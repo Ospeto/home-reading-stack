@@ -261,5 +261,29 @@ with zipfile.ZipFile("${bombZip}", "w", compression=zipfile.ZIP_DEFLATED) as zf:
           fs.rmSync(symlinkDir, { recursive: true, force: true });
       }
     });
+
+    it("rejects archives containing newline-bearing entry names upfront", () => {
+      const newlineZip = path.join("/tmp", `test_newline_${Date.now()}.zip`);
+      const pythonScript = `
+import zipfile
+with zipfile.ZipFile("${newlineZip}", "w") as z:
+    z.writestr("evil\\nname.epub", "content")
+`;
+      spawnSync("python3", ["-c", pythonScript]);
+
+      try {
+        const inspection = inspectArchiveSafety(newlineZip);
+        expect(inspection.safe).toBe(false);
+        expect(inspection.error).toContain("newline characters");
+
+        const unp = unpackArchive(newlineZip);
+        expect(unp.success).toBe(false);
+        expect(unp.error).toContain("newline characters");
+      } finally {
+        if (fs.existsSync(newlineZip)) {
+          fs.unlinkSync(newlineZip);
+        }
+      }
+    });
   });
 });

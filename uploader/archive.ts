@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import { validateEpubContent } from "./security";
 
@@ -112,6 +113,43 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
         entryCount: 0,
         totalUncompressedBytes: 0,
       };
+    }
+
+    // Upfront structured binary scan for newline-bearing entry names in ZIP containers
+    const fd = fs.openSync(archivePath, "r");
+    const scanLen = Math.min(stat.size, 2 * 1024 * 1024);
+    const headerBytes = Buffer.alloc(scanLen);
+    fs.readSync(fd, headerBytes, 0, scanLen, 0);
+    fs.closeSync(fd);
+
+    for (let i = 0; i < scanLen - 4; i++) {
+      if (
+        headerBytes[i] === 0x50 &&
+        headerBytes[i + 1] === 0x4b &&
+        ((headerBytes[i + 2] === 0x03 && headerBytes[i + 3] === 0x04) ||
+          (headerBytes[i + 2] === 0x01 && headerBytes[i + 3] === 0x02))
+      ) {
+        const nameLenOffset = headerBytes[i + 2] === 0x03 ? i + 26 : i + 28;
+        const nameStartOffset = headerBytes[i + 2] === 0x03 ? i + 30 : i + 46;
+        if (nameStartOffset <= scanLen) {
+          const nameLen = headerBytes.readUInt16LE(nameLenOffset);
+          if (nameStartOffset + nameLen <= scanLen) {
+            const entryNameBuf = headerBytes.subarray(
+              nameStartOffset,
+              nameStartOffset + nameLen,
+            );
+            if (entryNameBuf.includes(0x0a) || entryNameBuf.includes(0x0d)) {
+              return {
+                safe: false,
+                error:
+                  "Archive entry names containing newline characters are strictly rejected",
+                entryCount: 0,
+                totalUncompressedBytes: 0,
+              };
+            }
+          }
+        }
+      }
     }
 
     // Run bsdtar -tvf to inspect entry headers and sizes

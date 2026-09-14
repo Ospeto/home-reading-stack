@@ -79,7 +79,8 @@ export function sanitizeJobForResponse(job: any): any {
   if (c.payload && typeof c.payload === "object") {
     const p = { ...c.payload };
     if (typeof p.filePath === "string") p.filePath = path.basename(p.filePath);
-    if (typeof p.archivePath === "string") p.archivePath = path.basename(p.archivePath);
+    if (typeof p.archivePath === "string")
+      p.archivePath = path.basename(p.archivePath);
     if (typeof p.token === "string") p.token = "[REDACTED]";
     if (typeof p.secret === "string") p.secret = "[REDACTED]";
     if (typeof p.apiKey === "string") p.apiKey = "[REDACTED]";
@@ -88,10 +89,12 @@ export function sanitizeJobForResponse(job: any): any {
   if (c.result && typeof c.result === "object") {
     const r = { ...c.result };
     if (typeof r.filePath === "string") r.filePath = path.basename(r.filePath);
-    if (typeof r.archivePath === "string") r.archivePath = path.basename(r.archivePath);
+    if (typeof r.archivePath === "string")
+      r.archivePath = path.basename(r.archivePath);
     if (typeof r.epubPath === "string") r.epubPath = path.basename(r.epubPath);
     if (typeof r.tempPath === "string") r.tempPath = path.basename(r.tempPath);
-    if (typeof r.coverImagePath === "string") r.coverImagePath = path.basename(r.coverImagePath);
+    if (typeof r.coverImagePath === "string")
+      r.coverImagePath = path.basename(r.coverImagePath);
     if (typeof r.token === "string") r.token = "[REDACTED]";
     if (typeof r.secret === "string") r.secret = "[REDACTED]";
     c.result = r;
@@ -1352,7 +1355,11 @@ export async function handleRequest(
         corsOrigin,
       );
 
-    return jsonResponse({ success: true, job: sanitizeJobForResponse(job) }, 200, corsOrigin);
+    return jsonResponse(
+      { success: true, job: sanitizeJobForResponse(job) },
+      200,
+      corsOrigin,
+    );
   }
 
   if (
@@ -1391,7 +1398,11 @@ export async function handleRequest(
       );
 
     return jsonResponse(
-      { success: true, message: `Job ${jobId} queued for retry`, job: sanitizeJobForResponse(retried) },
+      {
+        success: true,
+        message: `Job ${jobId} queued for retry`,
+        job: sanitizeJobForResponse(retried),
+      },
       200,
       corsOrigin,
     );
