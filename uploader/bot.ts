@@ -14,6 +14,7 @@ import {
   normalizeFormat
 } from "./scraper";
 import { isArchiveFile, unpackArchive } from "./archive";
+import { extractUrlFromText, ingestArticleFromUrl } from "./article";
 
 const DROP_DIR = "/Users/ospeto/Books_Drop";
 const SERVER_URL = "http://127.0.0.1:8088";
@@ -195,6 +196,46 @@ async function editOrSendMessage(chatId: number, messageId: number | null, text:
     }
   }
   return await sendMessage(chatId, text, parseMode);
+}
+
+async function sendDocument(
+  chatId: number,
+  filePath: string,
+  caption: string = "",
+  parseMode: string = ""
+): Promise<boolean> {
+  try {
+    const formData = new FormData();
+    formData.append("chat_id", String(chatId));
+    const fileBytes = fs.readFileSync(filePath);
+    const fileName = path.basename(filePath);
+    const blob = new Blob([fileBytes], { type: "application/epub+zip" });
+    formData.append("document", blob, fileName);
+    if (caption) {
+      formData.append("caption", caption);
+      if (parseMode) {
+        formData.append("parse_mode", parseMode);
+      }
+    }
+
+    const res = await tgFetch("sendDocument", {
+      method: "POST",
+      body: formData,
+      timeoutMs: 60000
+    });
+
+    const data = (await res.json()) as any;
+    if (data.ok) {
+      log(`Sent document "${fileName}" to chat ${chatId}`);
+      return true;
+    } else {
+      logError(`sendDocument failed for chat ${chatId}: ${data.description}`);
+      return false;
+    }
+  } catch (err: any) {
+    logError(`sendDocument exception for chat ${chatId}: ${err.message}`);
+    return false;
+  }
 }
 
 export interface IngestResult {
@@ -729,21 +770,84 @@ async function pollTelegram() {
             const text = msg.text.trim();
             log(`Received text: "${text}" from ${sender}`);
 
-            if (text === "/start" || text === "/help") {
+            const articleUrl = extractUrlFromText(text);
+
+            if (articleUrl) {
+              log(`Detected article URL in message: "${articleUrl}" from ${sender}`);
+              const statusMsgId = await sendMessage(
+                chatId,
+                `⏳ *Extracting article from URL...*\n\`${articleUrl}\``,
+                "Markdown"
+              );
+
+              try {
+                const result = await ingestArticleFromUrl(articleUrl);
+                if (result.success) {
+                  const detailsLink = result.bookId
+                    ? `[Book Details](${CALIBRE_WEB_URL}/#book_id=${result.bookId}&panel=book_details)`
+                    : "";
+                  const readerLink = result.bookId
+                    ? `[Read Online](${CALIBRE_WEB_URL}/read/${result.bookId}/epub)`
+                    : "";
+                  const links = [detailsLink, readerLink].filter(Boolean).join(" • ");
+
+                  const confirmation =
+                    `✅ *Article Ingested Successfully*\n\n` +
+                    `\uD83D\uDCD6 *Title:* ${result.title}\n` +
+                    `\uD83D\uDC64 *Author:* ${result.authors || "Unknown"}\n` +
+                    `\uD83C\uDF10 *Source:* ${result.siteName}\n` +
+                    `⏱️ *Read Time:* ~${result.readTimeMinutes} min (${result.wordCount} words)\n` +
+                    `\uD83D\uDCE6 *Format:* \`EPUB\`\n` +
+                    `ℹ️ ${result.message || "Added to library"}\n\n` +
+                    (links ? `\uD83D\uDD17 ${links}\n\n` : "") +
+                    `_Ready on your Kindle OPDS feed. Sending EPUB copy below..._`;
+
+                  await editOrSendMessage(chatId, statusMsgId, confirmation, "Markdown");
+
+                  if (result.epubPath && fs.existsSync(result.epubPath)) {
+                    log(`Sending generated EPUB to chat ${chatId}: ${result.epubPath}`);
+                    const caption = `\uD83D\uDCD6 *${result.title}*\n\uD83D\uDC64 ${result.authors || "Unknown"}`;
+                    await sendDocument(chatId, result.epubPath, caption, "Markdown");
+                  }
+                } else {
+                  await editOrSendMessage(
+                    chatId,
+                    statusMsgId,
+                    `⚠️ *Article Ingestion Failed*\n\n` +
+                    `\uD83D\uDD17 *URL:* \`${articleUrl}\`\n` +
+                    `❌ *Error:* ${result.error || "Failed to process article"}\n\n` +
+                    `_Please verify the link is publicly accessible and try again._`,
+                    "Markdown"
+                  );
+                }
+              } catch (err: any) {
+                logError(`Article ingestion exception for ${articleUrl}: ${err.message}`);
+                await editOrSendMessage(
+                  chatId,
+                  statusMsgId,
+                  `⚠️ *Article Ingestion Failed*\n\n` +
+                  `\uD83D\uDD17 *URL:* \`${articleUrl}\`\n` +
+                  `❌ *Error:* ${err.message || "Unknown error"}\n\n` +
+                  `_Please check the URL or paywall access and try again._`,
+                  "Markdown"
+                );
+              }
+            } else if (text === "/start" || text === "/help") {
               await sendMessage(chatId, 
                 `\uD83D\uDCDA *Reading HQ Ingestion Bot*\n\n` +
-                `Send or forward any book file(s) directly in this chat:\n` +
+                `Send books or web articles directly in this chat:\n` +
+                `• *Web Article Ingestion:* Send or forward any web article URL (or \`/epub <url>\`) to convert into a Kindle-ready EPUB with instant mobile delivery & Calibre sync.\n` +
                 `• *Serialization Auto-Group:* Vol 1, Vol 2, Book 3 automatically grouped into Series.\n` +
                 `• *Batch Uploads Supported:* Select and send multiple EPUBs/CBZs at once.\n` +
                 `• *Duplicate Protection:* Instant binary hash + volume-aware deduplication.\n` +
                 `• *Formats:* \`.epub\`, \`.pdf\`, \`.mobi\`, \`.azw3\`, \`.cbz\`, \`.cbr\`\n` +
                 `• *File Limit:* Up to *20 MB* per file (Telegram API limit)\n` +
                 `• *Large Files (>20MB):* Upload via [Web Uploader](${WEB_UPLOADER_URL})\n\n` +
-                `_Books are automatically de-duplicated, sanitized, and available on your Kindle._`,
+                `_Books and articles are automatically de-duplicated, sanitized, and available on your Kindle._`,
                 "Markdown"
               );
             } else {
-              await sendMessage(chatId, `\uD83D\uDC4B Please send or forward eBook files (\`.epub\`, \`.pdf\`, \`.mobi\`, \`.cbz\`) to add them to your library. For files over 20MB, use the [Web Uploader](${WEB_UPLOADER_URL}).`, "Markdown");
+              await sendMessage(chatId, `\uD83D\uDC4B Please send eBook files (\`.epub\`, \`.pdf\`, \`.mobi\`, \`.cbz\`) or paste an article URL to add them to your library. For files over 20MB, use the [Web Uploader](${WEB_UPLOADER_URL}).`, "Markdown");
             }
           }
         }
