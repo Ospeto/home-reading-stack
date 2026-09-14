@@ -1058,7 +1058,7 @@ export async function searchAllBookSources(query: string) {
 
   // 1. Google Books
   try {
-    const gRes = await fetch(
+    const gRes = await safeFetchWithSsrf(
       `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(cleanQ)}&maxResults=5`,
     );
     if (gRes.ok) {
@@ -1097,7 +1097,7 @@ export async function searchAllBookSources(query: string) {
 
   // 2. OpenLibrary
   try {
-    const olRes = await fetch(
+    const olRes = await safeFetchWithSsrf(
       `https://openlibrary.org/search.json?q=${encodeURIComponent(cleanQ)}&limit=5`,
     );
     if (olRes.ok) {
@@ -1470,8 +1470,11 @@ export async function handleRequest(
       }
 
       // Fetch master cover from Calibre
-      const masterRes = await fetch(
+      const masterRes = await safeFetchWithSsrf(
         `${SERVER_URL}/get/cover/${bookId}/Agent_Library`,
+        {},
+        5,
+        { allowCalibreServer: true },
       );
       if (!masterRes.ok) {
         return new Response("Cover not found", { status: 404 });
@@ -1526,8 +1529,11 @@ export async function handleRequest(
     }
 
     // Master cover request (full resolution)
-    const coverRes = await fetch(
+    const coverRes = await safeFetchWithSsrf(
       `${SERVER_URL}/get/cover/${bookId}/Agent_Library`,
+      {},
+      5,
+      { allowCalibreServer: true },
     );
     if (coverRes.ok) {
       const coverBuf = Buffer.from(await coverRes.arrayBuffer());
@@ -1561,8 +1567,11 @@ export async function handleRequest(
       return new Response("Invalid book ID or format", { status: 400 });
     }
 
-    const fileRes = await fetch(
+    const fileRes = await safeFetchWithSsrf(
       `${SERVER_URL}/get/${format}/${bookId}/Agent_Library`,
+      {},
+      5,
+      { allowCalibreServer: true },
     );
     if (fileRes.ok) {
       const books = getCalibreBooks();

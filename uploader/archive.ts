@@ -117,7 +117,8 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
     // Upfront structured scan across the entire archive for newline-bearing entry names
     const fd = fs.openSync(archivePath, "r");
     const CHUNK_SIZE = 128 * 1024;
-    const chunkBuf = Buffer.alloc(CHUNK_SIZE);
+    const chunkBuf = new Uint8Array(CHUNK_SIZE);
+    const chunkView = new DataView(chunkBuf.buffer);
     let offset = 0;
     const fileSize = stat.size;
 
@@ -135,8 +136,8 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
         ) {
           const nameLenOffset = chunkBuf[i + 2] === 0x03 ? i + 26 : i + 28;
           const nameStartOffset = chunkBuf[i + 2] === 0x03 ? i + 30 : i + 46;
-          if (nameStartOffset <= bytesRead) {
-            const nameLen = chunkBuf.readUInt16LE(nameLenOffset);
+          if (nameStartOffset <= bytesRead && nameLenOffset + 2 <= bytesRead) {
+            const nameLen = chunkView.getUint16(nameLenOffset, true);
             if (nameStartOffset + nameLen <= bytesRead) {
               const entryNameBuf = chunkBuf.subarray(
                 nameStartOffset,

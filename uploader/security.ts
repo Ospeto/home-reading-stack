@@ -177,6 +177,11 @@ export function isPrivateOrInternalIp(rawIp: string): boolean {
   return true;
 }
 
+export interface ValidateUrlOptions {
+  allowProxyBypass?: boolean;
+  allowCalibreServer?: boolean;
+}
+
 /**
  * Validates a target URL against SSRF threats.
  * Blocks private IP ranges, link-local, cloud metadata endpoints (169.254.169.254),
@@ -184,7 +189,7 @@ export function isPrivateOrInternalIp(rawIp: string): boolean {
  */
 export async function validateUrlForSSRF(
   rawUrl: string,
-  _options: { allowProxyBypass?: boolean } = {},
+  options: ValidateUrlOptions = {},
 ): Promise<{ safe: boolean; error?: string; resolvedIp?: string }> {
   try {
     const u = new URL(rawUrl);
@@ -197,6 +202,15 @@ export async function validateUrlForSSRF(
     // Reject userinfo (@ credentials in URL)
     if (u.username || u.password) {
       return { safe: false, error: "Embedded URL credentials not allowed" };
+    }
+
+    // If explicit Calibre server access is permitted, verify origin matches local Calibre server
+    if (options.allowCalibreServer) {
+      const serverOrigin = (process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088").toLowerCase();
+      const targetOrigin = `${u.protocol}//${u.host}`.toLowerCase();
+      if (targetOrigin === serverOrigin.replace(/\/$/, "") && u.pathname.startsWith("/get/")) {
+        return { safe: true, resolvedIp: "127.0.0.1" };
+      }
     }
 
     const host = u.hostname.toLowerCase();
@@ -974,12 +988,13 @@ export async function safeFetchWithSsrf(
   targetUrl: string,
   init: RequestInit = {},
   maxRedirects = 5,
+  options: ValidateUrlOptions = {},
 ): Promise<Response> {
   let currentUrl = targetUrl;
   let remaining = maxRedirects;
 
   while (true) {
-    const ssrfCheck = await validateUrlForSSRF(currentUrl);
+    const ssrfCheck = await validateUrlForSSRF(currentUrl, options);
     if (!ssrfCheck.safe) {
       throw new Error(
         `SSRF guard blocked target: ${ssrfCheck.error || "Forbidden target"}`,

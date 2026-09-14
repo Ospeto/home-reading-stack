@@ -318,7 +318,7 @@ export async function searchMangaDex(
 
   try {
     const url = `https://api.mangadex.org/manga?title=${encodeURIComponent(cleanQ)}&limit=3&includes[]=cover_art&includes[]=author`;
-    const res = await fetch(url, {
+    const res = await safeFetchWithSsrf(url, {
       headers: { "User-Agent": "ReadingHQ/1.0" },
       signal: AbortSignal.timeout(SCRAPER_TIMEOUT_MS),
       proxy: PROXY,
@@ -385,7 +385,7 @@ export async function searchBangumi(query: string): Promise<ScrapedMetadata[]> {
 
   try {
     const url = `https://api.bgm.tv/search/subject/${encodeURIComponent(cleanQ)}?type=1&responseGroup=medium`;
-    const res = await fetch(url, {
+    const res = await safeFetchWithSsrf(url, {
       headers: { "User-Agent": "ReadingHQ/1.0" },
       signal: AbortSignal.timeout(SCRAPER_TIMEOUT_MS),
       proxy: PROXY,
@@ -435,7 +435,7 @@ export async function searchGoogleBooks(
 
   try {
     const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(cleanQ)}&maxResults=3`;
-    const res = await fetch(url, {
+    const res = await safeFetchWithSsrf(url, {
       headers: { "User-Agent": "ReadingHQ/1.0" },
       signal: AbortSignal.timeout(SCRAPER_TIMEOUT_MS),
       proxy: PROXY,
@@ -494,7 +494,7 @@ export async function searchOpenLibrary(
 
   try {
     const url = `https://openlibrary.org/search.json?q=${encodeURIComponent(cleanQ)}&limit=3`;
-    const res = await fetch(url, {
+    const res = await safeFetchWithSsrf(url, {
       signal: AbortSignal.timeout(SCRAPER_TIMEOUT_MS),
       proxy: PROXY,
     } as any);
@@ -646,7 +646,7 @@ export async function applyMetadataToCalibre(
       } as any);
       if (imgRes.ok) {
         const buf = await imgRes.arrayBuffer();
-        fs.writeFileSync(tempCoverPath, Buffer.from(buf));
+        fs.writeFileSync(tempCoverPath, new Uint8Array(buf));
         args.push("--field", `cover:${tempCoverPath}`);
       }
     }
