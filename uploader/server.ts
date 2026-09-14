@@ -4,15 +4,21 @@ import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import process from "node:process";
 import { searchUniversalMetadata, applyMetadataToCalibre } from "./scraper";
 import { isArchiveFile, unpackArchive } from "./archive";
-import { ingestArticleFromUrl } from "./article";
+import { ingestArticleFromUrl, generateTypographicCover } from "./article";
 
 const DROP_DIR = "/Users/ospeto/Books_Drop";
 const SERVER_URL = "http://127.0.0.1:8088";
 const LIBRARY_DIR = "/Users/ospeto/Calibre Libraries/Agent Library";
 const KOSYNC_DB_PATH = "/Users/ospeto/kosync-server/data/koreader-sync.db";
 const CACHE_DB_PATH = "/Users/ospeto/uploader/cache.db";
+const COVER_CACHE_DIR = "/Users/ospeto/uploader/cache/covers";
+
+if (!fs.existsSync(COVER_CACHE_DIR)) {
+  fs.mkdirSync(COVER_CACHE_DIR, { recursive: true });
+}
 function resolveHtmlPath(): string {
   try {
     const dir = path.dirname(new URL(import.meta.url).pathname);
@@ -188,6 +194,23 @@ function safeParseJson(str: string): any {
 
 let calibreBooksCache: { books: any[]; timestamp: number } = { books: [], timestamp: 0 };
 
+function runCalibredb(args: string[]) {
+  const env = { ...process.env };
+  delete env.HTTP_PROXY;
+  delete env.http_proxy;
+  delete env.HTTPS_PROXY;
+  delete env.https_proxy;
+  delete env.ALL_PROXY;
+  delete env.all_proxy;
+  env.PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
+
+  return spawnSync("/opt/homebrew/bin/calibredb", args, {
+    encoding: "utf8",
+    env,
+    timeout: 30000,
+  });
+}
+
 function getCalibreBooks(forceFresh = false) {
   const now = Date.now();
   if (!forceFresh && calibreBooksCache.books.length > 0 && (now - calibreBooksCache.timestamp < 10000)) {
@@ -195,14 +218,14 @@ function getCalibreBooks(forceFresh = false) {
   }
 
   try {
-    const res = spawnSync("/opt/homebrew/bin/calibredb", [
+    const res = runCalibredb([
       "list",
       "--with-library",
       SERVER_URL,
       "--fields",
       "id,title,authors,formats,cover,tags,series,series_index,publisher,pubdate,comments,rating",
       "--for-machine"
-    ], { encoding: "utf8" });
+    ]);
     if (res.status === 0 && res.stdout) {
       const parsed = safeParseJson(res.stdout);
       calibreBooksCache = { books: parsed, timestamp: now };
@@ -334,13 +357,13 @@ function ingestBookFile(filePath: string, originalFileName: string) {
         message: `Book "${existingBook.title}" already exists in format ${format}.`
       };
     } else {
-      spawnSync("/opt/homebrew/bin/calibredb", [
+      runCalibredb([
         "add_format",
         String(existingBook.id),
         filePath,
         "--with-library",
         SERVER_URL
-      ], { encoding: "utf8" });
+      ]);
 
       getCalibreBooks(true);
       return {
@@ -354,12 +377,12 @@ function ingestBookFile(filePath: string, originalFileName: string) {
   }
 
   // 3. Brand new book: Add to Calibre
-  const addRes = spawnSync("/opt/homebrew/bin/calibredb", [
+  const addRes = runCalibredb([
     "add",
     filePath,
     "--with-library",
     SERVER_URL
-  ], { encoding: "utf8" });
+  ]);
 
   if (addRes.status === 0) {
     const match = addRes.stdout?.match(/Added book ids?:?\s*([0-9]+)/i);
@@ -379,7 +402,7 @@ function ingestBookFile(filePath: string, originalFileName: string) {
           setArgs.push("--field", `series_index:${incomingSeries.volume}`);
         }
         if (setArgs.length > 4) {
-          spawnSync("/opt/homebrew/bin/calibredb", setArgs, { encoding: "utf8" });
+          runCalibredb(setArgs);
         }
 
         // Auto-Scraper Background Enrichment
@@ -718,17 +741,98 @@ Bun.serve({
       });
     }
 
-    // API: Book Cover Proxy
+    // API: Book Cover Proxy & Native Downscaled Thumbnail Cache
     if (url.pathname.startsWith("/api/books/") && url.pathname.endsWith("/cover")) {
       const parts = url.pathname.split("/");
       const bookId = parts[3];
+      const widthParam = url.searchParams.get("w");
+
+      // Handle thumbnail downscaling and caching if width requested (e.g. ?w=360)
+      if (widthParam) {
+        const targetWidth = parseInt(widthParam, 10) || 360;
+        const cacheFilePath = path.join(COVER_CACHE_DIR, `${bookId}_${targetWidth}.jpg`);
+
+        if (fs.existsSync(cacheFilePath)) {
+          const cachedBuffer = fs.readFileSync(cacheFilePath);
+          const etag = `"${crypto.createHash("sha256").update(cachedBuffer).digest("hex").slice(0, 16)}"`;
+
+          if (req.headers.get("if-none-match") === etag) {
+            return new Response(null, { status: 304 });
+          }
+
+          return new Response(cachedBuffer, {
+            headers: {
+              "Content-Type": "image/jpeg",
+              "Cache-Control": "public, max-age=604800, immutable",
+              "ETag": etag,
+            },
+          });
+        }
+
+        // Fetch master cover from Calibre
+        const masterRes = await fetch(`${SERVER_URL}/get/cover/${bookId}/Agent_Library`);
+        if (!masterRes.ok) {
+          return new Response("Cover not found", { status: 404 });
+        }
+
+        const masterBuffer = Buffer.from(await masterRes.arrayBuffer());
+        const tempMaster = `/tmp/master_cover_${bookId}_${Date.now()}.jpg`;
+        fs.writeFileSync(tempMaster, masterBuffer);
+
+        try {
+          const sipsRes = spawnSync("/usr/bin/sips", [
+            "-Z",
+            String(targetWidth),
+            tempMaster,
+            "--out",
+            cacheFilePath,
+          ], { encoding: "utf8", timeout: 15000 });
+
+          if (sipsRes.status === 0 && fs.existsSync(cacheFilePath)) {
+            const thumbBuffer = fs.readFileSync(cacheFilePath);
+            const etag = `"${crypto.createHash("sha256").update(thumbBuffer).digest("hex").slice(0, 16)}"`;
+
+            return new Response(thumbBuffer, {
+              headers: {
+                "Content-Type": "image/jpeg",
+                "Cache-Control": "public, max-age=604800, immutable",
+                "ETag": etag,
+              },
+            });
+          }
+        } finally {
+          if (fs.existsSync(tempMaster)) {
+            try { fs.unlinkSync(tempMaster); } catch (_cleanErr) { void _cleanErr; }
+          }
+        }
+
+        // Fallback to original master if downscaling fails
+        const etag = `"${crypto.createHash("sha256").update(masterBuffer).digest("hex").slice(0, 16)}"`;
+        return new Response(masterBuffer, {
+          headers: {
+            "Content-Type": masterRes.headers.get("Content-Type") || "image/jpeg",
+            "Cache-Control": "public, max-age=604800, immutable",
+            "ETag": etag,
+          },
+        });
+      }
+
+      // Master cover request (full resolution)
       const coverRes = await fetch(`${SERVER_URL}/get/cover/${bookId}/Agent_Library`);
       if (coverRes.ok) {
-        return new Response(await coverRes.arrayBuffer(), {
+        const coverBuf = Buffer.from(await coverRes.arrayBuffer());
+        const etag = `"${crypto.createHash("sha256").update(coverBuf).digest("hex").slice(0, 16)}"`;
+
+        if (req.headers.get("if-none-match") === etag) {
+          return new Response(null, { status: 304 });
+        }
+
+        return new Response(coverBuf, {
           headers: {
             "Content-Type": coverRes.headers.get("Content-Type") || "image/jpeg",
-            "Cache-Control": "public, max-age=3600"
-          }
+            "Cache-Control": "public, max-age=86400",
+            "ETag": etag,
+          },
         });
       }
       return new Response("Cover not found", { status: 404 });
@@ -804,13 +908,68 @@ Bun.serve({
         }
 
         if (hasChanges) {
-          spawnSync("/opt/homebrew/bin/calibredb", setArgs, { encoding: "utf8" });
+          runCalibredb(setArgs);
           cleanedCount++;
         }
       }
 
       getCalibreBooks(true);
       return Response.json({ success: true, message: `Sanitized metadata for ${cleanedCount} books` });
+    }
+
+    // API: Backfill Covers for Web Articles without a Cover
+    if (url.pathname === "/api/library/backfill-covers" && req.method === "POST") {
+      try {
+        const books = getCalibreBooks(true);
+        const candidates = books.filter((b: any) => {
+          const tags = Array.isArray(b.tags) ? b.tags : (b.tags ? [b.tags] : []);
+          const isWeb = tags.some((t: string) => t === "Web Article" || t === "Read Later");
+          const hasCover = b.cover && b.cover !== 0 && b.cover !== false;
+          return isWeb && !hasCover;
+        });
+
+        const updated: Array<{ id: number; title: string }> = [];
+        for (const book of candidates) {
+          try {
+            const tags: string[] = Array.isArray(book.tags) ? book.tags : (book.tags ? [book.tags] : []);
+            const siteTag = tags.find((t: string) => t !== "Web Article" && t !== "Read Later");
+            const siteName = siteTag || book.publisher || "Web Article";
+            const coverPath = generateTypographicCover(book.title, book.authors || "Unknown", siteName);
+
+            const setRes = runCalibredb([
+              "set_metadata",
+              String(book.id),
+              "--with-library",
+              SERVER_URL,
+              "--field",
+              `cover:${coverPath}`,
+            ]);
+
+            if (fs.existsSync(coverPath)) {
+              try { fs.unlinkSync(coverPath); } catch (_unlinkErr) { void _unlinkErr; }
+            }
+
+            if (setRes.status === 0) {
+              updated.push({ id: book.id, title: book.title });
+              try {
+                cacheDb.run("UPDATE file_hashes SET cover = 1 WHERE book_id = ?", [book.id]);
+              } catch (_dbErr) { void _dbErr; }
+            }
+          } catch (itemErr) {
+            console.error(`[Backfill] Failed for book ${book.id}:`, itemErr);
+          }
+        }
+
+        getCalibreBooks(true);
+        return jsonResponse({
+          success: true,
+          count: updated.length,
+          updated,
+          message: `Generated and attached covers for ${updated.length} web articles.`,
+        });
+      } catch (err: any) {
+        return jsonResponse({ success: false, error: err.message }, 500);
+      }
     }
 
     // API: Export Obsidian Markdown with Real Highlights
@@ -1047,12 +1206,12 @@ Bun.serve({
     if (url.pathname.startsWith("/api/books/") && req.method === "DELETE") {
       const parts = url.pathname.split("/");
       const bookId = parts[3];
-      const delRes = spawnSync("/opt/homebrew/bin/calibredb", [
+      const delRes = runCalibredb([
         "remove",
         bookId,
         "--with-library",
         SERVER_URL
-      ], { encoding: "utf8" });
+      ]);
 
       getCalibreBooks(true);
       if (delRes.status === 0) {
@@ -1071,12 +1230,12 @@ Bun.serve({
         }
 
         const ids = body.bookIds.map(String).join(",");
-        const delRes = spawnSync("/opt/homebrew/bin/calibredb", [
+        const delRes = runCalibredb([
           "remove",
           ids,
           "--with-library",
           SERVER_URL
-        ], { encoding: "utf8" });
+        ]);
 
         getCalibreBooks(true);
         if (delRes.status === 0) {
@@ -1140,14 +1299,14 @@ Bun.serve({
             if (cRes.ok) {
               tempCover = `/tmp/cover_${bookId}_${Date.now()}.jpg`;
               fs.writeFileSync(tempCover, Buffer.from(await cRes.arrayBuffer()));
-              args.push("--cover", tempCover);
+              args.push("--field", `cover:${tempCover}`);
             }
           } catch (e) {
             console.error("Cover download error:", e);
           }
         }
 
-        const setRes = spawnSync("/opt/homebrew/bin/calibredb", args, { encoding: "utf8" });
+        const setRes = runCalibredb(args);
         if (tempCover && fs.existsSync(tempCover)) {
           try { fs.unlinkSync(tempCover); } catch {}
         }

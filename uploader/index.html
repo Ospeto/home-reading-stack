@@ -59,6 +59,34 @@
     .animate-slide-up {
       animation: slideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
     }
+
+    @keyframes shimmer {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(100%); }
+    }
+    .skeleton-shimmer {
+      position: relative;
+      background-color: #18181b;
+      overflow: hidden;
+    }
+    .skeleton-shimmer::after {
+      position: absolute;
+      top: 0; right: 0; bottom: 0; left: 0;
+      transform: translateX(-100%);
+      background-image: linear-gradient(
+        90deg,
+        rgba(255, 255, 255, 0) 0,
+        rgba(255, 255, 255, 0.04) 20%,
+        rgba(255, 255, 255, 0.08) 60%,
+        rgba(255, 255, 255, 0)
+      );
+      animation: shimmer 1.6s infinite;
+      content: '';
+      pointer-events: none;
+    }
+    .skeleton-shimmer.loaded::after {
+      display: none;
+    }
   </style>
 </head>
 <body class="bg-[#09090b] text-zinc-100 min-h-screen flex flex-col antialiased selection:bg-zinc-800 selection:text-white pb-12 sm:pb-0">
@@ -1161,7 +1189,7 @@
 
       // Grid View Render
       const gridCards = visibleList.map(book => {
-        const coverSrc = book.cover ? `/api/books/${book.id}/cover` : 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="120" height="180" fill="%2318181b"><rect width="120" height="180"/><text x="50%" y="50%" fill="%2371717a" text-anchor="middle" font-family="sans-serif" font-size="12">No Cover</text></svg>';
+        const coverSrc = book.cover ? `/api/books/${book.id}/cover?w=360` : 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="120" height="180" fill="%2318181b"><rect width="120" height="180"/><text x="50%" y="50%" fill="%2371717a" text-anchor="middle" font-family="sans-serif" font-size="12">No Cover</text></svg>';
         const formats = (book.formats || []).map(f => `<span class="px-1.5 py-0.5 bg-zinc-900 border border-zinc-800 text-[10px] font-bold text-zinc-300 rounded">${f}</span>`).join(' ');
         const isSelected = selectedBookIds.has(book.id);
 
@@ -1175,7 +1203,7 @@
           <div onclick="openBookDetail(${book.id})" class="book-card group relative ui-card rounded-xl overflow-hidden flex flex-col justify-between border ${isSelected ? 'border-zinc-400 ring-1 ring-zinc-400' : 'border-zinc-800'} transition-all cursor-pointer active:scale-[0.98]">
             
             <!-- Cover Image Container -->
-            <div class="relative aspect-[2/3] bg-zinc-950 overflow-hidden">
+            <div class="relative aspect-[2/3] bg-zinc-950 overflow-hidden skeleton-shimmer">
               ${seriesBadge}
 
               <!-- Checkbox Button -->
@@ -1183,7 +1211,7 @@
                 ${svgIcon('check', `w-3 h-3 ${isSelected ? 'opacity-100' : 'opacity-0'}`)}
               </button>
 
-              <img src="${coverSrc}" class="w-full h-full object-cover group-hover:scale-102 transition-transform duration-300" loading="lazy" decoding="async" alt="${escapeHtml(book.title)}">
+              <img src="${coverSrc}" class="w-full h-full object-cover group-hover:scale-102 transition-transform duration-300 relative z-0" loading="lazy" decoding="async" onload="this.parentElement.classList.add('loaded')" onerror="this.parentElement.classList.add('loaded')" alt="${escapeHtml(book.title)}">
               
               <!-- Desktop Hover Action Overlay -->
               <div class="action-bar absolute inset-0 bg-zinc-950/90 backdrop-blur-xs opacity-0 translate-y-1 pointer-events-none transition-all duration-150 p-2.5 flex flex-col justify-between hidden sm:flex">
@@ -1256,8 +1284,8 @@
               <input type="checkbox" onchange="toggleSelect(${book.id})" ${isSelected ? 'checked' : ''} class="rounded bg-zinc-800 border-zinc-700 text-white cursor-pointer">
             </td>
             <td class="px-4 py-2 cursor-pointer" onclick="openBookDetail(${book.id})">
-              <div class="w-8 h-11 bg-zinc-950 rounded overflow-hidden shadow border border-zinc-800">
-                ${coverSrc ? `<img src="${coverSrc}" class="w-full h-full object-cover" loading="lazy" decoding="async">` : ''}
+              <div class="w-8 h-11 bg-zinc-950 rounded overflow-hidden shadow border border-zinc-800 skeleton-shimmer">
+                ${coverSrc ? `<img src="/api/books/${book.id}/cover?w=360" class="w-full h-full object-cover" loading="lazy" decoding="async" onload="this.parentElement.classList.add('loaded')" onerror="this.parentElement.classList.add('loaded')">` : ''}
               </div>
             </td>
             <td class="px-4 py-2 cursor-pointer" onclick="openBookDetail(${book.id})">

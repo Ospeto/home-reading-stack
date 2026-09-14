@@ -1,10 +1,17 @@
 import { describe, test, expect } from "bun:test";
+import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import {
   isPaywallOrGarbage,
   cleanMarkdownNoise,
   cleanDirectHtml,
   PAYWALL_ERROR_MESSAGE,
-  extractArticle
+  extractArticle,
+  wrapText,
+  escapeXml,
+  generateTypographicCover,
+  parseJinaMarkdown,
+  convertHtmlToEpub,
 } from "./article";
 
 describe("Paywall Barrier & Content Quality Detection", () => {
@@ -172,4 +179,94 @@ describe("End-to-End Extraction & Paywall Rejection", () => {
     expect(thrownError).not.toBeNull();
     expect(thrownError?.message).toBe(PAYWALL_ERROR_MESSAGE);
   }, 30000);
+});
+
+describe("Automatic Cover Generation & Typography Pipeline", () => {
+  test("wrapText wraps long titles into lines within character limits", () => {
+    const shortTitle = "Short Title";
+    expect(wrapText(shortTitle, 22, 5)).toEqual(["Short Title"]);
+
+    const longTitle = "How to Do Great Work and Build Remarkable Things Across Multiple Decades";
+    const wrapped = wrapText(longTitle, 22, 5);
+    expect(wrapped.length).toBeGreaterThanOrEqual(3);
+    for (const line of wrapped) {
+      expect(line.length).toBeLessThanOrEqual(26);
+    }
+  });
+
+  test("escapeXml correctly escapes XML entity characters", () => {
+    const raw = `Tom & Jerry <cartoon> "best" 'show'`;
+    const escaped = escapeXml(raw);
+    expect(escaped).toBe("Tom &amp; Jerry &lt;cartoon&gt; &quot;best&quot; &apos;show&apos;");
+  });
+
+  test("generateTypographicCover creates a valid 600x900 JPEG cover via macOS sips", () => {
+    const title = "What I Wish Someone Had Told Me";
+    const author = "Sam Altman";
+    const siteName = "Sam Altman";
+    const coverPath = generateTypographicCover(title, author, siteName, 12);
+
+    try {
+      expect(fs.existsSync(coverPath)).toBe(true);
+      const stat = fs.statSync(coverPath);
+      expect(stat.size).toBeGreaterThan(1024);
+
+      // Verify with sips that it's a valid JPEG image with 600x900 dimensions
+      const sipsProbe = spawnSync("/usr/bin/sips", ["-g", "format", "-g", "pixelWidth", "-g", "pixelHeight", coverPath], {
+        encoding: "utf8",
+      });
+      expect(sipsProbe.status).toBe(0);
+      expect(sipsProbe.stdout).toContain("format: jpeg");
+      expect(sipsProbe.stdout).toContain("pixelWidth: 600");
+      expect(sipsProbe.stdout).toContain("pixelHeight: 900");
+    } finally {
+      if (fs.existsSync(coverPath)) {
+        try { fs.unlinkSync(coverPath); } catch (_err) { void _err; }
+      }
+    }
+  });
+
+  test("parseJinaMarkdown extracts image from Image: header or lead markdown syntax", () => {
+    const rawWithHeader = `Title: Article Title
+URL Source: https://example.com/story
+Image: https://example.com/cover.jpg
+
+Markdown Content:
+Body text goes here.`;
+    const parsedHeader = parseJinaMarkdown(rawWithHeader, "https://example.com/story");
+    expect(parsedHeader.imageUrl).toBe("https://example.com/cover.jpg");
+
+    const rawWithLeadImg = `Title: Story Title
+URL Source: https://example.com/story2
+
+Markdown Content:
+![Hero Image](https://example.com/lead.png)
+More body text.`;
+    const parsedLead = parseJinaMarkdown(rawWithLeadImg, "https://example.com/story2");
+    expect(parsedLead.imageUrl).toBe("https://example.com/lead.png");
+  });
+
+  test("convertHtmlToEpub attaches generated cover to EPUB", () => {
+    const coverPath = generateTypographicCover("Test Book With Cover", "Author", "Example.com");
+    try {
+      const epubPath = convertHtmlToEpub(
+        "<h1>Hello</h1><p>Test content for epub conversion.</p>",
+        "Test Book With Cover",
+        "Author",
+        "Example.com",
+        "https://example.com/article",
+        coverPath
+      );
+
+      expect(fs.existsSync(epubPath)).toBe(true);
+      expect(fs.statSync(epubPath).size).toBeGreaterThan(2048);
+
+      // Clean up temp epub
+      try { fs.unlinkSync(epubPath); } catch (_err) { void _err; }
+    } finally {
+      if (fs.existsSync(coverPath)) {
+        try { fs.unlinkSync(coverPath); } catch (_err) { void _err; }
+      }
+    }
+  });
 });
