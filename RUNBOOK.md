@@ -196,6 +196,37 @@ launchctl load -w ~/Library/LaunchAgents/com.ospeto.book-uploader.plist
   ssh mac-mini "tail -f ~/Library/Logs/reading-stack-watchdog.log"
   ```
 
+### 6. Library Search & Retrieval Verification
+Verify the Telegram bot's in-chat library search and retrieval functionality:
+```bash
+# 1. Search library books from CLI or test runner
+bun -e '
+  import { searchCalibreLibrary, locateBookFile } from "./uploader/bot.ts";
+  console.log("Search Piece:", searchCalibreLibrary("Piece", 3));
+  console.log("Locate Book 6:", locateBookFile(6));
+'
+
+# 2. In Telegram (@saroat_ospeto_bot):
+# Send: /find One Piece
+# Expected: Returns matching books with [📥 Send File], [📖 Read Online], and [ℹ️ Details] buttons.
+# Tap [📥 Send File] or send /get 6 to test direct file delivery.
+```
+
+### 7. Jina Reader Fallback & Paywall Verification
+Verify that blocked/paywalled article URLs automatically route through Jina Reader:
+```bash
+# 1. Test Jina Reader fallback fetch via local proxy
+bun -e '
+  import { extractArticleViaJina } from "./uploader/article.ts";
+  const article = await extractArticleViaJina("https://paulgraham.com/foundermode.html");
+  console.log("Jina Extracted:", article.title, "words:", article.wordCount);
+'
+
+# 2. In Telegram:
+# Send an article URL from a Cloudflare-protected or paywalled site.
+# The bot detects 401/403 or challenge HTML and falls back to Jina Reader transparently.
+```
+
 ---
 
 ## 🌐 Remote VPS Standby Stack (`us3` / `198.46.146.17`)
