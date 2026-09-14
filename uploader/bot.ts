@@ -25,6 +25,7 @@ const MANGA_DB_PATH = process.env.MANGA_DB_PATH || "/Users/ospeto/manga-processo
 const PROXY_URL = "http://127.0.0.1:7890";
 const WEB_UPLOADER_URL = "http://192.168.31.15:8086";
 const CALIBRE_WEB_URL = "http://192.168.31.15:8088";
+export const READING_WEBAPP_URL = process.env.READING_WEBAPP_URL || "https://reading.wavypremium.xyz";
 const MAX_TELEGRAM_FILE_SIZE = 20 * 1024 * 1024; // 20MB Telegram Bot API limit
 const ALLOWED_EXTS = [".epub", ".pdf", ".mobi", ".azw3", ".cbz", ".cbr", ".azw", ".zip", ".rar", ".7z", ".tar"];
 
@@ -337,6 +338,38 @@ async function sendDocument(
   }
 }
 
+export async function initChatMenuButton(chatId?: number): Promise<boolean> {
+  try {
+    const payload: any = {
+      menu_button: {
+        type: "web_app",
+        text: "📖 Reading HQ",
+        web_app: { url: READING_WEBAPP_URL }
+      }
+    };
+    if (chatId) {
+      payload.chat_id = chatId;
+    }
+    const res = await tgFetch("setChatMenuButton", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      timeoutMs: 15000
+    });
+    const data = (await res.json()) as any;
+    if (data.ok) {
+      log(`Registered Telegram Web App Menu Button (${chatId ? `chatId: ${chatId}` : "global default"}) -> ${READING_WEBAPP_URL}`);
+      return true;
+    } else {
+      logError(`Failed to set Telegram Chat Menu Button: ${data.description || "Unknown error"}`);
+      return false;
+    }
+  } catch (err: any) {
+    logError(`Exception in setChatMenuButton: ${err.message}`);
+    return false;
+  }
+}
+
 export interface DatabaseBackupResult {
   stagingDir: string;
   archivePath: string;
@@ -476,7 +509,7 @@ export interface CalibreBookResult {
 
 export function escapeTelegramMarkdown(text: string): string {
   if (!text) return "";
-  return text.replace(/([_*`\[\]])/g, "\\$1");
+  return text.replace(/([_*`[\]])/g, "\\$1");
 }
 
 export function searchCalibreLibrary(query: string, limit: number = 5): CalibreBookResult[] {
@@ -1297,6 +1330,8 @@ process.on("SIGTERM", () => {
 async function pollTelegram() {
   log(`Polling started via proxy ${PROXY_URL} for bot: ${TELEGRAM_BOT_TOKEN.substring(0, 10)}...`);
 
+  await initChatMenuButton();
+
   while (isPollingRunning) {
     try {
       const res = await tgFetch(`getUpdates?offset=${offset}&timeout=${POLL_TIMEOUT_SECONDS}`, {
@@ -1341,10 +1376,20 @@ async function pollTelegram() {
                 chatId,
                 `⚠️ *File Exceeds Telegram Bot Limit*\n\n` +
                 `*${fileName}* is *${sizeMB} MB*, which exceeds Telegram Bot API's *20 MB* download ceiling.\n\n` +
-                `\uD83D\uDC49 *Upload directly via Web Uploader:*\n` +
-                `[Web Uploader](${WEB_UPLOADER_URL}) (\`${WEB_UPLOADER_URL}\`)\n\n` +
+                `👉 *Upload directly via Reading HQ Mini App or Web Uploader:*\n` +
+                `[Reading HQ](${READING_WEBAPP_URL}) • [Web Uploader](${WEB_UPLOADER_URL})\n\n` +
                 `_The Web Uploader accepts books of any size and automatically synchronizes with Calibre._`,
-                "Markdown"
+                "Markdown",
+                {
+                  inline_keyboard: [
+                    [
+                      {
+                        text: "📖 Open Reading HQ",
+                        web_app: { url: READING_WEBAPP_URL }
+                      }
+                    ]
+                  ]
+                }
               );
               continue;
             }
@@ -1518,6 +1563,37 @@ async function pollTelegram() {
               continue;
             }
 
+            // Telegram Mini App: /app or /webapp
+            if (
+              text === "/app" ||
+              text === "/webapp" ||
+              text.startsWith("/app@") ||
+              text.startsWith("/webapp@") ||
+              text.startsWith("/app ") ||
+              text.startsWith("/webapp ")
+            ) {
+              log(`Handling /app command from ${sender} (chatId: ${chatId})`);
+              await sendMessage(
+                chatId,
+                `📖 *Reading HQ Mini App*\n\n` +
+                `Access your complete reading catalog, search books, edit metadata, and upload files directly inside Telegram:\n\n` +
+                `👉 Tap *[📖 Open Reading HQ]* below or use the *📖 Reading HQ* menu button next to the chat input field.`,
+                "Markdown",
+                {
+                  inline_keyboard: [
+                    [
+                      {
+                        text: "📖 Open Reading HQ",
+                        web_app: { url: READING_WEBAPP_URL }
+                      }
+                    ]
+                  ]
+                }
+              );
+              initChatMenuButton(chatId).catch(() => {});
+              continue;
+            }
+
             const articleUrl = extractUrlFromText(text);
 
             if (articleUrl) {
@@ -1588,8 +1664,9 @@ async function pollTelegram() {
             } else if (text === "/start" || text === "/help") {
               await sendMessage(
                 chatId,
-                `📚 *Reading HQ Ingestion & Library Bot*\n\n` +
+                `📖 *Reading HQ Ingestion & Library Bot*\n\n` +
                 `Send books, search your library, or ingest web articles directly:\n` +
+                `• *Reading HQ Mini App:* Tap the *📖 Reading HQ* menu button or send \`/app\` / \`/webapp\` to launch the responsive catalog dashboard.\n` +
                 `• *Library Search:* \`/find <query>\` or \`/search <query>\` (or \`/f <query>\`) to search books by title, author, or series with interactive retrieval.\n` +
                 `• *Instant Book Retrieval:* \`/get <id>\` or tap *[📥 Send File]* to download any book directly to Telegram.\n` +
                 `• *Web Article Ingestion:* Send or forward any web article URL (or \`/epub <url>\`) to convert into a Kindle-ready EPUB with instant mobile delivery & Calibre sync (includes Jina Reader paywall fallback).\n` +
@@ -1598,16 +1675,37 @@ async function pollTelegram() {
                 `• *Duplicate Protection:* Instant binary hash + volume-aware deduplication.\n` +
                 `• *Formats:* \`.epub\`, \`.pdf\`, \`.mobi\`, \`.azw3\`, \`.cbz\`, \`.cbr\`\n` +
                 `• *File Limit:* Up to *20 MB* per file (Telegram API limit)\n` +
-                `• *Large Files (>20MB):* Upload via [Web Uploader](${WEB_UPLOADER_URL})\n` +
+                `• *Large Files (>20MB):* Upload via [Reading HQ](${READING_WEBAPP_URL}) or [Web Uploader](${WEB_UPLOADER_URL})\n` +
                 `• \`/backup\`: Instant hot snapshot of all reading databases sent directly to this chat.\n\n` +
                 `_Books and articles are automatically de-duplicated, sanitized, and available on your Kindle._`,
-                "Markdown"
+                "Markdown",
+                {
+                  inline_keyboard: [
+                    [
+                      {
+                        text: "📖 Open Reading HQ",
+                        web_app: { url: READING_WEBAPP_URL }
+                      }
+                    ]
+                  ]
+                }
               );
+              initChatMenuButton(chatId).catch(() => {});
             } else {
               await sendMessage(
                 chatId,
-                `👋 Please send eBook files (\`.epub\`, \`.pdf\`, \`.mobi\`, \`.cbz\`), paste an article URL, search your library (\`/find <query>\`), or send \`/backup\` for an instant database snapshot. For files over 20MB, use the [Web Uploader](${WEB_UPLOADER_URL}).`,
-                "Markdown"
+                `📖 Please send eBook files (\`.epub\`, \`.pdf\`, \`.mobi\`, \`.cbz\`), paste an article URL, search your library (\`/find <query>\`), open the dashboard (\`/app\`), or send \`/backup\` for an instant database snapshot. For files over 20MB, use [Reading HQ](${READING_WEBAPP_URL}).`,
+                "Markdown",
+                {
+                  inline_keyboard: [
+                    [
+                      {
+                        text: "📖 Open Reading HQ",
+                        web_app: { url: READING_WEBAPP_URL }
+                      }
+                    ]
+                  ]
+                }
               );
             }
           }
