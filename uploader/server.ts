@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { searchUniversalMetadata, applyMetadataToCalibre } from "./scraper";
 import { isArchiveFile, unpackArchive } from "./archive";
+import { ingestArticleFromUrl } from "./article";
 
 const DROP_DIR = "/Users/ospeto/Books_Drop";
 const SERVER_URL = "http://127.0.0.1:8088";
@@ -152,16 +153,25 @@ function safeParseJson(str: string): any {
   if (startBracket !== -1 && endBracket !== -1 && endBracket > startBracket) {
     try {
       return JSON.parse(trimmed.substring(startBracket, endBracket + 1));
-    } catch {}
+    } catch (_err) {
+      void _err;
+    }
   }
   const startBrace = trimmed.indexOf("{");
   const endBrace = trimmed.lastIndexOf("}");
   if (startBrace !== -1 && endBrace !== -1 && endBrace > startBrace) {
     try {
       return JSON.parse(trimmed.substring(startBrace, endBrace + 1));
-    } catch {}
+    } catch (_err) {
+      void _err;
+    }
   }
-  return JSON.parse(trimmed);
+  try {
+    return JSON.parse(trimmed);
+  } catch (_err) {
+    void _err;
+    return null;
+  }
 }
 
 let calibreBooksCache: { books: any[]; timestamp: number } = { books: [], timestamp: 0 };
@@ -209,7 +219,9 @@ function getCalibreHashMap() {
         };
       }
     }
-  } catch (e) {}
+  } catch (e) {
+    void e;
+  }
 
   const selectStmt = cacheDb.prepare("SELECT hash FROM file_hashes WHERE filepath = ? AND mtime = ?");
   const insertStmt = cacheDb.prepare("INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)");
@@ -252,7 +264,9 @@ function getCalibreHashMap() {
           }
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      void e;
+    }
   }
 
   scanDir(LIBRARY_DIR);
@@ -308,7 +322,7 @@ function ingestBookFile(filePath: string, originalFileName: string) {
         message: `Book "${existingBook.title}" already exists in format ${format}.`
       };
     } else {
-      const addFormatRes = spawnSync("/opt/homebrew/bin/calibredb", [
+      spawnSync("/opt/homebrew/bin/calibredb", [
         "add_format",
         String(existingBook.id),
         filePath,
@@ -452,7 +466,9 @@ function getKosyncProgress() {
                 displayAuthors = alias.normalized_authors || "Unknown Author";
               }
             }
-          } catch (e) {}
+          } catch (e) {
+            void e;
+          }
         }
 
         if (!displayTitle) {
@@ -545,7 +561,7 @@ function extractHighlightsFromSdr(bookId: number): Array<{ text: string; notes: 
 }
 
 // Helper: Extra Metadata Scrapers (Google Books, OpenLibrary, Douban/Search)
-async function searchAllBookSources(query: string) {
+async function _searchAllBookSources(query: string) {
   const results: any[] = [];
   const cleanQ = cleanString(query);
 
@@ -574,7 +590,9 @@ async function searchAllBookSources(query: string) {
         }
       }
     }
-  } catch (e) {}
+  } catch (e) {
+    void e;
+  }
 
   // 2. OpenLibrary
   try {
@@ -598,7 +616,9 @@ async function searchAllBookSources(query: string) {
         }
       }
     }
-  } catch (e) {}
+  } catch (e) {
+    void e;
+  }
 
   return results;
 }
@@ -607,7 +627,13 @@ Bun.serve({
   port: 8086,
   hostname: "0.0.0.0",
   async fetch(req) {
-    const url = new URL(req.url);
+    let url: URL;
+    try {
+      url = new URL(req.url);
+    } catch (_err) {
+      void _err;
+      return new Response("Bad Request", { status: 400 });
+    }
 
     // API: List books
     if (url.pathname === "/api/books" && req.method === "GET") {
@@ -887,6 +913,36 @@ Bun.serve({
         return Response.json({ success: false, error: "KOSync database not found" }, { status: 404 });
       } catch (err: any) {
         return Response.json({ success: false, error: err.message }, { status: 500 });
+      }
+    }
+
+    // API: Ingest Web Article from URL (Read Later EPUB)
+    if (url.pathname === "/api/ingest-url" && req.method === "POST") {
+      try {
+        const body = (await req.json()) as { url?: string };
+        if (!body.url || typeof body.url !== "string") {
+          return Response.json({ success: false, error: "Missing or invalid 'url' parameter" }, { status: 400 });
+        }
+        const targetUrl = body.url.trim();
+        if (!/^https?:\/\/\S+/i.test(targetUrl)) {
+          return Response.json({ success: false, error: "Please provide a valid http:// or https:// URL" }, { status: 400 });
+        }
+
+        const result = await ingestArticleFromUrl(targetUrl);
+        if (!result.success) {
+          return Response.json(result, { status: 500 });
+        }
+
+        getCalibreBooks(true);
+        return Response.json(result);
+      } catch (err: any) {
+        return Response.json(
+          {
+            success: false,
+            error: err.message || "Failed to ingest article from URL"
+          },
+          { status: 500 }
+        );
       }
     }
 
