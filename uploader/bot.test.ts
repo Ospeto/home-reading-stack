@@ -2,7 +2,20 @@ import { describe, expect, it } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { READING_WEBAPP_URL, KOSYNC_WAN_URL, getStatusDashboard } from "./bot";
+import {
+  READING_WEBAPP_URL,
+  KOSYNC_WAN_URL,
+  getStatusDashboard,
+  getMainMenuKeyboard,
+  getMainMenuText,
+  getPostIngestionKeyboard,
+  renderProgressBar,
+  truncate,
+  formatRelativeTime,
+  getCurrentlyReadingShelf,
+  getRecentBooks,
+  deleteBookFromLibrary
+} from "./bot";
 
 describe("Telegram Mini App (TMA) Integration", () => {
   it("exports READING_WEBAPP_URL defaulting to production WAN domain", () => {
@@ -179,5 +192,171 @@ describe("Unified In-Chat Health Dashboard (/status)", () => {
     expect(card).toContain("Uptime:");
     expect(card).toContain("Memory:");
     expect(card).toContain("Internal Disk:");
+  }, 15000);
+});
+
+describe("Interactive Main Menu Dashboard (/menu & /start)", () => {
+  it("getMainMenuKeyboard returns 4 rows matching the specification", () => {
+    const kb = getMainMenuKeyboard();
+    expect(kb).toBeDefined();
+    expect(Array.isArray(kb.inline_keyboard)).toBe(true);
+    expect(kb.inline_keyboard.length).toBe(4);
+
+    // Row 1: Open Reading HQ Mini App
+    expect(kb.inline_keyboard[0].length).toBe(1);
+    expect(kb.inline_keyboard[0][0].text).toContain("Open Reading HQ");
+    expect(kb.inline_keyboard[0][0].web_app?.url).toBe(READING_WEBAPP_URL);
+
+    // Row 2: Search Library & Recent Books
+    expect(kb.inline_keyboard[1].length).toBe(2);
+    expect(kb.inline_keyboard[1][0].text).toContain("Search Library");
+    expect(kb.inline_keyboard[1][0].callback_data).toBe("menu:search");
+    expect(kb.inline_keyboard[1][1].text).toContain("Recent Books");
+    expect(kb.inline_keyboard[1][1].callback_data).toBe("menu:recent");
+
+    // Row 3: Currently Reading & Server Status
+    expect(kb.inline_keyboard[2].length).toBe(2);
+    expect(kb.inline_keyboard[2][0].text).toContain("Currently Reading");
+    expect(kb.inline_keyboard[2][0].callback_data).toBe("menu:reading");
+    expect(kb.inline_keyboard[2][1].text).toContain("Server Status");
+    expect(kb.inline_keyboard[2][1].callback_data).toBe("refresh_status");
+
+    // Row 4: Hot Backup
+    expect(kb.inline_keyboard[3].length).toBe(1);
+    expect(kb.inline_keyboard[3][0].text).toContain("Hot Backup");
+    expect(kb.inline_keyboard[3][0].callback_data).toBe("menu:backup");
+  });
+
+  it("getMainMenuText returns formatted dashboard overview", () => {
+    const text = getMainMenuText();
+    expect(typeof text).toBe("string");
+    expect(text).toContain("Reading HQ Dashboard");
+    expect(text).toContain("Open Reading HQ");
+    expect(text).toContain("/f <query>");
+    expect(text).toContain("/reading");
+    expect(text).toContain("/recent");
+    expect(text).toContain("/status");
+    expect(text).toContain("/backup");
+  });
+});
+
+describe("Post-Ingestion Action Bar & Book Deletion", () => {
+  it("getPostIngestionKeyboard generates 1-row action bar with Send, Mini App, and Delete buttons", () => {
+    const testBookId = 42;
+    const kb = getPostIngestionKeyboard(testBookId);
+    expect(kb).toBeDefined();
+    expect(kb.inline_keyboard.length).toBe(1);
+
+    const row = kb.inline_keyboard[0];
+    expect(row.length).toBe(3);
+
+    // 1. Send File
+    expect(row[0].text).toContain("Send File");
+    expect(row[0].callback_data).toBe(`send_book:${testBookId}`);
+
+    // 2. Open in Mini App
+    expect(row[1].text).toContain("Open in Mini App");
+    expect(row[1].web_app?.url).toBe(READING_WEBAPP_URL);
+
+    // 3. Undo / Delete
+    expect(row[2].text).toContain("Undo / Delete");
+    expect(row[2].callback_data).toBe(`delete_book:${testBookId}`);
+  });
+
+  it("deleteBookFromLibrary rejects invalid or non-positive book IDs", () => {
+    const invalidRes1 = deleteBookFromLibrary(0);
+    expect(invalidRes1.success).toBe(false);
+    expect(invalidRes1.error).toBe("Invalid book ID");
+
+    const invalidRes2 = deleteBookFromLibrary(-5);
+    expect(invalidRes2.success).toBe(false);
+    expect(invalidRes2.error).toBe("Invalid book ID");
+
+    const invalidRes3 = deleteBookFromLibrary(NaN);
+    expect(invalidRes3.success).toBe(false);
+    expect(invalidRes3.error).toBe("Invalid book ID");
+  });
+});
+
+describe("Live 'Currently Reading' Shelf (/reading)", () => {
+  it("renderProgressBar computes accurate percentage bars and handles clamping", () => {
+    // 0% -> 8 empty blocks
+    expect(renderProgressBar(0, 8)).toBe("░░░░░░░░");
+    // 45% -> 4 filled blocks, 4 empty blocks
+    expect(renderProgressBar(0.45, 8)).toBe("████░░░░");
+    // 50% -> 4 filled blocks, 4 empty blocks
+    expect(renderProgressBar(0.5, 8)).toBe("████░░░░");
+    // 75% -> 6 filled blocks, 2 empty blocks
+    expect(renderProgressBar(0.75, 8)).toBe("██████░░");
+    // 100% -> 8 filled blocks
+    expect(renderProgressBar(1.0, 8)).toBe("████████");
+
+    // Clamping
+    expect(renderProgressBar(-0.2, 8)).toBe("░░░░░░░░");
+    expect(renderProgressBar(1.5, 8)).toBe("████████");
+  });
+
+  it("truncate helper truncates long text with ellipsis and preserves short text", () => {
+    expect(truncate("Short", 10)).toBe("Short");
+    expect(truncate("This is a very long title that exceeds limit", 15)).toBe("This is a very…");
+    expect(truncate("", 10)).toBe("");
+  });
+
+  it("formatRelativeTime formats elapsed seconds into human readable badges", () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    expect(formatRelativeTime(0)).toBe("recently");
+    expect(formatRelativeTime(nowSec - 10)).toBe("just now");
+    expect(formatRelativeTime(nowSec - 120)).toBe("2m ago");
+    expect(formatRelativeTime(nowSec - 7200)).toBe("2h ago");
+    expect(formatRelativeTime(nowSec - 86400)).toBe("yesterday");
+    expect(formatRelativeTime(nowSec - 86400 * 3)).toBe("3d ago");
+  });
+
+  it("getCurrentlyReadingShelf queries active documents and builds shelf card", () => {
+    const shelf = getCurrentlyReadingShelf(5);
+    expect(shelf).toBeDefined();
+    expect(Array.isArray(shelf.items)).toBe(true);
+    expect(typeof shelf.card).toBe("string");
+    expect(shelf.card).toContain("Currently Reading Shelf");
+
+    if (shelf.items.length > 0) {
+      const first = shelf.items[0];
+      expect(first.percentage).toBeGreaterThan(0);
+      expect(first.percentage).toBeLessThan(1);
+      expect(typeof first.title).toBe("string");
+      expect(typeof first.device).toBe("string");
+      expect(first.timestamp).toBeGreaterThan(0);
+
+      // Card formatting contains progress bar
+      expect(shelf.card).toContain("%");
+      expect(shelf.keyboard).toBeDefined();
+      expect(Array.isArray(shelf.keyboard.inline_keyboard)).toBe(true);
+    }
+  });
+});
+
+describe("Recent Books List (/recent)", () => {
+  it("getRecentBooks queries Calibre and builds card with download buttons", () => {
+    const recent = getRecentBooks(5);
+    expect(recent).toBeDefined();
+    expect(Array.isArray(recent.books)).toBe(true);
+    expect(typeof recent.card).toBe("string");
+    expect(recent.card).toContain("Recent Additions");
+
+    if (recent.books.length > 0) {
+      expect(recent.books.length).toBeLessThanOrEqual(5);
+      const first = recent.books[0];
+      expect(first.id).toBeGreaterThan(0);
+      expect(typeof first.title).toBe("string");
+
+      // Card includes book title
+      expect(recent.card).toContain(first.title);
+
+      // Keyboard includes send_book button
+      expect(recent.keyboard).toBeDefined();
+      const rows = recent.keyboard.inline_keyboard;
+      const sendButton = rows.flat().find((btn: any) => btn.callback_data === `send_book:${first.id}`);
+      expect(sendButton).toBeDefined();
+    }
   });
 });
