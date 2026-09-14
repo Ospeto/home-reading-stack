@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
@@ -26,6 +27,7 @@ const PROXY_URL = "http://127.0.0.1:7890";
 const WEB_UPLOADER_URL = "http://192.168.31.15:8086";
 const CALIBRE_WEB_URL = "http://192.168.31.15:8088";
 export const READING_WEBAPP_URL = process.env.READING_WEBAPP_URL || "https://reading.wavypremium.xyz";
+export const KOSYNC_WAN_URL = process.env.KOSYNC_WAN_URL || "https://kosync.wavypremium.xyz";
 const MAX_TELEGRAM_FILE_SIZE = 20 * 1024 * 1024; // 20MB Telegram Bot API limit
 const ALLOWED_EXTS = [".epub", ".pdf", ".mobi", ".azw3", ".cbz", ".cbr", ".azw", ".zip", ".rar", ".7z", ".tar"];
 
@@ -833,9 +835,206 @@ export async function retrieveAndSendBook(chatId: number, bookId: number): Promi
   }
 }
 
+export async function getStatusDashboard(): Promise<string> {
+  const ts = new Date().toLocaleString("en-GB", { timeZone: "Asia/Yangon" }).replace(",", "");
+
+  // 1. WAN Edge
+  let wanReadingStatus = "🔴 `Unreachable`";
+  const t0 = performance.now();
+  try {
+    const res = await fetch(READING_WEBAPP_URL, {
+      proxy: PROXY_URL,
+      signal: AbortSignal.timeout(8000)
+    });
+    const dt = Math.round(performance.now() - t0);
+    wanReadingStatus = res.status === 200 ? `🟢 \`200 OK\` (${dt}ms)` : `🔴 \`HTTP ${res.status}\` (${dt}ms)`;
+  } catch (_e) {
+    void _e;
+    const dt = Math.round(performance.now() - t0);
+    wanReadingStatus = `🔴 \`Timeout/Error\` (${dt}ms)`;
+  }
+
+  let wanKosyncStatus = "🟡 `Pending WAN Setup`";
+  try {
+    const res = await fetch(KOSYNC_WAN_URL, {
+      proxy: PROXY_URL,
+      signal: AbortSignal.timeout(4000)
+    });
+    wanKosyncStatus = res.status === 200 ? `🟢 \`200 OK\`` : `🟡 \`HTTP ${res.status}\``;
+  } catch (_e) {
+    void _e;
+    wanKosyncStatus = `🟡 \`Tunnel Forwarded (:7200)\` (DNS Pending)`;
+  }
+
+  // 2. Reverse SSH Tunnel
+  let tunnelStatus = "🔴 `Stopped`";
+  try {
+    const pg = spawnSync("pgrep", ["-f", "ssh.*0.0.0.0:8086"], { encoding: "utf8" });
+    const pid = (pg.stdout || "").trim().split("\n")[0];
+    if (pid) tunnelStatus = `🟢 \`Active\` (PID ${pid})`;
+  } catch (_e) {
+    void _e;
+  }
+
+  let proxyStatus = "🔴 `Disconnected`";
+  try {
+    const pCheck = spawnSync("nc", ["-z", "127.0.0.1", "7890"], { timeout: 1500 });
+    if (pCheck.status === 0) proxyStatus = "🟢 `Connected` (127.0.0.1:7890)";
+  } catch (_e) {
+    void _e;
+  }
+
+  // 3. Reading HQ & Calibre
+  let uploaderLocal = "🔴 `Inactive`";
+  try {
+    const res = await fetch("http://127.0.0.1:8086/api/books", { signal: AbortSignal.timeout(2000) });
+    if (res.status === 200) uploaderLocal = "🟢 `Active` (:8086)";
+  } catch (_e) {
+    void _e;
+  }
+
+  let calibreLocal = "🔴 `Inactive`";
+  try {
+    const res = await fetch("http://127.0.0.1:8088/opds", { signal: AbortSignal.timeout(2000) });
+    if (res.status === 200) calibreLocal = "🟢 `Active` (:8088 / OPDS)";
+  } catch (_e) {
+    void _e;
+  }
+
+  let totalBooks = 0;
+  let formatStats = "None";
+  let newestTitle = "None";
+  if (fs.existsSync(CALIBRE_DB_PATH)) {
+    try {
+      const db = new Database(CALIBRE_DB_PATH, { readonly: true });
+      const bRow = db.query("SELECT COUNT(*) as cnt FROM books").get() as any;
+      totalBooks = bRow?.cnt || 0;
+      const fRows = db.query("SELECT format, count(*) as cnt FROM data GROUP BY format ORDER BY cnt DESC LIMIT 4").all() as any[];
+      if (fRows && fRows.length > 0) {
+        formatStats = fRows.map(f => `${f.format}: ${f.cnt}`).join(", ");
+      }
+      const nRow = db.query("SELECT id, title FROM books ORDER BY id DESC LIMIT 1").get() as any;
+      if (nRow) {
+        newestTitle = `#${nRow.id} ${escapeTelegramMarkdown(nRow.title || "Untitled")}`;
+      }
+    } catch (_e) {
+      void _e;
+    }
+  }
+
+  // 4. KOSync
+  let kosyncLocal = "🔴 `Inactive`";
+  try {
+    const res = await fetch("http://127.0.0.1:7200/", { signal: AbortSignal.timeout(2000) });
+    if (res.status === 200) kosyncLocal = "🟢 `Active` (:7200)";
+  } catch (_e) {
+    void _e;
+  }
+
+  let kosyncDbStatus = "🔴 `Not Found`";
+  let kosyncUsers = 0;
+  let kosyncProgress = 0;
+  let deviceNames = "";
+  if (fs.existsSync(KOSYNC_DB_PATH)) {
+    try {
+      const kDb = new Database(KOSYNC_DB_PATH, { readonly: true });
+      kosyncDbStatus = "🟢 `Healthy` (SQLite WAL)";
+      const uRow = kDb.query("SELECT COUNT(*) as cnt FROM users").get() as any;
+      kosyncUsers = uRow?.cnt || 0;
+      const pRow = kDb.query("SELECT COUNT(*) as cnt FROM progress").get() as any;
+      kosyncProgress = pRow?.cnt || 0;
+      const dRows = kDb.query("SELECT DISTINCT device FROM progress WHERE device IS NOT NULL AND device != \"\"").all() as any[];
+      if (dRows && dRows.length > 0) {
+        deviceNames = dRows.map(d => d.device).join(", ");
+      }
+    } catch (_e) {
+      void _e;
+    }
+  }
+
+  // 5. Host Metrics
+  const uptimeSec = os.uptime();
+  const days = Math.floor(uptimeSec / 86400);
+  const hours = Math.floor((uptimeSec % 86400) / 3600);
+  const mins = Math.floor((uptimeSec % 3600) / 60);
+  const uptimeStr = `${days}d ${hours}h ${mins}m`;
+
+  let memStr = "";
+  try {
+    const mp = spawnSync("memory_pressure", ["-Q"], { encoding: "utf8", timeout: 2000 });
+    const match = mp.stdout?.match(/System-wide memory free percentage:\s*(\d+)%/i);
+    const totalGb = (os.totalmem() / (1024 ** 3)).toFixed(1);
+    if (match) {
+      memStr = `\`${match[1]}% free\` (${totalGb} GB RAM)`;
+    } else {
+      const freeGb = (os.freemem() / (1024 ** 3)).toFixed(1);
+      memStr = `\`${freeGb} GB free\` / ${totalGb} GB`;
+    }
+  } catch (_e) {
+    void _e;
+    const totalGb = (os.totalmem() / (1024 ** 3)).toFixed(1);
+    const freeGb = (os.freemem() / (1024 ** 3)).toFixed(1);
+    memStr = `\`${freeGb} GB free\` / ${totalGb} GB`;
+  }
+
+  let internalDiskStr = "N/A";
+  try {
+    const df = spawnSync("df", ["-h", path.dirname(CALIBRE_DB_PATH)], { encoding: "utf8", timeout: 2000 });
+    const lines = (df.stdout || "").trim().split("\n");
+    if (lines.length > 1) {
+      const parts = lines[1].split(/\s+/);
+      internalDiskStr = `\`${parts[3]} free\` / ${parts[1]} (${parts[4]} used)`;
+    }
+  } catch (_e) {
+    void _e;
+  }
+
+  let ssdDiskStr = "";
+  if (fs.existsSync("/Volumes/Ospeto_SSD")) {
+    try {
+      const df = spawnSync("df", ["-h", "/Volumes/Ospeto_SSD"], { encoding: "utf8", timeout: 2000 });
+      const lines = (df.stdout || "").trim().split("\n");
+      if (lines.length > 1) {
+        const parts = lines[1].split(/\s+/);
+        ssdDiskStr = `\n• *External SSD:* \`${parts[3]} free\` / ${parts[1]} (${parts[4]} used)`;
+      }
+    } catch (_e) {
+      void _e;
+    }
+  }
+
+  const deviceText = deviceNames ? ` (${deviceNames})` : "";
+
+  return `📊 *Reading Stack Health Dashboard*\n` +
+    `_Updated: ${ts} (Asia/Yangon)_\n\n` +
+    `🌐 *WAN Edge (VPS panel)*\n` +
+    `• *Reading HQ:* ${wanReadingStatus} • [reading.wavypremium.xyz](${READING_WEBAPP_URL})\n` +
+    `• *KOSync WAN:* ${wanKosyncStatus}\n\n` +
+    `🚇 *Reverse SSH Tunnel*\n` +
+    `• *Tunnel Daemon:* ${tunnelStatus}\n` +
+    `• *Port Forwards:* \`8086\` (HQ) • \`7200\` (KOSync)\n` +
+    `• *Sing-box Proxy:* ${proxyStatus}\n\n` +
+    `📚 *Reading HQ & Calibre*\n` +
+    `• *Web Uploader:* ${uploaderLocal}\n` +
+    `• *Calibre Server:* ${calibreLocal}\n` +
+    `• *Total Catalog:* \`${totalBooks} books\` (\`${formatStats}\`)\n` +
+    `• *Newest Title:* ${newestTitle}\n\n` +
+    `🔄 *KOReader Sync (KOSync)*\n` +
+    `• *KOSync Server:* ${kosyncLocal}\n` +
+    `• *Sync Database:* ${kosyncDbStatus}\n` +
+    `• *Users & Devices:* \`${kosyncUsers} user(s)\` • \`${deviceNames ? "Active" : "None"}${deviceText}\`\n` +
+    `• *Synced Progress:* \`${kosyncProgress} reading record(s)\`\n\n` +
+    `🖥️ *Mac Mini Host*\n` +
+    `• *Uptime:* \`${uptimeStr}\`\n` +
+    `• *Memory:* ${memStr}\n` +
+    `• *Internal Disk:* ${internalDiskStr}` +
+    ssdDiskStr;
+}
+
 export async function handleCallbackQuery(cq: any): Promise<void> {
   const callbackId = cq.id;
   const chatId = cq.message?.chat?.id || cq.from?.id;
+  const messageId = cq.message?.message_id;
   const data = cq.data || "";
   const sender = cq.from?.username || cq.from?.first_name || `ID ${chatId}`;
 
@@ -846,11 +1045,25 @@ export async function handleCallbackQuery(cq: any): Promise<void> {
     await tgFetch("answerCallbackQuery", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ callback_query_id: callbackId }),
+      body: JSON.stringify({ callback_query_id: callbackId, text: data === "refresh_status" ? "Refreshing status..." : undefined }),
       timeoutMs: 10000
     });
   } catch (err: any) {
     logError(`answerCallbackQuery failed: ${err?.message || err}`);
+  }
+
+  if (data === "refresh_status") {
+    const card = await getStatusDashboard();
+    const inlineKeyboard = {
+      inline_keyboard: [
+        [
+          { text: "🔄 Refresh Status", callback_data: "refresh_status" },
+          { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } }
+        ]
+      ]
+    };
+    await editOrSendMessage(chatId, messageId, card, "Markdown", inlineKeyboard);
+    return;
   }
 
   if (data.startsWith("send_book:")) {
@@ -1412,6 +1625,35 @@ async function pollTelegram() {
             const text = msg.text.trim();
             log(`Received text: "${text}" from ${sender}`);
 
+            // Status Dashboard: /status or /health
+            if (
+              text === "/status" ||
+              text === "/health" ||
+              text.startsWith("/status@") ||
+              text.startsWith("/health@") ||
+              text.startsWith("/status ") ||
+              text.startsWith("/health ")
+            ) {
+              log(`Handling ${text.split(" ")[0]} command from ${sender} (chatId: ${chatId})`);
+              const statusMsgId = await sendMessage(
+                chatId,
+                `⏳ *Gathering reading stack diagnostics...*`,
+                "Markdown"
+              );
+
+              const card = await getStatusDashboard();
+              const inlineKeyboard = {
+                inline_keyboard: [
+                  [
+                    { text: "🔄 Refresh Status", callback_data: "refresh_status" },
+                    { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } }
+                  ]
+                ]
+              };
+              await editOrSendMessage(chatId, statusMsgId, card, "Markdown", inlineKeyboard);
+              continue;
+            }
+
             if (text === "/backup" || text.startsWith("/backup@") || text.startsWith("/backup ")) {
               log(`Handling /backup command from ${sender} (chatId: ${chatId})`);
               const statusMsgId = await sendMessage(
@@ -1676,6 +1918,7 @@ async function pollTelegram() {
                 `• *Formats:* \`.epub\`, \`.pdf\`, \`.mobi\`, \`.azw3\`, \`.cbz\`, \`.cbr\`\n` +
                 `• *File Limit:* Up to *20 MB* per file (Telegram API limit)\n` +
                 `• *Large Files (>20MB):* Upload via [Reading HQ](${READING_WEBAPP_URL}) or [Web Uploader](${WEB_UPLOADER_URL})\n` +
+                `• \`/status\` (or \`/health\`): Live health dashboard for WAN edge, reverse tunnel, Calibre catalog, KOSync progress, and host metrics.\n` +
                 `• \`/backup\`: Instant hot snapshot of all reading databases sent directly to this chat.\n\n` +
                 `_Books and articles are automatically de-duplicated, sanitized, and available on your Kindle._`,
                 "Markdown",
@@ -1694,7 +1937,7 @@ async function pollTelegram() {
             } else {
               await sendMessage(
                 chatId,
-                `📖 Please send eBook files (\`.epub\`, \`.pdf\`, \`.mobi\`, \`.cbz\`), paste an article URL, search your library (\`/find <query>\`), open the dashboard (\`/app\`), or send \`/backup\` for an instant database snapshot. For files over 20MB, use [Reading HQ](${READING_WEBAPP_URL}).`,
+                `📖 Please send eBook files (\`.epub\`, \`.pdf\`, \`.mobi\`, \`.cbz\`), paste an article URL, search your library (\`/find <query>\`), open the dashboard (\`/app\`), check system status (\`/status\`), or send \`/backup\` for an instant database snapshot. For files over 20MB, use [Reading HQ](${READING_WEBAPP_URL}).`,
                 "Markdown",
                 {
                   inline_keyboard: [

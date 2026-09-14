@@ -10,6 +10,8 @@
         <string>-N</string>
         <string>-R</string>
         <string>0.0.0.0:8086:127.0.0.1:8086</string>
+        <string>-R</string>
+        <string>0.0.0.0:7200:127.0.0.1:7200</string>
         <string>-o</string>
         <string>ProxyCommand=nc -X 5 -x 127.0.0.1:7890 %h %p</string>
         <string>-o</string>
