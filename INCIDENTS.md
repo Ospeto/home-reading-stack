@@ -1,0 +1,81 @@
+# Incident History & Technical Post-Mortems
+
+This document chronicles the technical challenges encountered during the Kindle / KOReader sync and OPDS deployment, root causes identified, and structural mitigations implemented.
+
+---
+
+## 📋 Incident Summary Matrix
+
+| ID | Title | Root Cause | Resolution | Impact |
+|---|---|---|---|---|
+| **INC-01** | Myanmar GFW/DPI Blocking Raw Kindle HTTPS | Myanmar ISPs filter dynamic DNS, `.sslip.io`, and raw VPS IP ranges on standard HTTPS ports | Transitioned primary stack to local Mac mini home server (`192.168.31.15`); set up sing-box VLESS proxy for external fallback | Resolved |
+| **INC-02** | KOReader Cross-Device Sync Mismatch | Different book file encodings generated conflicting partial MD5 document hashes | Unified book delivery via central OPDS catalog ensuring byte-identical copies | Resolved |
+| **INC-03** | KOReader Localhost Port 8321 Refusal | Proxy request destination misconfigured to localhost loopback `127.0.0.1:8321` | Separated Network Proxy settings from Custom Sync Server settings | Resolved |
+| **INC-04** | Calibre SQLite Multi-Process Lock Contention | Direct filesystem mutation conflicted with active `calibre-server` process | Enabled `--enable-local-write` and switched CLI tools to server URL `http://127.0.0.1:8088` | Resolved |
+| **INC-05** | Happ VPN Extension Overhead on Turn Start | Synchronous accessibility tree traversals on `input` and `before_agent_start` blocked Pi | Removed automatic turn-hooks; preserved manual `/happ` slash commands and tools | Resolved |
+| **INC-06** | Telegram Ingest Bot Deadlock & Stalled Long-Poll Socket | Direct connection to `api.telegram.org` hung silently without request timeout; process became orphaned | Routed polling through Sing-box VLESS proxy (`:7890`), added `AbortSignal` timeouts, and enabled auto-restart | Resolved |
+| **INC-07** | Calibre Ingestion Crash from Subprocess Proxy Leak | `HTTP_PROXY` in LaunchAgent env caused Python `calibredb` to append debug text to JSON output | Sanitized subprocess environment and implemented boundary-bracket `safeParseJson` | Resolved |
+| **INC-08** | Sing-Box Outbound Drop via macOS Empty Resolv.conf | macOS lacks DNS in `/etc/resolv.conf`; Sing-box failed to resolve domain-based VLESS endpoints | Added explicit UDP DNS servers (`8.8.8.8`, `1.1.1.1`) and `default_domain_resolver` in `config.json` | Resolved |
+| **INC-09** | Daily Backup Failure via macOS TCC Volume Restriction | Non-interactive LaunchAgent blocked from writing to `/Volumes/Ospeto_SSD` by macOS sandbox | Implemented dual-tier backup (local fallback + SSD mirror) and converted databases to SQLite WAL mode | Resolved |
+
+---
+
+## 🔍 Detailed Post-Mortems
+
+### INC-01: Myanmar GFW Dropping Direct Kindle HTTPS
+- **Symptom:** Kindle displayed *"Check your network connection"* when accessing `https://kosync-198-46-146-17.sslip.io` and `https://calibre-198-46-146-17.sslip.io`, while laptop/phone succeeded.
+- **Root Cause:** Laptop and phone were tunneled through Happ VPN (VLESS Reality camouflage). Kindle lacked VPN capabilities and sent raw HTTPS packets to overseas IPs. Deep Packet Inspection (DPI) in Myanmar dropped direct TLS handshakes to international IP ranges and blocked `.sslip.io` SNI.
+- **Solution:** Moved sync server and book catalog directly onto Mac mini (`192.168.31.15`) on the local Wi-Fi subnet. Kindle now talks directly to Mac mini with zero GFW exposure.
+
+---
+
+### INC-02: Conflicting Document Hashes on Same Book Title
+- **Symptom:** Devices reported successful `HTTP 200` sync responses, but bookmarks and progress remained out of sync between Paperwhite and Kindle Basic.
+- **Root Cause:** KOReader identifies documents by computing a partial MD5 hash of binary file chunks at exponentially spaced offsets. Because books had been converted or imported via different paths, the binary files were non-identical, causing the server to treat them as two distinct books (`fca01ed1...` vs `20820c7c...`).
+- **Solution:** Standardized book ingestion via Calibre-Web/OPDS. Downloading from the central OPDS feed guarantees byte-identical files and identical document hashes on all e-readers.
+
+---
+
+### INC-03: Calibre Database Lock Contention (`calibredb add`)
+- **Symptom:** Web uploader failed with *"Another calibre program such as calibre-server is running"*.
+- **Root Cause:** SQLite does not allow concurrent write access from separate OS processes (`calibredb` and `calibre-server`) against the same `metadata.db` file.
+- **Solution:** Added `--enable-local-write` flag to `calibre-server` on port `8088`. Updated all ingestion scripts to pass `--with-library http://127.0.0.1:8088` instead of directory paths. Calibre server now manages all database writes safely through its internal socket.
+
+---
+
+### INC-04: Happ Extension Blocking User Prompts
+- **Symptom:** Pi coding harness experienced multi-second latency and notification spam on every user message.
+- **Root Cause:** `happ-vpn-guard.ts` registered synchronous event listeners (`pi.on("input")` and `pi.on("before_agent_start")`) that executed `macos-harness` accessibility queries via `execSync` on every single turn.
+- **Solution:** Removed automatic turn hooks from `happ-vpn-guard.ts`, fixed button detection bugs in `happ_helper.py`, and synced updated extensions across fleet machines.
+
+---
+
+### INC-06: Telegram Ingest Bot Deadlock & Stalled Socket
+- **Symptom:** Telegram bot (`@saroat_ospeto_bot`) stopped responding to incoming book sends and `/start` commands.
+- **Root Cause:** Direct outbound TLS connections to `api.telegram.org` (`149.154.166.110`) were subject to firewall silent drops. Bun's `fetch()` had no abort timeout, leaving the TCP socket in `ESTABLISHED` state indefinitely for days. Re-launch attempts failed with `HTTP 409 Conflict` because the orphaned process held the polling lock.
+- **Solution:** Routed all Telegram API communication through the local Sing-box VLESS proxy (`http://127.0.0.1:7890`). Added strict `AbortController` timeouts (35s poll, 20s download, 15s message) to prevent socket hangs, and updated LaunchAgent with auto-restart keepalives.
+
+---
+
+### INC-07: Calibre CLI Output Contamination & JSON Parse Crash
+- **Symptom:** Telegram bot crashed during book ingestion with error: `JSON Parse error: Unable to parse JSON string`.
+- **Root Cause:** When `HTTP_PROXY` was exported in the LaunchAgent environment, Python's `calibredb` detected proxy variables and appended debug text (`Using proxies: {'http': '127.0.0.1:7890'}`) to its standard output right after the JSON array. Calling `JSON.parse(res.stdout)` failed.
+- **Solution:** Isolated proxy environment variables so child CLI processes (`calibredb`) communicate directly with local `127.0.0.1:8088` with clean environments. Implemented `safeParseJson` to extract only valid JSON bracket boundaries `[...]` / `{...}`, ignoring any stdout warnings or debug banners.
+
+---
+
+### INC-08: Sing-Box DNS Blackhole on macOS Empty `/etc/resolv.conf`
+- **Symptom:** Sing-box VLESS proxy failed to connect to overseas endpoints; `curl --proxy` returned `Connection reset by peer` and HTTP `000`.
+- **Root Cause:** macOS does not populate `/etc/resolv.conf` with active DNS resolvers (uses `scutil` / mDNSResponder). Sing-box compiled in Go defaulted to querying `127.0.0.1:53` and `[::1]:53`, causing DNS connection refused errors when resolving domain-based VLESS outbounds (`jprobin.wavypremium.xyz`, `usrobin.wavypremium.xyz`).
+- **Solution:** Configured explicit UDP DNS servers (`8.8.8.8`, `1.1.1.1`) and set `route.default_domain_resolver = "dns-remote"` in `~/.config/sing-box/config.json`. Outbounds now resolve reliably without depending on macOS `/etc/resolv.conf`.
+
+---
+
+### INC-09: Background LaunchAgent Backup Blocked by macOS TCC
+- **Symptom:** Daily 04:00 AM backup daemon `com.ospeto.reading-stack-backup` exited with code 1; backup archives were not created.
+- **Root Cause:** macOS Transparency, Consent, and Control (TCC) prohibits non-interactive background LaunchAgents from writing to Removable Volumes (`/Volumes/Ospeto_SSD`) without explicit user interactive entitlement.
+- **Solution:** Re-architected backup strategy into a dual-tier pipeline:
+  1. Primary backup archives are written to `~/.backups/reading-stack/` in the user's home directory (always permitted by macOS sandbox).
+  2. Opportunistic mirror syncs to `/Volumes/Ospeto_SSD/backups/reading-stack/` when accessible.
+  3. Switched all 4 SQLite databases (`koreader-sync.db`, `cache.db`, `manga.db`, `metadata.db`) to `WAL` mode (`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`) for zero-corruption power-loss resilience.
+  4. Deployed automated 15-minute watchdog (`watchdog.sh`) to self-heal any failed service across the stack.

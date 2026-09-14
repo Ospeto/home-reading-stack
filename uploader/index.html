@@ -1,0 +1,1276 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Reading HQ — Home Library & Catalog</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; -webkit-tap-highlight-color: transparent; }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
+    .ui-card { background: #121216; border: 1px solid #23232a; }
+    .ui-card:hover { border-color: #3f3f46; }
+    .ui-card-active { border-color: #52525b; background: #18181f; }
+    @media (hover: hover) {
+      .book-card:hover .action-bar { opacity: 1; transform: translateY(0); pointer-events: auto; }
+    }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: #09090b; }
+    ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 2px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+  </style>
+</head>
+<body class="bg-[#09090b] text-zinc-100 min-h-screen flex flex-col antialiased selection:bg-zinc-800 selection:text-white pb-12 sm:pb-0">
+
+  <!-- RESPONSIVE HEADER -->
+  <header class="sticky top-0 z-40 bg-[#09090b]/95 backdrop-blur-md border-b border-zinc-800/80 px-4 sm:px-6 py-2.5 sm:py-3 transition-all">
+    <div class="max-w-[1600px] mx-auto flex flex-col gap-2.5">
+      
+      <!-- Top Bar: Brand, Actions -->
+      <div class="flex items-center justify-between gap-3">
+        
+        <!-- Brand & Library Status -->
+        <div class="flex items-center gap-2.5 shrink-0">
+          <div class="w-8 h-8 rounded-lg bg-zinc-100 text-zinc-950 flex items-center justify-center font-bold text-sm shadow-sm">
+            <i class="fa-solid fa-book"></i>
+          </div>
+          <div>
+            <div class="flex items-center gap-1.5 sm:gap-2">
+              <span class="text-sm font-bold tracking-tight text-zinc-100">Reading HQ</span>
+              <span class="inline-flex items-center gap-1 px-1.5 sm:px-2 py-0.5 rounded text-[10px] font-semibold bg-zinc-800 text-zinc-300 border border-zinc-700">
+                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                <span class="hidden xs:inline">Calibre</span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Search Bar on Desktop -->
+        <div class="hidden md:flex items-center gap-3 flex-1 max-w-lg mx-2">
+          <div class="relative w-full">
+            <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 text-xs"></i>
+            <input type="text" id="searchInputDesktop" placeholder="Search books, authors, series, tags..." oninput="syncSearch(this.value)"
+              class="w-full pl-8 pr-8 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-500 transition-colors">
+            <button onclick="clearSearch()" class="clear-search-btn hidden absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-200 text-xs">
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Primary Actions -->
+        <div class="flex items-center gap-2 shrink-0">
+          <!-- Mobile Filter Toggle Button -->
+          <button onclick="openFilterDrawer()" class="lg:hidden px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-xs font-semibold rounded-lg border border-zinc-800 transition-colors flex items-center gap-1.5 cursor-pointer active:scale-95">
+            <i class="fa-solid fa-filter text-[11px] text-zinc-400"></i>
+            <span class="text-[11px]">Filters</span>
+            <span id="mobileFilterBadgeCount" class="hidden px-1.5 py-0.2 rounded-full bg-zinc-700 text-[9px] font-bold"></span>
+          </button>
+
+          <!-- Clean Tags Button -->
+          <button onclick="cleanLibraryMetadata()" class="p-2 sm:px-3 sm:py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white font-semibold text-xs rounded-lg border border-zinc-800 transition-colors flex items-center gap-1.5 cursor-pointer active:scale-95" title="Sanitize Titles & Strip Junk Tags">
+            <i class="fa-solid fa-broom text-[11px] text-amber-400"></i>
+            <span class="hidden sm:inline">Clean Tags</span>
+          </button>
+
+          <!-- Upload Button -->
+          <button onclick="openUploadModal()" class="px-3 sm:px-3.5 py-1.5 bg-zinc-100 hover:bg-white text-zinc-950 font-bold text-xs rounded-lg transition-all active:scale-95 flex items-center gap-1.5 shadow-sm cursor-pointer">
+            <i class="fa-solid fa-plus text-[11px]"></i>
+            <span>Upload</span>
+          </button>
+        </div>
+
+      </div>
+
+      <!-- Mobile Search Bar (Dedicated Row on Small Screens) -->
+      <div class="md:hidden relative w-full">
+        <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 text-xs"></i>
+        <input type="text" id="searchInputMobile" placeholder="Search books, authors, series, tags..." oninput="syncSearch(this.value)"
+          class="w-full pl-8 pr-8 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-sm sm:text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-500 transition-colors">
+        <button onclick="clearSearch()" class="clear-search-btn hidden absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-200 text-xs p-1">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <!-- HORIZONTAL QUICK FILTER PILLS (Mobile & Desktop) -->
+      <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5 text-xs">
+        <button onclick="setFilter('all', null)" id="chip-all" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-zinc-100 text-zinc-950 shrink-0 transition-colors">
+          All Books (<span id="quickTotalBooks">0</span>)
+        </button>
+        <button onclick="setFilter('status', 'reading')" id="chip-reading" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-zinc-900 border border-zinc-800 text-emerald-400 hover:text-white shrink-0 transition-colors flex items-center gap-1.5 cursor-pointer">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span>Reading</span>
+          <span id="quickReadingCount" class="text-[10px] text-zinc-500 font-mono">0</span>
+        </button>
+        <div id="quickSeriesChips" class="flex items-center gap-1.5 shrink-0"></div>
+        <div id="quickFormatChips" class="flex items-center gap-1.5 shrink-0"></div>
+      </div>
+
+    </div>
+  </header>
+
+  <!-- MAIN APP LAYOUT -->
+  <div class="max-w-[1600px] mx-auto w-full px-4 sm:px-6 py-4 sm:py-5 flex-1 flex gap-5">
+
+    <!-- DESKTOP SIDEBAR -->
+    <aside class="w-60 shrink-0 hidden lg:block space-y-3.5">
+      
+      <!-- Primary Navigation -->
+      <div class="ui-card rounded-xl p-1.5 space-y-0.5">
+        <button onclick="setFilter('all', null)" id="nav-all" class="w-full flex items-center justify-between px-3 py-1.5 rounded-lg text-xs font-semibold bg-zinc-800 text-white transition-colors">
+          <span class="flex items-center gap-2"><i class="fa-solid fa-layer-group text-zinc-400"></i> All Books</span>
+          <span id="facetTotalBooks" class="text-[10px] bg-zinc-900 text-zinc-300 px-1.5 py-0.5 rounded font-mono">0</span>
+        </button>
+      </div>
+
+      <!-- Active Filter Badge -->
+      <div id="activeFilterBox" class="hidden ui-card rounded-xl p-3 border-zinc-700">
+        <div class="flex items-center justify-between mb-1.5">
+          <span class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Active Filter</span>
+          <button onclick="clearAllFilters()" class="text-[10px] text-zinc-400 hover:text-white transition-colors">Clear</button>
+        </div>
+        <div id="activeFilterBadge" class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-semibold bg-zinc-800 text-zinc-200 border border-zinc-700"></div>
+      </div>
+
+      <!-- Series Facet -->
+      <div class="ui-card rounded-xl p-3 space-y-2">
+        <div class="flex items-center justify-between text-[11px] font-bold text-zinc-400 uppercase tracking-wider px-0.5">
+          <span><i class="fa-solid fa-bookmark mr-1 text-zinc-500"></i> Series</span>
+          <span id="seriesCountLabel" class="text-zinc-500 font-mono text-[10px]">0</span>
+        </div>
+        <div id="seriesList" class="space-y-0.5 max-h-36 overflow-y-auto pr-1"></div>
+      </div>
+
+      <!-- Authors Facet -->
+      <div class="ui-card rounded-xl p-3 space-y-2">
+        <div class="flex items-center justify-between text-[11px] font-bold text-zinc-400 uppercase tracking-wider px-0.5">
+          <span><i class="fa-solid fa-feather mr-1 text-zinc-500"></i> Authors</span>
+          <span id="authorCountLabel" class="text-zinc-500 font-mono text-[10px]">0</span>
+        </div>
+        <div id="authorList" class="space-y-0.5 max-h-40 overflow-y-auto pr-1"></div>
+      </div>
+
+      <!-- Tags Facet -->
+      <div class="ui-card rounded-xl p-3 space-y-2">
+        <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider px-0.5">
+          <i class="fa-solid fa-tags mr-1 text-zinc-500"></i> Tags
+        </div>
+        <div id="tagPills" class="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto"></div>
+      </div>
+
+      <!-- Formats Facet -->
+      <div class="ui-card rounded-xl p-3 space-y-2">
+        <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider px-0.5">
+          <i class="fa-solid fa-file mr-1 text-zinc-500"></i> Formats
+        </div>
+        <div id="formatList" class="flex flex-wrap gap-1.5"></div>
+      </div>
+
+    </aside>
+
+    <!-- MAIN CONTENT AREA -->
+    <main class="flex-1 min-w-0 space-y-4 sm:space-y-5">
+
+      <!-- LIBRARY METRICS (Collapsible / Compact on Mobile) -->
+      <div id="statsSummaryBar" class="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3">
+        <div class="ui-card p-2.5 sm:p-3 rounded-xl border border-zinc-800 flex items-center gap-2.5 sm:gap-3">
+          <div class="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-center text-purple-400 font-bold text-xs sm:text-sm">
+            <i class="fa-solid fa-book"></i>
+          </div>
+          <div>
+            <div id="totalBooksStat" class="text-sm sm:text-base font-extrabold text-white font-mono">0</div>
+            <div class="text-[9px] sm:text-[10px] text-zinc-500 uppercase tracking-wider font-semibold">Total Books</div>
+          </div>
+        </div>
+
+        <div class="ui-card p-2.5 sm:p-3 rounded-xl border border-zinc-800 flex items-center gap-2.5 sm:gap-3">
+          <div class="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-center text-sky-400 font-bold text-xs sm:text-sm">
+            <i class="fa-solid fa-feather"></i>
+          </div>
+          <div>
+            <div id="totalAuthorsStat" class="text-sm sm:text-base font-extrabold text-white font-mono">0</div>
+            <div class="text-[9px] sm:text-[10px] text-zinc-500 uppercase tracking-wider font-semibold">Authors</div>
+          </div>
+        </div>
+
+        <div class="ui-card p-2.5 sm:p-3 rounded-xl border border-zinc-800 flex items-center gap-2.5 sm:gap-3">
+          <div class="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-center text-amber-400 font-bold text-xs sm:text-sm">
+            <i class="fa-solid fa-bookmark"></i>
+          </div>
+          <div>
+            <div id="totalSeriesStat" class="text-sm sm:text-base font-extrabold text-white font-mono">0</div>
+            <div class="text-[9px] sm:text-[10px] text-zinc-500 uppercase tracking-wider font-semibold">Series</div>
+          </div>
+        </div>
+
+        <div class="ui-card p-2.5 sm:p-3 rounded-xl border border-zinc-800 flex items-center gap-2.5 sm:gap-3 cursor-pointer" onclick="copyToClipboard('http://192.168.31.15:8088/opds')">
+          <div class="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-center text-emerald-400 font-bold text-xs sm:text-sm">
+            <i class="fa-solid fa-rss"></i>
+          </div>
+          <div>
+            <div class="text-sm sm:text-base font-extrabold text-emerald-400 font-mono flex items-center gap-1">
+              <span>OPDS</span>
+              <i class="fa-solid fa-copy text-[10px] text-zinc-500"></i>
+            </div>
+            <div class="text-[9px] sm:text-[10px] text-zinc-500 uppercase tracking-wider font-semibold">Kindle Feed</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- LIBRARY CONTROLS & COUNTERS -->
+      <div class="flex items-center justify-between gap-2.5 flex-wrap">
+        <div class="flex items-center gap-2">
+          <h2 class="text-xs font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+            <i class="fa-solid fa-books text-zinc-500"></i>
+            <span>Library</span>
+          </h2>
+          <span id="filteredCountBadge" class="text-[10px] bg-zinc-900 text-zinc-400 border border-zinc-800 px-2 py-0.5 rounded font-mono font-bold">0 Books</span>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <!-- Sort Dropdown -->
+          <select id="sortSelect" onchange="applyFilters()" class="bg-zinc-900 border border-zinc-800 text-xs text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-zinc-500 cursor-pointer">
+            <option value="recent">Recently Added</option>
+            <option value="last_read">Last Read on Kindle</option>
+            <option value="title">Title (A-Z)</option>
+            <option value="author">Author (A-Z)</option>
+            <option value="series">Series Order</option>
+          </select>
+
+          <!-- View Switcher -->
+          <div class="bg-zinc-900 p-0.5 rounded-lg border border-zinc-800 flex items-center">
+            <button onclick="setViewMode('grid')" id="gridBtn" class="px-2.5 py-1.5 rounded text-xs font-semibold text-white bg-zinc-800 transition-all cursor-pointer">
+              <i class="fa-solid fa-grip"></i>
+            </button>
+            <button onclick="setViewMode('table')" id="tableBtn" class="px-2.5 py-1.5 rounded text-xs font-semibold text-zinc-400 hover:text-white transition-all cursor-pointer">
+              <i class="fa-solid fa-list"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- BOOK COVER GRID -->
+      <div id="libraryGridView" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-3 sm:gap-4"></div>
+
+      <!-- COMPACT TABLE VIEW -->
+      <div id="libraryTableView" class="hidden ui-card rounded-xl overflow-x-auto border border-zinc-800">
+        <table class="w-full text-left text-xs text-zinc-300 min-w-[600px]">
+          <thead class="bg-zinc-900/80 border-b border-zinc-800 text-[10px] font-bold text-zinc-400 uppercase tracking-wider">
+            <tr>
+              <th class="px-4 py-2.5 w-10 text-center"><input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll()" class="rounded bg-zinc-800 border-zinc-700 text-white"></th>
+              <th class="px-4 py-2.5 w-14">Cover</th>
+              <th class="px-4 py-2.5">Title & Series</th>
+              <th class="px-4 py-2.5">Author</th>
+              <th class="px-4 py-2.5">Formats</th>
+              <th class="px-4 py-2.5">Tags</th>
+              <th class="px-4 py-2.5 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="libraryTableBody" class="divide-y divide-zinc-800/60"></tbody>
+        </table>
+      </div>
+
+      <!-- LOCAL NETWORK ENDPOINTS (Kindle OPDS Banner) -->
+      <div class="ui-card rounded-xl p-3.5 sm:p-4 border border-zinc-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-center text-emerald-400 shrink-0">
+            <i class="fa-solid fa-wifi text-sm"></i>
+          </div>
+          <div>
+            <div class="text-xs font-bold text-white">Kindle OPDS Catalog Feed</div>
+            <div class="text-[11px] text-zinc-400">Add to KOReader for one-tap wireless downloads over local Wi-Fi.</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-2 w-full sm:w-auto shrink-0 justify-between sm:justify-end">
+          <code class="px-2.5 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-300 select-all truncate">http://192.168.31.15:8088/opds</code>
+          <button onclick="copyToClipboard('http://192.168.31.15:8088/opds')" class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-emerald-600 text-zinc-200 text-xs font-semibold rounded-lg transition-colors shrink-0 flex items-center gap-1.5 cursor-pointer">
+            <i class="fa-solid fa-copy"></i>
+            <span>Copy</span>
+          </button>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- FLOATING BULK ACTIONS TOOLBAR -->
+  <div id="bulkToolbar" class="hidden fixed bottom-5 left-4 right-4 sm:left-1/2 sm:-translate-x-1/2 sm:w-auto z-40 bg-zinc-900/95 backdrop-blur-md border border-zinc-700 shadow-2xl rounded-2xl px-4 py-3 flex items-center justify-between sm:justify-start gap-3.5 text-xs">
+    <span id="selectedCountText" class="font-bold text-white font-mono shrink-0">0 selected</span>
+    <div class="h-4 w-px bg-zinc-700 hidden sm:block"></div>
+    <div class="flex items-center gap-2">
+      <button onclick="deleteSelectedBooks()" class="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer">
+        <i class="fa-solid fa-trash text-[10px]"></i> <span>Delete</span>
+      </button>
+      <button onclick="deselectAll()" class="px-2.5 py-1.5 text-zinc-400 hover:text-white transition-colors cursor-pointer">Cancel</button>
+    </div>
+  </div>
+
+  <!-- MOBILE FILTER SLIDE-OVER DRAWER -->
+  <div id="filterDrawer" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex justify-end">
+    <div class="ui-card w-full max-w-xs h-full p-4 border-l border-zinc-800 flex flex-col justify-between overflow-y-auto space-y-4 shadow-2xl animate-slide-left">
+      <div class="space-y-4">
+        <div class="flex items-center justify-between pb-2 border-b border-zinc-800">
+          <div class="text-sm font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-filter text-zinc-400"></i>
+            <span>Filter Library</span>
+          </div>
+          <button onclick="closeFilterDrawer()" class="w-7 h-7 rounded-lg bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer">
+            <i class="fa-solid fa-xmark text-xs"></i>
+          </button>
+        </div>
+
+        <!-- Series Facet -->
+        <div class="space-y-1.5">
+          <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
+            <span>Series</span>
+            <span id="drawerSeriesCount" class="text-zinc-500 font-mono text-[10px]">0</span>
+          </div>
+          <div id="drawerSeriesList" class="space-y-1 max-h-48 overflow-y-auto pr-1"></div>
+        </div>
+
+        <!-- Authors Facet -->
+        <div class="space-y-1.5">
+          <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
+            <span>Authors</span>
+            <span id="drawerAuthorCount" class="text-zinc-500 font-mono text-[10px]">0</span>
+          </div>
+          <div id="drawerAuthorList" class="space-y-1 max-h-48 overflow-y-auto pr-1"></div>
+        </div>
+
+        <!-- Tags Facet -->
+        <div class="space-y-1.5">
+          <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Tags</div>
+          <div id="drawerTagList" class="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto"></div>
+        </div>
+
+        <!-- Formats Facet -->
+        <div class="space-y-1.5">
+          <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Formats</div>
+          <div id="drawerFormatList" class="flex flex-wrap gap-1.5"></div>
+        </div>
+      </div>
+
+      <div class="pt-3 border-t border-zinc-800 flex gap-2">
+        <button onclick="clearAllFilters(); closeFilterDrawer();" class="flex-1 py-2 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-semibold text-xs rounded-lg border border-zinc-800">Reset</button>
+        <button onclick="closeFilterDrawer()" class="flex-1 py-2 bg-white text-zinc-950 font-bold text-xs rounded-lg shadow-sm">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- BOOK DETAIL MODAL / BOTTOM SHEET (MOBILE & DESKTOP) -->
+  <div id="bookDetailModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div class="ui-card w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-5 border border-zinc-800 space-y-4 shadow-2xl max-h-[88vh] overflow-y-auto animate-slide-up sm:animate-none">
+      
+      <!-- Top Bar: Close & Selection -->
+      <div class="flex items-center justify-between">
+        <span id="detailSeriesTag" class="px-2 py-0.5 rounded text-[10px] font-bold bg-zinc-800 text-zinc-300 border border-zinc-700"></span>
+        <button onclick="closeBookDetailModal()" class="w-7 h-7 rounded-lg bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer">
+          <i class="fa-solid fa-xmark text-xs"></i>
+        </button>
+      </div>
+
+      <!-- Hero Header: Cover + Info -->
+      <div class="flex gap-4">
+        <div class="w-24 h-36 bg-zinc-950 rounded-xl overflow-hidden shadow-lg border border-zinc-800 shrink-0">
+          <img id="detailCover" src="" class="w-full h-full object-cover">
+        </div>
+        <div class="flex-1 min-w-0 flex flex-col justify-between py-0.5">
+          <div class="space-y-1">
+            <h3 id="detailTitle" class="text-sm font-bold text-white line-clamp-2 leading-tight"></h3>
+            <p id="detailAuthor" class="text-xs text-zinc-400 truncate"></p>
+            <div id="detailTags" class="flex flex-wrap gap-1 pt-1"></div>
+          </div>
+          <div class="text-[10px] text-zinc-500 font-mono" id="detailId"></div>
+        </div>
+      </div>
+
+      <!-- Synopsis / Comments -->
+      <div id="detailCommentsBox" class="hidden p-3 bg-zinc-900/60 rounded-xl border border-zinc-800/80 text-xs text-zinc-300 max-h-28 overflow-y-auto leading-relaxed"></div>
+
+      <!-- Direct Downloads -->
+      <div class="space-y-1.5">
+        <div class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Download to Device</div>
+        <div id="detailDownloadButtons" class="grid grid-cols-2 gap-2"></div>
+      </div>
+
+      <!-- Action Buttons -->
+      <div class="grid grid-cols-3 gap-2 pt-2 border-t border-zinc-800">
+        <a id="detailObsidianBtn" href="#" download class="py-2 bg-zinc-900 hover:bg-purple-950/60 text-zinc-300 hover:text-purple-300 font-semibold text-xs rounded-xl border border-zinc-800 text-center flex items-center justify-center gap-1.5 transition-colors">
+          <i class="fa-solid fa-file-pen text-purple-400 text-[11px]"></i>
+          <span>Obsidian</span>
+        </a>
+        <button id="detailEditBtn" onclick="" class="py-2 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-semibold text-xs rounded-xl border border-zinc-800 flex items-center justify-center gap-1.5 transition-colors cursor-pointer">
+          <i class="fa-solid fa-pen text-zinc-400 text-[11px]"></i>
+          <span>Edit</span>
+        </button>
+        <button id="detailDeleteBtn" onclick="" class="py-2 bg-zinc-900 hover:bg-rose-950/60 text-zinc-300 hover:text-rose-400 font-semibold text-xs rounded-xl border border-zinc-800 flex items-center justify-center gap-1.5 transition-colors cursor-pointer">
+          <i class="fa-solid fa-trash text-rose-400 text-[11px]"></i>
+          <span>Delete</span>
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- UPLOAD MODAL -->
+  <div id="uploadModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div class="ui-card w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl p-5 border border-zinc-700 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+      
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-bold text-white flex items-center gap-2">
+          <i class="fa-solid fa-cloud-arrow-up text-zinc-400"></i> Upload Books to Calibre
+        </h3>
+        <button onclick="closeUploadModal()" class="w-7 h-7 rounded-lg bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer">
+          <i class="fa-solid fa-xmark text-xs"></i>
+        </button>
+      </div>
+
+      <!-- Telegram Ingestion Banner -->
+      <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2.5">
+          <div class="w-7 h-7 rounded-lg bg-sky-500/20 text-sky-400 flex items-center justify-center text-xs shrink-0">
+            <i class="fa-brands fa-telegram"></i>
+          </div>
+          <div>
+            <div class="text-xs font-bold text-white">Telegram Ingestion Bot Active</div>
+            <div class="text-[10px] text-zinc-400">Send or forward multiple files directly on Telegram.</div>
+          </div>
+        </div>
+        <a href="https://t.me/saroat_ospeto_bot" target="_blank" class="px-2.5 py-1 bg-sky-600 hover:bg-sky-500 text-white text-[10px] font-bold rounded-lg transition-colors shrink-0">
+          Open Bot
+        </a>
+      </div>
+
+      <!-- Drag & Drop / Folder Picker Area -->
+      <div id="dropzone" class="border-2 border-dashed border-zinc-700 hover:border-zinc-500 rounded-xl p-6 text-center transition-colors space-y-3">
+        <div class="w-12 h-12 mx-auto rounded-full bg-zinc-900/90 flex items-center justify-center text-zinc-400 border border-zinc-800 shadow-inner">
+          <i class="fa-solid fa-cloud-arrow-up text-xl"></i>
+        </div>
+        <div>
+          <div class="text-xs font-bold text-zinc-100">Drag & drop books or an entire folder</div>
+          <div class="text-[11px] text-zinc-500 mt-0.5">Supports .epub, .pdf, .mobi, .azw3, .cbz, and .zip / .rar packs</div>
+        </div>
+
+        <div class="flex items-center justify-center gap-2 pt-1 flex-wrap">
+          <button type="button" onclick="event.stopPropagation(); document.getElementById('fileInput').click();" class="px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold text-xs rounded-lg border border-zinc-700 transition-colors flex items-center gap-1.5 cursor-pointer active:scale-95 shadow-xs">
+            <i class="fa-solid fa-file text-[11px] text-sky-400"></i>
+            <span>Choose Files</span>
+          </button>
+          <button type="button" onclick="event.stopPropagation(); document.getElementById('folderInput').click();" class="px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold text-xs rounded-lg border border-zinc-700 transition-colors flex items-center gap-1.5 cursor-pointer active:scale-95 shadow-xs">
+            <i class="fa-solid fa-folder-open text-[11px] text-amber-400"></i>
+            <span>Choose Folder</span>
+          </button>
+        </div>
+
+        <input type="file" id="fileInput" multiple accept=".epub,.pdf,.mobi,.azw3,.cbz,.cbr,.zip,.rar,.7z,.tar" class="hidden">
+        <input type="file" id="folderInput" webkitdirectory directory multiple class="hidden">
+      </div>
+
+      <div id="uploadQueue" class="max-h-44 overflow-y-auto space-y-1.5"></div>
+
+      <div class="flex justify-end pt-2">
+        <button onclick="closeUploadModal()" class="w-full sm:w-auto px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold text-xs rounded-lg cursor-pointer">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- METADATA & COVER EDITOR MODAL -->
+  <div id="editModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div class="ui-card w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl p-5 border border-zinc-700 space-y-4 shadow-2xl max-h-[92vh] overflow-y-auto">
+      
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-bold text-white flex items-center gap-2">
+          <i class="fa-solid fa-pen-to-square text-zinc-400"></i> Edit Book Metadata
+        </h3>
+        <button onclick="closeEditModal()" class="w-7 h-7 rounded-lg bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer">
+          <i class="fa-solid fa-xmark text-xs"></i>
+        </button>
+      </div>
+
+      <input type="hidden" id="editBookId">
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <!-- Cover Preview -->
+        <div class="space-y-2 flex flex-col items-center md:items-stretch">
+          <div class="w-32 md:w-full aspect-[2/3] bg-zinc-950 rounded-xl overflow-hidden border border-zinc-800 flex items-center justify-center shadow">
+            <img id="editCoverPreview" src="" class="w-full h-full object-cover">
+          </div>
+          <input type="text" id="editCoverUrl" placeholder="Paste Cover Image URL..." class="w-full px-2.5 py-1.5 bg-zinc-900 border border-zinc-800 rounded text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-zinc-500">
+        </div>
+
+        <!-- Form Fields -->
+        <div class="md:col-span-2 space-y-3">
+          <div>
+            <label class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Title</label>
+            <input type="text" id="editTitle" class="w-full px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-zinc-500">
+          </div>
+
+          <div>
+            <label class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Author(s)</label>
+            <input type="text" id="editAuthors" class="w-full px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-zinc-500">
+          </div>
+
+          <!-- Series & Number -->
+          <div class="grid grid-cols-3 gap-2">
+            <div class="col-span-2">
+              <label class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Series</label>
+              <input type="text" id="editSeries" placeholder="e.g. One Piece" class="w-full px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-zinc-500">
+            </div>
+            <div>
+              <label class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Index #</label>
+              <input type="number" id="editSeriesIndex" step="0.1" placeholder="1" class="w-full px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-zinc-500">
+            </div>
+          </div>
+
+          <div>
+            <label class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Tags (Comma-separated)</label>
+            <input type="text" id="editTags" class="w-full px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-zinc-500">
+          </div>
+
+          <div>
+            <label class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Summary / Comments</label>
+            <textarea id="editComments" rows="3" class="w-full px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-zinc-500 resize-none"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <!-- AUTO-SCRAPER SECTION -->
+      <div class="p-3 bg-zinc-900/60 rounded-xl border border-zinc-800 space-y-2.5">
+        <div class="flex items-center justify-between">
+          <div class="text-xs font-bold text-white flex items-center gap-1.5">
+            <i class="fa-solid fa-wand-magic-sparkles text-purple-400"></i>
+            <span>Multi-Source Metadata Lookup</span>
+          </div>
+          <button onclick="lookupMetadata()" id="lookupBtn" class="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg border border-zinc-700 transition-colors flex items-center gap-1.5 cursor-pointer">
+            <i class="fa-solid fa-magnifying-glass text-[10px]"></i> Search Online
+          </button>
+        </div>
+
+        <div id="lookupResults" class="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-40 overflow-y-auto"></div>
+      </div>
+
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="closeEditModal()" class="px-3.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-semibold text-xs rounded-lg border border-zinc-800 cursor-pointer">Cancel</button>
+        <button onclick="saveMetadata()" class="px-4 py-1.5 bg-white hover:bg-zinc-100 text-zinc-950 font-bold text-xs rounded-lg shadow-sm cursor-pointer">Save Changes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST FEEDBACK NOTIFICATION -->
+  <div id="toastNotification" class="hidden fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-zinc-100 text-zinc-950 px-4 py-2 rounded-xl text-xs font-bold shadow-2xl flex items-center gap-2 border border-white/20 transition-all duration-300">
+    <i class="fa-solid fa-check text-emerald-600"></i>
+    <span id="toastMessage">Done</span>
+  </div>
+
+  <!-- APPLICATION JAVASCRIPT -->
+  <script>
+    let allBooks = [];
+    let facets = { authors: [], series: [], tags: [], formats: [] };
+    let activeFilter = { type: 'all', value: null };
+    let viewMode = 'grid';
+    let selectedBookIds = new Set();
+    let kosyncMap = new Map();
+
+    async function init() {
+      await Promise.all([loadBooks(), loadFacets(), loadKosync()]);
+    }
+
+    async function loadKosync() {
+      try {
+        const res = await fetch('/api/kosync/active');
+        const data = await res.json();
+        kosyncMap.clear();
+        let readingCount = 0;
+        for (const p of data) {
+          if (p.bookId && !kosyncMap.has(p.bookId)) {
+            kosyncMap.set(p.bookId, p);
+            if (p.percentage > 0 && p.percentage < 0.99) readingCount++;
+          }
+        }
+        document.getElementById('quickReadingCount').innerText = readingCount;
+      } catch (e) {
+        console.error('Failed to load KOSync active progress:', e);
+      }
+    }
+
+    async function loadBooks() {
+      try {
+        const res = await fetch('/api/books');
+        allBooks = await res.json();
+        document.getElementById('totalBooksStat').innerText = allBooks.length;
+        document.getElementById('facetTotalBooks').innerText = allBooks.length;
+        document.getElementById('quickTotalBooks').innerText = allBooks.length;
+        applyFilters();
+      } catch (e) {
+        console.error('Failed to load books:', e);
+      }
+    }
+
+    async function loadFacets() {
+      try {
+        const res = await fetch('/api/library/facets');
+        facets = await res.json();
+        document.getElementById('totalAuthorsStat').innerText = facets.authors.length;
+        document.getElementById('totalSeriesStat').innerText = facets.series.length;
+        renderFacets();
+        renderQuickFilterChips();
+      } catch (e) {
+        console.error('Failed to load facets:', e);
+      }
+    }
+
+    // RENDER QUICK FILTER PILLS (HORIZONTAL BAR)
+    function renderQuickFilterChips() {
+      const seriesContainer = document.getElementById('quickSeriesChips');
+      const formatContainer = document.getElementById('quickFormatChips');
+
+      // Top 3 Series
+      seriesContainer.innerHTML = facets.series.slice(0, 3).map(s => `
+        <button onclick="setFilter('series', '${s.name.replace(/'/g, "\\'")}')" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white hover:border-zinc-600 shrink-0 transition-colors flex items-center gap-1">
+          <i class="fa-solid fa-bookmark text-[9px] text-amber-400/80"></i>
+          <span>${s.name}</span>
+          <span class="text-[9px] text-zinc-500 font-mono">${s.count}</span>
+        </button>
+      `).join('');
+
+      // Formats
+      formatContainer.innerHTML = facets.formats.map(f => `
+        <button onclick="setFilter('format', '${f.name}')" class="px-2 py-1 rounded-full text-xs font-semibold bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white shrink-0 transition-colors">
+          ${f.name}
+        </button>
+      `).join('');
+    }
+
+    function renderFacets() {
+      // Desktop Series
+      const seriesList = document.getElementById('seriesList');
+      document.getElementById('seriesCountLabel').innerText = facets.series.length;
+      const seriesHtml = facets.series.slice(0, 15).map(s => `
+        <button onclick="setFilter('series', '${s.name.replace(/'/g, "\\'")}')" class="w-full text-left px-2 py-1 rounded text-xs text-zinc-400 hover:text-white hover:bg-zinc-800/60 flex items-center justify-between truncate transition-colors cursor-pointer">
+          <span class="truncate">${s.name}</span>
+          <span class="text-[10px] text-zinc-500 font-mono shrink-0 ml-1">${s.count}</span>
+        </button>
+      `).join('') || '<div class="text-[10px] text-zinc-600 italic px-2">No series</div>';
+      seriesList.innerHTML = seriesHtml;
+
+      // Mobile Drawer Series
+      document.getElementById('drawerSeriesCount').innerText = facets.series.length;
+      document.getElementById('drawerSeriesList').innerHTML = seriesHtml;
+
+      // Desktop Authors
+      const authorList = document.getElementById('authorList');
+      document.getElementById('authorCountLabel').innerText = facets.authors.length;
+      const authorHtml = facets.authors.slice(0, 15).map(a => `
+        <button onclick="setFilter('author', '${a.name.replace(/'/g, "\\'")}')" class="w-full text-left px-2 py-1 rounded text-xs text-zinc-400 hover:text-white hover:bg-zinc-800/60 flex items-center justify-between truncate transition-colors cursor-pointer">
+          <span class="truncate">${a.name}</span>
+          <span class="text-[10px] text-zinc-500 font-mono shrink-0 ml-1">${a.count}</span>
+        </button>
+      `).join('') || '<div class="text-[10px] text-zinc-600 italic px-2">No authors</div>';
+      authorList.innerHTML = authorHtml;
+
+      // Mobile Drawer Authors
+      document.getElementById('drawerAuthorCount').innerText = facets.authors.length;
+      document.getElementById('drawerAuthorList').innerHTML = authorHtml;
+
+      // Desktop Tags
+      const tagHtml = facets.tags.slice(0, 15).map(t => `
+        <button onclick="setFilter('tag', '${t.name.replace(/'/g, "\\'")}')" class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-600 transition-colors cursor-pointer">
+          #${t.name} <span class="text-[9px] text-zinc-500 font-mono">${t.count}</span>
+        </button>
+      `).join('') || '<div class="text-[10px] text-zinc-600 italic px-2">No tags</div>';
+      document.getElementById('tagPills').innerHTML = tagHtml;
+      document.getElementById('drawerTagList').innerHTML = tagHtml;
+
+      // Desktop Formats
+      const formatHtml = facets.formats.map(f => `
+        <button onclick="setFilter('format', '${f.name}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white hover:border-zinc-600 transition-colors cursor-pointer">
+          ${f.name} <span class="text-[9px] text-zinc-500 font-mono">${f.count}</span>
+        </button>
+      `).join('');
+      document.getElementById('formatList').innerHTML = formatHtml;
+      document.getElementById('drawerFormatList').innerHTML = formatHtml;
+    }
+
+    function setFilter(type, value) {
+      activeFilter = { type, value };
+      const box = document.getElementById('activeFilterBox');
+      const badge = document.getElementById('activeFilterBadge');
+      const mobileBadge = document.getElementById('mobileFilterBadgeCount');
+
+      if (type === 'all') {
+        box.classList.add('hidden');
+        document.getElementById('nav-all').className = 'w-full flex items-center justify-between px-3 py-1.5 rounded-lg text-xs font-semibold bg-zinc-800 text-white transition-colors';
+        document.getElementById('chip-all').className = 'px-2.5 py-1 rounded-full text-xs font-semibold bg-zinc-100 text-zinc-950 shrink-0 transition-colors';
+        mobileBadge.classList.add('hidden');
+      } else {
+        box.classList.remove('hidden');
+        badge.innerHTML = `${type.toUpperCase()}: ${value}`;
+        document.getElementById('nav-all').className = 'w-full flex items-center justify-between px-3 py-1.5 rounded-lg text-xs font-medium text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40 transition-colors';
+        document.getElementById('chip-all').className = 'px-2.5 py-1 rounded-full text-xs font-semibold bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white shrink-0 transition-colors';
+        mobileBadge.classList.remove('hidden');
+        mobileBadge.innerText = '1';
+      }
+
+      applyFilters();
+    }
+
+    function clearAllFilters() {
+      setFilter('all', null);
+      clearSearch();
+    }
+
+    function syncSearch(val) {
+      document.getElementById('searchInputDesktop').value = val;
+      document.getElementById('searchInputMobile').value = val;
+      const btns = document.querySelectorAll('.clear-search-btn');
+      btns.forEach(b => val ? b.classList.remove('hidden') : b.classList.add('hidden'));
+      applyFilters();
+    }
+
+    function clearSearch() {
+      syncSearch('');
+    }
+
+    function applyFilters() {
+      const q = document.getElementById('searchInputDesktop').value.trim().toLowerCase();
+      const sort = document.getElementById('sortSelect').value;
+
+      let filtered = allBooks.filter(b => {
+        const matchSearch = !q || (
+          (b.title || '').toLowerCase().includes(q) ||
+          (b.authors || '').toLowerCase().includes(q) ||
+          (b.series || '').toLowerCase().includes(q) ||
+          (b.comments || '').toLowerCase().includes(q) ||
+          (b.tags || []).some(t => t.toLowerCase().includes(q))
+        );
+        if (!matchSearch) return false;
+
+        if (activeFilter.type === 'series') return (b.series || '') === activeFilter.value;
+        if (activeFilter.type === 'author') return (b.authors || '').includes(activeFilter.value);
+        if (activeFilter.type === 'tag') return (b.tags || []).includes(activeFilter.value);
+        if (activeFilter.type === 'format') return (b.formats || []).includes(activeFilter.value);
+        if (activeFilter.type === 'status' && activeFilter.value === 'reading') {
+          const sync = kosyncMap.get(b.id);
+          return sync && sync.percentage > 0 && sync.percentage < 0.99;
+        }
+
+        return true;
+      });
+
+      if (sort === 'title') filtered.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+      else if (sort === 'author') filtered.sort((a, b) => (a.authors || '').localeCompare(b.authors || ''));
+      else if (sort === 'series') filtered.sort((a, b) => (a.series_index || 0) - (b.series_index || 0));
+      else if (sort === 'last_read') {
+        filtered.sort((a, b) => {
+          const tsA = kosyncMap.get(a.id)?.timestamp || 0;
+          const tsB = kosyncMap.get(b.id)?.timestamp || 0;
+          return tsB - tsA;
+        });
+      } else filtered.sort((a, b) => (b.id || 0) - (a.id || 0));
+
+      renderBooks(filtered);
+    }
+
+    function renderBooks(filteredList) {
+      document.getElementById('filteredCountBadge').innerText = `${filteredList.length} Books`;
+      const grid = document.getElementById('libraryGridView');
+      const tableBody = document.getElementById('libraryTableBody');
+
+      // Grid
+      if (filteredList.length === 0) {
+        grid.innerHTML = '<div class="col-span-full text-center py-16 text-zinc-500 text-xs ui-card rounded-xl">No books found. Click Upload to add a book!</div>';
+      } else {
+        grid.innerHTML = filteredList.map(book => {
+          const coverSrc = book.cover ? `/api/books/${book.id}/cover` : 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="120" height="180" fill="%2318181b"><rect width="120" height="180"/><text x="50%" y="50%" fill="%2371717a" text-anchor="middle" font-family="sans-serif" font-size="12">No Cover</text></svg>';
+          const formats = (book.formats || []).map(f => `<span class="px-1.5 py-0.5 bg-zinc-900 border border-zinc-800 text-[10px] font-bold text-zinc-300 rounded">${f}</span>`).join(' ');
+          const isSelected = selectedBookIds.has(book.id);
+
+          const seriesBadge = book.series ? `
+            <div class="absolute top-2 left-2 z-10 px-1.5 sm:px-2 py-0.5 rounded text-[9px] sm:text-[10px] font-bold bg-zinc-900/90 text-zinc-100 border border-zinc-700 backdrop-blur-sm max-w-[85%] truncate">
+              ${book.series} ${book.series_index ? '#' + book.series_index : ''}
+            </div>
+          ` : '';
+
+          return `
+            <div onclick="openBookDetail(${book.id})" class="book-card group relative ui-card rounded-xl overflow-hidden flex flex-col justify-between border ${isSelected ? 'border-zinc-400 ring-1 ring-zinc-400' : 'border-zinc-800'} transition-all cursor-pointer active:scale-[0.98]">
+              
+              <!-- Cover Image Container -->
+              <div class="relative aspect-[2/3] bg-zinc-950 overflow-hidden">
+                ${seriesBadge}
+
+                <!-- Checkbox Button -->
+                <button onclick="event.stopPropagation(); toggleSelect(${book.id})" class="absolute top-2 right-2 z-10 w-6 h-6 rounded-lg bg-zinc-900/90 text-white flex items-center justify-center border border-zinc-700 ${isSelected ? 'bg-white text-zinc-950 border-white' : 'sm:opacity-0 sm:group-hover:opacity-100'} transition-all cursor-pointer" title="Select Book">
+                  <i class="fa-solid fa-check text-[11px] ${isSelected ? 'opacity-100' : 'opacity-0'}"></i>
+                </button>
+
+                <img src="${coverSrc}" class="w-full h-full object-cover group-hover:scale-102 transition-transform duration-300" loading="lazy">
+                
+                <!-- Desktop Hover Action Overlay -->
+                <div class="action-bar absolute inset-0 bg-zinc-950/90 backdrop-blur-xs opacity-0 translate-y-1 pointer-events-none transition-all duration-150 p-2.5 flex flex-col justify-between hidden sm:flex">
+                  <div class="flex justify-end gap-1">
+                    <a href="/api/books/${book.id}/obsidian.md" download onclick="event.stopPropagation()" class="w-7 h-7 rounded bg-zinc-800 hover:bg-purple-600 text-zinc-300 hover:text-white flex items-center justify-center text-xs transition-colors" title="Export Obsidian Notes">
+                      <i class="fa-solid fa-file-pen text-[11px]"></i>
+                    </a>
+                    <button onclick="event.stopPropagation(); openEditModal(${book.id})" class="w-7 h-7 rounded bg-zinc-800 hover:bg-zinc-100 text-zinc-300 hover:text-zinc-950 flex items-center justify-center text-xs transition-colors" title="Edit Metadata">
+                      <i class="fa-solid fa-pen text-[10px]"></i>
+                    </button>
+                    <button onclick="event.stopPropagation(); deleteBook(${book.id})" class="w-7 h-7 rounded bg-zinc-800 hover:bg-rose-600 text-zinc-300 hover:text-white flex items-center justify-center text-xs transition-colors" title="Delete">
+                      <i class="fa-solid fa-trash text-[10px]"></i>
+                    </button>
+                  </div>
+                  
+                  <div class="space-y-1">
+                    ${(book.formats || []).map(f => `
+                      <a href="/api/books/${book.id}/download/${f.toLowerCase()}" onclick="event.stopPropagation()" class="block w-full py-1 text-center bg-zinc-800 hover:bg-white text-zinc-300 hover:text-zinc-950 text-[11px] font-bold rounded transition-colors">
+                        Download ${f}
+                      </a>
+                    `).join('')}
+                  </div>
+                </div>
+              </div>
+
+              <!-- Metadata Info Footer -->
+              <div class="p-2 sm:p-2.5 space-y-0.5">
+                <div class="text-xs font-bold text-zinc-100 line-clamp-1" title="${book.title}">${book.title}</div>
+                <div class="text-[11px] text-zinc-400 line-clamp-1" title="${book.authors}">${book.authors || 'Unknown'}</div>
+                <div class="flex items-center justify-between gap-1 mt-1.5">
+                  <div class="flex items-center gap-1 flex-wrap">${formats}</div>
+                  <button onclick="event.stopPropagation(); openBookDetail(${book.id})" class="sm:hidden text-zinc-500 hover:text-zinc-300 px-1 py-0.5" title="More Options">
+                    <i class="fa-solid fa-ellipsis text-xs"></i>
+                  </button>
+                </div>
+                ${kosyncMap.has(book.id) ? `
+                  <div class="pt-1.5 mt-1 border-t border-zinc-800/80">
+                    <div class="flex items-center justify-between text-[9px] font-mono">
+                      <span class="text-emerald-400 font-bold">${Math.round((kosyncMap.get(book.id).percentage || 0) * 100)}%</span>
+                      <span class="text-zinc-500 truncate max-w-[70px]">${kosyncMap.get(book.id).device || 'Kindle'}</span>
+                    </div>
+                    <div class="w-full bg-zinc-900 rounded-full h-1 mt-0.5 overflow-hidden border border-zinc-800">
+                      <div class="bg-emerald-400 h-1 rounded-full transition-all" style="width: ${Math.min(100, Math.round((kosyncMap.get(book.id).percentage || 0) * 100))}%;"></div>
+                    </div>
+                  </div>
+                ` : ''}
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      // Table View
+      tableBody.innerHTML = filteredList.map(book => {
+        const coverSrc = book.cover ? `/api/books/${book.id}/cover` : '';
+        const isSelected = selectedBookIds.has(book.id);
+        const seriesText = book.series ? `<span class="text-[10px] font-semibold text-zinc-400 block">${book.series} #${book.series_index || 1}</span>` : '';
+
+        return `
+          <tr class="hover:bg-zinc-900/40 transition-colors ${isSelected ? 'bg-zinc-800/30' : ''}">
+            <td class="px-4 py-2.5 text-center">
+              <input type="checkbox" onchange="toggleSelect(${book.id})" ${isSelected ? 'checked' : ''} class="rounded bg-zinc-800 border-zinc-700 text-white cursor-pointer">
+            </td>
+            <td class="px-4 py-2 cursor-pointer" onclick="openBookDetail(${book.id})">
+              <div class="w-8 h-11 bg-zinc-950 rounded overflow-hidden shadow border border-zinc-800">
+                <img src="${coverSrc}" class="w-full h-full object-cover">
+              </div>
+            </td>
+            <td class="px-4 py-2 cursor-pointer" onclick="openBookDetail(${book.id})">
+              ${seriesText}
+              <div class="font-bold text-zinc-100 text-xs">${book.title}</div>
+            </td>
+            <td class="px-4 py-2 text-zinc-400 text-xs">${book.authors || 'Unknown'}</td>
+            <td class="px-4 py-2 text-xs text-zinc-300 font-mono font-bold">${(book.formats || []).join(', ')}</td>
+            <td class="px-4 py-2 text-xs text-zinc-400">
+              ${(book.tags || []).map(t => `<span class="px-1.5 py-0.5 bg-zinc-900 rounded text-[10px] text-zinc-300 mr-1">#${t}</span>`).join('')}
+            </td>
+            <td class="px-4 py-2 text-right space-x-1.5">
+              <button onclick="openBookDetail(${book.id})" class="text-zinc-400 hover:text-white text-xs p-1" title="View Options"><i class="fa-solid fa-ellipsis-vertical"></i></button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    // BOOK DETAIL MODAL HANDLERS
+    function openBookDetail(bookId) {
+      const book = allBooks.find(b => b.id === bookId);
+      if (!book) return;
+
+      document.getElementById('detailTitle').innerText = book.title;
+      document.getElementById('detailAuthor').innerText = book.authors || 'Unknown Author';
+      document.getElementById('detailId').innerText = `ID #${book.id}`;
+      document.getElementById('detailCover').src = book.cover ? `/api/books/${book.id}/cover` : '';
+
+      const seriesTag = document.getElementById('detailSeriesTag');
+      if (book.series) {
+        seriesTag.innerText = `${book.series} #${book.series_index || 1}`;
+        seriesTag.classList.remove('hidden');
+      } else {
+        seriesTag.classList.add('hidden');
+      }
+
+      const tagsContainer = document.getElementById('detailTags');
+      tagsContainer.innerHTML = (book.tags || []).slice(0, 4).map(t => `
+        <span class="px-1.5 py-0.5 rounded text-[9px] bg-zinc-900 text-zinc-400 border border-zinc-800">#${t}</span>
+      `).join('');
+
+      const commentsBox = document.getElementById('detailCommentsBox');
+      if (book.comments) {
+        commentsBox.innerHTML = book.comments.replace(/<[^>]*>?/gm, '');
+        commentsBox.classList.remove('hidden');
+      } else {
+        commentsBox.classList.add('hidden');
+      }
+
+      // Download Buttons
+      const dlContainer = document.getElementById('detailDownloadButtons');
+      dlContainer.innerHTML = (book.formats || []).map(f => `
+        <a href="/api/books/${book.id}/download/${f.toLowerCase()}" class="py-2 px-3 bg-zinc-900 hover:bg-zinc-800 text-white font-bold text-xs rounded-xl border border-zinc-800 text-center flex items-center justify-center gap-2 transition-colors active:scale-98">
+          <i class="fa-solid fa-download text-zinc-400 text-xs"></i>
+          <span>${f}</span>
+        </a>
+      `).join('');
+
+      // Wire Actions
+      document.getElementById('detailObsidianBtn').href = `/api/books/${book.id}/obsidian.md`;
+      document.getElementById('detailEditBtn').onclick = () => { closeBookDetailModal(); openEditModal(book.id); };
+      document.getElementById('detailDeleteBtn').onclick = () => { closeBookDetailModal(); deleteBook(book.id); };
+
+      document.getElementById('bookDetailModal').classList.remove('hidden');
+    }
+
+    function closeBookDetailModal() {
+      document.getElementById('bookDetailModal').classList.add('hidden');
+    }
+
+    // MOBILE FILTER DRAWER
+    function openFilterDrawer() { document.getElementById('filterDrawer').classList.remove('hidden'); }
+    function closeFilterDrawer() { document.getElementById('filterDrawer').classList.add('hidden'); }
+
+    // VIEW MODE
+    function setViewMode(mode) {
+      viewMode = mode;
+      if (mode === 'grid') {
+        document.getElementById('libraryGridView').classList.remove('hidden');
+        document.getElementById('libraryTableView').classList.add('hidden');
+        document.getElementById('gridBtn').className = 'px-2.5 py-1.5 rounded text-xs font-semibold text-white bg-zinc-800 transition-all cursor-pointer';
+        document.getElementById('tableBtn').className = 'px-2.5 py-1.5 rounded text-xs font-semibold text-zinc-400 hover:text-white transition-all cursor-pointer';
+      } else {
+        document.getElementById('libraryGridView').classList.add('hidden');
+        document.getElementById('libraryTableView').classList.remove('hidden');
+        document.getElementById('tableBtn').className = 'px-2.5 py-1.5 rounded text-xs font-semibold text-white bg-zinc-800 transition-all cursor-pointer';
+        document.getElementById('gridBtn').className = 'px-2.5 py-1.5 rounded text-xs font-semibold text-zinc-400 hover:text-white transition-all cursor-pointer';
+      }
+    }
+
+    function toggleSelect(id) {
+      if (selectedBookIds.has(id)) selectedBookIds.delete(id); else selectedBookIds.add(id);
+      updateBulkToolbar();
+      renderBooks(allBooks);
+    }
+
+    function toggleSelectAll() {
+      const checked = document.getElementById('selectAllCheckbox').checked;
+      if (checked) allBooks.forEach(b => selectedBookIds.add(b.id)); else selectedBookIds.clear();
+      updateBulkToolbar();
+      renderBooks(allBooks);
+    }
+
+    function deselectAll() {
+      selectedBookIds.clear();
+      updateBulkToolbar();
+      renderBooks(allBooks);
+    }
+
+    function updateBulkToolbar() {
+      const bar = document.getElementById('bulkToolbar');
+      const text = document.getElementById('selectedCountText');
+      if (selectedBookIds.size > 0) {
+        bar.classList.remove('hidden');
+        text.innerText = `${selectedBookIds.size} selected`;
+      } else {
+        bar.classList.add('hidden');
+      }
+    }
+
+    async function deleteSelectedBooks() {
+      if (!confirm(`Delete ${selectedBookIds.size} selected books from Calibre?`)) return;
+      try {
+        const res = await fetch('/api/books/bulk-delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bookIds: Array.from(selectedBookIds) })
+        });
+        const json = await res.json();
+        if (json.success) {
+          selectedBookIds.clear();
+          updateBulkToolbar();
+          showToast(`Deleted ${json.count || 'selected'} books.`);
+          await init();
+        } else {
+          alert('Delete failed: ' + json.error);
+        }
+      } catch (e) {
+        alert('Network error on bulk delete');
+      }
+    }
+
+    async function cleanLibraryMetadata() {
+      if (!confirm('Scan entire library to sanitize titles, clean authors, and strip junk URL tags?')) return;
+      try {
+        const res = await fetch('/api/library/clean-metadata', { method: 'POST' });
+        const json = await res.json();
+        showToast(json.message || 'Library sanitized!');
+        await init();
+      } catch (e) {
+        alert('Failed to sanitize library metadata');
+      }
+    }
+
+    // UPLOAD MODAL & FOLDER SUPPORT
+    function openUploadModal() { document.getElementById('uploadModal').classList.remove('hidden'); }
+    function closeUploadModal() { document.getElementById('uploadModal').classList.add('hidden'); init(); }
+
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('fileInput');
+    const folderInput = document.getElementById('folderInput');
+    const uploadQueue = document.getElementById('uploadQueue');
+
+    function isSupportedBook(name) {
+      return /\.(epub|pdf|mobi|azw3|cbz|cbr|zip|rar|7z|tar)$/i.test(name) && !name.startsWith('.');
+    }
+
+    async function scanFilesFromDataTransfer(dataTransfer) {
+      const files = [];
+      const items = dataTransfer.items;
+      if (items && items.length > 0 && items[0].webkitGetAsEntry) {
+        const queue = [];
+        for (let i = 0; i < items.length; i++) {
+          const entry = items[i].webkitGetAsEntry();
+          if (entry) queue.push(entry);
+        }
+        while (queue.length > 0) {
+          const entry = queue.shift();
+          if (entry.isFile) {
+            const file = await new Promise((resolve) => entry.file(resolve, () => resolve(null)));
+            if (file && isSupportedBook(file.name)) files.push(file);
+          } else if (entry.isDirectory) {
+            const dirReader = entry.createReader();
+            const readEntries = async () => {
+              return new Promise((resolve) => {
+                dirReader.readEntries(async (entries) => {
+                  if (!entries || entries.length === 0) resolve();
+                  else {
+                    for (const child of entries) queue.push(child);
+                    await readEntries();
+                    resolve();
+                  }
+                }, () => resolve());
+              });
+            };
+            await readEntries();
+          }
+        }
+        return files;
+      }
+      for (const f of dataTransfer.files) {
+        if (isSupportedBook(f.name)) files.push(f);
+      }
+      return files;
+    }
+
+    ['dragenter', 'dragover'].forEach(n => dropzone.addEventListener(n, (e) => { e.preventDefault(); dropzone.classList.add('border-zinc-400'); }));
+    ['dragleave', 'drop'].forEach(n => dropzone.addEventListener(n, (e) => { e.preventDefault(); dropzone.classList.remove('border-zinc-400'); }));
+
+    dropzone.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      dropzone.classList.remove('border-zinc-400');
+      const files = await scanFilesFromDataTransfer(e.dataTransfer);
+      if (files.length) handleUploads(files);
+      else alert("No supported eBook files (.epub, .pdf, .mobi, .azw3, .cbz) found in dropped items.");
+    });
+
+    fileInput.addEventListener('change', () => {
+      const files = Array.from(fileInput.files || []).filter(f => isSupportedBook(f.name));
+      if (files.length) handleUploads(files);
+      fileInput.value = '';
+    });
+
+    folderInput.addEventListener('change', () => {
+      const files = Array.from(folderInput.files || []).filter(f => isSupportedBook(f.name));
+      if (files.length) handleUploads(files);
+      else alert("No supported eBook files (.epub, .pdf, .mobi, .azw3, .cbz) found in chosen folder.");
+      folderInput.value = '';
+    });
+
+    async function handleUploads(files) {
+      const total = files.length;
+      let count = 0;
+
+      for (const file of files) {
+        count++;
+        const item = document.createElement('div');
+        item.className = 'ui-card p-2.5 rounded-lg flex items-center justify-between text-xs border border-zinc-800';
+        item.innerHTML = `<span class="truncate font-medium">${file.name}</span><span class="text-zinc-400 font-bold shrink-0">[${count}/${total}] Uploading...</span>`;
+        uploadQueue.prepend(item);
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+          const res = await fetch('/api/upload', { method: 'POST', body: formData });
+          const json = await res.json();
+          if (json.isArchive) {
+            item.innerHTML = `<span class="truncate text-emerald-400 font-medium">📦 ${file.name}</span><span class="text-emerald-400 font-bold shrink-0">Unpacked ${json.imported}/${json.total}</span>`;
+            await init();
+          } else if (json.duplicate) {
+            item.innerHTML = `<span class="truncate text-sky-400 font-medium">${file.name}</span><span class="text-sky-400 font-bold shrink-0">Already exists</span>`;
+          } else if (json.attachedFormat) {
+            item.innerHTML = `<span class="truncate text-indigo-400 font-medium">✓ ${file.name}</span><span class="text-indigo-400 font-bold shrink-0">Attached Format</span>`;
+            await init();
+          } else if (json.success) {
+            item.innerHTML = `<span class="truncate text-emerald-400 font-medium">✓ ${file.name}</span><span class="text-emerald-400 font-bold shrink-0">Added</span>`;
+            await init();
+          } else {
+            item.innerHTML = `<span class="truncate text-rose-300">${file.name}</span><span class="text-rose-400 font-bold shrink-0">${json.error || 'Failed'}</span>`;
+          }
+        } catch (err) {
+          item.innerHTML = `<span class="truncate text-rose-300">${file.name}</span><span class="text-rose-400 font-bold shrink-0">Error</span>`;
+        }
+      }
+    }
+
+    // EDIT MODAL & SCRAPING
+    function openEditModal(bookId) {
+      const book = allBooks.find(b => b.id === bookId);
+      if (!book) return;
+
+      document.getElementById('editBookId').value = book.id;
+      document.getElementById('editTitle').value = book.title || '';
+      document.getElementById('editAuthors').value = book.authors || '';
+      document.getElementById('editSeries').value = book.series || '';
+      document.getElementById('editSeriesIndex').value = book.series_index || '';
+      document.getElementById('editTags').value = (book.tags || []).join(', ');
+      document.getElementById('editComments').value = book.comments || '';
+      document.getElementById('editCoverPreview').src = book.cover ? `/api/books/${book.id}/cover` : '';
+      document.getElementById('editCoverUrl').value = '';
+      document.getElementById('lookupResults').innerHTML = '';
+
+      document.getElementById('editModal').classList.remove('hidden');
+    }
+
+    function closeEditModal() { document.getElementById('editModal').classList.add('hidden'); }
+
+    async function lookupMetadata() {
+      const title = document.getElementById('editTitle').value;
+      const author = document.getElementById('editAuthors').value;
+      const btn = document.getElementById('lookupBtn');
+      const container = document.getElementById('lookupResults');
+
+      btn.innerHTML = '<i class="fa-solid fa-spinner animate-spin"></i> Searching...';
+      try {
+        const res = await fetch('/api/metadata/lookup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: `${title} ${author}`.trim() })
+        });
+        const json = await res.json();
+        if (json.results && json.results.length > 0) {
+          container.innerHTML = json.results.map((r, i) => `
+            <div onclick="applyMetadata(${i})" class="p-2.5 rounded-lg bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-600 cursor-pointer transition-colors flex gap-2.5 items-center">
+              ${r.coverUrl ? `<img src="${r.coverUrl}" class="w-9 h-13 object-cover rounded shadow shrink-0">` : '<div class="w-9 h-13 bg-zinc-900 rounded flex items-center justify-center text-[9px] text-zinc-500 shrink-0">No Cover</div>'}
+              <div class="flex-1 min-w-0">
+                <div class="text-[9px] font-bold text-zinc-400 uppercase tracking-wider">${r.source}</div>
+                <div class="text-xs font-bold text-zinc-100 truncate">${r.title}</div>
+                <div class="text-[11px] text-zinc-400 truncate">${r.authors || 'Unknown'}</div>
+              </div>
+              <span class="text-[10px] font-bold text-zinc-200 shrink-0 px-2 py-0.5 bg-zinc-800 rounded">Apply</span>
+            </div>
+          `).join('');
+          window._lastLookup = json.results;
+        } else {
+          container.innerHTML = '<div class="text-xs text-zinc-500 italic py-3 text-center col-span-full">No online metadata found.</div>';
+        }
+      } catch (e) {
+        container.innerHTML = '<div class="text-xs text-rose-400 py-2 col-span-full">Search failed</div>';
+      }
+      btn.innerHTML = '<i class="fa-solid fa-magnifying-glass text-[10px]"></i> Search';
+    }
+
+    function applyMetadata(index) {
+      const r = window._lastLookup[index];
+      if (!r) return;
+      if (r.title) document.getElementById('editTitle').value = r.title;
+      if (r.authors) document.getElementById('editAuthors').value = r.authors;
+      if (r.tags && r.tags.length) document.getElementById('editTags').value = r.tags.join(', ');
+      if (r.description) document.getElementById('editComments').value = r.description;
+      if (r.coverUrl) {
+        document.getElementById('editCoverPreview').src = r.coverUrl;
+        document.getElementById('editCoverUrl').value = r.coverUrl;
+      }
+    }
+
+    async function saveMetadata() {
+      const bookId = document.getElementById('editBookId').value;
+      const title = document.getElementById('editTitle').value;
+      const authors = document.getElementById('editAuthors').value;
+      const series = document.getElementById('editSeries').value;
+      const seriesIndex = document.getElementById('editSeriesIndex').value;
+      const tags = document.getElementById('editTags').value;
+      const comments = document.getElementById('editComments').value;
+      const coverUrl = document.getElementById('editCoverUrl').value;
+
+      try {
+        const res = await fetch(`/api/books/${bookId}/metadata`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title, authors, series, seriesIndex, tags, comments, coverUrl })
+        });
+        const json = await res.json();
+        if (json.success) {
+          closeEditModal();
+          showToast('Metadata saved successfully!');
+          await init();
+        } else {
+          alert('Failed to save metadata: ' + (json.error || 'Unknown error'));
+        }
+      } catch (e) {
+        alert('Network error saving metadata');
+      }
+    }
+
+    async function deleteBook(bookId) {
+      if (!confirm('Are you sure you want to remove this book from your library?')) return;
+      try {
+        const res = await fetch(`/api/books/${bookId}`, { method: 'DELETE' });
+        const json = await res.json();
+        if (json.success) {
+          showToast('Book removed from library.');
+          await init();
+        } else {
+          alert('Failed to delete book: ' + json.error);
+        }
+      } catch (e) {
+        alert('Error deleting book');
+      }
+    }
+
+    function showToast(msg) {
+      const toast = document.getElementById('toastNotification');
+      document.getElementById('toastMessage').innerText = msg;
+      toast.classList.remove('hidden');
+      setTimeout(() => toast.classList.add('hidden'), 2500);
+    }
+
+    function copyToClipboard(text) {
+      navigator.clipboard.writeText(text);
+      showToast('Copied to clipboard!');
+    }
+
+    init();
+  </script>
+</body>
+</html>

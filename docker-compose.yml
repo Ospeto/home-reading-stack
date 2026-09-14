@@ -1,0 +1,78 @@
+# Home Reading Stack — Standby Docker Compose Architecture
+# Designed for portable hardware migration, disaster recovery, or containerized execution.
+#
+# Usage:
+#   cp .env.example .env
+#   docker compose up -d
+
+services:
+  # 1. KOSync Server — Real-time KOReader Progress Synchronization
+  kosync:
+    image: ghcr.io/nperez0111/koreader-sync:latest
+    container_name: reading-kosync
+    restart: unless-stopped
+    ports:
+      - "${KOSYNC_PORT:-7200}:3000"
+    environment:
+      - PORT=3000
+      - HOST=0.0.0.0
+      - PASSWORD_SALT=${KOSYNC_PASSWORD_SALT:-747aa604e460376f174d9e73240f9d768b06b02dfa63a0b4}
+      - DISABLE_USER_REGISTRATION=false
+      - LOG_LEVEL=info
+      - NODE_ENV=production
+    volumes:
+      - ./data/kosync:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # 2. Calibre Server & OPDS Feed — Book Catalog for Kindle OTA Downloads
+  calibre-web:
+    image: lscr.io/linuxserver/calibre-web:latest
+    container_name: reading-calibre-web
+    restart: unless-stopped
+    ports:
+      - "${CALIBRE_PORT:-8088}:8083"
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-Asia/Yangon}
+      - DOCKER_MODS=linuxserver/mods:universal-calibre
+      - OAUTHLIB_RELAX_TOKEN_SCOPE=1
+    volumes:
+      - ./data/calibre-config:/config
+      - ${CALIBRE_LIBRARY_DIR:-./data/calibre-library}:/books
+      - ${BOOKS_DROP_DIR:-./data/books-drop}:/import
+    depends_on:
+      - kosync
+
+  # 3. Reading HQ Dashboard & Telegram Bot — Ingestion, Metadata Scraper, & Manga Pipe
+  reading-hq:
+    image: oven/bun:1-alpine
+    container_name: reading-hq
+    restart: unless-stopped
+    working_dir: /app
+    command: ["bun", "run", "server.ts"]
+    ports:
+      - "${UPLOADER_PORT:-8086}:8086"
+    environment:
+      - PORT=8086
+      - SERVER_URL=http://calibre-web:8083
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - NODE_ENV=production
+    volumes:
+      - ${UPLOADER_DIR:-./src/uploader}:/app
+      - ./data/uploader:/app/data
+      - ${CALIBRE_LIBRARY_DIR:-./data/calibre-library}:/books
+      - ${MANGA_DIR:-./data/manga}:/manga
+    depends_on:
+      - calibre-web
+      - kosync
+
+volumes:
+  kosync_data:
+  calibre_config:

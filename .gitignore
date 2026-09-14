@@ -1,0 +1,21 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Databases & Runtime State
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+data/
+cache.db*
+
+# Logs
+*.log
+logs/
+
+# Dependencies & OS Artifacts
+node_modules/
+.DS_Store
+Thumbs.db
