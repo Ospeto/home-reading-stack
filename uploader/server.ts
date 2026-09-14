@@ -623,10 +623,34 @@ async function _searchAllBookSources(query: string) {
   return results;
 }
 
+function jsonResponse(data: any, status = 200) {
+  return Response.json(data, {
+    status,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "*",
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      "Pragma": "no-cache",
+      "Expires": "0"
+    }
+  });
+}
+
 Bun.serve({
   port: 8086,
   hostname: "0.0.0.0",
   async fetch(req) {
+    if (req.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+          "Access-Control-Allow-Headers": "*",
+        }
+      });
+    }
+
     let url: URL;
     try {
       url = new URL(req.url);
@@ -638,7 +662,7 @@ Bun.serve({
     // API: List books
     if (url.pathname === "/api/books" && req.method === "GET") {
       const books = getCalibreBooks();
-      return Response.json(books);
+      return jsonResponse(books);
     }
 
     // API: Library Facets
@@ -671,7 +695,7 @@ Bun.serve({
         }
       }
 
-      return Response.json({
+      return jsonResponse({
         totalBooks: books.length,
         authors: Object.entries(authorMap).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
         series: Object.entries(seriesMap).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
@@ -716,7 +740,7 @@ Bun.serve({
     // API: KOSync Live Telemetry
     if (url.pathname === "/api/kosync/active" && req.method === "GET") {
       const progress = getKosyncProgress();
-      return Response.json(progress);
+      return jsonResponse(progress);
     }
 
     // API: Reading Stats

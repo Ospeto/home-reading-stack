@@ -73,6 +73,12 @@
             <span id="mobileFilterBadgeCount" class="hidden px-1.5 py-0.2 rounded-full bg-zinc-700 text-[9px] font-bold"></span>
           </button>
 
+          <!-- Refresh Button -->
+          <button onclick="init()" class="p-2 sm:px-3 sm:py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white font-semibold text-xs rounded-lg border border-zinc-800 transition-colors flex items-center gap-1.5 cursor-pointer active:scale-95" title="Refresh Library">
+            <i class="fa-solid fa-arrows-rotate text-[11px] text-emerald-400"></i>
+            <span class="hidden sm:inline">Refresh</span>
+          </button>
+
           <!-- Clean Tags Button -->
           <button onclick="cleanLibraryMetadata()" class="p-2 sm:px-3 sm:py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white font-semibold text-xs rounded-lg border border-zinc-800 transition-colors flex items-center gap-1.5 cursor-pointer active:scale-95" title="Sanitize Titles & Strip Junk Tags">
             <i class="fa-solid fa-broom text-[11px] text-amber-400"></i>
@@ -648,19 +654,29 @@
     let kosyncMap = new Map();
 
     async function init() {
-      await Promise.all([loadBooks(), loadFacets(), loadKosync()]);
+      const grid = document.getElementById('libraryGridView');
+      if (grid && allBooks.length === 0) {
+        setHtml(grid, '<div class="col-span-full text-center py-16 text-zinc-500 text-xs flex items-center justify-center gap-2"><i class="fa-solid fa-circle-notch fa-spin text-emerald-400 text-sm"></i> <span>Loading library...</span></div>');
+      }
+      try {
+        await Promise.all([loadBooks(), loadFacets(), loadKosync()]);
+      } catch (err) {
+        console.error('Init error:', err);
+      }
     }
 
     async function loadKosync() {
       try {
-        const res = await fetch('/api/kosync/active');
+        const res = await fetch('/api/kosync/active', { cache: 'no-store' });
         const data = await res.json();
         kosyncMap.clear();
         let readingCount = 0;
-        for (const p of data) {
-          if (p.bookId && !kosyncMap.has(p.bookId)) {
-            kosyncMap.set(p.bookId, p);
-            if (p.percentage > 0 && p.percentage < 0.99) readingCount++;
+        if (Array.isArray(data)) {
+          for (const p of data) {
+            if (p.bookId && !kosyncMap.has(p.bookId)) {
+              kosyncMap.set(p.bookId, p);
+              if (p.percentage > 0 && p.percentage < 0.99) readingCount++;
+            }
           }
         }
         document.getElementById('quickReadingCount').innerText = readingCount;
@@ -671,7 +687,8 @@
 
     async function loadBooks() {
       try {
-        const res = await fetch('/api/books');
+        const res = await fetch('/api/books', { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         allBooks = await res.json();
         document.getElementById('totalBooksStat').innerText = allBooks.length;
         document.getElementById('facetTotalBooks').innerText = allBooks.length;
@@ -679,15 +696,20 @@
         applyFilters();
       } catch (e) {
         console.error('Failed to load books:', e);
+        const grid = document.getElementById('libraryGridView');
+        if (grid && allBooks.length === 0) {
+          setHtml(grid, `<div class="col-span-full text-center py-12 px-4 ui-card rounded-xl text-xs space-y-2"><div class="text-rose-400 font-bold">⚠️ Failed to connect to Reading HQ API (${e.message})</div><div class="text-zinc-500 text-[11px]">Please check connection or tap below to reload.</div><button onclick="init()" class="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-semibold mt-2">Retry</button></div>`);
+        }
       }
     }
 
     async function loadFacets() {
       try {
-        const res = await fetch('/api/library/facets');
+        const res = await fetch('/api/library/facets', { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         facets = await res.json();
-        document.getElementById('totalAuthorsStat').innerText = facets.authors.length;
-        document.getElementById('totalSeriesStat').innerText = facets.series.length;
+        document.getElementById('totalAuthorsStat').innerText = (facets.authors || []).length;
+        document.getElementById('totalSeriesStat').innerText = (facets.series || []).length;
         renderFacets();
         renderQuickFilterChips();
       } catch (e) {
@@ -929,7 +951,7 @@
               </div>
             </div>
           `;
-        }).join('');
+        }).join(''));
       }
 
       // Table View
@@ -962,7 +984,7 @@
             </td>
           </tr>
         `;
-      }).join('');
+      }).join(''));
     }
 
     // BOOK DETAIL MODAL HANDLERS
