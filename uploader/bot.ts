@@ -15,6 +15,7 @@ import { isArchiveFile, unpackArchive, isCanonicalEpub } from "./archive";
 import { extractUrlFromText, ingestArticleFromUrl } from "./article";
 import { generateMetadataFilename } from "./filename";
 import { getJobQueue } from "./jobs";
+import { validateEpubContent } from "./security";
 
 export function getDropDir(): string {
   const dir = process.env.BOOKS_DROP_DIR || "/Users/ospeto/Books_Drop";
@@ -78,6 +79,9 @@ export function getCacheDb(): Database {
 const KOSYNC_DB_PATH =
   process.env.KOSYNC_DB_PATH ||
   "/Users/ospeto/kosync-server/data/koreader-sync.db";
+export function getCalibredbPath(): string {
+  return process.env.CALIBREDB_PATH || "/opt/homebrew/bin/calibredb";
+}
 export function getCalibreDbPath(): string {
   return (
     process.env.CALIBRE_DB_PATH ||
@@ -133,20 +137,27 @@ export const cacheDb = {
   },
 } as unknown as Database;
 
-let TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
-if (fs.existsSync(ENV_PATH)) {
-  const envContent = fs.readFileSync(ENV_PATH, "utf8");
-  for (const line of envContent.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("TELEGRAM_BOT_TOKEN=")) {
-      TELEGRAM_BOT_TOKEN = trimmed.replace("TELEGRAM_BOT_TOKEN=", "").trim();
-    }
+let _telegramBotToken: string | null = null;
+export function getTelegramBotToken(): string {
+  if (_telegramBotToken) return _telegramBotToken;
+  if (process.env.TELEGRAM_BOT_TOKEN) {
+    _telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
+    return _telegramBotToken;
   }
-}
-
-if (!TELEGRAM_BOT_TOKEN) {
-  console.error("[TelegramBot] Missing TELEGRAM_BOT_TOKEN. Exiting.");
-  process.exit(1);
+  const envPath = process.env.ENV_PATH || ENV_PATH;
+  if (fs.existsSync(envPath)) {
+    try {
+      const envContent = fs.readFileSync(envPath, "utf8");
+      for (const line of envContent.split("\n")) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("TELEGRAM_BOT_TOKEN=")) {
+          _telegramBotToken = trimmed.replace("TELEGRAM_BOT_TOKEN=", "").trim();
+          return _telegramBotToken;
+        }
+      }
+    } catch {}
+  }
+  return _telegramBotToken || "";
 }
 
 function log(msg: string) {
@@ -192,7 +203,7 @@ function runCalibredb(args: string[]) {
   env.PATH =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
 
-  return spawnSync("/opt/homebrew/bin/calibredb", args, {
+  return spawnSync(getCalibredbPath(), args, {
     encoding: "utf8",
     env,
   });
@@ -228,7 +239,8 @@ function safeParseJson(str: string): any {
 }
 
 async function tgFetch(endpoint: string, options: any = {}) {
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${endpoint}`;
+  const token = getTelegramBotToken();
+  const url = `https://api.telegram.org/bot${token}/${endpoint}`;
   const timeoutMs = options.timeoutMs || 45000;
   const signal = options.signal || AbortSignal.timeout(timeoutMs);
 
@@ -2282,7 +2294,8 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
         continue;
       }
 
-      const dlUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${fileJson.result.file_path}`;
+      const token = getTelegramBotToken();
+      const dlUrl = `https://api.telegram.org/file/bot${token}/${fileJson.result.file_path}`;
       const dl = await fetch(dlUrl, { proxy: PROXY_URL } as any);
       if (!dl.ok) {
         results.push({
@@ -2301,6 +2314,22 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
       const destPath = path.join(getDropDir(), tempFileName);
 
       fs.writeFileSync(destPath, Buffer.from(arrayBuf));
+
+      if (!isArchiveFile(fileName)) {
+        const contentValidation = validateEpubContent(destPath);
+        if (!contentValidation.valid) {
+          try {
+            fs.unlinkSync(destPath);
+          } catch {}
+          results.push({
+            name: fileName,
+            format,
+            status: "error",
+            note: `Invalid EPUB file: ${contentValidation.error}`,
+          });
+          continue;
+        }
+      }
 
       if (isArchiveFile(fileName)) {
         log(`Unpacking archive "${fileName}"...`);
@@ -2521,8 +2550,13 @@ process.on("SIGTERM", () => {
 });
 
 async function pollTelegram() {
+  const token = getTelegramBotToken();
+  if (!token) {
+    console.error("[TelegramBot] Missing TELEGRAM_BOT_TOKEN. Exiting.");
+    process.exit(1);
+  }
   log(
-    `Polling started via proxy ${PROXY_URL} for bot: ${TELEGRAM_BOT_TOKEN.substring(0, 10)}...`,
+    `Polling started via proxy ${PROXY_URL} for bot: ${token.substring(0, 10)}...`,
   );
 
   await initChatMenuButton();

@@ -36,6 +36,18 @@ export interface MigrationInventory {
     authors: string;
     file: string;
   }>;
+  heuristicDuplicates: Array<{
+    id: number;
+    title: string;
+    authors: string;
+    file: string;
+    matchedWith: string;
+  }>;
+  missingFilesOnDisk: Array<{
+    id: number;
+    title: string;
+    file: string;
+  }>;
   newEpubCandidates: Array<{
     id: number;
     title: string;
@@ -171,7 +183,7 @@ export function runMigrationPreflight(
     const compoundKey = normalizeTitleAndAuthor(t.title, t.authors);
     const titleKey = cleanTitle(t.title);
 
-    if (compoundKey) {
+    if (compoundKey && !compoundKey.endsWith(":::unknown")) {
       targetMap.set(compoundKey, t);
     }
     if (titleKey) {
@@ -183,23 +195,42 @@ export function runMigrationPreflight(
   }
 
   const exactDuplicates: MigrationInventory["exactDuplicates"] = [];
+  const heuristicDuplicates: MigrationInventory["heuristicDuplicates"] = [];
+  const missingFilesOnDisk: MigrationInventory["missingFilesOnDisk"] = [];
   const newEpubCandidates: MigrationInventory["newEpubCandidates"] = [];
 
   for (const src of srcEpubRows) {
     const relFile = path.join(src.path, `${src.filename}.epub`);
     const fullSourceFilePath = path.join(sourcePath, relFile);
 
+    // Verify physical file existence on disk
+    if (!fs.existsSync(fullSourceFilePath)) {
+      missingFilesOnDisk.push({
+        id: src.id,
+        title: src.title || "Untitled",
+        file: fullSourceFilePath,
+      });
+      continue;
+    }
+
     const compoundKey = normalizeTitleAndAuthor(src.title, src.authors);
     const titleKey = cleanTitle(src.title);
     const srcAuthor = cleanTitle(src.authors || "");
 
-    let isDuplicate = false;
-
-    // 1. Primary match: normalized Title PLUS Author
+    // 1. Exact Duplicate: both title and author match identically
     if (targetMap.has(compoundKey)) {
-      isDuplicate = true;
-    } else if (titleKey && targetTitleMap.has(titleKey)) {
-      // 2. Secondary match: Title match with author compatibility check
+      exactDuplicates.push({
+        id: src.id,
+        title: src.title || "Untitled",
+        authors: src.authors || "Unknown",
+        file: fullSourceFilePath,
+      });
+      continue;
+    }
+
+    // 2. Heuristic Duplicate: matching title with compatible known authors
+    let matchedHeuristic: any = null;
+    if (titleKey && targetTitleMap.has(titleKey)) {
       const candidates = targetTitleMap.get(titleKey)!;
       for (const cand of candidates) {
         const candAuthor = cleanTitle(cand.authors || "");
@@ -209,30 +240,30 @@ export function runMigrationPreflight(
           srcAuthor !== "unknown" &&
           candAuthor !== "unknown";
 
+        // Do not match title-only when authors are missing/unknown
         if (!hasBothAuthors) {
-          // If either author is unknown/missing, title match is treated as duplicate to be safe
-          isDuplicate = true;
-          break;
+          continue;
         }
 
-        // Both authors are known: verify they are actually the same or compatible
+        // Both authors known: check compatibility (substring or exact)
         if (
           srcAuthor === candAuthor ||
           srcAuthor.includes(candAuthor) ||
           candAuthor.includes(srcAuthor)
         ) {
-          isDuplicate = true;
+          matchedHeuristic = cand;
           break;
         }
       }
     }
 
-    if (isDuplicate) {
-      exactDuplicates.push({
+    if (matchedHeuristic) {
+      heuristicDuplicates.push({
         id: src.id,
         title: src.title || "Untitled",
         authors: src.authors || "Unknown",
         file: fullSourceFilePath,
+        matchedWith: `[#${matchedHeuristic.id}] "${matchedHeuristic.title}" by ${matchedHeuristic.authors || "Unknown"}`,
       });
     } else {
       newEpubCandidates.push({
@@ -258,6 +289,8 @@ export function runMigrationPreflight(
     })),
     targetTotalEpubs: tgtEpubRows.length,
     exactDuplicates,
+    heuristicDuplicates,
+    missingFilesOnDisk,
     newEpubCandidates,
   };
 }
@@ -266,21 +299,11 @@ export function runMigrationPreflight(
  * CLI Execution Handler
  */
 if (import.meta.main) {
-  console.log(
-    "===================================================================",
-  );
-  console.log(
-    "  Home Reading Stack: EPUB Migration Preflight & Inventory Analysis",
-  );
-  console.log(
-    "===================================================================\n",
-  );
-  console.log(
-    "🔒 [SAFETY CHECK]: Running in strictly READ-ONLY analysis mode.",
-  );
-  console.log(
-    "   No live Calibre files or metadata databases will be modified.\n",
-  );
+  console.log("===================================================================");
+  console.log("  Home Reading Stack: EPUB Migration Preflight & Inventory Analysis");
+  console.log("===================================================================\n");
+  console.log("🔒 [SAFETY CHECK]: Running in strictly READ-ONLY analysis mode.");
+  console.log("   No live Calibre files or metadata databases will be modified.\n");
 
   try {
     const inventory = runMigrationPreflight();
@@ -288,94 +311,70 @@ if (import.meta.main) {
     console.log(`📁 Source Library: ${inventory.sourcePath}`);
     console.log(`   - Total Registered Books: ${inventory.sourceTotalBooks}`);
     console.log(`   - EPUB Format Books:      ${inventory.sourceTotalEpubs}`);
-    console.log(
-      `   - Non-EPUB Formats Skipped: ${inventory.sourceNonEpubsExcluded.length} (e.g. KFX, AZW, TXT)\n`,
-    );
+    console.log(`   - Non-EPUB Formats Skipped: ${inventory.sourceNonEpubsExcluded.length} (e.g. KFX, AZW, TXT)`);
+    if (inventory.missingFilesOnDisk.length > 0) {
+      console.log(`   - Missing on Disk (Skipped): ${inventory.missingFilesOnDisk.length}\n`);
+    } else {
+      console.log("");
+    }
 
     console.log(`📁 Target Canonical Library: ${inventory.targetPath}`);
     console.log(`   - Existing EPUB Books:    ${inventory.targetTotalEpubs}\n`);
 
-    console.log(
-      "-------------------------------------------------------------------",
-    );
+    console.log("-------------------------------------------------------------------");
     console.log("  INVENTORY MATCHING RESULTS");
-    console.log(
-      "-------------------------------------------------------------------",
-    );
-    console.log(
-      `✅ New Unique EPUBs to Migrate:     ${inventory.newEpubCandidates.length}`,
-    );
-    console.log(
-      `⚠️ Existing Duplicates (Will Skip): ${inventory.exactDuplicates.length}\n`,
-    );
+    console.log("-------------------------------------------------------------------");
+    console.log(`✅ New Unique EPUBs to Migrate:     ${inventory.newEpubCandidates.length}`);
+    console.log(`⚠️ Exact Duplicates (Skipped):      ${inventory.exactDuplicates.length}`);
+    console.log(`ℹ️ Heuristic Duplicates (Skipped):  ${inventory.heuristicDuplicates.length}\n`);
 
     if (inventory.exactDuplicates.length > 0) {
-      console.log(
-        "Sample Existing Duplicates Detected (Matched on Title + Author):",
-      );
+      console.log("Sample Exact Duplicates Detected (Exact Title + Author):");
       for (const d of inventory.exactDuplicates.slice(0, 5)) {
         console.log(`  • [#${d.id}] "${d.title}" by ${d.authors}`);
       }
       if (inventory.exactDuplicates.length > 5) {
-        console.log(
-          `    ... and ${inventory.exactDuplicates.length - 5} more.`,
-        );
+        console.log(`    ... and ${inventory.exactDuplicates.length - 5} more.`);
+      }
+      console.log("");
+    }
+
+    if (inventory.heuristicDuplicates.length > 0) {
+      console.log("Sample Heuristic Duplicates Detected:");
+      for (const h of inventory.heuristicDuplicates.slice(0, 3)) {
+        console.log(`  • [#${h.id}] "${h.title}" by ${h.authors} -> ${h.matchedWith}`);
       }
       console.log("");
     }
 
     console.log("Sample New Unique EPUB Candidates Ready for Migration:");
     for (const c of inventory.newEpubCandidates.slice(0, 8)) {
-      const seriesBadge = c.series
-        ? ` [Series: ${c.series} #${c.seriesIndex || 1}]`
-        : "";
+      const seriesBadge = c.series ? ` [Series: ${c.series} #${c.seriesIndex || 1}]` : "";
       console.log(`  • [#${c.id}] "${c.title}" by ${c.authors}${seriesBadge}`);
     }
     if (inventory.newEpubCandidates.length > 8) {
-      console.log(
-        `    ... and ${inventory.newEpubCandidates.length - 8} more.`,
-      );
+      console.log(`    ... and ${inventory.newEpubCandidates.length - 8} more.`);
     }
     console.log("");
 
-    console.log(
-      "===================================================================",
-    );
+    console.log("===================================================================");
     console.log("  RECOMMENDED MIGRATION PROCEDURE (SUPERVISED STEP)");
-    console.log(
-      "===================================================================",
-    );
+    console.log("===================================================================");
     console.log("1. OFFLINE SNAPSHOT BACKUP (MANDATORY BEFORE IMPORT):");
     console.log("   Run this command while calibre-server is stopped or idle:");
-    console.log(
-      `   cp -a "${inventory.targetPath}" "${inventory.targetPath}.backup.$(date +%Y%m%d_%H%M%S)"\n`,
-    );
+    console.log(`   cp -a "${inventory.targetPath}" "${inventory.targetPath}.backup.$(date +%Y%m%d_%H%M%S)"\n`);
 
     console.log("2. BATCH IMPORT COMMAND (VIA CALIBREDB HTTP API):");
-    console.log(
-      "   calibredb add --with-library http://127.0.0.1:8088 --automerge ignore <path-to-epub>\n",
-    );
+    console.log("   calibredb add --with-library http://127.0.0.1:8088 --automerge ignore <path-to-epub>\n");
 
     console.log("3. POST-MIGRATION VERIFICATION CHECKLIST:");
-    console.log(
-      "   • OPDS Feed:       curl -s http://127.0.0.1:8088/opds | head -n 25",
-    );
-    console.log(
-      "   • Reading HQ API:  curl -s http://127.0.0.1:8086/api/books | jq length",
-    );
-    console.log(
-      "   • Telegram Bot:    Send /recent and /reading to verify catalog refresh",
-    );
-    console.log(
-      "   • KOReader Sync:   Verify synchronization at https://kosync.wavypremium.xyz\n",
-    );
+    console.log("   • OPDS Feed:       curl -s http://127.0.0.1:8088/opds | head -n 25");
+    console.log("   • Reading HQ API:  curl -s http://127.0.0.1:8086/api/books | jq length");
+    console.log("   • Telegram Bot:    Send /recent and /reading to verify catalog refresh");
+    console.log("   • KOReader Sync:   Verify synchronization at https://kosync.wavypremium.xyz\n");
 
-    console.log(
-      "🔒 [SAFETY GUARD VERIFIED]: Preflight analysis completed successfully.",
-    );
-    console.log(
-      "   Zero files were modified. The live libraries remain intact.\n",
-    );
+    console.log("🔒 [SAFETY GUARD VERIFIED]: Preflight analysis completed successfully.");
+    console.log("   Zero files were modified. The live libraries remain intact.\n");
   } catch (err: any) {
     console.error("❌ Preflight check failed:", err.message);
     process.exit(1);

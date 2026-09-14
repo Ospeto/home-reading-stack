@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { validateEpubContent } from "./security";
 
 // Resource Limits & Safety Thresholds
 export const MAX_ARCHIVE_SIZE_BYTES = 100 * 1024 * 1024; // 100MB compressed
@@ -150,6 +151,16 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
       if (tokens.length >= 9) {
         const size = parseInt(tokens[4], 10);
         const entryName = tokens.slice(8).join(" ");
+
+        // Reject symbolic links before extraction
+        if (tokens[0].startsWith("l") || line.includes(" -> ")) {
+          return {
+            safe: false,
+            error: `Symbolic link detected in archive entry: "${entryName}"`,
+            entryCount: lines.length,
+            totalUncompressedBytes,
+          };
+        }
 
         // Check for path traversal guards:
         // Reject any entry with '..' components, starting with '/', '\', or containing null bytes
@@ -303,10 +314,20 @@ export function unpackArchive(archivePath: string): UnpackResult {
         }
       } else if (entry.isFile()) {
         if (isSupportedBook(entry.name)) {
-          foundBooks.push({
-            tempPath: fullPath,
-            originalName: entry.name,
-          });
+          const contentCheck = validateEpubContent(fullPath);
+          if (contentCheck.valid) {
+            foundBooks.push({
+              tempPath: fullPath,
+              originalName: entry.name,
+            });
+          } else {
+            quarantined.push({
+              name: entry.name,
+              originalName: entry.name,
+              format: "EPUB",
+              reason: `Invalid or corrupted EPUB container: ${contentCheck.error}`,
+            });
+          }
         } else if (isNonEpubBook(entry.name)) {
           const ext = path.extname(entry.name).replace(/^\./, "").toUpperCase();
           quarantined.push({

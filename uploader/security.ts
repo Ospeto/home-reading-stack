@@ -161,7 +161,9 @@ export function isPrivateOrInternalIp(rawIp: string): boolean {
     if (v4MappedDotted) {
       return isPrivateOrInternalIp(v4MappedDotted[1]);
     }
-    const v4MappedHex = normalizedV6.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    const v4MappedHex = normalizedV6.match(
+      /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/,
+    );
     if (v4MappedHex) {
       const high = parseInt(v4MappedHex[1], 16);
       const low = parseInt(v4MappedHex[2], 16);
@@ -256,10 +258,16 @@ export async function validateUrlForSSRF(
 export function isLanHost(host: string): boolean {
   const clean = host.toLowerCase().split(":")[0].trim();
   if (!clean) return false;
-  if (clean === "localhost" || clean === "127.0.0.1" || clean === "::1") return true;
+  if (clean === "localhost" || clean === "127.0.0.1" || clean === "::1")
+    return true;
   if (clean.startsWith("192.168.") || clean.startsWith("10.")) return true;
   if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(clean)) return true;
-  if (clean.endsWith(".local") || clean.endsWith(".lan") || clean.endsWith(".home.arpa")) return true;
+  if (
+    clean.endsWith(".local") ||
+    clean.endsWith(".lan") ||
+    clean.endsWith(".home.arpa")
+  )
+    return true;
   return false;
 }
 
@@ -720,8 +728,16 @@ export function validateEpubContent(filePath: string): EpubValidationResult {
     }
 
     // 1. Check ZIP magic bytes (PK\x03\x04)
-    if (headerBuf[0] !== 0x50 || headerBuf[1] !== 0x4B || headerBuf[2] !== 0x03 || headerBuf[3] !== 0x04) {
-      return { valid: false, error: "Invalid magic bytes: not a valid ZIP/EPUB container" };
+    if (
+      headerBuf[0] !== 0x50 ||
+      headerBuf[1] !== 0x4b ||
+      headerBuf[2] !== 0x03 ||
+      headerBuf[3] !== 0x04
+    ) {
+      return {
+        valid: false,
+        error: "Invalid magic bytes: not a valid ZIP/EPUB container",
+      };
     }
 
     // 2. Inspect archive entries with bsdtar -tf
@@ -749,12 +765,14 @@ export function validateEpubContent(filePath: string): EpubValidationResult {
 
     // Check META-INF/container.xml entry
     const hasContainer = entries.some(
-      (e: string) => e === "META-INF/container.xml" || e.endsWith("META-INF/container.xml"),
+      (e: string) =>
+        e === "META-INF/container.xml" || e.endsWith("META-INF/container.xml"),
     );
     if (!hasContainer) {
       return {
         valid: false,
-        error: "Missing required EPUB container definition: META-INF/container.xml",
+        error:
+          "Missing required EPUB container definition: META-INF/container.xml",
       };
     }
 

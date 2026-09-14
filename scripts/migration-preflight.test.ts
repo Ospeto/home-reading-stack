@@ -35,6 +35,12 @@ describe("Migration Preflight & Inventory Engine", () => {
       fs.mkdirSync(srcLibDir, { recursive: true });
       fs.mkdirSync(tgtLibDir, { recursive: true });
 
+      // Create physical mock files for source books
+      fs.mkdirSync(path.join(srcLibDir, "Frost"), { recursive: true });
+      fs.writeFileSync(path.join(srcLibDir, "Frost", "Book1.epub"), "content");
+      fs.mkdirSync(path.join(srcLibDir, "Dickinson"), { recursive: true });
+      fs.writeFileSync(path.join(srcLibDir, "Dickinson", "Book2.epub"), "content");
+
       const srcDbPath = path.join(srcLibDir, "metadata.db");
       const tgtDbPath = path.join(tgtLibDir, "metadata.db");
 
@@ -52,7 +58,7 @@ describe("Migration Preflight & Inventory Engine", () => {
       // Add Books to Source
       // Book 1: EPUB (existing in target: matching title AND author)
       srcDb.run(
-        "INSERT INTO books (id, title, path) VALUES (1, 'Selected Works', 'Frost/Book1');",
+        "INSERT INTO books (id, title, path) VALUES (1, 'Selected Works', 'Frost');",
       );
       srcDb.run(
         "INSERT INTO data (id, book, format, name) VALUES (1, 1, 'EPUB', 'Book1');",
@@ -64,7 +70,7 @@ describe("Migration Preflight & Inventory Engine", () => {
 
       // Book 2: EPUB (same title 'Selected Works', but DIFFERENT author 'Emily Dickinson' - NOT a duplicate!)
       srcDb.run(
-        "INSERT INTO books (id, title, path) VALUES (2, 'Selected Works', 'Dickinson/Book2');",
+        "INSERT INTO books (id, title, path) VALUES (2, 'Selected Works', 'Dickinson');",
       );
       srcDb.run(
         "INSERT INTO data (id, book, format, name) VALUES (2, 2, 'EPUB', 'Book2');",
@@ -78,10 +84,22 @@ describe("Migration Preflight & Inventory Engine", () => {
 
       // Book 3: Non-EPUB (KFX format - must be excluded)
       srcDb.run(
-        "INSERT INTO books (id, title, path) VALUES (3, 'Comic Issue 1', 'Comics/Book3');",
+        "INSERT INTO books (id, title, path) VALUES (3, 'Comic Issue 1', 'Comics');",
       );
       srcDb.run(
         "INSERT INTO data (id, book, format, name) VALUES (3, 3, 'KFX', 'Book3');",
+      );
+
+      // Book 4: Missing on disk (ghost database entry)
+      srcDb.run(
+        "INSERT INTO books (id, title, path) VALUES (4, 'Ghost Book', 'Ghost');",
+      );
+      srcDb.run(
+        "INSERT INTO data (id, book, format, name) VALUES (4, 4, 'EPUB', 'Missing');",
+      );
+      srcDb.run("INSERT INTO authors (id, name) VALUES (4, 'Ghost Author');");
+      srcDb.run(
+        "INSERT INTO books_authors_link (id, book, author) VALUES (4, 4, 4);",
       );
 
       srcDb.close();
@@ -97,7 +115,7 @@ describe("Migration Preflight & Inventory Engine", () => {
 
       // Target has 'Selected Works' by 'Robert Frost'
       tgtDb.run(
-        "INSERT INTO books (id, title, path) VALUES (10, 'Selected Works', 'Frost/Book10');",
+        "INSERT INTO books (id, title, path) VALUES (10, 'Selected Works', 'Frost');",
       );
       tgtDb.run(
         "INSERT INTO data (id, book, format, name) VALUES (10, 10, 'EPUB', 'Book10');",
@@ -120,8 +138,8 @@ describe("Migration Preflight & Inventory Engine", () => {
       });
 
       // Verify inventory counts
-      expect(inventory.sourceTotalBooks).toBe(3);
-      expect(inventory.sourceTotalEpubs).toBe(2);
+      expect(inventory.sourceTotalBooks).toBe(4);
+      expect(inventory.sourceTotalEpubs).toBe(3);
       expect(inventory.sourceNonEpubsExcluded.length).toBe(1);
       expect(inventory.sourceNonEpubsExcluded[0].format).toBe("KFX");
 
@@ -134,6 +152,10 @@ describe("Migration Preflight & Inventory Engine", () => {
       // Unique candidate: Emily Dickinson book is NOT marked as duplicate despite same title!
       expect(inventory.newEpubCandidates.length).toBe(1);
       expect(inventory.newEpubCandidates[0].authors).toBe("Emily Dickinson");
+
+      // Missing on disk check: Ghost book detected and skipped from candidates
+      expect(inventory.missingFilesOnDisk.length).toBe(1);
+      expect(inventory.missingFilesOnDisk[0].title).toBe("Ghost Book");
 
       // Verify ZERO MUTATION on files
       const srcStatAfter = fs.statSync(srcDbPath);

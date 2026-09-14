@@ -71,7 +71,15 @@ describe("EPUB-Only Archive & Format Quarantine", () => {
       const mobiFile = path.join(tempDir, "old.mobi");
       const txtFile = path.join(tempDir, "readme.txt");
 
-      fs.writeFileSync(epubFile, "mock epub content");
+      // Create a valid minimal EPUB container
+      const minDir = path.join(tempDir, "min_epub_content");
+      const metaDir = path.join(minDir, "META-INF");
+      fs.mkdirSync(metaDir, { recursive: true });
+      fs.writeFileSync(path.join(minDir, "mimetype"), "application/epub+zip");
+      fs.writeFileSync(path.join(metaDir, "container.xml"), "<container/>");
+      spawnSync("/usr/bin/bsdtar", ["--format", "zip", "-cf", epubFile, "-C", minDir, "mimetype", "META-INF"]);
+      fs.rmSync(minDir, { recursive: true, force: true });
+
       fs.writeFileSync(pdfFile, "mock pdf content");
       fs.writeFileSync(mobiFile, "mock mobi content");
       fs.writeFileSync(txtFile, "plain text");
@@ -98,6 +106,30 @@ describe("EPUB-Only Archive & Format Quarantine", () => {
         if (fs.existsSync(tempDir)) {
           fs.rmSync(tempDir, { recursive: true, force: true });
         }
+      }
+    });
+
+    it("quarantines corrupted .epub files inside archives that fail physical container validation", () => {
+      const corruptDir = path.join("/tmp", `test_corrupt_archive_${Date.now()}`);
+      fs.mkdirSync(corruptDir, { recursive: true });
+
+      const fakeEpub = path.join(corruptDir, "fake_corrupt.epub");
+      fs.writeFileSync(fakeEpub, "not a real epub container at all");
+
+      const zipPath = path.join("/tmp", `test_corrupt_pack_${Date.now()}.zip`);
+      spawnSync("/usr/bin/bsdtar", ["-cf", zipPath, "-C", corruptDir, "."]);
+
+      const res = unpackArchive(zipPath);
+      try {
+        expect(res.success).toBe(false);
+        expect(res.books.length).toBe(0);
+        expect(res.quarantined.length).toBe(1);
+        expect(res.quarantined[0].name).toBe("fake_corrupt.epub");
+        expect(res.quarantined[0].reason).toContain("Invalid or corrupted EPUB container");
+      } finally {
+        res.cleanup();
+        if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
+        if (fs.existsSync(corruptDir)) fs.rmSync(corruptDir, { recursive: true, force: true });
       }
     });
 
@@ -185,7 +217,7 @@ with zipfile.ZipFile("${bombZip}", "w", compression=zipfile.ZIP_DEFLATED) as zf:
       }
     });
 
-    it("skips symbolic links extracted from archives (symlink guard)", () => {
+    it("rejects archives containing symbolic links before extraction (symlink safety guard)", () => {
       const symlinkDir = path.join("/tmp", `test_symlink_dir_${Date.now()}`);
       fs.mkdirSync(symlinkDir, { recursive: true });
 
@@ -205,10 +237,8 @@ with zipfile.ZipFile("${bombZip}", "w", compression=zipfile.ZIP_DEFLATED) as zf:
 
       const unp = unpackArchive(symlinkTar);
       try {
-        expect(unp.success).toBe(true);
-        // Only the real file should be extracted, the symlink must be ignored
-        expect(unp.books.length).toBe(1);
-        expect(unp.books[0].originalName).toBe("legit.epub");
+        expect(unp.success).toBe(false);
+        expect(unp.error).toContain("Symbolic link detected");
       } finally {
         unp.cleanup();
         if (fs.existsSync(symlinkTar)) fs.unlinkSync(symlinkTar);
