@@ -20,6 +20,7 @@ const ENV_PATH = process.env.ENV_PATH || "/Users/ospeto/uploader/.env";
 const CACHE_DB_PATH = "/Users/ospeto/uploader/cache.db";
 const KOSYNC_DB_PATH = process.env.KOSYNC_DB_PATH || "/Users/ospeto/kosync-server/data/koreader-sync.db";
 const CALIBRE_DB_PATH = process.env.CALIBRE_DB_PATH || "/Users/ospeto/Calibre Libraries/Agent Library/metadata.db";
+const CALIBRE_LIBRARY_DIR = process.env.CALIBRE_LIBRARY_DIR || path.dirname(CALIBRE_DB_PATH);
 const MANGA_DB_PATH = process.env.MANGA_DB_PATH || "/Users/ospeto/manga-processor/manga.db";
 const PROXY_URL = "http://127.0.0.1:7890";
 const WEB_UPLOADER_URL = "http://192.168.31.15:8086";
@@ -158,19 +159,49 @@ async function tgFetch(endpoint: string, options: any = {}) {
   return await fetch(url, fetchOpts);
 }
 
-async function sendMessage(chatId: number, text: string, parseMode: string = ""): Promise<number | null> {
+async function sendMessage(
+  chatId: number,
+  text: string,
+  parseMode: string = "",
+  replyMarkup: any = null
+): Promise<number | null> {
   try {
     const body: any = { chat_id: chatId, text };
     if (parseMode) body.parse_mode = parseMode;
+    if (replyMarkup) body.reply_markup = replyMarkup;
     const res = await tgFetch("sendMessage", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       timeoutMs: 15000
     });
-    const data = await res.json() as any;
+    const data = (await res.json()) as any;
     if (data.ok && data.result?.message_id) {
       return data.result.message_id;
+    }
+    // Safe Telegram plain-text fallback:
+    if (
+      !data.ok &&
+      parseMode &&
+      (data.error_code === 400 || (data.description && /parse|entity|markdown/i.test(data.description)))
+    ) {
+      logError(`sendMessage failed with parseMode="${parseMode}" (${data.description}), retrying as plain text...`);
+      const fallbackBody: any = { chat_id: chatId, text };
+      if (replyMarkup) fallbackBody.reply_markup = replyMarkup;
+      const retryRes = await tgFetch("sendMessage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(fallbackBody),
+        timeoutMs: 15000
+      });
+      const retryData = (await retryRes.json()) as any;
+      if (retryData.ok && retryData.result?.message_id) {
+        return retryData.result.message_id;
+      } else {
+        logError(`sendMessage plain-text retry also failed: ${retryData.description}`);
+      }
+    } else if (!data.ok) {
+      logError(`sendMessage failed for chat ${chatId}: ${data.description}`);
     }
   } catch (err: any) {
     logError(`Failed to send message to chat ${chatId}: ${err.message}`);
@@ -178,26 +209,53 @@ async function sendMessage(chatId: number, text: string, parseMode: string = "")
   return null;
 }
 
-async function editOrSendMessage(chatId: number, messageId: number | null, text: string, parseMode: string = ""): Promise<number | null> {
+async function editOrSendMessage(
+  chatId: number,
+  messageId: number | null,
+  text: string,
+  parseMode: string = "",
+  replyMarkup: any = null
+): Promise<number | null> {
   if (messageId) {
     try {
       const body: any = { chat_id: chatId, message_id: messageId, text };
       if (parseMode) body.parse_mode = parseMode;
+      if (replyMarkup) body.reply_markup = replyMarkup;
       const res = await tgFetch("editMessageText", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
         timeoutMs: 15000
       });
-      const data = await res.json() as any;
+      const data = (await res.json()) as any;
       if (data.ok && data.result?.message_id) {
         return data.result.message_id;
+      }
+      // Safe Telegram plain-text fallback:
+      if (
+        !data.ok &&
+        parseMode &&
+        (data.error_code === 400 || (data.description && /parse|entity|markdown/i.test(data.description)))
+      ) {
+        logError(`editMessageText failed with parseMode="${parseMode}" (${data.description}), retrying as plain text...`);
+        const fallbackBody: any = { chat_id: chatId, message_id: messageId, text };
+        if (replyMarkup) fallbackBody.reply_markup = replyMarkup;
+        const retryRes = await tgFetch("editMessageText", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(fallbackBody),
+          timeoutMs: 15000
+        });
+        const retryData = (await retryRes.json()) as any;
+        if (retryData.ok && retryData.result?.message_id) {
+          return retryData.result.message_id;
+        }
       }
     } catch (err: any) {
       logError(`editMessageText failed for message ${messageId}, falling back to sendMessage: ${err?.message || err}`);
     }
   }
-  return await sendMessage(chatId, text, parseMode);
+  return await sendMessage(chatId, text, parseMode, replyMarkup);
 }
 
 async function sendDocument(
@@ -245,6 +303,30 @@ async function sendDocument(
     if (data.ok) {
       log(`Sent document "${fileName}" to chat ${chatId}`);
       return true;
+    } else if (
+      parseMode &&
+      (data.error_code === 400 || (data.description && /parse|entity|caption/i.test(data.description)))
+    ) {
+      logError(`sendDocument failed with parseMode="${parseMode}" (${data.description}), retrying caption as plain text...`);
+      const fallbackFormData = new FormData();
+      fallbackFormData.append("chat_id", String(chatId));
+      fallbackFormData.append("document", blob, fileName);
+      if (caption) {
+        fallbackFormData.append("caption", caption);
+      }
+      const retryRes = await tgFetch("sendDocument", {
+        method: "POST",
+        body: fallbackFormData,
+        timeoutMs: 60000
+      });
+      const retryData = (await retryRes.json()) as any;
+      if (retryData.ok) {
+        log(`Sent document "${fileName}" to chat ${chatId} (plain-text caption fallback)`);
+        return true;
+      } else {
+        logError(`sendDocument plain-text retry failed for chat ${chatId}: ${retryData.description}`);
+        return false;
+      }
     } else {
       logError(`sendDocument failed for chat ${chatId}: ${data.description}`);
       return false;
@@ -380,6 +462,372 @@ export function createHotDatabaseBackup(): DatabaseBackupResult | null {
       void _cleanupErr;
     }
     return null;
+  }
+}
+
+export interface CalibreBookResult {
+  id: number;
+  title: string;
+  authors: string;
+  series?: string | null;
+  series_index?: number | null;
+  formats: string;
+}
+
+export function escapeTelegramMarkdown(text: string): string {
+  if (!text) return "";
+  return text.replace(/([_*`\[\]])/g, "\\$1");
+}
+
+export function searchCalibreLibrary(query: string, limit: number = 5): CalibreBookResult[] {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+
+  // 1. Try querying Calibre SQLite database first for instant sub-millisecond response
+  if (fs.existsSync(CALIBRE_DB_PATH)) {
+    try {
+      const db = new Database(CALIBRE_DB_PATH, { readonly: true });
+      db.run("PRAGMA busy_timeout = 3000;");
+
+      const words = trimmed.split(/\s+/).filter(Boolean);
+
+      // Primary query: whole phrase match against title, author, or series
+      const primarySql = `
+        SELECT b.id, b.title, b.path, b.series_index,
+               GROUP_CONCAT(DISTINCT a.name) as authors,
+               s.name as series,
+               GROUP_CONCAT(DISTINCT d.format) as formats
+        FROM books b
+        LEFT JOIN books_authors_link bal ON b.id = bal.book
+        LEFT JOIN authors a ON bal.author = a.id
+        LEFT JOIN books_series_link bsl ON b.id = bsl.book
+        LEFT JOIN series s ON bsl.series = s.id
+        LEFT JOIN data d ON b.id = d.book
+        WHERE b.title LIKE ? OR a.name LIKE ? OR s.name LIKE ?
+        GROUP BY b.id
+        ORDER BY b.id DESC
+        LIMIT ?
+      `;
+
+      const wildcardQuery = `%${trimmed}%`;
+      const primaryRows = db.query(primarySql).all(wildcardQuery, wildcardQuery, wildcardQuery, limit) as any[];
+
+      const matchedBooks: CalibreBookResult[] = primaryRows.map((r) => ({
+        id: r.id,
+        title: r.title || "Untitled",
+        authors: r.authors || "Unknown",
+        series: r.series || null,
+        series_index: r.series_index || null,
+        formats: r.formats || ""
+      }));
+
+      // If fewer than limit and query had multiple terms, perform multi-term matching
+      if (matchedBooks.length < limit && words.length > 1) {
+        const existingIds = new Set(matchedBooks.map((b) => b.id));
+        const conditions = words
+          .map(() => "(b.title LIKE ? OR a.name LIKE ? OR s.name LIKE ?)")
+          .join(" AND ");
+
+        const multiSql = `
+          SELECT b.id, b.title, b.path, b.series_index,
+                 GROUP_CONCAT(DISTINCT a.name) as authors,
+                 s.name as series,
+                 GROUP_CONCAT(DISTINCT d.format) as formats
+          FROM books b
+          LEFT JOIN books_authors_link bal ON b.id = bal.book
+          LEFT JOIN authors a ON bal.author = a.id
+          LEFT JOIN books_series_link bsl ON b.id = bsl.book
+          LEFT JOIN series s ON bsl.series = s.id
+          LEFT JOIN data d ON b.id = d.book
+          WHERE ${conditions}
+          GROUP BY b.id
+          ORDER BY b.id DESC
+          LIMIT ?
+        `;
+
+        const params: any[] = [];
+        for (const w of words) {
+          const p = `%${w}%`;
+          params.push(p, p, p);
+        }
+        params.push(limit);
+
+        const multiRows = db.query(multiSql).all(...params) as any[];
+        for (const r of multiRows) {
+          if (!existingIds.has(r.id)) {
+            existingIds.add(r.id);
+            matchedBooks.push({
+              id: r.id,
+              title: r.title || "Untitled",
+              authors: r.authors || "Unknown",
+              series: r.series || null,
+              series_index: r.series_index || null,
+              formats: r.formats || ""
+            });
+            if (matchedBooks.length >= limit) break;
+          }
+        }
+      }
+
+      db.close();
+      if (matchedBooks.length > 0) {
+        return matchedBooks.slice(0, limit);
+      }
+    } catch (err: any) {
+      logError(`SQLite search failed, falling back to calibredb: ${err?.message || err}`);
+    }
+  }
+
+  // 2. Fallback to calibredb list
+  try {
+    const listRes = runCalibredb([
+      "list",
+      "--with-library",
+      SERVER_URL,
+      "--search",
+      trimmed,
+      "--fields",
+      "id,title,authors,series,series_index,formats",
+      "--for-machine"
+    ]);
+
+    if (listRes.status === 0 && listRes.stdout) {
+      const parsed = safeParseJson(listRes.stdout);
+      if (Array.isArray(parsed)) {
+        return parsed.slice(0, limit).map((item: any) => {
+          const fmts = Array.isArray(item.formats)
+            ? item.formats.map((f: string) => path.extname(f).replace(/^\./, "").toUpperCase() || f).join(",")
+            : String(item.formats || "");
+          return {
+            id: item.id,
+            title: item.title || "Untitled",
+            authors: Array.isArray(item.authors) ? item.authors.join(", ") : String(item.authors || "Unknown"),
+            series: item.series || null,
+            series_index: item.series_index || null,
+            formats: fmts
+          };
+        });
+      }
+    }
+  } catch (err: any) {
+    logError(`calibredb search fallback failed: ${err?.message || err}`);
+  }
+
+  return [];
+}
+
+export interface BookFileDetails {
+  bookId: number;
+  title: string;
+  authors: string;
+  chosenFormat: string;
+  filePath: string;
+  fileSize: number;
+}
+
+export function locateBookFile(bookId: number): BookFileDetails | null {
+  const PREFERRED_FORMATS = ["EPUB", "PDF", "MOBI", "AZW3", "CBZ", "CBR", "AZW", "ZIP", "RAR", "7Z"];
+
+  if (fs.existsSync(CALIBRE_DB_PATH)) {
+    try {
+      const db = new Database(CALIBRE_DB_PATH, { readonly: true });
+      db.run("PRAGMA busy_timeout = 3000;");
+
+      const rows = db.query(`
+        SELECT b.id, b.title, b.path,
+               GROUP_CONCAT(DISTINCT a.name) as authors,
+               d.format, d.name as filename, d.uncompressed_size
+        FROM books b
+        JOIN data d ON b.id = d.book
+        LEFT JOIN books_authors_link bal ON b.id = bal.book
+        LEFT JOIN authors a ON bal.author = a.id
+        WHERE b.id = ?
+        GROUP BY d.id
+      `).all(bookId) as any[];
+
+      db.close();
+
+      if (rows && rows.length > 0) {
+        const title = rows[0].title || "Book";
+        const authors = rows[0].authors || "Unknown";
+        const bookRelPath = rows[0].path;
+        const basePath = path.join(CALIBRE_LIBRARY_DIR, bookRelPath);
+
+        // Sort by preferred formats (EPUB first, etc.)
+        rows.sort((a, b) => {
+          const idxA = PREFERRED_FORMATS.indexOf(String(a.format || "").toUpperCase());
+          const idxB = PREFERRED_FORMATS.indexOf(String(b.format || "").toUpperCase());
+          const scoreA = idxA === -1 ? 999 : idxA;
+          const scoreB = idxB === -1 ? 999 : idxB;
+          return scoreA - scoreB;
+        });
+
+        for (const row of rows) {
+          const fmt = String(row.format || "").toUpperCase();
+          const filename = row.filename;
+
+          const candidate1 = path.join(basePath, `${filename}.${fmt.toLowerCase()}`);
+          const candidate2 = path.join(basePath, `${filename}.${fmt.toUpperCase()}`);
+
+          if (fs.existsSync(candidate1)) {
+            const stat = fs.statSync(candidate1);
+            return { bookId, title, authors, chosenFormat: fmt, filePath: candidate1, fileSize: stat.size };
+          }
+          if (fs.existsSync(candidate2)) {
+            const stat = fs.statSync(candidate2);
+            return { bookId, title, authors, chosenFormat: fmt, filePath: candidate2, fileSize: stat.size };
+          }
+
+          if (fs.existsSync(basePath)) {
+            const files = fs.readdirSync(basePath);
+            const extLower = `.${fmt.toLowerCase()}`;
+            const matchedFile = files.find((f) => f.toLowerCase().endsWith(extLower));
+            if (matchedFile) {
+              const fullPath = path.join(basePath, matchedFile);
+              const stat = fs.statSync(fullPath);
+              return { bookId, title, authors, chosenFormat: fmt, filePath: fullPath, fileSize: stat.size };
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      logError(`Error locating book file via SQLite for #${bookId}: ${err?.message || err}`);
+    }
+  }
+
+  // Fallback: search via calibredb
+  try {
+    const listRes = runCalibredb([
+      "list",
+      "--with-library",
+      SERVER_URL,
+      "--search",
+      `id:${bookId}`,
+      "--fields",
+      "id,title,authors,formats",
+      "--for-machine"
+    ]);
+
+    if (listRes.status === 0 && listRes.stdout) {
+      const parsed = safeParseJson(listRes.stdout);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const item = parsed[0];
+        const title = item.title || "Book";
+        const authors = Array.isArray(item.authors) ? item.authors.join(", ") : String(item.authors || "Unknown");
+        const fmts: string[] = Array.isArray(item.formats) ? item.formats : [];
+
+        for (const f of fmts) {
+          if (fs.existsSync(f)) {
+            const stat = fs.statSync(f);
+            const fmtName = path.extname(f).replace(/^\./, "").toUpperCase() || "FILE";
+            return { bookId, title, authors, chosenFormat: fmtName, filePath: f, fileSize: stat.size };
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    logError(`calibredb fallback failed for #${bookId}: ${err?.message || err}`);
+  }
+
+  return null;
+}
+
+export async function retrieveAndSendBook(chatId: number, bookId: number): Promise<boolean> {
+  const fileDetails = locateBookFile(bookId);
+
+  if (!fileDetails) {
+    log(`Book #${bookId} not found on disk.`);
+    await sendMessage(
+      chatId,
+      `❌ *Book #${bookId} Not Found*\n\nUnable to locate the file in Calibre library. Verify the book exists via [Calibre Web](${CALIBRE_WEB_URL}).`,
+      "Markdown"
+    );
+    return false;
+  }
+
+  const { title, authors, chosenFormat, filePath, fileSize } = fileDetails;
+
+  // Check 20MB Telegram limit
+  if (fileSize > MAX_TELEGRAM_FILE_SIZE) {
+    const sizeMB = (fileSize / (1024 * 1024)).toFixed(1);
+    log(`Book #${bookId} (${title}) exceeds 20MB (${sizeMB} MB). Sending web links.`);
+    await sendMessage(
+      chatId,
+      `⚠️ *File Exceeds Telegram Bot Limit*\n\n` +
+      `📚 *${escapeTelegramMarkdown(title)}* (\`${chosenFormat}\`) is *${sizeMB} MB*, exceeding Telegram Bot API's *20 MB* download ceiling.\n\n` +
+      `👉 *Read Online or Download via Calibre Web:*\n` +
+      `• [Read Online](${CALIBRE_WEB_URL}/read/${bookId}/epub)\n` +
+      `• [Book Details](${CALIBRE_WEB_URL}/#book_id=${bookId}&panel=book_details)`,
+      "Markdown"
+    );
+    return false;
+  }
+
+  const statusMsgId = await sendMessage(
+    chatId,
+    `⏳ *Retrieving \`${chosenFormat}\` for "${escapeTelegramMarkdown(title)}"...*`,
+    "Markdown"
+  );
+
+  const caption =
+    `📚 *${escapeTelegramMarkdown(title)}*\n` +
+    `👤 *Author:* ${escapeTelegramMarkdown(authors)}\n` +
+    `📦 *Format:* \`${chosenFormat}\`\n\n` +
+    `[Read Online](${CALIBRE_WEB_URL}/read/${bookId}/epub) • [Book Details](${CALIBRE_WEB_URL}/#book_id=${bookId}&panel=book_details)`;
+
+  const sent = await sendDocument(chatId, filePath, caption, "Markdown");
+
+  if (sent) {
+    if (statusMsgId) {
+      await editOrSendMessage(
+        chatId,
+        statusMsgId,
+        `✅ *Delivered "${escapeTelegramMarkdown(title)}" below.*`,
+        "Markdown"
+      );
+    }
+    return true;
+  } else {
+    if (statusMsgId) {
+      await editOrSendMessage(
+        chatId,
+        statusMsgId,
+        `⚠️ Failed to send *${escapeTelegramMarkdown(title)}*. Check bot logs.`,
+        "Markdown"
+      );
+    }
+    return false;
+  }
+}
+
+export async function handleCallbackQuery(cq: any): Promise<void> {
+  const callbackId = cq.id;
+  const chatId = cq.message?.chat?.id || cq.from?.id;
+  const data = cq.data || "";
+  const sender = cq.from?.username || cq.from?.first_name || `ID ${chatId}`;
+
+  log(`Received callback_query: "${data}" from ${sender} (chatId: ${chatId})`);
+
+  // Answer callback query immediately so Telegram client stops loading animation
+  try {
+    await tgFetch("answerCallbackQuery", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_query_id: callbackId }),
+      timeoutMs: 10000
+    });
+  } catch (err: any) {
+    logError(`answerCallbackQuery failed: ${err?.message || err}`);
+  }
+
+  if (data.startsWith("send_book:")) {
+    const rawId = data.replace("send_book:", "").trim();
+    const bookId = parseInt(rawId, 10);
+    if (!isNaN(bookId) && bookId > 0) {
+      await retrieveAndSendBook(chatId, bookId);
+    } else {
+      await sendMessage(chatId, `❌ Invalid book ID: \`${rawId}\``, "Markdown");
+    }
   }
 }
 
@@ -870,6 +1318,12 @@ async function pollTelegram() {
       if (json.ok && json.result && json.result.length > 0) {
         for (const update of json.result) {
           offset = update.update_id + 1;
+
+          if (update.callback_query) {
+            await handleCallbackQuery(update.callback_query);
+            continue;
+          }
+
           const msg = update.message;
           if (!msg) continue;
           const chatId = msg.chat.id;
@@ -981,6 +1435,89 @@ async function pollTelegram() {
               continue;
             }
 
+            // Library Search: /find <query>, /search <query>, /f <query>
+            const searchMatch = text.match(/^\/(?:search|find|f)(?:@\w+)?(?:\s+(.*))?$/i);
+            if (searchMatch) {
+              const query = (searchMatch[1] || "").trim();
+              if (!query) {
+                await sendMessage(
+                  chatId,
+                  `🔍 *Library Search*\n\n` +
+                  `Usage: \`/find <query>\` or \`/search <query>\` (or \`/f <query>\`)\n\n` +
+                  `Examples:\n` +
+                  `• \`/find One Piece\`\n` +
+                  `• \`/search Foundation\`\n` +
+                  `• \`/f Isaac Asimov\``,
+                  "Markdown"
+                );
+                continue;
+              }
+
+              log(`Searching library for "${query}" from ${sender}`);
+              const results = searchCalibreLibrary(query, 5);
+
+              if (results.length === 0) {
+                await sendMessage(
+                  chatId,
+                  `🔍 *No books found matching "${escapeTelegramMarkdown(query)}".*\n\nTry searching by title, author name, or series name.`,
+                  "Markdown"
+                );
+                continue;
+              }
+
+              await sendMessage(
+                chatId,
+                `🔍 *Found ${results.length} book(s) matching "${escapeTelegramMarkdown(query)}":*`,
+                "Markdown"
+              );
+
+              for (const book of results) {
+                const formatBadges = (book.formats || "")
+                  .split(",")
+                  .flatMap((f: string) => (f.trim() ? [`[${f.trim()}]`] : []))
+                  .join(" ");
+
+                let card = `📚 *${escapeTelegramMarkdown(book.title)}*\n`;
+                card += `👤 *Author:* ${escapeTelegramMarkdown(book.authors || "Unknown")}\n`;
+                if (book.series) {
+                  const idx = book.series_index ? ` (#${book.series_index})` : "";
+                  card += `📖 *Series:* ${escapeTelegramMarkdown(book.series)}${idx}\n`;
+                }
+                card += `📦 *Formats:* \`${formatBadges || "[None]"}\`\n\n`;
+                card += `💡 _Tap below or send_ \`/get ${book.id}\``;
+
+                const inlineKeyboard = {
+                  inline_keyboard: [
+                    [
+                      { text: "📥 Send File", callback_data: `send_book:${book.id}` },
+                      { text: "📖 Read Online", url: `${CALIBRE_WEB_URL}/read/${book.id}/epub` },
+                      { text: "ℹ️ Details", url: `${CALIBRE_WEB_URL}/#book_id=${book.id}&panel=book_details` }
+                    ]
+                  ]
+                };
+
+                await sendMessage(chatId, card, "Markdown", inlineKeyboard);
+              }
+              continue;
+            }
+
+            // Book Retrieval: /get <id> or /get_<id>
+            const getMatch = text.match(/^\/get(?:_|\s+)(\d+)$/i);
+            if (getMatch) {
+              const bookId = parseInt(getMatch[1], 10);
+              log(`Handling /get command for book #${bookId} from ${sender}`);
+              await retrieveAndSendBook(chatId, bookId);
+              continue;
+            }
+            if (/^\/get(?:@\w+)?$/i.test(text)) {
+              await sendMessage(
+                chatId,
+                `ℹ️ *Book Retrieval*\n\nPlease specify a book ID:\nUsage: \`/get <id>\`\nExample: \`/get 6\``,
+                "Markdown"
+              );
+              continue;
+            }
+
             const articleUrl = extractUrlFromText(text);
 
             if (articleUrl) {
@@ -1044,10 +1581,13 @@ async function pollTelegram() {
                 );
               }
             } else if (text === "/start" || text === "/help") {
-              await sendMessage(chatId, 
-                `\uD83D\uDCDA *Reading HQ Ingestion Bot*\n\n` +
-                `Send books or web articles directly in this chat:\n` +
-                `• *Web Article Ingestion:* Send or forward any web article URL (or \`/epub <url>\`) to convert into a Kindle-ready EPUB with instant mobile delivery & Calibre sync.\n` +
+              await sendMessage(
+                chatId,
+                `📚 *Reading HQ Ingestion & Library Bot*\n\n` +
+                `Send books, search your library, or ingest web articles directly:\n` +
+                `• *Library Search:* \`/find <query>\` or \`/search <query>\` (or \`/f <query>\`) to search books by title, author, or series with interactive retrieval.\n` +
+                `• *Instant Book Retrieval:* \`/get <id>\` or tap *[📥 Send File]* to download any book directly to Telegram.\n` +
+                `• *Web Article Ingestion:* Send or forward any web article URL (or \`/epub <url>\`) to convert into a Kindle-ready EPUB with instant mobile delivery & Calibre sync (includes Jina Reader paywall fallback).\n` +
                 `• *Serialization Auto-Group:* Vol 1, Vol 2, Book 3 automatically grouped into Series.\n` +
                 `• *Batch Uploads Supported:* Select and send multiple EPUBs/CBZs at once.\n` +
                 `• *Duplicate Protection:* Instant binary hash + volume-aware deduplication.\n` +
@@ -1059,7 +1599,11 @@ async function pollTelegram() {
                 "Markdown"
               );
             } else {
-              await sendMessage(chatId, `\uD83D\uDC4B Please send eBook files (\`.epub\`, \`.pdf\`, \`.mobi\`, \`.cbz\`), paste an article URL, or send \`/backup\` for an instant database snapshot. For files over 20MB, use the [Web Uploader](${WEB_UPLOADER_URL}).`, "Markdown");
+              await sendMessage(
+                chatId,
+                `👋 Please send eBook files (\`.epub\`, \`.pdf\`, \`.mobi\`, \`.cbz\`), paste an article URL, search your library (\`/find <query>\`), or send \`/backup\` for an instant database snapshot. For files over 20MB, use the [Web Uploader](${WEB_UPLOADER_URL}).`,
+                "Markdown"
+              );
             }
           }
         }

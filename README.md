@@ -97,6 +97,46 @@ A self-hosted, private reading infrastructure designed for jailbroken and standa
 
 ---
 
+## 🔍 In-Chat Library Search & Retrieval (`/find`, `/search`, `/get`)
+
+Search your entire Calibre catalog directly within Telegram and retrieve books on the go:
+
+1. **Commands:**
+   - `/find <query>`, `/search <query>`, or `/f <query>`: Fast multi-term search across book titles, authors, and series names.
+   - `/get <id>`: Direct instant file download by Calibre book ID.
+
+2. **Interactive Results:**
+   - Displays top 3–5 matching books with Title, Author, Series index, and available formats (`[EPUB]`, `[PDF]`, `[CBZ]`).
+   - Under each match, inline keyboard buttons provide 1-tap actions:
+     - `[📥 Send File]` (or command `/get <id>`): Instantly extracts the book file (`.epub` preferred) from Calibre storage and delivers it directly to your Telegram chat via `sendDocument`.
+     - `[📖 Read Online]`: Direct link to Calibre Web online reader (`/read/<id>/epub`).
+     - `[ℹ️ Details]`: Direct link to full book metadata panel in Calibre Web.
+   - Files exceeding Telegram's 20MB limit trigger an informative message with direct Web Uploader and Calibre Web reader links.
+
+---
+
+## 🛡️ Paywall & Bot-Wall Fallback (Jina Reader)
+
+When ingesting web articles (`/epub <url>` or pasting URLs):
+1. **Cloudflare & Paywall Detection:**
+   - Checks HTTP status (401, 403) and response bodies for anti-bot / challenge signatures (`Just a moment...`, `cf-browser-verification`, `Attention Required! | Cloudflare`).
+2. **Jina Reader Routing:**
+   - Transparently re-routes blocked URLs through `https://r.jina.ai/<url>` via the local Sing-box proxy gateway (`http://127.0.0.1:7890`).
+   - Extracts title, author, publication timestamp, and clean markdown content.
+3. **Kindle Typography Compilation:**
+   - Converts markdown into structured, serif-styled HTML (`Charter`, `Georgia`) optimized for e-ink readability.
+   - Invokes `ebook-convert` to package the article as `.epub`, registers it in Calibre, and sends a copy directly back to your Telegram chat.
+
+---
+
+## 📨 Resilient Telegram Delivery (Safe Plain-Text Fallback)
+
+To prevent unclosed Markdown characters (`_`, `*`, `[`) in book titles or error messages from dropping messages:
+- `sendMessage`, `editOrSendMessage`, and `sendDocument` inspect API responses for HTTP 400 entity parsing errors.
+- Any Markdown formatting failure automatically triggers an immediate retry in plain text, ensuring status messages and book notifications are never dropped.
+
+---
+
 ## 💾 Database Backups & Offsite Delivery
 
 The reading stack protects all critical reading databases (progress sync, library catalog metadata, ingestion hash cache, manga state) using hot SQLite online snapshots:

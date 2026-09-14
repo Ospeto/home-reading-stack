@@ -214,6 +214,374 @@ export function validateArticleUrl(rawUrl: string): URL {
 }
 
 /**
+ * Check if HTML content indicates a Cloudflare bot wall or challenge page.
+ */
+export function isCloudflareChallenge(html: string): boolean {
+  if (!html) return false;
+  return (
+    html.includes("Just a moment...") ||
+    html.includes("cf-browser-verification") ||
+    html.includes("Attention Required! | Cloudflare") ||
+    html.includes("challenge-running") ||
+    html.includes("cf-turnstile") ||
+    (html.includes("Cloudflare") && /Ray ID:/i.test(html))
+  );
+}
+
+/**
+ * Parse metadata header and body markdown returned by Jina Reader.
+ */
+export function parseJinaMarkdown(rawText: string, originalUrl: string): {
+  title: string;
+  url: string;
+  publishedTime?: string;
+  author?: string;
+  bodyMarkdown: string;
+} {
+  let title = "";
+  let url = originalUrl;
+  let publishedTime = "";
+  let author = "";
+  let bodyMarkdown = rawText;
+
+  const mdMarker = "Markdown Content:";
+  const mdIndex = rawText.indexOf(mdMarker);
+
+  if (mdIndex !== -1) {
+    const header = rawText.substring(0, mdIndex);
+    bodyMarkdown = rawText.substring(mdIndex + mdMarker.length).trim();
+
+    const titleMatch = header.match(/^Title:\s*(.+)$/m);
+    if (titleMatch) title = titleMatch[1].trim();
+
+    const urlMatch = header.match(/^URL Source:\s*(.+)$/m);
+    if (urlMatch) url = urlMatch[1].trim();
+
+    const timeMatch = header.match(/^Published Time:\s*(.+)$/m);
+    if (timeMatch) publishedTime = timeMatch[1].trim();
+
+    const authorMatch = header.match(/^Author:\s*(.+)$/m);
+    if (authorMatch) author = authorMatch[1].trim();
+  }
+
+  // If no title from header, check if first line of markdown is # Title
+  if (!title) {
+    const h1Match = bodyMarkdown.match(/^#\s+(.+)$/m);
+    if (h1Match) {
+      title = h1Match[1].trim();
+    }
+  }
+
+  return { title, url, publishedTime, author, bodyMarkdown };
+}
+
+/**
+ * Convert markdown to structured semantic HTML with Kindle-friendly formatting.
+ */
+export function markdownToHtml(md: string): string {
+  if (!md) return "";
+  let html = md.replace(/\r\n/g, "\n");
+
+  // Code blocks: ```lang ... ```
+  const codeBlocks: string[] = [];
+  html = html.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, _lang, code) => {
+    const idx = codeBlocks.length;
+    const escaped = code
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+    codeBlocks.push(`<pre><code>${escaped}</code></pre>`);
+    return `\x01CODEBLOCK${idx}\x02`;
+  });
+
+  // Inline code: `...`
+  const inlineCodes: string[] = [];
+  html = html.replace(/`([^`\n]+)`/g, (_, code) => {
+    const idx = inlineCodes.length;
+    const escaped = code
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+    inlineCodes.push(`<code>${escaped}</code>`);
+    return `\x01INLINECODE${idx}\x02`;
+  });
+
+  // Markdown tables
+  const tableRegex = /^\|(.+)\|\r?\n\|[-:\s|]+\|\r?\n((?:\|.*\|\r?\n?)*)/gm;
+  html = html.replace(tableRegex, (_, headerLine, rowsBlock) => {
+    const headers = headerLine.split("|").map((h: string) => h.trim()).filter(Boolean);
+    const ths = headers.map((h: string) => `<th>${h}</th>`).join("");
+    const rows = rowsBlock.trim().split("\n").filter(Boolean);
+    const trs = rows.map((row: string) => {
+      const cells = row.split("|").map((c: string) => c.trim()).filter(Boolean);
+      return `<tr>${cells.map((c: string) => `<td>${c}</td>`).join("")}</tr>`;
+    }).join("");
+    return `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>\n\n`;
+  });
+
+  // Images: ![alt](url)
+  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => {
+    const safeAlt = alt ? alt.trim() : "";
+    const safeUrl = url ? url.trim() : "";
+    return `<figure><img src="${safeUrl}" alt="${safeAlt}" /><figcaption>${safeAlt}</figcaption></figure>`;
+  });
+
+  // Links: [text](url)
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, `<a href="$2">$1</a>`);
+
+  // Horizontal rules
+  html = html.replace(/^(?:---|\*\*\*|___)\s*$/gm, "<hr />");
+
+  // Headings
+  html = html.replace(/^######\s+(.+)$/gm, "<h6>$1</h6>");
+  html = html.replace(/^#####\s+(.+)$/gm, "<h5>$1</h5>");
+  html = html.replace(/^####\s+(.+)$/gm, "<h4>$1</h4>");
+  html = html.replace(/^###\s+(.+)$/gm, "<h3>$1</h3>");
+  html = html.replace(/^##\s+(.+)$/gm, "<h2>$1</h2>");
+  html = html.replace(/^#\s+(.+)$/gm, "<h1>$1</h1>");
+
+  // Blockquotes
+  html = html.replace(/^>\s*(.+)$/gm, "<blockquote><p>$1</p></blockquote>");
+  html = html.replace(/<\/blockquote>\s*<blockquote>/g, "\n");
+
+  // Bold & Italics
+  html = html.replace(/\*\*\*([^*]+)\*\*\*/g, "<strong><em>$1</em></strong>");
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+  html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  html = html.replace(/\b_([^_]+)_\b/g, "<em>$1</em>");
+
+  // Lists
+  html = html.replace(/^(\s*)[-*+]\s+(.+)$/gm, "<li>$2</li>");
+  html = html.replace(/^(\s*)\d+\.\s+(.+)$/gm, "<li>$2</li>");
+  html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, "<ul>$1</ul>");
+
+  // Normalize newlines around block tags for clean paragraph splitting
+  html = html.replace(/(<(?:h[1-6]|ul|ol|blockquote|table|figure|hr)[^>]*>)/g, "\n\n$1");
+  html = html.replace(/(<\/(?:h[1-6]|ul|ol|blockquote|table|figure)>|<hr\s*\/?>)/g, "$1\n\n");
+
+  // Paragraphs
+  const blocks = html.split(/\n\n+/);
+  html = blocks.map((block) => {
+    const trimmed = block.trim();
+    if (!trimmed) return "";
+    if (/^(<h[1-6]|<ul|<ol|<li|<blockquote|<pre|<figure|<hr|<table)/i.test(trimmed)) {
+      return trimmed;
+    }
+    if (trimmed.startsWith("\x01CODEBLOCK")) return trimmed;
+    return `<p>${trimmed.replace(/\n/g, "<br />")}</p>`;
+  }).filter(Boolean).join("\n\n");
+
+  // Restore code blocks and inline code
+  html = html.replace(/\x01CODEBLOCK(\d+)\x02/g, (_, idx) => codeBlocks[Number(idx)]);
+  html = html.replace(/\x01INLINECODE(\d+)\x02/g, (_, idx) => inlineCodes[Number(idx)]);
+
+  return html;
+}
+
+export interface StyledDocumentOptions {
+  title: string;
+  author: string;
+  siteName: string;
+  url: string;
+  publishedDate?: string;
+  readTimeMinutes: number;
+  wordCount: number;
+  contentHtml: string;
+}
+
+/**
+ * Build a complete Kindle-optimized serif HTML document.
+ */
+export function buildStyledHtmlDocument(opts: StyledDocumentOptions): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>${escapeHtml(opts.title)}</title>
+  <meta name="author" content="${escapeHtml(opts.author)}">
+  <meta name="description" content="Saved from ${escapeHtml(opts.url)}">
+  <style>
+    body {
+      font-family: "Charter", "Georgia", "Iowan Old Style", "Palatino", serif;
+      line-height: 1.6;
+      margin: 4% 6%;
+      color: #111;
+    }
+    h1.article-title {
+      font-size: 1.8em;
+      line-height: 1.25;
+      margin-bottom: 0.3em;
+      color: #000;
+    }
+    h2 { font-size: 1.35em; margin-top: 1.4em; margin-bottom: 0.4em; }
+    h3 { font-size: 1.15em; margin-top: 1.2em; margin-bottom: 0.3em; }
+    .article-meta {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 0.85em;
+      color: #555;
+      padding-bottom: 0.8em;
+      margin-bottom: 1.5em;
+      border-bottom: 1px solid #ccc;
+    }
+    .article-meta p { margin: 0.25em 0; }
+    .article-meta a { color: #0066cc; text-decoration: underline; }
+    .article-content p {
+      margin: 0 0 1.2em 0;
+      text-align: justify;
+      text-justify: inter-word;
+    }
+    .article-content img {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 1.5em auto;
+    }
+    blockquote {
+      margin: 1.5em 1em;
+      padding-left: 1em;
+      border-left: 3px solid #666;
+      color: #444;
+      font-style: italic;
+    }
+    pre, code {
+      font-family: "Courier New", Courier, monospace;
+      font-size: 0.9em;
+      background: #f4f4f4;
+    }
+    pre {
+      padding: 0.8em;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    figure { margin: 1.5em 0; text-align: center; }
+    figcaption { font-size: 0.85em; color: #666; margin-top: 0.4em; }
+    table { border-collapse: collapse; width: 100%; margin: 1.5em 0; }
+    th, td { border: 1px solid #ddd; padding: 0.4em 0.6em; text-align: left; }
+    hr { border: none; border-top: 1px solid #ddd; margin: 1.5em 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1 class="article-title">${escapeHtml(opts.title)}</h1>
+    <div class="article-meta">
+      <p><strong>Author:</strong> ${escapeHtml(opts.author)} | <strong>Source:</strong> ${escapeHtml(opts.siteName)}</p>
+      ${opts.publishedDate ? `<p><strong>Published:</strong> ${escapeHtml(opts.publishedDate)}</p>` : ""}
+      <p><strong>Reading Time:</strong> ~${opts.readTimeMinutes} min (${opts.wordCount} words)</p>
+      <p><a href="${escapeHtml(opts.url)}">Original Web Article</a></p>
+    </div>
+  </header>
+  <div class="article-content">
+    ${opts.contentHtml}
+  </div>
+</body>
+</html>`;
+}
+
+/**
+ * Fetch and extract article content using Jina Reader (r.jina.ai) as a fallback
+ * for paywalls, Cloudflare bot-walls, or restricted content.
+ */
+export async function extractArticleViaJina(
+  url: string,
+  fallbackHostname?: string
+): Promise<ExtractedArticle> {
+  const jinaUrl = `https://r.jina.ai/${encodeURI(url)}`;
+  console.log(`[Article] Fetching via Jina Reader: ${jinaUrl}`);
+
+  let res: Response;
+  try {
+    res = await fetch(jinaUrl, {
+      headers: {
+        "X-Return-Format": "markdown",
+        Accept: "text/markdown, text/plain, */*"
+      },
+      proxy: PROXY_URL,
+      signal: AbortSignal.timeout(30000)
+    } as any);
+  } catch (err: any) {
+    throw new Error(`Jina Reader connection failed: ${err.message}`);
+  }
+
+  if (!res.ok) {
+    throw new Error(`Jina Reader fallback failed (HTTP ${res.status} ${res.statusText})`);
+  }
+
+  const rawMd = await res.text();
+  if (!rawMd || rawMd.trim().length === 0) {
+    throw new Error("Jina Reader returned empty response");
+  }
+
+  const parsed = parseJinaMarkdown(rawMd, url);
+  const hostname =
+    fallbackHostname ||
+    (() => {
+      try {
+        return new URL(url).hostname.replace(/^www\./i, "");
+      } catch (_err) {
+        void _err;
+        return "Web";
+      }
+    })();
+
+  let title = cleanString(parsed.title);
+  if (!title || title.length < 2) {
+    title = `Article from ${hostname}`;
+  }
+
+  let author = cleanString(parsed.author);
+  if (!author || author.toLowerCase() === "unknown" || author.length < 2) {
+    author = hostname;
+  }
+
+  const siteName = hostname;
+  let publishedDate = "";
+  if (parsed.publishedTime) {
+    try {
+      const p = new Date(parsed.publishedTime);
+      if (!isNaN(p.getTime())) {
+        publishedDate = p.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+      } else {
+        publishedDate = parsed.publishedTime.split("T")[0];
+      }
+    } catch (_err) {
+      void _err;
+      publishedDate = parsed.publishedTime.split("T")[0];
+    }
+  }
+
+  const cleanedHtml = markdownToHtml(parsed.bodyMarkdown);
+
+  const textOnly = decodeHtmlEntities(cleanedHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+  const wordCount = Math.max(1, textOnly.split(/\s+/).filter(Boolean).length);
+  const readTimeMinutes = Math.max(1, Math.ceil(wordCount / 200));
+
+  const styledDocument = buildStyledHtmlDocument({
+    title,
+    author,
+    siteName,
+    url,
+    publishedDate,
+    readTimeMinutes,
+    wordCount,
+    contentHtml: cleanedHtml
+  });
+
+  return {
+    url,
+    title,
+    author,
+    siteName,
+    publishedDate,
+    wordCount,
+    readTimeMinutes,
+    cleanedHtml,
+    styledDocument
+  };
+}
+
+/**
  * Execute HTTP request to fetch article web page with proxy routing.
  */
 async function fetchArticlePage(validatedUrl: string): Promise<Response> {
@@ -292,24 +660,34 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
     res = await fetchArticlePage(validatedHref);
   } catch (err: any) {
     if (err.name === "AbortError" || err.name === "TimeoutError") {
-      throw new Error(`Connection timed out after ${FETCH_TIMEOUT_MS / 1000}s while fetching article`);
+      console.log(`[Article] Direct fetch timed out, attempting Jina Reader fallback...`);
+      return await extractArticleViaJina(validatedHref, hostname);
     }
-    throw new Error(`Failed to connect to ${hostname}: ${err.message}`);
+    console.log(`[Article] Direct fetch error (${err.message}), attempting Jina Reader fallback...`);
+    return await extractArticleViaJina(validatedHref, hostname);
   }
 
   if (res.status === 401 || res.status === 403) {
-    throw new Error(`Site access blocked (HTTP ${res.status} Forbidden / Paywall)`);
+    console.log(`[Article] Direct fetch blocked (HTTP ${res.status}), attempting Jina Reader fallback...`);
+    return await extractArticleViaJina(validatedHref, hostname);
   }
   if (res.status === 404) {
     throw new Error(`Article page not found (HTTP 404)`);
   }
   if (!res.ok) {
-    throw new Error(`Failed to fetch article (HTTP ${res.status} ${res.statusText})`);
+    console.log(`[Article] Direct fetch blocked (HTTP ${res.status}), attempting Jina Reader fallback...`);
+    return await extractArticleViaJina(validatedHref, hostname);
   }
 
   const rawHtml = await res.text();
   if (!rawHtml || rawHtml.trim().length === 0) {
-    throw new Error("Received empty response from web page");
+    console.log(`[Article] Direct fetch blocked (HTTP ${res.status} empty response), attempting Jina Reader fallback...`);
+    return await extractArticleViaJina(validatedHref, hostname);
+  }
+
+  if (isCloudflareChallenge(rawHtml)) {
+    console.log(`[Article] Direct fetch blocked (HTTP ${res.status} Cloudflare challenge), attempting Jina Reader fallback...`);
+    return await extractArticleViaJina(validatedHref, hostname);
   }
 
   // 2. Extract Metadata (Title, Site Name, Author, Published Date)
@@ -475,89 +853,16 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
   const readTimeMinutes = Math.max(1, Math.ceil(wordCount / 200));
 
   // 4. Assemble clean styled HTML document (Kindle-optimized serif layout)
-  const styledDocument = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>${escapeHtml(title)}</title>
-  <meta name="author" content="${escapeHtml(author)}">
-  <meta name="description" content="Saved from ${escapeHtml(validatedHref)}">
-  <style>
-    body {
-      font-family: "Charter", "Georgia", "Iowan Old Style", "Palatino", serif;
-      line-height: 1.6;
-      margin: 4% 6%;
-      color: #111;
-    }
-    h1.article-title {
-      font-size: 1.8em;
-      line-height: 1.25;
-      margin-bottom: 0.3em;
-      color: #000;
-    }
-    h2 { font-size: 1.35em; margin-top: 1.4em; margin-bottom: 0.4em; }
-    h3 { font-size: 1.15em; margin-top: 1.2em; margin-bottom: 0.3em; }
-    .article-meta {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      font-size: 0.85em;
-      color: #555;
-      padding-bottom: 0.8em;
-      margin-bottom: 1.5em;
-      border-bottom: 1px solid #ccc;
-    }
-    .article-meta p { margin: 0.25em 0; }
-    .article-meta a { color: #0066cc; text-decoration: underline; }
-    .article-content p {
-      margin: 0 0 1.2em 0;
-      text-align: justify;
-      text-justify: inter-word;
-    }
-    .article-content img {
-      max-width: 100%;
-      height: auto;
-      display: block;
-      margin: 1.5em auto;
-    }
-    blockquote {
-      margin: 1.5em 1em;
-      padding-left: 1em;
-      border-left: 3px solid #666;
-      color: #444;
-      font-style: italic;
-    }
-    pre, code {
-      font-family: "Courier New", Courier, monospace;
-      font-size: 0.9em;
-      background: #f4f4f4;
-    }
-    pre {
-      padding: 0.8em;
-      overflow-x: auto;
-      white-space: pre-wrap;
-      word-break: break-all;
-    }
-    figure { margin: 1.5em 0; text-align: center; }
-    figcaption { font-size: 0.85em; color: #666; margin-top: 0.4em; }
-    table { border-collapse: collapse; width: 100%; margin: 1.5em 0; }
-    th, td { border: 1px solid #ddd; padding: 0.4em 0.6em; text-align: left; }
-    hr { border: none; border-top: 1px solid #ddd; margin: 1.5em 0; }
-  </style>
-</head>
-<body>
-  <header>
-    <h1 class="article-title">${escapeHtml(title)}</h1>
-    <div class="article-meta">
-      <p><strong>Author:</strong> ${escapeHtml(author)} | <strong>Source:</strong> ${escapeHtml(siteName)}</p>
-      ${publishedDate ? `<p><strong>Published:</strong> ${escapeHtml(publishedDate)}</p>` : ""}
-      <p><strong>Reading Time:</strong> ~${readTimeMinutes} min (${wordCount} words)</p>
-      <p><a href="${escapeHtml(validatedHref)}">Original Web Article</a></p>
-    </div>
-  </header>
-  <div class="article-content">
-    ${cleaned}
-  </div>
-</body>
-</html>`;
+  const styledDocument = buildStyledHtmlDocument({
+    title,
+    author,
+    siteName,
+    url: validatedHref,
+    publishedDate,
+    readTimeMinutes,
+    wordCount,
+    contentHtml: cleaned,
+  });
 
   return {
     url: validatedHref,
