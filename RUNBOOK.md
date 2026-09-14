@@ -122,20 +122,61 @@ ssh mac-mini "tail -f ~/Library/Logs/sing-box/stderr.log"
   ssh mac-mini "tail -f ~/Library/Logs/manga-processor.log ~/Library/Logs/manga-processor-error.log"
   ```
 
-### 4. Daily Database Snapshot Backup & WAL Durability
+### 4. Database Snapshot Backups, Telegram Delivery & WAL Durability
 - Primary Local Storage: `/Users/ospeto/.backups/reading-stack/` (Always writable, immune to TCC / drive unmounts)
 - Secondary Mirror: `/Volumes/Ospeto_SSD/backups/reading-stack/` (Automated sync when SSD is mounted)
 - SQLite Database Resiliency: All databases (`koreader-sync.db`, `cache.db`, `manga.db`, `metadata.db`) run in `WAL` mode (`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`) for zero-corruption power loss safety.
 - Retention: 7 days rolling retention
 - Log Hygiene: Auto-truncates logs in `~/Library/Logs/` if exceeding 10 MB.
+
+#### On-Demand Telegram Backup (`/backup`)
+- Send `/backup` to `@saroat_ospeto_bot` in Telegram.
+- The bot performs a hot SQLite snapshot (`.backup`) of:
+  1. KOSync database (`koreader-sync.db`)
+  2. Calibre metadata (`metadata.db`)
+  3. Uploader cache (`cache.db`)
+  4. Manga processor DB (`manga.db`)
+- The compressed `.tar.gz` (~85 KB) is delivered directly into your Telegram chat.
+- The command automatically updates `TELEGRAM_BACKUP_CHAT_ID` in `/Users/ospeto/uploader/.env` so daily scheduled backups know where to deliver.
+
+#### Scheduled Daily Backups (`scripts/backup-daily.sh`)
+- Tracked in git at `scripts/backup-daily.sh`.
+- Run automatically at 04:00 AM daily by LaunchAgent `com.ospeto.reading-stack-backup`.
+- Checks `/Users/ospeto/uploader/.env` for `TELEGRAM_BOT_TOKEN` and `TELEGRAM_BACKUP_CHAT_ID`. If present, sends the daily `.tar.gz` archive to Telegram via proxy `http://127.0.0.1:7890`.
 - Manual backup run:
   ```bash
-  ssh mac-mini "/Users/ospeto/kosync-server/backup-daily.sh"
+  ssh mac-mini "/Users/ospeto/uploader/scripts/backup-daily.sh"
+  # Or:
+  /Users/ospeto/.treehouse/home-reading-stack-6428f1/1/home-reading-stack/scripts/backup-daily.sh
   ```
 - Inspect backup logs:
   ```bash
   ssh mac-mini "tail -f ~/Library/Logs/reading-stack-backup.log"
   ```
+
+#### Restoring from a Backup Archive
+To restore databases from a Telegram or disk backup archive:
+```bash
+# 1. Extract archive to a temporary inspection directory
+mkdir -p /tmp/reading-restore
+tar -xzf reading-stack-backup-YYYY-MM-DD_HHMMSS.tar.gz -C /tmp/reading-restore
+
+# 2. Stop running stack services
+launchctl unload ~/Library/LaunchAgents/com.ospeto.kosync.plist
+launchctl unload ~/Library/LaunchAgents/com.ospeto.calibre-server.plist
+launchctl unload ~/Library/LaunchAgents/com.ospeto.book-uploader.plist
+
+# 3. Copy restored SQLite databases into place
+cp /tmp/reading-restore/koreader-sync.db /Users/ospeto/kosync-server/data/koreader-sync.db
+cp /tmp/reading-restore/metadata.db "/Users/ospeto/Calibre Libraries/Agent Library/metadata.db"
+cp /tmp/reading-restore/cache.db /Users/ospeto/uploader/cache.db
+[ -f /tmp/reading-restore/manga.db ] && cp /tmp/reading-restore/manga.db /Users/ospeto/manga-processor/manga.db
+
+# 4. Restart stack services
+launchctl load -w ~/Library/LaunchAgents/com.ospeto.kosync.plist
+launchctl load -w ~/Library/LaunchAgents/com.ospeto.calibre-server.plist
+launchctl load -w ~/Library/LaunchAgents/com.ospeto.book-uploader.plist
+```
 
 ### 5. Automated Self-Healing Watchdog
 - Agent: `com.ospeto.kosync-watchdog` (Runs every 15 minutes)
