@@ -690,8 +690,8 @@
           <svg class="w-6 h-6"><use href="#icon-cloud-arrow-up"/></svg>
         </div>
         <div>
-          <div class="text-xs font-bold text-zinc-100">Drag & drop books or an entire folder</div>
-          <div class="text-[11px] text-zinc-500 mt-0.5">Supports .epub, .pdf, .mobi, .azw3, .cbz, and .zip / .rar packs</div>
+          <div class="text-xs font-bold text-zinc-100">Drag & drop EPUB books or an entire folder</div>
+          <div class="text-[11px] text-zinc-500 mt-0.5">EPUB-only collection — supports .epub and .zip / .rar / .7z archives</div>
         </div>
 
         <div class="flex items-center justify-center gap-2 pt-1 flex-wrap">
@@ -705,7 +705,7 @@
           </button>
         </div>
 
-        <input type="file" id="fileInput" multiple accept=".epub,.pdf,.mobi,.azw3,.cbz,.cbr,.zip,.rar,.7z,.tar" class="hidden">
+        <input type="file" id="fileInput" multiple accept=".epub,.zip,.rar,.7z,.tar" class="hidden">
         <input type="file" id="folderInput" webkitdirectory directory multiple class="hidden">
       </div>
 
@@ -1563,7 +1563,7 @@
     const uploadQueue = document.getElementById('uploadQueue');
 
     function isSupportedBook(name) {
-      return /\.(epub|pdf|mobi|azw3|cbz|cbr|zip|rar|7z|tar)$/i.test(name) && !name.startsWith('.');
+      return /\.(epub|zip|rar|7z|tar)$/i.test(name) && !name.startsWith('.');
     }
 
     async function scanFilesFromDataTransfer(dataTransfer) {
@@ -1613,7 +1613,7 @@
       dropzone.classList.remove('border-zinc-400');
       const files = await scanFilesFromDataTransfer(e.dataTransfer);
       if (files.length) handleUploads(files);
-      else showToast("No supported eBook files (.epub, .pdf, .mobi, .azw3, .cbz) found in dropped items.", "error");
+      else showToast("No EPUB files (.epub) or archives (.zip, .7z) found in dropped items. Reading HQ is an EPUB-only library.", "error");
     });
 
     fileInput.addEventListener('change', () => {
@@ -1625,7 +1625,7 @@
     folderInput.addEventListener('change', () => {
       const files = Array.from(folderInput.files || []).filter(f => isSupportedBook(f.name));
       if (files.length) handleUploads(files);
-      else showToast("No supported eBook files (.epub, .pdf, .mobi, .azw3, .cbz) found in chosen folder.", "error");
+      else showToast("No EPUB files (.epub) or archives (.zip, .7z) found in chosen folder. Reading HQ is an EPUB-only library.", "error");
       folderInput.value = '';
     });
 

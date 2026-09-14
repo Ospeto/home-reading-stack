@@ -22,6 +22,7 @@ import {
   cleanString
 } from "./security";
 import { getJobQueue, DurableJobQueue } from "./jobs";
+import { generateMetadataFilename, buildContentDisposition } from "./filename";
 
 const DROP_DIR = process.env.BOOKS_DROP_DIR || "/Users/ospeto/Books_Drop";
 const SERVER_URL = process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088";
@@ -338,14 +339,26 @@ export function getCalibreBooks(forceFresh = false) {
       "list",
       "--with-library",
       SERVER_URL,
+      "--search",
+      "format:epub",
       "--fields",
       "id,title,authors,formats,cover,tags,series,series_index,publisher,pubdate,comments,rating",
       "--for-machine"
     ]);
     if (res.status === 0 && res.stdout) {
       const parsed = safeParseJson(res.stdout);
-      calibreBooksCache = { books: parsed, timestamp: now };
-      return parsed;
+      // Clean EPUB-only collection enforcement
+      const epubBooks = (Array.isArray(parsed) ? parsed : [])
+        .filter((b: any) => {
+          const fmts = (b.formats || []).map((f: string) => String(f).toUpperCase());
+          return fmts.includes("EPUB");
+        })
+        .map((b: any) => ({
+          ...b,
+          formats: ["EPUB"]
+        }));
+      calibreBooksCache = { books: epubBooks, timestamp: now };
+      return epubBooks;
     }
   } catch (e) {
     console.error("Error listing calibre books:", e);
@@ -385,13 +398,7 @@ function getCalibreHashMap() {
         const full = path.join(dir, e.name);
         if (e.isDirectory()) {
           scanDir(full);
-        } else if (
-          e.name.endsWith(".epub") ||
-          e.name.endsWith(".pdf") ||
-          e.name.endsWith(".mobi") ||
-          e.name.endsWith(".azw3") ||
-          e.name.endsWith(".cbz")
-        ) {
+        } else if (e.name.endsWith(".epub")) {
           const stat = fs.statSync(full);
           const mtime = Math.floor(stat.mtimeMs);
 
@@ -436,16 +443,19 @@ function getCalibreHashMap() {
  * Strictly enforces canonical EPUB-only format policy.
  */
 export function ingestBookFile(filePath: string, originalFileName: string) {
+  const ext = path.extname(originalFileName).toLowerCase();
+  const format = ext.replace(/^\./, "").toUpperCase();
+
   // Enforce EPUB-only canonical format
-  if (!isCanonicalEpub(originalFileName)) {
+  if (format !== "EPUB") {
     return {
       success: false,
-      error: `Rejected non-canonical format "${path.extname(originalFileName)}". Only EPUB format is supported for the canonical collection.`
+      rejected: true,
+      format,
+      error: `Rejected non-canonical format "${ext}". Only EPUB format is accepted for the canonical collection.`
     };
   }
-
   const books = getCalibreBooks(true);
-  const format = path.extname(originalFileName).replace(".", "").toUpperCase();
   const fileHash = getKOReaderBinary256(filePath);
 
   // 1. Check if exact hash exists in Calibre Library
@@ -486,26 +496,12 @@ export function ingestBookFile(filePath: string, originalFileName: string) {
   });
 
   if (existingBook) {
-    const existingFormats = (existingBook.formats || []).map((f: string) => f.toUpperCase());
-    if (existingFormats.includes(format)) {
-      return {
-        success: true,
-        duplicate: true,
-        bookId: existingBook.id,
-        message: `Book "${existingBook.title}" already exists in format ${format}.`
-      };
-    } else {
-      runCalibredb(["add_format", String(existingBook.id), filePath, "--with-library", SERVER_URL]);
-
-      getCalibreBooks(true);
-      return {
-        success: true,
-        duplicate: false,
-        attachedFormat: true,
-        bookId: existingBook.id,
-        message: `Attached ${format} format to existing book "${existingBook.title}".`
-      };
-    }
+    return {
+      success: true,
+      duplicate: true,
+      bookId: existingBook.id,
+      message: `Book "${existingBook.title}" already exists in your library.`
+    };
   }
 
   // 3. Brand new book: Add to Calibre
@@ -1230,10 +1226,20 @@ export async function handleRequest(req: Request): Promise<Response> {
       ...highlightLines
     ].join("\n");
 
+    const obsidianFilename = generateMetadataFilename({
+      title: `${title} Notes`,
+      authors: author,
+      series: book?.series || null,
+      seriesIndex: book?.series_index || null,
+      format: "md",
+      fallbackBase: "notes"
+    });
+
     return new Response(md, {
       headers: {
         "Content-Type": "text/markdown; charset=utf-8",
-        "Content-Disposition": `attachment; filename="${encodeURIComponent(title)}_notes.md"`
+        "Content-Disposition": buildContentDisposition(obsidianFilename),
+        "X-Content-Type-Options": "nosniff"
       }
     });
   }
@@ -1440,6 +1446,7 @@ export async function handleRequest(req: Request): Promise<Response> {
             total: unp.books.length,
             imported: importedCount,
             quarantined: unp.quarantined || [],
+            quarantinedCount: (unp.quarantined || []).length,
             results
           },
           200,
@@ -1447,7 +1454,21 @@ export async function handleRequest(req: Request): Promise<Response> {
         );
       }
 
-      // Single file ingestion
+      // Single file ingestion: strictly enforce .epub format
+      if (!isEpub) {
+        try { fs.unlinkSync(destPath); } catch {}
+        return jsonResponse(
+          {
+            success: false,
+            rejected: true,
+            format: ext.replace(/^\./, "").toUpperCase() || "UNKNOWN",
+            error: `Rejected format "${ext}". home-reading-stack is an EPUB-only collection; only .epub files (or archives containing .epub files) are accepted.`
+          },
+          400,
+          corsOrigin
+        );
+      }
+
       const result = ingestBookFile(destPath, fileName);
       try { fs.unlinkSync(destPath); } catch {}
 

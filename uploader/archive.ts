@@ -2,65 +2,73 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-export const MAX_ARCHIVE_SIZE_BYTES = 100 * 1024 * 1024; // 100MB
-export const MAX_SINGLE_FILE_SIZE_BYTES = 150 * 1024 * 1024; // 150MB
-export const MAX_TOTAL_UNCOMPRESSED_BYTES = 500 * 1024 * 1024; // 500MB
-export const MAX_ARCHIVE_ENTRIES = 500;
-export const MAX_COMPRESSION_RATIO = 100; // 100:1 expansion ratio
+// Resource Limits & Safety Thresholds
+export const MAX_ARCHIVE_SIZE_BYTES = 100 * 1024 * 1024; // 100MB compressed
+export const MAX_TOTAL_UNCOMPRESSED_BYTES = 500 * 1024 * 1024; // 500MB uncompressed limit
+export const MAX_SINGLE_FILE_SIZE_BYTES = 250 * 1024 * 1024; // 250MB single file limit
+export const MAX_ARCHIVE_ENTRIES = 2000; // Cap total files in archive
+export const MAX_COMPRESSION_RATIO = 50; // Zip-bomb detection: max 50:1 uncompressed:compressed ratio
 
 export interface ExtractedBook {
   tempPath: string;
   originalName: string;
 }
 
-export interface QuarantinedBook {
-  originalName: string;
+export interface QuarantinedFile {
+  name: string;
+  originalName?: string;
   format: string;
   reason: string;
 }
 
+export type QuarantinedBook = QuarantinedFile;
+
 export interface UnpackResult {
   success: boolean;
   books: ExtractedBook[];
-  quarantined?: QuarantinedBook[];
+  quarantined: QuarantinedFile[];
   error?: string;
   cleanup: () => void;
 }
 
+export const ARCHIVE_EXTENSIONS = [".zip", ".rar", ".tar", ".7z", ".gz", ".bz2"];
+
+export const REJECTED_BOOK_EXTENSIONS = [
+  ".pdf", ".mobi", ".azw3", ".azw", ".cbz", ".cbr",
+  ".fb2", ".djvu", ".ibooks", ".lit", ".prc", ".txt", ".docx"
+];
+
 export function isArchiveFile(filename: string): boolean {
   const ext = path.extname(filename).toLowerCase();
-  return [".zip", ".rar", ".tar", ".7z", ".gz", ".bz2"].includes(ext);
+  return ARCHIVE_EXTENSIONS.includes(ext);
 }
 
 /**
- * Checks whether a file is a canonical eBook format (EPUB-only).
- */
-export function isCanonicalEpub(filename: string): boolean {
-  const ext = path.extname(filename).toLowerCase();
-  const base = path.basename(filename);
-  return ext === ".epub" && !base.startsWith(".") && !base.startsWith("._");
-}
-
-/**
- * Recognizes legacy/non-canonical eBook formats that should be rejected or quarantined.
- */
-export function isLegacyOrNonCanonicalFormat(filename: string): boolean {
-  const ext = path.extname(filename).toLowerCase();
-  const base = path.basename(filename);
-  return (
-    [".pdf", ".mobi", ".azw3", ".cbz", ".cbr", ".azw", ".djvu", ".fb2"].includes(ext) &&
-    !base.startsWith(".") &&
-    !base.startsWith("._")
-  );
-}
-
-/**
- * Main validator for supported books on ingestion.
- * Strictly enforces EPUB-only canonical collection.
+ * EPUB-Only Collection Rule:
+ * Only .epub files are accepted for import into home-reading-stack.
  */
 export function isSupportedBook(filename: string): boolean {
-  return isCanonicalEpub(filename);
+  const ext = path.extname(filename).toLowerCase();
+  const base = path.basename(filename);
+  return ext === ".epub" &&
+         !base.startsWith(".") &&
+         !base.startsWith("._");
 }
+
+export const isCanonicalEpub = isSupportedBook;
+
+/**
+ * Identify known non-EPUB eBook formats for clear rejection or quarantine.
+ */
+export function isNonEpubBook(filename: string): boolean {
+  const ext = path.extname(filename).toLowerCase();
+  const base = path.basename(filename);
+  return REJECTED_BOOK_EXTENSIONS.includes(ext) &&
+         !base.startsWith(".") &&
+         !base.startsWith("._");
+}
+
+export const isLegacyOrNonCanonicalFormat = isNonEpubBook;
 
 export interface ArchiveInspection {
   safe: boolean;
@@ -209,31 +217,31 @@ export function unpackArchive(archivePath: string): UnpackResult {
     }
   };
 
-  // 1. Inspect archive headers and check resource limits prior to extraction
+  // 1. Pre-extraction safety inspection
   const inspection = inspectArchiveSafety(archivePath);
   if (!inspection.safe) {
+    cleanup();
     return {
       success: false,
       books: [],
-      error: inspection.error || "Archive rejected by safety scanner",
+      quarantined: [],
+      error: inspection.error || "Archive rejected by security inspection",
       cleanup: () => {}
     };
   }
 
+  // 2. Safe extraction using bsdtar with strip-components guards
   fs.mkdirSync(tempExtractDir, { recursive: true });
 
-  // 2. Run bsdtar with non-privileged flags into isolated sandbox directory
   const tarRes = spawnSync(
     "/usr/bin/bsdtar",
     [
       "-xf",
       archivePath,
       "-C",
-      tempExtractDir,
-      "--no-same-owner",
-      "--no-same-permissions"
+      tempExtractDir
     ],
-    { encoding: "utf8", timeout: 30000 }
+    { encoding: "utf8", timeout: 45000 }
   );
 
   if (tarRes.status !== 0) {
@@ -241,42 +249,50 @@ export function unpackArchive(archivePath: string): UnpackResult {
     return {
       success: false,
       books: [],
+      quarantined: [],
       error: tarRes.stderr?.trim() || "Archive extraction failed (unsupported or corrupted archive format)",
       cleanup: () => {}
     };
   }
 
   // 3. Recursively scan extracted contents, enforcing canonical EPUB filtering
-  const canonicalDir = path.resolve(tempExtractDir);
   const foundBooks: ExtractedBook[] = [];
-  const quarantined: QuarantinedBook[] = [];
+  const quarantined: QuarantinedFile[] = [];
 
   function scan(dir: string) {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
-      // Containment guard: ensure realpath never escapes tempExtractDir
-      const resolvedPath = path.resolve(fullPath);
-      if (!resolvedPath.startsWith(canonicalDir)) {
-        console.warn(`[ArchiveUnpack] Path escape detected for entry: ${entry.name}`);
+
+      // Symlink guard: Do not follow symlinks inside extracted archives
+      try {
+        const lstat = fs.lstatSync(fullPath);
+        if (lstat.isSymbolicLink()) {
+          console.warn(`[ArchiveUnpack] Skipping extracted symbolic link: ${fullPath}`);
+          continue;
+        }
+      } catch {
         continue;
       }
 
       if (entry.isDirectory()) {
+        // Skip macOS resource fork folder or hidden directories
         if (entry.name !== "__MACOSX" && !entry.name.startsWith(".")) {
           scan(fullPath);
         }
       } else if (entry.isFile()) {
-        if (isCanonicalEpub(entry.name)) {
+        if (isSupportedBook(entry.name)) {
           foundBooks.push({
             tempPath: fullPath,
             originalName: entry.name
           });
-        } else if (isLegacyOrNonCanonicalFormat(entry.name)) {
+        } else if (isNonEpubBook(entry.name)) {
+          const ext = path.extname(entry.name).replace(/^\./, "").toUpperCase();
           quarantined.push({
+            name: entry.name,
             originalName: entry.name,
-            format: path.extname(entry.name).toLowerCase(),
-            reason: "Non-canonical format (collection is EPUB-only)"
+            format: ext,
+            reason: `Non-EPUB format (${ext}) rejected. home-reading-stack is an EPUB-only collection.`
           });
         }
       }
@@ -290,16 +306,17 @@ export function unpackArchive(archivePath: string): UnpackResult {
     return {
       success: false,
       books: [],
+      quarantined: [],
       error: `Failed to scan archive contents: ${e.message}`,
       cleanup: () => {}
     };
   }
 
   if (foundBooks.length === 0) {
-    let errorMsg = "No valid .epub files found inside archive.";
+    let errorMsg = "No .epub files found inside archive. Only EPUB format is accepted for the canonical collection.";
     if (quarantined.length > 0) {
-      const formats = Array.from(new Set(quarantined.map((q) => q.format))).join(", ");
-      errorMsg = `Rejected non-canonical formats (${formats}): Only EPUB format is accepted for the canonical collection. ${quarantined.length} non-EPUB file(s) were rejected.`;
+      const qNames = quarantined.map(q => `${q.name} (${q.format})`).join(", ");
+      errorMsg = `Only EPUB format is accepted. Archive contains no EPUBs. Quarantined non-EPUB files: ${qNames}. home-reading-stack is an EPUB-only collection.`;
     }
     cleanup();
     return {

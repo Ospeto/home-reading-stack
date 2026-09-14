@@ -5,8 +5,6 @@ import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import { Database } from "bun:sqlite";
 import {
-  searchUniversalMetadata,
-  applyMetadataToCalibre,
   sanitizeMetadata,
   extractSeries,
   isSameBook,
@@ -14,7 +12,7 @@ import {
 } from "./scraper";
 import { isArchiveFile, unpackArchive } from "./archive";
 import { extractUrlFromText, ingestArticleFromUrl } from "./article";
-import { getDownloadFilename } from "./security";
+import { generateMetadataFilename } from "./filename";
 import { getJobQueue } from "./jobs";
 
 const DROP_DIR = "/Users/ospeto/Books_Drop";
@@ -31,7 +29,8 @@ const CALIBRE_WEB_URL = "http://192.168.31.15:8088";
 export const READING_WEBAPP_URL = process.env.READING_WEBAPP_URL || "https://reading.wavypremium.xyz";
 export const KOSYNC_WAN_URL = process.env.KOSYNC_WAN_URL || "https://kosync.wavypremium.xyz";
 const MAX_TELEGRAM_FILE_SIZE = 20 * 1024 * 1024; // 20MB Telegram Bot API limit
-const ALLOWED_EXTS = [".epub", ".zip", ".rar", ".7z", ".tar"];
+export const ALLOWED_EXTS = [".epub", ".zip", ".rar", ".7z", ".tar"];
+export const REJECTED_EXTS = [".pdf", ".mobi", ".azw3", ".cbz", ".cbr", ".azw", ".fb2", ".djvu", ".txt", ".docx"];
 
 const INITIAL_BACKOFF_MS = 2000;
 const MAX_BACKOFF_MS = 60000;
@@ -269,13 +268,13 @@ async function sendDocument(
   caption: string = "",
   parseMode: string = "",
   mimeType: string = "",
-  customFilename?: string
+  customFileName: string = ""
 ): Promise<boolean> {
   try {
     const formData = new FormData();
     formData.append("chat_id", String(chatId));
     const fileBytes = fs.readFileSync(filePath);
-    const fileName = customFilename || path.basename(filePath);
+    const fileName = customFileName || path.basename(filePath);
     let type = mimeType;
     if (!type) {
       if (fileName.endsWith(".tar.gz") || fileName.endsWith(".tgz")) {
@@ -529,7 +528,7 @@ export function searchCalibreLibrary(query: string, limit: number = 5): CalibreB
 
       const words = trimmed.split(/\s+/).filter(Boolean);
 
-      // Primary query: whole phrase match against title, author, or series
+      // Primary query: whole phrase match against title, author, or series (EPUB only)
       const primarySql = `
         SELECT b.id, b.title, b.path, b.series_index,
                GROUP_CONCAT(DISTINCT a.name) as authors,
@@ -540,8 +539,8 @@ export function searchCalibreLibrary(query: string, limit: number = 5): CalibreB
         LEFT JOIN authors a ON bal.author = a.id
         LEFT JOIN books_series_link bsl ON b.id = bsl.book
         LEFT JOIN series s ON bsl.series = s.id
-        LEFT JOIN data d ON b.id = d.book
-        WHERE b.title LIKE ? OR a.name LIKE ? OR s.name LIKE ?
+        JOIN data d ON b.id = d.book
+        WHERE UPPER(d.format) = 'EPUB' AND (b.title LIKE ? OR a.name LIKE ? OR s.name LIKE ?)
         GROUP BY b.id
         ORDER BY b.id DESC
         LIMIT ?
@@ -576,8 +575,8 @@ export function searchCalibreLibrary(query: string, limit: number = 5): CalibreB
           LEFT JOIN authors a ON bal.author = a.id
           LEFT JOIN books_series_link bsl ON b.id = bsl.book
           LEFT JOIN series s ON bsl.series = s.id
-          LEFT JOIN data d ON b.id = d.book
-          WHERE ${conditions}
+          JOIN data d ON b.id = d.book
+          WHERE UPPER(d.format) = 'EPUB' AND ${conditions}
           GROUP BY b.id
           ORDER BY b.id DESC
           LIMIT ?
@@ -616,14 +615,14 @@ export function searchCalibreLibrary(query: string, limit: number = 5): CalibreB
     }
   }
 
-  // 2. Fallback to calibredb list
+  // 2. Fallback to calibredb list (EPUB only)
   try {
     const listRes = runCalibredb([
       "list",
       "--with-library",
       SERVER_URL,
       "--search",
-      trimmed,
+      `${trimmed} and format:epub`,
       "--fields",
       "id,title,authors,series,series_index,formats",
       "--for-machine"
@@ -632,19 +631,22 @@ export function searchCalibreLibrary(query: string, limit: number = 5): CalibreB
     if (listRes.status === 0 && listRes.stdout) {
       const parsed = safeParseJson(listRes.stdout);
       if (Array.isArray(parsed)) {
-        return parsed.slice(0, limit).map((item: any) => {
-          const fmts = Array.isArray(item.formats)
-            ? item.formats.map((f: string) => path.extname(f).replace(/^\./, "").toUpperCase() || f).join(",")
-            : String(item.formats || "");
-          return {
+        return parsed
+          .filter((item: any) => {
+            const fmts = Array.isArray(item.formats)
+              ? item.formats.map((f: string) => path.extname(f).replace(/^\./, "").toUpperCase() || f)
+              : [String(item.formats || "")];
+            return fmts.some((f: string) => f.toUpperCase().includes("EPUB"));
+          })
+          .slice(0, limit)
+          .map((item: any) => ({
             id: item.id,
             title: item.title || "Untitled",
             authors: Array.isArray(item.authors) ? item.authors.join(", ") : String(item.authors || "Unknown"),
             series: item.series || null,
             series_index: item.series_index || null,
-            formats: fmts
-          };
-        });
+            formats: "EPUB"
+          }));
       }
     }
   } catch (err: any) {
@@ -658,13 +660,15 @@ export interface BookFileDetails {
   bookId: number;
   title: string;
   authors: string;
+  series?: string | null;
+  seriesIndex?: number | string | null;
   chosenFormat: string;
   filePath: string;
   fileSize: number;
 }
 
 export function locateBookFile(bookId: number): BookFileDetails | null {
-  const PREFERRED_FORMATS = ["EPUB", "PDF", "MOBI", "AZW3", "CBZ", "CBR", "AZW", "ZIP", "RAR", "7Z"];
+  const PREFERRED_FORMATS = ["EPUB"];
 
   if (fs.existsSync(CALIBRE_DB_PATH)) {
     try {
@@ -672,14 +676,17 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
       db.run("PRAGMA busy_timeout = 3000;");
 
       const rows = db.query(`
-        SELECT b.id, b.title, b.path,
+        SELECT b.id, b.title, b.path, b.series_index,
                GROUP_CONCAT(DISTINCT a.name) as authors,
+               s.name as series,
                d.format, d.name as filename, d.uncompressed_size
         FROM books b
         JOIN data d ON b.id = d.book
         LEFT JOIN books_authors_link bal ON b.id = bal.book
         LEFT JOIN authors a ON bal.author = a.id
-        WHERE b.id = ?
+        LEFT JOIN books_series_link bsl ON b.id = bsl.book
+        LEFT JOIN series s ON bsl.series = s.id
+        WHERE b.id = ? AND UPPER(d.format) = 'EPUB'
         GROUP BY d.id
       `).all(bookId) as any[];
 
@@ -688,10 +695,12 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
       if (rows && rows.length > 0) {
         const title = rows[0].title || "Book";
         const authors = rows[0].authors || "Unknown";
+        const series = rows[0].series || null;
+        const seriesIndex = rows[0].series_index || null;
         const bookRelPath = rows[0].path;
         const basePath = path.join(CALIBRE_LIBRARY_DIR, bookRelPath);
 
-        // Sort by preferred formats (EPUB first, etc.)
+        // EPUB only
         rows.sort((a, b) => {
           const idxA = PREFERRED_FORMATS.indexOf(String(a.format || "").toUpperCase());
           const idxB = PREFERRED_FORMATS.indexOf(String(b.format || "").toUpperCase());
@@ -709,11 +718,11 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
 
           if (fs.existsSync(candidate1)) {
             const stat = fs.statSync(candidate1);
-            return { bookId, title, authors, chosenFormat: fmt, filePath: candidate1, fileSize: stat.size };
+            return { bookId, title, authors, series, seriesIndex, chosenFormat: fmt, filePath: candidate1, fileSize: stat.size };
           }
           if (fs.existsSync(candidate2)) {
             const stat = fs.statSync(candidate2);
-            return { bookId, title, authors, chosenFormat: fmt, filePath: candidate2, fileSize: stat.size };
+            return { bookId, title, authors, series, seriesIndex, chosenFormat: fmt, filePath: candidate2, fileSize: stat.size };
           }
 
           if (fs.existsSync(basePath)) {
@@ -723,7 +732,7 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
             if (matchedFile) {
               const fullPath = path.join(basePath, matchedFile);
               const stat = fs.statSync(fullPath);
-              return { bookId, title, authors, chosenFormat: fmt, filePath: fullPath, fileSize: stat.size };
+              return { bookId, title, authors, series, seriesIndex, chosenFormat: fmt, filePath: fullPath, fileSize: stat.size };
             }
           }
         }
@@ -740,9 +749,9 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
       "--with-library",
       SERVER_URL,
       "--search",
-      `id:${bookId}`,
+      `id:${bookId} and format:epub`,
       "--fields",
-      "id,title,authors,formats",
+      "id,title,authors,formats,series,series_index",
       "--for-machine"
     ]);
 
@@ -752,13 +761,14 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
         const item = parsed[0];
         const title = item.title || "Book";
         const authors = Array.isArray(item.authors) ? item.authors.join(", ") : String(item.authors || "Unknown");
+        const series = item.series || null;
+        const seriesIndex = item.series_index || null;
         const fmts: string[] = Array.isArray(item.formats) ? item.formats : [];
 
         for (const f of fmts) {
-          if (fs.existsSync(f)) {
+          if (fs.existsSync(f) && f.toLowerCase().endsWith(".epub")) {
             const stat = fs.statSync(f);
-            const fmtName = path.extname(f).replace(/^\./, "").toUpperCase() || "FILE";
-            return { bookId, title, authors, chosenFormat: fmtName, filePath: f, fileSize: stat.size };
+            return { bookId, title, authors, series, seriesIndex, chosenFormat: "EPUB", filePath: f, fileSize: stat.size };
           }
         }
       }
@@ -813,8 +823,16 @@ export async function retrieveAndSendBook(chatId: number, bookId: number): Promi
     `📦 *Format:* \`${chosenFormat}\`\n\n` +
     `[Read Online](${CALIBRE_WEB_URL}/read/${bookId}/epub) • [Book Details](${CALIBRE_WEB_URL}/#book_id=${bookId}&panel=book_details)`;
 
-  const downloadName = getDownloadFilename({ title, authors }, chosenFormat);
-  const sent = await sendDocument(chatId, filePath, caption, "Markdown", "", downloadName);
+  const deliveryFileName = generateMetadataFilename({
+    title,
+    authors,
+    series: fileDetails.series,
+    seriesIndex: fileDetails.seriesIndex,
+    format: "epub",
+    fallbackBase: `book-${bookId}`
+  });
+
+  const sent = await sendDocument(chatId, filePath, caption, "Markdown", "application/epub+zip", deliveryFileName);
 
   if (sent) {
     if (statusMsgId) {
@@ -1298,7 +1316,8 @@ export function getRecentBooks(limit: number = 5): { books: CalibreBookResult[];
         LEFT JOIN authors a ON bal.author = a.id
         LEFT JOIN books_series_link bsl ON b.id = bsl.book
         LEFT JOIN series s ON bsl.series = s.id
-        LEFT JOIN data d ON b.id = d.book
+        JOIN data d ON b.id = d.book
+        WHERE UPPER(d.format) = 'EPUB'
         GROUP BY b.id
         ORDER BY b.id DESC
         LIMIT ?
@@ -1598,8 +1617,20 @@ export interface IngestResult {
 }
 
 function ingestBookFile(filePath: string, originalFileName: string): IngestResult {
-  const format = normalizeFormat(path.extname(originalFileName));
+  const ext = path.extname(originalFileName).toLowerCase();
+  const format = normalizeFormat(ext);
   const preliminary = sanitizeMetadata("", "", [], originalFileName);
+
+  // Enforce EPUB-only collection
+  if (format !== "EPUB") {
+    return {
+      success: false,
+      format,
+      displayTitle: preliminary.title,
+      author: preliminary.author,
+      error: `Rejected non-EPUB format "${format}". home-reading-stack accepts only .epub files.`
+    };
+  }
 
   // 1. Level 1: KOReader Binary Checksum Deduplication
   const fileHash = getKOReaderBinary256(filePath);
@@ -1649,47 +1680,16 @@ function ingestBookFile(filePath: string, originalFileName: string): IngestResul
     );
 
     if (existingBook) {
-      const existingFormats = (existingBook.formats || []).map((f: string) => normalizeFormat(f));
-      if (existingFormats.includes(format)) {
-        log(`Duplicate detected via title/series match: "${existingBook.title}" (has format: ${format})`);
-        return {
-          success: true,
-          duplicate: true,
-          bookId: existingBook.id,
-          displayTitle: existingBook.title,
-          author: existingBook.authors || preliminary.author,
-          format,
-          message: `Already exists in format ${format}`
-        };
-      } else {
-        // Multi-format attach
-        log(`Attaching new format ${format} to existing book "${existingBook.title}" (ID: ${existingBook.id})`);
-        runCalibredb([
-          "add_format",
-          String(existingBook.id),
-          filePath,
-          "--with-library",
-          SERVER_URL
-        ]);
-
-        if (fileHash) {
-          cacheDb.run(
-            "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            filePath, Date.now(), fileHash, existingBook.id, existingBook.title, existingBook.authors || "", 0
-          );
-        }
-
-        return {
-          success: true,
-          duplicate: false,
-          attachedFormat: true,
-          bookId: existingBook.id,
-          displayTitle: existingBook.title,
-          author: existingBook.authors || preliminary.author,
-          format,
-          message: `Attached ${format} format to existing book`
-        };
-      }
+      log(`Duplicate detected via title/series match: "${existingBook.title}" (existing library book)`);
+      return {
+        success: true,
+        duplicate: true,
+        bookId: existingBook.id,
+        displayTitle: existingBook.title,
+        author: existingBook.authors || preliminary.author,
+        format,
+        message: `Already exists in library`
+      };
     }
 
     // 3. Level 3: Add to Calibre with --automerge ignore guard
@@ -1851,11 +1851,14 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
     log(`[Batch ${i + 1}/${total}] Processing "${fileName}" (${sizeMB} MB) from ${sender}`);
 
     if (!ALLOWED_EXTS.includes(ext)) {
+      const isKnownNonEpub = REJECTED_EXTS.includes(ext);
       results.push({
         name: fileName,
         format,
         status: "error",
-        note: `Unsupported format: ${ext}`
+        note: isKnownNonEpub
+          ? `Rejected non-EPUB format (${ext}). home-reading-stack is an EPUB-only library collection. Please upload .epub files or archives containing .epub files.`
+          : `Unsupported format: ${ext}. home-reading-stack accepts only .epub files (or .zip/.7z archives containing .epub).`
       });
       continue;
     }
@@ -1914,11 +1917,27 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
 
         if (unp.books.length === 0) {
           unp.cleanup();
-          results.push({ name: fileName, format, status: "error", note: "No supported eBooks found in archive" });
+          results.push({
+            name: fileName,
+            format,
+            status: "error",
+            note: unp.error || "No supported EPUB books found in archive"
+          });
           continue;
         }
 
-        log(`Archive "${fileName}" yielded ${unp.books.length} book(s)`);
+        log(`Archive "${fileName}" yielded ${unp.books.length} EPUB book(s)`);
+        // Track any quarantined non-EPUB files from the archive
+        if (unp.quarantined && unp.quarantined.length > 0) {
+          for (const q of unp.quarantined) {
+            results.push({
+              name: q.name,
+              format: q.format,
+              status: "error",
+              note: q.reason
+            });
+          }
+        }
         for (const b of unp.books) {
           const r = ingestBookFile(b.tempPath, b.originalName);
           results.push({
@@ -2368,7 +2387,12 @@ async function pollTelegram() {
                   if (result.epubPath && fs.existsSync(result.epubPath)) {
                     log(`Sending generated EPUB to chat ${chatId}: ${result.epubPath}`);
                     const caption = `\uD83D\uDCD6 *${result.title}*\n\uD83D\uDC64 ${result.authors || "Unknown"}`;
-                    await sendDocument(chatId, result.epubPath, caption, "Markdown");
+                    const customName = generateMetadataFilename({
+                      title: result.title,
+                      authors: result.authors,
+                      format: "epub"
+                    });
+                    await sendDocument(chatId, result.epubPath, caption, "Markdown", "application/epub+zip", customName);
                   }
                 } else {
                   await editOrSendMessage(
@@ -2414,7 +2438,7 @@ async function pollTelegram() {
                 `• \`/app\` - Launch Reading HQ Mini App\n` +
                 `• \`/status\` (or \`/health\`) - System health dashboard\n` +
                 `• \`/backup\` - Hot backup of SQLite databases\n\n` +
-                `_Send any eBook file (.epub, .pdf, .cbz) or article URL to ingest immediately._`,
+                `_Send any EPUB file (.epub or .zip/.7z archive) or article URL to ingest immediately._`,
                 "Markdown",
                 getMainMenuKeyboard()
               );
@@ -2422,7 +2446,7 @@ async function pollTelegram() {
             } else {
               await sendMessage(
                 chatId,
-                `📚 Please send eBook files (\`.epub\`, \`.pdf\`, \`.mobi\`, \`.cbz\`), paste an article URL, search your library (\`/find <query>\`), view current reads (\`/reading\`), view recent books (\`/recent\`), open the dashboard (\`/menu\`), check system status (\`/status\`), or send \`/backup\`. For files over 20MB, use [Reading HQ](${READING_WEBAPP_URL}).`,
+                `📚 Please send EPUB files (\`.epub\`, or \`.zip\`/\`.7z\` archives containing .epub), paste an article URL, search your library (\`/find <query>\`), view current reads (\`/reading\`), view recent books (\`/recent\`), open the dashboard (\`/menu\`), check system status (\`/status\`), or send \`/backup\`. For files over 20MB, use [Reading HQ](${READING_WEBAPP_URL}).`,
                 "Markdown",
                 getMainMenuKeyboard()
               );

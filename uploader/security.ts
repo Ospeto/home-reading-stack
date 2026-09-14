@@ -497,9 +497,9 @@ export function isAllowedOrigin(
   // Check extra allowed origins from options or env
   const envOrigins = (process.env.ALLOWED_ORIGINS || "")
     .split(",")
-    .map((o) => o.trim().toLowerCase())
+    .map((o: string) => o.trim().toLowerCase())
     .filter(Boolean);
-  const allAllowed = [...extraAllowedOrigins.map((o) => o.toLowerCase()), ...envOrigins];
+  const allAllowed = [...extraAllowedOrigins.map((o: string) => o.toLowerCase()), ...envOrigins];
   if (allAllowed.includes(lower)) {
     return true;
   }
