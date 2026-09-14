@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import crypto from "node:crypto";
+import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -12,7 +13,18 @@ const SERVER_URL = "http://127.0.0.1:8088";
 const LIBRARY_DIR = "/Users/ospeto/Calibre Libraries/Agent Library";
 const KOSYNC_DB_PATH = "/Users/ospeto/kosync-server/data/koreader-sync.db";
 const CACHE_DB_PATH = "/Users/ospeto/uploader/cache.db";
-const HTML_PATH = "/Users/ospeto/uploader/index.html";
+function resolveHtmlPath(): string {
+  try {
+    const dir = path.dirname(new URL(import.meta.url).pathname);
+    const localPath = path.join(dir, "index.html");
+    if (fs.existsSync(localPath)) return localPath;
+  } catch {
+    // Fall back to default location
+  }
+  return "/Users/ospeto/uploader/index.html";
+}
+
+const HTML_PATH = resolveHtmlPath();
 
 if (!fs.existsSync(DROP_DIR)) {
   fs.mkdirSync(DROP_DIR, { recursive: true });
@@ -50,7 +62,7 @@ function getKOReaderBinary256(filePath: string): string | null {
     }
     fs.closeSync(fd);
     return md5.digest("hex");
-  } catch (e) {
+  } catch {
     return null;
   }
 }
@@ -69,7 +81,7 @@ function getKOReaderPartial512(filePath: string): string | null {
     }
     fs.closeSync(fd);
     return md5.digest("hex");
-  } catch (e) {
+  } catch {
     return null;
   }
 }
@@ -561,7 +573,7 @@ function extractHighlightsFromSdr(bookId: number): Array<{ text: string; notes: 
 }
 
 // Helper: Extra Metadata Scrapers (Google Books, OpenLibrary, Douban/Search)
-async function _searchAllBookSources(query: string) {
+export async function searchAllBookSources(query: string) {
   const results: any[] = [];
   const cleanQ = cleanString(query);
 
@@ -623,11 +635,12 @@ async function _searchAllBookSources(query: string) {
   return results;
 }
 
-function jsonResponse(data: any, status = 200) {
+function jsonResponse(data: any, status = 200, origin = "*") {
+  const corsOrigin = origin === "*" ? "*" : origin;
   return Response.json(data, {
     status,
     headers: {
-      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Origin": corsOrigin,
       "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "*",
       "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
@@ -640,11 +653,12 @@ function jsonResponse(data: any, status = 200) {
 Bun.serve({
   port: 8086,
   hostname: "0.0.0.0",
-  async fetch(req) {
+  async fetch(req: Request) {
+    const origin = req.headers.get("origin") || "*";
     if (req.method === "OPTIONS") {
       return new Response(null, {
         headers: {
-          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Origin": origin,
           "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
           "Access-Control-Allow-Headers": "*",
         }
@@ -1151,6 +1165,11 @@ Bun.serve({
 
     // Serve SPA HTML
     const html = fs.readFileSync(HTML_PATH, "utf8");
-    return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    return new Response(html, {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-cache"
+      }
+    });
   }
 });

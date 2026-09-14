@@ -10,6 +10,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **Telegram Formatting Resilience**: Telegram Markdown parsing mode fails with HTTP 400 on unescaped special characters (`_`, `*`, `[`). Always guard `sendMessage`, `editOrSendMessage`, and `sendDocument` with automatic plain-text retry on HTTP 400.
 - **Module Exports & Polling**: The Telegram bot script (`uploader/bot.ts`) guards `pollTelegram()` with `if ((import.meta as any).main)` so helper functions can be safely imported without starting conflicting polling loops.
 - **WAN Reverse Tunnel & Mini App**: Reading HQ dashboard is exposed via persistent SSH reverse tunnel (`com.ospeto.reading-vless-tunnel.plist`) through Sing-box SOCKS5 (`127.0.0.1:7890`) to the cloud VPS, reverse-proxied by Caddy at `https://reading.wavypremium.xyz`. The bot registers a native Telegram Web App menu button via `setChatMenuButton` on startup and handles `/app` and `/webapp`.
+- **TMA Asset & UX Optimization**: `uploader/index.html` embeds pre-compiled static minified Tailwind CSS and an inline SVG symbol sprite, removing runtime CDN compilation (`cdn.tailwindcss.com`) and external font requests. Native Telegram WebApp integration synchronizes `Telegram.WebApp.themeParams`, viewport height (`--tg-viewport-height`), `HapticFeedback`, and binds `BackButton` to close active drawers/modals. The catalog uses `sessionStorage` stale-while-revalidate caching and progressive rendering (`PAGE_SIZE = 36` with `IntersectionObserver`) for mobile DOM efficiency.
 
 ## Maintaining this file
 
