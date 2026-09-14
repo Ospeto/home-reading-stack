@@ -809,11 +809,18 @@ export function validateEpubContent(filePath: string): EpubValidationResult {
       };
     }
 
-    const mimeRes = spawnSync("/usr/bin/bsdtar", ["-xOf", filePath, "mimetype"], {
-      encoding: "utf8",
-      timeout: 10000,
-    });
-    if (mimeRes.status !== 0 || mimeRes.stdout.trim() !== "application/epub+zip") {
+    const mimeRes = spawnSync(
+      "/usr/bin/bsdtar",
+      ["-xOf", filePath, "mimetype"],
+      {
+        encoding: "utf8",
+        timeout: 10000,
+      },
+    );
+    if (
+      mimeRes.status !== 0 ||
+      mimeRes.stdout.trim() !== "application/epub+zip"
+    ) {
       return {
         valid: false,
         error: `Invalid EPUB mimetype content: expected 'application/epub+zip', got '${mimeRes.stdout.trim().slice(0, 50)}'`,

@@ -143,7 +143,9 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
     const lanReq = new Request("http://192.168.31.15:8086/api/books", {
       headers: { host: "192.168.31.15:8086" },
     });
-    expect(isWanRequest(lanReq, { remoteAddress: "192.168.31.15" })).toBe(false);
+    expect(isWanRequest(lanReq, { remoteAddress: "192.168.31.15" })).toBe(
+      false,
+    );
 
     // Unverified request without socket address fails closed to WAN
     expect(isWanRequest(lanReq)).toBe(true);

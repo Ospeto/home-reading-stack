@@ -1356,6 +1356,22 @@ export async function handleRequest(
     url.pathname.endsWith("/retry") &&
     req.method === "POST"
   ) {
+    if (isWan) {
+      const auth = authenticateRequest(req, authOpts);
+      if (!auth.authenticated) {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              auth.error ||
+              "Authentication required for public WAN job retry",
+          },
+          401,
+          corsOrigin,
+        );
+      }
+    }
+
     const jobId = url.pathname.split("/")[3];
     if (!jobId)
       return jsonResponse(
@@ -1370,8 +1386,20 @@ export async function handleRequest(
         404,
         corsOrigin,
       );
+
+    const c = { ...retried };
+    if (c.payload) {
+      const p = { ...c.payload };
+      if (p.filePath) p.filePath = path.basename(p.filePath);
+      if (p.archivePath) p.archivePath = path.basename(p.archivePath);
+      if (p.token) p.token = "[REDACTED]";
+      if (p.secret) p.secret = "[REDACTED]";
+      c.payload = p;
+    }
+    if (c.error) c.error = sanitizeErrorMessage(c.error);
+
     return jsonResponse(
-      { success: true, message: `Job ${jobId} queued for retry`, job: retried },
+      { success: true, message: `Job ${jobId} queued for retry`, job: c },
       200,
       corsOrigin,
     );

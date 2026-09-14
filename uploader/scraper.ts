@@ -2,6 +2,12 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { Buffer } from "node:buffer";
+import { safeFetchWithSsrf } from "./security";
+
+export function getCalibredbPath(): string {
+  return process.env.CALIBREDB_PATH || "/opt/homebrew/bin/calibredb";
+}
 
 const SERVER_URL = "http://127.0.0.1:8088";
 const PROXY = "http://127.0.0.1:7890";
@@ -530,7 +536,7 @@ export async function applyMetadataToCalibre(bookId: number, meta: ScrapedMetada
     if (meta.coverUrl && isAllowedCoverUrl(meta.coverUrl)) {
       tempCoverPath = `/tmp/cover_${bookId}_${Date.now()}.jpg`;
       const coverUrl = meta.coverUrl;
-      const imgRes = await fetch(coverUrl, {
+      const imgRes = await safeFetchWithSsrf(coverUrl, {
         signal: AbortSignal.timeout(COVER_TIMEOUT_MS),
         proxy: PROXY
       } as any);
@@ -550,7 +556,7 @@ export async function applyMetadataToCalibre(bookId: number, meta: ScrapedMetada
     delete env.all_proxy;
     env.PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
 
-    const res = spawnSync("/opt/homebrew/bin/calibredb", args, { encoding: "utf8", env, timeout: 30000 });
+    const res = spawnSync(getCalibredbPath(), args, { encoding: "utf8", env, timeout: 30000 });
     if (tempCoverPath && fs.existsSync(tempCoverPath)) {
       fs.unlinkSync(tempCoverPath);
     }
