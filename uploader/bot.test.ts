@@ -149,8 +149,11 @@ describe("Reverse SSH Tunnel Auto-Healing Watchdog", () => {
     expect(content).toContain("<key>RunAtLoad</key>");
     expect(content).toContain("<true/>");
 
-    const lintRes = spawnSync("plutil", ["-lint", watchdogPlistPath]);
-    expect(lintRes.status).toBe(0);
+    const plutilCheck = spawnSync("which", ["plutil"], { encoding: "utf8" });
+    if (plutilCheck.status === 0 && plutilCheck.stdout.trim()) {
+      const lintRes = spawnSync("plutil", ["-lint", watchdogPlistPath]);
+      expect(lintRes.status).toBe(0);
+    }
   });
 });
 

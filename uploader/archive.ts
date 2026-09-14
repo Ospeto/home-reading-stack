@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
+import process from "node:process";
 import { spawnSync } from "node:child_process";
+import { sanitizeErrorMessage } from "./security";
 
 export const MAX_ARCHIVE_SIZE_BYTES = 100 * 1024 * 1024; // 100MB
 export const MAX_SINGLE_FILE_SIZE_BYTES = 150 * 1024 * 1024; // 150MB
@@ -27,6 +29,17 @@ export interface UnpackResult {
   cleanup: () => void;
 }
 
+export function getTarBinary(): string {
+  if (process.env.TAR_PATH && fs.existsSync(process.env.TAR_PATH))
+    return process.env.TAR_PATH;
+  if (fs.existsSync("/usr/bin/bsdtar")) return "/usr/bin/bsdtar";
+  if (fs.existsSync("/usr/local/bin/bsdtar")) return "/usr/local/bin/bsdtar";
+  const whichCheck = spawnSync("which", ["bsdtar"], { encoding: "utf8" });
+  if (whichCheck.status === 0 && whichCheck.stdout.trim())
+    return whichCheck.stdout.trim();
+  return "tar";
+}
+
 export function isArchiveFile(filename: string): boolean {
   const ext = path.extname(filename).toLowerCase();
   return [".zip", ".rar", ".tar", ".7z", ".gz", ".bz2"].includes(ext);
@@ -48,7 +61,16 @@ export function isLegacyOrNonCanonicalFormat(filename: string): boolean {
   const ext = path.extname(filename).toLowerCase();
   const base = path.basename(filename);
   return (
-    [".pdf", ".mobi", ".azw3", ".cbz", ".cbr", ".azw", ".djvu", ".fb2"].includes(ext) &&
+    [
+      ".pdf",
+      ".mobi",
+      ".azw3",
+      ".cbz",
+      ".cbr",
+      ".azw",
+      ".djvu",
+      ".fb2",
+    ].includes(ext) &&
     !base.startsWith(".") &&
     !base.startsWith("._")
   );
@@ -83,32 +105,37 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
         safe: false,
         error: `Archive file size (${Math.round(stat.size / 1024 / 1024)}MB) exceeds maximum allowed size (${MAX_ARCHIVE_SIZE_BYTES / 1024 / 1024}MB)`,
         entryCount: 0,
-        totalUncompressedBytes: 0
+        totalUncompressedBytes: 0,
       };
     }
 
-    // Run bsdtar -tvf to inspect entry headers and sizes
-    const listRes = spawnSync("/usr/bin/bsdtar", ["-tvf", archivePath], {
+    // Run tar/bsdtar -tvf to inspect entry headers and sizes
+    const listRes = spawnSync(getTarBinary(), ["-tvf", archivePath], {
       encoding: "utf8",
-      timeout: 15000
+      timeout: 15000,
     });
 
     if (listRes.status !== 0) {
       return {
         safe: false,
-        error: listRes.stderr?.trim() || "Failed to inspect archive (corrupted or unsupported archive format)",
+        error: sanitizeErrorMessage(
+          listRes.stderr?.trim() ||
+            "Failed to inspect archive (corrupted or unsupported archive format)",
+        ),
         entryCount: 0,
-        totalUncompressedBytes: 0
+        totalUncompressedBytes: 0,
       };
     }
 
-    const lines = (listRes.stdout || "").split("\n").filter((l: string) => l.trim().length > 0);
+    const lines = (listRes.stdout || "")
+      .split("\n")
+      .filter((l: string) => l.trim().length > 0);
     if (lines.length > MAX_ARCHIVE_ENTRIES) {
       return {
         safe: false,
         error: `Archive contains ${lines.length} entries, exceeding limit of ${MAX_ARCHIVE_ENTRIES}`,
         entryCount: lines.length,
-        totalUncompressedBytes: 0
+        totalUncompressedBytes: 0,
       };
     }
 
@@ -120,6 +147,25 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
       if (tokens.length >= 9) {
         const size = parseInt(tokens[4], 10);
         const entryName = tokens.slice(8).join(" ");
+
+        const mode = tokens[0];
+        // Reject prohibited symlink or hardlink entries
+        if (mode.startsWith("l") || line.includes(" -> ")) {
+          return {
+            safe: false,
+            error: `Path traversal / prohibited symlink detected in archive entry: "${entryName}"`,
+            entryCount: lines.length,
+            totalUncompressedBytes,
+          };
+        }
+        if (mode.startsWith("h") || line.includes(" link to ")) {
+          return {
+            safe: false,
+            error: `Path traversal / prohibited hardlink detected in archive entry: "${entryName}"`,
+            entryCount: lines.length,
+            totalUncompressedBytes,
+          };
+        }
 
         // Check for path traversal guards:
         // Reject any entry with '..' components, starting with '/', '\', or containing null bytes
@@ -134,7 +180,7 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
             safe: false,
             error: `Path traversal detected in archive entry: "${entryName}"`,
             entryCount: lines.length,
-            totalUncompressedBytes
+            totalUncompressedBytes,
           };
         }
 
@@ -144,7 +190,7 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
               safe: false,
               error: `Archive entry "${entryName}" uncompressed size (${Math.round(size / 1024 / 1024)}MB) exceeds limit (${MAX_SINGLE_FILE_SIZE_BYTES / 1024 / 1024}MB)`,
               entryCount: lines.length,
-              totalUncompressedBytes
+              totalUncompressedBytes,
             };
           }
           totalUncompressedBytes += size;
@@ -157,7 +203,7 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
         safe: false,
         error: `Total uncompressed archive size (${Math.round(totalUncompressedBytes / 1024 / 1024)}MB) exceeds limit (${MAX_TOTAL_UNCOMPRESSED_BYTES / 1024 / 1024}MB)`,
         entryCount: lines.length,
-        totalUncompressedBytes
+        totalUncompressedBytes,
       };
     }
 
@@ -169,7 +215,7 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
           safe: false,
           error: `Decompression bomb detected: compression ratio ${Math.round(ratio)}:1 exceeds limit of ${MAX_COMPRESSION_RATIO}:1`,
           entryCount: lines.length,
-          totalUncompressedBytes
+          totalUncompressedBytes,
         };
       }
     }
@@ -177,14 +223,16 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
     return {
       safe: true,
       entryCount: lines.length,
-      totalUncompressedBytes
+      totalUncompressedBytes,
     };
   } catch (err: any) {
     return {
       safe: false,
-      error: `Archive inspection error: ${err?.message || err}`,
+      error: sanitizeErrorMessage(
+        `Archive inspection error: ${err?.message || err}`,
+      ),
       entryCount: 0,
-      totalUncompressedBytes: 0
+      totalUncompressedBytes: 0,
     };
   }
 }
@@ -196,7 +244,7 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
 export function unpackArchive(archivePath: string): UnpackResult {
   const tempExtractDir = path.join(
     "/tmp",
-    `archive_unpack_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
+    `archive_unpack_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
   );
 
   const cleanup = () => {
@@ -216,24 +264,24 @@ export function unpackArchive(archivePath: string): UnpackResult {
       success: false,
       books: [],
       error: inspection.error || "Archive rejected by safety scanner",
-      cleanup: () => {}
+      cleanup: () => {},
     };
   }
 
   fs.mkdirSync(tempExtractDir, { recursive: true });
 
-  // 2. Run bsdtar with non-privileged flags into isolated sandbox directory
+  // 2. Run tar/bsdtar with non-privileged flags into isolated sandbox directory
   const tarRes = spawnSync(
-    "/usr/bin/bsdtar",
+    getTarBinary(),
     [
       "-xf",
       archivePath,
       "-C",
       tempExtractDir,
       "--no-same-owner",
-      "--no-same-permissions"
+      "--no-same-permissions",
     ],
-    { encoding: "utf8", timeout: 30000 }
+    { encoding: "utf8", timeout: 30000 },
   );
 
   if (tarRes.status !== 0) {
@@ -241,13 +289,16 @@ export function unpackArchive(archivePath: string): UnpackResult {
     return {
       success: false,
       books: [],
-      error: tarRes.stderr?.trim() || "Archive extraction failed (unsupported or corrupted archive format)",
-      cleanup: () => {}
+      error: sanitizeErrorMessage(
+        tarRes.stderr?.trim() ||
+          "Archive extraction failed (unsupported or corrupted archive format)",
+      ),
+      cleanup: () => {},
     };
   }
 
   // 3. Recursively scan extracted contents, enforcing canonical EPUB filtering
-  const canonicalDir = path.resolve(tempExtractDir);
+  const canonicalDir = fs.realpathSync(tempExtractDir);
   const foundBooks: ExtractedBook[] = [];
   const quarantined: QuarantinedBook[] = [];
 
@@ -255,10 +306,42 @@ export function unpackArchive(archivePath: string): UnpackResult {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
-      // Containment guard: ensure realpath never escapes tempExtractDir
-      const resolvedPath = path.resolve(fullPath);
-      if (!resolvedPath.startsWith(canonicalDir)) {
-        console.warn(`[ArchiveUnpack] Path escape detected for entry: ${entry.name}`);
+
+      // Verify lstat to reject symlinks after extraction
+      let lstat: fs.Stats;
+      try {
+        lstat = fs.lstatSync(fullPath);
+      } catch {
+        continue;
+      }
+
+      if (lstat.isSymbolicLink()) {
+        try {
+          fs.unlinkSync(fullPath);
+        } catch (_unlinkErr) {
+          void _unlinkErr;
+        }
+        console.warn(
+          `[ArchiveUnpack] Prohibited symlink unlinked: ${fullPath}`,
+        );
+        continue;
+      }
+
+      // Containment guard: verify realpath never escapes tempExtractDir
+      try {
+        const realPath = fs.realpathSync(fullPath);
+        if (!realPath.startsWith(canonicalDir)) {
+          try {
+            fs.unlinkSync(fullPath);
+          } catch (_unlinkErr) {
+            void _unlinkErr;
+          }
+          console.warn(
+            `[ArchiveUnpack] Realpath escape detected for entry: ${entry.name}`,
+          );
+          continue;
+        }
+      } catch {
         continue;
       }
 
@@ -270,13 +353,13 @@ export function unpackArchive(archivePath: string): UnpackResult {
         if (isCanonicalEpub(entry.name)) {
           foundBooks.push({
             tempPath: fullPath,
-            originalName: entry.name
+            originalName: entry.name,
           });
         } else if (isLegacyOrNonCanonicalFormat(entry.name)) {
           quarantined.push({
             originalName: entry.name,
             format: path.extname(entry.name).toLowerCase(),
-            reason: "Non-canonical format (collection is EPUB-only)"
+            reason: "Non-canonical format (collection is EPUB-only)",
           });
         }
       }
@@ -290,15 +373,19 @@ export function unpackArchive(archivePath: string): UnpackResult {
     return {
       success: false,
       books: [],
-      error: `Failed to scan archive contents: ${e.message}`,
-      cleanup: () => {}
+      error: sanitizeErrorMessage(
+        `Failed to scan archive contents: ${e.message}`,
+      ),
+      cleanup: () => {},
     };
   }
 
   if (foundBooks.length === 0) {
     let errorMsg = "No valid .epub files found inside archive.";
     if (quarantined.length > 0) {
-      const formats = Array.from(new Set(quarantined.map((q) => q.format))).join(", ");
+      const formats = Array.from(
+        new Set(quarantined.map((q) => q.format)),
+      ).join(", ");
       errorMsg = `Rejected non-canonical formats (${formats}): Only EPUB format is accepted for the canonical collection. ${quarantined.length} non-EPUB file(s) were rejected.`;
     }
     cleanup();
@@ -307,7 +394,7 @@ export function unpackArchive(archivePath: string): UnpackResult {
       books: [],
       quarantined,
       error: errorMsg,
-      cleanup: () => {}
+      cleanup: () => {},
     };
   }
 
@@ -315,6 +402,6 @@ export function unpackArchive(archivePath: string): UnpackResult {
     success: true,
     books: foundBooks,
     quarantined,
-    cleanup
+    cleanup,
   };
 }

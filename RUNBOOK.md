@@ -321,14 +321,15 @@ Manage and verify the tunnel auto-healing watchdog and in-chat diagnostics:
 #### Watchdog Architecture & Healing Flow
 
 The auto-healing watchdog (`scripts/tunnel-watchdog.sh`) runs via LaunchAgent `com.ospeto.reading-tunnel-watchdog` every 120 seconds:
+
 1. **Local Health Checks**: Verifies `nc -z 127.0.0.1 7890` (Sing-box proxy), `127.0.0.1:8086` (Reading HQ), and `127.0.0.1:7200` (KOSync).
 2. **WAN Probe**: Checks `https://reading.wavypremium.xyz` through the local VLESS proxy.
 3. **Auto-Healing**:
    - If unreachable or returning HTTP 502/000:
-     * Kills hanging local SSH forward processes (`pkill -f "ssh.*0.0.0.0:8086"`).
-     * Clears orphaned remote listeners holding ports 8086/7200 on VPS `panel` via `ssh panel "fuser -k 8086/tcp 7200/tcp"`.
-     * Kickstarts `gui/$(id -u)/com.ospeto.reading-vless-tunnel`.
-     * Re-probes after a 4-second delay.
+     - Kills hanging local SSH forward processes (`pkill -f "ssh.*0.0.0.0:8086"`).
+     - Clears orphaned remote listeners holding ports 8086/7200 on VPS `panel` via `ssh panel "fuser -k 8086/tcp 7200/tcp"`.
+     - Kickstarts `gui/$(id -u)/com.ospeto.reading-vless-tunnel`.
+     - Re-probes after a 4-second delay.
 4. **Telegram Escalation**:
    - Maintains failure count in `/tmp/reading-tunnel-failures`.
    - If consecutive failures reach 3, dispatches an alert card to the captain via `TELEGRAM_BACKUP_CHAT_ID`.
@@ -350,6 +351,7 @@ launchctl list | grep com.ospeto.reading-tunnel-watchdog
 #### In-Chat Health Dashboard (`/status` and `/health`)
 
 Send `/status` or `/health` to the Telegram bot to inspect:
+
 - **WAN Edge**: VPS Caddy reverse proxy latency and response code for Reading HQ and KOSync.
 - **Reverse Tunnel**: Active SSH PID, forwarded ports (`8086`, `7200`), Sing-box proxy status.
 - **Reading HQ & Calibre**: Web Uploader (:8086) and Calibre (:8088) states, total catalog count, top format distribution, and newest ingested title.
@@ -374,6 +376,7 @@ https://kosync.wavypremium.xyz {
 ```
 
 Reload Caddy:
+
 ```bash
 ssh panel "systemctl reload caddy || docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
 ```
@@ -420,16 +423,30 @@ curl -i -X POST https://reading.wavypremium.xyz/api/library/clean-metadata \
   -H "Authorization: Bearer <YOUR_READING_API_KEY>"
 # Expected: HTTP 200 OK
 
-# 4. Verify CSRF guard blocks mutating requests with untrusted Origin
+# 4. Verify CSRF guard blocks mutating requests with untrusted Origin or lookalike IP domain
 curl -i -X POST http://192.168.31.15:8086/api/books/1 \
-  -H "Origin: https://malicious-site.com"
-# Expected: HTTP 403 Forbidden {"success":false,"error":"Disallowed Origin: https://malicious-site.com"}
+  -H "Origin: http://192.168.attacker.example:8086"
+# Expected: HTTP 403 Forbidden {"success":false,"error":"Disallowed Origin: ..."}
 
-# 5. Verify SSRF protection on URL ingestion
+# 5. Verify API keys in query strings are rejected
+curl -i -X POST https://reading.wavypremium.xyz/api/books/1?token=<YOUR_API_KEY>
+# Expected: HTTP 401 Unauthorized {"success":false,"error":"Authentication required for public WAN access"}
+
+# 6. Verify cookie-based mutations require Origin or Referer
+curl -i -X DELETE https://reading.wavypremium.xyz/api/books/1 \
+  -H "Cookie: reading_token=<YOUR_API_KEY>"
+# Expected: HTTP 403 Forbidden {"success":false,"error":"Origin or Referer header required..."}
+
+# 7. Verify SSRF protection on URL ingestion (blocks private/metadata addresses & redirects)
 curl -i -X POST http://192.168.31.15:8086/api/ingest-url \
   -H "Content-Type: application/json" \
   -d '{"url": "http://169.254.169.254/latest/meta-data/"}'
 # Expected: HTTP 400 Bad Request {"success":false,"error":"SSRF protection: ..."}
+
+# 8. Verify fake EPUB upload rejection (checks ZIP magic bytes and container.xml)
+curl -i -X POST http://192.168.31.15:8086/api/upload \
+  -F "file=@/dev/null;filename=fake.epub"
+# Expected: HTTP 400 Bad Request {"success":false,"error":"Invalid EPUB content: ..."}
 ```
 
 #### 2. Durable Ingestion Job Queue Monitoring & Recovery
@@ -440,14 +457,15 @@ Inspect and manage durable background jobs:
 # 1. Query recent jobs via API
 curl -s http://192.168.31.15:8086/api/jobs/recent | jq .
 
-# 2. Inspect a specific job by ID
+# 2. Inspect a specific job by ID (verifies server filesystem paths and tokens are redacted)
 curl -s http://192.168.31.15:8086/api/jobs/<job_id> | jq .
+# Expected: Output contains '[path]/...' for filepaths and '[REDACTED]' for any auth tokens/secrets
 
-# 3. Retry a failed job manually
+# 3. Retry a failed job manually (resets retry counter to 0)
 curl -i -X POST http://192.168.31.15:8086/api/jobs/<job_id>/retry
 
-# 4. Direct SQLite inspection of the jobs table
-sqlite3 /Users/ospeto/uploader/cache.db "SELECT id, type, status, retries, created_at, error FROM jobs ORDER BY created_at DESC LIMIT 10;"
+# 4. Direct SQLite inspection of the jobs table (includes worker_id and lease_expires_at)
+sqlite3 /Users/ospeto/uploader/cache.db "SELECT id, type, status, retries, worker_id, lease_expires_at, created_at, error FROM jobs ORDER BY created_at DESC LIMIT 10;"
 
 # 5. Job queue process recovery
 # If the book-uploader service is restarted while jobs are processing,
@@ -460,7 +478,7 @@ sqlite3 /Users/ospeto/uploader/cache.db "SELECT id, type, status, retries, creat
 
 *Note: Per architecture decision, live Calibre library migration is a separately supervised operation executed after backups are verified. Do not physically rename or move files inside Calibre library directories by hand.*
 
-#### Preflight Audit & Inspection Commands:
+#### Preflight Audit & Inspection Commands
 
 ```bash
 # 1. Run full database backup first

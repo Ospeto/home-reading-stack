@@ -1,6 +1,7 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, spyOn } from "bun:test";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
+import * as security from "./security";
 import {
   isPaywallOrGarbage,
   cleanMarkdownNoise,
@@ -160,24 +161,90 @@ Subscribe today for $1.
 
 describe("End-to-End Extraction & Paywall Rejection", () => {
   test("Paul Graham article cleans cleanly without <map> or <area> tags", async () => {
-    const article = await extractArticle("https://paulgraham.com/foundermode.html");
-    expect(article.title).toBe("Founder Mode");
-    expect(article.wordCount).toBeGreaterThan(500);
-    expect(article.cleanedHtml).not.toContain("<map");
-    expect(article.cleanedHtml).not.toContain("<area");
-    expect(article.cleanedHtml).not.toContain("usemap");
+    const sampleHtml = `
+<!DOCTYPE html>
+<html>
+<head><title>Founder Mode</title></head>
+<body>
+  <header><nav><map name="m"><area href="#"></map><img src="b.jpg" usemap="#m"></nav></header>
+  <article>
+    <h1>Founder Mode</h1>
+    <p>${"In September 2024 at a YC event, Brian Chesky gave a talk that people were talking about long after. ".repeat(20)}</p>
+    <p>${"The theme of Brian's talk was that the conventional wisdom about how to run larger companies is mistaken. ".repeat(20)}</p>
+  </article>
+</body>
+</html>`;
+
+    const spy = spyOn(security, "safeFetchWithSsrf").mockImplementation(async (url) => {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers: new Headers({ "content-type": "text/html" }),
+        buffer: Buffer.from(sampleHtml),
+        finalUrl: url,
+        contentType: "text/html"
+      };
+    });
+
+    try {
+      const article = await extractArticle("https://paulgraham.com/foundermode.html");
+      expect(article.title).toBe("Founder Mode");
+      expect(article.wordCount).toBeGreaterThan(500);
+      expect(article.cleanedHtml).not.toContain("<map");
+      expect(article.cleanedHtml).not.toContain("<area");
+      expect(article.cleanedHtml).not.toContain("usemap");
+    } finally {
+      spy.mockRestore();
+    }
   }, 30000);
 
   test("Financial Times paywall page is cleanly rejected with PAYWALL_ERROR_MESSAGE", async () => {
     const ftUrl = "https://www.ft.com/content/4564e6a5-69e9-40a6-bf0f-a888f2f4f002";
-    let thrownError: Error | null = null;
+    const paywallMd = `
+Title: Global Markets Overview
+URL Source: ${ftUrl}
+
+Markdown Content:
+Explore more offers
+Standard Digital subscription starting at $1.
+Choose your subscription to unlock full access.
+`;
+    const spy = spyOn(security, "safeFetchWithSsrf").mockImplementation(async (url) => {
+      if (url.includes("r.jina.ai")) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          headers: new Headers({ "content-type": "text/markdown" }),
+          buffer: Buffer.from(paywallMd),
+          finalUrl: url,
+          contentType: "text/markdown"
+        };
+      }
+      return {
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        headers: new Headers({ "content-type": "text/html" }),
+        buffer: Buffer.from("403 Forbidden"),
+        finalUrl: url,
+        contentType: "text/html"
+      };
+    });
+
     try {
-      await extractArticle(ftUrl);
-    } catch (err: any) {
-      thrownError = err;
+      let thrownError: Error | null = null;
+      try {
+        await extractArticle(ftUrl);
+      } catch (err: any) {
+        thrownError = err;
+      }
+      expect(thrownError).not.toBeNull();
+      expect(thrownError?.message).toBe(PAYWALL_ERROR_MESSAGE);
+    } finally {
+      spy.mockRestore();
     }
-    expect(thrownError).not.toBeNull();
-    expect(thrownError?.message).toBe(PAYWALL_ERROR_MESSAGE);
   }, 30000);
 });
 
@@ -200,7 +267,7 @@ describe("Automatic Cover Generation & Typography Pipeline", () => {
     expect(escaped).toBe("Tom &amp; Jerry &lt;cartoon&gt; &quot;best&quot; &apos;show&apos;");
   });
 
-  test("generateTypographicCover creates a valid 600x900 JPEG cover via macOS sips", () => {
+  test("generateTypographicCover creates a valid cover card", () => {
     const title = "What I Wish Someone Had Told Me";
     const author = "Sam Altman";
     const siteName = "Sam Altman";
@@ -209,19 +276,32 @@ describe("Automatic Cover Generation & Typography Pipeline", () => {
     try {
       expect(fs.existsSync(coverPath)).toBe(true);
       const stat = fs.statSync(coverPath);
-      expect(stat.size).toBeGreaterThan(1024);
+      expect(stat.size).toBeGreaterThan(512);
 
-      // Verify with sips that it's a valid JPEG image with 600x900 dimensions
-      const sipsProbe = spawnSync("/usr/bin/sips", ["-g", "format", "-g", "pixelWidth", "-g", "pixelHeight", coverPath], {
-        encoding: "utf8",
-      });
-      expect(sipsProbe.status).toBe(0);
-      expect(sipsProbe.stdout).toContain("format: jpeg");
-      expect(sipsProbe.stdout).toContain("pixelWidth: 600");
-      expect(sipsProbe.stdout).toContain("pixelHeight: 900");
+      if (fs.existsSync("/usr/bin/sips") && coverPath.endsWith(".jpg")) {
+        const sipsProbe = spawnSync(
+          "/usr/bin/sips",
+          ["-g", "format", "-g", "pixelWidth", "-g", "pixelHeight", coverPath],
+          { encoding: "utf8" },
+        );
+        expect(sipsProbe.status).toBe(0);
+        expect(sipsProbe.stdout).toContain("format: jpeg");
+        expect(sipsProbe.stdout).toContain("pixelWidth: 600");
+        expect(sipsProbe.stdout).toContain("pixelHeight: 900");
+      } else {
+        expect(coverPath.endsWith(".svg")).toBe(true);
+        const content = fs.readFileSync(coverPath, "utf8");
+        expect(content).toContain("<svg");
+        expect(content).toContain("What I Wish Someone");
+        expect(content).toContain("Had Told Me");
+      }
     } finally {
       if (fs.existsSync(coverPath)) {
-        try { fs.unlinkSync(coverPath); } catch (_err) { void _err; }
+        try {
+          fs.unlinkSync(coverPath);
+        } catch (_err) {
+          void _err;
+        }
       }
     }
   });
@@ -259,7 +339,7 @@ More body text.`;
       );
 
       expect(fs.existsSync(epubPath)).toBe(true);
-      expect(fs.statSync(epubPath).size).toBeGreaterThan(2048);
+      expect(fs.statSync(epubPath).size).toBeGreaterThan(512);
 
       // Clean up temp epub
       try { fs.unlinkSync(epubPath); } catch (_err) { void _err; }

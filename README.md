@@ -129,13 +129,16 @@ The reading stack provides seamless global access to Reading HQ from outside the
 ```
 
 ### 1. Telegram Mini App (TMA) Integration
+
 - **Chat Menu Button:** On bot startup, the bot registers a native Web App menu button labeled **"📖 Reading HQ"** pointing to `https://reading.wavypremium.xyz` via `setChatMenuButton`.
 - **Commands `/app` and `/webapp`:** Respond with an inline keyboard button **[📖 Open Reading HQ]** that opens the mobile-responsive reading dashboard inside Telegram's embedded browser.
 - **Telegram WebApp SDK:** `uploader/index.html` loads the official `telegram-web-app.js` SDK and calls `Telegram.WebApp.ready()` and `Telegram.WebApp.expand()` for a full-height, native app experience.
 
 ### 2. Persistent VLESS Reverse Tunnel (LaunchAgent)
+
 - Managed by `com.ospeto.reading-vless-tunnel.plist` installed in `~/Library/LaunchAgents/` (tracked in `scripts/com.ospeto.reading-vless-tunnel.plist`).
 - Executes:
+
   ```bash
   ssh -N -R 0.0.0.0:8086:127.0.0.1:8086 \
     -o 'ProxyCommand=nc -X 5 -x 127.0.0.1:7890 %h %p' \
@@ -144,16 +147,20 @@ The reading stack provides seamless global access to Reading HQ from outside the
     -o ExitOnForwardFailure=yes \
     panel
   ```
+
 - Uses `nc` over local Sing-box SOCKS5 (`127.0.0.1:7890`) to maintain a persistent reverse tunnel through censorship firewalls to the VPS (`panel`).
 - Configured with `RunAtLoad: true` and `KeepAlive: true` for automatic re-connection after network drops or reboot.
 
 ### 3. VPS Edge Proxy (Caddy)
+
 - Caddy configuration on VPS (`/opt/remnawave/caddy/Caddyfile`):
+
   ```caddyfile
   https://reading.wavypremium.xyz {
       reverse_proxy * http://172.18.0.1:8086
   }
   ```
+
 - Automatically provisions and renews Let's Encrypt / ZeroSSL TLS certificates.
 
 ---
@@ -223,57 +230,63 @@ The reading stack protects all critical reading databases (progress sync, librar
 
 ## 🛡️ Public WAN & API Surface Hardening
 
-The public WAN edge (`https://reading.wavypremium.xyz`) is hardened against unauthorized mutations and network exploitation while preserving friction-free local LAN usage:
+The public WAN edge (`https://reading.wavypremium.xyz`) is hardened against unauthorized mutations, SSRF, and network exploitation while preserving friction-free local LAN usage:
 
-1. **WAN vs LAN Differentiation & Authentication:**
-   - **Local LAN Requests:** Direct requests from home devices (`192.168.x.x`, `127.0.0.1`, `10.x.x.x`, etc.) do not require authentication credentials, maintaining zero-friction usage on home Wi-Fi.
-   - **WAN Reverse-Tunnel Requests:** Requests arriving through the reverse tunnel or public edge are identified via Host headers (`reading.wavypremium.xyz`), `X-Forwarded-Host`, and non-internal `X-Forwarded-For` IPs.
+1. **WAN vs LAN Differentiation & Fail-Closed Authentication:**
+   - **Fail-Closed Principle:** Requests missing Host headers, carrying non-private client IPs, or presenting unverified external/lookalike hostnames automatically fail closed and are classified as WAN.
+   - **Lookalike Domain Rejection:** Host and Origin validation strictly validates IPv4 octets (`isPrivateIPv4`), rejecting lookalike origins such as `192.168.attacker.example`.
+   - **Local LAN Requests:** Direct requests from verified home devices (`192.168.x.x`, `127.0.0.1`, `10.x.x.x`, etc.) do not require authentication credentials, maintaining zero-friction usage on home Wi-Fi.
+   - **WAN Reverse-Tunnel Requests:** Requests arriving through the reverse tunnel or public edge are identified via Host headers (`reading.wavypremium.xyz`), `X-Forwarded-Host`, `X-Forwarded-Proto`, and non-internal `X-Forwarded-For` IPs.
    - **Mutating Route Authentication:** All mutating endpoints (`POST`, `PUT`, `DELETE`) from WAN require either:
-     - Bearer token or `X-API-Key` matching `READING_API_KEY` in `.env`.
+     - Bearer token or `X-API-Key` matching `READING_API_KEY` in `.env`. (API keys in query strings `?token=` or `?auth=` are strictly rejected).
      - Valid Telegram WebApp `initData` cryptographically verified with `TELEGRAM_BOT_TOKEN` via HMAC-SHA256.
-     - Authenticated session cookie (`reading_token`).
+     - Authenticated session cookie (`reading_token`). For state-changing cookie mutations, valid `Origin` or `Referer` headers are strictly enforced.
 
 2. **CORS & CSRF Origin Protection:**
    - CORS is locked down from wildcard `*` to permitted origins: `https://reading.wavypremium.xyz`, `https://kosync.wavypremium.xyz`, local LAN origins, and custom entries in `ALLOWED_ORIGINS`.
    - Mutating routes validate `Origin`, `Referer`, and `Sec-Fetch-Site` to prevent cross-site request forgery attacks.
 
-3. **SSRF (Server-Side Request Forgery) Protection:**
-   - Outbound network requests (URL article ingestion, cover art downloads, external metadata scraping) strictly block internal IP ranges:
+3. **Complete SSRF Protection:**
+   - Outbound network requests (URL article ingestion, cover art downloads, external metadata scraping) strictly block internal and private IP ranges:
      - Loopback (`127.0.0.0/8`, `::1`)
      - RFC 1918 private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
      - Cloud metadata & link-local (`169.254.0.0/16`, `169.254.169.254`)
-     - Decimal/hex/octal IP representations and local hostnames (`localhost`, `*.internal`, `*.lan`)
+     - Decimal/hex/octal IP representations and local hostnames (`localhost`, `*.internal`, `*.lan`, `*.home.arpa`)
+   - **Redirect Verification:** HTTP redirects are intercepted and re-validated hop-by-hop against private IP blocks before following (`safeFetchWithSsrf`).
+   - **Strict Response & Timeout Bounds:** All outbound fetches enforce response byte caps (10MB for covers, 25MB for HTML) and strict timeouts to prevent memory exhaustion or slowloris attacks.
 
-4. **Decompression & Resource Limits:**
-   - Maximum upload payload: 100 MB.
-   - Archive extraction limits: max 500 entries, max 150 MB single file, max 500 MB total uncompressed, and 100:1 compression ratio limit to prevent zip/tar bombs.
-   - Path traversal `/..` guards reject any archive entry containing directory escape sequences.
+4. **Decompression & Streaming Resource Limits:**
+   - **Streaming Body Metering:** Upload endpoints meter incoming request body streams (`meterStream`) to enforce the 100 MB limit regardless of whether `Content-Length` is present, omitted, or spoofed.
+   - **Archive Safety:** Max 500 entries, max 150 MB single file, max 500 MB total uncompressed, and 100:1 compression ratio limit to prevent zip/tar bombs. Path traversal `/..` guards reject any archive entry containing directory escape sequences.
+   - **EPUB Content Validation:** Files are verified not only by `.epub` extension but also by ZIP magic bytes (`PK\x03\x04`) and container structure (`validateEpubContent`), rejecting disguised files.
 
-5. **Safe Error Responses & Metadata Filenames:**
+5. **Safe Error Responses & Public Job Redaction:**
    - Public API error responses redact internal filesystem paths and stack traces (`sanitizeErrorMessage`).
+   - Public job inspection endpoints (`GET /api/jobs/recent`, `GET /api/jobs/:id`) redact all filesystem paths, tokens, secrets, and API keys (`redactJobRecord`).
    - Download endpoints return clean metadata-derived filenames (`Title - Author.epub` or `[Series 1] Title - Author.epub`), never leaking Calibre internal storage directory paths.
 
 ---
 
-## ⚡ Durable SQLite Ingestion Job Queue
+## ⚡ Durable SQLite Ingestion Job Queue & Concurrency Lock
 
-Background tasks and asynchronous workflows are backed by a durable SQLite job queue (`jobs` table in `cache.db`) rather than unmonitored in-memory timeouts:
+Background tasks, file uploads, archive extractions, and Telegram bot ingestions route through a durable SQLite job queue (`jobs` table in `cache.db`):
 
 1. **Job Types:**
-   - `file_ingest`: Ingest single book file into Calibre with format validation and deduplication.
-   - `archive_extract`: Safe extraction of archive packages, importing canonical EPUB files.
-   - `url_article_ingest`: Web article extraction, conversion to EPUB, and Calibre ingestion.
+   - `file_ingest`: Ingest single book file into Calibre with content validation and deduplication.
+   - `archive_ingest` / `archive_extract`: Safe extraction of archive packages, importing canonical EPUB files.
+   - `url_ingest` / `url_article_ingest`: Web article extraction, conversion to EPUB, and Calibre ingestion.
    - `metadata_enrich`: Background metadata and cover art scraping for newly imported books.
    - `cover_backfill`: Batch generation of typographic covers for web articles lacking covers.
 
 2. **Resilience & Crash Recovery:**
-   - Bounded exponential backoff: Failed jobs auto-retry up to 3 times (2s, 4s, 8s backoff) before entering `failed` status.
-   - Crash recovery on startup: Interrupted jobs left in `processing` state during a process restart or server reboot are automatically recovered back to `pending` on startup.
-   - Calibre lock safety: Single-worker sequential execution prevents Calibre SQLite locking collisions.
+   - **Worker Lease & Heartbeat:** Workers acquire a 60-second lease with 10-second heartbeats while processing jobs. Stale jobs from crashed or hung workers are automatically recovered.
+   - **Bounded Exponential Backoff:** Failed jobs auto-retry up to 3 times (2s, 4s, 8s backoff) before entering `failed` status. Temporary files are preserved across retries and cleaned up only on final settlement.
+   - **Reset on Manual Retry:** Manual retries (`POST /api/jobs/:id/retry`) explicitly reset the retry counter to 0 for full retry attempts.
+   - **Global Calibre Concurrency Lock:** Mutating Calibre operations (`add`, `remove`, `set_metadata`, `add_format`) are serialized via `withCalibreLock` (in-process mutex + cross-process atomic file lock) to eliminate SQLite database locking errors.
 
 3. **Observability API:**
-   - `GET /api/jobs/recent`: List recent jobs with optional `?limit=`, `?status=`, `?type=` filters.
-   - `GET /api/jobs/:id`: Retrieve single job status, payload, result, and sanitized error.
+   - `GET /api/jobs/recent`: List recent jobs with optional `?limit=`, `?status=`, `?type=` filters (sanitized & redacted).
+   - `GET /api/jobs/:id`: Retrieve single job status, payload, result, and sanitized error (sanitized & redacted).
    - `POST /api/jobs/:id/retry`: Manually re-queue a failed job for immediate retry.
 
 ---

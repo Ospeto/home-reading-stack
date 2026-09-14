@@ -1,16 +1,170 @@
 import crypto from "node:crypto";
 import dns from "node:dns/promises";
+import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
+import { Buffer } from "node:buffer";
+import { spawnSync } from "node:child_process";
+// @ts-ignore
+import { Database } from "bun:sqlite";
 
 // Default production WAN domain and ports
 export const DEFAULT_WAN_DOMAIN = "reading.wavypremium.xyz";
 export const KOSYNC_WAN_DOMAIN = "kosync.wavypremium.xyz";
 
+/**
+ * Resolves the books drop directory portably and lazily.
+ * Respects BOOKS_DROP_DIR or DROP_DIR env variables, falling back to safe local or /tmp paths.
+ */
+export function getDropDir(): string {
+  const dir =
+    process.env.BOOKS_DROP_DIR ||
+    process.env.DROP_DIR ||
+    (process.env.HOME
+      ? path.join(process.env.HOME, "Books_Drop")
+      : "/tmp/Books_Drop");
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    return dir;
+  } catch {
+    const fallback = "/tmp/Books_Drop";
+    if (!fs.existsSync(fallback)) {
+      try {
+        fs.mkdirSync(fallback, { recursive: true });
+      } catch {
+        // Ignore fallback creation error
+      }
+    }
+    return fallback;
+  }
+}
+
+/**
+ * Resolves the cover cache directory portably and lazily.
+ * Eliminates import-time side-effects on /Users/ospeto.
+ */
+export function getCoverCacheDir(): string {
+  const custom = process.env.COVER_CACHE_DIR;
+  if (custom) {
+    try {
+      if (!fs.existsSync(custom)) fs.mkdirSync(custom, { recursive: true });
+      return custom;
+    } catch {
+      // fallback
+    }
+  }
+  const defaultDir = fs.existsSync("/Users/ospeto/uploader")
+    ? "/Users/ospeto/uploader/cache/covers"
+    : "/tmp/uploader/cache/covers";
+  try {
+    if (!fs.existsSync(defaultDir)) {
+      fs.mkdirSync(defaultDir, { recursive: true });
+    }
+    return defaultDir;
+  } catch {
+    const fallback = "/tmp/uploader/cache/covers";
+    try {
+      if (!fs.existsSync(fallback)) fs.mkdirSync(fallback, { recursive: true });
+    } catch {
+      // Ignore fallback creation error
+    }
+    return fallback;
+  }
+}
+
+let sharedCacheDb: Database | null = null;
+
+function initCacheDbSchema(db: Database) {
+  try {
+    db.run("PRAGMA busy_timeout = 5000;");
+    db.run(`
+      CREATE TABLE IF NOT EXISTS file_hashes (
+        filepath TEXT PRIMARY KEY,
+        mtime INTEGER NOT NULL,
+        hash TEXT NOT NULL,
+        book_id INTEGER,
+        title TEXT,
+        authors TEXT,
+        cover INTEGER
+      );
+    `);
+    db.run(
+      "CREATE INDEX IF NOT EXISTS idx_file_hashes_hash ON file_hashes(hash);",
+    );
+  } catch (_err) {
+    void _err;
+  }
+}
+
+/**
+ * Lazily opens and initializes the SQLite cache database.
+ * Falls back to /tmp if default /Users/ospeto layout is absent or unwritable.
+ */
+export function getCacheDb(customPath?: string): Database {
+  if (sharedCacheDb && !customPath) {
+    return sharedCacheDb;
+  }
+
+  const resolvePath = (): string => {
+    if (customPath) return customPath;
+    if (process.env.CACHE_DB_PATH) return process.env.CACHE_DB_PATH;
+    if (fs.existsSync("/Users/ospeto/uploader")) {
+      return "/Users/ospeto/uploader/cache.db";
+    }
+    return "/tmp/uploader_cache.db";
+  };
+
+  const targetPath = resolvePath();
+  const dir = path.dirname(targetPath);
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  } catch {
+    const fallbackPath = "/tmp/uploader_cache.db";
+    const db = new Database(fallbackPath);
+    initCacheDbSchema(db);
+    if (!customPath) sharedCacheDb = db;
+    return db;
+  }
+
+  try {
+    const db = new Database(targetPath);
+    initCacheDbSchema(db);
+    if (!customPath) sharedCacheDb = db;
+    return db;
+  } catch {
+    const fallbackPath = "/tmp/uploader_cache.db";
+    const db = new Database(fallbackPath);
+    initCacheDbSchema(db);
+    if (!customPath) sharedCacheDb = db;
+    return db;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 1. IP & SSRF Protection
 // ---------------------------------------------------------------------------
+
+/**
+ * Validates if a hostname string is an exact RFC 1918 or loopback private IPv4 address.
+ * Rejects lookalike domain names such as '192.168.attacker.example'.
+ */
+export function isPrivateIPv4(host: string): boolean {
+  if (!host || !net.isIPv4(host)) return false;
+  const parts = host.split(".").map((p) => parseInt(p, 10));
+  if (parts.length !== 4 || parts.some(isNaN)) return false;
+  if (parts.some((n) => n < 0 || n > 255)) return false;
+  const [b0, b1] = parts;
+  if (b0 === 127) return true; // 127.0.0.0/8 (Loopback)
+  if (b0 === 10) return true; // 10.0.0.0/8 (Private Class A)
+  if (b0 === 172 && b1 >= 16 && b1 <= 31) return true; // 172.16.0.0/12 (Private Class B)
+  if (b0 === 192 && b1 === 168) return true; // 192.168.0.0/16 (Private Class C)
+  return false;
+}
 
 /**
  * Parses numeric/hex/octal IP representations into standard dotted-decimal IPv4 if applicable.
@@ -25,7 +179,7 @@ export function normalizeIpString(ip: string): string {
         (num >>> 24) & 255,
         (num >>> 16) & 255,
         (num >>> 8) & 255,
-        num & 255
+        num & 255,
       ].join(".");
     }
   }
@@ -38,7 +192,7 @@ export function normalizeIpString(ip: string): string {
         (num >>> 24) & 255,
         (num >>> 16) & 255,
         (num >>> 8) & 255,
-        num & 255
+        num & 255,
       ].join(".");
     }
   }
@@ -138,7 +292,12 @@ export function isPrivateOrInternalIp(rawIp: string): boolean {
     if (lower === "::" || lower === "0:0:0:0:0:0:0:0") return true;
 
     // Link-local: fe80::/10
-    if (lower.startsWith("fe8") || lower.startsWith("fe9") || lower.startsWith("fea") || lower.startsWith("feb")) {
+    if (
+      lower.startsWith("fe8") ||
+      lower.startsWith("fe9") ||
+      lower.startsWith("fea") ||
+      lower.startsWith("feb")
+    ) {
       return true;
     }
 
@@ -166,7 +325,7 @@ export function isPrivateOrInternalIp(rawIp: string): boolean {
  */
 export async function validateUrlForSSRF(
   rawUrl: string,
-  options: { allowProxyBypass?: boolean } = {}
+  _options: { allowProxyBypass?: boolean } = {},
 ): Promise<{ safe: boolean; error?: string; resolvedIp?: string }> {
   try {
     const u = new URL(rawUrl);
@@ -199,7 +358,10 @@ export async function validateUrlForSSRF(
     const normalizedHost = normalizeIpString(host);
     if (net.isIP(normalizedHost)) {
       if (isPrivateOrInternalIp(normalizedHost)) {
-        return { safe: false, error: `Restricted private or loopback IP: ${normalizedHost}` };
+        return {
+          safe: false,
+          error: `Restricted private or loopback IP: ${normalizedHost}`,
+        };
       }
       return { safe: true, resolvedIp: normalizedHost };
     }
@@ -209,23 +371,24 @@ export async function validateUrlForSSRF(
     // to block resolution to local/internal IP addresses.
     try {
       const addresses = await dns.lookup(host, { all: true });
+      if (!addresses || addresses.length === 0) {
+        return { safe: false, error: `No DNS records found for ${host}` };
+      }
       for (const addr of addresses) {
         if (isPrivateOrInternalIp(addr.address)) {
           return {
             safe: false,
             error: `Domain ${host} resolved to restricted internal IP: ${addr.address}`,
-            resolvedIp: addr.address
+            resolvedIp: addr.address,
           };
         }
       }
       return { safe: true, resolvedIp: addresses[0]?.address };
     } catch (dnsErr: any) {
-      // In offline / test environments with mock domains, if allowProxyBypass is set,
-      // allow domain if host format is valid FQDN
-      if (options.allowProxyBypass && /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(host)) {
-        return { safe: true };
-      }
-      return { safe: false, error: `DNS resolution failed for ${host}: ${dnsErr?.message || dnsErr}` };
+      return {
+        safe: false,
+        error: `DNS resolution failed for ${host}: ${dnsErr?.message || dnsErr}`,
+      };
     }
   } catch (err: any) {
     return { safe: false, error: `Invalid URL: ${err?.message || err}` };
@@ -242,9 +405,13 @@ export async function validateUrlForSSRF(
  */
 export function isWanRequest(
   req: Request,
-  options: { wanDomain?: string; clientIp?: string } = {}
+  options: { wanDomain?: string; clientIp?: string } = {},
 ): boolean {
-  const wanDomain = (options.wanDomain || process.env.READING_WEBAPP_URL || DEFAULT_WAN_DOMAIN)
+  const wanDomain = (
+    options.wanDomain ||
+    process.env.READING_WEBAPP_URL ||
+    DEFAULT_WAN_DOMAIN
+  )
     .replace(/^https?:\/\//i, "")
     .split("/")[0]
     .toLowerCase();
@@ -254,7 +421,23 @@ export function isWanRequest(
     .split("/")[0]
     .toLowerCase();
 
-  const hostHeader = (req.headers.get("x-forwarded-host") || req.headers.get("host") || "").toLowerCase().split(":")[0];
+  // If clientIp is provided (from socket/peer), verify it
+  if (options.clientIp) {
+    const clientIp = normalizeIpString(options.clientIp);
+    // If client IP is not private/loopback, it is definitely WAN
+    if (!isPrivateOrInternalIp(clientIp)) {
+      return true;
+    }
+  }
+
+  const rawHost =
+    req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
+  const hostHeader = rawHost.toLowerCase().split(":")[0].trim();
+
+  // If host header is missing or empty, fail closed -> WAN
+  if (!hostHeader) {
+    return true;
+  }
 
   // 1. Host or X-Forwarded-Host matches WAN domain
   if (hostHeader === wanDomain || hostHeader === kosyncWanDomain) {
@@ -264,7 +447,10 @@ export function isWanRequest(
   // 2. Check X-Forwarded-For: if it contains any public (non-internal) IP, it arrived via WAN
   const xForwardedFor = req.headers.get("x-forwarded-for");
   if (xForwardedFor) {
-    const ips = xForwardedFor.split(",").map((s) => s.trim()).filter(Boolean);
+    const ips = xForwardedFor
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
     for (const ip of ips) {
       if (!isPrivateOrInternalIp(ip)) {
         return true;
@@ -272,19 +458,22 @@ export function isWanRequest(
     }
   }
 
-  // 3. Check client IP if provided
-  if (options.clientIp && !isPrivateOrInternalIp(options.clientIp)) {
+  // 3. Proxy indicator headers (X-Forwarded-Proto, Via)
+  const proto = req.headers.get("x-forwarded-proto");
+  const via = req.headers.get("via");
+  if (proto === "https" || via) {
     return true;
   }
 
-  // 4. Check X-Forwarded-Proto combined with reverse-tunnel headers
-  const proto = req.headers.get("x-forwarded-proto");
-  const via = req.headers.get("via");
-  if (proto === "https" && (via || hostHeader.includes("."))) {
-    // If it's HTTPS through a proxy and not on a local LAN host name
-    if (!hostHeader.startsWith("192.168.") && !hostHeader.startsWith("10.") && !hostHeader.startsWith("127.") && hostHeader !== "localhost") {
-      return true;
-    }
+  // 4. Verify hostHeader is genuinely a local/private hostname
+  // Accept localhost, 127.0.0.1, strict private IPv4, or .local mDNS
+  const isLocalhost = hostHeader === "localhost" || hostHeader === "127.0.0.1";
+  const isPrivateIp = isPrivateIPv4(hostHeader);
+  const isMDNS = hostHeader.endsWith(".local") && !hostHeader.includes("..");
+
+  if (!isLocalhost && !isPrivateIp && !isMDNS) {
+    // Non-private host or lookalike domain (e.g. 192.168.attacker.example) -> FAIL CLOSED (treat as WAN)
+    return true;
   }
 
   return false;
@@ -301,7 +490,7 @@ export function isWanRequest(
 export function validateTelegramWebAppData(
   initData: string,
   botToken: string,
-  maxAgeSec = 86400 // 24 hours
+  maxAgeSec = 86400, // 24 hours
 ): { valid: boolean; user?: any; error?: string } {
   if (!initData || !botToken) {
     return { valid: false, error: "Missing initData or botToken" };
@@ -331,8 +520,14 @@ export function validateTelegramWebAppData(
     items.sort();
     const dataCheckString = items.join("\n");
 
-    const secretKey = crypto.createHmac("sha256", "WebAppData").update(botToken).digest();
-    const calculatedHash = crypto.createHmac("sha256", secretKey).update(dataCheckString).digest("hex");
+    const secretKey = crypto
+      .createHmac("sha256", "WebAppData")
+      .update(botToken)
+      .digest();
+    const calculatedHash = crypto
+      .createHmac("sha256", secretKey)
+      .update(dataCheckString)
+      .digest("hex");
 
     if (calculatedHash !== hash) {
       return { valid: false, error: "Invalid Telegram signature hash" };
@@ -350,7 +545,10 @@ export function validateTelegramWebAppData(
 
     return { valid: true, user };
   } catch (err: any) {
-    return { valid: false, error: `Failed to parse initData: ${err?.message || err}` };
+    return {
+      valid: false,
+      error: `Failed to parse initData: ${err?.message || err}`,
+    };
   }
 }
 
@@ -380,7 +578,7 @@ export function authenticateRequest(
     botToken?: string;
     wanDomain?: string;
     clientIp?: string;
-  } = {}
+  } = {},
 ): AuthResult {
   // If request is from local LAN, grant immediate friction-free access
   const isWan = isWanRequest(req, options);
@@ -426,7 +624,10 @@ export function authenticateRequest(
   const cookieHeader = req.headers.get("cookie") || "";
   if (cookieHeader) {
     const cookies = parseCookies(cookieHeader);
-    if (apiKey && (cookies.reading_token === apiKey || cookies.reading_session === apiKey)) {
+    if (
+      apiKey &&
+      (cookies.reading_token === apiKey || cookies.reading_session === apiKey)
+    ) {
       return { authenticated: true, method: "cookie" };
     }
     if (cookies.reading_tma && botToken) {
@@ -437,20 +638,9 @@ export function authenticateRequest(
     }
   }
 
-  // 5. Check URL query param ?token= or ?auth= (for downloads or webview handoffs)
-  try {
-    const url = new URL(req.url);
-    const queryToken = url.searchParams.get("token") || url.searchParams.get("auth") || "";
-    if (apiKey && queryToken === apiKey) {
-      return { authenticated: true, method: "bearer" };
-    }
-  } catch (_urlErr) {
-    void _urlErr;
-  }
-
   return {
     authenticated: false,
-    error: "Authentication required for public WAN access"
+    error: "Authentication required for public WAN access",
   };
 }
 
@@ -471,7 +661,7 @@ function parseCookies(header: string): Record<string, string> {
 
 export function isAllowedOrigin(
   origin: string,
-  extraAllowedOrigins: string[] = []
+  extraAllowedOrigins: string[] = [],
 ): boolean {
   if (!origin) return false;
   const lower = origin.toLowerCase().trim();
@@ -497,9 +687,12 @@ export function isAllowedOrigin(
   // Check extra allowed origins from options or env
   const envOrigins = (process.env.ALLOWED_ORIGINS || "")
     .split(",")
-    .map((o) => o.trim().toLowerCase())
+    .map((o: string) => o.trim().toLowerCase())
     .filter(Boolean);
-  const allAllowed = [...extraAllowedOrigins.map((o) => o.toLowerCase()), ...envOrigins];
+  const allAllowed = [
+    ...extraAllowedOrigins.map((o: string): string => o.toLowerCase()),
+    ...envOrigins,
+  ];
   if (allAllowed.includes(lower)) {
     return true;
   }
@@ -507,11 +700,11 @@ export function isAllowedOrigin(
   // Allow local LAN origins: http://127.0.0.1:*, http://localhost:*, http://192.168.*:*
   try {
     const u = new URL(lower);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
     const h = u.hostname;
     if (h === "localhost" || h === "127.0.0.1") return true;
-    if (h.startsWith("192.168.") || h.startsWith("10.") || /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h)) {
-      return true;
-    }
+    if (isPrivateIPv4(h)) return true;
+    if (h.endsWith(".local") && !h.includes("..")) return true;
   } catch (_originErr) {
     void _originErr;
   }
@@ -524,18 +717,39 @@ export function isAllowedOrigin(
  */
 export function validateOriginAndCsrf(
   req: Request,
-  extraAllowedOrigins: string[] = []
+  optionsOrExtra?:
+    | string[]
+    | { extraAllowedOrigins?: string[]; isCookieAuth?: boolean },
 ): { valid: boolean; error?: string } {
+  let extraAllowedOrigins: string[] = [];
+  let isCookieAuth = false;
+
+  if (Array.isArray(optionsOrExtra)) {
+    extraAllowedOrigins = optionsOrExtra;
+  } else if (optionsOrExtra && typeof optionsOrExtra === "object") {
+    extraAllowedOrigins = optionsOrExtra.extraAllowedOrigins || [];
+    isCookieAuth = !!optionsOrExtra.isCookieAuth;
+  }
+
   const method = req.method.toUpperCase();
   const isMutating = ["POST", "PUT", "DELETE", "PATCH"].includes(method);
 
+  const origin = req.headers.get("origin");
+  const referer = req.headers.get("referer");
+
   // Read-only requests without origin are safe
-  if (!isMutating && !req.headers.has("origin")) {
+  if (!isMutating && !origin) {
     return { valid: true };
   }
 
-  const origin = req.headers.get("origin");
-  const referer = req.headers.get("referer");
+  // For state-changing cookie/session mutations: require Origin or Referer
+  if (isMutating && isCookieAuth && !origin && !referer) {
+    return {
+      valid: false,
+      error:
+        "Origin or Referer header required for cookie-authenticated mutating requests",
+    };
+  }
 
   // 1. If Origin header is present, it must be in the allowed list
   if (origin) {
@@ -548,7 +762,10 @@ export function validateOriginAndCsrf(
       const refUrl = new URL(referer);
       const refOrigin = `${refUrl.protocol}//${refUrl.host}`;
       if (!isAllowedOrigin(refOrigin, extraAllowedOrigins)) {
-        return { valid: false, error: `Disallowed Referer origin: ${refOrigin}` };
+        return {
+          valid: false,
+          error: `Disallowed Referer origin: ${refOrigin}`,
+        };
       }
     } catch {
       return { valid: false, error: "Malformed Referer header" };
@@ -560,7 +777,10 @@ export function validateOriginAndCsrf(
   if (secFetchSite === "cross-site" && isMutating) {
     // If browser marks it cross-site and origin was not explicitly allowed
     if (!origin || !isAllowedOrigin(origin, extraAllowedOrigins)) {
-      return { valid: false, error: "Cross-site request blocked by Sec-Fetch-Site policy" };
+      return {
+        valid: false,
+        error: "Cross-site request blocked by Sec-Fetch-Site policy",
+      };
     }
   }
 
@@ -592,12 +812,22 @@ export function validateIntegerId(rawId: any, min = 1): number | null {
 }
 
 export const CANONICAL_EBOOK_FORMATS = ["EPUB"] as const;
-export const LEGACY_EBOOK_FORMATS = ["EPUB", "PDF", "MOBI", "AZW3", "CBZ", "CBR"] as const;
+export const LEGACY_EBOOK_FORMATS = [
+  "EPUB",
+  "PDF",
+  "MOBI",
+  "AZW3",
+  "CBZ",
+  "CBR",
+] as const;
 
 /**
  * Validates an eBook format against allowed formats.
  */
-export function validateBookFormat(format: string, allowLegacy = true): string | null {
+export function validateBookFormat(
+  format: string,
+  allowLegacy = true,
+): string | null {
   if (!format) return null;
   const upper = format.trim().toUpperCase().replace(/^\./, "");
   const allowed = allowLegacy ? LEGACY_EBOOK_FORMATS : CANONICAL_EBOOK_FORMATS;
@@ -651,7 +881,7 @@ export function getDownloadFilename(
     series?: string;
     series_index?: number;
   },
-  format = "epub"
+  format = "epub",
 ): string {
   const cleanTitle = sanitizeFilename(book.title || "Untitled");
   const cleanAuthor = sanitizeFilename(book.authors || "Unknown");
@@ -680,8 +910,14 @@ export function cleanString(str: string): string {
   s = s.replace(/(?:t|telegram)\.me\/\S+/gi, " ");
   s = s.replace(/@\w+/gi, " ");
   s = s.replace(/www\.\S+/gi, " ");
-  s = s.replace(/\[.*?(?:ebook|pdf|epub|channel|mobi|azw|scan|myanmar|tg|bookr|z-?lib|libgen).*?\]/gi, " ");
-  s = s.replace(/\((.*?)(?:ebook|pdf|epub|channel|mobi|azw|scan|myanmar|tg|bookr|z-?lib|libgen)(.*?)\)/gi, " ");
+  s = s.replace(
+    /\[.*?(?:ebook|pdf|epub|channel|mobi|azw|scan|myanmar|tg|bookr|z-?lib|libgen).*?\]/gi,
+    " ",
+  );
+  s = s.replace(
+    /\((.*?)(?:ebook|pdf|epub|channel|mobi|azw|scan|myanmar|tg|bookr|z-?lib|libgen)(.*?)\)/gi,
+    " ",
+  );
   s = s.replace(/_v[0-9]+/gi, " ");
   s = s.replace(/\([0-9]+\)$/g, " ");
   s = s.replace(/\b(epub|pdf|mobi|azw3|cbz|cbr)\b/gi, " ");
@@ -691,7 +927,7 @@ export function cleanString(str: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// 7. Safe Error Handling
+// 7. Safe Error Handling & Payload Redaction
 // ---------------------------------------------------------------------------
 
 /**
@@ -700,7 +936,10 @@ export function cleanString(str: string): string {
  */
 export function sanitizeErrorMessage(err: any): string {
   if (!err) return "An unexpected error occurred";
-  const rawMsg = typeof err === "string" ? err : err.message || "An unexpected error occurred";
+  const rawMsg =
+    typeof err === "string"
+      ? err
+      : err.message || "An unexpected error occurred";
 
   // Remove filesystem paths (e.g. /Users/ospeto/..., /tmp/..., C:\...)
   let sanitized = rawMsg
@@ -710,11 +949,523 @@ export function sanitizeErrorMessage(err: any): string {
     .trim();
 
   // Strip token/key patterns
-  sanitized = sanitized.replace(/(?:token|key|secret)=[a-zA-Z0-9_-]+/gi, "$1=[REDACTED]");
+  sanitized = sanitized.replace(
+    /(?:token|key|secret)=[a-zA-Z0-9_-]+/gi,
+    "$1=[REDACTED]",
+  );
 
   if (sanitized.length > 300) {
     sanitized = sanitized.substring(0, 300) + "...";
   }
 
   return sanitized || "Operation failed";
+}
+
+/**
+ * Redacts sensitive tokens, API keys, credentials, and internal server paths
+ * from a job record before returning it in public APIs.
+ */
+export function redactJobRecord(job: any): any {
+  if (!job) return job;
+
+  const sanitizeValue = (val: any): any => {
+    if (val === null || val === undefined) return val;
+    if (typeof val === "string") {
+      let s = val;
+      // Redact filesystem paths
+      s = s.replace(/(?:\/[a-zA-Z0-9._-]+)+/g, (match) => {
+        const ext = path.extname(match);
+        if (ext) return `[path]/${path.basename(match)}`;
+        return "[path]";
+      });
+      s = s.replace(/[a-zA-Z]:\\[a-zA-Z0-9._\-\\]+/g, "[path]");
+      // Redact tokens/secrets
+      s = s.replace(
+        /(?:token|key|secret|password|auth|apiKey)=[a-zA-Z0-9_.-]+/gi,
+        "$1=[REDACTED]",
+      );
+      s = s.replace(/Bearer\s+[a-zA-Z0-9_.-]+/gi, "Bearer [REDACTED]");
+      return s;
+    }
+    if (Array.isArray(val)) {
+      return val.map(sanitizeValue);
+    }
+    if (typeof val === "object") {
+      const out: any = {};
+      for (const [k, v] of Object.entries(val)) {
+        const lowerKey = k.toLowerCase();
+        if (
+          lowerKey.includes("token") ||
+          lowerKey.includes("key") ||
+          lowerKey.includes("secret") ||
+          lowerKey.includes("password") ||
+          lowerKey.includes("auth") ||
+          lowerKey.includes("authorization")
+        ) {
+          out[k] = "[REDACTED]";
+        } else if (lowerKey.includes("path") && typeof v === "string") {
+          out[k] = `[path]/${path.basename(v)}`;
+        } else {
+          out[k] = sanitizeValue(v);
+        }
+      }
+      return out;
+    }
+    return val;
+  };
+
+  return {
+    id: job.id,
+    type: job.type,
+    payload: sanitizeValue(job.payload),
+    status: job.status,
+    retries: job.retries,
+    max_retries: job.max_retries,
+    created_at: job.created_at,
+    updated_at: job.updated_at,
+    next_run_at: job.next_run_at,
+    result: sanitizeValue(job.result),
+    error: job.error ? sanitizeErrorMessage(job.error) : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 9. Migration Identity & Canonical Book Matching
+// ---------------------------------------------------------------------------
+
+export interface BookIdentity {
+  id?: number | string | null;
+  importId?: string | null;
+  isbn?: string | null;
+  title: string;
+  author?: string | null;
+  authors?: string | null;
+  series?: string | { series: string; volume: number } | null;
+  series_index?: number | null;
+}
+
+/**
+ * Robust book identity matching for migrations and deduplication.
+ * Priority order:
+ * 1. Stable Import ID / Calibre ID (if present on both)
+ * 2. ISBN / Identifier (if present on both: match if equal, reject if different)
+ * 3. Author PLUS Normalized Title (NEVER matches on title alone!)
+ */
+export function isSameBookIdentity(
+  existing: BookIdentity,
+  incoming: BookIdentity,
+): boolean {
+  // 1. Stable import ID or Calibre ID
+  if (existing.importId && incoming.importId) {
+    return existing.importId === incoming.importId;
+  }
+  if (
+    existing.id !== undefined &&
+    existing.id !== null &&
+    incoming.id !== undefined &&
+    incoming.id !== null &&
+    String(existing.id) === String(incoming.id)
+  ) {
+    return true;
+  }
+
+  // 2. ISBN / Identifier
+  const cleanIsbn = (str?: string | null) =>
+    str ? str.replace(/[^0-9xX]/g, "").toUpperCase() : "";
+  const existingIsbn = cleanIsbn(existing.isbn);
+  const incomingIsbn = cleanIsbn(incoming.isbn);
+  if (existingIsbn && incomingIsbn) {
+    return existingIsbn === incomingIsbn;
+  }
+
+  // 3. Author PLUS Normalized Title
+  const existingTitle = cleanString(existing.title || "").toLowerCase();
+  const incomingTitle = cleanString(incoming.title || "").toLowerCase();
+  if (!existingTitle || !incomingTitle) return false;
+
+  const existingAuthor = cleanString(
+    existing.authors || existing.author || "",
+  ).toLowerCase();
+  const incomingAuthor = cleanString(
+    incoming.authors || incoming.author || "",
+  ).toLowerCase();
+
+  // Strict check: NEVER match on title alone! Author must be present and match on both sides.
+  const isExistingUnknown =
+    !existingAuthor ||
+    existingAuthor === "unknown" ||
+    existingAuthor.length < 2;
+  const isIncomingUnknown =
+    !incomingAuthor ||
+    incomingAuthor === "unknown" ||
+    incomingAuthor.length < 2;
+
+  if (isExistingUnknown || isIncomingUnknown) {
+    return false;
+  }
+
+  // Verify authors match or have strong overlap
+  const authorMatch =
+    existingAuthor === incomingAuthor ||
+    existingAuthor.includes(incomingAuthor) ||
+    incomingAuthor.includes(existingAuthor);
+  if (!authorMatch) {
+    return false;
+  }
+
+  // Verify titles match
+  if (existingTitle === incomingTitle) {
+    return true;
+  }
+
+  const minLen = Math.min(existingTitle.length, incomingTitle.length);
+  if (
+    minLen >= 5 &&
+    (existingTitle.startsWith(incomingTitle) ||
+      incomingTitle.startsWith(existingTitle))
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Reads a ReadableStream with a strict byte limit.
+ * If the limit is exceeded, cancels the stream and returns exceeded: true.
+ */
+export async function meterStream(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number,
+): Promise<{ buffer: Buffer; exceeded: boolean; totalBytes: number }> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel("Payload limit exceeded");
+        return { buffer: Buffer.alloc(0), exceeded: true, totalBytes };
+      }
+      chunks.push(value);
+    }
+    return { buffer: Buffer.concat(chunks), exceeded: false, totalBytes };
+  } catch (err) {
+    try {
+      await reader.cancel();
+    } catch (_cancelErr) {
+      void _cancelErr;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Validates that a file is a valid EPUB archive.
+ * Checks minimum size, ZIP magic bytes (PK\x03\x04), and EPUB internal structure (mimetype or container.xml).
+ */
+export function validateEpubContent(filePathOrBuffer: string | Buffer): {
+  valid: boolean;
+  error?: string;
+} {
+  try {
+    let buf: Buffer;
+    if (typeof filePathOrBuffer === "string") {
+      if (!fs.existsSync(filePathOrBuffer)) {
+        return { valid: false, error: "File does not exist" };
+      }
+      const stat = fs.statSync(filePathOrBuffer);
+      if (stat.size < 100) {
+        return {
+          valid: false,
+          error: "File too small to be a valid EPUB archive",
+        };
+      }
+      const fd = fs.openSync(filePathOrBuffer, "r");
+      buf = Buffer.alloc(Math.min(stat.size, 65536));
+      fs.readSync(fd, buf, 0, buf.length, 0);
+      fs.closeSync(fd);
+    } else {
+      buf = filePathOrBuffer;
+      if (buf.length < 100) {
+        return {
+          valid: false,
+          error: "Buffer too small to be a valid EPUB archive",
+        };
+      }
+    }
+
+    // Check ZIP magic bytes: PK\x03\x04
+    if (
+      buf[0] !== 0x50 ||
+      buf[1] !== 0x4b ||
+      buf[2] !== 0x03 ||
+      buf[3] !== 0x04
+    ) {
+      return {
+        valid: false,
+        error: "Invalid EPUB: Missing ZIP container magic bytes",
+      };
+    }
+
+    // Check for EPUB indicators: 'mimetype' or 'META-INF/container.xml' or 'application/epub+zip'
+    const sample = buf.toString("latin1");
+    const hasMimetype = sample.includes("mimetype");
+    const hasContainer =
+      sample.includes("META-INF/container.xml") ||
+      sample.includes("container.xml");
+    const hasEpubZip = sample.includes("application/epub+zip");
+
+    if (!hasMimetype && !hasContainer && !hasEpubZip) {
+      return {
+        valid: false,
+        error: "Invalid EPUB: Archive missing EPUB structure or mimetype",
+      };
+    }
+
+    // If a file path is provided, apply archive safety limits to EPUB ZIP contents
+    if (typeof filePathOrBuffer === "string") {
+      const tarCmd = fs.existsSync("/usr/bin/bsdtar")
+        ? "/usr/bin/bsdtar"
+        : fs.existsSync("/usr/local/bin/bsdtar")
+          ? "/usr/local/bin/bsdtar"
+          : "tar";
+      const listRes = spawnSync(tarCmd, ["-tvf", filePathOrBuffer], {
+        encoding: "utf8",
+        timeout: 10000,
+      });
+
+      if (listRes.status === 0 && listRes.stdout) {
+        const lines = listRes.stdout
+          .split("\n")
+          .filter((l: string) => l.trim().length > 0);
+        if (lines.length > 500) {
+          return {
+            valid: false,
+            error: `Invalid EPUB: Archive contains ${lines.length} entries, exceeding limit of 500`,
+          };
+        }
+
+        let totalUncompressed = 0;
+        for (const line of lines) {
+          const tokens = line.trim().split(/\s+/);
+          if (tokens.length >= 9) {
+            const mode = tokens[0];
+            const size = parseInt(tokens[4], 10);
+            const entryName = tokens.slice(8).join(" ");
+
+            // Reject symlinks, hardlinks, or path traversal inside EPUB zip
+            if (mode.startsWith("l") || line.includes(" -> ")) {
+              return {
+                valid: false,
+                error: `Invalid EPUB: Prohibited symlink entry "${entryName}"`,
+              };
+            }
+            if (mode.startsWith("h") || line.includes(" link to ")) {
+              return {
+                valid: false,
+                error: `Invalid EPUB: Prohibited hardlink entry "${entryName}"`,
+              };
+            }
+            if (
+              entryName.includes("..") ||
+              entryName.startsWith("/") ||
+              entryName.startsWith("\\") ||
+              /^[a-zA-Z]:[\\/]/.test(entryName)
+            ) {
+              return {
+                valid: false,
+                error: `Invalid EPUB: Path traversal in entry "${entryName}"`,
+              };
+            }
+
+            if (!isNaN(size) && size > 0) {
+              if (size > 150 * 1024 * 1024) {
+                return {
+                  valid: false,
+                  error: `Invalid EPUB: Entry "${entryName}" exceeds 150MB limit`,
+                };
+              }
+              totalUncompressed += size;
+            }
+          }
+        }
+
+        if (totalUncompressed > 250 * 1024 * 1024) {
+          return {
+            valid: false,
+            error:
+              "Invalid EPUB: Total uncompressed content exceeds 250MB limit",
+          };
+        }
+
+        const stat = fs.statSync(filePathOrBuffer);
+        if (stat.size > 0 && totalUncompressed > 5 * 1024 * 1024) {
+          const ratio = totalUncompressed / stat.size;
+          if (ratio > 100) {
+            return {
+              valid: false,
+              error: `Invalid EPUB: Compression ratio ${Math.round(ratio)}:1 exceeds limit of 100:1`,
+            };
+          }
+        }
+      }
+    }
+
+    return { valid: true };
+  } catch (err: any) {
+    return {
+      valid: false,
+      error: `EPUB validation error: ${err?.message || err}`,
+    };
+  }
+}
+
+export interface SafeFetchOptions {
+  maxRedirects?: number;
+  maxBytes?: number;
+  timeoutMs?: number;
+  headers?: Record<string, string>;
+  proxy?: string;
+  allowProxyBypass?: boolean;
+}
+
+export interface SafeFetchResult {
+  ok: boolean;
+  status: number;
+  statusText: string;
+  headers: Headers;
+  buffer: Buffer;
+  finalUrl: string;
+  contentType: string;
+}
+
+/**
+ * Performs an outbound HTTP fetch guarded against SSRF.
+ * Validates initial URL and EVERY redirect target against private IPs,
+ * strictly enforces response byte limits, and sets request timeouts.
+ */
+export async function safeFetchWithSsrf(
+  initialUrl: string,
+  options: SafeFetchOptions = {},
+): Promise<SafeFetchResult> {
+  const maxRedirects = options.maxRedirects ?? 5;
+  const maxBytes = options.maxBytes ?? 25 * 1024 * 1024; // 25MB default
+  const timeoutMs = options.timeoutMs ?? 20000;
+  const allowProxyBypass = options.allowProxyBypass ?? true;
+
+  let currentUrl = initialUrl;
+  let redirectCount = 0;
+
+  while (true) {
+    const ssrfCheck = await validateUrlForSSRF(currentUrl, {
+      allowProxyBypass,
+    });
+    if (!ssrfCheck.safe) {
+      throw new Error(
+        `SSRF validation blocked request to ${currentUrl}: ${ssrfCheck.error || "Unsafe destination"}`,
+      );
+    }
+
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(currentUrl);
+    } catch (urlErr: any) {
+      throw new Error(`Invalid URL: ${urlErr?.message || urlErr}`);
+    }
+
+    const hostname = parsedUrl.hostname.toLowerCase();
+    const originalHost = parsedUrl.host;
+
+    // Resolve and pin connection IP address to prevent DNS rebinding attacks
+    // Applies equally to direct and proxied requests
+    const fetchHeaders = { ...(options.headers || {}), Host: originalHost };
+    const fetchOptions: any = {
+      headers: fetchHeaders,
+      redirect: "manual",
+      signal: AbortSignal.timeout(timeoutMs),
+    };
+
+    if (ssrfCheck.resolvedIp && !net.isIP(hostname)) {
+      // Connect directly to the verified numeric IP with TLS SNI servername
+      parsedUrl.hostname = ssrfCheck.resolvedIp;
+      if (parsedUrl.protocol === "https:") {
+        fetchOptions.tls = { servername: hostname };
+      }
+      currentUrl = parsedUrl.href;
+    }
+
+    if (options.proxy) {
+      fetchOptions.proxy = options.proxy;
+    }
+
+    const res = await fetch(currentUrl, fetchOptions);
+
+    // Handle redirects (301, 302, 303, 307, 308)
+    if ([301, 302, 303, 307, 308].includes(res.status)) {
+      const location = res.headers.get("location");
+      if (!location) {
+        throw new Error(
+          `Redirect response (${res.status}) missing Location header`,
+        );
+      }
+      redirectCount++;
+      if (redirectCount > maxRedirects) {
+        throw new Error(`Exceeded maximum redirect limit of ${maxRedirects}`);
+      }
+      try {
+        currentUrl = new URL(location, currentUrl).href;
+      } catch (locErr: any) {
+        throw new Error(
+          `Invalid redirect Location: ${locErr?.message || locErr}`,
+        );
+      }
+      continue;
+    }
+
+    // Check Content-Length header if present
+    const clHeader = res.headers.get("content-length");
+    if (clHeader) {
+      const cl = parseInt(clHeader, 10);
+      if (!isNaN(cl) && cl > maxBytes) {
+        throw new Error(
+          `Response size (${Math.round(cl / 1024 / 1024)}MB) exceeds limit of ${Math.round(maxBytes / 1024 / 1024)}MB`,
+        );
+      }
+    }
+
+    // Stream and cap response bytes
+    if (!res.body) {
+      return {
+        ok: res.ok,
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers,
+        buffer: Buffer.alloc(0),
+        finalUrl: currentUrl,
+        contentType: res.headers.get("content-type") || "",
+      };
+    }
+
+    const metered = await meterStream(res.body, maxBytes);
+    if (metered.exceeded) {
+      throw new Error(
+        `Response exceeded maximum allowed size of ${Math.round(maxBytes / 1024 / 1024)}MB`,
+      );
+    }
+
+    return {
+      ok: res.ok,
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+      buffer: metered.buffer,
+      finalUrl: currentUrl,
+      contentType: res.headers.get("content-type") || "",
+    };
+  }
 }

@@ -5,9 +5,16 @@ import crypto from "node:crypto";
 import process from "node:process";
 import { Buffer } from "node:buffer";
 import { cleanString, isAllowedCoverUrl } from "./scraper";
-import { validateUrlForSSRF } from "./security";
+import {
+  validateUrlForSSRF,
+  safeFetchWithSsrf,
+  getDropDir,
+  SafeFetchResult,
+} from "./security";
+import { withCalibreLock } from "./jobs";
 
-const DROP_DIR = "/Users/ospeto/Books_Drop";
+export { getDropDir };
+
 const SERVER_URL = "http://127.0.0.1:8088";
 const PROXY_URL = "http://127.0.0.1:7890";
 const EBOOK_CONVERT_PATH = "/opt/homebrew/bin/ebook-convert";
@@ -15,10 +22,6 @@ const CALIBREDB_PATH = "/opt/homebrew/bin/calibredb";
 const FETCH_TIMEOUT_MS = 15000;
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
-
-if (!fs.existsSync(DROP_DIR)) {
-  fs.mkdirSync(DROP_DIR, { recursive: true });
-}
 
 export interface ExtractedArticle {
   url: string;
@@ -84,14 +87,18 @@ export function extractUrlFromText(text: string): string | null {
   const trimmed = text.trim();
 
   // Handle explicit commands: /epub <url>, /article <url>, /read <url>
-  const commandMatch = trimmed.match(/^\/(?:epub|read|article|url)\s+(https?:\/\/\S+)/i);
+  const commandMatch = trimmed.match(
+    /^\/(?:epub|read|article|url)\s+(https?:\/\/\S+)/i,
+  );
   if (commandMatch) {
     const candidate = cleanExtractedUrl(commandMatch[1]);
     if (!isInternalTelegramUrl(candidate)) return candidate;
   }
 
   // Find any http:// or https:// URL in message
-  const urlMatches = trimmed.match(/https?:\/\/[^\s<>"'()]+(?:\([^\s<>"']+\)|[^\s<>"'.,:;!?(){}[\]])/gi);
+  const urlMatches = trimmed.match(
+    /https?:\/\/[^\s<>"'()]+(?:\([^\s<>"']+\)|[^\s<>"'.,:;!?(){}[\]])/gi,
+  );
   if (!urlMatches) return null;
 
   for (const raw of urlMatches) {
@@ -132,7 +139,7 @@ export interface PaywallCheckResult {
 export function isPaywallOrGarbage(
   text: string,
   linkTextLen?: number,
-  totalTextLen?: number
+  totalTextLen?: number,
 ): PaywallCheckResult {
   if (!text) {
     return { isPaywall: true, reason: "Empty content" };
@@ -161,7 +168,7 @@ export function isPaywallOrGarbage(
         .replace(/!\[([^\]]*)\]\([^\)]+\)/g, "")
         .replace(/[#*_`~-]/g, " ")
         .replace(/\s+/g, " ")
-        .trim()
+        .trim(),
     );
     totalTextLen = plain.length;
   }
@@ -219,14 +226,16 @@ export function isPaywallOrGarbage(
         .replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "")
         .replace(/<[^>]+>/g, " ")
         .replace(/[#*_`~|]/g, " ")
-        .trim()
+        .trim(),
     );
     if (cleanLine) {
       proseParts.push(cleanLine);
     }
   }
   const proseStr = proseParts.join(" ").replace(/\s+/g, " ").trim();
-  const proseWordCount = proseStr ? proseStr.split(/\s+/).filter(Boolean).length : 0;
+  const proseWordCount = proseStr
+    ? proseStr.split(/\s+/).filter(Boolean).length
+    : 0;
 
   if (proseWordCount < 150) {
     return {
@@ -254,17 +263,39 @@ export function cleanMarkdownNoise(md: string): string {
   let text = md.replace(/\r\n/g, "\n");
 
   // 1. Strip boilerplate sections ('Most Read', 'Popular Searches', 'Explore more offers', 'Related Stories', 'Share this article')
-  const boilerplatePattern = /(?:^|\n)#{1,6}\s*(?:Most Read|Popular Searches|Explore more offers|Related Stories|Related Articles|Related Posts|Share this article|Share this story|Trending Stories|More from|Recommended Stories|FT recommends|Top sections|Useful links|Explore our full range of subscriptions|Try unlimited access)[\s\S]*?(?=(?:\n#{1,6}\s+)|$)/gi;
+  const boilerplatePattern =
+    /(?:^|\n)#{1,6}\s*(?:Most Read|Popular Searches|Explore more offers|Related Stories|Related Articles|Related Posts|Share this article|Share this story|Trending Stories|More from|Recommended Stories|FT recommends|Top sections|Useful links|Explore our full range of subscriptions|Try unlimited access)[\s\S]*?(?=(?:\n#{1,6}\s+)|$)/gi;
   text = text.replace(boilerplatePattern, "\n");
 
-  text = text.replace(/^(?:Most Read|Popular Searches|Explore more offers|Related Stories|Sections|Search the FT[^\n]*)\s*$/gim, "");
+  text = text.replace(
+    /^(?:Most Read|Popular Searches|Explore more offers|Related Stories|Sections|Search the FT[^\n]*)\s*$/gim,
+    "",
+  );
 
   // 2. Strip leading and trailing navigation lists
   const navKeywords = [
-    "home", "world", "sections", "sign in", "subscribe", "terms", "privacy", "accessibility help",
-    "skip to navigation", "skip to content", "skip to main content", "skip to footer",
-    "open side navigation", "close search bar", "search the ft", "feedback", "menu", "search",
-    "financial times", "top sections", "useful links", "edition"
+    "home",
+    "world",
+    "sections",
+    "sign in",
+    "subscribe",
+    "terms",
+    "privacy",
+    "accessibility help",
+    "skip to navigation",
+    "skip to content",
+    "skip to main content",
+    "skip to footer",
+    "open side navigation",
+    "close search bar",
+    "search the ft",
+    "feedback",
+    "menu",
+    "search",
+    "financial times",
+    "top sections",
+    "useful links",
+    "edition",
   ];
 
   const isNavLine = (line: string): boolean => {
@@ -275,10 +306,15 @@ export function cleanMarkdownNoise(md: string): string {
     const hasKeyword = navKeywords.some((k) => lower.includes(k));
 
     // Nav buttons or links like [Menu](...) or [Search](...)
-    if (/^\[[^\]]+\]\([^\)]*\)/.test(trimmed) && (hasKeyword || lower.length < 25)) return true;
+    if (
+      /^\[[^\]]+\]\([^\)]*\)/.test(trimmed) &&
+      (hasKeyword || lower.length < 25)
+    )
+      return true;
     // List item link
     if (/^[-*+]\s+/.test(trimmed) || /^\d+\.\s+/.test(trimmed)) {
-      if (hasKeyword || /^[-*+]\s+\[[^\]]+\]\([^\)]+\)$/.test(trimmed)) return true;
+      if (hasKeyword || /^[-*+]\s+\[[^\]]+\]\([^\)]+\)$/.test(trimmed))
+        return true;
     }
     if (/^(?:open|close)\s+/i.test(trimmed)) return true;
     return false;
@@ -289,7 +325,10 @@ export function cleanMarkdownNoise(md: string): string {
   // If text starts with Jina Reader metadata header ("Title: ... URL Source: ... Markdown Content:")
   const mdMarkerIdx = text.indexOf("Markdown Content:\n");
   if (mdMarkerIdx !== -1) {
-    const headerPrefix = text.slice(0, mdMarkerIdx + "Markdown Content:\n".length);
+    const headerPrefix = text.slice(
+      0,
+      mdMarkerIdx + "Markdown Content:\n".length,
+    );
     const rest = text.slice(mdMarkerIdx + "Markdown Content:\n".length);
     return headerPrefix + cleanMarkdownNoise(rest);
   }
@@ -324,21 +363,46 @@ export function cleanDirectHtml(rawHtml: string): string {
 
   // 2. Intrusive & non-content tags entirely:
   // <nav>, <header>, <footer>, <aside>, <form>, <map>, <area>, <noscript>, <style>, <script>, <iframe>, <svg>
-  workHtml = workHtml.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "");
-  workHtml = workHtml.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "");
-  workHtml = workHtml.replace(/<noscript\b[^<]*(?:(?!<\/noscript>)<[^<]*)*<\/noscript>/gi, "");
-  workHtml = workHtml.replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi, "");
+  workHtml = workHtml.replace(
+    /<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi,
+    "",
+  );
+  workHtml = workHtml.replace(
+    /<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi,
+    "",
+  );
+  workHtml = workHtml.replace(
+    /<noscript\b[^<]*(?:(?!<\/noscript>)<[^<]*)*<\/noscript>/gi,
+    "",
+  );
+  workHtml = workHtml.replace(
+    /<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi,
+    "",
+  );
   workHtml = workHtml.replace(/<svg\b[^<]*(?:(?!<\/svg>)<[^<]*)*<\/svg>/gi, "");
   workHtml = workHtml.replace(/<nav\b[^<]*(?:(?!<\/nav>)<[^<]*)*<\/nav>/gi, "");
-  workHtml = workHtml.replace(/<header\b[^<]*(?:(?!<\/header>)<[^<]*)*<\/header>/gi, "");
-  workHtml = workHtml.replace(/<footer\b[^<]*(?:(?!<\/footer>)<[^<]*)*<\/footer>/gi, "");
-  workHtml = workHtml.replace(/<aside\b[^<]*(?:(?!<\/aside>)<[^<]*)*<\/aside>/gi, "");
-  workHtml = workHtml.replace(/<form\b[^<]*(?:(?!<\/form>)<[^<]*)*<\/form>/gi, "");
+  workHtml = workHtml.replace(
+    /<header\b[^<]*(?:(?!<\/header>)<[^<]*)*<\/header>/gi,
+    "",
+  );
+  workHtml = workHtml.replace(
+    /<footer\b[^<]*(?:(?!<\/footer>)<[^<]*)*<\/footer>/gi,
+    "",
+  );
+  workHtml = workHtml.replace(
+    /<aside\b[^<]*(?:(?!<\/aside>)<[^<]*)*<\/aside>/gi,
+    "",
+  );
+  workHtml = workHtml.replace(
+    /<form\b[^<]*(?:(?!<\/form>)<[^<]*)*<\/form>/gi,
+    "",
+  );
   workHtml = workHtml.replace(/<map\b[^<]*(?:(?!<\/map>)<[^<]*)*<\/map>/gi, "");
   workHtml = workHtml.replace(/<area\b[^>]*\/?>/gi, "");
 
   // 3. Strip elements with classes/ids matching: nav, menu, sidebar, breadcrumb, footer, share-buttons, social-share, related-posts, ad, banner
-  const noiseClassIdRegex = /<(div|section|aside|ul|ol|p|span|table|td|nav|header|footer)\b[^>]*(?:class|id)=["'][^"']*(?:nav|menu|sidebar|breadcrumb|footer|share-buttons|social-share|related-posts|ad|banner|cookie|popup|newsletter|subscribe)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi;
+  const noiseClassIdRegex =
+    /<(div|section|aside|ul|ol|p|span|table|td|nav|header|footer)\b[^>]*(?:class|id)=["'][^"']*(?:nav|menu|sidebar|breadcrumb|footer|share-buttons|social-share|related-posts|ad|banner|cookie|popup|newsletter|subscribe)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi;
   for (let i = 0; i < 3; i++) {
     workHtml = workHtml.replace(noiseClassIdRegex, "");
   }
@@ -349,7 +413,10 @@ export function cleanDirectHtml(rawHtml: string): string {
 
   // 5. Clean empty table cells and layout rows
   for (let i = 0; i < 3; i++) {
-    workHtml = workHtml.replace(/<td\b[^>]*>\s*(?:&nbsp;|<br\s*\/?>|\s)*<\/td>/gi, "");
+    workHtml = workHtml.replace(
+      /<td\b[^>]*>\s*(?:&nbsp;|<br\s*\/?>|\s)*<\/td>/gi,
+      "",
+    );
     workHtml = workHtml.replace(/<tr\b[^>]*>\s*<\/tr>/gi, "");
     workHtml = workHtml.replace(/<table\b[^>]*>\s*<\/table>/gi, "");
   }
@@ -361,7 +428,7 @@ export function cleanDirectHtml(rawHtml: string): string {
       (match, inner) => {
         if (/<tr\b/i.test(inner)) return match;
         return inner;
-      }
+      },
     );
   }
 
@@ -395,7 +462,7 @@ export function decodeHtmlEntities(str: string): string {
 
   let res = str.replace(
     /&(?:amp|lt|gt|quot|#39|apos|nbsp|mdash|ndash|hellip|lsquo|rsquo|ldquo|rdquo|copy|reg|trade);/gi,
-    (m) => entities[m.toLowerCase()] || m
+    (m) => entities[m.toLowerCase()] || m,
   );
   res = res.replace(/&#([0-9]+);/g, (_, num) => {
     try {
@@ -493,7 +560,10 @@ export function isCloudflareChallenge(html: string): boolean {
 /**
  * Parse metadata header and body markdown returned by Jina Reader.
  */
-export function parseJinaMarkdown(rawText: string, originalUrl: string): {
+export function parseJinaMarkdown(
+  rawText: string,
+  originalUrl: string,
+): {
   title: string;
   url: string;
   publishedTime?: string;
@@ -541,7 +611,9 @@ export function parseJinaMarkdown(rawText: string, originalUrl: string): {
 
   // If no image from header, check for leading markdown image in the first 2000 chars of body
   if (!imageUrl) {
-    const leadImgMatch = bodyMarkdown.substring(0, 2000).match(/!\[.*?\]\((https?:\/\/[^\s\)]+)\)/);
+    const leadImgMatch = bodyMarkdown
+      .substring(0, 2000)
+      .match(/!\[.*?\]\((https?:\/\/[^\s\)]+)\)/);
     if (leadImgMatch) {
       imageUrl = leadImgMatch[1];
     }
@@ -559,15 +631,18 @@ export function markdownToHtml(md: string): string {
 
   // Code blocks: ```lang ... ```
   const codeBlocks: string[] = [];
-  html = html.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, _lang, code) => {
-    const idx = codeBlocks.length;
-    const escaped = code
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-    codeBlocks.push(`<pre><code>${escaped}</code></pre>`);
-    return `\x01CODEBLOCK${idx}\x02`;
-  });
+  html = html.replace(
+    /```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g,
+    (_, _lang, code) => {
+      const idx = codeBlocks.length;
+      const escaped = code
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      codeBlocks.push(`<pre><code>${escaped}</code></pre>`);
+      return `\x01CODEBLOCK${idx}\x02`;
+    },
+  );
 
   // Inline code: `...`
   const inlineCodes: string[] = [];
@@ -584,13 +659,21 @@ export function markdownToHtml(md: string): string {
   // Markdown tables
   const tableRegex = /^\|(.+)\|\r?\n\|[-:\s|]+\|\r?\n((?:\|.*\|\r?\n?)*)/gm;
   html = html.replace(tableRegex, (_, headerLine, rowsBlock) => {
-    const headers = headerLine.split("|").map((h: string) => h.trim()).filter(Boolean);
+    const headers = headerLine
+      .split("|")
+      .map((h: string) => h.trim())
+      .filter(Boolean);
     const ths = headers.map((h: string) => `<th>${h}</th>`).join("");
     const rows = rowsBlock.trim().split("\n").filter(Boolean);
-    const trs = rows.map((row: string) => {
-      const cells = row.split("|").map((c: string) => c.trim()).filter(Boolean);
-      return `<tr>${cells.map((c: string) => `<td>${c}</td>`).join("")}</tr>`;
-    }).join("");
+    const trs = rows
+      .map((row: string) => {
+        const cells = row
+          .split("|")
+          .map((c: string) => c.trim())
+          .filter(Boolean);
+        return `<tr>${cells.map((c: string) => `<td>${c}</td>`).join("")}</tr>`;
+      })
+      .join("");
     return `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>\n\n`;
   });
 
@@ -632,24 +715,43 @@ export function markdownToHtml(md: string): string {
   html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, "<ul>$1</ul>");
 
   // Normalize newlines around block tags for clean paragraph splitting
-  html = html.replace(/(<(?:h[1-6]|ul|ol|blockquote|table|figure|hr)[^>]*>)/g, "\n\n$1");
-  html = html.replace(/(<\/(?:h[1-6]|ul|ol|blockquote|table|figure)>|<hr\s*\/?>)/g, "$1\n\n");
+  html = html.replace(
+    /(<(?:h[1-6]|ul|ol|blockquote|table|figure|hr)[^>]*>)/g,
+    "\n\n$1",
+  );
+  html = html.replace(
+    /(<\/(?:h[1-6]|ul|ol|blockquote|table|figure)>|<hr\s*\/?>)/g,
+    "$1\n\n",
+  );
 
   // Paragraphs
   const blocks = html.split(/\n\n+/);
-  html = blocks.map((block) => {
-    const trimmed = block.trim();
-    if (!trimmed) return "";
-    if (/^(<h[1-6]|<ul|<ol|<li|<blockquote|<pre|<figure|<hr|<table)/i.test(trimmed)) {
-      return trimmed;
-    }
-    if (trimmed.startsWith("\x01CODEBLOCK")) return trimmed;
-    return `<p>${trimmed.replace(/\n/g, "<br />")}</p>`;
-  }).filter(Boolean).join("\n\n");
+  html = blocks
+    .map((block) => {
+      const trimmed = block.trim();
+      if (!trimmed) return "";
+      if (
+        /^(<h[1-6]|<ul|<ol|<li|<blockquote|<pre|<figure|<hr|<table)/i.test(
+          trimmed,
+        )
+      ) {
+        return trimmed;
+      }
+      if (trimmed.startsWith("\x01CODEBLOCK")) return trimmed;
+      return `<p>${trimmed.replace(/\n/g, "<br />")}</p>`;
+    })
+    .filter(Boolean)
+    .join("\n\n");
 
   // Restore code blocks and inline code
-  html = html.replace(/\x01CODEBLOCK(\d+)\x02/g, (_, idx) => codeBlocks[Number(idx)]);
-  html = html.replace(/\x01INLINECODE(\d+)\x02/g, (_, idx) => inlineCodes[Number(idx)]);
+  html = html.replace(
+    /\x01CODEBLOCK(\d+)\x02/g,
+    (_, idx) => codeBlocks[Number(idx)],
+  );
+  html = html.replace(
+    /\x01INLINECODE(\d+)\x02/g,
+    (_, idx) => inlineCodes[Number(idx)],
+  );
 
   return html;
 }
@@ -757,7 +859,11 @@ export function buildStyledHtmlDocument(opts: StyledDocumentOptions): string {
 /**
  * Helper to wrap text into lines with character constraints.
  */
-export function wrapText(text: string, maxCharsPerLine = 22, maxLines = 5): string[] {
+export function wrapText(
+  text: string,
+  maxCharsPerLine = 22,
+  maxLines = 5,
+): string[] {
   const words = text.split(/\s+/).filter(Boolean);
   if (words.length === 0) return ["Web Article"];
   const lines: string[] = [];
@@ -800,7 +906,7 @@ export function generateTypographicCover(
   title: string,
   author: string,
   siteName: string,
-  readTimeMinutes?: number
+  readTimeMinutes?: number,
 ): string {
   const randomSuffix = `${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
   const tempSvg = `/tmp/typo_cover_${randomSuffix}.svg`;
@@ -809,15 +915,21 @@ export function generateTypographicCover(
   const safeTitle = cleanString(title) || "Web Article";
   const safeAuthor = cleanString(author) || "Unknown Author";
   const safeSite = (cleanString(siteName) || "Web Article").toUpperCase();
-  const readInfo = readTimeMinutes ? `${readTimeMinutes} MIN READ • WEB ARTICLE` : "WEB ARTICLE";
+  const readInfo = readTimeMinutes
+    ? `${readTimeMinutes} MIN READ • WEB ARTICLE`
+    : "WEB ARTICLE";
 
   const titleLines = wrapText(safeTitle, 22, 5);
-  const fontSize = titleLines.length <= 2 ? 44 : titleLines.length === 3 ? 38 : 32;
+  const fontSize =
+    titleLines.length <= 2 ? 44 : titleLines.length === 3 ? 38 : 32;
   const lineHeight = fontSize + 12;
   const startY = 220;
 
   const titleTspans = titleLines
-    .map((line, idx) => `<tspan x="60" y="${startY + idx * lineHeight}">${escapeXml(line)}</tspan>`)
+    .map(
+      (line, idx) =>
+        `<tspan x="60" y="${startY + idx * lineHeight}">${escapeXml(line)}</tspan>`,
+    )
     .join("\n    ");
 
   const badgeText = escapeXml(safeSite);
@@ -865,28 +977,40 @@ export function generateTypographicCover(
 
   fs.writeFileSync(tempSvg, svgContent, "utf8");
 
-  const sipsRes = spawnSync("/usr/bin/sips", ["-s", "format", "jpeg", tempSvg, "--out", tempJpg], {
-    encoding: "utf8",
-    timeout: 15000,
-  });
+  // Check if /usr/bin/sips is available (macOS)
+  const hasSips = fs.existsSync("/usr/bin/sips");
+  if (hasSips) {
+    const sipsRes = spawnSync(
+      "/usr/bin/sips",
+      ["-s", "format", "jpeg", tempSvg, "--out", tempJpg],
+      {
+        encoding: "utf8",
+        timeout: 15000,
+      },
+    );
 
-  try {
-    fs.unlinkSync(tempSvg);
-  } catch (_err) {
-    void _err;
+    if (sipsRes.status === 0 && fs.existsSync(tempJpg)) {
+      try {
+        fs.unlinkSync(tempSvg);
+      } catch (_err) {
+        void _err;
+      }
+      return tempJpg;
+    }
   }
 
-  if (sipsRes.status !== 0 || !fs.existsSync(tempJpg)) {
-    throw new Error(`Failed to generate typographic cover via sips: ${sipsRes.stderr || "Unknown error"}`);
-  }
-
-  return tempJpg;
+  // Graceful pure SVG fallback when sips is absent or fails (portable across Linux/Docker)
+  // Calibre ebook-convert and the EPUB standard natively support SVG covers
+  return tempSvg;
 }
 
 /**
  * Download a candidate web cover image and convert to standardized JPEG.
  */
-export async function downloadCoverImage(imageUrl: string, articleUrl: string): Promise<string | null> {
+export async function downloadCoverImage(
+  imageUrl: string,
+  articleUrl: string,
+): Promise<string | null> {
   let resolvedUrl: string;
   try {
     resolvedUrl = new URL(imageUrl, articleUrl).href;
@@ -903,35 +1027,62 @@ export async function downloadCoverImage(imageUrl: string, articleUrl: string): 
   const tempJpg = `/tmp/article_cover_${randomSuffix}.jpg`;
 
   try {
-    const res = await fetch(resolvedUrl, {
+    const fetchRes = await safeFetchWithSsrf(resolvedUrl, {
       headers: {
         "User-Agent": BROWSER_USER_AGENT,
-        Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        Accept:
+          "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
       },
       proxy: PROXY_URL,
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    } as any);
+      maxBytes: 10 * 1024 * 1024,
+      timeoutMs: FETCH_TIMEOUT_MS,
+    });
 
-    if (!res.ok) return null;
+    if (!fetchRes.ok || fetchRes.buffer.length < 1024) return null;
 
-    const contentType = res.headers.get("content-type") || "";
-    if (contentType && !contentType.includes("image") && !contentType.includes("octet-stream")) {
+    const contentType = fetchRes.contentType.toLowerCase();
+    if (
+      contentType &&
+      !contentType.includes("image") &&
+      !contentType.includes("octet-stream")
+    ) {
       return null;
     }
 
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length < 1024) return null;
+    fs.writeFileSync(tempRaw, fetchRes.buffer);
 
-    fs.writeFileSync(tempRaw, buf);
+    const hasSips = fs.existsSync("/usr/bin/sips");
+    if (hasSips) {
+      const sipsRes = spawnSync(
+        "/usr/bin/sips",
+        ["-s", "format", "jpeg", tempRaw, "--out", tempJpg],
+        {
+          encoding: "utf8",
+          timeout: 15000,
+        },
+      );
 
-    const sipsRes = spawnSync("/usr/bin/sips", ["-s", "format", "jpeg", tempRaw, "--out", tempJpg], {
-      encoding: "utf8",
-      timeout: 15000,
-    });
-
-    if (sipsRes.status === 0 && fs.existsSync(tempJpg) && fs.statSync(tempJpg).size > 1024) {
-      return tempJpg;
+      if (
+        sipsRes.status === 0 &&
+        fs.existsSync(tempJpg) &&
+        fs.statSync(tempJpg).size > 1024
+      ) {
+        return tempJpg;
+      }
     }
+
+    // Portable fallback: if sips is absent or fails, preserve raw downloaded image
+    if (fs.existsSync(tempRaw) && fs.statSync(tempRaw).size > 1024) {
+      const ext = contentType.includes("png")
+        ? ".png"
+        : contentType.includes("webp")
+          ? ".webp"
+          : ".jpg";
+      const fallbackImg = `/tmp/article_cover_${randomSuffix}${ext}`;
+      fs.copyFileSync(tempRaw, fallbackImg);
+      return fallbackImg;
+    }
+
     return null;
   } catch (_err) {
     void _err;
@@ -953,30 +1104,32 @@ export async function downloadCoverImage(imageUrl: string, articleUrl: string): 
  */
 export async function extractArticleViaJina(
   url: string,
-  fallbackHostname?: string
+  fallbackHostname?: string,
 ): Promise<ExtractedArticle> {
   const jinaUrl = `https://r.jina.ai/${encodeURI(url)}`;
   console.log(`[Article] Fetching via Jina Reader: ${jinaUrl}`);
 
-  let res: Response;
+  let fetchRes: SafeFetchResult;
   try {
-    res = await fetch(jinaUrl, {
+    fetchRes = await safeFetchWithSsrf(jinaUrl, {
       headers: {
         "X-Return-Format": "markdown",
-        Accept: "text/markdown, text/plain, */*"
+        Accept: "text/markdown, text/plain, */*",
       },
       proxy: PROXY_URL,
-      signal: AbortSignal.timeout(30000)
-    } as any);
+      timeoutMs: 30000,
+    });
   } catch (err: any) {
     throw new Error(`Jina Reader connection failed: ${err.message}`);
   }
 
-  if (!res.ok) {
-    throw new Error(`Jina Reader fallback failed (HTTP ${res.status} ${res.statusText})`);
+  if (!fetchRes.ok) {
+    throw new Error(
+      `Jina Reader fallback failed (HTTP ${fetchRes.status} ${fetchRes.statusText})`,
+    );
   }
 
-  const rawMd = await res.text();
+  const rawMd = fetchRes.buffer.toString("utf8");
   if (!rawMd || rawMd.trim().length === 0) {
     throw new Error("Jina Reader returned empty response");
   }
@@ -994,12 +1147,12 @@ export async function extractArticleViaJina(
       }
     })();
 
-  let title = cleanString(parsed.title);
+  let title = cleanString(parsed.title || "");
   if (!title || title.length < 2) {
     title = `Article from ${hostname}`;
   }
 
-  let author = cleanString(parsed.author);
+  let author = cleanString(parsed.author || "");
   if (!author || author.toLowerCase() === "unknown" || author.length < 2) {
     author = hostname;
   }
@@ -1010,7 +1163,11 @@ export async function extractArticleViaJina(
     try {
       const p = new Date(parsed.publishedTime);
       if (!isNaN(p.getTime())) {
-        publishedDate = p.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+        publishedDate = p.toLocaleDateString("en-US", {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+        });
       } else {
         publishedDate = parsed.publishedTime.split("T")[0];
       }
@@ -1028,7 +1185,12 @@ export async function extractArticleViaJina(
     throw new Error(PAYWALL_ERROR_MESSAGE);
   }
 
-  const textOnly = decodeHtmlEntities(cleanedHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+  const textOnly = decodeHtmlEntities(
+    cleanedHtml
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim(),
+  );
   const wordCount = Math.max(1, textOnly.split(/\s+/).filter(Boolean).length);
   const readTimeMinutes = Math.max(1, Math.ceil(wordCount / 200));
 
@@ -1040,7 +1202,7 @@ export async function extractArticleViaJina(
     publishedDate,
     readTimeMinutes,
     wordCount,
-    contentHtml: cleanedHtml
+    contentHtml: cleanedHtml,
   });
 
   // Cover image extraction & generation
@@ -1060,9 +1222,16 @@ export async function extractArticleViaJina(
 
   if (!coverImagePath) {
     try {
-      coverImagePath = generateTypographicCover(title, author, siteName, readTimeMinutes);
+      coverImagePath = generateTypographicCover(
+        title,
+        author,
+        siteName,
+        readTimeMinutes,
+      );
     } catch (coverErr: any) {
-      console.warn(`[Article] Typographic cover generation warning: ${coverErr.message}`);
+      console.warn(
+        `[Article] Typographic cover generation warning: ${coverErr.message}`,
+      );
     }
   }
 
@@ -1082,14 +1251,21 @@ export async function extractArticleViaJina(
 }
 
 /**
- * Execute HTTP request to fetch article web page with proxy routing.
+ * Execute HTTP request to fetch article web page with proxy routing and SSRF protection.
  */
-async function fetchArticlePage(validatedUrl: string): Promise<Response> {
-  return await fetch(validatedUrl, {
+async function fetchArticlePage(validatedUrl: string): Promise<{
+  ok: boolean;
+  status: number;
+  statusText: string;
+  text: () => Promise<string>;
+  headers: Headers;
+}> {
+  const fetchRes = await safeFetchWithSsrf(validatedUrl, {
     headers: {
       "User-Agent":
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
       "Accept-Language": "en-US,en;q=0.9",
       "Sec-Fetch-Dest": "document",
       "Sec-Fetch-Mode": "navigate",
@@ -1098,32 +1274,63 @@ async function fetchArticlePage(validatedUrl: string): Promise<Response> {
       "Upgrade-Insecure-Requests": "1",
     },
     proxy: PROXY_URL,
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    redirect: "follow",
-  } as any);
+    maxBytes: 25 * 1024 * 1024,
+    timeoutMs: FETCH_TIMEOUT_MS,
+  });
+
+  return {
+    ok: fetchRes.ok,
+    status: fetchRes.status,
+    statusText: fetchRes.statusText,
+    headers: fetchRes.headers,
+    text: async () => fetchRes.buffer.toString("utf8"),
+  };
 }
 
 /**
  * Extract author or date from Schema.org JSON-LD scripts.
  */
-function extractFromJsonLd(html: string): { author?: string; publishedDate?: string; title?: string; image?: string } {
-  const result: { author?: string; publishedDate?: string; title?: string; image?: string } = {};
-  const regex = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+function extractFromJsonLd(html: string): {
+  author?: string;
+  publishedDate?: string;
+  title?: string;
+  image?: string;
+} {
+  const result: {
+    author?: string;
+    publishedDate?: string;
+    title?: string;
+    image?: string;
+  } = {};
+  const regex =
+    /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
   let match: RegExpExecArray | null;
 
   while ((match = regex.exec(html)) !== null) {
     try {
       const data = JSON.parse(match[1].trim());
-      const items = Array.isArray(data) ? data : data["@graph"] ? data["@graph"] : [data];
+      const items = Array.isArray(data)
+        ? data
+        : data["@graph"]
+          ? data["@graph"]
+          : [data];
 
       for (const item of items) {
         if (!item || typeof item !== "object") continue;
 
-        if (!result.title && item.headline && typeof item.headline === "string") {
+        if (
+          !result.title &&
+          item.headline &&
+          typeof item.headline === "string"
+        ) {
           result.title = item.headline;
         }
 
-        if (!result.publishedDate && item.datePublished && typeof item.datePublished === "string") {
+        if (
+          !result.publishedDate &&
+          item.datePublished &&
+          typeof item.datePublished === "string"
+        ) {
           result.publishedDate = item.datePublished;
         }
 
@@ -1131,7 +1338,10 @@ function extractFromJsonLd(html: string): { author?: string; publishedDate?: str
           if (typeof item.author === "string") {
             result.author = item.author;
           } else if (Array.isArray(item.author) && item.author[0]) {
-            result.author = typeof item.author[0] === "string" ? item.author[0] : item.author[0].name;
+            result.author =
+              typeof item.author[0] === "string"
+                ? item.author[0]
+                : item.author[0].name;
           } else if (typeof item.author === "object" && item.author.name) {
             result.author = item.author.name;
           }
@@ -1141,12 +1351,19 @@ function extractFromJsonLd(html: string): { author?: string; publishedDate?: str
           if (typeof item.image === "string") {
             result.image = item.image;
           } else if (Array.isArray(item.image) && item.image[0]) {
-            result.image = typeof item.image[0] === "string" ? item.image[0] : item.image[0].url;
+            result.image =
+              typeof item.image[0] === "string"
+                ? item.image[0]
+                : item.image[0].url;
           } else if (typeof item.image === "object" && item.image.url) {
             result.image = item.image.url;
           }
         }
-        if (!result.image && item.thumbnailUrl && typeof item.thumbnailUrl === "string") {
+        if (
+          !result.image &&
+          item.thumbnailUrl &&
+          typeof item.thumbnailUrl === "string"
+        ) {
           result.image = item.thumbnailUrl;
         }
       }
@@ -1162,44 +1379,66 @@ function extractFromJsonLd(html: string): { author?: string; publishedDate?: str
 /**
  * Fetch and extract article metadata and clean readable content from a URL.
  */
-export async function extractArticle(rawUrlInput: string): Promise<ExtractedArticle> {
+export async function extractArticle(
+  rawUrlInput: string,
+): Promise<ExtractedArticle> {
   const validated = validateArticleUrl(rawUrlInput);
   const validatedHref = validated.href;
   const hostname = validated.hostname.replace(/^www\./i, "");
 
   // 1. Fetch the page with standard browser headers and local proxy
-  let res: Response;
+  let res:
+    | {
+        ok: boolean;
+        status: number;
+        statusText: string;
+        text: () => Promise<string>;
+        headers?: Headers;
+      }
+    | Response;
   try {
     res = await fetchArticlePage(validatedHref);
   } catch (err: any) {
     if (err.name === "AbortError" || err.name === "TimeoutError") {
-      console.log(`[Article] Direct fetch timed out, attempting Jina Reader fallback...`);
+      console.log(
+        `[Article] Direct fetch timed out, attempting Jina Reader fallback...`,
+      );
       return await extractArticleViaJina(validatedHref, hostname);
     }
-    console.log(`[Article] Direct fetch error (${err.message}), attempting Jina Reader fallback...`);
+    console.log(
+      `[Article] Direct fetch error (${err.message}), attempting Jina Reader fallback...`,
+    );
     return await extractArticleViaJina(validatedHref, hostname);
   }
 
   if (res.status === 401 || res.status === 403) {
-    console.log(`[Article] Direct fetch blocked (HTTP ${res.status}), attempting Jina Reader fallback...`);
+    console.log(
+      `[Article] Direct fetch blocked (HTTP ${res.status}), attempting Jina Reader fallback...`,
+    );
     return await extractArticleViaJina(validatedHref, hostname);
   }
   if (res.status === 404) {
     throw new Error(`Article page not found (HTTP 404)`);
   }
   if (!res.ok) {
-    console.log(`[Article] Direct fetch blocked (HTTP ${res.status}), attempting Jina Reader fallback...`);
+    console.log(
+      `[Article] Direct fetch blocked (HTTP ${res.status}), attempting Jina Reader fallback...`,
+    );
     return await extractArticleViaJina(validatedHref, hostname);
   }
 
   const rawHtml = await res.text();
   if (!rawHtml || rawHtml.trim().length === 0) {
-    console.log(`[Article] Direct fetch blocked (HTTP ${res.status} empty response), attempting Jina Reader fallback...`);
+    console.log(
+      `[Article] Direct fetch blocked (HTTP ${res.status} empty response), attempting Jina Reader fallback...`,
+    );
     return await extractArticleViaJina(validatedHref, hostname);
   }
 
   if (isCloudflareChallenge(rawHtml)) {
-    console.log(`[Article] Direct fetch blocked (HTTP ${res.status} Cloudflare challenge), attempting Jina Reader fallback...`);
+    console.log(
+      `[Article] Direct fetch blocked (HTTP ${res.status} Cloudflare challenge), attempting Jina Reader fallback...`,
+    );
     return await extractArticleViaJina(validatedHref, hostname);
   }
 
@@ -1207,15 +1446,21 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
   const jsonLd = extractFromJsonLd(rawHtml);
 
   // Site Name
-  const ogSiteMatch = rawHtml.match(/<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']+)["']/i);
+  const ogSiteMatch = rawHtml.match(
+    /<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']+)["']/i,
+  );
   let siteName = cleanString(ogSiteMatch ? ogSiteMatch[1] : "");
   if (!siteName) {
     siteName = hostname;
   }
 
   // Title
-  const ogTitleMatch = rawHtml.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i);
-  const twitterTitleMatch = rawHtml.match(/<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']+)["']/i);
+  const ogTitleMatch = rawHtml.match(
+    /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i,
+  );
+  const twitterTitleMatch = rawHtml.match(
+    /<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']+)["']/i,
+  );
   const titleTagMatch = rawHtml.match(/<title[^>]*>([^<]+)<\/title>/i);
   const h1Match = rawHtml.match(/<h1[^>]*>([^<]+)<\/h1>/i);
 
@@ -1229,7 +1474,9 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
   rawTitle = decodeHtmlEntities(rawTitle).trim();
   // Strip redundant site suffix if present (e.g. "My Title - Sam Altman" or "My Title | The Verge")
   if (siteName && rawTitle.toLowerCase().endsWith(siteName.toLowerCase())) {
-    rawTitle = rawTitle.replace(new RegExp(`[-–—|:]\\s*${siteName}$`, "i"), "").trim();
+    rawTitle = rawTitle
+      .replace(new RegExp(`[-–—|:]\\s*${siteName}$`, "i"), "")
+      .trim();
   }
   let title = cleanString(rawTitle);
   if (!title || title.length < 2) {
@@ -1237,10 +1484,18 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
   }
 
   // Author
-  const metaAuthor = rawHtml.match(/<meta[^>]+name=["']author["'][^>]+content=["']([^"']+)["']/i);
-  const articleAuthor = rawHtml.match(/<meta[^>]+property=["']article:author["'][^>]+content=["']([^"']+)["']/i);
-  const twitterCreator = rawHtml.match(/<meta[^>]+name=["']twitter:creator["'][^>]+content=["']([^"']+)["']/i);
-  const bylineMatch = rawHtml.match(/<(?:span|div|p|a)[^>]+class=["'][^"']*(?:author|byline)[^"']*["'][^>]*>([^<]+)<\//i);
+  const metaAuthor = rawHtml.match(
+    /<meta[^>]+name=["']author["'][^>]+content=["']([^"']+)["']/i,
+  );
+  const articleAuthor = rawHtml.match(
+    /<meta[^>]+property=["']article:author["'][^>]+content=["']([^"']+)["']/i,
+  );
+  const twitterCreator = rawHtml.match(
+    /<meta[^>]+name=["']twitter:creator["'][^>]+content=["']([^"']+)["']/i,
+  );
+  const bylineMatch = rawHtml.match(
+    /<(?:span|div|p|a)[^>]+class=["'][^"']*(?:author|byline)[^"']*["'][^>]*>([^<]+)<\//i,
+  );
 
   let rawAuthor =
     jsonLd.author ||
@@ -1256,11 +1511,19 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
   }
 
   // Published Date
-  const ogPubDate = rawHtml.match(/<meta[^>]+property=["']article:published_time["'][^>]+content=["']([^"']+)["']/i);
-  const metaDate = rawHtml.match(/<meta[^>]+name=["'](?:date|pubdate)["'][^>]+content=["']([^"']+)["']/i);
+  const ogPubDate = rawHtml.match(
+    /<meta[^>]+property=["']article:published_time["'][^>]+content=["']([^"']+)["']/i,
+  );
+  const metaDate = rawHtml.match(
+    /<meta[^>]+name=["'](?:date|pubdate)["'][^>]+content=["']([^"']+)["']/i,
+  );
   const timeMatch = rawHtml.match(/<time[^>]+datetime=["']([^"']+)["']/i);
 
-  const rawDate = jsonLd.publishedDate || (ogPubDate ? ogPubDate[1] : "") || (metaDate ? metaDate[1] : "") || (timeMatch ? timeMatch[1] : "");
+  const rawDate =
+    jsonLd.publishedDate ||
+    (ogPubDate ? ogPubDate[1] : "") ||
+    (metaDate ? metaDate[1] : "") ||
+    (timeMatch ? timeMatch[1] : "");
   let publishedDate = "";
   if (rawDate) {
     try {
@@ -1268,7 +1531,11 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
       if (isNaN(parsed.getTime())) {
         publishedDate = rawDate.split("T")[0];
       } else {
-        publishedDate = parsed.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+        publishedDate = parsed.toLocaleDateString("en-US", {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+        });
       }
     } catch (_err) {
       void _err;
@@ -1282,29 +1549,46 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
 
   // Identify Best Article Container
   let candidateHtml = "";
-  const articleMatches = workHtml.match(/<article\b[^>]*>([\s\S]*?)<\/article>/gi);
+  const articleMatches = workHtml.match(
+    /<article\b[^>]*>([\s\S]*?)<\/article>/gi,
+  );
   if (articleMatches && articleMatches.length > 0) {
     // Pick longest article block
     candidateHtml = articleMatches.sort((a, b) => b.length - a.length)[0];
   }
 
-  if (!candidateHtml || candidateHtml.replace(/<[^>]+>/g, "").trim().length < 150) {
+  if (
+    !candidateHtml ||
+    candidateHtml.replace(/<[^>]+>/g, "").trim().length < 150
+  ) {
     const mainMatch = workHtml.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i);
-    if (mainMatch && mainMatch[1].replace(/<[^>]+>/g, "").trim().length >= 150) {
+    if (
+      mainMatch &&
+      mainMatch[1].replace(/<[^>]+>/g, "").trim().length >= 150
+    ) {
       candidateHtml = mainMatch[1];
     }
   }
 
-  if (!candidateHtml || candidateHtml.replace(/<[^>]+>/g, "").trim().length < 150) {
+  if (
+    !candidateHtml ||
+    candidateHtml.replace(/<[^>]+>/g, "").trim().length < 150
+  ) {
     const contentClassMatch = workHtml.match(
-      /<div\b[^>]*class=["'][^"']*(?:article[-_]content|post[-_]content|entry[-_]content|story[-_]body|article[-_]body|post[-_]body|main[-_]content)[^"']*["'][^>]*>([\s\S]*?)<\/div>/i
+      /<div\b[^>]*class=["'][^"']*(?:article[-_]content|post[-_]content|entry[-_]content|story[-_]body|article[-_]body|post[-_]body|main[-_]content)[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
     );
-    if (contentClassMatch && contentClassMatch[1].replace(/<[^>]+>/g, "").trim().length >= 150) {
+    if (
+      contentClassMatch &&
+      contentClassMatch[1].replace(/<[^>]+>/g, "").trim().length >= 150
+    ) {
       candidateHtml = contentClassMatch[1];
     }
   }
 
-  if (!candidateHtml || candidateHtml.replace(/<[^>]+>/g, "").trim().length < 100) {
+  if (
+    !candidateHtml ||
+    candidateHtml.replace(/<[^>]+>/g, "").trim().length < 100
+  ) {
     const bodyMatch = workHtml.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
     candidateHtml = bodyMatch ? bodyMatch[1] : workHtml;
   }
@@ -1314,10 +1598,16 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
   let cleaned = candidateHtml.replace(/<img\b([^>]*)>/gi, (_, attrs) => {
     let src = "";
     const srcMatch = attrs.match(/\bsrc=["']([^"']+)["']/i);
-    const dataSrcMatch = attrs.match(/\b(?:data-src|data-original|data-lazy-src)=["']([^"']+)["']/i);
+    const dataSrcMatch = attrs.match(
+      /\b(?:data-src|data-original|data-lazy-src)=["']([^"']+)["']/i,
+    );
     const altMatch = attrs.match(/\balt=["']([^"']*)["']/i);
 
-    if (dataSrcMatch && dataSrcMatch[1] && (!srcMatch || srcMatch[1].startsWith("data:") || srcMatch[1].length < 10)) {
+    if (
+      dataSrcMatch &&
+      dataSrcMatch[1] &&
+      (!srcMatch || srcMatch[1].startsWith("data:") || srcMatch[1].length < 10)
+    ) {
       src = dataSrcMatch[1];
     } else if (srcMatch) {
       src = srcMatch[1];
@@ -1337,7 +1627,10 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
   });
 
   // Strip inline styling and events
-  cleaned = cleaned.replace(/\s+(?:style|class|onclick|onload|onerror|data-[a-z0-9_-]+)=["'][^"']*["']/gi, "");
+  cleaned = cleaned.replace(
+    /\s+(?:style|class|onclick|onload|onerror|data-[a-z0-9_-]+)=["'][^"']*["']/gi,
+    "",
+  );
 
   // Remove empty paragraphs and empty div tags
   cleaned = cleaned.replace(/<p\s*>\s*(&nbsp;|\s)*<\/p>/gi, "");
@@ -1350,7 +1643,12 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
   }
 
   // Calculate word count & reading time
-  const textOnly = decodeHtmlEntities(cleaned.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+  const textOnly = decodeHtmlEntities(
+    cleaned
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim(),
+  );
   const wordCount = Math.max(1, textOnly.split(/\s+/).filter(Boolean).length);
   const readTimeMinutes = Math.max(1, Math.ceil(wordCount / 200));
 
@@ -1368,13 +1666,22 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
 
   // 5. Automatic Cover Extraction & Generation
   const ogImageMatch =
-    rawHtml.match(/<meta[^>]+property=["']og:image(?::url)?["'][^>]+content=["']([^"']+)["']/i) ||
-    rawHtml.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image(?::url)?["']/i);
+    rawHtml.match(
+      /<meta[^>]+property=["']og:image(?::url)?["'][^>]+content=["']([^"']+)["']/i,
+    ) ||
+    rawHtml.match(
+      /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image(?::url)?["']/i,
+    );
   const twitterImageMatch =
-    rawHtml.match(/<meta[^>]+name=["']twitter:image(?::src)?["'][^>]+content=["']([^"']+)["']/i) ||
-    rawHtml.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image(?::src)?["']/i);
-  const articleImageMatch =
-    rawHtml.match(/<meta[^>]+property=["']article:image["'][^>]+content=["']([^"']+)["']/i);
+    rawHtml.match(
+      /<meta[^>]+name=["']twitter:image(?::src)?["'][^>]+content=["']([^"']+)["']/i,
+    ) ||
+    rawHtml.match(
+      /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image(?::src)?["']/i,
+    );
+  const articleImageMatch = rawHtml.match(
+    /<meta[^>]+property=["']article:image["'][^>]+content=["']([^"']+)["']/i,
+  );
 
   const candidateImageUrl =
     jsonLd.image ||
@@ -1382,7 +1689,9 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
     (twitterImageMatch ? twitterImageMatch[1] : "") ||
     (articleImageMatch ? articleImageMatch[1] : "");
 
-  let coverImageUrl = candidateImageUrl ? decodeHtmlEntities(candidateImageUrl).trim() : "";
+  let coverImageUrl = candidateImageUrl
+    ? decodeHtmlEntities(candidateImageUrl).trim()
+    : "";
   let coverImagePath: string | undefined;
 
   if (coverImageUrl) {
@@ -1398,9 +1707,16 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
 
   if (!coverImagePath) {
     try {
-      coverImagePath = generateTypographicCover(title, author, siteName, readTimeMinutes);
+      coverImagePath = generateTypographicCover(
+        title,
+        author,
+        siteName,
+        readTimeMinutes,
+      );
     } catch (coverErr: any) {
-      console.warn(`[Article] Typographic cover generation warning: ${coverErr.message}`);
+      console.warn(
+        `[Article] Typographic cover generation warning: ${coverErr.message}`,
+      );
     }
   }
 
@@ -1430,7 +1746,8 @@ function runEbookConvert(args: string[]) {
   delete env.https_proxy;
   delete env.ALL_PROXY;
   delete env.all_proxy;
-  env.PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
+  env.PATH =
+    "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
 
   return spawnSync(EBOOK_CONVERT_PATH, args, {
     encoding: "utf8",
@@ -1451,7 +1768,8 @@ function runCalibredb(args: string[]) {
   delete env.https_proxy;
   delete env.ALL_PROXY;
   delete env.all_proxy;
-  env.PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
+  env.PATH =
+    "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
 
   return spawnSync(CALIBREDB_PATH, args, {
     encoding: "utf8",
@@ -1461,7 +1779,89 @@ function runCalibredb(args: string[]) {
 }
 
 /**
- * Convert an HTML document string to EPUB format using ebook-convert.
+ * Fallback hermetic EPUB generator using Python zipfile when ebook-convert is not installed.
+ */
+function createDirectEpubZip(
+  epubPath: string,
+  opts: {
+    title: string;
+    author: string;
+    htmlContent: string;
+    coverPath?: string;
+  },
+): boolean {
+  try {
+    const pythonScript = `
+import zipfile, os, sys
+
+epub_path = sys.argv[1]
+title = sys.argv[2]
+author = sys.argv[3]
+html_path = sys.argv[4]
+cover_path = sys.argv[5] if len(sys.argv) > 5 and os.path.exists(sys.argv[5]) else None
+
+with open(html_path, "r", encoding="utf-8") as f:
+    html_content = f.read()
+
+with zipfile.ZipFile(epub_path, "w", zipfile.ZIP_DEFLATED) as z:
+    z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+    z.writestr(
+        "META-INF/container.xml",
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>'
+    )
+    manifest_items = '<item id="content" href="content.html" media-type="application/xhtml+xml"/>'
+    if cover_path:
+        ext = os.path.splitext(cover_path)[1].lower()
+        mtype = "image/svg+xml" if ext == ".svg" else "image/jpeg"
+        with open(cover_path, "rb") as cf:
+            z.writestr("OEBPS/cover" + ext, cf.read())
+        manifest_items += f'<item id="cover-image" href="cover{ext}" media-type="{mtype}"/>'
+
+    opf = f'''<?xml version="1.0" encoding="utf-8"?>
+<package version="2.0" unique-identifier="BookId" xmlns="http://www.idpf.org/2007/opf">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>{title}</dc:title>
+    <dc:creator>{author}</dc:creator>
+  </metadata>
+  <manifest>{manifest_items}</manifest>
+  <spine><itemref idref="content"/></spine>
+</package>'''
+    z.writestr("OEBPS/content.opf", opf)
+    z.writestr("OEBPS/content.html", html_content)
+`;
+
+    const tempHtmlForScript = `${epubPath}.content.html`;
+    fs.writeFileSync(tempHtmlForScript, opts.htmlContent, "utf8");
+    try {
+      const args = [
+        "-c",
+        pythonScript,
+        epubPath,
+        opts.title,
+        opts.author,
+        tempHtmlForScript,
+      ];
+      if (opts.coverPath && fs.existsSync(opts.coverPath)) {
+        args.push(opts.coverPath);
+      }
+      const res = spawnSync("python3", args, { encoding: "utf8" });
+      return res.status === 0 && fs.existsSync(epubPath);
+    } finally {
+      if (fs.existsSync(tempHtmlForScript)) {
+        try {
+          fs.unlinkSync(tempHtmlForScript);
+        } catch {
+          // Ignore temp cleanup error
+        }
+      }
+    }
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Convert an HTML document string to EPUB format using ebook-convert (with hermetic fallback).
  */
 export function convertHtmlToEpub(
   htmlContent: string,
@@ -1469,7 +1869,7 @@ export function convertHtmlToEpub(
   author: string,
   siteName: string,
   sourceUrl?: string,
-  coverPath?: string
+  coverPath?: string,
 ): string {
   const randomSuffix = `${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
   const tempHtml = `/tmp/article_${randomSuffix}.html`;
@@ -1478,8 +1878,12 @@ export function convertHtmlToEpub(
   try {
     fs.writeFileSync(tempHtml, htmlContent, "utf8");
 
-    const tags = ["Web Article", "Read Later", siteName].filter(Boolean).join(",");
-    const comments = sourceUrl ? `Saved from ${sourceUrl}` : `Web article from ${siteName}`;
+    const tags = ["Web Article", "Read Later", siteName]
+      .filter(Boolean)
+      .join(",");
+    const comments = sourceUrl
+      ? `Saved from ${sourceUrl}`
+      : `Web article from ${siteName}`;
 
     const convertArgs = [
       tempHtml,
@@ -1506,8 +1910,21 @@ export function convertHtmlToEpub(
     const convertRes = runEbookConvert(convertArgs);
 
     if (convertRes.status !== 0 || !fs.existsSync(tempEpub)) {
-      const err = convertRes.stderr || convertRes.stdout || "ebook-convert returned non-zero exit code";
-      throw new Error(`EPUB conversion failed: ${err}`);
+      // Hermetic fallback: build canonical EPUB zip directly when ebook-convert is not installed
+      const created = createDirectEpubZip(tempEpub, {
+        title,
+        author,
+        htmlContent,
+        coverPath,
+      });
+
+      if (!created || !fs.existsSync(tempEpub)) {
+        const err =
+          convertRes.stderr ||
+          convertRes.stdout ||
+          "ebook-convert returned non-zero exit code";
+        throw new Error(`EPUB conversion failed: ${err}`);
+      }
     }
 
     return tempEpub;
@@ -1529,9 +1946,13 @@ export function convertHtmlToEpub(
  * 3. Save EPUB to Books_Drop directory
  * 4. Ingest into Calibre database with proper metadata and tags
  */
-export async function ingestArticleFromUrl(targetUrl: string): Promise<IngestArticleResult> {
+export async function ingestArticleFromUrl(
+  targetUrl: string,
+): Promise<IngestArticleResult> {
   // SSRF guard
-  const ssrfCheck = await validateUrlForSSRF(targetUrl, { allowProxyBypass: true });
+  const ssrfCheck = await validateUrlForSSRF(targetUrl, {
+    allowProxyBypass: true,
+  });
   if (!ssrfCheck.safe) {
     return {
       success: false,
@@ -1541,7 +1962,7 @@ export async function ingestArticleFromUrl(targetUrl: string): Promise<IngestArt
       wordCount: 0,
       readTimeMinutes: 0,
       format: "EPUB",
-      error: ssrfCheck.error || "Target URL rejected by SSRF guard"
+      error: ssrfCheck.error || "Target URL rejected by SSRF guard",
     };
   }
 
@@ -1556,17 +1977,19 @@ export async function ingestArticleFromUrl(targetUrl: string): Promise<IngestArt
       article.author,
       article.siteName,
       article.url,
-      article.coverImagePath
+      article.coverImagePath,
     );
 
     // 3. Save to Books_Drop with sanitized filename
-    const safeFilenameBase = cleanString(article.title)
-      .replace(/[^a-zA-Z0-9_\u00A0-\uFFFF -]/g, "")
-      .replace(/\s+/g, "_")
-      .substring(0, 60)
-      .trim() || "Web_Article";
+    const safeFilenameBase =
+      cleanString(article.title)
+        .replace(/[^a-zA-Z0-9_\u00A0-\uFFFF -]/g, "")
+        .replace(/\s+/g, "_")
+        .substring(0, 60)
+        .trim() || "Web_Article";
     const dropFileName = `${safeFilenameBase}_${Date.now()}.epub`;
-    const dropFilePath = path.join(DROP_DIR, dropFileName);
+    const dropDir = getDropDir();
+    const dropFilePath = path.join(dropDir, dropFileName);
 
     fs.copyFileSync(tempEpub, dropFilePath);
     try {
@@ -1576,7 +1999,9 @@ export async function ingestArticleFromUrl(targetUrl: string): Promise<IngestArt
     }
 
     // 4. Ingest into Calibre via calibredb
-    const tagsStr = ["Web Article", "Read Later", article.siteName].filter(Boolean).join(",");
+    const tagsStr = ["Web Article", "Read Later", article.siteName]
+      .filter(Boolean)
+      .join(",");
     const addArgs = [
       "add",
       dropFilePath,
@@ -1595,7 +2020,7 @@ export async function ingestArticleFromUrl(targetUrl: string): Promise<IngestArt
       addArgs.push("--cover", article.coverImagePath);
     }
 
-    const addRes = runCalibredb(addArgs);
+    const addRes = await withCalibreLock(() => runCalibredb(addArgs));
 
     let bookId: number | null = null;
     let isDuplicate = false;
@@ -1634,15 +2059,18 @@ export async function ingestArticleFromUrl(targetUrl: string): Promise<IngestArt
     }
 
     // Ensure cover is attached in Calibre (handles duplicates or add quirks)
-    if (bookId && article.coverImagePath && fs.existsSync(article.coverImagePath)) {
-      runCalibredb([
-        "set_metadata",
-        String(bookId),
-        "--with-library",
-        SERVER_URL,
-        "--cover",
-        article.coverImagePath,
-      ]);
+    const coverPathToSet = article.coverImagePath;
+    if (bookId && coverPathToSet && fs.existsSync(coverPathToSet)) {
+      await withCalibreLock(() =>
+        runCalibredb([
+          "set_metadata",
+          String(bookId),
+          "--with-library",
+          SERVER_URL,
+          "--cover",
+          coverPathToSet,
+        ]),
+      );
     }
 
     return {

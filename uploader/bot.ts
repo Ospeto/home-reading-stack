@@ -1,35 +1,50 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
+import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import { Database } from "bun:sqlite";
 import {
-  searchUniversalMetadata,
-  applyMetadataToCalibre,
   sanitizeMetadata,
   extractSeries,
   isSameBook,
-  normalizeFormat
+  normalizeFormat,
 } from "./scraper";
 import { isArchiveFile, unpackArchive } from "./archive";
 import { extractUrlFromText, ingestArticleFromUrl } from "./article";
-import { getDownloadFilename } from "./security";
-import { getJobQueue } from "./jobs";
+import {
+  getDownloadFilename,
+  validateEpubContent,
+  getDropDir,
+  safeFetchWithSsrf,
+  sanitizeErrorMessage,
+  getCacheDb,
+} from "./security";
+import { getJobQueue, withCalibreLockSync } from "./jobs";
 
-const DROP_DIR = "/Users/ospeto/Books_Drop";
+const DROP_DIR = getDropDir();
 const SERVER_URL = "http://127.0.0.1:8088";
 const ENV_PATH = process.env.ENV_PATH || "/Users/ospeto/uploader/.env";
 const CACHE_DB_PATH = "/Users/ospeto/uploader/cache.db";
-const KOSYNC_DB_PATH = process.env.KOSYNC_DB_PATH || "/Users/ospeto/kosync-server/data/koreader-sync.db";
-const CALIBRE_DB_PATH = process.env.CALIBRE_DB_PATH || "/Users/ospeto/Calibre Libraries/Agent Library/metadata.db";
-const CALIBRE_LIBRARY_DIR = process.env.CALIBRE_LIBRARY_DIR || path.dirname(CALIBRE_DB_PATH);
-const MANGA_DB_PATH = process.env.MANGA_DB_PATH || "/Users/ospeto/manga-processor/manga.db";
+const KOSYNC_DB_PATH =
+  process.env.KOSYNC_DB_PATH ||
+  "/Users/ospeto/kosync-server/data/koreader-sync.db";
+const CALIBRE_DB_PATH =
+  process.env.CALIBRE_DB_PATH ||
+  "/Users/ospeto/Calibre Libraries/Agent Library/metadata.db";
+const CALIBRE_LIBRARY_DIR =
+  process.env.CALIBRE_LIBRARY_DIR || path.dirname(CALIBRE_DB_PATH);
+const MANGA_DB_PATH =
+  process.env.MANGA_DB_PATH || "/Users/ospeto/manga-processor/manga.db";
 const PROXY_URL = "http://127.0.0.1:7890";
 const WEB_UPLOADER_URL = "http://192.168.31.15:8086";
 const CALIBRE_WEB_URL = "http://192.168.31.15:8088";
-export const READING_WEBAPP_URL = process.env.READING_WEBAPP_URL || "https://reading.wavypremium.xyz";
-export const KOSYNC_WAN_URL = process.env.KOSYNC_WAN_URL || "https://kosync.wavypremium.xyz";
+export const READING_WEBAPP_URL =
+  process.env.READING_WEBAPP_URL || "https://reading.wavypremium.xyz";
+export const KOSYNC_WAN_URL =
+  process.env.KOSYNC_WAN_URL || "https://kosync.wavypremium.xyz";
 const MAX_TELEGRAM_FILE_SIZE = 20 * 1024 * 1024; // 20MB Telegram Bot API limit
 const ALLOWED_EXTS = [".epub", ".zip", ".rar", ".7z", ".tar"];
 
@@ -38,24 +53,13 @@ const MAX_BACKOFF_MS = 60000;
 const POLL_TIMEOUT_SECONDS = 25;
 const POLL_REQUEST_TIMEOUT_MS = 35000;
 
-if (!fs.existsSync(DROP_DIR)) {
-  fs.mkdirSync(DROP_DIR, { recursive: true });
-}
-
-const cacheDb = new Database(CACHE_DB_PATH);
-cacheDb.run("PRAGMA busy_timeout = 5000;");
-cacheDb.run(`
-  CREATE TABLE IF NOT EXISTS file_hashes (
-    filepath TEXT PRIMARY KEY,
-    mtime INTEGER NOT NULL,
-    hash TEXT NOT NULL,
-    book_id INTEGER,
-    title TEXT,
-    authors TEXT,
-    cover INTEGER
-  );
-`);
-cacheDb.run(`CREATE INDEX IF NOT EXISTS idx_file_hashes_hash ON file_hashes(hash);`);
+const cacheDb: Database = new Proxy({} as Database, {
+  get(_target, prop) {
+    const db = getCacheDb();
+    const val = (db as any)[prop];
+    return typeof val === "function" ? val.bind(db) : val;
+  },
+});
 
 let TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 if (fs.existsSync(ENV_PATH)) {
@@ -69,8 +73,12 @@ if (fs.existsSync(ENV_PATH)) {
 }
 
 if (!TELEGRAM_BOT_TOKEN) {
-  console.error("[TelegramBot] Missing TELEGRAM_BOT_TOKEN. Exiting.");
-  process.exit(1);
+  if ((import.meta as any).main) {
+    console.error("[TelegramBot] Missing TELEGRAM_BOT_TOKEN. Exiting.");
+    process.exit(1);
+  } else {
+    TELEGRAM_BOT_TOKEN = "test_bot_token";
+  }
 }
 
 function log(msg: string) {
@@ -113,11 +121,12 @@ function runCalibredb(args: string[]) {
   delete env.https_proxy;
   delete env.ALL_PROXY;
   delete env.all_proxy;
-  env.PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
+  env.PATH =
+    "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
 
   return spawnSync("/opt/homebrew/bin/calibredb", args, {
     encoding: "utf8",
-    env
+    env,
   });
 }
 
@@ -158,7 +167,7 @@ async function tgFetch(endpoint: string, options: any = {}) {
   const fetchOpts: any = {
     ...options,
     signal,
-    proxy: PROXY_URL
+    proxy: PROXY_URL,
   };
   delete fetchOpts.timeoutMs;
   return await fetch(url, fetchOpts);
@@ -168,7 +177,7 @@ async function sendMessage(
   chatId: number,
   text: string,
   parseMode: string = "",
-  replyMarkup: any = null
+  replyMarkup: any = null,
 ): Promise<number | null> {
   try {
     const body: any = { chat_id: chatId, text };
@@ -178,7 +187,7 @@ async function sendMessage(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      timeoutMs: 15000
+      timeoutMs: 15000,
     });
     const data = (await res.json()) as any;
     if (data.ok && data.result?.message_id) {
@@ -188,22 +197,27 @@ async function sendMessage(
     if (
       !data.ok &&
       parseMode &&
-      (data.error_code === 400 || (data.description && /parse|entity|markdown/i.test(data.description)))
+      (data.error_code === 400 ||
+        (data.description && /parse|entity|markdown/i.test(data.description)))
     ) {
-      logError(`sendMessage failed with parseMode="${parseMode}" (${data.description}), retrying as plain text...`);
+      logError(
+        `sendMessage failed with parseMode="${parseMode}" (${data.description}), retrying as plain text...`,
+      );
       const fallbackBody: any = { chat_id: chatId, text };
       if (replyMarkup) fallbackBody.reply_markup = replyMarkup;
       const retryRes = await tgFetch("sendMessage", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(fallbackBody),
-        timeoutMs: 15000
+        timeoutMs: 15000,
       });
       const retryData = (await retryRes.json()) as any;
       if (retryData.ok && retryData.result?.message_id) {
         return retryData.result.message_id;
       } else {
-        logError(`sendMessage plain-text retry also failed: ${retryData.description}`);
+        logError(
+          `sendMessage plain-text retry also failed: ${retryData.description}`,
+        );
       }
     } else if (!data.ok) {
       logError(`sendMessage failed for chat ${chatId}: ${data.description}`);
@@ -219,7 +233,7 @@ async function editOrSendMessage(
   messageId: number | null,
   text: string,
   parseMode: string = "",
-  replyMarkup: any = null
+  replyMarkup: any = null,
 ): Promise<number | null> {
   if (messageId) {
     try {
@@ -230,7 +244,7 @@ async function editOrSendMessage(
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-        timeoutMs: 15000
+        timeoutMs: 15000,
       });
       const data = (await res.json()) as any;
       if (data.ok && data.result?.message_id) {
@@ -240,16 +254,23 @@ async function editOrSendMessage(
       if (
         !data.ok &&
         parseMode &&
-        (data.error_code === 400 || (data.description && /parse|entity|markdown/i.test(data.description)))
+        (data.error_code === 400 ||
+          (data.description && /parse|entity|markdown/i.test(data.description)))
       ) {
-        logError(`editMessageText failed with parseMode="${parseMode}" (${data.description}), retrying as plain text...`);
-        const fallbackBody: any = { chat_id: chatId, message_id: messageId, text };
+        logError(
+          `editMessageText failed with parseMode="${parseMode}" (${data.description}), retrying as plain text...`,
+        );
+        const fallbackBody: any = {
+          chat_id: chatId,
+          message_id: messageId,
+          text,
+        };
         if (replyMarkup) fallbackBody.reply_markup = replyMarkup;
         const retryRes = await tgFetch("editMessageText", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(fallbackBody),
-          timeoutMs: 15000
+          timeoutMs: 15000,
         });
         const retryData = (await retryRes.json()) as any;
         if (retryData.ok && retryData.result?.message_id) {
@@ -257,7 +278,9 @@ async function editOrSendMessage(
         }
       }
     } catch (err: any) {
-      logError(`editMessageText failed for message ${messageId}, falling back to sendMessage: ${err?.message || err}`);
+      logError(
+        `editMessageText failed for message ${messageId}, falling back to sendMessage: ${err?.message || err}`,
+      );
     }
   }
   return await sendMessage(chatId, text, parseMode, replyMarkup);
@@ -269,7 +292,7 @@ async function sendDocument(
   caption: string = "",
   parseMode: string = "",
   mimeType: string = "",
-  customFilename?: string
+  customFilename?: string,
 ): Promise<boolean> {
   try {
     const formData = new FormData();
@@ -302,7 +325,7 @@ async function sendDocument(
     const res = await tgFetch("sendDocument", {
       method: "POST",
       body: formData,
-      timeoutMs: 60000
+      timeoutMs: 60000,
     });
 
     const data = (await res.json()) as any;
@@ -311,9 +334,12 @@ async function sendDocument(
       return true;
     } else if (
       parseMode &&
-      (data.error_code === 400 || (data.description && /parse|entity|caption/i.test(data.description)))
+      (data.error_code === 400 ||
+        (data.description && /parse|entity|caption/i.test(data.description)))
     ) {
-      logError(`sendDocument failed with parseMode="${parseMode}" (${data.description}), retrying caption as plain text...`);
+      logError(
+        `sendDocument failed with parseMode="${parseMode}" (${data.description}), retrying caption as plain text...`,
+      );
       const fallbackFormData = new FormData();
       fallbackFormData.append("chat_id", String(chatId));
       fallbackFormData.append("document", blob, fileName);
@@ -323,14 +349,18 @@ async function sendDocument(
       const retryRes = await tgFetch("sendDocument", {
         method: "POST",
         body: fallbackFormData,
-        timeoutMs: 60000
+        timeoutMs: 60000,
       });
       const retryData = (await retryRes.json()) as any;
       if (retryData.ok) {
-        log(`Sent document "${fileName}" to chat ${chatId} (plain-text caption fallback)`);
+        log(
+          `Sent document "${fileName}" to chat ${chatId} (plain-text caption fallback)`,
+        );
         return true;
       } else {
-        logError(`sendDocument plain-text retry failed for chat ${chatId}: ${retryData.description}`);
+        logError(
+          `sendDocument plain-text retry failed for chat ${chatId}: ${retryData.description}`,
+        );
         return false;
       }
     } else {
@@ -349,8 +379,8 @@ export async function initChatMenuButton(chatId?: number): Promise<boolean> {
       menu_button: {
         type: "web_app",
         text: "📖 Reading HQ",
-        web_app: { url: READING_WEBAPP_URL }
-      }
+        web_app: { url: READING_WEBAPP_URL },
+      },
     };
     if (chatId) {
       payload.chat_id = chatId;
@@ -359,14 +389,18 @@ export async function initChatMenuButton(chatId?: number): Promise<boolean> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      timeoutMs: 15000
+      timeoutMs: 15000,
     });
     const data = (await res.json()) as any;
     if (data.ok) {
-      log(`Registered Telegram Web App Menu Button (${chatId ? `chatId: ${chatId}` : "global default"}) -> ${READING_WEBAPP_URL}`);
+      log(
+        `Registered Telegram Web App Menu Button (${chatId ? `chatId: ${chatId}` : "global default"}) -> ${READING_WEBAPP_URL}`,
+      );
       return true;
     } else {
-      logError(`Failed to set Telegram Chat Menu Button: ${data.description || "Unknown error"}`);
+      logError(
+        `Failed to set Telegram Chat Menu Button: ${data.description || "Unknown error"}`,
+      );
       return false;
     }
   } catch (err: any) {
@@ -410,7 +444,9 @@ export function saveBackupChatId(chatId: number): void {
     fs.writeFileSync(envPath, newLines.join("\n"));
     log(`Saved TELEGRAM_BACKUP_CHAT_ID=${chatId} to ${envPath}`);
   } catch (err: any) {
-    logError(`Failed to save TELEGRAM_BACKUP_CHAT_ID to ${ENV_PATH}: ${err?.message || err}`);
+    logError(
+      `Failed to save TELEGRAM_BACKUP_CHAT_ID to ${ENV_PATH}: ${err?.message || err}`,
+    );
   }
 }
 
@@ -419,7 +455,7 @@ export function createHotDatabaseBackup(): DatabaseBackupResult | null {
     { name: "KOSync", fileName: "koreader-sync.db", path: KOSYNC_DB_PATH },
     { name: "Calibre", fileName: "metadata.db", path: CALIBRE_DB_PATH },
     { name: "Uploader Cache", fileName: "cache.db", path: CACHE_DB_PATH },
-    { name: "Manga", fileName: "manga.db", path: MANGA_DB_PATH }
+    { name: "Manga", fileName: "manga.db", path: MANGA_DB_PATH },
   ];
 
   const stagingDir = fs.mkdtempSync(path.join("/tmp", "reading-stack-backup-"));
@@ -428,7 +464,9 @@ export function createHotDatabaseBackup(): DatabaseBackupResult | null {
 
   const env: any = {
     ...process.env,
-    PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (process.env.PATH || "")
+    PATH:
+      "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" +
+      (process.env.PATH || ""),
   };
 
   try {
@@ -440,17 +478,25 @@ export function createHotDatabaseBackup(): DatabaseBackupResult | null {
 
       const destPath = path.join(stagingDir, target.fileName);
       log(`Backing up ${target.name} (${target.path}) -> ${destPath}...`);
-      const backupRes = spawnSync("sqlite3", [target.path, `.backup '${destPath}'`], {
-        encoding: "utf8",
-        env
-      });
+      const backupRes = spawnSync(
+        "sqlite3",
+        [target.path, `.backup '${destPath}'`],
+        {
+          encoding: "utf8",
+          env,
+        },
+      );
 
       if (backupRes.status === 0 && fs.existsSync(destPath)) {
         backedUpFiles.push(target.fileName);
         backedUpDbs.push(target.name);
-        log(`Successfully backed up ${target.name} (${(fs.statSync(destPath).size / 1024).toFixed(1)} KB)`);
+        log(
+          `Successfully backed up ${target.name} (${(fs.statSync(destPath).size / 1024).toFixed(1)} KB)`,
+        );
       } else {
-        logError(`Failed to back up ${target.name}: ${backupRes.stderr || "sqlite3 exited with code " + backupRes.status}`);
+        logError(
+          `Failed to back up ${target.name}: ${backupRes.stderr || "sqlite3 exited with code " + backupRes.status}`,
+        );
       }
     }
 
@@ -469,13 +515,19 @@ export function createHotDatabaseBackup(): DatabaseBackupResult | null {
     const archivePath = path.join("/tmp", fileName);
 
     log(`Archiving ${backedUpFiles.length} database(s) into ${archivePath}...`);
-    const tarRes = spawnSync("tar", ["-czf", archivePath, "-C", stagingDir, ...backedUpFiles], {
-      encoding: "utf8",
-      env
-    });
+    const tarRes = spawnSync(
+      "tar",
+      ["-czf", archivePath, "-C", stagingDir, ...backedUpFiles],
+      {
+        encoding: "utf8",
+        env,
+      },
+    );
 
     if (tarRes.status !== 0 || !fs.existsSync(archivePath)) {
-      logError(`Failed to create tar archive: ${tarRes.stderr || "tar exited with code " + tarRes.status}`);
+      logError(
+        `Failed to create tar archive: ${tarRes.stderr || "tar exited with code " + tarRes.status}`,
+      );
       fs.rmSync(stagingDir, { recursive: true, force: true });
       return null;
     }
@@ -490,7 +542,7 @@ export function createHotDatabaseBackup(): DatabaseBackupResult | null {
       sizeKb,
       timestamp: fileTimestamp,
       displayTimestamp,
-      backedUpDbs
+      backedUpDbs,
     };
   } catch (err: any) {
     logError(`Exception during database backup: ${err?.message || err}`);
@@ -517,7 +569,10 @@ export function escapeTelegramMarkdown(text: string): string {
   return text.replace(/([_*`[\]])/g, "\\$1");
 }
 
-export function searchCalibreLibrary(query: string, limit: number = 5): CalibreBookResult[] {
+export function searchCalibreLibrary(
+  query: string,
+  limit: number = 5,
+): CalibreBookResult[] {
   const trimmed = query.trim();
   if (!trimmed) return [];
 
@@ -548,7 +603,9 @@ export function searchCalibreLibrary(query: string, limit: number = 5): CalibreB
       `;
 
       const wildcardQuery = `%${trimmed}%`;
-      const primaryRows = db.query(primarySql).all(wildcardQuery, wildcardQuery, wildcardQuery, limit) as any[];
+      const primaryRows = db
+        .query(primarySql)
+        .all(wildcardQuery, wildcardQuery, wildcardQuery, limit) as any[];
 
       const matchedBooks: CalibreBookResult[] = primaryRows.map((r) => ({
         id: r.id,
@@ -556,7 +613,7 @@ export function searchCalibreLibrary(query: string, limit: number = 5): CalibreB
         authors: r.authors || "Unknown",
         series: r.series || null,
         series_index: r.series_index || null,
-        formats: r.formats || ""
+        formats: r.formats || "",
       }));
 
       // If fewer than limit and query had multiple terms, perform multi-term matching
@@ -600,7 +657,7 @@ export function searchCalibreLibrary(query: string, limit: number = 5): CalibreB
               authors: r.authors || "Unknown",
               series: r.series || null,
               series_index: r.series_index || null,
-              formats: r.formats || ""
+              formats: r.formats || "",
             });
             if (matchedBooks.length >= limit) break;
           }
@@ -612,7 +669,9 @@ export function searchCalibreLibrary(query: string, limit: number = 5): CalibreB
         return matchedBooks.slice(0, limit);
       }
     } catch (err: any) {
-      logError(`SQLite search failed, falling back to calibredb: ${err?.message || err}`);
+      logError(
+        `SQLite search failed, falling back to calibredb: ${err?.message || err}`,
+      );
     }
   }
 
@@ -626,7 +685,7 @@ export function searchCalibreLibrary(query: string, limit: number = 5): CalibreB
       trimmed,
       "--fields",
       "id,title,authors,series,series_index,formats",
-      "--for-machine"
+      "--for-machine",
     ]);
 
     if (listRes.status === 0 && listRes.stdout) {
@@ -634,15 +693,22 @@ export function searchCalibreLibrary(query: string, limit: number = 5): CalibreB
       if (Array.isArray(parsed)) {
         return parsed.slice(0, limit).map((item: any) => {
           const fmts = Array.isArray(item.formats)
-            ? item.formats.map((f: string) => path.extname(f).replace(/^\./, "").toUpperCase() || f).join(",")
+            ? item.formats
+                .map(
+                  (f: string) =>
+                    path.extname(f).replace(/^\./, "").toUpperCase() || f,
+                )
+                .join(",")
             : String(item.formats || "");
           return {
             id: item.id,
             title: item.title || "Untitled",
-            authors: Array.isArray(item.authors) ? item.authors.join(", ") : String(item.authors || "Unknown"),
+            authors: Array.isArray(item.authors)
+              ? item.authors.join(", ")
+              : String(item.authors || "Unknown"),
             series: item.series || null,
             series_index: item.series_index || null,
-            formats: fmts
+            formats: fmts,
           };
         });
       }
@@ -664,14 +730,26 @@ export interface BookFileDetails {
 }
 
 export function locateBookFile(bookId: number): BookFileDetails | null {
-  const PREFERRED_FORMATS = ["EPUB", "PDF", "MOBI", "AZW3", "CBZ", "CBR", "AZW", "ZIP", "RAR", "7Z"];
+  const PREFERRED_FORMATS = [
+    "EPUB",
+    "PDF",
+    "MOBI",
+    "AZW3",
+    "CBZ",
+    "CBR",
+    "AZW",
+    "ZIP",
+    "RAR",
+    "7Z",
+  ];
 
   if (fs.existsSync(CALIBRE_DB_PATH)) {
     try {
       const db = new Database(CALIBRE_DB_PATH, { readonly: true });
       db.run("PRAGMA busy_timeout = 3000;");
 
-      const rows = db.query(`
+      const rows = db
+        .query(`
         SELECT b.id, b.title, b.path,
                GROUP_CONCAT(DISTINCT a.name) as authors,
                d.format, d.name as filename, d.uncompressed_size
@@ -681,7 +759,8 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
         LEFT JOIN authors a ON bal.author = a.id
         WHERE b.id = ?
         GROUP BY d.id
-      `).all(bookId) as any[];
+      `)
+        .all(bookId) as any[];
 
       db.close();
 
@@ -693,8 +772,12 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
 
         // Sort by preferred formats (EPUB first, etc.)
         rows.sort((a, b) => {
-          const idxA = PREFERRED_FORMATS.indexOf(String(a.format || "").toUpperCase());
-          const idxB = PREFERRED_FORMATS.indexOf(String(b.format || "").toUpperCase());
+          const idxA = PREFERRED_FORMATS.indexOf(
+            String(a.format || "").toUpperCase(),
+          );
+          const idxB = PREFERRED_FORMATS.indexOf(
+            String(b.format || "").toUpperCase(),
+          );
           const scoreA = idxA === -1 ? 999 : idxA;
           const scoreB = idxB === -1 ? 999 : idxB;
           return scoreA - scoreB;
@@ -704,32 +787,63 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
           const fmt = String(row.format || "").toUpperCase();
           const filename = row.filename;
 
-          const candidate1 = path.join(basePath, `${filename}.${fmt.toLowerCase()}`);
-          const candidate2 = path.join(basePath, `${filename}.${fmt.toUpperCase()}`);
+          const candidate1 = path.join(
+            basePath,
+            `${filename}.${fmt.toLowerCase()}`,
+          );
+          const candidate2 = path.join(
+            basePath,
+            `${filename}.${fmt.toUpperCase()}`,
+          );
 
           if (fs.existsSync(candidate1)) {
             const stat = fs.statSync(candidate1);
-            return { bookId, title, authors, chosenFormat: fmt, filePath: candidate1, fileSize: stat.size };
+            return {
+              bookId,
+              title,
+              authors,
+              chosenFormat: fmt,
+              filePath: candidate1,
+              fileSize: stat.size,
+            };
           }
           if (fs.existsSync(candidate2)) {
             const stat = fs.statSync(candidate2);
-            return { bookId, title, authors, chosenFormat: fmt, filePath: candidate2, fileSize: stat.size };
+            return {
+              bookId,
+              title,
+              authors,
+              chosenFormat: fmt,
+              filePath: candidate2,
+              fileSize: stat.size,
+            };
           }
 
           if (fs.existsSync(basePath)) {
             const files = fs.readdirSync(basePath);
             const extLower = `.${fmt.toLowerCase()}`;
-            const matchedFile = files.find((f) => f.toLowerCase().endsWith(extLower));
+            const matchedFile = files.find((f: string) =>
+              f.toLowerCase().endsWith(extLower),
+            );
             if (matchedFile) {
               const fullPath = path.join(basePath, matchedFile);
               const stat = fs.statSync(fullPath);
-              return { bookId, title, authors, chosenFormat: fmt, filePath: fullPath, fileSize: stat.size };
+              return {
+                bookId,
+                title,
+                authors,
+                chosenFormat: fmt,
+                filePath: fullPath,
+                fileSize: stat.size,
+              };
             }
           }
         }
       }
     } catch (err: any) {
-      logError(`Error locating book file via SQLite for #${bookId}: ${err?.message || err}`);
+      logError(
+        `Error locating book file via SQLite for #${bookId}: ${err?.message || err}`,
+      );
     }
   }
 
@@ -743,7 +857,7 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
       `id:${bookId}`,
       "--fields",
       "id,title,authors,formats",
-      "--for-machine"
+      "--for-machine",
     ]);
 
     if (listRes.status === 0 && listRes.stdout) {
@@ -751,26 +865,41 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
       if (Array.isArray(parsed) && parsed.length > 0) {
         const item = parsed[0];
         const title = item.title || "Book";
-        const authors = Array.isArray(item.authors) ? item.authors.join(", ") : String(item.authors || "Unknown");
+        const authors = Array.isArray(item.authors)
+          ? item.authors.join(", ")
+          : String(item.authors || "Unknown");
         const fmts: string[] = Array.isArray(item.formats) ? item.formats : [];
 
         for (const f of fmts) {
           if (fs.existsSync(f)) {
             const stat = fs.statSync(f);
-            const fmtName = path.extname(f).replace(/^\./, "").toUpperCase() || "FILE";
-            return { bookId, title, authors, chosenFormat: fmtName, filePath: f, fileSize: stat.size };
+            const fmtName =
+              path.extname(f).replace(/^\./, "").toUpperCase() || "FILE";
+            return {
+              bookId,
+              title,
+              authors,
+              chosenFormat: fmtName,
+              filePath: f,
+              fileSize: stat.size,
+            };
           }
         }
       }
     }
   } catch (err: any) {
-    logError(`calibredb fallback failed for #${bookId}: ${err?.message || err}`);
+    logError(
+      `calibredb fallback failed for #${bookId}: ${err?.message || err}`,
+    );
   }
 
   return null;
 }
 
-export async function retrieveAndSendBook(chatId: number, bookId: number): Promise<boolean> {
+export async function retrieveAndSendBook(
+  chatId: number,
+  bookId: number,
+): Promise<boolean> {
   const fileDetails = locateBookFile(bookId);
 
   if (!fileDetails) {
@@ -778,7 +907,7 @@ export async function retrieveAndSendBook(chatId: number, bookId: number): Promi
     await sendMessage(
       chatId,
       `❌ *Book #${bookId} Not Found*\n\nUnable to locate the file in Calibre library. Verify the book exists via [Calibre Web](${CALIBRE_WEB_URL}).`,
-      "Markdown"
+      "Markdown",
     );
     return false;
   }
@@ -788,15 +917,17 @@ export async function retrieveAndSendBook(chatId: number, bookId: number): Promi
   // Check 20MB Telegram limit
   if (fileSize > MAX_TELEGRAM_FILE_SIZE) {
     const sizeMB = (fileSize / (1024 * 1024)).toFixed(1);
-    log(`Book #${bookId} (${title}) exceeds 20MB (${sizeMB} MB). Sending web links.`);
+    log(
+      `Book #${bookId} (${title}) exceeds 20MB (${sizeMB} MB). Sending web links.`,
+    );
     await sendMessage(
       chatId,
       `⚠️ *File Exceeds Telegram Bot Limit*\n\n` +
-      `📚 *${escapeTelegramMarkdown(title)}* (\`${chosenFormat}\`) is *${sizeMB} MB*, exceeding Telegram Bot API's *20 MB* download ceiling.\n\n` +
-      `👉 *Read Online or Download via Calibre Web:*\n` +
-      `• [Read Online](${CALIBRE_WEB_URL}/read/${bookId}/epub)\n` +
-      `• [Book Details](${CALIBRE_WEB_URL}/#book_id=${bookId}&panel=book_details)`,
-      "Markdown"
+        `📚 *${escapeTelegramMarkdown(title)}* (\`${chosenFormat}\`) is *${sizeMB} MB*, exceeding Telegram Bot API's *20 MB* download ceiling.\n\n` +
+        `👉 *Read Online or Download via Calibre Web:*\n` +
+        `• [Read Online](${CALIBRE_WEB_URL}/read/${bookId}/epub)\n` +
+        `• [Book Details](${CALIBRE_WEB_URL}/#book_id=${bookId}&panel=book_details)`,
+      "Markdown",
     );
     return false;
   }
@@ -804,7 +935,7 @@ export async function retrieveAndSendBook(chatId: number, bookId: number): Promi
   const statusMsgId = await sendMessage(
     chatId,
     `⏳ *Retrieving \`${chosenFormat}\` for "${escapeTelegramMarkdown(title)}"...*`,
-    "Markdown"
+    "Markdown",
   );
 
   const caption =
@@ -814,7 +945,14 @@ export async function retrieveAndSendBook(chatId: number, bookId: number): Promi
     `[Read Online](${CALIBRE_WEB_URL}/read/${bookId}/epub) • [Book Details](${CALIBRE_WEB_URL}/#book_id=${bookId}&panel=book_details)`;
 
   const downloadName = getDownloadFilename({ title, authors }, chosenFormat);
-  const sent = await sendDocument(chatId, filePath, caption, "Markdown", "", downloadName);
+  const sent = await sendDocument(
+    chatId,
+    filePath,
+    caption,
+    "Markdown",
+    "",
+    downloadName,
+  );
 
   if (sent) {
     if (statusMsgId) {
@@ -822,7 +960,7 @@ export async function retrieveAndSendBook(chatId: number, bookId: number): Promi
         chatId,
         statusMsgId,
         `✅ *Delivered "${escapeTelegramMarkdown(title)}" below.*`,
-        "Markdown"
+        "Markdown",
       );
     }
     return true;
@@ -832,7 +970,7 @@ export async function retrieveAndSendBook(chatId: number, bookId: number): Promi
         chatId,
         statusMsgId,
         `⚠️ Failed to send *${escapeTelegramMarkdown(title)}*. Check bot logs.`,
-        "Markdown"
+        "Markdown",
       );
     }
     return false;
@@ -840,7 +978,9 @@ export async function retrieveAndSendBook(chatId: number, bookId: number): Promi
 }
 
 export async function getStatusDashboard(): Promise<string> {
-  const ts = new Date().toLocaleString("en-GB", { timeZone: "Asia/Yangon" }).replace(",", "");
+  const ts = new Date()
+    .toLocaleString("en-GB", { timeZone: "Asia/Yangon" })
+    .replace(",", "");
 
   // 1. WAN Edge
   let wanReadingStatus = "🔴 `Unreachable`";
@@ -848,10 +988,13 @@ export async function getStatusDashboard(): Promise<string> {
   try {
     const res = await fetch(READING_WEBAPP_URL, {
       proxy: PROXY_URL,
-      signal: AbortSignal.timeout(8000)
-    });
+      signal: AbortSignal.timeout(8000),
+    } as any);
     const dt = Math.round(performance.now() - t0);
-    wanReadingStatus = res.status === 200 ? `🟢 \`200 OK\` (${dt}ms)` : `🔴 \`HTTP ${res.status}\` (${dt}ms)`;
+    wanReadingStatus =
+      res.status === 200
+        ? `🟢 \`200 OK\` (${dt}ms)`
+        : `🔴 \`HTTP ${res.status}\` (${dt}ms)`;
   } catch (_e) {
     void _e;
     const dt = Math.round(performance.now() - t0);
@@ -862,9 +1005,10 @@ export async function getStatusDashboard(): Promise<string> {
   try {
     const res = await fetch(KOSYNC_WAN_URL, {
       proxy: PROXY_URL,
-      signal: AbortSignal.timeout(4000)
-    });
-    wanKosyncStatus = res.status === 200 ? `🟢 \`200 OK\`` : `🟡 \`HTTP ${res.status}\``;
+      signal: AbortSignal.timeout(4000),
+    } as any);
+    wanKosyncStatus =
+      res.status === 200 ? `🟢 \`200 OK\`` : `🟡 \`HTTP ${res.status}\``;
   } catch (_e) {
     void _e;
     wanKosyncStatus = `🟡 \`Tunnel Forwarded (:7200)\` (DNS Pending)`;
@@ -873,7 +1017,9 @@ export async function getStatusDashboard(): Promise<string> {
   // 2. Reverse SSH Tunnel
   let tunnelStatus = "🔴 `Stopped`";
   try {
-    const pg = spawnSync("pgrep", ["-f", "ssh.*0.0.0.0:8086"], { encoding: "utf8" });
+    const pg = spawnSync("pgrep", ["-f", "ssh.*0.0.0.0:8086"], {
+      encoding: "utf8",
+    });
     const pid = (pg.stdout || "").trim().split("\n")[0];
     if (pid) tunnelStatus = `🟢 \`Active\` (PID ${pid})`;
   } catch (_e) {
@@ -882,7 +1028,9 @@ export async function getStatusDashboard(): Promise<string> {
 
   let proxyStatus = "🔴 `Disconnected`";
   try {
-    const pCheck = spawnSync("nc", ["-z", "127.0.0.1", "7890"], { timeout: 1500 });
+    const pCheck = spawnSync("nc", ["-z", "127.0.0.1", "7890"], {
+      timeout: 1500,
+    });
     if (pCheck.status === 0) proxyStatus = "🟢 `Connected` (127.0.0.1:7890)";
   } catch (_e) {
     void _e;
@@ -891,7 +1039,9 @@ export async function getStatusDashboard(): Promise<string> {
   // 3. Reading HQ & Calibre
   let uploaderLocal = "🔴 `Inactive`";
   try {
-    const res = await fetch("http://127.0.0.1:8086/api/books", { signal: AbortSignal.timeout(2000) });
+    const res = await fetch("http://127.0.0.1:8086/api/books", {
+      signal: AbortSignal.timeout(2000),
+    });
     if (res.status === 200) uploaderLocal = "🟢 `Active` (:8086)";
   } catch (_e) {
     void _e;
@@ -899,7 +1049,9 @@ export async function getStatusDashboard(): Promise<string> {
 
   let calibreLocal = "🔴 `Inactive`";
   try {
-    const res = await fetch("http://127.0.0.1:8088/opds", { signal: AbortSignal.timeout(2000) });
+    const res = await fetch("http://127.0.0.1:8088/opds", {
+      signal: AbortSignal.timeout(2000),
+    });
     if (res.status === 200) calibreLocal = "🟢 `Active` (:8088 / OPDS)";
   } catch (_e) {
     void _e;
@@ -913,11 +1065,17 @@ export async function getStatusDashboard(): Promise<string> {
       const db = new Database(CALIBRE_DB_PATH, { readonly: true });
       const bRow = db.query("SELECT COUNT(*) as cnt FROM books").get() as any;
       totalBooks = bRow?.cnt || 0;
-      const fRows = db.query("SELECT format, count(*) as cnt FROM data GROUP BY format ORDER BY cnt DESC LIMIT 4").all() as any[];
+      const fRows = db
+        .query(
+          "SELECT format, count(*) as cnt FROM data GROUP BY format ORDER BY cnt DESC LIMIT 4",
+        )
+        .all() as any[];
       if (fRows && fRows.length > 0) {
-        formatStats = fRows.map(f => `${f.format}: ${f.cnt}`).join(", ");
+        formatStats = fRows.map((f) => `${f.format}: ${f.cnt}`).join(", ");
       }
-      const nRow = db.query("SELECT id, title FROM books ORDER BY id DESC LIMIT 1").get() as any;
+      const nRow = db
+        .query("SELECT id, title FROM books ORDER BY id DESC LIMIT 1")
+        .get() as any;
       if (nRow) {
         newestTitle = `#${nRow.id} ${escapeTelegramMarkdown(nRow.title || "Untitled")}`;
       }
@@ -929,7 +1087,9 @@ export async function getStatusDashboard(): Promise<string> {
   // 4. KOSync
   let kosyncLocal = "🔴 `Inactive`";
   try {
-    const res = await fetch("http://127.0.0.1:7200/", { signal: AbortSignal.timeout(2000) });
+    const res = await fetch("http://127.0.0.1:7200/", {
+      signal: AbortSignal.timeout(2000),
+    });
     if (res.status === 200) kosyncLocal = "🟢 `Active` (:7200)";
   } catch (_e) {
     void _e;
@@ -945,11 +1105,17 @@ export async function getStatusDashboard(): Promise<string> {
       kosyncDbStatus = "🟢 `Healthy` (SQLite WAL)";
       const uRow = kDb.query("SELECT COUNT(*) as cnt FROM users").get() as any;
       kosyncUsers = uRow?.cnt || 0;
-      const pRow = kDb.query("SELECT COUNT(*) as cnt FROM progress").get() as any;
+      const pRow = kDb
+        .query("SELECT COUNT(*) as cnt FROM progress")
+        .get() as any;
       kosyncProgress = pRow?.cnt || 0;
-      const dRows = kDb.query("SELECT DISTINCT device FROM progress WHERE device IS NOT NULL AND device != \"\"").all() as any[];
+      const dRows = kDb
+        .query(
+          'SELECT DISTINCT device FROM progress WHERE device IS NOT NULL AND device != ""',
+        )
+        .all() as any[];
       if (dRows && dRows.length > 0) {
-        deviceNames = dRows.map(d => d.device).join(", ");
+        deviceNames = dRows.map((d) => d.device).join(", ");
       }
     } catch (_e) {
       void _e;
@@ -965,25 +1131,33 @@ export async function getStatusDashboard(): Promise<string> {
 
   let memStr = "";
   try {
-    const mp = spawnSync("memory_pressure", ["-Q"], { encoding: "utf8", timeout: 2000 });
-    const match = mp.stdout?.match(/System-wide memory free percentage:\s*(\d+)%/i);
-    const totalGb = (os.totalmem() / (1024 ** 3)).toFixed(1);
+    const mp = spawnSync("memory_pressure", ["-Q"], {
+      encoding: "utf8",
+      timeout: 2000,
+    });
+    const match = mp.stdout?.match(
+      /System-wide memory free percentage:\s*(\d+)%/i,
+    );
+    const totalGb = (os.totalmem() / 1024 ** 3).toFixed(1);
     if (match) {
       memStr = `\`${match[1]}% free\` (${totalGb} GB RAM)`;
     } else {
-      const freeGb = (os.freemem() / (1024 ** 3)).toFixed(1);
+      const freeGb = (os.freemem() / 1024 ** 3).toFixed(1);
       memStr = `\`${freeGb} GB free\` / ${totalGb} GB`;
     }
   } catch (_e) {
     void _e;
-    const totalGb = (os.totalmem() / (1024 ** 3)).toFixed(1);
-    const freeGb = (os.freemem() / (1024 ** 3)).toFixed(1);
+    const totalGb = (os.totalmem() / 1024 ** 3).toFixed(1);
+    const freeGb = (os.freemem() / 1024 ** 3).toFixed(1);
     memStr = `\`${freeGb} GB free\` / ${totalGb} GB`;
   }
 
   let internalDiskStr = "N/A";
   try {
-    const df = spawnSync("df", ["-h", path.dirname(CALIBRE_DB_PATH)], { encoding: "utf8", timeout: 2000 });
+    const df = spawnSync("df", ["-h", path.dirname(CALIBRE_DB_PATH)], {
+      encoding: "utf8",
+      timeout: 2000,
+    });
     const lines = (df.stdout || "").trim().split("\n");
     if (lines.length > 1) {
       const parts = lines[1].split(/\s+/);
@@ -996,7 +1170,10 @@ export async function getStatusDashboard(): Promise<string> {
   let ssdDiskStr = "";
   if (fs.existsSync("/Volumes/Ospeto_SSD")) {
     try {
-      const df = spawnSync("df", ["-h", "/Volumes/Ospeto_SSD"], { encoding: "utf8", timeout: 2000 });
+      const df = spawnSync("df", ["-h", "/Volumes/Ospeto_SSD"], {
+        encoding: "utf8",
+        timeout: 2000,
+      });
       const lines = (df.stdout || "").trim().split("\n");
       if (lines.length > 1) {
         const parts = lines[1].split(/\s+/);
@@ -1009,7 +1186,8 @@ export async function getStatusDashboard(): Promise<string> {
 
   const deviceText = deviceNames ? ` (${deviceNames})` : "";
 
-  return `📊 *Reading Stack Health Dashboard*\n` +
+  return (
+    `📊 *Reading Stack Health Dashboard*\n` +
     `_Updated: ${ts} (Asia/Yangon)_\n\n` +
     `🌐 *WAN Edge (VPS panel)*\n` +
     `• *Reading HQ:* ${wanReadingStatus} • [reading.wavypremium.xyz](${READING_WEBAPP_URL})\n` +
@@ -1032,10 +1210,14 @@ export async function getStatusDashboard(): Promise<string> {
     `• *Uptime:* \`${uptimeStr}\`\n` +
     `• *Memory:* ${memStr}\n` +
     `• *Internal Disk:* ${internalDiskStr}` +
-    ssdDiskStr;
+    ssdDiskStr
+  );
 }
 
-export function renderProgressBar(percentage: number, length: number = 8): string {
+export function renderProgressBar(
+  percentage: number,
+  length: number = 8,
+): string {
   const clamped = Math.max(0, Math.min(1, percentage));
   const filled = Math.round(clamped * length);
   const empty = length - filled;
@@ -1066,14 +1248,14 @@ export function getMainMenuKeyboard() {
       [{ text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } }],
       [
         { text: "🔍 Search Library", callback_data: "menu:search" },
-        { text: "📚 Recent Books", callback_data: "menu:recent" }
+        { text: "📚 Recent Books", callback_data: "menu:recent" },
       ],
       [
         { text: "📖 Currently Reading", callback_data: "menu:reading" },
-        { text: "⚡ Server Status", callback_data: "refresh_status" }
+        { text: "⚡ Server Status", callback_data: "refresh_status" },
       ],
-      [{ text: "💾 Hot Backup", callback_data: "menu:backup" }]
-    ]
+      [{ text: "💾 Hot Backup", callback_data: "menu:backup" }],
+    ],
   };
 }
 
@@ -1097,13 +1279,17 @@ export function getPostIngestionKeyboard(bookId: number) {
       [
         { text: "📥 Send File", callback_data: `send_book:${bookId}` },
         { text: "📖 Open in Mini App", web_app: { url: READING_WEBAPP_URL } },
-        { text: "🗑️ Undo / Delete", callback_data: `delete_book:${bookId}` }
-      ]
-    ]
+        { text: "🗑️ Undo / Delete", callback_data: `delete_book:${bookId}` },
+      ],
+    ],
   };
 }
 
-export function deleteBookFromLibrary(bookId: number): { success: boolean; title?: string; error?: string } {
+export function deleteBookFromLibrary(bookId: number): {
+  success: boolean;
+  title?: string;
+  error?: string;
+} {
   if (isNaN(bookId) || bookId <= 0) {
     return { success: false, error: "Invalid book ID" };
   }
@@ -1112,7 +1298,9 @@ export function deleteBookFromLibrary(bookId: number): { success: boolean; title
   if (fs.existsSync(CALIBRE_DB_PATH)) {
     try {
       const db = new Database(CALIBRE_DB_PATH, { readonly: true });
-      const row = db.query("SELECT title FROM books WHERE id = ?").get(bookId) as any;
+      const row = db
+        .query("SELECT title FROM books WHERE id = ?")
+        .get(bookId) as any;
       if (row && row.title) {
         bookTitle = row.title;
       }
@@ -1122,7 +1310,9 @@ export function deleteBookFromLibrary(bookId: number): { success: boolean; title
     }
   }
 
-  const res = runCalibredb(["remove", String(bookId), "--with-library", SERVER_URL]);
+  const res = withCalibreLockSync(() =>
+    runCalibredb(["remove", String(bookId), "--with-library", SERVER_URL]),
+  );
   if (res.status === 0) {
     try {
       cacheDb.run("DELETE FROM file_hashes WHERE book_id = ?", bookId);
@@ -1144,7 +1334,11 @@ export function deleteBookFromLibrary(bookId: number): { success: boolean; title
     }
     return { success: true, title: bookTitle || `Book #${bookId}` };
   } else {
-    return { success: false, title: bookTitle || `Book #${bookId}`, error: res.stderr || "Calibre remove failed" };
+    return {
+      success: false,
+      title: bookTitle || `Book #${bookId}`,
+      error: res.stderr || "Calibre remove failed",
+    };
   }
 }
 
@@ -1158,7 +1352,11 @@ export interface ActiveReadingDoc {
   bookId: number | null;
 }
 
-export function getCurrentlyReadingShelf(limit: number = 5): { items: ActiveReadingDoc[]; card: string; keyboard: any } {
+export function getCurrentlyReadingShelf(limit: number = 5): {
+  items: ActiveReadingDoc[];
+  card: string;
+  keyboard: any;
+} {
   const items: ActiveReadingDoc[] = [];
 
   if (fs.existsSync(KOSYNC_DB_PATH)) {
@@ -1166,13 +1364,15 @@ export function getCurrentlyReadingShelf(limit: number = 5): { items: ActiveRead
       const kDb = new Database(KOSYNC_DB_PATH, { readonly: true });
       kDb.run("PRAGMA busy_timeout = 3000;");
 
-      const rows = kDb.query(`
+      const rows = kDb
+        .query(`
         SELECT document, percentage, device, filename, title, authors, timestamp
         FROM progress
         WHERE percentage > 0 AND percentage < 0.99
         ORDER BY timestamp DESC
         LIMIT ?
-      `).all(limit) as any[];
+      `)
+        .all(limit) as any[];
 
       kDb.close();
 
@@ -1182,19 +1382,35 @@ export function getCurrentlyReadingShelf(limit: number = 5): { items: ActiveRead
           title = path.basename(r.filename, path.extname(r.filename));
         }
         if (!title) {
-          title = "Document " + (r.document ? r.document.substring(0, 8) : "Unknown");
+          title =
+            "Document " + (r.document ? r.document.substring(0, 8) : "Unknown");
         }
 
         const author = (r.authors || "Unknown").trim();
         const device = (r.device || "Unknown Device").trim();
-        const pct = Math.max(0, Math.min(1, typeof r.percentage === "number" ? r.percentage : parseFloat(r.percentage) || 0));
-        const timestamp = typeof r.timestamp === "number" ? r.timestamp : parseInt(r.timestamp, 10) || 0;
+        const pct = Math.max(
+          0,
+          Math.min(
+            1,
+            typeof r.percentage === "number"
+              ? r.percentage
+              : parseFloat(r.percentage) || 0,
+          ),
+        );
+        const timestamp =
+          typeof r.timestamp === "number"
+            ? r.timestamp
+            : parseInt(r.timestamp, 10) || 0;
 
         let bookId: number | null = null;
 
         // Try mapping via cacheDb file_hashes (hash = document)
         try {
-          const hashRow = cacheDb.query("SELECT book_id FROM file_hashes WHERE hash = ? AND book_id IS NOT NULL LIMIT 1").get(r.document) as any;
+          const hashRow = cacheDb
+            .query(
+              "SELECT book_id FROM file_hashes WHERE hash = ? AND book_id IS NOT NULL LIMIT 1",
+            )
+            .get(r.document) as any;
           if (hashRow?.book_id) {
             bookId = hashRow.book_id;
           }
@@ -1221,7 +1437,7 @@ export function getCurrentlyReadingShelf(limit: number = 5): { items: ActiveRead
           author,
           device,
           timestamp,
-          bookId
+          bookId,
         });
       }
     } catch (_e) {
@@ -1238,9 +1454,9 @@ export function getCurrentlyReadingShelf(limit: number = 5): { items: ActiveRead
       inline_keyboard: [
         [
           { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } },
-          { text: "🔙 Main Menu", callback_data: "menu:main" }
-        ]
-      ]
+          { text: "🔙 Main Menu", callback_data: "menu:main" },
+        ],
+      ],
     };
     return { items, card, keyboard };
   }
@@ -1263,24 +1479,32 @@ export function getCurrentlyReadingShelf(limit: number = 5): { items: ActiveRead
 
     if (it.bookId) {
       keyboardRows.push([
-        { text: `📥 Get "${truncate(it.title, 18)}"`, callback_data: `send_book:${it.bookId}` },
-        { text: "ℹ️ Details", url: `${CALIBRE_WEB_URL}/#book_id=${it.bookId}&panel=book_details` }
+        {
+          text: `📥 Get "${truncate(it.title, 18)}"`,
+          callback_data: `send_book:${it.bookId}`,
+        },
+        {
+          text: "ℹ️ Details",
+          url: `${CALIBRE_WEB_URL}/#book_id=${it.bookId}&panel=book_details`,
+        },
       ]);
     }
   }
 
   keyboardRows.push([
     { text: "🔄 Refresh", callback_data: "menu:reading" },
-    { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } }
+    { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } },
   ]);
-  keyboardRows.push([
-    { text: "🔙 Main Menu", callback_data: "menu:main" }
-  ]);
+  keyboardRows.push([{ text: "🔙 Main Menu", callback_data: "menu:main" }]);
 
   return { items, card, keyboard: { inline_keyboard: keyboardRows } };
 }
 
-export function getRecentBooks(limit: number = 5): { books: CalibreBookResult[]; card: string; keyboard: any } {
+export function getRecentBooks(limit: number = 5): {
+  books: CalibreBookResult[];
+  card: string;
+  keyboard: any;
+} {
   let books: CalibreBookResult[] = [];
 
   if (fs.existsSync(CALIBRE_DB_PATH)) {
@@ -1288,7 +1512,8 @@ export function getRecentBooks(limit: number = 5): { books: CalibreBookResult[];
       const db = new Database(CALIBRE_DB_PATH, { readonly: true });
       db.run("PRAGMA busy_timeout = 3000;");
 
-      const rows = db.query(`
+      const rows = db
+        .query(`
         SELECT b.id, b.title, b.path, b.series_index,
                GROUP_CONCAT(DISTINCT a.name) as authors,
                s.name as series,
@@ -1302,7 +1527,8 @@ export function getRecentBooks(limit: number = 5): { books: CalibreBookResult[];
         GROUP BY b.id
         ORDER BY b.id DESC
         LIMIT ?
-      `).all(limit) as any[];
+      `)
+        .all(limit) as any[];
 
       db.close();
 
@@ -1312,7 +1538,7 @@ export function getRecentBooks(limit: number = 5): { books: CalibreBookResult[];
         authors: r.authors || "Unknown",
         series: r.series || null,
         series_index: r.series_index || null,
-        formats: r.formats || ""
+        formats: r.formats || "",
       }));
     } catch (_e) {
       logError("Failed to query Calibre library for recent books", _e);
@@ -1328,9 +1554,9 @@ export function getRecentBooks(limit: number = 5): { books: CalibreBookResult[];
       inline_keyboard: [
         [
           { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } },
-          { text: "🔙 Main Menu", callback_data: "menu:main" }
-        ]
-      ]
+          { text: "🔙 Main Menu", callback_data: "menu:main" },
+        ],
+      ],
     };
     return { books, card, keyboard };
   }
@@ -1357,18 +1583,22 @@ export function getRecentBooks(limit: number = 5): { books: CalibreBookResult[];
     card += `\n\n`;
 
     keyboardRows.push([
-      { text: `📥 Get "${truncate(b.title, 18)}"`, callback_data: `send_book:${b.id}` },
-      { text: "ℹ️ Details", url: `${CALIBRE_WEB_URL}/#book_id=${b.id}&panel=book_details` }
+      {
+        text: `📥 Get "${truncate(b.title, 18)}"`,
+        callback_data: `send_book:${b.id}`,
+      },
+      {
+        text: "ℹ️ Details",
+        url: `${CALIBRE_WEB_URL}/#book_id=${b.id}&panel=book_details`,
+      },
     ]);
   }
 
   keyboardRows.push([
     { text: "🔄 Refresh", callback_data: "menu:recent" },
-    { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } }
+    { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } },
   ]);
-  keyboardRows.push([
-    { text: "🔙 Main Menu", callback_data: "menu:main" }
-  ]);
+  keyboardRows.push([{ text: "🔙 Main Menu", callback_data: "menu:main" }]);
 
   return { books, card, keyboard: { inline_keyboard: keyboardRows } };
 }
@@ -1377,7 +1607,7 @@ export async function triggerBackup(chatId: number): Promise<boolean> {
   const statusMsgId = await sendMessage(
     chatId,
     `⏳ *Creating hot SQLite backup of reading stack databases...*`,
-    "Markdown"
+    "Markdown",
   );
 
   saveBackupChatId(chatId);
@@ -1397,7 +1627,7 @@ export async function triggerBackup(chatId: number): Promise<boolean> {
         chatId,
         backupResult.archivePath,
         caption,
-        "Markdown"
+        "Markdown",
       );
 
       if (sent) {
@@ -1406,7 +1636,7 @@ export async function triggerBackup(chatId: number): Promise<boolean> {
             chatId,
             statusMsgId,
             `✅ *Hot SQLite backup created successfully.* Delivered below.`,
-            "Markdown"
+            "Markdown",
           );
         }
         return true;
@@ -1416,7 +1646,7 @@ export async function triggerBackup(chatId: number): Promise<boolean> {
             chatId,
             statusMsgId,
             `⚠️ *Backup Delivery Failed*\n\nUnable to deliver backup archive to Telegram. Check bot logs for details.`,
-            "Markdown"
+            "Markdown",
           );
         }
         return false;
@@ -1439,7 +1669,7 @@ export async function triggerBackup(chatId: number): Promise<boolean> {
         chatId,
         statusMsgId,
         `⚠️ *Database Backup Failed*\n\nCould not snapshot reading stack databases. Please check system logs.`,
-        "Markdown"
+        "Markdown",
       );
     }
     return false;
@@ -1455,8 +1685,9 @@ export async function handleCallbackQuery(cq: any): Promise<void> {
 
   log(`Received callback_query: "${data}" from ${sender} (chatId: ${chatId})`);
 
-  let answerText: string | undefined ;
-  if (data === "refresh_status" || data === "menu:status") answerText = "Refreshing status...";
+  let answerText: string | undefined;
+  if (data === "refresh_status" || data === "menu:status")
+    answerText = "Refreshing status...";
   else if (data === "menu:reading") answerText = "Loading currently reading...";
   else if (data === "menu:recent") answerText = "Loading recent books...";
   else if (data === "menu:backup") answerText = "Starting backup...";
@@ -1471,7 +1702,7 @@ export async function handleCallbackQuery(cq: any): Promise<void> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ callback_query_id: callbackId, text: answerText }),
-      timeoutMs: 10000
+      timeoutMs: 10000,
     });
   } catch (err: any) {
     logError(`answerCallbackQuery failed: ${err?.message || err}`);
@@ -1483,19 +1714,29 @@ export async function handleCallbackQuery(cq: any): Promise<void> {
       inline_keyboard: [
         [
           { text: "🔄 Refresh Status", callback_data: "refresh_status" },
-          { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } }
+          { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } },
         ],
-        [
-          { text: "🔙 Main Menu", callback_data: "menu:main" }
-        ]
-      ]
+        [{ text: "🔙 Main Menu", callback_data: "menu:main" }],
+      ],
     };
-    await editOrSendMessage(chatId, messageId, card, "Markdown", inlineKeyboard);
+    await editOrSendMessage(
+      chatId,
+      messageId,
+      card,
+      "Markdown",
+      inlineKeyboard,
+    );
     return;
   }
 
   if (data === "menu:main") {
-    await editOrSendMessage(chatId, messageId, getMainMenuText(), "Markdown", getMainMenuKeyboard());
+    await editOrSendMessage(
+      chatId,
+      messageId,
+      getMainMenuText(),
+      "Markdown",
+      getMainMenuKeyboard(),
+    );
     return;
   }
 
@@ -1511,14 +1752,18 @@ export async function handleCallbackQuery(cq: any): Promise<void> {
       inline_keyboard: [
         [
           { text: "📚 Recent Books", callback_data: "menu:recent" },
-          { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } }
+          { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } },
         ],
-        [
-          { text: "🔙 Main Menu", callback_data: "menu:main" }
-        ]
-      ]
+        [{ text: "🔙 Main Menu", callback_data: "menu:main" }],
+      ],
     };
-    await editOrSendMessage(chatId, messageId, searchCard, "Markdown", keyboard);
+    await editOrSendMessage(
+      chatId,
+      messageId,
+      searchCard,
+      "Markdown",
+      keyboard,
+    );
     return;
   }
 
@@ -1553,18 +1798,21 @@ export async function handleCallbackQuery(cq: any): Promise<void> {
           {
             inline_keyboard: [
               [
-                { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } },
-                { text: "🔙 Main Menu", callback_data: "menu:main" }
-              ]
-            ]
-          }
+                {
+                  text: "📖 Open Reading HQ",
+                  web_app: { url: READING_WEBAPP_URL },
+                },
+                { text: "🔙 Main Menu", callback_data: "menu:main" },
+              ],
+            ],
+          },
         );
       } else {
         await editOrSendMessage(
           chatId,
           messageId,
           `⚠️ *Failed to Delete Book #${bookId}*\n\n${escapeTelegramMarkdown(delRes.error || "Unknown error")}`,
-          "Markdown"
+          "Markdown",
         );
       }
     } else {
@@ -1597,19 +1845,40 @@ export interface IngestResult {
   error?: string;
 }
 
-function ingestBookFile(filePath: string, originalFileName: string): IngestResult {
+function ingestBookFile(
+  filePath: string,
+  originalFileName: string,
+): IngestResult {
   const format = normalizeFormat(path.extname(originalFileName));
   const preliminary = sanitizeMetadata("", "", [], originalFileName);
+
+  if (format === "EPUB") {
+    const contentCheck = validateEpubContent(filePath);
+    if (!contentCheck.valid) {
+      return {
+        success: false,
+        duplicate: false,
+        displayTitle: preliminary.title || originalFileName,
+        author: preliminary.author,
+        format,
+        error: `Invalid EPUB content: ${contentCheck.error || "file is not a valid EPUB archive"}`,
+      };
+    }
+  }
 
   // 1. Level 1: KOReader Binary Checksum Deduplication
   const fileHash = getKOReaderBinary256(filePath);
   if (fileHash) {
-    const hashMatch = cacheDb.query(
-      "SELECT book_id, title, authors FROM file_hashes WHERE hash = ? LIMIT 1"
-    ).get(fileHash) as any;
+    const hashMatch = cacheDb
+      .query(
+        "SELECT book_id, title, authors FROM file_hashes WHERE hash = ? LIMIT 1",
+      )
+      .get(fileHash) as any;
 
     if (hashMatch && hashMatch.book_id) {
-      log(`Duplicate detected via KOReader binary hash: "${hashMatch.title}" (ID: ${hashMatch.book_id})`);
+      log(
+        `Duplicate detected via KOReader binary hash: "${hashMatch.title}" (ID: ${hashMatch.book_id})`,
+      );
       return {
         success: true,
         duplicate: true,
@@ -1617,7 +1886,7 @@ function ingestBookFile(filePath: string, originalFileName: string): IngestResul
         displayTitle: hashMatch.title || preliminary.title,
         author: hashMatch.authors || preliminary.author,
         format,
-        message: "Already in your library (identical content)"
+        message: "Already in your library (identical content)",
       };
     }
   }
@@ -1632,7 +1901,7 @@ function ingestBookFile(filePath: string, originalFileName: string): IngestResul
       SERVER_URL,
       "--fields",
       "id,title,authors,formats,series,series_index",
-      "--for-machine"
+      "--for-machine",
     ]);
 
     let books: any[] = [];
@@ -1643,15 +1912,28 @@ function ingestBookFile(filePath: string, originalFileName: string): IngestResul
 
     const existingBook = books.find((b: any) =>
       isSameBook(
-        { title: b.title, authors: b.authors, series: b.series, series_index: b.series_index },
-        { title: preliminary.title, author: preliminary.author, series: incomingSeries }
-      )
+        {
+          title: b.title,
+          authors: b.authors,
+          series: b.series,
+          series_index: b.series_index,
+        },
+        {
+          title: preliminary.title,
+          author: preliminary.author,
+          series: incomingSeries,
+        },
+      ),
     );
 
     if (existingBook) {
-      const existingFormats = (existingBook.formats || []).map((f: string) => normalizeFormat(f));
+      const existingFormats = (existingBook.formats || []).map((f: string) =>
+        normalizeFormat(f),
+      );
       if (existingFormats.includes(format)) {
-        log(`Duplicate detected via title/series match: "${existingBook.title}" (has format: ${format})`);
+        log(
+          `Duplicate detected via title/series match: "${existingBook.title}" (has format: ${format})`,
+        );
         return {
           success: true,
           duplicate: true,
@@ -1659,23 +1941,33 @@ function ingestBookFile(filePath: string, originalFileName: string): IngestResul
           displayTitle: existingBook.title,
           author: existingBook.authors || preliminary.author,
           format,
-          message: `Already exists in format ${format}`
+          message: `Already exists in format ${format}`,
         };
       } else {
         // Multi-format attach
-        log(`Attaching new format ${format} to existing book "${existingBook.title}" (ID: ${existingBook.id})`);
-        runCalibredb([
-          "add_format",
-          String(existingBook.id),
-          filePath,
-          "--with-library",
-          SERVER_URL
-        ]);
+        log(
+          `Attaching new format ${format} to existing book "${existingBook.title}" (ID: ${existingBook.id})`,
+        );
+        withCalibreLockSync(() =>
+          runCalibredb([
+            "add_format",
+            String(existingBook.id),
+            filePath,
+            "--with-library",
+            SERVER_URL,
+          ]),
+        );
 
         if (fileHash) {
           cacheDb.run(
             "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            filePath, Date.now(), fileHash, existingBook.id, existingBook.title, existingBook.authors || "", 0
+            filePath,
+            Date.now(),
+            fileHash,
+            existingBook.id,
+            existingBook.title,
+            existingBook.authors || "",
+            0,
           );
         }
 
@@ -1687,20 +1979,22 @@ function ingestBookFile(filePath: string, originalFileName: string): IngestResul
           displayTitle: existingBook.title,
           author: existingBook.authors || preliminary.author,
           format,
-          message: `Attached ${format} format to existing book`
+          message: `Attached ${format} format to existing book`,
         };
       }
     }
 
     // 3. Level 3: Add to Calibre with --automerge ignore guard
-    const addRes = runCalibredb([
-      "add",
-      filePath,
-      "--with-library",
-      SERVER_URL,
-      "--automerge",
-      "ignore"
-    ]);
+    const addRes = withCalibreLockSync(() =>
+      runCalibredb([
+        "add",
+        filePath,
+        "--with-library",
+        SERVER_URL,
+        "--automerge",
+        "ignore",
+      ]),
+    );
 
     if (addRes.status === 0) {
       const match = addRes.stdout?.match(/Added book ids?:?\s*([0-9]+)/i);
@@ -1719,7 +2013,7 @@ function ingestBookFile(filePath: string, originalFileName: string): IngestResul
           `id:${newId}`,
           "--fields",
           "id,title,authors,tags,series,series_index",
-          "--for-machine"
+          "--for-machine",
         ]);
 
         let rawTitle = "";
@@ -1737,40 +2031,68 @@ function ingestBookFile(filePath: string, originalFileName: string): IngestResul
           }
         }
 
-        const clean = sanitizeMetadata(rawTitle, rawAuthors, rawTags, originalFileName);
+        const clean = sanitizeMetadata(
+          rawTitle,
+          rawAuthors,
+          rawTags,
+          originalFileName,
+        );
         finalTitle = clean.title || preliminary.title;
         finalAuthor = clean.author || preliminary.author;
 
-        const setArgs = ["set_metadata", String(newId), "--with-library", SERVER_URL];
-        if (clean.title && clean.title !== rawTitle) setArgs.push("--field", `title:${clean.title}`);
-        if (clean.author && clean.author !== rawAuthors && clean.author !== "Unknown") setArgs.push("--field", `authors:${clean.author}`);
-        if (clean.tags && clean.tags.length) setArgs.push("--field", `tags:${clean.tags.join(",")}`);
+        const setArgs = [
+          "set_metadata",
+          String(newId),
+          "--with-library",
+          SERVER_URL,
+        ];
+        if (clean.title && clean.title !== rawTitle)
+          setArgs.push("--field", `title:${clean.title}`);
+        if (
+          clean.author &&
+          clean.author !== rawAuthors &&
+          clean.author !== "Unknown"
+        )
+          setArgs.push("--field", `authors:${clean.author}`);
+        if (clean.tags && clean.tags.length)
+          setArgs.push("--field", `tags:${clean.tags.join(",")}`);
 
         // Serialization auto-tagging
         if (!rawSeries && incomingSeries) {
           setArgs.push("--field", `series:${incomingSeries.series}`);
           setArgs.push("--field", `series_index:${incomingSeries.volume}`);
-          log(`Auto-assigned series "${incomingSeries.series}" #${incomingSeries.volume} to ID ${newId}`);
+          log(
+            `Auto-assigned series "${incomingSeries.series}" #${incomingSeries.volume} to ID ${newId}`,
+          );
         }
 
         if (setArgs.length > 4) {
-          runCalibredb(setArgs);
+          withCalibreLockSync(() => runCalibredb(setArgs));
         }
 
         // Cache binary hash for instant future deduplication
         if (fileHash) {
           cacheDb.run(
             "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            filePath, Date.now(), fileHash, newId, finalTitle, finalAuthor, 0
+            filePath,
+            Date.now(),
+            fileHash,
+            newId,
+            finalTitle,
+            finalAuthor,
+            0,
           );
         }
 
         // Durable metadata enrichment via Job Queue
-        const isManga = format === "CBZ" || format === "CBR" || (clean.tags || []).some(t => /manga|comic/i.test(t));
+        const isManga =
+          format === "CBZ" ||
+          format === "CBR" ||
+          (clean.tags || []).some((t) => /manga|comic/i.test(t));
         getJobQueue(cacheDb).enqueue("metadata_enrich", {
           bookId: newId,
           title: finalTitle,
-          isManga
+          isManga,
         });
       }
 
@@ -1781,7 +2103,9 @@ function ingestBookFile(filePath: string, originalFileName: string): IngestResul
         displayTitle: finalTitle,
         author: finalAuthor,
         format,
-        message: incomingSeries ? `Added (${incomingSeries.series} #${incomingSeries.volume})` : `Added to library`
+        message: incomingSeries
+          ? `Added (${incomingSeries.series} #${incomingSeries.volume})`
+          : `Added to library`,
       };
     } else {
       return {
@@ -1790,7 +2114,7 @@ function ingestBookFile(filePath: string, originalFileName: string): IngestResul
         displayTitle: preliminary.title || originalFileName,
         author: preliminary.author,
         format,
-        error: addRes.stderr || "Failed to add book to Calibre"
+        error: addRes.stderr || "Failed to add book to Calibre",
       };
     }
   } catch (err: any) {
@@ -1800,10 +2124,89 @@ function ingestBookFile(filePath: string, originalFileName: string): IngestResul
       displayTitle: preliminary.title || originalFileName,
       author: preliminary.author,
       format,
-      error: err.message
+      error: err.message,
     };
   }
 }
+
+// Register Durable Job Queue Handlers for Bot Ingestion
+const botJobQueue = getJobQueue(cacheDb);
+botJobQueue.registerHandler(
+  "file_ingest",
+  async (payload: {
+    filePath: string;
+    originalFileName: string;
+    deleteAfterIngest?: boolean;
+  }) => {
+    const result = ingestBookFile(payload.filePath, payload.originalFileName);
+    if (
+      result.success &&
+      payload.deleteAfterIngest &&
+      fs.existsSync(payload.filePath)
+    ) {
+      try {
+        fs.unlinkSync(payload.filePath);
+      } catch (_unlinkErr) {
+        void _unlinkErr;
+      }
+    }
+    if (!result.success) {
+      throw new Error(result.error || "File ingestion failed");
+    }
+    return result;
+  },
+);
+botJobQueue.registerHandler(
+  "archive_ingest",
+  async (payload: {
+    archivePath: string;
+    archiveName: string;
+    deleteAfterExtract?: boolean;
+  }) => {
+    const unp = unpackArchive(payload.archivePath);
+    if (!unp.success) {
+      throw new Error(unp.error || "Archive extraction failed");
+    }
+    if (payload.deleteAfterExtract && fs.existsSync(payload.archivePath)) {
+      try {
+        fs.unlinkSync(payload.archivePath);
+      } catch (_unlinkErr) {
+        void _unlinkErr;
+      }
+    }
+    const results: any[] = [];
+    try {
+      for (const book of unp.books) {
+        const r = ingestBookFile(book.tempPath, book.originalName);
+        results.push({
+          name: book.originalName,
+          ...r,
+          error: r.error ? sanitizeErrorMessage(r.error) : undefined,
+        });
+      }
+    } finally {
+      unp.cleanup();
+    }
+    const importedCount = results.filter(
+      (r: any) => r.success && !r.duplicate,
+    ).length;
+    return {
+      isArchive: true,
+      archiveName: payload.archiveName,
+      total: unp.books.length,
+      imported: importedCount,
+      quarantined: unp.quarantined || [],
+      results,
+    };
+  },
+);
+botJobQueue.registerHandler("url_ingest", async (payload: { url: string }) => {
+  const result = await ingestArticleFromUrl(payload.url);
+  if (!result.success) {
+    throw new Error(result.error || "Article ingestion failed");
+  }
+  return result;
+});
 
 interface QueuedDoc {
   doc: any;
@@ -1813,10 +2216,13 @@ interface QueuedDoc {
   sender: string;
 }
 
-const pendingBatches = new Map<number, {
-  docs: QueuedDoc[];
-  timer: any;
-}>();
+const pendingBatches = new Map<
+  number,
+  {
+    docs: QueuedDoc[];
+    timer: any;
+  }
+>();
 
 async function processBatch(chatId: number, items: QueuedDoc[]) {
   if (items.length === 0) return;
@@ -1827,7 +2233,11 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
 
   let statusMsgId: number | null = null;
   if (isBatch) {
-    statusMsgId = await sendMessage(chatId, `\uD83D\uDCE5 Received *${total}* books. Starting batch ingestion...`, "Markdown");
+    statusMsgId = await sendMessage(
+      chatId,
+      `\uD83D\uDCE5 Received *${total}* books. Starting batch ingestion...`,
+      "Markdown",
+    );
   }
 
   const results: Array<{
@@ -1848,14 +2258,16 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
     const ext = path.extname(fileName).toLowerCase();
     const format = normalizeFormat(ext);
 
-    log(`[Batch ${i + 1}/${total}] Processing "${fileName}" (${sizeMB} MB) from ${sender}`);
+    log(
+      `[Batch ${i + 1}/${total}] Processing "${fileName}" (${sizeMB} MB) from ${sender}`,
+    );
 
     if (!ALLOWED_EXTS.includes(ext)) {
       results.push({
         name: fileName,
         format,
         status: "error",
-        note: `Unsupported format: ${ext}`
+        note: `Unsupported format: ${ext}`,
       });
       continue;
     }
@@ -1865,36 +2277,55 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
         name: fileName,
         format,
         status: "error",
-        note: `Exceeds 20MB limit (${sizeMB} MB). Use Web Uploader: ${WEB_UPLOADER_URL}`
+        note: `Exceeds 20MB limit (${sizeMB} MB). Use Web Uploader: ${WEB_UPLOADER_URL}`,
       });
       continue;
     }
 
     if (isBatch) {
-      await editOrSendMessage(chatId, statusMsgId, `⏳ *[${i + 1}/${total}]* Ingesting "${fileName}"...`, "Markdown");
+      await editOrSendMessage(
+        chatId,
+        statusMsgId,
+        `⏳ *[${i + 1}/${total}]* Ingesting "${fileName}"...`,
+        "Markdown",
+      );
     } else {
-      statusMsgId = await sendMessage(chatId, `⏳ Downloading & Ingesting "${fileName}" (${sizeMB} MB)...`);
+      statusMsgId = await sendMessage(
+        chatId,
+        `⏳ Downloading & Ingesting "${fileName}" (${sizeMB} MB)...`,
+      );
     }
 
     // Download from Telegram
     try {
-      const fileRes = await tgFetch(`getFile?file_id=${doc.file_id}`, { timeoutMs: 20000 });
-      const fileJson = await fileRes.json() as any;
+      const fileRes = await tgFetch(`getFile?file_id=${doc.file_id}`, {
+        timeoutMs: 20000,
+      });
+      const fileJson = (await fileRes.json()) as any;
 
       if (!fileJson.ok || !fileJson.result?.file_path) {
-        const errMsg = fileJson.description || "Failed to retrieve file from Telegram";
+        const errMsg =
+          fileJson.description || "Failed to retrieve file from Telegram";
         results.push({ name: fileName, format, status: "error", note: errMsg });
         continue;
       }
 
       const dlUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${fileJson.result.file_path}`;
-      const dl = await fetch(dlUrl, { proxy: PROXY_URL } as any);
+      const dl = await safeFetchWithSsrf(dlUrl, {
+        proxy: PROXY_URL,
+        timeoutMs: 30000,
+      });
       if (!dl.ok) {
-        results.push({ name: fileName, format, status: "error", note: `Download failed (HTTP ${dl.status})` });
+        results.push({
+          name: fileName,
+          format,
+          status: "error",
+          note: `Download failed (HTTP ${dl.status})`,
+        });
         continue;
       }
 
-      const arrayBuf = await dl.arrayBuffer();
+      const arrayBuf = dl.buffer;
       const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
       const safeBase = path.basename(fileName, ext);
       const tempFileName = `${safeBase}_${uniqueSuffix}${ext}`;
@@ -1903,41 +2334,48 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
       fs.writeFileSync(destPath, Buffer.from(arrayBuf));
 
       if (isArchiveFile(fileName)) {
-        log(`Unpacking archive "${fileName}"...`);
-        const unp = unpackArchive(destPath);
-        try { fs.unlinkSync(destPath); } catch {}
-
-        if (!unp.success) {
-          results.push({ name: fileName, format, status: "error", note: unp.error || "Archive extraction failed" });
-          continue;
-        }
-
-        if (unp.books.length === 0) {
-          unp.cleanup();
-          results.push({ name: fileName, format, status: "error", note: "No supported eBooks found in archive" });
-          continue;
-        }
-
-        log(`Archive "${fileName}" yielded ${unp.books.length} book(s)`);
-        for (const b of unp.books) {
-          const r = ingestBookFile(b.tempPath, b.originalName);
+        log(`Unpacking archive "${fileName}" via durable queue...`);
+        const queue = getJobQueue(cacheDb);
+        const job = queue.enqueue("archive_ingest", {
+          archivePath: destPath,
+          archiveName: fileName,
+          deleteAfterExtract: true,
+        });
+        const outcome = await queue.waitForJob(job.id);
+        if (outcome.status !== "completed") {
           results.push({
-            name: b.originalName,
-            title: r.displayTitle,
-            author: r.author,
+            name: fileName,
+            format,
+            status: "error",
+            note: outcome.error || "Archive extraction failed",
+          });
+          continue;
+        }
+
+        const outcomeResult = outcome.result;
+        for (const r of outcomeResult?.results || []) {
+          results.push({
+            name: r.name,
+            title: r.displayTitle || r.title,
+            author: r.author || r.authors,
             format: r.format,
             bookId: r.bookId,
             attachedFormat: r.attachedFormat,
-            status: r.duplicate ? "duplicate" : (r.success ? "success" : "error"),
-            note: r.message || r.error || "Processed"
+            status: r.duplicate ? "duplicate" : r.success ? "success" : "error",
+            note: r.message || r.error || "Processed",
           });
         }
-        unp.cleanup();
         continue;
       }
 
-      const res = ingestBookFile(destPath, fileName);
-      try { fs.unlinkSync(destPath); } catch {}
+      const queue = getJobQueue(cacheDb);
+      const job = queue.enqueue("file_ingest", {
+        filePath: destPath,
+        originalFileName: fileName,
+        deleteAfterIngest: true,
+      });
+      const outcome = await queue.waitForJob(job.id);
+      const res = outcome.result || { success: false, error: outcome.error };
 
       results.push({
         name: fileName,
@@ -1946,25 +2384,38 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
         format: res.format,
         bookId: res.bookId,
         attachedFormat: res.attachedFormat,
-        status: res.duplicate ? "duplicate" : (res.success ? "success" : "error"),
-        note: res.message || res.error || (res.success ? "Added" : "Calibre ingest failed")
+        status: res.duplicate ? "duplicate" : res.success ? "success" : "error",
+        note:
+          res.message ||
+          res.error ||
+          (res.success ? "Added" : "Calibre ingest failed"),
       });
     } catch (err: any) {
-      results.push({ name: fileName, format, status: "error", note: err.message });
+      results.push({
+        name: fileName,
+        format,
+        status: "error",
+        note: err.message,
+      });
     }
   }
 
   // Send Final Status with Rich Details and Calibre Links
   if (isBatch) {
-    const successCount = results.filter(r => r.status === "success").length;
-    const duplicateCount = results.filter(r => r.status === "duplicate").length;
+    const successCount = results.filter((r) => r.status === "success").length;
+    const duplicateCount = results.filter(
+      (r) => r.status === "duplicate",
+    ).length;
     const totalSuccess = successCount + duplicateCount;
 
     let summary = `\uD83D\uDCDA *Batch Ingestion Complete* (${totalSuccess}/${total} processed)\n\n`;
 
     for (const r of results) {
-      const link = r.bookId ? `[Open](${CALIBRE_WEB_URL}/#book_id=${r.bookId}&panel=book_details)` : "";
-      const authorStr = r.author && r.author !== "Unknown" ? ` by _${r.author}_` : "";
+      const link = r.bookId
+        ? `[Open](${CALIBRE_WEB_URL}/#book_id=${r.bookId}&panel=book_details)`
+        : "";
+      const authorStr =
+        r.author && r.author !== "Unknown" ? ` by _${r.author}_` : "";
       const fmtStr = r.format ? `[\`${r.format}\`]` : "";
 
       if (r.status === "success") {
@@ -1977,58 +2428,80 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
     }
 
     summary += `\n✨ _All books are cataloged and ready on your Kindle OPDS feed._`;
-    const validBooks = results.filter(r => r.bookId && (r.status === "success" || r.status === "duplicate"));
-    let batchKeyboard: any ;
+    const validBooks = results.filter(
+      (r) => r.bookId && (r.status === "success" || r.status === "duplicate"),
+    );
+    let batchKeyboard: any;
     if (validBooks.length === 1 && validBooks[0].bookId) {
       batchKeyboard = getPostIngestionKeyboard(validBooks[0].bookId);
     } else if (validBooks.length > 1) {
       const rows: any[][] = [];
       for (const b of validBooks.slice(0, 4)) {
         rows.push([
-          { text: `📥 Send "${truncate(b.title || b.name, 16)}"`, callback_data: `send_book:${b.bookId}` },
-          { text: "🗑️ Undo", callback_data: `delete_book:${b.bookId}` }
+          {
+            text: `📥 Send "${truncate(b.title || b.name, 16)}"`,
+            callback_data: `send_book:${b.bookId}`,
+          },
+          { text: "🗑️ Undo", callback_data: `delete_book:${b.bookId}` },
         ]);
       }
-      rows.push([{ text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } }]);
+      rows.push([
+        { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } },
+      ]);
       batchKeyboard = { inline_keyboard: rows };
     }
-    await editOrSendMessage(chatId, statusMsgId, summary, "Markdown", batchKeyboard);
+    await editOrSendMessage(
+      chatId,
+      statusMsgId,
+      summary,
+      "Markdown",
+      batchKeyboard,
+    );
   } else {
     const single = results[0];
-    const detailsLink = single.bookId ? `[Book Details](${CALIBRE_WEB_URL}/#book_id=${single.bookId}&panel=book_details)` : "";
-    const readerLink = (single.bookId && single.format) ? `[Read Online](${CALIBRE_WEB_URL}/read/${single.bookId}/${single.format.toLowerCase()})` : "";
+    const detailsLink = single.bookId
+      ? `[Book Details](${CALIBRE_WEB_URL}/#book_id=${single.bookId}&panel=book_details)`
+      : "";
+    const readerLink =
+      single.bookId && single.format
+        ? `[Read Online](${CALIBRE_WEB_URL}/read/${single.bookId}/${single.format.toLowerCase()})`
+        : "";
     const links = [detailsLink, readerLink].filter(Boolean).join(" • ");
 
-    const postIngestKeyboard = single.bookId ? getPostIngestionKeyboard(single.bookId) : undefined;
+    const postIngestKeyboard = single.bookId
+      ? getPostIngestionKeyboard(single.bookId)
+      : undefined;
 
     if (single.status === "success") {
-      const actionHeader = single.attachedFormat ? "\uD83D\uDCCE *Format Attached*" : "✅ *Book Ingested Successfully*";
+      const actionHeader = single.attachedFormat
+        ? "\uD83D\uDCCE *Format Attached*"
+        : "✅ *Book Ingested Successfully*";
       await editOrSendMessage(
         chatId,
         statusMsgId,
         `${actionHeader}\n\n` +
-        `\uD83D\uDCD6 *Title:* ${single.title || single.name}\n` +
-        `\uD83D\uDC64 *Author:* ${single.author || "Unknown"}\n` +
-        `\uD83D\uDCE6 *Format:* \`${single.format || "Unknown"}\`\n` +
-        `ℹ️ ${single.note}\n\n` +
-        (links ? `\uD83D\uDD17 ${links}\n\n` : "") +
-        `_Ready on your Kindle OPDS feed._`,
+          `\uD83D\uDCD6 *Title:* ${single.title || single.name}\n` +
+          `\uD83D\uDC64 *Author:* ${single.author || "Unknown"}\n` +
+          `\uD83D\uDCE6 *Format:* \`${single.format || "Unknown"}\`\n` +
+          `ℹ️ ${single.note}\n\n` +
+          (links ? `\uD83D\uDD17 ${links}\n\n` : "") +
+          `_Ready on your Kindle OPDS feed._`,
         "Markdown",
-        postIngestKeyboard
+        postIngestKeyboard,
       );
     } else if (single.status === "duplicate") {
       await editOrSendMessage(
         chatId,
         statusMsgId,
         `ℹ️ *Book Already in Library*\n\n` +
-        `\uD83D\uDCD6 *Title:* ${single.title || single.name}\n` +
-        `\uD83D\uDC64 *Author:* ${single.author || "Unknown"}\n` +
-        `\uD83D\uDCE6 *Format:* \`${single.format || "Unknown"}\`\n` +
-        `ℹ️ ${single.note}\n\n` +
-        (links ? `\uD83D\uDD17 ${links}\n\n` : "") +
-        `_Available on your Kindle and Calibre._`,
+          `\uD83D\uDCD6 *Title:* ${single.title || single.name}\n` +
+          `\uD83D\uDC64 *Author:* ${single.author || "Unknown"}\n` +
+          `\uD83D\uDCE6 *Format:* \`${single.format || "Unknown"}\`\n` +
+          `ℹ️ ${single.note}\n\n` +
+          (links ? `\uD83D\uDD17 ${links}\n\n` : "") +
+          `_Available on your Kindle and Calibre._`,
         "Markdown",
-        postIngestKeyboard
+        postIngestKeyboard,
       );
     } else {
       const isOverSize = single.note.includes("20MB");
@@ -2036,12 +2509,12 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
         chatId,
         statusMsgId,
         `⚠️ *Import Failed*\n\n` +
-        `\uD83D\uDCC4 *File:* \`${single.name}\`\n` +
-        `❌ *Error:* ${single.note}\n\n` +
-        (isOverSize
-          ? `\uD83D\uDC49 Upload directly via [Web Uploader](${WEB_UPLOADER_URL}) to bypass the 20MB limit.`
-          : `Please check the file format and try again.`),
-        "Markdown"
+          `\uD83D\uDCC4 *File:* \`${single.name}\`\n` +
+          `❌ *Error:* ${single.note}\n\n` +
+          (isOverSize
+            ? `\uD83D\uDC49 Upload directly via [Web Uploader](${WEB_UPLOADER_URL}) to bypass the 20MB limit.`
+            : `Please check the file format and try again.`),
+        "Markdown",
       );
     }
   }
@@ -2061,25 +2534,32 @@ process.on("SIGTERM", () => {
 });
 
 async function pollTelegram() {
-  log(`Polling started via proxy ${PROXY_URL} for bot: ${TELEGRAM_BOT_TOKEN.substring(0, 10)}...`);
+  log(
+    `Polling started via proxy ${PROXY_URL} for bot: ${TELEGRAM_BOT_TOKEN.substring(0, 10)}...`,
+  );
 
   await initChatMenuButton();
 
   while (isPollingRunning) {
     try {
-      const res = await tgFetch(`getUpdates?offset=${offset}&timeout=${POLL_TIMEOUT_SECONDS}`, {
-        timeoutMs: POLL_REQUEST_TIMEOUT_MS
-      });
+      const res = await tgFetch(
+        `getUpdates?offset=${offset}&timeout=${POLL_TIMEOUT_SECONDS}`,
+        {
+          timeoutMs: POLL_REQUEST_TIMEOUT_MS,
+        },
+      );
 
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
-        logError(`getUpdates returned HTTP ${res.status}: ${errText}. Retrying in ${Math.round(backoffMs / 1000)}s...`);
+        logError(
+          `getUpdates returned HTTP ${res.status}: ${errText}. Retrying in ${Math.round(backoffMs / 1000)}s...`,
+        );
         await new Promise((r) => setTimeout(r, backoffMs));
         backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
         continue;
       }
 
-      const json = await res.json() as any;
+      const json = (await res.json()) as any;
       // On successful polling response, reset backoff to initial delay
       backoffMs = INITIAL_BACKOFF_MS;
 
@@ -2095,7 +2575,8 @@ async function pollTelegram() {
           const msg = update.message;
           if (!msg) continue;
           const chatId = msg.chat.id;
-          const sender = msg.from?.username || msg.from?.first_name || `ID ${chatId}`;
+          const sender =
+            msg.from?.username || msg.from?.first_name || `ID ${chatId}`;
 
           if (msg.document) {
             const doc = msg.document;
@@ -2104,25 +2585,27 @@ async function pollTelegram() {
 
             if (fileSize > MAX_TELEGRAM_FILE_SIZE) {
               const sizeMB = (fileSize / (1024 * 1024)).toFixed(1);
-              log(`File "${fileName}" exceeds 20MB (${sizeMB} MB). Sending instant Web Uploader redirect to chat ${chatId}`);
+              log(
+                `File "${fileName}" exceeds 20MB (${sizeMB} MB). Sending instant Web Uploader redirect to chat ${chatId}`,
+              );
               await sendMessage(
                 chatId,
                 `⚠️ *File Exceeds Telegram Bot Limit*\n\n` +
-                `*${fileName}* is *${sizeMB} MB*, which exceeds Telegram Bot API's *20 MB* download ceiling.\n\n` +
-                `👉 *Upload directly via Reading HQ Mini App or Web Uploader:*\n` +
-                `[Reading HQ](${READING_WEBAPP_URL}) • [Web Uploader](${WEB_UPLOADER_URL})\n\n` +
-                `_The Web Uploader accepts books of any size and automatically synchronizes with Calibre._`,
+                  `*${fileName}* is *${sizeMB} MB*, which exceeds Telegram Bot API's *20 MB* download ceiling.\n\n` +
+                  `👉 *Upload directly via Reading HQ Mini App or Web Uploader:*\n` +
+                  `[Reading HQ](${READING_WEBAPP_URL}) • [Web Uploader](${WEB_UPLOADER_URL})\n\n` +
+                  `_The Web Uploader accepts books of any size and automatically synchronizes with Calibre._`,
                 "Markdown",
                 {
                   inline_keyboard: [
                     [
                       {
                         text: "📖 Open Reading HQ",
-                        web_app: { url: READING_WEBAPP_URL }
-                      }
-                    ]
-                  ]
-                }
+                        web_app: { url: READING_WEBAPP_URL },
+                      },
+                    ],
+                  ],
+                },
               );
               continue;
             }
@@ -2140,7 +2623,6 @@ async function pollTelegram() {
               pendingBatches.delete(chatId);
               processBatch(chatId, currentDocs);
             }, 1800); // 1.8s debounce collects files sent in a burst
-
           } else if (msg.text) {
             const text = msg.text.trim();
             log(`Received text: "${text}" from ${sender}`);
@@ -2154,28 +2636,48 @@ async function pollTelegram() {
               text.startsWith("/status ") ||
               text.startsWith("/health ")
             ) {
-              log(`Handling ${text.split(" ")[0]} command from ${sender} (chatId: ${chatId})`);
+              log(
+                `Handling ${text.split(" ")[0]} command from ${sender} (chatId: ${chatId})`,
+              );
               const statusMsgId = await sendMessage(
                 chatId,
                 `⏳ *Gathering reading stack diagnostics...*`,
-                "Markdown"
+                "Markdown",
               );
 
               const card = await getStatusDashboard();
               const inlineKeyboard = {
                 inline_keyboard: [
                   [
-                    { text: "🔄 Refresh Status", callback_data: "refresh_status" },
-                    { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } }
-                  ]
-                ]
+                    {
+                      text: "🔄 Refresh Status",
+                      callback_data: "refresh_status",
+                    },
+                    {
+                      text: "📖 Open Reading HQ",
+                      web_app: { url: READING_WEBAPP_URL },
+                    },
+                  ],
+                ],
               };
-              await editOrSendMessage(chatId, statusMsgId, card, "Markdown", inlineKeyboard);
+              await editOrSendMessage(
+                chatId,
+                statusMsgId,
+                card,
+                "Markdown",
+                inlineKeyboard,
+              );
               continue;
             }
 
-            if (text === "/backup" || text.startsWith("/backup@") || text.startsWith("/backup ")) {
-              log(`Handling /backup command from ${sender} (chatId: ${chatId})`);
+            if (
+              text === "/backup" ||
+              text.startsWith("/backup@") ||
+              text.startsWith("/backup ")
+            ) {
+              log(
+                `Handling /backup command from ${sender} (chatId: ${chatId})`,
+              );
               await triggerBackup(chatId);
               continue;
             }
@@ -2186,7 +2688,9 @@ async function pollTelegram() {
               text.startsWith("/reading@") ||
               text.startsWith("/reading ")
             ) {
-              log(`Handling /reading command from ${sender} (chatId: ${chatId})`);
+              log(
+                `Handling /reading command from ${sender} (chatId: ${chatId})`,
+              );
               const { card, keyboard } = getCurrentlyReadingShelf(5);
               await sendMessage(chatId, card, "Markdown", keyboard);
               continue;
@@ -2198,7 +2702,9 @@ async function pollTelegram() {
               text.startsWith("/recent@") ||
               text.startsWith("/recent ")
             ) {
-              log(`Handling /recent command from ${sender} (chatId: ${chatId})`);
+              log(
+                `Handling /recent command from ${sender} (chatId: ${chatId})`,
+              );
               const { card, keyboard } = getRecentBooks(5);
               await sendMessage(chatId, card, "Markdown", keyboard);
               continue;
@@ -2211,25 +2717,32 @@ async function pollTelegram() {
               text.startsWith("/menu ")
             ) {
               log(`Handling /menu command from ${sender} (chatId: ${chatId})`);
-              await sendMessage(chatId, getMainMenuText(), "Markdown", getMainMenuKeyboard());
+              await sendMessage(
+                chatId,
+                getMainMenuText(),
+                "Markdown",
+                getMainMenuKeyboard(),
+              );
               initChatMenuButton(chatId).catch(() => {});
               continue;
             }
 
             // Library Search: /find <query>, /search <query>, /f <query>
-            const searchMatch = text.match(/^\/(?:search|find|f)(?:@\w+)?(?:\s+(.*))?$/i);
+            const searchMatch = text.match(
+              /^\/(?:search|find|f)(?:@\w+)?(?:\s+(.*))?$/i,
+            );
             if (searchMatch) {
               const query = (searchMatch[1] || "").trim();
               if (!query) {
                 await sendMessage(
                   chatId,
                   `🔍 *Library Search*\n\n` +
-                  `Usage: \`/find <query>\` or \`/search <query>\` (or \`/f <query>\`)\n\n` +
-                  `Examples:\n` +
-                  `• \`/find One Piece\`\n` +
-                  `• \`/search Foundation\`\n` +
-                  `• \`/f Isaac Asimov\``,
-                  "Markdown"
+                    `Usage: \`/find <query>\` or \`/search <query>\` (or \`/f <query>\`)\n\n` +
+                    `Examples:\n` +
+                    `• \`/find One Piece\`\n` +
+                    `• \`/search Foundation\`\n` +
+                    `• \`/f Isaac Asimov\``,
+                  "Markdown",
                 );
                 continue;
               }
@@ -2241,7 +2754,7 @@ async function pollTelegram() {
                 await sendMessage(
                   chatId,
                   `🔍 *No books found matching "${escapeTelegramMarkdown(query)}".*\n\nTry searching by title, author name, or series name.`,
-                  "Markdown"
+                  "Markdown",
                 );
                 continue;
               }
@@ -2249,7 +2762,7 @@ async function pollTelegram() {
               await sendMessage(
                 chatId,
                 `🔍 *Found ${results.length} book(s) matching "${escapeTelegramMarkdown(query)}":*`,
-                "Markdown"
+                "Markdown",
               );
 
               for (const book of results) {
@@ -2261,7 +2774,9 @@ async function pollTelegram() {
                 let card = `📚 *${escapeTelegramMarkdown(book.title)}*\n`;
                 card += `👤 *Author:* ${escapeTelegramMarkdown(book.authors || "Unknown")}\n`;
                 if (book.series) {
-                  const idx = book.series_index ? ` (#${book.series_index})` : "";
+                  const idx = book.series_index
+                    ? ` (#${book.series_index})`
+                    : "";
                   card += `📖 *Series:* ${escapeTelegramMarkdown(book.series)}${idx}\n`;
                 }
                 card += `📦 *Formats:* \`${formatBadges || "[None]"}\`\n\n`;
@@ -2270,11 +2785,20 @@ async function pollTelegram() {
                 const inlineKeyboard = {
                   inline_keyboard: [
                     [
-                      { text: "📥 Send File", callback_data: `send_book:${book.id}` },
-                      { text: "📖 Read Online", url: `${CALIBRE_WEB_URL}/read/${book.id}/epub` },
-                      { text: "ℹ️ Details", url: `${CALIBRE_WEB_URL}/#book_id=${book.id}&panel=book_details` }
-                    ]
-                  ]
+                      {
+                        text: "📥 Send File",
+                        callback_data: `send_book:${book.id}`,
+                      },
+                      {
+                        text: "📖 Read Online",
+                        url: `${CALIBRE_WEB_URL}/read/${book.id}/epub`,
+                      },
+                      {
+                        text: "ℹ️ Details",
+                        url: `${CALIBRE_WEB_URL}/#book_id=${book.id}&panel=book_details`,
+                      },
+                    ],
+                  ],
                 };
 
                 await sendMessage(chatId, card, "Markdown", inlineKeyboard);
@@ -2294,7 +2818,7 @@ async function pollTelegram() {
               await sendMessage(
                 chatId,
                 `ℹ️ *Book Retrieval*\n\nPlease specify a book ID:\nUsage: \`/get <id>\`\nExample: \`/get 6\``,
-                "Markdown"
+                "Markdown",
               );
               continue;
             }
@@ -2312,19 +2836,19 @@ async function pollTelegram() {
               await sendMessage(
                 chatId,
                 `📖 *Reading HQ Mini App*\n\n` +
-                `Access your complete reading catalog, search books, edit metadata, and upload files directly inside Telegram:\n\n` +
-                `👉 Tap *[📖 Open Reading HQ]* below or use the *📖 Reading HQ* menu button next to the chat input field.`,
+                  `Access your complete reading catalog, search books, edit metadata, and upload files directly inside Telegram:\n\n` +
+                  `👉 Tap *[📖 Open Reading HQ]* below or use the *📖 Reading HQ* menu button next to the chat input field.`,
                 "Markdown",
                 {
                   inline_keyboard: [
                     [
                       {
                         text: "📖 Open Reading HQ",
-                        web_app: { url: READING_WEBAPP_URL }
-                      }
-                    ]
-                  ]
-                }
+                        web_app: { url: READING_WEBAPP_URL },
+                      },
+                    ],
+                  ],
+                },
               );
               initChatMenuButton(chatId).catch(() => {});
               continue;
@@ -2333,15 +2857,24 @@ async function pollTelegram() {
             const articleUrl = extractUrlFromText(text);
 
             if (articleUrl) {
-              log(`Detected article URL in message: "${articleUrl}" from ${sender}`);
+              log(
+                `Detected article URL in message: "${articleUrl}" from ${sender}`,
+              );
               const statusMsgId = await sendMessage(
                 chatId,
                 `⏳ *Extracting article from URL...*\n\`${articleUrl}\``,
-                "Markdown"
+                "Markdown",
               );
 
               try {
-                const result = await ingestArticleFromUrl(articleUrl);
+                const queue = getJobQueue(cacheDb);
+                const job = queue.enqueue("url_ingest", { url: articleUrl });
+                const outcome = await queue.waitForJob(job.id);
+                const result = outcome.result || {
+                  success: false,
+                  error: outcome.error,
+                };
+
                 if (result.success) {
                   const detailsLink = result.bookId
                     ? `[Book Details](${CALIBRE_WEB_URL}/#book_id=${result.bookId}&panel=book_details)`
@@ -2349,7 +2882,9 @@ async function pollTelegram() {
                   const readerLink = result.bookId
                     ? `[Read Online](${CALIBRE_WEB_URL}/read/${result.bookId}/epub)`
                     : "";
-                  const links = [detailsLink, readerLink].filter(Boolean).join(" • ");
+                  const links = [detailsLink, readerLink]
+                    .filter(Boolean)
+                    .join(" • ");
 
                   const confirmation =
                     `✅ *Article Ingested Successfully*\n\n` +
@@ -2362,28 +2897,48 @@ async function pollTelegram() {
                     (links ? `\uD83D\uDD17 ${links}\n\n` : "") +
                     `_Ready on your Kindle OPDS feed. Sending EPUB copy below..._`;
 
-                  const postIngestKeyboard = result.bookId ? getPostIngestionKeyboard(result.bookId) : undefined;
-                  await editOrSendMessage(chatId, statusMsgId, confirmation, "Markdown", postIngestKeyboard);
+                  const postIngestKeyboard = result.bookId
+                    ? getPostIngestionKeyboard(result.bookId)
+                    : undefined;
+                  await editOrSendMessage(
+                    chatId,
+                    statusMsgId,
+                    confirmation,
+                    "Markdown",
+                    postIngestKeyboard,
+                  );
 
                   if (result.epubPath && fs.existsSync(result.epubPath)) {
-                    log(`Sending generated EPUB to chat ${chatId}: ${result.epubPath}`);
+                    log(
+                      `Sending generated EPUB to chat ${chatId}: ${result.epubPath}`,
+                    );
                     const caption = `\uD83D\uDCD6 *${result.title}*\n\uD83D\uDC64 ${result.authors || "Unknown"}`;
-                    await sendDocument(chatId, result.epubPath, caption, "Markdown");
+                    await sendDocument(
+                      chatId,
+                      result.epubPath,
+                      caption,
+                      "Markdown",
+                    );
                   }
                 } else {
                   await editOrSendMessage(
                     chatId,
                     statusMsgId,
                     `⚠️ *Article Ingestion Failed*\n\n` +
-                    `\uD83D\uDD17 *URL:* \`${articleUrl}\`\n` +
-                    `❌ *Error:* ${result.error || "Failed to process article"}\n\n` +
-                    `_Please verify the link is publicly accessible and try again._`,
-                    "Markdown"
+                      `\uD83D\uDD17 *URL:* \`${articleUrl}\`\n` +
+                      `❌ *Error:* ${result.error || "Failed to process article"}\n\n` +
+                      `_Please verify the link is publicly accessible and try again._`,
+                    "Markdown",
                   );
                 }
               } catch (err: any) {
-                logError(`Article ingestion exception for ${articleUrl}: ${err.message}`);
-                const isPaywall = /paid subscription paywall|subscription offer/i.test(err.message);
+                logError(
+                  `Article ingestion exception for ${articleUrl}: ${err.message}`,
+                );
+                const isPaywall =
+                  /paid subscription paywall|subscription offer/i.test(
+                    err.message,
+                  );
                 const advice = isPaywall
                   ? `_Please paste the article text directly into Reading HQ or provide an unlocked link._`
                   : `_Please check the URL or paywall access and try again._`;
@@ -2392,31 +2947,44 @@ async function pollTelegram() {
                   chatId,
                   statusMsgId,
                   `⚠️ *Article Ingestion Failed*\n\n` +
-                  `\uD83D\uDD17 *URL:* \`${articleUrl}\`\n` +
-                  `❌ *Error:* ${err.message || "Unknown error"}\n\n` +
-                  advice,
-                  "Markdown"
+                    `\uD83D\uDD17 *URL:* \`${articleUrl}\`\n` +
+                    `❌ *Error:* ${err.message || "Unknown error"}\n\n` +
+                    advice,
+                  "Markdown",
                 );
               }
-            } else if (text === "/start" || text.startsWith("/start@") || text.startsWith("/start ")) {
+            } else if (
+              text === "/start" ||
+              text.startsWith("/start@") ||
+              text.startsWith("/start ")
+            ) {
               log(`Handling /start command from ${sender} (chatId: ${chatId})`);
-              await sendMessage(chatId, getMainMenuText(), "Markdown", getMainMenuKeyboard());
+              await sendMessage(
+                chatId,
+                getMainMenuText(),
+                "Markdown",
+                getMainMenuKeyboard(),
+              );
               initChatMenuButton(chatId).catch(() => {});
-            } else if (text === "/help" || text.startsWith("/help@") || text.startsWith("/help ")) {
+            } else if (
+              text === "/help" ||
+              text.startsWith("/help@") ||
+              text.startsWith("/help ")
+            ) {
               await sendMessage(
                 chatId,
                 `📚 *Reading HQ Commands & Features*\n\n` +
-                `• \`/menu\` - Interactive dashboard with one-tap access\n` +
-                `• \`/reading\` - Currently reading shelf with progress bars\n` +
-                `• \`/recent\` - 5 newest books in Calibre library\n` +
-                `• \`/find <query>\` (or \`/f <query>\`) - Search library\n` +
-                `• \`/get <id>\` - Download any book by ID\n` +
-                `• \`/app\` - Launch Reading HQ Mini App\n` +
-                `• \`/status\` (or \`/health\`) - System health dashboard\n` +
-                `• \`/backup\` - Hot backup of SQLite databases\n\n` +
-                `_Send any eBook file (.epub, .pdf, .cbz) or article URL to ingest immediately._`,
+                  `• \`/menu\` - Interactive dashboard with one-tap access\n` +
+                  `• \`/reading\` - Currently reading shelf with progress bars\n` +
+                  `• \`/recent\` - 5 newest books in Calibre library\n` +
+                  `• \`/find <query>\` (or \`/f <query>\`) - Search library\n` +
+                  `• \`/get <id>\` - Download any book by ID\n` +
+                  `• \`/app\` - Launch Reading HQ Mini App\n` +
+                  `• \`/status\` (or \`/health\`) - System health dashboard\n` +
+                  `• \`/backup\` - Hot backup of SQLite databases\n\n` +
+                  `_Send any eBook file (.epub, .pdf, .cbz) or article URL to ingest immediately._`,
                 "Markdown",
-                getMainMenuKeyboard()
+                getMainMenuKeyboard(),
               );
               initChatMenuButton(chatId).catch(() => {});
             } else {
@@ -2424,7 +2992,7 @@ async function pollTelegram() {
                 chatId,
                 `📚 Please send eBook files (\`.epub\`, \`.pdf\`, \`.mobi\`, \`.cbz\`), paste an article URL, search your library (\`/find <query>\`), view current reads (\`/reading\`), view recent books (\`/recent\`), open the dashboard (\`/menu\`), check system status (\`/status\`), or send \`/backup\`. For files over 20MB, use [Reading HQ](${READING_WEBAPP_URL}).`,
                 "Markdown",
-                getMainMenuKeyboard()
+                getMainMenuKeyboard(),
               );
             }
           }
@@ -2432,14 +3000,17 @@ async function pollTelegram() {
       }
     } catch (err: any) {
       const isAbort = err.name === "AbortError" || err.name === "TimeoutError";
-      const isSocketClosed = err.message && /socket connection was closed/i.test(err.message);
+      const isSocketClosed =
+        err.message && /socket connection was closed/i.test(err.message);
 
       if (isAbort || isSocketClosed) {
         // Routine long-poll timeout or idle proxy keep-alive closure: immediate seamless reconnect
         backoffMs = INITIAL_BACKOFF_MS;
         await new Promise((r) => setTimeout(r, 150));
       } else {
-        logError(`Polling exception (${err.message}). Retrying in ${Math.round(backoffMs / 1000)}s...`);
+        logError(
+          `Polling exception (${err.message}). Retrying in ${Math.round(backoffMs / 1000)}s...`,
+        );
         await new Promise((r) => setTimeout(r, backoffMs));
         backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
       }

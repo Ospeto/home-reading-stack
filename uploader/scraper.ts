@@ -1,7 +1,14 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import process from "node:process";
+import {
+  isPrivateOrInternalIp,
+  normalizeIpString,
+  safeFetchWithSsrf,
+} from "./security";
+import { withCalibreLock } from "./jobs";
 
 const SERVER_URL = "http://127.0.0.1:8088";
 const PROXY = "http://127.0.0.1:7890";
@@ -82,7 +89,10 @@ export function cleanQuery(str: string): string {
   s = s.replace(/\[.*?\]/g, " ");
   s = s.replace(/\(.*?\)/g, " ");
   // Strip chapter / volume prefixes so search hits the canonical work
-  s = s.replace(/\b(c[0-9]+|ch\.?\s*[0-9]+|chapter\s*[0-9]+|vol\.?\s*[0-9]+|volume\s*[0-9]+|book\s*[0-9]+|part\s*[0-9]+)\b/gi, " ");
+  s = s.replace(
+    /\b(c[0-9]+|ch\.?\s*[0-9]+|chapter\s*[0-9]+|vol\.?\s*[0-9]+|volume\s*[0-9]+|book\s*[0-9]+|part\s*[0-9]+)\b/gi,
+    " ",
+  );
   // Normalize punctuation separators to spaces
   s = s.replace(/[-_–—:]+/g, " ");
   s = s.replace(/\s+/g, " ").trim();
@@ -96,7 +106,9 @@ export function isJunkTag(tag: string): boolean {
   if (!tag) return true;
   const t = tag.trim();
   if (t.length < 2 || t.length > 35) return true;
-  return /http|t\.me|telegram|channel|\.com|\.org|\.li|\.is|\.pub|download|share|thebookr|z-?lib|libgen|annas?-archive|oceanofpdf|vk\.com|ebook|free/i.test(t);
+  return /http|t\.me|telegram|channel|\.com|\.org|\.li|\.is|\.pub|download|share|thebookr|z-?lib|libgen|annas?-archive|oceanofpdf|vk\.com|ebook|free/i.test(
+    t,
+  );
 }
 
 /**
@@ -106,16 +118,23 @@ export function isJunkAuthor(author: string): boolean {
   if (!author) return true;
   const a = author.trim();
   if (a.length < 2) return true;
-  return /http|t\.me|telegram|channel|admin|unknown|anonymous|\.com|\.org|\.li|\.is|\.pub|thebookr|z-?lib|libgen|annas?-archive|oceanofpdf|vk\.com/i.test(a);
+  return /http|t\.me|telegram|channel|admin|unknown|anonymous|\.com|\.org|\.li|\.is|\.pub|thebookr|z-?lib|libgen|annas?-archive|oceanofpdf|vk\.com/i.test(
+    a,
+  );
 }
 
 /**
  * Sanitize extracted metadata and fallback to filename parsing if needed.
  */
-export function sanitizeMetadata(rawTitle: string, rawAuthors: string, rawTags: string[], filename?: string) {
+export function sanitizeMetadata(
+  rawTitle: string,
+  rawAuthors: string,
+  rawTags: string[],
+  filename?: string,
+) {
   let title = cleanString(rawTitle);
   let author = cleanString(rawAuthors);
-  const tags = (rawTags || []).map(cleanString).filter(t => !isJunkTag(t));
+  const tags = (rawTags || []).map(cleanString).filter((t) => !isJunkTag(t));
 
   const authorJunk = isJunkAuthor(author);
 
@@ -131,27 +150,39 @@ export function sanitizeMetadata(rawTitle: string, rawAuthors: string, rawTags: 
     }
   }
 
-  return { title: cleanString(title), author: cleanString(author || "Unknown"), tags };
+  return {
+    title: cleanString(title),
+    author: cleanString(author || "Unknown"),
+    tags,
+  };
 }
 
 /**
  * Extract series name and volume number from title or filename.
  */
-export function extractSeries(title: string, filename: string = ""): { series: string; volume: number } | null {
-  const candidates = [title, filename ? filename.replace(/\.[^/.]+$/, "") : ""].filter(Boolean);
+export function extractSeries(
+  title: string,
+  filename: string = "",
+): { series: string; volume: number } | null {
+  const candidates = [
+    title,
+    filename ? filename.replace(/\.[^/.]+$/, "") : "",
+  ].filter(Boolean);
 
   const patterns = [
     /^(.*?)[,_\s-]+(?:vol(?:ume)?|v)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
     /^(.*?)[,_\s-]+(?:book|bk)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
     /^(.*?)[,_\s-]+#\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
-    /^(.*?)[,_\s-]+(?:part|pt)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i
+    /^(.*?)[,_\s-]+(?:part|pt)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
   ];
 
   for (const str of candidates) {
     for (const p of patterns) {
       const m = str.match(p);
       if (m) {
-        const series = cleanString(m[1]).replace(/[,_–—:-]+$/, "").trim();
+        const series = cleanString(m[1])
+          .replace(/[,_–—:-]+$/, "")
+          .trim();
         const vol = parseFloat(m[2]);
         if (series.length >= 2 && !isNaN(vol)) {
           return { series, volume: vol };
@@ -210,9 +241,47 @@ export function stringSimilarity(a: string, b: string): number {
  * Checks series/volume consistency, author similarity, and title similarity.
  */
 export function isSameBook(
-  existing: { title: string; authors?: string; series?: string; series_index?: number },
-  incoming: { title: string; author?: string; series?: { series: string; volume: number } | null }
+  existing: {
+    id?: number | string | null;
+    importId?: string | null;
+    isbn?: string | null;
+    title: string;
+    authors?: string;
+    series?: string;
+    series_index?: number;
+  },
+  incoming: {
+    id?: number | string | null;
+    importId?: string | null;
+    isbn?: string | null;
+    title: string;
+    author?: string;
+    series?: { series: string; volume: number } | null;
+  },
 ): boolean {
+  // 1. Stable import ID or Calibre ID match
+  if (existing.importId && incoming.importId) {
+    return existing.importId === incoming.importId;
+  }
+  if (
+    existing.id !== undefined &&
+    existing.id !== null &&
+    incoming.id !== undefined &&
+    incoming.id !== null &&
+    String(existing.id) === String(incoming.id)
+  ) {
+    return true;
+  }
+
+  // 2. ISBN / Identifier match
+  const cleanIsbn = (str?: string | null) =>
+    str ? str.replace(/[^0-9xX]/g, "").toUpperCase() : "";
+  const existingIsbn = cleanIsbn(existing.isbn);
+  const incomingIsbn = cleanIsbn(incoming.isbn);
+  if (existingIsbn && incomingIsbn) {
+    return existingIsbn === incomingIsbn;
+  }
+
   const bTitle = cleanString(existing.title).toLowerCase();
   const sTitle = cleanString(incoming.title).toLowerCase();
   if (!bTitle || !sTitle) return false;
@@ -220,14 +289,19 @@ export function isSameBook(
   const bAuthor = cleanString(existing.authors || "");
   const sAuthor = cleanString(incoming.author || "");
 
-  // 1. Series comparison
+  // 3. Series comparison
   const bSeries = existing.series
-    ? { series: cleanString(existing.series), volume: existing.series_index || 1 }
+    ? {
+        series: cleanString(existing.series),
+        volume: existing.series_index || 1,
+      }
     : extractSeries(existing.title);
   const sSeries = incoming.series || extractSeries(incoming.title);
 
   if (bSeries && sSeries) {
-    const sameSeries = cleanString(bSeries.series).toLowerCase() === cleanString(sSeries.series).toLowerCase();
+    const sameSeries =
+      cleanString(bSeries.series).toLowerCase() ===
+      cleanString(sSeries.series).toLowerCase();
     if (sameSeries) {
       return bSeries.volume === sSeries.volume;
     }
@@ -237,24 +311,31 @@ export function isSameBook(
     return false;
   }
 
-  // 2. Author conflict check
-  const hasKnownAuthors = bAuthor && sAuthor && !isJunkAuthor(bAuthor) && !isJunkAuthor(sAuthor);
-  const authorSim = hasKnownAuthors ? stringSimilarity(bAuthor, sAuthor) : 1.0;
-  if (hasKnownAuthors && authorSim < 0.35) {
-    // Both books have explicit authors, but they are clearly different people
+  // 4. Author conflict & Title comparison: NEVER match on title alone!
+  const hasKnownAuthors =
+    bAuthor && sAuthor && !isJunkAuthor(bAuthor) && !isJunkAuthor(sAuthor);
+
+  if (!hasKnownAuthors) {
+    // Require exact match on both title and author string when unknown
+    return bTitle === sTitle && bAuthor === sAuthor;
+  }
+
+  const authorSim = stringSimilarity(bAuthor, sAuthor);
+  if (authorSim < 0.5) {
+    // Different authors: never match regardless of identical title
     return false;
   }
 
-  // 3. Title comparison
-  if (bTitle === sTitle) return true;
+  // Title comparison
+  if (bTitle === sTitle && authorSim >= 0.5) return true;
 
   const titleSim = stringSimilarity(bTitle, sTitle);
-  if (titleSim >= 0.85) return true;
+  if (titleSim >= 0.85 && authorSim >= 0.6) return true;
 
   // Subtitle / prefix match with length guard
   const minLen = Math.min(bTitle.length, sTitle.length);
   if (minLen >= 5 && (bTitle.startsWith(sTitle) || sTitle.startsWith(bTitle))) {
-    if (!hasKnownAuthors || authorSim >= 0.6) return true;
+    if (authorSim >= 0.7) return true;
   }
 
   return false;
@@ -265,36 +346,53 @@ export function isSameBook(
 // ---------------------------------------------------------------------------
 
 // 1. MangaDex Scraper
-export async function searchMangaDex(query: string): Promise<ScrapedMetadata[]> {
+export async function searchMangaDex(
+  query: string,
+): Promise<ScrapedMetadata[]> {
   const results: ScrapedMetadata[] = [];
   const cleanQ = cleanQuery(query);
   if (!cleanQ) return results;
 
   try {
     const url = `https://api.mangadex.org/manga?title=${encodeURIComponent(cleanQ)}&limit=3&includes[]=cover_art&includes[]=author`;
-    const res = await fetch(url, {
+    const fetchRes = await safeFetchWithSsrf(url, {
       headers: { "User-Agent": "ReadingHQ/1.0" },
-      signal: AbortSignal.timeout(SCRAPER_TIMEOUT_MS),
-      proxy: PROXY
-    } as any);
+      timeoutMs: SCRAPER_TIMEOUT_MS,
+      proxy: PROXY,
+    });
 
-    if (res.ok) {
-      const json: any = await res.json();
+    if (fetchRes.ok) {
+      let json: any = {};
+      try {
+        json = JSON.parse(fetchRes.buffer.toString("utf8"));
+      } catch {
+        json = {};
+      }
       if (json.data) {
         for (const item of json.data) {
           const attr = item.attributes || {};
-          const title = attr.title?.en || attr.title?.["ja-ro"] || Object.values(attr.title || {})[0] || "";
+          const title =
+            attr.title?.en ||
+            attr.title?.["ja-ro"] ||
+            Object.values(attr.title || {})[0] ||
+            "";
           if (!title) continue;
 
           let author = "";
           let coverFilename = "";
-          for (const rel of (item.relationships || [])) {
-            if (rel.type === "author" && rel.attributes?.name) author = rel.attributes.name;
-            if (rel.type === "cover_art" && rel.attributes?.fileName) coverFilename = rel.attributes.fileName;
+          for (const rel of item.relationships || []) {
+            if (rel.type === "author" && rel.attributes?.name)
+              author = rel.attributes.name;
+            if (rel.type === "cover_art" && rel.attributes?.fileName)
+              coverFilename = rel.attributes.fileName;
           }
 
-          const coverUrl = coverFilename ? `https://uploads.mangadex.org/covers/${item.id}/${coverFilename}.512.jpg` : "";
-          const tags: string[] = (attr.tags || []).map((t: any) => t.attributes?.name?.en).filter(Boolean);
+          const coverUrl = coverFilename
+            ? `https://uploads.mangadex.org/covers/${item.id}/${coverFilename}.512.jpg`
+            : "";
+          const tags: string[] = (attr.tags || [])
+            .map((t: any) => t.attributes?.name?.en)
+            .filter(Boolean);
           tags.unshift("Manga");
 
           const sim = stringSimilarity(cleanQ, title);
@@ -307,13 +405,16 @@ export async function searchMangaDex(query: string): Promise<ScrapedMetadata[]> 
             tags,
             source: "MangaDex",
             confidence: Math.round(sim * 100) / 100,
-            isManga: true
+            isManga: true,
           });
         }
       }
     }
   } catch (err: any) {
-    console.debug(`[Scraper:MangaDex] Query "${cleanQ}" failed:`, err?.message || err);
+    console.debug(
+      `[Scraper:MangaDex] Query "${cleanQ}" failed:`,
+      err?.message || err,
+    );
   }
   return results;
 }
@@ -326,20 +427,28 @@ export async function searchBangumi(query: string): Promise<ScrapedMetadata[]> {
 
   try {
     const url = `https://api.bgm.tv/search/subject/${encodeURIComponent(cleanQ)}?type=1&responseGroup=medium`;
-    const res = await fetch(url, {
+    const fetchRes = await safeFetchWithSsrf(url, {
       headers: { "User-Agent": "ReadingHQ/1.0" },
-      signal: AbortSignal.timeout(SCRAPER_TIMEOUT_MS),
-      proxy: PROXY
-    } as any);
+      timeoutMs: SCRAPER_TIMEOUT_MS,
+      proxy: PROXY,
+    });
 
-    if (res.ok) {
-      const json: any = await res.json();
+    if (fetchRes.ok) {
+      let json: any = {};
+      try {
+        json = JSON.parse(fetchRes.buffer.toString("utf8"));
+      } catch {
+        json = {};
+      }
       if (json.list) {
         for (const item of json.list.slice(0, 3)) {
           const title = item.name_cn || item.name || "";
           if (!title) continue;
 
-          const sim = Math.max(stringSimilarity(cleanQ, item.name || ""), stringSimilarity(cleanQ, item.name_cn || ""));
+          const sim = Math.max(
+            stringSimilarity(cleanQ, item.name || ""),
+            stringSimilarity(cleanQ, item.name_cn || ""),
+          );
           results.push({
             title,
             authors: "", // Bangumi search results often omit author in summary list
@@ -349,33 +458,43 @@ export async function searchBangumi(query: string): Promise<ScrapedMetadata[]> {
             tags: ["Manga"],
             source: "Bangumi",
             confidence: Math.round(sim * 100) / 100,
-            isManga: true
+            isManga: true,
           });
         }
       }
     }
   } catch (err: any) {
-    console.debug(`[Scraper:Bangumi] Query "${cleanQ}" failed:`, err?.message || err);
+    console.debug(
+      `[Scraper:Bangumi] Query "${cleanQ}" failed:`,
+      err?.message || err,
+    );
   }
   return results;
 }
 
 // 3. Google Books Scraper
-export async function searchGoogleBooks(query: string): Promise<ScrapedMetadata[]> {
+export async function searchGoogleBooks(
+  query: string,
+): Promise<ScrapedMetadata[]> {
   const results: ScrapedMetadata[] = [];
   const cleanQ = cleanQuery(query);
   if (!cleanQ) return results;
 
   try {
     const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(cleanQ)}&maxResults=3`;
-    const res = await fetch(url, {
+    const fetchRes = await safeFetchWithSsrf(url, {
       headers: { "User-Agent": "ReadingHQ/1.0" },
-      signal: AbortSignal.timeout(SCRAPER_TIMEOUT_MS),
-      proxy: PROXY
-    } as any);
+      timeoutMs: SCRAPER_TIMEOUT_MS,
+      proxy: PROXY,
+    });
 
-    if (res.ok) {
-      const json: any = await res.json();
+    if (fetchRes.ok) {
+      let json: any = {};
+      try {
+        json = JSON.parse(fetchRes.buffer.toString("utf8"));
+      } catch {
+        json = {};
+      }
       if (json.items && Array.isArray(json.items)) {
         for (const item of json.items.slice(0, 3)) {
           const info = item.volumeInfo || {};
@@ -383,8 +502,13 @@ export async function searchGoogleBooks(query: string): Promise<ScrapedMetadata[
           if (!title) continue;
 
           const authors = (info.authors || []).join(", ");
-          const coverUrl = info.imageLinks?.thumbnail || info.imageLinks?.smallThumbnail || "";
-          const secureCover = coverUrl ? coverUrl.replace(/^http:\/\//i, "https://").replace("&edge=curl", "") : "";
+          const coverUrl =
+            info.imageLinks?.thumbnail || info.imageLinks?.smallThumbnail || "";
+          const secureCover = coverUrl
+            ? coverUrl
+                .replace(/^http:\/\//i, "https://")
+                .replace("&edge=curl", "")
+            : "";
           const tags: string[] = (info.categories || []).slice(0, 4);
 
           const sim = stringSimilarity(cleanQ, title);
@@ -398,32 +522,43 @@ export async function searchGoogleBooks(query: string): Promise<ScrapedMetadata[
             tags,
             source: "GoogleBooks",
             confidence: Math.round(sim * 100) / 100,
-            isManga: false
+            isManga: false,
           });
         }
       }
     }
   } catch (err: any) {
-    console.debug(`[Scraper:GoogleBooks] Query "${cleanQ}" failed:`, err?.message || err);
+    console.debug(
+      `[Scraper:GoogleBooks] Query "${cleanQ}" failed:`,
+      err?.message || err,
+    );
   }
   return results;
 }
 
 // 4. OpenLibrary Scraper
-export async function searchOpenLibrary(query: string): Promise<ScrapedMetadata[]> {
+export async function searchOpenLibrary(
+  query: string,
+): Promise<ScrapedMetadata[]> {
   const results: ScrapedMetadata[] = [];
   const cleanQ = cleanQuery(query);
   if (!cleanQ) return results;
 
   try {
     const url = `https://openlibrary.org/search.json?q=${encodeURIComponent(cleanQ)}&limit=3`;
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(SCRAPER_TIMEOUT_MS),
-      proxy: PROXY
-    } as any);
+    const fetchRes = await safeFetchWithSsrf(url, {
+      headers: { "User-Agent": "ReadingHQ/1.0" },
+      timeoutMs: SCRAPER_TIMEOUT_MS,
+      proxy: PROXY,
+    });
 
-    if (res.ok) {
-      const json: any = await res.json();
+    if (fetchRes.ok) {
+      let json: any = {};
+      try {
+        json = JSON.parse(fetchRes.buffer.toString("utf8"));
+      } catch {
+        json = {};
+      }
       if (json.docs) {
         for (const doc of json.docs) {
           const title = doc.title || "";
@@ -431,40 +566,56 @@ export async function searchOpenLibrary(query: string): Promise<ScrapedMetadata[
 
           const authors = (doc.author_name || []).join(", ");
           const coverId = doc.cover_i;
-          const coverUrl = coverId ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg` : "";
-          const tags = (doc.subject ? doc.subject.slice(0, 4) : []);
+          const coverUrl = coverId
+            ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg`
+            : "";
+          const tags = doc.subject ? doc.subject.slice(0, 4) : [];
 
           const sim = stringSimilarity(cleanQ, title);
           results.push({
             title,
             authors: authors || "Unknown",
             publisher: (doc.publisher || [])[0] || "",
-            publishedDate: doc.first_publish_year ? String(doc.first_publish_year) : "",
-            description: Array.isArray(doc.first_sentence) ? doc.first_sentence[0] : (doc.first_sentence || ""),
+            publishedDate: doc.first_publish_year
+              ? String(doc.first_publish_year)
+              : "",
+            description: Array.isArray(doc.first_sentence)
+              ? doc.first_sentence[0]
+              : doc.first_sentence || "",
             coverUrl,
             tags,
             source: "OpenLibrary",
             confidence: Math.round(sim * 100) / 100,
-            isManga: false
+            isManga: false,
           });
         }
       }
     }
   } catch (err: any) {
-    console.debug(`[Scraper:OpenLibrary] Query "${cleanQ}" failed:`, err?.message || err);
+    console.debug(
+      `[Scraper:OpenLibrary] Query "${cleanQ}" failed:`,
+      err?.message || err,
+    );
   }
   return results;
 }
 
 // Unified Search with Multi-Source Fallback
-export async function searchUniversalMetadata(query: string, hintManga: boolean = false): Promise<ScrapedMetadata[]> {
+export async function searchUniversalMetadata(
+  query: string,
+  hintManga: boolean = false,
+): Promise<ScrapedMetadata[]> {
   const results: ScrapedMetadata[] = [];
-  const isMangaTarget = hintManga || /manga|comic|chapter|ch\.|vol\.|c0|one piece|naruto|bleach|berserk/i.test(query);
+  const isMangaTarget =
+    hintManga ||
+    /manga|comic|chapter|ch\.|vol\.|c0|one piece|naruto|bleach|berserk/i.test(
+      query,
+    );
 
   if (isMangaTarget) {
     const mangaSettled = await Promise.allSettled([
       searchMangaDex(query),
-      searchBangumi(query)
+      searchBangumi(query),
     ]);
     for (const res of mangaSettled) {
       if (res.status === "fulfilled") {
@@ -476,7 +627,7 @@ export async function searchUniversalMetadata(query: string, hintManga: boolean 
   if (results.length === 0) {
     const bookSettled = await Promise.allSettled([
       searchGoogleBooks(query),
-      searchOpenLibrary(query)
+      searchOpenLibrary(query),
     ]);
     for (const res of bookSettled) {
       if (res.status === "fulfilled") {
@@ -489,7 +640,7 @@ export async function searchUniversalMetadata(query: string, hintManga: boolean 
   if (results.length === 0 && !isMangaTarget) {
     const fallbackSettled = await Promise.allSettled([
       searchMangaDex(query),
-      searchBangumi(query)
+      searchBangumi(query),
     ]);
     for (const res of fallbackSettled) {
       if (res.status === "fulfilled") {
@@ -507,9 +658,21 @@ export function isAllowedCoverUrl(rawUrl: string): boolean {
   try {
     const u = new URL(rawUrl);
     if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    if (u.username || u.password) return false;
     const h = u.hostname.toLowerCase();
-    if (h === "localhost" || h === "127.0.0.1" || h === "0.0.0.0" || h.endsWith(".local") || h.endsWith(".internal")) return false;
-    if (h.startsWith("10.") || h.startsWith("192.168.") || /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h)) return false;
+    if (
+      h === "localhost" ||
+      h.endsWith(".local") ||
+      h.endsWith(".internal") ||
+      h.endsWith(".lan") ||
+      h.endsWith(".home.arpa")
+    ) {
+      return false;
+    }
+    const normalizedHost = normalizeIpString(h);
+    if (net.isIP(normalizedHost)) {
+      if (isPrivateOrInternalIp(normalizedHost)) return false;
+    }
     return true;
   } catch {
     return false;
@@ -517,27 +680,39 @@ export function isAllowedCoverUrl(rawUrl: string): boolean {
 }
 
 // Auto-Enrich Calibre Book Metadata & Cover
-export async function applyMetadataToCalibre(bookId: number, meta: ScrapedMetadata): Promise<boolean> {
+export async function applyMetadataToCalibre(
+  bookId: number,
+  meta: ScrapedMetadata,
+): Promise<boolean> {
   try {
     const args = ["set_metadata", String(bookId), "--with-library", SERVER_URL];
     if (meta.title) args.push("--field", `title:${meta.title}`);
-    if (meta.authors && meta.authors !== "Unknown") args.push("--field", `authors:${meta.authors}`);
-    if (meta.tags && meta.tags.length > 0) args.push("--field", `tags:${meta.tags.join(",")}`);
+    if (meta.authors && meta.authors !== "Unknown")
+      args.push("--field", `authors:${meta.authors}`);
+    if (meta.tags && meta.tags.length > 0)
+      args.push("--field", `tags:${meta.tags.join(",")}`);
     if (meta.description) args.push("--field", `comments:${meta.description}`);
 
     // Download cover to temporary file if coverUrl exists and passes URL validation
     let tempCoverPath = "";
     if (meta.coverUrl && isAllowedCoverUrl(meta.coverUrl)) {
-      tempCoverPath = `/tmp/cover_${bookId}_${Date.now()}.jpg`;
-      const coverUrl = meta.coverUrl;
-      const imgRes = await fetch(coverUrl, {
-        signal: AbortSignal.timeout(COVER_TIMEOUT_MS),
-        proxy: PROXY
-      } as any);
-      if (imgRes.ok) {
-        const buf = await imgRes.arrayBuffer();
-        fs.writeFileSync(tempCoverPath, Buffer.from(buf));
-        args.push("--field", `cover:${tempCoverPath}`);
+      try {
+        const coverUrl = meta.coverUrl;
+        const fetchRes = await safeFetchWithSsrf(coverUrl, {
+          proxy: PROXY,
+          maxBytes: 10 * 1024 * 1024, // 10MB cover limit
+          timeoutMs: COVER_TIMEOUT_MS,
+        });
+        if (fetchRes.ok && fetchRes.buffer.length > 0) {
+          tempCoverPath = `/tmp/cover_${bookId}_${Date.now()}.jpg`;
+          fs.writeFileSync(tempCoverPath, fetchRes.buffer);
+          args.push("--field", `cover:${tempCoverPath}`);
+        }
+      } catch (coverErr: any) {
+        console.warn(
+          `[Scraper] Failed to safely download cover from ${meta.coverUrl}:`,
+          coverErr.message,
+        );
       }
     }
 
@@ -548,16 +723,30 @@ export async function applyMetadataToCalibre(bookId: number, meta: ScrapedMetada
     delete env.https_proxy;
     delete env.ALL_PROXY;
     delete env.all_proxy;
-    env.PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
+    env.PATH =
+      "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
 
-    const res = spawnSync("/opt/homebrew/bin/calibredb", args, { encoding: "utf8", env, timeout: 30000 });
+    const res = await withCalibreLock(() =>
+      spawnSync("/opt/homebrew/bin/calibredb", args, {
+        encoding: "utf8",
+        env,
+        timeout: 30000,
+      }),
+    );
     if (tempCoverPath && fs.existsSync(tempCoverPath)) {
-      fs.unlinkSync(tempCoverPath);
+      try {
+        fs.unlinkSync(tempCoverPath);
+      } catch (_unlinkErr) {
+        void _unlinkErr;
+      }
     }
 
     return res.status === 0;
   } catch (e) {
-    console.error(`[AutoScraper] Failed to apply metadata to book ${bookId}:`, e);
+    console.error(
+      `[AutoScraper] Failed to apply metadata to book ${bookId}:`,
+      e,
+    );
     return false;
   }
 }
