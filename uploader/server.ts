@@ -41,7 +41,7 @@ function getKOReaderBinary256(filePath: string): string | null {
     const md5 = crypto.createHash("md5");
     const size = 1024;
     for (let i = -1; i <= 10; i++) {
-      const offset = i === -1 ? 256 : 1024 * Math.pow(4, i);
+      const offset = i === -1 ? 256 : 1024 * 4 ** i;
       if (offset >= stats.size) break;
       const buf = Buffer.alloc(size);
       const bytesRead = fs.readSync(fd, buf, 0, size, offset);
@@ -110,8 +110,8 @@ function extractSeries(title: string, filename?: string): { series: string; volu
     for (const p of patterns) {
       const m = str.match(p);
       if (m) {
-        let series = cleanString(m[1]).replace(/[,_–—:-]+$/, "").trim();
-        let vol = parseFloat(m[2]);
+        const series = cleanString(m[1]).replace(/[,_–—:-]+$/, "").trim();
+        const vol = parseFloat(m[2]);
         if (series.length >= 2 && !isNaN(vol)) {
           return { series, volume: vol };
         }
@@ -124,7 +124,7 @@ function extractSeries(title: string, filename?: string): { series: string; volu
 function sanitizeMetadata(rawTitle: string, rawAuthors: string, rawTags: string[], filename?: string) {
   let title = cleanString(rawTitle);
   let author = cleanString(rawAuthors);
-  let tags = (rawTags || []).map(cleanString).filter(t => t && !/http|t\.me|channel|\.com|\.org|download|share|thebookr/i.test(t) && t.length < 30);
+  const tags = (rawTags || []).map(cleanString).filter(t => t && !/http|t\.me|channel|\.com|\.org|download|share|thebookr/i.test(t) && t.length < 30);
 
   const isAuthorJunk = !author || /http|t\.me|channel|admin|unknown|\.com|\.org|thebookr/i.test(author);
 

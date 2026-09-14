@@ -3,7 +3,16 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import { Database } from "bun:sqlite";
-import { searchUniversalMetadata, applyMetadataToCalibre } from "./scraper";
+import {
+  searchUniversalMetadata,
+  applyMetadataToCalibre,
+  cleanString,
+  cleanQuery,
+  sanitizeMetadata,
+  extractSeries,
+  isSameBook,
+  normalizeFormat
+} from "./scraper";
 import { isArchiveFile, unpackArchive } from "./archive";
 
 const DROP_DIR = "/Users/ospeto/Books_Drop";
@@ -11,8 +20,15 @@ const SERVER_URL = "http://127.0.0.1:8088";
 const ENV_PATH = "/Users/ospeto/uploader/.env";
 const CACHE_DB_PATH = "/Users/ospeto/uploader/cache.db";
 const PROXY_URL = "http://127.0.0.1:7890";
+const WEB_UPLOADER_URL = "http://192.168.31.15:8086";
+const CALIBRE_WEB_URL = "http://192.168.31.15:8088";
 const MAX_TELEGRAM_FILE_SIZE = 20 * 1024 * 1024; // 20MB Telegram Bot API limit
 const ALLOWED_EXTS = [".epub", ".pdf", ".mobi", ".azw3", ".cbz", ".cbr", ".azw", ".zip", ".rar", ".7z", ".tar"];
+
+const INITIAL_BACKOFF_MS = 2000;
+const MAX_BACKOFF_MS = 60000;
+const POLL_TIMEOUT_SECONDS = 25;
+const POLL_REQUEST_TIMEOUT_MS = 35000;
 
 if (!fs.existsSync(DROP_DIR)) {
   fs.mkdirSync(DROP_DIR, { recursive: true });
@@ -63,18 +79,19 @@ function getKOReaderBinary256(filePath: string): string | null {
   try {
     const stats = fs.statSync(filePath);
     const fd = fs.openSync(filePath, "r");
-    const md5 = crypto.createHash("md5");
+    const KOREADER_HASH_ALGO = "md5";
+    const hasher = crypto.createHash(KOREADER_HASH_ALGO);
     const size = 1024;
     for (let i = -1; i <= 10; i++) {
-      const offset = i === -1 ? 256 : 1024 * Math.pow(4, i);
+      const offset = i === -1 ? 256 : 1024 * 4 ** i;
       if (offset >= stats.size) break;
       const buf = Buffer.alloc(size);
       const bytesRead = fs.readSync(fd, buf, 0, size, offset);
-      if (bytesRead > 0) md5.update(buf.subarray(0, bytesRead));
+      if (bytesRead > 0) hasher.update(buf.subarray(0, bytesRead));
     }
     fs.closeSync(fd);
-    return md5.digest("hex");
-  } catch (e) {
+    return hasher.digest("hex");
+  } catch (_err) {
     return null;
   }
 }
@@ -103,36 +120,39 @@ function safeParseJson(str: string): any {
   if (startBracket !== -1 && endBracket !== -1 && endBracket > startBracket) {
     try {
       return JSON.parse(trimmed.substring(startBracket, endBracket + 1));
-    } catch {}
+    } catch (err: any) {
+      void err;
+    }
   }
   const startBrace = trimmed.indexOf("{");
   const endBrace = trimmed.lastIndexOf("}");
   if (startBrace !== -1 && endBrace !== -1 && endBrace > startBrace) {
     try {
       return JSON.parse(trimmed.substring(startBrace, endBrace + 1));
-    } catch {}
+    } catch (err: any) {
+      void err;
+    }
   }
-  return JSON.parse(trimmed);
+  try {
+    return JSON.parse(trimmed);
+  } catch (err: any) {
+    void err;
+    return null;
+  }
 }
 
 async function tgFetch(endpoint: string, options: any = {}) {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${endpoint}`;
   const timeoutMs = options.timeoutMs || 45000;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const signal = options.signal || AbortSignal.timeout(timeoutMs);
 
-  try {
-    const fetchOpts: any = {
-      ...options,
-      signal: controller.signal,
-      proxy: PROXY_URL
-    };
-    delete fetchOpts.timeoutMs;
-    const res = await fetch(url, fetchOpts);
-    return res;
-  } finally {
-    clearTimeout(timer);
-  }
+  const fetchOpts: any = {
+    ...options,
+    signal,
+    proxy: PROXY_URL
+  };
+  delete fetchOpts.timeoutMs;
+  return await fetch(url, fetchOpts);
 }
 
 async function sendMessage(chatId: number, text: string, parseMode: string = ""): Promise<number | null> {
@@ -170,77 +190,27 @@ async function editOrSendMessage(chatId: number, messageId: number | null, text:
       if (data.ok && data.result?.message_id) {
         return data.result.message_id;
       }
-    } catch {}
+    } catch (err: any) {
+      logError(`editMessageText failed for message ${messageId}, falling back to sendMessage: ${err?.message || err}`);
+    }
   }
   return await sendMessage(chatId, text, parseMode);
 }
 
-function cleanString(str: string): string {
-  if (!str) return "";
-  let s = str;
-  s = s.replace(/https?:\/\/\S+/gi, " ");
-  s = s.replace(/t\.me\/\S+/gi, " ");
-  s = s.replace(/@\w+/gi, " ");
-  s = s.replace(/www\.\S+/gi, " ");
-  s = s.replace(/\[.*?(ebook|pdf|epub|channel|mobi|azw|scan|myanmar|tg|bookr).*?\]/gi, " ");
-  s = s.replace(/\((.*?)(ebook|pdf|epub|channel|mobi|azw|scan|myanmar|tg|bookr)(.*?)\)/gi, " ");
-  s = s.replace(/_v[0-9]+/gi, " ");
-  s = s.replace(/\([0-9]+\)$/g, " ");
-  s = s.replace(/\b(epub|pdf|mobi|azw3|cbz|cbr)\b/gi, " ");
-  s = s.replace(/[_\s]+/g, " ").trim();
-  s = s.replace(/^[-–—\s]+|[-–—\s]+$/g, "").trim();
-  return s;
+export interface IngestResult {
+  success: boolean;
+  duplicate: boolean;
+  attachedFormat?: boolean;
+  bookId?: number | null;
+  displayTitle: string;
+  author: string;
+  format: string;
+  message?: string;
+  error?: string;
 }
 
-export function extractSeries(title: string, filename?: string): { series: string; volume: number } | null {
-  const candidates = [title, filename ? path.basename(filename, path.extname(filename)) : ""].filter(Boolean);
-
-  const patterns = [
-    /^(.*?)[,_\s-]+(?:vol(?:ume)?|v)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
-    /^(.*?)[,_\s-]+(?:book|bk)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
-    /^(.*?)[,_\s-]+#\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
-    /^(.*?)[,_\s-]+(?:part|pt)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i
-  ];
-
-  for (const str of candidates) {
-    for (const p of patterns) {
-      const m = str.match(p);
-      if (m) {
-        let series = cleanString(m[1]).replace(/[,_–—:-]+$/, "").trim();
-        let vol = parseFloat(m[2]);
-        if (series.length >= 2 && !isNaN(vol)) {
-          return { series, volume: vol };
-        }
-      }
-    }
-  }
-  return null;
-}
-
-function sanitizeMetadata(rawTitle: string, rawAuthors: string, rawTags: string[], filename?: string) {
-  let title = cleanString(rawTitle);
-  let author = cleanString(rawAuthors);
-  let tags = (rawTags || []).map(cleanString).filter(t => t && !/http|t\.me|channel|\.com|\.org|download|share|thebookr/i.test(t) && t.length < 30);
-
-  const isAuthorJunk = !author || /http|t\.me|channel|admin|unknown|\.com|\.org|thebookr/i.test(author);
-
-  if ((!title || isAuthorJunk) && filename) {
-    const base = path.basename(filename, path.extname(filename));
-    const parts = base.split(/[-–—]/).map(cleanString).filter(Boolean);
-    if (parts.length >= 2) {
-      if (!title || title.length < 3) title = parts[0];
-      if (isAuthorJunk) author = parts[1] || "Unknown";
-    } else {
-      if (!title || title.length < 3) title = base;
-      if (isAuthorJunk) author = "Unknown";
-    }
-  }
-
-  return { title: cleanString(title), author: cleanString(author), tags };
-}
-
-function ingestBookFile(filePath: string, originalFileName: string) {
-  const format = path.extname(originalFileName).replace(".", "").toUpperCase();
+function ingestBookFile(filePath: string, originalFileName: string): IngestResult {
+  const format = normalizeFormat(path.extname(originalFileName));
   const preliminary = sanitizeMetadata("", "", [], originalFileName);
 
   // 1. Level 1: KOReader Binary Checksum Deduplication
@@ -257,7 +227,9 @@ function ingestBookFile(filePath: string, originalFileName: string) {
         duplicate: true,
         bookId: hashMatch.book_id,
         displayTitle: hashMatch.title || preliminary.title,
-        message: `Already in your library (identical content)`
+        author: hashMatch.authors || preliminary.author,
+        format,
+        message: "Already in your library (identical content)"
       };
     }
   }
@@ -281,36 +253,24 @@ function ingestBookFile(filePath: string, originalFileName: string) {
       if (Array.isArray(parsed)) books = parsed;
     }
 
-    const existingBook = books.find((b: any) => {
-      const bTitle = cleanString(b.title).toLowerCase();
-      const sTitle = preliminary.title.toLowerCase();
-
-      // Check series & volume differentiation
-      const bSeries = extractSeries(b.title, "");
-      const bActualSeries = b.series ? { series: cleanString(b.series), volume: b.series_index || 1 } : bSeries;
-
-      if (incomingSeries && bActualSeries) {
-        // Different volume number in the same series -> NOT a duplicate!
-        if (cleanString(incomingSeries.series).toLowerCase() === cleanString(bActualSeries.series).toLowerCase()) {
-          return incomingSeries.volume === bActualSeries.volume;
-        }
-      } else if (incomingSeries || bActualSeries) {
-        // One has a series volume number and the other doesn't -> separate books!
-        return false;
-      }
-
-      return bTitle === sTitle || (sTitle.length > 5 && (bTitle === sTitle || bTitle.startsWith(sTitle) || sTitle.startsWith(bTitle)));
-    });
+    const existingBook = books.find((b: any) =>
+      isSameBook(
+        { title: b.title, authors: b.authors, series: b.series, series_index: b.series_index },
+        { title: preliminary.title, author: preliminary.author, series: incomingSeries }
+      )
+    );
 
     if (existingBook) {
-      const existingFormats = (existingBook.formats || []).map((f: string) => f.toUpperCase());
+      const existingFormats = (existingBook.formats || []).map((f: string) => normalizeFormat(f));
       if (existingFormats.includes(format)) {
-        log(`Duplicate detected via title match: "${existingBook.title}" (has format: ${format})`);
+        log(`Duplicate detected via title/series match: "${existingBook.title}" (has format: ${format})`);
         return {
           success: true,
           duplicate: true,
           bookId: existingBook.id,
           displayTitle: existingBook.title,
+          author: existingBook.authors || preliminary.author,
+          format,
           message: `Already exists in format ${format}`
         };
       } else {
@@ -337,7 +297,9 @@ function ingestBookFile(filePath: string, originalFileName: string) {
           attachedFormat: true,
           bookId: existingBook.id,
           displayTitle: existingBook.title,
-          message: `Attached ${format} to existing entry`
+          author: existingBook.authors || preliminary.author,
+          format,
+          message: `Attached ${format} format to existing book`
         };
       }
     }
@@ -376,7 +338,7 @@ function ingestBookFile(filePath: string, originalFileName: string) {
         let rawAuthors = "";
         let rawTags: string[] = [];
         let rawSeries = "";
-        let rawSeriesIndex = 0;
+        let _rawSeriesIndex = 0;
 
         if (listOne.status === 0 && listOne.stdout) {
           const parsed = safeParseJson(listOne.stdout);
@@ -385,7 +347,7 @@ function ingestBookFile(filePath: string, originalFileName: string) {
             rawAuthors = parsed[0].authors || "";
             rawTags = parsed[0].tags || [];
             rawSeries = parsed[0].series || "";
-            rawSeriesIndex = parsed[0].series_index || 0;
+            _rawSeriesIndex = parsed[0].series_index || 0;
           }
         }
 
@@ -438,19 +400,27 @@ function ingestBookFile(filePath: string, originalFileName: string) {
         duplicate: false,
         bookId: newId,
         displayTitle: finalTitle,
+        author: finalAuthor,
+        format,
         message: incomingSeries ? `Added (${incomingSeries.series} #${incomingSeries.volume})` : `Added to library`
       };
     } else {
       return {
         success: false,
+        duplicate: false,
         displayTitle: preliminary.title || originalFileName,
+        author: preliminary.author,
+        format,
         error: addRes.stderr || "Failed to add book to Calibre"
       };
     }
   } catch (err: any) {
     return {
       success: false,
+      duplicate: false,
       displayTitle: preliminary.title || originalFileName,
+      author: preliminary.author,
+      format,
       error: err.message
     };
   }
@@ -478,22 +448,33 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
 
   let statusMsgId: number | null = null;
   if (isBatch) {
-    statusMsgId = await sendMessage(chatId, `📥 Received *${total}* books. Starting batch ingestion...`, "Markdown");
+    statusMsgId = await sendMessage(chatId, `\uD83D\uDCE5 Received *${total}* books. Starting batch ingestion...`, "Markdown");
   }
 
-  const results: Array<{ name: string; title?: string; status: "success" | "duplicate" | "error"; note: string }> = [];
+  const results: Array<{
+    name: string;
+    title?: string;
+    author?: string;
+    format?: string;
+    bookId?: number | null;
+    attachedFormat?: boolean;
+    status: "success" | "duplicate" | "error";
+    note: string;
+  }> = [];
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     const { doc, fileName, fileSize, sender } = item;
     const sizeMB = (fileSize / (1024 * 1024)).toFixed(2);
     const ext = path.extname(fileName).toLowerCase();
+    const format = normalizeFormat(ext);
 
     log(`[Batch ${i + 1}/${total}] Processing "${fileName}" (${sizeMB} MB) from ${sender}`);
 
     if (!ALLOWED_EXTS.includes(ext)) {
       results.push({
         name: fileName,
+        format,
         status: "error",
         note: `Unsupported format: ${ext}`
       });
@@ -503,8 +484,9 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
     if (fileSize > MAX_TELEGRAM_FILE_SIZE) {
       results.push({
         name: fileName,
+        format,
         status: "error",
-        note: `Exceeds 20MB limit (${sizeMB} MB). Use Web Uploader.`
+        note: `Exceeds 20MB limit (${sizeMB} MB). Use Web Uploader: ${WEB_UPLOADER_URL}`
       });
       continue;
     }
@@ -522,14 +504,14 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
 
       if (!fileJson.ok || !fileJson.result?.file_path) {
         const errMsg = fileJson.description || "Failed to retrieve file from Telegram";
-        results.push({ name: fileName, status: "error", note: errMsg });
+        results.push({ name: fileName, format, status: "error", note: errMsg });
         continue;
       }
 
       const dlUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${fileJson.result.file_path}`;
       const dl = await fetch(dlUrl, { proxy: PROXY_URL } as any);
       if (!dl.ok) {
-        results.push({ name: fileName, status: "error", note: `Download failed (HTTP ${dl.status})` });
+        results.push({ name: fileName, format, status: "error", note: `Download failed (HTTP ${dl.status})` });
         continue;
       }
 
@@ -547,13 +529,13 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
         try { fs.unlinkSync(destPath); } catch {}
 
         if (!unp.success) {
-          results.push({ name: fileName, status: "error", note: unp.error || "Archive extraction failed" });
+          results.push({ name: fileName, format, status: "error", note: unp.error || "Archive extraction failed" });
           continue;
         }
 
         if (unp.books.length === 0) {
           unp.cleanup();
-          results.push({ name: fileName, status: "error", note: "No supported eBooks found in archive" });
+          results.push({ name: fileName, format, status: "error", note: "No supported eBooks found in archive" });
           continue;
         }
 
@@ -563,6 +545,10 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
           results.push({
             name: b.originalName,
             title: r.displayTitle,
+            author: r.author,
+            format: r.format,
+            bookId: r.bookId,
+            attachedFormat: r.attachedFormat,
             status: r.duplicate ? "duplicate" : (r.success ? "success" : "error"),
             note: r.message || r.error || "Processed"
           });
@@ -574,70 +560,129 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
       const res = ingestBookFile(destPath, fileName);
       try { fs.unlinkSync(destPath); } catch {}
 
-      if (res.success) {
-        results.push({
-          name: fileName,
-          title: res.displayTitle,
-          status: res.duplicate ? "duplicate" : "success",
-          note: res.message
-        });
-      } else {
-        results.push({
-          name: fileName,
-          title: res.displayTitle,
-          status: "error",
-          note: res.error || "Calibre ingest failed"
-        });
-      }
+      results.push({
+        name: fileName,
+        title: res.displayTitle,
+        author: res.author,
+        format: res.format,
+        bookId: res.bookId,
+        attachedFormat: res.attachedFormat,
+        status: res.duplicate ? "duplicate" : (res.success ? "success" : "error"),
+        note: res.message || res.error || (res.success ? "Added" : "Calibre ingest failed")
+      });
     } catch (err: any) {
-      results.push({ name: fileName, status: "error", note: err.message });
+      results.push({ name: fileName, format, status: "error", note: err.message });
     }
   }
 
-  // Send Final Status
-  if (!isBatch) {
-    const single = results[0];
-    if (single.status === "success") {
-      await editOrSendMessage(chatId, statusMsgId, `✅ *${single.title || single.name}*\n\n${single.note}. Ready on Kindle OPDS feed.`, "Markdown");
-    } else if (single.status === "duplicate") {
-      await editOrSendMessage(chatId, statusMsgId, `ℹ️ *${single.title || single.name}*\n\n${single.note}. Ready on Kindle.`, "Markdown");
-    } else {
-      await editOrSendMessage(chatId, statusMsgId, `⚠️ Import failed for *${single.name}*:\n${single.note}`, "Markdown");
-    }
-  } else {
-    const successCount = results.filter(r => r.status === "success" || r.status === "duplicate").length;
-    let summary = `📚 *Batch Ingestion Complete* (${successCount}/${total} processed)\n\n`;
+  // Send Final Status with Rich Details and Calibre Links
+  if (isBatch) {
+    const successCount = results.filter(r => r.status === "success").length;
+    const duplicateCount = results.filter(r => r.status === "duplicate").length;
+    const totalSuccess = successCount + duplicateCount;
+
+    let summary = `\uD83D\uDCDA *Batch Ingestion Complete* (${totalSuccess}/${total} processed)\n\n`;
 
     for (const r of results) {
+      const link = r.bookId ? `[Open](${CALIBRE_WEB_URL}/#book_id=${r.bookId}&panel=book_details)` : "";
+      const authorStr = r.author && r.author !== "Unknown" ? ` by _${r.author}_` : "";
+      const fmtStr = r.format ? `[\`${r.format}\`]` : "";
+
       if (r.status === "success") {
-        summary += `✅ \`${r.name}\` — ${r.note}\n`;
+        summary += `✅ *${r.title || r.name}* ${fmtStr}${authorStr}\n   └ ${r.note} ${link ? `• ${link}` : ""}\n`;
       } else if (r.status === "duplicate") {
-        summary += `ℹ️ \`${r.name}\` — ${r.note}\n`;
+        summary += `ℹ️ *${r.title || r.name}* ${fmtStr}${authorStr}\n   └ ${r.note} ${link ? `• ${link}` : ""}\n`;
       } else {
-        summary += `⚠️ \`${r.name}\` — ${r.note}\n`;
+        summary += `⚠️ \`${r.name}\`\n   └ ${r.note}\n`;
       }
     }
 
-    summary += `\n📖 _All books are cataloged and ready on your Kindle OPDS feed._`;
+    summary += `\n✨ _All books are cataloged and ready on your Kindle OPDS feed._`;
     await editOrSendMessage(chatId, statusMsgId, summary, "Markdown");
+  } else {
+    const single = results[0];
+    const detailsLink = single.bookId ? `[Book Details](${CALIBRE_WEB_URL}/#book_id=${single.bookId}&panel=book_details)` : "";
+    const readerLink = (single.bookId && single.format) ? `[Read Online](${CALIBRE_WEB_URL}/read/${single.bookId}/${single.format.toLowerCase()})` : "";
+    const links = [detailsLink, readerLink].filter(Boolean).join(" • ");
+
+    if (single.status === "success") {
+      const actionHeader = single.attachedFormat ? "\uD83D\uDCCE *Format Attached*" : "✅ *Book Ingested Successfully*";
+      await editOrSendMessage(
+        chatId,
+        statusMsgId,
+        `${actionHeader}\n\n` +
+        `\uD83D\uDCD6 *Title:* ${single.title || single.name}\n` +
+        `\uD83D\uDC64 *Author:* ${single.author || "Unknown"}\n` +
+        `\uD83D\uDCE6 *Format:* \`${single.format || "Unknown"}\`\n` +
+        `ℹ️ ${single.note}\n\n` +
+        (links ? `\uD83D\uDD17 ${links}\n\n` : "") +
+        `_Ready on your Kindle OPDS feed._`,
+        "Markdown"
+      );
+    } else if (single.status === "duplicate") {
+      await editOrSendMessage(
+        chatId,
+        statusMsgId,
+        `ℹ️ *Book Already in Library*\n\n` +
+        `\uD83D\uDCD6 *Title:* ${single.title || single.name}\n` +
+        `\uD83D\uDC64 *Author:* ${single.author || "Unknown"}\n` +
+        `\uD83D\uDCE6 *Format:* \`${single.format || "Unknown"}\`\n` +
+        `ℹ️ ${single.note}\n\n` +
+        (links ? `\uD83D\uDD17 ${links}\n\n` : "") +
+        `_Available on your Kindle and Calibre._`,
+        "Markdown"
+      );
+    } else {
+      const isOverSize = single.note.includes("20MB");
+      await editOrSendMessage(
+        chatId,
+        statusMsgId,
+        `⚠️ *Import Failed*\n\n` +
+        `\uD83D\uDCC4 *File:* \`${single.name}\`\n` +
+        `❌ *Error:* ${single.note}\n\n` +
+        (isOverSize
+          ? `\uD83D\uDC49 Upload directly via [Web Uploader](${WEB_UPLOADER_URL}) to bypass the 20MB limit.`
+          : `Please check the file format and try again.`),
+        "Markdown"
+      );
+    }
   }
 }
 
 let offset = 0;
+let backoffMs = INITIAL_BACKOFF_MS;
+let isPollingRunning = true;
+
+process.on("SIGINT", () => {
+  log("Received SIGINT, stopping poll loop...");
+  isPollingRunning = false;
+});
+process.on("SIGTERM", () => {
+  log("Received SIGTERM, stopping poll loop...");
+  isPollingRunning = false;
+});
+
 async function pollTelegram() {
   log(`Polling started via proxy ${PROXY_URL} for bot: ${TELEGRAM_BOT_TOKEN.substring(0, 10)}...`);
 
-  while (true) {
+  while (isPollingRunning) {
     try {
-      const res = await tgFetch(`getUpdates?offset=${offset}&timeout=25`, { timeoutMs: 35000 });
+      const res = await tgFetch(`getUpdates?offset=${offset}&timeout=${POLL_TIMEOUT_SECONDS}`, {
+        timeoutMs: POLL_REQUEST_TIMEOUT_MS
+      });
+
       if (!res.ok) {
-        const errText = await res.text();
-        logError(`getUpdates returned HTTP ${res.status}: ${errText}`);
-        await new Promise((r) => setTimeout(r, 4000));
+        const errText = await res.text().catch(() => "");
+        logError(`getUpdates returned HTTP ${res.status}: ${errText}. Retrying in ${Math.round(backoffMs / 1000)}s...`);
+        await new Promise((r) => setTimeout(r, backoffMs));
+        backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
         continue;
       }
 
       const json = await res.json() as any;
+      // On successful polling response, reset backoff to initial delay
+      backoffMs = INITIAL_BACKOFF_MS;
+
       if (json.ok && json.result && json.result.length > 0) {
         for (const update of json.result) {
           offset = update.update_id + 1;
@@ -650,6 +695,21 @@ async function pollTelegram() {
             const doc = msg.document;
             const fileName = doc.file_name || "telegram_book.epub";
             const fileSize = doc.file_size || 0;
+
+            if (fileSize > MAX_TELEGRAM_FILE_SIZE) {
+              const sizeMB = (fileSize / (1024 * 1024)).toFixed(1);
+              log(`File "${fileName}" exceeds 20MB (${sizeMB} MB). Sending instant Web Uploader redirect to chat ${chatId}`);
+              await sendMessage(
+                chatId,
+                `⚠️ *File Exceeds Telegram Bot Limit*\n\n` +
+                `*${fileName}* is *${sizeMB} MB*, which exceeds Telegram Bot API's *20 MB* download ceiling.\n\n` +
+                `\uD83D\uDC49 *Upload directly via Web Uploader:*\n` +
+                `[Web Uploader](${WEB_UPLOADER_URL}) (\`${WEB_UPLOADER_URL}\`)\n\n` +
+                `_The Web Uploader accepts books of any size and automatically synchronizes with Calibre._`,
+                "Markdown"
+              );
+              continue;
+            }
 
             let batch = pendingBatches.get(chatId);
             if (!batch) {
@@ -671,25 +731,29 @@ async function pollTelegram() {
 
             if (text === "/start" || text === "/help") {
               await sendMessage(chatId, 
-                `📚 *Reading HQ Ingestion Bot*\n\n` +
+                `\uD83D\uDCDA *Reading HQ Ingestion Bot*\n\n` +
                 `Send or forward any book file(s) directly in this chat:\n` +
                 `• *Serialization Auto-Group:* Vol 1, Vol 2, Book 3 automatically grouped into Series.\n` +
                 `• *Batch Uploads Supported:* Select and send multiple EPUBs/CBZs at once.\n` +
                 `• *Duplicate Protection:* Instant binary hash + volume-aware deduplication.\n` +
                 `• *Formats:* \`.epub\`, \`.pdf\`, \`.mobi\`, \`.azw3\`, \`.cbz\`, \`.cbr\`\n` +
-                `• *File Limit:* Up to *20 MB* per file (Telegram API limit)\n\n` +
+                `• *File Limit:* Up to *20 MB* per file (Telegram API limit)\n` +
+                `• *Large Files (>20MB):* Upload via [Web Uploader](${WEB_UPLOADER_URL})\n\n` +
                 `_Books are automatically de-duplicated, sanitized, and available on your Kindle._`,
                 "Markdown"
               );
             } else {
-              await sendMessage(chatId, "👋 Please send or forward eBook files (`.epub`, `.pdf`, `.mobi`, `.cbz`) to add them to your library. You can send multiple files at once!", "Markdown");
+              await sendMessage(chatId, `\uD83D\uDC4B Please send or forward eBook files (\`.epub\`, \`.pdf\`, \`.mobi\`, \`.cbz\`) to add them to your library. For files over 20MB, use the [Web Uploader](${WEB_UPLOADER_URL}).`, "Markdown");
             }
           }
         }
       }
     } catch (err: any) {
-      logError(`Polling exception: ${err.message}`);
-      await new Promise((r) => setTimeout(r, 4000));
+      const isAbort = err.name === "AbortError" || err.name === "TimeoutError";
+      const reason = isAbort ? `Socket timeout after ${POLL_REQUEST_TIMEOUT_MS / 1000}s` : err.message;
+      logError(`Polling exception (${reason}). Retrying in ${Math.round(backoffMs / 1000)}s...`);
+      await new Promise((r) => setTimeout(r, backoffMs));
+      backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
     }
   }
 }
