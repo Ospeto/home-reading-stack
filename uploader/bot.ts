@@ -1031,6 +1031,417 @@ export async function getStatusDashboard(): Promise<string> {
     ssdDiskStr;
 }
 
+export function renderProgressBar(percentage: number, length: number = 8): string {
+  const clamped = Math.max(0, Math.min(1, percentage));
+  const filled = Math.round(clamped * length);
+  const empty = length - filled;
+  return "█".repeat(filled) + "░".repeat(empty);
+}
+
+export function truncate(str: string, maxLen: number): string {
+  if (!str) return "";
+  return str.length > maxLen ? str.substring(0, maxLen - 1) + "…" : str;
+}
+
+export function formatRelativeTime(timestampSec: number): string {
+  if (!timestampSec) return "recently";
+  const nowSec = Math.floor(Date.now() / 1000);
+  const diff = Math.max(0, nowSec - timestampSec);
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  const days = Math.floor(diff / 86400);
+  if (days === 1) return "yesterday";
+  if (days < 30) return `${days}d ago`;
+  return `${Math.floor(days / 30)}mo ago`;
+}
+
+export function getMainMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } }],
+      [
+        { text: "🔍 Search Library", callback_data: "menu:search" },
+        { text: "📚 Recent Books", callback_data: "menu:recent" }
+      ],
+      [
+        { text: "📖 Currently Reading", callback_data: "menu:reading" },
+        { text: "⚡ Server Status", callback_data: "refresh_status" }
+      ],
+      [{ text: "💾 Hot Backup", callback_data: "menu:backup" }]
+    ]
+  };
+}
+
+export function getMainMenuText(): string {
+  return (
+    `📚 *Reading HQ Dashboard*\n\n` +
+    `Welcome to your personal library and reading companion.\n\n` +
+    `• *Mini App:* Tap *[📖 Open Reading HQ]* to explore your visual catalog.\n` +
+    `• *Search Library:* Find any book by title, author, or series (\`/f <query>\`).\n` +
+    `• *Currently Reading:* Track reading progress synchronized from KOReader (\`/reading\`).\n` +
+    `• *Recent Books:* View newest additions to your library (\`/recent\`).\n` +
+    `• *Ingest:* Send eBook files (\`.epub\`, \`.pdf\`, \`.cbz\`, etc.) or paste any article URL.\n` +
+    `• *Server Status:* Monitor WAN edge, reverse tunnel, and host metrics (\`/status\`).\n` +
+    `• *Hot Backup:* Snapshot reading databases to Telegram (\`/backup\`).`
+  );
+}
+
+export function getPostIngestionKeyboard(bookId: number) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "📥 Send File", callback_data: `send_book:${bookId}` },
+        { text: "📖 Open in Mini App", web_app: { url: READING_WEBAPP_URL } },
+        { text: "🗑️ Undo / Delete", callback_data: `delete_book:${bookId}` }
+      ]
+    ]
+  };
+}
+
+export function deleteBookFromLibrary(bookId: number): { success: boolean; title?: string; error?: string } {
+  if (isNaN(bookId) || bookId <= 0) {
+    return { success: false, error: "Invalid book ID" };
+  }
+
+  let bookTitle: string | null = null;
+  if (fs.existsSync(CALIBRE_DB_PATH)) {
+    try {
+      const db = new Database(CALIBRE_DB_PATH, { readonly: true });
+      const row = db.query("SELECT title FROM books WHERE id = ?").get(bookId) as any;
+      if (row && row.title) {
+        bookTitle = row.title;
+      }
+      db.close();
+    } catch (_e) {
+      void _e;
+    }
+  }
+
+  const res = runCalibredb(["remove", String(bookId), "--with-library", SERVER_URL]);
+  if (res.status === 0) {
+    try {
+      cacheDb.run("DELETE FROM file_hashes WHERE book_id = ?", bookId);
+    } catch (_e) {
+      void _e;
+    }
+    try {
+      const thumbDir = "/Users/ospeto/uploader/cache/covers";
+      if (fs.existsSync(thumbDir)) {
+        const files = fs.readdirSync(thumbDir);
+        for (const f of files) {
+          if (f.startsWith(`${bookId}_`)) {
+            fs.unlinkSync(path.join(thumbDir, f));
+          }
+        }
+      }
+    } catch (_e) {
+      void _e;
+    }
+    return { success: true, title: bookTitle || `Book #${bookId}` };
+  } else {
+    return { success: false, title: bookTitle || `Book #${bookId}`, error: res.stderr || "Calibre remove failed" };
+  }
+}
+
+export interface ActiveReadingDoc {
+  document: string;
+  percentage: number;
+  title: string;
+  author: string;
+  device: string;
+  timestamp: number;
+  bookId: number | null;
+}
+
+export function getCurrentlyReadingShelf(limit: number = 5): { items: ActiveReadingDoc[]; card: string; keyboard: any } {
+  const items: ActiveReadingDoc[] = [];
+
+  if (fs.existsSync(KOSYNC_DB_PATH)) {
+    try {
+      const kDb = new Database(KOSYNC_DB_PATH, { readonly: true });
+      kDb.run("PRAGMA busy_timeout = 3000;");
+
+      const rows = kDb.query(`
+        SELECT document, percentage, device, filename, title, authors, timestamp
+        FROM progress
+        WHERE percentage > 0 AND percentage < 0.99
+        ORDER BY timestamp DESC
+        LIMIT ?
+      `).all(limit) as any[];
+
+      kDb.close();
+
+      for (const r of rows) {
+        let title = (r.title || "").trim();
+        if (!title && r.filename) {
+          title = path.basename(r.filename, path.extname(r.filename));
+        }
+        if (!title) {
+          title = "Document " + (r.document ? r.document.substring(0, 8) : "Unknown");
+        }
+
+        const author = (r.authors || "Unknown").trim();
+        const device = (r.device || "Unknown Device").trim();
+        const pct = Math.max(0, Math.min(1, typeof r.percentage === "number" ? r.percentage : parseFloat(r.percentage) || 0));
+        const timestamp = typeof r.timestamp === "number" ? r.timestamp : parseInt(r.timestamp, 10) || 0;
+
+        let bookId: number | null = null;
+
+        // Try mapping via cacheDb file_hashes (hash = document)
+        try {
+          const hashRow = cacheDb.query("SELECT book_id FROM file_hashes WHERE hash = ? AND book_id IS NOT NULL LIMIT 1").get(r.document) as any;
+          if (hashRow?.book_id) {
+            bookId = hashRow.book_id;
+          }
+        } catch (_e) {
+          void _e;
+        }
+
+        // Try mapping via Calibre title match if not found via hash
+        if (!bookId && title && !title.startsWith("Document ")) {
+          try {
+            const results = searchCalibreLibrary(title, 1);
+            if (results && results.length > 0) {
+              bookId = results[0].id;
+            }
+          } catch (_e) {
+            void _e;
+          }
+        }
+
+        items.push({
+          document: r.document,
+          percentage: pct,
+          title,
+          author,
+          device,
+          timestamp,
+          bookId
+        });
+      }
+    } catch (_e) {
+      logError("Failed to query koreader-sync.db for currently reading", _e);
+    }
+  }
+
+  if (items.length === 0) {
+    const card =
+      `📖 *Currently Reading Shelf*\n\n` +
+      `No active reading sessions found (progress between 1% and 99%).\n\n` +
+      `_Start reading on your KOReader device or open Reading HQ to sync progress!_`;
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } },
+          { text: "🔙 Main Menu", callback_data: "menu:main" }
+        ]
+      ]
+    };
+    return { items, card, keyboard };
+  }
+
+  let card = `📖 *Currently Reading Shelf*\n\nActive reading sessions synced from your devices:\n\n`;
+  const keyboardRows: any[][] = [];
+
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const pctInt = Math.round(it.percentage * 100);
+    const bar = renderProgressBar(it.percentage, 8);
+    const deviceIcon = it.device.toLowerCase().includes("phone") ? "📱" : "📖";
+    const timeAgo = formatRelativeTime(it.timestamp);
+
+    card += `${i + 1}. *${escapeTelegramMarkdown(it.title)}*\n`;
+    if (it.author && it.author !== "Unknown") {
+      card += `   👤 _${escapeTelegramMarkdown(it.author)}_\n`;
+    }
+    card += `   \`${bar} ${pctInt}%\` • ${deviceIcon} ${escapeTelegramMarkdown(it.device)} • _${timeAgo}_\n\n`;
+
+    if (it.bookId) {
+      keyboardRows.push([
+        { text: `📥 Get "${truncate(it.title, 18)}"`, callback_data: `send_book:${it.bookId}` },
+        { text: "ℹ️ Details", url: `${CALIBRE_WEB_URL}/#book_id=${it.bookId}&panel=book_details` }
+      ]);
+    }
+  }
+
+  keyboardRows.push([
+    { text: "🔄 Refresh", callback_data: "menu:reading" },
+    { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } }
+  ]);
+  keyboardRows.push([
+    { text: "🔙 Main Menu", callback_data: "menu:main" }
+  ]);
+
+  return { items, card, keyboard: { inline_keyboard: keyboardRows } };
+}
+
+export function getRecentBooks(limit: number = 5): { books: CalibreBookResult[]; card: string; keyboard: any } {
+  let books: CalibreBookResult[] = [];
+
+  if (fs.existsSync(CALIBRE_DB_PATH)) {
+    try {
+      const db = new Database(CALIBRE_DB_PATH, { readonly: true });
+      db.run("PRAGMA busy_timeout = 3000;");
+
+      const rows = db.query(`
+        SELECT b.id, b.title, b.path, b.series_index,
+               GROUP_CONCAT(DISTINCT a.name) as authors,
+               s.name as series,
+               GROUP_CONCAT(DISTINCT d.format) as formats
+        FROM books b
+        LEFT JOIN books_authors_link bal ON b.id = bal.book
+        LEFT JOIN authors a ON bal.author = a.id
+        LEFT JOIN books_series_link bsl ON b.id = bsl.book
+        LEFT JOIN series s ON bsl.series = s.id
+        LEFT JOIN data d ON b.id = d.book
+        GROUP BY b.id
+        ORDER BY b.id DESC
+        LIMIT ?
+      `).all(limit) as any[];
+
+      db.close();
+
+      books = rows.map((r) => ({
+        id: r.id,
+        title: r.title || "Untitled",
+        authors: r.authors || "Unknown",
+        series: r.series || null,
+        series_index: r.series_index || null,
+        formats: r.formats || ""
+      }));
+    } catch (_e) {
+      logError("Failed to query Calibre library for recent books", _e);
+    }
+  }
+
+  if (books.length === 0) {
+    const card =
+      `📚 *Recent Additions*\n\n` +
+      `No books found in the Calibre library yet.\n\n` +
+      `_Send eBook files or web article links to add them!_`;
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } },
+          { text: "🔙 Main Menu", callback_data: "menu:main" }
+        ]
+      ]
+    };
+    return { books, card, keyboard };
+  }
+
+  let card = `📚 *Recent Additions*\n\nThe latest ${books.length} book(s) added to your library:\n\n`;
+  const keyboardRows: any[][] = [];
+
+  for (let i = 0; i < books.length; i++) {
+    const b = books[i];
+    const formatBadges = (b.formats || "")
+      .split(",")
+      .flatMap((f: string) => (f.trim() ? [`[${f.trim()}]`] : []))
+      .join(" ");
+
+    card += `${i + 1}. *${escapeTelegramMarkdown(b.title)}*\n`;
+    card += `   👤 _${escapeTelegramMarkdown(b.authors || "Unknown")}_`;
+    if (b.series) {
+      const idx = b.series_index ? ` (#${b.series_index})` : "";
+      card += ` • 🏷️ _${escapeTelegramMarkdown(b.series)}${idx}_`;
+    }
+    if (formatBadges) {
+      card += ` • \`${formatBadges}\``;
+    }
+    card += `\n\n`;
+
+    keyboardRows.push([
+      { text: `📥 Get "${truncate(b.title, 18)}"`, callback_data: `send_book:${b.id}` },
+      { text: "ℹ️ Details", url: `${CALIBRE_WEB_URL}/#book_id=${b.id}&panel=book_details` }
+    ]);
+  }
+
+  keyboardRows.push([
+    { text: "🔄 Refresh", callback_data: "menu:recent" },
+    { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } }
+  ]);
+  keyboardRows.push([
+    { text: "🔙 Main Menu", callback_data: "menu:main" }
+  ]);
+
+  return { books, card, keyboard: { inline_keyboard: keyboardRows } };
+}
+
+export async function triggerBackup(chatId: number): Promise<boolean> {
+  const statusMsgId = await sendMessage(
+    chatId,
+    `⏳ *Creating hot SQLite backup of reading stack databases...*`,
+    "Markdown"
+  );
+
+  saveBackupChatId(chatId);
+
+  const backupResult = createHotDatabaseBackup();
+  if (backupResult) {
+    try {
+      const dbList = backupResult.backedUpDbs.join(", ");
+      const caption =
+        `📦 *Reading Stack Database Backup*\n` +
+        `📅 *Date:* ${backupResult.displayTimestamp}\n` +
+        `📊 *Size:* ${backupResult.sizeKb} KB\n` +
+        `🗄️ *Databases:* ${dbList}\n` +
+        `✨ _Secure offline snapshot stored in your Telegram history._`;
+
+      const sent = await sendDocument(
+        chatId,
+        backupResult.archivePath,
+        caption,
+        "Markdown"
+      );
+
+      if (sent) {
+        if (statusMsgId) {
+          await editOrSendMessage(
+            chatId,
+            statusMsgId,
+            `✅ *Hot SQLite backup created successfully.* Delivered below.`,
+            "Markdown"
+          );
+        }
+        return true;
+      } else {
+        if (statusMsgId) {
+          await editOrSendMessage(
+            chatId,
+            statusMsgId,
+            `⚠️ *Backup Delivery Failed*\n\nUnable to deliver backup archive to Telegram. Check bot logs for details.`,
+            "Markdown"
+          );
+        }
+        return false;
+      }
+    } finally {
+      try {
+        fs.rmSync(backupResult.stagingDir, { recursive: true, force: true });
+      } catch (_cleanupErr) {
+        void _cleanupErr;
+      }
+      try {
+        fs.unlinkSync(backupResult.archivePath);
+      } catch (_unlinkErr) {
+        void _unlinkErr;
+      }
+    }
+  } else {
+    if (statusMsgId) {
+      await editOrSendMessage(
+        chatId,
+        statusMsgId,
+        `⚠️ *Database Backup Failed*\n\nCould not snapshot reading stack databases. Please check system logs.`,
+        "Markdown"
+      );
+    }
+    return false;
+  }
+}
+
 export async function handleCallbackQuery(cq: any): Promise<void> {
   const callbackId = cq.id;
   const chatId = cq.message?.chat?.id || cq.from?.id;
@@ -1040,29 +1451,121 @@ export async function handleCallbackQuery(cq: any): Promise<void> {
 
   log(`Received callback_query: "${data}" from ${sender} (chatId: ${chatId})`);
 
+  let answerText: string | undefined ;
+  if (data === "refresh_status" || data === "menu:status") answerText = "Refreshing status...";
+  else if (data === "menu:reading") answerText = "Loading currently reading...";
+  else if (data === "menu:recent") answerText = "Loading recent books...";
+  else if (data === "menu:backup") answerText = "Starting backup...";
+  else if (data === "menu:main") answerText = "Loading menu...";
+  else if (data === "menu:search") answerText = "Search Library...";
+  else if (data.startsWith("delete_book:")) answerText = "Deleting book...";
+  else if (data.startsWith("send_book:")) answerText = "Retrieving book...";
+
   // Answer callback query immediately so Telegram client stops loading animation
   try {
     await tgFetch("answerCallbackQuery", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ callback_query_id: callbackId, text: data === "refresh_status" ? "Refreshing status..." : undefined }),
+      body: JSON.stringify({ callback_query_id: callbackId, text: answerText }),
       timeoutMs: 10000
     });
   } catch (err: any) {
     logError(`answerCallbackQuery failed: ${err?.message || err}`);
   }
 
-  if (data === "refresh_status") {
+  if (data === "refresh_status" || data === "menu:status") {
     const card = await getStatusDashboard();
     const inlineKeyboard = {
       inline_keyboard: [
         [
           { text: "🔄 Refresh Status", callback_data: "refresh_status" },
           { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } }
+        ],
+        [
+          { text: "🔙 Main Menu", callback_data: "menu:main" }
         ]
       ]
     };
     await editOrSendMessage(chatId, messageId, card, "Markdown", inlineKeyboard);
+    return;
+  }
+
+  if (data === "menu:main") {
+    await editOrSendMessage(chatId, messageId, getMainMenuText(), "Markdown", getMainMenuKeyboard());
+    return;
+  }
+
+  if (data === "menu:search") {
+    const searchCard =
+      `🔍 *Library Search*\n\n` +
+      `Send \`/find <query>\`, \`/search <query>\`, or \`/f <query>\` to instantly search your Calibre library by title, author, or series.\n\n` +
+      `*Examples:*\n` +
+      `• \`/f Foundation\`\n` +
+      `• \`/f Isaac Asimov\`\n` +
+      `• \`/f One Piece\``;
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: "📚 Recent Books", callback_data: "menu:recent" },
+          { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } }
+        ],
+        [
+          { text: "🔙 Main Menu", callback_data: "menu:main" }
+        ]
+      ]
+    };
+    await editOrSendMessage(chatId, messageId, searchCard, "Markdown", keyboard);
+    return;
+  }
+
+  if (data === "menu:reading") {
+    const { card, keyboard } = getCurrentlyReadingShelf(5);
+    await editOrSendMessage(chatId, messageId, card, "Markdown", keyboard);
+    return;
+  }
+
+  if (data === "menu:recent") {
+    const { card, keyboard } = getRecentBooks(5);
+    await editOrSendMessage(chatId, messageId, card, "Markdown", keyboard);
+    return;
+  }
+
+  if (data === "menu:backup") {
+    await triggerBackup(chatId);
+    return;
+  }
+
+  if (data.startsWith("delete_book:")) {
+    const rawId = data.replace("delete_book:", "").trim();
+    const bookId = parseInt(rawId, 10);
+    if (!isNaN(bookId) && bookId > 0) {
+      const delRes = deleteBookFromLibrary(bookId);
+      if (delRes.success) {
+        await editOrSendMessage(
+          chatId,
+          messageId,
+          `🗑️ *Book Removed*\n\n*${escapeTelegramMarkdown(delRes.title || `Book #${bookId}`)}* has been deleted from your Calibre library.`,
+          "Markdown",
+          {
+            inline_keyboard: [
+              [
+                { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } },
+                { text: "🔙 Main Menu", callback_data: "menu:main" }
+              ]
+            ]
+          }
+        );
+      } else {
+        await editOrSendMessage(
+          chatId,
+          messageId,
+          `⚠️ *Failed to Delete Book #${bookId}*\n\n${escapeTelegramMarkdown(delRes.error || "Unknown error")}`,
+          "Markdown"
+        );
+      }
+    } else {
+      await sendMessage(chatId, `❌ Invalid book ID: \`${rawId}\``, "Markdown");
+    }
     return;
   }
 
@@ -1074,6 +1577,7 @@ export async function handleCallbackQuery(cq: any): Promise<void> {
     } else {
       await sendMessage(chatId, `❌ Invalid book ID: \`${rawId}\``, "Markdown");
     }
+    return;
   }
 }
 
@@ -1476,12 +1980,29 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
     }
 
     summary += `\n✨ _All books are cataloged and ready on your Kindle OPDS feed._`;
-    await editOrSendMessage(chatId, statusMsgId, summary, "Markdown");
+    const validBooks = results.filter(r => r.bookId && (r.status === "success" || r.status === "duplicate"));
+    let batchKeyboard: any ;
+    if (validBooks.length === 1 && validBooks[0].bookId) {
+      batchKeyboard = getPostIngestionKeyboard(validBooks[0].bookId);
+    } else if (validBooks.length > 1) {
+      const rows: any[][] = [];
+      for (const b of validBooks.slice(0, 4)) {
+        rows.push([
+          { text: `📥 Send "${truncate(b.title || b.name, 16)}"`, callback_data: `send_book:${b.bookId}` },
+          { text: "🗑️ Undo", callback_data: `delete_book:${b.bookId}` }
+        ]);
+      }
+      rows.push([{ text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } }]);
+      batchKeyboard = { inline_keyboard: rows };
+    }
+    await editOrSendMessage(chatId, statusMsgId, summary, "Markdown", batchKeyboard);
   } else {
     const single = results[0];
     const detailsLink = single.bookId ? `[Book Details](${CALIBRE_WEB_URL}/#book_id=${single.bookId}&panel=book_details)` : "";
     const readerLink = (single.bookId && single.format) ? `[Read Online](${CALIBRE_WEB_URL}/read/${single.bookId}/${single.format.toLowerCase()})` : "";
     const links = [detailsLink, readerLink].filter(Boolean).join(" • ");
+
+    const postIngestKeyboard = single.bookId ? getPostIngestionKeyboard(single.bookId) : undefined;
 
     if (single.status === "success") {
       const actionHeader = single.attachedFormat ? "\uD83D\uDCCE *Format Attached*" : "✅ *Book Ingested Successfully*";
@@ -1495,7 +2016,8 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
         `ℹ️ ${single.note}\n\n` +
         (links ? `\uD83D\uDD17 ${links}\n\n` : "") +
         `_Ready on your Kindle OPDS feed._`,
-        "Markdown"
+        "Markdown",
+        postIngestKeyboard
       );
     } else if (single.status === "duplicate") {
       await editOrSendMessage(
@@ -1508,7 +2030,8 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
         `ℹ️ ${single.note}\n\n` +
         (links ? `\uD83D\uDD17 ${links}\n\n` : "") +
         `_Available on your Kindle and Calibre._`,
-        "Markdown"
+        "Markdown",
+        postIngestKeyboard
       );
     } else {
       const isOverSize = single.note.includes("20MB");
@@ -1656,69 +2179,43 @@ async function pollTelegram() {
 
             if (text === "/backup" || text.startsWith("/backup@") || text.startsWith("/backup ")) {
               log(`Handling /backup command from ${sender} (chatId: ${chatId})`);
-              const statusMsgId = await sendMessage(
-                chatId,
-                `⏳ *Creating hot SQLite backup of reading stack databases...*`,
-                "Markdown"
-              );
+              await triggerBackup(chatId);
+              continue;
+            }
 
-              saveBackupChatId(chatId);
+            // Currently Reading Shelf: /reading
+            if (
+              text === "/reading" ||
+              text.startsWith("/reading@") ||
+              text.startsWith("/reading ")
+            ) {
+              log(`Handling /reading command from ${sender} (chatId: ${chatId})`);
+              const { card, keyboard } = getCurrentlyReadingShelf(5);
+              await sendMessage(chatId, card, "Markdown", keyboard);
+              continue;
+            }
 
-              const backupResult = createHotDatabaseBackup();
-              if (backupResult) {
-                try {
-                  const dbList = backupResult.backedUpDbs.join(", ");
-                  const caption =
-                    `\uD83D\uDCE6 *Reading Stack Database Backup*\n` +
-                    `\uD83D\uDCC5 *Date:* ${backupResult.displayTimestamp}\n` +
-                    `\uD83D\uDCCA *Size:* ${backupResult.sizeKb} KB\n` +
-                    `\uD83D\uDDD4\uFE0F *Databases:* ${dbList}\n` +
-                    `✨ _Secure offline snapshot stored in your Telegram history._`;
+            // Recent Books: /recent
+            if (
+              text === "/recent" ||
+              text.startsWith("/recent@") ||
+              text.startsWith("/recent ")
+            ) {
+              log(`Handling /recent command from ${sender} (chatId: ${chatId})`);
+              const { card, keyboard } = getRecentBooks(5);
+              await sendMessage(chatId, card, "Markdown", keyboard);
+              continue;
+            }
 
-                  const sent = await sendDocument(
-                    chatId,
-                    backupResult.archivePath,
-                    caption,
-                    "Markdown"
-                  );
-
-                  if (sent) {
-                    if (statusMsgId) {
-                      await editOrSendMessage(
-                        chatId,
-                        statusMsgId,
-                        `✅ *Hot SQLite backup created successfully.* Delivered below.`,
-                        "Markdown"
-                      );
-                    }
-                  } else {
-                    await editOrSendMessage(
-                      chatId,
-                      statusMsgId,
-                      `⚠️ *Backup Delivery Failed*\n\nUnable to deliver backup archive to Telegram. Check bot logs for details.`,
-                      "Markdown"
-                    );
-                  }
-                } finally {
-                  try {
-                    fs.rmSync(backupResult.stagingDir, { recursive: true, force: true });
-                  } catch (_cleanupErr) {
-                    void _cleanupErr;
-                  }
-                  try {
-                    fs.unlinkSync(backupResult.archivePath);
-                  } catch (_unlinkErr) {
-                    void _unlinkErr;
-                  }
-                }
-              } else {
-                await editOrSendMessage(
-                  chatId,
-                  statusMsgId,
-                  `⚠️ *Database Backup Failed*\n\nCould not snapshot reading stack databases. Please check system logs.`,
-                  "Markdown"
-                );
-              }
+            // Main Menu Dashboard: /menu
+            if (
+              text === "/menu" ||
+              text.startsWith("/menu@") ||
+              text.startsWith("/menu ")
+            ) {
+              log(`Handling /menu command from ${sender} (chatId: ${chatId})`);
+              await sendMessage(chatId, getMainMenuText(), "Markdown", getMainMenuKeyboard());
+              initChatMenuButton(chatId).catch(() => {});
               continue;
             }
 
@@ -1868,7 +2365,8 @@ async function pollTelegram() {
                     (links ? `\uD83D\uDD17 ${links}\n\n` : "") +
                     `_Ready on your Kindle OPDS feed. Sending EPUB copy below..._`;
 
-                  await editOrSendMessage(chatId, statusMsgId, confirmation, "Markdown");
+                  const postIngestKeyboard = result.bookId ? getPostIngestionKeyboard(result.bookId) : undefined;
+                  await editOrSendMessage(chatId, statusMsgId, confirmation, "Markdown", postIngestKeyboard);
 
                   if (result.epubPath && fs.existsSync(result.epubPath)) {
                     log(`Sending generated EPUB to chat ${chatId}: ${result.epubPath}`);
@@ -1903,52 +2401,33 @@ async function pollTelegram() {
                   "Markdown"
                 );
               }
-            } else if (text === "/start" || text === "/help") {
+            } else if (text === "/start" || text.startsWith("/start@") || text.startsWith("/start ")) {
+              log(`Handling /start command from ${sender} (chatId: ${chatId})`);
+              await sendMessage(chatId, getMainMenuText(), "Markdown", getMainMenuKeyboard());
+              initChatMenuButton(chatId).catch(() => {});
+            } else if (text === "/help" || text.startsWith("/help@") || text.startsWith("/help ")) {
               await sendMessage(
                 chatId,
-                `📖 *Reading HQ Ingestion & Library Bot*\n\n` +
-                `Send books, search your library, or ingest web articles directly:\n` +
-                `• *Reading HQ Mini App:* Tap the *📖 Reading HQ* menu button or send \`/app\` / \`/webapp\` to launch the responsive catalog dashboard.\n` +
-                `• *Library Search:* \`/find <query>\` or \`/search <query>\` (or \`/f <query>\`) to search books by title, author, or series with interactive retrieval.\n` +
-                `• *Instant Book Retrieval:* \`/get <id>\` or tap *[📥 Send File]* to download any book directly to Telegram.\n` +
-                `• *Web Article Ingestion:* Send or forward any web article URL (or \`/epub <url>\`) to convert into a Kindle-ready EPUB with instant mobile delivery & Calibre sync (includes Jina Reader paywall fallback).\n` +
-                `• *Serialization Auto-Group:* Vol 1, Vol 2, Book 3 automatically grouped into Series.\n` +
-                `• *Batch Uploads Supported:* Select and send multiple EPUBs/CBZs at once.\n` +
-                `• *Duplicate Protection:* Instant binary hash + volume-aware deduplication.\n` +
-                `• *Formats:* \`.epub\`, \`.pdf\`, \`.mobi\`, \`.azw3\`, \`.cbz\`, \`.cbr\`\n` +
-                `• *File Limit:* Up to *20 MB* per file (Telegram API limit)\n` +
-                `• *Large Files (>20MB):* Upload via [Reading HQ](${READING_WEBAPP_URL}) or [Web Uploader](${WEB_UPLOADER_URL})\n` +
-                `• \`/status\` (or \`/health\`): Live health dashboard for WAN edge, reverse tunnel, Calibre catalog, KOSync progress, and host metrics.\n` +
-                `• \`/backup\`: Instant hot snapshot of all reading databases sent directly to this chat.\n\n` +
-                `_Books and articles are automatically de-duplicated, sanitized, and available on your Kindle._`,
+                `📚 *Reading HQ Commands & Features*\n\n` +
+                `• \`/menu\` - Interactive dashboard with one-tap access\n` +
+                `• \`/reading\` - Currently reading shelf with progress bars\n` +
+                `• \`/recent\` - 5 newest books in Calibre library\n` +
+                `• \`/find <query>\` (or \`/f <query>\`) - Search library\n` +
+                `• \`/get <id>\` - Download any book by ID\n` +
+                `• \`/app\` - Launch Reading HQ Mini App\n` +
+                `• \`/status\` (or \`/health\`) - System health dashboard\n` +
+                `• \`/backup\` - Hot backup of SQLite databases\n\n` +
+                `_Send any eBook file (.epub, .pdf, .cbz) or article URL to ingest immediately._`,
                 "Markdown",
-                {
-                  inline_keyboard: [
-                    [
-                      {
-                        text: "📖 Open Reading HQ",
-                        web_app: { url: READING_WEBAPP_URL }
-                      }
-                    ]
-                  ]
-                }
+                getMainMenuKeyboard()
               );
               initChatMenuButton(chatId).catch(() => {});
             } else {
               await sendMessage(
                 chatId,
-                `📖 Please send eBook files (\`.epub\`, \`.pdf\`, \`.mobi\`, \`.cbz\`), paste an article URL, search your library (\`/find <query>\`), open the dashboard (\`/app\`), check system status (\`/status\`), or send \`/backup\` for an instant database snapshot. For files over 20MB, use [Reading HQ](${READING_WEBAPP_URL}).`,
+                `📚 Please send eBook files (\`.epub\`, \`.pdf\`, \`.mobi\`, \`.cbz\`), paste an article URL, search your library (\`/find <query>\`), view current reads (\`/reading\`), view recent books (\`/recent\`), open the dashboard (\`/menu\`), check system status (\`/status\`), or send \`/backup\`. For files over 20MB, use [Reading HQ](${READING_WEBAPP_URL}).`,
                 "Markdown",
-                {
-                  inline_keyboard: [
-                    [
-                      {
-                        text: "📖 Open Reading HQ",
-                        web_app: { url: READING_WEBAPP_URL }
-                      }
-                    ]
-                  ]
-                }
+                getMainMenuKeyboard()
               );
             }
           }
