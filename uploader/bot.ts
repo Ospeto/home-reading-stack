@@ -2,7 +2,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import { Database } from "bun:sqlite";
@@ -2150,7 +2149,7 @@ function ingestBookFile(
           format === "CBZ" ||
           format === "CBR" ||
           (clean.tags || []).some((t) => /manga|comic/i.test(t));
-        getJobQueue(cacheDb).enqueue("metadata_enrich", {
+        getJobQueue(getCacheDb()).enqueue("metadata_enrich", {
           bookId: newId,
           title: finalTitle,
           isManga,
@@ -2553,7 +2552,7 @@ process.on("SIGTERM", () => {
   isPollingRunning = false;
 });
 
-export function registerJobHandlers(q = getJobQueue(cacheDb)) {
+export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
   q.registerHandler(
     "metadata_enrich",
     async (payload: { bookId: number; title: string; isManga?: boolean }) => {
