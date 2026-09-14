@@ -9,7 +9,7 @@ This runbook documents operational commands, health checks, service management, 
 All services on the Mac mini run as native macOS LaunchAgents under `/Users/ospeto/Library/LaunchAgents/`:
 
 | LaunchAgent Label | File Path | Port | Work Directory |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `com.ospeto.kosync` | `~/Library/LaunchAgents/com.ospeto.kosync.plist` | `7200` | `/Users/ospeto/kosync-server` |
 | `com.ospeto.calibre-server` | `~/Library/LaunchAgents/com.ospeto.calibre-server.plist` | `8088` | `/Users/ospeto/Calibre Libraries/Agent Library` |
 | `com.ospeto.book-uploader` | `~/Library/LaunchAgents/com.ospeto.book-uploader.plist` | `8086` | `/Users/ospeto/uploader` |
@@ -19,6 +19,7 @@ All services on the Mac mini run as native macOS LaunchAgents under `/Users/ospe
 | `com.ospeto.reading-stack-backup` | `~/Library/LaunchAgents/com.ospeto.reading-stack-backup.plist` | — | `/Users/ospeto/kosync-server` |
 | `com.ospeto.kosync-watchdog` | `~/Library/LaunchAgents/com.ospeto.kosync-watchdog.plist` | — | `/Users/ospeto/kosync-server` |
 | `com.ospeto.singbox-proxy` | `~/Library/LaunchAgents/com.ospeto.singbox-proxy.plist` | `7890` | `/Users/ospeto/.config/sing-box` |
+| `com.ospeto.reading-vless-tunnel` | `~/Library/LaunchAgents/com.ospeto.reading-vless-tunnel.plist` | `8086 (remote)` | `/Users/ospeto` |
 
 ---
 
@@ -38,6 +39,12 @@ curl -s http://192.168.31.15:8086/api/books
 
 # 4. Check Sing-box Proxy Connectivity
 curl -s --proxy http://192.168.31.15:7890 https://ipinfo.io/json
+
+# 5. Check WAN Reading HQ Public Endpoint & TLS
+curl -s -I https://reading.wavypremium.xyz
+
+# 6. Check Persistent Reverse Tunnel LaunchAgent Status
+launchctl list | grep com.ospeto.reading-vless-tunnel
 ```
 
 ---
@@ -45,6 +52,7 @@ curl -s --proxy http://192.168.31.15:7890 https://ipinfo.io/json
 ## 🔄 Service Control & Lifecycle
 
 ### Restart All Services
+
 ```bash
 ssh mac-mini "
   launchctl unload ~/Library/LaunchAgents/com.ospeto.kosync.plist 2>/dev/null || true
@@ -61,10 +69,14 @@ ssh mac-mini "
 
   launchctl unload ~/Library/LaunchAgents/com.ospeto.singbox-proxy.plist 2>/dev/null || true
   launchctl load -w ~/Library/LaunchAgents/com.ospeto.singbox-proxy.plist
+
+  launchctl unload ~/Library/LaunchAgents/com.ospeto.reading-vless-tunnel.plist 2>/dev/null || true
+  launchctl load -w ~/Library/LaunchAgents/com.ospeto.reading-vless-tunnel.plist
 "
 ```
 
 ### Inspect Live Logs
+
 ```bash
 # KOSync logs
 ssh mac-mini "tail -f ~/Library/Logs/kosync.log"
@@ -77,6 +89,9 @@ ssh mac-mini "tail -f ~/Library/Logs/uploader.log ~/Library/Logs/uploader-error.
 
 # Sing-box Proxy logs
 ssh mac-mini "tail -f ~/Library/Logs/sing-box/stderr.log"
+
+# VLESS SSH Reverse Tunnel logs
+ssh mac-mini "tail -f ~/Library/Logs/reading-vless-tunnel.log"
 ```
 
 ---
@@ -84,8 +99,10 @@ ssh mac-mini "tail -f ~/Library/Logs/sing-box/stderr.log"
 ## 💾 Database & Library Management
 
 ### 1. KOSync SQLite Database
+
 - Location: `/Users/ospeto/kosync-server/data/koreader-sync.db`
 - Inspect active sync records:
+
   ```bash
   ssh mac-mini "python3 -c \"
   import sqlite3
@@ -96,33 +113,44 @@ ssh mac-mini "tail -f ~/Library/Logs/sing-box/stderr.log"
   ```
 
 ### 2. Calibre Library Database
+
 - Location: `/Users/ospeto/Calibre Libraries/Agent Library/metadata.db`
 - List books via CLI:
+
   ```bash
   ssh mac-mini "export PATH=/opt/homebrew/bin:\$PATH; calibredb list --with-library http://127.0.0.1:8088"
   ```
+
 - Manually add a book:
+
   ```bash
   ssh mac-mini "export PATH=/opt/homebrew/bin:\$PATH; calibredb add /path/to/book.epub --with-library http://127.0.0.1:8088"
   ```
+
 - Remove a book:
+
   ```bash
   ssh mac-mini "export PATH=/opt/homebrew/bin:\$PATH; calibredb remove <BOOK_ID> --with-library http://127.0.0.1:8088"
   ```
 
 ### 3. Manga Processing & Ingestion
+
 - Watch root: `/Volumes/Ospeto_SSD/Manga/<Series Name>/<Chapter Name>/`
 - Processed archive: `/Volumes/Ospeto_SSD/Manga/.processed/`
 - Trigger one-shot scan:
+
   ```bash
   ssh mac-mini "/opt/homebrew/bin/python3 /Users/ospeto/manga-processor/processor.py --scan"
   ```
+
 - Inspect processor logs:
+
   ```bash
   ssh mac-mini "tail -f ~/Library/Logs/manga-processor.log ~/Library/Logs/manga-processor-error.log"
   ```
 
 ### 4. Database Snapshot Backups, Telegram Delivery & WAL Durability
+
 - Primary Local Storage: `/Users/ospeto/.backups/reading-stack/` (Always writable, immune to TCC / drive unmounts)
 - Secondary Mirror: `/Volumes/Ospeto_SSD/backups/reading-stack/` (Automated sync when SSD is mounted)
 - SQLite Database Resiliency: All databases (`koreader-sync.db`, `cache.db`, `manga.db`, `metadata.db`) run in `WAL` mode (`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`) for zero-corruption power loss safety.
@@ -130,6 +158,7 @@ ssh mac-mini "tail -f ~/Library/Logs/sing-box/stderr.log"
 - Log Hygiene: Auto-truncates logs in `~/Library/Logs/` if exceeding 10 MB.
 
 #### On-Demand Telegram Backup (`/backup`)
+
 - Send `/backup` to `@saroat_ospeto_bot` in Telegram.
 - The bot performs a hot SQLite snapshot (`.backup`) of:
   1. KOSync database (`koreader-sync.db`)
@@ -140,22 +169,28 @@ ssh mac-mini "tail -f ~/Library/Logs/sing-box/stderr.log"
 - The command automatically updates `TELEGRAM_BACKUP_CHAT_ID` in `/Users/ospeto/uploader/.env` so daily scheduled backups know where to deliver.
 
 #### Scheduled Daily Backups (`scripts/backup-daily.sh`)
+
 - Tracked in git at `scripts/backup-daily.sh`.
 - Run automatically at 04:00 AM daily by LaunchAgent `com.ospeto.reading-stack-backup`.
 - Checks `/Users/ospeto/uploader/.env` for `TELEGRAM_BOT_TOKEN` and `TELEGRAM_BACKUP_CHAT_ID`. If present, sends the daily `.tar.gz` archive to Telegram via proxy `http://127.0.0.1:7890`.
 - Manual backup run:
+
   ```bash
   ssh mac-mini "/Users/ospeto/uploader/scripts/backup-daily.sh"
   # Or:
   /Users/ospeto/.treehouse/home-reading-stack-6428f1/1/home-reading-stack/scripts/backup-daily.sh
   ```
+
 - Inspect backup logs:
+
   ```bash
   ssh mac-mini "tail -f ~/Library/Logs/reading-stack-backup.log"
   ```
 
 #### Restoring from a Backup Archive
+
 To restore databases from a Telegram or disk backup archive:
+
 ```bash
 # 1. Extract archive to a temporary inspection directory
 mkdir -p /tmp/reading-restore
@@ -179,6 +214,7 @@ launchctl load -w ~/Library/LaunchAgents/com.ospeto.book-uploader.plist
 ```
 
 ### 5. Automated Self-Healing Watchdog
+
 - Agent: `com.ospeto.kosync-watchdog` (Runs every 15 minutes)
 - Monitored services:
   1. KOSync Server (`:7200`)
@@ -188,16 +224,21 @@ launchctl load -w ~/Library/LaunchAgents/com.ospeto.book-uploader.plist
   5. Manga Auto-Packer Daemon (`processor.py`)
   6. Sing-box VLESS Gateway (`:7890`)
 - Manual watchdog trigger:
+
   ```bash
   ssh mac-mini "/Users/ospeto/kosync-server/watchdog.sh"
   ```
+
 - Inspect watchdog logs:
+
   ```bash
   ssh mac-mini "tail -f ~/Library/Logs/reading-stack-watchdog.log"
   ```
 
 ### 6. Library Search & Retrieval Verification
+
 Verify the Telegram bot's in-chat library search and retrieval functionality:
+
 ```bash
 # 1. Search library books from CLI or test runner
 bun -e '
@@ -213,7 +254,9 @@ bun -e '
 ```
 
 ### 7. Jina Reader Fallback & Paywall Verification
+
 Verify that blocked/paywalled article URLs automatically route through Jina Reader:
+
 ```bash
 # 1. Test Jina Reader fallback fetch via local proxy
 bun -e '
@@ -225,6 +268,47 @@ bun -e '
 # 2. In Telegram:
 # Send an article URL from a Cloudflare-protected or paywalled site.
 # The bot detects 401/403 or challenge HTML and falls back to Jina Reader transparently.
+```
+
+---
+
+### 8. WAN Reverse Tunnel & Telegram Mini App Operations
+
+Manage and verify the persistent reverse tunnel and Telegram Mini App integration:
+
+#### Tunnel Lifecycle on Mac Mini
+
+```bash
+# Check LaunchAgent job status
+launchctl list | grep com.ospeto.reading-vless-tunnel
+
+# View tunnel output logs
+tail -n 50 ~/Library/Logs/reading-vless-tunnel.log
+
+# Manually reload the LaunchAgent
+launchctl unload ~/Library/LaunchAgents/com.ospeto.reading-vless-tunnel.plist
+launchctl load -w ~/Library/LaunchAgents/com.ospeto.reading-vless-tunnel.plist
+```
+
+#### Test WAN Endpoint & Edge Proxy
+
+```bash
+# Check public HTTPS response from WAN
+curl -s -I https://reading.wavypremium.xyz
+
+# Check reverse proxy routing on VPS (panel)
+ssh panel "curl -s -I http://172.18.0.1:8086"
+```
+
+#### Test Telegram Mini App Menu Button Registration
+
+```bash
+bun -e '
+  import { initChatMenuButton, READING_WEBAPP_URL } from "./uploader/bot.ts";
+  console.log("Mini App URL:", READING_WEBAPP_URL);
+  const ok = await initChatMenuButton();
+  console.log("Menu button registered:", ok);
+'
 ```
 
 ---
