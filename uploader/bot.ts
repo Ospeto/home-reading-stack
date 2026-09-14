@@ -20,8 +20,12 @@ const SERVER_URL = "http://127.0.0.1:8088";
 const ENV_PATH = process.env.ENV_PATH || "/Users/ospeto/uploader/.env";
 const CACHE_DB_PATH = "/Users/ospeto/uploader/cache.db";
 const KOSYNC_DB_PATH = process.env.KOSYNC_DB_PATH || "/Users/ospeto/kosync-server/data/koreader-sync.db";
-const CALIBRE_DB_PATH = process.env.CALIBRE_DB_PATH || "/Users/ospeto/Calibre Libraries/Agent Library/metadata.db";
-const CALIBRE_LIBRARY_DIR = process.env.CALIBRE_LIBRARY_DIR || path.dirname(CALIBRE_DB_PATH);
+export function getCalibreDbPath(): string {
+  return process.env.CALIBRE_DB_PATH || "/Users/ospeto/Calibre Libraries/Agent Library/metadata.db";
+}
+export function getCalibreLibraryDir(): string {
+  return process.env.CALIBRE_LIBRARY_DIR || path.dirname(getCalibreDbPath());
+}
 const MANGA_DB_PATH = process.env.MANGA_DB_PATH || "/Users/ospeto/manga-processor/manga.db";
 const PROXY_URL = "http://127.0.0.1:7890";
 const WEB_UPLOADER_URL = "http://192.168.31.15:8086";
@@ -416,7 +420,7 @@ export function saveBackupChatId(chatId: number): void {
 export function createHotDatabaseBackup(): DatabaseBackupResult | null {
   const targets = [
     { name: "KOSync", fileName: "koreader-sync.db", path: KOSYNC_DB_PATH },
-    { name: "Calibre", fileName: "metadata.db", path: CALIBRE_DB_PATH },
+    { name: "Calibre", fileName: "metadata.db", path: getCalibreDbPath() },
     { name: "Uploader Cache", fileName: "cache.db", path: CACHE_DB_PATH },
     { name: "Manga", fileName: "manga.db", path: MANGA_DB_PATH }
   ];
@@ -521,9 +525,10 @@ export function searchCalibreLibrary(query: string, limit: number = 5): CalibreB
   if (!trimmed) return [];
 
   // 1. Try querying Calibre SQLite database first for instant sub-millisecond response
-  if (fs.existsSync(CALIBRE_DB_PATH)) {
+  const calibreDbPath = getCalibreDbPath();
+  if (fs.existsSync(calibreDbPath)) {
     try {
-      const db = new Database(CALIBRE_DB_PATH, { readonly: true });
+      const db = new Database(calibreDbPath, { readonly: true });
       db.run("PRAGMA busy_timeout = 3000;");
 
       const words = trimmed.split(/\s+/).filter(Boolean);
@@ -670,9 +675,12 @@ export interface BookFileDetails {
 export function locateBookFile(bookId: number): BookFileDetails | null {
   const PREFERRED_FORMATS = ["EPUB"];
 
-  if (fs.existsSync(CALIBRE_DB_PATH)) {
+  const dbPath = getCalibreDbPath();
+  const libDir = getCalibreLibraryDir();
+
+  if (fs.existsSync(dbPath)) {
     try {
-      const db = new Database(CALIBRE_DB_PATH, { readonly: true });
+      const db = new Database(dbPath, { readonly: true });
       db.run("PRAGMA busy_timeout = 3000;");
 
       const rows = db.query(`
@@ -698,7 +706,7 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
         const series = rows[0].series || null;
         const seriesIndex = rows[0].series_index || null;
         const bookRelPath = rows[0].path;
-        const basePath = path.join(CALIBRE_LIBRARY_DIR, bookRelPath);
+        const basePath = path.join(libDir, bookRelPath);
 
         // EPUB only
         rows.sort((a, b) => {
@@ -926,9 +934,10 @@ export async function getStatusDashboard(): Promise<string> {
   let totalBooks = 0;
   let formatStats = "None";
   let newestTitle = "None";
-  if (fs.existsSync(CALIBRE_DB_PATH)) {
+  const calibreDbPath = getCalibreDbPath();
+  if (fs.existsSync(calibreDbPath)) {
     try {
-      const db = new Database(CALIBRE_DB_PATH, { readonly: true });
+      const db = new Database(calibreDbPath, { readonly: true });
       const bRow = db.query("SELECT COUNT(*) as cnt FROM books").get() as any;
       totalBooks = bRow?.cnt || 0;
       const fRows = db.query("SELECT format, count(*) as cnt FROM data GROUP BY format ORDER BY cnt DESC LIMIT 4").all() as any[];
@@ -1127,9 +1136,10 @@ export function deleteBookFromLibrary(bookId: number): { success: boolean; title
   }
 
   let bookTitle: string | null = null;
-  if (fs.existsSync(CALIBRE_DB_PATH)) {
+  const calibreDbPath = getCalibreDbPath();
+  if (fs.existsSync(calibreDbPath)) {
     try {
-      const db = new Database(CALIBRE_DB_PATH, { readonly: true });
+      const db = new Database(calibreDbPath, { readonly: true });
       const row = db.query("SELECT title FROM books WHERE id = ?").get(bookId) as any;
       if (row && row.title) {
         bookTitle = row.title;
@@ -1300,10 +1310,11 @@ export function getCurrentlyReadingShelf(limit: number = 5): { items: ActiveRead
 
 export function getRecentBooks(limit: number = 5): { books: CalibreBookResult[]; card: string; keyboard: any } {
   let books: CalibreBookResult[] = [];
+  const calibreDbPath = getCalibreDbPath();
 
-  if (fs.existsSync(CALIBRE_DB_PATH)) {
+  if (fs.existsSync(calibreDbPath)) {
     try {
-      const db = new Database(CALIBRE_DB_PATH, { readonly: true });
+      const db = new Database(calibreDbPath, { readonly: true });
       db.run("PRAGMA busy_timeout = 3000;");
 
       const rows = db.query(`

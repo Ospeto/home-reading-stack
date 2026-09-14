@@ -13,7 +13,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
+import process from "node:process";
 import { Database } from "bun:sqlite";
 
 export interface PreflightOptions {
@@ -45,11 +45,25 @@ export function cleanTitle(str: string): string {
 }
 
 /**
+ * Normalizes title and author together for high-accuracy duplicate matching.
+ * Prevents false positives between different books sharing common titles.
+ */
+export function normalizeTitleAndAuthor(title: string, authors?: string): string {
+  const t = cleanTitle(title);
+  const a = cleanTitle(authors || "");
+  const isJunkAuthor = !a || a === "unknown" || a === "anonymous" || a === "admin";
+  return isJunkAuthor ? `${t}:::unknown` : `${t}:::${a}`;
+}
+
+/**
  * Run safe read-only preflight inventory comparing source and target Calibre libraries.
  */
 export function runMigrationPreflight(options: PreflightOptions = {}): MigrationInventory {
-  const sourcePath = options.sourceLibraryPath || "/Volumes/Ospeto_SSD/Calibre Library";
-  const targetPath = options.targetLibraryPath || "/Users/ospeto/Calibre Libraries/Agent Library";
+  const defaultSource = process.env.CALIBRE_SOURCE_LIBRARY_DIR || "/Volumes/Ospeto_SSD/Calibre Library";
+  const defaultTarget = process.env.CALIBRE_LIBRARY_DIR || "/Users/ospeto/Calibre Libraries/Agent Library";
+
+  const sourcePath = options.sourceLibraryPath || defaultSource;
+  const targetPath = options.targetLibraryPath || defaultTarget;
 
   const sourceDbPath = path.join(sourcePath, "metadata.db");
   const targetDbPath = path.join(targetPath, "metadata.db");
@@ -113,12 +127,22 @@ export function runMigrationPreflight(options: PreflightOptions = {}): Migration
   srcDb.close();
   tgtDb.close();
 
-  // Index target library books by normalized title and authors
+  // Index target library books by normalized title PLUS author
   const targetMap = new Map<string, any>();
+  const targetTitleMap = new Map<string, any[]>();
+
   for (const t of tgtEpubRows) {
-    const key = cleanTitle(t.title);
-    if (key) {
-      targetMap.set(key, t);
+    const compoundKey = normalizeTitleAndAuthor(t.title, t.authors);
+    const titleKey = cleanTitle(t.title);
+
+    if (compoundKey) {
+      targetMap.set(compoundKey, t);
+    }
+    if (titleKey) {
+      if (!targetTitleMap.has(titleKey)) {
+        targetTitleMap.set(titleKey, []);
+      }
+      targetTitleMap.get(titleKey)!.push(t);
     }
   }
 
@@ -128,9 +152,42 @@ export function runMigrationPreflight(options: PreflightOptions = {}): Migration
   for (const src of srcEpubRows) {
     const relFile = path.join(src.path, `${src.filename}.epub`);
     const fullSourceFilePath = path.join(sourcePath, relFile);
-    const key = cleanTitle(src.title);
 
-    if (key && targetMap.has(key)) {
+    const compoundKey = normalizeTitleAndAuthor(src.title, src.authors);
+    const titleKey = cleanTitle(src.title);
+    const srcAuthor = cleanTitle(src.authors || "");
+
+    let isDuplicate = false;
+
+    // 1. Primary match: normalized Title PLUS Author
+    if (targetMap.has(compoundKey)) {
+      isDuplicate = true;
+    } else if (titleKey && targetTitleMap.has(titleKey)) {
+      // 2. Secondary match: Title match with author compatibility check
+      const candidates = targetTitleMap.get(titleKey)!;
+      for (const cand of candidates) {
+        const candAuthor = cleanTitle(cand.authors || "");
+        const hasBothAuthors = srcAuthor && candAuthor && srcAuthor !== "unknown" && candAuthor !== "unknown";
+
+        if (!hasBothAuthors) {
+          // If either author is unknown/missing, title match is treated as duplicate to be safe
+          isDuplicate = true;
+          break;
+        }
+
+        // Both authors are known: verify they are actually the same or compatible
+        if (
+          srcAuthor === candAuthor ||
+          srcAuthor.includes(candAuthor) ||
+          candAuthor.includes(srcAuthor)
+        ) {
+          isDuplicate = true;
+          break;
+        }
+      }
+    }
+
+    if (isDuplicate) {
       exactDuplicates.push({
         id: src.id,
         title: src.title || "Untitled",
@@ -189,7 +246,7 @@ if (import.meta.main) {
     console.log(`⚠️ Existing Duplicates (Will Skip): ${inventory.exactDuplicates.length}\n`);
 
     if (inventory.exactDuplicates.length > 0) {
-      console.log("Sample Existing Duplicates Detected:");
+      console.log("Sample Existing Duplicates Detected (Matched on Title + Author):");
       for (const d of inventory.exactDuplicates.slice(0, 5)) {
         console.log(`  • [#${d.id}] "${d.title}" by ${d.authors}`);
       }

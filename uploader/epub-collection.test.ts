@@ -1,5 +1,9 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import fs from "node:fs";
+import path from "node:path";
+import process from "node:process";
+import { Buffer } from "node:buffer";
+import { Database } from "bun:sqlite";
 import { generateMetadataFilename, buildContentDisposition } from "./filename";
 import { locateBookFile } from "./bot";
 import { isSupportedBook, isNonEpubBook } from "./archive";
@@ -111,44 +115,97 @@ describe("EPUB-Only Collection & Storage Path Invariants", () => {
     });
   });
 
-  describe("Calibre Storage Path Preservation (Zero In-Place Mutation)", () => {
-    it("never alters or renames physical Calibre library paths when locating files", () => {
-      // Locate an existing book (e.g. ID 3 or 4 in the local Calibre library)
-      const details = locateBookFile(3);
-      if (details) {
-        expect(details.chosenFormat).toBe("EPUB");
-        expect(fs.existsSync(details.filePath)).toBe(true);
+  describe("Calibre Storage Path Preservation (Hermetic Test)", () => {
+    const tempLibDir = path.join("/tmp", `test_calibre_lib_${Date.now()}`);
+    const bookDir = path.join(tempLibDir, "Frank Herbert", "Dune (1)");
+    const epubPath = path.join(bookDir, "Dune - Frank Herbert.epub");
+    const cbzDir = path.join(tempLibDir, "Oda", "One Piece (2)");
+    const cbzPath = path.join(cbzDir, "One Piece - Oda.cbz");
 
-        // Record initial state and mtime
-        const initialStat = fs.statSync(details.filePath);
+    let origDbPath: string | undefined;
+    let origLibDir: string | undefined;
 
-        // Generate user-facing download name
-        const userDownloadName = generateMetadataFilename({
-          title: details.title,
-          authors: details.authors,
-          series: details.series,
-          seriesIndex: details.seriesIndex,
-          format: "epub"
-        });
+    beforeAll(() => {
+      fs.mkdirSync(bookDir, { recursive: true });
+      fs.mkdirSync(cbzDir, { recursive: true });
+      fs.writeFileSync(epubPath, "mock epub book content");
+      fs.writeFileSync(cbzPath, "mock cbz comic content");
 
-        // The user download name is friendly and metadata-derived
-        expect(userDownloadName.endsWith(".epub")).toBe(true);
+      const tempDbPath = path.join(tempLibDir, "metadata.db");
+      const db = new Database(tempDbPath);
+      db.run(`
+        CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, path TEXT, series_index REAL);
+        CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, name TEXT, uncompressed_size INTEGER);
+        CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+        CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+      `);
 
-        // CRITICAL INVARIANT: The physical file path on disk must NOT have changed
-        const currentStat = fs.statSync(details.filePath);
-        expect(fs.existsSync(details.filePath)).toBe(true);
-        expect(currentStat.mtimeMs).toBe(initialStat.mtimeMs);
-        expect(currentStat.size).toBe(initialStat.size);
+      // Book 1: EPUB format with series
+      db.run("INSERT INTO books (id, title, path, series_index) VALUES (1, 'Dune', 'Frank Herbert/Dune (1)', 1);");
+      db.run("INSERT INTO data (id, book, format, name, uncompressed_size) VALUES (1, 1, 'EPUB', 'Dune - Frank Herbert', 100);");
+      db.run("INSERT INTO authors (id, name) VALUES (1, 'Frank Herbert');");
+      db.run("INSERT INTO books_authors_link (id, book, author) VALUES (1, 1, 1);");
+      db.run("INSERT INTO series (id, name) VALUES (1, 'Dune Chronicles');");
+      db.run("INSERT INTO books_series_link (id, book, series) VALUES (1, 1, 1);");
 
-        // Physical path remains inside Calibre's internal directory hierarchy
-        expect(details.filePath).toContain("Agent Library");
+      // Book 2: CBZ format (non-EPUB)
+      db.run("INSERT INTO books (id, title, path) VALUES (2, 'One Piece', 'Oda/One Piece (2)');");
+      db.run("INSERT INTO data (id, book, format, name, uncompressed_size) VALUES (2, 2, 'CBZ', 'One Piece - Oda', 200);");
+      db.run("INSERT INTO authors (id, name) VALUES (2, 'Oda');");
+      db.run("INSERT INTO books_authors_link (id, book, author) VALUES (2, 2, 2);");
+
+      db.close();
+
+      origDbPath = process.env.CALIBRE_DB_PATH;
+      origLibDir = process.env.CALIBRE_LIBRARY_DIR;
+      process.env.CALIBRE_DB_PATH = tempDbPath;
+      process.env.CALIBRE_LIBRARY_DIR = tempLibDir;
+    });
+
+    afterAll(() => {
+      if (origDbPath === undefined) delete process.env.CALIBRE_DB_PATH; else process.env.CALIBRE_DB_PATH = origDbPath;
+
+      if (origLibDir === undefined) delete process.env.CALIBRE_LIBRARY_DIR; else process.env.CALIBRE_LIBRARY_DIR = origLibDir;
+
+      if (fs.existsSync(tempLibDir)) {
+        fs.rmSync(tempLibDir, { recursive: true, force: true });
       }
     });
 
+    it("never alters or renames physical Calibre library paths when locating files", () => {
+      const details = locateBookFile(1);
+      expect(details).not.toBeNull();
+      expect(details!.chosenFormat).toBe("EPUB");
+      expect(details!.series).toBe("Dune Chronicles");
+      expect(details!.seriesIndex).toBe(1);
+      expect(fs.existsSync(details!.filePath)).toBe(true);
+
+      const initialStat = fs.statSync(details!.filePath);
+
+      const userDownloadName = generateMetadataFilename({
+        title: details!.title,
+        authors: details!.authors,
+        series: details!.series,
+        seriesIndex: details!.seriesIndex,
+        format: "epub"
+      });
+
+      expect(userDownloadName).toBe("Dune Chronicles 01 - Dune - Frank Herbert.epub");
+
+      // CRITICAL INVARIANT: The physical file path on disk must NOT have changed
+      const currentStat = fs.statSync(details!.filePath);
+      expect(fs.existsSync(details!.filePath)).toBe(true);
+      expect(currentStat.mtimeMs).toBe(initialStat.mtimeMs);
+      expect(currentStat.size).toBe(initialStat.size);
+      expect(details!.filePath).toBe(epubPath);
+    });
+
     it("verifies locateBookFile returns only EPUB files and rejects non-EPUB books", () => {
-      // Books 6, 7, 10 in live Calibre library are CBZ comics
+      // Book 2 in temp library is CBZ format
       // locateBookFile must return null for non-EPUB books in EPUB-only mode
-      const cbzBook = locateBookFile(6);
+      const cbzBook = locateBookFile(2);
       expect(cbzBook).toBeNull();
     });
   });

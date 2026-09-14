@@ -2,7 +2,13 @@ import { describe, it, expect } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { isSupportedBook, isNonEpubBook, isArchiveFile, unpackArchive } from "./archive";
+import {
+  isSupportedBook,
+  isNonEpubBook,
+  isArchiveFile,
+  unpackArchive,
+  inspectArchiveSafety
+} from "./archive";
 
 describe("EPUB-Only Archive & Format Quarantine", () => {
   describe("isSupportedBook", () => {
@@ -54,7 +60,7 @@ describe("EPUB-Only Archive & Format Quarantine", () => {
     });
   });
 
-  describe("unpackArchive", () => {
+  describe("unpackArchive & Archive Safety Regression", () => {
     const tempDir = path.join("/tmp", `test_archive_${Date.now()}`);
 
     it("extracts EPUBs and quarantines non-EPUB files from mixed archives", () => {
@@ -123,6 +129,87 @@ describe("EPUB-Only Archive & Format Quarantine", () => {
         if (fs.existsSync(nonEpubDir)) {
           fs.rmSync(nonEpubDir, { recursive: true, force: true });
         }
+      }
+    });
+
+    it("rejects archives with path traversal entries via inspectArchiveSafety", () => {
+      const traversalZip = path.join("/tmp", `test_traversal_${Date.now()}.zip`);
+      const pythonScript = `
+import zipfile
+with zipfile.ZipFile("${traversalZip}", "w") as zf:
+    zf.writestr("../../etc/passwd", "root:x:0:0:root:/root:/bin/bash")
+    zf.writestr("normal.epub", "content")
+`;
+      spawnSync("python3", ["-c", pythonScript]);
+
+      try {
+        const inspection = inspectArchiveSafety(traversalZip);
+        expect(inspection.safe).toBe(false);
+        expect(inspection.error).toContain("Path traversal detected");
+
+        const unp = unpackArchive(traversalZip);
+        expect(unp.success).toBe(false);
+        expect(unp.error).toContain("Path traversal detected");
+      } finally {
+        if (fs.existsSync(traversalZip)) {
+          fs.unlinkSync(traversalZip);
+        }
+      }
+    });
+
+    it("detects decompression bomb ratio exceeding limits", () => {
+      const bombZip = path.join("/tmp", `test_bomb_${Date.now()}.zip`);
+      // Create a zip with 10MB of zeroes that compresses down to ~10KB (> 50:1 ratio)
+      const pythonScript = `
+import zipfile
+with zipfile.ZipFile("${bombZip}", "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    zf.writestr("huge_sparse.epub", b"0" * (12 * 1024 * 1024))
+`;
+      spawnSync("python3", ["-c", pythonScript]);
+
+      try {
+        const inspection = inspectArchiveSafety(bombZip);
+        expect(inspection.safe).toBe(false);
+        expect(inspection.error).toContain("Decompression bomb detected");
+
+        const unp = unpackArchive(bombZip);
+        expect(unp.success).toBe(false);
+        expect(unp.error).toContain("Decompression bomb detected");
+      } finally {
+        if (fs.existsSync(bombZip)) {
+          fs.unlinkSync(bombZip);
+        }
+      }
+    });
+
+    it("skips symbolic links extracted from archives (symlink guard)", () => {
+      const symlinkDir = path.join("/tmp", `test_symlink_dir_${Date.now()}`);
+      fs.mkdirSync(symlinkDir, { recursive: true });
+
+      const realEpub = path.join(symlinkDir, "legit.epub");
+      fs.writeFileSync(realEpub, "real epub data");
+
+      // Create a relative symlink pointing to /etc/passwd or similar
+      const linkPath = path.join(symlinkDir, "evil_link.epub");
+      try {
+        fs.symlinkSync("/etc/hosts", linkPath);
+      } catch {
+        // If symlink creation fails due to permissions, skip test gracefully
+      }
+
+      const symlinkTar = path.join("/tmp", `test_symlink_${Date.now()}.tar`);
+      spawnSync("/usr/bin/bsdtar", ["-cf", symlinkTar, "-C", symlinkDir, "."]);
+
+      const unp = unpackArchive(symlinkTar);
+      try {
+        expect(unp.success).toBe(true);
+        // Only the real file should be extracted, the symlink must be ignored
+        expect(unp.books.length).toBe(1);
+        expect(unp.books[0].originalName).toBe("legit.epub");
+      } finally {
+        unp.cleanup();
+        if (fs.existsSync(symlinkTar)) fs.unlinkSync(symlinkTar);
+        if (fs.existsSync(symlinkDir)) fs.rmSync(symlinkDir, { recursive: true, force: true });
       }
     });
   });
