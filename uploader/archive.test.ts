@@ -285,5 +285,33 @@ with zipfile.ZipFile("${newlineZip}", "w") as z:
         }
       }
     });
+
+    it("rejects archives containing newline-bearing entry names beyond 2 MiB", () => {
+      const largeNewlineZip = path.join(
+        "/tmp",
+        `test_large_newline_${Date.now()}.zip`,
+      );
+      const pythonScript = `
+import zipfile
+with zipfile.ZipFile("${largeNewlineZip}", "w") as z:
+    z.writestr("large_padding.bin", b"A" * (3 * 1024 * 1024))
+    z.writestr("evil\\nname.epub", "content")
+`;
+      spawnSync("python3", ["-c", pythonScript]);
+
+      try {
+        const inspection = inspectArchiveSafety(largeNewlineZip);
+        expect(inspection.safe).toBe(false);
+        expect(inspection.error).toContain("newline characters");
+
+        const unp = unpackArchive(largeNewlineZip);
+        expect(unp.success).toBe(false);
+        expect(unp.error).toContain("newline characters");
+      } finally {
+        if (fs.existsSync(largeNewlineZip)) {
+          fs.unlinkSync(largeNewlineZip);
+        }
+      }
+    });
   });
 });

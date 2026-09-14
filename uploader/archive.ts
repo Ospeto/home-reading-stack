@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import { validateEpubContent } from "./security";
 
@@ -115,42 +114,51 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
       };
     }
 
-    // Upfront structured binary scan for newline-bearing entry names in ZIP containers
+    // Upfront structured scan across the entire archive for newline-bearing entry names
     const fd = fs.openSync(archivePath, "r");
-    const scanLen = Math.min(stat.size, 2 * 1024 * 1024);
-    const headerBytes = Buffer.alloc(scanLen);
-    fs.readSync(fd, headerBytes, 0, scanLen, 0);
-    fs.closeSync(fd);
+    const CHUNK_SIZE = 128 * 1024;
+    const chunkBuf = Buffer.alloc(CHUNK_SIZE);
+    let offset = 0;
+    const fileSize = stat.size;
 
-    for (let i = 0; i < scanLen - 4; i++) {
-      if (
-        headerBytes[i] === 0x50 &&
-        headerBytes[i + 1] === 0x4b &&
-        ((headerBytes[i + 2] === 0x03 && headerBytes[i + 3] === 0x04) ||
-          (headerBytes[i + 2] === 0x01 && headerBytes[i + 3] === 0x02))
-      ) {
-        const nameLenOffset = headerBytes[i + 2] === 0x03 ? i + 26 : i + 28;
-        const nameStartOffset = headerBytes[i + 2] === 0x03 ? i + 30 : i + 46;
-        if (nameStartOffset <= scanLen) {
-          const nameLen = headerBytes.readUInt16LE(nameLenOffset);
-          if (nameStartOffset + nameLen <= scanLen) {
-            const entryNameBuf = headerBytes.subarray(
-              nameStartOffset,
-              nameStartOffset + nameLen,
-            );
-            if (entryNameBuf.includes(0x0a) || entryNameBuf.includes(0x0d)) {
-              return {
-                safe: false,
-                error:
-                  "Archive entry names containing newline characters are strictly rejected",
-                entryCount: 0,
-                totalUncompressedBytes: 0,
-              };
+    while (offset < fileSize) {
+      const readSize = Math.min(CHUNK_SIZE, fileSize - offset);
+      const bytesRead = fs.readSync(fd, chunkBuf, 0, readSize, offset);
+      if (bytesRead <= 4) break;
+
+      for (let i = 0; i < bytesRead - 4; i++) {
+        if (
+          chunkBuf[i] === 0x50 &&
+          chunkBuf[i + 1] === 0x4b &&
+          ((chunkBuf[i + 2] === 0x03 && chunkBuf[i + 3] === 0x04) ||
+            (chunkBuf[i + 2] === 0x01 && chunkBuf[i + 3] === 0x02))
+        ) {
+          const nameLenOffset = chunkBuf[i + 2] === 0x03 ? i + 26 : i + 28;
+          const nameStartOffset = chunkBuf[i + 2] === 0x03 ? i + 30 : i + 46;
+          if (nameStartOffset <= bytesRead) {
+            const nameLen = chunkBuf.readUInt16LE(nameLenOffset);
+            if (nameStartOffset + nameLen <= bytesRead) {
+              const entryNameBuf = chunkBuf.subarray(
+                nameStartOffset,
+                nameStartOffset + nameLen,
+              );
+              if (entryNameBuf.includes(0x0a) || entryNameBuf.includes(0x0d)) {
+                fs.closeSync(fd);
+                return {
+                  safe: false,
+                  error:
+                    "Archive entry names containing newline characters are strictly rejected",
+                  entryCount: 0,
+                  totalUncompressedBytes: 0,
+                };
+              }
             }
           }
         }
       }
+      offset += Math.max(1, bytesRead - 2048);
     }
+    fs.closeSync(fd);
 
     // Run bsdtar -tvf to inspect entry headers and sizes
     const listRes = spawnSync("/usr/bin/bsdtar", ["-tvf", archivePath], {
