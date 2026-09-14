@@ -45,7 +45,8 @@ export function getDropDir(): string {
 }
 
 export function getCoverCacheDir(): string {
-  const dir = process.env.COVER_CACHE_DIR || "/Users/ospeto/uploader/cache/covers";
+  const dir =
+    process.env.COVER_CACHE_DIR || "/Users/ospeto/uploader/cache/covers";
   try {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -67,8 +68,6 @@ const LIBRARY_DIR =
 const KOSYNC_DB_PATH =
   process.env.KOSYNC_DB_PATH ||
   "/Users/ospeto/kosync-server/data/koreader-sync.db";
-const CACHE_DB_PATH =
-  process.env.CACHE_DB_PATH || "/Users/ospeto/uploader/cache.db";
 const MAX_UPLOAD_SIZE = MAX_ARCHIVE_SIZE_BYTES; // 100MB
 
 function resolveHtmlPath(): string {
@@ -84,202 +83,254 @@ function resolveHtmlPath(): string {
 
 const HTML_PATH = resolveHtmlPath();
 
-// Initialize SQLite Cache Database for Fast Hash & Metadata Lookups
-export const cacheDb = new Database(CACHE_DB_PATH);
-cacheDb.run("PRAGMA busy_timeout = 5000;");
-cacheDb.run(`
-  CREATE TABLE IF NOT EXISTS file_hashes (
-    filepath TEXT PRIMARY KEY,
-    mtime INTEGER NOT NULL,
-    hash TEXT NOT NULL,
-    book_id INTEGER,
-    title TEXT,
-    authors TEXT,
-    cover INTEGER
-  );
-`);
-cacheDb.run(
-  "CREATE INDEX IF NOT EXISTS idx_file_hashes_hash ON file_hashes(hash);",
-);
+export function getCacheDbPath(): string {
+  const defaultPath = "/Users/ospeto/uploader/cache.db";
+  const p = process.env.CACHE_DB_PATH || defaultPath;
+  try {
+    const dir = path.dirname(p);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    return p;
+  } catch {
+    const fallbackDir = path.join("/tmp", "uploader_cache");
+    if (!fs.existsSync(fallbackDir)) {
+      fs.mkdirSync(fallbackDir, { recursive: true });
+    }
+    return path.join(fallbackDir, "cache.db");
+  }
+}
 
-// Initialize Durable Job Queue
-export const jobQueue: DurableJobQueue = getJobQueue(cacheDb);
+let _serverCacheDbInstance: Database | null = null;
+export function getCacheDb(): Database {
+  if (!_serverCacheDbInstance) {
+    const dbPath = getCacheDbPath();
+    _serverCacheDbInstance = new Database(dbPath);
+    _serverCacheDbInstance.run("PRAGMA busy_timeout = 5000;");
+    _serverCacheDbInstance.run(`
+      CREATE TABLE IF NOT EXISTS file_hashes (
+        filepath TEXT PRIMARY KEY,
+        mtime INTEGER NOT NULL,
+        hash TEXT NOT NULL,
+        book_id INTEGER,
+        title TEXT,
+        authors TEXT,
+        cover INTEGER
+      );
+    `);
+    _serverCacheDbInstance.run(
+      "CREATE INDEX IF NOT EXISTS idx_file_hashes_hash ON file_hashes(hash);",
+    );
+  }
+  return _serverCacheDbInstance;
+}
 
-// Register Durable Job Handlers
-jobQueue.registerHandler(
-  "metadata_enrich",
-  async (payload: { bookId: number; title: string; isManga?: boolean }) => {
-    console.log(
-      `[JobQueue:MetadataEnrich] Background enrichment for book ID ${payload.bookId} ("${payload.title}")...`,
-    );
-    const matches = await searchUniversalMetadata(
-      payload.title,
-      payload.isManga || false,
-    );
-    if (matches.length > 0) {
-      const top = matches[0];
+// Lazy singleton cacheDb proxy for backward-compatible call-sites
+// SAFETY: Proxy delegates Database operations to dynamically initialized Database instance
+export const cacheDb = {
+  run(...args: any[]) { return (getCacheDb().run as any)(...args); },
+  query(...args: any[]) { return (getCacheDb().query as any)(...args); },
+  prepare(...args: any[]) { return (getCacheDb().prepare as any)(...args); },
+  close() { if (_serverCacheDbInstance) _serverCacheDbInstance.close(); }
+} as unknown as Database;
+
+let _serverJobQueue: DurableJobQueue | null = null;
+function registerJobHandlers(q: DurableJobQueue) {
+  q.registerHandler(
+    "metadata_enrich",
+    async (payload: { bookId: number; title: string; isManga?: boolean }) => {
       console.log(
-        `[JobQueue:MetadataEnrich] Top match: "${top.title}" by "${top.authors}" (Confidence: ${top.confidence}, Source: ${top.source})`,
+        `[JobQueue:MetadataEnrich] Background enrichment for book ID ${payload.bookId} ("${payload.title}")...`,
       );
-      if (top.confidence >= 0.85) {
-        const applied = await applyMetadataToCalibre(payload.bookId, top);
-        getCalibreBooks(true);
-        return {
-          success: applied,
-          topMatch: top.title,
-          confidence: top.confidence,
-        };
-      } else {
-        return {
-          success: true,
-          message: `Match confidence ${top.confidence} < 0.85. Preserved original title.`,
-        };
-      }
-    }
-    return { success: true, message: "No external metadata matches found." };
-  },
-);
-
-jobQueue.registerHandler(
-  "file_ingest",
-  async (payload: {
-    filePath: string;
-    originalFileName: string;
-    deleteAfterIngest?: boolean;
-  }) => {
-    const result = ingestBookFile(payload.filePath, payload.originalFileName);
-    if (payload.deleteAfterIngest && fs.existsSync(payload.filePath)) {
-      try {
-        fs.unlinkSync(payload.filePath);
-      } catch {}
-    }
-    if (!result.success) {
-      throw new Error(result.error || "File ingestion failed");
-    }
-    return result;
-  },
-);
-
-jobQueue.registerHandler(
-  "archive_extract",
-  async (payload: {
-    archivePath: string;
-    archiveName: string;
-    deleteAfterExtract?: boolean;
-  }) => {
-    const unp = unpackArchive(payload.archivePath);
-    if (payload.deleteAfterExtract && fs.existsSync(payload.archivePath)) {
-      try {
-        fs.unlinkSync(payload.archivePath);
-      } catch {}
-    }
-    if (!unp.success) {
-      throw new Error(unp.error || "Archive extraction failed");
-    }
-
-    const results: any[] = [];
-    try {
-      for (const book of unp.books) {
-        const r = ingestBookFile(book.tempPath, book.originalName);
-        results.push({ name: book.originalName, ...r });
-      }
-    } finally {
-      unp.cleanup();
-    }
-
-    const importedCount = results.filter(
-      (r: any) => r.success && !r.duplicate,
-    ).length;
-    return {
-      total: unp.books.length,
-      imported: importedCount,
-      quarantined: unp.quarantined || [],
-      results,
-    };
-  },
-);
-
-jobQueue.registerHandler(
-  "url_article_ingest",
-  async (payload: { url: string }) => {
-    const result = await ingestArticleFromUrl(payload.url);
-    if (!result.success) {
-      throw new Error(result.error || "Article ingestion failed");
-    }
-    getCalibreBooks(true);
-    return result;
-  },
-);
-
-jobQueue.registerHandler(
-  "cover_backfill",
-  async (payload: { candidateBookIds?: number[] }) => {
-    const books = getCalibreBooks(true);
-    const candidates = books.filter((b: any) => {
-      if (payload.candidateBookIds && !payload.candidateBookIds.includes(b.id))
-        return false;
-      const tags = Array.isArray(b.tags) ? b.tags : b.tags ? [b.tags] : [];
-      const isWeb = tags.some(
-        (t: string) => t === "Web Article" || t === "Read Later",
+      const matches = await searchUniversalMetadata(
+        payload.title,
+        payload.isManga || false,
       );
-      const hasCover = b.cover && b.cover !== 0 && b.cover !== false;
-      return isWeb && !hasCover;
-    });
-
-    const updated: Array<{ id: number; title: string }> = [];
-    for (const book of candidates) {
-      try {
-        const tags: string[] = Array.isArray(book.tags)
-          ? book.tags
-          : book.tags
-            ? [book.tags]
-            : [];
-        const siteTag = tags.find(
-          (t: string) => t !== "Web Article" && t !== "Read Later",
+      if (matches.length > 0) {
+        const top = matches[0];
+        console.log(
+          `[JobQueue:MetadataEnrich] Top match: "${top.title}" by "${top.authors}" (Confidence: ${top.confidence}, Source: ${top.source})`,
         );
-        const siteName = siteTag || book.publisher || "Web Article";
-        const coverPath = generateTypographicCover(
-          book.title,
-          book.authors || "Unknown",
-          siteName,
-        );
-
-        const setRes = runCalibredb([
-          "set_metadata",
-          String(book.id),
-          "--with-library",
-          SERVER_URL,
-          "--field",
-          `cover:${coverPath}`,
-        ]);
-
-        if (fs.existsSync(coverPath)) {
-          try {
-            fs.unlinkSync(coverPath);
-          } catch (_unlinkErr) {
-            void _unlinkErr;
-          }
+        if (top.confidence >= 0.85) {
+          const applied = await applyMetadataToCalibre(payload.bookId, top);
+          getCalibreBooks(true);
+          return {
+            success: applied,
+            topMatch: top.title,
+            confidence: top.confidence,
+          };
+        } else {
+          return {
+            success: true,
+            message: `Match confidence ${top.confidence} < 0.85. Preserved original title.`,
+          };
         }
-
-        if (setRes.status === 0) {
-          updated.push({ id: book.id, title: book.title });
-          try {
-            cacheDb.run("UPDATE file_hashes SET cover = 1 WHERE book_id = ?", [
-              book.id,
-            ]);
-          } catch (_dbErr) {
-            void _dbErr;
-          }
-        }
-      } catch (itemErr) {
-        console.error(`[CoverBackfill] Failed for book ${book.id}:`, itemErr);
       }
-    }
+      return { success: true, message: "No external metadata matches found." };
+    },
+  );
 
-    getCalibreBooks(true);
-    return { updatedCount: updated.length, updated };
-  },
-);
+  q.registerHandler(
+    "file_ingest",
+    async (payload: {
+      filePath: string;
+      originalFileName: string;
+      deleteAfterIngest?: boolean;
+    }) => {
+      const result = ingestBookFile(payload.filePath, payload.originalFileName);
+      if (payload.deleteAfterIngest && fs.existsSync(payload.filePath)) {
+        try {
+          fs.unlinkSync(payload.filePath);
+        } catch {}
+      }
+      if (!result.success) {
+        throw new Error(result.error || "File ingestion failed");
+      }
+      return result;
+    },
+  );
+
+  q.registerHandler(
+    "archive_extract",
+    async (payload: {
+      archivePath: string;
+      archiveName: string;
+      deleteAfterExtract?: boolean;
+    }) => {
+      const unp = unpackArchive(payload.archivePath);
+      if (payload.deleteAfterExtract && fs.existsSync(payload.archivePath)) {
+        try {
+          fs.unlinkSync(payload.archivePath);
+        } catch {}
+      }
+      if (!unp.success) {
+        throw new Error(unp.error || "Archive extraction failed");
+      }
+
+      const results: any[] = [];
+      try {
+        for (const book of unp.books) {
+          const r = ingestBookFile(book.tempPath, book.originalName);
+          results.push({ name: book.originalName, ...r });
+        }
+      } finally {
+        unp.cleanup();
+      }
+
+      const importedCount = results.filter(
+        (r: any) => r.success && !r.duplicate,
+      ).length;
+      return {
+        total: unp.books.length,
+        imported: importedCount,
+        quarantined: unp.quarantined || [],
+        results,
+      };
+    },
+  );
+
+  q.registerHandler(
+    "url_article_ingest",
+    async (payload: { url: string }) => {
+      const result = await ingestArticleFromUrl(payload.url);
+      if (!result.success) {
+        throw new Error(result.error || "Article ingestion failed");
+      }
+      getCalibreBooks(true);
+      return result;
+    },
+  );
+
+  q.registerHandler(
+    "cover_backfill",
+    async (payload: { candidateBookIds?: number[] }) => {
+      const books = getCalibreBooks(true);
+      const candidates = books.filter((b: any) => {
+        if (payload.candidateBookIds && !payload.candidateBookIds.includes(b.id))
+          return false;
+        const tags = Array.isArray(b.tags) ? b.tags : b.tags ? [b.tags] : [];
+        const isWeb = tags.some(
+          (t: string) => t === "Web Article" || t === "Read Later",
+        );
+        const hasCover = b.cover && b.cover !== 0 && b.cover !== false;
+        return isWeb && !hasCover;
+      });
+
+      const updated: Array<{ id: number; title: string }> = [];
+      for (const book of candidates) {
+        try {
+          const tags: string[] = Array.isArray(book.tags)
+            ? book.tags
+            : book.tags
+              ? [book.tags]
+              : [];
+          const siteTag = tags.find(
+            (t: string) => t !== "Web Article" && t !== "Read Later",
+          );
+          const siteName = siteTag || book.publisher || "Web Article";
+          const coverPath = generateTypographicCover(
+            book.title,
+            book.authors || "Unknown",
+            siteName,
+          );
+
+          const setRes = runCalibredb([
+            "set_metadata",
+            String(book.id),
+            "--with-library",
+            SERVER_URL,
+            "--field",
+            `cover:${coverPath}`,
+          ]);
+
+          if (fs.existsSync(coverPath)) {
+            try {
+              fs.unlinkSync(coverPath);
+            } catch (_unlinkErr) {
+              void _unlinkErr;
+            }
+          }
+
+          if (setRes.status === 0) {
+            updated.push({ id: book.id, title: book.title });
+            try {
+              getCacheDb().run("UPDATE file_hashes SET cover = 1 WHERE book_id = ?", [
+                book.id,
+              ]);
+            } catch (_dbErr) {
+              void _dbErr;
+            }
+          }
+        } catch (itemErr) {
+          console.error(`[CoverBackfill] Failed for book ${book.id}:`, itemErr);
+        }
+      }
+
+      getCalibreBooks(true);
+      return { updatedCount: updated.length, updated };
+    },
+  );
+}
+
+export function getJobQueueInstance(): DurableJobQueue {
+  if (!_serverJobQueue) {
+    _serverJobQueue = getJobQueue(getCacheDb());
+    registerJobHandlers(_serverJobQueue);
+  }
+  return _serverJobQueue;
+}
+
+// Lazy singleton jobQueue proxy
+// SAFETY: Proxy delegates JobQueue operations to dynamically initialized DurableJobQueue instance
+export const jobQueue = {
+  enqueue(...args: any[]) { return (getJobQueueInstance().enqueue as any)(...args); },
+  getJob(...args: any[]) { return (getJobQueueInstance().getJob as any)(...args); },
+  getRecentJobs(...args: any[]) { return (getJobQueueInstance().getRecentJobs as any)(...args); },
+  retryJob(...args: any[]) { return (getJobQueueInstance().retryJob as any)(...args); },
+  registerHandler(...args: any[]) { return (getJobQueueInstance().registerHandler as any)(...args); },
+  startWorker(...args: any[]) { return (getJobQueueInstance().startWorker as any)(...args); },
+  recoverInterruptedJobs(...args: any[]) { return (getJobQueueInstance().recoverInterruptedJobs as any)(...args); }
+} as unknown as DurableJobQueue;
 
 const KOREADER_HASH_ALGO = "md5";
 

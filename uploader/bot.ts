@@ -119,10 +119,18 @@ const POLL_REQUEST_TIMEOUT_MS = 35000;
 // Lazy singleton cacheDb proxy for backward-compatible call-sites
 // SAFETY: Proxy delegates Database methods to dynamically initialized Database instance
 export const cacheDb = {
-  run(...args: any[]) { return (getCacheDb().run as any)(...args); },
-  query(...args: any[]) { return (getCacheDb().query as any)(...args); },
-  prepare(...args: any[]) { return (getCacheDb().prepare as any)(...args); },
-  close() { if (_cacheDbInstance) _cacheDbInstance.close(); }
+  run(...args: any[]) {
+    return (getCacheDb().run as any)(...args);
+  },
+  query(...args: any[]) {
+    return (getCacheDb().query as any)(...args);
+  },
+  prepare(...args: any[]) {
+    return (getCacheDb().prepare as any)(...args);
+  },
+  close() {
+    if (_cacheDbInstance) _cacheDbInstance.close();
+  },
 } as unknown as Database;
 
 let TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
@@ -514,7 +522,7 @@ export function createHotDatabaseBackup(): DatabaseBackupResult | null {
   const targets = [
     { name: "KOSync", fileName: "koreader-sync.db", path: KOSYNC_DB_PATH },
     { name: "Calibre", fileName: "metadata.db", path: getCalibreDbPath() },
-    { name: "Uploader Cache", fileName: "cache.db", path: CACHE_DB_PATH },
+    { name: "Uploader Cache", fileName: "cache.db", path: getCacheDbPath() },
     { name: "Manga", fileName: "manga.db", path: MANGA_DB_PATH },
   ];
 
