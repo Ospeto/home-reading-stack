@@ -48,7 +48,7 @@ A self-hosted, private reading infrastructure designed for jailbroken and standa
 | **Local OPDS Feed** | `http://192.168.31.15:8088/opds` | Atom / XML | Direct book catalog for KOReader search & downloads |
 | **Local Calibre Reader** | `http://192.168.31.15:8088` | Web UI | In-browser reading & library management |
 | **Manga Auto-Packer** | `/Volumes/Ospeto_SSD/Manga` | Background Daemon | Auto-packs image folders into uncompressed `.cbz` with ComicInfo right-to-left metadata |
-| **Daily Snapshot Backup** | `/Volumes/Ospeto_SSD/backups` | 04:00 AM LaunchAgent | Online SQLite snapshots of KOSync, Calibre, and Uploader DBs with 7-day retention |
+| **Daily Snapshot Backup** | `/Users/ospeto/.backups/reading-stack` | 04:00 AM LaunchAgent | Online SQLite snapshots of KOSync, Calibre, Uploader, and Manga DBs with 7-day retention + Telegram delivery |
 | **Local Proxy Gateway**| `http://192.168.31.15:7890` | HTTP / SOCKS5 | sing-box background tunnel via Remnawave VLESS |
 | **Standby VPS KOSync** | `https://kosync-198-46-146-17.sslip.io` | HTTPS | Remote sync server (requires VPN / Proxy) |
 | **Standby VPS OPDS**   | `https://calibre-198-46-146-17.sslip.io` | HTTPS | Remote Calibre-Web (requires VPN / Proxy) |
@@ -94,3 +94,24 @@ A self-hosted, private reading infrastructure designed for jailbroken and standa
 2. Drag and drop `.epub`, `.pdf`, `.mobi`, `.azw3`, `.cbz`, or `.zip` / `.rar` archive packs (or click **"Choose Folder"** to upload an entire directory).
 3. Books and extracted archive contents are immediately imported into Calibre, de-duplicated, scraped for metadata, and broadcast on the OPDS feed.
 4. Or send/forward book files and `.zip` packs directly to the **Telegram Bot (`@saroat_ospeto_bot`)** from anywhere.
+
+---
+
+## 💾 Database Backups & Offsite Delivery
+
+The reading stack protects all critical reading databases (progress sync, library catalog metadata, ingestion hash cache, manga state) using hot SQLite online snapshots:
+
+1. **On-Demand Hot Backup (`/backup` in Telegram):**
+   - Send `/backup` to the Telegram bot (`@saroat_ospeto_bot`) at any time.
+   - The bot creates a live online snapshot (`sqlite3 .backup`) across:
+     - KOSync Database (`koreader-sync.db`)
+     - Calibre Library Metadata (`metadata.db`)
+     - Uploader Ingestion Cache (`cache.db`)
+     - Manga Processor DB (`manga.db`, if present)
+   - Compresses all snapshots into a timestamped `.tar.gz` archive (~85 KB) and delivers it directly to your Telegram chat.
+   - Automatically registers your chat ID as `TELEGRAM_BACKUP_CHAT_ID` in `/Users/ospeto/uploader/.env` for scheduled backups.
+
+2. **Daily Scheduled Offsite Backup Delivery:**
+   - Managed via LaunchAgent `com.ospeto.reading-stack-backup` running `scripts/backup-daily.sh` every morning at 04:00 AM.
+   - Backs up databases, saves local copies to `~/.backups/reading-stack/` (7-day rolling retention), and mirrors to external SSD if mounted.
+   - When `TELEGRAM_BACKUP_CHAT_ID` and `TELEGRAM_BOT_TOKEN` are configured in `.env`, automatically pushes the fresh `.tar.gz` archive directly to your Telegram chat through the local proxy.

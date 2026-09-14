@@ -6,8 +6,6 @@ import { Database } from "bun:sqlite";
 import {
   searchUniversalMetadata,
   applyMetadataToCalibre,
-  cleanString,
-  cleanQuery,
   sanitizeMetadata,
   extractSeries,
   isSameBook,
@@ -18,8 +16,11 @@ import { extractUrlFromText, ingestArticleFromUrl } from "./article";
 
 const DROP_DIR = "/Users/ospeto/Books_Drop";
 const SERVER_URL = "http://127.0.0.1:8088";
-const ENV_PATH = "/Users/ospeto/uploader/.env";
+const ENV_PATH = process.env.ENV_PATH || "/Users/ospeto/uploader/.env";
 const CACHE_DB_PATH = "/Users/ospeto/uploader/cache.db";
+const KOSYNC_DB_PATH = process.env.KOSYNC_DB_PATH || "/Users/ospeto/kosync-server/data/koreader-sync.db";
+const CALIBRE_DB_PATH = process.env.CALIBRE_DB_PATH || "/Users/ospeto/Calibre Libraries/Agent Library/metadata.db";
+const MANGA_DB_PATH = process.env.MANGA_DB_PATH || "/Users/ospeto/manga-processor/manga.db";
 const PROXY_URL = "http://127.0.0.1:7890";
 const WEB_UPLOADER_URL = "http://192.168.31.15:8086";
 const CALIBRE_WEB_URL = "http://192.168.31.15:8088";
@@ -93,6 +94,7 @@ function getKOReaderBinary256(filePath: string): string | null {
     fs.closeSync(fd);
     return hasher.digest("hex");
   } catch (_err) {
+    void _err;
     return null;
   }
 }
@@ -202,14 +204,29 @@ async function sendDocument(
   chatId: number,
   filePath: string,
   caption: string = "",
-  parseMode: string = ""
+  parseMode: string = "",
+  mimeType: string = ""
 ): Promise<boolean> {
   try {
     const formData = new FormData();
     formData.append("chat_id", String(chatId));
     const fileBytes = fs.readFileSync(filePath);
     const fileName = path.basename(filePath);
-    const blob = new Blob([fileBytes], { type: "application/epub+zip" });
+    let type = mimeType;
+    if (!type) {
+      if (fileName.endsWith(".tar.gz") || fileName.endsWith(".tgz")) {
+        type = "application/gzip";
+      } else if (fileName.endsWith(".epub")) {
+        type = "application/epub+zip";
+      } else if (fileName.endsWith(".pdf")) {
+        type = "application/pdf";
+      } else if (fileName.endsWith(".cbz")) {
+        type = "application/vnd.comicbook+zip";
+      } else {
+        type = "application/octet-stream";
+      }
+    }
+    const blob = new Blob([fileBytes], { type });
     formData.append("document", blob, fileName);
     if (caption) {
       formData.append("caption", caption);
@@ -235,6 +252,134 @@ async function sendDocument(
   } catch (err: any) {
     logError(`sendDocument exception for chat ${chatId}: ${err.message}`);
     return false;
+  }
+}
+
+export interface DatabaseBackupResult {
+  stagingDir: string;
+  archivePath: string;
+  fileName: string;
+  sizeKb: number;
+  timestamp: string;
+  displayTimestamp: string;
+  backedUpDbs: string[];
+}
+
+export function saveBackupChatId(chatId: number): void {
+  try {
+    const envPath = process.env.ENV_PATH || ENV_PATH;
+    let content = "";
+    if (fs.existsSync(envPath)) {
+      content = fs.readFileSync(envPath, "utf8");
+    }
+    const lines = content.split("\n");
+    let found = false;
+    const newLines = lines.map((line) => {
+      if (line.trim().startsWith("TELEGRAM_BACKUP_CHAT_ID=")) {
+        found = true;
+        return `TELEGRAM_BACKUP_CHAT_ID=${chatId}`;
+      }
+      return line;
+    });
+    if (!found) {
+      if (content.length > 0 && !content.endsWith("\n")) {
+        newLines.push("");
+      }
+      newLines.push(`TELEGRAM_BACKUP_CHAT_ID=${chatId}`);
+    }
+    fs.writeFileSync(envPath, newLines.join("\n"));
+    log(`Saved TELEGRAM_BACKUP_CHAT_ID=${chatId} to ${envPath}`);
+  } catch (err: any) {
+    logError(`Failed to save TELEGRAM_BACKUP_CHAT_ID to ${ENV_PATH}: ${err?.message || err}`);
+  }
+}
+
+export function createHotDatabaseBackup(): DatabaseBackupResult | null {
+  const targets = [
+    { name: "KOSync", fileName: "koreader-sync.db", path: KOSYNC_DB_PATH },
+    { name: "Calibre", fileName: "metadata.db", path: CALIBRE_DB_PATH },
+    { name: "Uploader Cache", fileName: "cache.db", path: CACHE_DB_PATH },
+    { name: "Manga", fileName: "manga.db", path: MANGA_DB_PATH }
+  ];
+
+  const stagingDir = fs.mkdtempSync(path.join("/tmp", "reading-stack-backup-"));
+  const backedUpFiles: string[] = [];
+  const backedUpDbs: string[] = [];
+
+  const env: any = {
+    ...process.env,
+    PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (process.env.PATH || "")
+  };
+
+  try {
+    for (const target of targets) {
+      if (!fs.existsSync(target.path)) {
+        log(`Database not found at ${target.path}, skipping.`);
+        continue;
+      }
+
+      const destPath = path.join(stagingDir, target.fileName);
+      log(`Backing up ${target.name} (${target.path}) -> ${destPath}...`);
+      const backupRes = spawnSync("sqlite3", [target.path, `.backup '${destPath}'`], {
+        encoding: "utf8",
+        env
+      });
+
+      if (backupRes.status === 0 && fs.existsSync(destPath)) {
+        backedUpFiles.push(target.fileName);
+        backedUpDbs.push(target.name);
+        log(`Successfully backed up ${target.name} (${(fs.statSync(destPath).size / 1024).toFixed(1)} KB)`);
+      } else {
+        logError(`Failed to back up ${target.name}: ${backupRes.stderr || "sqlite3 exited with code " + backupRes.status}`);
+      }
+    }
+
+    if (backedUpFiles.length === 0) {
+      logError("No databases were successfully backed up.");
+      fs.rmSync(stagingDir, { recursive: true, force: true });
+      return null;
+    }
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const fileTimestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const displayTimestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    const fileName = `reading-stack-backup-${fileTimestamp}.tar.gz`;
+    const archivePath = path.join("/tmp", fileName);
+
+    log(`Archiving ${backedUpFiles.length} database(s) into ${archivePath}...`);
+    const tarRes = spawnSync("tar", ["-czf", archivePath, "-C", stagingDir, ...backedUpFiles], {
+      encoding: "utf8",
+      env
+    });
+
+    if (tarRes.status !== 0 || !fs.existsSync(archivePath)) {
+      logError(`Failed to create tar archive: ${tarRes.stderr || "tar exited with code " + tarRes.status}`);
+      fs.rmSync(stagingDir, { recursive: true, force: true });
+      return null;
+    }
+
+    const sizeBytes = fs.statSync(archivePath).size;
+    const sizeKb = Math.round(sizeBytes / 1024);
+
+    return {
+      stagingDir,
+      archivePath,
+      fileName,
+      sizeKb,
+      timestamp: fileTimestamp,
+      displayTimestamp,
+      backedUpDbs
+    };
+  } catch (err: any) {
+    logError(`Exception during database backup: ${err?.message || err}`);
+    try {
+      fs.rmSync(stagingDir, { recursive: true, force: true });
+    } catch (_cleanupErr) {
+      void _cleanupErr;
+    }
+    return null;
   }
 }
 
@@ -379,7 +524,6 @@ function ingestBookFile(filePath: string, originalFileName: string): IngestResul
         let rawAuthors = "";
         let rawTags: string[] = [];
         let rawSeries = "";
-        let _rawSeriesIndex = 0;
 
         if (listOne.status === 0 && listOne.stdout) {
           const parsed = safeParseJson(listOne.stdout);
@@ -388,7 +532,6 @@ function ingestBookFile(filePath: string, originalFileName: string): IngestResul
             rawAuthors = parsed[0].authors || "";
             rawTags = parsed[0].tags || [];
             rawSeries = parsed[0].series || "";
-            _rawSeriesIndex = parsed[0].series_index || 0;
           }
         }
 
@@ -770,6 +913,74 @@ async function pollTelegram() {
             const text = msg.text.trim();
             log(`Received text: "${text}" from ${sender}`);
 
+            if (text === "/backup" || text.startsWith("/backup@") || text.startsWith("/backup ")) {
+              log(`Handling /backup command from ${sender} (chatId: ${chatId})`);
+              const statusMsgId = await sendMessage(
+                chatId,
+                `⏳ *Creating hot SQLite backup of reading stack databases...*`,
+                "Markdown"
+              );
+
+              saveBackupChatId(chatId);
+
+              const backupResult = createHotDatabaseBackup();
+              if (backupResult) {
+                try {
+                  const dbList = backupResult.backedUpDbs.join(", ");
+                  const caption =
+                    `\uD83D\uDCE6 *Reading Stack Database Backup*\n` +
+                    `\uD83D\uDCC5 *Date:* ${backupResult.displayTimestamp}\n` +
+                    `\uD83D\uDCCA *Size:* ${backupResult.sizeKb} KB\n` +
+                    `\uD83D\uDDD4\uFE0F *Databases:* ${dbList}\n` +
+                    `✨ _Secure offline snapshot stored in your Telegram history._`;
+
+                  const sent = await sendDocument(
+                    chatId,
+                    backupResult.archivePath,
+                    caption,
+                    "Markdown"
+                  );
+
+                  if (sent) {
+                    if (statusMsgId) {
+                      await editOrSendMessage(
+                        chatId,
+                        statusMsgId,
+                        `✅ *Hot SQLite backup created successfully.* Delivered below.`,
+                        "Markdown"
+                      );
+                    }
+                  } else {
+                    await editOrSendMessage(
+                      chatId,
+                      statusMsgId,
+                      `⚠️ *Backup Delivery Failed*\n\nUnable to deliver backup archive to Telegram. Check bot logs for details.`,
+                      "Markdown"
+                    );
+                  }
+                } finally {
+                  try {
+                    fs.rmSync(backupResult.stagingDir, { recursive: true, force: true });
+                  } catch (_cleanupErr) {
+                    void _cleanupErr;
+                  }
+                  try {
+                    fs.unlinkSync(backupResult.archivePath);
+                  } catch (_unlinkErr) {
+                    void _unlinkErr;
+                  }
+                }
+              } else {
+                await editOrSendMessage(
+                  chatId,
+                  statusMsgId,
+                  `⚠️ *Database Backup Failed*\n\nCould not snapshot reading stack databases. Please check system logs.`,
+                  "Markdown"
+                );
+              }
+              continue;
+            }
+
             const articleUrl = extractUrlFromText(text);
 
             if (articleUrl) {
@@ -842,12 +1053,13 @@ async function pollTelegram() {
                 `• *Duplicate Protection:* Instant binary hash + volume-aware deduplication.\n` +
                 `• *Formats:* \`.epub\`, \`.pdf\`, \`.mobi\`, \`.azw3\`, \`.cbz\`, \`.cbr\`\n` +
                 `• *File Limit:* Up to *20 MB* per file (Telegram API limit)\n` +
-                `• *Large Files (>20MB):* Upload via [Web Uploader](${WEB_UPLOADER_URL})\n\n` +
+                `• *Large Files (>20MB):* Upload via [Web Uploader](${WEB_UPLOADER_URL})\n` +
+                `• \`/backup\`: Instant hot snapshot of all reading databases sent directly to this chat.\n\n` +
                 `_Books and articles are automatically de-duplicated, sanitized, and available on your Kindle._`,
                 "Markdown"
               );
             } else {
-              await sendMessage(chatId, `\uD83D\uDC4B Please send eBook files (\`.epub\`, \`.pdf\`, \`.mobi\`, \`.cbz\`) or paste an article URL to add them to your library. For files over 20MB, use the [Web Uploader](${WEB_UPLOADER_URL}).`, "Markdown");
+              await sendMessage(chatId, `\uD83D\uDC4B Please send eBook files (\`.epub\`, \`.pdf\`, \`.mobi\`, \`.cbz\`), paste an article URL, or send \`/backup\` for an instant database snapshot. For files over 20MB, use the [Web Uploader](${WEB_UPLOADER_URL}).`, "Markdown");
             }
           }
         }
@@ -862,4 +1074,6 @@ async function pollTelegram() {
   }
 }
 
-pollTelegram();
+if ((import.meta as any).main) {
+  pollTelegram();
+}
