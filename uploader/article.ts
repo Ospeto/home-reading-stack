@@ -3,7 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import process from "node:process";
+import { Buffer } from "node:buffer";
 import { cleanString, isAllowedCoverUrl } from "./scraper";
+import { validateUrlForSSRF } from "./security";
 
 const DROP_DIR = "/Users/ospeto/Books_Drop";
 const SERVER_URL = "http://127.0.0.1:8088";
@@ -1528,6 +1530,21 @@ export function convertHtmlToEpub(
  * 4. Ingest into Calibre database with proper metadata and tags
  */
 export async function ingestArticleFromUrl(targetUrl: string): Promise<IngestArticleResult> {
+  // SSRF guard
+  const ssrfCheck = await validateUrlForSSRF(targetUrl, { allowProxyBypass: true });
+  if (!ssrfCheck.safe) {
+    return {
+      success: false,
+      title: "Rejected URL",
+      authors: "Unknown",
+      siteName: "Security Guard",
+      wordCount: 0,
+      readTimeMinutes: 0,
+      format: "EPUB",
+      error: ssrfCheck.error || "Target URL rejected by SSRF guard"
+    };
+  }
+
   // 1. Extraction
   const article = await extractArticle(targetUrl);
 

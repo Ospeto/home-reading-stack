@@ -399,6 +399,99 @@ ssh panel "systemctl reload caddy || docker exec caddy caddy reload --config /et
 
 ---
 
+### 11. Public WAN Security & Job Queue Operational Verification
+
+#### 1. Public WAN Security & Authentication
+
+Verify that the WAN surface (`https://reading.wavypremium.xyz`) is locked down while LAN access remains friction-free:
+
+```bash
+# 1. Verify friction-free LAN access (mutations allowed without auth on local network)
+curl -i -X POST http://192.168.31.15:8086/api/library/facets
+
+# 2. Verify WAN mutating route blocks unauthenticated requests (HTTP 401)
+curl -i -X POST https://reading.wavypremium.xyz/api/books/bulk-delete \
+  -H "Content-Type: application/json" \
+  -d '{"bookIds": [9999]}'
+# Expected: HTTP 401 Unauthorized {"success":false,"error":"Authentication required for public WAN access"}
+
+# 3. Verify WAN mutating route succeeds with valid Bearer token
+curl -i -X POST https://reading.wavypremium.xyz/api/library/clean-metadata \
+  -H "Authorization: Bearer <YOUR_READING_API_KEY>"
+# Expected: HTTP 200 OK
+
+# 4. Verify CSRF guard blocks mutating requests with untrusted Origin
+curl -i -X POST http://192.168.31.15:8086/api/books/1 \
+  -H "Origin: https://malicious-site.com"
+# Expected: HTTP 403 Forbidden {"success":false,"error":"Disallowed Origin: https://malicious-site.com"}
+
+# 5. Verify SSRF protection on URL ingestion
+curl -i -X POST http://192.168.31.15:8086/api/ingest-url \
+  -H "Content-Type: application/json" \
+  -d '{"url": "http://169.254.169.254/latest/meta-data/"}'
+# Expected: HTTP 400 Bad Request {"success":false,"error":"SSRF protection: ..."}
+```
+
+#### 2. Durable Ingestion Job Queue Monitoring & Recovery
+
+Inspect and manage durable background jobs:
+
+```bash
+# 1. Query recent jobs via API
+curl -s http://192.168.31.15:8086/api/jobs/recent | jq .
+
+# 2. Inspect a specific job by ID
+curl -s http://192.168.31.15:8086/api/jobs/<job_id> | jq .
+
+# 3. Retry a failed job manually
+curl -i -X POST http://192.168.31.15:8086/api/jobs/<job_id>/retry
+
+# 4. Direct SQLite inspection of the jobs table
+sqlite3 /Users/ospeto/uploader/cache.db "SELECT id, type, status, retries, created_at, error FROM jobs ORDER BY created_at DESC LIMIT 10;"
+
+# 5. Job queue process recovery
+# If the book-uploader service is restarted while jobs are processing,
+# the service automatically recovers any interrupted jobs back to 'pending' on startup.
+```
+
+---
+
+### 12. Canonical EPUB-Only Library Migration Preflight
+
+*Note: Per architecture decision, live Calibre library migration is a separately supervised operation executed after backups are verified. Do not physically rename or move files inside Calibre library directories by hand.*
+
+#### Preflight Audit & Inspection Commands:
+
+```bash
+# 1. Run full database backup first
+/Users/ospeto/uploader/scripts/backup-daily.sh
+
+# 2. Audit current format distribution in Calibre library
+calibredb list --with-library http://127.0.0.1:8088 --fields id,title,authors,formats --for-machine | jq '
+  map(.formats[]) | group_by(.) | map({format: .[0], count: length}) | sort_by(-.count)
+'
+
+# 3. Identify non-EPUB records that lack an EPUB companion (candidates for conversion/quarantine)
+calibredb list --with-library http://127.0.0.1:8088 --fields id,title,authors,formats --for-machine | jq '
+  map(select(.formats | map(endswith(".epub")) | any | not)) | {
+    totalNonEpubOnly: length,
+    sample: .[0:5]
+  }
+'
+
+# 4. Migration Execution Plan (Supervised Step Post-Merge):
+#    a. Convert non-EPUB books to EPUB using Calibre CLI:
+#       calibredb export <id> --with-library http://127.0.0.1:8088 --to-dir /tmp/migration
+#       ebook-convert /tmp/migration/<name>.pdf /tmp/migration/<name>.epub
+#       calibredb add_format <id> /tmp/migration/<name>.epub --with-library http://127.0.0.1:8088
+#    b. Quarantine unsupported legacy formats:
+#       calibredb remove_format <id> PDF --with-library http://127.0.0.1:8088
+#    c. Verify Calibre database integrity:
+#       calibredb check_library --with-library http://127.0.0.1:8088
+```
+
+---
+
 ## 🌐 Remote VPS Standby Stack (`us3` / `198.46.146.17`)
 
 If ever needing to manage or update the cloud backup stack:
