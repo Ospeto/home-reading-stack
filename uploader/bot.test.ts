@@ -36,4 +36,39 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain("Telegram.WebApp.ready");
     expect(html).toContain("Telegram.WebApp.expand");
   });
+
+  it("index.html eliminates runtime Tailwind CDN and external FontAwesome in favor of static CSS & SVG sprite", () => {
+    const htmlPath = path.join(import.meta.dir, "index.html");
+    const html = fs.readFileSync(htmlPath, "utf8");
+
+    // Runtime Tailwind CDN script removed
+    expect(html).not.toContain("cdn.tailwindcss.com");
+    // External FontAwesome stylesheet removed
+    expect(html).not.toContain("cdnjs.cloudflare.com/ajax/libs/font-awesome");
+    // Self-contained SVG sprite defined
+    expect(html).toContain("<symbol id=\"icon-book\"");
+    expect(html).toContain("<symbol id=\"icon-filter\"");
+    expect(html).toContain("<symbol id=\"icon-telegram\"");
+  });
+
+  it("index.html implements Telegram native UX (viewport, themeParams, HapticFeedback, BackButton)", () => {
+    const htmlPath = path.join(import.meta.dir, "index.html");
+    const html = fs.readFileSync(htmlPath, "utf8");
+
+    expect(html).toContain("--tg-viewport-height");
+    expect(html).toContain("themeParams");
+    expect(html).toContain("HapticFeedback");
+    expect(html).toContain("BackButton");
+  });
+
+  it("index.html implements progressive rendering and client caching for mobile performance", () => {
+    const htmlPath = path.join(import.meta.dir, "index.html");
+    const html = fs.readFileSync(htmlPath, "utf8");
+
+    expect(html).toContain("sessionStorage");
+    expect(html).toContain("IntersectionObserver");
+    expect(html).toContain("PAGE_SIZE");
+    expect(html).toContain("decoding=\"async\"");
+    expect(html).toContain("loading=\"lazy\"");
+  });
 });
