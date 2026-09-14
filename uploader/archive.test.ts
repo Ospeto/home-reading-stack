@@ -77,7 +77,16 @@ describe("EPUB-Only Archive & Format Quarantine", () => {
       fs.mkdirSync(metaDir, { recursive: true });
       fs.writeFileSync(path.join(minDir, "mimetype"), "application/epub+zip");
       fs.writeFileSync(path.join(metaDir, "container.xml"), "<container/>");
-      spawnSync("/usr/bin/bsdtar", ["--format", "zip", "-cf", epubFile, "-C", minDir, "mimetype", "META-INF"]);
+      spawnSync("/usr/bin/bsdtar", [
+        "--format",
+        "zip",
+        "-cf",
+        epubFile,
+        "-C",
+        minDir,
+        "mimetype",
+        "META-INF",
+      ]);
       fs.rmSync(minDir, { recursive: true, force: true });
 
       fs.writeFileSync(pdfFile, "mock pdf content");
@@ -110,7 +119,10 @@ describe("EPUB-Only Archive & Format Quarantine", () => {
     });
 
     it("quarantines corrupted .epub files inside archives that fail physical container validation", () => {
-      const corruptDir = path.join("/tmp", `test_corrupt_archive_${Date.now()}`);
+      const corruptDir = path.join(
+        "/tmp",
+        `test_corrupt_archive_${Date.now()}`,
+      );
       fs.mkdirSync(corruptDir, { recursive: true });
 
       const fakeEpub = path.join(corruptDir, "fake_corrupt.epub");
@@ -125,11 +137,14 @@ describe("EPUB-Only Archive & Format Quarantine", () => {
         expect(res.books.length).toBe(0);
         expect(res.quarantined.length).toBe(1);
         expect(res.quarantined[0].name).toBe("fake_corrupt.epub");
-        expect(res.quarantined[0].reason).toContain("Invalid or corrupted EPUB container");
+        expect(res.quarantined[0].reason).toContain(
+          "Invalid or corrupted EPUB container",
+        );
       } finally {
         res.cleanup();
         if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
-        if (fs.existsSync(corruptDir)) fs.rmSync(corruptDir, { recursive: true, force: true });
+        if (fs.existsSync(corruptDir))
+          fs.rmSync(corruptDir, { recursive: true, force: true });
       }
     });
 

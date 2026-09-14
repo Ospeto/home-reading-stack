@@ -39,7 +39,10 @@ describe("Migration Preflight & Inventory Engine", () => {
       fs.mkdirSync(path.join(srcLibDir, "Frost"), { recursive: true });
       fs.writeFileSync(path.join(srcLibDir, "Frost", "Book1.epub"), "content");
       fs.mkdirSync(path.join(srcLibDir, "Dickinson"), { recursive: true });
-      fs.writeFileSync(path.join(srcLibDir, "Dickinson", "Book2.epub"), "content");
+      fs.writeFileSync(
+        path.join(srcLibDir, "Dickinson", "Book2.epub"),
+        "content",
+      );
 
       const srcDbPath = path.join(srcLibDir, "metadata.db");
       const tgtDbPath = path.join(tgtLibDir, "metadata.db");

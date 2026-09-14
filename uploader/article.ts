@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import process from "node:process";
 import { Buffer } from "node:buffer";
 import { cleanString, isAllowedCoverUrl } from "./scraper";
-import { validateUrlForSSRF } from "./security";
+import { validateUrlForSSRF, safeFetchWithSsrf } from "./security";
 
 export function getDropDir(): string {
   const dir = process.env.BOOKS_DROP_DIR || "/Users/ospeto/Books_Drop";
@@ -28,7 +28,12 @@ const PROXY_URL = "http://127.0.0.1:7890";
 export function getEbookConvertPath(): string {
   return process.env.EBOOK_CONVERT_PATH || "/opt/homebrew/bin/ebook-convert";
 }
-const CALIBREDB_PATH = "/opt/homebrew/bin/calibredb";
+export function getCalibredbPath(): string {
+  return process.env.CALIBREDB_PATH || "/opt/homebrew/bin/calibredb";
+}
+export function getSipsPath(): string {
+  return process.env.SIPS_PATH || "/usr/bin/sips";
+}
 const FETCH_TIMEOUT_MS = 15000;
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
@@ -1034,7 +1039,7 @@ export async function downloadCoverImage(
   const tempJpg = `/tmp/article_cover_${randomSuffix}.jpg`;
 
   try {
-    const res = await fetch(resolvedUrl, {
+    const res = await safeFetchWithSsrf(resolvedUrl, {
       headers: {
         "User-Agent": BROWSER_USER_AGENT,
         Accept:
@@ -1060,21 +1065,24 @@ export async function downloadCoverImage(
 
     fs.writeFileSync(tempRaw, buf);
 
-    const sipsRes = spawnSync(
-      "/usr/bin/sips",
-      ["-s", "format", "jpeg", tempRaw, "--out", tempJpg],
-      {
-        encoding: "utf8",
-        timeout: 15000,
-      },
-    );
+    const sipsBin = getSipsPath();
+    if (fs.existsSync(sipsBin)) {
+      const sipsRes = spawnSync(
+        sipsBin,
+        ["-s", "format", "jpeg", tempRaw, "--out", tempJpg],
+        {
+          encoding: "utf8",
+          timeout: 15000,
+        },
+      );
 
-    if (
-      sipsRes.status === 0 &&
-      fs.existsSync(tempJpg) &&
-      fs.statSync(tempJpg).size > 1024
-    ) {
-      return tempJpg;
+      if (
+        sipsRes.status === 0 &&
+        fs.existsSync(tempJpg) &&
+        fs.statSync(tempJpg).size > 1024
+      ) {
+        return tempJpg;
+      }
     }
     return null;
   } catch (_err) {
@@ -1104,7 +1112,7 @@ export async function extractArticleViaJina(
 
   let res: Response;
   try {
-    res = await fetch(jinaUrl, {
+    res = await safeFetchWithSsrf(jinaUrl, {
       headers: {
         "X-Return-Format": "markdown",
         Accept: "text/markdown, text/plain, */*",
@@ -1244,10 +1252,10 @@ export async function extractArticleViaJina(
 }
 
 /**
- * Execute HTTP request to fetch article web page with proxy routing.
+ * Execute HTTP request to fetch article web page with proxy routing and SSRF validation.
  */
 async function fetchArticlePage(validatedUrl: string): Promise<Response> {
-  return await fetch(validatedUrl, {
+  return await safeFetchWithSsrf(validatedUrl, {
     headers: {
       "User-Agent":
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
@@ -1262,7 +1270,6 @@ async function fetchArticlePage(validatedUrl: string): Promise<Response> {
     },
     proxy: PROXY_URL,
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    redirect: "follow",
   } as any);
 }
 
@@ -1742,7 +1749,7 @@ function runCalibredb(args: string[]) {
   env.PATH =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
 
-  return spawnSync(CALIBREDB_PATH, args, {
+  return spawnSync(getCalibredbPath(), args, {
     encoding: "utf8",
     env,
     timeout: 30000,

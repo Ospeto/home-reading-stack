@@ -21,6 +21,7 @@ import {
   validateIntegerId,
   validateBookFormat,
   isCanonicalEpub,
+  validateEpubContent,
   getDownloadFilename,
   sanitizeErrorMessage,
   cleanString,
@@ -498,6 +499,13 @@ function safeParseJson(str: string): any {
   }
 }
 
+export function getCalibredbPath(): string {
+  return process.env.CALIBREDB_PATH || "/opt/homebrew/bin/calibredb";
+}
+export function getSipsPath(): string {
+  return process.env.SIPS_PATH || "/usr/bin/sips";
+}
+
 let calibreBooksCache: { books: any[]; timestamp: number } = {
   books: [],
   timestamp: 0,
@@ -514,7 +522,7 @@ function runCalibredb(args: string[]) {
   env.PATH =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
 
-  return spawnSync("/opt/homebrew/bin/calibredb", args, {
+  return spawnSync(getCalibredbPath(), args, {
     encoding: "utf8",
     env,
     timeout: 30000,
@@ -676,12 +684,23 @@ export function ingestBookFile(filePath: string, originalFileName: string) {
   const format = ext.replace(/^\./, "").toUpperCase();
 
   // Enforce EPUB-only canonical format
-  if (format !== "EPUB") {
+  if (format !== "EPUB" || !isCanonicalEpub(originalFileName)) {
     return {
       success: false,
       rejected: true,
       format,
       error: `Rejected non-canonical format "${ext}". Only EPUB format is accepted for the canonical collection.`,
+    };
+  }
+
+  // Enforce physical EPUB container validation before reaching calibredb
+  const contentValidation = validateEpubContent(filePath);
+  if (!contentValidation.valid) {
+    return {
+      success: false,
+      rejected: true,
+      format,
+      error: `Invalid EPUB container "${originalFileName}": ${contentValidation.error}`,
     };
   }
   const books = getCalibreBooks(true);
@@ -1082,7 +1101,7 @@ function jsonResponse(data: any, status = 200, origin?: string) {
  * Primary HTTP Request Handler with Hardened WAN Security, CORS, CSRF,
  * and Durable Job Queue Lifecycle.
  */
-export async function handleRequest(req: Request): Promise<Response> {
+export async function handleRequest(req: Request, server?: any): Promise<Response> {
   const origin = req.headers.get("origin") || "";
   const originAllowed = isAllowedOrigin(origin);
   const corsOrigin = originAllowed ? origin : undefined;
@@ -1130,8 +1149,11 @@ export async function handleRequest(req: Request): Promise<Response> {
     }
   }
 
-  // 2. WAN Authentication Gate on mutating routes (exempts local LAN)
-  const isWan = isWanRequest(req);
+  // 2. WAN Authentication Gate on mutating routes (strictly based on socket address)
+  const isWan = isWanRequest(req, {
+    server,
+    remoteAddress: server?.requestIP?.(req)?.address,
+  });
   if (isMutating && isWan) {
     const auth = authenticateRequest(req);
     if (!auth.authenticated) {
@@ -1225,24 +1247,66 @@ export async function handleRequest(req: Request): Promise<Response> {
     );
   }
 
-  // API: Durable Job Queue Inspection
+  // API: Durable Job Queue Inspection (Protected on public WAN)
   if (url.pathname === "/api/jobs/recent" && req.method === "GET") {
+    if (isWan) {
+      const auth = authenticateRequest(req);
+      if (!auth.authenticated) {
+        return jsonResponse(
+          {
+            success: false,
+            error: auth.error || "Authentication required for public WAN job inspection",
+          },
+          401,
+          corsOrigin,
+        );
+      }
+    }
+
     const limitParam = parseInt(url.searchParams.get("limit") || "50", 10);
     const statusParam = url.searchParams.get("status") as any;
     const typeParam = url.searchParams.get("type") as any;
-    const jobs = jobQueue.getRecentJobs({
+    const rawJobs = jobQueue.getRecentJobs({
       limit: isNaN(limitParam) ? 50 : limitParam,
       status: statusParam || undefined,
       type: typeParam || undefined,
     });
+    const sanitizedJobs = rawJobs.map((j: any) => {
+      const c = { ...j };
+      if (c.payload) {
+        const p = { ...c.payload };
+        if (p.filePath) p.filePath = path.basename(p.filePath);
+        if (p.archivePath) p.archivePath = path.basename(p.archivePath);
+        if (p.token) p.token = "[REDACTED]";
+        if (p.secret) p.secret = "[REDACTED]";
+        c.payload = p;
+      }
+      if (c.error) c.error = sanitizeErrorMessage(c.error);
+      return c;
+    });
+
     return jsonResponse(
-      { success: true, count: jobs.length, jobs },
+      { success: true, count: sanitizedJobs.length, jobs: sanitizedJobs },
       200,
       corsOrigin,
     );
   }
 
   if (url.pathname.startsWith("/api/jobs/") && req.method === "GET") {
+    if (isWan) {
+      const auth = authenticateRequest(req);
+      if (!auth.authenticated) {
+        return jsonResponse(
+          {
+            success: false,
+            error: auth.error || "Authentication required for public WAN job inspection",
+          },
+          401,
+          corsOrigin,
+        );
+      }
+    }
+
     const jobId = url.pathname.split("/")[3];
     if (!jobId)
       return jsonResponse(
@@ -1257,7 +1321,19 @@ export async function handleRequest(req: Request): Promise<Response> {
         404,
         corsOrigin,
       );
-    return jsonResponse({ success: true, job }, 200, corsOrigin);
+
+    const c = { ...job };
+    if (c.payload) {
+      const p = { ...c.payload };
+      if (p.filePath) p.filePath = path.basename(p.filePath);
+      if (p.archivePath) p.archivePath = path.basename(p.archivePath);
+      if (p.token) p.token = "[REDACTED]";
+      if (p.secret) p.secret = "[REDACTED]";
+      c.payload = p;
+    }
+    if (c.error) c.error = sanitizeErrorMessage(c.error);
+
+    return jsonResponse({ success: true, job: c }, 200, corsOrigin);
   }
 
   if (
@@ -1337,14 +1413,17 @@ export async function handleRequest(req: Request): Promise<Response> {
       fs.writeFileSync(tempMaster, masterBuffer);
 
       try {
-        const sipsRes = spawnSync(
-          "/usr/bin/sips",
-          ["-Z", String(targetWidth), tempMaster, "--out", cacheFilePath],
-          {
-            encoding: "utf8",
-            timeout: 15000,
-          },
-        );
+        const sipsBin = getSipsPath();
+        const sipsRes = fs.existsSync(sipsBin)
+          ? spawnSync(
+              sipsBin,
+              ["-Z", String(targetWidth), tempMaster, "--out", cacheFilePath],
+              {
+                encoding: "utf8",
+                timeout: 15000,
+              },
+            )
+          : { status: -1 };
 
         if (sipsRes.status === 0 && fs.existsSync(cacheFilePath)) {
           const thumbBuffer = fs.readFileSync(cacheFilePath);
@@ -2243,7 +2322,9 @@ if ((import.meta as any).main) {
   Bun.serve({
     port: 8086,
     hostname: "0.0.0.0",
-    fetch: handleRequest,
+    fetch(req, server) {
+      return handleRequest(req, server);
+    },
   });
   console.log(
     "[Server] Reading HQ Web Uploader listening on http://0.0.0.0:8086",

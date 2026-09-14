@@ -271,14 +271,22 @@ export function isLanHost(host: string): boolean {
   return false;
 }
 
+export interface IsWanRequestOptions {
+  wanDomain?: string;
+  clientIp?: string;
+  remoteAddress?: string;
+  server?: { requestIP?: (req: Request) => { address: string } | null };
+}
+
 /**
- * Determines whether a request originated from the public WAN (via reverse tunnel / Caddy)
- * vs a local LAN client (direct connection to 192.168.x.x, 127.0.0.1, etc.).
- * Fails closed: unrecognized requests on a 0.0.0.0 listener are classified as WAN.
+ * Determines whether a request originated from the public WAN vs local LAN.
+ * Strictly verifies the actual remote socket address.
+ * Proxy headers (X-Forwarded-*) are ONLY trusted if the connecting socket is 127.0.0.1 / ::1 (the local reverse tunnel).
+ * Direct connections from outside 127.0.0.1 cannot spoof LAN status via Host or X-Forwarded headers.
  */
 export function isWanRequest(
   req: Request,
-  options: { wanDomain?: string; clientIp?: string } = {},
+  options: IsWanRequestOptions = {},
 ): boolean {
   const wanDomain = (
     options.wanDomain ||
@@ -294,49 +302,81 @@ export function isWanRequest(
     .split("/")[0]
     .toLowerCase();
 
-  const hostHeader = (
-    req.headers.get("x-forwarded-host") ||
-    req.headers.get("host") ||
-    ""
-  )
-    .toLowerCase()
-    .split(":")[0];
-
-  // 1. Host or X-Forwarded-Host matches WAN domain
-  if (hostHeader === wanDomain || hostHeader === kosyncWanDomain) {
-    return true;
+  // Extract socket address from server or options
+  let socketIp = options.remoteAddress || options.clientIp || "";
+  if (!socketIp && options.server?.requestIP) {
+    const sock = options.server.requestIP(req);
+    if (sock?.address) socketIp = sock.address;
   }
+  const cleanSocketIp = socketIp.trim().replace(/^::ffff:/, "");
 
-  // 2. Check X-Forwarded-For: if it contains any public (non-internal) IP, it arrived via WAN
-  const xForwardedFor = req.headers.get("x-forwarded-for");
-  if (xForwardedFor) {
-    const ips = xForwardedFor
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    for (const ip of ips) {
-      if (!isPrivateOrInternalIp(ip)) {
-        return true;
-      }
-    }
-  }
+  const isLocalhostSocket =
+    cleanSocketIp === "127.0.0.1" ||
+    cleanSocketIp === "::1" ||
+    cleanSocketIp === "localhost";
 
-  // 3. Check client IP if provided
-  if (options.clientIp && !isPrivateOrInternalIp(options.clientIp)) {
-    return true;
-  }
+  // CASE 1: Socket is 127.0.0.1 / ::1 (traffic from local reverse tunnel)
+  // Proxy headers are ONLY trusted when connecting socket is 127.0.0.1
+  if (isLocalhostSocket) {
+    const hostHeader = (
+      req.headers.get("x-forwarded-host") ||
+      req.headers.get("host") ||
+      ""
+    )
+      .toLowerCase()
+      .split(":")[0];
 
-  // 4. Check X-Forwarded-Proto combined with reverse-tunnel headers
-  const proto = req.headers.get("x-forwarded-proto");
-  const via = req.headers.get("via");
-  if (proto === "https" && (via || hostHeader.includes("."))) {
-    // If it's HTTPS through a proxy and not on a local LAN host name
-    if (!isLanHost(hostHeader)) {
+    if (hostHeader === wanDomain || hostHeader === kosyncWanDomain) {
       return true;
     }
+
+    const xForwardedFor = req.headers.get("x-forwarded-for");
+    if (xForwardedFor) {
+      const ips = xForwardedFor
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      for (const ip of ips) {
+        if (!isPrivateOrInternalIp(ip)) {
+          return true;
+        }
+      }
+    }
+
+    const proto = req.headers.get("x-forwarded-proto");
+    if (proto === "https") {
+      return true;
+    }
+
+    return false;
   }
 
-  // 5. Fail closed: on a 0.0.0.0 listener, any unrecognized non-LAN host header is classified as WAN
+  // CASE 2: Socket address is provided and NOT 127.0.0.1
+  // Disregard all X-Forwarded headers because peer is not our trusted 127.0.0.1 tunnel
+  if (cleanSocketIp) {
+    // If socket IP is not a private RFC 1918 address, it is a direct public internet request -> WAN
+    if (!isPrivateOrInternalIp(cleanSocketIp)) {
+      return true;
+    }
+    // Socket IP is from private home LAN (192.168.*, 10.*, etc.) -> LAN
+    return false;
+  }
+
+  // CASE 3: Fallback when socket address is unavailable (e.g. standalone test mocks)
+  // Fail closed on unrecognized hosts
+  const hostHeader = (req.headers.get("host") || "").toLowerCase().split(":")[0];
+  const fwdHost = (req.headers.get("x-forwarded-host") || "").toLowerCase().split(":")[0];
+  if (hostHeader === wanDomain || hostHeader === kosyncWanDomain || fwdHost === wanDomain || fwdHost === kosyncWanDomain) {
+    return true;
+  }
+  const xForwardedFor = req.headers.get("x-forwarded-for");
+  if (xForwardedFor) {
+    const ips = xForwardedFor.split(",").map((s) => s.trim()).filter(Boolean);
+    for (const ip of ips) {
+      if (!isPrivateOrInternalIp(ip)) return true;
+    }
+  }
+
   if (!isLanHost(hostHeader)) {
     return true;
   }
@@ -610,6 +650,19 @@ export function validateOriginAndCsrf(
 
   const origin = req.headers.get("origin");
   const referer = req.headers.get("referer");
+  const hasCookie = req.headers.has("cookie");
+  const hasAuthHeader =
+    req.headers.has("authorization") ||
+    req.headers.has("x-api-key") ||
+    req.headers.has("x-telegram-init-data");
+
+  // CSRF protection: mutating requests with cookie authentication MUST provide Origin or Referer
+  if (isMutating && hasCookie && !hasAuthHeader && !origin && !referer) {
+    return {
+      valid: false,
+      error: "CSRF protection: mutating request with cookie authentication must provide Origin or Referer header",
+    };
+  }
 
   // 1. If Origin header is present, it must be in the allowed list
   if (origin) {
@@ -885,6 +938,47 @@ export function cleanString(str: string): string {
 // 7. Safe Error Handling
 // ---------------------------------------------------------------------------
 
+/**
+ * Performs a network fetch with strict SSRF validation on the initial URL AND all redirect hops.
+ * Uses manual redirect handling (redirect: 'manual') to intercept and validate every Location header.
+ */
+export async function safeFetchWithSsrf(
+  targetUrl: string,
+  init: RequestInit = {},
+  maxRedirects = 5,
+): Promise<Response> {
+  let currentUrl = targetUrl;
+  let remaining = maxRedirects;
+
+  while (true) {
+    const ssrfCheck = await validateUrlForSSRF(currentUrl);
+    if (!ssrfCheck.safe) {
+      throw new Error(`SSRF guard blocked target: ${ssrfCheck.error || "Forbidden target"}`);
+    }
+
+    const fetchOpts: any = {
+      ...init,
+      redirect: "manual",
+    };
+
+    const res = await fetch(currentUrl, fetchOpts);
+
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get("location");
+      if (!loc) {
+        throw new Error(`HTTP ${res.status} redirect without Location header`);
+      }
+      if (remaining <= 0) {
+        throw new Error("Too many redirects (exceeded limit of 5)");
+      }
+      remaining--;
+      currentUrl = new URL(loc, currentUrl).href;
+      continue;
+    }
+
+    return res;
+  }
+}
 /**
  * Sanitizes an error to prevent leaking server filesystem paths, internal stack traces,
  * or host usernames in public HTTP responses.
