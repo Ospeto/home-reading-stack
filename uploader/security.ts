@@ -25,7 +25,7 @@ export function normalizeIpString(ip: string): string {
         (num >>> 24) & 255,
         (num >>> 16) & 255,
         (num >>> 8) & 255,
-        num & 255
+        num & 255,
       ].join(".");
     }
   }
@@ -38,7 +38,7 @@ export function normalizeIpString(ip: string): string {
         (num >>> 24) & 255,
         (num >>> 16) & 255,
         (num >>> 8) & 255,
-        num & 255
+        num & 255,
       ].join(".");
     }
   }
@@ -138,7 +138,12 @@ export function isPrivateOrInternalIp(rawIp: string): boolean {
     if (lower === "::" || lower === "0:0:0:0:0:0:0:0") return true;
 
     // Link-local: fe80::/10
-    if (lower.startsWith("fe8") || lower.startsWith("fe9") || lower.startsWith("fea") || lower.startsWith("feb")) {
+    if (
+      lower.startsWith("fe8") ||
+      lower.startsWith("fe9") ||
+      lower.startsWith("fea") ||
+      lower.startsWith("feb")
+    ) {
       return true;
     }
 
@@ -166,7 +171,7 @@ export function isPrivateOrInternalIp(rawIp: string): boolean {
  */
 export async function validateUrlForSSRF(
   rawUrl: string,
-  options: { allowProxyBypass?: boolean } = {}
+  options: { allowProxyBypass?: boolean } = {},
 ): Promise<{ safe: boolean; error?: string; resolvedIp?: string }> {
   try {
     const u = new URL(rawUrl);
@@ -199,7 +204,10 @@ export async function validateUrlForSSRF(
     const normalizedHost = normalizeIpString(host);
     if (net.isIP(normalizedHost)) {
       if (isPrivateOrInternalIp(normalizedHost)) {
-        return { safe: false, error: `Restricted private or loopback IP: ${normalizedHost}` };
+        return {
+          safe: false,
+          error: `Restricted private or loopback IP: ${normalizedHost}`,
+        };
       }
       return { safe: true, resolvedIp: normalizedHost };
     }
@@ -214,7 +222,7 @@ export async function validateUrlForSSRF(
           return {
             safe: false,
             error: `Domain ${host} resolved to restricted internal IP: ${addr.address}`,
-            resolvedIp: addr.address
+            resolvedIp: addr.address,
           };
         }
       }
@@ -222,10 +230,16 @@ export async function validateUrlForSSRF(
     } catch (dnsErr: any) {
       // In offline / test environments with mock domains, if allowProxyBypass is set,
       // allow domain if host format is valid FQDN
-      if (options.allowProxyBypass && /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(host)) {
+      if (
+        options.allowProxyBypass &&
+        /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(host)
+      ) {
         return { safe: true };
       }
-      return { safe: false, error: `DNS resolution failed for ${host}: ${dnsErr?.message || dnsErr}` };
+      return {
+        safe: false,
+        error: `DNS resolution failed for ${host}: ${dnsErr?.message || dnsErr}`,
+      };
     }
   } catch (err: any) {
     return { safe: false, error: `Invalid URL: ${err?.message || err}` };
@@ -242,9 +256,13 @@ export async function validateUrlForSSRF(
  */
 export function isWanRequest(
   req: Request,
-  options: { wanDomain?: string; clientIp?: string } = {}
+  options: { wanDomain?: string; clientIp?: string } = {},
 ): boolean {
-  const wanDomain = (options.wanDomain || process.env.READING_WEBAPP_URL || DEFAULT_WAN_DOMAIN)
+  const wanDomain = (
+    options.wanDomain ||
+    process.env.READING_WEBAPP_URL ||
+    DEFAULT_WAN_DOMAIN
+  )
     .replace(/^https?:\/\//i, "")
     .split("/")[0]
     .toLowerCase();
@@ -254,7 +272,13 @@ export function isWanRequest(
     .split("/")[0]
     .toLowerCase();
 
-  const hostHeader = (req.headers.get("x-forwarded-host") || req.headers.get("host") || "").toLowerCase().split(":")[0];
+  const hostHeader = (
+    req.headers.get("x-forwarded-host") ||
+    req.headers.get("host") ||
+    ""
+  )
+    .toLowerCase()
+    .split(":")[0];
 
   // 1. Host or X-Forwarded-Host matches WAN domain
   if (hostHeader === wanDomain || hostHeader === kosyncWanDomain) {
@@ -264,7 +288,10 @@ export function isWanRequest(
   // 2. Check X-Forwarded-For: if it contains any public (non-internal) IP, it arrived via WAN
   const xForwardedFor = req.headers.get("x-forwarded-for");
   if (xForwardedFor) {
-    const ips = xForwardedFor.split(",").map((s) => s.trim()).filter(Boolean);
+    const ips = xForwardedFor
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
     for (const ip of ips) {
       if (!isPrivateOrInternalIp(ip)) {
         return true;
@@ -282,7 +309,12 @@ export function isWanRequest(
   const via = req.headers.get("via");
   if (proto === "https" && (via || hostHeader.includes("."))) {
     // If it's HTTPS through a proxy and not on a local LAN host name
-    if (!hostHeader.startsWith("192.168.") && !hostHeader.startsWith("10.") && !hostHeader.startsWith("127.") && hostHeader !== "localhost") {
+    if (
+      !hostHeader.startsWith("192.168.") &&
+      !hostHeader.startsWith("10.") &&
+      !hostHeader.startsWith("127.") &&
+      hostHeader !== "localhost"
+    ) {
       return true;
     }
   }
@@ -301,7 +333,7 @@ export function isWanRequest(
 export function validateTelegramWebAppData(
   initData: string,
   botToken: string,
-  maxAgeSec = 86400 // 24 hours
+  maxAgeSec = 86400, // 24 hours
 ): { valid: boolean; user?: any; error?: string } {
   if (!initData || !botToken) {
     return { valid: false, error: "Missing initData or botToken" };
@@ -331,8 +363,14 @@ export function validateTelegramWebAppData(
     items.sort();
     const dataCheckString = items.join("\n");
 
-    const secretKey = crypto.createHmac("sha256", "WebAppData").update(botToken).digest();
-    const calculatedHash = crypto.createHmac("sha256", secretKey).update(dataCheckString).digest("hex");
+    const secretKey = crypto
+      .createHmac("sha256", "WebAppData")
+      .update(botToken)
+      .digest();
+    const calculatedHash = crypto
+      .createHmac("sha256", secretKey)
+      .update(dataCheckString)
+      .digest("hex");
 
     if (calculatedHash !== hash) {
       return { valid: false, error: "Invalid Telegram signature hash" };
@@ -350,7 +388,10 @@ export function validateTelegramWebAppData(
 
     return { valid: true, user };
   } catch (err: any) {
-    return { valid: false, error: `Failed to parse initData: ${err?.message || err}` };
+    return {
+      valid: false,
+      error: `Failed to parse initData: ${err?.message || err}`,
+    };
   }
 }
 
@@ -380,7 +421,7 @@ export function authenticateRequest(
     botToken?: string;
     wanDomain?: string;
     clientIp?: string;
-  } = {}
+  } = {},
 ): AuthResult {
   // If request is from local LAN, grant immediate friction-free access
   const isWan = isWanRequest(req, options);
@@ -426,7 +467,10 @@ export function authenticateRequest(
   const cookieHeader = req.headers.get("cookie") || "";
   if (cookieHeader) {
     const cookies = parseCookies(cookieHeader);
-    if (apiKey && (cookies.reading_token === apiKey || cookies.reading_session === apiKey)) {
+    if (
+      apiKey &&
+      (cookies.reading_token === apiKey || cookies.reading_session === apiKey)
+    ) {
       return { authenticated: true, method: "cookie" };
     }
     if (cookies.reading_tma && botToken) {
@@ -440,7 +484,8 @@ export function authenticateRequest(
   // 5. Check URL query param ?token= or ?auth= (for downloads or webview handoffs)
   try {
     const url = new URL(req.url);
-    const queryToken = url.searchParams.get("token") || url.searchParams.get("auth") || "";
+    const queryToken =
+      url.searchParams.get("token") || url.searchParams.get("auth") || "";
     if (apiKey && queryToken === apiKey) {
       return { authenticated: true, method: "bearer" };
     }
@@ -450,7 +495,7 @@ export function authenticateRequest(
 
   return {
     authenticated: false,
-    error: "Authentication required for public WAN access"
+    error: "Authentication required for public WAN access",
   };
 }
 
@@ -471,7 +516,7 @@ function parseCookies(header: string): Record<string, string> {
 
 export function isAllowedOrigin(
   origin: string,
-  extraAllowedOrigins: string[] = []
+  extraAllowedOrigins: string[] = [],
 ): boolean {
   if (!origin) return false;
   const lower = origin.toLowerCase().trim();
@@ -499,7 +544,10 @@ export function isAllowedOrigin(
     .split(",")
     .map((o: string) => o.trim().toLowerCase())
     .filter(Boolean);
-  const allAllowed = [...extraAllowedOrigins.map((o: string) => o.toLowerCase()), ...envOrigins];
+  const allAllowed = [
+    ...extraAllowedOrigins.map((o: string) => o.toLowerCase()),
+    ...envOrigins,
+  ];
   if (allAllowed.includes(lower)) {
     return true;
   }
@@ -509,7 +557,11 @@ export function isAllowedOrigin(
     const u = new URL(lower);
     const h = u.hostname;
     if (h === "localhost" || h === "127.0.0.1") return true;
-    if (h.startsWith("192.168.") || h.startsWith("10.") || /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h)) {
+    if (
+      h.startsWith("192.168.") ||
+      h.startsWith("10.") ||
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h)
+    ) {
       return true;
     }
   } catch (_originErr) {
@@ -524,7 +576,7 @@ export function isAllowedOrigin(
  */
 export function validateOriginAndCsrf(
   req: Request,
-  extraAllowedOrigins: string[] = []
+  extraAllowedOrigins: string[] = [],
 ): { valid: boolean; error?: string } {
   const method = req.method.toUpperCase();
   const isMutating = ["POST", "PUT", "DELETE", "PATCH"].includes(method);
@@ -548,7 +600,10 @@ export function validateOriginAndCsrf(
       const refUrl = new URL(referer);
       const refOrigin = `${refUrl.protocol}//${refUrl.host}`;
       if (!isAllowedOrigin(refOrigin, extraAllowedOrigins)) {
-        return { valid: false, error: `Disallowed Referer origin: ${refOrigin}` };
+        return {
+          valid: false,
+          error: `Disallowed Referer origin: ${refOrigin}`,
+        };
       }
     } catch {
       return { valid: false, error: "Malformed Referer header" };
@@ -560,7 +615,10 @@ export function validateOriginAndCsrf(
   if (secFetchSite === "cross-site" && isMutating) {
     // If browser marks it cross-site and origin was not explicitly allowed
     if (!origin || !isAllowedOrigin(origin, extraAllowedOrigins)) {
-      return { valid: false, error: "Cross-site request blocked by Sec-Fetch-Site policy" };
+      return {
+        valid: false,
+        error: "Cross-site request blocked by Sec-Fetch-Site policy",
+      };
     }
   }
 
@@ -592,12 +650,22 @@ export function validateIntegerId(rawId: any, min = 1): number | null {
 }
 
 export const CANONICAL_EBOOK_FORMATS = ["EPUB"] as const;
-export const LEGACY_EBOOK_FORMATS = ["EPUB", "PDF", "MOBI", "AZW3", "CBZ", "CBR"] as const;
+export const LEGACY_EBOOK_FORMATS = [
+  "EPUB",
+  "PDF",
+  "MOBI",
+  "AZW3",
+  "CBZ",
+  "CBR",
+] as const;
 
 /**
  * Validates an eBook format against allowed formats.
  */
-export function validateBookFormat(format: string, allowLegacy = true): string | null {
+export function validateBookFormat(
+  format: string,
+  allowLegacy = true,
+): string | null {
   if (!format) return null;
   const upper = format.trim().toUpperCase().replace(/^\./, "");
   const allowed = allowLegacy ? LEGACY_EBOOK_FORMATS : CANONICAL_EBOOK_FORMATS;
@@ -651,7 +719,7 @@ export function getDownloadFilename(
     series?: string;
     series_index?: number;
   },
-  format = "epub"
+  format = "epub",
 ): string {
   const cleanTitle = sanitizeFilename(book.title || "Untitled");
   const cleanAuthor = sanitizeFilename(book.authors || "Unknown");
@@ -680,8 +748,14 @@ export function cleanString(str: string): string {
   s = s.replace(/(?:t|telegram)\.me\/\S+/gi, " ");
   s = s.replace(/@\w+/gi, " ");
   s = s.replace(/www\.\S+/gi, " ");
-  s = s.replace(/\[.*?(?:ebook|pdf|epub|channel|mobi|azw|scan|myanmar|tg|bookr|z-?lib|libgen).*?\]/gi, " ");
-  s = s.replace(/\((.*?)(?:ebook|pdf|epub|channel|mobi|azw|scan|myanmar|tg|bookr|z-?lib|libgen)(.*?)\)/gi, " ");
+  s = s.replace(
+    /\[.*?(?:ebook|pdf|epub|channel|mobi|azw|scan|myanmar|tg|bookr|z-?lib|libgen).*?\]/gi,
+    " ",
+  );
+  s = s.replace(
+    /\((.*?)(?:ebook|pdf|epub|channel|mobi|azw|scan|myanmar|tg|bookr|z-?lib|libgen)(.*?)\)/gi,
+    " ",
+  );
   s = s.replace(/_v[0-9]+/gi, " ");
   s = s.replace(/\([0-9]+\)$/g, " ");
   s = s.replace(/\b(epub|pdf|mobi|azw3|cbz|cbr)\b/gi, " ");
@@ -700,7 +774,10 @@ export function cleanString(str: string): string {
  */
 export function sanitizeErrorMessage(err: any): string {
   if (!err) return "An unexpected error occurred";
-  const rawMsg = typeof err === "string" ? err : err.message || "An unexpected error occurred";
+  const rawMsg =
+    typeof err === "string"
+      ? err
+      : err.message || "An unexpected error occurred";
 
   // Remove filesystem paths (e.g. /Users/ospeto/..., /tmp/..., C:\...)
   let sanitized = rawMsg
@@ -710,7 +787,10 @@ export function sanitizeErrorMessage(err: any): string {
     .trim();
 
   // Strip token/key patterns
-  sanitized = sanitized.replace(/(?:token|key|secret)=[a-zA-Z0-9_-]+/gi, "$1=[REDACTED]");
+  sanitized = sanitized.replace(
+    /(?:token|key|secret)=[a-zA-Z0-9_-]+/gi,
+    "$1=[REDACTED]",
+  );
 
   if (sanitized.length > 300) {
     sanitized = sanitized.substring(0, 300) + "...";

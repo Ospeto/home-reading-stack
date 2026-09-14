@@ -7,7 +7,7 @@ import {
   isNonEpubBook,
   isArchiveFile,
   unpackArchive,
-  inspectArchiveSafety
+  inspectArchiveSafety,
 } from "./archive";
 
 describe("EPUB-Only Archive & Format Quarantine", () => {
@@ -86,7 +86,7 @@ describe("EPUB-Only Archive & Format Quarantine", () => {
         expect(res.books[0].originalName).toBe("valid_book.epub");
 
         // Non-EPUB files must be quarantined
-        const quarantinedNames = res.quarantined.map(q => q.name);
+        const quarantinedNames = res.quarantined.map((q) => q.name);
         expect(quarantinedNames).toContain("manual.pdf");
         expect(quarantinedNames).toContain("old.mobi");
         expect(quarantinedNames).toContain("readme.txt");
@@ -133,7 +133,10 @@ describe("EPUB-Only Archive & Format Quarantine", () => {
     });
 
     it("rejects archives with path traversal entries via inspectArchiveSafety", () => {
-      const traversalZip = path.join("/tmp", `test_traversal_${Date.now()}.zip`);
+      const traversalZip = path.join(
+        "/tmp",
+        `test_traversal_${Date.now()}.zip`,
+      );
       const pythonScript = `
 import zipfile
 with zipfile.ZipFile("${traversalZip}", "w") as zf:
@@ -209,7 +212,8 @@ with zipfile.ZipFile("${bombZip}", "w", compression=zipfile.ZIP_DEFLATED) as zf:
       } finally {
         unp.cleanup();
         if (fs.existsSync(symlinkTar)) fs.unlinkSync(symlinkTar);
-        if (fs.existsSync(symlinkDir)) fs.rmSync(symlinkDir, { recursive: true, force: true });
+        if (fs.existsSync(symlinkDir))
+          fs.rmSync(symlinkDir, { recursive: true, force: true });
       }
     });
   });

@@ -7,7 +7,22 @@ import { Buffer } from "node:buffer";
 import { cleanString, isAllowedCoverUrl } from "./scraper";
 import { validateUrlForSSRF } from "./security";
 
-const DROP_DIR = "/Users/ospeto/Books_Drop";
+export function getDropDir(): string {
+  const dir = process.env.BOOKS_DROP_DIR || "/Users/ospeto/Books_Drop";
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  } catch (_e) {
+    const fallback = path.join("/tmp", "Books_Drop");
+    if (!fs.existsSync(fallback)) {
+      fs.mkdirSync(fallback, { recursive: true });
+    }
+    return fallback;
+  }
+  return dir;
+}
+
 const SERVER_URL = "http://127.0.0.1:8088";
 const PROXY_URL = "http://127.0.0.1:7890";
 const EBOOK_CONVERT_PATH = "/opt/homebrew/bin/ebook-convert";
@@ -15,10 +30,6 @@ const CALIBREDB_PATH = "/opt/homebrew/bin/calibredb";
 const FETCH_TIMEOUT_MS = 15000;
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
-
-if (!fs.existsSync(DROP_DIR)) {
-  fs.mkdirSync(DROP_DIR, { recursive: true });
-}
 
 export interface ExtractedArticle {
   url: string;
@@ -1566,7 +1577,7 @@ export async function ingestArticleFromUrl(targetUrl: string): Promise<IngestArt
       .substring(0, 60)
       .trim() || "Web_Article";
     const dropFileName = `${safeFilenameBase}_${Date.now()}.epub`;
-    const dropFilePath = path.join(DROP_DIR, dropFileName);
+    const dropFilePath = path.join(getDropDir(), dropFileName);
 
     fs.copyFileSync(tempEpub, dropFilePath);
     try {

@@ -30,16 +30,34 @@ export interface MigrationInventory {
   sourceTotalEpubs: number;
   sourceNonEpubsExcluded: Array<{ id: number; title: string; format: string }>;
   targetTotalEpubs: number;
-  exactDuplicates: Array<{ id: number; title: string; authors: string; file: string }>;
-  newEpubCandidates: Array<{ id: number; title: string; authors: string; series: string | null; seriesIndex: number | null; file: string }>;
+  exactDuplicates: Array<{
+    id: number;
+    title: string;
+    authors: string;
+    file: string;
+  }>;
+  newEpubCandidates: Array<{
+    id: number;
+    title: string;
+    authors: string;
+    series: string | null;
+    seriesIndex: number | null;
+    file: string;
+  }>;
 }
 
 export function cleanTitle(str: string): string {
   if (!str) return "";
   return str
     .toLowerCase()
-    .replace(/\[.*?(ebook|pdf|epub|channel|mobi|azw|scan|myanmar|tg|bookr).*?\]/gi, " ")
-    .replace(/\((.*?)(ebook|pdf|epub|channel|mobi|azw|scan|myanmar|tg|bookr)(.*?)\)/gi, " ")
+    .replace(
+      /\[.*?(ebook|pdf|epub|channel|mobi|azw|scan|myanmar|tg|bookr).*?\]/gi,
+      " ",
+    )
+    .replace(
+      /\((.*?)(ebook|pdf|epub|channel|mobi|azw|scan|myanmar|tg|bookr)(.*?)\)/gi,
+      " ",
+    )
     .replace(/[^a-z0-9\u00A0-\uFFFF]+/g, " ")
     .trim();
 }
@@ -48,19 +66,29 @@ export function cleanTitle(str: string): string {
  * Normalizes title and author together for high-accuracy duplicate matching.
  * Prevents false positives between different books sharing common titles.
  */
-export function normalizeTitleAndAuthor(title: string, authors?: string): string {
+export function normalizeTitleAndAuthor(
+  title: string,
+  authors?: string,
+): string {
   const t = cleanTitle(title);
   const a = cleanTitle(authors || "");
-  const isJunkAuthor = !a || a === "unknown" || a === "anonymous" || a === "admin";
+  const isJunkAuthor =
+    !a || a === "unknown" || a === "anonymous" || a === "admin";
   return isJunkAuthor ? `${t}:::unknown` : `${t}:::${a}`;
 }
 
 /**
  * Run safe read-only preflight inventory comparing source and target Calibre libraries.
  */
-export function runMigrationPreflight(options: PreflightOptions = {}): MigrationInventory {
-  const defaultSource = process.env.CALIBRE_SOURCE_LIBRARY_DIR || "/Volumes/Ospeto_SSD/Calibre Library";
-  const defaultTarget = process.env.CALIBRE_LIBRARY_DIR || "/Users/ospeto/Calibre Libraries/Agent Library";
+export function runMigrationPreflight(
+  options: PreflightOptions = {},
+): MigrationInventory {
+  const defaultSource =
+    process.env.CALIBRE_SOURCE_LIBRARY_DIR ||
+    "/Volumes/Ospeto_SSD/Calibre Library";
+  const defaultTarget =
+    process.env.CALIBRE_LIBRARY_DIR ||
+    "/Users/ospeto/Calibre Libraries/Agent Library";
 
   const sourcePath = options.sourceLibraryPath || defaultSource;
   const targetPath = options.targetLibraryPath || defaultTarget;
@@ -82,10 +110,13 @@ export function runMigrationPreflight(options: PreflightOptions = {}): Migration
   srcDb.run("PRAGMA busy_timeout = 5000;");
   tgtDb.run("PRAGMA busy_timeout = 5000;");
 
-  const sourceTotalBooks = (srcDb.query("SELECT count(*) as count FROM books;").get() as any)?.count || 0;
+  const sourceTotalBooks =
+    (srcDb.query("SELECT count(*) as count FROM books;").get() as any)?.count ||
+    0;
 
   // Query all EPUB files in source library
-  const srcEpubRows = srcDb.query(`
+  const srcEpubRows = srcDb
+    .query(`
     SELECT b.id, b.title, b.path, b.series_index,
            GROUP_CONCAT(DISTINCT a.name) as authors,
            s.name as series,
@@ -99,20 +130,24 @@ export function runMigrationPreflight(options: PreflightOptions = {}): Migration
     WHERE UPPER(d.format) = 'EPUB'
     GROUP BY b.id
     ORDER BY b.id ASC;
-  `).all() as any[];
+  `)
+    .all() as any[];
 
   // Query non-EPUB formats in source library to document excluded formats
-  const srcNonEpubRows = srcDb.query(`
+  const srcNonEpubRows = srcDb
+    .query(`
     SELECT b.id, b.title, d.format
     FROM books b
     JOIN data d ON b.id = d.book
     WHERE UPPER(d.format) != 'EPUB'
     GROUP BY b.id, d.format
     ORDER BY d.format ASC;
-  `).all() as any[];
+  `)
+    .all() as any[];
 
   // Query all existing EPUBs in target library
-  const tgtEpubRows = tgtDb.query(`
+  const tgtEpubRows = tgtDb
+    .query(`
     SELECT b.id, b.title, b.path,
            GROUP_CONCAT(DISTINCT a.name) as authors,
            d.name as filename
@@ -122,7 +157,8 @@ export function runMigrationPreflight(options: PreflightOptions = {}): Migration
     LEFT JOIN authors a ON bal.author = a.id
     WHERE UPPER(d.format) = 'EPUB'
     GROUP BY b.id;
-  `).all() as any[];
+  `)
+    .all() as any[];
 
   srcDb.close();
   tgtDb.close();
@@ -167,7 +203,11 @@ export function runMigrationPreflight(options: PreflightOptions = {}): Migration
       const candidates = targetTitleMap.get(titleKey)!;
       for (const cand of candidates) {
         const candAuthor = cleanTitle(cand.authors || "");
-        const hasBothAuthors = srcAuthor && candAuthor && srcAuthor !== "unknown" && candAuthor !== "unknown";
+        const hasBothAuthors =
+          srcAuthor &&
+          candAuthor &&
+          srcAuthor !== "unknown" &&
+          candAuthor !== "unknown";
 
         if (!hasBothAuthors) {
           // If either author is unknown/missing, title match is treated as duplicate to be safe
@@ -192,7 +232,7 @@ export function runMigrationPreflight(options: PreflightOptions = {}): Migration
         id: src.id,
         title: src.title || "Untitled",
         authors: src.authors || "Unknown",
-        file: fullSourceFilePath
+        file: fullSourceFilePath,
       });
     } else {
       newEpubCandidates.push({
@@ -201,7 +241,7 @@ export function runMigrationPreflight(options: PreflightOptions = {}): Migration
         authors: src.authors || "Unknown",
         series: src.series || null,
         seriesIndex: src.series_index || null,
-        file: fullSourceFilePath
+        file: fullSourceFilePath,
       });
     }
   }
@@ -211,10 +251,14 @@ export function runMigrationPreflight(options: PreflightOptions = {}): Migration
     targetPath,
     sourceTotalBooks,
     sourceTotalEpubs: srcEpubRows.length,
-    sourceNonEpubsExcluded: srcNonEpubRows.map(r => ({ id: r.id, title: r.title, format: r.format })),
+    sourceNonEpubsExcluded: srcNonEpubRows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      format: r.format,
+    })),
     targetTotalEpubs: tgtEpubRows.length,
     exactDuplicates,
-    newEpubCandidates
+    newEpubCandidates,
   };
 }
 
@@ -222,11 +266,21 @@ export function runMigrationPreflight(options: PreflightOptions = {}): Migration
  * CLI Execution Handler
  */
 if (import.meta.main) {
-  console.log("===================================================================");
-  console.log("  Home Reading Stack: EPUB Migration Preflight & Inventory Analysis");
-  console.log("===================================================================\n");
-  console.log("🔒 [SAFETY CHECK]: Running in strictly READ-ONLY analysis mode.");
-  console.log("   No live Calibre files or metadata databases will be modified.\n");
+  console.log(
+    "===================================================================",
+  );
+  console.log(
+    "  Home Reading Stack: EPUB Migration Preflight & Inventory Analysis",
+  );
+  console.log(
+    "===================================================================\n",
+  );
+  console.log(
+    "🔒 [SAFETY CHECK]: Running in strictly READ-ONLY analysis mode.",
+  );
+  console.log(
+    "   No live Calibre files or metadata databases will be modified.\n",
+  );
 
   try {
     const inventory = runMigrationPreflight();
@@ -234,56 +288,94 @@ if (import.meta.main) {
     console.log(`📁 Source Library: ${inventory.sourcePath}`);
     console.log(`   - Total Registered Books: ${inventory.sourceTotalBooks}`);
     console.log(`   - EPUB Format Books:      ${inventory.sourceTotalEpubs}`);
-    console.log(`   - Non-EPUB Formats Skipped: ${inventory.sourceNonEpubsExcluded.length} (e.g. KFX, AZW, TXT)\n`);
+    console.log(
+      `   - Non-EPUB Formats Skipped: ${inventory.sourceNonEpubsExcluded.length} (e.g. KFX, AZW, TXT)\n`,
+    );
 
     console.log(`📁 Target Canonical Library: ${inventory.targetPath}`);
     console.log(`   - Existing EPUB Books:    ${inventory.targetTotalEpubs}\n`);
 
-    console.log("-------------------------------------------------------------------");
+    console.log(
+      "-------------------------------------------------------------------",
+    );
     console.log("  INVENTORY MATCHING RESULTS");
-    console.log("-------------------------------------------------------------------");
-    console.log(`✅ New Unique EPUBs to Migrate:     ${inventory.newEpubCandidates.length}`);
-    console.log(`⚠️ Existing Duplicates (Will Skip): ${inventory.exactDuplicates.length}\n`);
+    console.log(
+      "-------------------------------------------------------------------",
+    );
+    console.log(
+      `✅ New Unique EPUBs to Migrate:     ${inventory.newEpubCandidates.length}`,
+    );
+    console.log(
+      `⚠️ Existing Duplicates (Will Skip): ${inventory.exactDuplicates.length}\n`,
+    );
 
     if (inventory.exactDuplicates.length > 0) {
-      console.log("Sample Existing Duplicates Detected (Matched on Title + Author):");
+      console.log(
+        "Sample Existing Duplicates Detected (Matched on Title + Author):",
+      );
       for (const d of inventory.exactDuplicates.slice(0, 5)) {
         console.log(`  • [#${d.id}] "${d.title}" by ${d.authors}`);
       }
       if (inventory.exactDuplicates.length > 5) {
-        console.log(`    ... and ${inventory.exactDuplicates.length - 5} more.`);
+        console.log(
+          `    ... and ${inventory.exactDuplicates.length - 5} more.`,
+        );
       }
       console.log("");
     }
 
     console.log("Sample New Unique EPUB Candidates Ready for Migration:");
     for (const c of inventory.newEpubCandidates.slice(0, 8)) {
-      const seriesBadge = c.series ? ` [Series: ${c.series} #${c.seriesIndex || 1}]` : "";
+      const seriesBadge = c.series
+        ? ` [Series: ${c.series} #${c.seriesIndex || 1}]`
+        : "";
       console.log(`  • [#${c.id}] "${c.title}" by ${c.authors}${seriesBadge}`);
     }
     if (inventory.newEpubCandidates.length > 8) {
-      console.log(`    ... and ${inventory.newEpubCandidates.length - 8} more.`);
+      console.log(
+        `    ... and ${inventory.newEpubCandidates.length - 8} more.`,
+      );
     }
     console.log("");
 
-    console.log("===================================================================");
+    console.log(
+      "===================================================================",
+    );
     console.log("  RECOMMENDED MIGRATION PROCEDURE (SUPERVISED STEP)");
-    console.log("===================================================================");
+    console.log(
+      "===================================================================",
+    );
     console.log("1. OFFLINE SNAPSHOT BACKUP (MANDATORY BEFORE IMPORT):");
     console.log("   Run this command while calibre-server is stopped or idle:");
-    console.log(`   cp -a "${inventory.targetPath}" "${inventory.targetPath}.backup.$(date +%Y%m%d_%H%M%S)"\n`);
+    console.log(
+      `   cp -a "${inventory.targetPath}" "${inventory.targetPath}.backup.$(date +%Y%m%d_%H%M%S)"\n`,
+    );
 
     console.log("2. BATCH IMPORT COMMAND (VIA CALIBREDB HTTP API):");
-    console.log("   calibredb add --with-library http://127.0.0.1:8088 --automerge ignore <path-to-epub>\n");
+    console.log(
+      "   calibredb add --with-library http://127.0.0.1:8088 --automerge ignore <path-to-epub>\n",
+    );
 
     console.log("3. POST-MIGRATION VERIFICATION CHECKLIST:");
-    console.log("   • OPDS Feed:       curl -s http://127.0.0.1:8088/opds | head -n 25");
-    console.log("   • Reading HQ API:  curl -s http://127.0.0.1:8086/api/books | jq length");
-    console.log("   • Telegram Bot:    Send /recent and /reading to verify catalog refresh");
-    console.log("   • KOReader Sync:   Verify synchronization at https://kosync.wavypremium.xyz\n");
+    console.log(
+      "   • OPDS Feed:       curl -s http://127.0.0.1:8088/opds | head -n 25",
+    );
+    console.log(
+      "   • Reading HQ API:  curl -s http://127.0.0.1:8086/api/books | jq length",
+    );
+    console.log(
+      "   • Telegram Bot:    Send /recent and /reading to verify catalog refresh",
+    );
+    console.log(
+      "   • KOReader Sync:   Verify synchronization at https://kosync.wavypremium.xyz\n",
+    );
 
-    console.log("🔒 [SAFETY GUARD VERIFIED]: Preflight analysis completed successfully.");
-    console.log("   Zero files were modified. The live libraries remain intact.\n");
+    console.log(
+      "🔒 [SAFETY GUARD VERIFIED]: Preflight analysis completed successfully.",
+    );
+    console.log(
+      "   Zero files were modified. The live libraries remain intact.\n",
+    );
   } catch (err: any) {
     console.error("❌ Preflight check failed:", err.message);
     process.exit(1);

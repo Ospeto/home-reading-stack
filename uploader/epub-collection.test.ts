@@ -24,7 +24,7 @@ describe("EPUB-Only Collection & Storage Path Invariants", () => {
         "one_piece_ch01.cbz",
         "naruto_ch02.cbr",
         "raw_text.txt",
-        "microsoft.docx"
+        "microsoft.docx",
       ];
 
       for (const file of nonEpubExamples) {
@@ -33,13 +33,21 @@ describe("EPUB-Only Collection & Storage Path Invariants", () => {
       }
     });
 
+    it("rejects hidden and macOS resource fork files (.hidden.epub, ._Book.epub)", () => {
+      expect(isSupportedBook(".hidden.epub")).toBe(false);
+      expect(isSupportedBook("._Book.epub")).toBe(false);
+      expect(isSupportedBook("._Dune.epub")).toBe(false);
+    });
+
     it("ensures web article ingestion generates clean .epub output", () => {
       const articleFilename = generateMetadataFilename({
         title: "How to Build Great Things",
         authors: "Paul Graham",
-        format: "epub"
+        format: "epub",
       });
-      expect(articleFilename).toBe("How to Build Great Things - Paul Graham.epub");
+      expect(articleFilename).toBe(
+        "How to Build Great Things - Paul Graham.epub",
+      );
       expect(articleFilename.endsWith(".epub")).toBe(true);
     });
   });
@@ -50,15 +58,17 @@ describe("EPUB-Only Collection & Storage Path Invariants", () => {
         title: "The Fellowship of the Ring",
         authors: "J. R. R. Tolkien",
         series: "The Lord of the Rings",
-        seriesIndex: 1
+        seriesIndex: 1,
       });
-      expect(filename).toBe("The Lord of the Rings 01 - The Fellowship of the Ring - J. R. R. Tolkien.epub");
+      expect(filename).toBe(
+        "The Lord of the Rings 01 - The Fellowship of the Ring - J. R. R. Tolkien.epub",
+      );
     });
 
     it("generates 'Title - Author.epub' for standalone books", () => {
       const filename = generateMetadataFilename({
         title: "1984",
-        authors: "George Orwell"
+        authors: "George Orwell",
       });
       expect(filename).toBe("1984 - George Orwell.epub");
     });
@@ -66,7 +76,7 @@ describe("EPUB-Only Collection & Storage Path Invariants", () => {
     it("handles missing or unknown author safely", () => {
       const filename = generateMetadataFilename({
         title: "Epic of Gilgamesh",
-        authors: "Unknown"
+        authors: "Unknown",
       });
       expect(filename).toBe("Epic of Gilgamesh.epub");
     });
@@ -75,7 +85,7 @@ describe("EPUB-Only Collection & Storage Path Invariants", () => {
       const filename = generateMetadataFilename({
         title: "../../../secret/passwords",
         authors: "../../hacker",
-        fallbackBase: "safe_book"
+        fallbackBase: "safe_book",
       });
       expect(filename).not.toContain("/");
       expect(filename).not.toContain("\\");
@@ -86,19 +96,24 @@ describe("EPUB-Only Collection & Storage Path Invariants", () => {
     it("replaces filesystem-illegal characters with clean separators", () => {
       const filename = generateMetadataFilename({
         title: 'Star Wars: Episode IV "A New Hope" <Special>?',
-        authors: "George Lucas | Lucasfilm*"
+        authors: "George Lucas | Lucasfilm*",
       });
-      expect(filename).toBe("Star Wars Episode IV A New Hope Special - George Lucas Lucasfilm.epub");
+      expect(filename).toBe(
+        "Star Wars Episode IV A New Hope Special - George Lucas Lucasfilm.epub",
+      );
       expect(filename).not.toMatch(/[<>:"/\\|?*]/);
     });
 
     it("handles long multi-byte Unicode strings safely without breaking UTF-8 code points", () => {
       // Burmese multi-byte characters (3 bytes each)
       const burmeseTitle = "လေပြည်ကလေး၏တေးဆိုသံ".repeat(20);
-      const filename = generateMetadataFilename({
-        title: burmeseTitle,
-        authors: "ရဲမြလွင်"
-      }, { maxBytes: 120 });
+      const filename = generateMetadataFilename(
+        {
+          title: burmeseTitle,
+          authors: "ရဲမြလွင်",
+        },
+        { maxBytes: 120 },
+      );
 
       expect(Buffer.byteLength(filename, "utf8")).toBeLessThanOrEqual(125); // 120 base + .epub
       expect(filename.endsWith(".epub")).toBe(true);
@@ -109,9 +124,15 @@ describe("EPUB-Only Collection & Storage Path Invariants", () => {
     });
 
     it("builds RFC 5987 / RFC 6266 compliant Content-Disposition header with UTF-8 encoding", () => {
-      const disposition = buildContentDisposition("Dune 01 - Dune - Frank Herbert.epub");
-      expect(disposition).toContain('attachment; filename="Dune 01 - Dune - Frank Herbert.epub"');
-      expect(disposition).toContain("filename*=UTF-8''Dune%2001%20-%20Dune%20-%20Frank%20Herbert.epub");
+      const disposition = buildContentDisposition(
+        "Dune 01 - Dune - Frank Herbert.epub",
+      );
+      expect(disposition).toContain(
+        'attachment; filename="Dune 01 - Dune - Frank Herbert.epub"',
+      );
+      expect(disposition).toContain(
+        "filename*=UTF-8''Dune%2001%20-%20Dune%20-%20Frank%20Herbert.epub",
+      );
     });
   });
 
@@ -143,18 +164,32 @@ describe("EPUB-Only Collection & Storage Path Invariants", () => {
       `);
 
       // Book 1: EPUB format with series
-      db.run("INSERT INTO books (id, title, path, series_index) VALUES (1, 'Dune', 'Frank Herbert/Dune (1)', 1);");
-      db.run("INSERT INTO data (id, book, format, name, uncompressed_size) VALUES (1, 1, 'EPUB', 'Dune - Frank Herbert', 100);");
+      db.run(
+        "INSERT INTO books (id, title, path, series_index) VALUES (1, 'Dune', 'Frank Herbert/Dune (1)', 1);",
+      );
+      db.run(
+        "INSERT INTO data (id, book, format, name, uncompressed_size) VALUES (1, 1, 'EPUB', 'Dune - Frank Herbert', 100);",
+      );
       db.run("INSERT INTO authors (id, name) VALUES (1, 'Frank Herbert');");
-      db.run("INSERT INTO books_authors_link (id, book, author) VALUES (1, 1, 1);");
+      db.run(
+        "INSERT INTO books_authors_link (id, book, author) VALUES (1, 1, 1);",
+      );
       db.run("INSERT INTO series (id, name) VALUES (1, 'Dune Chronicles');");
-      db.run("INSERT INTO books_series_link (id, book, series) VALUES (1, 1, 1);");
+      db.run(
+        "INSERT INTO books_series_link (id, book, series) VALUES (1, 1, 1);",
+      );
 
       // Book 2: CBZ format (non-EPUB)
-      db.run("INSERT INTO books (id, title, path) VALUES (2, 'One Piece', 'Oda/One Piece (2)');");
-      db.run("INSERT INTO data (id, book, format, name, uncompressed_size) VALUES (2, 2, 'CBZ', 'One Piece - Oda', 200);");
+      db.run(
+        "INSERT INTO books (id, title, path) VALUES (2, 'One Piece', 'Oda/One Piece (2)');",
+      );
+      db.run(
+        "INSERT INTO data (id, book, format, name, uncompressed_size) VALUES (2, 2, 'CBZ', 'One Piece - Oda', 200);",
+      );
       db.run("INSERT INTO authors (id, name) VALUES (2, 'Oda');");
-      db.run("INSERT INTO books_authors_link (id, book, author) VALUES (2, 2, 2);");
+      db.run(
+        "INSERT INTO books_authors_link (id, book, author) VALUES (2, 2, 2);",
+      );
 
       db.close();
 
@@ -165,9 +200,11 @@ describe("EPUB-Only Collection & Storage Path Invariants", () => {
     });
 
     afterAll(() => {
-      if (origDbPath === undefined) delete process.env.CALIBRE_DB_PATH; else process.env.CALIBRE_DB_PATH = origDbPath;
+      if (origDbPath === undefined) delete process.env.CALIBRE_DB_PATH;
+      else process.env.CALIBRE_DB_PATH = origDbPath;
 
-      if (origLibDir === undefined) delete process.env.CALIBRE_LIBRARY_DIR; else process.env.CALIBRE_LIBRARY_DIR = origLibDir;
+      if (origLibDir === undefined) delete process.env.CALIBRE_LIBRARY_DIR;
+      else process.env.CALIBRE_LIBRARY_DIR = origLibDir;
 
       if (fs.existsSync(tempLibDir)) {
         fs.rmSync(tempLibDir, { recursive: true, force: true });
@@ -189,10 +226,12 @@ describe("EPUB-Only Collection & Storage Path Invariants", () => {
         authors: details!.authors,
         series: details!.series,
         seriesIndex: details!.seriesIndex,
-        format: "epub"
+        format: "epub",
       });
 
-      expect(userDownloadName).toBe("Dune Chronicles 01 - Dune - Frank Herbert.epub");
+      expect(userDownloadName).toBe(
+        "Dune Chronicles 01 - Dune - Frank Herbert.epub",
+      );
 
       // CRITICAL INVARIANT: The physical file path on disk must NOT have changed
       const currentStat = fs.statSync(details!.filePath);
