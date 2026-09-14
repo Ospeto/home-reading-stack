@@ -13,6 +13,7 @@ import {
   validateIntegerId,
   validateBookFormat,
   isCanonicalEpub,
+  validateEpubContent,
   sanitizeFilename,
   getDownloadFilename,
   sanitizeErrorMessage,
@@ -60,6 +61,9 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
     expect(isPrivateOrInternalIp("fd00::1234")).toBe(true);
     expect(isPrivateOrInternalIp("::ffff:127.0.0.1")).toBe(true);
     expect(isPrivateOrInternalIp("::ffff:192.168.1.1")).toBe(true);
+    expect(isPrivateOrInternalIp("::ffff:7f00:1")).toBe(true);
+    expect(isPrivateOrInternalIp("::ffff:c0a8:101")).toBe(true);
+    expect(isPrivateOrInternalIp("0:0:0:0:0:ffff:7f00:1")).toBe(true);
   });
 
   it("normalizes and blocks decimal, hex, and octal IP representations", () => {
@@ -150,6 +154,12 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
       }
     });
     expect(isWanRequest(wanReq3)).toBe(true);
+
+    // Unrecognized direct request on 0.0.0.0 listener fails closed to WAN
+    const unknownReq = new Request("http://unknown-external.com/api/books", {
+      headers: { host: "unknown-external.com" }
+    });
+    expect(isWanRequest(unknownReq)).toBe(true);
   });
 
   it("authenticateRequest passes local LAN requests without credentials", () => {
@@ -317,6 +327,46 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
     const sanitized = sanitizeErrorMessage(errWithPath);
     expect(sanitized).not.toContain("/Users/ospeto");
     expect(sanitized).toContain("[path]");
+
+    const errWithSecret = new Error("Failed connecting with token=abc12345secret and key=mySecretKey");
+    const sanitizedSecret = sanitizeErrorMessage(errWithSecret);
+    expect(sanitizedSecret).toContain("token=[REDACTED]");
+    expect(sanitizedSecret).toContain("key=[REDACTED]");
+    expect(sanitizedSecret).not.toContain("abc12345secret");
+  });
+
+  it("validateEpubContent validates ZIP magic bytes, mimetype, and required container", () => {
+    const tempDir = path.join("/tmp", `test_epub_val_${Date.now()}`);
+    const metaDir = path.join(tempDir, "META-INF");
+    fs.mkdirSync(metaDir, { recursive: true });
+
+    fs.writeFileSync(path.join(tempDir, "mimetype"), "application/epub+zip");
+    fs.writeFileSync(path.join(metaDir, "container.xml"), "<container/>");
+
+    const validEpub = path.join("/tmp", `valid_${Date.now()}.epub`);
+    const { spawnSync } = require("node:child_process");
+    spawnSync("/usr/bin/bsdtar", ["--format", "zip", "-cf", validEpub, "-C", tempDir, "mimetype", "META-INF"]);
+
+    try {
+      const validRes = validateEpubContent(validEpub);
+      expect(validRes.valid).toBe(true);
+
+      const fakeEpub = path.join("/tmp", `fake_${Date.now()}.epub`);
+      fs.writeFileSync(fakeEpub, "not a zip file at all - this text simulates a corrupted non-zip file claiming to be an epub");
+      const fakeRes = validateEpubContent(fakeEpub);
+      expect(fakeRes.valid).toBe(false);
+      expect(fakeRes.error).toContain("magic bytes");
+      if (fs.existsSync(fakeEpub)) {
+        fs.unlinkSync(fakeEpub);
+      }
+    } finally {
+      if (fs.existsSync(validEpub)) {
+        fs.unlinkSync(validEpub);
+      }
+      if (fs.existsSync(tempDir)) {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }
   });
 });
 
@@ -465,6 +515,7 @@ describe("Durable Ingestion Job Queue Lifecycle & Crash Recovery", () => {
     const jobAfter2 = queue.getJob(job.id);
     expect(jobAfter2?.status).toBe("failed");
     expect(jobAfter2?.retries).toBe(2);
+    expect(attempts).toBe(2);
     expect(jobAfter2?.error).toContain("Network timeout");
   });
 

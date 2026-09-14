@@ -28,8 +28,9 @@ beforeAll(() => {
     // Intercept Paul Graham article fetch
     if (urlStr.includes("paulgraham.com/foundermode.html")) {
       const dummyEssay =
-        "At a YC event recently Brian Chesky gave a talk that everyone who was there is still talking about. Most founder advice is wrong because modularizing companies when they grow breaks the core vision. Founders need to stay deeply involved in details. "
-          .repeat(25);
+        "At a YC event recently Brian Chesky gave a talk that everyone who was there is still talking about. Most founder advice is wrong because modularizing companies when they grow breaks the core vision. Founders need to stay deeply involved in details. ".repeat(
+          25,
+        );
       const html = `<!DOCTYPE html>
 <html>
 <head><title>Founder Mode</title></head>
@@ -76,7 +77,7 @@ printf "PK\\003\\004mock_hermetic_epub_archive" > "$OUT"
 head -c 3000 /dev/zero >> "$OUT"
 exit 0
 `,
-    { mode: 0o755 }
+    { mode: 0o755 },
   );
   origEbookConvertPath = process.env.EBOOK_CONVERT_PATH;
   process.env.EBOOK_CONVERT_PATH = mockConvertScript;
@@ -139,8 +140,9 @@ Here is a very brief notice about a website update. It has only twenty words or 
     for (const marker of markers) {
       // 200 words of dummy text + marker
       const dummyProse =
-        "The financial markets saw substantial trading activity across all major global asset classes today. "
-          .repeat(20);
+        "The financial markets saw substantial trading activity across all major global asset classes today. ".repeat(
+          20,
+        );
       const text = `${dummyProse}\n\n${marker}\n\n${dummyProse}`;
       const result = isPaywallOrGarbage(text);
       expect(result.isPaywall).toBe(true);
@@ -251,7 +253,9 @@ Subscribe today for $1.
 
 describe("End-to-End Extraction & Paywall Rejection", () => {
   test("Paul Graham article cleans cleanly without <map> or <area> tags", async () => {
-    const article = await extractArticle("https://paulgraham.com/foundermode.html");
+    const article = await extractArticle(
+      "https://paulgraham.com/foundermode.html",
+    );
     expect(article.title).toBe("Founder Mode");
     expect(article.wordCount).toBeGreaterThan(500);
     expect(article.cleanedHtml).not.toContain("<map");
@@ -260,7 +264,8 @@ describe("End-to-End Extraction & Paywall Rejection", () => {
   }, 15000);
 
   test("Financial Times paywall page is cleanly rejected with PAYWALL_ERROR_MESSAGE", async () => {
-    const ftUrl = "https://www.ft.com/content/4564e6a5-69e9-40a6-bf0f-a888f2f4f002";
+    const ftUrl =
+      "https://www.ft.com/content/4564e6a5-69e9-40a6-bf0f-a888f2f4f002";
     let thrownError: Error | null = null;
     try {
       await extractArticle(ftUrl);
@@ -277,7 +282,8 @@ describe("Automatic Cover Generation & Typography Pipeline", () => {
     const shortTitle = "Short Title";
     expect(wrapText(shortTitle, 22, 5)).toEqual(["Short Title"]);
 
-    const longTitle = "How to Do Great Work and Build Remarkable Things Across Multiple Decades";
+    const longTitle =
+      "How to Do Great Work and Build Remarkable Things Across Multiple Decades";
     const wrapped = wrapText(longTitle, 22, 5);
     expect(wrapped.length).toBeGreaterThanOrEqual(3);
     for (const line of wrapped) {
@@ -288,7 +294,9 @@ describe("Automatic Cover Generation & Typography Pipeline", () => {
   test("escapeXml correctly escapes XML entity characters", () => {
     const raw = `Tom & Jerry <cartoon> "best" 'show'`;
     const escaped = escapeXml(raw);
-    expect(escaped).toBe("Tom &amp; Jerry &lt;cartoon&gt; &quot;best&quot; &apos;show&apos;");
+    expect(escaped).toBe(
+      "Tom &amp; Jerry &lt;cartoon&gt; &quot;best&quot; &apos;show&apos;",
+    );
   });
 
   test("generateTypographicCover creates a valid 600x900 JPEG cover via macOS sips", () => {
@@ -330,7 +338,10 @@ Image: https://example.com/cover.jpg
 
 Markdown Content:
 Body text goes here.`;
-    const parsedHeader = parseJinaMarkdown(rawWithHeader, "https://example.com/story");
+    const parsedHeader = parseJinaMarkdown(
+      rawWithHeader,
+      "https://example.com/story",
+    );
     expect(parsedHeader.imageUrl).toBe("https://example.com/cover.jpg");
 
     const rawWithLeadImg = `Title: Story Title
@@ -339,12 +350,19 @@ URL Source: https://example.com/story2
 Markdown Content:
 ![Hero Image](https://example.com/lead.png)
 More body text.`;
-    const parsedLead = parseJinaMarkdown(rawWithLeadImg, "https://example.com/story2");
+    const parsedLead = parseJinaMarkdown(
+      rawWithLeadImg,
+      "https://example.com/story2",
+    );
     expect(parsedLead.imageUrl).toBe("https://example.com/lead.png");
   });
 
   test("convertHtmlToEpub attaches generated cover to EPUB", () => {
-    const coverPath = generateTypographicCover("Test Book With Cover", "Author", "Example.com");
+    const coverPath = generateTypographicCover(
+      "Test Book With Cover",
+      "Author",
+      "Example.com",
+    );
     try {
       const epubPath = convertHtmlToEpub(
         "<h1>Hello</h1><p>Test content for epub conversion.</p>",

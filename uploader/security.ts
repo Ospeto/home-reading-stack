@@ -3,6 +3,9 @@ import dns from "node:dns/promises";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
+import fs from "node:fs";
+import { spawnSync } from "node:child_process";
+import { Buffer } from "node:buffer";
 
 // Default production WAN domain and ports
 export const DEFAULT_WAN_DOMAIN = "reading.wavypremium.xyz";
@@ -152,10 +155,18 @@ export function isPrivateOrInternalIp(rawIp: string): boolean {
       return true;
     }
 
-    // IPv4-mapped IPv6: ::ffff:a.b.c.d
-    const v4MappedMatch = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (v4MappedMatch) {
-      return isPrivateOrInternalIp(v4MappedMatch[1]);
+    // IPv4-mapped IPv6: ::ffff:a.b.c.d or hex forms e.g. ::ffff:7f00:1 or 0:0:0:0:0:ffff:...
+    const normalizedV6 = lower.replace(/^(?:0+:){1,5}ffff:/, "::ffff:");
+    const v4MappedDotted = normalizedV6.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (v4MappedDotted) {
+      return isPrivateOrInternalIp(v4MappedDotted[1]);
+    }
+    const v4MappedHex = normalizedV6.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (v4MappedHex) {
+      const high = parseInt(v4MappedHex[1], 16);
+      const low = parseInt(v4MappedHex[2], 16);
+      const dotted = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
+      return isPrivateOrInternalIp(dotted);
     }
 
     return false;
@@ -171,7 +182,7 @@ export function isPrivateOrInternalIp(rawIp: string): boolean {
  */
 export async function validateUrlForSSRF(
   rawUrl: string,
-  options: { allowProxyBypass?: boolean } = {},
+  _options: { allowProxyBypass?: boolean } = {},
 ): Promise<{ safe: boolean; error?: string; resolvedIp?: string }> {
   try {
     const u = new URL(rawUrl);
@@ -228,14 +239,6 @@ export async function validateUrlForSSRF(
       }
       return { safe: true, resolvedIp: addresses[0]?.address };
     } catch (dnsErr: any) {
-      // In offline / test environments with mock domains, if allowProxyBypass is set,
-      // allow domain if host format is valid FQDN
-      if (
-        options.allowProxyBypass &&
-        /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(host)
-      ) {
-        return { safe: true };
-      }
       return {
         safe: false,
         error: `DNS resolution failed for ${host}: ${dnsErr?.message || dnsErr}`,
@@ -250,9 +253,20 @@ export async function validateUrlForSSRF(
 // 2. WAN vs LAN Detection
 // ---------------------------------------------------------------------------
 
+export function isLanHost(host: string): boolean {
+  const clean = host.toLowerCase().split(":")[0].trim();
+  if (!clean) return false;
+  if (clean === "localhost" || clean === "127.0.0.1" || clean === "::1") return true;
+  if (clean.startsWith("192.168.") || clean.startsWith("10.")) return true;
+  if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(clean)) return true;
+  if (clean.endsWith(".local") || clean.endsWith(".lan") || clean.endsWith(".home.arpa")) return true;
+  return false;
+}
+
 /**
  * Determines whether a request originated from the public WAN (via reverse tunnel / Caddy)
  * vs a local LAN client (direct connection to 192.168.x.x, 127.0.0.1, etc.).
+ * Fails closed: unrecognized requests on a 0.0.0.0 listener are classified as WAN.
  */
 export function isWanRequest(
   req: Request,
@@ -309,14 +323,14 @@ export function isWanRequest(
   const via = req.headers.get("via");
   if (proto === "https" && (via || hostHeader.includes("."))) {
     // If it's HTTPS through a proxy and not on a local LAN host name
-    if (
-      !hostHeader.startsWith("192.168.") &&
-      !hostHeader.startsWith("10.") &&
-      !hostHeader.startsWith("127.") &&
-      hostHeader !== "localhost"
-    ) {
+    if (!isLanHost(hostHeader)) {
       return true;
     }
+  }
+
+  // 5. Fail closed: on a 0.0.0.0 listener, any unrecognized non-LAN host header is classified as WAN
+  if (!isLanHost(hostHeader)) {
+    return true;
   }
 
   return false;
@@ -675,14 +689,99 @@ export function validateBookFormat(
   return null;
 }
 
+export interface EpubValidationResult {
+  valid: boolean;
+  error?: string;
+}
+
+/**
+ * Validates the physical content of an EPUB container:
+ * - Checks ZIP magic bytes (0x50, 0x4B, 0x03, 0x04)
+ * - Verifies mimetype entry contains application/epub+zip
+ * - Verifies required container entry: META-INF/container.xml
+ */
+export function validateEpubContent(filePath: string): EpubValidationResult {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return { valid: false, error: "File does not exist" };
+    }
+    const stat = fs.statSync(filePath);
+    if (stat.size < 58) {
+      return { valid: false, error: "File size too small for a valid EPUB" };
+    }
+
+    const fd = fs.openSync(filePath, "r");
+    const headerBuf = Buffer.alloc(128);
+    const bytesRead = fs.readSync(fd, headerBuf, 0, 128, 0);
+    fs.closeSync(fd);
+
+    if (bytesRead < 30) {
+      return { valid: false, error: "Truncated file header" };
+    }
+
+    // 1. Check ZIP magic bytes (PK\x03\x04)
+    if (headerBuf[0] !== 0x50 || headerBuf[1] !== 0x4B || headerBuf[2] !== 0x03 || headerBuf[3] !== 0x04) {
+      return { valid: false, error: "Invalid magic bytes: not a valid ZIP/EPUB container" };
+    }
+
+    // 2. Inspect archive entries with bsdtar -tf
+    const listRes = spawnSync("/usr/bin/bsdtar", ["-tf", filePath], {
+      encoding: "utf8",
+      timeout: 10000,
+    });
+
+    if (listRes.status !== 0) {
+      return { valid: false, error: "Failed to read EPUB ZIP entries" };
+    }
+
+    const entries = (listRes.stdout || "")
+      .split("\n")
+      .map((e: string) => e.trim())
+      .filter(Boolean);
+
+    // Check mimetype entry
+    const hasMimetype = entries.some(
+      (e: string) => e === "mimetype" || e.endsWith("/mimetype"),
+    );
+    if (!hasMimetype) {
+      return { valid: false, error: "Missing required EPUB 'mimetype' entry" };
+    }
+
+    // Check META-INF/container.xml entry
+    const hasContainer = entries.some(
+      (e: string) => e === "META-INF/container.xml" || e.endsWith("META-INF/container.xml"),
+    );
+    if (!hasContainer) {
+      return {
+        valid: false,
+        error: "Missing required EPUB container definition: META-INF/container.xml",
+      };
+    }
+
+    return { valid: true };
+  } catch (err: any) {
+    return {
+      valid: false,
+      error: `EPUB content validation error: ${err?.message || err}`,
+    };
+  }
+}
+
 /**
  * Checks if a filename is a canonical EPUB.
+ * Optionally validates the physical file content if filePath is provided.
  */
-export function isCanonicalEpub(filename: string): boolean {
+export function isCanonicalEpub(filename: string, filePath?: string): boolean {
   if (!filename) return false;
   const ext = path.extname(filename).toLowerCase();
   const base = path.basename(filename);
-  return ext === ".epub" && !base.startsWith(".") && !base.startsWith("._");
+  if (ext !== ".epub" || base.startsWith(".") || base.startsWith("._")) {
+    return false;
+  }
+  if (filePath && fs.existsSync(filePath)) {
+    return validateEpubContent(filePath).valid;
+  }
+  return true;
 }
 
 /**
@@ -788,7 +887,7 @@ export function sanitizeErrorMessage(err: any): string {
 
   // Strip token/key patterns
   sanitized = sanitized.replace(
-    /(?:token|key|secret)=[a-zA-Z0-9_-]+/gi,
+    /(token|key|secret)=[a-zA-Z0-9_-]+/gi,
     "$1=[REDACTED]",
   );
 

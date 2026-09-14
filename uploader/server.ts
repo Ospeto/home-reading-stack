@@ -128,10 +128,18 @@ export function getCacheDb(): Database {
 // Lazy singleton cacheDb proxy for backward-compatible call-sites
 // SAFETY: Proxy delegates Database operations to dynamically initialized Database instance
 export const cacheDb = {
-  run(...args: any[]) { return (getCacheDb().run as any)(...args); },
-  query(...args: any[]) { return (getCacheDb().query as any)(...args); },
-  prepare(...args: any[]) { return (getCacheDb().prepare as any)(...args); },
-  close() { if (_serverCacheDbInstance) _serverCacheDbInstance.close(); }
+  run(...args: any[]) {
+    return (getCacheDb().run as any)(...args);
+  },
+  query(...args: any[]) {
+    return (getCacheDb().query as any)(...args);
+  },
+  prepare(...args: any[]) {
+    return (getCacheDb().prepare as any)(...args);
+  },
+  close() {
+    if (_serverCacheDbInstance) _serverCacheDbInstance.close();
+  },
 } as unknown as Database;
 
 let _serverJobQueue: DurableJobQueue | null = null;
@@ -229,24 +237,24 @@ function registerJobHandlers(q: DurableJobQueue) {
     },
   );
 
-  q.registerHandler(
-    "url_article_ingest",
-    async (payload: { url: string }) => {
-      const result = await ingestArticleFromUrl(payload.url);
-      if (!result.success) {
-        throw new Error(result.error || "Article ingestion failed");
-      }
-      getCalibreBooks(true);
-      return result;
-    },
-  );
+  q.registerHandler("url_article_ingest", async (payload: { url: string }) => {
+    const result = await ingestArticleFromUrl(payload.url);
+    if (!result.success) {
+      throw new Error(result.error || "Article ingestion failed");
+    }
+    getCalibreBooks(true);
+    return result;
+  });
 
   q.registerHandler(
     "cover_backfill",
     async (payload: { candidateBookIds?: number[] }) => {
       const books = getCalibreBooks(true);
       const candidates = books.filter((b: any) => {
-        if (payload.candidateBookIds && !payload.candidateBookIds.includes(b.id))
+        if (
+          payload.candidateBookIds &&
+          !payload.candidateBookIds.includes(b.id)
+        )
           return false;
         const tags = Array.isArray(b.tags) ? b.tags : b.tags ? [b.tags] : [];
         const isWeb = tags.some(
@@ -294,9 +302,10 @@ function registerJobHandlers(q: DurableJobQueue) {
           if (setRes.status === 0) {
             updated.push({ id: book.id, title: book.title });
             try {
-              getCacheDb().run("UPDATE file_hashes SET cover = 1 WHERE book_id = ?", [
-                book.id,
-              ]);
+              getCacheDb().run(
+                "UPDATE file_hashes SET cover = 1 WHERE book_id = ?",
+                [book.id],
+              );
             } catch (_dbErr) {
               void _dbErr;
             }
@@ -323,13 +332,27 @@ export function getJobQueueInstance(): DurableJobQueue {
 // Lazy singleton jobQueue proxy
 // SAFETY: Proxy delegates JobQueue operations to dynamically initialized DurableJobQueue instance
 export const jobQueue = {
-  enqueue(...args: any[]) { return (getJobQueueInstance().enqueue as any)(...args); },
-  getJob(...args: any[]) { return (getJobQueueInstance().getJob as any)(...args); },
-  getRecentJobs(...args: any[]) { return (getJobQueueInstance().getRecentJobs as any)(...args); },
-  retryJob(...args: any[]) { return (getJobQueueInstance().retryJob as any)(...args); },
-  registerHandler(...args: any[]) { return (getJobQueueInstance().registerHandler as any)(...args); },
-  startWorker(...args: any[]) { return (getJobQueueInstance().startWorker as any)(...args); },
-  recoverInterruptedJobs(...args: any[]) { return (getJobQueueInstance().recoverInterruptedJobs as any)(...args); }
+  enqueue(...args: any[]) {
+    return (getJobQueueInstance().enqueue as any)(...args);
+  },
+  getJob(...args: any[]) {
+    return (getJobQueueInstance().getJob as any)(...args);
+  },
+  getRecentJobs(...args: any[]) {
+    return (getJobQueueInstance().getRecentJobs as any)(...args);
+  },
+  retryJob(...args: any[]) {
+    return (getJobQueueInstance().retryJob as any)(...args);
+  },
+  registerHandler(...args: any[]) {
+    return (getJobQueueInstance().registerHandler as any)(...args);
+  },
+  startWorker(...args: any[]) {
+    return (getJobQueueInstance().startWorker as any)(...args);
+  },
+  recoverInterruptedJobs(...args: any[]) {
+    return (getJobQueueInstance().recoverInterruptedJobs as any)(...args);
+  },
 } as unknown as DurableJobQueue;
 
 const KOREADER_HASH_ALGO = "md5";
