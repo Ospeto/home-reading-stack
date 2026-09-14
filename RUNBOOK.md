@@ -19,7 +19,8 @@ All services on the Mac mini run as native macOS LaunchAgents under `/Users/ospe
 | `com.ospeto.reading-stack-backup` | `~/Library/LaunchAgents/com.ospeto.reading-stack-backup.plist` | — | `/Users/ospeto/kosync-server` |
 | `com.ospeto.kosync-watchdog` | `~/Library/LaunchAgents/com.ospeto.kosync-watchdog.plist` | — | `/Users/ospeto/kosync-server` |
 | `com.ospeto.singbox-proxy` | `~/Library/LaunchAgents/com.ospeto.singbox-proxy.plist` | `7890` | `/Users/ospeto/.config/sing-box` |
-| `com.ospeto.reading-vless-tunnel` | `~/Library/LaunchAgents/com.ospeto.reading-vless-tunnel.plist` | `8086 (remote)` | `/Users/ospeto` |
+| `com.ospeto.reading-vless-tunnel` | `~/Library/LaunchAgents/com.ospeto.reading-vless-tunnel.plist` | `8086, 7200 (remote)` | `/Users/ospeto` |
+| `com.ospeto.reading-tunnel-watchdog` | `~/Library/LaunchAgents/com.ospeto.reading-tunnel-watchdog.plist` | — | `/Users/ospeto/uploader` |
 
 ---
 
@@ -310,6 +311,91 @@ bun -e '
   console.log("Menu button registered:", ok);
 '
 ```
+
+---
+
+### 9. Reverse SSH Tunnel Auto-Healing Watchdog & /status Dashboard
+
+Manage and verify the tunnel auto-healing watchdog and in-chat diagnostics:
+
+#### Watchdog Architecture & Healing Flow
+
+The auto-healing watchdog (`scripts/tunnel-watchdog.sh`) runs via LaunchAgent `com.ospeto.reading-tunnel-watchdog` every 120 seconds:
+1. **Local Health Checks**: Verifies `nc -z 127.0.0.1 7890` (Sing-box proxy), `127.0.0.1:8086` (Reading HQ), and `127.0.0.1:7200` (KOSync).
+2. **WAN Probe**: Checks `https://reading.wavypremium.xyz` through the local VLESS proxy.
+3. **Auto-Healing**:
+   - If unreachable or returning HTTP 502/000:
+     * Kills hanging local SSH forward processes (`pkill -f "ssh.*0.0.0.0:8086"`).
+     * Clears orphaned remote listeners holding ports 8086/7200 on VPS `panel` via `ssh panel "fuser -k 8086/tcp 7200/tcp"`.
+     * Kickstarts `gui/$(id -u)/com.ospeto.reading-vless-tunnel`.
+     * Re-probes after a 4-second delay.
+4. **Telegram Escalation**:
+   - Maintains failure count in `/tmp/reading-tunnel-failures`.
+   - If consecutive failures reach 3, dispatches an alert card to the captain via `TELEGRAM_BACKUP_CHAT_ID`.
+   - Automatically resets counter to 0 on any healthy probe.
+
+#### Manual Watchdog Operations
+
+```bash
+# 1. Trigger manual watchdog run
+/Users/ospeto/uploader/scripts/tunnel-watchdog.sh
+
+# 2. Inspect watchdog logs
+tail -f ~/Library/Logs/reading-tunnel-watchdog.log
+
+# 3. Check LaunchAgent status
+launchctl list | grep com.ospeto.reading-tunnel-watchdog
+```
+
+#### In-Chat Health Dashboard (`/status` and `/health`)
+
+Send `/status` or `/health` to the Telegram bot to inspect:
+- **WAN Edge**: VPS Caddy reverse proxy latency and response code for Reading HQ and KOSync.
+- **Reverse Tunnel**: Active SSH PID, forwarded ports (`8086`, `7200`), Sing-box proxy status.
+- **Reading HQ & Calibre**: Web Uploader (:8086) and Calibre (:8088) states, total catalog count, top format distribution, and newest ingested title.
+- **KOReader Sync**: Server state (:7200), SQLite WAL health, user/device counts, and reading progress records.
+- **Mac Mini Host**: System uptime, available memory, and storage free space (internal disk + External SSD).
+- **Interactive Controls**: `[🔄 Refresh Status]` updates the message card in-place; `[📖 Open Reading HQ]` launches the Telegram Mini App.
+
+---
+
+### 10. KOSync WAN Setup & KOReader Client Configuration
+
+To access KOSync over the WAN (cellular / remote WiFi) without VPN:
+
+#### 1. VPS Caddy Configuration (`panel`)
+
+Add the following site block to `/etc/caddy/Caddyfile` on VPS `panel` (or inside the Caddy container):
+
+```caddy
+https://kosync.wavypremium.xyz {
+    reverse_proxy * http://172.18.0.1:7200
+}
+```
+
+Reload Caddy:
+```bash
+ssh panel "systemctl reload caddy || docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
+```
+
+#### 2. KOReader Client Setup (Kindle / Android / Kobo)
+
+1. Open **KOReader** on your device.
+2. Tap the top menu bar -> **Settings** (gear icon) -> **Sync**.
+3. Tap **Custom sync server**.
+4. Check **Use custom sync server**.
+5. Set **Server URL**:
+   - **WAN (Everywhere):** `https://kosync.wavypremium.xyz`
+   - **LAN (Home WiFi):** `http://192.168.31.15:7200`
+6. Tap **Register / Login**:
+   - Username: your KOSync username (e.g. `moe`)
+   - Password: your user password
+7. Enable **Auto sync**:
+   - Check **Auto sync reading progress when opening and closing books**.
+8. Verify sync:
+   - Read a page on your Kindle/eReader.
+   - Send `/status` to the Telegram bot or check `/Users/ospeto/kosync-server/data/koreader-sync.db`.
+   - The updated progress record and timestamp appear immediately.
 
 ---
 
