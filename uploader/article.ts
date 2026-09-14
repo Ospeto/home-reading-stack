@@ -106,6 +106,262 @@ export function extractUrlFromText(text: string): string | null {
   return null;
 }
 
+export const PAYWALL_ERROR_MESSAGE =
+  "Site content is behind a paid subscription paywall. Only navigation menus and subscription offers were returned, so no eBook was generated. Please paste the article text directly into Reading HQ or provide an unlocked link.";
+
+export interface PaywallCheckResult {
+  isPaywall: boolean;
+  reason?: string;
+  linkDensity?: number;
+  proseWordCount?: number;
+  totalTextLen?: number;
+}
+
+/**
+ * Heuristics to detect hard subscription barriers, paywalls, and navigation dumps:
+ * 1. Link density (characters in links vs total text) > 50% when totalTextLen > 200.
+ * 2. Prose word count (excluding links, navs, headers) < 150 words.
+ * 3. Subscription/pricing markers (e.g. 'Explore more offers', 'Standard Digital', 'Save over 40%').
+ */
+export function isPaywallOrGarbage(
+  text: string,
+  linkTextLen?: number,
+  totalTextLen?: number
+): PaywallCheckResult {
+  if (!text) {
+    return { isPaywall: true, reason: "Empty content" };
+  }
+
+  // If linkTextLen / totalTextLen are not provided, calculate from text
+  if (linkTextLen === undefined || totalTextLen === undefined) {
+    let lLen = 0;
+    // Markdown links: [text](url)
+    const mdLinkRegex = /\[([^\]]+)\]\([^\)]+\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = mdLinkRegex.exec(text)) !== null) {
+      lLen += m[1].trim().length;
+    }
+    // HTML links: <a ...>text</a>
+    const htmlLinkRegex = /<a\b[^>]*>([\s\S]*?)<\/a>/gi;
+    while ((m = htmlLinkRegex.exec(text)) !== null) {
+      lLen += m[1].replace(/<[^>]+>/g, "").trim().length;
+    }
+    linkTextLen = lLen;
+
+    const plain = decodeHtmlEntities(
+      text
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1")
+        .replace(/!\[([^\]]*)\]\([^\)]+\)/g, "")
+        .replace(/[#*_`~-]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+    );
+    totalTextLen = plain.length;
+  }
+
+  // a) Link density check: > 50% when totalTextLen > 200
+  const linkDensity = totalTextLen > 0 ? linkTextLen / totalTextLen : 0;
+  if (totalTextLen > 200 && linkDensity > 0.5) {
+    return {
+      isPaywall: true,
+      reason: `Link density too high (${Math.round(linkDensity * 100)}% > 50%)`,
+      linkDensity,
+      totalTextLen,
+    };
+  }
+
+  // c) Subscription / paywall marker checks
+  const subscriptionMarkers = [
+    /explore more offers/i,
+    /standard digital/i,
+    /save over \d+%/i,
+    /choose your subscription/i,
+    /subscribe to unlock/i,
+    /subscribe for full access/i,
+    /already a subscriber\?\s*sign in/i,
+    /to continue reading,?\s*please subscribe/i,
+    /become a subscriber/i,
+    /get unlimited access/i,
+    /start your free trial/i,
+    /try unlimited access/i,
+  ];
+
+  for (const marker of subscriptionMarkers) {
+    if (marker.test(text)) {
+      return {
+        isPaywall: true,
+        reason: `Subscription paywall marker detected: ${marker.source}`,
+        linkDensity,
+        totalTextLen,
+      };
+    }
+  }
+
+  // b) Prose word count check: prose word count (excluding links, navs, headers) < 150 words
+  const lines = text.split("\n");
+  const proseParts: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith("#")) continue;
+    if (/^[-*+]\s*\[.+\]\(.+\)/.test(trimmed)) continue;
+    if (/^\[.+\]\(.+\)/.test(trimmed)) continue;
+    const cleanLine = decodeHtmlEntities(
+      trimmed
+        .replace(/\[([^\]]+)\]\([^\)]+\)/g, "")
+        .replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/[#*_`~|]/g, " ")
+        .trim()
+    );
+    if (cleanLine) {
+      proseParts.push(cleanLine);
+    }
+  }
+  const proseStr = proseParts.join(" ").replace(/\s+/g, " ").trim();
+  const proseWordCount = proseStr ? proseStr.split(/\s+/).filter(Boolean).length : 0;
+
+  if (proseWordCount < 150) {
+    return {
+      isPaywall: true,
+      reason: `Insufficient prose content (${proseWordCount} words < 150)`,
+      linkDensity,
+      proseWordCount,
+      totalTextLen,
+    };
+  }
+
+  return {
+    isPaywall: false,
+    linkDensity,
+    proseWordCount,
+    totalTextLen,
+  };
+}
+
+/**
+ * Strip aggressive navigation noise and boilerplate from markdown content (e.g. from Jina Reader).
+ */
+export function cleanMarkdownNoise(md: string): string {
+  if (!md) return "";
+  let text = md.replace(/\r\n/g, "\n");
+
+  // 1. Strip boilerplate sections ('Most Read', 'Popular Searches', 'Explore more offers', 'Related Stories', 'Share this article')
+  const boilerplatePattern = /(?:^|\n)#{1,6}\s*(?:Most Read|Popular Searches|Explore more offers|Related Stories|Related Articles|Related Posts|Share this article|Share this story|Trending Stories|More from|Recommended Stories|FT recommends|Top sections|Useful links|Explore our full range of subscriptions|Try unlimited access)[\s\S]*?(?=(?:\n#{1,6}\s+)|$)/gi;
+  text = text.replace(boilerplatePattern, "\n");
+
+  text = text.replace(/^(?:Most Read|Popular Searches|Explore more offers|Related Stories|Sections|Search the FT[^\n]*)\s*$/gim, "");
+
+  // 2. Strip leading and trailing navigation lists
+  const navKeywords = [
+    "home", "world", "sections", "sign in", "subscribe", "terms", "privacy", "accessibility help",
+    "skip to navigation", "skip to content", "skip to main content", "skip to footer",
+    "open side navigation", "close search bar", "search the ft", "feedback", "menu", "search",
+    "financial times", "top sections", "useful links", "edition"
+  ];
+
+  const isNavLine = (line: string): boolean => {
+    const trimmed = line.trim();
+    if (!trimmed) return true; // whitespace between nav lines
+    if (/^\[\s*\]\([^\)]+\)$/.test(trimmed)) return true;
+    const lower = trimmed.toLowerCase();
+    const hasKeyword = navKeywords.some((k) => lower.includes(k));
+
+    // Nav buttons or links like [Menu](...) or [Search](...)
+    if (/^\[[^\]]+\]\([^\)]*\)/.test(trimmed) && (hasKeyword || lower.length < 25)) return true;
+    // List item link
+    if (/^[-*+]\s+/.test(trimmed) || /^\d+\.\s+/.test(trimmed)) {
+      if (hasKeyword || /^[-*+]\s+\[[^\]]+\]\([^\)]+\)$/.test(trimmed)) return true;
+    }
+    if (/^(?:open|close)\s+/i.test(trimmed)) return true;
+    return false;
+  };
+
+  const lines = text.split("\n");
+  let startIdx = 0;
+  // If text starts with Jina Reader metadata header ("Title: ... URL Source: ... Markdown Content:")
+  const mdMarkerIdx = text.indexOf("Markdown Content:\n");
+  if (mdMarkerIdx !== -1) {
+    const headerPrefix = text.slice(0, mdMarkerIdx + "Markdown Content:\n".length);
+    const rest = text.slice(mdMarkerIdx + "Markdown Content:\n".length);
+    return headerPrefix + cleanMarkdownNoise(rest);
+  }
+
+  while (startIdx < lines.length && isNavLine(lines[startIdx])) {
+    startIdx++;
+  }
+
+  let endIdx = lines.length - 1;
+  while (endIdx >= 0 && isNavLine(lines[endIdx])) {
+    endIdx--;
+  }
+
+  if (startIdx <= endIdx) {
+    text = lines.slice(startIdx, endIdx + 1).join("\n");
+  } else {
+    text = "";
+  }
+
+  return text.trim();
+}
+
+/**
+ * Strip aggressive navigation and noise elements from raw HTML.
+ */
+export function cleanDirectHtml(rawHtml: string): string {
+  if (!rawHtml) return "";
+  let workHtml = rawHtml;
+
+  // 1. Comments
+  workHtml = workHtml.replace(/<!--[\s\S]*?-->/g, "");
+
+  // 2. Intrusive & non-content tags entirely:
+  // <nav>, <header>, <footer>, <aside>, <form>, <map>, <area>, <noscript>, <style>, <script>, <iframe>, <svg>
+  workHtml = workHtml.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "");
+  workHtml = workHtml.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "");
+  workHtml = workHtml.replace(/<noscript\b[^<]*(?:(?!<\/noscript>)<[^<]*)*<\/noscript>/gi, "");
+  workHtml = workHtml.replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi, "");
+  workHtml = workHtml.replace(/<svg\b[^<]*(?:(?!<\/svg>)<[^<]*)*<\/svg>/gi, "");
+  workHtml = workHtml.replace(/<nav\b[^<]*(?:(?!<\/nav>)<[^<]*)*<\/nav>/gi, "");
+  workHtml = workHtml.replace(/<header\b[^<]*(?:(?!<\/header>)<[^<]*)*<\/header>/gi, "");
+  workHtml = workHtml.replace(/<footer\b[^<]*(?:(?!<\/footer>)<[^<]*)*<\/footer>/gi, "");
+  workHtml = workHtml.replace(/<aside\b[^<]*(?:(?!<\/aside>)<[^<]*)*<\/aside>/gi, "");
+  workHtml = workHtml.replace(/<form\b[^<]*(?:(?!<\/form>)<[^<]*)*<\/form>/gi, "");
+  workHtml = workHtml.replace(/<map\b[^<]*(?:(?!<\/map>)<[^<]*)*<\/map>/gi, "");
+  workHtml = workHtml.replace(/<area\b[^>]*\/?>/gi, "");
+
+  // 3. Strip elements with classes/ids matching: nav, menu, sidebar, breadcrumb, footer, share-buttons, social-share, related-posts, ad, banner
+  const noiseClassIdRegex = /<(div|section|aside|ul|ol|p|span|table|td|nav|header|footer)\b[^>]*(?:class|id)=["'][^"']*(?:nav|menu|sidebar|breadcrumb|footer|share-buttons|social-share|related-posts|ad|banner|cookie|popup|newsletter|subscribe)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi;
+  for (let i = 0; i < 3; i++) {
+    workHtml = workHtml.replace(noiseClassIdRegex, "");
+  }
+
+  // 4. Remove image map references and tracking/spacer pixels
+  workHtml = workHtml.replace(/<img\b[^>]*\b(?:usemap|ismap)[^>]*>/gi, "");
+  workHtml = workHtml.replace(/<img\b[^>]*(?:1x1|trans_|spacer)[^>]*>/gi, "");
+
+  // 5. Clean empty table cells and layout rows
+  for (let i = 0; i < 3; i++) {
+    workHtml = workHtml.replace(/<td\b[^>]*>\s*(?:&nbsp;|<br\s*\/?>|\s)*<\/td>/gi, "");
+    workHtml = workHtml.replace(/<tr\b[^>]*>\s*<\/tr>/gi, "");
+    workHtml = workHtml.replace(/<table\b[^>]*>\s*<\/table>/gi, "");
+  }
+
+  // Unwrap layout tables that only wrap a single cell
+  for (let i = 0; i < 3; i++) {
+    workHtml = workHtml.replace(
+      /<table\b[^>]*>\s*<tr\b[^>]*>\s*<td\b[^>]*>([\s\S]*?)<\/td>\s*<\/tr>\s*<\/table>/gi,
+      (match, inner) => {
+        if (/<tr\b/i.test(inner)) return match;
+        return inner;
+      }
+    );
+  }
+
+  return workHtml;
+}
+
 /**
  * Decode common HTML entities into plain characters.
  */
@@ -514,6 +770,7 @@ export async function extractArticleViaJina(
   }
 
   const parsed = parseJinaMarkdown(rawMd, url);
+  const cleanedBodyMarkdown = cleanMarkdownNoise(parsed.bodyMarkdown);
   const hostname =
     fallbackHostname ||
     (() => {
@@ -551,7 +808,13 @@ export async function extractArticleViaJina(
     }
   }
 
-  const cleanedHtml = markdownToHtml(parsed.bodyMarkdown);
+  const cleanedHtml = markdownToHtml(cleanedBodyMarkdown);
+
+  // Validate content quality & detect paywalls or garbage dumps
+  const paywallCheck = isPaywallOrGarbage(cleanedBodyMarkdown);
+  if (paywallCheck.isPaywall) {
+    throw new Error(PAYWALL_ERROR_MESSAGE);
+  }
 
   const textOnly = decodeHtmlEntities(cleanedHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
   const wordCount = Math.max(1, textOnly.split(/\s+/).filter(Boolean).length);
@@ -764,25 +1027,8 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
   }
 
   // 3. Clean Article Body HTML
-  // Remove intrusive clutter tags
-  let workHtml = rawHtml;
-  workHtml = workHtml.replace(/<!--[\s\S]*?-->/g, "");
-  workHtml = workHtml.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "");
-  workHtml = workHtml.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "");
-  workHtml = workHtml.replace(/<noscript\b[^<]*(?:(?!<\/noscript>)<[^<]*)*<\/noscript>/gi, "");
-  workHtml = workHtml.replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi, "");
-  workHtml = workHtml.replace(/<svg\b[^<]*(?:(?!<\/svg>)<[^<]*)*<\/svg>/gi, "");
-  workHtml = workHtml.replace(/<nav\b[^<]*(?:(?!<\/nav>)<[^<]*)*<\/nav>/gi, "");
-  workHtml = workHtml.replace(/<header\b[^<]*(?:(?!<\/header>)<[^<]*)*<\/header>/gi, "");
-  workHtml = workHtml.replace(/<footer\b[^<]*(?:(?!<\/footer>)<[^<]*)*<\/footer>/gi, "");
-  workHtml = workHtml.replace(/<aside\b[^<]*(?:(?!<\/aside>)<[^<]*)*<\/aside>/gi, "");
-  workHtml = workHtml.replace(/<form\b[^<]*(?:(?!<\/form>)<[^<]*)*<\/form>/gi, "");
-
-  // Strip ad containers, social bars, comment sections, popups
-  workHtml = workHtml.replace(
-    /<(div|section|aside|ul|p)\b[^>]*(?:class|id)=["'][^"']*(?:ad-container|advertisement|banner|social-share|share-buttons|comments|sidebar|related-posts|cookie|popup|newsletter|subscribe)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi,
-    ""
-  );
+  // Remove intrusive clutter tags & navigation noise
+  const workHtml = cleanDirectHtml(rawHtml);
 
   // Identify Best Article Container
   let candidateHtml = "";
@@ -846,6 +1092,12 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
   // Remove empty paragraphs and empty div tags
   cleaned = cleaned.replace(/<p\s*>\s*(&nbsp;|\s)*<\/p>/gi, "");
   cleaned = cleaned.replace(/<div\s*>\s*<\/div>/gi, "");
+
+  // Validate content quality & detect paywalls or garbage dumps
+  const paywallCheck = isPaywallOrGarbage(cleaned);
+  if (paywallCheck.isPaywall) {
+    throw new Error(PAYWALL_ERROR_MESSAGE);
+  }
 
   // Calculate word count & reading time
   const textOnly = decodeHtmlEntities(cleaned.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());

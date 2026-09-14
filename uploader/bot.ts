@@ -1570,13 +1570,18 @@ async function pollTelegram() {
                 }
               } catch (err: any) {
                 logError(`Article ingestion exception for ${articleUrl}: ${err.message}`);
+                const isPaywall = /paid subscription paywall|subscription offer/i.test(err.message);
+                const advice = isPaywall
+                  ? `_Please paste the article text directly into Reading HQ or provide an unlocked link._`
+                  : `_Please check the URL or paywall access and try again._`;
+
                 await editOrSendMessage(
                   chatId,
                   statusMsgId,
                   `⚠️ *Article Ingestion Failed*\n\n` +
                   `\uD83D\uDD17 *URL:* \`${articleUrl}\`\n` +
                   `❌ *Error:* ${err.message || "Unknown error"}\n\n` +
-                  `_Please check the URL or paywall access and try again._`,
+                  advice,
                   "Markdown"
                 );
               }
