@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import process from "node:process";
-import { cleanString } from "./scraper";
+import { cleanString, isAllowedCoverUrl } from "./scraper";
 
 const DROP_DIR = "/Users/ospeto/Books_Drop";
 const SERVER_URL = "http://127.0.0.1:8088";
@@ -11,6 +11,8 @@ const PROXY_URL = "http://127.0.0.1:7890";
 const EBOOK_CONVERT_PATH = "/opt/homebrew/bin/ebook-convert";
 const CALIBREDB_PATH = "/opt/homebrew/bin/calibredb";
 const FETCH_TIMEOUT_MS = 15000;
+const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
 if (!fs.existsSync(DROP_DIR)) {
   fs.mkdirSync(DROP_DIR, { recursive: true });
@@ -26,6 +28,8 @@ export interface ExtractedArticle {
   readTimeMinutes: number;
   cleanedHtml: string;
   styledDocument: string;
+  coverImagePath?: string;
+  coverImageUrl?: string;
 }
 
 export interface IngestArticleResult {
@@ -492,12 +496,14 @@ export function parseJinaMarkdown(rawText: string, originalUrl: string): {
   url: string;
   publishedTime?: string;
   author?: string;
+  imageUrl?: string;
   bodyMarkdown: string;
 } {
   let title = "";
   let url = originalUrl;
   let publishedTime = "";
   let author = "";
+  let imageUrl = "";
   let bodyMarkdown = rawText;
 
   const mdMarker = "Markdown Content:";
@@ -518,6 +524,9 @@ export function parseJinaMarkdown(rawText: string, originalUrl: string): {
 
     const authorMatch = header.match(/^Author:\s*(.+)$/m);
     if (authorMatch) author = authorMatch[1].trim();
+
+    const imageMatch = header.match(/^Image:\s*(.+)$/m);
+    if (imageMatch) imageUrl = imageMatch[1].trim();
   }
 
   // If no title from header, check if first line of markdown is # Title
@@ -528,7 +537,15 @@ export function parseJinaMarkdown(rawText: string, originalUrl: string): {
     }
   }
 
-  return { title, url, publishedTime, author, bodyMarkdown };
+  // If no image from header, check for leading markdown image in the first 2000 chars of body
+  if (!imageUrl) {
+    const leadImgMatch = bodyMarkdown.substring(0, 2000).match(/!\[.*?\]\((https?:\/\/[^\s\)]+)\)/);
+    if (leadImgMatch) {
+      imageUrl = leadImgMatch[1];
+    }
+  }
+
+  return { title, url, publishedTime, author, imageUrl, bodyMarkdown };
 }
 
 /**
@@ -736,6 +753,199 @@ export function buildStyledHtmlDocument(opts: StyledDocumentOptions): string {
 }
 
 /**
+ * Helper to wrap text into lines with character constraints.
+ */
+export function wrapText(text: string, maxCharsPerLine = 22, maxLines = 5): string[] {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return ["Web Article"];
+  const lines: string[] = [];
+  let currentLine = "";
+
+  for (const word of words) {
+    if (!currentLine) {
+      currentLine = word;
+    } else if ((currentLine + " " + word).length <= maxCharsPerLine) {
+      currentLine += " " + word;
+    } else {
+      lines.push(currentLine);
+      currentLine = word;
+      if (lines.length >= maxLines - 1) break;
+    }
+  }
+  if (currentLine && lines.length < maxLines) {
+    lines.push(currentLine);
+  }
+  return lines;
+}
+
+/**
+ * Helper to escape XML special characters for SVG text.
+ */
+export function escapeXml(unsafe: string): string {
+  return unsafe
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/**
+ * Dynamically generate a clean typographic SVG/JPEG cover card:
+ * Dark gradient background, crisp article title, author, and site name badge.
+ */
+export function generateTypographicCover(
+  title: string,
+  author: string,
+  siteName: string,
+  readTimeMinutes?: number
+): string {
+  const randomSuffix = `${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+  const tempSvg = `/tmp/typo_cover_${randomSuffix}.svg`;
+  const tempJpg = `/tmp/typo_cover_${randomSuffix}.jpg`;
+
+  const safeTitle = cleanString(title) || "Web Article";
+  const safeAuthor = cleanString(author) || "Unknown Author";
+  const safeSite = (cleanString(siteName) || "Web Article").toUpperCase();
+  const readInfo = readTimeMinutes ? `${readTimeMinutes} MIN READ • WEB ARTICLE` : "WEB ARTICLE";
+
+  const titleLines = wrapText(safeTitle, 22, 5);
+  const fontSize = titleLines.length <= 2 ? 44 : titleLines.length === 3 ? 38 : 32;
+  const lineHeight = fontSize + 12;
+  const startY = 220;
+
+  const titleTspans = titleLines
+    .map((line, idx) => `<tspan x="60" y="${startY + idx * lineHeight}">${escapeXml(line)}</tspan>`)
+    .join("\n    ");
+
+  const badgeText = escapeXml(safeSite);
+  const badgeWidth = Math.min(480, Math.max(120, badgeText.length * 9 + 40));
+
+  const dividerY = startY + titleLines.length * lineHeight + 20;
+  const authorY = dividerY + 45;
+  const metaY = authorY + 35;
+
+  const svgContent = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="900" viewBox="0 0 600 900">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090d16" />
+      <stop offset="40%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#1e1b4b" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#6366f1" />
+      <stop offset="100%" stop-color="#a855f7" />
+    </linearGradient>
+  </defs>
+  <rect width="600" height="900" fill="url(#bg)" />
+  <rect x="60" y="70" width="60" height="4" rx="2" fill="url(#accent)" />
+  <rect x="60" y="90" width="${badgeWidth}" height="32" rx="16" fill="#1e293b" stroke="#334155" stroke-width="1" />
+  <text x="${60 + badgeWidth / 2}" y="111" fill="#a5b4fc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="700" letter-spacing="1.5" text-anchor="middle">${badgeText}</text>
+  
+  <text fill="#f8fafc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="${fontSize}" font-weight="800">
+    ${titleTspans}
+  </text>
+  
+  <line x1="60" y1="${dividerY}" x2="140" y2="${dividerY}" stroke="#475569" stroke-width="2" />
+  
+  <text x="60" y="${authorY}" fill="#cbd5e1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="22" font-weight="600">
+    ${escapeXml(safeAuthor)}
+  </text>
+  
+  <text x="60" y="${metaY}" fill="#64748b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="14" font-weight="600" letter-spacing="1.5">
+    ${escapeXml(readInfo)}
+  </text>
+  
+  <text x="60" y="830" fill="#475569" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="700" letter-spacing="2">
+    READING HQ
+  </text>
+</svg>`;
+
+  fs.writeFileSync(tempSvg, svgContent, "utf8");
+
+  const sipsRes = spawnSync("/usr/bin/sips", ["-s", "format", "jpeg", tempSvg, "--out", tempJpg], {
+    encoding: "utf8",
+    timeout: 15000,
+  });
+
+  try {
+    fs.unlinkSync(tempSvg);
+  } catch (_err) {
+    void _err;
+  }
+
+  if (sipsRes.status !== 0 || !fs.existsSync(tempJpg)) {
+    throw new Error(`Failed to generate typographic cover via sips: ${sipsRes.stderr || "Unknown error"}`);
+  }
+
+  return tempJpg;
+}
+
+/**
+ * Download a candidate web cover image and convert to standardized JPEG.
+ */
+export async function downloadCoverImage(imageUrl: string, articleUrl: string): Promise<string | null> {
+  let resolvedUrl: string;
+  try {
+    resolvedUrl = new URL(imageUrl, articleUrl).href;
+  } catch {
+    return null;
+  }
+
+  if (!isAllowedCoverUrl(resolvedUrl)) {
+    return null;
+  }
+
+  const randomSuffix = `${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+  const tempRaw = `/tmp/raw_cover_${randomSuffix}`;
+  const tempJpg = `/tmp/article_cover_${randomSuffix}.jpg`;
+
+  try {
+    const res = await fetch(resolvedUrl, {
+      headers: {
+        "User-Agent": BROWSER_USER_AGENT,
+        Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+      },
+      proxy: PROXY_URL,
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    } as any);
+
+    if (!res.ok) return null;
+
+    const contentType = res.headers.get("content-type") || "";
+    if (contentType && !contentType.includes("image") && !contentType.includes("octet-stream")) {
+      return null;
+    }
+
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length < 1024) return null;
+
+    fs.writeFileSync(tempRaw, buf);
+
+    const sipsRes = spawnSync("/usr/bin/sips", ["-s", "format", "jpeg", tempRaw, "--out", tempJpg], {
+      encoding: "utf8",
+      timeout: 15000,
+    });
+
+    if (sipsRes.status === 0 && fs.existsSync(tempJpg) && fs.statSync(tempJpg).size > 1024) {
+      return tempJpg;
+    }
+    return null;
+  } catch (_err) {
+    void _err;
+    return null;
+  } finally {
+    if (fs.existsSync(tempRaw)) {
+      try {
+        fs.unlinkSync(tempRaw);
+      } catch (_err) {
+        void _err;
+      }
+    }
+  }
+}
+
+/**
  * Fetch and extract article content using Jina Reader (r.jina.ai) as a fallback
  * for paywalls, Cloudflare bot-walls, or restricted content.
  */
@@ -831,6 +1041,29 @@ export async function extractArticleViaJina(
     contentHtml: cleanedHtml
   });
 
+  // Cover image extraction & generation
+  let coverImageUrl = parsed.imageUrl;
+  let coverImagePath: string | undefined;
+
+  if (coverImageUrl) {
+    try {
+      const downloadedPath = await downloadCoverImage(coverImageUrl, url);
+      if (downloadedPath) {
+        coverImagePath = downloadedPath;
+      }
+    } catch (_err) {
+      void _err;
+    }
+  }
+
+  if (!coverImagePath) {
+    try {
+      coverImagePath = generateTypographicCover(title, author, siteName, readTimeMinutes);
+    } catch (coverErr: any) {
+      console.warn(`[Article] Typographic cover generation warning: ${coverErr.message}`);
+    }
+  }
+
   return {
     url,
     title,
@@ -840,7 +1073,9 @@ export async function extractArticleViaJina(
     wordCount,
     readTimeMinutes,
     cleanedHtml,
-    styledDocument
+    styledDocument,
+    coverImagePath,
+    coverImageUrl,
   };
 }
 
@@ -869,8 +1104,8 @@ async function fetchArticlePage(validatedUrl: string): Promise<Response> {
 /**
  * Extract author or date from Schema.org JSON-LD scripts.
  */
-function extractFromJsonLd(html: string): { author?: string; publishedDate?: string; title?: string } {
-  const result: { author?: string; publishedDate?: string; title?: string } = {};
+function extractFromJsonLd(html: string): { author?: string; publishedDate?: string; title?: string; image?: string } {
+  const result: { author?: string; publishedDate?: string; title?: string; image?: string } = {};
   const regex = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
   let match: RegExpExecArray | null;
 
@@ -898,6 +1133,19 @@ function extractFromJsonLd(html: string): { author?: string; publishedDate?: str
           } else if (typeof item.author === "object" && item.author.name) {
             result.author = item.author.name;
           }
+        }
+
+        if (!result.image && item.image) {
+          if (typeof item.image === "string") {
+            result.image = item.image;
+          } else if (Array.isArray(item.image) && item.image[0]) {
+            result.image = typeof item.image[0] === "string" ? item.image[0] : item.image[0].url;
+          } else if (typeof item.image === "object" && item.image.url) {
+            result.image = item.image.url;
+          }
+        }
+        if (!result.image && item.thumbnailUrl && typeof item.thumbnailUrl === "string") {
+          result.image = item.thumbnailUrl;
         }
       }
     } catch (_err) {
@@ -1116,6 +1364,44 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
     contentHtml: cleaned,
   });
 
+  // 5. Automatic Cover Extraction & Generation
+  const ogImageMatch =
+    rawHtml.match(/<meta[^>]+property=["']og:image(?::url)?["'][^>]+content=["']([^"']+)["']/i) ||
+    rawHtml.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image(?::url)?["']/i);
+  const twitterImageMatch =
+    rawHtml.match(/<meta[^>]+name=["']twitter:image(?::src)?["'][^>]+content=["']([^"']+)["']/i) ||
+    rawHtml.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image(?::src)?["']/i);
+  const articleImageMatch =
+    rawHtml.match(/<meta[^>]+property=["']article:image["'][^>]+content=["']([^"']+)["']/i);
+
+  const candidateImageUrl =
+    jsonLd.image ||
+    (ogImageMatch ? ogImageMatch[1] : "") ||
+    (twitterImageMatch ? twitterImageMatch[1] : "") ||
+    (articleImageMatch ? articleImageMatch[1] : "");
+
+  let coverImageUrl = candidateImageUrl ? decodeHtmlEntities(candidateImageUrl).trim() : "";
+  let coverImagePath: string | undefined;
+
+  if (coverImageUrl) {
+    try {
+      const downloaded = await downloadCoverImage(coverImageUrl, validatedHref);
+      if (downloaded) {
+        coverImagePath = downloaded;
+      }
+    } catch (_err) {
+      void _err;
+    }
+  }
+
+  if (!coverImagePath) {
+    try {
+      coverImagePath = generateTypographicCover(title, author, siteName, readTimeMinutes);
+    } catch (coverErr: any) {
+      console.warn(`[Article] Typographic cover generation warning: ${coverErr.message}`);
+    }
+  }
+
   return {
     url: validatedHref,
     title,
@@ -1126,6 +1412,8 @@ export async function extractArticle(rawUrlInput: string): Promise<ExtractedArti
     readTimeMinutes,
     cleanedHtml: cleaned,
     styledDocument,
+    coverImagePath,
+    coverImageUrl,
   };
 }
 
@@ -1178,7 +1466,8 @@ export function convertHtmlToEpub(
   title: string,
   author: string,
   siteName: string,
-  sourceUrl?: string
+  sourceUrl?: string,
+  coverPath?: string
 ): string {
   const randomSuffix = `${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
   const tempHtml = `/tmp/article_${randomSuffix}.html`;
@@ -1190,7 +1479,7 @@ export function convertHtmlToEpub(
     const tags = ["Web Article", "Read Later", siteName].filter(Boolean).join(",");
     const comments = sourceUrl ? `Saved from ${sourceUrl}` : `Web article from ${siteName}`;
 
-    const convertRes = runEbookConvert([
+    const convertArgs = [
       tempHtml,
       tempEpub,
       "--output-profile",
@@ -1204,8 +1493,15 @@ export function convertHtmlToEpub(
       "--comments",
       comments,
       "--dont-split-on-page-breaks",
-      "--no-default-epub-cover",
-    ]);
+    ];
+
+    if (coverPath && fs.existsSync(coverPath)) {
+      convertArgs.push("--cover", coverPath);
+    } else {
+      convertArgs.push("--no-default-epub-cover");
+    }
+
+    const convertRes = runEbookConvert(convertArgs);
 
     if (convertRes.status !== 0 || !fs.existsSync(tempEpub)) {
       const err = convertRes.stderr || convertRes.stdout || "ebook-convert returned non-zero exit code";
@@ -1235,97 +1531,126 @@ export async function ingestArticleFromUrl(targetUrl: string): Promise<IngestArt
   // 1. Extraction
   const article = await extractArticle(targetUrl);
 
-  // 2. EPUB Conversion
-  const tempEpub = convertHtmlToEpub(
-    article.styledDocument,
-    article.title,
-    article.author,
-    article.siteName,
-    article.url
-  );
-
-  // 3. Save to Books_Drop with sanitized filename
-  const safeFilenameBase = cleanString(article.title)
-    .replace(/[^a-zA-Z0-9_\u00A0-\uFFFF -]/g, "")
-    .replace(/\s+/g, "_")
-    .substring(0, 60)
-    .trim() || "Web_Article";
-  const dropFileName = `${safeFilenameBase}_${Date.now()}.epub`;
-  const dropFilePath = path.join(DROP_DIR, dropFileName);
-
-  fs.copyFileSync(tempEpub, dropFilePath);
   try {
-    fs.unlinkSync(tempEpub);
-  } catch (_err) {
-    void _err;
-  }
+    // 2. EPUB Conversion
+    const tempEpub = convertHtmlToEpub(
+      article.styledDocument,
+      article.title,
+      article.author,
+      article.siteName,
+      article.url,
+      article.coverImagePath
+    );
 
-  // 4. Ingest into Calibre via calibredb
-  const tagsStr = ["Web Article", "Read Later", article.siteName].filter(Boolean).join(",");
-  const addRes = runCalibredb([
-    "add",
-    dropFilePath,
-    "--with-library",
-    SERVER_URL,
-    "--title",
-    article.title,
-    "--authors",
-    article.author,
-    "--tags",
-    tagsStr,
-    "--automerge",
-    "ignore",
-  ]);
+    // 3. Save to Books_Drop with sanitized filename
+    const safeFilenameBase = cleanString(article.title)
+      .replace(/[^a-zA-Z0-9_\u00A0-\uFFFF -]/g, "")
+      .replace(/\s+/g, "_")
+      .substring(0, 60)
+      .trim() || "Web_Article";
+    const dropFileName = `${safeFilenameBase}_${Date.now()}.epub`;
+    const dropFilePath = path.join(DROP_DIR, dropFileName);
 
-  let bookId: number | null = null;
-  let isDuplicate = false;
-
-  if (addRes.status === 0) {
-    const match = addRes.stdout?.match(/Added book ids?:?\s*([0-9]+)/i);
-    if (match) {
-      bookId = parseInt(match[1], 10);
+    fs.copyFileSync(tempEpub, dropFilePath);
+    try {
+      fs.unlinkSync(tempEpub);
+    } catch (_err) {
+      void _err;
     }
-  }
 
-  // If bookId not returned directly, search by title to link book record
-  if (!bookId) {
-    const listRes = runCalibredb([
-      "list",
+    // 4. Ingest into Calibre via calibredb
+    const tagsStr = ["Web Article", "Read Later", article.siteName].filter(Boolean).join(",");
+    const addArgs = [
+      "add",
+      dropFilePath,
       "--with-library",
       SERVER_URL,
-      "--search",
-      `title:"=${article.title}"`,
-      "--fields",
-      "id,title,authors",
-      "--for-machine",
-    ]);
+      "--title",
+      article.title,
+      "--authors",
+      article.author,
+      "--tags",
+      tagsStr,
+      "--automerge",
+      "ignore",
+    ];
+    if (article.coverImagePath && fs.existsSync(article.coverImagePath)) {
+      addArgs.push("--cover", article.coverImagePath);
+    }
 
-    if (listRes.status === 0 && listRes.stdout) {
-      try {
-        const parsed = JSON.parse(listRes.stdout.trim());
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          bookId = parsed[0].id;
-          isDuplicate = true;
+    const addRes = runCalibredb(addArgs);
+
+    let bookId: number | null = null;
+    let isDuplicate = false;
+
+    if (addRes.status === 0) {
+      const match = addRes.stdout?.match(/Added book ids?:?\s*([0-9]+)/i);
+      if (match) {
+        bookId = parseInt(match[1], 10);
+      }
+    }
+
+    // If bookId not returned directly, search by title to link book record
+    if (!bookId) {
+      const listRes = runCalibredb([
+        "list",
+        "--with-library",
+        SERVER_URL,
+        "--search",
+        `title:"=${article.title}"`,
+        "--fields",
+        "id,title,authors",
+        "--for-machine",
+      ]);
+
+      if (listRes.status === 0 && listRes.stdout) {
+        try {
+          const parsed = JSON.parse(listRes.stdout.trim());
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            bookId = parsed[0].id;
+            isDuplicate = true;
+          }
+        } catch (_err) {
+          void _err;
         }
+      }
+    }
+
+    // Ensure cover is attached in Calibre (handles duplicates or add quirks)
+    if (bookId && article.coverImagePath && fs.existsSync(article.coverImagePath)) {
+      runCalibredb([
+        "set_metadata",
+        String(bookId),
+        "--with-library",
+        SERVER_URL,
+        "--cover",
+        article.coverImagePath,
+      ]);
+    }
+
+    return {
+      success: true,
+      duplicate: isDuplicate,
+      bookId,
+      title: article.title,
+      authors: article.author,
+      siteName: article.siteName,
+      wordCount: article.wordCount,
+      readTimeMinutes: article.readTimeMinutes,
+      epubPath: dropFilePath,
+      format: "EPUB",
+      message: isDuplicate
+        ? `Article already exists in Calibre (ID: ${bookId})`
+        : `Successfully ingested "${article.title}" into library`,
+    };
+  } finally {
+    // Clean up temporary cover image
+    if (article.coverImagePath && fs.existsSync(article.coverImagePath)) {
+      try {
+        fs.unlinkSync(article.coverImagePath);
       } catch (_err) {
         void _err;
       }
     }
   }
-
-  return {
-    success: true,
-    duplicate: isDuplicate,
-    bookId,
-    title: article.title,
-    authors: article.author,
-    siteName: article.siteName,
-    wordCount: article.wordCount,
-    readTimeMinutes: article.readTimeMinutes,
-    epubPath: dropFilePath,
-    format: "EPUB",
-    message: isDuplicate
-      ? `Article already exists in Calibre (ID: ${bookId})`
-      : `Successfully ingested "${article.title}" into library`,
-  };
 }

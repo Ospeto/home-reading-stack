@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import process from "node:process";
 
 const SERVER_URL = "http://127.0.0.1:8088";
 const PROXY = "http://127.0.0.1:7890";
@@ -536,11 +537,20 @@ export async function applyMetadataToCalibre(bookId: number, meta: ScrapedMetada
       if (imgRes.ok) {
         const buf = await imgRes.arrayBuffer();
         fs.writeFileSync(tempCoverPath, Buffer.from(buf));
-        args.push("--cover", tempCoverPath);
+        args.push("--field", `cover:${tempCoverPath}`);
       }
     }
 
-    const res = spawnSync("/opt/homebrew/bin/calibredb", args, { encoding: "utf8" });
+    const env = { ...process.env };
+    delete env.HTTP_PROXY;
+    delete env.http_proxy;
+    delete env.HTTPS_PROXY;
+    delete env.https_proxy;
+    delete env.ALL_PROXY;
+    delete env.all_proxy;
+    env.PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
+
+    const res = spawnSync("/opt/homebrew/bin/calibredb", args, { encoding: "utf8", env, timeout: 30000 });
     if (tempCoverPath && fs.existsSync(tempCoverPath)) {
       fs.unlinkSync(tempCoverPath);
     }

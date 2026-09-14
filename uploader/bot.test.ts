@@ -71,4 +71,17 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain("decoding=\"async\"");
     expect(html).toContain("loading=\"lazy\"");
   });
+
+  it("index.html uses native downscaled thumbnails for cards and reserves full resolution for modal", () => {
+    const htmlPath = path.join((import.meta as any).dir, "index.html");
+    const html = fs.readFileSync(htmlPath, "utf8");
+
+    // Grid cards request 360px width optimized thumbnails
+    expect(html).toContain("/cover?w=360");
+    // Detail modal displays full resolution cover
+    expect(html).toContain("detailCover').src = book.cover ? `/api/books/${book.id}/cover` : ''");
+    // Skeleton shimmer placeholder styling
+    expect(html).toContain("skeleton-shimmer");
+    expect(html).toContain("@keyframes shimmer");
+  });
 });
