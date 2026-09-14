@@ -14,6 +14,8 @@ import {
 } from "./scraper";
 import { isArchiveFile, unpackArchive } from "./archive";
 import { extractUrlFromText, ingestArticleFromUrl } from "./article";
+import { getDownloadFilename } from "./security";
+import { getJobQueue } from "./jobs";
 
 const DROP_DIR = "/Users/ospeto/Books_Drop";
 const SERVER_URL = "http://127.0.0.1:8088";
@@ -29,7 +31,7 @@ const CALIBRE_WEB_URL = "http://192.168.31.15:8088";
 export const READING_WEBAPP_URL = process.env.READING_WEBAPP_URL || "https://reading.wavypremium.xyz";
 export const KOSYNC_WAN_URL = process.env.KOSYNC_WAN_URL || "https://kosync.wavypremium.xyz";
 const MAX_TELEGRAM_FILE_SIZE = 20 * 1024 * 1024; // 20MB Telegram Bot API limit
-const ALLOWED_EXTS = [".epub", ".pdf", ".mobi", ".azw3", ".cbz", ".cbr", ".azw", ".zip", ".rar", ".7z", ".tar"];
+const ALLOWED_EXTS = [".epub", ".zip", ".rar", ".7z", ".tar"];
 
 const INITIAL_BACKOFF_MS = 2000;
 const MAX_BACKOFF_MS = 60000;
@@ -266,13 +268,14 @@ async function sendDocument(
   filePath: string,
   caption: string = "",
   parseMode: string = "",
-  mimeType: string = ""
+  mimeType: string = "",
+  customFilename?: string
 ): Promise<boolean> {
   try {
     const formData = new FormData();
     formData.append("chat_id", String(chatId));
     const fileBytes = fs.readFileSync(filePath);
-    const fileName = path.basename(filePath);
+    const fileName = customFilename || path.basename(filePath);
     let type = mimeType;
     if (!type) {
       if (fileName.endsWith(".tar.gz") || fileName.endsWith(".tgz")) {
@@ -810,7 +813,8 @@ export async function retrieveAndSendBook(chatId: number, bookId: number): Promi
     `📦 *Format:* \`${chosenFormat}\`\n\n` +
     `[Read Online](${CALIBRE_WEB_URL}/read/${bookId}/epub) • [Book Details](${CALIBRE_WEB_URL}/#book_id=${bookId}&panel=book_details)`;
 
-  const sent = await sendDocument(chatId, filePath, caption, "Markdown");
+  const downloadName = getDownloadFilename({ title, authors }, chosenFormat);
+  const sent = await sendDocument(chatId, filePath, caption, "Markdown", "", downloadName);
 
   if (sent) {
     if (statusMsgId) {
@@ -1761,20 +1765,13 @@ function ingestBookFile(filePath: string, originalFileName: string): IngestResul
           );
         }
 
-        // Background scraper enrichment
-        setTimeout(async () => {
-          try {
-            const isManga = format === "CBZ" || format === "CBR" || (clean.tags || []).some(t => /manga|comic/i.test(t));
-            log(`Background metadata enrichment for book ID ${newId} ("${finalTitle}")...`);
-            const matches = await searchUniversalMetadata(finalTitle, isManga);
-            if (matches.length > 0 && matches[0].confidence >= 0.85) {
-              await applyMetadataToCalibre(newId, matches[0]);
-              log(`Auto-applied metadata (${matches[0].source}, confidence: ${matches[0].confidence}) to ID ${newId}`);
-            }
-          } catch (err: any) {
-            logError(`Scraper background task error for ID ${newId}: ${err.message}`);
-          }
-        }, 300);
+        // Durable metadata enrichment via Job Queue
+        const isManga = format === "CBZ" || format === "CBR" || (clean.tags || []).some(t => /manga|comic/i.test(t));
+        getJobQueue(cacheDb).enqueue("metadata_enrich", {
+          bookId: newId,
+          title: finalTitle,
+          isManga
+        });
       }
 
       return {

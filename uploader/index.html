@@ -1825,6 +1825,22 @@
       showToast('Copied to clipboard!');
     }
 
+    // Transparent API fetch interceptor: attaches Telegram WebApp initData & CSRF headers
+    const _originalFetch = window.fetch;
+    window.fetch = async function(resource, init = {}) {
+      const headers = new Headers(init.headers || {});
+      if (window.Telegram?.WebApp?.initData) {
+        headers.set('X-Telegram-Init-Data', window.Telegram.WebApp.initData);
+      }
+      headers.set('X-Requested-With', 'XMLHttpRequest');
+      const apiKey = localStorage.getItem('reading_api_key');
+      if (apiKey && !headers.has('Authorization')) {
+        headers.set('Authorization', `Bearer ${apiKey}`);
+      }
+      init.headers = headers;
+      return _originalFetch(resource, init);
+    };
+
     // TELEGRAM WEB APP BOOTSTRAP
     if (window.Telegram && window.Telegram.WebApp) {
       try {
