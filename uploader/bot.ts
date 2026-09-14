@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import { Database } from "bun:sqlite";
@@ -10,6 +11,8 @@ import {
   extractSeries,
   isSameBook,
   normalizeFormat,
+  searchUniversalMetadata,
+  applyMetadataToCalibre,
 } from "./scraper";
 import { isArchiveFile, unpackArchive, isCanonicalEpub } from "./archive";
 import { extractUrlFromText, ingestArticleFromUrl } from "./article";
@@ -137,7 +140,7 @@ export const cacheDb = {
   },
 } as unknown as Database;
 
-let _telegramBotToken: string | null = null;
+let _telegramBotToken: string = "";
 export function getTelegramBotToken(): string {
   if (_telegramBotToken) return _telegramBotToken;
   if (process.env.TELEGRAM_BOT_TOKEN) {
@@ -157,7 +160,7 @@ export function getTelegramBotToken(): string {
       }
     } catch {}
   }
-  return _telegramBotToken || "";
+  return _telegramBotToken;
 }
 
 function log(msg: string) {
@@ -1252,7 +1255,7 @@ export async function getStatusDashboard(): Promise<string> {
 
   let internalDiskStr = "N/A";
   try {
-    const df = spawnSync("df", ["-h", path.dirname(CALIBRE_DB_PATH)], {
+    const df = spawnSync("df", ["-h", path.dirname(getCalibreDbPath())], {
       encoding: "utf8",
       timeout: 2000,
     });
@@ -1961,6 +1964,7 @@ function ingestBookFile(
   if (!isCanonicalEpub(originalFileName)) {
     return {
       success: false,
+      duplicate: false,
       format,
       displayTitle: preliminary.title,
       author: preliminary.author,
@@ -2549,12 +2553,55 @@ process.on("SIGTERM", () => {
   isPollingRunning = false;
 });
 
+export function registerJobHandlers(q = getJobQueue(cacheDb)) {
+  q.registerHandler(
+    "metadata_enrich",
+    async (payload: { bookId: number; title: string; isManga?: boolean }) => {
+      log(
+        `[JobQueue:MetadataEnrich] Background enrichment for book ID ${payload.bookId} ("${payload.title}")...`,
+      );
+      const matches = await searchUniversalMetadata(
+        payload.title,
+        payload.isManga || false,
+      );
+      if (matches.length > 0) {
+        const top = matches[0];
+        log(
+          `[JobQueue:MetadataEnrich] Top match: "${top.title}" by "${top.authors}" (Confidence: ${top.confidence}, Source: ${top.source})`,
+        );
+        if (top.confidence >= 0.85) {
+          const applied = await applyMetadataToCalibre(payload.bookId, top);
+          return {
+            success: applied,
+            topMatch: top.title,
+            confidence: top.confidence,
+          };
+        } else {
+          return {
+            success: true,
+            message: `Match confidence ${top.confidence} < 0.85. Preserved original title.`,
+          };
+        }
+      }
+      return { success: true, message: "No external metadata matches found." };
+    },
+  );
+  return q;
+}
+
+export function startJobWorker(intervalMs = 1000) {
+  const q = registerJobHandlers();
+  q.startWorker(intervalMs);
+  return q;
+}
+
 async function pollTelegram() {
   const token = getTelegramBotToken();
   if (!token) {
     console.error("[TelegramBot] Missing TELEGRAM_BOT_TOKEN. Exiting.");
     process.exit(1);
   }
+  startJobWorker(1000);
   log(
     `Polling started via proxy ${PROXY_URL} for bot: ${token.substring(0, 10)}...`,
   );
