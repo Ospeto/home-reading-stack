@@ -15,6 +15,7 @@ import { ingestArticleFromUrl, generateTypographicCover } from "./article";
 import {
   isWanRequest,
   authenticateRequest,
+  AuthenticateRequestOptions,
   isAllowedOrigin,
   validateOriginAndCsrf,
   validateUrlForSSRF,
@@ -1101,7 +1102,10 @@ function jsonResponse(data: any, status = 200, origin?: string) {
  * Primary HTTP Request Handler with Hardened WAN Security, CORS, CSRF,
  * and Durable Job Queue Lifecycle.
  */
-export async function handleRequest(req: Request, server?: any): Promise<Response> {
+export async function handleRequest(
+  req: Request,
+  server?: any,
+): Promise<Response> {
   const origin = req.headers.get("origin") || "";
   const originAllowed = isAllowedOrigin(origin);
   const corsOrigin = originAllowed ? origin : undefined;
@@ -1150,12 +1154,18 @@ export async function handleRequest(req: Request, server?: any): Promise<Respons
   }
 
   // 2. WAN Authentication Gate on mutating routes (strictly based on socket address)
+  const socketIp = server?.requestIP?.(req)?.address;
   const isWan = isWanRequest(req, {
     server,
-    remoteAddress: server?.requestIP?.(req)?.address,
+    remoteAddress: socketIp,
   });
+  const authOpts: AuthenticateRequestOptions = {
+    server,
+    remoteAddress: socketIp,
+    isWan,
+  };
   if (isMutating && isWan) {
-    const auth = authenticateRequest(req);
+    const auth = authenticateRequest(req, authOpts);
     if (!auth.authenticated) {
       return jsonResponse(
         {
@@ -1173,7 +1183,7 @@ export async function handleRequest(req: Request, server?: any): Promise<Respons
     url.pathname === "/api/auth/session" &&
     (req.method === "GET" || req.method === "POST")
   ) {
-    const auth = authenticateRequest(req);
+    const auth = authenticateRequest(req, authOpts);
     return jsonResponse(
       {
         success: auth.authenticated,
@@ -1250,12 +1260,14 @@ export async function handleRequest(req: Request, server?: any): Promise<Respons
   // API: Durable Job Queue Inspection (Protected on public WAN)
   if (url.pathname === "/api/jobs/recent" && req.method === "GET") {
     if (isWan) {
-      const auth = authenticateRequest(req);
+      const auth = authenticateRequest(req, authOpts);
       if (!auth.authenticated) {
         return jsonResponse(
           {
             success: false,
-            error: auth.error || "Authentication required for public WAN job inspection",
+            error:
+              auth.error ||
+              "Authentication required for public WAN job inspection",
           },
           401,
           corsOrigin,
@@ -1294,12 +1306,14 @@ export async function handleRequest(req: Request, server?: any): Promise<Respons
 
   if (url.pathname.startsWith("/api/jobs/") && req.method === "GET") {
     if (isWan) {
-      const auth = authenticateRequest(req);
+      const auth = authenticateRequest(req, authOpts);
       if (!auth.authenticated) {
         return jsonResponse(
           {
             success: false,
-            error: auth.error || "Authentication required for public WAN job inspection",
+            error:
+              auth.error ||
+              "Authentication required for public WAN job inspection",
           },
           401,
           corsOrigin,

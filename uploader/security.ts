@@ -364,14 +364,26 @@ export function isWanRequest(
 
   // CASE 3: Fallback when socket address is unavailable (e.g. standalone test mocks)
   // Fail closed on unrecognized hosts
-  const hostHeader = (req.headers.get("host") || "").toLowerCase().split(":")[0];
-  const fwdHost = (req.headers.get("x-forwarded-host") || "").toLowerCase().split(":")[0];
-  if (hostHeader === wanDomain || hostHeader === kosyncWanDomain || fwdHost === wanDomain || fwdHost === kosyncWanDomain) {
+  const hostHeader = (req.headers.get("host") || "")
+    .toLowerCase()
+    .split(":")[0];
+  const fwdHost = (req.headers.get("x-forwarded-host") || "")
+    .toLowerCase()
+    .split(":")[0];
+  if (
+    hostHeader === wanDomain ||
+    hostHeader === kosyncWanDomain ||
+    fwdHost === wanDomain ||
+    fwdHost === kosyncWanDomain
+  ) {
     return true;
   }
   const xForwardedFor = req.headers.get("x-forwarded-for");
   if (xForwardedFor) {
-    const ips = xForwardedFor.split(",").map((s) => s.trim()).filter(Boolean);
+    const ips = xForwardedFor
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
     for (const ip of ips) {
       if (!isPrivateOrInternalIp(ip)) return true;
     }
@@ -468,6 +480,16 @@ export interface AuthResult {
   error?: string;
 }
 
+export interface AuthenticateRequestOptions {
+  apiKey?: string;
+  botToken?: string;
+  wanDomain?: string;
+  clientIp?: string;
+  remoteAddress?: string;
+  isWan?: boolean;
+  server?: { requestIP?: (req: Request) => { address: string } | null };
+}
+
 /**
  * Authenticates an incoming request.
  * Local LAN requests pass automatically. WAN requests must present:
@@ -478,15 +500,11 @@ export interface AuthResult {
  */
 export function authenticateRequest(
   req: Request,
-  options: {
-    apiKey?: string;
-    botToken?: string;
-    wanDomain?: string;
-    clientIp?: string;
-  } = {},
+  options: AuthenticateRequestOptions = {},
 ): AuthResult {
-  // If request is from local LAN, grant immediate friction-free access
-  const isWan = isWanRequest(req, options);
+  // If caller already classified WAN status, use it; otherwise compute using socket peer address
+  const isWan =
+    options.isWan !== undefined ? options.isWan : isWanRequest(req, options);
   if (!isWan) {
     return { authenticated: true, method: "lan" };
   }
@@ -660,7 +678,8 @@ export function validateOriginAndCsrf(
   if (isMutating && hasCookie && !hasAuthHeader && !origin && !referer) {
     return {
       valid: false,
-      error: "CSRF protection: mutating request with cookie authentication must provide Origin or Referer header",
+      error:
+        "CSRF protection: mutating request with cookie authentication must provide Origin or Referer header",
     };
   }
 
@@ -953,7 +972,9 @@ export async function safeFetchWithSsrf(
   while (true) {
     const ssrfCheck = await validateUrlForSSRF(currentUrl);
     if (!ssrfCheck.safe) {
-      throw new Error(`SSRF guard blocked target: ${ssrfCheck.error || "Forbidden target"}`);
+      throw new Error(
+        `SSRF guard blocked target: ${ssrfCheck.error || "Forbidden target"}`,
+      );
     }
 
     const fetchOpts: any = {

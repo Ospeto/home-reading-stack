@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   isPrivateOrInternalIp,
   validateUrlForSSRF,
+  safeFetchWithSsrf,
   isWanRequest,
   authenticateRequest,
   isAllowedOrigin,
@@ -18,15 +19,12 @@ import {
   getDownloadFilename,
   sanitizeErrorMessage,
   validateTelegramWebAppData,
-  cleanString,
 } from "./security";
 import {
   inspectArchiveSafety,
   unpackArchive,
   isArchiveFile,
   isSupportedBook,
-  MAX_ARCHIVE_ENTRIES,
-  MAX_COMPRESSION_RATIO,
 } from "./archive";
 import { DurableJobQueue } from "./jobs";
 import { handleRequest } from "./server";
@@ -126,6 +124,17 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
     );
     expect(pub.safe).toBe(true);
   });
+
+  it("safeFetchWithSsrf blocks redirects targeting internal or link-local endpoints", async () => {
+    let thrownError: Error | null = null;
+    try {
+      await safeFetchWithSsrf("http://169.254.169.254/latest/meta-data/");
+    } catch (err: any) {
+      thrownError = err;
+    }
+    expect(thrownError).not.toBeNull();
+    expect(thrownError?.message).toContain("SSRF");
+  });
 });
 
 describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", () => {
@@ -184,6 +193,20 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
     });
     const result = authenticateRequest(wanReq, { apiKey: "secret123" });
     expect(result.authenticated).toBe(false);
+  });
+
+  it("authenticateRequest blocks public client spoofing LAN host header", () => {
+    // Public client (93.184.216.34) connecting directly, sending spoofed LAN Host header
+    const spoofedReq = new Request("http://192.168.31.15:8086/api/upload", {
+      method: "POST",
+      headers: { host: "192.168.31.15:8086" },
+    });
+    const result = authenticateRequest(spoofedReq, {
+      remoteAddress: "93.184.216.34",
+      apiKey: "secret123",
+    });
+    expect(result.authenticated).toBe(false);
+    expect(result.error).toContain("Authentication required for public WAN access");
   });
 
   it("authenticateRequest accepts Bearer token or X-API-Key matching apiKey", () => {
@@ -277,6 +300,18 @@ describe("Public WAN & API Surface Hardening — CORS & CSRF Guards", () => {
     });
     const check = validateOriginAndCsrf(maliciousPost);
     expect(check.valid).toBe(false);
+  });
+
+  it("validateOriginAndCsrf rejects mutating request with cookie auth when both Origin and Referer are absent", () => {
+    const cookiePost = new Request("http://127.0.0.1:8086/api/books/1", {
+      method: "DELETE",
+      headers: {
+        cookie: "reading_token=secret123",
+      },
+    });
+    const check = validateOriginAndCsrf(cookiePost);
+    expect(check.valid).toBe(false);
+    expect(check.error).toContain("Origin or Referer");
   });
 
   it("validateOriginAndCsrf allows mutating requests from permitted origins", () => {
