@@ -73,6 +73,33 @@ const KOSYNC_DB_PATH =
   "/Users/ospeto/kosync-server/data/koreader-sync.db";
 const MAX_UPLOAD_SIZE = MAX_ARCHIVE_SIZE_BYTES; // 100MB
 
+export function sanitizeJobForResponse(job: any): any {
+  if (!job) return null;
+  const c = { ...job };
+  if (c.payload && typeof c.payload === "object") {
+    const p = { ...c.payload };
+    if (typeof p.filePath === "string") p.filePath = path.basename(p.filePath);
+    if (typeof p.archivePath === "string") p.archivePath = path.basename(p.archivePath);
+    if (typeof p.token === "string") p.token = "[REDACTED]";
+    if (typeof p.secret === "string") p.secret = "[REDACTED]";
+    if (typeof p.apiKey === "string") p.apiKey = "[REDACTED]";
+    c.payload = p;
+  }
+  if (c.result && typeof c.result === "object") {
+    const r = { ...c.result };
+    if (typeof r.filePath === "string") r.filePath = path.basename(r.filePath);
+    if (typeof r.archivePath === "string") r.archivePath = path.basename(r.archivePath);
+    if (typeof r.epubPath === "string") r.epubPath = path.basename(r.epubPath);
+    if (typeof r.tempPath === "string") r.tempPath = path.basename(r.tempPath);
+    if (typeof r.coverImagePath === "string") r.coverImagePath = path.basename(r.coverImagePath);
+    if (typeof r.token === "string") r.token = "[REDACTED]";
+    if (typeof r.secret === "string") r.secret = "[REDACTED]";
+    c.result = r;
+  }
+  if (c.error) c.error = sanitizeErrorMessage(c.error);
+  return c;
+}
+
 function resolveHtmlPath(): string {
   try {
     const dir = path.dirname(new URL(import.meta.url).pathname);
@@ -1284,19 +1311,7 @@ export async function handleRequest(
       status: statusParam || undefined,
       type: typeParam || undefined,
     });
-    const sanitizedJobs = rawJobs.map((j: any) => {
-      const c = { ...j };
-      if (c.payload) {
-        const p = { ...c.payload };
-        if (p.filePath) p.filePath = path.basename(p.filePath);
-        if (p.archivePath) p.archivePath = path.basename(p.archivePath);
-        if (p.token) p.token = "[REDACTED]";
-        if (p.secret) p.secret = "[REDACTED]";
-        c.payload = p;
-      }
-      if (c.error) c.error = sanitizeErrorMessage(c.error);
-      return c;
-    });
+    const sanitizedJobs = rawJobs.map(sanitizeJobForResponse);
 
     return jsonResponse(
       { success: true, count: sanitizedJobs.length, jobs: sanitizedJobs },
@@ -1337,18 +1352,7 @@ export async function handleRequest(
         corsOrigin,
       );
 
-    const c = { ...job };
-    if (c.payload) {
-      const p = { ...c.payload };
-      if (p.filePath) p.filePath = path.basename(p.filePath);
-      if (p.archivePath) p.archivePath = path.basename(p.archivePath);
-      if (p.token) p.token = "[REDACTED]";
-      if (p.secret) p.secret = "[REDACTED]";
-      c.payload = p;
-    }
-    if (c.error) c.error = sanitizeErrorMessage(c.error);
-
-    return jsonResponse({ success: true, job: c }, 200, corsOrigin);
+    return jsonResponse({ success: true, job: sanitizeJobForResponse(job) }, 200, corsOrigin);
   }
 
   if (
@@ -1363,8 +1367,7 @@ export async function handleRequest(
           {
             success: false,
             error:
-              auth.error ||
-              "Authentication required for public WAN job retry",
+              auth.error || "Authentication required for public WAN job retry",
           },
           401,
           corsOrigin,
@@ -1387,19 +1390,8 @@ export async function handleRequest(
         corsOrigin,
       );
 
-    const c = { ...retried };
-    if (c.payload) {
-      const p = { ...c.payload };
-      if (p.filePath) p.filePath = path.basename(p.filePath);
-      if (p.archivePath) p.archivePath = path.basename(p.archivePath);
-      if (p.token) p.token = "[REDACTED]";
-      if (p.secret) p.secret = "[REDACTED]";
-      c.payload = p;
-    }
-    if (c.error) c.error = sanitizeErrorMessage(c.error);
-
     return jsonResponse(
-      { success: true, message: `Job ${jobId} queued for retry`, job: c },
+      { success: true, message: `Job ${jobId} queued for retry`, job: sanitizeJobForResponse(retried) },
       200,
       corsOrigin,
     );

@@ -792,10 +792,30 @@ export function validateEpubContent(filePath: string): EpubValidationResult {
       return { valid: false, error: "Failed to read EPUB ZIP entries" };
     }
 
-    const rawEntries = (listRes.stdout || "")
+    const lines = (listRes.stdout || "")
       .split("\n")
-      .map((e: string) => e.trim().replace(/^[./\\]+/, ""))
+      .map((e: string) => e.trim())
       .filter(Boolean);
+
+    // Reject absolute paths, path traversal, drive letters, or non-canonical names BEFORE any normalization
+    for (const entry of lines) {
+      if (
+        entry.includes("..") ||
+        entry.startsWith("/") ||
+        entry.startsWith("\\") ||
+        entry.startsWith("./") ||
+        entry.startsWith(".\\") ||
+        /^[a-zA-Z]:[\\/]/.test(entry) ||
+        entry.includes("\0")
+      ) {
+        return {
+          valid: false,
+          error: `Unsafe or non-canonical path in EPUB archive entry: "${entry}"`,
+        };
+      }
+    }
+
+    const rawEntries = lines;
 
     // 3. Mimetype must be the exact root entry 'mimetype' matching 'application/epub+zip'
     const hasExactRootMimetype = rawEntries.includes("mimetype");
@@ -828,9 +848,7 @@ export function validateEpubContent(filePath: string): EpubValidationResult {
     }
 
     // 4. Container entry must be exactly 'META-INF/container.xml' (not nested in subfolders)
-    const hasExactContainer =
-      rawEntries.includes("META-INF/container.xml") ||
-      rawEntries.includes("META-INF\\container.xml");
+    const hasExactContainer = rawEntries.includes("META-INF/container.xml");
     if (!hasExactContainer) {
       return {
         valid: false,
