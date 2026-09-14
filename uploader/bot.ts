@@ -1713,10 +1713,17 @@ async function pollTelegram() {
       }
     } catch (err: any) {
       const isAbort = err.name === "AbortError" || err.name === "TimeoutError";
-      const reason = isAbort ? `Socket timeout after ${POLL_REQUEST_TIMEOUT_MS / 1000}s` : err.message;
-      logError(`Polling exception (${reason}). Retrying in ${Math.round(backoffMs / 1000)}s...`);
-      await new Promise((r) => setTimeout(r, backoffMs));
-      backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+      const isSocketClosed = err.message && /socket connection was closed/i.test(err.message);
+
+      if (isAbort || isSocketClosed) {
+        // Routine long-poll timeout or idle proxy keep-alive closure: immediate seamless reconnect
+        backoffMs = INITIAL_BACKOFF_MS;
+        await new Promise((r) => setTimeout(r, 150));
+      } else {
+        logError(`Polling exception (${err.message}). Retrying in ${Math.round(backoffMs / 1000)}s...`);
+        await new Promise((r) => setTimeout(r, backoffMs));
+        backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+      }
     }
   }
 }
