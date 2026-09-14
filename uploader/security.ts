@@ -362,38 +362,8 @@ export function isWanRequest(
     return false;
   }
 
-  // CASE 3: Fallback when socket address is unavailable (e.g. standalone test mocks)
-  // Fail closed on unrecognized hosts
-  const hostHeader = (req.headers.get("host") || "")
-    .toLowerCase()
-    .split(":")[0];
-  const fwdHost = (req.headers.get("x-forwarded-host") || "")
-    .toLowerCase()
-    .split(":")[0];
-  if (
-    hostHeader === wanDomain ||
-    hostHeader === kosyncWanDomain ||
-    fwdHost === wanDomain ||
-    fwdHost === kosyncWanDomain
-  ) {
-    return true;
-  }
-  const xForwardedFor = req.headers.get("x-forwarded-for");
-  if (xForwardedFor) {
-    const ips = xForwardedFor
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    for (const ip of ips) {
-      if (!isPrivateOrInternalIp(ip)) return true;
-    }
-  }
-
-  if (!isLanHost(hostHeader)) {
-    return true;
-  }
-
-  return false;
+  // CASE 3: No verified peer socket address supplied -> FAIL CLOSED (treat as WAN)
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -504,7 +474,7 @@ export function authenticateRequest(
 ): AuthResult {
   // If caller already classified WAN status, use it; otherwise compute using socket peer address
   const isWan =
-    options.isWan !== undefined ? options.isWan : isWanRequest(req, options);
+    options.isWan === undefined ? isWanRequest(req, options) : options.isWan;
   if (!isWan) {
     return { authenticated: true, method: "lan" };
   }
@@ -822,29 +792,43 @@ export function validateEpubContent(filePath: string): EpubValidationResult {
       return { valid: false, error: "Failed to read EPUB ZIP entries" };
     }
 
-    const entries = (listRes.stdout || "")
+    const rawEntries = (listRes.stdout || "")
       .split("\n")
-      .map((e: string) => e.trim())
+      .map((e: string) => e.trim().replace(/^[./\\]+/, ""))
       .filter(Boolean);
 
-    // Check mimetype entry
-    const hasMimetype = entries.some(
-      (e: string) => e === "mimetype" || e.endsWith("/mimetype"),
+    // 3. Mimetype must be the exact root entry 'mimetype' matching 'application/epub+zip'
+    const hasExactRootMimetype = rawEntries.includes("mimetype");
+    const hasNestedMimetype = rawEntries.some(
+      (e: string) => e !== "mimetype" && e.endsWith("mimetype"),
     );
-    if (!hasMimetype) {
-      return { valid: false, error: "Missing required EPUB 'mimetype' entry" };
+    if (!hasExactRootMimetype || hasNestedMimetype) {
+      return {
+        valid: false,
+        error: "Missing required exact root EPUB 'mimetype' entry",
+      };
     }
 
-    // Check META-INF/container.xml entry
-    const hasContainer = entries.some(
-      (e: string) =>
-        e === "META-INF/container.xml" || e.endsWith("META-INF/container.xml"),
-    );
-    if (!hasContainer) {
+    const mimeRes = spawnSync("/usr/bin/bsdtar", ["-xOf", filePath, "mimetype"], {
+      encoding: "utf8",
+      timeout: 10000,
+    });
+    if (mimeRes.status !== 0 || mimeRes.stdout.trim() !== "application/epub+zip") {
+      return {
+        valid: false,
+        error: `Invalid EPUB mimetype content: expected 'application/epub+zip', got '${mimeRes.stdout.trim().slice(0, 50)}'`,
+      };
+    }
+
+    // 4. Container entry must be exactly 'META-INF/container.xml' (not nested in subfolders)
+    const hasExactContainer =
+      rawEntries.includes("META-INF/container.xml") ||
+      rawEntries.includes("META-INF\\container.xml");
+    if (!hasExactContainer) {
       return {
         valid: false,
         error:
-          "Missing required EPUB container definition: META-INF/container.xml",
+          "Missing required exact root EPUB container definition: META-INF/container.xml",
       };
     }
 

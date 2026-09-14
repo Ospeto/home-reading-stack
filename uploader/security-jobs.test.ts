@@ -139,41 +139,41 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
 
 describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", () => {
   it("classifies requests by host and proxy headers", () => {
-    // LAN request
+    // LAN request with verified local peer address
     const lanReq = new Request("http://192.168.31.15:8086/api/books", {
       headers: { host: "192.168.31.15:8086" },
     });
-    expect(isWanRequest(lanReq)).toBe(false);
+    expect(isWanRequest(lanReq, { remoteAddress: "192.168.31.15" })).toBe(false);
 
-    // WAN request via domain
+    // Unverified request without socket address fails closed to WAN
+    expect(isWanRequest(lanReq)).toBe(true);
+
+    // WAN request via domain with local tunnel socket
     const wanReq1 = new Request("http://127.0.0.1:8086/api/books", {
       headers: { host: "reading.wavypremium.xyz" },
     });
-    expect(isWanRequest(wanReq1)).toBe(true);
+    expect(isWanRequest(wanReq1, { remoteAddress: "127.0.0.1" })).toBe(true);
 
-    // WAN request via X-Forwarded-Host
+    // WAN request via X-Forwarded-Host with local tunnel socket
     const wanReq2 = new Request("http://127.0.0.1:8086/api/books", {
       headers: {
         host: "127.0.0.1:8086",
         "x-forwarded-host": "reading.wavypremium.xyz",
       },
     });
-    expect(isWanRequest(wanReq2)).toBe(true);
+    expect(isWanRequest(wanReq2, { remoteAddress: "127.0.0.1" })).toBe(true);
 
-    // WAN request via public client X-Forwarded-For
+    // WAN request via public client X-Forwarded-For through local tunnel socket
     const wanReq3 = new Request("http://127.0.0.1:8086/api/books", {
       headers: {
         host: "127.0.0.1:8086",
         "x-forwarded-for": "8.8.8.8",
       },
     });
-    expect(isWanRequest(wanReq3)).toBe(true);
+    expect(isWanRequest(wanReq3, { remoteAddress: "127.0.0.1" })).toBe(true);
 
-    // Unrecognized direct request on 0.0.0.0 listener fails closed to WAN
-    const unknownReq = new Request("http://unknown-external.com/api/books", {
-      headers: { host: "unknown-external.com" },
-    });
-    expect(isWanRequest(unknownReq)).toBe(true);
+    // Direct public client (93.184.216.34) fails closed to WAN
+    expect(isWanRequest(lanReq, { remoteAddress: "93.184.216.34" })).toBe(true);
   });
 
   it("authenticateRequest passes local LAN requests without credentials", () => {
@@ -181,7 +181,10 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
       method: "POST",
       headers: { host: "192.168.31.15:8086" },
     });
-    const result = authenticateRequest(lanReq, { apiKey: "secret123" });
+    const result = authenticateRequest(lanReq, {
+      remoteAddress: "192.168.31.15",
+      apiKey: "secret123",
+    });
     expect(result.authenticated).toBe(true);
     expect(result.method).toBe("lan");
   });
@@ -206,7 +209,9 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
       apiKey: "secret123",
     });
     expect(result.authenticated).toBe(false);
-    expect(result.error).toContain("Authentication required for public WAN access");
+    expect(result.error).toContain(
+      "Authentication required for public WAN access",
+    );
   });
 
   it("authenticateRequest accepts Bearer token or X-API-Key matching apiKey", () => {
@@ -665,6 +670,8 @@ describe("Durable Ingestion Job Queue Lifecycle & Crash Recovery", () => {
 });
 
 describe("Server Integration Endpoints & Hardened API Surface", () => {
+  const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+
   it("rejects non-EPUB direct file uploads", async () => {
     const formData = new FormData();
     const pdfBlob = new Blob(["%PDF-1.4 mock pdf"], {
@@ -680,7 +687,7 @@ describe("Server Integration Endpoints & Hardened API Surface", () => {
       body: formData,
     });
 
-    const res = await handleRequest(req);
+    const res = await handleRequest(req, localServer);
     expect(res.status).toBe(400);
     const data = (await res.json()) as any;
     expect(data.success).toBe(false);
@@ -697,26 +704,36 @@ describe("Server Integration Endpoints & Hardened API Surface", () => {
       body: JSON.stringify({ url: "http://169.254.169.254/latest/meta-data/" }),
     });
 
-    const res = await handleRequest(req);
+    const res = await handleRequest(req, localServer);
     expect(res.status).toBe(400);
     const data = (await res.json()) as any;
     expect(data.success).toBe(false);
     expect(data.error).toContain("SSRF");
   });
 
-  it("exposes job inspection endpoint GET /api/jobs/recent", async () => {
-    const req = new Request("http://127.0.0.1:8086/api/jobs/recent", {
+  it("exposes job inspection endpoint GET /api/jobs/recent on LAN and blocks on WAN without auth", async () => {
+    const lanReq = new Request("http://127.0.0.1:8086/api/jobs/recent", {
       method: "GET",
       headers: {
         host: "127.0.0.1:8086",
       },
     });
 
-    const res = await handleRequest(req);
-    expect(res.status).toBe(200);
-    const data = (await res.json()) as any;
+    const lanRes = await handleRequest(lanReq, localServer);
+    expect(lanRes.status).toBe(200);
+    const data = (await lanRes.json()) as any;
     expect(data.success).toBe(true);
     expect(Array.isArray(data.jobs)).toBe(true);
+
+    // WAN unauthenticated request blocks with 401
+    const wanReq = new Request("http://127.0.0.1:8086/api/jobs/recent", {
+      method: "GET",
+      headers: {
+        host: "reading.wavypremium.xyz",
+      },
+    });
+    const wanRes = await handleRequest(wanReq, localServer);
+    expect(wanRes.status).toBe(401);
   });
 
   it("blocks unauthenticated WAN mutating requests with 401", async () => {

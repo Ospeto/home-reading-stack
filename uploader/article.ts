@@ -992,28 +992,29 @@ export function generateTypographicCover(
 
   fs.writeFileSync(tempSvg, svgContent, "utf8");
 
-  const sipsRes = spawnSync(
-    "/usr/bin/sips",
-    ["-s", "format", "jpeg", tempSvg, "--out", tempJpg],
-    {
-      encoding: "utf8",
-      timeout: 15000,
-    },
-  );
-
-  try {
-    fs.unlinkSync(tempSvg);
-  } catch (_err) {
-    void _err;
-  }
-
-  if (sipsRes.status !== 0 || !fs.existsSync(tempJpg)) {
-    throw new Error(
-      `Failed to generate typographic cover via sips: ${sipsRes.stderr || "Unknown error"}`,
+  const sipsBin = getSipsPath();
+  if (fs.existsSync(sipsBin)) {
+    const sipsRes = spawnSync(
+      sipsBin,
+      ["-s", "format", "jpeg", tempSvg, "--out", tempJpg],
+      {
+        encoding: "utf8",
+        timeout: 15000,
+      },
     );
+
+    if (sipsRes.status === 0 && fs.existsSync(tempJpg)) {
+      try {
+        fs.unlinkSync(tempSvg);
+      } catch (_err) {
+        void _err;
+      }
+      return tempJpg;
+    }
   }
 
-  return tempJpg;
+  // Pure SVG fallback when sips is absent or fails (portable across Linux/macOS/CI)
+  return tempSvg;
 }
 
 /**

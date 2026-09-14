@@ -19,6 +19,7 @@ import {
   isAllowedOrigin,
   validateOriginAndCsrf,
   validateUrlForSSRF,
+  safeFetchWithSsrf,
   validateIntegerId,
   validateBookFormat,
   isCanonicalEpub,
@@ -2266,7 +2267,7 @@ export async function handleRequest(
         }
 
         try {
-          const cRes = await fetch(coverUrl);
+          const cRes = await safeFetchWithSsrf(coverUrl);
           if (cRes.ok) {
             tempCover = `/tmp/cover_${bookId}_${Date.now()}.jpg`;
             fs.writeFileSync(tempCover, Buffer.from(await cRes.arrayBuffer()));
@@ -2333,10 +2334,10 @@ export async function handleRequest(
 // Start Server & Background Job Queue Worker when run directly
 if ((import.meta as any).main) {
   jobQueue.startWorker(1000);
-  Bun.serve({
+  (globalThis as any).Bun.serve({
     port: 8086,
     hostname: "0.0.0.0",
-    fetch(req, server) {
+    fetch(req: any, server: any) {
       return handleRequest(req, server);
     },
   });
