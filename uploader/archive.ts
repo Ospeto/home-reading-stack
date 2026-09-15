@@ -1,7 +1,8 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { validateEpubContent } from "./security";
+import { validateEpubContent, getBsdtarPath } from "./security";
 
 // Resource Limits & Safety Thresholds
 export const MAX_ARCHIVE_SIZE_BYTES = 100 * 1024 * 1024; // 100MB compressed
@@ -89,6 +90,67 @@ export function isNonEpubBook(filename: string): boolean {
 
 export const isLegacyOrNonCanonicalFormat = isNonEpubBook;
 
+/**
+ * Validates an archive entry name strictly BEFORE any normalization.
+ * Rejects entries containing '..', leading '/', '\', drive letters, null bytes,
+ * or newline / carriage return characters.
+ */
+export function validateArchiveEntryName(entryName: string): {
+  valid: boolean;
+  error?: string;
+} {
+  // Check for newline / carriage return characters before any normalization
+  if (entryName.includes("\n") || entryName.includes("\r")) {
+    return {
+      valid: false,
+      error: `Archive entry names containing newline characters are strictly rejected: "${entryName}"`,
+    };
+  }
+
+  // Check for null bytes before any normalization
+  if (entryName.includes("\0")) {
+    return {
+      valid: false,
+      error: `Null byte detected in archive entry: "${entryName}"`,
+    };
+  }
+
+  // Check for path traversal '..' before any normalization
+  if (
+    entryName === ".." ||
+    entryName.includes("/../") ||
+    entryName.includes("\\..\\") ||
+    entryName.startsWith("../") ||
+    entryName.startsWith("..\\") ||
+    entryName.endsWith("/..") ||
+    entryName.endsWith("\\..") ||
+    entryName.includes("/..") ||
+    entryName.includes("\\..") ||
+    entryName.includes("../") ||
+    entryName.includes("..\\") ||
+    entryName.includes("..")
+  ) {
+    return {
+      valid: false,
+      error: `Path traversal detected in archive entry: "${entryName}"`,
+    };
+  }
+
+  // Check for absolute paths before any normalization
+  if (
+    entryName.startsWith("/") ||
+    entryName.startsWith("\\") ||
+    /^[a-zA-Z]:[\\/]/.test(entryName)
+  ) {
+    return {
+      valid: false,
+      error: `Path traversal detected in archive entry: "${entryName}"`,
+    };
+  }
+
+  return { valid: true };
+}
+
 export interface ArchiveInspection {
   safe: boolean;
   error?: string;
@@ -157,12 +219,37 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
           }
         }
       }
+
+      // Check TAR header boundaries (512 bytes) for newline entry names
+      for (let b = 0; b <= bytesRead - 512; b += 512) {
+        if (
+          chunkBuf[b + 257] === 0x75 && // 'u'
+          chunkBuf[b + 258] === 0x73 && // 's'
+          chunkBuf[b + 259] === 0x74 && // 't'
+          chunkBuf[b + 260] === 0x61 && // 'a'
+          chunkBuf[b + 261] === 0x72 // 'r'
+        ) {
+          const tarNameBuf = chunkBuf.subarray(b, b + 100);
+          if (tarNameBuf.includes(0x0a) || tarNameBuf.includes(0x0d)) {
+            fs.closeSync(fd);
+            return {
+              safe: false,
+              error:
+                "Archive entry names containing newline characters are strictly rejected",
+              entryCount: 0,
+              totalUncompressedBytes: 0,
+            };
+          }
+        }
+      }
+
       offset += Math.max(1, bytesRead - 2048);
     }
     fs.closeSync(fd);
 
     // Run bsdtar -tvf to inspect entry headers and sizes
-    const listRes = spawnSync("/usr/bin/bsdtar", ["-tvf", archivePath], {
+    const bsdtarBin = getBsdtarPath();
+    const listRes = spawnSync(bsdtarBin, ["-tvf", archivePath], {
       encoding: "utf8",
       timeout: 15000,
     });
@@ -192,51 +279,78 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
 
     let totalUncompressedBytes = 0;
 
+    // Structured regex for bsdtar -tvf entry metadata:
+    // Captures: 1: mode, 2: links, 3: owner/group, 4: size, 5: date, 6: name/target
+    const ENTRY_REGEX =
+      /^([-ldcbpsSwxrt]{10})\s+(\d+)\s+(.+?)\s+(\d+)\s+([A-Za-z]{3,}\s+\d+\s+(?:\d{1,2}:\d{2}(?::\d{2})?|\d{4}))\s+(.+)$/;
+
     for (const line of lines) {
-      // bsdtar -tvf format: mode links uid gid size month day time/year filename
-      const tokens = line.trim().split(/\s+/);
-      if (tokens.length >= 9) {
-        const size = parseInt(tokens[4], 10);
-        const entryName = tokens.slice(8).join(" ");
+      // Reject non-conforming continuation lines (e.g. from multiline / newline entry names)
+      if (!/^[-ldcbpsSwxrt]{10}\s/.test(line)) {
+        return {
+          safe: false,
+          error:
+            "Archive entry names containing newline characters are strictly rejected",
+          entryCount: lines.length,
+          totalUncompressedBytes,
+        };
+      }
 
-        // Reject symbolic links before extraction
-        if (tokens[0].startsWith("l") || line.includes(" -> ")) {
+      const match = line.match(ENTRY_REGEX);
+      let mode = "";
+      let size = 0;
+      let rawName = "";
+
+      if (match) {
+        mode = match[1];
+        size = parseInt(match[4], 10);
+        rawName = match[6];
+      } else {
+        // Fallback for non-standard column layouts
+        const tokens = line.trim().split(/\s+/);
+        if (tokens.length >= 9) {
+          mode = tokens[0];
+          size = parseInt(tokens[4], 10);
+          rawName = tokens.slice(8).join(" ");
+        }
+      }
+
+      const isSymlink = mode.startsWith("l") || rawName.includes(" -> ");
+      const entryName = rawName.includes(" -> ")
+        ? rawName.split(" -> ")[0]
+        : rawName;
+
+      // Reject symbolic links before extraction
+      if (isSymlink) {
+        return {
+          safe: false,
+          error: `Symbolic link detected in archive entry: "${entryName}"`,
+          entryCount: lines.length,
+          totalUncompressedBytes,
+        };
+      }
+
+      // Pre-normalization validation: reject entries with '..', '/', '\', drive letters, nulls, or newlines
+      const nameCheck = validateArchiveEntryName(entryName);
+      if (!nameCheck.valid) {
+        return {
+          safe: false,
+          error: nameCheck.error,
+          entryCount: lines.length,
+          totalUncompressedBytes,
+        };
+      }
+
+      if (!isNaN(size) && size > 0) {
+        if (size > MAX_SINGLE_FILE_SIZE_BYTES) {
           return {
             safe: false,
-            error: `Symbolic link detected in archive entry: "${entryName}"`,
+            error: `Archive entry "${entryName}" uncompressed size (${Math.round(size / 1024 / 1024)}MB) exceeds limit (${MAX_SINGLE_FILE_SIZE_BYTES / 1024 / 1024}MB)`,
             entryCount: lines.length,
             totalUncompressedBytes,
           };
         }
-
-        // Check for path traversal guards:
-        // Reject any entry with '..' components, starting with '/', '\', or containing null bytes
-        if (
-          entryName.includes("..") ||
-          entryName.startsWith("/") ||
-          entryName.startsWith("\\") ||
-          /^[a-zA-Z]:[\\/]/.test(entryName) ||
-          entryName.includes("\0")
-        ) {
-          return {
-            safe: false,
-            error: `Path traversal detected in archive entry: "${entryName}"`,
-            entryCount: lines.length,
-            totalUncompressedBytes,
-          };
-        }
-
-        if (!isNaN(size) && size > 0) {
-          if (size > MAX_SINGLE_FILE_SIZE_BYTES) {
-            return {
-              safe: false,
-              error: `Archive entry "${entryName}" uncompressed size (${Math.round(size / 1024 / 1024)}MB) exceeds limit (${MAX_SINGLE_FILE_SIZE_BYTES / 1024 / 1024}MB)`,
-              entryCount: lines.length,
-              totalUncompressedBytes,
-            };
-          }
-          totalUncompressedBytes += size;
-        }
+        totalUncompressedBytes += size;
       }
     }
 
@@ -283,7 +397,7 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
  */
 export function unpackArchive(archivePath: string): UnpackResult {
   const tempExtractDir = path.join(
-    "/tmp",
+    os.tmpdir(),
     `archive_unpack_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
   );
 
@@ -312,9 +426,11 @@ export function unpackArchive(archivePath: string): UnpackResult {
 
   // 2. Safe extraction using bsdtar with strip-components guards
   fs.mkdirSync(tempExtractDir, { recursive: true });
+  const canonicalExtractDir = fs.realpathSync(tempExtractDir);
 
+  const bsdtarBin = getBsdtarPath();
   const tarRes = spawnSync(
-    "/usr/bin/bsdtar",
+    bsdtarBin,
     ["-xf", archivePath, "-C", tempExtractDir],
     { encoding: "utf8", timeout: 45000 },
   );
@@ -332,7 +448,7 @@ export function unpackArchive(archivePath: string): UnpackResult {
     };
   }
 
-  // 3. Recursively scan extracted contents, enforcing canonical EPUB filtering
+  // 3. Recursively scan extracted contents, enforcing canonical EPUB filtering and containment
   const foundBooks: ExtractedBook[] = [];
   const quarantined: QuarantinedFile[] = [];
 
@@ -352,6 +468,20 @@ export function unpackArchive(archivePath: string): UnpackResult {
         }
       } catch {
         continue;
+      }
+
+      // Explicit post-extraction realpath containment verification
+      let realPath: string;
+      try {
+        realPath = fs.realpathSync(fullPath);
+      } catch {
+        continue;
+      }
+      const relative = path.relative(canonicalExtractDir, realPath);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) {
+        throw new Error(
+          `Archive extraction containment violation: ${fullPath} resolved to ${realPath} outside ${canonicalExtractDir}`,
+        );
       }
 
       if (entry.isDirectory()) {

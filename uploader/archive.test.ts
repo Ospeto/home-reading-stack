@@ -8,7 +8,10 @@ import {
   isArchiveFile,
   unpackArchive,
   inspectArchiveSafety,
+  validateArchiveEntryName,
+  MAX_ARCHIVE_SIZE_BYTES,
 } from "./archive";
+import { getBsdtarPath } from "./security";
 
 describe("EPUB-Only Archive & Format Quarantine", () => {
   describe("isSupportedBook", () => {
@@ -77,7 +80,7 @@ describe("EPUB-Only Archive & Format Quarantine", () => {
       fs.mkdirSync(metaDir, { recursive: true });
       fs.writeFileSync(path.join(minDir, "mimetype"), "application/epub+zip");
       fs.writeFileSync(path.join(metaDir, "container.xml"), "<container/>");
-      spawnSync("/usr/bin/bsdtar", [
+      spawnSync(getBsdtarPath(), [
         "--format",
         "zip",
         "-cf",
@@ -94,7 +97,7 @@ describe("EPUB-Only Archive & Format Quarantine", () => {
       fs.writeFileSync(txtFile, "plain text");
 
       const zipPath = path.join("/tmp", `test_pack_${Date.now()}.zip`);
-      spawnSync("/usr/bin/bsdtar", ["-cf", zipPath, "-C", tempDir, "."]);
+      spawnSync(getBsdtarPath(), ["-cf", zipPath, "-C", tempDir, "."]);
 
       const res = unpackArchive(zipPath);
       try {
@@ -129,7 +132,7 @@ describe("EPUB-Only Archive & Format Quarantine", () => {
       fs.writeFileSync(fakeEpub, "not a real epub container at all");
 
       const zipPath = path.join("/tmp", `test_corrupt_pack_${Date.now()}.zip`);
-      spawnSync("/usr/bin/bsdtar", ["-cf", zipPath, "-C", corruptDir, "."]);
+      spawnSync(getBsdtarPath(), ["-cf", zipPath, "-C", corruptDir, "."]);
 
       const res = unpackArchive(zipPath);
       try {
@@ -158,7 +161,7 @@ describe("EPUB-Only Archive & Format Quarantine", () => {
       fs.writeFileSync(cbzFile, "cbz content");
 
       const zipPath = path.join("/tmp", `test_nonepub_${Date.now()}.zip`);
-      spawnSync("/usr/bin/bsdtar", ["-cf", zipPath, "-C", nonEpubDir, "."]);
+      spawnSync(getBsdtarPath(), ["-cf", zipPath, "-C", nonEpubDir, "."]);
 
       const res = unpackArchive(zipPath);
       try {
@@ -248,7 +251,7 @@ with zipfile.ZipFile("${bombZip}", "w", compression=zipfile.ZIP_DEFLATED) as zf:
       }
 
       const symlinkTar = path.join("/tmp", `test_symlink_${Date.now()}.tar`);
-      spawnSync("/usr/bin/bsdtar", ["-cf", symlinkTar, "-C", symlinkDir, "."]);
+      spawnSync(getBsdtarPath(), ["-cf", symlinkTar, "-C", symlinkDir, "."]);
 
       const unp = unpackArchive(symlinkTar);
       try {
@@ -311,6 +314,123 @@ with zipfile.ZipFile("${largeNewlineZip}", "w") as z:
         if (fs.existsSync(largeNewlineZip)) {
           fs.unlinkSync(largeNewlineZip);
         }
+      }
+    });
+
+    it("validateArchiveEntryName rejects entries containing traversal, leading slashes, nulls, or newlines", () => {
+      // Newlines and carriage returns
+      expect(validateArchiveEntryName("book\nname.epub").valid).toBe(false);
+      expect(validateArchiveEntryName("book\rname.epub").valid).toBe(false);
+
+      // Null bytes
+      expect(validateArchiveEntryName("book\0.epub").valid).toBe(false);
+
+      // Path traversal
+      expect(validateArchiveEntryName("../secret.txt").valid).toBe(false);
+      expect(validateArchiveEntryName("foo/../../bar.epub").valid).toBe(false);
+      expect(validateArchiveEntryName("..\\windows\\system32").valid).toBe(false);
+      expect(validateArchiveEntryName("..").valid).toBe(false);
+
+      // Absolute paths
+      expect(validateArchiveEntryName("/etc/passwd").valid).toBe(false);
+      expect(validateArchiveEntryName("\\windows\\win.ini").valid).toBe(false);
+      expect(validateArchiveEntryName("C:\\boot.ini").valid).toBe(false);
+
+      // Clean relative entries
+      expect(validateArchiveEntryName("OEBPS/content.opf").valid).toBe(true);
+      expect(validateArchiveEntryName("Title - Author.epub").valid).toBe(true);
+    });
+
+    it("preserves exact multiple consecutive spaces in filenames and handles owner/group spacing", () => {
+      const spaceDir = path.join("/tmp", `test_space_dir_${Date.now()}`);
+      fs.mkdirSync(spaceDir, { recursive: true });
+
+      // Create a valid mini EPUB with multiple consecutive spaces
+      const spaceEpub = path.join(spaceDir, "My   Book   With   Spaces.epub");
+      const minDir = path.join(spaceDir, "min_epub");
+      const metaDir = path.join(minDir, "META-INF");
+      fs.mkdirSync(metaDir, { recursive: true });
+      fs.writeFileSync(path.join(minDir, "mimetype"), "application/epub+zip");
+      fs.writeFileSync(path.join(metaDir, "container.xml"), "<container/>");
+      spawnSync(getBsdtarPath(), [
+        "--format",
+        "zip",
+        "-cf",
+        spaceEpub,
+        "-C",
+        minDir,
+        "mimetype",
+        "META-INF",
+      ]);
+      fs.rmSync(minDir, { recursive: true, force: true });
+
+      const spaceZip = path.join("/tmp", `test_space_pack_${Date.now()}.zip`);
+      spawnSync(getBsdtarPath(), ["-cf", spaceZip, "-C", spaceDir, "."]);
+
+      try {
+        const inspection = inspectArchiveSafety(spaceZip);
+        expect(inspection.safe).toBe(true);
+
+        const res = unpackArchive(spaceZip);
+        try {
+          expect(res.success).toBe(true);
+          expect(res.books.length).toBe(1);
+          expect(res.books[0].originalName).toBe(
+            "My   Book   With   Spaces.epub",
+          );
+        } finally {
+          res.cleanup();
+        }
+      } finally {
+        if (fs.existsSync(spaceZip)) fs.unlinkSync(spaceZip);
+        if (fs.existsSync(spaceDir))
+          fs.rmSync(spaceDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects TAR archives containing carriage-return or newline entry names", () => {
+      const crTar = path.join("/tmp", `test_cr_${Date.now()}.tar`);
+      // Create a tar archive with an entry containing \r
+      const testDir = path.join("/tmp", `test_cr_dir_${Date.now()}`);
+      fs.mkdirSync(testDir, { recursive: true });
+      fs.writeFileSync(path.join(testDir, "normal.txt"), "hello");
+      spawnSync(getBsdtarPath(), ["-cf", crTar, "-C", testDir, "."]);
+
+      // Manually mutate tar header block to inject a carriage return in the filename
+      const fd = fs.openSync(crTar, "r+");
+      const block = Buffer.alloc(512);
+      fs.readSync(fd, block, 0, 512, 0);
+      block.write("evil\rname.epub\0", 0, "utf8");
+      fs.writeSync(fd, block, 0, 512, 0);
+      fs.closeSync(fd);
+
+      try {
+        const inspection = inspectArchiveSafety(crTar);
+        expect(inspection.safe).toBe(false);
+        expect(inspection.error).toContain("newline characters");
+      } finally {
+        if (fs.existsSync(crTar)) fs.unlinkSync(crTar);
+        if (fs.existsSync(testDir))
+          fs.rmSync(testDir, { recursive: true, force: true });
+      }
+    });
+
+    it("enforces archive size and entry count limits", () => {
+      // 1. inspectArchiveSafety rejects when file size exceeds MAX_ARCHIVE_SIZE_BYTES
+      const fakeLargeArchive = path.join(
+        "/tmp",
+        `test_fake_large_${Date.now()}.zip`,
+      );
+      fs.writeFileSync(fakeLargeArchive, "PK");
+      // Truncate to pretend it's > 100MB
+      fs.truncateSync(fakeLargeArchive, MAX_ARCHIVE_SIZE_BYTES + 1024);
+
+      try {
+        const inspection = inspectArchiveSafety(fakeLargeArchive);
+        expect(inspection.safe).toBe(false);
+        expect(inspection.error).toContain("exceeds maximum allowed size");
+      } finally {
+        if (fs.existsSync(fakeLargeArchive)) fs.unlinkSync(fakeLargeArchive);
       }
     });
   });

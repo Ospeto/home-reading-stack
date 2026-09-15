@@ -5,7 +5,19 @@ import process from "node:process";
 import { safeFetchWithSsrf } from "./security";
 
 export function getCalibredbPath(): string {
-  return process.env.CALIBREDB_PATH || "/opt/homebrew/bin/calibredb";
+  if (process.env.CALIBREDB_PATH) return process.env.CALIBREDB_PATH;
+  const probe = spawnSync("which", ["calibredb"], { encoding: "utf8" });
+  if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
+  const candidates = [
+    "/opt/homebrew/bin/calibredb",
+    "/usr/local/bin/calibredb",
+    "/usr/bin/calibredb",
+    "/Applications/calibre.app/Contents/MacOS/calibredb",
+  ];
+  for (const cand of candidates) {
+    if (fs.existsSync(cand)) return cand;
+  }
+  return "calibredb";
 }
 
 const SERVER_URL = "http://127.0.0.1:8088";

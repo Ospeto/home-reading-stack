@@ -17,37 +17,56 @@ import { isArchiveFile, unpackArchive, isCanonicalEpub } from "./archive";
 import { extractUrlFromText, ingestArticleFromUrl } from "./article";
 import { generateMetadataFilename } from "./filename";
 import { getJobQueue } from "./jobs";
-import { validateEpubContent } from "./security";
+import { validateEpubContent, safeFetchWithSsrf } from "./security";
 
 export function getDropDir(): string {
-  const dir = process.env.BOOKS_DROP_DIR || "/Users/ospeto/Books_Drop";
+  if (process.env.BOOKS_DROP_DIR) return process.env.BOOKS_DROP_DIR;
+  const home = process.env.HOME || os.homedir();
+  const dir = path.join(home, "Books_Drop");
   try {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
+    return dir;
   } catch {
-    const fallback = path.join("/tmp", "Books_Drop");
+    const fallback = path.join(os.tmpdir(), "Books_Drop");
     if (!fs.existsSync(fallback)) {
       fs.mkdirSync(fallback, { recursive: true });
     }
     return fallback;
   }
-  return dir;
 }
 
 const SERVER_URL = "http://127.0.0.1:8088";
-const ENV_PATH = process.env.ENV_PATH || "/Users/ospeto/uploader/.env";
+const ENV_PATH =
+  process.env.ENV_PATH ||
+  path.resolve((import.meta as any).dir || process.cwd(), ".env");
+
+export function getCoverCacheDir(): string {
+  if (process.env.COVER_CACHE_DIR) return process.env.COVER_CACHE_DIR;
+  return path.resolve(
+    (import.meta as any).dir || process.cwd(),
+    "cache",
+    "covers",
+  );
+}
+
 export function getCacheDbPath(): string {
-  const defaultPath = "/Users/ospeto/uploader/cache.db";
-  const p = process.env.CACHE_DB_PATH || defaultPath;
+  if (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH) {
+    return (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH)!;
+  }
+  const defaultPath = path.resolve(
+    (import.meta as any).dir || process.cwd(),
+    "cache.db",
+  );
   try {
-    const dir = path.dirname(p);
+    const dir = path.dirname(defaultPath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-    return p;
+    return defaultPath;
   } catch {
-    const fallbackDir = path.join("/tmp", "uploader_cache");
+    const fallbackDir = path.join(os.tmpdir(), "uploader_cache");
     if (!fs.existsSync(fallbackDir)) {
       fs.mkdirSync(fallbackDir, { recursive: true });
     }
@@ -78,23 +97,52 @@ export function getCacheDb(): Database {
   }
   return _cacheDbInstance;
 }
-const KOSYNC_DB_PATH =
-  process.env.KOSYNC_DB_PATH ||
-  "/Users/ospeto/kosync-server/data/koreader-sync.db";
-export function getCalibredbPath(): string {
-  return process.env.CALIBREDB_PATH || "/opt/homebrew/bin/calibredb";
+export function getKosyncDbPath(): string {
+  if (process.env.KOSYNC_DB_PATH) return process.env.KOSYNC_DB_PATH;
+  const home = process.env.HOME || os.homedir();
+  return path.join(home, "kosync-server", "data", "koreader-sync.db");
 }
+const KOSYNC_DB_PATH = getKosyncDbPath();
+
+export function getCalibredbPath(): string {
+  if (process.env.CALIBREDB_PATH) return process.env.CALIBREDB_PATH;
+  const probe = spawnSync("which", ["calibredb"], { encoding: "utf8" });
+  if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
+  const candidates = [
+    "/opt/homebrew/bin/calibredb",
+    "/usr/local/bin/calibredb",
+    "/usr/bin/calibredb",
+    "/Applications/calibre.app/Contents/MacOS/calibredb",
+  ];
+  for (const cand of candidates) {
+    if (fs.existsSync(cand)) return cand;
+  }
+  return "calibredb";
+}
+
 export function getCalibreDbPath(): string {
-  return (
-    process.env.CALIBRE_DB_PATH ||
-    "/Users/ospeto/Calibre Libraries/Agent Library/metadata.db"
+  if (process.env.CALIBRE_DB_PATH) return process.env.CALIBRE_DB_PATH;
+  if (process.env.CALIBRE_LIBRARY_DIR) {
+    return path.join(process.env.CALIBRE_LIBRARY_DIR, "metadata.db");
+  }
+  const home = process.env.HOME || os.homedir();
+  return path.join(
+    home,
+    "Calibre Libraries",
+    "Agent Library",
+    "metadata.db",
   );
 }
 export function getCalibreLibraryDir(): string {
   return process.env.CALIBRE_LIBRARY_DIR || path.dirname(getCalibreDbPath());
 }
-const MANGA_DB_PATH =
-  process.env.MANGA_DB_PATH || "/Users/ospeto/manga-processor/manga.db";
+
+export function getMangaDbPath(): string {
+  if (process.env.MANGA_DB_PATH) return process.env.MANGA_DB_PATH;
+  const home = process.env.HOME || os.homedir();
+  return path.join(home, "manga-processor", "manga.db");
+}
+const MANGA_DB_PATH = getMangaDbPath();
 const PROXY_URL = "http://127.0.0.1:7890";
 const WEB_UPLOADER_URL = "http://192.168.31.15:8086";
 const CALIBRE_WEB_URL = "http://192.168.31.15:8088";
@@ -182,7 +230,7 @@ function getKOReaderBinary256(filePath: string): string | null {
     for (let i = -1; i <= 10; i++) {
       const offset = i === -1 ? 256 : 1024 * 4 ** i;
       if (offset >= stats.size) break;
-      const buf = Buffer.alloc(size);
+      const buf = new Uint8Array(size);
       const bytesRead = fs.readSync(fd, buf, 0, size, offset);
       if (bytesRead > 0) hasher.update(buf.subarray(0, bytesRead));
     }
@@ -252,7 +300,7 @@ async function tgFetch(endpoint: string, options: any = {}) {
     proxy: PROXY_URL,
   };
   delete fetchOpts.timeoutMs;
-  return await fetch(url, fetchOpts);
+  return await safeFetchWithSsrf(url, fetchOpts);
 }
 
 async function sendMessage(
@@ -909,7 +957,7 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
           if (fs.existsSync(basePath)) {
             const files = fs.readdirSync(basePath);
             const extLower = `.${fmt.toLowerCase()}`;
-            const matchedFile = files.find((f) =>
+            const matchedFile = files.find((f: string) =>
               f.toLowerCase().endsWith(extLower),
             );
             if (matchedFile) {
@@ -1085,10 +1133,10 @@ export async function getStatusDashboard(): Promise<string> {
   let wanReadingStatus = "🔴 `Unreachable`";
   const t0 = performance.now();
   try {
-    const res = await fetch(READING_WEBAPP_URL, {
+    const res = await safeFetchWithSsrf(READING_WEBAPP_URL, {
       proxy: PROXY_URL,
       signal: AbortSignal.timeout(8000),
-    });
+    } as any);
     const dt = Math.round(performance.now() - t0);
     wanReadingStatus =
       res.status === 200
@@ -1102,10 +1150,10 @@ export async function getStatusDashboard(): Promise<string> {
 
   let wanKosyncStatus = "🟡 `Pending WAN Setup`";
   try {
-    const res = await fetch(KOSYNC_WAN_URL, {
+    const res = await safeFetchWithSsrf(KOSYNC_WAN_URL, {
       proxy: PROXY_URL,
       signal: AbortSignal.timeout(4000),
-    });
+    } as any);
     wanKosyncStatus =
       res.status === 200 ? `🟢 \`200 OK\`` : `🟡 \`HTTP ${res.status}\``;
   } catch (_e) {
@@ -1138,9 +1186,14 @@ export async function getStatusDashboard(): Promise<string> {
   // 3. Reading HQ & Calibre
   let uploaderLocal = "🔴 `Inactive`";
   try {
-    const res = await fetch("http://127.0.0.1:8086/api/books", {
-      signal: AbortSignal.timeout(2000),
-    });
+    const res = await safeFetchWithSsrf(
+      "http://127.0.0.1:8086/api/books",
+      {
+        signal: AbortSignal.timeout(2000),
+      },
+      5,
+      { allowInternalServices: true },
+    );
     if (res.status === 200) uploaderLocal = "🟢 `Active` (:8086)";
   } catch (_e) {
     void _e;
@@ -1148,9 +1201,14 @@ export async function getStatusDashboard(): Promise<string> {
 
   let calibreLocal = "🔴 `Inactive`";
   try {
-    const res = await fetch("http://127.0.0.1:8088/opds", {
-      signal: AbortSignal.timeout(2000),
-    });
+    const res = await safeFetchWithSsrf(
+      "http://127.0.0.1:8088/opds",
+      {
+        signal: AbortSignal.timeout(2000),
+      },
+      5,
+      { allowInternalServices: true },
+    );
     if (res.status === 200) calibreLocal = "🟢 `Active` (:8088 / OPDS)";
   } catch (_e) {
     void _e;
@@ -1187,9 +1245,14 @@ export async function getStatusDashboard(): Promise<string> {
   // 4. KOSync
   let kosyncLocal = "🔴 `Inactive`";
   try {
-    const res = await fetch("http://127.0.0.1:7200/", {
-      signal: AbortSignal.timeout(2000),
-    });
+    const res = await safeFetchWithSsrf(
+      "http://127.0.0.1:7200/",
+      {
+        signal: AbortSignal.timeout(2000),
+      },
+      5,
+      { allowInternalServices: true },
+    );
     if (res.status === 200) kosyncLocal = "🟢 `Active` (:7200)";
   } catch (_e) {
     void _e;
@@ -1267,17 +1330,20 @@ export async function getStatusDashboard(): Promise<string> {
     void _e;
   }
 
+  const ssdMount =
+    process.env.STORAGE_MOUNT ||
+    (fs.existsSync("/Volumes/Ospeto_SSD") ? "/Volumes/Ospeto_SSD" : null);
   let ssdDiskStr = "";
-  if (fs.existsSync("/Volumes/Ospeto_SSD")) {
+  if (ssdMount && fs.existsSync(ssdMount)) {
     try {
-      const df = spawnSync("df", ["-h", "/Volumes/Ospeto_SSD"], {
+      const df = spawnSync("df", ["-h", ssdMount], {
         encoding: "utf8",
         timeout: 2000,
       });
       const lines = (df.stdout || "").trim().split("\n");
       if (lines.length > 1) {
         const parts = lines[1].split(/\s+/);
-        ssdDiskStr = `\n• *External SSD:* \`${parts[3]} free\` / ${parts[1]} (${parts[4]} used)`;
+        ssdDiskStr = `\n• *Storage Mount:* \`${parts[3]} free\` / ${parts[1]} (${parts[4]} used)`;
       }
     } catch (_e) {
       void _e;
@@ -1424,7 +1490,7 @@ export function deleteBookFromLibrary(bookId: number): {
       void _e;
     }
     try {
-      const thumbDir = "/Users/ospeto/uploader/cache/covers";
+      const thumbDir = getCoverCacheDir();
       if (fs.existsSync(thumbDir)) {
         const files = fs.readdirSync(thumbDir);
         for (const f of files) {
@@ -2299,7 +2365,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
 
       const token = getTelegramBotToken();
       const dlUrl = `https://api.telegram.org/file/bot${token}/${fileJson.result.file_path}`;
-      const dl = await fetch(dlUrl, { proxy: PROXY_URL } as any);
+      const dl = await safeFetchWithSsrf(dlUrl, { proxy: PROXY_URL } as any);
       if (!dl.ok) {
         results.push({
           name: fileName,
@@ -2316,7 +2382,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
       const tempFileName = `${safeBase}_${uniqueSuffix}${ext}`;
       const destPath = path.join(getDropDir(), tempFileName);
 
-      fs.writeFileSync(destPath, Buffer.from(arrayBuf));
+      fs.writeFileSync(destPath, new Uint8Array(arrayBuf));
 
       if (!isArchiveFile(fileName)) {
         const contentValidation = validateEpubContent(destPath);

@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { searchUniversalMetadata, applyMetadataToCalibre } from "./scraper";
@@ -32,45 +33,55 @@ import { getJobQueue, DurableJobQueue } from "./jobs";
 import { generateMetadataFilename, buildContentDisposition } from "./filename";
 
 export function getDropDir(): string {
-  const dir = process.env.BOOKS_DROP_DIR || "/Users/ospeto/Books_Drop";
+  if (process.env.BOOKS_DROP_DIR) return process.env.BOOKS_DROP_DIR;
+  const home = process.env.HOME || os.homedir();
+  const dir = path.join(home, "Books_Drop");
   try {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
+    return dir;
   } catch {
-    const fallback = path.join("/tmp", "Books_Drop");
+    const fallback = path.join(os.tmpdir(), "Books_Drop");
     if (!fs.existsSync(fallback)) {
       fs.mkdirSync(fallback, { recursive: true });
     }
     return fallback;
   }
-  return dir;
 }
 
 export function getCoverCacheDir(): string {
-  const dir =
-    process.env.COVER_CACHE_DIR || "/Users/ospeto/uploader/cache/covers";
+  const defaultDir =
+    process.env.COVER_CACHE_DIR ||
+    path.resolve((import.meta as any).dir || process.cwd(), "cache", "covers");
   try {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(defaultDir)) {
+      fs.mkdirSync(defaultDir, { recursive: true });
     }
+    return defaultDir;
   } catch {
-    const fallback = path.join("/tmp", "uploader_cache", "covers");
+    const fallback = path.join(os.tmpdir(), "uploader_cache", "covers");
     if (!fs.existsSync(fallback)) {
       fs.mkdirSync(fallback, { recursive: true });
     }
     return fallback;
   }
-  return dir;
 }
 
 const SERVER_URL = process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088";
-const LIBRARY_DIR =
-  process.env.CALIBRE_LIBRARY_DIR ||
-  "/Users/ospeto/Calibre Libraries/Agent Library";
-const KOSYNC_DB_PATH =
-  process.env.KOSYNC_DB_PATH ||
-  "/Users/ospeto/kosync-server/data/koreader-sync.db";
+export function getCalibreLibraryDir(): string {
+  if (process.env.CALIBRE_LIBRARY_DIR) return process.env.CALIBRE_LIBRARY_DIR;
+  const home = process.env.HOME || os.homedir();
+  return path.join(home, "Calibre Libraries", "Agent Library");
+}
+const LIBRARY_DIR = getCalibreLibraryDir();
+
+export function getKosyncDbPath(): string {
+  if (process.env.KOSYNC_DB_PATH) return process.env.KOSYNC_DB_PATH;
+  const home = process.env.HOME || os.homedir();
+  return path.join(home, "kosync-server", "data", "koreader-sync.db");
+}
+const KOSYNC_DB_PATH = getKosyncDbPath();
 const MAX_UPLOAD_SIZE = MAX_ARCHIVE_SIZE_BYTES; // 100MB
 
 const FILE_EXT_PATH_REGEX =
@@ -127,6 +138,12 @@ export function sanitizeJobForResponse(job: any): any {
 }
 
 function resolveHtmlPath(): string {
+  if (
+    process.env.INDEX_HTML_PATH &&
+    fs.existsSync(process.env.INDEX_HTML_PATH)
+  ) {
+    return process.env.INDEX_HTML_PATH;
+  }
   try {
     const dir = path.dirname(new URL(import.meta.url).pathname);
     const localPath = path.join(dir, "index.html");
@@ -134,14 +151,22 @@ function resolveHtmlPath(): string {
   } catch {
     // Fall back to default location
   }
-  return "/Users/ospeto/uploader/index.html";
+  const rootIndex = path.resolve(process.cwd(), "uploader", "index.html");
+  if (fs.existsSync(rootIndex)) return rootIndex;
+  return path.resolve(process.cwd(), "index.html");
 }
 
 const HTML_PATH = resolveHtmlPath();
 
 export function getCacheDbPath(): string {
-  const defaultPath = "/Users/ospeto/uploader/cache.db";
-  const p = process.env.CACHE_DB_PATH || defaultPath;
+  if (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH) {
+    return (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH)!;
+  }
+  const defaultPath = path.resolve(
+    (import.meta as any).dir || process.cwd(),
+    "cache.db",
+  );
+  const p = defaultPath;
   try {
     const dir = path.dirname(p);
     if (!fs.existsSync(dir)) {
@@ -149,7 +174,7 @@ export function getCacheDbPath(): string {
     }
     return p;
   } catch {
-    const fallbackDir = path.join("/tmp", "uploader_cache");
+    const fallbackDir = path.join(os.tmpdir(), "uploader_cache");
     if (!fs.existsSync(fallbackDir)) {
       fs.mkdirSync(fallbackDir, { recursive: true });
     }
@@ -555,10 +580,27 @@ function safeParseJson(str: string): any {
 }
 
 export function getCalibredbPath(): string {
-  return process.env.CALIBREDB_PATH || "/opt/homebrew/bin/calibredb";
+  if (process.env.CALIBREDB_PATH) return process.env.CALIBREDB_PATH;
+  const probe = spawnSync("which", ["calibredb"], { encoding: "utf8" });
+  if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
+  const candidates = [
+    "/opt/homebrew/bin/calibredb",
+    "/usr/local/bin/calibredb",
+    "/usr/bin/calibredb",
+    "/Applications/calibre.app/Contents/MacOS/calibredb",
+  ];
+  for (const cand of candidates) {
+    if (fs.existsSync(cand)) return cand;
+  }
+  return "calibredb";
 }
+
 export function getSipsPath(): string {
-  return process.env.SIPS_PATH || "/usr/bin/sips";
+  if (process.env.SIPS_PATH) return process.env.SIPS_PATH;
+  const probe = spawnSync("which", ["sips"], { encoding: "utf8" });
+  if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
+  if (fs.existsSync("/usr/bin/sips")) return "/usr/bin/sips";
+  return "sips";
 }
 
 let calibreBooksCache: { books: any[]; timestamp: number } = {

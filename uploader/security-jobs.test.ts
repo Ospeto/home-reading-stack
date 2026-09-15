@@ -19,6 +19,7 @@ import {
   getDownloadFilename,
   sanitizeErrorMessage,
   validateTelegramWebAppData,
+  getBsdtarPath,
 } from "./security";
 import {
   inspectArchiveSafety,
@@ -134,6 +135,153 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
     }
     expect(thrownError).not.toBeNull();
     expect(thrownError?.message).toContain("SSRF");
+  });
+
+  it("enforces that safeFetchWithSsrf is the only production outbound fetch entry point in uploader/", () => {
+    const uploaderDir = path.resolve(__dirname);
+    const files = fs
+      .readdirSync(uploaderDir)
+      .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+
+    const violations: string[] = [];
+
+    for (const f of files) {
+      if (f === "security.ts") continue; // The single helper is defined here
+      const fullPath = path.join(uploaderDir, f);
+      const content = fs.readFileSync(fullPath, "utf8");
+      const lines = content.split("\n");
+
+      lines.forEach((line, idx) => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("//") || trimmed.startsWith("*")) return;
+        // Bun server export: fetch(req: any, server: any)
+        if (/fetch\s*\(\s*req\b/.test(trimmed)) return;
+
+        // Check for raw fetch( or globalThis.fetch
+        // Matches fetch( when NOT preceded by 'safe'
+        if (
+          /(?<!safe)fetch\s*\(/.test(trimmed) ||
+          /globalThis\.fetch\b/.test(trimmed)
+        ) {
+          violations.push(`${f}:${idx + 1}: ${trimmed}`);
+        }
+      });
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  it("safeFetchWithSsrf successfully fetches public URLs with IP binding", async () => {
+    const res = await safeFetchWithSsrf(
+      "https://en.wikipedia.org/wiki/E-book",
+      {
+        method: "HEAD",
+        headers: { "User-Agent": "ReadingHQ-Test/1.0" },
+        signal: AbortSignal.timeout(10000),
+      },
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("safeFetchWithSsrf rejects redirects to localhost or private IPs", async () => {
+    const redirectServer = Bun.serve({
+      port: 0,
+      fetch(req: any) {
+        const u = new URL(req.url);
+        if (u.pathname === "/init") {
+          return new Response(null, {
+            status: 302,
+            headers: { Location: "http://127.0.0.1:8088/admin-secret" },
+          });
+        }
+        return new Response("OK");
+      },
+    });
+
+    try {
+      let err: Error | null = null;
+      try {
+        await safeFetchWithSsrf(
+          `http://127.0.0.1:${redirectServer.port}/init`,
+          { signal: AbortSignal.timeout(3000) },
+          5,
+          { allowInternalServices: true },
+        );
+      } catch (e: any) {
+        err = e;
+      }
+      expect(err).not.toBeNull();
+      expect(err?.message).toContain("SSRF guard blocked target");
+    } finally {
+      redirectServer.stop(true);
+    }
+  });
+
+  it("safeFetchWithSsrf rejects redirect re-binding targeting internal/loopback addresses", async () => {
+    const redirectServer = Bun.serve({
+      port: 0,
+      fetch(req: any) {
+        const u = new URL(req.url);
+        if (u.pathname === "/rebind") {
+          return new Response(null, {
+            status: 302,
+            headers: { Location: "http://localhost:8088/secret" },
+          });
+        }
+        return new Response("OK");
+      },
+    });
+
+    try {
+      let err: Error | null = null;
+      try {
+        await safeFetchWithSsrf(
+          `http://127.0.0.1:${redirectServer.port}/rebind`,
+          { signal: AbortSignal.timeout(3000) },
+          5,
+          { allowInternalServices: true },
+        );
+      } catch (e: any) {
+        err = e;
+      }
+      expect(err).not.toBeNull();
+      expect(err?.message).toContain("SSRF guard blocked target");
+    } finally {
+      redirectServer.stop(true);
+    }
+  });
+
+  it("safeFetchWithSsrf enforces proxy rejection for internal, metadata, or unauthorized proxy targets", async () => {
+    // 1. Direct private IP target rejected even if proxy is supplied
+    let err1: Error | null = null;
+    try {
+      await safeFetchWithSsrf("http://127.0.0.1:8088/secret", {
+        proxy: "http://127.0.0.1:7890",
+      } as any);
+    } catch (e: any) {
+      err1 = e;
+    }
+    expect(err1).not.toBeNull();
+    expect(err1?.message).toContain("SSRF guard blocked target");
+
+    // 2. Malicious proxy pointing to cloud metadata (169.254.169.254) rejected
+    let err2: Error | null = null;
+    try {
+      await safeFetchWithSsrf("https://en.wikipedia.org/wiki/E-book", {
+        proxy: "http://169.254.169.254:80",
+      } as any);
+    } catch (e: any) {
+      err2 = e;
+    }
+    expect(err2).not.toBeNull();
+    expect(err2?.message).toContain("SSRF guard blocked proxy target");
+
+    // 3. allowProxyBypass cannot bypass cloud metadata or link-local endpoints
+    const metaCheck = await validateUrlForSSRF(
+      "http://169.254.169.254/latest/meta-data/",
+      { allowProxyBypass: true },
+    );
+    expect(metaCheck.safe).toBe(false);
   });
 });
 
@@ -424,7 +572,7 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
 
     const validEpub = path.join("/tmp", `valid_${Date.now()}.epub`);
     const { spawnSync } = require("node:child_process");
-    spawnSync("/usr/bin/bsdtar", [
+    spawnSync(getBsdtarPath(), [
       "--format",
       "zip",
       "-cf",

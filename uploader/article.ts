@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import process from "node:process";
@@ -8,31 +9,61 @@ import { cleanString, isAllowedCoverUrl } from "./scraper";
 import { validateUrlForSSRF, safeFetchWithSsrf } from "./security";
 
 export function getDropDir(): string {
-  const dir = process.env.BOOKS_DROP_DIR || "/Users/ospeto/Books_Drop";
+  if (process.env.BOOKS_DROP_DIR) return process.env.BOOKS_DROP_DIR;
+  const home = process.env.HOME || os.homedir();
+  const dir = path.join(home, "Books_Drop");
   try {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
+    return dir;
   } catch (_e) {
-    const fallback = path.join("/tmp", "Books_Drop");
+    const fallback = path.join(os.tmpdir(), "Books_Drop");
     if (!fs.existsSync(fallback)) {
       fs.mkdirSync(fallback, { recursive: true });
     }
     return fallback;
   }
-  return dir;
 }
 
 const SERVER_URL = "http://127.0.0.1:8088";
 const PROXY_URL = "http://127.0.0.1:7890";
 export function getEbookConvertPath(): string {
-  return process.env.EBOOK_CONVERT_PATH || "/opt/homebrew/bin/ebook-convert";
+  if (process.env.EBOOK_CONVERT_PATH) return process.env.EBOOK_CONVERT_PATH;
+  const probe = spawnSync("which", ["ebook-convert"], { encoding: "utf8" });
+  if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
+  const candidates = [
+    "/opt/homebrew/bin/ebook-convert",
+    "/usr/local/bin/ebook-convert",
+    "/usr/bin/ebook-convert",
+    "/Applications/calibre.app/Contents/MacOS/ebook-convert",
+  ];
+  for (const cand of candidates) {
+    if (fs.existsSync(cand)) return cand;
+  }
+  return "ebook-convert";
 }
 export function getCalibredbPath(): string {
-  return process.env.CALIBREDB_PATH || "/opt/homebrew/bin/calibredb";
+  if (process.env.CALIBREDB_PATH) return process.env.CALIBREDB_PATH;
+  const probe = spawnSync("which", ["calibredb"], { encoding: "utf8" });
+  if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
+  const candidates = [
+    "/opt/homebrew/bin/calibredb",
+    "/usr/local/bin/calibredb",
+    "/usr/bin/calibredb",
+    "/Applications/calibre.app/Contents/MacOS/calibredb",
+  ];
+  for (const cand of candidates) {
+    if (fs.existsSync(cand)) return cand;
+  }
+  return "calibredb";
 }
 export function getSipsPath(): string {
-  return process.env.SIPS_PATH || "/usr/bin/sips";
+  if (process.env.SIPS_PATH) return process.env.SIPS_PATH;
+  const probe = spawnSync("which", ["sips"], { encoding: "utf8" });
+  if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
+  if (fs.existsSync("/usr/bin/sips")) return "/usr/bin/sips";
+  return "sips";
 }
 const FETCH_TIMEOUT_MS = 15000;
 const BROWSER_USER_AGENT =

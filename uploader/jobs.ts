@@ -5,7 +5,10 @@ import path from "node:path";
 import process from "node:process";
 import { sanitizeErrorMessage } from "./security";
 
-export const DEFAULT_JOBS_DB_PATH = process.env.JOBS_DB_PATH || process.env.CACHE_DB_PATH || "/Users/ospeto/uploader/cache.db";
+export const DEFAULT_JOBS_DB_PATH =
+  process.env.JOBS_DB_PATH ||
+  process.env.CACHE_DB_PATH ||
+  path.resolve((import.meta as any).dir || process.cwd(), "cache.db");
 
 export type JobType =
   | "file_ingest"

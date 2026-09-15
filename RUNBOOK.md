@@ -554,6 +554,13 @@ Verify each reading stack integration point after import:
 
 ---
 
+### 13. Security, Secret Hygiene & Credential Rotation Protocol
+
+- **Placeholders in Configuration Templates:** `.env.example` contains non-functional dummy placeholders only (`your_kosync_password_salt_here`, `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`). Real secrets, salts, and tokens must never be committed to source control.
+- **Exposed Credentials Policy:** If production credentials (such as `TELEGRAM_BOT_TOKEN`, `KOSYNC_PASSWORD_SALT`, or `READING_API_KEY`) are ever exposed or committed to repository history, they require captain-authorized live credential rotation and repository history remediation (e.g. via `git filter-repo` or BFG Repo-Cleaner). Crewmate agents must not rewrite git history or perform live credential rotation autonomously without explicit captain authorization.
+
+---
+
 ## ☁️ Remote VPS Standby Stack (`us3` / `198.46.146.17`)
 
 If ever needing to manage or update the cloud backup stack:

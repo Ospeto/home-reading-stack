@@ -177,9 +177,27 @@ export function isPrivateOrInternalIp(rawIp: string): boolean {
   return true;
 }
 
+export function getBsdtarPath(): string {
+  if (process.env.BSDTAR_PATH) return process.env.BSDTAR_PATH;
+  const probe = spawnSync("which", ["bsdtar"], { encoding: "utf8" });
+  if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
+  const candidates = [
+    "/usr/bin/bsdtar",
+    "/opt/homebrew/bin/bsdtar",
+    "/usr/local/bin/bsdtar",
+  ];
+  for (const cand of candidates) {
+    if (fs.existsSync(cand)) return cand;
+  }
+  return "bsdtar";
+}
+
 export interface ValidateUrlOptions {
   allowProxyBypass?: boolean;
   allowCalibreServer?: boolean;
+  allowInternalServices?: boolean;
+  bindIp?: boolean;
+  allowedProxyUrls?: string[];
 }
 
 /**
@@ -209,6 +227,19 @@ export async function validateUrlForSSRF(
       const serverOrigin = (process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088").toLowerCase();
       const targetOrigin = `${u.protocol}//${u.host}`.toLowerCase();
       if (targetOrigin === serverOrigin.replace(/\/$/, "") && u.pathname.startsWith("/get/")) {
+        return { safe: true, resolvedIp: "127.0.0.1" };
+      }
+    }
+
+    // If explicit internal services probe is permitted, verify host is loopback and port is permitted
+    if (options.allowInternalServices) {
+      const isLoopback =
+        host === "127.0.0.1" || host === "localhost" || host === "::1";
+      const port = u.port || (u.protocol === "https:" ? "443" : "80");
+      if (
+        isLoopback &&
+        (port === "8086" || port === "8088" || port === "7200")
+      ) {
         return { safe: true, resolvedIp: "127.0.0.1" };
       }
     }
@@ -797,7 +828,7 @@ export function validateEpubContent(filePath: string): EpubValidationResult {
     }
 
     // 2. Inspect archive entries with bsdtar -tf
-    const listRes = spawnSync("/usr/bin/bsdtar", ["-tf", filePath], {
+    const listRes = spawnSync(getBsdtarPath(), ["-tf", filePath], {
       encoding: "utf8",
       timeout: 10000,
     });
@@ -844,7 +875,7 @@ export function validateEpubContent(filePath: string): EpubValidationResult {
     }
 
     const mimeRes = spawnSync(
-      "/usr/bin/bsdtar",
+      getBsdtarPath(),
       ["-xOf", filePath, "mimetype"],
       {
         encoding: "utf8",
@@ -993,6 +1024,33 @@ export async function safeFetchWithSsrf(
   let currentUrl = targetUrl;
   let remaining = maxRedirects;
 
+  // Validate proxy if specified
+  const proxyOption = (init as any)?.proxy;
+  if (proxyOption) {
+    const proxyStr = String(proxyOption);
+    const configuredProxy =
+      process.env.HTTP_PROXY ||
+      process.env.HTTPS_PROXY ||
+      "http://127.0.0.1:7890";
+    const allowedProxies = [
+      configuredProxy,
+      "http://127.0.0.1:7890",
+      ...(options.allowedProxyUrls || []),
+    ].map((p) => p.toLowerCase().replace(/\/$/, ""));
+
+    const normalizedProxy = proxyStr.toLowerCase().replace(/\/$/, "");
+    if (!allowedProxies.includes(normalizedProxy)) {
+      const proxyCheck = await validateUrlForSSRF(proxyStr, {
+        allowProxyBypass: false,
+      });
+      if (!proxyCheck.safe) {
+        throw new Error(
+          `SSRF guard blocked proxy target: ${proxyCheck.error || "Forbidden proxy"}`,
+        );
+      }
+    }
+  }
+
   while (true) {
     const ssrfCheck = await validateUrlForSSRF(currentUrl, options);
     if (!ssrfCheck.safe) {
@@ -1001,12 +1059,63 @@ export async function safeFetchWithSsrf(
       );
     }
 
+    let parsed: URL;
+    try {
+      parsed = new URL(currentUrl);
+    } catch (urlErr: any) {
+      throw new Error(`Invalid URL target: ${urlErr?.message || urlErr}`);
+    }
+    const hostIsIp = net.isIP(normalizeIpString(parsed.hostname));
+
+    let fetchUrl = currentUrl;
     const fetchOpts: any = {
       ...init,
       redirect: "manual",
     };
 
-    const res = await fetch(currentUrl, fetchOpts);
+    // IP Binding: bind outbound request to the resolved IP to prevent DNS rebinding attacks (TOCTOU)
+    // Preserves Host header and TLS SNI serverName
+    if (
+      options.bindIp !== false &&
+      ssrfCheck.resolvedIp &&
+      !hostIsIp &&
+      !options.allowInternalServices
+    ) {
+      const ipHost = ssrfCheck.resolvedIp.includes(":")
+        ? `[${ssrfCheck.resolvedIp}]`
+        : ssrfCheck.resolvedIp;
+      try {
+        const bound = new URL(currentUrl);
+        bound.hostname = ipHost;
+        fetchUrl = bound.href;
+      } catch {
+        // Fallback to original URL if binding fails
+        fetchUrl = currentUrl;
+      }
+
+      const headers = new Headers(init.headers || {});
+      if (!headers.has("host")) {
+        headers.set("host", parsed.host);
+      }
+      fetchOpts.headers = headers;
+
+      if (parsed.protocol === "https:") {
+        fetchOpts.tls = {
+          ...(fetchOpts.tls || {}),
+          serverName: parsed.hostname,
+        };
+      }
+    }
+
+    const res = await fetch(fetchUrl, fetchOpts);
+    try {
+      Object.defineProperty(res, "url", {
+        value: currentUrl,
+        configurable: true,
+      });
+    } catch {
+      // ignore
+    }
 
     if (res.status >= 300 && res.status < 400) {
       const loc = res.headers.get("location");
@@ -1017,7 +1126,13 @@ export async function safeFetchWithSsrf(
         throw new Error("Too many redirects (exceeded limit of 5)");
       }
       remaining--;
-      currentUrl = new URL(loc, currentUrl).href;
+      try {
+        currentUrl = new URL(loc, currentUrl).href;
+      } catch (redirectErr: any) {
+        throw new Error(
+          `Invalid redirect location URL: ${redirectErr?.message || redirectErr}`,
+        );
+      }
       continue;
     }
 

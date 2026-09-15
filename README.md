@@ -253,6 +253,10 @@ The public WAN edge (`https://reading.wavypremium.xyz`) is hardened against unau
    - Public API error responses redact internal filesystem paths and stack traces (`sanitizeErrorMessage`).
    - Download endpoints return clean metadata-derived filenames (`Title - Author.epub` or `[Series 1] Title - Author.epub`), never leaking Calibre internal storage directory paths.
 
+6. **Secret Hygiene & Credential Rotation Protocol:**
+   - `.env.example` contains non-functional dummy placeholders only. Never commit production tokens, salts, or API keys to the repository.
+   - Any exposed or leaked credentials require captain-authorized live credential rotation and repository history remediation (such as `git filter-repo` or BFG Repo-Cleaner). Autonomous agents must not rewrite git history or perform live credential rotation without explicit captain authorization.
+
 ---
 
 ## ⚡ Durable SQLite Ingestion Job Queue

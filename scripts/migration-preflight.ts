@@ -12,6 +12,7 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { Database } from "bun:sqlite";
@@ -95,12 +96,13 @@ export function normalizeTitleAndAuthor(
 export function runMigrationPreflight(
   options: PreflightOptions = {},
 ): MigrationInventory {
+  const home = process.env.HOME || os.homedir();
   const defaultSource =
     process.env.CALIBRE_SOURCE_LIBRARY_DIR ||
     "/Volumes/Ospeto_SSD/Calibre Library";
   const defaultTarget =
     process.env.CALIBRE_LIBRARY_DIR ||
-    "/Users/ospeto/Calibre Libraries/Agent Library";
+    path.join(home, "Calibre Libraries", "Agent Library");
 
   const sourcePath = options.sourceLibraryPath || defaultSource;
   const targetPath = options.targetLibraryPath || defaultTarget;
