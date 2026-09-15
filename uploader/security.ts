@@ -1040,10 +1040,15 @@ export function redactJobRecord(job: any): any {
       // Query values are redacted with callbacks so literal `$1` payloads stay literal.
       const protectedUrls: string[] = [];
       s = s.replace(/https?:\/\/[^\s<>"']+/gi, (url) => {
-        const redactedUrl = url.replace(
-          /([?&](?:token|key|secret|password|auth|apiKey)=)[^&#\s]*/gi,
-          (_match, prefix: string) => `${prefix}[REDACTED]`,
-        );
+        const redactedUrl = url
+          .replace(
+            /^(https?:\/\/)[^/\s@]+:[^/\s@]+@/i,
+            (_match, scheme: string) => `${scheme}[REDACTED]@`,
+          )
+          .replace(
+            /([?&](?:token|key|secret|password|auth|api[_-]?key|authorization)=)[^&#\s]*/gi,
+            (_match, prefix: string) => `${prefix}[REDACTED]`,
+          );
         const marker = `__REDACTED_URL_${protectedUrls.length}__`;
         protectedUrls.push(redactedUrl);
         return marker;
@@ -1058,7 +1063,7 @@ export function redactJobRecord(job: any): any {
       s = s.replace(/[a-zA-Z]:\\[a-zA-Z0-9._\-\\]+/g, "[path]");
       // Redact tokens/secrets, including encoded, slash-containing, and `$` values.
       s = s.replace(
-        /((?:token|key|secret|password|auth|apiKey))=([^&\s]+)/gi,
+        /((?:token|key|secret|password|auth|api[_-]?key|authorization))=([^&\s]+)/gi,
         (_match, key: string) => `${key}=[REDACTED]`,
       );
       s = s.replace(/Bearer\s+[^\s]+/gi, "Bearer [REDACTED]");
