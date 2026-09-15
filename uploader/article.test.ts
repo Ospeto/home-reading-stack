@@ -1,5 +1,7 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import fs from "node:fs";
+import path from "node:path";
+import process from "node:process";
 import { spawnSync } from "node:child_process";
 import {
   isPaywallOrGarbage,
@@ -14,10 +16,111 @@ import {
   convertHtmlToEpub,
 } from "./article";
 
+const originalFetch = globalThis.fetch;
+let mockConvertScript: string | null = null;
+let origEbookConvertPath: string | undefined;
+
+beforeAll(() => {
+  // 1. Isolate external article and Jina network access
+  globalThis.fetch = (async (input: any, init?: any) => {
+    const urlStr = typeof input === "string" ? input : input?.url || "";
+    const hostHeader =
+      init?.headers instanceof Headers
+        ? init.headers.get("host")
+        : (init?.headers?.host || "");
+
+    // Intercept Paul Graham article fetch
+    if (
+      urlStr.includes("paulgraham.com/foundermode.html") ||
+      (hostHeader?.includes("paulgraham.com") &&
+        urlStr.includes("/foundermode.html"))
+    ) {
+      const dummyEssay =
+        "At a YC event recently Brian Chesky gave a talk that everyone who was there is still talking about. Most founder advice is wrong because modularizing companies when they grow breaks the core vision. Founders need to stay deeply involved in details. ".repeat(
+          25,
+        );
+      const html = `<!DOCTYPE html>
+<html>
+<head><title>Founder Mode</title></head>
+<body>
+  <header><nav><a href="/">Home</a></nav></header>
+  <map name="navmap"><area shape="rect" coords="0,0,10,10" href="/maplink"></map>
+  <img src="banner.jpg" usemap="#navmap" />
+  <h1>Founder Mode</h1>
+  <p>${dummyEssay}</p>
+  <footer>Copyright 2024</footer>
+</body>
+</html>`;
+      return new Response(html, {
+        status: 200,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+
+    // Intercept FT article paywall & Jina fallback
+    if (
+      urlStr.includes("ft.com") ||
+      hostHeader?.includes("ft.com") ||
+      urlStr.includes("r.jina.ai") ||
+      hostHeader?.includes("r.jina.ai")
+    ) {
+      if (urlStr.includes("r.jina.ai") || hostHeader?.includes("r.jina.ai")) {
+        const jinaPaywall = `Title: Financial Times
+URL Source: https://www.ft.com/content/sample
+Markdown Content:
+Standard Digital subscription required. Explore more offers. Save over 40% on subscription.`;
+        return new Response(jinaPaywall, {
+          status: 200,
+          headers: { "Content-Type": "text/markdown; charset=utf-8" },
+        });
+      }
+      return new Response("Paywall Access Denied", { status: 403 });
+    }
+
+    return originalFetch(input, init);
+  }) as typeof fetch;
+
+  // 2. Isolate machine-specific ebook-convert via hermetic mock script
+  mockConvertScript = path.join("/tmp", `mock_ebook_convert_${Date.now()}.sh`);
+  fs.writeFileSync(
+    mockConvertScript,
+    `#!/bin/sh
+OUT="$2"
+printf "PK\\003\\004mock_hermetic_epub_archive" > "$OUT"
+head -c 3000 /dev/zero >> "$OUT"
+exit 0
+`,
+    { mode: 0o755 },
+  );
+  origEbookConvertPath = process.env.EBOOK_CONVERT_PATH;
+  process.env.EBOOK_CONVERT_PATH = mockConvertScript;
+});
+
+afterAll(() => {
+  globalThis.fetch = originalFetch;
+
+  if (origEbookConvertPath === undefined) {
+    delete process.env.EBOOK_CONVERT_PATH;
+  } else {
+    process.env.EBOOK_CONVERT_PATH = origEbookConvertPath;
+  }
+
+  if (mockConvertScript && fs.existsSync(mockConvertScript)) {
+    try {
+      fs.unlinkSync(mockConvertScript);
+    } catch {}
+  }
+});
+
 describe("Paywall Barrier & Content Quality Detection", () => {
   test("flags content with link density > 50% when totalTextLen > 200", () => {
     // 250 total chars, 150 link chars => 60% link density
-    const text = "A".repeat(100) + "[Link Text](" + "https://example.com/".repeat(5) + ")" + "B".repeat(50);
+    const text =
+      "A".repeat(100) +
+      "[Link Text](" +
+      "https://example.com/".repeat(5) +
+      ")" +
+      "B".repeat(50);
     const linkLen = 150;
     const totalLen = 250;
     const result = isPaywallOrGarbage(text, linkLen, totalLen);
@@ -44,12 +147,15 @@ Here is a very brief notice about a website update. It has only twenty words or 
       "Subscribe to unlock",
       "Subscribe for full access",
       "Already a subscriber? Sign in",
-      "To continue reading, please subscribe"
+      "To continue reading, please subscribe",
     ];
 
     for (const marker of markers) {
       // 200 words of dummy text + marker
-      const dummyProse = "The financial markets saw substantial trading activity across all major global asset classes today. ".repeat(20);
+      const dummyProse =
+        "The financial markets saw substantial trading activity across all major global asset classes today. ".repeat(
+          20,
+        );
       const text = `${dummyProse}\n\n${marker}\n\n${dummyProse}`;
       const result = isPaywallOrGarbage(text);
       expect(result.isPaywall).toBe(true);
@@ -64,7 +170,7 @@ Here is a very brief notice about a website update. It has only twenty words or 
       "Observability plays a fundamental role in understanding system health during unexpected failure modes. Structured logging, metrics aggregation, and distributed tracing work together to form a comprehensive diagnostic framework.",
       "Furthermore, caching strategies must account for eventual consistency, cache invalidation storms, and cold start latency. Using write-through or cache-aside topologies depends strictly on the application's read-to-write ratio.",
       "Security cannot be treated as an afterthought in modern cloud architectures. Zero-trust principles require that every service boundary verifies and authorizes each incoming request, regardless of whether it originates within the internal private network or across the public internet.",
-      "Ultimately, successful engineering organizations cultivate strong engineering hygiene through automated testing, continuous integration, and disciplined operational runbooks that allow teams to recover rapidly from outages."
+      "Ultimately, successful engineering organizations cultivate strong engineering hygiene through automated testing, continuous integration, and disciplined operational runbooks that allow teams to recover rapidly from outages.",
     ];
     const fullArticle = paragraphs.join("\n\n");
     const result = isPaywallOrGarbage(fullArticle);
@@ -160,16 +266,19 @@ Subscribe today for $1.
 
 describe("End-to-End Extraction & Paywall Rejection", () => {
   test("Paul Graham article cleans cleanly without <map> or <area> tags", async () => {
-    const article = await extractArticle("https://paulgraham.com/foundermode.html");
+    const article = await extractArticle(
+      "https://paulgraham.com/foundermode.html",
+    );
     expect(article.title).toBe("Founder Mode");
     expect(article.wordCount).toBeGreaterThan(500);
     expect(article.cleanedHtml).not.toContain("<map");
     expect(article.cleanedHtml).not.toContain("<area");
     expect(article.cleanedHtml).not.toContain("usemap");
-  }, 30000);
+  }, 15000);
 
   test("Financial Times paywall page is cleanly rejected with PAYWALL_ERROR_MESSAGE", async () => {
-    const ftUrl = "https://www.ft.com/content/4564e6a5-69e9-40a6-bf0f-a888f2f4f002";
+    const ftUrl =
+      "https://www.ft.com/content/4564e6a5-69e9-40a6-bf0f-a888f2f4f002";
     let thrownError: Error | null = null;
     try {
       await extractArticle(ftUrl);
@@ -178,7 +287,7 @@ describe("End-to-End Extraction & Paywall Rejection", () => {
     }
     expect(thrownError).not.toBeNull();
     expect(thrownError?.message).toBe(PAYWALL_ERROR_MESSAGE);
-  }, 30000);
+  }, 15000);
 });
 
 describe("Automatic Cover Generation & Typography Pipeline", () => {
@@ -186,7 +295,8 @@ describe("Automatic Cover Generation & Typography Pipeline", () => {
     const shortTitle = "Short Title";
     expect(wrapText(shortTitle, 22, 5)).toEqual(["Short Title"]);
 
-    const longTitle = "How to Do Great Work and Build Remarkable Things Across Multiple Decades";
+    const longTitle =
+      "How to Do Great Work and Build Remarkable Things Across Multiple Decades";
     const wrapped = wrapText(longTitle, 22, 5);
     expect(wrapped.length).toBeGreaterThanOrEqual(3);
     for (const line of wrapped) {
@@ -197,7 +307,9 @@ describe("Automatic Cover Generation & Typography Pipeline", () => {
   test("escapeXml correctly escapes XML entity characters", () => {
     const raw = `Tom & Jerry <cartoon> "best" 'show'`;
     const escaped = escapeXml(raw);
-    expect(escaped).toBe("Tom &amp; Jerry &lt;cartoon&gt; &quot;best&quot; &apos;show&apos;");
+    expect(escaped).toBe(
+      "Tom &amp; Jerry &lt;cartoon&gt; &quot;best&quot; &apos;show&apos;",
+    );
   });
 
   test("generateTypographicCover creates a valid 600x900 JPEG cover via macOS sips", () => {
@@ -212,16 +324,22 @@ describe("Automatic Cover Generation & Typography Pipeline", () => {
       expect(stat.size).toBeGreaterThan(1024);
 
       // Verify with sips that it's a valid JPEG image with 600x900 dimensions
-      const sipsProbe = spawnSync("/usr/bin/sips", ["-g", "format", "-g", "pixelWidth", "-g", "pixelHeight", coverPath], {
-        encoding: "utf8",
-      });
+      const sipsProbe = spawnSync(
+        "/usr/bin/sips",
+        ["-g", "format", "-g", "pixelWidth", "-g", "pixelHeight", coverPath],
+        { encoding: "utf8" },
+      );
       expect(sipsProbe.status).toBe(0);
       expect(sipsProbe.stdout).toContain("format: jpeg");
       expect(sipsProbe.stdout).toContain("pixelWidth: 600");
       expect(sipsProbe.stdout).toContain("pixelHeight: 900");
     } finally {
       if (fs.existsSync(coverPath)) {
-        try { fs.unlinkSync(coverPath); } catch (_err) { void _err; }
+        try {
+          fs.unlinkSync(coverPath);
+        } catch (_err) {
+          void _err;
+        }
       }
     }
   });
@@ -233,7 +351,10 @@ Image: https://example.com/cover.jpg
 
 Markdown Content:
 Body text goes here.`;
-    const parsedHeader = parseJinaMarkdown(rawWithHeader, "https://example.com/story");
+    const parsedHeader = parseJinaMarkdown(
+      rawWithHeader,
+      "https://example.com/story",
+    );
     expect(parsedHeader.imageUrl).toBe("https://example.com/cover.jpg");
 
     const rawWithLeadImg = `Title: Story Title
@@ -242,12 +363,19 @@ URL Source: https://example.com/story2
 Markdown Content:
 ![Hero Image](https://example.com/lead.png)
 More body text.`;
-    const parsedLead = parseJinaMarkdown(rawWithLeadImg, "https://example.com/story2");
+    const parsedLead = parseJinaMarkdown(
+      rawWithLeadImg,
+      "https://example.com/story2",
+    );
     expect(parsedLead.imageUrl).toBe("https://example.com/lead.png");
   });
 
   test("convertHtmlToEpub attaches generated cover to EPUB", () => {
-    const coverPath = generateTypographicCover("Test Book With Cover", "Author", "Example.com");
+    const coverPath = generateTypographicCover(
+      "Test Book With Cover",
+      "Author",
+      "Example.com",
+    );
     try {
       const epubPath = convertHtmlToEpub(
         "<h1>Hello</h1><p>Test content for epub conversion.</p>",
@@ -255,17 +383,25 @@ More body text.`;
         "Author",
         "Example.com",
         "https://example.com/article",
-        coverPath
+        coverPath,
       );
 
       expect(fs.existsSync(epubPath)).toBe(true);
       expect(fs.statSync(epubPath).size).toBeGreaterThan(2048);
 
       // Clean up temp epub
-      try { fs.unlinkSync(epubPath); } catch (_err) { void _err; }
+      try {
+        fs.unlinkSync(epubPath);
+      } catch (_err) {
+        void _err;
+      }
     } finally {
       if (fs.existsSync(coverPath)) {
-        try { fs.unlinkSync(coverPath); } catch (_err) { void _err; }
+        try {
+          fs.unlinkSync(coverPath);
+        } catch (_err) {
+          void _err;
+        }
       }
     }
   });

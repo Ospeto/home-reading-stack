@@ -3,39 +3,147 @@ import crypto from "node:crypto";
 import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { searchUniversalMetadata, applyMetadataToCalibre } from "./scraper";
-import { isArchiveFile, unpackArchive, MAX_ARCHIVE_SIZE_BYTES } from "./archive";
+import {
+  isArchiveFile,
+  unpackArchive,
+  MAX_ARCHIVE_SIZE_BYTES,
+} from "./archive";
 import { ingestArticleFromUrl, generateTypographicCover } from "./article";
 import {
   isWanRequest,
   authenticateRequest,
+  AuthenticateRequestOptions,
   isAllowedOrigin,
   validateOriginAndCsrf,
   validateUrlForSSRF,
+  safeFetchWithSsrf,
   validateIntegerId,
   validateBookFormat,
   isCanonicalEpub,
+  validateEpubContent,
   getDownloadFilename,
   sanitizeErrorMessage,
-  cleanString
+  cleanString,
 } from "./security";
 import { getJobQueue, DurableJobQueue } from "./jobs";
+import { generateMetadataFilename, buildContentDisposition } from "./filename";
 
-const DROP_DIR = process.env.BOOKS_DROP_DIR || "/Users/ospeto/Books_Drop";
+export function getDropDir(): string {
+  if (process.env.BOOKS_DROP_DIR) return process.env.BOOKS_DROP_DIR;
+  const home = process.env.HOME || os.homedir();
+  const dir = path.join(home, "Books_Drop");
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    return dir;
+  } catch {
+    const fallback = path.join(os.tmpdir(), "Books_Drop");
+    if (!fs.existsSync(fallback)) {
+      fs.mkdirSync(fallback, { recursive: true });
+    }
+    return fallback;
+  }
+}
+
+export function getCoverCacheDir(): string {
+  const defaultDir =
+    process.env.COVER_CACHE_DIR ||
+    path.resolve((import.meta as any).dir || process.cwd(), "cache", "covers");
+  try {
+    if (!fs.existsSync(defaultDir)) {
+      fs.mkdirSync(defaultDir, { recursive: true });
+    }
+    return defaultDir;
+  } catch {
+    const fallback = path.join(os.tmpdir(), "uploader_cache", "covers");
+    if (!fs.existsSync(fallback)) {
+      fs.mkdirSync(fallback, { recursive: true });
+    }
+    return fallback;
+  }
+}
+
 const SERVER_URL = process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088";
-const LIBRARY_DIR = process.env.CALIBRE_LIBRARY_DIR || "/Users/ospeto/Calibre Libraries/Agent Library";
-const KOSYNC_DB_PATH = process.env.KOSYNC_DB_PATH || "/Users/ospeto/kosync-server/data/koreader-sync.db";
-const CACHE_DB_PATH = process.env.CACHE_DB_PATH || "/Users/ospeto/uploader/cache.db";
-const COVER_CACHE_DIR = process.env.COVER_CACHE_DIR || "/Users/ospeto/uploader/cache/covers";
+export function getCalibreLibraryDir(): string {
+  if (process.env.CALIBRE_LIBRARY_DIR) return process.env.CALIBRE_LIBRARY_DIR;
+  const home = process.env.HOME || os.homedir();
+  return path.join(home, "Calibre Libraries", "Agent Library");
+}
+const LIBRARY_DIR = getCalibreLibraryDir();
+
+export function getKosyncDbPath(): string {
+  if (process.env.KOSYNC_DB_PATH) return process.env.KOSYNC_DB_PATH;
+  const home = process.env.HOME || os.homedir();
+  return path.join(home, "kosync-server", "data", "koreader-sync.db");
+}
+const KOSYNC_DB_PATH = getKosyncDbPath();
 const MAX_UPLOAD_SIZE = MAX_ARCHIVE_SIZE_BYTES; // 100MB
 
-if (!fs.existsSync(COVER_CACHE_DIR)) {
-  fs.mkdirSync(COVER_CACHE_DIR, { recursive: true });
+const FILE_EXT_PATH_REGEX =
+  /\.(?:epub|pdf|mobi|azw\d*|cbz|cbr|zip|rar|7z|tar|gz|bz2|html|jpg|jpeg|png|svg|db)$/i;
+const SENSITIVE_KEY_REGEX = /(?:token|secret|password|key|auth)/i;
+const PATH_KEY_REGEX = /(?:path|file|dir)$/i;
+const ERROR_KEY_REGEX = /(?:error|message|stderr|stdout|reason|note)$/i;
+
+export function recursivelySanitize(val: any, keyName = ""): any {
+  if (val === null || val === undefined) return val;
+
+  if (typeof val === "string") {
+    if (SENSITIVE_KEY_REGEX.test(keyName)) {
+      return "[REDACTED]";
+    }
+    if (
+      PATH_KEY_REGEX.test(keyName) ||
+      ((val.includes("/") || val.includes("\\")) &&
+        FILE_EXT_PATH_REGEX.test(val))
+    ) {
+      return path.basename(val);
+    }
+    if (ERROR_KEY_REGEX.test(keyName)) {
+      return sanitizeErrorMessage(val);
+    }
+    if (
+      val.includes("/Users/") ||
+      val.includes("/tmp/") ||
+      /^[a-zA-Z]:\\/.test(val)
+    ) {
+      return sanitizeErrorMessage(val);
+    }
+    return val;
+  }
+
+  if (typeof val !== "object") {
+    return val;
+  }
+
+  if (Array.isArray(val)) {
+    return val.map((item) => recursivelySanitize(item, keyName));
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(val)) {
+    out[k] = recursivelySanitize(v, k);
+  }
+  return out;
+}
+
+export function sanitizeJobForResponse(job: any): any {
+  if (!job) return null;
+  return recursivelySanitize(job);
 }
 
 function resolveHtmlPath(): string {
+  if (
+    process.env.INDEX_HTML_PATH &&
+    fs.existsSync(process.env.INDEX_HTML_PATH)
+  ) {
+    return process.env.INDEX_HTML_PATH;
+  }
   try {
     const dir = path.dirname(new URL(import.meta.url).pathname);
     const localPath = path.join(dir, "index.html");
@@ -43,147 +151,290 @@ function resolveHtmlPath(): string {
   } catch {
     // Fall back to default location
   }
-  return "/Users/ospeto/uploader/index.html";
+  const rootIndex = path.resolve(process.cwd(), "uploader", "index.html");
+  if (fs.existsSync(rootIndex)) return rootIndex;
+  return path.resolve(process.cwd(), "index.html");
 }
 
 const HTML_PATH = resolveHtmlPath();
 
-if (!fs.existsSync(DROP_DIR)) {
-  fs.mkdirSync(DROP_DIR, { recursive: true });
+export function getCacheDbPath(): string {
+  if (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH) {
+    return (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH)!;
+  }
+  const defaultPath = path.resolve(
+    (import.meta as any).dir || process.cwd(),
+    "cache.db",
+  );
+  const p = defaultPath;
+  try {
+    const dir = path.dirname(p);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    return p;
+  } catch {
+    const fallbackDir = path.join(os.tmpdir(), "uploader_cache");
+    if (!fs.existsSync(fallbackDir)) {
+      fs.mkdirSync(fallbackDir, { recursive: true });
+    }
+    return path.join(fallbackDir, "cache.db");
+  }
 }
 
-// Initialize SQLite Cache Database for Fast Hash & Metadata Lookups
-export const cacheDb = new Database(CACHE_DB_PATH);
-cacheDb.run("PRAGMA busy_timeout = 5000;");
-cacheDb.run(`
-  CREATE TABLE IF NOT EXISTS file_hashes (
-    filepath TEXT PRIMARY KEY,
-    mtime INTEGER NOT NULL,
-    hash TEXT NOT NULL,
-    book_id INTEGER,
-    title TEXT,
-    authors TEXT,
-    cover INTEGER
-  );
-`);
-cacheDb.run("CREATE INDEX IF NOT EXISTS idx_file_hashes_hash ON file_hashes(hash);");
-
-// Initialize Durable Job Queue
-export const jobQueue: DurableJobQueue = getJobQueue(cacheDb);
-
-// Register Durable Job Handlers
-jobQueue.registerHandler("metadata_enrich", async (payload: { bookId: number; title: string; isManga?: boolean }) => {
-  console.log(`[JobQueue:MetadataEnrich] Background enrichment for book ID ${payload.bookId} ("${payload.title}")...`);
-  const matches = await searchUniversalMetadata(payload.title, payload.isManga || false);
-  if (matches.length > 0) {
-    const top = matches[0];
-    console.log(
-      `[JobQueue:MetadataEnrich] Top match: "${top.title}" by "${top.authors}" (Confidence: ${top.confidence}, Source: ${top.source})`
+let _serverCacheDbInstance: Database | null = null;
+export function getCacheDb(): Database {
+  if (!_serverCacheDbInstance) {
+    const dbPath = getCacheDbPath();
+    _serverCacheDbInstance = new Database(dbPath);
+    _serverCacheDbInstance.run("PRAGMA busy_timeout = 5000;");
+    _serverCacheDbInstance.run(`
+      CREATE TABLE IF NOT EXISTS file_hashes (
+        filepath TEXT PRIMARY KEY,
+        mtime INTEGER NOT NULL,
+        hash TEXT NOT NULL,
+        book_id INTEGER,
+        title TEXT,
+        authors TEXT,
+        cover INTEGER
+      );
+    `);
+    _serverCacheDbInstance.run(
+      "CREATE INDEX IF NOT EXISTS idx_file_hashes_hash ON file_hashes(hash);",
     );
-    if (top.confidence >= 0.85) {
-      const applied = await applyMetadataToCalibre(payload.bookId, top);
-      getCalibreBooks(true);
-      return { success: applied, topMatch: top.title, confidence: top.confidence };
-    } else {
-      return { success: true, message: `Match confidence ${top.confidence} < 0.85. Preserved original title.` };
+  }
+  return _serverCacheDbInstance;
+}
+
+// Lazy singleton cacheDb proxy for backward-compatible call-sites
+// SAFETY: Proxy delegates Database operations to dynamically initialized Database instance
+export const cacheDb = {
+  run(...args: any[]) {
+    return (getCacheDb().run as any)(...args);
+  },
+  query(...args: any[]) {
+    return (getCacheDb().query as any)(...args);
+  },
+  prepare(...args: any[]) {
+    return (getCacheDb().prepare as any)(...args);
+  },
+  close() {
+    if (_serverCacheDbInstance) _serverCacheDbInstance.close();
+  },
+} as unknown as Database;
+
+let _serverJobQueue: DurableJobQueue | null = null;
+function registerJobHandlers(q: DurableJobQueue) {
+  q.registerHandler(
+    "metadata_enrich",
+    async (payload: { bookId: number; title: string; isManga?: boolean }) => {
+      console.log(
+        `[JobQueue:MetadataEnrich] Background enrichment for book ID ${payload.bookId} ("${payload.title}")...`,
+      );
+      const matches = await searchUniversalMetadata(
+        payload.title,
+        payload.isManga || false,
+      );
+      if (matches.length > 0) {
+        const top = matches[0];
+        console.log(
+          `[JobQueue:MetadataEnrich] Top match: "${top.title}" by "${top.authors}" (Confidence: ${top.confidence}, Source: ${top.source})`,
+        );
+        if (top.confidence >= 0.85) {
+          const applied = await applyMetadataToCalibre(payload.bookId, top);
+          getCalibreBooks(true);
+          return {
+            success: applied,
+            topMatch: top.title,
+            confidence: top.confidence,
+          };
+        } else {
+          return {
+            success: true,
+            message: `Match confidence ${top.confidence} < 0.85. Preserved original title.`,
+          };
+        }
+      }
+      return { success: true, message: "No external metadata matches found." };
+    },
+  );
+
+  q.registerHandler(
+    "file_ingest",
+    async (payload: {
+      filePath: string;
+      originalFileName: string;
+      deleteAfterIngest?: boolean;
+    }) => {
+      const result = ingestBookFile(payload.filePath, payload.originalFileName);
+      if (payload.deleteAfterIngest && fs.existsSync(payload.filePath)) {
+        try {
+          fs.unlinkSync(payload.filePath);
+        } catch {}
+      }
+      if (!result.success) {
+        throw new Error(result.error || "File ingestion failed");
+      }
+      return result;
+    },
+  );
+
+  q.registerHandler(
+    "archive_extract",
+    async (payload: {
+      archivePath: string;
+      archiveName: string;
+      deleteAfterExtract?: boolean;
+    }) => {
+      const unp = unpackArchive(payload.archivePath);
+      if (payload.deleteAfterExtract && fs.existsSync(payload.archivePath)) {
+        try {
+          fs.unlinkSync(payload.archivePath);
+        } catch {}
+      }
+      if (!unp.success) {
+        throw new Error(unp.error || "Archive extraction failed");
+      }
+
+      const results: any[] = [];
+      try {
+        for (const book of unp.books) {
+          const r = ingestBookFile(book.tempPath, book.originalName);
+          results.push({ name: book.originalName, ...r });
+        }
+      } finally {
+        unp.cleanup();
+      }
+
+      const importedCount = results.filter(
+        (r: any) => r.success && !r.duplicate,
+      ).length;
+      return {
+        total: unp.books.length,
+        imported: importedCount,
+        quarantined: unp.quarantined || [],
+        results,
+      };
+    },
+  );
+
+  q.registerHandler("url_article_ingest", async (payload: { url: string }) => {
+    const result = await ingestArticleFromUrl(payload.url);
+    if (!result.success) {
+      throw new Error(result.error || "Article ingestion failed");
     }
-  }
-  return { success: true, message: "No external metadata matches found." };
-});
-
-jobQueue.registerHandler("file_ingest", async (payload: { filePath: string; originalFileName: string; deleteAfterIngest?: boolean }) => {
-  const result = ingestBookFile(payload.filePath, payload.originalFileName);
-  if (payload.deleteAfterIngest && fs.existsSync(payload.filePath)) {
-    try { fs.unlinkSync(payload.filePath); } catch {}
-  }
-  if (!result.success) {
-    throw new Error(result.error || "File ingestion failed");
-  }
-  return result;
-});
-
-jobQueue.registerHandler("archive_extract", async (payload: { archivePath: string; archiveName: string; deleteAfterExtract?: boolean }) => {
-  const unp = unpackArchive(payload.archivePath);
-  if (payload.deleteAfterExtract && fs.existsSync(payload.archivePath)) {
-    try { fs.unlinkSync(payload.archivePath); } catch {}
-  }
-  if (!unp.success) {
-    throw new Error(unp.error || "Archive extraction failed");
-  }
-
-  const results: any[] = [];
-  try {
-    for (const book of unp.books) {
-      const r = ingestBookFile(book.tempPath, book.originalName);
-      results.push({ name: book.originalName, ...r });
-    }
-  } finally {
-    unp.cleanup();
-  }
-
-  const importedCount = results.filter((r: any) => r.success && !r.duplicate).length;
-  return {
-    total: unp.books.length,
-    imported: importedCount,
-    quarantined: unp.quarantined || [],
-    results
-  };
-});
-
-jobQueue.registerHandler("url_article_ingest", async (payload: { url: string }) => {
-  const result = await ingestArticleFromUrl(payload.url);
-  if (!result.success) {
-    throw new Error(result.error || "Article ingestion failed");
-  }
-  getCalibreBooks(true);
-  return result;
-});
-
-jobQueue.registerHandler("cover_backfill", async (payload: { candidateBookIds?: number[] }) => {
-  const books = getCalibreBooks(true);
-  const candidates = books.filter((b: any) => {
-    if (payload.candidateBookIds && !payload.candidateBookIds.includes(b.id)) return false;
-    const tags = Array.isArray(b.tags) ? b.tags : b.tags ? [b.tags] : [];
-    const isWeb = tags.some((t: string) => t === "Web Article" || t === "Read Later");
-    const hasCover = b.cover && b.cover !== 0 && b.cover !== false;
-    return isWeb && !hasCover;
+    getCalibreBooks(true);
+    return result;
   });
 
-  const updated: Array<{ id: number; title: string }> = [];
-  for (const book of candidates) {
-    try {
-      const tags: string[] = Array.isArray(book.tags) ? book.tags : book.tags ? [book.tags] : [];
-      const siteTag = tags.find((t: string) => t !== "Web Article" && t !== "Read Later");
-      const siteName = siteTag || book.publisher || "Web Article";
-      const coverPath = generateTypographicCover(book.title, book.authors || "Unknown", siteName);
+  q.registerHandler(
+    "cover_backfill",
+    async (payload: { candidateBookIds?: number[] }) => {
+      const books = getCalibreBooks(true);
+      const candidates = books.filter((b: any) => {
+        if (
+          payload.candidateBookIds &&
+          !payload.candidateBookIds.includes(b.id)
+        )
+          return false;
+        const tags = Array.isArray(b.tags) ? b.tags : b.tags ? [b.tags] : [];
+        const isWeb = tags.some(
+          (t: string) => t === "Web Article" || t === "Read Later",
+        );
+        const hasCover = b.cover && b.cover !== 0 && b.cover !== false;
+        return isWeb && !hasCover;
+      });
 
-      const setRes = runCalibredb([
-        "set_metadata",
-        String(book.id),
-        "--with-library",
-        SERVER_URL,
-        "--field",
-        `cover:${coverPath}`
-      ]);
-
-      if (fs.existsSync(coverPath)) {
-        try { fs.unlinkSync(coverPath); } catch (_unlinkErr) { void _unlinkErr; }
-      }
-
-      if (setRes.status === 0) {
-        updated.push({ id: book.id, title: book.title });
+      const updated: Array<{ id: number; title: string }> = [];
+      for (const book of candidates) {
         try {
-          cacheDb.run("UPDATE file_hashes SET cover = 1 WHERE book_id = ?", [book.id]);
-        } catch (_dbErr) { void _dbErr; }
-      }
-    } catch (itemErr) {
-      console.error(`[CoverBackfill] Failed for book ${book.id}:`, itemErr);
-    }
-  }
+          const tags: string[] = Array.isArray(book.tags)
+            ? book.tags
+            : book.tags
+              ? [book.tags]
+              : [];
+          const siteTag = tags.find(
+            (t: string) => t !== "Web Article" && t !== "Read Later",
+          );
+          const siteName = siteTag || book.publisher || "Web Article";
+          const coverPath = generateTypographicCover(
+            book.title,
+            book.authors || "Unknown",
+            siteName,
+          );
 
-  getCalibreBooks(true);
-  return { updatedCount: updated.length, updated };
-});
+          const setRes = runCalibredb([
+            "set_metadata",
+            String(book.id),
+            "--with-library",
+            SERVER_URL,
+            "--field",
+            `cover:${coverPath}`,
+          ]);
+
+          if (fs.existsSync(coverPath)) {
+            try {
+              fs.unlinkSync(coverPath);
+            } catch (_unlinkErr) {
+              void _unlinkErr;
+            }
+          }
+
+          if (setRes.status === 0) {
+            updated.push({ id: book.id, title: book.title });
+            try {
+              getCacheDb().run(
+                "UPDATE file_hashes SET cover = 1 WHERE book_id = ?",
+                [book.id],
+              );
+            } catch (_dbErr) {
+              void _dbErr;
+            }
+          }
+        } catch (itemErr) {
+          console.error(`[CoverBackfill] Failed for book ${book.id}:`, itemErr);
+        }
+      }
+
+      getCalibreBooks(true);
+      return { updatedCount: updated.length, updated };
+    },
+  );
+}
+
+export function getJobQueueInstance(): DurableJobQueue {
+  if (!_serverJobQueue) {
+    _serverJobQueue = getJobQueue(getCacheDb());
+    registerJobHandlers(_serverJobQueue);
+  }
+  return _serverJobQueue;
+}
+
+// Lazy singleton jobQueue proxy
+// SAFETY: Proxy delegates JobQueue operations to dynamically initialized DurableJobQueue instance
+export const jobQueue = {
+  enqueue(...args: any[]) {
+    return (getJobQueueInstance().enqueue as any)(...args);
+  },
+  getJob(...args: any[]) {
+    return (getJobQueueInstance().getJob as any)(...args);
+  },
+  getRecentJobs(...args: any[]) {
+    return (getJobQueueInstance().getRecentJobs as any)(...args);
+  },
+  retryJob(...args: any[]) {
+    return (getJobQueueInstance().retryJob as any)(...args);
+  },
+  registerHandler(...args: any[]) {
+    return (getJobQueueInstance().registerHandler as any)(...args);
+  },
+  startWorker(...args: any[]) {
+    return (getJobQueueInstance().startWorker as any)(...args);
+  },
+  recoverInterruptedJobs(...args: any[]) {
+    return (getJobQueueInstance().recoverInterruptedJobs as any)(...args);
+  },
+} as unknown as DurableJobQueue;
 
 const KOREADER_HASH_ALGO = "md5";
 
@@ -230,21 +481,29 @@ function getFilenameMD5(name: string): string {
   return crypto.createHash(KOREADER_HASH_ALGO).update(name).digest("hex");
 }
 
-function extractSeries(title: string, filename?: string): { series: string; volume: number } | null {
-  const candidates = [title, filename ? path.basename(filename, path.extname(filename)) : ""].filter(Boolean);
+function extractSeries(
+  title: string,
+  filename?: string,
+): { series: string; volume: number } | null {
+  const candidates = [
+    title,
+    filename ? path.basename(filename, path.extname(filename)) : "",
+  ].filter(Boolean);
 
   const patterns = [
     /^(.*?)[,_\s-]+(?:vol(?:ume)?|v)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
     /^(.*?)[,_\s-]+(?:book|bk)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
     /^(.*?)[,_\s-]+#\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
-    /^(.*?)[,_\s-]+(?:part|pt)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i
+    /^(.*?)[,_\s-]+(?:part|pt)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
   ];
 
   for (const str of candidates) {
     for (const p of patterns) {
       const m = str.match(p);
       if (m) {
-        const series = cleanString(m[1]).replace(/[,_–—:-]+$/, "").trim();
+        const series = cleanString(m[1])
+          .replace(/[,_–—:-]+$/, "")
+          .trim();
         const vol = parseFloat(m[2]);
         if (series.length >= 2 && !isNaN(vol)) {
           return { series, volume: vol };
@@ -255,14 +514,26 @@ function extractSeries(title: string, filename?: string): { series: string; volu
   return null;
 }
 
-function sanitizeMetadata(rawTitle: string, rawAuthors: string, rawTags: string[], filename?: string) {
+function sanitizeMetadata(
+  rawTitle: string,
+  rawAuthors: string,
+  rawTags: string[],
+  filename?: string,
+) {
   let title = cleanString(rawTitle);
   let author = cleanString(rawAuthors);
   const tags = (rawTags || [])
     .map(cleanString)
-    .filter((t) => t && !/http|t\.me|channel|\.com|\.org|download|share|thebookr/i.test(t) && t.length < 30);
+    .filter(
+      (t) =>
+        t &&
+        !/http|t\.me|channel|\.com|\.org|download|share|thebookr/i.test(t) &&
+        t.length < 30,
+    );
 
-  const isAuthorJunk = !author || /http|t\.me|channel|admin|unknown|\.com|\.org|thebookr/i.test(author);
+  const isAuthorJunk =
+    !author ||
+    /http|t\.me|channel|admin|unknown|\.com|\.org|thebookr/i.test(author);
 
   if ((!title || isAuthorJunk) && filename) {
     const base = path.basename(filename, path.extname(filename));
@@ -308,7 +579,34 @@ function safeParseJson(str: string): any {
   }
 }
 
-let calibreBooksCache: { books: any[]; timestamp: number } = { books: [], timestamp: 0 };
+export function getCalibredbPath(): string {
+  if (process.env.CALIBREDB_PATH) return process.env.CALIBREDB_PATH;
+  const probe = spawnSync("which", ["calibredb"], { encoding: "utf8" });
+  if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
+  const candidates = [
+    "/opt/homebrew/bin/calibredb",
+    "/usr/local/bin/calibredb",
+    "/usr/bin/calibredb",
+    "/Applications/calibre.app/Contents/MacOS/calibredb",
+  ];
+  for (const cand of candidates) {
+    if (fs.existsSync(cand)) return cand;
+  }
+  return "calibredb";
+}
+
+export function getSipsPath(): string {
+  if (process.env.SIPS_PATH) return process.env.SIPS_PATH;
+  const probe = spawnSync("which", ["sips"], { encoding: "utf8" });
+  if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
+  if (fs.existsSync("/usr/bin/sips")) return "/usr/bin/sips";
+  return "sips";
+}
+
+let calibreBooksCache: { books: any[]; timestamp: number } = {
+  books: [],
+  timestamp: 0,
+};
 
 function runCalibredb(args: string[]) {
   const env = { ...process.env };
@@ -318,18 +616,23 @@ function runCalibredb(args: string[]) {
   delete env.https_proxy;
   delete env.ALL_PROXY;
   delete env.all_proxy;
-  env.PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
+  env.PATH =
+    "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
 
-  return spawnSync("/opt/homebrew/bin/calibredb", args, {
+  return spawnSync(getCalibredbPath(), args, {
     encoding: "utf8",
     env,
-    timeout: 30000
+    timeout: 30000,
   });
 }
 
 export function getCalibreBooks(forceFresh = false) {
   const now = Date.now();
-  if (!forceFresh && calibreBooksCache.books.length > 0 && now - calibreBooksCache.timestamp < 10000) {
+  if (
+    !forceFresh &&
+    calibreBooksCache.books.length > 0 &&
+    now - calibreBooksCache.timestamp < 10000
+  ) {
     return calibreBooksCache.books;
   }
 
@@ -338,14 +641,28 @@ export function getCalibreBooks(forceFresh = false) {
       "list",
       "--with-library",
       SERVER_URL,
+      "--search",
+      "format:epub",
       "--fields",
       "id,title,authors,formats,cover,tags,series,series_index,publisher,pubdate,comments,rating",
-      "--for-machine"
+      "--for-machine",
     ]);
     if (res.status === 0 && res.stdout) {
       const parsed = safeParseJson(res.stdout);
-      calibreBooksCache = { books: parsed, timestamp: now };
-      return parsed;
+      // Clean EPUB-only collection enforcement
+      const epubBooks = (Array.isArray(parsed) ? parsed : [])
+        .filter((b: any) => {
+          const fmts = (b.formats || []).map((f: string) =>
+            String(f).toUpperCase(),
+          );
+          return fmts.includes("EPUB");
+        })
+        .map((b: any) => ({
+          ...b,
+          formats: ["EPUB"],
+        }));
+      calibreBooksCache = { books: epubBooks, timestamp: now };
+      return epubBooks;
     }
   } catch (e) {
     console.error("Error listing calibre books:", e);
@@ -354,18 +671,23 @@ export function getCalibreBooks(forceFresh = false) {
 }
 
 function getCalibreHashMap() {
-  const map: Record<string, { id: number; title: string; authors: string; cover: boolean }> = {};
+  const map: Record<
+    string,
+    { id: number; title: string; authors: string; cover: boolean }
+  > = {};
   const books = getCalibreBooks();
 
   try {
-    const allCached = cacheDb.query("SELECT hash, book_id, title, authors, cover FROM file_hashes").all() as any[];
+    const allCached = cacheDb
+      .query("SELECT hash, book_id, title, authors, cover FROM file_hashes")
+      .all() as any[];
     for (const row of allCached) {
       if (row.hash) {
         map[row.hash] = {
           id: row.book_id,
           title: row.title,
           authors: row.authors || "Unknown",
-          cover: !!row.cover
+          cover: !!row.cover,
         };
       }
     }
@@ -373,9 +695,11 @@ function getCalibreHashMap() {
     void _e;
   }
 
-  const selectStmt = cacheDb.prepare("SELECT hash FROM file_hashes WHERE filepath = ? AND mtime = ?");
+  const selectStmt = cacheDb.prepare(
+    "SELECT hash FROM file_hashes WHERE filepath = ? AND mtime = ?",
+  );
   const insertStmt = cacheDb.prepare(
-    "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
   );
 
   function scanDir(dir: string) {
@@ -385,13 +709,7 @@ function getCalibreHashMap() {
         const full = path.join(dir, e.name);
         if (e.isDirectory()) {
           scanDir(full);
-        } else if (
-          e.name.endsWith(".epub") ||
-          e.name.endsWith(".pdf") ||
-          e.name.endsWith(".mobi") ||
-          e.name.endsWith(".azw3") ||
-          e.name.endsWith(".cbz")
-        ) {
+        } else if (e.name.endsWith(".epub")) {
           const stat = fs.statSync(full);
           const mtime = Math.floor(stat.mtimeMs);
 
@@ -401,12 +719,20 @@ function getCalibreHashMap() {
             const bookMatch = books.find(
               (b: any) =>
                 parentDir.includes(`(${b.id})`) ||
-                b.title.toLowerCase().includes(path.basename(e.name, path.extname(e.name)).toLowerCase()) ||
-                e.name.toLowerCase().includes(b.title.toLowerCase())
+                b.title
+                  .toLowerCase()
+                  .includes(
+                    path.basename(e.name, path.extname(e.name)).toLowerCase(),
+                  ) ||
+                e.name.toLowerCase().includes(b.title.toLowerCase()),
             );
             const bId = bookMatch ? bookMatch.id : null;
-            const bTitle = bookMatch ? bookMatch.title : path.basename(e.name, path.extname(e.name));
-            const bAuthors = bookMatch ? bookMatch.authors || "Unknown" : "Unknown";
+            const bTitle = bookMatch
+              ? bookMatch.title
+              : path.basename(e.name, path.extname(e.name));
+            const bAuthors = bookMatch
+              ? bookMatch.authors || "Unknown"
+              : "Unknown";
             const bCover = bookMatch ? (bookMatch.cover ? 1 : 0) : 0;
 
             const h1 = getKOReaderBinary256(full);
@@ -414,10 +740,25 @@ function getCalibreHashMap() {
             const h3 = getFilenameMD5(e.name);
             const h4 = getFilenameMD5(bTitle + ".epub");
 
-            const hashSet = new Set([h1, h2, h3, h4].filter(Boolean) as string[]);
+            const hashSet = new Set(
+              [h1, h2, h3, h4].filter(Boolean) as string[],
+            );
             for (const h of hashSet) {
-              insertStmt.run(full + "#" + h, mtime, h, bId, bTitle, bAuthors, bCover);
-              map[h] = { id: bId, title: bTitle, authors: bAuthors, cover: !!bCover };
+              insertStmt.run(
+                full + "#" + h,
+                mtime,
+                h,
+                bId,
+                bTitle,
+                bAuthors,
+                bCover,
+              );
+              map[h] = {
+                id: bId,
+                title: bTitle,
+                authors: bAuthors,
+                cover: !!bCover,
+              };
             }
           }
         }
@@ -436,16 +777,30 @@ function getCalibreHashMap() {
  * Strictly enforces canonical EPUB-only format policy.
  */
 export function ingestBookFile(filePath: string, originalFileName: string) {
+  const ext = path.extname(originalFileName).toLowerCase();
+  const format = ext.replace(/^\./, "").toUpperCase();
+
   // Enforce EPUB-only canonical format
-  if (!isCanonicalEpub(originalFileName)) {
+  if (format !== "EPUB" || !isCanonicalEpub(originalFileName)) {
     return {
       success: false,
-      error: `Rejected non-canonical format "${path.extname(originalFileName)}". Only EPUB format is supported for the canonical collection.`
+      rejected: true,
+      format,
+      error: `Rejected non-canonical format "${ext}". Only EPUB format is accepted for the canonical collection.`,
     };
   }
 
+  // Enforce physical EPUB container validation before reaching calibredb
+  const contentValidation = validateEpubContent(filePath);
+  if (!contentValidation.valid) {
+    return {
+      success: false,
+      rejected: true,
+      format,
+      error: `Invalid EPUB container "${originalFileName}": ${contentValidation.error}`,
+    };
+  }
   const books = getCalibreBooks(true);
-  const format = path.extname(originalFileName).replace(".", "").toUpperCase();
   const fileHash = getKOReaderBinary256(filePath);
 
   // 1. Check if exact hash exists in Calibre Library
@@ -456,7 +811,7 @@ export function ingestBookFile(filePath: string, originalFileName: string) {
       success: true,
       duplicate: true,
       bookId: existing.id,
-      message: `Book "${existing.title}" is already in your library.`
+      message: `Book "${existing.title}" is already in your library.`,
     };
   }
 
@@ -469,10 +824,15 @@ export function ingestBookFile(filePath: string, originalFileName: string) {
     const sTitle = sanitized.title.toLowerCase();
 
     const bSeries = extractSeries(b.title, "");
-    const bActualSeries = b.series ? { series: cleanString(b.series), volume: b.series_index || 1 } : bSeries;
+    const bActualSeries = b.series
+      ? { series: cleanString(b.series), volume: b.series_index || 1 }
+      : bSeries;
 
     if (incomingSeries && bActualSeries) {
-      if (cleanString(incomingSeries.series).toLowerCase() === cleanString(bActualSeries.series).toLowerCase()) {
+      if (
+        cleanString(incomingSeries.series).toLowerCase() ===
+        cleanString(bActualSeries.series).toLowerCase()
+      ) {
         return incomingSeries.volume === bActualSeries.volume;
       }
     } else if (incomingSeries || bActualSeries) {
@@ -481,31 +841,20 @@ export function ingestBookFile(filePath: string, originalFileName: string) {
 
     return (
       bTitle === sTitle ||
-      (sTitle.length > 5 && (bTitle === sTitle || bTitle.startsWith(sTitle) || sTitle.startsWith(bTitle)))
+      (sTitle.length > 5 &&
+        (bTitle === sTitle ||
+          bTitle.startsWith(sTitle) ||
+          sTitle.startsWith(bTitle)))
     );
   });
 
   if (existingBook) {
-    const existingFormats = (existingBook.formats || []).map((f: string) => f.toUpperCase());
-    if (existingFormats.includes(format)) {
-      return {
-        success: true,
-        duplicate: true,
-        bookId: existingBook.id,
-        message: `Book "${existingBook.title}" already exists in format ${format}.`
-      };
-    } else {
-      runCalibredb(["add_format", String(existingBook.id), filePath, "--with-library", SERVER_URL]);
-
-      getCalibreBooks(true);
-      return {
-        success: true,
-        duplicate: false,
-        attachedFormat: true,
-        bookId: existingBook.id,
-        message: `Attached ${format} format to existing book "${existingBook.title}".`
-      };
-    }
+    return {
+      success: true,
+      duplicate: true,
+      bookId: existingBook.id,
+      message: `Book "${existingBook.title}" already exists in your library.`,
+    };
   }
 
   // 3. Brand new book: Add to Calibre
@@ -519,10 +868,22 @@ export function ingestBookFile(filePath: string, originalFileName: string) {
       const freshBooks = getCalibreBooks(true);
       const newBook = freshBooks.find((b: any) => b.id === newId);
       if (newBook) {
-        const clean = sanitizeMetadata(newBook.title, newBook.authors, newBook.tags, originalFileName);
-        const setArgs = ["set_metadata", String(newId), "--with-library", SERVER_URL];
-        if (clean.title && clean.title !== newBook.title) setArgs.push("--field", `title:${clean.title}`);
-        if (clean.author && clean.author !== newBook.authors) setArgs.push("--field", `authors:${clean.author}`);
+        const clean = sanitizeMetadata(
+          newBook.title,
+          newBook.authors,
+          newBook.tags,
+          originalFileName,
+        );
+        const setArgs = [
+          "set_metadata",
+          String(newId),
+          "--with-library",
+          SERVER_URL,
+        ];
+        if (clean.title && clean.title !== newBook.title)
+          setArgs.push("--field", `title:${clean.title}`);
+        if (clean.author && clean.author !== newBook.authors)
+          setArgs.push("--field", `authors:${clean.author}`);
         if (clean.tags) setArgs.push("--field", `tags:${clean.tags.join(",")}`);
         if (!newBook.series && incomingSeries) {
           setArgs.push("--field", `series:${incomingSeries.series}`);
@@ -533,11 +894,14 @@ export function ingestBookFile(filePath: string, originalFileName: string) {
         }
 
         // Durable Metadata Enrichment via Job Queue (survives restarts, auto-retries)
-        const isManga = format === "CBZ" || format === "CBR" || (clean.tags || []).some((t) => /manga|comic/i.test(t));
+        const isManga =
+          format === "CBZ" ||
+          format === "CBR" ||
+          (clean.tags || []).some((t) => /manga|comic/i.test(t));
         jobQueue.enqueue("metadata_enrich", {
           bookId: newId,
           title: clean.title,
-          isManga
+          isManga,
         });
       }
     }
@@ -546,12 +910,12 @@ export function ingestBookFile(filePath: string, originalFileName: string) {
       success: true,
       duplicate: false,
       bookId: newId,
-      message: `Added "${sanitized.title}" to library`
+      message: `Added "${sanitized.title}" to library`,
     };
   } else {
     return {
       success: false,
-      error: addRes.stderr || "Failed to add book"
+      error: addRes.stderr || "Failed to add book",
     };
   }
 }
@@ -562,13 +926,14 @@ function getKosyncProgress() {
       const db = new Database(KOSYNC_DB_PATH);
       const rows = db
         .query(
-          "SELECT id, document, progress, percentage, device, device_id, filename, title, authors, timestamp FROM progress ORDER BY timestamp DESC LIMIT 50;"
+          "SELECT id, document, progress, percentage, device, device_id, filename, title, authors, timestamp FROM progress ORDER BY timestamp DESC LIMIT 50;",
         )
         .all() as any[];
 
       const { map, books } = getCalibreHashMap();
 
-      const norm = (s: string) => (s || "").toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, "");
+      const norm = (s: string) =>
+        (s || "").toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, "");
 
       return rows.map((r) => {
         let displayTitle = r.title || r.filename;
@@ -587,7 +952,11 @@ function getKosyncProgress() {
           const searchNorm = norm(r.title || r.filename);
           const bookMatch = books.find((b: any) => {
             const bNorm = norm(b.title);
-            return bNorm === searchNorm || (searchNorm.length > 5 && (bNorm.includes(searchNorm) || searchNorm.includes(bNorm)));
+            return (
+              bNorm === searchNorm ||
+              (searchNorm.length > 5 &&
+                (bNorm.includes(searchNorm) || searchNorm.includes(bNorm)))
+            );
           });
           if (bookMatch) {
             bookId = bookMatch.id;
@@ -601,13 +970,15 @@ function getKosyncProgress() {
           try {
             const alias = db
               .query(
-                "SELECT canonical_id, normalized_title, normalized_authors FROM document_aliases WHERE document_hash = ?"
+                "SELECT canonical_id, normalized_title, normalized_authors FROM document_aliases WHERE document_hash = ?",
               )
               .get(r.document) as any;
 
             if (alias) {
               const aliasNorm = norm(alias.normalized_title);
-              const bookMatch = books.find((b: any) => norm(b.title) === aliasNorm);
+              const bookMatch = books.find(
+                (b: any) => norm(b.title) === aliasNorm,
+              );
               if (bookMatch) {
                 bookId = bookMatch.id;
                 cover = !!bookMatch.cover;
@@ -625,7 +996,9 @@ function getKosyncProgress() {
 
         if (!displayTitle) {
           const match = books.find(
-            (b: any) => cleanString(b.title).toLowerCase() === cleanString(r.filename || "").toLowerCase()
+            (b: any) =>
+              cleanString(b.title).toLowerCase() ===
+              cleanString(r.filename || "").toLowerCase(),
           );
           if (match) {
             displayTitle = match.title;
@@ -650,7 +1023,7 @@ function getKosyncProgress() {
           displayTitle,
           displayAuthors: cleanString(displayAuthors) || "Unknown Author",
           bookId,
-          cover
+          cover,
         };
       });
     }
@@ -660,8 +1033,15 @@ function getKosyncProgress() {
   return [];
 }
 
-function extractHighlightsFromSdr(bookId: number): Array<{ text: string; notes: string; datetime: string; page?: number }> {
-  const highlights: Array<{ text: string; notes: string; datetime: string; page?: number }> = [];
+function extractHighlightsFromSdr(
+  bookId: number,
+): Array<{ text: string; notes: string; datetime: string; page?: number }> {
+  const highlights: Array<{
+    text: string;
+    notes: string;
+    datetime: string;
+    page?: number;
+  }> = [];
   try {
     const books = getCalibreBooks();
     const book = books.find((b: any) => b.id === bookId);
@@ -677,7 +1057,9 @@ function extractHighlightsFromSdr(bookId: number): Array<{ text: string; notes: 
             for (const f of files) {
               if (f.endsWith(".lua")) {
                 const luaContent = fs.readFileSync(path.join(full, f), "utf8");
-                const bookmarkMatches = luaContent.matchAll(/\{[^}]*\["text"\]\s*=\s*"([^"]*)"[^}]*\}/gs);
+                const bookmarkMatches = luaContent.matchAll(
+                  /\{[^}]*\["text"\]\s*=\s*"([^"]*)"[^}]*\}/gs,
+                );
                 for (const bm of bookmarkMatches) {
                   const chunk = bm[0];
                   const textMatch = chunk.match(/\["text"\]\s*=\s*"([^"]*)"/);
@@ -687,10 +1069,12 @@ function extractHighlightsFromSdr(bookId: number): Array<{ text: string; notes: 
 
                   if (textMatch && textMatch[1]) {
                     highlights.push({
-                      text: textMatch[1].replace(/\\"/g, '"').replace(/\\n/g, " "),
+                      text: textMatch[1]
+                        .replace(/\\"/g, '"')
+                        .replace(/\\n/g, " "),
                       notes: notesMatch ? notesMatch[1] : "",
                       datetime: dtMatch ? dtMatch[1] : new Date().toISOString(),
-                      page: pageMatch ? parseInt(pageMatch[1], 10) : undefined
+                      page: pageMatch ? parseInt(pageMatch[1], 10) : undefined,
                     });
                   }
                 }
@@ -716,7 +1100,9 @@ export async function searchAllBookSources(query: string) {
 
   // 1. Google Books
   try {
-    const gRes = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(cleanQ)}&maxResults=5`);
+    const gRes = await safeFetchWithSsrf(
+      `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(cleanQ)}&maxResults=5`,
+    );
     if (gRes.ok) {
       const data = (await gRes.json()) as any;
       if (data.items) {
@@ -728,7 +1114,10 @@ export async function searchAllBookSources(query: string) {
             info.imageLinks?.medium ||
             info.imageLinks?.thumbnail ||
             "";
-          if (cover) cover = cover.replace("http://", "https://").replace("&edge=curl", "");
+          if (cover)
+            cover = cover
+              .replace("http://", "https://")
+              .replace("&edge=curl", "");
 
           results.push({
             title: cleanString(info.title || ""),
@@ -739,7 +1128,7 @@ export async function searchAllBookSources(query: string) {
             coverUrl: cover,
             tags: (info.categories || []).map(cleanString).filter(Boolean),
             pageCount: info.pageCount || null,
-            source: "Google Books"
+            source: "Google Books",
           });
         }
       }
@@ -750,7 +1139,9 @@ export async function searchAllBookSources(query: string) {
 
   // 2. OpenLibrary
   try {
-    const olRes = await fetch(`https://openlibrary.org/search.json?q=${encodeURIComponent(cleanQ)}&limit=5`);
+    const olRes = await safeFetchWithSsrf(
+      `https://openlibrary.org/search.json?q=${encodeURIComponent(cleanQ)}&limit=5`,
+    );
     if (olRes.ok) {
       const data = (await olRes.json()) as any;
       if (data.docs) {
@@ -760,12 +1151,20 @@ export async function searchAllBookSources(query: string) {
             title: cleanString(doc.title || ""),
             authors: (doc.author_name || []).map(cleanString).join(", "),
             publisher: cleanString((doc.publisher || [])[0] || ""),
-            publishedDate: doc.first_publish_year ? String(doc.first_publish_year) : "",
-            description: Array.isArray(doc.first_sentence) ? doc.first_sentence[0] : doc.first_sentence || "",
-            coverUrl: coverId ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg` : "",
-            tags: (doc.subject ? doc.subject.slice(0, 4) : []).map(cleanString).filter(Boolean),
+            publishedDate: doc.first_publish_year
+              ? String(doc.first_publish_year)
+              : "",
+            description: Array.isArray(doc.first_sentence)
+              ? doc.first_sentence[0]
+              : doc.first_sentence || "",
+            coverUrl: coverId
+              ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg`
+              : "",
+            tags: (doc.subject ? doc.subject.slice(0, 4) : [])
+              .map(cleanString)
+              .filter(Boolean),
             pageCount: doc.number_of_pages_median || null,
-            source: "OpenLibrary"
+            source: "OpenLibrary",
           });
         }
       }
@@ -783,7 +1182,7 @@ function jsonResponse(data: any, status = 200, origin?: string) {
     "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
     Pragma: "no-cache",
     Expires: "0",
-    "X-Content-Type-Options": "nosniff"
+    "X-Content-Type-Options": "nosniff",
   };
 
   if (origin && isAllowedOrigin(origin)) {
@@ -799,7 +1198,10 @@ function jsonResponse(data: any, status = 200, origin?: string) {
  * Primary HTTP Request Handler with Hardened WAN Security, CORS, CSRF,
  * and Durable Job Queue Lifecycle.
  */
-export async function handleRequest(req: Request): Promise<Response> {
+export async function handleRequest(
+  req: Request,
+  server?: any,
+): Promise<Response> {
   const origin = req.headers.get("origin") || "";
   const originAllowed = isAllowedOrigin(origin);
   const corsOrigin = originAllowed ? origin : undefined;
@@ -810,7 +1212,7 @@ export async function handleRequest(req: Request): Promise<Response> {
       "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
       "Access-Control-Allow-Headers":
         "Content-Type, Authorization, X-API-Key, X-Telegram-Init-Data, X-Requested-With",
-      "X-Content-Type-Options": "nosniff"
+      "X-Content-Type-Options": "nosniff",
     };
     if (originAllowed) {
       preflightHeaders["Access-Control-Allow-Origin"] = origin;
@@ -828,44 +1230,65 @@ export async function handleRequest(req: Request): Promise<Response> {
     return new Response("Bad Request", { status: 400 });
   }
 
-  const isMutating = ["POST", "PUT", "DELETE", "PATCH"].includes(req.method.toUpperCase());
+  const isMutating = ["POST", "PUT", "DELETE", "PATCH"].includes(
+    req.method.toUpperCase(),
+  );
 
   // 1. CSRF & Origin Validation on mutating routes
   if (isMutating) {
     const csrfCheck = validateOriginAndCsrf(req);
     if (!csrfCheck.valid) {
-      return jsonResponse({ success: false, error: csrfCheck.error || "CSRF origin validation failed" }, 403, corsOrigin);
+      return jsonResponse(
+        {
+          success: false,
+          error: csrfCheck.error || "CSRF origin validation failed",
+        },
+        403,
+        corsOrigin,
+      );
     }
   }
 
-  // 2. WAN Authentication Gate on mutating routes (exempts local LAN)
-  const isWan = isWanRequest(req);
+  // 2. WAN Authentication Gate on mutating routes (strictly based on socket address)
+  const socketIp = server?.requestIP?.(req)?.address;
+  const isWan = isWanRequest(req, {
+    server,
+    remoteAddress: socketIp,
+  });
+  const authOpts: AuthenticateRequestOptions = {
+    server,
+    remoteAddress: socketIp,
+    isWan,
+  };
   if (isMutating && isWan) {
-    const auth = authenticateRequest(req);
+    const auth = authenticateRequest(req, authOpts);
     if (!auth.authenticated) {
       return jsonResponse(
         {
           success: false,
-          error: auth.error || "Authentication required for public WAN access"
+          error: auth.error || "Authentication required for public WAN access",
         },
         401,
-        corsOrigin
+        corsOrigin,
       );
     }
   }
 
   // API: Session Verification & Cookie Handoff
-  if (url.pathname === "/api/auth/session" && (req.method === "GET" || req.method === "POST")) {
-    const auth = authenticateRequest(req);
+  if (
+    url.pathname === "/api/auth/session" &&
+    (req.method === "GET" || req.method === "POST")
+  ) {
+    const auth = authenticateRequest(req, authOpts);
     return jsonResponse(
       {
         success: auth.authenticated,
         method: auth.method,
         user: auth.user || null,
-        isWan
+        isWan,
       },
       auth.authenticated ? 200 : 401,
-      corsOrigin
+      corsOrigin,
     );
   }
 
@@ -885,7 +1308,10 @@ export async function handleRequest(req: Request): Promise<Response> {
 
     for (const b of books) {
       if (b.authors) {
-        const auths = b.authors.split("&").map((a: string) => cleanString(a)).filter(Boolean);
+        const auths = b.authors
+          .split("&")
+          .map((a: string) => cleanString(a))
+          .filter(Boolean);
         for (const a of auths) authorMap[a] = (authorMap[a] || 0) + 1;
       }
       if (b.series) {
@@ -895,7 +1321,8 @@ export async function handleRequest(req: Request): Promise<Response> {
       if (b.tags && Array.isArray(b.tags)) {
         for (const t of b.tags) {
           const cleanT = cleanString(t);
-          if (cleanT && !/http|t\.me|thebookr/i.test(cleanT)) tagMap[cleanT] = (tagMap[cleanT] || 0) + 1;
+          if (cleanT && !/http|t\.me|thebookr/i.test(cleanT))
+            tagMap[cleanT] = (tagMap[cleanT] || 0) + 1;
         }
       }
       if (b.formats && Array.isArray(b.formats)) {
@@ -908,47 +1335,118 @@ export async function handleRequest(req: Request): Promise<Response> {
     return jsonResponse(
       {
         totalBooks: books.length,
-        authors: Object.entries(authorMap).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
-        series: Object.entries(seriesMap).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
-        tags: Object.entries(tagMap).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
-        formats: Object.entries(formatMap).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count)
+        authors: Object.entries(authorMap)
+          .map(([name, count]) => ({ name, count }))
+          .sort((a, b) => b.count - a.count),
+        series: Object.entries(seriesMap)
+          .map(([name, count]) => ({ name, count }))
+          .sort((a, b) => b.count - a.count),
+        tags: Object.entries(tagMap)
+          .map(([name, count]) => ({ name, count }))
+          .sort((a, b) => b.count - a.count),
+        formats: Object.entries(formatMap)
+          .map(([name, count]) => ({ name, count }))
+          .sort((a, b) => b.count - a.count),
       },
       200,
-      corsOrigin
+      corsOrigin,
     );
   }
 
-  // API: Durable Job Queue Inspection
+  // API: Durable Job Queue Inspection. Read-only library and reading-data
+  // endpoints remain public on WAN; only mutation routes use the auth gate above.
   if (url.pathname === "/api/jobs/recent" && req.method === "GET") {
     const limitParam = parseInt(url.searchParams.get("limit") || "50", 10);
     const statusParam = url.searchParams.get("status") as any;
     const typeParam = url.searchParams.get("type") as any;
-    const jobs = jobQueue.getRecentJobs({
+    const rawJobs = jobQueue.getRecentJobs({
       limit: isNaN(limitParam) ? 50 : limitParam,
       status: statusParam || undefined,
-      type: typeParam || undefined
+      type: typeParam || undefined,
     });
-    return jsonResponse({ success: true, count: jobs.length, jobs }, 200, corsOrigin);
+    const sanitizedJobs = rawJobs.map(sanitizeJobForResponse);
+
+    return jsonResponse(
+      { success: true, count: sanitizedJobs.length, jobs: sanitizedJobs },
+      200,
+      corsOrigin,
+    );
   }
 
   if (url.pathname.startsWith("/api/jobs/") && req.method === "GET") {
     const jobId = url.pathname.split("/")[3];
-    if (!jobId) return jsonResponse({ success: false, error: "Missing job ID" }, 400, corsOrigin);
+    if (!jobId)
+      return jsonResponse(
+        { success: false, error: "Missing job ID" },
+        400,
+        corsOrigin,
+      );
     const job = jobQueue.getJob(jobId);
-    if (!job) return jsonResponse({ success: false, error: "Job not found" }, 404, corsOrigin);
-    return jsonResponse({ success: true, job }, 200, corsOrigin);
+    if (!job)
+      return jsonResponse(
+        { success: false, error: "Job not found" },
+        404,
+        corsOrigin,
+      );
+
+    return jsonResponse(
+      { success: true, job: sanitizeJobForResponse(job) },
+      200,
+      corsOrigin,
+    );
   }
 
-  if (url.pathname.startsWith("/api/jobs/") && url.pathname.endsWith("/retry") && req.method === "POST") {
+  if (
+    url.pathname.startsWith("/api/jobs/") &&
+    url.pathname.endsWith("/retry") &&
+    req.method === "POST"
+  ) {
+    if (isWan) {
+      const auth = authenticateRequest(req, authOpts);
+      if (!auth.authenticated) {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              auth.error || "Authentication required for public WAN job retry",
+          },
+          401,
+          corsOrigin,
+        );
+      }
+    }
+
     const jobId = url.pathname.split("/")[3];
-    if (!jobId) return jsonResponse({ success: false, error: "Missing job ID" }, 400, corsOrigin);
+    if (!jobId)
+      return jsonResponse(
+        { success: false, error: "Missing job ID" },
+        400,
+        corsOrigin,
+      );
     const retried = jobQueue.retryJob(jobId);
-    if (!retried) return jsonResponse({ success: false, error: "Job not found" }, 404, corsOrigin);
-    return jsonResponse({ success: true, message: `Job ${jobId} queued for retry`, job: retried }, 200, corsOrigin);
+    if (!retried)
+      return jsonResponse(
+        { success: false, error: "Job not found" },
+        404,
+        corsOrigin,
+      );
+
+    return jsonResponse(
+      {
+        success: true,
+        message: `Job ${jobId} queued for retry`,
+        job: sanitizeJobForResponse(retried),
+      },
+      200,
+      corsOrigin,
+    );
   }
 
   // API: Book Cover Proxy & Native Downscaled Thumbnail Cache
-  if (url.pathname.startsWith("/api/books/") && url.pathname.endsWith("/cover")) {
+  if (
+    url.pathname.startsWith("/api/books/") &&
+    url.pathname.endsWith("/cover")
+  ) {
     const parts = url.pathname.split("/");
     const bookId = validateIntegerId(parts[3]);
     if (!bookId) return new Response("Invalid book ID", { status: 400 });
@@ -956,8 +1454,14 @@ export async function handleRequest(req: Request): Promise<Response> {
     const widthParam = url.searchParams.get("w");
 
     if (widthParam) {
-      const targetWidth = Math.min(Math.max(parseInt(widthParam, 10) || 360, 64), 1600);
-      const cacheFilePath = path.join(COVER_CACHE_DIR, `${bookId}_${targetWidth}.jpg`);
+      const targetWidth = Math.min(
+        Math.max(parseInt(widthParam, 10) || 360, 64),
+        1600,
+      );
+      const cacheFilePath = path.join(
+        getCoverCacheDir(),
+        `${bookId}_${targetWidth}.jpg`,
+      );
 
       if (fs.existsSync(cacheFilePath)) {
         const cachedBuffer = fs.readFileSync(cacheFilePath);
@@ -971,13 +1475,18 @@ export async function handleRequest(req: Request): Promise<Response> {
           headers: {
             "Content-Type": "image/jpeg",
             "Cache-Control": "public, max-age=604800, immutable",
-            ETag: etag
-          }
+            ETag: etag,
+          },
         });
       }
 
       // Fetch master cover from Calibre
-      const masterRes = await fetch(`${SERVER_URL}/get/cover/${bookId}/Agent_Library`);
+      const masterRes = await safeFetchWithSsrf(
+        `${SERVER_URL}/get/cover/${bookId}/Agent_Library`,
+        {},
+        5,
+        { allowCalibreServer: true },
+      );
       if (!masterRes.ok) {
         return new Response("Cover not found", { status: 404 });
       }
@@ -987,10 +1496,17 @@ export async function handleRequest(req: Request): Promise<Response> {
       fs.writeFileSync(tempMaster, masterBuffer);
 
       try {
-        const sipsRes = spawnSync("/usr/bin/sips", ["-Z", String(targetWidth), tempMaster, "--out", cacheFilePath], {
-          encoding: "utf8",
-          timeout: 15000
-        });
+        const sipsBin = getSipsPath();
+        const sipsRes = fs.existsSync(sipsBin)
+          ? spawnSync(
+              sipsBin,
+              ["-Z", String(targetWidth), tempMaster, "--out", cacheFilePath],
+              {
+                encoding: "utf8",
+                timeout: 15000,
+              },
+            )
+          : { status: -1 };
 
         if (sipsRes.status === 0 && fs.existsSync(cacheFilePath)) {
           const thumbBuffer = fs.readFileSync(cacheFilePath);
@@ -1000,13 +1516,15 @@ export async function handleRequest(req: Request): Promise<Response> {
             headers: {
               "Content-Type": "image/jpeg",
               "Cache-Control": "public, max-age=604800, immutable",
-              ETag: etag
-            }
+              ETag: etag,
+            },
           });
         }
       } finally {
         if (fs.existsSync(tempMaster)) {
-          try { fs.unlinkSync(tempMaster); } catch {}
+          try {
+            fs.unlinkSync(tempMaster);
+          } catch {}
         }
       }
 
@@ -1016,13 +1534,18 @@ export async function handleRequest(req: Request): Promise<Response> {
         headers: {
           "Content-Type": masterRes.headers.get("Content-Type") || "image/jpeg",
           "Cache-Control": "public, max-age=604800, immutable",
-          ETag: etag
-        }
+          ETag: etag,
+        },
       });
     }
 
     // Master cover request (full resolution)
-    const coverRes = await fetch(`${SERVER_URL}/get/cover/${bookId}/Agent_Library`);
+    const coverRes = await safeFetchWithSsrf(
+      `${SERVER_URL}/get/cover/${bookId}/Agent_Library`,
+      {},
+      5,
+      { allowCalibreServer: true },
+    );
     if (coverRes.ok) {
       const coverBuf = Buffer.from(await coverRes.arrayBuffer());
       const etag = `"${crypto.createHash("sha256").update(coverBuf).digest("hex").slice(0, 16)}"`;
@@ -1035,15 +1558,18 @@ export async function handleRequest(req: Request): Promise<Response> {
         headers: {
           "Content-Type": coverRes.headers.get("Content-Type") || "image/jpeg",
           "Cache-Control": "public, max-age=86400",
-          ETag: etag
-        }
+          ETag: etag,
+        },
       });
     }
     return new Response("Cover not found", { status: 404 });
   }
 
   // API: Book Download Proxy (Delivers clean sanitized metadata-based filename)
-  if (url.pathname.startsWith("/api/books/") && url.pathname.includes("/download/")) {
+  if (
+    url.pathname.startsWith("/api/books/") &&
+    url.pathname.includes("/download/")
+  ) {
     const parts = url.pathname.split("/");
     const bookId = validateIntegerId(parts[3]);
     const format = validateBookFormat(parts[5]);
@@ -1052,18 +1578,27 @@ export async function handleRequest(req: Request): Promise<Response> {
       return new Response("Invalid book ID or format", { status: 400 });
     }
 
-    const fileRes = await fetch(`${SERVER_URL}/get/${format}/${bookId}/Agent_Library`);
+    const fileRes = await safeFetchWithSsrf(
+      `${SERVER_URL}/get/${format}/${bookId}/Agent_Library`,
+      {},
+      5,
+      { allowCalibreServer: true },
+    );
     if (fileRes.ok) {
       const books = getCalibreBooks();
-      const book = books.find((b: any) => b.id === bookId) || { title: `Book-${bookId}`, authors: "Unknown" };
+      const book = books.find((b: any) => b.id === bookId) || {
+        title: `Book-${bookId}`,
+        authors: "Unknown",
+      };
       const downloadFilename = getDownloadFilename(book, format);
 
       return new Response(await fileRes.arrayBuffer(), {
         headers: {
-          "Content-Type": fileRes.headers.get("Content-Type") || "application/octet-stream",
+          "Content-Type":
+            fileRes.headers.get("Content-Type") || "application/octet-stream",
           "Content-Disposition": `attachment; filename="${downloadFilename}"`,
-          "X-Content-Type-Options": "nosniff"
-        }
+          "X-Content-Type-Options": "nosniff",
+        },
       });
     }
     return new Response("File not found", { status: 404 });
@@ -1079,12 +1614,16 @@ export async function handleRequest(req: Request): Promise<Response> {
   if (url.pathname === "/api/kosync/stats" && req.method === "GET") {
     const progress = getKosyncProgress();
     const finishedBooks = progress.filter((p) => p.percentage >= 0.99);
-    const activeBooks = progress.filter((p) => p.percentage < 0.99 && p.percentage > 0);
+    const activeBooks = progress.filter(
+      (p) => p.percentage < 0.99 && p.percentage > 0,
+    );
 
     const days = new Set<string>();
     for (const p of progress) {
       if (p.timestamp) {
-        const dateStr = new Date(p.timestamp * 1000).toISOString().split("T")[0];
+        const dateStr = new Date(p.timestamp * 1000)
+          .toISOString()
+          .split("T")[0];
         days.add(dateStr);
       }
     }
@@ -1095,10 +1634,10 @@ export async function handleRequest(req: Request): Promise<Response> {
         readingDaysCount: days.size,
         finishedCount: finishedBooks.length,
         finishedBooks,
-        activeBooks
+        activeBooks,
       },
       200,
-      corsOrigin
+      corsOrigin,
     );
   }
 
@@ -1110,7 +1649,12 @@ export async function handleRequest(req: Request): Promise<Response> {
 
       for (const b of books) {
         const clean = sanitizeMetadata(b.title, b.authors, b.tags);
-        const setArgs = ["set_metadata", String(b.id), "--with-library", SERVER_URL];
+        const setArgs = [
+          "set_metadata",
+          String(b.id),
+          "--with-library",
+          SERVER_URL,
+        ];
         let hasChanges = false;
 
         if (clean.title && clean.title !== b.title) {
@@ -1133,25 +1677,41 @@ export async function handleRequest(req: Request): Promise<Response> {
       }
 
       getCalibreBooks(true);
-      return jsonResponse({ success: true, message: `Sanitized metadata for ${cleanedCount} books` }, 200, corsOrigin);
+      return jsonResponse(
+        {
+          success: true,
+          message: `Sanitized metadata for ${cleanedCount} books`,
+        },
+        200,
+        corsOrigin,
+      );
     } catch (err) {
-      return jsonResponse({ success: false, error: sanitizeErrorMessage(err) }, 500, corsOrigin);
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
     }
   }
 
   // API: Backfill Covers for Web Articles without a Cover
-  if (url.pathname === "/api/library/backfill-covers" && req.method === "POST") {
+  if (
+    url.pathname === "/api/library/backfill-covers" &&
+    req.method === "POST"
+  ) {
     try {
       const books = getCalibreBooks(true);
       const candidates = books.filter((b: any) => {
         const tags = Array.isArray(b.tags) ? b.tags : b.tags ? [b.tags] : [];
-        const isWeb = tags.some((t: string) => t === "Web Article" || t === "Read Later");
+        const isWeb = tags.some(
+          (t: string) => t === "Web Article" || t === "Read Later",
+        );
         const hasCover = b.cover && b.cover !== 0 && b.cover !== false;
         return isWeb && !hasCover;
       });
 
       const job = jobQueue.enqueue("cover_backfill", {
-        candidateBookIds: candidates.map((c: any) => c.id)
+        candidateBookIds: candidates.map((c: any) => c.id),
       });
 
       return jsonResponse(
@@ -1159,25 +1719,34 @@ export async function handleRequest(req: Request): Promise<Response> {
           success: true,
           count: candidates.length,
           jobId: job.id,
-          message: `Enqueued cover backfill job for ${candidates.length} web articles.`
+          message: `Enqueued cover backfill job for ${candidates.length} web articles.`,
         },
         200,
-        corsOrigin
+        corsOrigin,
       );
     } catch (err: any) {
-      return jsonResponse({ success: false, error: sanitizeErrorMessage(err) }, 500, corsOrigin);
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
     }
   }
 
   // API: Export Obsidian Markdown with Real Highlights
-  if (url.pathname.startsWith("/api/books/") && url.pathname.endsWith("/obsidian.md")) {
+  if (
+    url.pathname.startsWith("/api/books/") &&
+    url.pathname.endsWith("/obsidian.md")
+  ) {
     const parts = url.pathname.split("/");
     const bookId = validateIntegerId(parts[3]);
     if (!bookId) return new Response("Invalid book ID", { status: 400 });
 
     const books = getCalibreBooks();
     const book = books.find((b: any) => b.id === bookId);
-    const progress = getKosyncProgress().find((p) => p.bookId === bookId || (book && p.displayTitle === book.title));
+    const progress = getKosyncProgress().find(
+      (p) => p.bookId === bookId || (book && p.displayTitle === book.title),
+    );
 
     const title = book?.title || progress?.displayTitle || "Book Notes";
     const author = book?.authors || progress?.displayAuthors || "Unknown";
@@ -1192,11 +1761,15 @@ export async function handleRequest(req: Request): Promise<Response> {
         highlightLines.push(`### Highlight ${i + 1}`);
         highlightLines.push(`> ${h.text}`);
         if (h.notes) highlightLines.push(`**Note:** ${h.notes}`);
-        highlightLines.push(`*Captured: ${h.datetime}${h.page ? " | Page: " + h.page : ""}*`);
+        highlightLines.push(
+          `*Captured: ${h.datetime}${h.page ? " | Page: " + h.page : ""}*`,
+        );
         highlightLines.push("");
       });
     } else {
-      highlightLines.push("*(No highlights found in .sdr sidecar for this document)*");
+      highlightLines.push(
+        "*(No highlights found in .sdr sidecar for this document)*",
+      );
       highlightLines.push("");
       highlightLines.push(`- Current Progress: ${pct}%`);
     }
@@ -1222,19 +1795,31 @@ export async function handleRequest(req: Request): Promise<Response> {
       "---",
       "",
       "## 📑 Book Summary",
-      book?.comments ? book.comments.replace(/<[^>]*>?/gm, "") : "No summary provided.",
+      book?.comments
+        ? book.comments.replace(/<[^>]*>?/gm, "")
+        : "No summary provided.",
       "",
       "---",
       "",
       "## 📝 Highlights & Annotations",
-      ...highlightLines
+      ...highlightLines,
     ].join("\n");
+
+    const obsidianFilename = generateMetadataFilename({
+      title: `${title} Notes`,
+      authors: author,
+      series: book?.series || null,
+      seriesIndex: book?.series_index || null,
+      format: "md",
+      fallbackBase: "notes",
+    });
 
     return new Response(md, {
       headers: {
         "Content-Type": "text/markdown; charset=utf-8",
-        "Content-Disposition": `attachment; filename="${encodeURIComponent(title)}_notes.md"`
-      }
+        "Content-Disposition": buildContentDisposition(obsidianFilename),
+        "X-Content-Type-Options": "nosniff",
+      },
     });
   }
 
@@ -1244,16 +1829,27 @@ export async function handleRequest(req: Request): Promise<Response> {
       const body = (await req.json()) as { document: string; bookId: number };
       const bookId = validateIntegerId(body.bookId);
       if (!body.document || !bookId) {
-        return jsonResponse({ success: false, error: "Valid document and bookId required" }, 400, corsOrigin);
+        return jsonResponse(
+          { success: false, error: "Valid document and bookId required" },
+          400,
+          corsOrigin,
+        );
       }
 
       const books = getCalibreBooks();
       const book = books.find((b: any) => b.id === bookId);
       if (!book) {
-        return jsonResponse({ success: false, error: "Book not found in Calibre" }, 404, corsOrigin);
+        return jsonResponse(
+          { success: false, error: "Book not found in Calibre" },
+          404,
+          corsOrigin,
+        );
       }
 
-      const canonicalId = cleanString(book.title).toLowerCase() + "__" + cleanString(book.authors || "").toLowerCase();
+      const canonicalId =
+        cleanString(book.title).toLowerCase() +
+        "__" +
+        cleanString(book.authors || "").toLowerCase();
       const now = Math.floor(Date.now() / 1000);
 
       if (fs.existsSync(KOSYNC_DB_PATH)) {
@@ -1264,45 +1860,81 @@ export async function handleRequest(req: Request): Promise<Response> {
            ON CONFLICT(document_hash) DO UPDATE SET
              canonical_id = excluded.canonical_id,
              normalized_title = excluded.normalized_title,
-             normalized_authors = excluded.normalized_authors`
-        ).run(body.document, canonicalId, book.title, book.authors || "Unknown", now);
+             normalized_authors = excluded.normalized_authors`,
+        ).run(
+          body.document,
+          canonicalId,
+          book.title,
+          book.authors || "Unknown",
+          now,
+        );
 
         db.prepare(
           `UPDATE progress
            SET title = ?, authors = ?
-           WHERE document = ?`
+           WHERE document = ?`,
         ).run(book.title, book.authors || "Unknown", body.document);
 
         return jsonResponse(
-          { success: true, message: `Linked hash ${body.document.substring(0, 8)}... to "${book.title}"` },
+          {
+            success: true,
+            message: `Linked hash ${body.document.substring(0, 8)}... to "${book.title}"`,
+          },
           200,
-          corsOrigin
+          corsOrigin,
         );
       }
 
-      return jsonResponse({ success: false, error: "KOSync database missing" }, 500, corsOrigin);
+      return jsonResponse(
+        { success: false, error: "KOSync database missing" },
+        500,
+        corsOrigin,
+      );
     } catch (err: any) {
-      return jsonResponse({ success: false, error: sanitizeErrorMessage(err) }, 500, corsOrigin);
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
     }
   }
 
   // API: Delete Single KOSync Progress Entry
-  if (url.pathname.startsWith("/api/kosync/progress/") && req.method === "DELETE") {
+  if (
+    url.pathname.startsWith("/api/kosync/progress/") &&
+    req.method === "DELETE"
+  ) {
     try {
       const parts = url.pathname.split("/");
       const progressId = validateIntegerId(parts[4]);
       if (!progressId) {
-        return jsonResponse({ success: false, error: "Invalid progress ID" }, 400, corsOrigin);
+        return jsonResponse(
+          { success: false, error: "Invalid progress ID" },
+          400,
+          corsOrigin,
+        );
       }
 
       if (fs.existsSync(KOSYNC_DB_PATH)) {
         const db = new Database(KOSYNC_DB_PATH);
         db.run("DELETE FROM progress WHERE id = ?;", [progressId]);
-        return jsonResponse({ success: true, message: `Removed progress entry ${progressId}` }, 200, corsOrigin);
+        return jsonResponse(
+          { success: true, message: `Removed progress entry ${progressId}` },
+          200,
+          corsOrigin,
+        );
       }
-      return jsonResponse({ success: false, error: "KOSync database not found" }, 404, corsOrigin);
+      return jsonResponse(
+        { success: false, error: "KOSync database not found" },
+        404,
+        corsOrigin,
+      );
     } catch (err: any) {
-      return jsonResponse({ success: false, error: sanitizeErrorMessage(err) }, 500, corsOrigin);
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
     }
   }
 
@@ -1312,11 +1944,23 @@ export async function handleRequest(req: Request): Promise<Response> {
       if (fs.existsSync(KOSYNC_DB_PATH)) {
         const db = new Database(KOSYNC_DB_PATH);
         db.run("DELETE FROM progress;");
-        return jsonResponse({ success: true, message: "Cleared all sync sessions" }, 200, corsOrigin);
+        return jsonResponse(
+          { success: true, message: "Cleared all sync sessions" },
+          200,
+          corsOrigin,
+        );
       }
-      return jsonResponse({ success: false, error: "KOSync database not found" }, 404, corsOrigin);
+      return jsonResponse(
+        { success: false, error: "KOSync database not found" },
+        404,
+        corsOrigin,
+      );
     } catch (err: any) {
-      return jsonResponse({ success: false, error: sanitizeErrorMessage(err) }, 500, corsOrigin);
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
     }
   }
 
@@ -1325,17 +1969,26 @@ export async function handleRequest(req: Request): Promise<Response> {
     try {
       const body = (await req.json()) as { url?: string };
       if (!body.url || typeof body.url !== "string") {
-        return jsonResponse({ success: false, error: "Missing or invalid 'url' parameter" }, 400, corsOrigin);
+        return jsonResponse(
+          { success: false, error: "Missing or invalid 'url' parameter" },
+          400,
+          corsOrigin,
+        );
       }
       const targetUrl = body.url.trim();
 
       // Validate URL against SSRF vulnerabilities
-      const ssrfCheck = await validateUrlForSSRF(targetUrl, { allowProxyBypass: true });
+      const ssrfCheck = await validateUrlForSSRF(targetUrl, {
+        allowProxyBypass: true,
+      });
       if (!ssrfCheck.safe) {
         return jsonResponse(
-          { success: false, error: `SSRF protection: ${ssrfCheck.error || "Unsafe target URL rejected by SSRF guard"}` },
+          {
+            success: false,
+            error: `SSRF protection: ${ssrfCheck.error || "Unsafe target URL rejected by SSRF guard"}`,
+          },
           400,
-          corsOrigin
+          corsOrigin,
         );
       }
 
@@ -1350,10 +2003,11 @@ export async function handleRequest(req: Request): Promise<Response> {
       return jsonResponse(
         {
           success: false,
-          error: sanitizeErrorMessage(err) || "Failed to ingest article from URL"
+          error:
+            sanitizeErrorMessage(err) || "Failed to ingest article from URL",
         },
         500,
-        corsOrigin
+        corsOrigin,
       );
     }
   }
@@ -1368,10 +2022,10 @@ export async function handleRequest(req: Request): Promise<Response> {
           return jsonResponse(
             {
               success: false,
-              error: `Upload payload (${Math.round(contentLength / 1024 / 1024)}MB) exceeds safety limit (${MAX_UPLOAD_SIZE / 1024 / 1024}MB)`
+              error: `Upload payload (${Math.round(contentLength / 1024 / 1024)}MB) exceeds safety limit (${MAX_UPLOAD_SIZE / 1024 / 1024}MB)`,
             },
             413,
-            corsOrigin
+            corsOrigin,
           );
         }
       }
@@ -1379,7 +2033,11 @@ export async function handleRequest(req: Request): Promise<Response> {
       const formData = await req.formData();
       const file = formData.get("file") as File;
       if (!file || typeof file === "string") {
-        return jsonResponse({ success: false, error: "No file provided" }, 400, corsOrigin);
+        return jsonResponse(
+          { success: false, error: "No file provided" },
+          400,
+          corsOrigin,
+        );
       }
 
       const fileName = file.name;
@@ -1393,37 +2051,43 @@ export async function handleRequest(req: Request): Promise<Response> {
         return jsonResponse(
           {
             success: false,
-            error: `Rejected non-canonical format "${ext}". Only EPUB format is accepted for the canonical collection.`
+            error: `Rejected non-canonical format "${ext}". Only EPUB format is accepted for the canonical collection.`,
           },
           400,
-          corsOrigin
+          corsOrigin,
         );
       }
 
       const safeBase = path.basename(fileName, ext);
       const tempName = `${safeBase}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}${ext}`;
-      const destPath = path.join(DROP_DIR, tempName);
+      const destPath = path.join(getDropDir(), tempName);
       const arrayBuffer = await file.arrayBuffer();
       fs.writeFileSync(destPath, Buffer.from(arrayBuffer));
 
       if (isArchive) {
-        console.log(`[Upload] Archive received: ${fileName}. Inspecting and unpacking...`);
+        console.log(
+          `[Upload] Archive received: ${fileName}. Inspecting and unpacking...`,
+        );
         const unp = unpackArchive(destPath);
-        try { fs.unlinkSync(destPath); } catch {}
+        try {
+          fs.unlinkSync(destPath);
+        } catch {}
 
         if (!unp.success) {
           return jsonResponse(
             {
               success: false,
               error: unp.error || "Archive extraction failed",
-              quarantined: unp.quarantined || []
+              quarantined: unp.quarantined || [],
             },
             400,
-            corsOrigin
+            corsOrigin,
           );
         }
 
-        console.log(`[Upload] Archive ${fileName} yielded ${unp.books.length} canonical EPUB(s). Processing...`);
+        console.log(
+          `[Upload] Archive ${fileName} yielded ${unp.books.length} canonical EPUB(s). Processing...`,
+        );
         const results: any[] = [];
         for (const book of unp.books) {
           const r = ingestBookFile(book.tempPath, book.originalName);
@@ -1431,29 +2095,55 @@ export async function handleRequest(req: Request): Promise<Response> {
         }
         unp.cleanup();
 
-        const importedCount = results.filter((r: any) => r.success && !r.duplicate).length;
+        const importedCount = results.filter(
+          (r: any) => r.success && !r.duplicate,
+        ).length;
+        const uploadResponsePayload = {
+          success: true,
+          isArchive: true,
+          archiveName: fileName,
+          total: unp.books.length,
+          imported: importedCount,
+          quarantined: unp.quarantined || [],
+          quarantinedCount: (unp.quarantined || []).length,
+          results,
+        };
         return jsonResponse(
-          {
-            success: true,
-            isArchive: true,
-            archiveName: fileName,
-            total: unp.books.length,
-            imported: importedCount,
-            quarantined: unp.quarantined || [],
-            results
-          },
+          recursivelySanitize(uploadResponsePayload),
           200,
-          corsOrigin
+          corsOrigin,
         );
       }
 
-      // Single file ingestion
+      // Single file ingestion: strictly enforce .epub format
+      if (!isEpub) {
+        try {
+          fs.unlinkSync(destPath);
+        } catch {}
+        return jsonResponse(
+          {
+            success: false,
+            rejected: true,
+            format: ext.replace(/^\./, "").toUpperCase() || "UNKNOWN",
+            error: `Rejected format "${ext}". home-reading-stack is an EPUB-only collection; only .epub files (or archives containing .epub files) are accepted.`,
+          },
+          400,
+          corsOrigin,
+        );
+      }
+
       const result = ingestBookFile(destPath, fileName);
-      try { fs.unlinkSync(destPath); } catch {}
+      try {
+        fs.unlinkSync(destPath);
+      } catch {}
 
       return jsonResponse(result, result.success ? 200 : 500, corsOrigin);
     } catch (err: any) {
-      return jsonResponse({ success: false, error: sanitizeErrorMessage(err) }, 500, corsOrigin);
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
     }
   }
 
@@ -1462,16 +2152,36 @@ export async function handleRequest(req: Request): Promise<Response> {
     const parts = url.pathname.split("/");
     const bookId = validateIntegerId(parts[3]);
     if (!bookId) {
-      return jsonResponse({ success: false, error: "Invalid book ID" }, 400, corsOrigin);
+      return jsonResponse(
+        { success: false, error: "Invalid book ID" },
+        400,
+        corsOrigin,
+      );
     }
 
-    const delRes = runCalibredb(["remove", String(bookId), "--with-library", SERVER_URL]);
+    const delRes = runCalibredb([
+      "remove",
+      String(bookId),
+      "--with-library",
+      SERVER_URL,
+    ]);
 
     getCalibreBooks(true);
     if (delRes.status === 0) {
-      return jsonResponse({ success: true, message: `Removed book ${bookId}` }, 200, corsOrigin);
+      return jsonResponse(
+        { success: true, message: `Removed book ${bookId}` },
+        200,
+        corsOrigin,
+      );
     } else {
-      return jsonResponse({ success: false, error: sanitizeErrorMessage(delRes.stderr || "Delete failed") }, 500, corsOrigin);
+      return jsonResponse(
+        {
+          success: false,
+          error: sanitizeErrorMessage(delRes.stderr || "Delete failed"),
+        },
+        500,
+        corsOrigin,
+      );
     }
   }
 
@@ -1479,34 +2189,62 @@ export async function handleRequest(req: Request): Promise<Response> {
   if (url.pathname === "/api/books/bulk-delete" && req.method === "POST") {
     try {
       const body = (await req.json()) as { bookIds: (string | number)[] };
-      if (!body.bookIds || !Array.isArray(body.bookIds) || !body.bookIds.length) {
-        return jsonResponse({ success: false, error: "No book IDs provided" }, 400, corsOrigin);
+      if (
+        !body.bookIds ||
+        !Array.isArray(body.bookIds) ||
+        !body.bookIds.length
+      ) {
+        return jsonResponse(
+          { success: false, error: "No book IDs provided" },
+          400,
+          corsOrigin,
+        );
       }
 
       const validIds: number[] = [];
       for (const raw of body.bookIds) {
         const id = validateIntegerId(raw);
         if (!id) {
-          return jsonResponse({ success: false, error: `Invalid book ID: ${raw}` }, 400, corsOrigin);
+          return jsonResponse(
+            { success: false, error: `Invalid book ID: ${raw}` },
+            400,
+            corsOrigin,
+          );
         }
         validIds.push(id);
       }
 
       const idsStr = validIds.map(String).join(",");
-      const delRes = runCalibredb(["remove", idsStr, "--with-library", SERVER_URL]);
+      const delRes = runCalibredb([
+        "remove",
+        idsStr,
+        "--with-library",
+        SERVER_URL,
+      ]);
 
       getCalibreBooks(true);
       if (delRes.status === 0) {
-        return jsonResponse({ success: true, message: `Removed ${validIds.length} books` }, 200, corsOrigin);
+        return jsonResponse(
+          { success: true, message: `Removed ${validIds.length} books` },
+          200,
+          corsOrigin,
+        );
       } else {
         return jsonResponse(
-          { success: false, error: sanitizeErrorMessage(delRes.stderr || "Bulk delete failed") },
+          {
+            success: false,
+            error: sanitizeErrorMessage(delRes.stderr || "Bulk delete failed"),
+          },
           500,
-          corsOrigin
+          corsOrigin,
         );
       }
     } catch (err: any) {
-      return jsonResponse({ success: false, error: sanitizeErrorMessage(err) }, 500, corsOrigin);
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
     }
   }
 
@@ -1517,21 +2255,35 @@ export async function handleRequest(req: Request): Promise<Response> {
       const query = body.query;
       if (!query) return jsonResponse({ results: [] }, 200, corsOrigin);
 
-      const isManga = req.url.includes("manga=true") || /manga|comic|chapter|one piece|naruto|bleach/i.test(query);
+      const isManga =
+        req.url.includes("manga=true") ||
+        /manga|comic|chapter|one piece|naruto|bleach/i.test(query);
       const results = await searchUniversalMetadata(query, isManga);
       return jsonResponse({ results }, 200, corsOrigin);
     } catch (err: any) {
-      return jsonResponse({ results: [], error: sanitizeErrorMessage(err) }, 200, corsOrigin);
+      return jsonResponse(
+        { results: [], error: sanitizeErrorMessage(err) },
+        200,
+        corsOrigin,
+      );
     }
   }
 
   // API: Update Metadata & Cover
-  if (url.pathname.startsWith("/api/books/") && url.pathname.endsWith("/metadata") && req.method === "POST") {
+  if (
+    url.pathname.startsWith("/api/books/") &&
+    url.pathname.endsWith("/metadata") &&
+    req.method === "POST"
+  ) {
     try {
       const parts = url.pathname.split("/");
       const bookId = validateIntegerId(parts[3]);
       if (!bookId) {
-        return jsonResponse({ success: false, error: "Invalid book ID" }, 400, corsOrigin);
+        return jsonResponse(
+          { success: false, error: "Invalid book ID" },
+          400,
+          corsOrigin,
+        );
       }
 
       const body = (await req.json()) as {
@@ -1553,25 +2305,44 @@ export async function handleRequest(req: Request): Promise<Response> {
         .filter((t) => t && !/http|t\.me|thebookr/i.test(t))
         .join(",");
 
-      const args = ["set_metadata", String(bookId), "--with-library", SERVER_URL];
+      const args = [
+        "set_metadata",
+        String(bookId),
+        "--with-library",
+        SERVER_URL,
+      ];
       if (cleanTitle) args.push("--field", `title:${cleanTitle}`);
       if (cleanAuth) args.push("--field", `authors:${cleanAuth}`);
       if (cleanTags !== undefined) args.push("--field", `tags:${cleanTags}`);
-      if (body.series !== undefined) args.push("--field", `series:${cleanString(body.series)}`);
-      if (body.seriesIndex !== undefined) args.push("--field", `series_index:${body.seriesIndex}`);
-      if (body.comments !== undefined) args.push("--field", `comments:${body.comments}`);
-      if (body.rating !== undefined) args.push("--field", `rating:${body.rating}`);
+      if (body.series !== undefined)
+        args.push("--field", `series:${cleanString(body.series)}`);
+      if (body.seriesIndex !== undefined)
+        args.push("--field", `series_index:${body.seriesIndex}`);
+      if (body.comments !== undefined)
+        args.push("--field", `comments:${body.comments}`);
+      if (body.rating !== undefined)
+        args.push("--field", `rating:${body.rating}`);
 
       let tempCover = "";
       if (body.coverUrl) {
         const coverUrl = body.coverUrl;
-        const ssrfCheck = await validateUrlForSSRF(coverUrl, { allowProxyBypass: true });
+        const ssrfCheck = await validateUrlForSSRF(coverUrl, {
+          allowProxyBypass: true,
+        });
         if (!ssrfCheck.safe) {
-          return jsonResponse({ success: false, error: ssrfCheck.error || "Unsafe cover URL rejected by SSRF guard" }, 400, corsOrigin);
+          return jsonResponse(
+            {
+              success: false,
+              error:
+                ssrfCheck.error || "Unsafe cover URL rejected by SSRF guard",
+            },
+            400,
+            corsOrigin,
+          );
         }
 
         try {
-          const cRes = await fetch(coverUrl);
+          const cRes = await safeFetchWithSsrf(coverUrl);
           if (cRes.ok) {
             tempCover = `/tmp/cover_${bookId}_${Date.now()}.jpg`;
             fs.writeFileSync(tempCover, Buffer.from(await cRes.arrayBuffer()));
@@ -1584,17 +2355,36 @@ export async function handleRequest(req: Request): Promise<Response> {
 
       const setRes = runCalibredb(args);
       if (tempCover && fs.existsSync(tempCover)) {
-        try { fs.unlinkSync(tempCover); } catch (_cleanErr) { void _cleanErr; }
+        try {
+          fs.unlinkSync(tempCover);
+        } catch (_cleanErr) {
+          void _cleanErr;
+        }
       }
 
       getCalibreBooks(true);
       if (setRes.status === 0) {
-        return jsonResponse({ success: true, message: "Metadata sanitized & updated" }, 200, corsOrigin);
+        return jsonResponse(
+          { success: true, message: "Metadata sanitized & updated" },
+          200,
+          corsOrigin,
+        );
       } else {
-        return jsonResponse({ success: false, error: sanitizeErrorMessage(setRes.stderr || "Update failed") }, 500, corsOrigin);
+        return jsonResponse(
+          {
+            success: false,
+            error: sanitizeErrorMessage(setRes.stderr || "Update failed"),
+          },
+          500,
+          corsOrigin,
+        );
       }
     } catch (err: any) {
-      return jsonResponse({ success: false, error: sanitizeErrorMessage(err) }, 500, corsOrigin);
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
     }
   }
 
@@ -1605,22 +2395,28 @@ export async function handleRequest(req: Request): Promise<Response> {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-cache",
-        "X-Content-Type-Options": "nosniff"
-      }
+        "X-Content-Type-Options": "nosniff",
+      },
     });
   } catch (_e) {
     void _e;
-    return new Response("Reading HQ Web App", { headers: { "Content-Type": "text/plain" } });
+    return new Response("Reading HQ Web App", {
+      headers: { "Content-Type": "text/plain" },
+    });
   }
 }
 
 // Start Server & Background Job Queue Worker when run directly
 if ((import.meta as any).main) {
   jobQueue.startWorker(1000);
-  Bun.serve({
+  (globalThis as any).Bun.serve({
     port: 8086,
     hostname: "0.0.0.0",
-    fetch: handleRequest
+    fetch(req: any, server: any) {
+      return handleRequest(req, server);
+    },
   });
-  console.log("[Server] Reading HQ Web Uploader listening on http://0.0.0.0:8086");
+  console.log(
+    "[Server] Reading HQ Web Uploader listening on http://0.0.0.0:8086",
+  );
 }

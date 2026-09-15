@@ -129,13 +129,16 @@ The reading stack provides seamless global access to Reading HQ from outside the
 ```
 
 ### 1. Telegram Mini App (TMA) Integration
+
 - **Chat Menu Button:** On bot startup, the bot registers a native Web App menu button labeled **"📖 Reading HQ"** pointing to `https://reading.wavypremium.xyz` via `setChatMenuButton`.
 - **Commands `/app` and `/webapp`:** Respond with an inline keyboard button **[📖 Open Reading HQ]** that opens the mobile-responsive reading dashboard inside Telegram's embedded browser.
 - **Telegram WebApp SDK:** `uploader/index.html` loads the official `telegram-web-app.js` SDK and calls `Telegram.WebApp.ready()` and `Telegram.WebApp.expand()` for a full-height, native app experience.
 
 ### 2. Persistent VLESS Reverse Tunnel (LaunchAgent)
+
 - Managed by `com.ospeto.reading-vless-tunnel.plist` installed in `~/Library/LaunchAgents/` (tracked in `scripts/com.ospeto.reading-vless-tunnel.plist`).
 - Executes:
+
   ```bash
   ssh -N -R 0.0.0.0:8086:127.0.0.1:8086 \
     -o 'ProxyCommand=nc -X 5 -x 127.0.0.1:7890 %h %p' \
@@ -144,16 +147,20 @@ The reading stack provides seamless global access to Reading HQ from outside the
     -o ExitOnForwardFailure=yes \
     panel
   ```
+
 - Uses `nc` over local Sing-box SOCKS5 (`127.0.0.1:7890`) to maintain a persistent reverse tunnel through censorship firewalls to the VPS (`panel`).
 - Configured with `RunAtLoad: true` and `KeepAlive: true` for automatic re-connection after network drops or reboot.
 
 ### 3. VPS Edge Proxy (Caddy)
+
 - Caddy configuration on VPS (`/opt/remnawave/caddy/Caddyfile`):
+
   ```caddyfile
   https://reading.wavypremium.xyz {
       reverse_proxy * http://172.18.0.1:8086
   }
   ```
+
 - Automatically provisions and renews Let's Encrypt / ZeroSSL TLS certificates.
 
 ---
@@ -232,6 +239,8 @@ The public WAN edge (`https://reading.wavypremium.xyz`) is hardened against unau
      - Bearer token or `X-API-Key` matching `READING_API_KEY` in `.env`.
      - Valid Telegram WebApp `initData` cryptographically verified with `TELEGRAM_BOT_TOKEN` via HMAC-SHA256.
      - Authenticated session cookie (`reading_token`).
+   - **Captain-approved public reads:** Read-only library, covers/downloads, telemetry, export, and reading-data endpoints remain public on WAN. Authentication is not added to `GET /api/books`, library facets, read-only job inspection, or equivalent read routes; only state-changing routes are protected.
+   - **Credential transport:** API keys and TMA/session credentials are accepted only in their header or cookie channels. Query-string `token`/`auth` values are rejected because URLs leak through history, logs, Referer headers, and analytics.
 
 2. **CORS & CSRF Origin Protection:**
    - CORS is locked down from wildcard `*` to permitted origins: `https://reading.wavypremium.xyz`, `https://kosync.wavypremium.xyz`, local LAN origins, and custom entries in `ALLOWED_ORIGINS`.
@@ -242,7 +251,8 @@ The public WAN edge (`https://reading.wavypremium.xyz`) is hardened against unau
      - Loopback (`127.0.0.0/8`, `::1`)
      - RFC 1918 private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
      - Cloud metadata & link-local (`169.254.0.0/16`, `169.254.169.254`)
-     - Decimal/hex/octal IP representations and local hostnames (`localhost`, `*.internal`, `*.lan`)
+     - Decimal/hex/octal IP representations, IPv6 multicast/reserved ranges, and local hostnames (`localhost`, `*.internal`, `*.lan`)
+   - Every A and AAAA result is validated, then each redirect hop reconnects through a pinned connector using the original hostname for Host/TLS SNI semantics; DNS is never re-resolved by the connector.
 
 4. **Decompression & Resource Limits:**
    - Maximum upload payload: 100 MB.
@@ -252,6 +262,10 @@ The public WAN edge (`https://reading.wavypremium.xyz`) is hardened against unau
 5. **Safe Error Responses & Metadata Filenames:**
    - Public API error responses redact internal filesystem paths and stack traces (`sanitizeErrorMessage`).
    - Download endpoints return clean metadata-derived filenames (`Title - Author.epub` or `[Series 1] Title - Author.epub`), never leaking Calibre internal storage directory paths.
+
+6. **Secret Hygiene & Credential Rotation Protocol:**
+   - `.env.example` contains non-functional dummy placeholders only. Never commit production tokens, salts, or API keys to the repository.
+   - Any exposed or leaked credentials require captain-authorized live credential rotation and repository history remediation (such as `git filter-repo` or BFG Repo-Cleaner). Autonomous agents must not rewrite git history or perform live credential rotation without explicit captain authorization.
 
 ---
 

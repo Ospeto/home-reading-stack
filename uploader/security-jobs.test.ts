@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   isPrivateOrInternalIp,
   validateUrlForSSRF,
+  safeFetchWithSsrf,
   isWanRequest,
   authenticateRequest,
   isAllowedOrigin,
@@ -13,19 +14,18 @@ import {
   validateIntegerId,
   validateBookFormat,
   isCanonicalEpub,
+  validateEpubContent,
   sanitizeFilename,
   getDownloadFilename,
   sanitizeErrorMessage,
   validateTelegramWebAppData,
-  cleanString
+  getBsdtarPath,
 } from "./security";
 import {
   inspectArchiveSafety,
   unpackArchive,
   isArchiveFile,
   isSupportedBook,
-  MAX_ARCHIVE_ENTRIES,
-  MAX_COMPRESSION_RATIO
 } from "./archive";
 import { DurableJobQueue } from "./jobs";
 import { handleRequest } from "./server";
@@ -60,6 +60,10 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
     expect(isPrivateOrInternalIp("fd00::1234")).toBe(true);
     expect(isPrivateOrInternalIp("::ffff:127.0.0.1")).toBe(true);
     expect(isPrivateOrInternalIp("::ffff:192.168.1.1")).toBe(true);
+    expect(isPrivateOrInternalIp("::ffff:8.8.8.8")).toBe(false);
+    expect(isPrivateOrInternalIp("::ffff:7f00:1")).toBe(true);
+    expect(isPrivateOrInternalIp("::ffff:c0a8:101")).toBe(true);
+    expect(isPrivateOrInternalIp("0:0:0:0:0:ffff:7f00:1")).toBe(true);
   });
 
   it("normalizes and blocks decimal, hex, and octal IP representations", () => {
@@ -71,10 +75,38 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
     expect(isPrivateOrInternalIp("0177.0.0.1")).toBe(true);
   });
 
-  it("allows standard public internet IPv4 addresses", () => {
+  it("allows standard public internet IPv4 and IPv6 addresses", () => {
     expect(isPrivateOrInternalIp("8.8.8.8")).toBe(false);
     expect(isPrivateOrInternalIp("1.1.1.1")).toBe(false);
     expect(isPrivateOrInternalIp("104.21.5.19")).toBe(false);
+    expect(isPrivateOrInternalIp("2001:4860:4860::8888")).toBe(false);
+    expect(isPrivateOrInternalIp("2606:4700:4700::1111")).toBe(false);
+    expect(isPrivateOrInternalIp("ff02::1")).toBe(true);
+    expect(isPrivateOrInternalIp("2001:db8::1")).toBe(true);
+  });
+
+  it("validates every A and AAAA result and preserves an allowed IPv6 snapshot", async () => {
+    const safe = await validateUrlForSSRF("http://dualstack.example.test/", {
+      dnsLookup: async () => [
+        { address: "198.51.100.20", family: 4 },
+        { address: "2001:4860:4860::8888", family: 6 },
+      ],
+    });
+    expect(safe.safe).toBe(false);
+
+    const publicOnly = await validateUrlForSSRF(
+      "http://dualstack.example.test/",
+      {
+        dnsLookup: async () => [
+          { address: "93.184.216.34", family: 4 },
+          { address: "2001:4860:4860::8888", family: 6 },
+        ],
+      },
+    );
+    expect(publicOnly.safe).toBe(true);
+    expect(publicOnly.resolvedAddresses?.map((entry) => entry.family)).toEqual([
+      4, 6,
+    ]);
   });
 
   it("validateUrlForSSRF rejects non-http protocols and embedded credentials", async () => {
@@ -102,8 +134,26 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
     expect(homeArpa.safe).toBe(false);
   });
 
+  it("allowInternalServices enables only the explicit loopback service allowlist", async () => {
+    const enabled = await validateUrlForSSRF("http://127.0.0.1:8088/status", {
+      allowInternalServices: true,
+    });
+    expect(enabled.safe).toBe(true);
+    expect(enabled.resolvedIp).toBe("127.0.0.1");
+
+    const disabled = await validateUrlForSSRF("http://127.0.0.1:8088/status");
+    expect(disabled.safe).toBe(false);
+
+    const wrongPort = await validateUrlForSSRF("http://127.0.0.1:8089/status", {
+      allowInternalServices: true,
+    });
+    expect(wrongPort.safe).toBe(false);
+  });
+
   it("validateUrlForSSRF blocks direct private IP literals and metadata endpoints", async () => {
-    const meta = await validateUrlForSSRF("http://169.254.169.254/latest/meta-data/");
+    const meta = await validateUrlForSSRF(
+      "http://169.254.169.254/latest/meta-data/",
+    );
     expect(meta.safe).toBe(false);
 
     const loop = await validateUrlForSSRF("http://127.0.0.1:8088/calibre");
@@ -114,50 +164,248 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
   });
 
   it("validateUrlForSSRF accepts valid public URLs with allowProxyBypass", async () => {
-    const pub = await validateUrlForSSRF("https://en.wikipedia.org/wiki/E-book", { allowProxyBypass: true });
+    const pub = await validateUrlForSSRF(
+      "https://en.wikipedia.org/wiki/E-book",
+      { allowProxyBypass: true },
+    );
     expect(pub.safe).toBe(true);
+  });
+
+  it("safeFetchWithSsrf blocks redirects targeting internal or link-local endpoints", async () => {
+    let thrownError: Error | null = null;
+    try {
+      await safeFetchWithSsrf("http://169.254.169.254/latest/meta-data/");
+    } catch (err: any) {
+      thrownError = err;
+    }
+    expect(thrownError).not.toBeNull();
+    expect(thrownError?.message).toContain("SSRF");
+  });
+
+  it("enforces that safeFetchWithSsrf is the only production outbound fetch entry point in uploader/", () => {
+    const uploaderDir = path.resolve(__dirname);
+    const files = fs
+      .readdirSync(uploaderDir)
+      .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+
+    const violations: string[] = [];
+
+    for (const f of files) {
+      if (f === "security.ts") continue; // The single helper is defined here
+      const fullPath = path.join(uploaderDir, f);
+      const content = fs.readFileSync(fullPath, "utf8");
+      const lines = content.split("\n");
+
+      lines.forEach((line, idx) => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("//") || trimmed.startsWith("*")) return;
+        // Bun server export: fetch(req: any, server: any)
+        if (/fetch\s*\(\s*req\b/.test(trimmed)) return;
+
+        // Check for raw fetch( or globalThis.fetch
+        // Matches fetch( when NOT preceded by 'safe'
+        if (
+          /(?<!safe)fetch\s*\(/.test(trimmed) ||
+          /globalThis\.fetch\b/.test(trimmed)
+        ) {
+          violations.push(`${f}:${idx + 1}: ${trimmed}`);
+        }
+      });
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  it("safeFetchWithSsrf successfully fetches public URLs with IP binding", async () => {
+    const res = await safeFetchWithSsrf(
+      "https://en.wikipedia.org/wiki/E-book",
+      {
+        method: "HEAD",
+        headers: { "User-Agent": "ReadingHQ-Test/1.0" },
+        signal: AbortSignal.timeout(10000),
+      },
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("safeFetchWithSsrf preserves the original hostname while binding a validated address", async () => {
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 8088,
+      fetch(req: Request) {
+        return new Response(new URL(req.url).host);
+      },
+    });
+
+    try {
+      const res = await safeFetchWithSsrf(
+        "http://localhost:8088/bound",
+        { signal: AbortSignal.timeout(3000) },
+        5,
+        {
+          allowInternalServices: true,
+          dnsLookup: async () => [{ address: "127.0.0.1", family: 4 }],
+        },
+      );
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe("localhost:8088");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it("safeFetchWithSsrf rejects redirects to localhost or private IPs", async () => {
+    const redirectServer = Bun.serve({
+      port: 0,
+      fetch(req: any) {
+        const u = new URL(req.url);
+        if (u.pathname === "/init") {
+          return new Response(null, {
+            status: 302,
+            headers: { Location: "http://127.0.0.1:8089/admin-secret" },
+          });
+        }
+        return new Response("OK");
+      },
+    });
+
+    try {
+      let err: Error | null = null;
+      try {
+        await safeFetchWithSsrf(
+          `http://127.0.0.1:${redirectServer.port}/init`,
+          { signal: AbortSignal.timeout(3000) },
+          5,
+          { allowInternalServices: true },
+        );
+      } catch (e: any) {
+        err = e;
+      }
+      expect(err).not.toBeNull();
+      expect(err?.message).toContain("SSRF guard blocked target");
+    } finally {
+      redirectServer.stop(true);
+    }
+  });
+
+  it("safeFetchWithSsrf rejects redirect re-binding targeting internal/loopback addresses", async () => {
+    const redirectServer = Bun.serve({
+      port: 0,
+      fetch(req: any) {
+        const u = new URL(req.url);
+        if (u.pathname === "/rebind") {
+          return new Response(null, {
+            status: 302,
+            headers: { Location: "http://localhost:8089/secret" },
+          });
+        }
+        return new Response("OK");
+      },
+    });
+
+    try {
+      let err: Error | null = null;
+      try {
+        await safeFetchWithSsrf(
+          `http://127.0.0.1:${redirectServer.port}/rebind`,
+          { signal: AbortSignal.timeout(3000) },
+          5,
+          { allowInternalServices: true },
+        );
+      } catch (e: any) {
+        err = e;
+      }
+      expect(err).not.toBeNull();
+      expect(err?.message).toContain("SSRF guard blocked target");
+    } finally {
+      redirectServer.stop(true);
+    }
+  });
+
+  it("safeFetchWithSsrf enforces proxy rejection for internal, metadata, or unauthorized proxy targets", async () => {
+    // 1. Direct private IP target rejected even if proxy is supplied
+    let err1: Error | null = null;
+    try {
+      await safeFetchWithSsrf("http://127.0.0.1:8088/secret", {
+        proxy: "http://127.0.0.1:7890",
+      } as any);
+    } catch (e: any) {
+      err1 = e;
+    }
+    expect(err1).not.toBeNull();
+    expect(err1?.message).toContain("SSRF guard blocked target");
+
+    // 2. Malicious proxy pointing to cloud metadata (169.254.169.254) rejected
+    let err2: Error | null = null;
+    try {
+      await safeFetchWithSsrf("https://en.wikipedia.org/wiki/E-book", {
+        proxy: "http://169.254.169.254:80",
+      } as any);
+    } catch (e: any) {
+      err2 = e;
+    }
+    expect(err2).not.toBeNull();
+    expect(err2?.message).toContain("SSRF guard blocked proxy target");
+
+    // 3. allowProxyBypass cannot bypass cloud metadata or link-local endpoints
+    const metaCheck = await validateUrlForSSRF(
+      "http://169.254.169.254/latest/meta-data/",
+      { allowProxyBypass: true },
+    );
+    expect(metaCheck.safe).toBe(false);
   });
 });
 
 describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", () => {
   it("classifies requests by host and proxy headers", () => {
-    // LAN request
+    // LAN request with verified local peer address
     const lanReq = new Request("http://192.168.31.15:8086/api/books", {
-      headers: { host: "192.168.31.15:8086" }
+      headers: { host: "192.168.31.15:8086" },
     });
-    expect(isWanRequest(lanReq)).toBe(false);
+    expect(isWanRequest(lanReq, { remoteAddress: "192.168.31.15" })).toBe(
+      false,
+    );
 
-    // WAN request via domain
+    // Unverified request without socket address fails closed to WAN
+    expect(isWanRequest(lanReq)).toBe(true);
+
+    // WAN request via domain with local tunnel socket
     const wanReq1 = new Request("http://127.0.0.1:8086/api/books", {
-      headers: { host: "reading.wavypremium.xyz" }
+      headers: { host: "reading.wavypremium.xyz" },
     });
-    expect(isWanRequest(wanReq1)).toBe(true);
+    expect(isWanRequest(wanReq1, { remoteAddress: "127.0.0.1" })).toBe(true);
 
-    // WAN request via X-Forwarded-Host
+    // WAN request via X-Forwarded-Host with local tunnel socket
     const wanReq2 = new Request("http://127.0.0.1:8086/api/books", {
       headers: {
         host: "127.0.0.1:8086",
-        "x-forwarded-host": "reading.wavypremium.xyz"
-      }
+        "x-forwarded-host": "reading.wavypremium.xyz",
+      },
     });
-    expect(isWanRequest(wanReq2)).toBe(true);
+    expect(isWanRequest(wanReq2, { remoteAddress: "127.0.0.1" })).toBe(true);
 
-    // WAN request via public client X-Forwarded-For
+    // WAN request via public client X-Forwarded-For through local tunnel socket
     const wanReq3 = new Request("http://127.0.0.1:8086/api/books", {
       headers: {
         host: "127.0.0.1:8086",
-        "x-forwarded-for": "8.8.8.8"
-      }
+        "x-forwarded-for": "8.8.8.8",
+      },
     });
-    expect(isWanRequest(wanReq3)).toBe(true);
+    expect(isWanRequest(wanReq3, { remoteAddress: "127.0.0.1" })).toBe(true);
+
+    // Direct public client (93.184.216.34) fails closed to WAN
+    expect(isWanRequest(lanReq, { remoteAddress: "93.184.216.34" })).toBe(true);
   });
 
   it("authenticateRequest passes local LAN requests without credentials", () => {
     const lanReq = new Request("http://192.168.31.15:8086/api/upload", {
       method: "POST",
-      headers: { host: "192.168.31.15:8086" }
+      headers: { host: "192.168.31.15:8086" },
     });
-    const result = authenticateRequest(lanReq, { apiKey: "secret123" });
+    const result = authenticateRequest(lanReq, {
+      remoteAddress: "192.168.31.15",
+      apiKey: "secret123",
+    });
     expect(result.authenticated).toBe(true);
     expect(result.method).toBe("lan");
   });
@@ -165,9 +413,39 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
   it("authenticateRequest blocks unauthenticated WAN requests", () => {
     const wanReq = new Request("http://127.0.0.1:8086/api/upload", {
       method: "POST",
-      headers: { host: "reading.wavypremium.xyz" }
+      headers: { host: "reading.wavypremium.xyz" },
     });
     const result = authenticateRequest(wanReq, { apiKey: "secret123" });
+    expect(result.authenticated).toBe(false);
+  });
+
+  it("authenticateRequest blocks public client spoofing LAN host header", () => {
+    // Public client (93.184.216.34) connecting directly, sending spoofed LAN Host header
+    const spoofedReq = new Request("http://192.168.31.15:8086/api/upload", {
+      method: "POST",
+      headers: { host: "192.168.31.15:8086" },
+    });
+    const result = authenticateRequest(spoofedReq, {
+      remoteAddress: "93.184.216.34",
+      apiKey: "secret123",
+    });
+    expect(result.authenticated).toBe(false);
+    expect(result.error).toContain(
+      "Authentication required for public WAN access",
+    );
+  });
+
+  it("authenticateRequest never accepts query-string credentials", () => {
+    const queryReq = new Request(
+      "http://127.0.0.1:8086/api/upload?token=my-secret-key-123",
+      {
+        method: "POST",
+        headers: { host: "reading.wavypremium.xyz" },
+      },
+    );
+    const result = authenticateRequest(queryReq, {
+      apiKey: "my-secret-key-123",
+    });
     expect(result.authenticated).toBe(false);
   });
 
@@ -176,19 +454,25 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
       method: "POST",
       headers: {
         host: "reading.wavypremium.xyz",
-        authorization: "Bearer my-secret-key-123"
-      }
+        authorization: "Bearer my-secret-key-123",
+      },
     });
-    expect(authenticateRequest(bearerReq, { apiKey: "my-secret-key-123" }).authenticated).toBe(true);
+    expect(
+      authenticateRequest(bearerReq, { apiKey: "my-secret-key-123" })
+        .authenticated,
+    ).toBe(true);
 
     const headerReq = new Request("http://127.0.0.1:8086/api/upload", {
       method: "POST",
       headers: {
         host: "reading.wavypremium.xyz",
-        "x-api-key": "my-secret-key-123"
-      }
+        "x-api-key": "my-secret-key-123",
+      },
     });
-    expect(authenticateRequest(headerReq, { apiKey: "my-secret-key-123" }).authenticated).toBe(true);
+    expect(
+      authenticateRequest(headerReq, { apiKey: "my-secret-key-123" })
+        .authenticated,
+    ).toBe(true);
   });
 
   it("validateTelegramWebAppData correctly verifies valid HMAC-SHA256 signatures and rejects tampered data", () => {
@@ -197,8 +481,14 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
     const userJson = JSON.stringify({ id: 998877, first_name: "ReadingMate" });
 
     const checkString = `auth_date=${authDate}\nquery_id=AAHdF6IQAAAAAN0XohDhrOrc\nuser=${userJson}`;
-    const secretKey = crypto.createHmac("sha256", "WebAppData").update(botToken).digest();
-    const validHash = crypto.createHmac("sha256", secretKey).update(checkString).digest("hex");
+    const secretKey = crypto
+      .createHmac("sha256", "WebAppData")
+      .update(botToken)
+      .digest();
+    const validHash = crypto
+      .createHmac("sha256", secretKey)
+      .update(checkString)
+      .digest("hex");
 
     const validInitData = `query_id=AAHdF6IQAAAAAN0XohDhrOrc&user=${encodeURIComponent(userJson)}&auth_date=${authDate}&hash=${validHash}`;
 
@@ -208,15 +498,25 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
 
     // Tampered user data
     const tamperedInitData = `query_id=AAHdF6IQAAAAAN0XohDhrOrc&user=${encodeURIComponent(JSON.stringify({ id: 111 }))}&auth_date=${authDate}&hash=${validHash}`;
-    const invalidResult = validateTelegramWebAppData(tamperedInitData, botToken);
+    const invalidResult = validateTelegramWebAppData(
+      tamperedInitData,
+      botToken,
+    );
     expect(invalidResult.valid).toBe(false);
 
     // Expired initData (older than maxAgeSec)
     const oldDate = authDate - 100000;
     const oldCheckString = `auth_date=${oldDate}\nquery_id=AAHdF6IQAAAAAN0XohDhrOrc`;
-    const oldHash = crypto.createHmac("sha256", secretKey).update(oldCheckString).digest("hex");
+    const oldHash = crypto
+      .createHmac("sha256", secretKey)
+      .update(oldCheckString)
+      .digest("hex");
     const expiredInitData = `query_id=AAHdF6IQAAAAAN0XohDhrOrc&auth_date=${oldDate}&hash=${oldHash}`;
-    const expiredResult = validateTelegramWebAppData(expiredInitData, botToken, 3600);
+    const expiredResult = validateTelegramWebAppData(
+      expiredInitData,
+      botToken,
+      3600,
+    );
     expect(expiredResult.valid).toBe(false);
   });
 });
@@ -235,19 +535,31 @@ describe("Public WAN & API Surface Hardening — CORS & CSRF Guards", () => {
     const maliciousPost = new Request("http://127.0.0.1:8086/api/books/1", {
       method: "DELETE",
       headers: {
-        origin: "https://attacker.site"
-      }
+        origin: "https://attacker.site",
+      },
     });
     const check = validateOriginAndCsrf(maliciousPost);
     expect(check.valid).toBe(false);
+  });
+
+  it("validateOriginAndCsrf rejects mutating request with cookie auth when both Origin and Referer are absent", () => {
+    const cookiePost = new Request("http://127.0.0.1:8086/api/books/1", {
+      method: "DELETE",
+      headers: {
+        cookie: "reading_token=secret123",
+      },
+    });
+    const check = validateOriginAndCsrf(cookiePost);
+    expect(check.valid).toBe(false);
+    expect(check.error).toContain("Origin or Referer");
   });
 
   it("validateOriginAndCsrf allows mutating requests from permitted origins", () => {
     const validPost = new Request("http://127.0.0.1:8086/api/books/1", {
       method: "DELETE",
       headers: {
-        origin: "https://reading.wavypremium.xyz"
-      }
+        origin: "https://reading.wavypremium.xyz",
+      },
     });
     const check = validateOriginAndCsrf(validPost);
     expect(check.valid).toBe(true);
@@ -281,7 +593,9 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
 
   it("sanitizeFilename strips path traversal, illegal chars, and control characters", () => {
     expect(sanitizeFilename("../../etc/passwd")).toBe("etc passwd");
-    expect(sanitizeFilename("Title: Subtitle? *Awesome* <Book>")).toBe("Title Subtitle Awesome Book");
+    expect(sanitizeFilename("Title: Subtitle? *Awesome* <Book>")).toBe(
+      "Title Subtitle Awesome Book",
+    );
     expect(sanitizeFilename("   Lots   of   spaces   ")).toBe("Lots of spaces");
     expect(sanitizeFilename(".hidden")).toBe("hidden");
   });
@@ -289,22 +603,26 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
   it("getDownloadFilename produces clean 'Title - Author.epub' and avoids Calibre internal paths", () => {
     const book = {
       title: "The Great Gatsby",
-      authors: "F. Scott Fitzgerald"
+      authors: "F. Scott Fitzgerald",
     };
-    expect(getDownloadFilename(book, "epub")).toBe("The Great Gatsby - F. Scott Fitzgerald.epub");
+    expect(getDownloadFilename(book, "epub")).toBe(
+      "The Great Gatsby - F. Scott Fitzgerald.epub",
+    );
 
     const seriesBook = {
       title: "Dune Messiah",
       authors: "Frank Herbert",
       series: "Dune",
-      series_index: 2
+      series_index: 2,
     };
-    expect(getDownloadFilename(seriesBook, "epub")).toBe("[Dune 2] Dune Messiah - Frank Herbert.epub");
+    expect(getDownloadFilename(seriesBook, "epub")).toBe(
+      "[Dune 2] Dune Messiah - Frank Herbert.epub",
+    );
 
     // Book with malicious characters in title
     const unsafeBook = {
       title: "Hackers: /..//etc/passwd *Edition*?",
-      authors: "Anonymous <Hacker>"
+      authors: "Anonymous <Hacker>",
     };
     const cleanName = getDownloadFilename(unsafeBook, "epub");
     expect(cleanName).not.toContain("/");
@@ -313,10 +631,66 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
   });
 
   it("sanitizeErrorMessage redacts server file paths and secrets", () => {
-    const errWithPath = new Error("ENOENT: no such file or directory, open '/Users/ospeto/uploader/secret.txt'");
+    const errWithPath = new Error(
+      "ENOENT: no such file or directory, open '/Users/ospeto/uploader/secret.txt'",
+    );
     const sanitized = sanitizeErrorMessage(errWithPath);
     expect(sanitized).not.toContain("/Users/ospeto");
     expect(sanitized).toContain("[path]");
+
+    const errWithSecret = new Error(
+      "Failed connecting with token=abc12345secret and key=mySecretKey",
+    );
+    const sanitizedSecret = sanitizeErrorMessage(errWithSecret);
+    expect(sanitizedSecret).toContain("token=[REDACTED]");
+    expect(sanitizedSecret).toContain("key=[REDACTED]");
+    expect(sanitizedSecret).not.toContain("abc12345secret");
+  });
+
+  it("validateEpubContent validates ZIP magic bytes, mimetype, and required container", () => {
+    const tempDir = path.join("/tmp", `test_epub_val_${Date.now()}`);
+    const metaDir = path.join(tempDir, "META-INF");
+    fs.mkdirSync(metaDir, { recursive: true });
+
+    fs.writeFileSync(path.join(tempDir, "mimetype"), "application/epub+zip");
+    fs.writeFileSync(path.join(metaDir, "container.xml"), "<container/>");
+
+    const validEpub = path.join("/tmp", `valid_${Date.now()}.epub`);
+    const { spawnSync } = require("node:child_process");
+    spawnSync(getBsdtarPath(), [
+      "--format",
+      "zip",
+      "-cf",
+      validEpub,
+      "-C",
+      tempDir,
+      "mimetype",
+      "META-INF",
+    ]);
+
+    try {
+      const validRes = validateEpubContent(validEpub);
+      expect(validRes.valid).toBe(true);
+
+      const fakeEpub = path.join("/tmp", `fake_${Date.now()}.epub`);
+      fs.writeFileSync(
+        fakeEpub,
+        "not a zip file at all - this text simulates a corrupted non-zip file claiming to be an epub",
+      );
+      const fakeRes = validateEpubContent(fakeEpub);
+      expect(fakeRes.valid).toBe(false);
+      expect(fakeRes.error).toContain("magic bytes");
+      if (fs.existsSync(fakeEpub)) {
+        fs.unlinkSync(fakeEpub);
+      }
+    } finally {
+      if (fs.existsSync(validEpub)) {
+        fs.unlinkSync(validEpub);
+      }
+      if (fs.existsSync(tempDir)) {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }
   });
 });
 
@@ -356,9 +730,13 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
   it("unpackArchive extracts canonical EPUBs and quarantines non-EPUB files", () => {
     const tempZip = `/tmp/test_mixed_${Date.now()}.zip`;
     const pythonScript = `
-import zipfile
+import zipfile, io
+epub_buf = io.BytesIO()
+with zipfile.ZipFile(epub_buf, "w") as ez:
+    ez.writestr("mimetype", "application/epub+zip")
+    ez.writestr("META-INF/container.xml", "<container/>")
 with zipfile.ZipFile("${tempZip}", "w") as z:
-    z.writestr("book1.epub", "epub data")
+    z.writestr("book1.epub", epub_buf.getvalue())
     z.writestr("manual.pdf", "pdf data")
     z.writestr("manga.cbz", "cbz data")
 `;
@@ -370,8 +748,12 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
       expect(res.books.length).toBe(1);
       expect(res.books[0].originalName).toBe("book1.epub");
       expect(res.quarantined?.length).toBe(2);
-      expect(res.quarantined?.map((q) => q.originalName)).toContain("manual.pdf");
-      expect(res.quarantined?.map((q) => q.originalName)).toContain("manga.cbz");
+      expect(res.quarantined?.map((q) => q.originalName)).toContain(
+        "manual.pdf",
+      );
+      expect(res.quarantined?.map((q) => q.originalName)).toContain(
+        "manga.cbz",
+      );
       res.cleanup();
     } finally {
       if (fs.existsSync(tempZip)) fs.unlinkSync(tempZip);
@@ -405,7 +787,7 @@ describe("Durable Ingestion Job Queue Lifecycle & Crash Recovery", () => {
 
     const job = queue.enqueue("file_ingest", {
       filePath: "/tmp/test.epub",
-      originalFileName: "test.epub"
+      originalFileName: "test.epub",
     });
 
     expect(job.id).toBeDefined();
@@ -427,7 +809,10 @@ describe("Durable Ingestion Job Queue Lifecycle & Crash Recovery", () => {
       return { enriched: true, bookId: payload.bookId };
     });
 
-    const job = queue.enqueue("metadata_enrich", { bookId: 42, title: "Test Title" });
+    const job = queue.enqueue("metadata_enrich", {
+      bookId: 42,
+      title: "Test Title",
+    });
     const processed = await queue.processNextJob();
 
     expect(processed).toBe(true);
@@ -448,7 +833,11 @@ describe("Durable Ingestion Job Queue Lifecycle & Crash Recovery", () => {
       throw new Error("Network timeout contacting target host");
     });
 
-    const job = queue.enqueue("url_article_ingest", { url: "https://example.com/fail" }, { maxRetries: 2 });
+    const job = queue.enqueue(
+      "url_article_ingest",
+      { url: "https://example.com/fail" },
+      { maxRetries: 2 },
+    );
 
     // Attempt 1 -> pending retry
     await queue.processNextJob();
@@ -458,13 +847,16 @@ describe("Durable Ingestion Job Queue Lifecycle & Crash Recovery", () => {
     expect(jobAfter1?.next_run_at).toBeGreaterThan(Date.now() - 100);
 
     // Fast-forward next_run_at to simulate backoff passing
-    testDb.prepare("UPDATE jobs SET next_run_at = ? WHERE id = ?").run(Date.now() - 1000, job.id);
+    testDb
+      .prepare("UPDATE jobs SET next_run_at = ? WHERE id = ?")
+      .run(Date.now() - 1000, job.id);
 
     // Attempt 2 (max retries reached) -> status failed
     await queue.processNextJob();
     const jobAfter2 = queue.getJob(job.id);
     expect(jobAfter2?.status).toBe("failed");
     expect(jobAfter2?.retries).toBe(2);
+    expect(attempts).toBe(2);
     expect(jobAfter2?.error).toContain("Network timeout");
   });
 
@@ -476,7 +868,7 @@ describe("Durable Ingestion Job Queue Lifecycle & Crash Recovery", () => {
     testDb
       .prepare(
         `INSERT INTO jobs (id, type, payload, status, retries, max_retries, created_at, updated_at, next_run_at)
-         VALUES ('crash_job_1', 'file_ingest', '{"file":"test"}', 'processing', 0, 3, 1000, 1000, 1000)`
+         VALUES ('crash_job_1', 'file_ingest', '{"file":"test"}', 'processing', 0, 3, 1000, 1000, 1000)`,
       )
       .run();
 
@@ -497,7 +889,11 @@ describe("Durable Ingestion Job Queue Lifecycle & Crash Recovery", () => {
     queue.enqueue("metadata_enrich", { id: 10 });
     const failedJob = queue.enqueue("cover_backfill", {});
 
-    testDb.prepare("UPDATE jobs SET status = 'failed', error = 'Disk full' WHERE id = ?").run(failedJob.id);
+    testDb
+      .prepare(
+        "UPDATE jobs SET status = 'failed', error = 'Disk full' WHERE id = ?",
+      )
+      .run(failedJob.id);
 
     const recent = queue.getRecentJobs({ limit: 10 });
     expect(recent.length).toBe(3);
@@ -509,20 +905,24 @@ describe("Durable Ingestion Job Queue Lifecycle & Crash Recovery", () => {
 });
 
 describe("Server Integration Endpoints & Hardened API Surface", () => {
+  const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+
   it("rejects non-EPUB direct file uploads", async () => {
     const formData = new FormData();
-    const pdfBlob = new Blob(["%PDF-1.4 mock pdf"], { type: "application/pdf" });
+    const pdfBlob = new Blob(["%PDF-1.4 mock pdf"], {
+      type: "application/pdf",
+    });
     formData.append("file", pdfBlob, "manual.pdf");
 
     const req = new Request("http://127.0.0.1:8086/api/upload", {
       method: "POST",
       headers: {
-        host: "127.0.0.1:8086"
+        host: "127.0.0.1:8086",
       },
-      body: formData
+      body: formData,
     });
 
-    const res = await handleRequest(req);
+    const res = await handleRequest(req, localServer);
     expect(res.status).toBe(400);
     const data = (await res.json()) as any;
     expect(data.success).toBe(false);
@@ -534,31 +934,41 @@ describe("Server Integration Endpoints & Hardened API Surface", () => {
       method: "POST",
       headers: {
         host: "127.0.0.1:8086",
-        "content-type": "application/json"
+        "content-type": "application/json",
       },
-      body: JSON.stringify({ url: "http://169.254.169.254/latest/meta-data/" })
+      body: JSON.stringify({ url: "http://169.254.169.254/latest/meta-data/" }),
     });
 
-    const res = await handleRequest(req);
+    const res = await handleRequest(req, localServer);
     expect(res.status).toBe(400);
     const data = (await res.json()) as any;
     expect(data.success).toBe(false);
     expect(data.error).toContain("SSRF");
   });
 
-  it("exposes job inspection endpoint GET /api/jobs/recent", async () => {
-    const req = new Request("http://127.0.0.1:8086/api/jobs/recent", {
+  it("keeps read-only job inspection public on LAN and WAN", async () => {
+    const lanReq = new Request("http://127.0.0.1:8086/api/jobs/recent", {
       method: "GET",
       headers: {
-        host: "127.0.0.1:8086"
-      }
+        host: "127.0.0.1:8086",
+      },
     });
 
-    const res = await handleRequest(req);
-    expect(res.status).toBe(200);
-    const data = (await res.json()) as any;
+    const lanRes = await handleRequest(lanReq, localServer);
+    expect(lanRes.status).toBe(200);
+    const data = (await lanRes.json()) as any;
     expect(data.success).toBe(true);
     expect(Array.isArray(data.jobs)).toBe(true);
+
+    // Captain-approved read-only reading-data boundary remains public on WAN.
+    const wanReq = new Request("http://127.0.0.1:8086/api/jobs/recent", {
+      method: "GET",
+      headers: {
+        host: "reading.wavypremium.xyz",
+      },
+    });
+    const wanRes = await handleRequest(wanReq, localServer);
+    expect(wanRes.status).toBe(200);
   });
 
   it("blocks unauthenticated WAN mutating requests with 401", async () => {
@@ -566,8 +976,8 @@ describe("Server Integration Endpoints & Hardened API Surface", () => {
       method: "DELETE",
       headers: {
         host: "reading.wavypremium.xyz",
-        origin: "https://reading.wavypremium.xyz"
-      }
+        origin: "https://reading.wavypremium.xyz",
+      },
     });
 
     const res = await handleRequest(wanDelete);
@@ -584,11 +994,12 @@ describe("Server Integration Endpoints & Hardened API Surface", () => {
       title: "Clean Architecture: A Craftsman's Guide",
       authors: "Robert C. Martin",
       series: "Robert C. Martin Series",
-      series_index: 1
+      series_index: 1,
     };
 
     // Internal path simulated: /Users/ospeto/Calibre Libraries/Agent Library/Robert C. Martin/Clean Architecture (42)/Clean Architecture - Robert C. Martin.epub
-    const simulatedInternalPath = "/Users/ospeto/Calibre Libraries/Agent Library/Robert C. Martin/Clean Architecture (42)/Clean Architecture - Robert C. Martin.epub";
+    const simulatedInternalPath =
+      "/Users/ospeto/Calibre Libraries/Agent Library/Robert C. Martin/Clean Architecture (42)/Clean Architecture - Robert C. Martin.epub";
 
     // User-facing download name
     const downloadName = getDownloadFilename(calibreBook, "epub");
@@ -597,6 +1008,8 @@ describe("Server Integration Endpoints & Hardened API Surface", () => {
     expect(downloadName).not.toContain(path.dirname(simulatedInternalPath));
     expect(downloadName).not.toContain("/Users/ospeto");
     expect(downloadName).not.toContain("Agent Library");
-    expect(downloadName).toBe("[Robert C. Martin Series 1] Clean Architecture A Craftsman's Guide - Robert C. Martin.epub");
+    expect(downloadName).toBe(
+      "[Robert C. Martin Series 1] Clean Architecture A Craftsman's Guide - Robert C. Martin.epub",
+    );
   });
 });
