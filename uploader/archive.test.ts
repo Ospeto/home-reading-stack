@@ -358,7 +358,9 @@ with zipfile.ZipFile("${largeNewlineZip}", "w") as z:
       // Path traversal
       expect(validateArchiveEntryName("../secret.txt").valid).toBe(false);
       expect(validateArchiveEntryName("foo/../../bar.epub").valid).toBe(false);
-      expect(validateArchiveEntryName("..\\windows\\system32").valid).toBe(false);
+      expect(validateArchiveEntryName("..\\windows\\system32").valid).toBe(
+        false,
+      );
       expect(validateArchiveEntryName("..").valid).toBe(false);
 
       // Absolute paths

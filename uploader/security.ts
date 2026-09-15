@@ -198,7 +198,8 @@ export function isPrivateOrInternalIp(rawIp: string): boolean {
     if ((first & 0xff00) === 0xff00) return true;
     // Documentation, benchmarking, and ORCHIDv2 reservations.
     if (first === 0x2001 && groups[1] === 0x0db8) return true;
-    if (first === 0x2001 && groups[1] === 0x0002 && groups[2] === 0) return true;
+    if (first === 0x2001 && groups[1] === 0x0002 && groups[2] === 0)
+      return true;
     if (first === 0x2001 && groups[1] === 0x0010) return true;
     if (first === 0x3fff && groups[1] === 0) return true;
 
@@ -365,7 +366,10 @@ export async function validateUrlForSSRF(
     try {
       const addresses = await resolveAll(host, options);
       if (addresses.length === 0) {
-        return { safe: false, error: `DNS resolution returned no addresses for ${host}` };
+        return {
+          safe: false,
+          error: `DNS resolution returned no addresses for ${host}`,
+        };
       }
       for (const addr of addresses) {
         if (isPrivateOrInternalIp(addr.address)) {
@@ -961,14 +965,10 @@ export function validateEpubContent(filePath: string): EpubValidationResult {
       };
     }
 
-    const mimeRes = spawnSync(
-      getBsdtarPath(),
-      ["-xOf", filePath, "mimetype"],
-      {
-        encoding: "utf8",
-        timeout: 10000,
-      },
-    );
+    const mimeRes = spawnSync(getBsdtarPath(), ["-xOf", filePath, "mimetype"], {
+      encoding: "utf8",
+      timeout: 10000,
+    });
     if (
       mimeRes.status !== 0 ||
       mimeRes.stdout.trim() !== "application/epub+zip"

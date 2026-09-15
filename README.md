@@ -129,13 +129,16 @@ The reading stack provides seamless global access to Reading HQ from outside the
 ```
 
 ### 1. Telegram Mini App (TMA) Integration
+
 - **Chat Menu Button:** On bot startup, the bot registers a native Web App menu button labeled **"📖 Reading HQ"** pointing to `https://reading.wavypremium.xyz` via `setChatMenuButton`.
 - **Commands `/app` and `/webapp`:** Respond with an inline keyboard button **[📖 Open Reading HQ]** that opens the mobile-responsive reading dashboard inside Telegram's embedded browser.
 - **Telegram WebApp SDK:** `uploader/index.html` loads the official `telegram-web-app.js` SDK and calls `Telegram.WebApp.ready()` and `Telegram.WebApp.expand()` for a full-height, native app experience.
 
 ### 2. Persistent VLESS Reverse Tunnel (LaunchAgent)
+
 - Managed by `com.ospeto.reading-vless-tunnel.plist` installed in `~/Library/LaunchAgents/` (tracked in `scripts/com.ospeto.reading-vless-tunnel.plist`).
 - Executes:
+
   ```bash
   ssh -N -R 0.0.0.0:8086:127.0.0.1:8086 \
     -o 'ProxyCommand=nc -X 5 -x 127.0.0.1:7890 %h %p' \
@@ -144,16 +147,20 @@ The reading stack provides seamless global access to Reading HQ from outside the
     -o ExitOnForwardFailure=yes \
     panel
   ```
+
 - Uses `nc` over local Sing-box SOCKS5 (`127.0.0.1:7890`) to maintain a persistent reverse tunnel through censorship firewalls to the VPS (`panel`).
 - Configured with `RunAtLoad: true` and `KeepAlive: true` for automatic re-connection after network drops or reboot.
 
 ### 3. VPS Edge Proxy (Caddy)
+
 - Caddy configuration on VPS (`/opt/remnawave/caddy/Caddyfile`):
+
   ```caddyfile
   https://reading.wavypremium.xyz {
       reverse_proxy * http://172.18.0.1:8086
   }
   ```
+
 - Automatically provisions and renews Let's Encrypt / ZeroSSL TLS certificates.
 
 ---

@@ -105,8 +105,7 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
     );
     expect(publicOnly.safe).toBe(true);
     expect(publicOnly.resolvedAddresses?.map((entry) => entry.family)).toEqual([
-      4,
-      6,
+      4, 6,
     ]);
   });
 
@@ -145,10 +144,9 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
     const disabled = await validateUrlForSSRF("http://127.0.0.1:8088/status");
     expect(disabled.safe).toBe(false);
 
-    const wrongPort = await validateUrlForSSRF(
-      "http://127.0.0.1:8089/status",
-      { allowInternalServices: true },
-    );
+    const wrongPort = await validateUrlForSSRF("http://127.0.0.1:8089/status", {
+      allowInternalServices: true,
+    });
     expect(wrongPort.safe).toBe(false);
   });
 
