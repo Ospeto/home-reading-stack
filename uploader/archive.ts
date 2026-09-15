@@ -407,17 +407,17 @@ export function unpackArchive(archivePath: string): UnpackResult {
       } else if (entry.isFile()) {
         if (isCanonicalEpub(entry.name)) {
           const contentCheck = validateEpubContent(fullPath);
-          if (!contentCheck.valid) {
+          if (contentCheck.valid) {
+            foundBooks.push({
+              tempPath: fullPath,
+              originalName: entry.name,
+            });
+          } else {
             quarantined.push({
               name: entry.name,
               originalName: entry.name,
               format: ".epub",
               reason: `Invalid or corrupted EPUB container: ${contentCheck.error || "validation failed"}`,
-            });
-          } else {
-            foundBooks.push({
-              tempPath: fullPath,
-              originalName: entry.name,
             });
           }
         } else if (isLegacyOrNonCanonicalFormat(entry.name)) {
