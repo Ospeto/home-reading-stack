@@ -282,11 +282,11 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
     // Structured regex for bsdtar -tvf entry metadata:
     // Captures: 1: mode, 2: links, 3: owner/group, 4: size, 5: date, 6: name/target
     const ENTRY_REGEX =
-      /^([-ldcbpsSwxrt]{10})\s+(\d+)\s+(.+?)\s+(\d+)\s+([A-Za-z]{3,}\s+\d+\s+(?:\d{1,2}:\d{2}(?::\d{2})?|\d{4}))\s+(.+)$/;
+      /^([-hldcbpsSwxrt]{10})\s+(\d+)\s+(.+?)\s+(\d+)\s+([A-Za-z]{3,}\s+\d+\s+(?:\d{1,2}:\d{2}(?::\d{2})?|\d{4}))\s+(.+)$/;
 
     for (const line of lines) {
       // Reject non-conforming continuation lines (e.g. from multiline / newline entry names)
-      if (!/^[-ldcbpsSwxrt]{10}\s/.test(line)) {
+      if (!/^[-hldcbpsSwxrt]{10}\s/.test(line)) {
         return {
           safe: false,
           error:
@@ -315,10 +315,24 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
         }
       }
 
+      const isHardlink = mode.startsWith("h") || rawName.includes(" link to ");
       const isSymlink = mode.startsWith("l") || rawName.includes(" -> ");
       const entryName = rawName.includes(" -> ")
         ? rawName.split(" -> ")[0]
-        : rawName;
+        : rawName.includes(" link to ")
+          ? rawName.split(" link to ")[0]
+          : rawName;
+
+      // Reject hard links before extraction; extraction can otherwise materialize
+      // an alias to another entry and bypass the post-extraction file walk.
+      if (isHardlink) {
+        return {
+          safe: false,
+          error: `Hard link detected in archive entry: "${entryName}"`,
+          entryCount: lines.length,
+          totalUncompressedBytes,
+        };
+      }
 
       // Reject symbolic links before extraction
       if (isSymlink) {

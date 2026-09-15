@@ -6,6 +6,7 @@ import process from "node:process";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import { Buffer } from "node:buffer";
+import { Agent, buildConnector } from "undici";
 
 // Default production WAN domain and ports
 export const DEFAULT_WAN_DOMAIN = "reading.wavypremium.xyz";
@@ -75,6 +76,42 @@ export function normalizeIpString(ip: string): string {
 /**
  * Checks if an IP string is a private, loopback, link-local, or cloud metadata address.
  */
+function expandIpv6(ip: string): number[] | null {
+  const lower = ip.toLowerCase();
+  const halves = lower.split("::");
+  if (halves.length > 2) return null;
+
+  const parseGroups = (part: string): number[] => {
+    if (!part) return [];
+    const groups = part.split(":");
+    const last = groups[groups.length - 1];
+    if (last?.includes(".")) {
+      if (!net.isIPv4(last)) return [];
+      const octets = last.split(".").map((octet) => parseInt(octet, 10));
+      groups.splice(
+        groups.length - 1,
+        1,
+        ((octets[0] << 8) | octets[1]).toString(16),
+        ((octets[2] << 8) | octets[3]).toString(16),
+      );
+    }
+    if (groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return [];
+    return groups.map((group) => parseInt(group, 16));
+  };
+
+  const left = parseGroups(halves[0]);
+  const right = halves.length === 2 ? parseGroups(halves[1]) : [];
+  if ((halves[0] && left.length === 0) || (halves[1] && right.length === 0)) {
+    return null;
+  }
+  if (halves.length === 1 && left.length !== 8) return null;
+  if (halves.length === 2 && left.length + right.length >= 8) return null;
+
+  return halves.length === 2
+    ? [...left, ...Array(8 - left.length - right.length).fill(0), ...right]
+    : left;
+}
+
 export function isPrivateOrInternalIp(rawIp: string): boolean {
   if (!rawIp) return true;
   const ip = normalizeIpString(rawIp);
@@ -130,46 +167,40 @@ export function isPrivateOrInternalIp(rawIp: string): boolean {
     return false;
   }
 
-  // Check IPv6
+  // Check IPv6. Expand the address so range checks are based on bits rather
+  // than textual prefixes (which are unsafe across equivalent compressed forms).
   if (net.isIPv6(ip)) {
-    const lower = ip.toLowerCase();
+    const groups = expandIpv6(ip);
+    if (!groups) return true;
 
-    // ::1 (Loopback)
-    if (lower === "::1" || lower === "0:0:0:0:0:0:0:1") return true;
-
-    // :: (Unspecified)
-    if (lower === "::" || lower === "0:0:0:0:0:0:0:0") return true;
-
-    // Link-local: fe80::/10
-    if (
-      lower.startsWith("fe8") ||
-      lower.startsWith("fe9") ||
-      lower.startsWith("fea") ||
-      lower.startsWith("feb")
-    ) {
-      return true;
-    }
-
-    // Unique local (ULA): fc00::/7 (fc00:: and fd00::)
-    if (lower.startsWith("fc") || lower.startsWith("fd")) {
-      return true;
-    }
-
-    // IPv4-mapped IPv6: ::ffff:a.b.c.d or hex forms e.g. ::ffff:7f00:1 or 0:0:0:0:0:ffff:...
-    const normalizedV6 = lower.replace(/^(?:0+:){1,5}ffff:/, "::ffff:");
-    const v4MappedDotted = normalizedV6.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (v4MappedDotted) {
-      return isPrivateOrInternalIp(v4MappedDotted[1]);
-    }
-    const v4MappedHex = normalizedV6.match(
-      /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/,
-    );
-    if (v4MappedHex) {
-      const high = parseInt(v4MappedHex[1], 16);
-      const low = parseInt(v4MappedHex[2], 16);
+    const first = groups[0];
+    const isIpv4Mapped =
+      groups[0] === 0 &&
+      groups[1] === 0 &&
+      groups[2] === 0 &&
+      groups[3] === 0 &&
+      groups[4] === 0 &&
+      groups[5] === 0xffff;
+    if (isIpv4Mapped) {
+      const high = groups[6];
+      const low = groups[7];
       const dotted = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
       return isPrivateOrInternalIp(dotted);
     }
+
+    // Unspecified, loopback, IPv4-compatible, and other ::/8 special-use space.
+    if (first === 0) return true;
+    // Unique local: fc00::/7.
+    if ((first & 0xfe00) === 0xfc00) return true;
+    // Link-local: fe80::/10.
+    if ((first & 0xffc0) === 0xfe80) return true;
+    // Multicast: ff00::/8.
+    if ((first & 0xff00) === 0xff00) return true;
+    // Documentation, benchmarking, and ORCHIDv2 reservations.
+    if (first === 0x2001 && groups[1] === 0x0db8) return true;
+    if (first === 0x2001 && groups[1] === 0x0002 && groups[2] === 0) return true;
+    if (first === 0x2001 && groups[1] === 0x0010) return true;
+    if (first === 0x3fff && groups[1] === 0) return true;
 
     return false;
   }
@@ -192,61 +223,116 @@ export function getBsdtarPath(): string {
   return "bsdtar";
 }
 
+export interface ResolvedAddress {
+  address: string;
+  family: number;
+}
+
+export type DnsLookup = (hostname: string) => Promise<ResolvedAddress[]>;
+
 export interface ValidateUrlOptions {
   allowProxyBypass?: boolean;
   allowCalibreServer?: boolean;
   allowInternalServices?: boolean;
   bindIp?: boolean;
   allowedProxyUrls?: string[];
+  /** Test-only resolver seam; every returned address is still validated. */
+  dnsLookup?: DnsLookup;
+}
+
+function isLoopbackIp(rawIp: string): boolean {
+  const ip = normalizeIpString(rawIp);
+  if (net.isIPv4(ip)) return ip.split(".")[0] === "127";
+  if (!net.isIPv6(ip)) return false;
+  const groups = expandIpv6(ip);
+  return Boolean(
+    groups &&
+      groups.slice(0, 7).every((group) => group === 0) &&
+      groups[7] === 1,
+  );
+}
+
+async function resolveAll(
+  hostname: string,
+  options: ValidateUrlOptions,
+): Promise<ResolvedAddress[]> {
+  if (options.dnsLookup) return options.dnsLookup(hostname);
+  return dns.lookup(hostname, { all: true });
 }
 
 /**
  * Validates a target URL against SSRF threats.
  * Blocks private IP ranges, link-local, cloud metadata endpoints (169.254.169.254),
- * and local hostnames.
+ * and local hostnames. For allowed hosts, the complete validated DNS snapshot is
+ * returned so the caller can connect without performing an unconstrained lookup.
  */
 export async function validateUrlForSSRF(
   rawUrl: string,
   options: ValidateUrlOptions = {},
-): Promise<{ safe: boolean; error?: string; resolvedIp?: string }> {
+): Promise<{
+  safe: boolean;
+  error?: string;
+  resolvedIp?: string;
+  resolvedAddresses?: ResolvedAddress[];
+}> {
   try {
     const u = new URL(rawUrl);
 
-    // Only HTTP and HTTPS are permitted
     if (u.protocol !== "http:" && u.protocol !== "https:") {
       return { safe: false, error: `Disallowed protocol: ${u.protocol}` };
     }
-
-    // Reject userinfo (@ credentials in URL)
     if (u.username || u.password) {
       return { safe: false, error: "Embedded URL credentials not allowed" };
     }
 
-    // If explicit Calibre server access is permitted, verify origin matches local Calibre server
-    if (options.allowCalibreServer) {
-      const serverOrigin = (process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088").toLowerCase();
-      const targetOrigin = `${u.protocol}//${u.host}`.toLowerCase();
-      if (targetOrigin === serverOrigin.replace(/\/$/, "") && u.pathname.startsWith("/get/")) {
-        return { safe: true, resolvedIp: "127.0.0.1" };
-      }
-    }
-
-    // If explicit internal services probe is permitted, verify host is loopback and port is permitted
-    if (options.allowInternalServices) {
-      const isLoopback =
-        host === "127.0.0.1" || host === "localhost" || host === "::1";
-      const port = u.port || (u.protocol === "https:" ? "443" : "80");
-      if (
-        isLoopback &&
-        (port === "8086" || port === "8088" || port === "7200")
-      ) {
-        return { safe: true, resolvedIp: "127.0.0.1" };
-      }
-    }
-
     const host = u.hostname.toLowerCase();
+    const normalizedHost = normalizeIpString(host);
+    const isIpLiteral = net.isIP(normalizedHost) !== 0;
+    const port = u.port || (u.protocol === "https:" ? "443" : "80");
 
-    // Block common internal/local hostname patterns
+    // Explicit internal-service access is a narrow, opt-in allowlist. It is
+    // intentionally checked only after deriving host and only for loopback hosts.
+    if (
+      options.allowInternalServices &&
+      (host === "localhost" || isLoopbackIp(normalizedHost)) &&
+      ["8086", "8088", "7200"].includes(port)
+    ) {
+      const addresses = isIpLiteral
+        ? [{ address: normalizedHost, family: net.isIP(normalizedHost) }]
+        : await resolveAll(host, options);
+      if (
+        addresses.length > 0 &&
+        addresses.every((addr) => isLoopbackIp(addr.address))
+      ) {
+        return {
+          safe: true,
+          resolvedIp: addresses[0].address,
+          resolvedAddresses: addresses,
+        };
+      }
+      return {
+        safe: false,
+        error: `Internal service ${host}:${port} did not resolve exclusively to loopback addresses`,
+      };
+    }
+
+    if (options.allowCalibreServer) {
+      const serverOrigin = (
+        process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088"
+      ).toLowerCase();
+      const targetOrigin = `${u.protocol}//${u.host}`.toLowerCase();
+      if (
+        targetOrigin === serverOrigin.replace(/\/$/, "") &&
+        u.pathname.startsWith("/get/")
+      ) {
+        return {
+          safe: true,
+          resolvedIp: "127.0.0.1",
+          resolvedAddresses: [{ address: "127.0.0.1", family: 4 }],
+        };
+      }
+    }
+
     if (
       host === "localhost" ||
       host.endsWith(".localhost") ||
@@ -258,23 +344,29 @@ export async function validateUrlForSSRF(
       return { safe: false, error: `Restricted internal hostname: ${host}` };
     }
 
-    // Check if host is direct IP literal (or numeric/hex representation)
-    const normalizedHost = normalizeIpString(host);
-    if (net.isIP(normalizedHost)) {
+    if (isIpLiteral) {
       if (isPrivateOrInternalIp(normalizedHost)) {
         return {
           safe: false,
           error: `Restricted private or loopback IP: ${normalizedHost}`,
         };
       }
-      return { safe: true, resolvedIp: normalizedHost };
+      const address = {
+        address: normalizedHost,
+        family: net.isIP(normalizedHost),
+      };
+      return {
+        safe: true,
+        resolvedIp: normalizedHost,
+        resolvedAddresses: [address],
+      };
     }
 
-    // If configured to allow designated proxy routing, outbound requests to public
-    // domains through the proxy are accepted. But we still perform DNS validation
-    // to block resolution to local/internal IP addresses.
     try {
-      const addresses = await dns.lookup(host, { all: true });
+      const addresses = await resolveAll(host, options);
+      if (addresses.length === 0) {
+        return { safe: false, error: `DNS resolution returned no addresses for ${host}` };
+      }
       for (const addr of addresses) {
         if (isPrivateOrInternalIp(addr.address)) {
           return {
@@ -284,7 +376,11 @@ export async function validateUrlForSSRF(
           };
         }
       }
-      return { safe: true, resolvedIp: addresses[0]?.address };
+      return {
+        safe: true,
+        resolvedIp: addresses[0].address,
+        resolvedAddresses: addresses,
+      };
     } catch (dnsErr: any) {
       return {
         safe: false,
@@ -576,18 +672,9 @@ export function authenticateRequest(
     }
   }
 
-  // 5. Check URL query param ?token= or ?auth= (for downloads or webview handoffs)
-  try {
-    const url = new URL(req.url);
-    const queryToken =
-      url.searchParams.get("token") || url.searchParams.get("auth") || "";
-    if (apiKey && queryToken === apiKey) {
-      return { authenticated: true, method: "bearer" };
-    }
-  } catch (_urlErr) {
-    void _urlErr;
-  }
-
+  // Credentials in query strings are intentionally not accepted. URLs leak via
+  // browser history, proxy logs, Referer headers, and analytics; use a header or
+  // the intended secure cookie channel instead.
   return {
     authenticated: false,
     error: "Authentication required for public WAN access",
@@ -1012,6 +1099,55 @@ export function cleanString(str: string): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * Creates an Undici dispatcher whose connector never performs DNS. The original
+ * hostname remains in the URL, so HTTP Host and TLS SNI/certificate semantics
+ * are preserved, while socket lookup is limited to the already validated DNS
+ * snapshot for this redirect hop.
+ */
+function createBoundDispatcher(
+  parsed: URL,
+  addresses: ResolvedAddress[],
+): Agent {
+  let nextAddress = 0;
+  const lookup = (
+    _hostname: string,
+    lookupOptions: { all?: boolean; family?: number },
+    callback: (error: Error | null, address?: any, family?: number) => void,
+  ) => {
+    const candidates = lookupOptions?.family
+      ? addresses.filter((address) => address.family === lookupOptions.family)
+      : addresses;
+    if (candidates.length === 0) {
+      callback(new Error(`No validated address for requested address family`));
+      return;
+    }
+    if (lookupOptions?.all) {
+      callback(null, candidates);
+      return;
+    }
+    const selected = candidates[nextAddress++ % candidates.length];
+    callback(null, selected.address, selected.family);
+  };
+
+  const connector = buildConnector({ lookup } as any);
+  return new Agent({
+    connect(connectOptions: any, callback: any) {
+      connector(
+        {
+          ...connectOptions,
+          // Undici uses servername for TLS verification/SNI. The URL hostname
+          // is deliberately retained; only the connector's lookup is pinned.
+          servername: parsed.hostname,
+        },
+        callback,
+      );
+    },
+    connections: Math.max(1, addresses.length),
+    pipelining: 0,
+  } as any);
+}
+
+/**
  * Performs a network fetch with strict SSRF validation on the initial URL AND all redirect hops.
  * Uses manual redirect handling (redirect: 'manual') to intercept and validate every Location header.
  */
@@ -1066,39 +1202,25 @@ export async function safeFetchWithSsrf(
       throw new Error(`Invalid URL target: ${urlErr?.message || urlErr}`);
     }
     const hostIsIp = net.isIP(normalizeIpString(parsed.hostname));
-
-    let fetchUrl = currentUrl;
     const fetchOpts: any = {
       ...init,
       redirect: "manual",
     };
 
-    // IP Binding: bind outbound request to the resolved IP to prevent DNS rebinding attacks (TOCTOU)
-    // Preserves Host header and TLS SNI serverName
+    // IP binding uses a supported dispatcher/connector rather than replacing
+    // the URL hostname with an IP literal. This keeps Host and TLS SNI intact.
     if (
       options.bindIp !== false &&
-      ssrfCheck.resolvedIp &&
       !hostIsIp &&
-      !options.allowInternalServices
+      ssrfCheck.resolvedAddresses?.length
     ) {
-      const ipHost = ssrfCheck.resolvedIp.includes(":")
-        ? `[${ssrfCheck.resolvedIp}]`
-        : ssrfCheck.resolvedIp;
-      try {
-        const bound = new URL(currentUrl);
-        bound.hostname = ipHost;
-        fetchUrl = bound.href;
-      } catch {
-        // Fallback to original URL if binding fails
-        fetchUrl = currentUrl;
-      }
-
       const headers = new Headers(init.headers || {});
-      if (!headers.has("host")) {
-        headers.set("host", parsed.host);
-      }
+      if (!headers.has("host")) headers.set("host", parsed.host);
       fetchOpts.headers = headers;
-
+      fetchOpts.dispatcher = createBoundDispatcher(
+        parsed,
+        ssrfCheck.resolvedAddresses,
+      );
       if (parsed.protocol === "https:") {
         fetchOpts.tls = {
           ...(fetchOpts.tls || {}),
@@ -1107,7 +1229,7 @@ export async function safeFetchWithSsrf(
       }
     }
 
-    const res = await fetch(fetchUrl, fetchOpts);
+    const res = await fetch(currentUrl, fetchOpts);
     try {
       Object.defineProperty(res, "url", {
         value: currentUrl,

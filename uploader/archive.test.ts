@@ -265,6 +265,36 @@ with zipfile.ZipFile("${bombZip}", "w", compression=zipfile.ZIP_DEFLATED) as zf:
       }
     });
 
+    it("rejects hardlink entries before extraction", () => {
+      const hardlinkTar = path.join("/tmp", `test_hardlink_${Date.now()}.tar`);
+      const pythonScript = `
+import tarfile
+with tarfile.open("${hardlinkTar}", "w") as tf:
+    data = tarfile.TarInfo("book.epub")
+    payload = b"not a real epub"
+    data.size = len(payload)
+    tf.addfile(data, __import__("io").BytesIO(payload))
+    link = tarfile.TarInfo("alias.epub")
+    link.type = tarfile.LNKTYPE
+    link.linkname = "book.epub"
+    tf.addfile(link)
+`;
+      spawnSync("python3", ["-c", pythonScript]);
+
+      try {
+        const inspection = inspectArchiveSafety(hardlinkTar);
+        expect(inspection.safe).toBe(false);
+        expect(inspection.error).toContain("Hard link detected");
+
+        const unpacked = unpackArchive(hardlinkTar);
+        expect(unpacked.success).toBe(false);
+        expect(unpacked.error).toContain("Hard link detected");
+        unpacked.cleanup();
+      } finally {
+        if (fs.existsSync(hardlinkTar)) fs.unlinkSync(hardlinkTar);
+      }
+    });
+
     it("rejects archives containing newline-bearing entry names upfront", () => {
       const newlineZip = path.join("/tmp", `test_newline_${Date.now()}.zip`);
       const pythonScript = `

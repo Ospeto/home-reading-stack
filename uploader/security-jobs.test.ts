@@ -60,6 +60,7 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
     expect(isPrivateOrInternalIp("fd00::1234")).toBe(true);
     expect(isPrivateOrInternalIp("::ffff:127.0.0.1")).toBe(true);
     expect(isPrivateOrInternalIp("::ffff:192.168.1.1")).toBe(true);
+    expect(isPrivateOrInternalIp("::ffff:8.8.8.8")).toBe(false);
     expect(isPrivateOrInternalIp("::ffff:7f00:1")).toBe(true);
     expect(isPrivateOrInternalIp("::ffff:c0a8:101")).toBe(true);
     expect(isPrivateOrInternalIp("0:0:0:0:0:ffff:7f00:1")).toBe(true);
@@ -74,10 +75,39 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
     expect(isPrivateOrInternalIp("0177.0.0.1")).toBe(true);
   });
 
-  it("allows standard public internet IPv4 addresses", () => {
+  it("allows standard public internet IPv4 and IPv6 addresses", () => {
     expect(isPrivateOrInternalIp("8.8.8.8")).toBe(false);
     expect(isPrivateOrInternalIp("1.1.1.1")).toBe(false);
     expect(isPrivateOrInternalIp("104.21.5.19")).toBe(false);
+    expect(isPrivateOrInternalIp("2001:4860:4860::8888")).toBe(false);
+    expect(isPrivateOrInternalIp("2606:4700:4700::1111")).toBe(false);
+    expect(isPrivateOrInternalIp("ff02::1")).toBe(true);
+    expect(isPrivateOrInternalIp("2001:db8::1")).toBe(true);
+  });
+
+  it("validates every A and AAAA result and preserves an allowed IPv6 snapshot", async () => {
+    const safe = await validateUrlForSSRF("http://dualstack.example.test/", {
+      dnsLookup: async () => [
+        { address: "198.51.100.20", family: 4 },
+        { address: "2001:4860:4860::8888", family: 6 },
+      ],
+    });
+    expect(safe.safe).toBe(false);
+
+    const publicOnly = await validateUrlForSSRF(
+      "http://dualstack.example.test/",
+      {
+        dnsLookup: async () => [
+          { address: "93.184.216.34", family: 4 },
+          { address: "2001:4860:4860::8888", family: 6 },
+        ],
+      },
+    );
+    expect(publicOnly.safe).toBe(true);
+    expect(publicOnly.resolvedAddresses?.map((entry) => entry.family)).toEqual([
+      4,
+      6,
+    ]);
   });
 
   it("validateUrlForSSRF rejects non-http protocols and embedded credentials", async () => {
@@ -103,6 +133,23 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
 
     const homeArpa = await validateUrlForSSRF("http://server.home.arpa/");
     expect(homeArpa.safe).toBe(false);
+  });
+
+  it("allowInternalServices enables only the explicit loopback service allowlist", async () => {
+    const enabled = await validateUrlForSSRF("http://127.0.0.1:8088/status", {
+      allowInternalServices: true,
+    });
+    expect(enabled.safe).toBe(true);
+    expect(enabled.resolvedIp).toBe("127.0.0.1");
+
+    const disabled = await validateUrlForSSRF("http://127.0.0.1:8088/status");
+    expect(disabled.safe).toBe(false);
+
+    const wrongPort = await validateUrlForSSRF(
+      "http://127.0.0.1:8089/status",
+      { allowInternalServices: true },
+    );
+    expect(wrongPort.safe).toBe(false);
   });
 
   it("validateUrlForSSRF blocks direct private IP literals and metadata endpoints", async () => {
@@ -183,6 +230,32 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
     expect(res.status).toBe(200);
   });
 
+  it("safeFetchWithSsrf preserves the original hostname while binding a validated address", async () => {
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 8088,
+      fetch(req: Request) {
+        return new Response(new URL(req.url).host);
+      },
+    });
+
+    try {
+      const res = await safeFetchWithSsrf(
+        "http://localhost:8088/bound",
+        { signal: AbortSignal.timeout(3000) },
+        5,
+        {
+          allowInternalServices: true,
+          dnsLookup: async () => [{ address: "127.0.0.1", family: 4 }],
+        },
+      );
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe("localhost:8088");
+    } finally {
+      server.stop(true);
+    }
+  });
+
   it("safeFetchWithSsrf rejects redirects to localhost or private IPs", async () => {
     const redirectServer = Bun.serve({
       port: 0,
@@ -191,7 +264,7 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
         if (u.pathname === "/init") {
           return new Response(null, {
             status: 302,
-            headers: { Location: "http://127.0.0.1:8088/admin-secret" },
+            headers: { Location: "http://127.0.0.1:8089/admin-secret" },
           });
         }
         return new Response("OK");
@@ -225,7 +298,7 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
         if (u.pathname === "/rebind") {
           return new Response(null, {
             status: 302,
-            headers: { Location: "http://localhost:8088/secret" },
+            headers: { Location: "http://localhost:8089/secret" },
           });
         }
         return new Response("OK");
@@ -362,6 +435,20 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
     expect(result.error).toContain(
       "Authentication required for public WAN access",
     );
+  });
+
+  it("authenticateRequest never accepts query-string credentials", () => {
+    const queryReq = new Request(
+      "http://127.0.0.1:8086/api/upload?token=my-secret-key-123",
+      {
+        method: "POST",
+        headers: { host: "reading.wavypremium.xyz" },
+      },
+    );
+    const result = authenticateRequest(queryReq, {
+      apiKey: "my-secret-key-123",
+    });
+    expect(result.authenticated).toBe(false);
   });
 
   it("authenticateRequest accepts Bearer token or X-API-Key matching apiKey", () => {
@@ -861,7 +948,7 @@ describe("Server Integration Endpoints & Hardened API Surface", () => {
     expect(data.error).toContain("SSRF");
   });
 
-  it("exposes job inspection endpoint GET /api/jobs/recent on LAN and blocks on WAN without auth", async () => {
+  it("keeps read-only job inspection public on LAN and WAN", async () => {
     const lanReq = new Request("http://127.0.0.1:8086/api/jobs/recent", {
       method: "GET",
       headers: {
@@ -875,7 +962,7 @@ describe("Server Integration Endpoints & Hardened API Surface", () => {
     expect(data.success).toBe(true);
     expect(Array.isArray(data.jobs)).toBe(true);
 
-    // WAN unauthenticated request blocks with 401
+    // Captain-approved read-only reading-data boundary remains public on WAN.
     const wanReq = new Request("http://127.0.0.1:8086/api/jobs/recent", {
       method: "GET",
       headers: {
@@ -883,7 +970,7 @@ describe("Server Integration Endpoints & Hardened API Surface", () => {
       },
     });
     const wanRes = await handleRequest(wanReq, localServer);
-    expect(wanRes.status).toBe(401);
+    expect(wanRes.status).toBe(200);
   });
 
   it("blocks unauthenticated WAN mutating requests with 401", async () => {

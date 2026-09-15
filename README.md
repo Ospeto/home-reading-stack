@@ -232,6 +232,8 @@ The public WAN edge (`https://reading.wavypremium.xyz`) is hardened against unau
      - Bearer token or `X-API-Key` matching `READING_API_KEY` in `.env`.
      - Valid Telegram WebApp `initData` cryptographically verified with `TELEGRAM_BOT_TOKEN` via HMAC-SHA256.
      - Authenticated session cookie (`reading_token`).
+   - **Captain-approved public reads:** Read-only library, covers/downloads, telemetry, export, and reading-data endpoints remain public on WAN. Authentication is not added to `GET /api/books`, library facets, read-only job inspection, or equivalent read routes; only state-changing routes are protected.
+   - **Credential transport:** API keys and TMA/session credentials are accepted only in their header or cookie channels. Query-string `token`/`auth` values are rejected because URLs leak through history, logs, Referer headers, and analytics.
 
 2. **CORS & CSRF Origin Protection:**
    - CORS is locked down from wildcard `*` to permitted origins: `https://reading.wavypremium.xyz`, `https://kosync.wavypremium.xyz`, local LAN origins, and custom entries in `ALLOWED_ORIGINS`.
@@ -242,7 +244,8 @@ The public WAN edge (`https://reading.wavypremium.xyz`) is hardened against unau
      - Loopback (`127.0.0.0/8`, `::1`)
      - RFC 1918 private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
      - Cloud metadata & link-local (`169.254.0.0/16`, `169.254.169.254`)
-     - Decimal/hex/octal IP representations and local hostnames (`localhost`, `*.internal`, `*.lan`)
+     - Decimal/hex/octal IP representations, IPv6 multicast/reserved ranges, and local hostnames (`localhost`, `*.internal`, `*.lan`)
+   - Every A and AAAA result is validated, then each redirect hop reconnects through a pinned connector using the original hostname for Host/TLS SNI semantics; DNS is never re-resolved by the connector.
 
 4. **Decompression & Resource Limits:**
    - Maximum upload payload: 100 MB.

@@ -1353,24 +1353,9 @@ export async function handleRequest(
     );
   }
 
-  // API: Durable Job Queue Inspection (Protected on public WAN)
+  // API: Durable Job Queue Inspection. Read-only library and reading-data
+  // endpoints remain public on WAN; only mutation routes use the auth gate above.
   if (url.pathname === "/api/jobs/recent" && req.method === "GET") {
-    if (isWan) {
-      const auth = authenticateRequest(req, authOpts);
-      if (!auth.authenticated) {
-        return jsonResponse(
-          {
-            success: false,
-            error:
-              auth.error ||
-              "Authentication required for public WAN job inspection",
-          },
-          401,
-          corsOrigin,
-        );
-      }
-    }
-
     const limitParam = parseInt(url.searchParams.get("limit") || "50", 10);
     const statusParam = url.searchParams.get("status") as any;
     const typeParam = url.searchParams.get("type") as any;
@@ -1389,22 +1374,6 @@ export async function handleRequest(
   }
 
   if (url.pathname.startsWith("/api/jobs/") && req.method === "GET") {
-    if (isWan) {
-      const auth = authenticateRequest(req, authOpts);
-      if (!auth.authenticated) {
-        return jsonResponse(
-          {
-            success: false,
-            error:
-              auth.error ||
-              "Authentication required for public WAN job inspection",
-          },
-          401,
-          corsOrigin,
-        );
-      }
-    }
-
     const jobId = url.pathname.split("/")[3];
     if (!jobId)
       return jsonResponse(
