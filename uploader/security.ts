@@ -1045,8 +1045,8 @@ export function redactJobRecord(job: any): any {
       s = s.replace(/[a-zA-Z]:\\[a-zA-Z0-9._\-\\]+/g, "[path]");
       // Redact tokens/secrets
       s = s.replace(
-        /(?:token|key|secret|password|auth|apiKey)=[a-zA-Z0-9_.-]+/gi,
-        "$1=[REDACTED]",
+        /((?:token|key|secret|password|auth|apiKey))=[a-zA-Z0-9_.-]+/gi,
+        (_match, key: string) => `${key}=[REDACTED]`,
       );
       s = s.replace(/Bearer\s+[a-zA-Z0-9_.-]+/gi, "Bearer [REDACTED]");
       return s;

@@ -36,7 +36,11 @@ import { DurableJobQueue, withCalibreLock, withCalibreLockSync } from "./jobs";
 import { handleRequest, matchKosyncBookByTitleAuthor } from "./server";
 import { isAllowedCoverUrl, isSameBook } from "./scraper";
 import { generateTypographicCover, getDropDir } from "./article";
-import { getExternalVolumeStatusPath } from "./bot";
+import {
+  getExternalVolumeStatusPath,
+  getCurrentlyReadingShelf,
+  getKosyncDbPath,
+} from "./bot";
 
 describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
   it("blocks IPv4 loopback and local addresses", () => {
@@ -920,6 +924,30 @@ with zipfile.ZipFile("${tempEpub}", "w") as z:
     expect(redacted.error).toContain("[REDACTED]");
   });
 
+  it("redacts URL query secrets without interpreting literal replacement tokens", () => {
+    const rawJob = {
+      id: "job_url",
+      type: "url_ingest",
+      payload: {
+        sourceUrl: "https://example.test/article?token=secret&next=$1&payload=$1-value",
+      },
+      status: "failed",
+      retries: 1,
+      max_retries: 3,
+      created_at: 1000,
+      updated_at: 2000,
+      next_run_at: 1000,
+      result: null,
+      error: null,
+    };
+
+    const redacted = redactJobRecord(rawJob);
+    expect(redacted.payload.sourceUrl).toContain("token=[REDACTED]");
+    expect(redacted.payload.sourceUrl).toContain("next=$1");
+    expect(redacted.payload.sourceUrl).toContain("payload=$1-value");
+    expect(redacted.payload.sourceUrl).not.toContain("$1=[REDACTED]");
+  });
+
   it("resets retry counter to 0 on manual retry", () => {
     const testDb = new Database(":memory:");
     const queue = new DurableJobQueue(testDb);
@@ -1101,6 +1129,53 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
         books,
       ),
     ).toBeNull();
+  });
+
+  it("closes the KOSync SQLite handle after successful and failed reads", () => {
+    const previousPath = process.env.KOSYNC_DB_PATH;
+    const successPath = `/tmp/kosync_lifecycle_success_${Date.now()}.db`;
+    const errorPath = `/tmp/kosync_lifecycle_error_${Date.now()}.db`;
+    const closeCalls: string[] = [];
+    const databasePrototype = Database.prototype as any;
+    const originalClose = databasePrototype.close;
+    databasePrototype.close = function (this: any) {
+      closeCalls.push(this.filename || "sqlite");
+      return originalClose.call(this);
+    };
+
+    try {
+      process.env.KOSYNC_DB_PATH = successPath;
+      const successDb = new Database(successPath);
+      successDb.run(
+        `CREATE TABLE progress (
+          document TEXT, percentage REAL, device TEXT, filename TEXT,
+          title TEXT, authors TEXT, timestamp INTEGER
+        )`,
+      );
+      successDb.close();
+      closeCalls.length = 0;
+      expect(getKosyncDbPath()).toBe(successPath);
+      expect(getCurrentlyReadingShelf(5).items).toEqual([]);
+      expect(closeCalls).toHaveLength(1);
+
+      process.env.KOSYNC_DB_PATH = errorPath;
+      const errorDb = new Database(errorPath);
+      errorDb.close();
+      closeCalls.length = 0;
+      expect(getCurrentlyReadingShelf(5).items).toEqual([]);
+      expect(closeCalls).toHaveLength(1);
+    } finally {
+      databasePrototype.close = originalClose;
+      if (previousPath === undefined) delete process.env.KOSYNC_DB_PATH;
+      else process.env.KOSYNC_DB_PATH = previousPath;
+      for (const dbPath of [successPath, errorPath]) {
+        if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+        for (const suffix of ["-wal", "-shm"]) {
+          const sidecar = `${dbPath}${suffix}`;
+          if (fs.existsSync(sidecar)) fs.unlinkSync(sidecar);
+        }
+      }
+    }
   });
 
   it("external volume status path is optional and configurable", () => {

@@ -1698,6 +1698,7 @@ export async function handleRequest(
 
   // API: Link Unmapped KOSync Document to Calibre Book
   if (url.pathname === "/api/kosync/link-document" && req.method === "POST") {
+    let db: Database | null = null;
     try {
       const body = (await req.json()) as { document: string; bookId: number };
       const bookId = validateIntegerId(body.bookId);
@@ -1726,7 +1727,7 @@ export async function handleRequest(
       const now = Math.floor(Date.now() / 1000);
 
       if (fs.existsSync(KOSYNC_DB_PATH)) {
-        const db = new Database(KOSYNC_DB_PATH);
+        db = new Database(KOSYNC_DB_PATH);
         db.prepare(
           `INSERT INTO document_aliases (document_hash, canonical_id, normalized_title, normalized_authors, created_at)
            VALUES (?, ?, ?, ?, ?)
@@ -1769,6 +1770,12 @@ export async function handleRequest(
         500,
         corsOrigin,
       );
+    } finally {
+      try {
+        db?.close();
+      } catch (_closeErr) {
+        void _closeErr;
+      }
     }
   }
 
@@ -1777,6 +1784,7 @@ export async function handleRequest(
     url.pathname.startsWith("/api/kosync/progress/") &&
     req.method === "DELETE"
   ) {
+    let db: Database | null = null;
     try {
       const parts = url.pathname.split("/");
       const progressId = validateIntegerId(parts[4]);
@@ -1789,7 +1797,7 @@ export async function handleRequest(
       }
 
       if (fs.existsSync(KOSYNC_DB_PATH)) {
-        const db = new Database(KOSYNC_DB_PATH);
+        db = new Database(KOSYNC_DB_PATH);
         db.run("DELETE FROM progress WHERE id = ?;", [progressId]);
         return jsonResponse(
           { success: true, message: `Removed progress entry ${progressId}` },
@@ -1808,14 +1816,21 @@ export async function handleRequest(
         500,
         corsOrigin,
       );
+    } finally {
+      try {
+        db?.close();
+      } catch (_closeErr) {
+        void _closeErr;
+      }
     }
   }
 
   // API: Clear All KOSync Progress Entries
   if (url.pathname === "/api/kosync/progress/clear" && req.method === "POST") {
+    let db: Database | null = null;
     try {
       if (fs.existsSync(KOSYNC_DB_PATH)) {
-        const db = new Database(KOSYNC_DB_PATH);
+        db = new Database(KOSYNC_DB_PATH);
         db.run("DELETE FROM progress;");
         return jsonResponse(
           { success: true, message: "Cleared all sync sessions" },
@@ -1834,6 +1849,12 @@ export async function handleRequest(
         500,
         corsOrigin,
       );
+    } finally {
+      try {
+        db?.close();
+      } catch (_closeErr) {
+        void _closeErr;
+      }
     }
   }
 

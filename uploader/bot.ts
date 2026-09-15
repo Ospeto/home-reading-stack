@@ -38,9 +38,14 @@ const HOME_DIR = process.env.HOME || os.homedir();
 const ENV_PATH = process.env.ENV_PATH || path.join(RUNTIME_DIR, ".env");
 const CACHE_DB_PATH =
   process.env.CACHE_DB_PATH || path.join(RUNTIME_DIR, "cache.db");
-const KOSYNC_DB_PATH =
-  process.env.KOSYNC_DB_PATH ||
-  path.join(HOME_DIR, "kosync-server", "data", "koreader-sync.db");
+export function getKosyncDbPath(): string {
+  return (
+    process.env.KOSYNC_DB_PATH ||
+    path.join(HOME_DIR, "kosync-server", "data", "koreader-sync.db")
+  );
+}
+
+const KOSYNC_DB_PATH = getKosyncDbPath();
 const CALIBRE_DB_PATH =
   process.env.CALIBRE_DB_PATH ||
   path.join(HOME_DIR, "Calibre Library", "metadata.db");
@@ -608,8 +613,9 @@ export function searchCalibreLibrary(
 
   // 1. Try querying Calibre SQLite database first for instant sub-millisecond response
   if (fs.existsSync(CALIBRE_DB_PATH)) {
+    let db: Database | null = null;
     try {
-      const db = new Database(CALIBRE_DB_PATH, { readonly: true });
+      db = new Database(CALIBRE_DB_PATH, { readonly: true });
       db.run("PRAGMA busy_timeout = 3000;");
 
       const words = trimmed.split(/\s+/).filter(Boolean);
@@ -694,7 +700,6 @@ export function searchCalibreLibrary(
         }
       }
 
-      db.close();
       if (matchedBooks.length > 0) {
         return matchedBooks.slice(0, limit);
       }
@@ -702,6 +707,12 @@ export function searchCalibreLibrary(
       logError(
         `SQLite search failed, falling back to calibredb: ${err?.message || err}`,
       );
+    } finally {
+      try {
+        db?.close();
+      } catch (_closeErr) {
+        void _closeErr;
+      }
     }
   }
 
@@ -775,8 +786,9 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
   const calibreLibraryDir = getCalibreLibraryDir();
 
   if (fs.existsSync(calibreDbPath)) {
+    let db: Database | null = null;
     try {
-      const db = new Database(calibreDbPath, { readonly: true });
+      db = new Database(calibreDbPath, { readonly: true });
       db.run("PRAGMA busy_timeout = 3000;");
 
       const rows = db
@@ -795,8 +807,6 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
         GROUP BY d.id
       `)
         .all(bookId) as any[];
-
-      db.close();
 
       if (rows && rows.length > 0) {
         const title = rows[0].title || "Book";
@@ -887,6 +897,12 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
       logError(
         `Error locating book file via SQLite for #${bookId}: ${err?.message || err}`,
       );
+    } finally {
+      try {
+        db?.close();
+      } catch (_closeErr) {
+        void _closeErr;
+      }
     }
   }
 
@@ -1117,8 +1133,9 @@ export async function getStatusDashboard(): Promise<string> {
   let formatStats = "None";
   let newestTitle = "None";
   if (fs.existsSync(CALIBRE_DB_PATH)) {
+    let db: Database | null = null;
     try {
-      const db = new Database(CALIBRE_DB_PATH, { readonly: true });
+      db = new Database(CALIBRE_DB_PATH, { readonly: true });
       const bRow = db.query("SELECT COUNT(*) as cnt FROM books").get() as any;
       totalBooks = bRow?.cnt || 0;
       const fRows = db
@@ -1137,6 +1154,12 @@ export async function getStatusDashboard(): Promise<string> {
       }
     } catch (_e) {
       void _e;
+    } finally {
+      try {
+        db?.close();
+      } catch (_closeErr) {
+        void _closeErr;
+      }
     }
   }
 
@@ -1157,10 +1180,11 @@ export async function getStatusDashboard(): Promise<string> {
   let kosyncUsers = 0;
   let kosyncProgress = 0;
   let deviceNames = "";
-  if (fs.existsSync(KOSYNC_DB_PATH)) {
+  const kosyncDbPath = getKosyncDbPath();
+  if (fs.existsSync(kosyncDbPath)) {
     let kDb: Database | null = null;
     try {
-      kDb = new Database(KOSYNC_DB_PATH, { readonly: true });
+      kDb = new Database(kosyncDbPath, { readonly: true });
       kosyncDbStatus = "🟢 `Healthy` (SQLite WAL)";
       const uRow = kDb.query("SELECT COUNT(*) as cnt FROM users").get() as any;
       kosyncUsers = uRow?.cnt || 0;
@@ -1362,17 +1386,23 @@ export function deleteBookFromLibrary(bookId: number): {
 
   let bookTitle: string | null = null;
   if (fs.existsSync(CALIBRE_DB_PATH)) {
+    let db: Database | null = null;
     try {
-      const db = new Database(CALIBRE_DB_PATH, { readonly: true });
+      db = new Database(CALIBRE_DB_PATH, { readonly: true });
       const row = db
         .query("SELECT title FROM books WHERE id = ?")
         .get(bookId) as any;
       if (row && row.title) {
         bookTitle = row.title;
       }
-      db.close();
     } catch (_e) {
       void _e;
+    } finally {
+      try {
+        db?.close();
+      } catch (_closeErr) {
+        void _closeErr;
+      }
     }
   }
 
@@ -1425,10 +1455,11 @@ export function getCurrentlyReadingShelf(limit: number = 5): {
 } {
   const items: ActiveReadingDoc[] = [];
 
-  if (fs.existsSync(KOSYNC_DB_PATH)) {
+  const kosyncDbPath = getKosyncDbPath();
+  if (fs.existsSync(kosyncDbPath)) {
     let kDb: Database | null = null;
     try {
-      kDb = new Database(KOSYNC_DB_PATH, { readonly: true });
+      kDb = new Database(kosyncDbPath, { readonly: true });
       kDb.run("PRAGMA busy_timeout = 3000;");
 
       const rows = kDb
@@ -1579,8 +1610,9 @@ export function getRecentBooks(limit: number = 5): {
   let books: CalibreBookResult[] = [];
 
   if (fs.existsSync(CALIBRE_DB_PATH)) {
+    let db: Database | null = null;
     try {
-      const db = new Database(CALIBRE_DB_PATH, { readonly: true });
+      db = new Database(CALIBRE_DB_PATH, { readonly: true });
       db.run("PRAGMA busy_timeout = 3000;");
 
       const rows = db
@@ -1613,6 +1645,12 @@ export function getRecentBooks(limit: number = 5): {
       }));
     } catch (_e) {
       logError("Failed to query Calibre library for recent books", _e);
+    } finally {
+      try {
+        db?.close();
+      } catch (_closeErr) {
+        void _closeErr;
+      }
     }
   }
 
