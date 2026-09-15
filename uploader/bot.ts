@@ -18,6 +18,8 @@ import {
   getDownloadFilename,
   validateEpubContent,
   getDropDir,
+  getCoverCacheDir,
+  resolveExecutable,
   safeFetchWithSsrf,
   sanitizeErrorMessage,
   getCacheDb,
@@ -25,26 +27,53 @@ import {
 import { getJobQueue, withCalibreLockSync } from "./jobs";
 
 const DROP_DIR = getDropDir();
-const SERVER_URL = "http://127.0.0.1:8088";
-const ENV_PATH = process.env.ENV_PATH || "/Users/ospeto/uploader/.env";
-const CACHE_DB_PATH = "/Users/ospeto/uploader/cache.db";
+const SERVER_URL = process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088";
+let RUNTIME_DIR = process.cwd();
+try {
+  RUNTIME_DIR = path.dirname(new URL(import.meta.url).pathname);
+} catch {
+  // Keep the portable process-relative fallback.
+}
+const HOME_DIR = process.env.HOME || os.homedir();
+const ENV_PATH = process.env.ENV_PATH || path.join(RUNTIME_DIR, ".env");
+const CACHE_DB_PATH =
+  process.env.CACHE_DB_PATH || path.join(RUNTIME_DIR, "cache.db");
 const KOSYNC_DB_PATH =
   process.env.KOSYNC_DB_PATH ||
-  "/Users/ospeto/kosync-server/data/koreader-sync.db";
+  path.join(HOME_DIR, "kosync-server", "data", "koreader-sync.db");
 const CALIBRE_DB_PATH =
   process.env.CALIBRE_DB_PATH ||
-  "/Users/ospeto/Calibre Libraries/Agent Library/metadata.db";
+  path.join(HOME_DIR, "Calibre Library", "metadata.db");
 const CALIBRE_LIBRARY_DIR =
   process.env.CALIBRE_LIBRARY_DIR || path.dirname(CALIBRE_DB_PATH);
 const MANGA_DB_PATH =
-  process.env.MANGA_DB_PATH || "/Users/ospeto/manga-processor/manga.db";
-const PROXY_URL = "http://127.0.0.1:7890";
-const WEB_UPLOADER_URL = "http://192.168.31.15:8086";
-const CALIBRE_WEB_URL = "http://192.168.31.15:8088";
+  process.env.MANGA_DB_PATH || path.join(HOME_DIR, "manga-processor", "manga.db");
+const PROXY_URL = process.env.HTTP_PROXY || "http://127.0.0.1:7890";
+const WEB_UPLOADER_URL =
+  process.env.WEB_UPLOADER_URL || "http://127.0.0.1:8086";
+const CALIBRE_WEB_URL =
+  process.env.CALIBRE_WEB_URL || "http://127.0.0.1:8088";
 export const READING_WEBAPP_URL =
   process.env.READING_WEBAPP_URL || "https://reading.wavypremium.xyz";
 export const KOSYNC_WAN_URL =
   process.env.KOSYNC_WAN_URL || "https://kosync.wavypremium.xyz";
+
+async function fetchSafeResponse(
+  url: string,
+  options: any = {},
+  allowPrivateHosts = false,
+): Promise<Response> {
+  const result = await safeFetchWithSsrf(url, {
+    ...options,
+    allowPrivateHosts,
+  });
+  return new Response(result.buffer, {
+    status: result.status,
+    statusText: result.statusText,
+    headers: result.headers,
+  });
+}
+
 const MAX_TELEGRAM_FILE_SIZE = 20 * 1024 * 1024; // 20MB Telegram Bot API limit
 const ALLOWED_EXTS = [".epub", ".zip", ".rar", ".7z", ".tar"];
 
@@ -121,10 +150,7 @@ function runCalibredb(args: string[]) {
   delete env.https_proxy;
   delete env.ALL_PROXY;
   delete env.all_proxy;
-  env.PATH =
-    "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
-
-  return spawnSync("/opt/homebrew/bin/calibredb", args, {
+  return spawnSync(resolveExecutable("calibredb", "CALIBREDB_PATH"), args, {
     encoding: "utf8",
     env,
   });
@@ -162,15 +188,19 @@ function safeParseJson(str: string): any {
 async function tgFetch(endpoint: string, options: any = {}) {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${endpoint}`;
   const timeoutMs = options.timeoutMs || 45000;
-  const signal = options.signal || AbortSignal.timeout(timeoutMs);
-
   const fetchOpts: any = {
     ...options,
-    signal,
+    timeoutMs,
     proxy: PROXY_URL,
   };
   delete fetchOpts.timeoutMs;
-  return await fetch(url, fetchOpts);
+
+  const result = await safeFetchWithSsrf(url, fetchOpts);
+  return new Response(result.buffer, {
+    status: result.status,
+    statusText: result.statusText,
+    headers: result.headers,
+  });
 }
 
 async function sendMessage(
@@ -458,15 +488,15 @@ export function createHotDatabaseBackup(): DatabaseBackupResult | null {
     { name: "Manga", fileName: "manga.db", path: MANGA_DB_PATH },
   ];
 
-  const stagingDir = fs.mkdtempSync(path.join("/tmp", "reading-stack-backup-"));
+  const stagingDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "reading-stack-backup-"),
+  );
   const backedUpFiles: string[] = [];
   const backedUpDbs: string[] = [];
 
   const env: any = {
     ...process.env,
-    PATH:
-      "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" +
-      (process.env.PATH || ""),
+    PATH: process.env.PATH || "",
   };
 
   try {
@@ -512,7 +542,7 @@ export function createHotDatabaseBackup(): DatabaseBackupResult | null {
     const displayTimestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
 
     const fileName = `reading-stack-backup-${fileTimestamp}.tar.gz`;
-    const archivePath = path.join("/tmp", fileName);
+    const archivePath = path.join(os.tmpdir(), fileName);
 
     log(`Archiving ${backedUpFiles.length} database(s) into ${archivePath}...`);
     const tarRes = spawnSync(
@@ -986,10 +1016,10 @@ export async function getStatusDashboard(): Promise<string> {
   let wanReadingStatus = "🔴 `Unreachable`";
   const t0 = performance.now();
   try {
-    const res = await fetch(READING_WEBAPP_URL, {
+    const res = await fetchSafeResponse(READING_WEBAPP_URL, {
       proxy: PROXY_URL,
-      signal: AbortSignal.timeout(8000),
-    } as any);
+      timeoutMs: 8000,
+    });
     const dt = Math.round(performance.now() - t0);
     wanReadingStatus =
       res.status === 200
@@ -1003,10 +1033,10 @@ export async function getStatusDashboard(): Promise<string> {
 
   let wanKosyncStatus = "🟡 `Pending WAN Setup`";
   try {
-    const res = await fetch(KOSYNC_WAN_URL, {
+    const res = await fetchSafeResponse(KOSYNC_WAN_URL, {
       proxy: PROXY_URL,
-      signal: AbortSignal.timeout(4000),
-    } as any);
+      timeoutMs: 4000,
+    });
     wanKosyncStatus =
       res.status === 200 ? `🟢 \`200 OK\`` : `🟡 \`HTTP ${res.status}\``;
   } catch (_e) {
@@ -1039,9 +1069,11 @@ export async function getStatusDashboard(): Promise<string> {
   // 3. Reading HQ & Calibre
   let uploaderLocal = "🔴 `Inactive`";
   try {
-    const res = await fetch("http://127.0.0.1:8086/api/books", {
-      signal: AbortSignal.timeout(2000),
-    });
+    const res = await fetchSafeResponse(
+      "http://127.0.0.1:8086/api/books",
+      { timeoutMs: 2000 },
+      true,
+    );
     if (res.status === 200) uploaderLocal = "🟢 `Active` (:8086)";
   } catch (_e) {
     void _e;
@@ -1049,9 +1081,11 @@ export async function getStatusDashboard(): Promise<string> {
 
   let calibreLocal = "🔴 `Inactive`";
   try {
-    const res = await fetch("http://127.0.0.1:8088/opds", {
-      signal: AbortSignal.timeout(2000),
-    });
+    const res = await fetchSafeResponse(
+      "http://127.0.0.1:8088/opds",
+      { timeoutMs: 2000 },
+      true,
+    );
     if (res.status === 200) calibreLocal = "🟢 `Active` (:8088 / OPDS)";
   } catch (_e) {
     void _e;
@@ -1087,9 +1121,11 @@ export async function getStatusDashboard(): Promise<string> {
   // 4. KOSync
   let kosyncLocal = "🔴 `Inactive`";
   try {
-    const res = await fetch("http://127.0.0.1:7200/", {
-      signal: AbortSignal.timeout(2000),
-    });
+    const res = await fetchSafeResponse(
+      "http://127.0.0.1:7200/",
+      { timeoutMs: 2000 },
+      true,
+    );
     if (res.status === 200) kosyncLocal = "🟢 `Active` (:7200)";
   } catch (_e) {
     void _e;
@@ -1320,7 +1356,7 @@ export function deleteBookFromLibrary(bookId: number): {
       void _e;
     }
     try {
-      const thumbDir = "/Users/ospeto/uploader/cache/covers";
+      const thumbDir = getCoverCacheDir();
       if (fs.existsSync(thumbDir)) {
         const files = fs.readdirSync(thumbDir);
         for (const f of files) {
@@ -2089,7 +2125,7 @@ function ingestBookFile(
           format === "CBZ" ||
           format === "CBR" ||
           (clean.tags || []).some((t) => /manga|comic/i.test(t));
-        getJobQueue(cacheDb).enqueue("metadata_enrich", {
+        botJobQueue.enqueue("metadata_enrich", {
           bookId: newId,
           title: finalTitle,
           isManga,
@@ -2130,7 +2166,7 @@ function ingestBookFile(
 }
 
 // Register Durable Job Queue Handlers for Bot Ingestion
-const botJobQueue = getJobQueue(cacheDb);
+const botJobQueue = getJobQueue();
 botJobQueue.registerHandler(
   "file_ingest",
   async (payload: {
@@ -2335,7 +2371,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
 
       if (isArchiveFile(fileName)) {
         log(`Unpacking archive "${fileName}" via durable queue...`);
-        const queue = getJobQueue(cacheDb);
+        const queue = botJobQueue;
         const job = queue.enqueue("archive_ingest", {
           archivePath: destPath,
           archiveName: fileName,
@@ -2368,7 +2404,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
         continue;
       }
 
-      const queue = getJobQueue(cacheDb);
+      const queue = botJobQueue;
       const job = queue.enqueue("file_ingest", {
         filePath: destPath,
         originalFileName: fileName,
@@ -2867,7 +2903,7 @@ async function pollTelegram() {
               );
 
               try {
-                const queue = getJobQueue(cacheDb);
+                const queue = botJobQueue;
                 const job = queue.enqueue("url_ingest", { url: articleUrl });
                 const outcome = await queue.waitForJob(job.id);
                 const result = outcome.result || {

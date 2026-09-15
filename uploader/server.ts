@@ -10,6 +10,7 @@ import crypto from "node:crypto";
 import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import {
@@ -45,17 +46,19 @@ import {
   safeFetchWithSsrf,
   getCoverCacheDir,
   getCacheDb,
+  resolveExecutable,
 } from "./security";
 import { getJobQueue, DurableJobQueue, withCalibreLock } from "./jobs";
 
 const DROP_DIR = getDropDir();
 const SERVER_URL = process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088";
+const HOME_DIR = process.env.HOME || os.homedir();
 const LIBRARY_DIR =
   process.env.CALIBRE_LIBRARY_DIR ||
-  "/Users/ospeto/Calibre Libraries/Agent Library";
+  path.join(HOME_DIR, "Calibre Library");
 const KOSYNC_DB_PATH =
   process.env.KOSYNC_DB_PATH ||
-  "/Users/ospeto/kosync-server/data/koreader-sync.db";
+  path.join(HOME_DIR, "kosync-server", "data", "koreader-sync.db");
 const MAX_UPLOAD_SIZE = MAX_ARCHIVE_SIZE_BYTES; // 100MB
 
 function resolveHtmlPath(): string {
@@ -66,10 +69,22 @@ function resolveHtmlPath(): string {
   } catch {
     // Fall back to default location
   }
-  return "/Users/ospeto/uploader/index.html";
+  return path.join(process.cwd(), "index.html");
 }
 
 const HTML_PATH = resolveHtmlPath();
+
+async function fetchTrustedService(url: string, options: any = {}): Promise<Response> {
+  const result = await safeFetchWithSsrf(url, {
+    ...options,
+    allowPrivateHosts: true,
+  });
+  return new Response(result.buffer, {
+    status: result.status,
+    statusText: result.statusText,
+    headers: result.headers,
+  });
+}
 
 // Lazy proxy to cache database — prevents SQLITE_CANTOPEN at module import time
 export const cacheDb: Database = new Proxy({} as Database, {
@@ -438,10 +453,7 @@ function runCalibredb(args: string[]) {
   delete env.https_proxy;
   delete env.ALL_PROXY;
   delete env.all_proxy;
-  env.PATH =
-    "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
-
-  return spawnSync("/opt/homebrew/bin/calibredb", args, {
+  return spawnSync(resolveExecutable("calibredb", "CALIBREDB_PATH"), args, {
     encoding: "utf8",
     env,
     timeout: 30000,
@@ -1318,7 +1330,7 @@ export async function handleRequest(
       }
 
       // Fetch master cover from Calibre
-      const masterRes = await fetch(
+      const masterRes = await fetchTrustedService(
         `${SERVER_URL}/get/cover/${bookId}/Agent_Library`,
       );
       if (!masterRes.ok) {
@@ -1331,7 +1343,7 @@ export async function handleRequest(
 
       try {
         const sipsRes = spawnSync(
-          "/usr/bin/sips",
+          resolveExecutable("sips", "SIPS_PATH"),
           ["-Z", String(targetWidth), tempMaster, "--out", cacheFilePath],
           {
             encoding: "utf8",
@@ -1371,7 +1383,7 @@ export async function handleRequest(
     }
 
     // Master cover request (full resolution)
-    const coverRes = await fetch(
+    const coverRes = await fetchTrustedService(
       `${SERVER_URL}/get/cover/${bookId}/Agent_Library`,
     );
     if (coverRes.ok) {
@@ -1406,7 +1418,7 @@ export async function handleRequest(
       return new Response("Invalid book ID or format", { status: 400 });
     }
 
-    const fileRes = await fetch(
+    const fileRes = await fetchTrustedService(
       `${SERVER_URL}/get/${format}/${bookId}/Agent_Library`,
     );
     if (fileRes.ok) {

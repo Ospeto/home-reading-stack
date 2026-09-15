@@ -1,14 +1,21 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
-import { sanitizeErrorMessage } from "./security";
+import { resolveExecutable, sanitizeErrorMessage } from "./security";
 
 export const MAX_ARCHIVE_SIZE_BYTES = 100 * 1024 * 1024; // 100MB
 export const MAX_SINGLE_FILE_SIZE_BYTES = 150 * 1024 * 1024; // 150MB
 export const MAX_TOTAL_UNCOMPRESSED_BYTES = 500 * 1024 * 1024; // 500MB
 export const MAX_ARCHIVE_ENTRIES = 500;
 export const MAX_COMPRESSION_RATIO = 100; // 100:1 expansion ratio
+
+function safeArchiveEntryLabel(entryName: string): string {
+  const basename = path.basename(entryName.replace(/\\/g, "/"));
+  const cleaned = sanitizeErrorMessage(basename).replace(/[\r\n]/g, " ");
+  return cleaned.slice(0, 120) || "[entry]";
+}
 
 export interface ExtractedBook {
   tempPath: string;
@@ -30,14 +37,11 @@ export interface UnpackResult {
 }
 
 export function getTarBinary(): string {
-  if (process.env.TAR_PATH && fs.existsSync(process.env.TAR_PATH))
+  if (process.env.TAR_PATH && fs.existsSync(process.env.TAR_PATH)) {
     return process.env.TAR_PATH;
-  if (fs.existsSync("/usr/bin/bsdtar")) return "/usr/bin/bsdtar";
-  if (fs.existsSync("/usr/local/bin/bsdtar")) return "/usr/local/bin/bsdtar";
-  const whichCheck = spawnSync("which", ["bsdtar"], { encoding: "utf8" });
-  if (whichCheck.status === 0 && whichCheck.stdout.trim())
-    return whichCheck.stdout.trim();
-  return "tar";
+  }
+  const bsdtar = resolveExecutable("bsdtar", "BSDTAR_PATH");
+  return bsdtar === "bsdtar" ? resolveExecutable("tar") : bsdtar;
 }
 
 export function isArchiveFile(filename: string): boolean {
@@ -153,7 +157,7 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
         if (mode.startsWith("l") || line.includes(" -> ")) {
           return {
             safe: false,
-            error: `Path traversal / prohibited symlink detected in archive entry: "${entryName}"`,
+            error: `Path traversal / prohibited symlink detected in archive entry "${safeArchiveEntryLabel(entryName)}"`,
             entryCount: lines.length,
             totalUncompressedBytes,
           };
@@ -161,7 +165,7 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
         if (mode.startsWith("h") || line.includes(" link to ")) {
           return {
             safe: false,
-            error: `Path traversal / prohibited hardlink detected in archive entry: "${entryName}"`,
+            error: `Path traversal / prohibited hardlink detected in archive entry "${safeArchiveEntryLabel(entryName)}"`,
             entryCount: lines.length,
             totalUncompressedBytes,
           };
@@ -178,7 +182,7 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
         ) {
           return {
             safe: false,
-            error: `Path traversal detected in archive entry: "${entryName}"`,
+            error: `Path traversal detected in archive entry "${safeArchiveEntryLabel(entryName)}"`,
             entryCount: lines.length,
             totalUncompressedBytes,
           };
@@ -188,7 +192,7 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
           if (size > MAX_SINGLE_FILE_SIZE_BYTES) {
             return {
               safe: false,
-              error: `Archive entry "${entryName}" uncompressed size (${Math.round(size / 1024 / 1024)}MB) exceeds limit (${MAX_SINGLE_FILE_SIZE_BYTES / 1024 / 1024}MB)`,
+              error: `Archive entry "${safeArchiveEntryLabel(entryName)}" uncompressed size (${Math.round(size / 1024 / 1024)}MB) exceeds limit (${MAX_SINGLE_FILE_SIZE_BYTES / 1024 / 1024}MB)`,
               entryCount: lines.length,
               totalUncompressedBytes,
             };
@@ -243,7 +247,7 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
  */
 export function unpackArchive(archivePath: string): UnpackResult {
   const tempExtractDir = path.join(
-    "/tmp",
+    os.tmpdir(),
     `archive_unpack_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
   );
 
@@ -253,7 +257,10 @@ export function unpackArchive(archivePath: string): UnpackResult {
         fs.rmSync(tempExtractDir, { recursive: true, force: true });
       }
     } catch (e) {
-      console.error(`[ArchiveUnpack] Cleanup error for ${tempExtractDir}:`, e);
+      console.error(
+        "[ArchiveUnpack] Cleanup error:",
+        sanitizeErrorMessage(e),
+      );
     }
   };
 
@@ -322,7 +329,7 @@ export function unpackArchive(archivePath: string): UnpackResult {
           void _unlinkErr;
         }
         console.warn(
-          `[ArchiveUnpack] Prohibited symlink unlinked: ${fullPath}`,
+          `[ArchiveUnpack] Prohibited symlink unlinked: ${safeArchiveEntryLabel(entry.name)}`,
         );
         continue;
       }

@@ -1,17 +1,19 @@
-// @ts-ignore
+// @ts-expect-error
 import { Database } from "bun:sqlite";
 import crypto from "node:crypto";
 import fs from "node:fs";
-// @ts-ignore
+// @ts-expect-error
+import os from "node:os";
+import path from "node:path";
 import process from "node:process";
 import { sanitizeErrorMessage, getCacheDb } from "./security";
 
 export const DEFAULT_JOBS_DB_PATH =
   process.env.JOBS_DB_PATH ||
   process.env.CACHE_DB_PATH ||
-  "/Users/ospeto/uploader/cache.db";
+  path.join(os.tmpdir(), "reading-hq", "cache.db");
 export const CALIBRE_LOCK_FILE =
-  process.env.CALIBRE_LOCK_FILE || "/tmp/calibre_execution.lock";
+  process.env.CALIBRE_LOCK_FILE || path.join(os.tmpdir(), "calibre_execution.lock");
 
 export type JobType =
   | "file_ingest"
@@ -504,6 +506,7 @@ export class DurableJobQueue {
   public async executeJob<T = any, R = any>(
     id: string,
   ): Promise<JobRecord<T, R>> {
+    this.recoverInterruptedJobs();
     const candidate = this.db
       .prepare("SELECT * FROM jobs WHERE id = ?")
       .get(id) as any;
@@ -516,6 +519,15 @@ export class DurableJobQueue {
     }
 
     const now = Date.now();
+    if (
+      candidate.status === "processing" &&
+      candidate.worker_id &&
+      candidate.worker_id !== this.workerId &&
+      candidate.lease_expires_at > now
+    ) {
+      return this.mapRowToRecord<T, R>(candidate);
+    }
+
     const LEASE_DURATION_MS = 60000;
     const leaseExpiresAt = now + LEASE_DURATION_MS;
 
@@ -527,15 +539,19 @@ export class DurableJobQueue {
              lease_expires_at = ?,
              heartbeat_at = ?,
              updated_at = ?
-         WHERE id = ? AND (status = 'pending' OR status = 'processing')`,
+         WHERE id = ?
+           AND (status = 'pending' OR (status = 'processing' AND worker_id = ?))`,
       )
-      .run(this.workerId, leaseExpiresAt, now, now, id);
+      .run(this.workerId, leaseExpiresAt, now, now, id, this.workerId);
 
     if (updateRes.changes === 0) {
       return this.getJob<T, R>(id)!;
     }
 
-    const job = this.mapRowToRecord<T, R>(candidate);
+    const claimedRow = this.db
+      .prepare("SELECT * FROM jobs WHERE id = ?")
+      .get(id) as any;
+    const job = this.mapRowToRecord<T, R>(claimedRow);
     const handler = this.resolveHandler(job.type);
 
     const heartbeatTimer = setInterval(() => {
@@ -547,9 +563,15 @@ export class DurableJobQueue {
              SET heartbeat_at = ?,
                  lease_expires_at = ?,
                  updated_at = ?
-             WHERE id = ? AND status = 'processing'`,
+             WHERE id = ? AND status = 'processing' AND worker_id = ?`,
           )
-          .run(hbNow, hbNow + LEASE_DURATION_MS, hbNow, job.id);
+          .run(
+            hbNow,
+            hbNow + LEASE_DURATION_MS,
+            hbNow,
+            job.id,
+            this.workerId,
+          );
       } catch (_hbErr) {
         void _hbErr;
       }
@@ -573,9 +595,9 @@ export class DurableJobQueue {
                worker_id = NULL,
                lease_expires_at = NULL,
                error = NULL
-           WHERE id = ?`,
+           WHERE id = ? AND status = 'processing' AND worker_id = ?`,
         )
-        .run(resultStr, finishedAt, job.id);
+        .run(resultStr, finishedAt, job.id, this.workerId);
 
       return this.getJob<T, R>(job.id)!;
     } catch (err: any) {
@@ -597,7 +619,7 @@ export class DurableJobQueue {
                worker_id = NULL,
                lease_expires_at = NULL,
                error = ?
-           WHERE id = ?`,
+           WHERE id = ? AND status = 'processing' AND worker_id = ?`,
         )
         .run(
           isFinal ? "failed" : "pending",
@@ -606,6 +628,7 @@ export class DurableJobQueue {
           failedAt,
           sanitizedErr,
           job.id,
+          this.workerId,
         );
 
       return this.getJob<T, R>(job.id)!;
@@ -626,15 +649,19 @@ export class DurableJobQueue {
     this.recoverInterruptedJobs();
 
     // 2. Select the oldest pending job that is ready to run
-    const candidate = this.db
+    const candidates = this.db
       .prepare(
         `SELECT * FROM jobs
          WHERE status = 'pending' AND next_run_at <= ?
          ORDER BY created_at ASC
-         LIMIT 1`,
+         LIMIT 100`,
       )
-      .get(now) as any;
+      .all(now) as any[];
 
+    // Multiple processes may share one queue database but register different
+    // handlers. Never claim a job this worker cannot execute; leave it for the
+    // process that owns its handler instead of converting it into a false failure.
+    const candidate = candidates.find((row) => !!this.resolveHandler(row.type));
     if (!candidate) return false;
 
     const LEASE_DURATION_MS = 60000;
@@ -657,7 +684,10 @@ export class DurableJobQueue {
       return false;
     }
 
-    const job = this.mapRowToRecord(candidate);
+    const claimedRow = this.db
+      .prepare("SELECT * FROM jobs WHERE id = ?")
+      .get(candidate.id) as any;
+    const job = this.mapRowToRecord(claimedRow);
     const handler = this.resolveHandler(job.type);
 
     this.isProcessing = true;
@@ -696,9 +726,9 @@ export class DurableJobQueue {
                worker_id = NULL,
                lease_expires_at = NULL,
                error = NULL
-           WHERE id = ?`,
+           WHERE id = ? AND status = 'processing' AND worker_id = ?`,
         )
-        .run(resultStr, finishedAt, job.id);
+        .run(resultStr, finishedAt, job.id, this.workerId);
 
       return true;
     } catch (err: any) {
@@ -720,7 +750,7 @@ export class DurableJobQueue {
                worker_id = NULL,
                lease_expires_at = NULL,
                error = ?
-           WHERE id = ?`,
+           WHERE id = ? AND status = 'processing' AND worker_id = ?`,
         )
         .run(
           isFinal ? "failed" : "pending",
@@ -729,6 +759,7 @@ export class DurableJobQueue {
           failedAt,
           sanitizedErr,
           job.id,
+          this.workerId,
         );
 
       return true;

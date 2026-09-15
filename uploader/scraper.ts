@@ -7,11 +7,13 @@ import {
   isPrivateOrInternalIp,
   normalizeIpString,
   safeFetchWithSsrf,
+  resolveExecutable,
 } from "./security";
 import { withCalibreLock } from "./jobs";
 
-const SERVER_URL = "http://127.0.0.1:8088";
-const PROXY = "http://127.0.0.1:7890";
+const SERVER_URL =
+  process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088";
+const PROXY = process.env.HTTP_PROXY || "http://127.0.0.1:7890";
 const SCRAPER_TIMEOUT_MS = 8000;
 const COVER_TIMEOUT_MS = 12000;
 
@@ -289,7 +291,16 @@ export function isSameBook(
   const bAuthor = cleanString(existing.authors || "");
   const sAuthor = cleanString(incoming.author || "");
 
-  // 3. Series comparison
+  // 3. Author is mandatory for title-based identity. Never match a title
+  // alone, including when both records have an unknown/empty author.
+  const hasKnownAuthors =
+    bAuthor && sAuthor && !isJunkAuthor(bAuthor) && !isJunkAuthor(sAuthor);
+  if (!hasKnownAuthors) return false;
+
+  const authorSim = stringSimilarity(bAuthor, sAuthor);
+  if (authorSim < 0.5) return false;
+
+  // 4. Series comparison
   const bSeries = existing.series
     ? {
         series: cleanString(existing.series),
@@ -311,22 +322,7 @@ export function isSameBook(
     return false;
   }
 
-  // 4. Author conflict & Title comparison: NEVER match on title alone!
-  const hasKnownAuthors =
-    bAuthor && sAuthor && !isJunkAuthor(bAuthor) && !isJunkAuthor(sAuthor);
-
-  if (!hasKnownAuthors) {
-    // Require exact match on both title and author string when unknown
-    return bTitle === sTitle && bAuthor === sAuthor;
-  }
-
-  const authorSim = stringSimilarity(bAuthor, sAuthor);
-  if (authorSim < 0.5) {
-    // Different authors: never match regardless of identical title
-    return false;
-  }
-
-  // Title comparison
+  // 5. Title comparison with the already-validated author identity.
   if (bTitle === sTitle && authorSim >= 0.5) return true;
 
   const titleSim = stringSimilarity(bTitle, sTitle);
@@ -723,11 +719,10 @@ export async function applyMetadataToCalibre(
     delete env.https_proxy;
     delete env.ALL_PROXY;
     delete env.all_proxy;
-    env.PATH =
-      "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
+    env.PATH = env.PATH || process.env.PATH || "";
 
     const res = await withCalibreLock(() =>
-      spawnSync("/opt/homebrew/bin/calibredb", args, {
+      spawnSync(resolveExecutable("calibredb", "CALIBREDB_PATH"), args, {
         encoding: "utf8",
         env,
         timeout: 30000,

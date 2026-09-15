@@ -487,6 +487,19 @@ describe("Durable Ingestion Job Queue Lifecycle & Crash Recovery", () => {
     expect(completedJob?.result?.enriched).toBe(true);
   });
 
+  it("leaves jobs without a local handler for the owning worker", async () => {
+    const testDb = new Database(":memory:");
+    const fileWorker = new DurableJobQueue(testDb);
+    const metadataWorker = new DurableJobQueue(testDb);
+    metadataWorker.registerHandler("metadata_enrich", async () => ({ ok: true }));
+
+    const job = fileWorker.enqueue("metadata_enrich", { bookId: 7 });
+    expect(await fileWorker.processNextJob()).toBe(false);
+    expect(fileWorker.getJob(job.id)?.status).toBe("pending");
+    expect(await metadataWorker.processNextJob()).toBe(true);
+    expect(metadataWorker.getJob(job.id)?.status).toBe("completed");
+  });
+
   it("handles handler errors with bounded exponential backoff retries and eventual failure", async () => {
     const testDb = new Database(":memory:");
     const queue = new DurableJobQueue(testDb);

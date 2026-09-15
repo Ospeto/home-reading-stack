@@ -9,16 +9,21 @@ import {
   validateUrlForSSRF,
   safeFetchWithSsrf,
   getDropDir,
+  resolveExecutable,
   SafeFetchResult,
 } from "./security";
 import { withCalibreLock } from "./jobs";
 
 export { getDropDir };
 
-const SERVER_URL = "http://127.0.0.1:8088";
-const PROXY_URL = "http://127.0.0.1:7890";
-const EBOOK_CONVERT_PATH = "/opt/homebrew/bin/ebook-convert";
-const CALIBREDB_PATH = "/opt/homebrew/bin/calibredb";
+const SERVER_URL =
+  process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088";
+const PROXY_URL = process.env.HTTP_PROXY || "http://127.0.0.1:7890";
+const EBOOK_CONVERT_PATH = resolveExecutable(
+  "ebook-convert",
+  "EBOOK_CONVERT_PATH",
+);
+const CALIBREDB_PATH = resolveExecutable("calibredb", "CALIBREDB_PATH");
 const FETCH_TIMEOUT_MS = 15000;
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
@@ -149,7 +154,7 @@ export function isPaywallOrGarbage(
   if (linkTextLen === undefined || totalTextLen === undefined) {
     let lLen = 0;
     // Markdown links: [text](url)
-    const mdLinkRegex = /\[([^\]]+)\]\([^\)]+\)/g;
+    const mdLinkRegex = /\[([^\]]+)\]\([^)]+\)/g;
     let m: RegExpExecArray | null;
     while ((m = mdLinkRegex.exec(text)) !== null) {
       lLen += m[1].trim().length;
@@ -164,8 +169,8 @@ export function isPaywallOrGarbage(
     const plain = decodeHtmlEntities(
       text
         .replace(/<[^>]+>/g, " ")
-        .replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1")
-        .replace(/!\[([^\]]*)\]\([^\)]+\)/g, "")
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+        .replace(/!\[([^\]]*)\]\([^)]+\)/g, "")
         .replace(/[#*_`~-]/g, " ")
         .replace(/\s+/g, " ")
         .trim(),
@@ -222,7 +227,7 @@ export function isPaywallOrGarbage(
     if (/^\[.+\]\(.+\)/.test(trimmed)) continue;
     const cleanLine = decodeHtmlEntities(
       trimmed
-        .replace(/\[([^\]]+)\]\([^\)]+\)/g, "")
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, "")
         .replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "")
         .replace(/<[^>]+>/g, " ")
         .replace(/[#*_`~|]/g, " ")
@@ -301,19 +306,19 @@ export function cleanMarkdownNoise(md: string): string {
   const isNavLine = (line: string): boolean => {
     const trimmed = line.trim();
     if (!trimmed) return true; // whitespace between nav lines
-    if (/^\[\s*\]\([^\)]+\)$/.test(trimmed)) return true;
+    if (/^\[\s*\]\([^)]+\)$/.test(trimmed)) return true;
     const lower = trimmed.toLowerCase();
     const hasKeyword = navKeywords.some((k) => lower.includes(k));
 
     // Nav buttons or links like [Menu](...) or [Search](...)
     if (
-      /^\[[^\]]+\]\([^\)]*\)/.test(trimmed) &&
+      /^\[[^\]]+\]\([^)]*\)/.test(trimmed) &&
       (hasKeyword || lower.length < 25)
     )
       return true;
     // List item link
     if (/^[-*+]\s+/.test(trimmed) || /^\d+\.\s+/.test(trimmed)) {
-      if (hasKeyword || /^[-*+]\s+\[[^\]]+\]\([^\)]+\)$/.test(trimmed))
+      if (hasKeyword || /^[-*+]\s+\[[^\]]+\]\([^)]+\)$/.test(trimmed))
         return true;
     }
     if (/^(?:open|close)\s+/i.test(trimmed)) return true;
@@ -613,7 +618,7 @@ export function parseJinaMarkdown(
   if (!imageUrl) {
     const leadImgMatch = bodyMarkdown
       .substring(0, 2000)
-      .match(/!\[.*?\]\((https?:\/\/[^\s\)]+)\)/);
+      .match(/!\[.*?\]\((https?:\/\/[^\s)]+)\)/);
     if (leadImgMatch) {
       imageUrl = leadImgMatch[1];
     }
@@ -977,11 +982,11 @@ export function generateTypographicCover(
 
   fs.writeFileSync(tempSvg, svgContent, "utf8");
 
-  // Check if /usr/bin/sips is available (macOS)
-  const hasSips = fs.existsSync("/usr/bin/sips");
+  const sipsPath = resolveExecutable("sips", "SIPS_PATH");
+  const hasSips = sipsPath !== "sips" || !!process.env.SIPS_PATH;
   if (hasSips) {
     const sipsRes = spawnSync(
-      "/usr/bin/sips",
+      sipsPath,
       ["-s", "format", "jpeg", tempSvg, "--out", tempJpg],
       {
         encoding: "utf8",
@@ -1051,10 +1056,11 @@ export async function downloadCoverImage(
 
     fs.writeFileSync(tempRaw, fetchRes.buffer);
 
-    const hasSips = fs.existsSync("/usr/bin/sips");
+    const sipsPath = resolveExecutable("sips", "SIPS_PATH");
+    const hasSips = sipsPath !== "sips" || !!process.env.SIPS_PATH;
     if (hasSips) {
       const sipsRes = spawnSync(
-        "/usr/bin/sips",
+        sipsPath,
         ["-s", "format", "jpeg", tempRaw, "--out", tempJpg],
         {
           encoding: "utf8",
@@ -1162,14 +1168,14 @@ export async function extractArticleViaJina(
   if (parsed.publishedTime) {
     try {
       const p = new Date(parsed.publishedTime);
-      if (!isNaN(p.getTime())) {
+      if (isNaN(p.getTime())) {
+        publishedDate = parsed.publishedTime.split("T")[0];
+      } else {
         publishedDate = p.toLocaleDateString("en-US", {
           year: "numeric",
           month: "short",
           day: "numeric",
         });
-      } else {
-        publishedDate = parsed.publishedTime.split("T")[0];
       }
     } catch (_err) {
       void _err;
@@ -1206,7 +1212,7 @@ export async function extractArticleViaJina(
   });
 
   // Cover image extraction & generation
-  let coverImageUrl = parsed.imageUrl;
+  const coverImageUrl = parsed.imageUrl;
   let coverImagePath: string | undefined;
 
   if (coverImageUrl) {
@@ -1689,7 +1695,7 @@ export async function extractArticle(
     (twitterImageMatch ? twitterImageMatch[1] : "") ||
     (articleImageMatch ? articleImageMatch[1] : "");
 
-  let coverImageUrl = candidateImageUrl
+  const coverImageUrl = candidateImageUrl
     ? decodeHtmlEntities(candidateImageUrl).trim()
     : "";
   let coverImagePath: string | undefined;
@@ -1746,8 +1752,7 @@ function runEbookConvert(args: string[]) {
   delete env.https_proxy;
   delete env.ALL_PROXY;
   delete env.all_proxy;
-  env.PATH =
-    "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
+  env.PATH = env.PATH || process.env.PATH || "";
 
   return spawnSync(EBOOK_CONVERT_PATH, args, {
     encoding: "utf8",
@@ -1768,8 +1773,7 @@ function runCalibredb(args: string[]) {
   delete env.https_proxy;
   delete env.ALL_PROXY;
   delete env.all_proxy;
-  env.PATH =
-    "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
+  env.PATH = env.PATH || process.env.PATH || "";
 
   return spawnSync(CALIBREDB_PATH, args, {
     encoding: "utf8",

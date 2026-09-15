@@ -2,11 +2,12 @@ import crypto from "node:crypto";
 import dns from "node:dns/promises";
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
-// @ts-ignore
+// @ts-expect-error
 import { Database } from "bun:sqlite";
 
 // Default production WAN domain and ports
@@ -15,22 +16,20 @@ export const KOSYNC_WAN_DOMAIN = "kosync.wavypremium.xyz";
 
 /**
  * Resolves the books drop directory portably and lazily.
- * Respects BOOKS_DROP_DIR or DROP_DIR env variables, falling back to safe local or /tmp paths.
+ * Respects BOOKS_DROP_DIR or DROP_DIR env variables, falling back to a per-user local path.
  */
 export function getDropDir(): string {
   const dir =
     process.env.BOOKS_DROP_DIR ||
     process.env.DROP_DIR ||
-    (process.env.HOME
-      ? path.join(process.env.HOME, "Books_Drop")
-      : "/tmp/Books_Drop");
+    path.join(process.env.HOME || os.homedir(), "Books_Drop");
   try {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
     return dir;
   } catch {
-    const fallback = "/tmp/Books_Drop";
+    const fallback = path.join(os.tmpdir(), "Books_Drop");
     if (!fs.existsSync(fallback)) {
       try {
         fs.mkdirSync(fallback, { recursive: true });
@@ -44,7 +43,7 @@ export function getDropDir(): string {
 
 /**
  * Resolves the cover cache directory portably and lazily.
- * Eliminates import-time side-effects on /Users/ospeto.
+ * Avoids import-time filesystem side effects and host-specific defaults.
  */
 export function getCoverCacheDir(): string {
   const custom = process.env.COVER_CACHE_DIR;
@@ -56,16 +55,14 @@ export function getCoverCacheDir(): string {
       // fallback
     }
   }
-  const defaultDir = fs.existsSync("/Users/ospeto/uploader")
-    ? "/Users/ospeto/uploader/cache/covers"
-    : "/tmp/uploader/cache/covers";
+  const defaultDir = path.join(os.tmpdir(), "reading-hq", "covers");
   try {
     if (!fs.existsSync(defaultDir)) {
       fs.mkdirSync(defaultDir, { recursive: true });
     }
     return defaultDir;
   } catch {
-    const fallback = "/tmp/uploader/cache/covers";
+    const fallback = path.join(os.tmpdir(), "reading-hq-fallback", "covers");
     try {
       if (!fs.existsSync(fallback)) fs.mkdirSync(fallback, { recursive: true });
     } catch {
@@ -101,8 +98,17 @@ function initCacheDbSchema(db: Database) {
 
 /**
  * Lazily opens and initializes the SQLite cache database.
- * Falls back to /tmp if default /Users/ospeto layout is absent or unwritable.
+ * Falls back to the operating system temporary directory if the configured path is absent or unwritable.
  */
+export function resolveExecutable(command: string, envVar?: string): string {
+  const configured = envVar ? process.env[envVar] : undefined;
+  if (configured) return configured;
+  const whichResult = spawnSync("which", [command], { encoding: "utf8" });
+  return whichResult.status === 0 && whichResult.stdout?.trim()
+    ? whichResult.stdout.trim()
+    : command;
+}
+
 export function getCacheDb(customPath?: string): Database {
   if (sharedCacheDb && !customPath) {
     return sharedCacheDb;
@@ -111,10 +117,7 @@ export function getCacheDb(customPath?: string): Database {
   const resolvePath = (): string => {
     if (customPath) return customPath;
     if (process.env.CACHE_DB_PATH) return process.env.CACHE_DB_PATH;
-    if (fs.existsSync("/Users/ospeto/uploader")) {
-      return "/Users/ospeto/uploader/cache.db";
-    }
-    return "/tmp/uploader_cache.db";
+    return path.join(os.tmpdir(), "reading-hq", "cache.db");
   };
 
   const targetPath = resolvePath();
@@ -124,7 +127,7 @@ export function getCacheDb(customPath?: string): Database {
       fs.mkdirSync(dir, { recursive: true });
     }
   } catch {
-    const fallbackPath = "/tmp/uploader_cache.db";
+    const fallbackPath = path.join(os.tmpdir(), "reading-hq-fallback.db");
     const db = new Database(fallbackPath);
     initCacheDbSchema(db);
     if (!customPath) sharedCacheDb = db;
@@ -137,7 +140,7 @@ export function getCacheDb(customPath?: string): Database {
     if (!customPath) sharedCacheDb = db;
     return db;
   } catch {
-    const fallbackPath = "/tmp/uploader_cache.db";
+    const fallbackPath = path.join(os.tmpdir(), "reading-hq-fallback.db");
     const db = new Database(fallbackPath);
     initCacheDbSchema(db);
     if (!customPath) sharedCacheDb = db;
@@ -281,37 +284,62 @@ export function isPrivateOrInternalIp(rawIp: string): boolean {
     return false;
   }
 
-  // Check IPv6
+  // Check IPv6. Use the normalized 128-bit value so compressed forms and
+  // alternate spellings cannot evade special-use prefix checks.
   if (net.isIPv6(ip)) {
     const lower = ip.toLowerCase();
-
-    // ::1 (Loopback)
-    if (lower === "::1" || lower === "0:0:0:0:0:0:0:1") return true;
-
-    // :: (Unspecified)
-    if (lower === "::" || lower === "0:0:0:0:0:0:0:0") return true;
-
-    // Link-local: fe80::/10
-    if (
-      lower.startsWith("fe8") ||
-      lower.startsWith("fe9") ||
-      lower.startsWith("fea") ||
-      lower.startsWith("feb")
-    ) {
-      return true;
+    const groups = lower.split(":");
+    const missing = groups.indexOf("");
+    let expanded: string[];
+    if (missing >= 0) {
+      const present = groups.filter(Boolean);
+      expanded = [
+        ...groups.slice(0, missing).filter(Boolean),
+        ...Array(8 - present.length).fill("0"),
+        ...groups.slice(missing + 1).filter(Boolean),
+      ];
+    } else {
+      expanded = groups;
     }
+    if (expanded.length === 8) {
+      const value = expanded.reduce(
+        (acc, group) => (acc << 16n) | BigInt(parseInt(group || "0", 16)),
+        0n,
+      );
+      const prefix = (bits: number) => value >> BigInt(128 - bits);
+      const prefixMatches = (bits: number, expected: bigint) =>
+        prefix(bits) === expected;
 
-    // Unique local (ULA): fc00::/7 (fc00:: and fd00::)
-    if (lower.startsWith("fc") || lower.startsWith("fd")) {
-      return true;
+      // Unspecified, loopback, IPv4-compatible/mapped, and discard ranges.
+      if (value === 0n || value === 1n) return true;
+      if (prefixMatches(96, 0n) || prefixMatches(96, 0xffffn)) {
+        const v4 = Number(value & 0xffffffffn);
+        const mapped = [
+          (v4 >>> 24) & 255,
+          (v4 >>> 16) & 255,
+          (v4 >>> 8) & 255,
+          v4 & 255,
+        ].join(".");
+        return isPrivateOrInternalIp(mapped) || prefixMatches(96, 0n);
+      }
+      // fc00::/7 (ULA), fe80::/10 (link-local), ff00::/8 (multicast).
+      if (prefixMatches(7, 0x7en) || prefixMatches(10, 0x3fan) || prefixMatches(8, 0xffn)) {
+        return true;
+      }
+      // Documentation, benchmarking, deprecated site-local, and other
+      // special-use IPv6 ranges must never be network destinations here.
+      if (
+        prefixMatches(32, 0x20010db8n) ||
+        prefixMatches(32, 0x20010000n) ||
+        prefixMatches(48, 0x200100020000n) ||
+        prefixMatches(28, 0x2001001n) ||
+        prefixMatches(10, 0x3fbn) ||
+        prefixMatches(64, 0x100n) ||
+        prefixMatches(20, 0x3fffn)
+      ) {
+        return true;
+      }
     }
-
-    // IPv4-mapped IPv6: ::ffff:a.b.c.d
-    const v4MappedMatch = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (v4MappedMatch) {
-      return isPrivateOrInternalIp(v4MappedMatch[1]);
-    }
-
     return false;
   }
 
@@ -325,8 +353,16 @@ export function isPrivateOrInternalIp(rawIp: string): boolean {
  */
 export async function validateUrlForSSRF(
   rawUrl: string,
-  _options: { allowProxyBypass?: boolean } = {},
-): Promise<{ safe: boolean; error?: string; resolvedIp?: string }> {
+  _options: {
+    allowProxyBypass?: boolean;
+    allowPrivateHosts?: boolean;
+  } = {},
+): Promise<{
+  safe: boolean;
+  error?: string;
+  resolvedIp?: string;
+  resolvedIps?: string[];
+}> {
   try {
     const u = new URL(rawUrl);
 
@@ -344,12 +380,13 @@ export async function validateUrlForSSRF(
 
     // Block common internal/local hostname patterns
     if (
-      host === "localhost" ||
-      host.endsWith(".localhost") ||
-      host.endsWith(".local") ||
-      host.endsWith(".internal") ||
-      host.endsWith(".lan") ||
-      host.endsWith(".home.arpa")
+      !_options.allowPrivateHosts &&
+      (host === "localhost" ||
+        host.endsWith(".localhost") ||
+        host.endsWith(".local") ||
+        host.endsWith(".internal") ||
+        host.endsWith(".lan") ||
+        host.endsWith(".home.arpa"))
     ) {
       return { safe: false, error: `Restricted internal hostname: ${host}` };
     }
@@ -357,13 +394,20 @@ export async function validateUrlForSSRF(
     // Check if host is direct IP literal (or numeric/hex representation)
     const normalizedHost = normalizeIpString(host);
     if (net.isIP(normalizedHost)) {
-      if (isPrivateOrInternalIp(normalizedHost)) {
+      if (
+        isPrivateOrInternalIp(normalizedHost) &&
+        !_options.allowPrivateHosts
+      ) {
         return {
           safe: false,
           error: `Restricted private or loopback IP: ${normalizedHost}`,
         };
       }
-      return { safe: true, resolvedIp: normalizedHost };
+      return {
+        safe: true,
+        resolvedIp: normalizedHost,
+        resolvedIps: [normalizedHost],
+      };
     }
 
     // If configured to allow designated proxy routing, outbound requests to public
@@ -375,7 +419,10 @@ export async function validateUrlForSSRF(
         return { safe: false, error: `No DNS records found for ${host}` };
       }
       for (const addr of addresses) {
-        if (isPrivateOrInternalIp(addr.address)) {
+        if (
+          isPrivateOrInternalIp(addr.address) &&
+          !_options.allowPrivateHosts
+        ) {
           return {
             safe: false,
             error: `Domain ${host} resolved to restricted internal IP: ${addr.address}`,
@@ -383,7 +430,14 @@ export async function validateUrlForSSRF(
           };
         }
       }
-      return { safe: true, resolvedIp: addresses[0]?.address };
+      const resolvedIps = addresses.map(
+        (address: { address: string }) => address.address,
+      );
+      return {
+        safe: true,
+        resolvedIp: resolvedIps[0],
+        resolvedIps,
+      };
     } catch (dnsErr: any) {
       return {
         safe: false,
@@ -941,18 +995,21 @@ export function sanitizeErrorMessage(err: any): string {
       ? err
       : err.message || "An unexpected error occurred";
 
-  // Remove filesystem paths (e.g. /Users/ospeto/..., /tmp/..., C:\...)
+  // Error strings are hostile input: redact secrets first, then remove
+  // filesystem details, stack fragments, and control characters.
   let sanitized = rawMsg
-    .replace(/(?:\/[a-zA-Z0-9._-]+)+/g, "[path]")
-    .replace(/[a-zA-Z]:\\[a-zA-Z0-9._\-\\]+/g, "[path]")
-    .replace(/at\s+.*\(.*:[0-9]+:[0-9]+\)/g, "") // Stack trace fragments
+    .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[REDACTED]@")
+    .replace(
+      /((?:token|key|secret|password|api[_-]?key|authorization)\s*[:=]\s*)[^\s,;]+/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/Bearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
+    .replace(/(['"])(?:file:\/\/)?\/[^'"\r\n]*\1/g, "$1[path]$1")
+    .replace(/(?:file:\/\/)?\/[^\s,;'"<>()[\]]+/g, "[path]")
+    .replace(/[a-zA-Z]:\\[^\s,;'"<>()[\]]+/g, "[path]")
+    .replace(/at\s+.*\(.*:[0-9]+:[0-9]+\)/g, "")
+    .replace(/[\x00-\x1f\x7f]/g, " ")
     .trim();
-
-  // Strip token/key patterns
-  sanitized = sanitized.replace(
-    /(?:token|key|secret)=[a-zA-Z0-9_-]+/gi,
-    "$1=[REDACTED]",
-  );
 
   if (sanitized.length > 300) {
     sanitized = sanitized.substring(0, 300) + "...";
@@ -1229,11 +1286,8 @@ export function validateEpubContent(filePathOrBuffer: string | Buffer): {
 
     // If a file path is provided, apply archive safety limits to EPUB ZIP contents
     if (typeof filePathOrBuffer === "string") {
-      const tarCmd = fs.existsSync("/usr/bin/bsdtar")
-        ? "/usr/bin/bsdtar"
-        : fs.existsSync("/usr/local/bin/bsdtar")
-          ? "/usr/local/bin/bsdtar"
-          : "tar";
+      const bsdtar = resolveExecutable("bsdtar", "BSDTAR_PATH");
+      const tarCmd = bsdtar === "bsdtar" ? resolveExecutable("tar") : bsdtar;
       const listRes = spawnSync(tarCmd, ["-tvf", filePathOrBuffer], {
         encoding: "utf8",
         timeout: 10000,
@@ -1329,9 +1383,13 @@ export interface SafeFetchOptions {
   maxRedirects?: number;
   maxBytes?: number;
   timeoutMs?: number;
+  method?: string;
   headers?: Record<string, string>;
+  body?: BodyInit | null;
   proxy?: string;
   allowProxyBypass?: boolean;
+  /** Only use for fixed, trusted local service endpoints. */
+  allowPrivateHosts?: boolean;
 }
 
 export interface SafeFetchResult {
@@ -1354,58 +1412,70 @@ export async function safeFetchWithSsrf(
   options: SafeFetchOptions = {},
 ): Promise<SafeFetchResult> {
   const maxRedirects = options.maxRedirects ?? 5;
-  const maxBytes = options.maxBytes ?? 25 * 1024 * 1024; // 25MB default
+  const maxBytes = options.maxBytes ?? 25 * 1024 * 1024;
   const timeoutMs = options.timeoutMs ?? 20000;
   const allowProxyBypass = options.allowProxyBypass ?? true;
 
-  let currentUrl = initialUrl;
+  // Keep the logical URL separate from the per-request connection URL. The
+  // former preserves redirect resolution and finalUrl semantics; the latter
+  // is pinned to the exact address validated immediately before connect.
+  let logicalUrl = initialUrl;
   let redirectCount = 0;
 
   while (true) {
-    const ssrfCheck = await validateUrlForSSRF(currentUrl, {
+    const ssrfCheck = await validateUrlForSSRF(logicalUrl, {
       allowProxyBypass,
+      allowPrivateHosts: options.allowPrivateHosts,
     });
     if (!ssrfCheck.safe) {
       throw new Error(
-        `SSRF validation blocked request to ${currentUrl}: ${ssrfCheck.error || "Unsafe destination"}`,
+        `SSRF validation blocked request: ${ssrfCheck.error || "Unsafe destination"}`,
       );
     }
 
     let parsedUrl: URL;
     try {
-      parsedUrl = new URL(currentUrl);
-    } catch (urlErr: any) {
-      throw new Error(`Invalid URL: ${urlErr?.message || urlErr}`);
+      parsedUrl = new URL(logicalUrl);
+    } catch {
+      throw new Error("Invalid URL");
     }
 
     const hostname = parsedUrl.hostname.toLowerCase();
     const originalHost = parsedUrl.host;
+    let connectionUrl: URL;
+    try {
+      connectionUrl = new URL(logicalUrl);
+    } catch {
+      throw new Error("Invalid URL");
+    }
+    const fetchHeaders = { ...(options.headers || {}) };
+    delete fetchHeaders.Host;
+    delete fetchHeaders.host;
+    fetchHeaders.Host = originalHost;
 
-    // Resolve and pin connection IP address to prevent DNS rebinding attacks
-    // Applies equally to direct and proxied requests
-    const fetchHeaders = { ...(options.headers || {}), Host: originalHost };
     const fetchOptions: any = {
+      method: options.method,
+      body: options.body,
       headers: fetchHeaders,
       redirect: "manual",
       signal: AbortSignal.timeout(timeoutMs),
     };
 
     if (ssrfCheck.resolvedIp && !net.isIP(hostname)) {
-      // Connect directly to the verified numeric IP with TLS SNI servername
-      parsedUrl.hostname = ssrfCheck.resolvedIp;
+      // Connect to the just-validated A/AAAA address, while retaining the
+      // original hostname for HTTP Host routing and TLS certificate/SNI.
+      connectionUrl.hostname = ssrfCheck.resolvedIp;
       if (parsedUrl.protocol === "https:") {
-        fetchOptions.tls = { servername: hostname };
+        fetchOptions.tls = { serverName: hostname };
       }
-      currentUrl = parsedUrl.href;
     }
 
     if (options.proxy) {
       fetchOptions.proxy = options.proxy;
     }
 
-    const res = await fetch(currentUrl, fetchOptions);
+    const res = await fetch(connectionUrl.href, fetchOptions);
 
-    // Handle redirects (301, 302, 303, 307, 308)
     if ([301, 302, 303, 307, 308].includes(res.status)) {
       const location = res.headers.get("location");
       if (!location) {
@@ -1418,16 +1488,15 @@ export async function safeFetchWithSsrf(
         throw new Error(`Exceeded maximum redirect limit of ${maxRedirects}`);
       }
       try {
-        currentUrl = new URL(location, currentUrl).href;
-      } catch (locErr: any) {
-        throw new Error(
-          `Invalid redirect Location: ${locErr?.message || locErr}`,
-        );
+        // Resolve relative redirects against the original hostname, never the
+        // pinned numeric address, then validate and pin the next hop anew.
+        logicalUrl = new URL(location, logicalUrl).href;
+      } catch {
+        throw new Error("Invalid redirect Location");
       }
       continue;
     }
 
-    // Check Content-Length header if present
     const clHeader = res.headers.get("content-length");
     if (clHeader) {
       const cl = parseInt(clHeader, 10);
@@ -1438,7 +1507,6 @@ export async function safeFetchWithSsrf(
       }
     }
 
-    // Stream and cap response bytes
     if (!res.body) {
       return {
         ok: res.ok,
@@ -1446,7 +1514,7 @@ export async function safeFetchWithSsrf(
         statusText: res.statusText,
         headers: res.headers,
         buffer: Buffer.alloc(0),
-        finalUrl: currentUrl,
+        finalUrl: logicalUrl,
         contentType: res.headers.get("content-type") || "",
       };
     }
@@ -1464,7 +1532,7 @@ export async function safeFetchWithSsrf(
       statusText: res.statusText,
       headers: res.headers,
       buffer: metered.buffer,
-      finalUrl: currentUrl,
+      finalUrl: logicalUrl,
       contentType: res.headers.get("content-type") || "",
     };
   }
