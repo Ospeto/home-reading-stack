@@ -929,7 +929,11 @@ with zipfile.ZipFile("${tempEpub}", "w") as z:
       id: "job_url",
       type: "url_ingest",
       payload: {
-        sourceUrl: "https://example.test/article?token=secret&next=$1&payload=$1-value",
+        sourceUrl:
+          "https://example.test/article?token=secret&next=$1&payload=$1-value",
+        encodedUrl:
+          "https://example.test/api?apiKey=abc%2Fdef%24x&unchanged=$1",
+        literalSecretUrl: "https://example.test/api?token=$1&keep=$1",
       },
       status: "failed",
       retries: 1,
@@ -942,10 +946,15 @@ with zipfile.ZipFile("${tempEpub}", "w") as z:
     };
 
     const redacted = redactJobRecord(rawJob);
-    expect(redacted.payload.sourceUrl).toContain("token=[REDACTED]");
-    expect(redacted.payload.sourceUrl).toContain("next=$1");
-    expect(redacted.payload.sourceUrl).toContain("payload=$1-value");
-    expect(redacted.payload.sourceUrl).not.toContain("$1=[REDACTED]");
+    expect(redacted.payload.sourceUrl).toBe(
+      "https://example.test/article?token=[REDACTED]&next=$1&payload=$1-value",
+    );
+    expect(redacted.payload.encodedUrl).toBe(
+      "https://example.test/api?apiKey=[REDACTED]&unchanged=$1",
+    );
+    expect(redacted.payload.literalSecretUrl).toBe(
+      "https://example.test/api?token=[REDACTED]&keep=$1",
+    );
   });
 
   it("resets retry counter to 0 on manual retry", () => {

@@ -1036,19 +1036,35 @@ export function redactJobRecord(job: any): any {
     if (val === null || val === undefined) return val;
     if (typeof val === "string") {
       let s = val;
-      // Redact filesystem paths
+      // Protect URL structure while sanitizing surrounding prose as paths.
+      // Query values are redacted with callbacks so literal `$1` payloads stay literal.
+      const protectedUrls: string[] = [];
+      s = s.replace(/https?:\/\/[^\s<>"']+/gi, (url) => {
+        const redactedUrl = url.replace(
+          /([?&](?:token|key|secret|password|auth|apiKey)=)[^&#\s]*/gi,
+          (_match, prefix: string) => `${prefix}[REDACTED]`,
+        );
+        const marker = `__REDACTED_URL_${protectedUrls.length}__`;
+        protectedUrls.push(redactedUrl);
+        return marker;
+      });
+
+      // Redact filesystem paths outside protected URLs.
       s = s.replace(/(?:\/[a-zA-Z0-9._-]+)+/g, (match) => {
         const ext = path.extname(match);
         if (ext) return `[path]/${path.basename(match)}`;
         return "[path]";
       });
       s = s.replace(/[a-zA-Z]:\\[a-zA-Z0-9._\-\\]+/g, "[path]");
-      // Redact tokens/secrets
+      // Redact tokens/secrets, including encoded, slash-containing, and `$` values.
       s = s.replace(
-        /((?:token|key|secret|password|auth|apiKey))=[a-zA-Z0-9_.-]+/gi,
+        /((?:token|key|secret|password|auth|apiKey))=([^&\s]+)/gi,
         (_match, key: string) => `${key}=[REDACTED]`,
       );
-      s = s.replace(/Bearer\s+[a-zA-Z0-9_.-]+/gi, "Bearer [REDACTED]");
+      s = s.replace(/Bearer\s+[^\s]+/gi, "Bearer [REDACTED]");
+      for (let i = 0; i < protectedUrls.length; i++) {
+        s = s.split(`__REDACTED_URL_${i}__`).join(protectedUrls[i]);
+      }
       return s;
     }
     if (Array.isArray(val)) {
