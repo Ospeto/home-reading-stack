@@ -933,7 +933,7 @@ with zipfile.ZipFile("${tempEpub}", "w") as z:
           "https://example.test/article?token=secret&next=$1&payload=$1-value",
         encodedUrl:
           "https://example.test/api?apiKey=abc%2Fdef%24x&unchanged=$1",
-        literalSecretUrl: "https://example.test/api?token=$1&keep=$1",
+        literalUrl: "https://example.test/api?token=$1&keep=$1",
       },
       status: "failed",
       retries: 1,
@@ -952,7 +952,7 @@ with zipfile.ZipFile("${tempEpub}", "w") as z:
     expect(redacted.payload.encodedUrl).toBe(
       "https://example.test/api?apiKey=[REDACTED]&unchanged=$1",
     );
-    expect(redacted.payload.literalSecretUrl).toBe(
+    expect(redacted.payload.literalUrl).toBe(
       "https://example.test/api?token=[REDACTED]&keep=$1",
     );
   });
