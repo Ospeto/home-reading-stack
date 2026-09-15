@@ -368,22 +368,35 @@ export class DurableJobQueue {
 
     let recoveredCount = 0;
     for (const row of interrupted) {
+      // The initial SELECT is only a candidate scan. Re-check every lease
+      // predicate in the UPDATE so a live worker cannot be recovered after it
+      // renews its lease (or finishes) between the two statements.
+      const workerPredicate = row.worker_id === null
+        ? "worker_id IS NULL"
+        : "worker_id = ?";
+      const workerParams = row.worker_id === null ? [] : [row.worker_id];
+
       if (row.retries >= row.max_retries) {
-        this.db
+        const result = this.db
           .prepare(
             `UPDATE jobs
              SET status = 'failed',
                  updated_at = ?,
                  worker_id = NULL,
                  lease_expires_at = NULL,
+                 heartbeat_at = NULL,
                  error = 'Job lease expired and exceeded max retry limit'
-             WHERE id = ?`,
+             WHERE id = ?
+               AND status = 'processing'
+               AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+               AND ${workerPredicate}`,
           )
-          .run(now, row.id);
+          .run(now, row.id, now, ...workerParams);
+        if (result.changes > 0) recoveredCount++;
       } else {
         const retries = row.retries + 1;
         const backoffMs = Math.min(60000, 2000 * 2 ** (retries - 1));
-        this.db
+        const result = this.db
           .prepare(
             `UPDATE jobs
              SET status = 'pending',
@@ -392,11 +405,15 @@ export class DurableJobQueue {
                  updated_at = ?,
                  worker_id = NULL,
                  lease_expires_at = NULL,
+                 heartbeat_at = NULL,
                  error = 'Recovered from unexpected process restart or expired worker lease'
-             WHERE id = ?`,
+             WHERE id = ?
+               AND status = 'processing'
+               AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+               AND ${workerPredicate}`,
           )
-          .run(retries, now + backoffMs, now, row.id);
-        recoveredCount++;
+          .run(retries, now + backoffMs, now, row.id, now, ...workerParams);
+        if (result.changes > 0) recoveredCount++;
       }
     }
 
@@ -449,11 +466,8 @@ export class DurableJobQueue {
    * Explicitly resets the retry counter to 0 so the job receives full retry attempts.
    */
   public retryJob(id: string): JobRecord | null {
-    const job = this.getJob(id);
-    if (!job) return null;
-
     const now = Date.now();
-    this.db
+    const result = this.db
       .prepare(
         `UPDATE jobs
          SET status = 'pending',
@@ -464,11 +478,13 @@ export class DurableJobQueue {
              lease_expires_at = NULL,
              heartbeat_at = NULL,
              error = NULL
-         WHERE id = ?`,
+         WHERE id = ? AND status = 'failed'`,
       )
       .run(now, now, id);
 
-    return this.getJob(id);
+    // Atomic CAS: processing jobs, including jobs with an active lease, are
+    // never reset or made eligible for duplicate execution.
+    return result.changes > 0 ? this.getJob(id) : null;
   }
 
   /**

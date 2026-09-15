@@ -1119,30 +1119,36 @@ export function isSameBookIdentity(
   existing: BookIdentity,
   incoming: BookIdentity,
 ): boolean {
-  // 1. Stable import ID or Calibre ID
-  if (existing.importId && incoming.importId) {
-    return existing.importId === incoming.importId;
-  }
-  if (
-    existing.id !== undefined &&
-    existing.id !== null &&
-    incoming.id !== undefined &&
-    incoming.id !== null &&
-    String(existing.id) === String(incoming.id)
-  ) {
-    return true;
+  // Stable identifiers are authoritative. If either record supplies one,
+  // the corresponding identifier must exist on both records and match; never
+  // fall through to fuzzy title/author matching after a one-sided or conflict.
+  const existingImportId = cleanString(existing.importId || "").trim();
+  const incomingImportId = cleanString(incoming.importId || "").trim();
+  if (Boolean(existingImportId) !== Boolean(incomingImportId)) return false;
+  if (existingImportId && incomingImportId && existingImportId !== incomingImportId) {
+    return false;
   }
 
-  // 2. ISBN / Identifier
+  const existingId = existing.id !== undefined && existing.id !== null
+    ? String(existing.id).trim()
+    : "";
+  const incomingId = incoming.id !== undefined && incoming.id !== null
+    ? String(incoming.id).trim()
+    : "";
+  if (Boolean(existingId) !== Boolean(incomingId)) return false;
+  if (existingId && incomingId && existingId !== incomingId) return false;
+
   const cleanIsbn = (str?: string | null) =>
     str ? str.replace(/[^0-9xX]/g, "").toUpperCase() : "";
   const existingIsbn = cleanIsbn(existing.isbn);
   const incomingIsbn = cleanIsbn(incoming.isbn);
-  if (existingIsbn && incomingIsbn) {
-    return existingIsbn === incomingIsbn;
+  if (Boolean(existingIsbn) !== Boolean(incomingIsbn)) return false;
+  if (existingIsbn && incomingIsbn && existingIsbn !== incomingIsbn) {
+    return false;
   }
+  if (existingImportId || existingId || existingIsbn) return true;
 
-  // 3. Author PLUS Normalized Title
+  // Author PLUS Normalized Title
   const existingTitle = cleanString(existing.title || "").toLowerCase();
   const incomingTitle = cleanString(incoming.title || "").toLowerCase();
   if (!existingTitle || !incomingTitle) return false;
@@ -1276,6 +1282,16 @@ export function validateEpubContent(filePathOrBuffer: string | Buffer): {
       };
     }
 
+    // Marker bytes are not sufficient evidence of an archive. Buffer inputs
+    // cannot be inspected with the same bounded archive listing guarantees as
+    // files, so fail closed rather than accepting a crafted marker-only blob.
+    if (typeof filePathOrBuffer !== "string") {
+      return {
+        valid: false,
+        error: "Invalid EPUB: Archive inspection requires a file path",
+      };
+    }
+
     // Check for EPUB indicators: 'mimetype' or 'META-INF/container.xml' or 'application/epub+zip'
     const sample = buf.toString("latin1");
     const hasMimetype = sample.includes("mimetype");
@@ -1298,13 +1314,33 @@ export function validateEpubContent(filePathOrBuffer: string | Buffer): {
       const listRes = spawnSync(tarCmd, ["-tvf", filePathOrBuffer], {
         encoding: "utf8",
         timeout: 10000,
+        maxBuffer: 2 * 1024 * 1024,
       });
 
-      if (listRes.status === 0 && listRes.stdout) {
-        const lines = listRes.stdout
-          .split("\n")
-          .filter((l: string) => l.trim().length > 0);
-        if (lines.length > 500) {
+      // Archive inspection is a mandatory validation gate. Any nonzero exit,
+      // timeout/signal, spawn error, or unparsable empty listing fails closed.
+      if (
+        listRes.error ||
+        listRes.status !== 0 ||
+        listRes.signal ||
+        typeof listRes.stdout !== "string"
+      ) {
+        return {
+          valid: false,
+          error: "Invalid EPUB: ZIP archive inspection failed",
+        };
+      }
+
+      const lines = listRes.stdout
+        .split("\n")
+        .filter((l: string) => l.trim().length > 0);
+      if (lines.length === 0) {
+        return {
+          valid: false,
+          error: "Invalid EPUB: ZIP archive inspection returned no entries",
+        };
+      }
+      if (lines.length > 500) {
           return {
             valid: false,
             error: `Invalid EPUB: Archive contains ${lines.length} entries, exceeding limit of 500`,
@@ -1314,10 +1350,15 @@ export function validateEpubContent(filePathOrBuffer: string | Buffer): {
         let totalUncompressed = 0;
         for (const line of lines) {
           const tokens = line.trim().split(/\s+/);
-          if (tokens.length >= 9) {
-            const mode = tokens[0];
-            const size = parseInt(tokens[4], 10);
-            const entryName = tokens.slice(8).join(" ");
+          if (tokens.length < 9 || !/^\d+$/.test(tokens[4])) {
+            return {
+              valid: false,
+              error: "Invalid EPUB: ZIP archive inspection output could not be parsed",
+            };
+          }
+          const mode = tokens[0];
+          const size = parseInt(tokens[4], 10);
+          const entryName = tokens.slice(8).join(" ");
 
             // Reject symlinks, hardlinks, or path traversal inside EPUB zip
             if (mode.startsWith("l") || line.includes(" -> ")) {
@@ -1353,7 +1394,6 @@ export function validateEpubContent(filePathOrBuffer: string | Buffer): {
               }
               totalUncompressed += size;
             }
-          }
         }
 
         if (totalUncompressed > 250 * 1024 * 1024) {
@@ -1375,7 +1415,6 @@ export function validateEpubContent(filePathOrBuffer: string | Buffer): {
           }
         }
       }
-    }
 
     return { valid: true };
   } catch (err: any) {

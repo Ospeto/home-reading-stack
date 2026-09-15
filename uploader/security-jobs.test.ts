@@ -33,9 +33,10 @@ import {
   MAX_ARCHIVE_ENTRIES,
 } from "./archive";
 import { DurableJobQueue, withCalibreLock, withCalibreLockSync } from "./jobs";
-import { handleRequest } from "./server";
+import { handleRequest, matchKosyncBookByTitleAuthor } from "./server";
 import { isAllowedCoverUrl, isSameBook } from "./scraper";
 import { generateTypographicCover, getDropDir } from "./article";
+import { getExternalVolumeStatusPath } from "./bot";
 
 describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
   it("blocks IPv4 loopback and local addresses", () => {
@@ -398,9 +399,14 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
   it("unpackArchive extracts canonical EPUBs and quarantines non-EPUB files", () => {
     const tempZip = `/tmp/test_mixed_${Date.now()}.zip`;
     const pythonScript = `
-import zipfile
+import io, zipfile
+inner = io.BytesIO()
+with zipfile.ZipFile(inner, "w") as epub:
+    epub.writestr("mimetype", "application/epub+zip")
+    epub.writestr("META-INF/container.xml", "<container></container>")
+    epub.writestr("OEBPS/content.xhtml", "<html></html>")
 with zipfile.ZipFile("${tempZip}", "w") as z:
-    z.writestr("book1.epub", "PK\\x03\\x04" + "x" * 120 + "mimetype application/epub+zip")
+    z.writestr("book1.epub", inner.getvalue())
     z.writestr("manual.pdf", "pdf data")
     z.writestr("manga.cbz", "cbz data")
 `;
@@ -841,6 +847,20 @@ with zipfile.ZipFile("${tempEpub}", "w") as z:
       expect(fakeCheck.valid).toBe(false);
       expect(fakeCheck.error).toContain("Missing ZIP container");
       fs.unlinkSync(fakeEpub);
+
+      const truncatedEpub = `/tmp/test_truncated_${Date.now()}.epub`;
+      fs.writeFileSync(
+        truncatedEpub,
+        Buffer.concat([
+          Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+          Buffer.from("mimetype application/epub+zip"),
+          Buffer.alloc(140),
+        ]),
+      );
+      const truncatedCheck = validateEpubContent(truncatedEpub);
+      expect(truncatedCheck.valid).toBe(false);
+      expect(truncatedCheck.error).toContain("archive inspection");
+      fs.unlinkSync(truncatedEpub);
     } finally {
       if (fs.existsSync(tempEpub)) fs.unlinkSync(tempEpub);
     }
@@ -921,6 +941,36 @@ with zipfile.ZipFile("${tempEpub}", "w") as z:
     expect(retried?.error).toBeNull();
   });
 
+  it("refuses retry of an active processing job without duplicate execution", async () => {
+    const testDb = new Database(":memory:");
+    const queue = new DurableJobQueue(testDb);
+    let started!: () => void;
+    const hasStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const mayFinish = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let executions = 0;
+    queue.registerHandler("file_ingest", async () => {
+      executions++;
+      started();
+      await mayFinish;
+      return { success: true };
+    });
+    const job = queue.enqueue("file_ingest", { name: "active" });
+    const execution = queue.executeJob(job.id);
+    await hasStarted;
+
+    expect(queue.retryJob(job.id)).toBeNull();
+    expect(queue.getJob(job.id)?.status).toBe("processing");
+    release();
+    const outcome = await execution;
+    expect(outcome.status).toBe("completed");
+    expect(executions).toBe(1);
+  });
+
   it("recovers hung worker jobs with expired leases", () => {
     const testDb = new Database(":memory:");
     const queue = new DurableJobQueue(testDb);
@@ -940,6 +990,14 @@ with zipfile.ZipFile("${tempEpub}", "w") as z:
     expect(recoveredJob?.status).toBe("pending");
     expect(recoveredJob?.retries).toBe(1);
     expect(recoveredJob?.worker_id).toBeNull();
+
+    testDb
+      .prepare(
+        `UPDATE jobs SET status = 'processing', worker_id = 'worker_live', lease_expires_at = ?, heartbeat_at = ? WHERE id = 'hung_job_1'`,
+      )
+      .run(Date.now() + 60000, Date.now());
+    expect(queue.recoverInterruptedJobs()).toBe(0);
+    expect(queue.getJob("hung_job_1")?.status).toBe("processing");
   });
 
   it("withCalibreLock serializes concurrent write executions", async () => {
@@ -1026,13 +1084,43 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
     }
   });
 
+  it("resolves KOSync title matches with author awareness", () => {
+    const books = [
+      { id: 1, title: "Dune", authors: "Frank Herbert", cover: true },
+      { id: 2, title: "Dune", authors: "Brian Herbert", cover: false },
+    ];
+    expect(
+      matchKosyncBookByTitleAuthor(
+        { title: "Dune", authors: "Brian Herbert" },
+        books,
+      )?.id,
+    ).toBe(2);
+    expect(
+      matchKosyncBookByTitleAuthor(
+        { title: "Dune", authors: "Unknown Author" },
+        books,
+      ),
+    ).toBeNull();
+  });
+
+  it("external volume status path is optional and configurable", () => {
+    const previous = process.env.EXTERNAL_VOLUME_STATUS_PATH;
+    delete process.env.EXTERNAL_VOLUME_STATUS_PATH;
+    delete process.env.EXTERNAL_VOLUME_PATH;
+    expect(getExternalVolumeStatusPath()).toBe("");
+    process.env.EXTERNAL_VOLUME_STATUS_PATH = "/tmp/test-volume";
+    expect(getExternalVolumeStatusPath()).toBe("/tmp/test-volume");
+    if (previous === undefined) delete process.env.EXTERNAL_VOLUME_STATUS_PATH;
+    else process.env.EXTERNAL_VOLUME_STATUS_PATH = previous;
+  });
+
   it("isSameBookIdentity and isSameBook require author matching and never match on title alone", () => {
     // 1. Stable import ID match
     expect(
       isSameBookIdentity(
         { id: 10, importId: "imp-123", title: "Book A", author: "Author A" },
         {
-          id: 20,
+          id: 10,
           importId: "imp-123",
           title: "Different Title",
           author: "Different Author",
@@ -1052,6 +1140,20 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
       isSameBookIdentity(
         { isbn: "978-0-11111-111-1", title: "Book A", author: "Author A" },
         { isbn: "978-0-22222-222-2", title: "Book A", author: "Author A" },
+      ),
+    ).toBe(false);
+
+    // One-sided or conflicting stable identifiers must never fall back.
+    expect(
+      isSameBookIdentity(
+        { isbn: "9780123456789", title: "Book A", author: "Author A" },
+        { title: "Book A", author: "Author A" },
+      ),
+    ).toBe(false);
+    expect(
+      isSameBook(
+        { isbn: "9780123456789", title: "Book A", authors: "Author A" },
+        { title: "Book A", author: "Author A" },
       ),
     ).toBe(false);
 

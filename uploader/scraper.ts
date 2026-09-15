@@ -261,28 +261,33 @@ export function isSameBook(
     series?: { series: string; volume: number } | null;
   },
 ): boolean {
-  // 1. Stable import ID or Calibre ID match
-  if (existing.importId && incoming.importId) {
-    return existing.importId === incoming.importId;
-  }
-  if (
-    existing.id !== undefined &&
-    existing.id !== null &&
-    incoming.id !== undefined &&
-    incoming.id !== null &&
-    String(existing.id) === String(incoming.id)
-  ) {
-    return true;
+  // Stable identifiers are authoritative. A one-sided identifier or a
+  // conflict must reject the candidate instead of falling back to title.
+  const existingImportId = cleanString(existing.importId || "").trim();
+  const incomingImportId = cleanString(incoming.importId || "").trim();
+  if (Boolean(existingImportId) !== Boolean(incomingImportId)) return false;
+  if (existingImportId && incomingImportId && existingImportId !== incomingImportId) {
+    return false;
   }
 
-  // 2. ISBN / Identifier match
+  const existingId = existing.id !== undefined && existing.id !== null
+    ? String(existing.id).trim()
+    : "";
+  const incomingId = incoming.id !== undefined && incoming.id !== null
+    ? String(incoming.id).trim()
+    : "";
+  if (Boolean(existingId) !== Boolean(incomingId)) return false;
+  if (existingId && incomingId && existingId !== incomingId) return false;
+
   const cleanIsbn = (str?: string | null) =>
     str ? str.replace(/[^0-9xX]/g, "").toUpperCase() : "";
   const existingIsbn = cleanIsbn(existing.isbn);
   const incomingIsbn = cleanIsbn(incoming.isbn);
-  if (existingIsbn && incomingIsbn) {
-    return existingIsbn === incomingIsbn;
+  if (Boolean(existingIsbn) !== Boolean(incomingIsbn)) return false;
+  if (existingIsbn && incomingIsbn && existingIsbn !== incomingIsbn) {
+    return false;
   }
+  if (existingImportId || existingId || existingIsbn) return true;
 
   const bTitle = cleanString(existing.title).toLowerCase();
   const sTitle = cleanString(incoming.title).toLowerCase();

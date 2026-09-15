@@ -777,11 +777,37 @@ export async function ingestBookFile(
   }
 }
 
+export function matchKosyncBookByTitleAuthor(
+  progress: { title?: string | null; filename?: string | null; authors?: string | null },
+  books: Array<{ id: number; title?: string; authors?: string; cover?: boolean }>,
+) {
+  const norm = (s: string) =>
+    (s || "").toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, "");
+  const searchNorm = norm(progress.title || progress.filename || "");
+  const searchAuthor = norm(progress.authors || "");
+  if (!searchNorm) return null;
+  return books.find((book) => {
+    const bookTitle = norm(book.title || "");
+    const titleMatch =
+      bookTitle === searchNorm ||
+      (searchNorm.length > 5 &&
+        (bookTitle.includes(searchNorm) || searchNorm.includes(bookTitle)));
+    if (!titleMatch) return false;
+    if (!searchAuthor) return true;
+    const bookAuthor = norm(book.authors || "");
+    return Boolean(bookAuthor) &&
+      (bookAuthor === searchAuthor ||
+        bookAuthor.includes(searchAuthor) ||
+        searchAuthor.includes(bookAuthor));
+  }) || null;
+}
+
 function getKosyncProgress() {
   try {
     if (fs.existsSync(KOSYNC_DB_PATH)) {
-      const db = new Database(KOSYNC_DB_PATH);
-      const rows = db
+      const db = new Database(KOSYNC_DB_PATH, { readonly: true });
+      try {
+        const rows = db
         .query(
           "SELECT id, document, progress, percentage, device, device_id, filename, title, authors, timestamp FROM progress ORDER BY timestamp DESC LIMIT 50;",
         )
@@ -792,11 +818,12 @@ function getKosyncProgress() {
       const norm = (s: string) =>
         (s || "").toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, "");
 
-      return rows.map((r) => {
+        return rows.map((r) => {
         let displayTitle = r.title || r.filename;
         let displayAuthors = r.authors;
         let bookId: number | null = null;
         let cover: boolean = false;
+        let aliasPresent = false;
 
         if (map[r.document]) {
           displayTitle = map[r.document].title;
@@ -805,24 +832,8 @@ function getKosyncProgress() {
           cover = map[r.document].cover;
         }
 
-        if (!bookId && (r.title || r.filename)) {
-          const searchNorm = norm(r.title || r.filename);
-          const bookMatch = books.find((b: any) => {
-            const bNorm = norm(b.title);
-            return (
-              bNorm === searchNorm ||
-              (searchNorm.length > 5 &&
-                (bNorm.includes(searchNorm) || searchNorm.includes(bNorm)))
-            );
-          });
-          if (bookMatch) {
-            bookId = bookMatch.id;
-            cover = !!bookMatch.cover;
-            displayTitle = bookMatch.title;
-            displayAuthors = bookMatch.authors || displayAuthors;
-          }
-        }
-
+        // Resolve durable aliases before any title lookup. Alias identity is
+        // canonical-id or title + author, never title alone.
         if (!bookId) {
           try {
             const alias = db
@@ -832,27 +843,19 @@ function getKosyncProgress() {
               .get(r.document) as any;
 
             if (alias) {
+              aliasPresent = true;
+              const aliasCanonical = cleanString(alias.canonical_id || "").toLowerCase();
+              const aliasTitle = norm(alias.normalized_title || "");
+              const aliasAuthor = norm(alias.normalized_authors || "");
               const bookMatch = books.find((b: any) => {
                 const bCanonical =
                   cleanString(b.title).toLowerCase() +
                   "__" +
                   cleanString(b.authors || "").toLowerCase();
-                if (
-                  alias.canonical_id &&
-                  bCanonical === alias.canonical_id.toLowerCase()
-                ) {
-                  return true;
-                }
-                const titleMatches =
-                  norm(b.title) === norm(alias.normalized_title);
-                const authorMatches =
-                  alias.normalized_authors && b.authors
-                    ? norm(b.authors).includes(
-                        norm(alias.normalized_authors),
-                      ) ||
-                      norm(alias.normalized_authors).includes(norm(b.authors))
-                    : false;
-                return titleMatches && authorMatches;
+                if (aliasCanonical && bCanonical === aliasCanonical) return true;
+                return Boolean(aliasTitle && aliasAuthor) &&
+                  norm(b.title) === aliasTitle &&
+                  norm(b.authors || "") === aliasAuthor;
               });
               if (bookMatch) {
                 bookId = bookMatch.id;
@@ -866,6 +869,19 @@ function getKosyncProgress() {
             }
           } catch (_e) {
             void _e;
+          }
+        }
+
+        // Only perform a title lookup after alias resolution, and require an
+        // author match whenever KOSync supplied one. This prevents two books
+        // with the same title from being assigned to the wrong author.
+        if (!bookId && !aliasPresent && (r.title || r.filename)) {
+          const bookMatch = matchKosyncBookByTitleAuthor(r, books);
+          if (bookMatch) {
+            bookId = bookMatch.id;
+            cover = !!bookMatch.cover;
+            displayTitle = bookMatch.title;
+            displayAuthors = bookMatch.authors || displayAuthors;
           }
         }
 
@@ -900,7 +916,14 @@ function getKosyncProgress() {
           bookId,
           cover,
         };
-      });
+        });
+      } finally {
+        try {
+          db.close();
+        } catch (_closeErr) {
+          void _closeErr;
+        }
+      }
     }
   } catch (e) {
     console.error("Error reading kosync db:", e);
@@ -1275,12 +1298,28 @@ export async function handleRequest(
         corsOrigin,
       );
     const retried = jobQueue.retryJob(jobId);
-    if (!retried)
+    if (!retried) {
+      const current = jobQueue.getJob(jobId);
+      if (!current) {
+        return jsonResponse(
+          { success: false, error: "Job not found" },
+          404,
+          corsOrigin,
+        );
+      }
+      if (current.status === "processing") {
+        return jsonResponse(
+          { success: false, error: "Cannot retry an active processing job" },
+          409,
+          corsOrigin,
+        );
+      }
       return jsonResponse(
-        { success: false, error: "Job not found" },
-        404,
+        { success: false, error: "Only failed jobs can be retried" },
+        409,
         corsOrigin,
       );
+    }
     return jsonResponse(
       {
         success: true,

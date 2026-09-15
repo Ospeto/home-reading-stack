@@ -1021,6 +1021,14 @@ export async function retrieveAndSendBook(
   }
 }
 
+export function getExternalVolumeStatusPath(): string {
+  return (
+    process.env.EXTERNAL_VOLUME_STATUS_PATH ||
+    process.env.EXTERNAL_VOLUME_PATH ||
+    ""
+  );
+}
+
 export async function getStatusDashboard(): Promise<string> {
   const ts = new Date()
     .toLocaleString("en-GB", { timeZone: "Asia/Yangon" })
@@ -1150,8 +1158,9 @@ export async function getStatusDashboard(): Promise<string> {
   let kosyncProgress = 0;
   let deviceNames = "";
   if (fs.existsSync(KOSYNC_DB_PATH)) {
+    let kDb: Database | null = null;
     try {
-      const kDb = new Database(KOSYNC_DB_PATH, { readonly: true });
+      kDb = new Database(KOSYNC_DB_PATH, { readonly: true });
       kosyncDbStatus = "🟢 `Healthy` (SQLite WAL)";
       const uRow = kDb.query("SELECT COUNT(*) as cnt FROM users").get() as any;
       kosyncUsers = uRow?.cnt || 0;
@@ -1169,6 +1178,12 @@ export async function getStatusDashboard(): Promise<string> {
       }
     } catch (_e) {
       void _e;
+    } finally {
+      try {
+        kDb?.close();
+      } catch (_closeErr) {
+        void _closeErr;
+      }
     }
   }
 
@@ -1218,9 +1233,10 @@ export async function getStatusDashboard(): Promise<string> {
   }
 
   let ssdDiskStr = "";
-  if (fs.existsSync("/Volumes/Ospeto_SSD")) {
+  const externalVolumePath = getExternalVolumeStatusPath();
+  if (externalVolumePath && fs.existsSync(externalVolumePath)) {
     try {
-      const df = spawnSync("df", ["-h", "/Volumes/Ospeto_SSD"], {
+      const df = spawnSync("df", ["-h", externalVolumePath], {
         encoding: "utf8",
         timeout: 2000,
       });
@@ -1410,8 +1426,9 @@ export function getCurrentlyReadingShelf(limit: number = 5): {
   const items: ActiveReadingDoc[] = [];
 
   if (fs.existsSync(KOSYNC_DB_PATH)) {
+    let kDb: Database | null = null;
     try {
-      const kDb = new Database(KOSYNC_DB_PATH, { readonly: true });
+      kDb = new Database(KOSYNC_DB_PATH, { readonly: true });
       kDb.run("PRAGMA busy_timeout = 3000;");
 
       const rows = kDb
@@ -1423,8 +1440,6 @@ export function getCurrentlyReadingShelf(limit: number = 5): {
         LIMIT ?
       `)
         .all(limit) as any[];
-
-      kDb.close();
 
       for (const r of rows) {
         let title = (r.title || "").trim();
@@ -1492,6 +1507,12 @@ export function getCurrentlyReadingShelf(limit: number = 5): {
       }
     } catch (_e) {
       logError("Failed to query koreader-sync.db for currently reading", _e);
+    } finally {
+      try {
+        kDb?.close();
+      } catch (_closeErr) {
+        void _closeErr;
+      }
     }
   }
 
