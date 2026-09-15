@@ -936,6 +936,7 @@ with zipfile.ZipFile("${tempEpub}", "w") as z:
         literalUrl: "https://example.test/api?token=$1&keep=$1",
         credentialsUrl:
           "https://user:pass@example.test/api?api_key=SECRET&api-key=TOP&authorization=Bearer%20SECRET&keep=$1",
+        usernameOnlyUrl: "https://user@example.test/api?keep=$1",
       },
       status: "failed",
       retries: 1,
@@ -959,6 +960,9 @@ with zipfile.ZipFile("${tempEpub}", "w") as z:
     );
     expect(redacted.payload.credentialsUrl).toBe(
       "https://[REDACTED]@example.test/api?api_key=[REDACTED]&api-key=[REDACTED]&authorization=[REDACTED]&keep=$1",
+    );
+    expect(redacted.payload.usernameOnlyUrl).toBe(
+      "https://[REDACTED]@example.test/api?keep=$1",
     );
   });
 

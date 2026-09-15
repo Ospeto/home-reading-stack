@@ -1042,7 +1042,7 @@ export function redactJobRecord(job: any): any {
       s = s.replace(/https?:\/\/[^\s<>"']+/gi, (url) => {
         const redactedUrl = url
           .replace(
-            /^(https?:\/\/)[^/\s@]+:[^/\s@]+@/i,
+            /^(https?:\/\/)[^/\s@]+@/i,
             (_match, scheme: string) => `${scheme}[REDACTED]@`,
           )
           .replace(
