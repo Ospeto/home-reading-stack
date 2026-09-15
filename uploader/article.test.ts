@@ -24,9 +24,17 @@ beforeAll(() => {
   // 1. Isolate external article and Jina network access
   globalThis.fetch = (async (input: any, init?: any) => {
     const urlStr = typeof input === "string" ? input : input?.url || "";
+    const hostHeader =
+      init?.headers instanceof Headers
+        ? init.headers.get("host")
+        : (init?.headers?.host || "");
 
     // Intercept Paul Graham article fetch
-    if (urlStr.includes("paulgraham.com/foundermode.html")) {
+    if (
+      urlStr.includes("paulgraham.com/foundermode.html") ||
+      (hostHeader?.includes("paulgraham.com") &&
+        urlStr.includes("/foundermode.html"))
+    ) {
       const dummyEssay =
         "At a YC event recently Brian Chesky gave a talk that everyone who was there is still talking about. Most founder advice is wrong because modularizing companies when they grow breaks the core vision. Founders need to stay deeply involved in details. ".repeat(
           25,
@@ -50,8 +58,13 @@ beforeAll(() => {
     }
 
     // Intercept FT article paywall & Jina fallback
-    if (urlStr.includes("ft.com") || urlStr.includes("r.jina.ai")) {
-      if (urlStr.includes("r.jina.ai")) {
+    if (
+      urlStr.includes("ft.com") ||
+      hostHeader?.includes("ft.com") ||
+      urlStr.includes("r.jina.ai") ||
+      hostHeader?.includes("r.jina.ai")
+    ) {
+      if (urlStr.includes("r.jina.ai") || hostHeader?.includes("r.jina.ai")) {
         const jinaPaywall = `Title: Financial Times
 URL Source: https://www.ft.com/content/sample
 Markdown Content:
