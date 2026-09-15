@@ -754,40 +754,44 @@ export interface BookFileDetails {
   bookId: number;
   title: string;
   authors: string;
+  series?: string | null;
+  seriesIndex?: number | string | null;
   chosenFormat: string;
   filePath: string;
   fileSize: number;
 }
 
-export function locateBookFile(bookId: number): BookFileDetails | null {
-  const PREFERRED_FORMATS = [
-    "EPUB",
-    "PDF",
-    "MOBI",
-    "AZW3",
-    "CBZ",
-    "CBR",
-    "AZW",
-    "ZIP",
-    "RAR",
-    "7Z",
-  ];
+export function getCalibreDbPath(): string {
+  return process.env.CALIBRE_DB_PATH || CALIBRE_DB_PATH;
+}
 
-  if (fs.existsSync(CALIBRE_DB_PATH)) {
+export function getCalibreLibraryDir(): string {
+  return process.env.CALIBRE_LIBRARY_DIR || CALIBRE_LIBRARY_DIR;
+}
+
+export function locateBookFile(bookId: number): BookFileDetails | null {
+  const preferredFormats = ["EPUB"];
+  const calibreDbPath = getCalibreDbPath();
+  const calibreLibraryDir = getCalibreLibraryDir();
+
+  if (fs.existsSync(calibreDbPath)) {
     try {
-      const db = new Database(CALIBRE_DB_PATH, { readonly: true });
+      const db = new Database(calibreDbPath, { readonly: true });
       db.run("PRAGMA busy_timeout = 3000;");
 
       const rows = db
         .query(`
-        SELECT b.id, b.title, b.path,
+        SELECT b.id, b.title, b.path, b.series_index,
                GROUP_CONCAT(DISTINCT a.name) as authors,
+               s.name as series,
                d.format, d.name as filename, d.uncompressed_size
         FROM books b
         JOIN data d ON b.id = d.book
         LEFT JOIN books_authors_link bal ON b.id = bal.book
         LEFT JOIN authors a ON bal.author = a.id
-        WHERE b.id = ?
+        LEFT JOIN books_series_link bsl ON b.id = bsl.book
+        LEFT JOIN series s ON bsl.series = s.id
+        WHERE b.id = ? AND UPPER(d.format) = 'EPUB'
         GROUP BY d.id
       `)
         .all(bookId) as any[];
@@ -797,15 +801,18 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
       if (rows && rows.length > 0) {
         const title = rows[0].title || "Book";
         const authors = rows[0].authors || "Unknown";
+        const series = rows[0].series || null;
+        const seriesIndex = rows[0].series_index || null;
         const bookRelPath = rows[0].path;
-        const basePath = path.join(CALIBRE_LIBRARY_DIR, bookRelPath);
+        const basePath = path.join(calibreLibraryDir, bookRelPath);
 
-        // Sort by preferred formats (EPUB first, etc.)
-        rows.sort((a, b) => {
-          const idxA = PREFERRED_FORMATS.indexOf(
+        // The canonical collection is EPUB-only; do not deliver other formats.
+        const epubRows = rows.filter((row) => String(row.format || "").toUpperCase() === "EPUB");
+        epubRows.sort((a, b) => {
+          const idxA = preferredFormats.indexOf(
             String(a.format || "").toUpperCase(),
           );
-          const idxB = PREFERRED_FORMATS.indexOf(
+          const idxB = preferredFormats.indexOf(
             String(b.format || "").toUpperCase(),
           );
           const scoreA = idxA === -1 ? 999 : idxA;
@@ -813,7 +820,7 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
           return scoreA - scoreB;
         });
 
-        for (const row of rows) {
+        for (const row of epubRows) {
           const fmt = String(row.format || "").toUpperCase();
           const filename = row.filename;
 
@@ -832,6 +839,8 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
               bookId,
               title,
               authors,
+              series,
+              seriesIndex,
               chosenFormat: fmt,
               filePath: candidate1,
               fileSize: stat.size,
@@ -843,6 +852,8 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
               bookId,
               title,
               authors,
+              series,
+              seriesIndex,
               chosenFormat: fmt,
               filePath: candidate2,
               fileSize: stat.size,
@@ -862,6 +873,8 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
                 bookId,
                 title,
                 authors,
+                series,
+                seriesIndex,
                 chosenFormat: fmt,
                 filePath: fullPath,
                 fileSize: stat.size,
@@ -901,6 +914,7 @@ export function locateBookFile(bookId: number): BookFileDetails | null {
         const fmts: string[] = Array.isArray(item.formats) ? item.formats : [];
 
         for (const f of fmts) {
+          if (path.extname(f).toLowerCase() !== ".epub") continue;
           if (fs.existsSync(f)) {
             const stat = fs.statSync(f);
             const fmtName =

@@ -400,7 +400,7 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
     const pythonScript = `
 import zipfile
 with zipfile.ZipFile("${tempZip}", "w") as z:
-    z.writestr("book1.epub", "epub data")
+    z.writestr("book1.epub", "PK\\x03\\x04" + "x" * 120 + "mimetype application/epub+zip")
     z.writestr("manual.pdf", "pdf data")
     z.writestr("manga.cbz", "cbz data")
 `;

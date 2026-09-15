@@ -241,6 +241,8 @@ The public WAN edge (`https://reading.wavypremium.xyz`) is hardened against unau
      - Bearer token or `X-API-Key` matching `READING_API_KEY` in `.env`. (API keys in query strings `?token=` or `?auth=` are strictly rejected).
      - Valid Telegram WebApp `initData` cryptographically verified with `TELEGRAM_BOT_TOKEN` via HMAC-SHA256.
      - Authenticated session cookie (`reading_token`). For state-changing cookie mutations, valid `Origin` or `Referer` headers are strictly enforced.
+   - **Captain-approved public reads:** Read-only library, covers/downloads, telemetry, export, and reading-data endpoints remain public on WAN. Authentication is not added to `GET /api/books`, library facets, read-only job inspection, or equivalent read routes; only state-changing routes are protected.
+   - **Credential transport:** API keys and TMA/session credentials are accepted only in their header or cookie channels. Query-string `token`/`auth` values are rejected because URLs leak through history, logs, Referer headers, and analytics.
 
 2. **CORS & CSRF Origin Protection:**
    - CORS is locked down from wildcard `*` to permitted origins: `https://reading.wavypremium.xyz`, `https://kosync.wavypremium.xyz`, local LAN origins, and custom entries in `ALLOWED_ORIGINS`.
@@ -251,8 +253,8 @@ The public WAN edge (`https://reading.wavypremium.xyz`) is hardened against unau
      - Loopback (`127.0.0.0/8`, `::1`)
      - RFC 1918 private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
      - Cloud metadata & link-local (`169.254.0.0/16`, `169.254.169.254`)
-     - Decimal/hex/octal IP representations and local hostnames (`localhost`, `*.internal`, `*.lan`, `*.home.arpa`)
-   - **Redirect Verification:** HTTP redirects are intercepted and re-validated hop-by-hop against private IP blocks before following (`safeFetchWithSsrf`).
+     - Decimal/hex/octal IP representations, IPv6 multicast/reserved ranges, and local hostnames (`localhost`, `*.internal`, `*.lan`, `*.home.arpa`)
+   - **Redirect Verification:** HTTP redirects are intercepted and re-validated hop-by-hop against private IP blocks before following (`safeFetchWithSsrf`). Every A and AAAA result is validated and each hop reconnects through a validated address while retaining the original hostname for Host/TLS semantics.
    - **Strict Response & Timeout Bounds:** All outbound fetches enforce response byte caps (10MB for covers, 25MB for HTML) and strict timeouts to prevent memory exhaustion or slowloris attacks.
 
 4. **Decompression & Streaming Resource Limits:**
@@ -264,6 +266,10 @@ The public WAN edge (`https://reading.wavypremium.xyz`) is hardened against unau
    - Public API error responses redact internal filesystem paths and stack traces (`sanitizeErrorMessage`).
    - Public job inspection endpoints (`GET /api/jobs/recent`, `GET /api/jobs/:id`) redact all filesystem paths, tokens, secrets, and API keys (`redactJobRecord`).
    - Download endpoints return clean metadata-derived filenames (`Title - Author.epub` or `[Series 1] Title - Author.epub`), never leaking Calibre internal storage directory paths.
+
+6. **Secret Hygiene & Credential Rotation Protocol:**
+   - `.env.example` contains non-functional dummy placeholders only. Never commit production tokens, salts, or API keys to the repository.
+   - Any exposed or leaked credentials require captain-authorized live credential rotation and repository history remediation (such as `git filter-repo` or BFG Repo-Cleaner). Autonomous agents must not rewrite git history or perform live credential rotation without explicit captain authorization.
 
 ---
 

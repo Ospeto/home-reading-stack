@@ -4,7 +4,7 @@ This runbook documents operational commands, health checks, service management, 
 
 ---
 
-## 🛠️ Service Architecture on Mac Mini (`192.168.31.15`)
+## 🏗️ Service Architecture on Mac Mini (`192.168.31.15`)
 
 All services on the Mac mini run as native macOS LaunchAgents under `/Users/ospeto/Library/LaunchAgents/`:
 
@@ -24,7 +24,7 @@ All services on the Mac mini run as native macOS LaunchAgents under `/Users/ospe
 
 ---
 
-## 🩺 Routine Health Checks
+## 🔍 Routine Health Checks
 
 Run from your Mac laptop:
 
@@ -50,7 +50,7 @@ launchctl list | grep com.ospeto.reading-vless-tunnel
 
 ---
 
-## 🔄 Service Control & Lifecycle
+## 🕹️ Service Control & Lifecycle
 
 ### Restart All Services
 
@@ -250,8 +250,8 @@ bun -e '
 
 # 2. In Telegram (@saroat_ospeto_bot):
 # Send: /find One Piece
-# Expected: Returns matching books with [📥 Send File], [📖 Read Online], and [ℹ️ Details] buttons.
-# Tap [📥 Send File] or send /get 6 to test direct file delivery.
+# Expected: Returns matching books with [📤 Send File], [📖 Read Online], and [ℹ️ Details] buttons.
+# Tap [📤 Send File] or send /get 6 to test direct file delivery.
 ```
 
 ### 7. Jina Reader Fallback & Paywall Verification
@@ -357,7 +357,7 @@ Send `/status` or `/health` to the Telegram bot to inspect:
 - **Reading HQ & Calibre**: Web Uploader (:8086) and Calibre (:8088) states, total catalog count, top format distribution, and newest ingested title.
 - **KOReader Sync**: Server state (:7200), SQLite WAL health, user/device counts, and reading progress records.
 - **Mac Mini Host**: System uptime, available memory, and storage free space (internal disk + External SSD).
-- **Interactive Controls**: `[🔄 Refresh Status]` updates the message card in-place; `[📖 Open Reading HQ]` launches the Telegram Mini App.
+- **Interactive Controls**: `[🔄 Refresh Status]` updates the message card in-place; `[📱 Open Reading HQ]` launches the Telegram Mini App.
 
 ---
 
@@ -474,43 +474,107 @@ sqlite3 /Users/ospeto/uploader/cache.db "SELECT id, type, status, retries, worke
 
 ---
 
-### 12. Canonical EPUB-Only Library Migration Preflight
+### 12. Safe EPUB-Only Library Collection & SSD Migration Preflight
+
+Home Reading Stack operates as a clean, unified **EPUB-only library collection**. This guarantees uniform rendering, typography, reading progress synchronization via KOReader, and seamless OPDS delivery across all eReader devices.
 
 *Note: Per architecture decision, live Calibre library migration is a separately supervised operation executed after backups are verified. Do not physically rename or move files inside Calibre library directories by hand.*
 
 #### Preflight Audit & Inspection Commands
 
+#### 1. Ingestion & Format Quarantine Rules
+
+- **Accepted Formats:** `.epub` files, or `.zip` / `.rar` / `.7z` / `.tar` archives containing `.epub` files.
+- **Rejected / Quarantined Formats:** Non-EPUB formats (`.pdf`, `.mobi`, `.azw3`, `.cbz`, `.cbr`, `.kfx`, `.txt`, `.docx`) are rejected with clear error explanations rather than mixing into the collection.
+- **Web Articles:** Direct URL ingestion (`POST /api/ingest-url` or Telegram bot link sharing) converts web articles into clean, typography-enhanced `.epub` documents with auto-generated typographic covers.
+- **Calibre Queries & Views:** Calibre queries in `server.ts`, Telegram bot search (`/find`), `/recent`, and Reading HQ UI views strictly filter for EPUB format (`WHERE UPPER(d.format) = 'EPUB'`).
+
+#### 2. Sanitized Metadata-Derived Filenames
+
+User-facing downloads (`GET /api/books/:id/download/:format`), Telegram document deliveries, and Obsidian exports use sanitized metadata-derived names:
+
+- **With Series:** `"Series 01 - Title - Author.epub"`
+- **Standalone:** `"Title - Author.epub"`
+- **Missing Author:** `"Title.epub"`
+- **Safety Guarantee:** Internal physical files inside the Calibre library are **never renamed, moved, or mutated**. Calibre storage paths are treated as internal and immutable.
+- **Headers:** HTTP responses include standard RFC 5987 / RFC 6266 `Content-Disposition` with ASCII fallback and percent-encoded UTF-8 (`filename*=UTF-8''...`).
+
+#### 3. SSD Migration Preflight
+
+To safely migrate EPUBs from the external library into the canonical library, run the read-only migration preflight after backups are verified:
+
 ```bash
-# 1. Run full database backup first
-/Users/ospeto/uploader/scripts/backup-daily.sh
+# 1. Stop Calibre server
+launchctl unload ~/Library/LaunchAgents/com.ospeto.calibre-server.plist
 
-# 2. Audit current format distribution in Calibre library
-calibredb list --with-library http://127.0.0.1:8088 --fields id,title,authors,formats --for-machine | jq '
-  map(.formats[]) | group_by(.) | map({format: .[0], count: length}) | sort_by(-.count)
-'
+# 2. Create timestamped offline snapshot
+cp -a "/Users/ospeto/Calibre Libraries/Agent Library" "/Users/ospeto/Calibre Libraries/Agent Library.backup.$(date +%Y%m%d_%H%M%S)"
 
-# 3. Identify non-EPUB records that lack an EPUB companion (candidates for conversion/quarantine)
-calibredb list --with-library http://127.0.0.1:8088 --fields id,title,authors,formats --for-machine | jq '
-  map(select(.formats | map(endswith(".epub")) | any | not)) | {
-    totalNonEpubOnly: length,
-    sample: .[0:5]
-  }
-'
-
-# 4. Migration Execution Plan (Supervised Step Post-Merge):
-#    a. Convert non-EPUB books to EPUB using Calibre CLI:
-#       calibredb export <id> --with-library http://127.0.0.1:8088 --to-dir /tmp/migration
-#       ebook-convert /tmp/migration/<name>.pdf /tmp/migration/<name>.epub
-#       calibredb add_format <id> /tmp/migration/<name>.epub --with-library http://127.0.0.1:8088
-#    b. Quarantine unsupported legacy formats:
-#       calibredb remove_format <id> PDF --with-library http://127.0.0.1:8088
-#    c. Verify Calibre database integrity:
-#       calibredb check_library --with-library http://127.0.0.1:8088
+# 3. Restart Calibre server
+launchctl load -w ~/Library/LaunchAgents/com.ospeto.calibre-server.plist
 ```
+
+##### Step 2: Run Read-Only Migration Preflight Inventory
+
+Execute the dry-run preflight tool to analyze source inventory, detect duplicates, and skip non-EPUB formats without modifying any files:
+
+```bash
+./scripts/migration-preflight.sh
+```
+
+Preflight analysis reports:
+
+- Total registered books in source library (~1,105).
+- EPUB format books identified (~1,104).
+- Non-EPUB formats excluded (e.g. 1,104 KFX, AZW, TXT).
+- Exact duplicates already present in canonical library.
+- New unique EPUB candidates ready for batch ingestion.
+
+##### Step 3: Supervised Batch Import (Post-Merge)
+
+When migration is supervised, import unique EPUBs into Calibre using `calibredb add`:
+
+```bash
+# Import individual or batch EPUBs through Calibre HTTP server (prevents SQLite locks)
+/opt/homebrew/bin/calibredb add \
+  --with-library http://127.0.0.1:8088 \
+  --automerge ignore \
+  "/path/to/incoming/book.epub"
+```
+
+##### Step 4: Post-Migration Verification Checklist
+
+Verify each reading stack integration point after import:
+
+1. **OPDS Feed:**
+
+   ```bash
+   curl -s http://127.0.0.1:8088/opds | head -n 25
+   ```
+
+2. **Reading HQ API & Web App:**
+
+   ```bash
+   curl -s http://127.0.0.1:8086/api/books | jq length
+   ```
+
+3. **Telegram Bot:**
+   - Send `/recent` to inspect newly added EPUBs.
+   - Send `/find <title>` to verify instant search.
+   - Tap `[Send File]` on a migrated book to verify metadata-derived delivery.
+4. **KOReader Device Sync:**
+   - Trigger sync from device or check `https://kosync.wavypremium.xyz`.
 
 ---
 
-## 🌐 Remote VPS Standby Stack (`us3` / `198.46.146.17`)
+### 13. Security, Secret Hygiene & Credential Rotation Protocol
+
+- **Placeholders in Configuration Templates:** `.env.example` contains non-functional dummy placeholders only (`your_kosync_password_salt_here`, `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`). Real secrets, salts, and tokens must never be committed to source control.
+- **Exposed Credentials Policy:** If production credentials (such as `TELEGRAM_BOT_TOKEN`, `KOSYNC_PASSWORD_SALT`, or `READING_API_KEY`) are ever exposed or committed to repository history, they require captain-authorized live credential rotation and repository history remediation (e.g. via `git filter-repo` or BFG Repo-Cleaner). Crewmate agents must not rewrite git history or perform live credential rotation autonomously without explicit captain authorization.
+
+---
+
+## ☁️ Remote VPS Standby Stack (`us3` / `198.46.146.17`)
 
 If ever needing to manage or update the cloud backup stack:
 

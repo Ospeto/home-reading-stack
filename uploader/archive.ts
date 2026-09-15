@@ -3,7 +3,19 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
-import { resolveExecutable, sanitizeErrorMessage } from "./security";
+import {
+  resolveExecutable,
+  sanitizeErrorMessage,
+  validateEpubContent,
+} from "./security";
+
+export const ARCHIVE_EXTENSIONS = [
+  ".zip", ".rar", ".tar", ".7z", ".gz", ".bz2",
+] as const;
+export const REJECTED_BOOK_EXTENSIONS = [
+  ".pdf", ".mobi", ".azw3", ".azw", ".cbz", ".cbr", ".fb2", ".djvu",
+  ".ibooks", ".lit", ".prc", ".txt", ".docx",
+] as const;
 
 export const MAX_ARCHIVE_SIZE_BYTES = 100 * 1024 * 1024; // 100MB
 export const MAX_SINGLE_FILE_SIZE_BYTES = 150 * 1024 * 1024; // 150MB
@@ -23,6 +35,8 @@ export interface ExtractedBook {
 }
 
 export interface QuarantinedBook {
+  /** Public name retained for collection/quarantine reports. */
+  name: string;
   originalName: string;
   format: string;
   reason: string;
@@ -46,7 +60,7 @@ export function getTarBinary(): string {
 
 export function isArchiveFile(filename: string): boolean {
   const ext = path.extname(filename).toLowerCase();
-  return [".zip", ".rar", ".tar", ".7z", ".gz", ".bz2"].includes(ext);
+  return (ARCHIVE_EXTENSIONS as readonly string[]).includes(ext);
 }
 
 /**
@@ -65,16 +79,7 @@ export function isLegacyOrNonCanonicalFormat(filename: string): boolean {
   const ext = path.extname(filename).toLowerCase();
   const base = path.basename(filename);
   return (
-    [
-      ".pdf",
-      ".mobi",
-      ".azw3",
-      ".cbz",
-      ".cbr",
-      ".azw",
-      ".djvu",
-      ".fb2",
-    ].includes(ext) &&
+    (REJECTED_BOOK_EXTENSIONS as readonly string[]).includes(ext) &&
     !base.startsWith(".") &&
     !base.startsWith("._")
   );
@@ -86,6 +91,32 @@ export function isLegacyOrNonCanonicalFormat(filename: string): boolean {
  */
 export function isSupportedBook(filename: string): boolean {
   return isCanonicalEpub(filename);
+}
+
+export function isNonEpubBook(filename: string): boolean {
+  return isLegacyOrNonCanonicalFormat(filename);
+}
+
+export function validateArchiveEntryName(entryName: string): {
+  valid: boolean;
+  error?: string;
+} {
+  if (entryName.includes("\n") || entryName.includes("\r")) {
+    return { valid: false, error: "Archive entry names containing newline characters are strictly rejected" };
+  }
+  if (entryName.includes("\0")) {
+    return { valid: false, error: "Null byte detected in archive entry" };
+  }
+  if (
+    entryName === ".." ||
+    entryName.includes("..") ||
+    entryName.startsWith("/") ||
+    entryName.startsWith("\\") ||
+    /^[a-zA-Z]:[\\/]/.test(entryName)
+  ) {
+    return { valid: false, error: `Path traversal detected in archive entry: "${safeArchiveEntryLabel(entryName)}"` };
+  }
+  return { valid: true };
 }
 
 export interface ArchiveInspection {
@@ -111,6 +142,30 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
         entryCount: 0,
         totalUncompressedBytes: 0,
       };
+    }
+
+    // Check length-prefixed ZIP names and fixed-width TAR names before tar can
+    // normalize or split them in human-readable output.
+    const raw = fs.readFileSync(archivePath);
+    for (let offset = 0; offset + 46 <= raw.length; offset++) {
+      if (raw[offset] === 0x50 && raw[offset + 1] === 0x4b && raw[offset + 2] === 0x01 && raw[offset + 3] === 0x02) {
+        const nameLength = raw.readUInt16LE(offset + 28);
+        const extraLength = raw.readUInt16LE(offset + 30);
+        const commentLength = raw.readUInt16LE(offset + 32);
+        const name = raw.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
+        const checked = validateArchiveEntryName(name);
+        if (!checked.valid) return { safe: false, error: checked.error, entryCount: 0, totalUncompressedBytes: 0 };
+        offset += 46 + nameLength + extraLength + commentLength - 1;
+      }
+    }
+    for (let offset = 0; offset + 512 <= raw.length; offset += 512) {
+      const header = raw.subarray(offset, offset + 512);
+      if (header.subarray(257, 262).toString("ascii") === "ustar") {
+        const end = header.indexOf(0);
+        const name = header.subarray(0, end < 0 ? 100 : end).toString("utf8");
+        const checked = validateArchiveEntryName(name);
+        if (!checked.valid) return { safe: false, error: checked.error, entryCount: 0, totalUncompressedBytes: 0 };
+      }
     }
 
     // Run tar/bsdtar -tvf to inspect entry headers and sizes
@@ -157,7 +212,7 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
         if (mode.startsWith("l") || line.includes(" -> ")) {
           return {
             safe: false,
-            error: `Path traversal / prohibited symlink detected in archive entry "${safeArchiveEntryLabel(entryName)}"`,
+            error: `Symbolic link detected in archive entry "${safeArchiveEntryLabel(entryName)}" (symlink)`,
             entryCount: lines.length,
             totalUncompressedBytes,
           };
@@ -165,24 +220,17 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
         if (mode.startsWith("h") || line.includes(" link to ")) {
           return {
             safe: false,
-            error: `Path traversal / prohibited hardlink detected in archive entry "${safeArchiveEntryLabel(entryName)}"`,
+            error: `Hard link detected in archive entry "${safeArchiveEntryLabel(entryName)}"`,
             entryCount: lines.length,
             totalUncompressedBytes,
           };
         }
 
-        // Check for path traversal guards:
-        // Reject any entry with '..' components, starting with '/', '\', or containing null bytes
-        if (
-          entryName.includes("..") ||
-          entryName.startsWith("/") ||
-          entryName.startsWith("\\") ||
-          /^[a-zA-Z]:[\\/]/.test(entryName) ||
-          entryName.includes("\0")
-        ) {
+        const nameCheck = validateArchiveEntryName(entryName);
+        if (!nameCheck.valid) {
           return {
             safe: false,
-            error: `Path traversal detected in archive entry "${safeArchiveEntryLabel(entryName)}"`,
+            error: nameCheck.error,
             entryCount: lines.length,
             totalUncompressedBytes,
           };
@@ -358,12 +406,23 @@ export function unpackArchive(archivePath: string): UnpackResult {
         }
       } else if (entry.isFile()) {
         if (isCanonicalEpub(entry.name)) {
-          foundBooks.push({
-            tempPath: fullPath,
-            originalName: entry.name,
-          });
+          const contentCheck = validateEpubContent(fullPath);
+          if (!contentCheck.valid) {
+            quarantined.push({
+              name: entry.name,
+              originalName: entry.name,
+              format: ".epub",
+              reason: `Invalid or corrupted EPUB container: ${contentCheck.error || "validation failed"}`,
+            });
+          } else {
+            foundBooks.push({
+              tempPath: fullPath,
+              originalName: entry.name,
+            });
+          }
         } else if (isLegacyOrNonCanonicalFormat(entry.name)) {
           quarantined.push({
+            name: entry.name,
             originalName: entry.name,
             format: path.extname(entry.name).toLowerCase(),
             reason: "Non-canonical format (collection is EPUB-only)",
@@ -388,12 +447,13 @@ export function unpackArchive(archivePath: string): UnpackResult {
   }
 
   if (foundBooks.length === 0) {
-    let errorMsg = "No valid .epub files found inside archive.";
+    let errorMsg = "Archive contains no EPUBs: No valid .epub files found inside archive.";
     if (quarantined.length > 0) {
       const formats = Array.from(
         new Set(quarantined.map((q) => q.format)),
       ).join(", ");
-      errorMsg = `Rejected non-canonical formats (${formats}): Only EPUB format is accepted for the canonical collection. ${quarantined.length} non-EPUB file(s) were rejected.`;
+      const names = quarantined.map((q) => q.name).join(", ");
+      errorMsg = `Archive contains no EPUBs. Rejected non-canonical formats (${formats}): ${names}. Only EPUB format is accepted for the canonical collection. ${quarantined.length} non-EPUB file(s) were rejected.`;
     }
     cleanup();
     return {

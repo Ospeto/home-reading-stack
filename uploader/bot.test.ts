@@ -14,7 +14,7 @@ import {
   formatRelativeTime,
   getCurrentlyReadingShelf,
   getRecentBooks,
-  deleteBookFromLibrary
+  deleteBookFromLibrary,
 } from "./bot";
 
 describe("Telegram Mini App (TMA) Integration", () => {
@@ -29,11 +29,16 @@ describe("Telegram Mini App (TMA) Integration", () => {
   });
 
   it("com.ospeto.reading-vless-tunnel.plist contains required flags and ProxyCommand", () => {
-    const plistPath = path.join(import.meta.dir, "../scripts/com.ospeto.reading-vless-tunnel.plist");
+    const plistPath = path.join(
+      import.meta.dir,
+      "../scripts/com.ospeto.reading-vless-tunnel.plist",
+    );
     expect(fs.existsSync(plistPath)).toBe(true);
 
     const content = fs.readFileSync(plistPath, "utf8");
-    expect(content).toContain("<string>com.ospeto.reading-vless-tunnel</string>");
+    expect(content).toContain(
+      "<string>com.ospeto.reading-vless-tunnel</string>",
+    );
     expect(content).toContain("<string>0.0.0.0:8086:127.0.0.1:8086</string>");
     expect(content).toContain("<string>0.0.0.0:7200:127.0.0.1:7200</string>");
     expect(content).toContain("ProxyCommand=nc -X 5 -x 127.0.0.1:7890 %h %p");
@@ -44,7 +49,9 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(content).toContain("<key>RunAtLoad</key>");
     expect(content).toContain("<true/>");
     expect(content).toContain("<key>KeepAlive</key>");
-    expect(content).toContain("<string>/Users/ospeto/Library/Logs/reading-vless-tunnel.log</string>");
+    expect(content).toContain(
+      "<string>/Users/ospeto/Library/Logs/reading-vless-tunnel.log</string>",
+    );
   });
 
   it("index.html includes Telegram WebApp SDK script and initialization", () => {
@@ -66,9 +73,9 @@ describe("Telegram Mini App (TMA) Integration", () => {
     // External FontAwesome stylesheet removed
     expect(html).not.toContain("cdnjs.cloudflare.com/ajax/libs/font-awesome");
     // Self-contained SVG sprite defined
-    expect(html).toContain("<symbol id=\"icon-book\"");
-    expect(html).toContain("<symbol id=\"icon-filter\"");
-    expect(html).toContain("<symbol id=\"icon-telegram\"");
+    expect(html).toContain('<symbol id="icon-book"');
+    expect(html).toContain('<symbol id="icon-filter"');
+    expect(html).toContain('<symbol id="icon-telegram"');
   });
 
   it("index.html implements Telegram native UX (viewport, themeParams, HapticFeedback, BackButton)", () => {
@@ -88,8 +95,8 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain("sessionStorage");
     expect(html).toContain("IntersectionObserver");
     expect(html).toContain("PAGE_SIZE");
-    expect(html).toContain("decoding=\"async\"");
-    expect(html).toContain("loading=\"lazy\"");
+    expect(html).toContain('decoding="async"');
+    expect(html).toContain('loading="lazy"');
   });
 
   it("index.html uses native downscaled thumbnails for cards and reserves full resolution for modal", () => {
@@ -99,7 +106,9 @@ describe("Telegram Mini App (TMA) Integration", () => {
     // Grid cards request 360px width optimized thumbnails
     expect(html).toContain("/cover?w=360");
     // Detail modal displays full resolution cover
-    expect(html).toContain("detailCover').src = book.cover ? `/api/books/${book.id}/cover` : ''");
+    expect(html).toContain(
+      "detailCover').src = book.cover ? `/api/books/${book.id}/cover` : ''",
+    );
     // Skeleton shimmer placeholder styling
     expect(html).toContain("skeleton-shimmer");
     expect(html).toContain("@keyframes shimmer");
@@ -107,8 +116,14 @@ describe("Telegram Mini App (TMA) Integration", () => {
 });
 
 describe("Reverse SSH Tunnel Auto-Healing Watchdog", () => {
-  const watchdogScriptPath = path.join(import.meta.dir, "../scripts/tunnel-watchdog.sh");
-  const watchdogPlistPath = path.join(import.meta.dir, "../scripts/com.ospeto.reading-tunnel-watchdog.plist");
+  const watchdogScriptPath = path.join(
+    import.meta.dir,
+    "../scripts/tunnel-watchdog.sh",
+  );
+  const watchdogPlistPath = path.join(
+    import.meta.dir,
+    "../scripts/com.ospeto.reading-tunnel-watchdog.plist",
+  );
 
   it("tunnel-watchdog.sh exists, is executable, and passes bash syntax check", () => {
     expect(fs.existsSync(watchdogScriptPath)).toBe(true);
@@ -142,8 +157,12 @@ describe("Reverse SSH Tunnel Auto-Healing Watchdog", () => {
   it("com.ospeto.reading-tunnel-watchdog.plist is valid and runs periodically", () => {
     expect(fs.existsSync(watchdogPlistPath)).toBe(true);
     const content = fs.readFileSync(watchdogPlistPath, "utf8");
-    expect(content).toContain("<string>com.ospeto.reading-tunnel-watchdog</string>");
-    expect(content).toContain("<string>/Users/ospeto/uploader/scripts/tunnel-watchdog.sh</string>");
+    expect(content).toContain(
+      "<string>com.ospeto.reading-tunnel-watchdog</string>",
+    );
+    expect(content).toContain(
+      "<string>/Users/ospeto/uploader/scripts/tunnel-watchdog.sh</string>",
+    );
     expect(content).toContain("<key>StartInterval</key>");
     expect(content).toContain("<integer>120</integer>");
     expect(content).toContain("<key>RunAtLoad</key>");
@@ -159,7 +178,27 @@ describe("Reverse SSH Tunnel Auto-Healing Watchdog", () => {
 
 describe("Unified In-Chat Health Dashboard (/status)", () => {
   it("getStatusDashboard generates structured Markdown card with all 5 subsystems", async () => {
-    const card = await getStatusDashboard();
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any) => {
+      const u = typeof input === "string" ? input : input?.url || "";
+      if (
+        u.includes("reading.wavypremium.xyz") ||
+        u.includes("kosync.wavypremium.xyz") ||
+        u.includes("8086") ||
+        u.includes("8088") ||
+        u.includes("7200")
+      ) {
+        return new Response("OK", { status: 200 });
+      }
+      return origFetch(input);
+    }) as typeof fetch;
+
+    let card: string;
+    try {
+      card = await getStatusDashboard();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
     expect(typeof card).toBe("string");
     expect(card).toContain("📊 *Reading Stack Health Dashboard*");
 
@@ -301,7 +340,9 @@ describe("Live 'Currently Reading' Shelf (/reading)", () => {
 
   it("truncate helper truncates long text with ellipsis and preserves short text", () => {
     expect(truncate("Short", 10)).toBe("Short");
-    expect(truncate("This is a very long title that exceeds limit", 15)).toBe("This is a very…");
+    expect(truncate("This is a very long title that exceeds limit", 15)).toBe(
+      "This is a very…",
+    );
     expect(truncate("", 10)).toBe("");
   });
 
@@ -358,7 +399,9 @@ describe("Recent Books List (/recent)", () => {
       // Keyboard includes send_book button
       expect(recent.keyboard).toBeDefined();
       const rows = recent.keyboard.inline_keyboard;
-      const sendButton = rows.flat().find((btn: any) => btn.callback_data === `send_book:${first.id}`);
+      const sendButton = rows
+        .flat()
+        .find((btn: any) => btn.callback_data === `send_book:${first.id}`);
       expect(sendButton).toBeDefined();
     }
   });

@@ -14,6 +14,13 @@ import { Database } from "bun:sqlite";
 export const DEFAULT_WAN_DOMAIN = "reading.wavypremium.xyz";
 export const KOSYNC_WAN_DOMAIN = "kosync.wavypremium.xyz";
 
+export function getBsdtarPath(): string {
+  if (process.env.BSDTAR_PATH) return process.env.BSDTAR_PATH;
+  const resolved = resolveExecutable("bsdtar");
+  if (resolved !== "bsdtar") return resolved;
+  return resolveExecutable("tar");
+}
+
 /**
  * Resolves the books drop directory portably and lazily.
  * Respects BOOKS_DROP_DIR or DROP_DIR env variables, falling back to a per-user local path.

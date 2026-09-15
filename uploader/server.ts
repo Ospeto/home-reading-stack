@@ -49,6 +49,7 @@ import {
   resolveExecutable,
 } from "./security";
 import { getJobQueue, DurableJobQueue, withCalibreLock } from "./jobs";
+import { generateMetadataFilename, buildContentDisposition } from "./filename";
 
 const DROP_DIR = getDropDir();
 const SERVER_URL = process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088";
@@ -1427,13 +1428,19 @@ export async function handleRequest(
         title: `Book-${bookId}`,
         authors: "Unknown",
       };
-      const downloadFilename = getDownloadFilename(book, format);
+       const downloadFilename = generateMetadataFilename({
+         title: book.title,
+         authors: book.authors,
+         series: book.series,
+         seriesIndex: book.series_index,
+         format,
+       });
 
-      return new Response(await fileRes.arrayBuffer(), {
+       return new Response(await fileRes.arrayBuffer(), {
         headers: {
           "Content-Type":
             fileRes.headers.get("Content-Type") || "application/octet-stream",
-          "Content-Disposition": `attachment; filename="${downloadFilename}"`,
+          "Content-Disposition": buildContentDisposition(downloadFilename),
           "X-Content-Type-Options": "nosniff",
         },
       });
