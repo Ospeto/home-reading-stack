@@ -429,7 +429,9 @@ describe("Telegram Bot /help Command & KOReader Connection Guide", () => {
     expect(msg).toContain("moe");
     expect(msg).toContain("Automatically keep documents in sync");
     expect(msg).toContain("http://192.168.31.15:7200");
+    expect(msg).toContain("https://kosync.wavypremium.xyz");
     expect(msg).toContain("https://kosync-198-46-146-17.sslip.io");
+    expect(msg).toContain("WAN (Production): `https://kosync.wavypremium.xyz`");
 
     // KOReader Connection Guide: OPDS
     expect(msg).toContain("OPDS Book Catalog");
@@ -483,8 +485,11 @@ describe("Webpage Manual & KOReader Connection Section (index.html)", () => {
     expect(html).toContain('<symbol id="icon-server"');
 
     // All Stack Endpoints with one-click copy buttons
-    // 1. KOSync (Local & Standby VPS)
+    // 1. KOSync (Local, Canonical Production WAN, and Standby VPS)
     expect(html).toContain("copyToClipboard('http://192.168.31.15:7200')");
+    expect(html).toContain(
+      "copyToClipboard('https://kosync.wavypremium.xyz')",
+    );
     expect(html).toContain(
       "copyToClipboard('https://kosync-198-46-146-17.sslip.io')",
     );
@@ -527,6 +532,262 @@ describe("Webpage Manual & KOReader Connection Section (index.html)", () => {
     expect(html).toContain("Kindle Wi-Fi Proxy Gateway (GFW Bypass)");
     expect(html).toContain("192.168.31.15");
     expect(html).toContain("7890");
+  });
+});
+
+describe("HTTP LAN Clipboard & Stored XSS Hardening (index.html)", () => {
+  const htmlPath = path.join(import.meta.dir, "index.html");
+  const html = fs.readFileSync(htmlPath, "utf8");
+
+  it("escapeHtml escapes single quotes alongside ampersand, angle brackets, and double quotes", () => {
+    expect(html).toContain(
+      ".replace(/'/g, '&#39;')",
+    );
+
+    // Extract escapeHtml function from index.html and test directly
+    const match = html.match(/function escapeHtml\(str\) \{([\s\S]*?)\n {4}\}/);
+    expect(match).not.toBeNull();
+    const escapeHtmlFn = new Function("str", match![1]);
+
+    expect(escapeHtmlFn("")).toBe("");
+    expect(escapeHtmlFn(null)).toBe("");
+    expect(escapeHtmlFn(undefined)).toBe("");
+    expect(escapeHtmlFn("Tom & Jerry")).toBe("Tom &amp; Jerry");
+    expect(escapeHtmlFn('<script>alert("xss")</script>')).toBe(
+      "&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;",
+    );
+    expect(escapeHtmlFn("O'Reilly")).toBe("O&#39;Reilly");
+    expect(escapeHtmlFn(`"hello" & 'world'`)).toBe(
+      "&quot;hello&quot; &amp; &#39;world&#39;",
+    );
+  });
+
+  it("copyToClipboard implements secure context detection and textarea fallback for plain HTTP", () => {
+    // 1. Secure context branch checking navigator.clipboard.writeText
+    expect(html).toContain(
+      "navigator.clipboard && typeof navigator.clipboard.writeText === 'function'",
+    );
+    // 2. Fallback using hidden textarea and document.execCommand('copy')
+    expect(html).toContain("document.createElement('textarea')");
+    expect(html).toContain("textarea.style.position = 'fixed'");
+    expect(html).toContain("textarea.select()");
+    expect(html).toContain("document.execCommand('copy')");
+    expect(html).toContain("document.body.removeChild(textarea)");
+    // 3. Robust error handling with tgHaptic and showToast
+    expect(html).toContain("tgHaptic.success()");
+    expect(html).toContain("showToast('Copied to clipboard!')");
+    expect(html).toContain("tgHaptic.error()");
+    expect(html).toContain("showToast('Failed to copy to clipboard', 'error')");
+  });
+
+  it("copyToClipboard functions correctly in simulated secure, HTTP LAN fallback, and error environments", async () => {
+    const match = html.match(/async function copyToClipboard\(text\) \{([\s\S]*?)\n {4}\}/);
+    expect(match).not.toBeNull();
+    const copyBody = match![1];
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+
+    // Scenario A: Secure context (navigator.clipboard.writeText available)
+    {
+      let clipboardText = "";
+      let toastCalled = false;
+      let toastType = "";
+      let hapticSuccessCalled = false;
+      let hapticErrorCalled = false;
+
+      const mockNavigator = {
+        clipboard: {
+          writeText: async (t: string) => {
+            clipboardText = t;
+          },
+        },
+      };
+      const mockTgHaptic = {
+        success: () => { hapticSuccessCalled = true; },
+        error: () => { hapticErrorCalled = true; },
+      };
+      const mockShowToast = (msg: string, type = "success") => {
+        toastCalled = true;
+        toastType = type;
+      };
+
+      const copyFn = new AsyncFunction(
+        "text",
+        "navigator",
+        "document",
+        "tgHaptic",
+        "showToast",
+        copyBody,
+      );
+
+      await copyFn("http://192.168.31.15:7200", mockNavigator, {}, mockTgHaptic, mockShowToast);
+
+      expect(clipboardText).toBe("http://192.168.31.15:7200");
+      expect(hapticSuccessCalled).toBe(true);
+      expect(hapticErrorCalled).toBe(false);
+      expect(toastCalled).toBe(true);
+      expect(toastType).toBe("success");
+    }
+
+    // Scenario B: Plain HTTP LAN (navigator.clipboard is undefined, fallback executes)
+    {
+      let textareaAppended = false;
+      let textareaRemoved = false;
+      let selected = false;
+      let execCommandCalled = false;
+      let copiedValue = "";
+      let toastCalled = false;
+      let toastType = "";
+      let hapticSuccessCalled = false;
+      let hapticErrorCalled = false;
+
+      const mockTextarea: any = {
+        style: {},
+        setAttribute: () => {},
+        focus: () => {},
+        select: () => { selected = true; },
+      };
+
+      const mockDocument = {
+        createElement: (tag: string) => {
+          if (tag === "textarea") return mockTextarea;
+          return {};
+        },
+        body: {
+          appendChild: (el: any) => {
+            textareaAppended = true;
+            copiedValue = el.value;
+          },
+          removeChild: (_el: any) => {
+            textareaRemoved = true;
+          },
+        },
+        execCommand: (cmd: string) => {
+          if (cmd === "copy") {
+            execCommandCalled = true;
+            return true;
+          }
+          return false;
+        },
+      };
+
+      const mockTgHaptic = {
+        success: () => { hapticSuccessCalled = true; },
+        error: () => { hapticErrorCalled = true; },
+      };
+      const mockShowToast = (msg: string, type = "success") => {
+        toastCalled = true;
+        toastType = type;
+      };
+
+      const copyFn = new AsyncFunction(
+        "text",
+        "navigator",
+        "document",
+        "tgHaptic",
+        "showToast",
+        copyBody,
+      );
+
+      // navigator.clipboard is undefined on plain HTTP
+      await copyFn("http://192.168.31.15:8086", {}, mockDocument, mockTgHaptic, mockShowToast);
+
+      expect(textareaAppended).toBe(true);
+      expect(textareaRemoved).toBe(true);
+      expect(selected).toBe(true);
+      expect(execCommandCalled).toBe(true);
+      expect(copiedValue).toBe("http://192.168.31.15:8086");
+      expect(hapticSuccessCalled).toBe(true);
+      expect(hapticErrorCalled).toBe(false);
+      expect(toastCalled).toBe(true);
+      expect(toastType).toBe("success");
+    }
+
+    // Scenario C: Plain HTTP LAN fallback failure (execCommand returns false or throws)
+    {
+      let toastCalled = false;
+      let toastType = "";
+      let hapticSuccessCalled = false;
+      let hapticErrorCalled = false;
+
+      const mockTextarea: any = {
+        style: {},
+        setAttribute: () => {},
+        focus: () => {},
+        select: () => {},
+      };
+
+      const mockDocument = {
+        createElement: () => mockTextarea,
+        body: {
+          appendChild: () => {},
+          removeChild: () => {},
+        },
+        execCommand: () => false, // Fails
+      };
+
+      const mockTgHaptic = {
+        success: () => { hapticSuccessCalled = true; },
+        error: () => { hapticErrorCalled = true; },
+      };
+      const mockShowToast = (msg: string, type = "success") => {
+        toastCalled = true;
+        toastType = type;
+      };
+
+      const copyFn = new AsyncFunction(
+        "text",
+        "navigator",
+        "document",
+        "tgHaptic",
+        "showToast",
+        copyBody,
+      );
+
+      const origConsoleError = console.error;
+      console.error = () => {};
+      try {
+        await copyFn("test-fail", {}, mockDocument, mockTgHaptic, mockShowToast);
+      } finally {
+        console.error = origConsoleError;
+      }
+
+      expect(hapticSuccessCalled).toBe(false);
+      expect(hapticErrorCalled).toBe(true);
+      expect(toastCalled).toBe(true);
+      expect(toastType).toBe("error");
+    }
+  });
+
+  it("sanitizes facet filter metadata interpolation against stored XSS across all facet lists", () => {
+    // 1. Verify no unsafe string-escaped inline handlers remain (e.g. s.name.replace(/'/g, "\\'"))
+    expect(html).not.toContain("setFilter('series', '${s.name");
+    expect(html).not.toContain("setFilter('author', '${a.name");
+    expect(html).not.toContain("setFilter('tag', '${t.name");
+    expect(html).not.toContain("setFilter('format', '${f.name");
+
+    // 2. Verify all facet buttons bind safe data attributes and escaped text
+    expect(html).toContain('data-filter-type="series"');
+    expect(html).toContain('data-filter-type="author"');
+    expect(html).toContain('data-filter-type="tag"');
+    expect(html).toContain('data-filter-type="format"');
+
+    expect(html).toContain('onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)"');
+    expect(html).toContain('data-filter-value="${escapeHtml(s.name)}"');
+    expect(html).toContain('data-filter-value="${escapeHtml(a.name)}"');
+    expect(html).toContain('data-filter-value="${escapeHtml(t.name)}"');
+    expect(html).toContain('data-filter-value="${escapeHtml(f.name)}"');
+
+    // 3. Verify label interpolation is wrapped with escapeHtml
+    expect(html).toContain("<span>${escapeHtml(s.name)}</span>");
+    expect(html).toContain("<span class=\"truncate\">${escapeHtml(s.name)}</span>");
+    expect(html).toContain("<span class=\"truncate\">${escapeHtml(a.name)}</span>");
+    expect(html).toContain("#${escapeHtml(t.name)}");
+    expect(html).toContain("${escapeHtml(f.name)}");
+
+    // 4. Verify setFilter badge interpolation is escaped
+    expect(html).toContain(
+      "setHtml(badge, `${escapeHtml(type.toUpperCase())}: ${escapeHtml(value)}`);",
+    );
   });
 });
 
