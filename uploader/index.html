@@ -919,6 +919,16 @@
               </div>
               <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                 <div class="flex-1 flex items-center justify-between bg-zinc-950 px-2.5 py-1.5 rounded-lg border border-zinc-800">
+                  <span class="text-[10px] text-emerald-400 uppercase font-semibold mr-2">Production WAN</span>
+                  <code class="text-xs font-mono text-zinc-200 select-all truncate">https://kosync.wavypremium.xyz</code>
+                </div>
+                <button onclick="copyToClipboard('https://kosync.wavypremium.xyz')" class="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-emerald-600 text-zinc-200 text-xs font-semibold rounded-lg transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
+                  <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+                  <span>Copy WAN</span>
+                </button>
+              </div>
+              <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                <div class="flex-1 flex items-center justify-between bg-zinc-950 px-2.5 py-1.5 rounded-lg border border-zinc-800">
                   <span class="text-[10px] text-amber-400 uppercase font-semibold mr-2">Standby VPS</span>
                   <code class="text-xs font-mono text-zinc-200 select-all truncate">https://kosync-198-46-146-17.sslip.io</code>
                 </div>
@@ -1073,6 +1083,24 @@
             <div class="flex items-center gap-1.5 pt-1">
               <code class="flex-1 px-2 py-1 bg-zinc-950 border border-zinc-800 rounded text-xs font-mono text-zinc-300 truncate select-all">http://192.168.31.15:7200</code>
               <button onclick="copyToClipboard('http://192.168.31.15:7200')" class="p-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-emerald-600 text-zinc-300 hover:text-white rounded transition-colors cursor-pointer" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- KOSync Production WAN -->
+          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+                <span>KOSync Server (Production WAN)</span>
+              </span>
+              <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-emerald-400 font-mono border border-zinc-700">WAN</span>
+            </div>
+            <div class="text-[11px] text-zinc-400">KOReader progress sync via reverse tunnel</div>
+            <div class="flex items-center gap-1.5 pt-1">
+              <code class="flex-1 px-2 py-1 bg-zinc-950 border border-zinc-800 rounded text-xs font-mono text-zinc-300 truncate select-all">https://kosync.wavypremium.xyz</code>
+              <button onclick="copyToClipboard('https://kosync.wavypremium.xyz')" class="p-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-emerald-600 text-zinc-300 hover:text-white rounded transition-colors cursor-pointer" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
@@ -1270,7 +1298,12 @@
 
     function escapeHtml(str) {
       if (!str) return '';
-      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
 
     function svgIcon(name, cls = "w-3.5 h-3.5") {
@@ -1477,17 +1510,17 @@
 
       // Top 3 Series
       setHtml(seriesContainer, facets.series.slice(0, 3).map(s => `
-        <button onclick="setFilter('series', '${s.name.replace(/'/g, "\\'")}')" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white hover:border-zinc-600 shrink-0 transition-colors flex items-center gap-1 cursor-pointer">
+        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="series" data-filter-value="${escapeHtml(s.name)}" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white hover:border-zinc-600 shrink-0 transition-colors flex items-center gap-1 cursor-pointer">
           ${svgIcon('bookmark', 'w-2.5 h-2.5 text-amber-400/80')}
-          <span>${s.name}</span>
+          <span>${escapeHtml(s.name)}</span>
           <span class="text-[9px] text-zinc-500 font-mono">${s.count}</span>
         </button>
       `).join(''));
 
       // Formats
       setHtml(formatContainer, facets.formats.map(f => `
-        <button onclick="setFilter('format', '${f.name}')" class="px-2 py-1 rounded-full text-xs font-semibold bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white shrink-0 transition-colors cursor-pointer">
-          ${f.name}
+        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="format" data-filter-value="${escapeHtml(f.name)}" class="px-2 py-1 rounded-full text-xs font-semibold bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white shrink-0 transition-colors cursor-pointer">
+          ${escapeHtml(f.name)}
         </button>
       `).join(''));
     }
@@ -1497,8 +1530,8 @@
       const seriesList = document.getElementById('seriesList');
       document.getElementById('seriesCountLabel').textContent = facets.series.length;
       const seriesHtml = facets.series.slice(0, 15).map(s => `
-        <button onclick="setFilter('series', '${s.name.replace(/'/g, "\\'")}')" class="w-full text-left px-2 py-1 rounded text-xs text-zinc-400 hover:text-white hover:bg-zinc-800/60 flex items-center justify-between truncate transition-colors cursor-pointer">
-          <span class="truncate">${s.name}</span>
+        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="series" data-filter-value="${escapeHtml(s.name)}" class="w-full text-left px-2 py-1 rounded text-xs text-zinc-400 hover:text-white hover:bg-zinc-800/60 flex items-center justify-between truncate transition-colors cursor-pointer">
+          <span class="truncate">${escapeHtml(s.name)}</span>
           <span class="text-[10px] text-zinc-500 font-mono shrink-0 ml-1">${s.count}</span>
         </button>
       `).join('') || '<div class="text-[10px] text-zinc-600 italic px-2">No series</div>';
@@ -1512,8 +1545,8 @@
       const authorList = document.getElementById('authorList');
       document.getElementById('authorCountLabel').textContent = facets.authors.length;
       const authorHtml = facets.authors.slice(0, 15).map(a => `
-        <button onclick="setFilter('author', '${a.name.replace(/'/g, "\\'")}')" class="w-full text-left px-2 py-1 rounded text-xs text-zinc-400 hover:text-white hover:bg-zinc-800/60 flex items-center justify-between truncate transition-colors cursor-pointer">
-          <span class="truncate">${a.name}</span>
+        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="author" data-filter-value="${escapeHtml(a.name)}" class="w-full text-left px-2 py-1 rounded text-xs text-zinc-400 hover:text-white hover:bg-zinc-800/60 flex items-center justify-between truncate transition-colors cursor-pointer">
+          <span class="truncate">${escapeHtml(a.name)}</span>
           <span class="text-[10px] text-zinc-500 font-mono shrink-0 ml-1">${a.count}</span>
         </button>
       `).join('') || '<div class="text-[10px] text-zinc-600 italic px-2">No authors</div>';
@@ -1525,8 +1558,8 @@
 
       // Desktop Tags
       const tagHtml = facets.tags.slice(0, 15).map(t => `
-        <button onclick="setFilter('tag', '${t.name.replace(/'/g, "\\'")}')" class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-600 transition-colors cursor-pointer">
-          #${t.name} <span class="text-[9px] text-zinc-500 font-mono">${t.count}</span>
+        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="tag" data-filter-value="${escapeHtml(t.name)}" class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-600 transition-colors cursor-pointer">
+          #${escapeHtml(t.name)} <span class="text-[9px] text-zinc-500 font-mono">${t.count}</span>
         </button>
       `).join('') || '<div class="text-[10px] text-zinc-600 italic px-2">No tags</div>';
       setHtml('tagPills', tagHtml);
@@ -1534,8 +1567,8 @@
 
       // Desktop Formats
       const formatHtml = facets.formats.map(f => `
-        <button onclick="setFilter('format', '${f.name}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white hover:border-zinc-600 transition-colors cursor-pointer">
-          ${f.name} <span class="text-[9px] text-zinc-500 font-mono">${f.count}</span>
+        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="format" data-filter-value="${escapeHtml(f.name)}" class="px-2 py-0.5 rounded text-[10px] font-bold bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white hover:border-zinc-600 transition-colors cursor-pointer">
+          ${escapeHtml(f.name)} <span class="text-[9px] text-zinc-500 font-mono">${f.count}</span>
         </button>
       `).join('');
       setHtml('formatList', formatHtml);
@@ -1556,7 +1589,7 @@
         mobileBadge.classList.add('hidden');
       } else {
         box.classList.remove('hidden');
-        setHtml(badge, `${type.toUpperCase()}: ${value}`);
+        setHtml(badge, `${escapeHtml(type.toUpperCase())}: ${escapeHtml(value)}`);
         document.getElementById('nav-all').className = 'w-full flex items-center justify-between px-3 py-1.5 rounded-lg text-xs font-medium text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40 transition-colors';
         document.getElementById('chip-all').className = 'px-2.5 py-1 rounded-full text-xs font-semibold bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white shrink-0 transition-colors';
         mobileBadge.classList.remove('hidden');
@@ -2286,10 +2319,34 @@
       setTimeout(() => toast.classList.add('hidden'), 2800);
     }
 
-    function copyToClipboard(text) {
-      navigator.clipboard.writeText(text);
-      tgHaptic.success();
-      showToast('Copied to clipboard!');
+    async function copyToClipboard(text) {
+      try {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const textarea = document.createElement('textarea');
+          textarea.value = text;
+          textarea.style.position = 'fixed';
+          textarea.style.top = '0';
+          textarea.style.left = '-9999px';
+          textarea.style.opacity = '0';
+          textarea.setAttribute('readonly', '');
+          document.body.appendChild(textarea);
+          textarea.focus();
+          textarea.select();
+          const successful = document.execCommand('copy');
+          document.body.removeChild(textarea);
+          if (!successful) {
+            throw new Error('execCommand copy failed');
+          }
+        }
+        tgHaptic.success();
+        showToast('Copied to clipboard!');
+      } catch (e) {
+        console.error('Failed to copy to clipboard:', e);
+        tgHaptic.error();
+        showToast('Failed to copy to clipboard', 'error');
+      }
     }
 
     // Transparent API fetch interceptor: attaches Telegram WebApp initData & CSRF headers
