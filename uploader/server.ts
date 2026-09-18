@@ -69,12 +69,51 @@ export function getCoverCacheDir(): string {
 }
 
 const SERVER_URL = process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088";
+
+export function getCalibreDbPath(): string {
+  if (process.env.CALIBRE_DB_PATH) return process.env.CALIBRE_DB_PATH;
+  if (process.env.CALIBRE_LIBRARY_DIR) {
+    return path.join(process.env.CALIBRE_LIBRARY_DIR, "metadata.db");
+  }
+  const home = process.env.HOME || os.homedir();
+  return path.join(
+    home,
+    "Calibre Libraries",
+    "Agent Library",
+    "metadata.db",
+  );
+}
+
 export function getCalibreLibraryDir(): string {
   if (process.env.CALIBRE_LIBRARY_DIR) return process.env.CALIBRE_LIBRARY_DIR;
+  if (process.env.CALIBRE_DB_PATH) return path.dirname(process.env.CALIBRE_DB_PATH);
   const home = process.env.HOME || os.homedir();
   return path.join(home, "Calibre Libraries", "Agent Library");
 }
 const LIBRARY_DIR = getCalibreLibraryDir();
+
+export function getCalibreDbETag(): string {
+  try {
+    const dbPath = getCalibreDbPath();
+    if (fs.existsSync(dbPath)) {
+      const stat = fs.statSync(dbPath);
+      let mtime = Math.floor(stat.mtimeMs);
+      const walPath = `${dbPath}-wal`;
+      if (fs.existsSync(walPath)) {
+        try {
+          const walStat = fs.statSync(walPath);
+          mtime = Math.max(mtime, Math.floor(walStat.mtimeMs));
+        } catch (_walErr) {
+          void _walErr;
+        }
+      }
+      return `"${mtime.toString(16)}-${stat.size.toString(16)}"`;
+    }
+  } catch (_err) {
+    void _err;
+  }
+  return `"${Date.now().toString(16)}"`;
+}
 
 export function getKosyncDbPath(): string {
   if (process.env.KOSYNC_DB_PATH) return process.env.KOSYNC_DB_PATH;
@@ -606,7 +645,7 @@ export function getSipsPath(): string {
   return "sips";
 }
 
-let calibreBooksCache: { books: any[]; timestamp: number } = {
+let calibreBooksCache: { books: any[]; timestamp: number; etag?: string } = {
   books: [],
   timestamp: 0,
 };
@@ -631,14 +670,82 @@ function runCalibredb(args: string[]) {
 
 export function getCalibreBooks(forceFresh = false) {
   const now = Date.now();
+  const currentEtag = getCalibreDbETag();
   if (
     !forceFresh &&
     calibreBooksCache.books.length > 0 &&
+    calibreBooksCache.etag === currentEtag &&
     now - calibreBooksCache.timestamp < 10000
   ) {
     return calibreBooksCache.books;
   }
 
+  // 1. Direct in-process bun:sqlite query against Calibre metadata.db in read-only mode
+  try {
+    const dbPath = getCalibreDbPath();
+    if (fs.existsSync(dbPath)) {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        db.run("PRAGMA busy_timeout = 3000;");
+        const rows = db
+          .query(`
+            SELECT b.id, b.title, b.path, b.has_cover as cover, b.pubdate,
+                   GROUP_CONCAT(DISTINCT a.name) as authors,
+                   s.name as series, b.series_index,
+                   GROUP_CONCAT(DISTINCT t.name) as tags,
+                   pub.name as publisher
+            FROM books b
+            JOIN data d ON b.id = d.book AND UPPER(d.format) = 'EPUB'
+            LEFT JOIN books_authors_link bal ON b.id = bal.book
+            LEFT JOIN authors a ON bal.author = a.id
+            LEFT JOIN books_series_link bsl ON b.id = bsl.book
+            LEFT JOIN series s ON bsl.series = s.id
+            LEFT JOIN books_tags_link btl ON b.id = btl.book
+            LEFT JOIN tags t ON btl.tag = t.id
+            LEFT JOIN books_publishers_link bpl ON b.id = bpl.book
+            LEFT JOIN publishers pub ON bpl.publisher = pub.id
+            GROUP BY b.id
+            ORDER BY b.id DESC;
+          `)
+          .all() as any[];
+
+        const epubBooks = rows.map((row) => ({
+          id: row.id,
+          title: row.title || "Untitled",
+          path: row.path || "",
+          cover: row.cover ? 1 : null,
+          pubdate: row.pubdate || "",
+          authors: row.authors || "Unknown",
+          series: row.series || null,
+          series_index: row.series_index ?? null,
+          tags: row.tags
+            ? row.tags
+                .split(",")
+                .map((t: string) => t.trim())
+                .filter(Boolean)
+            : [],
+          publisher: row.publisher || null,
+          formats: ["EPUB"],
+        }));
+
+        calibreBooksCache = {
+          books: epubBooks,
+          timestamp: now,
+          etag: currentEtag,
+        };
+        return epubBooks;
+      } finally {
+        db.close();
+      }
+    }
+  } catch (sqliteErr) {
+    console.warn(
+      "Direct SQLite Calibre query failed, falling back to calibredb:",
+      sqliteErr,
+    );
+  }
+
+  // 2. Fallback to runCalibredb if direct database read encounters any error
   try {
     const res = runCalibredb([
       "list",
@@ -664,13 +771,118 @@ export function getCalibreBooks(forceFresh = false) {
           ...b,
           formats: ["EPUB"],
         }));
-      calibreBooksCache = { books: epubBooks, timestamp: now };
+      calibreBooksCache = {
+        books: epubBooks,
+        timestamp: now,
+        etag: currentEtag,
+      };
       return epubBooks;
     }
   } catch (e) {
-    console.error("Error listing calibre books:", e);
+    console.error("Error listing calibre books via fallback:", e);
   }
   return calibreBooksCache.books || [];
+}
+
+export function getBookPath(bookId: number): string | null {
+  const books = getCalibreBooks();
+  const book = books.find((b: any) => b.id === bookId);
+  if (book?.path) return book.path;
+
+  try {
+    const dbPath = getCalibreDbPath();
+    if (fs.existsSync(dbPath)) {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const row = db.query("SELECT path FROM books WHERE id = ?").get(bookId) as any;
+        if (row?.path) return row.path;
+      } finally {
+        db.close();
+      }
+    }
+  } catch (_err) {
+    void _err;
+  }
+  return null;
+}
+
+export function getMasterCoverPath(bookId: number): string | null {
+  const relPath = getBookPath(bookId);
+  if (relPath) {
+    const libDir = getCalibreLibraryDir();
+    const coverPath = path.join(libDir, relPath, "cover.jpg");
+    if (fs.existsSync(coverPath)) {
+      return coverPath;
+    }
+  }
+  return null;
+}
+
+export class SipsConcurrencyLimiter {
+  private active = 0;
+  private queue: (() => void)[] = [];
+  constructor(public readonly maxConcurrent = 4) {}
+
+  async run<T>(task: () => Promise<T>): Promise<T> {
+    if (this.active >= this.maxConcurrent) {
+      await new Promise<void>((resolve) => this.queue.push(resolve));
+    }
+    this.active++;
+    try {
+      return await task();
+    } finally {
+      this.active--;
+      if (this.queue.length > 0) {
+        const next = this.queue.shift();
+        if (next) next();
+      }
+    }
+  }
+
+  getActiveCount(): number {
+    return this.active;
+  }
+
+  getQueueLength(): number {
+    return this.queue.length;
+  }
+}
+
+export const sipsLimiter = new SipsConcurrencyLimiter(4);
+
+export async function downscaleImageAsync(
+  inputPath: string,
+  outputPath: string,
+  targetWidth: number,
+): Promise<boolean> {
+  const sipsBin = getSipsPath();
+  if (!fs.existsSync(sipsBin) && sipsBin !== "sips") {
+    return false;
+  }
+
+  return sipsLimiter.run(async () => {
+    try {
+      const proc = Bun.spawn(
+        [sipsBin, "-Z", String(targetWidth), inputPath, "--out", outputPath],
+        { stdout: "ignore", stderr: "pipe" },
+      );
+      const timeout = new Promise<number>((_, reject) =>
+        setTimeout(() => {
+          try {
+            proc.kill();
+          } catch (_killErr) {
+            void _killErr;
+          }
+          reject(new Error("sips timeout"));
+        }, 15000),
+      );
+      const exitCode = await Promise.race([proc.exited, timeout]);
+      return exitCode === 0 && fs.existsSync(outputPath);
+    } catch (err) {
+      console.warn("Async sips downscaling failed:", err);
+      return false;
+    }
+  });
 }
 
 function getCalibreHashMap() {
@@ -1297,8 +1509,39 @@ export async function handleRequest(
 
   // API: List books
   if (url.pathname === "/api/books" && req.method === "GET") {
+    const etag = getCalibreDbETag();
+    const ifNoneMatch = req.headers.get("if-none-match");
+
+    const cacheHeaders: Record<string, string> = {
+      ETag: etag,
+      "Cache-Control": "public, max-age=5, must-revalidate",
+    };
+    if (corsOrigin && isAllowedOrigin(corsOrigin)) {
+      cacheHeaders["Access-Control-Allow-Origin"] = corsOrigin;
+      cacheHeaders["Access-Control-Allow-Credentials"] = "true";
+      cacheHeaders["Vary"] = "Origin";
+    }
+
+    if (
+      ifNoneMatch &&
+      (ifNoneMatch === etag ||
+        ifNoneMatch.includes(etag) ||
+        ifNoneMatch === etag.replace(/"/g, ""))
+    ) {
+      return new Response(null, {
+        status: 304,
+        headers: cacheHeaders,
+      });
+    }
+
     const books = getCalibreBooks();
-    return jsonResponse(books, 200, corsOrigin);
+    return new Response(JSON.stringify(books), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        ...cacheHeaders,
+      },
+    });
   }
 
   // API: Library Facets
@@ -1312,7 +1555,7 @@ export async function handleRequest(
     for (const b of books) {
       if (b.authors) {
         const auths = b.authors
-          .split("&")
+          .split(/[&,]/)
           .map((a: string) => cleanString(a))
           .filter(Boolean);
         for (const a of auths) authorMap[a] = (authorMap[a] || 0) + 1;
@@ -1483,37 +1726,46 @@ export async function handleRequest(
         });
       }
 
-      // Fetch master cover from Calibre
-      const masterRes = await safeFetchWithSsrf(
-        `${SERVER_URL}/get/cover/${bookId}/Agent_Library`,
-        {},
-        5,
-        { allowCalibreServer: true },
-      );
-      if (!masterRes.ok) {
-        return new Response("Cover not found", { status: 404 });
+      // Check if master cover exists directly on disk
+      const diskCoverPath = getMasterCoverPath(bookId);
+      let tempMasterPath: string | null = null;
+      let masterInputPath: string | null = null;
+      let masterBuffer: Buffer | null = null;
+
+      if (diskCoverPath) {
+        masterInputPath = diskCoverPath;
+      } else {
+        // Fallback: Fetch master cover from Calibre server loopback
+        const masterRes = await safeFetchWithSsrf(
+          `${SERVER_URL}/get/cover/${bookId}/Agent_Library`,
+          {},
+          5,
+          { allowCalibreServer: true },
+        );
+        if (!masterRes.ok) {
+          return new Response("Cover not found", { status: 404 });
+        }
+
+        masterBuffer = Buffer.from(await masterRes.arrayBuffer());
+        tempMasterPath = `/tmp/master_cover_${bookId}_${Date.now()}.jpg`;
+        fs.writeFileSync(tempMasterPath, masterBuffer);
+        masterInputPath = tempMasterPath;
       }
 
-      const masterBuffer = Buffer.from(await masterRes.arrayBuffer());
-      const tempMaster = `/tmp/master_cover_${bookId}_${Date.now()}.jpg`;
-      fs.writeFileSync(tempMaster, masterBuffer);
-
       try {
-        const sipsBin = getSipsPath();
-        const sipsRes = fs.existsSync(sipsBin)
-          ? spawnSync(
-              sipsBin,
-              ["-Z", String(targetWidth), tempMaster, "--out", cacheFilePath],
-              {
-                encoding: "utf8",
-                timeout: 15000,
-              },
-            )
-          : { status: -1 };
+        const success = await downscaleImageAsync(
+          masterInputPath,
+          cacheFilePath,
+          targetWidth,
+        );
 
-        if (sipsRes.status === 0 && fs.existsSync(cacheFilePath)) {
+        if (success && fs.existsSync(cacheFilePath)) {
           const thumbBuffer = fs.readFileSync(cacheFilePath);
           const etag = `"${crypto.createHash("sha256").update(thumbBuffer).digest("hex").slice(0, 16)}"`;
+
+          if (req.headers.get("if-none-match") === etag) {
+            return new Response(null, { status: 304 });
+          }
 
           return new Response(thumbBuffer, {
             headers: {
@@ -1524,25 +1776,57 @@ export async function handleRequest(
           });
         }
       } finally {
-        if (fs.existsSync(tempMaster)) {
+        if (tempMasterPath && fs.existsSync(tempMasterPath)) {
           try {
-            fs.unlinkSync(tempMaster);
-          } catch {}
+            fs.unlinkSync(tempMasterPath);
+          } catch (_unlinkErr) {
+            void _unlinkErr;
+          }
         }
       }
 
       // Fallback to original master if downscaling fails
-      const etag = `"${crypto.createHash("sha256").update(masterBuffer).digest("hex").slice(0, 16)}"`;
-      return new Response(masterBuffer, {
+      if (!masterBuffer && diskCoverPath && fs.existsSync(diskCoverPath)) {
+        masterBuffer = fs.readFileSync(diskCoverPath);
+      }
+
+      if (masterBuffer) {
+        const etag = `"${crypto.createHash("sha256").update(masterBuffer).digest("hex").slice(0, 16)}"`;
+        if (req.headers.get("if-none-match") === etag) {
+          return new Response(null, { status: 304 });
+        }
+        return new Response(masterBuffer, {
+          headers: {
+            "Content-Type": "image/jpeg",
+            "Cache-Control": "public, max-age=604800, immutable",
+            ETag: etag,
+          },
+        });
+      }
+
+      return new Response("Cover not found", { status: 404 });
+    }
+
+    // Master cover request (full resolution)
+    const diskCoverPath = getMasterCoverPath(bookId);
+    if (diskCoverPath) {
+      const coverBuf = fs.readFileSync(diskCoverPath);
+      const etag = `"${crypto.createHash("sha256").update(coverBuf).digest("hex").slice(0, 16)}"`;
+
+      if (req.headers.get("if-none-match") === etag) {
+        return new Response(null, { status: 304 });
+      }
+
+      return new Response(coverBuf, {
         headers: {
-          "Content-Type": masterRes.headers.get("Content-Type") || "image/jpeg",
-          "Cache-Control": "public, max-age=604800, immutable",
+          "Content-Type": "image/jpeg",
+          "Cache-Control": "public, max-age=86400",
           ETag: etag,
         },
       });
     }
 
-    // Master cover request (full resolution)
+    // Fallback: Fetch master cover from Calibre server loopback if not on disk
     const coverRes = await safeFetchWithSsrf(
       `${SERVER_URL}/get/cover/${bookId}/Agent_Library`,
       {},
