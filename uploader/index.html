@@ -1630,12 +1630,32 @@
     let currentFilteredList = [];
     let currentRenderLimit = PAGE_SIZE;
     let catalogObserver = null;
+    let booksEtag = null;
+
+    function getStoredItem(key) {
+      try {
+        return sessionStorage.getItem(key) || localStorage.getItem(key);
+      } catch {
+        return null;
+      }
+    }
+
+    function setStoredItem(key, val) {
+      try { sessionStorage.setItem(key, val); } catch {}
+      try { localStorage.setItem(key, val); } catch {}
+    }
+
+    function removeStoredItem(key) {
+      try { sessionStorage.removeItem(key); } catch {}
+      try { localStorage.removeItem(key); } catch {}
+    }
 
     function loadCachedData() {
       try {
-        const cachedBooks = sessionStorage.getItem(CACHE_KEY_BOOKS);
+        const cachedBooks = getStoredItem(CACHE_KEY_BOOKS);
         if (cachedBooks) {
           const parsed = JSON.parse(cachedBooks);
+          if (parsed.etag) booksEtag = parsed.etag;
           if (Array.isArray(parsed.data) && parsed.data.length > 0) {
             allBooks = parsed.data;
             document.getElementById('totalBooksStat').textContent = allBooks.length;
@@ -1644,7 +1664,7 @@
             applyFilters();
           }
         }
-        const cachedFacets = sessionStorage.getItem(CACHE_KEY_FACETS);
+        const cachedFacets = getStoredItem(CACHE_KEY_FACETS);
         if (cachedFacets) {
           const parsed = JSON.parse(cachedFacets);
           if (parsed.data) {
@@ -1660,9 +1680,11 @@
       }
     }
 
-    function saveCachedData(key, data) {
+    function saveCachedData(key, data, etag = null) {
       try {
-        sessionStorage.setItem(key, JSON.stringify({ timestamp: Date.now(), data }));
+        const payload = { timestamp: Date.now(), data };
+        if (etag) payload.etag = etag;
+        setStoredItem(key, JSON.stringify(payload));
       } catch (e) {
         console.warn('Cache save error:', e);
       }
@@ -1670,8 +1692,9 @@
 
     function invalidateCatalogCache() {
       try {
-        sessionStorage.removeItem(CACHE_KEY_BOOKS);
-        sessionStorage.removeItem(CACHE_KEY_FACETS);
+        removeStoredItem(CACHE_KEY_BOOKS);
+        removeStoredItem(CACHE_KEY_FACETS);
+        booksEtag = null;
       } catch (e) {}
     }
 
@@ -1713,16 +1736,31 @@
 
     async function loadBooks() {
       try {
-        const res = await fetch('/api/books', { cache: 'no-store' });
+        const headers = {};
+        if (booksEtag) {
+          headers['If-None-Match'] = booksEtag;
+        }
+        const res = await fetch('/api/books', { headers });
+        if (res.status === 304) {
+          // Data is unmodified, 0ms instant cache remains fresh
+          return;
+        }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const newEtag = res.headers.get('ETag');
+        if (newEtag) booksEtag = newEtag;
+
         const freshBooks = await res.json();
+        const hasChanged = JSON.stringify(freshBooks) !== JSON.stringify(allBooks);
         allBooks = freshBooks;
-        saveCachedData(CACHE_KEY_BOOKS, freshBooks);
+        saveCachedData(CACHE_KEY_BOOKS, freshBooks, booksEtag);
         document.getElementById('totalBooksStat').textContent = allBooks.length;
         document.getElementById('facetTotalBooks').textContent = allBooks.length.toLocaleString();
         document.getElementById('quickTotalBooks').textContent = allBooks.length;
         updateLibraryCounters();
-        applyFilters();
+        if (hasChanged) {
+          applyFilters();
+        }
       } catch (e) {
         console.error('Failed to load books:', e);
         const grid = document.getElementById('libraryGridView');
