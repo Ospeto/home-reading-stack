@@ -247,11 +247,14 @@ function registerJobHandlers(q: DurableJobQueue) {
             success: applied,
             topMatch: top.title,
             confidence: top.confidence,
+            source: top.source,
           };
         } else {
           return {
             success: true,
             message: `Match confidence ${top.confidence} < 0.85. Preserved original title.`,
+            topMatch: top.title,
+            source: top.source,
           };
         }
       }
@@ -2258,7 +2261,12 @@ export async function handleRequest(
       const isManga =
         req.url.includes("manga=true") ||
         /manga|comic|chapter|one piece|naruto|bleach/i.test(query);
-      const results = await searchUniversalMetadata(query, isManga);
+      const isLn =
+        req.url.includes("ln=true") || req.url.includes("lightnovel=true");
+      const results = await searchUniversalMetadata(query, {
+        isManga,
+        isLightNovel: isLn,
+      });
       return jsonResponse({ results }, 200, corsOrigin);
     } catch (err: any) {
       return jsonResponse(

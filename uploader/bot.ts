@@ -2074,6 +2074,7 @@ export interface IngestResult {
 function ingestBookFile(
   filePath: string,
   originalFileName: string,
+  chatId?: number,
 ): IngestResult {
   const ext = path.extname(originalFileName).toLowerCase();
   const format = normalizeFormat(ext);
@@ -2273,6 +2274,7 @@ function ingestBookFile(
           bookId: newId,
           title: finalTitle,
           isManga,
+          chatId,
         });
       }
 
@@ -2495,7 +2497,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
           }
         }
         for (const b of unp.books) {
-          const r = ingestBookFile(b.tempPath, b.originalName);
+          const r = ingestBookFile(b.tempPath, b.originalName, chatId);
           results.push({
             name: b.originalName,
             title: r.displayTitle,
@@ -2511,7 +2513,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
         continue;
       }
 
-      const res = ingestBookFile(destPath, fileName);
+      const res = ingestBookFile(destPath, fileName, chatId);
       try {
         fs.unlinkSync(destPath);
       } catch {}
@@ -2675,7 +2677,12 @@ process.on("SIGTERM", () => {
 export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
   q.registerHandler(
     "metadata_enrich",
-    async (payload: { bookId: number; title: string; isManga?: boolean }) => {
+    async (payload: {
+      bookId: number;
+      title: string;
+      isManga?: boolean;
+      chatId?: number;
+    }) => {
       log(
         `[JobQueue:MetadataEnrich] Background enrichment for book ID ${payload.bookId} ("${payload.title}")...`,
       );
@@ -2690,15 +2697,34 @@ export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
         );
         if (top.confidence >= 0.85) {
           const applied = await applyMetadataToCalibre(payload.bookId, top);
+          if (applied && payload.chatId) {
+            try {
+              await sendMessage(
+                payload.chatId,
+                `✨ *Metadata Auto-Enriched*\n\n` +
+                  `\uD83D\uDCD6 *Title:* ${escapeTelegramMarkdown(top.title)}\n` +
+                  `\uD83D\uDC64 *Author:* ${escapeTelegramMarkdown(top.authors || "Unknown")}\n` +
+                  `\uD83C\uDF10 *Source:* \`${escapeTelegramMarkdown(top.source)}\` (${Math.round(top.confidence * 100)}% match)`,
+                "Markdown",
+              );
+            } catch (notifyErr) {
+              log(
+                `Failed to send enrichment notification to chat ${payload.chatId}: ${notifyErr}`,
+              );
+            }
+          }
           return {
             success: applied,
             topMatch: top.title,
             confidence: top.confidence,
+            source: top.source,
           };
         } else {
           return {
             success: true,
             message: `Match confidence ${top.confidence} < 0.85. Preserved original title.`,
+            topMatch: top.title,
+            source: top.source,
           };
         }
       }
