@@ -117,6 +117,51 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain("skeleton-shimmer");
     expect(html).toContain("@keyframes shimmer");
   });
+
+  it("index.html implements native macOS Calibre & OPDS Library structure and prototype components", () => {
+    const htmlPath = path.join((import.meta as any).dir, "index.html");
+    const html = fs.readFileSync(htmlPath, "utf8");
+
+    // Window Frame & Traffic Light Controls
+    expect(html).toContain('data-purpose="macos-window-frame"');
+    expect(html).toContain('data-purpose="window-toolbar"');
+    expect(html).toContain("#FF5F56");
+    expect(html).toContain("#FFBD2E");
+    expect(html).toContain("#27C93F");
+
+    // Breadcrumb navigation & ⌘K Search
+    expect(html).toContain("breadcrumbCategory");
+    expect(html).toContain("⌘K");
+
+    // macOS Translucent Sidebar (acrylic glass blur)
+    expect(html).toContain('data-purpose="macos-library-sidebar"');
+    expect(html).toContain("All Books");
+    expect(html).toContain("Reading Now");
+    expect(html).toContain("Want to Read");
+    expect(html).toContain("Finished");
+    expect(html).toContain("Collections");
+    expect(html).toContain("OPDS Wireless");
+
+    // Content Header, Sort & View Switches
+    expect(html).toContain('data-purpose="library-grid-header"');
+    expect(html).toContain("contentHeaderTitle");
+    expect(html).toContain("contentHeaderSubtitle");
+    expect(html).toContain('id="sortSelect"');
+    expect(html).toContain('id="gridBtn"');
+    expect(html).toContain('id="tableBtn"');
+
+    // High-Fidelity Book Grid with 3D Spine and Elevation Shadows
+    expect(html).toContain('data-purpose="books-cover-grid"');
+    expect(html).toContain("book-spine-effect");
+    expect(html).toContain("shadow-book");
+    expect(html).toContain("shadow-book-hover");
+    expect(html).toContain("aspect-[1/1.48]");
+
+    // Native macOS Bottom Status Bar
+    expect(html).toContain('data-purpose="macos-status-bar"');
+    expect(html).toContain("Calibre Synced");
+    expect(html).toContain("statusVolumeCount");
+  });
 });
 
 describe("Reverse SSH Tunnel Auto-Healing Watchdog", () => {
