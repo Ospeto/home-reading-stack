@@ -1439,6 +1439,58 @@ export function getMainMenuText(): string {
   );
 }
 
+export function getHelpMessage(): string {
+  return (
+    `📖 *Reading HQ Commands & Guide*\n\n` +
+    `*Command Reference*\n` +
+    `• \`/menu\` - Interactive dashboard with one-tap access\n` +
+    `• \`/reading\` - Currently reading shelf with progress bars\n` +
+    `• \`/recent\` - 5 newest books in Calibre library\n` +
+    `• \`/find <query>\` (or \`/f <query>\`) - Search library\n` +
+    `• \`/get <id>\` - Download any book by ID\n` +
+    `• \`/app\` - Launch Reading HQ Mini App\n` +
+    `• \`/status\` (or \`/health\`) - System health dashboard\n` +
+    `• \`/backup\` - Hot backup of SQLite databases\n\n` +
+    `*KOReader Connection Guide*\n\n` +
+    `*1. KOSync Progress Sync*\n` +
+    `• In KOReader: open any book → Top menu → *Tools* (wrench icon) → *Progress sync*\n` +
+    `• Tap *Custom sync server* → enter server address:\n` +
+    `  • Local: \`http://192.168.31.15:7200\`\n` +
+    `  • Standby VPS: \`https://kosync-198-46-146-17.sslip.io\`\n` +
+    `• Tap *Login* → enter Username: \`moe\` (password as configured)\n` +
+    `• Check *"Automatically keep documents in sync"*\n` +
+    `• Tap *"Pull progress to this device now"* to test sync\n\n` +
+    `*2. OPDS Book Catalog (Wireless Downloads)*\n` +
+    `• In KOReader: top menu → *Search* (magnifying glass) → *OPDS catalog*\n` +
+    `• Tap *Add new catalog*:\n` +
+    `  • Catalog Name: \`Mac Mini Library\`\n` +
+    `  • Catalog URL: \`http://192.168.31.15:8088/opds\`\n` +
+    `  • (Standby VPS: \`https://calibre-198-46-146-17.sslip.io/opds\`)\n` +
+    `• Tap *Connect* (no login required on local LAN)\n\n` +
+    `*3. Kindle Wi-Fi Proxy (GFW / DPI Bypass)*\n` +
+    `• If Kindle displays connection errors reaching external servers:\n` +
+    `• Wi-Fi Settings → connected network → Advanced → HTTP Proxy:\n` +
+    `  • Host: \`192.168.31.15\` | Port: \`7890\`\n\n` +
+    `*Stack Endpoints Reference*\n` +
+    `• *KOSync Server:*\n` +
+    `  • Local: \`http://192.168.31.15:7200\`\n` +
+    `  • Standby VPS: \`https://kosync-198-46-146-17.sslip.io\`\n` +
+    `• *Calibre OPDS Feed:*\n` +
+    `  • Local: \`http://192.168.31.15:8088/opds\`\n` +
+    `  • Standby VPS: \`https://calibre-198-46-146-17.sslip.io/opds\`\n` +
+    `• *Calibre Web Reader:*\n` +
+    `  • Local: \`http://192.168.31.15:8088\`\n` +
+    `  • Standby VPS: \`https://calibre-198-46-146-17.sslip.io\`\n` +
+    `• *Reading HQ Dashboard:*\n` +
+    `  • Local: \`http://192.168.31.15:8086\`\n` +
+    `  • WAN / Mini App: \`https://reading.wavypremium.xyz\`\n` +
+    `• *LAN Proxy Gateway:*\n` +
+    `  • \`192.168.31.15:7890\` (HTTP/SOCKS5)\n` +
+    `• *Telegram Bot:* \`@saroat_ospeto_bot\`\n\n` +
+    `_Send any EPUB file (.epub or .zip/.7z archive) or article URL to ingest immediately._`
+  );
+}
+
 export function getPostIngestionKeyboard(bookId: number) {
   return {
     inline_keyboard: [
@@ -3102,20 +3154,17 @@ async function pollTelegram() {
             } else if (
               text === "/help" ||
               text.startsWith("/help@") ||
-              text.startsWith("/help ")
+              text.startsWith("/help ") ||
+              text === "/guide" ||
+              text.startsWith("/guide@") ||
+              text.startsWith("/guide ") ||
+              text === "/manual" ||
+              text.startsWith("/manual@") ||
+              text.startsWith("/manual ")
             ) {
               await sendMessage(
                 chatId,
-                `📚 *Reading HQ Commands & Features*\n\n` +
-                  `• \`/menu\` - Interactive dashboard with one-tap access\n` +
-                  `• \`/reading\` - Currently reading shelf with progress bars\n` +
-                  `• \`/recent\` - 5 newest books in Calibre library\n` +
-                  `• \`/find <query>\` (or \`/f <query>\`) - Search library\n` +
-                  `• \`/get <id>\` - Download any book by ID\n` +
-                  `• \`/app\` - Launch Reading HQ Mini App\n` +
-                  `• \`/status\` (or \`/health\`) - System health dashboard\n` +
-                  `• \`/backup\` - Hot backup of SQLite databases\n\n` +
-                  `_Send any EPUB file (.epub or .zip/.7z archive) or article URL to ingest immediately._`,
+                getHelpMessage(),
                 "Markdown",
                 getMainMenuKeyboard(),
               );
