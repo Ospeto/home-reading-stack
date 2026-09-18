@@ -319,11 +319,31 @@ async function sendMessage(
       body: JSON.stringify(body),
       timeoutMs: 15000,
     });
-    const data = (await res.json()) as any;
+    let data = (await res.json()) as any;
     if (data.ok && data.result?.message_id) {
       return data.result.message_id;
     }
-    // Safe Telegram plain-text fallback:
+
+    // Fallback 1: If keyboard / reply_markup caused BUTTON_DATA_INVALID or any 400 error
+    if (!data.ok && replyMarkup && (data.error_code === 400 || (data.description && /button|markup|reply_markup/i.test(data.description)))) {
+      logError(
+        `sendMessage failed with reply_markup (${data.description}), retrying without reply_markup...`,
+      );
+      const noMarkupBody: any = { chat_id: chatId, text };
+      if (parseMode) noMarkupBody.parse_mode = parseMode;
+      const noMarkupRes = await tgFetch("sendMessage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(noMarkupBody),
+        timeoutMs: 15000,
+      });
+      data = (await noMarkupRes.json()) as any;
+      if (data.ok && data.result?.message_id) {
+        return data.result.message_id;
+      }
+    }
+
+    // Fallback 2: Safe Telegram plain-text fallback (strips markdown entity formatting)
     if (
       !data.ok &&
       parseMode &&
@@ -334,7 +354,6 @@ async function sendMessage(
         `sendMessage failed with parseMode="${parseMode}" (${data.description}), retrying as plain text...`,
       );
       const fallbackBody: any = { chat_id: chatId, text };
-      if (replyMarkup) fallbackBody.reply_markup = replyMarkup;
       const retryRes = await tgFetch("sendMessage", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -376,11 +395,35 @@ async function editOrSendMessage(
         body: JSON.stringify(body),
         timeoutMs: 15000,
       });
-      const data = (await res.json()) as any;
+      let data = (await res.json()) as any;
       if (data.ok && data.result?.message_id) {
         return data.result.message_id;
       }
-      // Safe Telegram plain-text fallback:
+
+      // Fallback 1: If reply_markup caused BUTTON_DATA_INVALID or any 400 error
+      if (!data.ok && replyMarkup && (data.error_code === 400 || (data.description && /button|markup|reply_markup/i.test(data.description)))) {
+        logError(
+          `editMessageText failed with reply_markup (${data.description}), retrying without reply_markup...`,
+        );
+        const noMarkupBody: any = {
+          chat_id: chatId,
+          message_id: messageId,
+          text,
+        };
+        if (parseMode) noMarkupBody.parse_mode = parseMode;
+        const noMarkupRes = await tgFetch("editMessageText", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(noMarkupBody),
+          timeoutMs: 15000,
+        });
+        data = (await noMarkupRes.json()) as any;
+        if (data.ok && data.result?.message_id) {
+          return data.result.message_id;
+        }
+      }
+
+      // Fallback 2: Safe Telegram plain-text fallback (strips markdown entities)
       if (
         !data.ok &&
         parseMode &&
@@ -395,7 +438,6 @@ async function editOrSendMessage(
           message_id: messageId,
           text,
         };
-        if (replyMarkup) fallbackBody.reply_markup = replyMarkup;
         const retryRes = await tgFetch("editMessageText", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1505,13 +1547,72 @@ export function getPostIngestionKeyboard(bookId: number) {
   };
 }
 
-export function getRetryImportKeyboard(fileId: string) {
+export interface RetryEntry {
+  fileId: string;
+  fileName: string;
+  fileSize: number;
+  chatId: number;
+  createdAt: number;
+}
+
+export const pendingRetries = new Map<string, RetryEntry>();
+const RETRY_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+export function cleanExpiredRetries() {
+  const now = Date.now();
+  for (const [token, entry] of pendingRetries.entries()) {
+    if (now - entry.createdAt > RETRY_TTL_MS) {
+      pendingRetries.delete(token);
+    }
+  }
+}
+
+export function registerPendingRetry(info: {
+  fileId: string;
+  fileName?: string;
+  fileSize?: number;
+  chatId: number;
+}): string {
+  cleanExpiredRetries();
+  const retryToken = crypto.randomBytes(8).toString("hex");
+  pendingRetries.set(retryToken, {
+    fileId: info.fileId,
+    fileName: info.fileName || "retry.epub",
+    fileSize: info.fileSize || 0,
+    chatId: info.chatId,
+    createdAt: Date.now(),
+  });
+  return retryToken;
+}
+
+export function getRetryImportKeyboard(
+  tokenOrFileId: string,
+  info?: { fileName?: string; fileSize?: number; chatId?: number }
+) {
+  let token = tokenOrFileId;
+  if (token.startsWith("retry:")) {
+    token = token.replace("retry:", "");
+  } else if (token.startsWith("retry_file:")) {
+    token = token.replace("retry_file:", "");
+  }
+
+  // If the identifier is longer than 32 chars (e.g. Telegram raw file_id),
+  // map it to a short random token so callback_data remains well under 64 bytes.
+  if (token.length > 32) {
+    token = registerPendingRetry({
+      fileId: token,
+      fileName: info?.fileName,
+      fileSize: info?.fileSize,
+      chatId: info?.chatId || 0,
+    });
+  }
+
   return {
     inline_keyboard: [
       [
         {
           text: "🔄 Retry Import",
-          callback_data: `retry_file:${fileId}`,
+          callback_data: `retry:${token}`,
         },
       ],
     ],
@@ -1934,7 +2035,7 @@ export async function handleCallbackQuery(cq: any): Promise<void> {
   else if (data === "menu:search") answerText = "Search Library...";
   else if (data.startsWith("delete_book:")) answerText = "Deleting book...";
   else if (data.startsWith("send_book:")) answerText = "Retrieving book...";
-  else if (data.startsWith("retry_file:")) answerText = "Retrying import...";
+  else if (data.startsWith("retry:") || data.startsWith("retry_file:")) answerText = "Retrying import...";
 
   // Answer callback query immediately so Telegram client stops loading animation
   try {
@@ -2072,8 +2173,26 @@ export async function handleCallbackQuery(cq: any): Promise<void> {
     return;
   }
 
-  if (data.startsWith("retry_file:")) {
-    const fileId = data.replace("retry_file:", "").trim();
+  if (data.startsWith("retry:") || data.startsWith("retry_file:")) {
+    let fileId = "";
+    let cachedFileName = "";
+    let cachedFileSize = 0;
+
+    if (data.startsWith("retry:")) {
+      const token = data.replace("retry:", "").trim();
+      const entry = pendingRetries.get(token);
+      if (entry) {
+        fileId = entry.fileId;
+        cachedFileName = entry.fileName;
+        cachedFileSize = entry.fileSize;
+      } else {
+        // Fallback: if token was actually a direct fileId (e.g. backward compat)
+        fileId = token;
+      }
+    } else {
+      fileId = data.replace("retry_file:", "").trim();
+    }
+
     if (!fileId) {
       await sendMessage(chatId, `❌ Invalid file ID for retry`, "Markdown");
       return;
@@ -2097,8 +2216,8 @@ export async function handleCallbackQuery(cq: any): Promise<void> {
       }
 
       const filePath = fileJson.result.file_path;
-      const fileName = path.basename(filePath || "retry.epub");
-      const fileSize = fileJson.result.file_size || 0;
+      const fileName = cachedFileName || path.basename(filePath || "retry.epub");
+      const fileSize = fileJson.result.file_size || cachedFileSize || 0;
 
       const item: QueuedDoc = {
         doc: {
@@ -2496,19 +2615,50 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
 
       const token = getTelegramBotToken();
       const dlUrl = `https://api.telegram.org/file/bot${token}/${fileJson.result.file_path}`;
-      const dl = await safeFetchWithSsrf(dlUrl, { proxy: PROXY_URL } as any);
-      if (!dl.ok) {
+      const expectedSize = doc.file_size || fileJson.result.file_size || 0;
+
+      let arrayBuf: ArrayBuffer | null = null;
+      let lastDlError = "";
+      const MAX_DL_RETRIES = 3;
+
+      for (let attempt = 1; attempt <= MAX_DL_RETRIES; attempt++) {
+        try {
+          const dl = await safeFetchWithSsrf(dlUrl, {
+            proxy: PROXY_URL,
+            signal: AbortSignal.timeout(60000),
+          } as any);
+
+          if (!dl.ok) {
+            lastDlError = `Download failed (HTTP ${dl.status})`;
+            logError(`[TelegramBot] Download attempt ${attempt}/${MAX_DL_RETRIES} failed for "${fileName}": ${lastDlError}`);
+            continue;
+          }
+
+          const buf = await dl.arrayBuffer();
+          if (expectedSize > 0 && buf.byteLength < expectedSize) {
+            lastDlError = `Download truncated (${buf.byteLength}/${expectedSize} bytes)`;
+            logError(`[TelegramBot] Download attempt ${attempt}/${MAX_DL_RETRIES} truncated for "${fileName}": ${lastDlError}`);
+            continue;
+          }
+
+          arrayBuf = buf;
+          break;
+        } catch (dlErr: any) {
+          lastDlError = dlErr?.message || "Network error";
+          logError(`[TelegramBot] Download attempt ${attempt}/${MAX_DL_RETRIES} error for "${fileName}": ${lastDlError}`);
+        }
+      }
+
+      if (!arrayBuf) {
         results.push({
           name: fileName,
           format,
           status: "error",
-          note: `Download failed (HTTP ${dl.status})`,
+          note: lastDlError || "Download failed",
           fileId: doc?.file_id,
         });
         continue;
       }
-
-      const arrayBuf = await dl.arrayBuffer();
       const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
       const safeBase = path.basename(fileName, ext);
       const tempFileName = `${safeBase}_${uniqueSuffix}${ext}`;
@@ -2732,7 +2882,10 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
       const isOverSize = single.note.includes("20MB");
       const retryKeyboard =
         single.fileId && !isOverSize
-          ? getRetryImportKeyboard(single.fileId)
+          ? getRetryImportKeyboard(single.fileId, {
+              fileName: single.name,
+              chatId,
+            })
           : undefined;
       await editOrSendMessage(
         chatId,
