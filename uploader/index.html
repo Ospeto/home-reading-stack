@@ -132,6 +132,7 @@
     .border-mac-accent\/30 { border-color: rgba(10, 132, 255, 0.3); }
 
     .text-mac-accent { color: #0A84FF; }
+    .text-mac-subtext { color: rgba(255, 255, 255, 0.45); }
     .hover\:bg-mac-accent:hover { background-color: #0A84FF; }
     .hover\:bg-mac-accentHover:hover { background-color: #0071E3; }
     .focus\:ring-mac-accent:focus { --tw-ring-color: #0A84FF; }
@@ -166,8 +167,8 @@
     }
 
     .acrylic {
-      backdrop-filter: blur(28px) saturate(190%);
-      -webkit-backdrop-filter: blur(28px) saturate(190%);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
     }
 
     .aspect-\[1\/1\.48\] {
@@ -175,16 +176,16 @@
     }
 
     .shadow-book {
-      box-shadow: 0 12px 28px -4px rgba(0, 0, 0, 0.65), 0 6px 12px -2px rgba(0, 0, 0, 0.45);
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5), 0 2px 4px -2px rgba(0, 0, 0, 0.5), -2px 0 3px rgba(0, 0, 0, 0.4);
     }
     .shadow-book-hover {
-      box-shadow: 0 20px 38px -4px rgba(0, 0, 0, 0.8), 0 10px 18px -2px rgba(10, 132, 255, 0.25);
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.6), -3px 0 5px rgba(0, 0, 0, 0.5);
     }
     .group:hover .group-hover\:shadow-book-hover {
-      box-shadow: 0 20px 38px -4px rgba(0, 0, 0, 0.8), 0 10px 18px -2px rgba(10, 132, 255, 0.25);
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.6), -3px 0 5px rgba(0, 0, 0, 0.5);
     }
     .shadow-mac-window {
-      box-shadow: 0 25px 60px -15px rgba(0,0,0,0.9), 0 0 0 1px rgba(255,255,255,0.1);
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.08);
     }
 
     .-translate-y-1\.5 {
@@ -232,15 +233,56 @@
     .gap-6 { gap: 1.5rem; }
     .gap-8 { gap: 2rem; }
     .p-8 { padding: 2rem; }
+    .min-h-0 { min-height: 0; }
+    .touch-pan-y { -webkit-overflow-scrolling: touch; }
+    .overflow-y-auto { -webkit-overflow-scrolling: touch; }
+
+    /* macOS Traffic Light Colors & Subtle Dark Borders */
+    .traffic-light-close {
+      background-color: #FF5F56 !important;
+      border-color: rgba(0, 0, 0, 0.25) !important;
+    }
+    .traffic-light-minimize {
+      background-color: #FFBD2E !important;
+      border-color: rgba(0, 0, 0, 0.25) !important;
+    }
+    .traffic-light-maximize {
+      background-color: #27C93F !important;
+      border-color: rgba(0, 0, 0, 0.25) !important;
+    }
+
+    /* Responsive Sidebar & Grid Utility Rules */
+    @media (min-width: 768px) {
+      .md\:flex { display: flex; }
+      .md\:hidden { display: none; }
+      .md\:w-64 { width: 16rem; }
+      .md\:grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    }
     @media (min-width: 1024px) {
+      .lg\:flex { display: flex; }
+      .lg\:hidden { display: none; }
       .lg\:grid-cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
       .lg\:grid-cols-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
       .lg\:p-3 { padding: 0.75rem; }
       .lg\:p-8 { padding: 2rem; }
     }
+    @media (min-width: 1280px) {
+      .xl\:grid-cols-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+    }
+    @media (min-width: 1536px) {
+      .2xl\:grid-cols-7 { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+    }
+
+    /* Book Card Bounds: keep book cards proportioned and bounded */
+    .book-card {
+      max-width: 220px;
+      width: 100%;
+      margin-left: auto;
+      margin-right: auto;
+    }
   </style>
 </head>
-<body class="bg-black text-neutral-200 antialiased h-screen flex flex-col overflow-hidden font-sans p-0 sm:p-2 lg:p-3 selection:bg-zinc-800 selection:text-white">
+<body class="bg-black text-neutral-200 antialiased flex flex-col font-sans p-0 sm:p-2 lg:p-3 selection:bg-zinc-800 selection:text-white">
 
   <!-- SVG ICON SPRITE -->
   <svg style="display:none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -355,7 +397,7 @@
   </svg>
 
   <!-- BEGIN: macOS App Window Container -->
-  <div class="flex-1 flex flex-col w-full h-full rounded-none sm:rounded-2xl overflow-hidden bg-mac-bg border-0 sm:border border-mac-border shadow-mac-window" data-purpose="macos-window-frame">
+  <div class="flex-1 min-h-0 flex flex-col w-full h-full rounded-none sm:rounded-2xl overflow-hidden bg-mac-bg border-0 sm:border border-mac-border shadow-mac-window" data-purpose="macos-window-frame">
     
     <!-- BEGIN: macOS Unified Window Toolbar -->
     <header class="h-14 bg-mac-sidebar/95 acrylic border-b border-mac-border flex items-center justify-between px-3 sm:px-4 z-30 shrink-0" data-purpose="window-toolbar">
@@ -363,9 +405,9 @@
       <!-- Traffic Light Controls & Breadcrumb -->
       <div class="flex items-center gap-4 sm:gap-6 min-w-[180px] sm:min-w-[220px]">
         <div class="flex items-center space-x-2 shrink-0">
-          <span class="w-3 h-3 rounded-full bg-[#FF5F56] border border-[#E0443E] cursor-pointer hover:opacity-80 transition-opacity" title="Close All Modals" onclick="closeAllModals()"></span>
-          <span class="w-3 h-3 rounded-full bg-[#FFBD2E] border border-[#DEA123] cursor-pointer hover:opacity-80 transition-opacity" title="Refresh Library" onclick="tgHaptic.light(); init();"></span>
-          <span class="w-3 h-3 rounded-full bg-[#27C93F] border border-[#1AAB29] cursor-pointer hover:opacity-80 transition-opacity" title="Toggle Fullscreen" onclick="toggleFullscreen()"></span>
+          <span class="w-3 h-3 rounded-full bg-[#FF5F56] traffic-light-close border border-[#E0443E] border-black/20 cursor-pointer hover:opacity-80 transition-opacity" title="Close All Modals" onclick="closeAllModals()"></span>
+          <span class="w-3 h-3 rounded-full bg-[#FFBD2E] traffic-light-minimize border border-[#DEA123] border-black/20 cursor-pointer hover:opacity-80 transition-opacity" title="Refresh Library" onclick="tgHaptic.light(); init();"></span>
+          <span class="w-3 h-3 rounded-full bg-[#27C93F] traffic-light-maximize border border-[#1AAB29] border-black/20 cursor-pointer hover:opacity-80 transition-opacity" title="Toggle Fullscreen" onclick="toggleFullscreen()"></span>
         </div>
         <div class="flex items-center gap-2 text-xs">
           <button onclick="setFilter('all', null)" class="font-medium text-xs tracking-tight text-neutral-200 hover:text-white transition-colors cursor-pointer">Library</button>
@@ -393,7 +435,7 @@
       <!-- Action Buttons -->
       <div class="flex items-center gap-2 sm:gap-2.5 shrink-0">
         <!-- Mobile Filter Toggle Button -->
-        <button onclick="openFilterDrawer()" class="lg:hidden w-7 h-7 sm:w-8 sm:h-8 rounded-lg text-neutral-400 hover:text-white hover:bg-white/10 transition-colors flex items-center justify-center cursor-pointer relative" title="Filter Library">
+        <button onclick="openFilterDrawer()" class="md:hidden w-7 h-7 sm:w-8 sm:h-8 rounded-lg text-neutral-400 hover:text-white hover:bg-white/10 transition-colors flex items-center justify-center cursor-pointer relative" title="Filter Library">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"></path></svg>
           <span id="mobileFilterBadgeCount" class="hidden absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-mac-accent"></span>
         </button>
@@ -427,10 +469,10 @@
     <!-- END: macOS Unified Window Toolbar -->
 
     <!-- BEGIN: Main Workspace Body (Sidebar + Content) -->
-    <div class="flex-1 flex overflow-hidden">
+    <div class="flex-1 min-h-0 flex overflow-hidden">
       
       <!-- BEGIN: Left macOS Translucent Sidebar -->
-      <aside class="w-64 xl:w-72 bg-mac-sidebar/70 acrylic border-r border-mac-border hidden lg:flex flex-col justify-between shrink-0 overflow-y-auto" data-purpose="macos-library-sidebar">
+      <aside class="w-64 xl:w-72 bg-mac-sidebar/70 acrylic border-r border-mac-border hidden md:flex md:w-64 shrink-0 flex-col justify-between overflow-y-auto" data-purpose="macos-library-sidebar">
         
         <div class="p-4 space-y-5">
           
@@ -530,7 +572,7 @@
       <!-- END: Left macOS Translucent Sidebar -->
 
       <!-- BEGIN: Right Primary Workspace -->
-      <main class="flex-1 flex flex-col overflow-y-auto bg-mac-bg">
+      <main class="flex-1 min-h-0 flex flex-col overflow-y-auto bg-mac-bg">
         
         <!-- Library Content Header: Series title, count, view toggle & sort -->
         <div class="px-4 sm:px-6 py-3.5 sm:py-4 flex items-center justify-between border-b border-mac-border shrink-0" data-purpose="library-grid-header">
@@ -561,7 +603,7 @@
         </div>
 
         <!-- Quick Pill Nav Strip for Mobile -->
-        <div class="px-4 py-2 flex items-center gap-1.5 overflow-x-auto no-scrollbar border-b border-mac-border/60 text-xs lg:hidden">
+        <div class="px-4 py-2 flex items-center gap-1.5 overflow-x-auto no-scrollbar border-b border-mac-border/60 text-xs md:hidden">
           <button onclick="setFilter('all', null)" id="chip-all" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-white text-neutral-950 shrink-0 transition-colors">
             All Books (<span id="quickTotalBooks">0</span>)
           </button>
@@ -584,9 +626,9 @@
         </div>
 
         <!-- Content Area: Book Grid & Table View -->
-        <div class="p-4 sm:p-6 lg:p-8 flex-1">
+        <div class="p-4 sm:p-6 lg:p-8 flex-1 min-h-0">
           <!-- BEGIN: High-Fidelity Book Grid -->
-          <div id="libraryGridView" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6 sm:gap-8" data-purpose="books-cover-grid"></div>
+          <div id="libraryGridView" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-4 sm:gap-6 max-w-[1600px] mx-auto w-full" data-purpose="books-cover-grid"></div>
           <!-- END: High-Fidelity Book Grid -->
 
           <!-- BEGIN: Compact Table View -->
@@ -2172,7 +2214,7 @@
                 renderBooks();
               }
             }
-          }, { rootMargin: '400px' });
+          }, { root: document.querySelector('main'), rootMargin: '400px' });
         }
         const sentinelEl = document.getElementById('catalogSentinel');
         if (sentinelEl) {
