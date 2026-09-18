@@ -19,6 +19,9 @@ import {
   getRetryImportKeyboard,
   handleCallbackQuery,
   batchProcessFiles,
+  pendingRetries,
+  cleanExpiredRetries,
+  registerPendingRetry,
 } from "./bot";
 
 describe("Telegram Mini App (TMA) Integration", () => {
@@ -653,7 +656,7 @@ describe("HTTP LAN Clipboard & Stored XSS Hardening (index.html)", () => {
         success: () => { hapticSuccessCalled = true; },
         error: () => { hapticErrorCalled = true; },
       };
-      const mockShowToast = (msg: string, type = "success") => {
+      const mockShowToast = (_msg: string, type = "success") => {
         toastCalled = true;
         toastType = type;
       };
@@ -722,7 +725,7 @@ describe("HTTP LAN Clipboard & Stored XSS Hardening (index.html)", () => {
         success: () => { hapticSuccessCalled = true; },
         error: () => { hapticErrorCalled = true; },
       };
-      const mockShowToast = (msg: string, type = "success") => {
+      const mockShowToast = (_msg: string, type = "success") => {
         toastCalled = true;
         toastType = type;
       };
@@ -777,7 +780,7 @@ describe("HTTP LAN Clipboard & Stored XSS Hardening (index.html)", () => {
         success: () => { hapticSuccessCalled = true; },
         error: () => { hapticErrorCalled = true; },
       };
-      const mockShowToast = (msg: string, type = "success") => {
+      const mockShowToast = (_msg: string, type = "success") => {
         toastCalled = true;
         toastType = type;
       };
@@ -840,22 +843,41 @@ describe("HTTP LAN Clipboard & Stored XSS Hardening (index.html)", () => {
 });
 
 describe("Retry Import Actions & Telegram Bot Handling", () => {
-  it("getRetryImportKeyboard generates 1-row inline keyboard pointing to retry_file:<file_id>", () => {
+  it("getRetryImportKeyboard generates callback_data strictly <= 64 bytes using short retry token", () => {
     expect(typeof batchProcessFiles).toBe("function");
-    const fileId = "BAADBAADAgADRETRY12345";
-    const kb = getRetryImportKeyboard(fileId);
+    // Typical long Telegram document file_id (70-90 bytes)
+    const longFileId = "BQACAgQAAxkBAAICa2edFk9abcdef0123456789ABCDEFghijklmnopqrstuvwxyz_very_long_telegram_file_id_example";
+    const kb = getRetryImportKeyboard(longFileId, {
+      fileName: "test_book.epub",
+      fileSize: 1024,
+      chatId: 123456,
+    });
     expect(kb).toBeDefined();
     expect(Array.isArray(kb.inline_keyboard)).toBe(true);
     expect(kb.inline_keyboard.length).toBe(1);
     expect(kb.inline_keyboard[0].length).toBe(1);
     expect(kb.inline_keyboard[0][0].text).toContain("Retry Import");
-    expect(kb.inline_keyboard[0][0].callback_data).toBe(`retry_file:${fileId}`);
+
+    const callbackData = kb.inline_keyboard[0][0].callback_data;
+    expect(callbackData).toBeDefined();
+    expect(callbackData.startsWith("retry:")).toBe(true);
+    // Strict Telegram Bot API limit: callback_data must be 1-64 bytes
+    expect(Buffer.byteLength(callbackData, "utf8")).toBeLessThanOrEqual(64);
+    expect(callbackData.length).toBeLessThanOrEqual(64);
   });
 
-  it("handleCallbackQuery handles retry_file: callback by answering query, retrieving file, and retrying batch ingestion", async () => {
+  it("handleCallbackQuery handles retry: token callback and re-triggers ingestion", async () => {
     const answeredQueries: any[] = [];
     const requestedEndpoints: string[] = [];
     const sentMessages: any[] = [];
+
+    const fileId = "long_file_id_for_retry_test_1234567890_abcdefghij";
+    const kb = getRetryImportKeyboard(fileId, {
+      fileName: "test_retry_book.epub",
+      fileSize: 2048,
+      chatId: 778899,
+    });
+    const retryCallbackData = kb.inline_keyboard[0][0].callback_data;
 
     const origFetch = globalThis.fetch;
     globalThis.fetch = (async (input: any, init: any) => {
@@ -870,12 +892,12 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
         });
       }
 
-      if (url.includes("getFile?file_id=retry_test_123")) {
+      if (url.includes(`getFile?file_id=${fileId}`)) {
         return new Response(
           JSON.stringify({
             ok: true,
             result: {
-              file_id: "retry_test_123",
+              file_id: fileId,
               file_path: "documents/test_retry_book.epub",
               file_size: 2048,
             },
@@ -903,7 +925,7 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
     try {
       const cq = {
         id: "cb_query_999",
-        data: "retry_file:retry_test_123",
+        data: retryCallbackData,
         message: { chat: { id: 778899 }, message_id: 456 },
         from: { username: "reader", id: 778899 },
       };
@@ -915,23 +937,102 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
       expect(answeredQueries[0].callback_query_id).toBe("cb_query_999");
       expect(answeredQueries[0].text).toBe("Retrying import...");
 
-      // Verify getFile was called with the file_id
+      // Verify getFile was called with the original fileId looked up from token
       const getFileCalled = requestedEndpoints.some((u) =>
-        u.includes("getFile?file_id=retry_test_123"),
+        u.includes(`getFile?file_id=${fileId}`),
       );
       expect(getFileCalled).toBe(true);
 
-      // Verify error message with retry keyboard was sent when validation failed
+      // Verify error message with short retry keyboard was sent when download truncated / validation failed
       const errorMessage = sentMessages.find(
         (m) =>
           m.text?.includes("Import Failed") &&
-          m.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data ===
-            "retry_file:retry_test_123",
+          m.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data?.startsWith("retry:"),
       );
       expect(errorMessage).toBeDefined();
+      expect(
+        errorMessage.reply_markup.inline_keyboard[0][0].callback_data.length,
+      ).toBeLessThanOrEqual(64);
     } finally {
       globalThis.fetch = origFetch;
     }
+  });
+
+  it("handleCallbackQuery preserves backward compatibility with retry_file: prefix", async () => {
+    const answeredQueries: any[] = [];
+    const requestedEndpoints: string[] = [];
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      requestedEndpoints.push(url);
+
+      if (url.includes("answerCallbackQuery")) {
+        const body = JSON.parse(init?.body || "{}");
+        answeredQueries.push(body);
+        return new Response(JSON.stringify({ ok: true, result: true }), {
+          status: 200,
+        });
+      }
+
+      if (url.includes("getFile?file_id=legacy_123")) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            result: {
+              file_id: "legacy_123",
+              file_path: "documents/legacy.epub",
+              file_size: 50,
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      if (url.includes("legacy.epub")) {
+        return new Response(new Uint8Array(50), { status: 200 });
+      }
+
+      return new Response(
+        JSON.stringify({ ok: true, result: { message_id: 101 } }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+
+    try {
+      const cq = {
+        id: "cb_legacy",
+        data: "retry_file:legacy_123",
+        message: { chat: { id: 112233 }, message_id: 789 },
+        from: { username: "legacy_user", id: 112233 },
+      };
+
+      await handleCallbackQuery(cq);
+      expect(answeredQueries.length).toBeGreaterThan(0);
+      expect(requestedEndpoints.some((u) => u.includes("legacy_123"))).toBe(true);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it("verifies pendingRetries map TTL expiration cleanup", () => {
+    cleanExpiredRetries();
+    const token = registerPendingRetry({
+      fileId: "test_ttl_file_id",
+      fileName: "test.epub",
+      fileSize: 500,
+      chatId: 12345,
+    });
+    expect(pendingRetries.has(token)).toBe(true);
+    const entry = pendingRetries.get(token);
+    expect(entry).toBeDefined();
+
+    // Artificially expire the entry
+    if (entry) {
+      entry.createdAt = Date.now() - (60 * 60 * 1000 + 1000);
+    }
+    cleanExpiredRetries();
+    expect(pendingRetries.has(token)).toBe(false);
   });
 
   it("index.html provides a direct Retry button for failed upload queue items", () => {
