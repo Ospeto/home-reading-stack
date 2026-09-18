@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { safeFetchWithSsrf } from "./security";
+import { safeFetchWithSsrf, isPrivateOrInternalIp } from "./security";
 
 export function getCalibredbPath(): string {
   if (process.env.CALIBREDB_PATH) return process.env.CALIBREDB_PATH;
@@ -554,19 +554,258 @@ export async function searchOpenLibrary(
   return results;
 }
 
+// 5. RanobeDB Light Novel Scraper
+export function formatRanobeDate(rawDate?: number | string | null): string {
+  if (!rawDate) return "";
+  const s = String(rawDate).trim();
+  if (!/^\d+$/.test(s) || s.startsWith("9999") || s === "0") return "";
+  if (s.length === 8) {
+    const y = s.slice(0, 4);
+    const m = s.slice(4, 6);
+    const d = s.slice(6, 8);
+    return `${y}-${m}-${d}`;
+  }
+  if (s.length === 6) {
+    const y = s.slice(0, 4);
+    const m = s.slice(4, 6);
+    return `${y}-${m}`;
+  }
+  if (s.length === 4) {
+    return s;
+  }
+  return "";
+}
+
+export function isLightNovelQuery(query: string): boolean {
+  if (!query) return false;
+  return /\b(?:light[\s_-]?novel|ln|web[\s_-]?novel|wn|ranobe|bunko|isekai|reincarnat(?:ed|ion)?|danmachi|(?:\w+)?monogatari|oregairu|tensura|konosuba|sword\s*art\s*online|overlord|mushoku\s*tensei|classroom\s*of\s*the\s*elite|re:?zero|toaru|mahouka|no\s*game\s*no\s*life|spice\s*and\s*wolf|rascal\s*does\s*not\s*dream)\b/i.test(
+    query,
+  );
+}
+
+export function parseRanobeBook(
+  book: any,
+  query: string,
+  fallbackHit?: any,
+): ScrapedMetadata {
+  const cleanQ = cleanQuery(query);
+  const title =
+    book.title ||
+    book.title_orig ||
+    fallbackHit?.title ||
+    fallbackHit?.title_orig ||
+    "";
+
+  let authors = (book.editions?.[0]?.staff || [])
+    .filter((s: any) => s.role_type === "author")
+    .map((s: any) => s.name)
+    .filter(Boolean)
+    .join(", ");
+
+  if (!authors && Array.isArray(book.editions)) {
+    for (const ed of book.editions) {
+      const list = (ed.staff || [])
+        .filter((s: any) => s.role_type === "author")
+        .map((s: any) => s.name)
+        .filter(Boolean);
+      if (list.length > 0) {
+        authors = Array.from(new Set(list)).join(", ");
+        break;
+      }
+    }
+  }
+
+  const rawTags = (book.series?.tags || fallbackHit?.series?.tags || [])
+    .map((t: any) => (typeof t === "string" ? t : t?.name))
+    .filter(Boolean);
+  const tags = Array.from(new Set(["Light Novel", ...rawTags]));
+
+  const filename = book.image?.filename || fallbackHit?.image?.filename;
+  const coverUrl = filename
+    ? `https://images.ranobedb.org/${filename}`
+    : undefined;
+
+  const sim = Math.max(
+    stringSimilarity(cleanQ, title),
+    stringSimilarity(cleanQ, book.title_orig || fallbackHit?.title_orig || ""),
+    stringSimilarity(cleanQ, book.romaji || fallbackHit?.romaji || ""),
+    stringSimilarity(
+      cleanQ,
+      book.series?.title || fallbackHit?.series?.title || "",
+    ),
+  );
+
+  return {
+    title,
+    authors: authors || "Unknown",
+    publisher: book.series?.title || fallbackHit?.series?.title || "",
+    publishedDate: formatRanobeDate(
+      book.c_release_date ?? fallbackHit?.c_release_date,
+    ),
+    description: book.description || book.description_ja || "",
+    coverUrl,
+    tags,
+    source: "RanobeDB",
+    confidence: Math.round(sim * 100) / 100,
+    isManga: false,
+  };
+}
+
+export async function searchRanobeDB(
+  query: string,
+  options?: {
+    baseUrl?: string;
+    timeoutMs?: number;
+    fetchFn?: (url: string, init?: any) => Promise<Response>;
+  },
+): Promise<ScrapedMetadata[]> {
+  const results: ScrapedMetadata[] = [];
+  const cleanQ = cleanQuery(query);
+  if (!cleanQ) return results;
+
+  const apiBase = options?.baseUrl || "https://ranobedb.org/api/v0";
+  const timeoutMs = options?.timeoutMs || SCRAPER_TIMEOUT_MS;
+  const doFetch =
+    options?.fetchFn ||
+    ((url: string, init?: any) =>
+      safeFetchWithSsrf(url, {
+        headers: { "User-Agent": "ReadingHQ/1.0", Accept: "application/json" },
+        signal: AbortSignal.timeout(timeoutMs),
+        proxy: PROXY,
+        ...init,
+      } as any));
+
+  try {
+    const searchUrl = `${apiBase}/books?q=${encodeURIComponent(cleanQ)}&limit=4`;
+    const res = await doFetch(searchUrl);
+
+    let bookHits: any[] = [];
+    if (res.ok) {
+      const json: any = await res.json();
+      if (Array.isArray(json.books)) {
+        bookHits = json.books;
+      } else if (Array.isArray(json.data)) {
+        bookHits = json.data;
+      } else if (Array.isArray(json)) {
+        bookHits = json;
+      }
+    }
+
+    // Series search fallback: if /books returns 0 hits, try GET /series?q=${encodeURIComponent(cleanQ)}&limit=2
+    if (bookHits.length === 0) {
+      const seriesUrl = `${apiBase}/series?q=${encodeURIComponent(cleanQ)}&limit=2`;
+      const sRes = await doFetch(seriesUrl);
+
+      if (sRes.ok) {
+        const sJson: any = await sRes.json();
+        const seriesList = Array.isArray(sJson.series)
+          ? sJson.series
+          : Array.isArray(sJson.data)
+          ? sJson.data
+          : [];
+
+        for (const s of seriesList.slice(0, 2)) {
+          if (s.book?.id) {
+            bookHits.push(s.book);
+          } else if (s.id) {
+            try {
+              const dRes = await doFetch(`${apiBase}/series/${s.id}`);
+              if (dRes.ok) {
+                const dJson: any = await dRes.json();
+                const seriesObj = dJson.series || dJson;
+                if (
+                  Array.isArray(seriesObj.books) &&
+                  seriesObj.books.length > 0
+                ) {
+                  bookHits.push(seriesObj.books[0]);
+                }
+              }
+            } catch {
+              // Ignore series detail error
+            }
+          }
+        }
+      }
+    }
+
+    // For top book hits, fetch detailed metadata via GET /book/${book.id}
+    const detailSettled = await Promise.allSettled(
+      bookHits.slice(0, 4).map(async (hit: any) => {
+        if (!hit.id) return null;
+        try {
+          const bRes = await doFetch(`${apiBase}/book/${hit.id}`);
+          if (bRes.ok) {
+            const bJson: any = await bRes.json();
+            const book = bJson.book || bJson;
+            return parseRanobeBook(book, cleanQ, hit);
+          }
+        } catch {
+          return parseRanobeBook(hit, cleanQ);
+        }
+        return parseRanobeBook(hit, cleanQ);
+      }),
+    );
+
+    for (const d of detailSettled) {
+      if (d.status === "fulfilled" && d.value) {
+        results.push(d.value);
+      }
+    }
+  } catch (err: any) {
+    console.debug(
+      `[Scraper:RanobeDB] Query "${cleanQ}" failed:`,
+      err?.message || err,
+    );
+  }
+
+  return results;
+}
+
 // Unified Search with Multi-Source Fallback
 export async function searchUniversalMetadata(
   query: string,
-  hintManga: boolean = false,
+  hint?:
+    | boolean
+    | string
+    | { isManga?: boolean; isLightNovel?: boolean; isLn?: boolean },
 ): Promise<ScrapedMetadata[]> {
   const results: ScrapedMetadata[] = [];
-  const isMangaTarget =
-    hintManga ||
-    /manga|comic|chapter|ch\.|vol\.|c0|one piece|naruto|bleach|berserk/i.test(
-      query,
-    );
+  const cleanQ = cleanQuery(query);
+  if (!cleanQ) return results;
 
-  if (isMangaTarget) {
+  let hintManga = false;
+  let hintLn = false;
+
+  if (typeof hint === "boolean") {
+    hintManga = hint;
+  } else if (typeof hint === "string") {
+    hintManga = /manga|comic/i.test(hint);
+    hintLn = /light[\s_-]?novel|ln|ranobe|bunko/i.test(hint);
+  } else if (hint && typeof hint === "object") {
+    hintManga = !!hint.isManga;
+    hintLn = !!(hint.isLightNovel || hint.isLn);
+  }
+
+  const isLnTarget = hintLn || isLightNovelQuery(cleanQ);
+  const isMangaTarget =
+    !isLnTarget &&
+    (hintManga ||
+      /manga|comic|chapter|ch\.|c0|one piece|naruto|bleach|berserk/i.test(
+        cleanQ,
+      ));
+
+  if (isLnTarget) {
+    const lnSettled = await Promise.allSettled([
+      searchRanobeDB(query),
+      searchBangumi(query),
+      searchGoogleBooks(query),
+    ]);
+    for (const res of lnSettled) {
+      if (res.status === "fulfilled") {
+        results.push(...res.value);
+      }
+    }
+  } else if (isMangaTarget) {
     const mangaSettled = await Promise.allSettled([
       searchMangaDex(query),
       searchBangumi(query),
@@ -580,6 +819,7 @@ export async function searchUniversalMetadata(
 
   if (results.length === 0) {
     const bookSettled = await Promise.allSettled([
+      searchRanobeDB(query),
       searchGoogleBooks(query),
       searchOpenLibrary(query),
     ]);
@@ -590,8 +830,8 @@ export async function searchUniversalMetadata(
     }
   }
 
-  // If still empty and was not initially marked manga, try manga scrapers as last resort
-  if (results.length === 0 && !isMangaTarget) {
+  // If still empty and was not initially marked manga or LN, try manga scrapers as last resort
+  if (results.length === 0 && !isMangaTarget && !isLnTarget) {
     const fallbackSettled = await Promise.allSettled([
       searchMangaDex(query),
       searchBangumi(query),
@@ -603,16 +843,62 @@ export async function searchUniversalMetadata(
     }
   }
 
-  // Sort by highest confidence
-  results.sort((a, b) => b.confidence - a.confidence);
+  // Sort results: prioritize RanobeDB when query matches light novel patterns or has high title similarity
+  results.sort((a, b) => {
+    if (isLnTarget) {
+      if (
+        a.source === "RanobeDB" &&
+        b.source !== "RanobeDB" &&
+        a.confidence >= 0.7
+      )
+        return -1;
+      if (
+        b.source === "RanobeDB" &&
+        a.source !== "RanobeDB" &&
+        b.confidence >= 0.7
+      )
+        return 1;
+    }
+    // High similarity RanobeDB priority
+    if (
+      a.source === "RanobeDB" &&
+      b.source !== "RanobeDB" &&
+      a.confidence >= 0.85 &&
+      b.confidence <= a.confidence + 0.05
+    ) {
+      return -1;
+    }
+    if (
+      b.source === "RanobeDB" &&
+      a.source !== "RanobeDB" &&
+      b.confidence >= 0.85 &&
+      a.confidence <= b.confidence + 0.05
+    ) {
+      return 1;
+    }
+    return b.confidence - a.confidence;
+  });
+
   return results;
 }
+
+export const KNOWN_COVER_DOMAINS = new Set([
+  "images.ranobedb.org",
+  "uploads.mangadex.org",
+  "covers.openlibrary.org",
+  "books.google.com",
+  "books.googleusercontent.com",
+  "api.bgm.tv",
+  "lain.bgm.tv",
+]);
 
 export function isAllowedCoverUrl(rawUrl: string): boolean {
   try {
     const u = new URL(rawUrl);
     if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    if (u.username || u.password) return false;
     const h = u.hostname.toLowerCase();
+    if (KNOWN_COVER_DOMAINS.has(h)) return true;
     if (
       h === "localhost" ||
       h === "127.0.0.1" ||
@@ -621,6 +907,7 @@ export function isAllowedCoverUrl(rawUrl: string): boolean {
       h.endsWith(".internal")
     )
       return false;
+    if (isPrivateOrInternalIp(h)) return false;
     if (
       h.startsWith("10.") ||
       h.startsWith("192.168.") ||
@@ -643,6 +930,9 @@ export async function applyMetadataToCalibre(
     if (meta.title) args.push("--field", `title:${meta.title}`);
     if (meta.authors && meta.authors !== "Unknown")
       args.push("--field", `authors:${meta.authors}`);
+    if (meta.publisher) args.push("--field", `publisher:${meta.publisher}`);
+    if (meta.publishedDate)
+      args.push("--field", `pubdate:${meta.publishedDate}`);
     if (meta.tags && meta.tags.length > 0)
       args.push("--field", `tags:${meta.tags.join(",")}`);
     if (meta.description) args.push("--field", `comments:${meta.description}`);
