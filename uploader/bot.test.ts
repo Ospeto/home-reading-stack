@@ -15,6 +15,7 @@ import {
   getCurrentlyReadingShelf,
   getRecentBooks,
   deleteBookFromLibrary,
+  getHelpMessage,
 } from "./bot";
 
 describe("Telegram Mini App (TMA) Integration", () => {
@@ -403,3 +404,129 @@ describe("Recent Books List (/recent)", () => {
     }
   });
 });
+
+describe("Telegram Bot /help Command & KOReader Connection Guide", () => {
+  it("getHelpMessage returns structured guide with command reference, KOReader setup, and all stack endpoints", () => {
+    const msg = getHelpMessage();
+    expect(typeof msg).toBe("string");
+
+    // Command reference
+    expect(msg).toContain("Reading HQ Commands & Guide");
+    expect(msg).toContain("/menu");
+    expect(msg).toContain("/reading");
+    expect(msg).toContain("/recent");
+    expect(msg).toContain("/find");
+    expect(msg).toContain("/get");
+    expect(msg).toContain("/app");
+    expect(msg).toContain("/status");
+    expect(msg).toContain("/backup");
+
+    // KOReader Connection Guide: KOSync
+    expect(msg).toContain("KOSync Progress Sync");
+    expect(msg).toContain("Tools");
+    expect(msg).toContain("Progress sync");
+    expect(msg).toContain("Custom sync server");
+    expect(msg).toContain("moe");
+    expect(msg).toContain("Automatically keep documents in sync");
+    expect(msg).toContain("http://192.168.31.15:7200");
+    expect(msg).toContain("https://kosync-198-46-146-17.sslip.io");
+
+    // KOReader Connection Guide: OPDS
+    expect(msg).toContain("OPDS Book Catalog");
+    expect(msg).toContain("Search");
+    expect(msg).toContain("OPDS catalog");
+    expect(msg).toContain("Add new catalog");
+    expect(msg).toContain("Mac Mini Library");
+    expect(msg).toContain("http://192.168.31.15:8088/opds");
+    expect(msg).toContain("https://calibre-198-46-146-17.sslip.io/opds");
+
+    // Kindle Wi-Fi Proxy
+    expect(msg).toContain("Kindle Wi-Fi Proxy");
+    expect(msg).toContain("192.168.31.15");
+    expect(msg).toContain("7890");
+
+    // Stack Endpoints Reference
+    expect(msg).toContain("KOSync Server:");
+    expect(msg).toContain("Calibre OPDS Feed:");
+    expect(msg).toContain("Calibre Web Reader:");
+    expect(msg).toContain("http://192.168.31.15:8088");
+    expect(msg).toContain("https://calibre-198-46-146-17.sslip.io");
+    expect(msg).toContain("Reading HQ Dashboard:");
+    expect(msg).toContain("http://192.168.31.15:8086");
+    expect(msg).toContain("https://reading.wavypremium.xyz");
+    expect(msg).toContain("LAN Proxy Gateway:");
+    expect(msg).toContain("@saroat_ospeto_bot");
+  });
+});
+
+describe("Webpage Manual & KOReader Connection Section (index.html)", () => {
+  it("index.html includes dedicated Manual & Connection Guide modal accessible from header, sidebar, and drawer", () => {
+    const htmlPath = path.join(import.meta.dir, "index.html");
+    const html = fs.readFileSync(htmlPath, "utf8");
+
+    // Modal definition and back-button / modal manager integration
+    expect(html).toContain('id="guideModal"');
+    expect(html).toContain("openGuideModal");
+    expect(html).toContain("closeGuideModal");
+    expect(html).toContain(
+      "'filterDrawer', 'bookDetailModal', 'urlModal', 'uploadModal', 'editModal', 'guideModal'",
+    );
+    expect(html).toContain("closeGuideModal();");
+
+    // Header, sidebar, and mobile drawer buttons
+    expect(html).toContain("openGuideModal()");
+    expect(html).toContain("KOReader & Manual");
+    expect(html).toContain("KOReader & Stack Manual");
+
+    // SVG icons
+    expect(html).toContain('<symbol id="icon-book-open"');
+    expect(html).toContain('<symbol id="icon-server"');
+
+    // All Stack Endpoints with one-click copy buttons
+    // 1. KOSync (Local & Standby VPS)
+    expect(html).toContain("copyToClipboard('http://192.168.31.15:7200')");
+    expect(html).toContain(
+      "copyToClipboard('https://kosync-198-46-146-17.sslip.io')",
+    );
+    // 2. Calibre OPDS (Local & Standby VPS)
+    expect(html).toContain("copyToClipboard('http://192.168.31.15:8088/opds')");
+    expect(html).toContain(
+      "copyToClipboard('https://calibre-198-46-146-17.sslip.io/opds')",
+    );
+    // 3. Calibre Web reader (Local & Standby VPS)
+    expect(html).toContain("copyToClipboard('http://192.168.31.15:8088')");
+    expect(html).toContain(
+      "copyToClipboard('https://calibre-198-46-146-17.sslip.io')",
+    );
+    // 4. Reading HQ Dashboard (Local & WAN)
+    expect(html).toContain("copyToClipboard('http://192.168.31.15:8086')");
+    expect(html).toContain(
+      "copyToClipboard('https://reading.wavypremium.xyz')",
+    );
+    // 5. LAN Proxy Gateway
+    expect(html).toContain("copyToClipboard('192.168.31.15:7890')");
+    // 6. Telegram Bot
+    expect(html).toContain("copyToClipboard('@saroat_ospeto_bot')");
+
+    // Step-by-step KOReader setup instructions
+    expect(html).toContain("KOReader Progress Sync (KOSync)");
+    expect(html).toContain("Tools (wrench icon)");
+    expect(html).toContain("Progress sync");
+    expect(html).toContain("Custom sync server");
+    expect(html).toContain("Username: <code");
+    expect(html).toContain("moe");
+    expect(html).toContain("Automatically keep documents in sync");
+
+    expect(html).toContain("KOReader OPDS Catalog (Direct Download)");
+    expect(html).toContain("Search icon (magnifying glass)");
+    expect(html).toContain("OPDS catalog");
+    expect(html).toContain("Add new catalog");
+    expect(html).toContain("Mac Mini Library");
+
+    // Kindle LAN Proxy instructions
+    expect(html).toContain("Kindle Wi-Fi Proxy Gateway (GFW Bypass)");
+    expect(html).toContain("192.168.31.15");
+    expect(html).toContain("7890");
+  });
+});
+

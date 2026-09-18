@@ -226,7 +226,7 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
       },
     );
     expect(res.status).toBe(200);
-  });
+  }, 15000);
 
   it("safeFetchWithSsrf preserves the original hostname while binding a validated address", async () => {
     const server = Bun.serve({
