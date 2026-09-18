@@ -1505,6 +1505,19 @@ export function getPostIngestionKeyboard(bookId: number) {
   };
 }
 
+export function getRetryImportKeyboard(fileId: string) {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "🔄 Retry Import",
+          callback_data: `retry_file:${fileId}`,
+        },
+      ],
+    ],
+  };
+}
+
 export function deleteBookFromLibrary(bookId: number): {
   success: boolean;
   title?: string;
@@ -1921,6 +1934,7 @@ export async function handleCallbackQuery(cq: any): Promise<void> {
   else if (data === "menu:search") answerText = "Search Library...";
   else if (data.startsWith("delete_book:")) answerText = "Deleting book...";
   else if (data.startsWith("send_book:")) answerText = "Retrieving book...";
+  else if (data.startsWith("retry_file:")) answerText = "Retrying import...";
 
   // Answer callback query immediately so Telegram client stops loading animation
   try {
@@ -2054,6 +2068,58 @@ export async function handleCallbackQuery(cq: any): Promise<void> {
       await retrieveAndSendBook(chatId, bookId);
     } else {
       await sendMessage(chatId, `❌ Invalid book ID: \`${rawId}\``, "Markdown");
+    }
+    return;
+  }
+
+  if (data.startsWith("retry_file:")) {
+    const fileId = data.replace("retry_file:", "").trim();
+    if (!fileId) {
+      await sendMessage(chatId, `❌ Invalid file ID for retry`, "Markdown");
+      return;
+    }
+
+    try {
+      const fileRes = await tgFetch(`getFile?file_id=${fileId}`, {
+        timeoutMs: 20000,
+      });
+      const fileJson = (await fileRes.json()) as any;
+
+      if (!fileJson.ok || !fileJson.result?.file_path) {
+        const errMsg =
+          fileJson.description || "Failed to retrieve file from Telegram";
+        await sendMessage(
+          chatId,
+          `⚠️ *Retry Failed*\n\nUnable to retrieve file from Telegram: ${errMsg}`,
+          "Markdown",
+        );
+        return;
+      }
+
+      const filePath = fileJson.result.file_path;
+      const fileName = path.basename(filePath || "retry.epub");
+      const fileSize = fileJson.result.file_size || 0;
+
+      const item: QueuedDoc = {
+        doc: {
+          file_id: fileId,
+          file_name: fileName,
+          file_size: fileSize,
+        },
+        fileName,
+        fileSize,
+        chatId,
+        sender,
+      };
+
+      await processBatch(chatId, [item]);
+    } catch (err: any) {
+      logError(`Failed to retry file import ${fileId}: ${err?.message || err}`);
+      await sendMessage(
+        chatId,
+        `⚠️ *Retry Failed*\n\nError initiating retry: ${err?.message || err}`,
+        "Markdown",
+      );
     }
     return;
   }
@@ -2352,6 +2418,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
     attachedFormat?: boolean;
     status: "success" | "duplicate" | "error";
     note: string;
+    fileId?: string;
   }> = [];
 
   for (let i = 0; i < items.length; i++) {
@@ -2377,6 +2444,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
         note: isKnownNonEpub
           ? `Rejected non-EPUB format (${ext}). home-reading-stack is an EPUB-only library collection. Please upload .epub files or archives containing .epub files.`
           : `Rejected non-canonical or hidden file: "${fileName}". home-reading-stack accepts only valid .epub files (or archives containing .epub).`,
+        fileId: doc?.file_id,
       });
       continue;
     }
@@ -2387,6 +2455,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
         format,
         status: "error",
         note: `Exceeds 20MB limit (${sizeMB} MB). Use Web Uploader: ${WEB_UPLOADER_URL}`,
+        fileId: doc?.file_id,
       });
       continue;
     }
@@ -2415,7 +2484,13 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
       if (!fileJson.ok || !fileJson.result?.file_path) {
         const errMsg =
           fileJson.description || "Failed to retrieve file from Telegram";
-        results.push({ name: fileName, format, status: "error", note: errMsg });
+        results.push({
+          name: fileName,
+          format,
+          status: "error",
+          note: errMsg,
+          fileId: doc?.file_id,
+        });
         continue;
       }
 
@@ -2428,6 +2503,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
           format,
           status: "error",
           note: `Download failed (HTTP ${dl.status})`,
+          fileId: doc?.file_id,
         });
         continue;
       }
@@ -2443,6 +2519,9 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
       if (!isArchiveFile(fileName)) {
         const contentValidation = validateEpubContent(destPath);
         if (!contentValidation.valid) {
+          logError(
+            `[TelegramBot] EPUB validation failed for "${fileName}": ${contentValidation.error}`,
+          );
           try {
             fs.unlinkSync(destPath);
           } catch {}
@@ -2451,6 +2530,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
             format,
             status: "error",
             note: `Invalid EPUB file: ${contentValidation.error}`,
+            fileId: doc?.file_id,
           });
           continue;
         }
@@ -2469,6 +2549,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
             format,
             status: "error",
             note: unp.error || "Archive extraction failed",
+            fileId: doc?.file_id,
           });
           continue;
         }
@@ -2480,6 +2561,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
             format,
             status: "error",
             note: unp.error || "No supported EPUB books found in archive",
+            fileId: doc?.file_id,
           });
           continue;
         }
@@ -2530,6 +2612,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
           res.message ||
           res.error ||
           (res.success ? "Added" : "Calibre ingest failed"),
+        fileId: doc?.file_id,
       });
     } catch (err: any) {
       results.push({
@@ -2537,6 +2620,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
         format,
         status: "error",
         note: err.message,
+        fileId: doc?.file_id,
       });
     }
   }
@@ -2646,6 +2730,10 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
       );
     } else {
       const isOverSize = single.note.includes("20MB");
+      const retryKeyboard =
+        single.fileId && !isOverSize
+          ? getRetryImportKeyboard(single.fileId)
+          : undefined;
       await editOrSendMessage(
         chatId,
         statusMsgId,
@@ -2656,10 +2744,13 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
             ? `\uD83D\uDC49 Upload directly via [Web Uploader](${WEB_UPLOADER_URL}) to bypass the 20MB limit.`
             : `Please check the file format and try again.`),
         "Markdown",
+        retryKeyboard,
       );
     }
   }
 }
+
+export { processBatch, processBatch as batchProcessFiles };
 
 let offset = 0;
 let backoffMs = INITIAL_BACKOFF_MS;
