@@ -16,6 +16,9 @@ import {
   getRecentBooks,
   deleteBookFromLibrary,
   getHelpMessage,
+  getRetryImportKeyboard,
+  handleCallbackQuery,
+  batchProcessFiles,
 } from "./bot";
 
 describe("Telegram Mini App (TMA) Integration", () => {
@@ -788,6 +791,112 @@ describe("HTTP LAN Clipboard & Stored XSS Hardening (index.html)", () => {
     expect(html).toContain(
       "setHtml(badge, `${escapeHtml(type.toUpperCase())}: ${escapeHtml(value)}`);",
     );
+  });
+});
+
+describe("Retry Import Actions & Telegram Bot Handling", () => {
+  it("getRetryImportKeyboard generates 1-row inline keyboard pointing to retry_file:<file_id>", () => {
+    expect(typeof batchProcessFiles).toBe("function");
+    const fileId = "BAADBAADAgADRETRY12345";
+    const kb = getRetryImportKeyboard(fileId);
+    expect(kb).toBeDefined();
+    expect(Array.isArray(kb.inline_keyboard)).toBe(true);
+    expect(kb.inline_keyboard.length).toBe(1);
+    expect(kb.inline_keyboard[0].length).toBe(1);
+    expect(kb.inline_keyboard[0][0].text).toContain("Retry Import");
+    expect(kb.inline_keyboard[0][0].callback_data).toBe(`retry_file:${fileId}`);
+  });
+
+  it("handleCallbackQuery handles retry_file: callback by answering query, retrieving file, and retrying batch ingestion", async () => {
+    const answeredQueries: any[] = [];
+    const requestedEndpoints: string[] = [];
+    const sentMessages: any[] = [];
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      requestedEndpoints.push(url);
+
+      if (url.includes("answerCallbackQuery")) {
+        const body = JSON.parse(init?.body || "{}");
+        answeredQueries.push(body);
+        return new Response(JSON.stringify({ ok: true, result: true }), {
+          status: 200,
+        });
+      }
+
+      if (url.includes("getFile?file_id=retry_test_123")) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            result: {
+              file_id: "retry_test_123",
+              file_path: "documents/test_retry_book.epub",
+              file_size: 2048,
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      if (url.includes("test_retry_book.epub")) {
+        return new Response(new Uint8Array(100), { status: 200 });
+      }
+
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentMessages.push(body);
+        return new Response(
+          JSON.stringify({ ok: true, result: { message_id: 101 } }),
+          { status: 200 },
+        );
+      }
+
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const cq = {
+        id: "cb_query_999",
+        data: "retry_file:retry_test_123",
+        message: { chat: { id: 778899 }, message_id: 456 },
+        from: { username: "reader", id: 778899 },
+      };
+
+      await handleCallbackQuery(cq);
+
+      // Verify callback query was answered with "Retrying import..."
+      expect(answeredQueries.length).toBeGreaterThan(0);
+      expect(answeredQueries[0].callback_query_id).toBe("cb_query_999");
+      expect(answeredQueries[0].text).toBe("Retrying import...");
+
+      // Verify getFile was called with the file_id
+      const getFileCalled = requestedEndpoints.some((u) =>
+        u.includes("getFile?file_id=retry_test_123"),
+      );
+      expect(getFileCalled).toBe(true);
+
+      // Verify error message with retry keyboard was sent when validation failed
+      const errorMessage = sentMessages.find(
+        (m) =>
+          m.text?.includes("Import Failed") &&
+          m.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data ===
+            "retry_file:retry_test_123",
+      );
+      expect(errorMessage).toBeDefined();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it("index.html provides a direct Retry button for failed upload queue items", () => {
+    const htmlPath = path.join(import.meta.dir, "index.html");
+    const htmlContent = fs.readFileSync(htmlPath, "utf8");
+
+    expect(htmlContent).toContain("renderFailedUploadItem");
+    expect(htmlContent).toContain("retry-upload-btn");
+    expect(htmlContent).toContain("Retry");
+    expect(htmlContent).toContain("uploadQueue");
   });
 });
 

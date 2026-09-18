@@ -692,6 +692,113 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
       }
     }
   });
+
+  it("parses EPUB with trailing bytes / non-zero bsdtar warning successfully via fallback", () => {
+    const tempDir = path.join("/tmp", `test_epub_fallback_${Date.now()}`);
+    const metaDir = path.join(tempDir, "META-INF");
+    fs.mkdirSync(metaDir, { recursive: true });
+
+    fs.writeFileSync(path.join(tempDir, "mimetype"), "application/epub+zip");
+    fs.writeFileSync(path.join(metaDir, "container.xml"), "<container/>");
+
+    const testEpub = path.join("/tmp", `fallback_${Date.now()}.epub`);
+    const { spawnSync } = require("node:child_process");
+    spawnSync(getBsdtarPath(), [
+      "--format",
+      "zip",
+      "-cf",
+      testEpub,
+      "-C",
+      tempDir,
+      "mimetype",
+      "META-INF",
+    ]);
+
+    // Append trailing bytes to simulate extra data / signatures after central directory
+    fs.appendFileSync(
+      testEpub,
+      Buffer.from("\n\nEXTRA_TRAILING_DATA_KOBO_SIGNATURE_PADDING\n"),
+    );
+
+    // Mock bsdtar to exit with code 1 and warning to ensure fallback to unzip is exercised
+    const mockBsdtarScript = path.join("/tmp", `mock_bsdtar_${Date.now()}.sh`);
+    fs.writeFileSync(
+      mockBsdtarScript,
+      "#!/bin/sh\necho 'bsdtar: warning: damaged or non-standard zip entries' >&2\nexit 1\n",
+    );
+    fs.chmodSync(mockBsdtarScript, 0o755);
+
+    const origBsdtar = process.env.BSDTAR_PATH;
+    try {
+      // 1. Direct validation with trailing bytes
+      const resWithTrailing = validateEpubContent(testEpub);
+      expect(resWithTrailing.valid).toBe(true);
+
+      // 2. Validation when bsdtar fails with exit code 1 (simulating libarchive warning/failure)
+      process.env.BSDTAR_PATH = mockBsdtarScript;
+      const resFallback = validateEpubContent(testEpub);
+      expect(resFallback.valid).toBe(true);
+    } finally {
+      if (origBsdtar !== undefined) {
+        process.env.BSDTAR_PATH = origBsdtar;
+      } else {
+        delete process.env.BSDTAR_PATH;
+      }
+      if (fs.existsSync(mockBsdtarScript)) {
+        fs.unlinkSync(mockBsdtarScript);
+      }
+      if (fs.existsSync(testEpub)) {
+        fs.unlinkSync(testEpub);
+      }
+      if (fs.existsSync(tempDir)) {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("validateEpubContent returns descriptive error on unparseable non-ZIP file", () => {
+    // 1. Completely non-ZIP file (without PK magic bytes)
+    const nonZipFile = path.join("/tmp", `non_zip_${Date.now()}.epub`);
+    fs.writeFileSync(
+      nonZipFile,
+      "This is plain text with no zip header or structure whatsoever.",
+    );
+
+    try {
+      const resNonZip = validateEpubContent(nonZipFile);
+      expect(resNonZip.valid).toBe(false);
+      expect(resNonZip.error).toContain("Invalid magic bytes");
+
+      // 2. File starting with PK\x03\x04 magic bytes but followed by unparseable corrupt bytes
+      const corruptZipFile = path.join("/tmp", `corrupt_pk_${Date.now()}.epub`);
+      fs.writeFileSync(
+        corruptZipFile,
+        Buffer.concat([
+          Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+          Buffer.alloc(200, 0),
+        ]),
+      );
+
+      try {
+        const resCorrupt = validateEpubContent(corruptZipFile);
+        expect(resCorrupt.valid).toBe(false);
+        // Returns descriptive error containing process output rather than bare generic string
+        expect(resCorrupt.error).toContain("Failed to read EPUB ZIP entries");
+        expect(
+          resCorrupt.error?.includes("bsdtar:") ||
+            resCorrupt.error?.includes("unzip:"),
+        ).toBe(true);
+      } finally {
+        if (fs.existsSync(corruptZipFile)) {
+          fs.unlinkSync(corruptZipFile);
+        }
+      }
+    } finally {
+      if (fs.existsSync(nonZipFile)) {
+        fs.unlinkSync(nonZipFile);
+      }
+    }
+  });
 });
 
 describe("Archive Extraction Hardening & Resource Limits", () => {

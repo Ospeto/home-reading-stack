@@ -224,6 +224,40 @@ export function getBsdtarPath(): string {
   return "bsdtar";
 }
 
+export function getUnzipPath(): string {
+  if (process.env.UNZIP_PATH) return process.env.UNZIP_PATH;
+  const probe = spawnSync("which", ["unzip"], { encoding: "utf8" });
+  if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
+  const candidates = [
+    "/usr/bin/unzip",
+    "/opt/homebrew/bin/unzip",
+    "/usr/local/bin/unzip",
+  ];
+  for (const cand of candidates) {
+    if (fs.existsSync(cand)) return cand;
+  }
+  return "unzip";
+}
+
+export function parseUnzipListOutput(stdout: string): string[] {
+  const entries: string[] = [];
+  const lines = stdout.split("\n");
+  let inEntries = false;
+  for (const line of lines) {
+    if (/^\s*[-]{4,}\s+[-]{4,}/.test(line)) {
+      inEntries = !inEntries;
+      continue;
+    }
+    if (inEntries) {
+      const match = line.match(/^\s*\d+\s+\S+\s+\S+\s+(.+)$/);
+      if (match && match[1]) {
+        entries.push(match[1].trim());
+      }
+    }
+  }
+  return entries;
+}
+
 export interface ResolvedAddress {
   address: string;
   family: number;
@@ -918,20 +952,85 @@ export function validateEpubContent(filePath: string): EpubValidationResult {
       };
     }
 
-    // 2. Inspect archive entries with bsdtar -tf
-    const listRes = spawnSync(getBsdtarPath(), ["-tf", filePath], {
-      encoding: "utf8",
-      timeout: 10000,
-    });
+    // 2. Inspect archive entries with bsdtar -tf (with Info-ZIP unzip fallback)
+    const execOpts = {
+      encoding: "utf8" as const,
+      timeout: 30000,
+      maxBuffer: 16 * 1024 * 1024,
+    };
 
-    if (listRes.status !== 0) {
-      return { valid: false, error: "Failed to read EPUB ZIP entries" };
+    let lines: string[] = [];
+    const listRes = spawnSync(getBsdtarPath(), ["-tf", filePath], execOpts);
+
+    if (
+      listRes.status === 0 &&
+      listRes.stdout &&
+      listRes.stdout.trim().length > 0
+    ) {
+      lines = listRes.stdout
+        .split("\n")
+        .map((e: string) => e.trim())
+        .filter(Boolean);
+    } else {
+      // bsdtar failed or yielded empty stdout: attempt Info-ZIP unzip fallback
+      const unzipRes = spawnSync(
+        getUnzipPath(),
+        ["-Z1", filePath],
+        execOpts,
+      );
+
+      if (
+        (unzipRes.status === 0 || unzipRes.status === 1) &&
+        unzipRes.stdout &&
+        unzipRes.stdout.trim().length > 0
+      ) {
+        lines = unzipRes.stdout
+          .split("\n")
+          .map((e: string) => e.trim())
+          .filter(Boolean);
+      } else {
+        // Try unzip -l if unzip -Z1 yielded no entries
+        const unzipLRes = spawnSync(
+          getUnzipPath(),
+          ["-l", filePath],
+          execOpts,
+        );
+        const parsedL =
+          (unzipLRes.status === 0 || unzipLRes.status === 1) && unzipLRes.stdout
+            ? parseUnzipListOutput(unzipLRes.stdout)
+            : [];
+
+        if (parsedL.length > 0) {
+          lines = parsedL;
+        } else {
+          const bsdtarErr =
+            listRes.error?.message ||
+            (listRes.stderr && listRes.stderr.trim()) ||
+            (listRes.status !== null && listRes.status !== undefined
+              ? `exit code ${listRes.status}`
+              : "");
+          const unzipErr =
+            unzipRes.error?.message ||
+            (unzipRes.stderr && unzipRes.stderr.trim()) ||
+            (unzipRes.status !== null && unzipRes.status !== undefined
+              ? `exit code ${unzipRes.status}`
+              : "");
+          const details = [
+            bsdtarErr ? `bsdtar: ${bsdtarErr}` : "",
+            unzipErr ? `unzip: ${unzipErr}` : "",
+          ]
+            .filter(Boolean)
+            .join("; ");
+
+          return {
+            valid: false,
+            error: details
+              ? `Failed to read EPUB ZIP entries: ${details}`
+              : "Failed to read EPUB ZIP entries",
+          };
+        }
+      }
     }
-
-    const lines = (listRes.stdout || "")
-      .split("\n")
-      .map((e: string) => e.trim())
-      .filter(Boolean);
 
     // Reject absolute paths, path traversal, drive letters, or non-canonical names BEFORE any normalization
     for (const entry of lines) {
@@ -965,18 +1064,38 @@ export function validateEpubContent(filePath: string): EpubValidationResult {
       };
     }
 
-    const mimeRes = spawnSync(getBsdtarPath(), ["-xOf", filePath, "mimetype"], {
-      encoding: "utf8",
-      timeout: 10000,
-    });
-    if (
-      mimeRes.status !== 0 ||
-      mimeRes.stdout.trim() !== "application/epub+zip"
-    ) {
-      return {
-        valid: false,
-        error: `Invalid EPUB mimetype content: expected 'application/epub+zip', got '${mimeRes.stdout.trim().slice(0, 50)}'`,
-      };
+    const mimeRes = spawnSync(
+      getBsdtarPath(),
+      ["-xOf", filePath, "mimetype"],
+      execOpts,
+    );
+    let mimeContent =
+      mimeRes.status === 0 && mimeRes.stdout ? mimeRes.stdout.trim() : "";
+
+    if (mimeContent !== "application/epub+zip") {
+      // Fallback to Info-ZIP unzip -p
+      const unzipMime = spawnSync(
+        getUnzipPath(),
+        ["-p", filePath, "mimetype"],
+        execOpts,
+      );
+      if (
+        (unzipMime.status === 0 || unzipMime.status === 1) &&
+        unzipMime.stdout &&
+        unzipMime.stdout.trim() === "application/epub+zip"
+      ) {
+        mimeContent = unzipMime.stdout.trim();
+      } else {
+        const actualGot = (
+          unzipMime.stdout ||
+          mimeRes.stdout ||
+          ""
+        ).trim().slice(0, 50);
+        return {
+          valid: false,
+          error: `Invalid EPUB mimetype content: expected 'application/epub+zip', got '${actualGot}'`,
+        };
+      }
     }
 
     // 4. Container entry must be exactly 'META-INF/container.xml' (not nested in subfolders)
