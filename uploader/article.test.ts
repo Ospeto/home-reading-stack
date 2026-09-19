@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -9,6 +9,7 @@ import {
   cleanDirectHtml,
   PAYWALL_ERROR_MESSAGE,
   extractArticle,
+  extractArticleViaJina,
   wrapText,
   escapeXml,
   generateTypographicCover,
@@ -19,6 +20,19 @@ import {
 const originalFetch = globalThis.fetch;
 let mockConvertScript: string | null = null;
 let origEbookConvertPath: string | undefined;
+let lastJinaRequest: { url: string; headers: any } | null = null;
+
+function getHeaderValue(headers: any, name: string): string | null {
+  if (!headers) return null;
+  if (typeof headers.get === "function") {
+    return headers.get(name);
+  }
+  const target = name.toLowerCase();
+  for (const [key, val] of Object.entries(headers)) {
+    if (key.toLowerCase() === target) return val as string;
+  }
+  return null;
+}
 
 beforeAll(() => {
   // 1. Isolate external article and Jina network access
@@ -65,11 +79,31 @@ beforeAll(() => {
       hostHeader?.includes("r.jina.ai")
     ) {
       if (urlStr.includes("r.jina.ai") || hostHeader?.includes("r.jina.ai")) {
-        const jinaPaywall = `Title: Financial Times
+        lastJinaRequest = {
+          url: urlStr,
+          headers: init?.headers,
+        };
+
+        if (urlStr.includes("ft.com") || hostHeader?.includes("ft.com")) {
+          const jinaPaywall = `Title: Financial Times
 URL Source: https://www.ft.com/content/sample
 Markdown Content:
 Standard Digital subscription required. Explore more offers. Save over 40% on subscription.`;
-        return new Response(jinaPaywall, {
+          return new Response(jinaPaywall, {
+            status: 200,
+            headers: { "Content-Type": "text/markdown; charset=utf-8" },
+          });
+        }
+
+        const dummyEssay =
+          "In modern software development, designing resilient and maintainable systems requires careful consideration of trade-offs. Architecture is not about finding the perfect solution, but rather about choosing the right compromises. ".repeat(
+            20,
+          );
+        const jinaValid = `Title: Authenticated Article Title
+URL Source: ${urlStr}
+Markdown Content:
+${dummyEssay}`;
+        return new Response(jinaValid, {
           status: 200,
           headers: { "Content-Type": "text/markdown; charset=utf-8" },
         });
@@ -406,3 +440,106 @@ More body text.`;
     }
   });
 });
+
+describe("Jina Reader API Key Authentication (JINA_API_KEY & JEV_API_KEY)", () => {
+  const origJinaKey = process.env.JINA_API_KEY;
+  const origJevKey = process.env.JEV_API_KEY;
+
+  afterEach(() => {
+    if (origJinaKey !== undefined) {
+      process.env.JINA_API_KEY = origJinaKey;
+    } else {
+      delete process.env.JINA_API_KEY;
+    }
+    if (origJevKey !== undefined) {
+      process.env.JEV_API_KEY = origJevKey;
+    } else {
+      delete process.env.JEV_API_KEY;
+    }
+    lastJinaRequest = null;
+  });
+
+  test("attaches x-api-key and Authorization Bearer headers when JINA_API_KEY is configured", async () => {
+    delete process.env.JEV_API_KEY;
+    process.env.JINA_API_KEY = "jina_test_secret_123";
+
+    const article = await extractArticleViaJina(
+      "https://example.com/jina-auth-test",
+    );
+    expect(article.title).toBe("Authenticated Article Title");
+    expect(lastJinaRequest).not.toBeNull();
+    expect(getHeaderValue(lastJinaRequest?.headers, "x-api-key")).toBe(
+      "jina_test_secret_123",
+    );
+    expect(getHeaderValue(lastJinaRequest?.headers, "authorization")).toBe(
+      "Bearer jina_test_secret_123",
+    );
+    expect(getHeaderValue(lastJinaRequest?.headers, "x-return-format")).toBe(
+      "markdown",
+    );
+  });
+
+  test("attaches x-api-key and Authorization Bearer headers when JEV_API_KEY is configured as fallback", async () => {
+    delete process.env.JINA_API_KEY;
+    process.env.JEV_API_KEY = "jev_test_secret_456";
+
+    const article = await extractArticleViaJina(
+      "https://example.com/jev-auth-test",
+    );
+    expect(article.title).toBe("Authenticated Article Title");
+    expect(lastJinaRequest).not.toBeNull();
+    expect(getHeaderValue(lastJinaRequest?.headers, "x-api-key")).toBe(
+      "jev_test_secret_456",
+    );
+    expect(getHeaderValue(lastJinaRequest?.headers, "authorization")).toBe(
+      "Bearer jev_test_secret_456",
+    );
+  });
+
+  test("prioritizes JINA_API_KEY over JEV_API_KEY when both are set", async () => {
+    process.env.JINA_API_KEY = "primary_jina_key";
+    process.env.JEV_API_KEY = "secondary_jev_key";
+
+    await extractArticleViaJina("https://example.com/both-keys-test");
+    expect(lastJinaRequest).not.toBeNull();
+    expect(getHeaderValue(lastJinaRequest?.headers, "x-api-key")).toBe(
+      "primary_jina_key",
+    );
+    expect(getHeaderValue(lastJinaRequest?.headers, "authorization")).toBe(
+      "Bearer primary_jina_key",
+    );
+  });
+
+  test("omits x-api-key and Authorization headers when neither key is configured", async () => {
+    delete process.env.JINA_API_KEY;
+    delete process.env.JEV_API_KEY;
+
+    await extractArticleViaJina("https://example.com/no-key-test");
+    expect(lastJinaRequest).not.toBeNull();
+    expect(getHeaderValue(lastJinaRequest?.headers, "x-api-key")).toBeNull();
+    expect(getHeaderValue(lastJinaRequest?.headers, "authorization")).toBeNull();
+    expect(getHeaderValue(lastJinaRequest?.headers, "x-return-format")).toBe(
+      "markdown",
+    );
+  });
+
+  test("trims whitespace from API keys and ignores empty strings", async () => {
+    delete process.env.JEV_API_KEY;
+    process.env.JINA_API_KEY = "  \t \n ";
+
+    await extractArticleViaJina("https://example.com/empty-key-test");
+    expect(lastJinaRequest).not.toBeNull();
+    expect(getHeaderValue(lastJinaRequest?.headers, "x-api-key")).toBeNull();
+    expect(getHeaderValue(lastJinaRequest?.headers, "authorization")).toBeNull();
+
+    process.env.JINA_API_KEY = "   trimmed_key_789   ";
+    await extractArticleViaJina("https://example.com/trimmed-key-test");
+    expect(getHeaderValue(lastJinaRequest?.headers, "x-api-key")).toBe(
+      "trimmed_key_789",
+    );
+    expect(getHeaderValue(lastJinaRequest?.headers, "authorization")).toBe(
+      "Bearer trimmed_key_789",
+    );
+  });
+});
+
