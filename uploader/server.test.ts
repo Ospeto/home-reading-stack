@@ -487,6 +487,8 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
         headers.set("Transfer-Encoding", "chunked");
         headers.set("Upgrade", "websocket");
         headers.set("Proxy-Authenticate", "Basic");
+        headers.set("Trailer", "Expires");
+        headers.set("Trailers", "X-Checksum");
 
         return new Response("<feed/>", {
           status: 200,
@@ -507,6 +509,8 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
         expect(res.headers.get("Transfer-Encoding")).toBeNull();
         expect(res.headers.get("Upgrade")).toBeNull();
         expect(res.headers.get("Proxy-Authenticate")).toBeNull();
+        expect(res.headers.get("Trailer")).toBeNull();
+        expect(res.headers.get("Trailers")).toBeNull();
       } finally {
         globalThis.fetch = origFetch;
       }

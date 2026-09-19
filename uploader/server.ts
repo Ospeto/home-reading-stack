@@ -1676,6 +1676,7 @@ export async function handleRequest(
         "proxy-authorization",
         "set-cookie",
         "te",
+        "trailer",
         "trailers",
         "transfer-encoding",
         "upgrade",
