@@ -1142,13 +1142,25 @@ export async function extractArticleViaJina(
   const jinaUrl = `https://r.jina.ai/${encodeURI(url)}`;
   console.log(`[Article] Fetching via Jina Reader: ${jinaUrl}`);
 
+  const headers: Record<string, string> = {
+    "X-Return-Format": "markdown",
+    Accept: "text/markdown, text/plain, */*",
+  };
+
+  const apiKey = (
+    process.env.JINA_API_KEY ||
+    process.env.JEV_API_KEY ||
+    ""
+  ).trim();
+  if (apiKey) {
+    headers["x-api-key"] = apiKey;
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  }
+
   let res: Response;
   try {
     res = await safeFetchWithSsrf(jinaUrl, {
-      headers: {
-        "X-Return-Format": "markdown",
-        Accept: "text/markdown, text/plain, */*",
-      },
+      headers,
       proxy: PROXY_URL,
       signal: AbortSignal.timeout(30000),
     } as any);
