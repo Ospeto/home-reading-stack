@@ -15,6 +15,7 @@ import {
 } from "./scraper";
 import { isArchiveFile, unpackArchive, isCanonicalEpub } from "./archive";
 import { extractUrlFromText, ingestArticleFromUrl } from "./article";
+import { isLnoriUrl, ingestLnoriSeries } from "./lnori";
 import { generateMetadataFilename } from "./filename";
 import { getJobQueue } from "./jobs";
 import { validateEpubContent, safeFetchWithSsrf } from "./security";
@@ -3314,6 +3315,85 @@ async function pollTelegram() {
             const articleUrl = extractUrlFromText(text);
 
             if (articleUrl) {
+              if (isLnoriUrl(articleUrl)) {
+                log(
+                  `Detected Lnori light novel URL in message: "${articleUrl}" from ${sender}`,
+                );
+                const initialStatus =
+                  `📖 *Detected Lnori Light Novel Series*\n\`${articleUrl}\`\n\n` +
+                  `⏳ _Fetching volume manifest..._`;
+                const statusMsgId = await sendMessage(
+                  chatId,
+                  initialStatus,
+                  "Markdown",
+                );
+
+                try {
+                  const result = await ingestLnoriSeries(
+                    articleUrl,
+                    async (progressText: string) => {
+                      await editOrSendMessage(
+                        chatId,
+                        statusMsgId,
+                        progressText,
+                        "Markdown",
+                      );
+                    },
+                  );
+
+                  if (result.success) {
+                    const confirmation =
+                      `✅ *Light Novel Series Imported Successfully!*\n\n` +
+                      `📚 *Series:* ${result.seriesTitle}\n` +
+                      `✍️ *Author:* ${result.author}\n` +
+                      `📦 *Volumes Imported:* ${result.importedCount}/${result.totalCount}\n` +
+                      `🏷️ *Tags:* ${result.tags}\n\n` +
+                      `_Ready in your library and syncable to KOReader._`;
+
+                    await editOrSendMessage(
+                      chatId,
+                      statusMsgId,
+                      confirmation,
+                      "Markdown",
+                      {
+                        inline_keyboard: [
+                          [
+                            {
+                              text: "📖 Open Reading HQ",
+                              web_app: { url: READING_WEBAPP_URL },
+                            },
+                          ],
+                        ],
+                      },
+                    );
+                  } else {
+                    await editOrSendMessage(
+                      chatId,
+                      statusMsgId,
+                      `⚠️ *Lnori Ingestion Incomplete*\n\n` +
+                        `🔗 *URL:* \`${articleUrl}\`\n` +
+                        `❌ *Error:* No volumes could be imported from Lnori.\n\n` +
+                        `_Please verify the link and try again._`,
+                      "Markdown",
+                    );
+                  }
+                } catch (err: any) {
+                  logError(
+                    `Lnori ingestion exception for ${articleUrl}: ${err.message}`,
+                  );
+                  await editOrSendMessage(
+                    chatId,
+                    statusMsgId,
+                    `⚠️ *Lnori Ingestion Failed*\n\n` +
+                      `🔗 *URL:* \`${articleUrl}\`\n` +
+                      `❌ *Error:* ${err.message || "Failed to import Lnori series"}\n\n` +
+                      `_Please verify the link is accessible and try again._`,
+                    "Markdown",
+                  );
+                }
+                continue;
+              }
+
               log(
                 `Detected article URL in message: "${articleUrl}" from ${sender}`,
               );
