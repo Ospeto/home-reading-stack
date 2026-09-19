@@ -1152,10 +1152,12 @@ const PK_MAGIC = Buffer.from([0x50, 0x4b]);
 /**
  * Strict well-formed XML parser in pure TypeScript with full-input cursor tracking.
  * - Tracks a position cursor from 0 to text.length.
- * - Allows optional <?xml ...?> strictly at the start of the document (rejects <?xml?> inside elements).
+ * - Allows optional <?xml ...?> strictly at index 0 without leading whitespace (rejects leading ws and <?xml?> inside elements).
+ * - Requires whitespace after '<?xml' (rejects <?xml-stuff?>).
+ * - Masks CDATA and comments before checking for stray '<?xml'.
  * - Quote-aware tag-end scanning so '>' inside attribute values (e.g. <root a="x>y"/>) is not treated as tag end.
  * - Requires whitespace before every attribute token (rejects '<root a="1"b="2"/>').
- * - Rejects duplicate attribute names on the same element (rejects '<root a="1" a="2"/>').
+ * - Rejects duplicate attribute names on the same element including duplicate '__proto__' via Set tracking.
  * - Verifies that all characters outside tags are valid whitespace/text and contain no unparsed '<'.
  * - Enforces balanced, closed tags (rejects unclosed elements like '<container><rootfile></container>').
  * - Returns null if the cursor does not consume the entire input (e.g. trailing '<' or '<broken').
@@ -1163,21 +1165,28 @@ const PK_MAGIC = Buffer.from([0x50, 0x4b]);
 export function parseStrictXml(xmlStr: string): XmlElement | null {
   if (!xmlStr || typeof xmlStr !== "string") return null;
 
-  // Allow optional <?xml ...?> strictly at the start of the document
+  // XML declaration must be strictly at index 0 without leading whitespace
   let src = xmlStr;
-  const trimmedLeading = src.match(/^\s*<\?xml\b[\s\S]*?\?>/i);
-  if (trimmedLeading) {
-    src = src.slice(trimmedLeading[0].length);
-  }
-  // Reject any <?xml ...?> placed inside elements or later in the document
-  if (/<\?xml\b/i.test(src)) {
-    return null;
+  if (src.startsWith("<?xml")) {
+    if (src.length < 6 || !/\s/.test(src[5])) {
+      return null; // Reject malformed processing instruction like <?xml-stuff?>
+    }
+    const declEnd = src.indexOf("?>");
+    if (declEnd === -1) {
+      return null;
+    }
+    src = src.slice(declEnd + 2);
   }
 
-  // Strip well-formed comments, CDATA, and DOCTYPE before tag parsing
+  // Mask CDATA, comments, and DOCTYPE before checking for stray <?xml
   src = src.replace(/<!--[\s\S]*?-->/g, "");
   src = src.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "");
   src = src.replace(/<!DOCTYPE\b[\s\S]*?>/gi, "");
+
+  // Reject any <?xml placed after leading whitespace, inside elements, or later in the document
+  if (/<\?xml\b/i.test(src)) {
+    return null;
+  }
 
   const stack: XmlElement[] = [];
   let root: XmlElement | null = null;
@@ -1206,11 +1215,7 @@ export function parseStrictXml(xmlStr: string): XmlElement | null {
     let inQuote: '"' | "'" | null = null;
     for (let i = nextLt + 1; i < src.length; i++) {
       const ch = src[i];
-      if (inQuote !== null) {
-        if (ch === inQuote) {
-          inQuote = null;
-        }
-      } else {
+      if (inQuote === null) {
         if (ch === '"' || ch === "'") {
           inQuote = ch;
         } else if (ch === "<") {
@@ -1219,6 +1224,8 @@ export function parseStrictXml(xmlStr: string): XmlElement | null {
           nextGt = i;
           break;
         }
+      } else if (ch === inQuote) {
+        inQuote = null;
       }
     }
 
@@ -1273,8 +1280,9 @@ export function parseStrictXml(xmlStr: string): XmlElement | null {
       return null; // Invalid tag name
     }
 
-    // Strictly validate all attribute tokens (require whitespace before each token, reject duplicates)
-    const attributes: Record<string, string> = {};
+    // Strictly validate all attribute tokens (require whitespace before each token, reject duplicates via Set)
+    const attributes: Record<string, string> = Object.create(null);
+    const seenAttrs = new Set<string>();
     if (rawAttrs.length > 0) {
       let attrPos = 0;
       while (attrPos < rawAttrs.length) {
@@ -1301,9 +1309,10 @@ export function parseStrictXml(xmlStr: string): XmlElement | null {
         }
 
         // Reject duplicate attribute names on the same element
-        if (Object.prototype.hasOwnProperty.call(attributes, attrName)) {
+        if (seenAttrs.has(attrName)) {
           return null;
         }
+        seenAttrs.add(attrName);
 
         let valStart = eqIdx + 1;
         while (valStart < rawAttrs.length && /\s/.test(rawAttrs[valStart])) {

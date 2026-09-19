@@ -1238,10 +1238,21 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
       // 3. Rejects duplicate attribute names on the same element
       expect(parseStrictXml('<root a="1" a="2"/>')).toBeNull();
 
-      // 4. Rejects <?xml ...?> placed inside elements or not at root start
+      // 4. Rejects duplicate __proto__ attributes while accepting valid single __proto__
+      expect(parseStrictXml('<root __proto__="1" __proto__="2"/>')).toBeNull();
+      expect(parseStrictXml('<root __proto__="1"/>')).not.toBeNull();
+
+      // 5. Allows valid CDATA containing '<?xml'
+      expect(parseStrictXml('<root><![CDATA[<?xml fake?>]]></root>')).not.toBeNull();
+
+      // 6. Rejects <?xml ...?> with leading whitespace or placed inside elements
+      expect(parseStrictXml('\n<?xml version="1.0"?><root/>')).toBeNull();
       expect(parseStrictXml('<root><?xml version="1.0"?></root>')).toBeNull();
 
-      // 5. Allows valid <?xml ...?> at the start of document
+      // 7. Rejects malformed processing instructions like <?xml-stuff?>
+      expect(parseStrictXml('<?xml-stuff?><root/>')).toBeNull();
+
+      // 8. Allows valid <?xml ...?> strictly at index 0
       expect(parseStrictXml('<?xml version="1.0"?><root a="1" b="2"/>')).not.toBeNull();
     });
   });
