@@ -353,26 +353,86 @@ export async function validateUrlForSSRF(
     }
 
     if (options.allowCalibreServer) {
-      const serverOrigin = (
-        process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088"
-      ).toLowerCase();
-      const targetOrigin = `${u.protocol}//${u.host}`.toLowerCase();
-      const isCalibreOrigin =
-        targetOrigin === serverOrigin.replace(/\/+$/, "") ||
-        targetOrigin.replace("localhost", "127.0.0.1") ===
-          serverOrigin.replace("localhost", "127.0.0.1").replace(/\/+$/, "");
-      if (
-        isCalibreOrigin &&
-        (u.pathname === "/opds" ||
-          u.pathname.startsWith("/opds/") ||
-          u.pathname.startsWith("/get/") ||
-          u.pathname === "/favicon.png")
-      ) {
+      let calibreUrl: URL;
+      try {
+        calibreUrl = new URL(
+          process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088",
+        );
+      } catch {
         return {
-          safe: true,
-          resolvedIp: "127.0.0.1",
-          resolvedAddresses: [{ address: "127.0.0.1", family: 4 }],
+          safe: false,
+          error: "Invalid CALIBRE_SERVER_URL configured",
         };
+      }
+
+      const calibreHost = calibreUrl.hostname.toLowerCase();
+      const calibreNormHost = normalizeIpString(calibreHost);
+      const isCalibreIp = net.isIP(calibreNormHost) !== 0;
+
+      // Verify that the configured CALIBRE_SERVER_URL resolves strictly to loopback IP (127.0.0.1, ::1)
+      let calibreAddresses: ResolvedAddress[] = [];
+      if (isCalibreIp) {
+        if (!isLoopbackIp(calibreNormHost)) {
+          return {
+            safe: false,
+            error: `Configured Calibre server IP ${calibreNormHost} is not a loopback address`,
+          };
+        }
+        calibreAddresses = [
+          { address: calibreNormHost, family: net.isIP(calibreNormHost) },
+        ];
+      } else {
+        if (calibreHost !== "localhost" && !calibreHost.endsWith(".localhost")) {
+          try {
+            calibreAddresses = await resolveAll(calibreHost, options);
+          } catch {
+            return {
+              safe: false,
+              error: `DNS resolution failed for configured Calibre server host: ${calibreHost}`,
+            };
+          }
+        } else {
+          calibreAddresses = [{ address: "127.0.0.1", family: 4 }];
+        }
+
+        if (
+          calibreAddresses.length === 0 ||
+          !calibreAddresses.every((addr) => isLoopbackIp(addr.address))
+        ) {
+          return {
+            safe: false,
+            error: `Configured Calibre server host ${calibreHost} did not resolve exclusively to loopback addresses`,
+          };
+        }
+      }
+
+      // Verify the target URL targets the loopback Calibre server
+      const calibrePort =
+        calibreUrl.port || (calibreUrl.protocol === "https:" ? "443" : "80");
+      const isLoopbackTarget =
+        host === "localhost" ||
+        host.endsWith(".localhost") ||
+        isLoopbackIp(normalizedHost);
+
+      if (isLoopbackTarget && port === calibrePort) {
+        const targetAddresses = isIpLiteral
+          ? [{ address: normalizedHost, family: net.isIP(normalizedHost) }]
+          : await resolveAll(host, options);
+
+        if (
+          targetAddresses.length > 0 &&
+          targetAddresses.every((addr) => isLoopbackIp(addr.address)) &&
+          (u.pathname === "/opds" ||
+            u.pathname.startsWith("/opds/") ||
+            u.pathname.startsWith("/get/") ||
+            u.pathname === "/favicon.png")
+        ) {
+          return {
+            safe: true,
+            resolvedIp: targetAddresses[0].address,
+            resolvedAddresses: targetAddresses,
+          };
+        }
       }
     }
 

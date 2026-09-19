@@ -517,7 +517,11 @@ describe("Telegram Bot /help Command & KOReader Connection Guide", () => {
     expect(msg).toContain("http://192.168.31.15:8088/opds");
     expect(msg).toContain("http://192.168.31.15:8086/opds");
     expect(msg).toContain("https://calibre-198-46-146-17.sslip.io/opds");
+    expect(msg).toContain("/dedup");
     expect(msg).toContain("/dedupe");
+    expect(msg).toContain("/duplicates");
+    expect(msg).toContain("/clean");
+    expect(msg).toContain("/clean_duplicates");
 
     // Kindle Wi-Fi Proxy
     expect(msg).toContain("Kindle Wi-Fi Proxy");
@@ -1593,6 +1597,18 @@ describe("Library Deduplication Bot Commands & Callbacks (/dedup, /clean_duplica
       expect(sentMessages.length).toBeGreaterThanOrEqual(1);
       const dedupeMsg = sentMessages[sentMessages.length - 1];
       expect(dedupeMsg.text).toContain("Library is Clean");
+
+      sentMessages.length = 0;
+      await handleTextMessage(123456, "/clean", "tester");
+      expect(sentMessages.length).toBeGreaterThanOrEqual(1);
+      const cleanMsg = sentMessages[sentMessages.length - 1];
+      expect(cleanMsg.text).toContain("Library is Clean");
+
+      sentMessages.length = 0;
+      await handleTextMessage(123456, "/clean_duplicates", "tester");
+      expect(sentMessages.length).toBeGreaterThanOrEqual(1);
+      const cleanDupsMsg = sentMessages[sentMessages.length - 1];
+      expect(cleanDupsMsg.text).toContain("Library is Clean");
     } finally {
       setDuplicateCleanerRunnerForTest(null);
       globalThis.fetch = origFetch;

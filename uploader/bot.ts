@@ -1766,7 +1766,7 @@ export function getHelpMessage(): string {
     `• \`/app\` - Launch Reading HQ Mini App\n` +
     `• \`/status\` (or \`/health\`) - System health dashboard\n` +
     `• \`/backup\` - Hot backup of SQLite databases\n` +
-    `• \`/dedup\` (or \`/dedupe\`, \`/duplicates\`) - Inspect and clean duplicate books\n\n` +
+    `• \`/dedup\` (or \`/dedupe\`, \`/duplicates\`, \`/clean\`, \`/clean_duplicates\`) - Inspect and clean duplicate books\n\n` +
     `*KOReader Connection Guide*\n\n` +
     `*1. KOSync Progress Sync*\n` +
     `• In KOReader: open any book → Top menu → *Tools* (wrench icon) → *Progress sync*\n` +

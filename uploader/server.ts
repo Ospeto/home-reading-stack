@@ -1409,6 +1409,142 @@ function jsonResponse(data: any, status = 200, origin?: string) {
   return new Response(JSON.stringify(data), { status, headers });
 }
 
+export interface ProxyPathValidationResult {
+  valid: boolean;
+  error?: string;
+  canonicalPath?: string;
+}
+
+/**
+ * Strictly validates and canonicalizes proxy paths and query strings before forwarding.
+ * Rejects path traversal, %2e%2e, backslashes, null bytes, duplicate slashes, and control characters.
+ */
+export function validateAndCanonicalizeProxyPath(
+  rawPath: string,
+  rawSearch: string = "",
+): ProxyPathValidationResult {
+  if (!rawPath || !rawPath.startsWith("/")) {
+    return { valid: false, error: "Path must start with /" };
+  }
+
+  // 1. Reject raw null bytes, backslashes, control characters, and duplicate slashes
+  if (
+    /[\0\r\n\t\x00-\x1f\x7f\\]/.test(rawPath) ||
+    /%00/i.test(rawPath) ||
+    /%5c/i.test(rawPath) ||
+    /%0[0-9a-f]|%1[0-9a-f]|%7f/i.test(rawPath) ||
+    rawPath.includes("//")
+  ) {
+    return {
+      valid: false,
+      error: "Path contains disallowed characters or duplicate slashes",
+    };
+  }
+
+  // Check query string for null bytes or control characters as well
+  if (
+    rawSearch &&
+    (/[\0\r\n\t\x00-\x1f\x7f\\]/.test(rawSearch) ||
+      /%00/i.test(rawSearch) ||
+      /%5c/i.test(rawSearch) ||
+      /%0[0-9a-f]|%1[0-9a-f]|%7f/i.test(rawSearch))
+  ) {
+    return {
+      valid: false,
+      error: "Query string contains disallowed characters",
+    };
+  }
+
+  // 2. Reject encoded path traversal tokens before decoding
+  if (
+    /%2e%2e/i.test(rawPath) ||
+    /%2e\./i.test(rawPath) ||
+    /\.%2e/i.test(rawPath) ||
+    /%2f/i.test(rawPath) ||
+    /%252e/i.test(rawPath) ||
+    /%252f/i.test(rawPath)
+  ) {
+    return { valid: false, error: "Encoded path traversal sequence detected" };
+  }
+
+  // 3. Decode URI components safely
+  let decoded: string;
+  try {
+    decoded = decodeURI(rawPath);
+  } catch {
+    return { valid: false, error: "Malformed URI encoding in path" };
+  }
+
+  // 4. Verify decoded path doesn't contain backslashes, nulls, control characters, or unrolled traversal
+  if (
+    /[\0\r\n\t\x00-\x1f\x7f\\]/.test(decoded) ||
+    /%2e%2e/i.test(decoded) ||
+    /%2f/i.test(decoded)
+  ) {
+    return {
+      valid: false,
+      error: "Decoded path contains control characters, backslashes, or nested traversal",
+    };
+  }
+
+  // 5. Check path segments for traversal or empty segments
+  const segments = decoded.split("/");
+  for (let i = 1; i < segments.length; i++) {
+    const seg = segments[i];
+    if (seg === "" && i < segments.length - 1) {
+      return { valid: false, error: "Duplicate slashes in path" };
+    }
+    if (seg === "." || seg === "..") {
+      return { valid: false, error: "Path traversal detected" };
+    }
+  }
+
+  // 6. Strict pattern matching
+  // Route A: /favicon.png
+  if (rawPath === "/favicon.png") {
+    return { valid: true, canonicalPath: "/favicon.png" };
+  }
+
+  // Route B: /opds or /opds/...
+  if (rawPath === "/opds" || rawPath.startsWith("/opds/")) {
+    for (let i = 2; i < segments.length; i++) {
+      const seg = segments[i];
+      if (!seg && i === segments.length - 1) continue;
+      if (!/^[a-zA-Z0-9_\-\.~%!$&'()*+,;=:@]+$/.test(seg)) {
+        return {
+          valid: false,
+          error: "Disallowed characters in OPDS path segment",
+        };
+      }
+    }
+    return { valid: true, canonicalPath: rawPath };
+  }
+
+  // Route C: /get/<format>/<id>/<library>
+  if (rawPath.startsWith("/get/")) {
+    if (segments.length !== 5) {
+      return {
+        valid: false,
+        error:
+          "Calibre get URL must follow /get/<format>/<id>/<library> structure",
+      };
+    }
+    const [, , format, idStr, library] = segments;
+    if (!/^[a-zA-Z0-9_-]+$/.test(format)) {
+      return { valid: false, error: "Invalid format in get URL" };
+    }
+    if (!/^[1-9][0-9]*$/.test(idStr)) {
+      return { valid: false, error: "Invalid numeric ID in get URL" };
+    }
+    if (!/^[a-zA-Z0-9_\-\.~%]+$/.test(library)) {
+      return { valid: false, error: "Invalid library name in get URL" };
+    }
+    return { valid: true, canonicalPath: rawPath };
+  }
+
+  return { valid: false, error: "Not an OPDS or Calibre asset route" };
+}
+
 /**
  * Primary HTTP Request Handler with Hardened WAN Security, CORS, CSRF,
  * and Durable Job Queue Lifecycle.
@@ -1454,7 +1590,22 @@ export async function handleRequest(
     url.pathname === "/favicon.png";
 
   if (isOpdsProxyRoute) {
-    // Restrict proxy to GET and HEAD methods
+    // 1. Path validation & canonicalization
+    const pathCheck = validateAndCanonicalizeProxyPath(
+      url.pathname,
+      url.search,
+    );
+    if (!pathCheck.valid) {
+      return new Response(`Bad Request: ${pathCheck.error || "Invalid path"}`, {
+        status: 400,
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
+
+    // 2. Restrict proxy to GET and HEAD methods
     if (req.method !== "GET" && req.method !== "HEAD") {
       const notAllowedHeaders: Record<string, string> = {
         Allow: "GET, HEAD",
@@ -1475,33 +1626,33 @@ export async function handleRequest(
       /\/+$/,
       "",
     );
-    const targetUrl = `${serverBase}${url.pathname}${url.search}`;
+    const targetUrl = `${serverBase}${pathCheck.canonicalPath}${url.search}`;
+
+    // 3. Header Forwarding Allowlist:
+    // Allow only: 'range', 'if-none-match', 'if-modified-since', 'accept', 'accept-encoding', 'user-agent'.
+    // Discard client 'cookie', 'authorization', 'forwarded', 'x-forwarded-*'.
+    const ALLOWED_FORWARD_HEADERS = new Set([
+      "range",
+      "if-none-match",
+      "if-modified-since",
+      "accept",
+      "accept-encoding",
+      "user-agent",
+    ]);
 
     const forwardedHeaders = new Headers();
     for (const [key, value] of req.headers.entries()) {
       const lower = key.toLowerCase();
-      if (
-        lower === "host" ||
-        lower === "connection" ||
-        lower === "keep-alive" ||
-        lower === "transfer-encoding" ||
-        lower === "te" ||
-        lower === "upgrade"
-      ) {
-        continue;
+      if (ALLOWED_FORWARD_HEADERS.has(lower)) {
+        forwardedHeaders.set(lower, value);
       }
-      forwardedHeaders.set(key, value);
     }
 
     forwardedHeaders.set("x-forwarded-host", url.host);
     forwardedHeaders.set("x-forwarded-proto", url.protocol.replace(":", ""));
-    const clientIp = server?.requestIP?.(req)?.address;
-    if (clientIp) {
-      const existingXff = req.headers.get("x-forwarded-for");
-      forwardedHeaders.set(
-        "x-forwarded-for",
-        existingXff ? `${existingXff}, ${clientIp}` : clientIp,
-      );
+    const socketIp = server?.requestIP?.(req)?.address;
+    if (socketIp) {
+      forwardedHeaders.set("x-forwarded-for", socketIp);
     }
 
     try {
@@ -1516,18 +1667,29 @@ export async function handleRequest(
         { allowCalibreServer: true },
       );
 
+      // 4. Response Header Filtering:
+      // Strip 'set-cookie' and hop-by-hop headers
+      const STRIPPED_RESPONSE_HEADERS = new Set([
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "set-cookie",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
+      ]);
+
       const proxyHeaders = new Headers();
       for (const [key, value] of upstreamRes.headers.entries()) {
         const lower = key.toLowerCase();
-        if (
-          lower === "connection" ||
-          lower === "keep-alive" ||
-          lower === "transfer-encoding"
-        ) {
+        if (STRIPPED_RESPONSE_HEADERS.has(lower)) {
           continue;
         }
         proxyHeaders.set(key, value);
       }
+      proxyHeaders.delete("set-cookie");
 
       // Rewrite Location header if Calibre server issues a redirect to its internal origin
       const location = proxyHeaders.get("location");

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { handleRequest } from "./server";
+import { handleRequest, validateAndCanonicalizeProxyPath } from "./server";
+import { validateUrlForSSRF } from "./security";
 
 describe("Calibre OPDS & Asset Reverse Proxy", () => {
   it("proxies /opds GET to Calibre server and preserves XML streaming body", async () => {
@@ -329,5 +330,235 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
     } finally {
       globalThis.fetch = origFetch;
     }
+  });
+
+  describe("Path Validation & Security Rejection (400 Bad Request)", () => {
+    it("rejects path traversal attempts with 400 Bad Request", async () => {
+      const attacks = [
+        "https://reading.wavypremium.xyz/opds/..%2f..%2fetc/passwd",
+        "https://reading.wavypremium.xyz/opds/%252e%252e/admin",
+        "https://reading.wavypremium.xyz/opds/.%252e/forbidden",
+        "https://reading.wavypremium.xyz/opds/%252e./forbidden",
+        "https://reading.wavypremium.xyz/get/epub/1/%252e%252e",
+        "https://reading.wavypremium.xyz/get/epub/1/Agent_Library/%252e%252e/%252e%252e/etc/passwd",
+        "https://reading.wavypremium.xyz/get/epub/1/Agent_Library/..%2f..%2fetc/passwd",
+      ];
+
+      for (const attackUrl of attacks) {
+        const req = new Request(attackUrl, { method: "GET" });
+        const res = await handleRequest(req);
+        expect(res.status).toBe(400);
+        const text = await res.text();
+        expect(text).toContain("Bad Request");
+      }
+    });
+
+    it("rejects duplicate slashes, backslashes, null bytes, and control characters with 400", async () => {
+      const invalidUrls = [
+        "https://reading.wavypremium.xyz/opds//double-slash",
+        "https://reading.wavypremium.xyz/opds///triple",
+        "https://reading.wavypremium.xyz/opds/back%5cslash",
+        "https://reading.wavypremium.xyz/opds/null%00byte",
+        "https://reading.wavypremium.xyz/opds/%0d%0acontrol",
+        "https://reading.wavypremium.xyz/opds/test?q=null%00byte",
+        "https://reading.wavypremium.xyz/opds/test?q=%0d%0acontrol",
+      ];
+
+      for (const invalidUrl of invalidUrls) {
+        const req = new Request(invalidUrl, { method: "GET" });
+        const res = await handleRequest(req);
+        expect(res.status).toBe(400);
+        const text = await res.text();
+        expect(text).toContain("Bad Request");
+      }
+    });
+
+    it("rejects malformed /get/ routes not adhering to /get/<format>/<id>/<library>", async () => {
+      const malformedGetUrls = [
+        "https://reading.wavypremium.xyz/get/epub",
+        "https://reading.wavypremium.xyz/get/epub/not-a-number/Agent_Library",
+        "https://reading.wavypremium.xyz/get/epub/0/Agent_Library",
+        "https://reading.wavypremium.xyz/get/epub/-5/Agent_Library",
+        "https://reading.wavypremium.xyz/get/epub/1/Agent_Library/extra/segments",
+      ];
+
+      for (const url of malformedGetUrls) {
+        const req = new Request(url, { method: "GET" });
+        const res = await handleRequest(req);
+        expect(res.status).toBe(400);
+        const text = await res.text();
+        expect(text).toContain("Bad Request");
+      }
+    });
+
+    it("validateAndCanonicalizeProxyPath unit checks", () => {
+      expect(validateAndCanonicalizeProxyPath("/favicon.png").valid).toBe(true);
+      expect(validateAndCanonicalizeProxyPath("/opds").valid).toBe(true);
+      expect(validateAndCanonicalizeProxyPath("/opds/navlist/0").valid).toBe(true);
+      expect(validateAndCanonicalizeProxyPath("/get/epub/100/Agent_Library").valid).toBe(true);
+      expect(validateAndCanonicalizeProxyPath("/get/cover/42/Agent_Library").valid).toBe(true);
+
+      // Traversal and malformed checks
+      expect(validateAndCanonicalizeProxyPath("/opds/..").valid).toBe(false);
+      expect(validateAndCanonicalizeProxyPath("/opds/%2e%2e/test").valid).toBe(false);
+      expect(validateAndCanonicalizeProxyPath("/opds//double").valid).toBe(false);
+      expect(validateAndCanonicalizeProxyPath("/opds/null\0").valid).toBe(false);
+      expect(validateAndCanonicalizeProxyPath("/opds/back\\slash").valid).toBe(false);
+      expect(validateAndCanonicalizeProxyPath("/get/epub/abc/Agent_Library").valid).toBe(false);
+      expect(validateAndCanonicalizeProxyPath("/get/epub").valid).toBe(false);
+      expect(validateAndCanonicalizeProxyPath("not-a-path").valid).toBe(false);
+    });
+  });
+
+  describe("Header Forwarding Allowlist & Response Stripping", () => {
+    it("discards client cookie, authorization, and spoofed forwarded headers while setting verified socket IP", async () => {
+      const origFetch = globalThis.fetch;
+      let forwardedHeaders: Headers | null = null;
+
+      globalThis.fetch = (async (_input: any, init: any) => {
+        forwardedHeaders = new Headers(init?.headers);
+        return new Response("<feed/>", {
+          status: 200,
+          headers: { "Content-Type": "application/atom+xml" },
+        });
+      }) as any;
+
+      try {
+        const req = new Request("https://reading.wavypremium.xyz/opds", {
+          method: "GET",
+          headers: {
+            Accept: "application/atom+xml",
+            "User-Agent": "KOReader/Test",
+            Range: "bytes=0-100",
+            "If-None-Match": '"abc"',
+            "If-Modified-Since": "Sat, 20 Sep 2026 00:00:00 GMT",
+            Cookie: "session_token=sensitive_session_123",
+            Authorization: "Bearer secret_jwt_token",
+            "X-Forwarded-For": "198.51.100.22",
+            "X-Forwarded-Host": "spoofed.attacker.com",
+            "X-Forwarded-Proto": "http",
+            Forwarded: "for=198.51.100.22;proto=http",
+            "X-Custom-Smuggle": "attack",
+          },
+        });
+
+        const mockServer = {
+          requestIP: (_req: any) => ({ address: "203.0.113.55", family: "IPv4" }),
+        };
+
+        const res = await handleRequest(req, mockServer);
+        expect(res.status).toBe(200);
+
+        // Allowed headers forwarded
+        expect(forwardedHeaders?.get("accept")).toBe("application/atom+xml");
+        expect(forwardedHeaders?.get("user-agent")).toBe("KOReader/Test");
+        expect(forwardedHeaders?.get("range")).toBe("bytes=0-100");
+        expect(forwardedHeaders?.get("if-none-match")).toBe('"abc"');
+        expect(forwardedHeaders?.get("if-modified-since")).toBe(
+          "Sat, 20 Sep 2026 00:00:00 GMT",
+        );
+
+        // Sensitive / spoofed headers discarded
+        expect(forwardedHeaders?.get("cookie")).toBeNull();
+        expect(forwardedHeaders?.get("authorization")).toBeNull();
+        expect(forwardedHeaders?.get("forwarded")).toBeNull();
+        expect(forwardedHeaders?.get("x-custom-smuggle")).toBeNull();
+
+        // Safe infrastructure headers set from server
+        expect(forwardedHeaders?.get("x-forwarded-for")).toBe("203.0.113.55");
+        expect(forwardedHeaders?.get("x-forwarded-host")).toBe(
+          "reading.wavypremium.xyz",
+        );
+        expect(forwardedHeaders?.get("x-forwarded-proto")).toBe("https");
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("strips set-cookie and hop-by-hop headers from upstream response", async () => {
+      const origFetch = globalThis.fetch;
+
+      globalThis.fetch = (async () => {
+        const headers = new Headers();
+        headers.set("Content-Type", "application/atom+xml");
+        headers.set("Set-Cookie", "session=evil_cookie; HttpOnly");
+        headers.set("Connection", "close");
+        headers.set("Keep-Alive", "timeout=5");
+        headers.set("Transfer-Encoding", "chunked");
+        headers.set("Upgrade", "websocket");
+        headers.set("Proxy-Authenticate", "Basic");
+
+        return new Response("<feed/>", {
+          status: 200,
+          headers,
+        });
+      }) as any;
+
+      try {
+        const req = new Request("https://reading.wavypremium.xyz/opds", {
+          method: "GET",
+        });
+
+        const res = await handleRequest(req);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("Set-Cookie")).toBeNull();
+        expect(res.headers.get("Connection")).toBeNull();
+        expect(res.headers.get("Keep-Alive")).toBeNull();
+        expect(res.headers.get("Transfer-Encoding")).toBeNull();
+        expect(res.headers.get("Upgrade")).toBeNull();
+        expect(res.headers.get("Proxy-Authenticate")).toBeNull();
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+  });
+
+  describe("SSRF Loopback Enforcement for allowCalibreServer", () => {
+    it("rejects allowCalibreServer when CALIBRE_SERVER_URL is configured to a non-loopback IP", async () => {
+      const origEnv = process.env.CALIBRE_SERVER_URL;
+      process.env.CALIBRE_SERVER_URL = "http://169.254.169.254:8088";
+
+      try {
+        const check = await validateUrlForSSRF(
+          "http://169.254.169.254:8088/opds",
+          { allowCalibreServer: true },
+        );
+        expect(check.safe).toBe(false);
+        expect(check.error).toContain("not a loopback address");
+      } finally {
+        process.env.CALIBRE_SERVER_URL = origEnv;
+      }
+    });
+
+    it("rejects allowCalibreServer when CALIBRE_SERVER_URL resolves to an external domain", async () => {
+      const origEnv = process.env.CALIBRE_SERVER_URL;
+      process.env.CALIBRE_SERVER_URL = "http://example.com:8088";
+
+      try {
+        const check = await validateUrlForSSRF("http://example.com:8088/opds", {
+          allowCalibreServer: true,
+          dnsLookup: async () => [{ address: "93.184.216.34", family: 4 }],
+        });
+        expect(check.safe).toBe(false);
+        expect(check.error).toContain("did not resolve exclusively to loopback");
+      } finally {
+        process.env.CALIBRE_SERVER_URL = origEnv;
+      }
+    });
+
+    it("allows allowCalibreServer when target and CALIBRE_SERVER_URL are strict loopback", async () => {
+      const origEnv = process.env.CALIBRE_SERVER_URL;
+      process.env.CALIBRE_SERVER_URL = "http://127.0.0.1:8088";
+
+      try {
+        const check = await validateUrlForSSRF("http://127.0.0.1:8088/opds", {
+          allowCalibreServer: true,
+        });
+        expect(check.safe).toBe(true);
+        expect(check.resolvedIp).toBe("127.0.0.1");
+      } finally {
+        process.env.CALIBRE_SERVER_URL = origEnv;
+      }
+    });
   });
 });
