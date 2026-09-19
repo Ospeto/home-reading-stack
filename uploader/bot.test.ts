@@ -1180,5 +1180,69 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
       }
     }
   });
+
+  describe("Enhanced Ingestion Deduplication in Telegram Bot", () => {
+    it("recognizes recompressed duplicate EPUB via EPUB content signature", async () => {
+      const { ingestBookFile, getCacheDb } = await import("./bot");
+      const cacheDb = getCacheDb();
+
+      const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "bot-dedup-test-"));
+      const zip1 = path.join(testDir, "book_orig.epub");
+      const zip2 = path.join(testDir, "book_recompressed.epub");
+
+      // Create two zip files with different zip metadata but identical entry contents
+      const proc = (globalThis as any).Bun.spawnSync([
+        "python3",
+        "-c",
+        `
+import zipfile
+with zipfile.ZipFile("${zip1}", "w") as z:
+    z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+    z.writestr("META-INF/container.xml", "<container/>", compress_type=zipfile.ZIP_STORED)
+    z.writestr("OEBPS/text.xhtml", "<html><body>Content Identical</body></html>", compress_type=zipfile.ZIP_STORED)
+
+with zipfile.ZipFile("${zip2}", "w") as z:
+    z.comment = b"recompressed comment"
+    z.writestr("OEBPS/text.xhtml", "<html><body>Content Identical</body></html>", compress_type=zipfile.ZIP_DEFLATED)
+    z.writestr("META-INF/container.xml", "<container/>", compress_type=zipfile.ZIP_DEFLATED)
+    z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+`,
+      ]);
+      expect(proc.exitCode).toBe(0);
+
+      const mockCalibre = path.join(testDir, "mock-calibredb.sh");
+      fs.writeFileSync(
+        mockCalibre,
+        '#!/bin/sh\nif [ "$1" = "add" ]; then echo "Added book ids: 991"; exit 0; fi\nif [ "$1" = "list" ]; then echo "[]"; exit 0; fi\nexit 0\n',
+      );
+      fs.chmodSync(mockCalibre, 0o755);
+
+      const origCalibredb = process.env.CALIBREDB_PATH;
+      process.env.CALIBREDB_PATH = mockCalibre;
+
+      try {
+        // First ingest book1
+        const res1 = ingestBookFile(zip1, "Book One.epub");
+        expect(res1.success).toBe(true);
+        expect(res1.duplicate).toBe(false);
+        expect(res1.bookId).toBe(991);
+
+        // Second ingest book2 (recompressed, different binary hash)
+        const res2 = ingestBookFile(zip2, "Book Recompressed.epub");
+        expect(res2.success).toBe(true);
+        expect(res2.duplicate).toBe(true);
+        expect(res2.bookId).toBe(991);
+        expect(res2.message).toContain("identical EPUB content");
+      } finally {
+        if (origCalibredb !== undefined) {
+          process.env.CALIBREDB_PATH = origCalibredb;
+        } else {
+          delete process.env.CALIBREDB_PATH;
+        }
+        cacheDb.run("DELETE FROM file_hashes WHERE book_id = 991");
+        fs.rmSync(testDir, { recursive: true, force: true });
+      }
+    });
+  });
 });
 

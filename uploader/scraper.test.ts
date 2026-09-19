@@ -1,4 +1,7 @@
 import { describe, it, expect } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   formatRanobeDate,
   parseRanobeBook,
@@ -7,6 +10,11 @@ import {
   isAllowedCoverUrl,
   KNOWN_COVER_DOMAINS,
   searchUniversalMetadata,
+  normalizeTitle,
+  normalizeAuthor,
+  isSameBook,
+  isSameBookAsync,
+  getEpubContentSignature,
   type ScrapedMetadata,
 } from "./scraper";
 
@@ -458,6 +466,196 @@ describe("RanobeDB Scraper & Light Novel Metadata Engine", () => {
       expect(botCode).toContain("Source: ${top.source}");
       expect(botCode).toContain("source: top.source");
       expect(botCode).toContain("Metadata Auto-Enriched");
+    });
+  });
+
+  describe("Enhanced Ingestion Deduplication & Normalization", () => {
+    describe("normalizeTitle", () => {
+      it("strips release metadata tags like [Light Novel], (EPUB), [Official], [v01]", () => {
+        expect(normalizeTitle("Overlord [Light Novel] [Official] (EPUB)")).toBe(
+          "overlord",
+        );
+        expect(normalizeTitle("Mushoku Tensei [v01] (Retail) [Digital]")).toBe(
+          "mushoku tensei",
+        );
+        expect(normalizeTitle("Sword Art Online (Fan-Translated) [Raw]")).toBe(
+          "sword art online",
+        );
+      });
+
+      it("strips punctuation variance (: - — ~ |)", () => {
+        expect(normalizeTitle("Re:Zero - Starting Life — in Another World ~ Vol 1 | Special")).toBe(
+          "re zero starting life in another world vol 1 special",
+        );
+      });
+
+      it("normalizes volume and chapter numbering (Vol 1, Volume 01, v1, #1, Book 1)", () => {
+        expect(normalizeTitle("Overlord Vol 1")).toBe("overlord vol 1");
+        expect(normalizeTitle("Overlord Volume 01")).toBe("overlord vol 1");
+        expect(normalizeTitle("Overlord v1")).toBe("overlord vol 1");
+        expect(normalizeTitle("Overlord #1")).toBe("overlord vol 1");
+        expect(normalizeTitle("Overlord Book 1")).toBe("overlord vol 1");
+        expect(normalizeTitle("Overlord Bk. 01")).toBe("overlord vol 1");
+        expect(normalizeTitle("Solo Leveling Chapter 05")).toBe("solo leveling ch 5");
+        expect(normalizeTitle("Solo Leveling Ch. 5")).toBe("solo leveling ch 5");
+      });
+    });
+
+    describe("normalizeAuthor", () => {
+      it("strips role tags like (Author), (Artist), (Illustrator)", () => {
+        expect(normalizeAuthor("Reki Kawahara (Author)")).toBe("reki kawahara");
+        expect(normalizeAuthor("abec (Artist)")).toBe("abec");
+        expect(normalizeAuthor("Fuse (Story), Mitz Vah (Art)")).toBe("fuse, mitz vah");
+      });
+
+      it("sorts multi-author lists alphabetically", () => {
+        expect(normalizeAuthor("Robert Jordan, Brandon Sanderson")).toBe(
+          "brandon sanderson, robert jordan",
+        );
+        expect(normalizeAuthor("Brandon Sanderson & Robert Jordan")).toBe(
+          "brandon sanderson, robert jordan",
+        );
+        expect(normalizeAuthor("abec (Illustrator) and Reki Kawahara (Author)")).toBe(
+          "abec, reki kawahara",
+        );
+      });
+    });
+
+    describe("getEpubContentSignature", () => {
+      it("returns identical signature for recompressed EPUBs with same internal files", () => {
+        const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "epubsig-test-"));
+        try {
+          const zip1Path = path.join(testDir, "book1.epub");
+          const zip2Path = path.join(testDir, "book2.epub");
+
+          // Build two zip files in python to guarantee different timestamps/compression
+          const proc = (globalThis as any).Bun.spawnSync([
+            "python3",
+            "-c",
+            `
+import zipfile
+with zipfile.ZipFile("${zip1Path}", "w") as z:
+    z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+    z.writestr("META-INF/container.xml", "<container/>", compress_type=zipfile.ZIP_STORED)
+    z.writestr("OEBPS/text.xhtml", "<html><body>Book text</body></html>", compress_type=zipfile.ZIP_STORED)
+
+with zipfile.ZipFile("${zip2Path}", "w") as z:
+    z.comment = b"recompressed"
+    z.writestr("OEBPS/text.xhtml", "<html><body>Book text</body></html>", compress_type=zipfile.ZIP_DEFLATED)
+    z.writestr("META-INF/container.xml", "<container/>", compress_type=zipfile.ZIP_DEFLATED)
+    z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+`,
+          ]);
+          expect(proc.exitCode).toBe(0);
+
+          const sig1 = getEpubContentSignature(zip1Path);
+          const sig2 = getEpubContentSignature(zip2Path);
+
+          expect(sig1).not.toBeNull();
+          expect(sig2).not.toBeNull();
+          expect(sig1).toBe(sig2);
+        } finally {
+          fs.rmSync(testDir, { recursive: true, force: true });
+        }
+      });
+    });
+
+    describe("isSameBook & isSameBookAsync with Jev arbitration", () => {
+      it("detects same book with punctuation and release tag variance", () => {
+        const bookA = {
+          title: "Overlord, Vol. 1: The Undead King",
+          authors: "Kugane Maruyama",
+        };
+        const bookB = {
+          title: "Overlord [Light Novel] Volume 01 — The Undead King (EPUB)",
+          author: "Kugane Maruyama",
+        };
+        expect(isSameBook(bookA, bookB)).toBe(true);
+      });
+
+      it("differentiates different volumes in the same series", () => {
+        const bookA = {
+          title: "Overlord, Vol. 1: The Undead King",
+          authors: "Kugane Maruyama",
+        };
+        const bookB = {
+          title: "Overlord, Vol. 2: The Dark Warrior",
+          author: "Kugane Maruyama",
+        };
+        expect(isSameBook(bookA, bookB)).toBe(false);
+      });
+
+      it("arbitrates ambiguous pairs via Jev System-1 arbitration hook", async () => {
+        // Create an ambiguous pair with similarity in the 0.65 - 0.88 range
+        const bookA = {
+          title: "Classroom of the Elite: Year 1",
+          authors: "Shougo Kinugasa",
+        };
+        const bookB = {
+          title: "Classroom of the Elite: First Year Arc",
+          author: "Shougo Kinugasa",
+        };
+
+        // Hermetic mock test for isSameBookAsync with custom Jev response
+        const origFetch = globalThis.fetch;
+        try {
+          (globalThis as any).fetch = async () =>
+            Response.json({
+              answers: {
+                is_duplicate: {
+                  type: "choice",
+                  choice: "duplicate",
+                  confidence: 0.95,
+                  probabilities: { duplicate: 0.95, distinct: 0.05 },
+                },
+              },
+            });
+
+          const isMatch = await isSameBookAsync(
+            bookA,
+            bookB,
+            { jevApiKey: "test_key" },
+          );
+          expect(isMatch).toBe(true);
+        } finally {
+          globalThis.fetch = origFetch;
+        }
+      });
+
+      it("respects Jev distinct arbitration for subtle false positives", async () => {
+        const bookA = {
+          title: "The Ancient Magus Bride Supplement",
+          authors: "Kore Yamazaki",
+        };
+        const bookB = {
+          title: "The Ancient Magus Bride Official Guide",
+          author: "Kore Yamazaki",
+        };
+
+        const origFetch = globalThis.fetch;
+        try {
+          (globalThis as any).fetch = async () =>
+            Response.json({
+              answers: {
+                is_duplicate: {
+                  type: "choice",
+                  choice: "distinct",
+                  confidence: 0.92,
+                  probabilities: { duplicate: 0.08, distinct: 0.92 },
+                },
+              },
+            });
+
+          const isMatch = await isSameBookAsync(
+            bookA,
+            bookB,
+            { jevApiKey: "test_key" },
+          );
+          expect(isMatch).toBe(false);
+        } finally {
+          globalThis.fetch = origFetch;
+        }
+      });
     });
   });
 });

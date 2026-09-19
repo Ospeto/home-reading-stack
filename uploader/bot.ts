@@ -9,9 +9,12 @@ import {
   sanitizeMetadata,
   extractSeries,
   isSameBook,
+  isSameBookAsync,
+  normalizeTitle,
   normalizeFormat,
   searchUniversalMetadata,
   applyMetadataToCalibre,
+  getEpubContentSignature,
 } from "./scraper";
 import { isArchiveFile, unpackArchive, isCanonicalEpub } from "./archive";
 import { extractUrlFromText, ingestArticleFromUrl } from "./article";
@@ -2294,7 +2297,319 @@ export interface IngestResult {
   error?: string;
 }
 
-function ingestBookFile(
+export async function ingestBookFileAsync(
+  filePath: string,
+  originalFileName: string,
+  chatId?: number,
+): Promise<IngestResult> {
+  const ext = path.extname(originalFileName).toLowerCase();
+  const format = normalizeFormat(ext);
+  const preliminary = sanitizeMetadata("", "", [], originalFileName);
+
+  // Enforce canonical EPUB format (rejects non-EPUB and hidden/resource-fork files)
+  if (!isCanonicalEpub(originalFileName)) {
+    return {
+      success: false,
+      duplicate: false,
+      format,
+      displayTitle: preliminary.title,
+      author: preliminary.author,
+      error: `Rejected non-canonical format "${originalFileName}". home-reading-stack accepts only valid .epub files.`,
+    };
+  }
+
+  // 1. Level 1: KOReader Binary Checksum & EPUB Content-Signature Deduplication
+  const fileHash = getKOReaderBinary256(filePath);
+  const epubSig = format === "EPUB" ? getEpubContentSignature(filePath) : null;
+
+  if (fileHash) {
+    const hashMatch = cacheDb
+      .query(
+        "SELECT book_id, title, authors FROM file_hashes WHERE hash = ? LIMIT 1",
+      )
+      .get(fileHash) as any;
+
+    if (hashMatch && hashMatch.book_id) {
+      log(
+        `Duplicate detected via KOReader binary hash: "${hashMatch.title}" (ID: ${hashMatch.book_id})`,
+      );
+      return {
+        success: true,
+        duplicate: true,
+        bookId: hashMatch.book_id,
+        displayTitle: hashMatch.title || preliminary.title,
+        author: hashMatch.authors || preliminary.author,
+        format,
+        message: "Already in your library (identical content)",
+      };
+    }
+  }
+
+  // Fallback: Check if EPUB content signature matches
+  if (epubSig) {
+    const sigMatch = cacheDb
+      .query(
+        "SELECT book_id, title, authors FROM file_hashes WHERE hash = ? LIMIT 1",
+      )
+      .get(epubSig) as any;
+
+    if (sigMatch && sigMatch.book_id) {
+      log(
+        `Duplicate detected via EPUB content signature: "${sigMatch.title}" (ID: ${sigMatch.book_id})`,
+      );
+      return {
+        success: true,
+        duplicate: true,
+        bookId: sigMatch.book_id,
+        displayTitle: sigMatch.title || preliminary.title,
+        author: sigMatch.authors || preliminary.author,
+        format,
+        message: "Already in your library (identical EPUB content)",
+      };
+    }
+  }
+
+  // 2. Level 2: Semantic Title, Serialization & Format Deduplication
+  const incomingSeries = extractSeries(preliminary.title, originalFileName);
+
+  try {
+    const listRes = runCalibredb([
+      "list",
+      "--with-library",
+      SERVER_URL,
+      "--fields",
+      "id,title,authors,formats,series,series_index",
+      "--for-machine",
+    ]);
+
+    let books: any[] = [];
+    if (listRes.status === 0 && listRes.stdout) {
+      const parsed = safeParseJson(listRes.stdout);
+      if (Array.isArray(parsed)) books = parsed;
+    }
+
+    let existingBook = books.find((b: any) =>
+      isSameBook(
+        {
+          title: b.title,
+          authors: b.authors,
+          series: b.series,
+          series_index: b.series_index,
+        },
+        {
+          title: preliminary.title,
+          author: preliminary.author,
+          series: incomingSeries,
+        },
+      ),
+    );
+
+    // If synchronous heuristic is ambiguous (title similarity 0.65 - 0.88),
+    // check candidates with Jev System-1 arbitration if available
+    if (!existingBook && books.length > 0) {
+      const normPrelim = normalizeTitle(preliminary.title);
+      const ambiguousCandidates = books.filter((b: any) => {
+        const normB = normalizeTitle(b.title);
+        const sim = Math.max(
+          stringSimilarity(b.title.toLowerCase(), preliminary.title.toLowerCase()),
+          stringSimilarity(normB, normPrelim),
+        );
+        return sim >= 0.65 && sim < 0.88;
+      });
+
+      for (const cand of ambiguousCandidates) {
+        const isMatch = await isSameBookAsync(
+          {
+            title: cand.title,
+            authors: cand.authors,
+            series: cand.series,
+            series_index: cand.series_index,
+          },
+          {
+            title: preliminary.title,
+            author: preliminary.author,
+            series: incomingSeries,
+          },
+        );
+        if (isMatch) {
+          existingBook = cand;
+          break;
+        }
+      }
+    }
+
+    if (existingBook) {
+      log(
+        `Duplicate detected via title/series match: "${existingBook.title}" (existing library book)`,
+      );
+      return {
+        success: true,
+        duplicate: true,
+        bookId: existingBook.id,
+        displayTitle: existingBook.title,
+        author: existingBook.authors || preliminary.author,
+        format,
+        message: `Already exists in library`,
+      };
+    }
+
+    // 3. Level 3: Add to Calibre with --automerge ignore guard
+    const addRes = runCalibredb([
+      "add",
+      filePath,
+      "--with-library",
+      SERVER_URL,
+      "--automerge",
+      "ignore",
+    ]);
+
+    if (addRes.status === 0) {
+      const match = addRes.stdout?.match(/Added book ids?:?\s*([0-9]+)/i);
+      const newId = match ? parseInt(match[1]) : null;
+
+      let finalTitle = preliminary.title;
+      let finalAuthor = preliminary.author;
+
+      if (newId) {
+        // Fetch embedded OPF metadata extracted by Calibre
+        const listOne = runCalibredb([
+          "list",
+          "--with-library",
+          SERVER_URL,
+          "--search",
+          `id:${newId}`,
+          "--fields",
+          "id,title,authors,tags,series,series_index",
+          "--for-machine",
+        ]);
+
+        let rawTitle = "";
+        let rawAuthors = "";
+        let rawTags: string[] = [];
+        let rawSeries = "";
+
+        if (listOne.status === 0 && listOne.stdout) {
+          const parsed = safeParseJson(listOne.stdout);
+          if (Array.isArray(parsed) && parsed[0]) {
+            rawTitle = parsed[0].title || "";
+            rawAuthors = parsed[0].authors || "";
+            rawTags = parsed[0].tags || [];
+            rawSeries = parsed[0].series || "";
+          }
+        }
+
+        const clean = sanitizeMetadata(
+          rawTitle,
+          rawAuthors,
+          rawTags,
+          originalFileName,
+        );
+        finalTitle = clean.title || preliminary.title;
+        finalAuthor = clean.author || preliminary.author;
+
+        const setArgs = [
+          "set_metadata",
+          String(newId),
+          "--with-library",
+          SERVER_URL,
+        ];
+        if (clean.title && clean.title !== rawTitle)
+          setArgs.push("--field", `title:${clean.title}`);
+        if (
+          clean.author &&
+          clean.author !== rawAuthors &&
+          clean.author !== "Unknown"
+        )
+          setArgs.push("--field", `authors:${clean.author}`);
+        if (clean.tags && clean.tags.length)
+          setArgs.push("--field", `tags:${clean.tags.join(",")}`);
+
+        // Serialization auto-tagging
+        if (!rawSeries && incomingSeries) {
+          setArgs.push("--field", `series:${incomingSeries.series}`);
+          setArgs.push("--field", `series_index:${incomingSeries.volume}`);
+          log(
+            `Auto-assigned series "${incomingSeries.series}" #${incomingSeries.volume} to ID ${newId}`,
+          );
+        }
+
+        if (setArgs.length > 4) {
+          runCalibredb(setArgs);
+        }
+
+        // Cache binary hash and EPUB content signature for instant future deduplication
+        if (fileHash) {
+          cacheDb.run(
+            "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            filePath,
+            Date.now(),
+            fileHash,
+            newId,
+            finalTitle,
+            finalAuthor,
+            0,
+          );
+        }
+        if (epubSig) {
+          cacheDb.run(
+            "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            `${filePath}#epubsig`,
+            Date.now(),
+            epubSig,
+            newId,
+            finalTitle,
+            finalAuthor,
+            0,
+          );
+        }
+
+        // Durable metadata enrichment via Job Queue
+        const isManga =
+          format === "CBZ" ||
+          format === "CBR" ||
+          (clean.tags || []).some((t) => /manga|comic/i.test(t));
+        getJobQueue(getCacheDb()).enqueue("metadata_enrich", {
+          bookId: newId,
+          title: finalTitle,
+          isManga,
+          chatId,
+        });
+      }
+
+      return {
+        success: true,
+        duplicate: false,
+        bookId: newId,
+        displayTitle: finalTitle,
+        author: finalAuthor,
+        format,
+        message: incomingSeries
+          ? `Added (${incomingSeries.series} #${incomingSeries.volume})`
+          : `Added to library`,
+      };
+    } else {
+      return {
+        success: false,
+        duplicate: false,
+        displayTitle: preliminary.title || originalFileName,
+        author: preliminary.author,
+        format,
+        error: addRes.stderr || "Failed to add book to Calibre",
+      };
+    }
+  } catch (err: any) {
+    return {
+      success: false,
+      duplicate: false,
+      displayTitle: preliminary.title || originalFileName,
+      author: preliminary.author,
+      format,
+      error: err.message,
+    };
+  }
+}
+
+export function ingestBookFile(
   filePath: string,
   originalFileName: string,
   chatId?: number,
@@ -2315,8 +2630,10 @@ function ingestBookFile(
     };
   }
 
-  // 1. Level 1: KOReader Binary Checksum Deduplication
+  // 1. Level 1: KOReader Binary Checksum & EPUB Content-Signature Deduplication
   const fileHash = getKOReaderBinary256(filePath);
+  const epubSig = format === "EPUB" ? getEpubContentSignature(filePath) : null;
+
   if (fileHash) {
     const hashMatch = cacheDb
       .query(
@@ -2336,6 +2653,30 @@ function ingestBookFile(
         author: hashMatch.authors || preliminary.author,
         format,
         message: "Already in your library (identical content)",
+      };
+    }
+  }
+
+  // Fallback: Check if EPUB content signature matches
+  if (epubSig) {
+    const sigMatch = cacheDb
+      .query(
+        "SELECT book_id, title, authors FROM file_hashes WHERE hash = ? LIMIT 1",
+      )
+      .get(epubSig) as any;
+
+    if (sigMatch && sigMatch.book_id) {
+      log(
+        `Duplicate detected via EPUB content signature: "${sigMatch.title}" (ID: ${sigMatch.book_id})`,
+      );
+      return {
+        success: true,
+        duplicate: true,
+        bookId: sigMatch.book_id,
+        displayTitle: sigMatch.title || preliminary.title,
+        author: sigMatch.authors || preliminary.author,
+        format,
+        message: "Already in your library (identical EPUB content)",
       };
     }
   }
@@ -2474,13 +2815,25 @@ function ingestBookFile(
           runCalibredb(setArgs);
         }
 
-        // Cache binary hash for instant future deduplication
+        // Cache binary hash and EPUB content signature for instant future deduplication
         if (fileHash) {
           cacheDb.run(
             "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
             filePath,
             Date.now(),
             fileHash,
+            newId,
+            finalTitle,
+            finalAuthor,
+            0,
+          );
+        }
+        if (epubSig) {
+          cacheDb.run(
+            "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            `${filePath}#epubsig`,
+            Date.now(),
+            epubSig,
             newId,
             finalTitle,
             finalAuthor,
