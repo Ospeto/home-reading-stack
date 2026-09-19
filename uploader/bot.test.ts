@@ -121,22 +121,30 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain("@keyframes shimmer");
   });
 
-  it("index.html implements native macOS Calibre & OPDS Library structure and prototype components", () => {
+  it("index.html implements minimal, responsive TMA-first library structure and components", () => {
     const htmlPath = path.join((import.meta as any).dir, "index.html");
     const html = fs.readFileSync(htmlPath, "utf8");
 
-    // Window Frame & Traffic Light Controls
-    expect(html).toContain('data-purpose="macos-window-frame"');
-    expect(html).toContain('data-purpose="window-toolbar"');
-    expect(html).toContain("#FF5F56");
-    expect(html).toContain("#FFBD2E");
-    expect(html).toContain("#27C93F");
+    // Pure natural scrolling & safe-area insets
+    expect(html).toContain("env(safe-area-inset-bottom)");
+    expect(html).toContain("-webkit-overflow-scrolling");
 
-    // Breadcrumb navigation & ⌘K Search
+    // Clean dark aesthetic (#09090b / #121216)
+    expect(html).toContain("#09090b");
+
+    // Sleek top app bar & search
+    expect(html).toContain("Reading HQ");
+    expect(html).toContain('id="searchInputDesktop"');
+    expect(html).toContain('id="filterBtn"');
     expect(html).toContain("breadcrumbCategory");
     expect(html).toContain("⌘K");
 
-    // macOS Translucent Sidebar (acrylic glass blur)
+    // Quick Category / Series swipeable chips for TMA & Mobile
+    expect(html).toContain('id="chip-all"');
+    expect(html).toContain('id="chip-reading"');
+    expect(html).toContain('id="quickSeriesChips"');
+
+    // Desktop/tablet collapsible sidebar & navigation
     expect(html).toContain('data-purpose="macos-library-sidebar"');
     expect(html).toContain("All Books");
     expect(html).toContain("Reading Now");
@@ -153,14 +161,14 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain('id="gridBtn"');
     expect(html).toContain('id="tableBtn"');
 
-    // High-Fidelity Book Grid with 3D Spine and Elevation Shadows
+    // Bounded Book Grid with 3D Spine and Elevation Shadows
     expect(html).toContain('data-purpose="books-cover-grid"');
     expect(html).toContain("book-spine-effect");
     expect(html).toContain("shadow-book");
     expect(html).toContain("shadow-book-hover");
     expect(html).toContain("aspect-[1/1.48]");
 
-    // Native macOS Bottom Status Bar
+    // Bottom Status Bar
     expect(html).toContain('data-purpose="macos-status-bar"');
     expect(html).toContain("Calibre Synced");
     expect(html).toContain("statusVolumeCount");
