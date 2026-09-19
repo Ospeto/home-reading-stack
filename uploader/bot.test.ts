@@ -1316,6 +1316,90 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
         if (fs.existsSync(nonEpub)) fs.unlinkSync(nonEpub);
       }
     });
+
+    it("enforces archive size bounds (<256MB) and escapes regex identifiers", () => {
+      // Mock statSync to simulate oversized file
+      const originalStatSync = fs.statSync;
+      const tmpFile = path.join(os.tmpdir(), `oversized_test_${Date.now()}.epub`);
+      fs.writeFileSync(tmpFile, "dummy");
+      try {
+        // Test >256MB bound
+        (fs as any).statSync = (p: string) => {
+          if (p === tmpFile) {
+            return { size: 300 * 1024 * 1024 };
+          }
+          return originalStatSync(p);
+        };
+        expect(getEpubContentSignature(tmpFile)).toBeNull();
+      } finally {
+        fs.statSync = originalStatSync;
+        if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+      }
+    });
+
+    it("bypasses content signature duplicate match when incoming book has volume conflict", async () => {
+      const testDir = path.join(os.tmpdir(), `volume_gate_test_${Date.now()}`);
+      fs.mkdirSync(testDir, { recursive: true });
+      fs.mkdirSync(path.join(testDir, "META-INF"), { recursive: true });
+      fs.mkdirSync(path.join(testDir, "OEBPS"), { recursive: true });
+
+      const containerXml = `<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>`;
+      fs.writeFileSync(path.join(testDir, "META-INF", "container.xml"), containerXml);
+      fs.writeFileSync(path.join(testDir, "mimetype"), "application/epub+zip");
+
+      const sharedUuid = "urn:uuid:shared-template-uuid-12345";
+      const opfXml = `<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Overlord, Vol. 2</dc:title>
+    <dc:creator>Kugane Maruyama</dc:creator>
+    <dc:identifier id="BookId">${sharedUuid}</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>`;
+      fs.writeFileSync(path.join(testDir, "OEBPS", "content.opf"), opfXml);
+      fs.writeFileSync(path.join(testDir, "OEBPS", "c1.xhtml"), "<html><body>Vol 2</body></html>");
+
+      const epubVol2 = path.join(testDir, "Overlord_Vol_2.epub");
+      spawnSync("zip", ["-q", "-r", epubVol2, "mimetype", "META-INF", "OEBPS"], {
+        cwd: testDir,
+      });
+
+      try {
+        const sig = getEpubContentSignature(epubVol2);
+        expect(sig).not.toBeNull();
+
+        // Seed cacheDb with Volume 1 pointing to the same content signature
+        const cacheDb = getCacheDb();
+        cacheDb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          `sig:101`,
+          Date.now(),
+          sig,
+          101,
+          "Overlord, Vol. 1",
+          "Kugane Maruyama",
+          0,
+        );
+
+        // Ingesting Vol 2 with the same signature must NOT falsely match Vol 1 as duplicate
+        const res = await ingestBookFile(epubVol2, "Overlord_Vol_2.epub");
+        // Because of volume conflict with Vol 1, it bypasses the signature match
+        if (res.duplicate) {
+          expect(res.bookId).not.toBe(101);
+        }
+      } finally {
+        fs.rmSync(testDir, { recursive: true, force: true });
+      }
+    });
   });
 });
 

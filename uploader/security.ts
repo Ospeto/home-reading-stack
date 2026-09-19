@@ -2082,6 +2082,14 @@ export async function safeFetchWithSsrf(
     }
 
     if (res.status >= 300 && res.status < 400) {
+      if (init.redirect === "error") {
+        throw new Error(
+          `Redirect blocked: request specified redirect: "error" (status ${res.status})`,
+        );
+      }
+      if (init.redirect === "manual") {
+        return res;
+      }
       const loc = res.headers.get("location");
       if (!loc) {
         throw new Error(`HTTP ${res.status} redirect without Location header`);

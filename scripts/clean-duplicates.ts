@@ -187,13 +187,56 @@ export function scoreBookForKeeper(b: CalibreBook): { score: number; reasons: st
  * Checks if two books are duplicates.
  * Guarantees that different volumes in a series are NEVER flagged as duplicates.
  */
+/**
+ * Derives a canonical volume number for a CalibreBook across:
+ * 1. Title volume heuristic (extractVolumeNumber)
+ * 2. Explicit series index (series_index with series present)
+ * 3. Title series extraction heuristic (extractSeries)
+ * 4. Positive series_index fallback
+ */
+export function getCanonicalVolume(book: CalibreBook): number | null {
+  // 1. Direct volume heuristic in title (e.g. "Vol 1", "Volume 01", "Book 1", "#1", Burmese volume)
+  const volFromTitle = extractVolumeNumber(book.title);
+  if (volFromTitle !== null && !Number.isNaN(volFromTitle)) {
+    return volFromTitle;
+  }
+
+  // 2. Explicit series_index if series name is present
+  if (
+    book.series &&
+    typeof book.series_index === "number" &&
+    !Number.isNaN(book.series_index) &&
+    book.series_index > 0
+  ) {
+    return book.series_index;
+  }
+
+  // 3. Extracted series heuristic from title
+  const s = extractSeries(book.title);
+  if (s && typeof s.volume === "number" && !Number.isNaN(s.volume) && s.volume > 0) {
+    return s.volume;
+  }
+
+  // 4. Fallback: positive series_index
+  if (
+    typeof book.series_index === "number" &&
+    !Number.isNaN(book.series_index) &&
+    book.series_index > 0
+  ) {
+    return book.series_index;
+  }
+
+  return null;
+}
+
 export function checkDuplicatePair(
   a: CalibreBook,
   b: CalibreBook,
 ): { isDuplicate: boolean; matchType?: DuplicateGroup["matchType"]; reason?: string } {
-  // 1. Hard Gate: Volume Isolation & Conflict Verification
-  const volA = extractVolumeNumber(a.title);
-  const volB = extractVolumeNumber(b.title);
+  // 1. Hard Gate: Volume Isolation Upfront - MUST reject volume mismatches BEFORE
+  // checking content hashes, series titles, or title similarity.
+  const volA = getCanonicalVolume(a);
+  const volB = getCanonicalVolume(b);
   if (volA !== null && volB !== null && volA !== volB) {
     return { isDuplicate: false }; // Different volumes are NEVER duplicates
   }
@@ -569,6 +612,16 @@ export async function removeCalibreBooks(
   }
 
   if (bookIds.length === 0) return { success: true };
+
+  // Fail closed: validate every book ID is a positive safe integer
+  for (const id of bookIds) {
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      return {
+        success: false,
+        error: `Invalid book ID for removal: ${id}. Must be a positive safe integer.`,
+      };
+    }
+  }
 
   const withLibrary =
     options.withLibrary ||

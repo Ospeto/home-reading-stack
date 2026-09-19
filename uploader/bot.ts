@@ -8,6 +8,8 @@ import { Database } from "bun:sqlite";
 import {
   sanitizeMetadata,
   extractSeries,
+  extractVolumeNumber,
+  normalizeTitleForDedup,
   isSameBookAsync,
   normalizeFormat,
   searchUniversalMetadata,
@@ -273,10 +275,18 @@ export function getEpubContentSignature(filePath: string): string | null {
   try {
     if (!fs.existsSync(filePath)) return null;
 
+    // Archive Bounds: reject files exceeding 256MB or empty files
+    const stat = fs.statSync(filePath);
+    if (stat.size <= 0 || stat.size > 256 * 1024 * 1024) {
+      return null;
+    }
+
+    const ARCHIVE_TIMEOUT_MS = 15000;
+    const ARCHIVE_MAX_BUFFER = 16 * 1024 * 1024;
     const execOpts = {
       encoding: "utf8" as const,
-      timeout: SUBPROCESS_TIMEOUT_MS,
-      maxBuffer: SUBPROCESS_MAX_BUFFER,
+      timeout: ARCHIVE_TIMEOUT_MS,
+      maxBuffer: ARCHIVE_MAX_BUFFER,
     };
 
     // 1. Read META-INF/container.xml to locate the OPF rootfile
@@ -357,13 +367,17 @@ export function getEpubContentSignature(filePath: string): string | null {
     );
     if (uidMatch && uidMatch[1]) {
       const idAttr = uidMatch[1].trim();
-      const idTagRegex = new RegExp(
-        `<dc:identifier[^>]*id=["']${idAttr}["'][^>]*>([\\s\\S]*?)<\\/dc:identifier>`,
-        "i",
+      const allIdMatches = opfXml.matchAll(
+        /<dc:identifier([^>]*)>([\s\S]*?)<\/dc:identifier>/gi,
       );
-      const idTagMatch = opfXml.match(idTagRegex);
-      if (idTagMatch && idTagMatch[1]) {
-        identifier = idTagMatch[1].replace(/<[^>]+>/g, "").trim();
+      for (const m of allIdMatches) {
+        const attrs = m[1];
+        const val = m[2].replace(/<[^>]+>/g, "").trim();
+        const attrMatch = attrs.match(/id=["']([^"']+)["']/i);
+        if (attrMatch && attrMatch[1].trim() === idAttr) {
+          identifier = val;
+          break;
+        }
       }
     }
 
@@ -2495,16 +2509,74 @@ export async function ingestBookFile(
   // 1b. Content-Signature Fingerprint: fallback if binary SHA-256 is a cache miss
   const contentSig = getEpubContentSignature(filePath);
   if (!hashMatch && contentSig) {
-    hashMatch = cacheDb
+    const candidateMatch = cacheDb
       .query(
         "SELECT book_id, title, authors FROM file_hashes WHERE hash = ? LIMIT 1",
       )
       .get(contentSig) as any;
 
-    if (hashMatch && hashMatch.book_id) {
+    if (candidateMatch && candidateMatch.book_id) {
+      // Validate volume compatibility before accepting content signature duplicates
+      const volIncoming = extractVolumeNumber(preliminary.title);
+      const volMatch = extractVolumeNumber(candidateMatch.title || "");
+      const seriesIncoming = extractSeries(preliminary.title, originalFileName);
+      const seriesMatch = extractSeries(candidateMatch.title || "");
+
+      let hasVolumeConflict = false;
+      if (volIncoming !== null && volMatch !== null && volIncoming !== volMatch) {
+        hasVolumeConflict = true;
+      } else if (
+        seriesIncoming &&
+        seriesMatch &&
+        seriesIncoming.volume !== seriesMatch.volume
+      ) {
+        const normSI = normalizeTitleForDedup(seriesIncoming.series);
+        const normSM = normalizeTitleForDedup(seriesMatch.series);
+        if (normSI === normSM || normSI.startsWith(normSM) || normSM.startsWith(normSI)) {
+          hasVolumeConflict = true;
+        }
+      }
+
+      if (hasVolumeConflict) {
+        log(
+          `[Dedup] Content signature matched ID ${candidateMatch.book_id} ("${candidateMatch.title}") but volume conflicts with incoming ("${preliminary.title}"). Bypassing signature match.`,
+        );
+      } else {
+        hashMatch = candidateMatch;
+        log(
+          `Duplicate detected via EPUB content signature: "${hashMatch.title}" (ID: ${hashMatch.book_id})`,
+        );
+      }
+    }
+  }
+
+  // Final Volume Gate on any hash-based duplicate match
+  if (hashMatch && hashMatch.book_id) {
+    const volIncoming = extractVolumeNumber(preliminary.title);
+    const volMatch = extractVolumeNumber(hashMatch.title || "");
+    const seriesIncoming = extractSeries(preliminary.title, originalFileName);
+    const seriesMatch = extractSeries(hashMatch.title || "");
+
+    let hasVolumeConflict = false;
+    if (volIncoming !== null && volMatch !== null && volIncoming !== volMatch) {
+      hasVolumeConflict = true;
+    } else if (
+      seriesIncoming &&
+      seriesMatch &&
+      seriesIncoming.volume !== seriesMatch.volume
+    ) {
+      const normSI = normalizeTitleForDedup(seriesIncoming.series);
+      const normSM = normalizeTitleForDedup(seriesMatch.series);
+      if (normSI === normSM || normSI.startsWith(normSM) || normSM.startsWith(normSI)) {
+        hasVolumeConflict = true;
+      }
+    }
+
+    if (hasVolumeConflict) {
       log(
-        `Duplicate detected via EPUB content signature: "${hashMatch.title}" (ID: ${hashMatch.book_id})`,
+        `[Dedup] Hash match found ID ${hashMatch.book_id} ("${hashMatch.title}") but volume conflicts with incoming ("${preliminary.title}"). Bypassing hash match.`,
       );
+      hashMatch = null;
     }
   }
 

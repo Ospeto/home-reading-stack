@@ -626,6 +626,7 @@ Task: Classify whether Book 1 and Book 2 are duplicates (same book/edition) or d
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
+      redirect: "error",
       body: JSON.stringify({
         model: "jev-latest",
         state: stateText,
@@ -645,10 +646,13 @@ Task: Classify whether Book 1 and Book 2 are duplicates (same book/edition) or d
       }),
       signal: controller.signal,
     });
-    clearTimeout(timer);
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      clearTimeout(timer);
+      return null;
+    }
     const json = (await res.json()) as any;
+    clearTimeout(timer);
     const ans = json?.answers?.is_duplicate;
     if (ans && ans.choice) {
       return {

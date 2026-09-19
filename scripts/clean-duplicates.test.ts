@@ -8,6 +8,8 @@ import {
   runDuplicateCleaner,
   formatCleanerReport,
   safeJsonParse,
+  getCanonicalVolume,
+  removeCalibreBooks,
 } from "./clean-duplicates";
 
 describe("Calibre Library Duplicate Scanner & Pruning Tool", () => {
@@ -140,20 +142,38 @@ describe("Calibre Library Duplicate Scanner & Pruning Tool", () => {
         expect(checkDuplicatePair(bookV1, bookV2).isDuplicate).toBe(false);
       });
 
-      it("NEVER flags books with conflicting number patterns in titles as duplicates", () => {
-        const bookA: CalibreBook = {
-          id: 301,
-          title: "Mushoku Tensei Book 10",
-          authors: "Rifujin na Magonote",
+      it("NEVER flags different volumes as duplicates even if content hash or binary hash matches", () => {
+        const vol1: CalibreBook = {
+          id: 401,
+          title: "Overlord, Vol. 1",
+          authors: "Kugane Maruyama",
+          series: "Overlord",
+          series_index: 1,
+          content_hash: "urn:uuid:same-template-uuid",
+          binary_hash: "same-binary-checksum-sample",
         };
 
-        const bookB: CalibreBook = {
-          id: 302,
-          title: "Mushoku Tensei Book 11",
-          authors: "Rifujin na Magonote",
+        const vol2: CalibreBook = {
+          id: 402,
+          title: "Overlord, Vol. 2",
+          authors: "Kugane Maruyama",
+          series: "Overlord",
+          series_index: 2,
+          content_hash: "urn:uuid:same-template-uuid",
+          binary_hash: "same-binary-checksum-sample",
         };
 
-        expect(checkDuplicatePair(bookA, bookB).isDuplicate).toBe(false);
+        const res = checkDuplicatePair(vol1, vol2);
+        expect(res.isDuplicate).toBe(false);
+      });
+
+      it("derives canonical volume accurately across title, series_index, and extractSeries heuristics", () => {
+        expect(getCanonicalVolume({ id: 1, title: "Overlord, Vol. 14" })).toBe(14);
+        expect(getCanonicalVolume({ id: 2, title: "Classroom of the Elite: Year 2 Vol. 4.5" })).toBe(4.5);
+        expect(getCanonicalVolume({ id: 3, title: "Book Title", series: "Series Name", series_index: 3 })).toBe(3);
+        expect(getCanonicalVolume({ id: 4, title: "The Beginning After the End: Book 10" })).toBe(10);
+        expect(getCanonicalVolume({ id: 5, title: "စစ်နှင့်ငြိမ်းချမ်းရေး (အတွဲ ၂)" })).toBe(2);
+        expect(getCanonicalVolume({ id: 6, title: "Standalone Novel Without Volume" })).toBeNull();
       });
     });
 
@@ -477,6 +497,25 @@ describe("Calibre Library Duplicate Scanner & Pruning Tool", () => {
       expect(report.totalPruned).toBe(0);
       expect(report.errors.length).toBe(1);
       expect(report.errors[0].message).toContain("calibredb lock timeout");
+    });
+  });
+
+  describe("removeCalibreBooks book ID validation", () => {
+    it("fails closed on invalid book IDs without invoking calibredb", async () => {
+      const invalidCases = [
+        [0],
+        [-1],
+        [NaN],
+        [1.5],
+        [Infinity],
+        [1, -2, 3],
+      ];
+
+      for (const badIds of invalidCases) {
+        const res = await removeCalibreBooks(badIds as number[], {});
+        expect(res.success).toBe(false);
+        expect(res.error).toContain("Must be a positive safe integer");
+      }
     });
   });
 
