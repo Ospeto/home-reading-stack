@@ -270,6 +270,18 @@
       margin-left: auto;
       margin-right: auto;
     }
+
+    /* Topbar Redesign & Focus Utility Helpers */
+    .h-\[42px\] { height: 42px; }
+    .border-zinc-800\/90 { border-color: rgba(39, 39, 42, 0.9); }
+    .focus\:ring-1:focus {
+      --tw-ring-offset-shadow: var(--tw-ring-inset) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color);
+      --tw-ring-shadow: var(--tw-ring-inset) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color);
+      box-shadow: var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow, 0 0 #0000);
+    }
+    .focus\:ring-zinc-400:focus { --tw-ring-opacity: 1; --tw-ring-color: rgb(161 161 170 / var(--tw-ring-opacity, 1)); }
+    .focus\:border-zinc-400:focus { --tw-border-opacity: 1; border-color: rgb(161 161 170 / var(--tw-border-opacity, 1)); }
+    .placeholder\:text-zinc-500::placeholder { color: rgb(113 113 122); }
   </style>
 </head>
 <body class="bg-[#09090b] text-[#f4f4f5] antialiased min-h-screen flex flex-col font-sans selection:bg-zinc-800 selection:text-white pb-12 sm:pb-6" style="padding-bottom: max(1.5rem, calc(1.5rem + env(safe-area-inset-bottom, 0px)));">
@@ -386,101 +398,110 @@
     </defs>
   </svg>
 
-  <!-- SLEEK COMPACT HEADER (TMA & DESKTOP) -->
+  <!-- DEDICATED MULTI-TIER MOBILE HEADER (TMA & DESKTOP) -->
   <header class="sticky top-0 z-40 bg-[#09090b]/95 backdrop-blur-md border-b border-[#23232a] px-3 sm:px-6 transition-all shrink-0" style="padding-top: max(0.6rem, env(safe-area-inset-top, 0px)); padding-bottom: 0.6rem;">
-    <div class="max-w-[1600px] mx-auto flex items-center justify-between gap-2.5 sm:gap-4">
+    <div class="max-w-[1600px] mx-auto flex flex-col gap-2.5">
       
-      <!-- Brand & Status -->
-      <div class="flex items-center gap-2.5 sm:gap-3 shrink-0">
-        <div class="w-10 h-10 rounded-xl bg-[#121216] text-[#38bdf8] flex items-center justify-center font-bold text-sm shadow-sm border border-[#23232a]">
-          <svg class="w-4 h-4"><use href="#icon-book"/></svg>
+      <!-- Top Row (Brand & Actions) -->
+      <div class="flex items-center justify-between gap-3">
+        <!-- Left: Clean, minimal brand typography -->
+        <div class="flex items-center gap-2.5 sm:gap-3 shrink-0">
+          <div class="w-8 h-8 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-200 flex items-center justify-center font-bold text-sm shadow-sm shrink-0">
+            <svg class="w-4 h-4"><use href="#icon-book"/></svg>
+          </div>
+          <div class="flex flex-col">
+            <span class="text-sm font-bold tracking-tight text-zinc-100">Reading HQ</span>
+            <div class="hidden sm:flex items-center gap-1 text-[11px] text-zinc-500">
+              <button onclick="setFilter('all', null)" class="hover:text-white transition-colors cursor-pointer">Library</button>
+              <span>/</span>
+              <span id="breadcrumbCategory" class="text-zinc-400 truncate max-w-[140px]">All Books</span>
+            </div>
+          </div>
         </div>
-        <div class="flex flex-col">
-          <div class="flex items-center gap-1.5 sm:gap-2">
-            <span class="text-sm font-bold tracking-tight text-[#f4f4f5]">Reading HQ</span>
-            <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-950/60 text-emerald-400 border border-emerald-800/40">
-              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-              <span>OPDS Live</span>
-            </span>
-          </div>
-          <div class="hidden sm:flex items-center gap-1 text-[11px] text-[#71717a]">
-            <button onclick="setFilter('all', null)" class="hover:text-white transition-colors cursor-pointer">Library</button>
-            <span>/</span>
-            <span id="breadcrumbCategory" class="text-[#a1a1aa] truncate max-w-[140px]">All Books</span>
-          </div>
+
+        <!-- Right: Three uniformly styled, high-quality touch buttons (height 36px, rounded-xl) -->
+        <div class="flex items-center gap-2 shrink-0">
+          <!-- Desktop Clean Metadata -->
+          <button onclick="cleanLibraryMetadata()" class="hidden sm:flex h-9 px-2.5 rounded-xl text-zinc-400 hover:text-zinc-200 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 transition-all items-center justify-center cursor-pointer active:scale-[0.98]" title="Sanitize Titles &amp; Strip Junk Tags">
+            <svg class="w-4 h-4"><use href="#icon-broom"/></svg>
+          </button>
+
+          <!-- Guide Button: Neutral zinc icon -->
+          <button onclick="openGuideModal()" class="h-9 w-9 sm:w-auto sm:px-3 rounded-xl text-zinc-300 hover:text-white bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-[0.98]" title="KOReader & Manual">
+            <svg class="w-4 h-4 text-zinc-300"><use href="#icon-book-open"/></svg>
+            <span class="hidden md:inline text-xs font-medium">Guide</span>
+          </button>
+
+          <!-- Filter Button: Sleek sliders/filter icon with subtle active dot badge -->
+          <button id="filterBtn" onclick="openFilterDrawer()" class="h-9 w-9 sm:w-auto sm:px-3 rounded-xl text-zinc-300 hover:text-white bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 transition-all flex items-center justify-center gap-1.5 cursor-pointer relative active:scale-[0.98]" title="Filter Library">
+            <svg class="w-4 h-4 text-zinc-300" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24">
+              <line x1="4" y1="21" x2="4" y2="14"></line>
+              <line x1="4" y1="10" x2="4" y2="3"></line>
+              <line x1="12" y1="21" x2="12" y2="12"></line>
+              <line x1="12" y1="8" x2="12" y2="3"></line>
+              <line x1="20" y1="21" x2="20" y2="16"></line>
+              <line x1="20" y1="12" x2="20" y2="3"></line>
+              <line x1="1" y1="14" x2="7" y2="14"></line>
+              <line x1="9" y1="8" x2="15" y2="8"></line>
+              <line x1="17" y1="16" x2="23" y2="16"></line>
+            </svg>
+            <span class="hidden md:inline text-xs font-medium">Filters</span>
+            <span id="mobileFilterBadgeCount" class="hidden absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-sky-400"></span>
+          </button>
+
+          <!-- Add Button: High-contrast white pill button -->
+          <button onclick="openUploadModal()" class="h-9 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-zinc-200 text-zinc-950 transition-all duration-150 flex items-center gap-1.5 cursor-pointer border border-white/10 active:scale-[0.98] shadow-sm">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            <span>Add</span>
+          </button>
         </div>
       </div>
 
-      <!-- Search Input (Desktop & Mobile Unified) -->
-      <div class="flex-1 max-w-md mx-1 sm:mx-4">
-        <div class="relative">
-          <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-zinc-500">
+      <!-- Second Row (Full-Width Search Bar) -->
+      <div class="w-full">
+        <div class="relative flex items-center">
+          <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-500">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" x2="16.65" y1="21" y2="16.65"></line></svg>
           </div>
-          <input id="searchInputDesktop" class="w-full h-11 min-h-[44px] pl-9 pr-10 sm:pr-12 py-2.5 bg-[#121216] text-xs rounded-xl border border-[#23232a] text-[#f4f4f5] placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-sky-400 focus:border-sky-400 transition-all font-sans" placeholder="Search titles, authors..." type="text" oninput="syncSearch(this.value)"/>
-          <div class="absolute inset-y-0 right-0 pr-1 flex items-center gap-1">
-            <button onclick="clearSearch()" class="clear-search-btn hidden text-zinc-400 hover:text-white min-w-[44px] min-h-[44px] w-11 h-11 flex items-center justify-center cursor-pointer active:scale-[0.98] transition-transform duration-150" title="Clear search">
+          <input id="searchInputDesktop" class="w-full h-[42px] pl-10 pr-10 sm:pr-12 bg-zinc-900/90 text-sm rounded-xl border border-zinc-800/90 text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 transition-all font-sans" placeholder="Search titles, authors, series..." type="text" oninput="syncSearch(this.value)"/>
+          <div class="absolute inset-y-0 right-0 pr-1.5 flex items-center gap-1">
+            <button onclick="clearSearch()" class="clear-search-btn hidden text-zinc-400 hover:text-white w-8 h-8 flex items-center justify-center cursor-pointer active:scale-[0.98] transition-transform duration-150 rounded-lg hover:bg-zinc-800" title="Clear search">
               <svg class="w-3.5 h-3.5"><use href="#icon-xmark"/></svg>
             </button>
-            <kbd class="hidden sm:inline-block text-[9px] text-zinc-500 font-mono pointer-events-none border border-[#23232a] rounded px-1.5 py-0.5 bg-zinc-900/60 mr-2">⌘K</kbd>
+            <kbd class="hidden sm:inline-block text-[10px] text-zinc-500 font-mono pointer-events-none border border-zinc-800 rounded px-1.5 py-0.5 bg-zinc-900 mr-2">⌘K</kbd>
           </div>
         </div>
       </div>
 
-      <!-- Actions Bar -->
-      <div class="flex items-center gap-2 shrink-0">
-        <!-- Mobile Filter Toggle Button -->
-        <button id="filterBtn" onclick="openFilterDrawer()" class="md:hidden w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl text-zinc-300 hover:text-white bg-[#121216] hover:bg-zinc-800 border border-[#23232a] hover:border-white/20 active:scale-[0.98] transition-all duration-150 flex items-center justify-center cursor-pointer relative" title="Filter Library">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"></path></svg>
-          <span id="mobileFilterBadgeCount" class="hidden absolute top-2 right-2 w-2 h-2 rounded-full bg-sky-400"></span>
+      <!-- Third Row (Category Rail) -->
+      <div class="overflow-x-auto no-scrollbar flex items-center gap-2 py-1 text-xs">
+        <button onclick="setFilter('all', null)" id="chip-all" class="h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5 shadow-sm">
+          <span>All Books</span>
+          <span id="quickTotalBooks" class="text-[10px] font-mono text-zinc-600">0</span>
         </button>
-
-        <!-- Clean Metadata (Desktop) -->
-        <button onclick="cleanLibraryMetadata()" class="hidden sm:flex w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl text-zinc-300 hover:text-amber-300 bg-[#121216] hover:bg-zinc-800 border border-[#23232a] hover:border-white/20 active:scale-[0.98] transition-all duration-150 items-center justify-center cursor-pointer" title="Sanitize Titles &amp; Strip Junk Tags">
-          <svg class="w-4 h-4 text-amber-400"><use href="#icon-broom"/></svg>
+        <button onclick="setFilter('category', 'series')" id="chip-series" class="h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
+          <span>Series</span>
         </button>
-
-        <!-- KOReader Connection Manual -->
-        <button onclick="openGuideModal()" class="w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl text-zinc-300 hover:text-amber-300 bg-[#121216] hover:bg-zinc-800 border border-[#23232a] hover:border-white/20 active:scale-[0.98] transition-all duration-150 flex items-center justify-center cursor-pointer" title="KOReader & Manual">
-          <svg class="w-4 h-4 text-amber-400"><use href="#icon-book-open"/></svg>
+        <button onclick="setFilter('category', 'light_novels')" id="chip-ln" class="h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
+          <span>Light Novels</span>
         </button>
-
-        <!-- Add Book Button -->
-        <button onclick="openUploadModal()" class="min-h-[44px] h-11 px-3.5 py-2.5 rounded-xl text-xs font-semibold bg-white hover:bg-zinc-200 text-zinc-950 transition-all duration-150 flex items-center gap-2 cursor-pointer border border-white/10 active:scale-[0.98] shadow-sm">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-          <span class="hidden xs:inline">Add</span>
+        <button onclick="setFilter('category', 'recently_added')" id="chip-recent" class="h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
+          <span>Recently Added</span>
         </button>
+        <button onclick="setFilter('status', 'reading')" id="chip-reading" class="h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 text-emerald-400 hover:text-white border border-zinc-800/80 shrink-0 transition-all duration-150 ease-out flex items-center gap-1.5 cursor-pointer active:scale-[0.98]">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span>Reading</span>
+          <span id="quickReadingCount" class="text-[10px] text-zinc-500 font-mono">0</span>
+        </button>
+        <button onclick="setFilter('format', 'EPUB')" id="chip-epub" class="h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
+          <span>EPUB</span>
+        </button>
+        <div id="quickSeriesChips" class="flex items-center gap-2 shrink-0"></div>
+        <div id="quickFormatChips" class="flex items-center gap-2 shrink-0"></div>
       </div>
 
     </div>
   </header>
-
-  <!-- QUICK FILTER PILLS (HORIZONTAL SWIPEABLE RAIL) -->
-  <div class="overflow-x-auto no-scrollbar py-2 px-3 flex gap-2 items-center border-b border-[#23232a] text-xs bg-[#09090b]/90 backdrop-blur-md sticky top-[61px] z-30">
-    <button onclick="setFilter('all', null)" id="chip-all" class="min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5 shadow-sm">
-      <span>All Books</span>
-      <span id="quickTotalBooks" class="text-[10px] font-mono text-zinc-600">0</span>
-    </button>
-    <button onclick="setFilter('category', 'light_novels')" id="chip-ln" class="min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-zinc-400 hover:text-zinc-200 hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
-      <span>Light Novels</span>
-    </button>
-    <button onclick="setFilter('format', 'EPUB')" id="chip-epub" class="min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-zinc-400 hover:text-zinc-200 hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
-      <span>EPUB</span>
-    </button>
-    <button onclick="setFilter('category', 'series')" id="chip-series" class="min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-zinc-400 hover:text-zinc-200 hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
-      <span>Series</span>
-    </button>
-    <button onclick="setFilter('category', 'recently_added')" id="chip-recent" class="min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-zinc-400 hover:text-zinc-200 hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
-      <span>Recently Added</span>
-    </button>
-    <button onclick="setFilter('status', 'reading')" id="chip-reading" class="min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-emerald-400 hover:text-white hover:border-white/20 shrink-0 transition-all duration-150 ease-out flex items-center gap-1.5 cursor-pointer active:scale-[0.98]">
-      <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-      <span>Reading</span>
-      <span id="quickReadingCount" class="text-[10px] text-zinc-500 font-mono">0</span>
-    </button>
-    <div id="quickSeriesChips" class="flex items-center gap-2 shrink-0"></div>
-    <div id="quickFormatChips" class="flex items-center gap-2 shrink-0"></div>
-  </div>
 
   <!-- MAIN WORKSPACE: SIDEBAR + CONTENT -->
   <div class="max-w-[1600px] w-full mx-auto flex-1 flex flex-col md:flex-row min-h-0">
@@ -670,61 +691,63 @@
   </div>
 
   <!-- MOBILE FILTER SLIDE-OVER DRAWER -->
-  <div id="filterDrawer" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex justify-end">
-    <div class="ui-card w-full max-w-xs h-full p-4 border-l border-[#23232a] flex flex-col justify-between overflow-y-auto space-y-4 shadow-2xl animate-slide-left bg-[#121216]">
-      <div class="space-y-4">
-        <div class="flex items-center justify-between pb-2 border-b border-[#23232a]">
-          <div class="text-sm font-bold text-white flex items-center gap-2">
-            <svg class="w-4 h-4 text-zinc-400"><use href="#icon-filter"/></svg>
+  <div id="filterDrawer" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex justify-end" onclick="if(event.target === this) closeFilterDrawer()">
+    <div class="ui-card w-full max-w-xs sm:max-w-sm h-full p-5 border-l border-zinc-800/90 flex flex-col justify-between overflow-y-auto space-y-5 shadow-2xl animate-slide-left bg-[#09090b]">
+      <div class="space-y-5">
+        <div class="flex items-center justify-between pb-3 border-b border-zinc-800/80">
+          <div class="text-sm font-bold text-zinc-100 flex items-center gap-2.5">
+            <div class="w-8 h-8 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300 flex items-center justify-center">
+              <svg class="w-4 h-4"><use href="#icon-filter"/></svg>
+            </div>
             <span>Filter Library</span>
           </div>
-          <button onclick="closeFilterDrawer()" class="w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl bg-[#18181f] text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer active:scale-[0.98] transition-transform duration-150" title="Close">
+          <button onclick="closeFilterDrawer()" class="w-9 h-9 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white border border-zinc-800 flex items-center justify-center cursor-pointer active:scale-[0.98] transition-all" title="Close">
             <svg class="w-4 h-4"><use href="#icon-xmark"/></svg>
           </button>
         </div>
 
         <!-- Series Facet -->
-        <div class="space-y-1.5">
+        <div class="space-y-2">
           <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
             <span>Series</span>
             <span id="drawerSeriesCount" class="text-zinc-500 font-mono text-[10px]">0</span>
           </div>
-          <div id="drawerSeriesList" class="space-y-1 max-h-48 overflow-y-auto pr-1"></div>
+          <div id="drawerSeriesList" class="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto pr-1"></div>
         </div>
 
         <!-- Authors Facet -->
-        <div class="space-y-1.5">
+        <div class="space-y-2">
           <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
             <span>Authors</span>
             <span id="drawerAuthorCount" class="text-zinc-500 font-mono text-[10px]">0</span>
           </div>
-          <div id="drawerAuthorList" class="space-y-1 max-h-48 overflow-y-auto pr-1"></div>
-        </div>
-
-        <!-- Tags Facet -->
-        <div class="space-y-1.5">
-          <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Tags</div>
-          <div id="drawerTagList" class="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto"></div>
+          <div id="drawerAuthorList" class="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto pr-1"></div>
         </div>
 
         <!-- Formats Facet -->
-        <div class="space-y-1.5">
+        <div class="space-y-2">
           <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Formats</div>
           <div id="drawerFormatList" class="flex flex-wrap gap-1.5"></div>
         </div>
 
+        <!-- Tags Facet -->
+        <div class="space-y-2">
+          <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Tags</div>
+          <div id="drawerTagList" class="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto"></div>
+        </div>
+
         <!-- Manual / Guide in Drawer -->
-        <div class="pt-2 border-t border-[#23232a]">
-          <button onclick="closeFilterDrawer(); openGuideModal();" class="w-full min-h-[44px] px-3.5 py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-200 text-xs font-semibold rounded-xl flex items-center justify-center gap-2 border border-[#23232a] transition-all duration-150 cursor-pointer active:scale-[0.98]">
-            <svg class="w-4 h-4 text-amber-400"><use href="#icon-book-open"/></svg>
+        <div class="pt-3 border-t border-zinc-800/80">
+          <button onclick="closeFilterDrawer(); openGuideModal();" class="w-full h-11 px-3.5 py-2.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 hover:text-white text-xs font-semibold rounded-xl flex items-center justify-center gap-2 border border-zinc-800 transition-all cursor-pointer active:scale-[0.98]">
+            <svg class="w-4 h-4 text-zinc-400"><use href="#icon-book-open"/></svg>
             <span>KOReader & Stack Manual</span>
           </button>
         </div>
       </div>
 
-      <div class="pt-3 border-t border-[#23232a] flex gap-2">
-        <button onclick="clearAllFilters(); closeFilterDrawer();" class="flex-1 min-h-[44px] py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-300 font-semibold text-xs rounded-xl border border-[#23232a] cursor-pointer active:scale-[0.98] transition-all duration-150">Reset</button>
-        <button onclick="closeFilterDrawer()" class="flex-1 min-h-[44px] py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl shadow-sm cursor-pointer active:scale-[0.98] transition-all duration-150">Done</button>
+      <div class="pt-4 border-t border-zinc-800/80 flex items-center gap-2">
+        <button onclick="clearAllFilters(); closeFilterDrawer();" class="flex-1 h-11 py-2.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white font-semibold text-xs rounded-xl border border-zinc-800 cursor-pointer active:scale-[0.98] transition-all">Reset All</button>
+        <button onclick="closeFilterDrawer()" class="flex-1 h-11 py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl shadow-sm cursor-pointer active:scale-[0.98] transition-all">Done</button>
       </div>
     </div>
   </div>
@@ -1011,59 +1034,44 @@
 
   <!-- MANUAL & KOREADER CONNECTION GUIDE MODAL -->
   <div id="guideModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4" onclick="if(event.target === this) closeGuideModal()">
-    <div class="ui-card w-full sm:max-w-2xl rounded-t-2xl sm:rounded-xl p-4 sm:p-6 border border-[#23232a] space-y-5 shadow-2xl max-h-[90vh] overflow-y-auto bg-[#121216]">
+    <div class="ui-card w-full sm:max-w-2xl rounded-t-2xl sm:rounded-xl p-4 sm:p-6 border border-zinc-800 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto bg-[#121216]">
       
-      <!-- Top Bar: Title & Close -->
-      <div class="flex items-center justify-between pb-3 border-b border-[#23232a]">
-        <div class="flex items-center gap-2.5">
-          <div class="w-10 h-10 rounded-xl bg-amber-400 text-zinc-950 flex items-center justify-center text-sm font-bold shrink-0 shadow-sm">
+      <!-- Top Bar: Title & Close (Sleek Monochrome Header) -->
+      <div class="flex items-center justify-between pb-3 border-b border-zinc-800/80">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-xl bg-zinc-800 text-zinc-100 flex items-center justify-center text-sm font-bold shrink-0 border border-zinc-700/60 shadow-sm">
             <svg class="w-4 h-4"><use href="#icon-book-open"/></svg>
           </div>
           <div>
-            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+            <h3 class="text-sm font-bold text-zinc-100 flex items-center gap-2">
               KOReader & Stack Connection Manual
             </h3>
-            <p class="text-[11px] text-[#a1a1aa]">Step-by-step connection guide and one-click copyable stack endpoints</p>
+            <p class="text-[11px] text-zinc-400">Step-by-step connection guide and one-click copyable stack endpoints</p>
           </div>
         </div>
-        <button onclick="closeGuideModal()" class="w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl bg-[#18181f] text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer active:scale-[0.98] transition-transform duration-150" title="Close">
+        <button onclick="closeGuideModal()" class="w-9 h-9 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white border border-zinc-800 flex items-center justify-center cursor-pointer active:scale-[0.98] transition-all" title="Close">
           <svg class="w-4 h-4"><use href="#icon-xmark"/></svg>
         </button>
       </div>
 
-      <!-- Quick Navigation Badges -->
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
-        <a href="#guide-kosync" class="p-2.5 rounded-xl bg-zinc-900/90 border border-zinc-800 hover:border-zinc-700 transition-colors flex items-center gap-2.5">
-          <div class="w-7 h-7 rounded-lg bg-zinc-800 text-emerald-400 flex items-center justify-center text-xs shrink-0">
-            <svg class="w-3.5 h-3.5"><use href="#icon-arrows-rotate"/></svg>
-          </div>
-          <div class="min-w-0">
-            <div class="text-xs font-bold text-zinc-200">1. KOSync Setup</div>
-            <div class="text-[10px] text-zinc-400 truncate">Progress synchronization</div>
-          </div>
-        </a>
-        <a href="#guide-opds" class="p-2.5 rounded-xl bg-zinc-900/90 border border-zinc-800 hover:border-zinc-700 transition-colors flex items-center gap-2.5">
-          <div class="w-7 h-7 rounded-lg bg-zinc-800 text-sky-400 flex items-center justify-center text-xs shrink-0">
-            <svg class="w-3.5 h-3.5"><use href="#icon-rss"/></svg>
-          </div>
-          <div class="min-w-0">
-            <div class="text-xs font-bold text-zinc-200">2. OPDS Catalog</div>
-            <div class="text-[10px] text-zinc-400 truncate">Wireless book browsing</div>
-          </div>
-        </a>
-        <a href="#guide-proxy" class="p-2.5 rounded-xl bg-zinc-900/90 border border-zinc-800 hover:border-zinc-700 transition-colors flex items-center gap-2.5">
-          <div class="w-7 h-7 rounded-lg bg-zinc-800 text-purple-400 flex items-center justify-center text-xs shrink-0">
-            <svg class="w-3.5 h-3.5"><use href="#icon-wifi"/></svg>
-          </div>
-          <div class="min-w-0">
-            <div class="text-xs font-bold text-zinc-200">3. Kindle Proxy</div>
-            <div class="text-[10px] text-zinc-400 truncate">LAN bypass for GFW</div>
-          </div>
-        </a>
+      <!-- Tab Pills for Quick Switching (KOSync, OPDS Catalog, Kindle Proxy, All Endpoints) -->
+      <div class="flex items-center gap-2 overflow-x-auto no-scrollbar py-1">
+        <button id="guide-tab-kosync" onclick="setGuideTab('kosync')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-white text-zinc-950 shadow-sm cursor-pointer transition-all shrink-0">
+          KOSync
+        </button>
+        <button id="guide-tab-opds" onclick="setGuideTab('opds')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
+          OPDS Catalog
+        </button>
+        <button id="guide-tab-proxy" onclick="setGuideTab('proxy')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
+          Kindle Proxy
+        </button>
+        <button id="guide-tab-all" onclick="setGuideTab('all')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
+          All Endpoints
+        </button>
       </div>
 
       <!-- SECTION 1: KOSYNC PROGRESS SYNC -->
-      <div id="guide-kosync" class="space-y-3 pt-2">
+      <div id="guide-kosync" class="space-y-3 pt-1">
         <div class="flex items-center justify-between">
           <h4 class="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
             <svg class="w-3.5 h-3.5"><use href="#icon-arrows-rotate"/></svg>
@@ -1088,31 +1096,31 @@
             <div class="w-full space-y-1.5">
               <div>Tap <strong>Custom sync server</strong> and enter server address:</div>
               <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1">
-                <div class="flex-1 flex items-center justify-between bg-zinc-950 px-2.5 py-1.5 rounded-lg border border-zinc-800">
+                <div class="flex-1 flex items-center justify-between bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
                   <span class="text-[10px] text-zinc-500 uppercase font-semibold mr-2">Local LAN</span>
-                  <code class="text-xs font-mono text-zinc-200 select-all truncate">http://192.168.31.15:7200</code>
+                  <code class="text-xs font-mono text-zinc-100 select-all truncate">http://192.168.31.15:7200</code>
                 </div>
-                <button onclick="copyToClipboard('http://192.168.31.15:7200')" class="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-emerald-600 text-zinc-200 text-xs font-semibold rounded-lg transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
+                <button onclick="copyToClipboard('http://192.168.31.15:7200')" class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 text-xs font-semibold rounded-xl border border-zinc-700/60 transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
                   <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
                   <span>Copy Local</span>
                 </button>
               </div>
               <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                <div class="flex-1 flex items-center justify-between bg-zinc-950 px-2.5 py-1.5 rounded-lg border border-zinc-800">
+                <div class="flex-1 flex items-center justify-between bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
                   <span class="text-[10px] text-emerald-400 uppercase font-semibold mr-2">Production WAN</span>
-                  <code class="text-xs font-mono text-zinc-200 select-all truncate">https://kosync.wavypremium.xyz</code>
+                  <code class="text-xs font-mono text-zinc-100 select-all truncate">https://kosync.wavypremium.xyz</code>
                 </div>
-                <button onclick="copyToClipboard('https://kosync.wavypremium.xyz')" class="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-emerald-600 text-zinc-200 text-xs font-semibold rounded-lg transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
+                <button onclick="copyToClipboard('https://kosync.wavypremium.xyz')" class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 text-xs font-semibold rounded-xl border border-zinc-700/60 transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
                   <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
                   <span>Copy WAN</span>
                 </button>
               </div>
               <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                <div class="flex-1 flex items-center justify-between bg-zinc-950 px-2.5 py-1.5 rounded-lg border border-zinc-800">
+                <div class="flex-1 flex items-center justify-between bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
                   <span class="text-[10px] text-amber-400 uppercase font-semibold mr-2">Standby VPS</span>
-                  <code class="text-xs font-mono text-zinc-200 select-all truncate">https://kosync-198-46-146-17.sslip.io</code>
+                  <code class="text-xs font-mono text-zinc-100 select-all truncate">https://kosync-198-46-146-17.sslip.io</code>
                 </div>
-                <button onclick="copyToClipboard('https://kosync-198-46-146-17.sslip.io')" class="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-emerald-600 text-zinc-200 text-xs font-semibold rounded-lg transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
+                <button onclick="copyToClipboard('https://kosync-198-46-146-17.sslip.io')" class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 text-xs font-semibold rounded-xl border border-zinc-700/60 transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
                   <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
                   <span>Copy VPS</span>
                 </button>
@@ -1135,7 +1143,7 @@
       </div>
 
       <!-- SECTION 2: OPDS BOOK CATALOG -->
-      <div id="guide-opds" class="space-y-3 pt-2">
+      <div id="guide-opds" class="space-y-3 pt-1">
         <div class="flex items-center justify-between">
           <h4 class="text-xs font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
             <svg class="w-3.5 h-3.5"><use href="#icon-rss"/></svg>
@@ -1164,21 +1172,21 @@
             <div class="w-full space-y-1.5">
               <div>Enter Catalog URL:</div>
               <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1">
-                <div class="flex-1 flex items-center justify-between bg-zinc-950 px-2.5 py-1.5 rounded-lg border border-zinc-800">
+                <div class="flex-1 flex items-center justify-between bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
                   <span class="text-[10px] text-zinc-500 uppercase font-semibold mr-2">Local LAN</span>
-                  <code class="text-xs font-mono text-zinc-200 select-all truncate">http://192.168.31.15:8088/opds</code>
+                  <code class="text-xs font-mono text-zinc-100 select-all truncate">http://192.168.31.15:8088/opds</code>
                 </div>
-                <button onclick="copyToClipboard('http://192.168.31.15:8088/opds')" class="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-sky-600 text-zinc-200 text-xs font-semibold rounded-lg transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
+                <button onclick="copyToClipboard('http://192.168.31.15:8088/opds')" class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 text-xs font-semibold rounded-xl border border-zinc-700/60 transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
                   <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
                   <span>Copy Local</span>
                 </button>
               </div>
               <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                <div class="flex-1 flex items-center justify-between bg-zinc-950 px-2.5 py-1.5 rounded-lg border border-zinc-800">
+                <div class="flex-1 flex items-center justify-between bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
                   <span class="text-[10px] text-amber-400 uppercase font-semibold mr-2">Standby VPS</span>
-                  <code class="text-xs font-mono text-zinc-200 select-all truncate">https://calibre-198-46-146-17.sslip.io/opds</code>
+                  <code class="text-xs font-mono text-zinc-100 select-all truncate">https://calibre-198-46-146-17.sslip.io/opds</code>
                 </div>
-                <button onclick="copyToClipboard('https://calibre-198-46-146-17.sslip.io/opds')" class="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-sky-600 text-zinc-200 text-xs font-semibold rounded-lg transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
+                <button onclick="copyToClipboard('https://calibre-198-46-146-17.sslip.io/opds')" class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 text-xs font-semibold rounded-xl border border-zinc-700/60 transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
                   <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
                   <span>Copy VPS</span>
                 </button>
@@ -1193,7 +1201,7 @@
       </div>
 
       <!-- SECTION 3: HOME LAN PROXY FOR KINDLE -->
-      <div id="guide-proxy" class="space-y-3 pt-2">
+      <div id="guide-proxy" class="space-y-3 pt-1">
         <div class="flex items-center justify-between">
           <h4 class="text-xs font-bold uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
             <svg class="w-3.5 h-3.5"><use href="#icon-wifi"/></svg>
@@ -1218,17 +1226,17 @@
             <div class="w-full space-y-1.5">
               <div>Configure <strong>HTTP Proxy</strong>:</div>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-                <div class="flex items-center justify-between bg-zinc-950 px-2.5 py-1.5 rounded-lg border border-zinc-800">
+                <div class="flex items-center justify-between bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
                   <span class="text-[10px] text-zinc-500 uppercase font-semibold">Proxy Host</span>
-                  <code class="text-xs font-mono text-zinc-200 select-all">192.168.31.15</code>
+                  <code class="text-xs font-mono text-zinc-100 select-all">192.168.31.15</code>
                 </div>
-                <div class="flex items-center justify-between bg-zinc-950 px-2.5 py-1.5 rounded-lg border border-zinc-800">
+                <div class="flex items-center justify-between bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
                   <span class="text-[10px] text-zinc-500 uppercase font-semibold">Proxy Port</span>
-                  <code class="text-xs font-mono text-zinc-200 select-all">7890</code>
+                  <code class="text-xs font-mono text-zinc-100 select-all">7890</code>
                 </div>
               </div>
               <div class="flex justify-end pt-1">
-                <button onclick="copyToClipboard('192.168.31.15:7890')" class="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-purple-600 text-zinc-200 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer">
+                <button onclick="copyToClipboard('192.168.31.15:7890')" class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 text-xs font-semibold rounded-xl border border-zinc-700/60 transition-colors flex items-center gap-1.5 cursor-pointer">
                   <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
                   <span>Copy Proxy Address (192.168.31.15:7890)</span>
                 </button>
@@ -1239,7 +1247,7 @@
       </div>
 
       <!-- SECTION 4: ALL SERVICE ENDPOINTS REFERENCE -->
-      <div class="space-y-3 pt-2">
+      <div id="guide-endpoints" class="space-y-3 pt-1">
         <div class="flex items-center justify-between">
           <h4 class="text-xs font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
             <svg class="w-3.5 h-3.5"><use href="#icon-server"/></svg>
@@ -1251,7 +1259,7 @@
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           
           <!-- KOSync Local -->
-          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
@@ -1260,16 +1268,16 @@
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-emerald-400 font-mono border border-zinc-700">LAN</span>
             </div>
             <div class="text-[11px] text-zinc-400">KOReader progress synchronization</div>
-            <div class="flex items-center gap-1.5 pt-1">
-              <code class="flex-1 px-2 py-1 bg-zinc-950 border border-zinc-800 rounded text-xs font-mono text-zinc-300 truncate select-all">http://192.168.31.15:7200</code>
-              <button onclick="copyToClipboard('http://192.168.31.15:7200')" class="p-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-emerald-600 text-zinc-300 hover:text-white rounded transition-colors cursor-pointer" title="Copy">
+            <div class="flex items-center gap-2 pt-1">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">http://192.168.31.15:7200</code>
+              <button onclick="copyToClipboard('http://192.168.31.15:7200')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
           </div>
 
           <!-- KOSync Production WAN -->
-          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
@@ -1278,16 +1286,16 @@
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-emerald-400 font-mono border border-zinc-700">WAN</span>
             </div>
             <div class="text-[11px] text-zinc-400">KOReader progress sync via reverse tunnel</div>
-            <div class="flex items-center gap-1.5 pt-1">
-              <code class="flex-1 px-2 py-1 bg-zinc-950 border border-zinc-800 rounded text-xs font-mono text-zinc-300 truncate select-all">https://kosync.wavypremium.xyz</code>
-              <button onclick="copyToClipboard('https://kosync.wavypremium.xyz')" class="p-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-emerald-600 text-zinc-300 hover:text-white rounded transition-colors cursor-pointer" title="Copy">
+            <div class="flex items-center gap-2 pt-1">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://kosync.wavypremium.xyz</code>
+              <button onclick="copyToClipboard('https://kosync.wavypremium.xyz')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
           </div>
 
           <!-- KOSync VPS -->
-          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-amber-400"></span>
@@ -1296,16 +1304,16 @@
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-amber-400 font-mono border border-zinc-700">Standby</span>
             </div>
             <div class="text-[11px] text-zinc-400">Remote fallback sync (requires VPN/Proxy)</div>
-            <div class="flex items-center gap-1.5 pt-1">
-              <code class="flex-1 px-2 py-1 bg-zinc-950 border border-zinc-800 rounded text-xs font-mono text-zinc-300 truncate select-all">https://kosync-198-46-146-17.sslip.io</code>
-              <button onclick="copyToClipboard('https://kosync-198-46-146-17.sslip.io')" class="p-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-emerald-600 text-zinc-300 hover:text-white rounded transition-colors cursor-pointer" title="Copy">
+            <div class="flex items-center gap-2 pt-1">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://kosync-198-46-146-17.sslip.io</code>
+              <button onclick="copyToClipboard('https://kosync-198-46-146-17.sslip.io')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
           </div>
 
           <!-- OPDS Local -->
-          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-sky-400"></span>
@@ -1314,16 +1322,16 @@
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-sky-400 font-mono border border-zinc-700">LAN</span>
             </div>
             <div class="text-[11px] text-zinc-400">Direct KOReader wireless book catalog</div>
-            <div class="flex items-center gap-1.5 pt-1">
-              <code class="flex-1 px-2 py-1 bg-zinc-950 border border-zinc-800 rounded text-xs font-mono text-zinc-300 truncate select-all">http://192.168.31.15:8088/opds</code>
-              <button onclick="copyToClipboard('http://192.168.31.15:8088/opds')" class="p-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-sky-600 text-zinc-300 hover:text-white rounded transition-colors cursor-pointer" title="Copy">
+            <div class="flex items-center gap-2 pt-1">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">http://192.168.31.15:8088/opds</code>
+              <button onclick="copyToClipboard('http://192.168.31.15:8088/opds')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
           </div>
 
           <!-- OPDS VPS -->
-          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-amber-400"></span>
@@ -1332,16 +1340,16 @@
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-amber-400 font-mono border border-zinc-700">Standby</span>
             </div>
             <div class="text-[11px] text-zinc-400">Remote Calibre OPDS (requires VPN/Proxy)</div>
-            <div class="flex items-center gap-1.5 pt-1">
-              <code class="flex-1 px-2 py-1 bg-zinc-950 border border-zinc-800 rounded text-xs font-mono text-zinc-300 truncate select-all">https://calibre-198-46-146-17.sslip.io/opds</code>
-              <button onclick="copyToClipboard('https://calibre-198-46-146-17.sslip.io/opds')" class="p-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-sky-600 text-zinc-300 hover:text-white rounded transition-colors cursor-pointer" title="Copy">
+            <div class="flex items-center gap-2 pt-1">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://calibre-198-46-146-17.sslip.io/opds</code>
+              <button onclick="copyToClipboard('https://calibre-198-46-146-17.sslip.io/opds')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
           </div>
 
           <!-- Calibre Web Reader Local -->
-          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-purple-400"></span>
@@ -1350,16 +1358,16 @@
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-purple-400 font-mono border border-zinc-700">LAN</span>
             </div>
             <div class="text-[11px] text-zinc-400">In-browser reading & library management</div>
-            <div class="flex items-center gap-1.5 pt-1">
-              <code class="flex-1 px-2 py-1 bg-zinc-950 border border-zinc-800 rounded text-xs font-mono text-zinc-300 truncate select-all">http://192.168.31.15:8088</code>
-              <button onclick="copyToClipboard('http://192.168.31.15:8088')" class="p-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-purple-600 text-zinc-300 hover:text-white rounded transition-colors cursor-pointer" title="Copy">
+            <div class="flex items-center gap-2 pt-1">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">http://192.168.31.15:8088</code>
+              <button onclick="copyToClipboard('http://192.168.31.15:8088')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
           </div>
 
           <!-- Calibre Web Reader VPS -->
-          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-amber-400"></span>
@@ -1368,16 +1376,16 @@
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-amber-400 font-mono border border-zinc-700">Standby</span>
             </div>
             <div class="text-[11px] text-zinc-400">Remote Calibre-Web (requires VPN/Proxy)</div>
-            <div class="flex items-center gap-1.5 pt-1">
-              <code class="flex-1 px-2 py-1 bg-zinc-950 border border-zinc-800 rounded text-xs font-mono text-zinc-300 truncate select-all">https://calibre-198-46-146-17.sslip.io</code>
-              <button onclick="copyToClipboard('https://calibre-198-46-146-17.sslip.io')" class="p-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-purple-600 text-zinc-300 hover:text-white rounded transition-colors cursor-pointer" title="Copy">
+            <div class="flex items-center gap-2 pt-1">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://calibre-198-46-146-17.sslip.io</code>
+              <button onclick="copyToClipboard('https://calibre-198-46-146-17.sslip.io')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
           </div>
 
           <!-- Reading HQ Dashboard Local -->
-          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-blue-400"></span>
@@ -1386,16 +1394,16 @@
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-emerald-400 font-mono border border-zinc-700">LAN</span>
             </div>
             <div class="text-[11px] text-zinc-400">Web dashboard on home Wi-Fi</div>
-            <div class="flex items-center gap-1.5 pt-1">
-              <code class="flex-1 px-2 py-1 bg-zinc-950 border border-zinc-800 rounded text-xs font-mono text-zinc-300 truncate select-all">http://192.168.31.15:8086</code>
-              <button onclick="copyToClipboard('http://192.168.31.15:8086')" class="p-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-blue-600 text-zinc-300 hover:text-white rounded transition-colors cursor-pointer" title="Copy">
+            <div class="flex items-center gap-2 pt-1">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">http://192.168.31.15:8086</code>
+              <button onclick="copyToClipboard('http://192.168.31.15:8086')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
           </div>
 
           <!-- Reading HQ WAN / Mini App -->
-          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-blue-400"></span>
@@ -1404,16 +1412,16 @@
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-sky-400 font-mono border border-zinc-700">Global</span>
             </div>
             <div class="text-[11px] text-zinc-400">Global HTTPS access & Telegram Mini App</div>
-            <div class="flex items-center gap-1.5 pt-1">
-              <code class="flex-1 px-2 py-1 bg-zinc-950 border border-zinc-800 rounded text-xs font-mono text-zinc-300 truncate select-all">https://reading.wavypremium.xyz</code>
-              <button onclick="copyToClipboard('https://reading.wavypremium.xyz')" class="p-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-blue-600 text-zinc-300 hover:text-white rounded transition-colors cursor-pointer" title="Copy">
+            <div class="flex items-center gap-2 pt-1">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://reading.wavypremium.xyz</code>
+              <button onclick="copyToClipboard('https://reading.wavypremium.xyz')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
           </div>
 
           <!-- LAN Proxy Gateway -->
-          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-indigo-400"></span>
@@ -1422,16 +1430,16 @@
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-indigo-400 font-mono border border-zinc-700">Proxy</span>
             </div>
             <div class="text-[11px] text-zinc-400">sing-box tunnel for GFW bypass (HTTP/SOCKS5)</div>
-            <div class="flex items-center gap-1.5 pt-1">
-              <code class="flex-1 px-2 py-1 bg-zinc-950 border border-zinc-800 rounded text-xs font-mono text-zinc-300 truncate select-all">192.168.31.15:7890</code>
-              <button onclick="copyToClipboard('192.168.31.15:7890')" class="p-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-indigo-600 text-zinc-300 hover:text-white rounded transition-colors cursor-pointer" title="Copy">
+            <div class="flex items-center gap-2 pt-1">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-300 truncate select-all">192.168.31.15:7890</code>
+              <button onclick="copyToClipboard('192.168.31.15:7890')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
           </div>
 
           <!-- Telegram Bot -->
-          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-sky-400"></span>
@@ -1440,9 +1448,9 @@
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-sky-400 font-mono border border-zinc-700">Bot</span>
             </div>
             <div class="text-[11px] text-zinc-400">Send books & search from chat</div>
-            <div class="flex items-center gap-1.5 pt-1">
-              <code class="flex-1 px-2 py-1 bg-zinc-950 border border-zinc-800 rounded text-xs font-mono text-zinc-300 truncate select-all">@saroat_ospeto_bot</code>
-              <button onclick="copyToClipboard('@saroat_ospeto_bot')" class="p-1.5 bg-zinc-800 hover:bg-zinc-700 active:bg-sky-600 text-zinc-300 hover:text-white rounded transition-colors cursor-pointer" title="Copy">
+            <div class="flex items-center gap-2 pt-1">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-300 truncate select-all">@saroat_ospeto_bot</code>
+              <button onclick="copyToClipboard('@saroat_ospeto_bot')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
@@ -1452,8 +1460,8 @@
       </div>
 
       <!-- Modal Footer -->
-      <div class="flex items-center justify-end pt-2 border-t border-[#23232a]">
-        <button onclick="closeGuideModal()" class="min-h-[44px] px-5 py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl cursor-pointer transition-all duration-150 active:scale-[0.98] shadow-sm">
+      <div class="flex items-center justify-end pt-2 border-t border-zinc-800/80">
+        <button onclick="closeGuideModal()" class="h-10 px-5 py-2 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl cursor-pointer transition-all duration-150 active:scale-[0.98] shadow-sm">
           Close Manual
         </button>
       </div>
@@ -1788,11 +1796,11 @@
       setHtml(seriesContainer, (facets.series || []).slice(0, 3).map(s => {
         const isActive = activeFilter.type === 'series' && activeFilter.value === s.name;
         const cls = isActive
-          ? 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] flex items-center gap-1.5 shadow-sm cursor-pointer'
-          : 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-zinc-300 hover:text-white hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] flex items-center gap-1.5 cursor-pointer';
+          ? 'h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] flex items-center gap-1.5 shadow-sm cursor-pointer'
+          : 'h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 border border-zinc-800/80 text-zinc-400 hover:text-zinc-200 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] flex items-center gap-1.5 cursor-pointer';
         return `
         <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="series" data-filter-value="${escapeHtml(s.name)}" class="${cls}">
-          ${svgIcon('bookmark', 'w-3 h-3 text-amber-400/80')}
+          ${svgIcon('bookmark', 'w-3 h-3 text-zinc-400')}
           <span>${escapeHtml(s.name)}</span>
           <span class="text-[10px] ${isActive ? 'text-zinc-600' : 'text-zinc-500'} font-mono">${s.count}</span>
         </button>
@@ -1803,8 +1811,8 @@
       setHtml(formatContainer, otherFormats.map(f => {
         const isActive = activeFilter.type === 'format' && activeFilter.value === f.name;
         const cls = isActive
-          ? 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] flex items-center gap-1.5 shadow-sm cursor-pointer'
-          : 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-zinc-400 hover:text-white hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] flex items-center gap-1.5 cursor-pointer';
+          ? 'h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] flex items-center gap-1.5 shadow-sm cursor-pointer'
+          : 'h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 border border-zinc-800/80 text-zinc-400 hover:text-zinc-200 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] flex items-center gap-1.5 cursor-pointer';
         return `
         <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="format" data-filter-value="${escapeHtml(f.name)}" class="${cls}">
           ${escapeHtml(f.name)}
@@ -1829,10 +1837,19 @@
       }).join('') || '<div class="text-[10px] text-neutral-600 italic px-2.5">No series</div>';
       setHtml(seriesList, seriesHtml);
 
-      // Mobile Drawer Series
+      // Mobile Drawer Series (Facet Chips with active/inactive states)
       const drawerSeriesCount = document.getElementById('drawerSeriesCount');
       if (drawerSeriesCount) drawerSeriesCount.textContent = facets.series.length;
-      setHtml('drawerSeriesList', seriesHtml);
+      const drawerSeriesHtml = facets.series.slice(0, 20).map(s => {
+        const isActive = activeFilter.type === 'series' && activeFilter.value === s.name;
+        return `
+        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="series" data-filter-value="${escapeHtml(s.name)}" class="px-2.5 py-1 rounded-lg text-xs font-semibold ${isActive ? 'bg-white text-zinc-950 shadow-sm' : 'bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80'} transition-all cursor-pointer flex items-center gap-1.5">
+          <span class="truncate max-w-[140px]">${escapeHtml(s.name)}</span>
+          <span class="text-[10px] ${isActive ? 'text-zinc-600' : 'text-zinc-500'} font-mono">${s.count}</span>
+        </button>
+      `;
+      }).join('') || '<div class="text-[10px] text-zinc-500 italic">No series</div>';
+      setHtml('drawerSeriesList', drawerSeriesHtml);
 
       // Desktop Authors
       const authorList = document.getElementById('authorList');
@@ -1850,26 +1867,42 @@
       }).join('') || '<div class="text-[10px] text-neutral-600 italic px-2.5">No authors</div>';
       setHtml(authorList, authorHtml);
 
-      // Mobile Drawer Authors
+      // Mobile Drawer Authors (Facet Chips with active/inactive states)
       const drawerAuthorCount = document.getElementById('drawerAuthorCount');
       if (drawerAuthorCount) drawerAuthorCount.textContent = facets.authors.length;
-      setHtml('drawerAuthorList', authorHtml);
+      const drawerAuthorHtml = facets.authors.slice(0, 20).map(a => {
+        const isActive = activeFilter.type === 'author' && activeFilter.value === a.name;
+        return `
+        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="author" data-filter-value="${escapeHtml(a.name)}" class="px-2.5 py-1 rounded-lg text-xs font-semibold ${isActive ? 'bg-white text-zinc-950 shadow-sm' : 'bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80'} transition-all cursor-pointer flex items-center gap-1.5">
+          <span class="truncate max-w-[140px]">${escapeHtml(a.name)}</span>
+          <span class="text-[10px] ${isActive ? 'text-zinc-600' : 'text-zinc-500'} font-mono">${a.count}</span>
+        </button>
+      `;
+      }).join('') || '<div class="text-[10px] text-zinc-500 italic">No authors</div>';
+      setHtml('drawerAuthorList', drawerAuthorHtml);
 
       // Tags
-      const tagHtml = facets.tags.slice(0, 15).map(t => `
-        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="tag" data-filter-value="${escapeHtml(t.name)}" class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-white/5 border border-white/10 text-neutral-400 hover:text-white hover:border-white/20 transition-colors cursor-pointer">
-          #${escapeHtml(t.name)} <span class="text-[9px] text-neutral-500 font-mono">${t.count}</span>
+      const tagHtml = facets.tags.slice(0, 15).map(t => {
+        const isActive = activeFilter.type === 'tag' && activeFilter.value === t.name;
+        return `
+        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="tag" data-filter-value="${escapeHtml(t.name)}" class="px-2.5 py-1 rounded-full text-xs font-medium ${isActive ? 'bg-white text-zinc-950 font-semibold shadow-sm' : 'bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80'} transition-all cursor-pointer">
+          #${escapeHtml(t.name)} <span class="text-[10px] ${isActive ? 'text-zinc-600' : 'text-zinc-500'} font-mono">${t.count}</span>
         </button>
-      `).join('') || '<div class="text-[10px] text-neutral-600 italic px-2.5">No tags</div>';
+      `;
+      }).join('') || '<div class="text-[10px] text-zinc-500 italic px-2.5">No tags</div>';
       setHtml('tagPills', tagHtml);
       setHtml('drawerTagList', tagHtml);
 
       // Formats
-      const formatHtml = facets.formats.map(f => `
-        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="format" data-filter-value="${escapeHtml(f.name)}" class="px-2 py-0.5 rounded text-[10px] font-bold bg-white/5 border border-white/10 text-neutral-300 hover:text-white hover:border-white/20 transition-colors cursor-pointer">
-          ${escapeHtml(f.name)} <span class="text-[9px] text-neutral-500 font-mono">${f.count}</span>
+      const formatHtml = facets.formats.map(f => {
+        const isActive = activeFilter.type === 'format' && activeFilter.value === f.name;
+        return `
+        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="format" data-filter-value="${escapeHtml(f.name)}" class="px-2.5 py-1 rounded-lg text-xs font-bold ${isActive ? 'bg-white text-zinc-950 shadow-sm' : 'bg-zinc-900/80 text-zinc-300 hover:text-white border border-zinc-800/80'} transition-all cursor-pointer flex items-center gap-1.5">
+          <span>${escapeHtml(f.name)}</span>
+          <span class="text-[10px] ${isActive ? 'text-zinc-600' : 'text-zinc-500'} font-mono">${f.count}</span>
         </button>
-      `).join('');
+      `;
+      }).join('');
       setHtml('formatList', formatHtml);
       setHtml('drawerFormatList', formatHtml);
     }
@@ -1902,8 +1935,8 @@
       if (navWant) navWant.className = (type === 'status' && value === 'want_to_read') ? navActive : navInactive;
       if (navFinished) navFinished.className = (type === 'status' && value === 'finished') ? navActive : navInactive;
 
-      const chipActiveCls = 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5 shadow-sm';
-      const chipInactiveCls = 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-zinc-400 hover:text-zinc-200 hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5';
+      const chipActiveCls = 'h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5 shadow-sm';
+      const chipInactiveCls = 'h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 border border-zinc-800/80 text-zinc-400 hover:text-zinc-200 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5';
 
       if (chipAll) chipAll.className = (type === 'all') ? chipActiveCls : chipInactiveCls;
       if (chipLn) chipLn.className = (type === 'category' && value === 'light_novels') ? chipActiveCls : chipInactiveCls;
@@ -1913,8 +1946,8 @@
 
       if (chipReading) {
         chipReading.className = (type === 'status' && value === 'reading')
-          ? 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5'
-          : 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-emerald-400 hover:text-white hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5';
+          ? 'h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5 shadow-sm'
+          : 'h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 border border-zinc-800/80 text-emerald-400 hover:text-white shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5';
       }
 
       const breadcrumb = document.getElementById('breadcrumbCategory');
@@ -2641,12 +2674,55 @@
     function openGuideModal() {
       tgHaptic.light();
       document.getElementById('guideModal').classList.remove('hidden');
+      setGuideTab('kosync');
       updateBackButton();
     }
 
     function closeGuideModal() {
       document.getElementById('guideModal').classList.add('hidden');
       updateBackButton();
+    }
+
+    // GUIDE MODAL TABS
+    function setGuideTab(tab) {
+      try { tgHaptic.light(); } catch {}
+      const tabs = ['kosync', 'opds', 'proxy', 'all'];
+      tabs.forEach(t => {
+        const btn = document.getElementById(`guide-tab-${t}`);
+        if (btn) {
+          if (t === tab) {
+            btn.className = 'px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-white text-zinc-950 shadow-sm cursor-pointer transition-all shrink-0';
+          } else {
+            btn.className = 'px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0';
+          }
+        }
+      });
+      const secKosync = document.getElementById('guide-kosync');
+      const secOpds = document.getElementById('guide-opds');
+      const secProxy = document.getElementById('guide-proxy');
+      const secEndpoints = document.getElementById('guide-endpoints');
+
+      if (tab === 'kosync') {
+        secKosync?.classList.remove('hidden');
+        secOpds?.classList.add('hidden');
+        secProxy?.classList.add('hidden');
+        secEndpoints?.classList.add('hidden');
+      } else if (tab === 'opds') {
+        secKosync?.classList.add('hidden');
+        secOpds?.classList.remove('hidden');
+        secProxy?.classList.add('hidden');
+        secEndpoints?.classList.add('hidden');
+      } else if (tab === 'proxy') {
+        secKosync?.classList.add('hidden');
+        secOpds?.classList.add('hidden');
+        secProxy?.classList.remove('hidden');
+        secEndpoints?.classList.add('hidden');
+      } else {
+        secKosync?.classList.remove('hidden');
+        secOpds?.classList.remove('hidden');
+        secProxy?.classList.remove('hidden');
+        secEndpoints?.classList.remove('hidden');
+      }
     }
 
     async function lookupMetadata() {
