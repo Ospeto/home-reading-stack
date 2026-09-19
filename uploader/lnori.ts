@@ -4,7 +4,8 @@ import path from "node:path";
 import process from "node:process";
 import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
-import { validateEpubContent, safeFetchWithSsrf } from "./security";
+import { Database } from "bun:sqlite";
+import { validateEpubContent, repairTruncatedEpub, safeFetchWithSsrf } from "./security";
 
 const PROXY_URL = "http://127.0.0.1:7890";
 export const MAX_EPUB_BYTES = 256 * 1024 * 1024;
@@ -18,6 +19,9 @@ export interface LnoriDependencies {
   fetch?: (url: string, init?: RequestInit) => Promise<Response>;
   spawnSync?: (...args: any[]) => any;
   sipsPath?: string;
+  calibreDbPath?: string;
+  isVolumeInLibrary?: (seriesTitle: string, volumeIndex: number, title: string) => boolean;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export function escapeTelegramMarkdown(text: string): string {
@@ -123,10 +127,32 @@ export function validateLnoriBookId(bookId: unknown): string {
   return String(bookId);
 }
 
+export function isMissingCentralDirectoryOrUnreadable(error?: string): boolean {
+  if (!error) return false;
+  const lower = error.toLowerCase();
+  return (
+    lower.includes("failed to read epub zip entries") ||
+    lower.includes("central directory") ||
+    lower.includes("end-of-central-directory") ||
+    lower.includes("unreadable") ||
+    lower.includes("truncated") ||
+    lower.includes("damaged") ||
+    lower.includes("cannot find zipfile directory")
+  );
+}
+
 export function validateDownloadedEpub(destPath: string): void {
   const validation = validateEpubContent(destPath) as { valid?: boolean; isValid?: boolean; error?: string };
   const isValid = validation.valid ?? validation.isValid ?? false;
   if (!isValid) {
+    if (isMissingCentralDirectoryOrUnreadable(validation.error)) {
+      const repaired = repairTruncatedEpub(destPath);
+      if (repaired) {
+        console.log(`[Lnori] Successfully auto-healed truncated EPUB with missing central directory: ${destPath}`);
+        return;
+      }
+    }
+
     try {
       fs.unlinkSync(destPath);
     } catch {
@@ -137,6 +163,113 @@ export function validateDownloadedEpub(destPath: string): void {
 }
 const SERVER_URL = "http://127.0.0.1:8088";
 const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+export function getCalibreDbPath(): string {
+  if (process.env.CALIBRE_DB_PATH) return process.env.CALIBRE_DB_PATH;
+  if (process.env.CALIBRE_LIBRARY_DIR) {
+    return path.join(process.env.CALIBRE_LIBRARY_DIR, "metadata.db");
+  }
+  const home = process.env.HOME || os.homedir();
+  return path.join(
+    home,
+    "Calibre Libraries",
+    "Agent Library",
+    "metadata.db",
+  );
+}
+
+export function isVolumeAlreadyInCalibre(
+  seriesTitle: string,
+  assignedIndex: number,
+  title: string,
+  dependencies?: LnoriDependencies,
+): boolean {
+  if (dependencies?.isVolumeInLibrary) {
+    return dependencies.isVolumeInLibrary(seriesTitle, assignedIndex, title);
+  }
+
+  const dbPath = dependencies?.calibreDbPath || getCalibreDbPath();
+  if (fs.existsSync(dbPath)) {
+    try {
+      const db = new Database(dbPath, { readonly: true });
+      db.run("PRAGMA busy_timeout = 2000;");
+
+      const seriesMatch = db.query(`
+        SELECT b.id FROM books b
+        JOIN books_series_link bsl ON b.id = bsl.book
+        JOIN series s ON bsl.series = s.id
+        WHERE LOWER(TRIM(s.name)) = LOWER(TRIM(?))
+          AND (ROUND(b.series_index, 2) = ROUND(?, 2) OR CAST(b.series_index AS INTEGER) = ?)
+        LIMIT 1
+      `).get(seriesTitle, assignedIndex, assignedIndex);
+
+      if (seriesMatch) {
+        db.close();
+        return true;
+      }
+
+      const titleMatch = db.query(`
+        SELECT b.id FROM books b
+        WHERE LOWER(TRIM(b.title)) = LOWER(TRIM(?))
+        LIMIT 1
+      `).get(title);
+
+      db.close();
+      if (titleMatch) {
+        return true;
+      }
+    } catch (err: any) {
+      console.warn(`[Lnori] SQLite duplicate check failed, trying calibredb: ${err?.message || err}`);
+    }
+  }
+
+  // Fallback: calibredb list
+  try {
+    const safeSeries = seriesTitle.replace(/"/g, '\\"');
+    const listRes = runCalibredb([
+      "list",
+      "--with-library",
+      SERVER_URL,
+      "--search",
+      `series:"="${safeSeries}"" and series_index:=${assignedIndex}`,
+      "--for-machine",
+    ]);
+    if (listRes.status === 0 && listRes.stdout) {
+      try {
+        const parsed = JSON.parse(listRes.stdout);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return true;
+        }
+      } catch {
+        // ignore parse error on invalid JSON
+      }
+    }
+
+    const safeTitle = title.replace(/"/g, '\\"');
+    const titleRes = runCalibredb([
+      "list",
+      "--with-library",
+      SERVER_URL,
+      "--search",
+      `title:"="${safeTitle}""`,
+      "--for-machine",
+    ]);
+    if (titleRes.status === 0 && titleRes.stdout) {
+      try {
+        const parsed = JSON.parse(titleRes.stdout);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return true;
+        }
+      } catch {
+        // ignore parse error on invalid JSON
+      }
+    }
+  } catch {
+    // Ignore fallback failure
+  }
+
+  return false;
+}
 
 export function getCalibredbPath(): string {
   if (process.env.CALIBREDB_PATH) return process.env.CALIBREDB_PATH;
@@ -573,45 +706,79 @@ export async function downloadLnoriEpub(
 ): Promise<void> {
   const fetcher = dependencies?.fetch ?? safeFetchWithSsrf;
   const downloadUrl = `https://files.lnori.com/${encodeURIComponent(epubFilename)}`;
-  let res: Response;
-  try {
-    res = await fetcher(downloadUrl, {
-      headers: {
-        Referer: "https://lnori.com/",
-        "User-Agent": USER_AGENT,
-      },
-      proxy: PROXY_URL,
-      signal: AbortSignal.timeout(120000),
-    } as any);
-  } catch {
-    res = await fetcher(downloadUrl, {
-      headers: {
-        Referer: "https://lnori.com/",
-        "User-Agent": USER_AGENT,
-      },
-      signal: AbortSignal.timeout(120000),
-    } as any);
+  const isTestEnv =
+    process.argv.some((a) => a.includes(".test.") || a.includes("test")) ||
+    process.env.NODE_ENV === "test";
+  const sleep =
+    dependencies?.sleep ??
+    ((ms: number) => new Promise((resolve) => setTimeout(resolve, isTestEnv ? 0 : ms)));
+
+  const MAX_RETRIES = 3;
+  let lastError: any = null;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const backoffMs = Math.min(10000, 1000 * 2 ** (attempt - 1));
+      await sleep(backoffMs);
+    }
+
+    try {
+      const res = await fetcher(downloadUrl, {
+        headers: {
+          Referer: "https://lnori.com/",
+          "User-Agent": USER_AGENT,
+        },
+        proxy: PROXY_URL,
+        signal: AbortSignal.timeout(60000),
+      } as any);
+
+      if (!res.ok) {
+        lastError = new Error(
+          `Failed to download EPUB from Lnori storage (${res.status}): ${downloadUrl}`,
+        );
+        if ((res.status >= 500 || res.status === 429) && attempt < MAX_RETRIES) {
+          continue;
+        }
+        throw lastError;
+      }
+
+      await streamResponseToFile(
+        res,
+        destPath,
+        MAX_EPUB_BYTES,
+        "Downloaded EPUB",
+        onProgress,
+      );
+      lastError = null;
+      break;
+    } catch (err: any) {
+      lastError = err;
+      try {
+        await fs.promises.rm(destPath, { force: true });
+      } catch {
+        // ignore cleanup error if file was already removed
+      }
+
+      if (
+        err?.message?.includes("exceeds maximum size") ||
+        err?.message?.includes("contained no body") ||
+        err?.message?.includes("Failed to download EPUB from Lnori storage (4")
+      ) {
+        throw err;
+      }
+
+      if (attempt < MAX_RETRIES) {
+        continue;
+      }
+      throw err;
+    }
   }
 
-  if (!res.ok) {
-    throw new Error(
-      `Failed to download EPUB from Lnori storage (${res.status}): ${downloadUrl}`,
-    );
+  if (lastError) {
+    throw lastError;
   }
 
-  try {
-    await streamResponseToFile(
-      res,
-      destPath,
-      MAX_EPUB_BYTES,
-      "Downloaded EPUB",
-      onProgress,
-    );
-    validateDownloadedEpub(destPath);
-  } catch (err) {
-    await fs.promises.rm(destPath, { force: true });
-    throw err;
-  }
+  validateDownloadedEpub(destPath);
 }
 
 export async function fetchAndConvertCover(
@@ -700,6 +867,8 @@ export interface IngestLnoriResult {
   author: string;
   tags: string;
   importedCount: number;
+  skippedCount: number;
+  duplicateCount: number;
   totalCount: number;
   calibreBookIds: number[];
   error?: string;
@@ -733,6 +902,7 @@ export async function ingestLnoriSeries(
 
   const totalCount = manifest.volumePaths.length;
   let importedCount = 0;
+  let skippedCount = 0;
   const calibreBookIds: number[] = [];
 
   const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-"));
@@ -767,6 +937,21 @@ export async function ingestLnoriSeries(
 
     const bookId = validateLnoriBookId(volMeta.bookId);
     const assignedIndex = volMeta.volumeNumber === undefined ? volNum : volMeta.volumeNumber;
+    const title = `${manifest.seriesTitle}: Volume ${assignedIndex}`;
+
+    // Pre-download duplicate detection: check if volume already exists in Calibre
+    if (isVolumeAlreadyInCalibre(manifest.seriesTitle, assignedIndex, title, dependencies)) {
+      console.log(
+        `[Lnori] Volume ${assignedIndex} of "${manifest.seriesTitle}" already in library, skipping`,
+      );
+      if (onProgress) {
+        await onProgress(
+          `⏭️ _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Volume ${escapeTelegramMarkdown(String(assignedIndex))} already in library, skipping..._`,
+        );
+      }
+      skippedCount++;
+      continue;
+    }
 
     if (onProgress) {
       await onProgress(
@@ -872,11 +1057,13 @@ export async function ingestLnoriSeries(
   const tagsFormatted = ["Light Novel", ...manifest.tags].join(", ");
 
   return {
-    success: importedCount > 0,
+    success: importedCount > 0 || (skippedCount > 0 && totalCount > 0),
     seriesTitle: manifest.seriesTitle,
     author: manifest.author,
     tags: tagsFormatted,
     importedCount,
+    skippedCount,
+    duplicateCount: skippedCount,
     totalCount,
     calibreBookIds,
   };

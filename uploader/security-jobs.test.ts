@@ -15,12 +15,14 @@ import {
   validateBookFormat,
   isCanonicalEpub,
   validateEpubContent,
+  repairTruncatedEpub,
   sanitizeFilename,
   getDownloadFilename,
   sanitizeErrorMessage,
   validateTelegramWebAppData,
   getBsdtarPath,
 } from "./security";
+import zlib from "node:zlib";
 import {
   inspectArchiveSafety,
   unpackArchive,
@@ -798,6 +800,179 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
         fs.unlinkSync(nonZipFile);
       }
     }
+  });
+
+  describe("In-Process ZIP Auto-Healer (repairTruncatedEpub)", () => {
+    function buildSyntheticZipEntry(
+      name: string,
+      data: Buffer,
+      compMethod = 0,
+      compData: Buffer | null = null,
+    ): Buffer {
+      const nameBuf = Buffer.from(name);
+      const payload = compData || data;
+      const crc = zlib.crc32(data);
+      const h = Buffer.alloc(30 + nameBuf.length);
+      h.writeUInt32LE(0x04034b50, 0);
+      h.writeUInt16LE(20, 4);
+      h.writeUInt16LE(0, 6);
+      h.writeUInt16LE(compMethod, 8);
+      h.writeUInt16LE(0, 10);
+      h.writeUInt16LE(0, 12);
+      h.writeUInt32LE(crc, 14);
+      h.writeUInt32LE(payload.length, 18);
+      h.writeUInt32LE(data.length, 22);
+      h.writeUInt16LE(nameBuf.length, 26);
+      h.writeUInt16LE(0, 28);
+      nameBuf.copy(h, 30);
+      return Buffer.concat([h, payload]);
+    }
+
+    function buildCoreEpubEntries(): Buffer[] {
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = buildSyntheticZipEntry("mimetype", mimeData, 0);
+
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerDef = zlib.deflateRawSync(containerXml);
+      const containerPart = buildSyntheticZipEntry(
+        "META-INF/container.xml",
+        containerXml,
+        8,
+        containerDef,
+      );
+
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test Title</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfDef = zlib.deflateRawSync(opfXml);
+      const opfPart = buildSyntheticZipEntry("content.opf", opfXml, 8, opfDef);
+
+      return [mimePart, containerPart, opfPart];
+    }
+
+    it("auto-heals a synthetic EPUB missing its central directory and validates successfully", () => {
+      const parts = buildCoreEpubEntries();
+      const testPath = path.join("/tmp", `test_autoheal_${Date.now()}.epub`);
+      // Concatenate entries with NO Central Directory or EOCD
+      fs.writeFileSync(testPath, Buffer.concat(parts));
+
+      try {
+        // Initial validation fails due to missing central directory
+        const initialVal = validateEpubContent(testPath);
+        expect(initialVal.valid).toBe(false);
+        expect(initialVal.error).toContain("Failed to read EPUB ZIP entries");
+
+        // Repair in-process
+        const start = performance.now();
+        const healed = repairTruncatedEpub(testPath);
+        const durationMs = performance.now() - start;
+
+        expect(healed).toBe(true);
+        expect(durationMs).toBeLessThan(50); // fast <50ms bound
+
+        // Validation now passes
+        const afterVal = validateEpubContent(testPath);
+        expect(afterVal.valid).toBe(true);
+      } finally {
+        if (fs.existsSync(testPath)) fs.unlinkSync(testPath);
+      }
+    });
+
+    it("auto-heals a synthetic EPUB with trailing zero padding from interrupted upload", () => {
+      const parts = buildCoreEpubEntries();
+      const testPath = path.join("/tmp", `test_padding_${Date.now()}.epub`);
+      // Entries + 4KB trailing null bytes
+      fs.writeFileSync(
+        testPath,
+        Buffer.concat([...parts, Buffer.alloc(4096, 0)]),
+      );
+
+      try {
+        const initialVal = validateEpubContent(testPath);
+        expect(initialVal.valid).toBe(false);
+
+        const healed = repairTruncatedEpub(testPath);
+        expect(healed).toBe(true);
+
+        const afterVal = validateEpubContent(testPath);
+        expect(afterVal.valid).toBe(true);
+      } finally {
+        if (fs.existsSync(testPath)) fs.unlinkSync(testPath);
+      }
+    });
+
+    it("discards trailing incomplete compressed entry while keeping core EPUB metadata", () => {
+      const parts = buildCoreEpubEntries();
+
+      // Create an incomplete/corrupted trailing chapter
+      const chapXml = Buffer.from('<!DOCTYPE html><html><body><h1>Chapter 1</h1></body></html>');
+      const chapDef = zlib.deflateRawSync(chapXml);
+      // Cut compressed stream to only 4 bytes (truncated deflate stream)
+      const chapIncomplete = chapDef.subarray(0, 4);
+      const chapPart = buildSyntheticZipEntry("chapter1.xhtml", chapXml, 8, chapIncomplete);
+
+      const testPath = path.join("/tmp", `test_trailing_incomplete_${Date.now()}.epub`);
+      fs.writeFileSync(
+        testPath,
+        Buffer.concat([...parts, chapPart, Buffer.alloc(1024, 0)]),
+      );
+
+      try {
+        const initialVal = validateEpubContent(testPath);
+        expect(initialVal.valid).toBe(false);
+
+        const healed = repairTruncatedEpub(testPath);
+        expect(healed).toBe(true);
+
+        const afterVal = validateEpubContent(testPath);
+        expect(afterVal.valid).toBe(true);
+      } finally {
+        if (fs.existsSync(testPath)) fs.unlinkSync(testPath);
+      }
+    });
+
+    it("fails cleanly without hanging on non-zip, corrupted, or non-EPUB files", () => {
+      // 1. Non-existent file
+      expect(repairTruncatedEpub("/tmp/nonexistent_file_12345.epub")).toBe(false);
+
+      // 2. Non-ZIP text file
+      const textPath = path.join("/tmp", `text_${Date.now()}.epub`);
+      fs.writeFileSync(textPath, "Just plain text");
+      try {
+        const start = performance.now();
+        expect(repairTruncatedEpub(textPath)).toBe(false);
+        expect(performance.now() - start).toBeLessThan(20);
+      } finally {
+        if (fs.existsSync(textPath)) fs.unlinkSync(textPath);
+      }
+
+      // 3. Null bytes starting with PK magic but no valid entries
+      const corruptPath = path.join("/tmp", `corrupt_${Date.now()}.epub`);
+      fs.writeFileSync(
+        corruptPath,
+        Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.alloc(100, 0)]),
+      );
+      try {
+        const start = performance.now();
+        expect(repairTruncatedEpub(corruptPath)).toBe(false);
+        expect(performance.now() - start).toBeLessThan(20);
+      } finally {
+        if (fs.existsSync(corruptPath)) fs.unlinkSync(corruptPath);
+      }
+
+      // 4. Valid ZIP entries but missing core EPUB metadata (missing container.xml and opf)
+      const nonEpubPath = path.join("/tmp", `non_epub_${Date.now()}.epub`);
+      const fooData = Buffer.from("hello world");
+      const fooPart = buildSyntheticZipEntry("foo.txt", fooData, 0);
+      fs.writeFileSync(nonEpubPath, fooPart);
+      try {
+        expect(repairTruncatedEpub(nonEpubPath)).toBe(false);
+      } finally {
+        if (fs.existsSync(nonEpubPath)) fs.unlinkSync(nonEpubPath);
+      }
+    });
   });
 });
 

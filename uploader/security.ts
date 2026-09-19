@@ -4,6 +4,7 @@ import net from "node:net";
 import path from "node:path";
 import process from "node:process";
 import fs from "node:fs";
+import zlib from "node:zlib";
 import { spawnSync } from "node:child_process";
 import { Buffer } from "node:buffer";
 import { Agent, buildConnector } from "undici";
@@ -1114,6 +1115,283 @@ export function validateEpubContent(filePath: string): EpubValidationResult {
       valid: false,
       error: `EPUB content validation error: ${err?.message || err}`,
     };
+  }
+}
+
+interface ParsedLocalHeaderEntry {
+  offset: number;
+  versionNeeded: number;
+  flags: number;
+  compMethod: number;
+  modTime: number;
+  modDate: number;
+  crc32: number;
+  compSize: number;
+  uncompSize: number;
+  fileNameLen: number;
+  extraLen: number;
+  fileName: string;
+  dataOffset: number;
+  dataEnd: number;
+}
+
+const MAX_REPAIR_FILE_SIZE = 500 * 1024 * 1024; // 500 MB bound
+
+/**
+ * In-process ZIP auto-healer for truncated EPUB files (missing Central Directory,
+ * trailing null padding, or incomplete trailing stream from interrupted uploads).
+ *
+ * 1. Verifies file begins with standard ZIP magic bytes PK\x03\x04.
+ * 2. Sequentially parses local file headers from offset 0 forward.
+ * 3. Reads each entry (filename, compMethod, compSize, uncompSize, crc32, modTime, modDate, extra).
+ * 4. Stops cleanly before trailing null padding or corrupted garbage. Discards trailing
+ *    incomplete entry while ensuring core EPUB metadata (mimetype, META-INF/container.xml, and OPF)
+ *    are present.
+ * 5. Builds standard ZIP Central Directory (PK\x01\x02) and EOCD (PK\x05\x06) records.
+ * 6. Atomically rewrites the repaired file.
+ * 7. Validates with validateEpubContent. Returns true if repaired and valid, false otherwise.
+ */
+export function repairTruncatedEpub(filePath: string): boolean {
+  let tempRepairedPath: string | null = null;
+  try {
+    if (!fs.existsSync(filePath)) {
+      return false;
+    }
+    const stat = fs.statSync(filePath);
+    if (stat.size < 30 || stat.size > MAX_REPAIR_FILE_SIZE) {
+      return false;
+    }
+
+    const buf = fs.readFileSync(filePath);
+    if (buf.length < 30) {
+      return false;
+    }
+
+    // 1. Verify standard ZIP magic bytes (PK\x03\x04)
+    if (
+      buf[0] !== 0x50 ||
+      buf[1] !== 0x4b ||
+      buf[2] !== 0x03 ||
+      buf[3] !== 0x04
+    ) {
+      return false;
+    }
+
+    // 2. Sequentially parse local file headers
+    let offset = 0;
+    const entries: ParsedLocalHeaderEntry[] = [];
+    let lastValidDataEnd = 0;
+
+    while (offset + 30 <= buf.length) {
+      const sig = buf.readUInt32LE(offset);
+      // If we hit Central Directory or EOCD, stop reading local headers
+      if (sig === 0x02014b50 || sig === 0x06054b50) {
+        break;
+      }
+      // If not a local header, stop before trailing garbage or null padding
+      if (sig !== 0x04034b50) {
+        break;
+      }
+
+      const versionNeeded = buf.readUInt16LE(offset + 4);
+      const flags = buf.readUInt16LE(offset + 6);
+      const compMethod = buf.readUInt16LE(offset + 8);
+      const modTime = buf.readUInt16LE(offset + 10);
+      const modDate = buf.readUInt16LE(offset + 12);
+      let crc32 = buf.readUInt32LE(offset + 14);
+      let compSize = buf.readUInt32LE(offset + 18);
+      let uncompSize = buf.readUInt32LE(offset + 22);
+      const fileNameLen = buf.readUInt16LE(offset + 26);
+      const extraLen = buf.readUInt16LE(offset + 28);
+
+      const headerSize = 30 + fileNameLen + extraLen;
+      if (offset + headerSize > buf.length) {
+        // Truncated local header
+        break;
+      }
+
+      const fileName = buf.toString("utf8", offset + 30, offset + 30 + fileNameLen);
+      const dataOffset = offset + headerSize;
+      let dataEnd = dataOffset + compSize;
+
+      // Handle streaming data descriptor if bit 3 is set
+      if ((flags & 0x0008) !== 0) {
+        if (compSize === 0) {
+          let p = dataOffset;
+          let foundDescriptor = false;
+          while (p + 4 <= buf.length) {
+            const descSig = buf.readUInt32LE(p);
+            if (descSig === 0x08074b50 && p + 16 <= buf.length) {
+              compSize = p - dataOffset;
+              crc32 = buf.readUInt32LE(p + 4);
+              uncompSize = buf.readUInt32LE(p + 12);
+              dataEnd = p + 16;
+              foundDescriptor = true;
+              break;
+            }
+            if (descSig === 0x04034b50 || descSig === 0x02014b50) {
+              if (p >= dataOffset + 12) {
+                const descOffset = p - 12;
+                compSize = descOffset - dataOffset;
+                crc32 = buf.readUInt32LE(descOffset);
+                uncompSize = buf.readUInt32LE(descOffset + 8);
+                dataEnd = p;
+                foundDescriptor = true;
+                break;
+              }
+            }
+            p++;
+          }
+          if (!foundDescriptor) {
+            break;
+          }
+        } else if (dataEnd + 16 <= buf.length && buf.readUInt32LE(dataEnd) === 0x08074b50) {
+          dataEnd += 16;
+        }
+      }
+
+      // Check if compressed data overflows buffer
+      if (dataEnd > buf.length) {
+        break;
+      }
+
+      entries.push({
+        offset,
+        versionNeeded,
+        flags,
+        compMethod,
+        modTime,
+        modDate,
+        crc32,
+        compSize,
+        uncompSize,
+        fileNameLen,
+        extraLen,
+        fileName,
+        dataOffset,
+        dataEnd,
+      });
+
+      lastValidDataEnd = dataEnd;
+      offset = dataEnd;
+    }
+
+    // 4. Validate compressed stream of trailing entries and discard if incomplete
+    while (entries.length > 0) {
+      const last = entries[entries.length - 1];
+      if (last.compMethod === 8) {
+        try {
+          zlib.inflateRawSync(
+            buf.subarray(last.dataOffset, last.dataOffset + last.compSize),
+          );
+          break;
+        } catch {
+          entries.pop();
+          lastValidDataEnd = entries.length > 0 ? entries[entries.length - 1].dataEnd : 0;
+        }
+      } else {
+        break;
+      }
+    }
+
+    if (entries.length === 0 || lastValidDataEnd === 0) {
+      return false;
+    }
+
+    // Ensure core EPUB metadata (mimetype, META-INF/container.xml, and OPF) are present
+    const hasMimetype = entries.some((e) => e.fileName === "mimetype");
+    const hasContainer = entries.some((e) => e.fileName === "META-INF/container.xml");
+    const hasOpf = entries.some((e) => e.fileName.toLowerCase().endsWith(".opf"));
+
+    if (!hasMimetype || !hasContainer || !hasOpf) {
+      return false;
+    }
+
+    // Verify root mimetype is application/epub+zip
+    const mimeEntry = entries.find((e) => e.fileName === "mimetype");
+    if (mimeEntry && mimeEntry.compMethod === 0) {
+      const mimeText = buf
+        .toString("utf8", mimeEntry.dataOffset, mimeEntry.dataOffset + mimeEntry.compSize)
+        .trim();
+      if (mimeText !== "application/epub+zip") {
+        return false;
+      }
+    }
+
+    // 5. Build standard ZIP Central Directory (PK\x01\x02) and EOCD (PK\x05\x06)
+    const cdBuffers: Buffer[] = [];
+    for (const entry of entries) {
+      const cd = Buffer.alloc(46 + entry.fileNameLen + entry.extraLen);
+      cd.writeUInt32LE(0x02014b50, 0); // PK\x01\x02 signature
+      cd.writeUInt16LE(20, 4); // Version made by (2.0)
+      cd.writeUInt16LE(entry.versionNeeded || 20, 6); // Version needed to extract
+      cd.writeUInt16LE(entry.flags, 8); // General purpose bit flag
+      cd.writeUInt16LE(entry.compMethod, 10); // Compression method
+      cd.writeUInt16LE(entry.modTime, 12); // Last mod file time
+      cd.writeUInt16LE(entry.modDate, 14); // Last mod file date
+      cd.writeUInt32LE(entry.crc32, 16); // CRC-32
+      cd.writeUInt32LE(entry.compSize, 20); // Compressed size
+      cd.writeUInt32LE(entry.uncompSize, 24); // Uncompressed size
+      cd.writeUInt16LE(entry.fileNameLen, 28); // File name length
+      cd.writeUInt16LE(entry.extraLen, 30); // Extra field length
+      cd.writeUInt16LE(0, 32); // File comment length
+      cd.writeUInt16LE(0, 34); // Disk number start
+      cd.writeUInt16LE(0, 36); // Internal file attributes
+      const isDir = entry.fileName.endsWith("/");
+      cd.writeUInt32LE(isDir ? 0x10 : 0x81a40000, 38); // External file attributes
+      cd.writeUInt32LE(entry.offset, 42); // Relative offset of local header
+
+      buf.copy(cd, 46, entry.offset + 30, entry.offset + 30 + entry.fileNameLen);
+      if (entry.extraLen > 0) {
+        buf.copy(
+          cd,
+          46 + entry.fileNameLen,
+          entry.offset + 30 + entry.fileNameLen,
+          entry.offset + 30 + entry.fileNameLen + entry.extraLen,
+        );
+      }
+      cdBuffers.push(cd);
+    }
+
+    const cdSize = cdBuffers.reduce((sum, b) => sum + b.length, 0);
+    const cdOffset = lastValidDataEnd;
+
+    // Build EOCD
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0); // PK\x05\x06 signature
+    eocd.writeUInt16LE(0, 4); // Number of this disk
+    eocd.writeUInt16LE(0, 6); // Disk where central directory starts
+    eocd.writeUInt16LE(entries.length, 8); // Number of central directory records on this disk
+    eocd.writeUInt16LE(entries.length, 10); // Total number of central directory records
+    eocd.writeUInt32LE(cdSize, 12); // Size of central directory
+    eocd.writeUInt32LE(cdOffset, 16); // Offset of start of central directory
+    eocd.writeUInt16LE(0, 20); // ZIP file comment length
+
+    const repaired = Buffer.concat([
+      buf.subarray(0, lastValidDataEnd),
+      ...cdBuffers,
+      eocd,
+    ]);
+
+    // 6. Atomically rewrite the repaired file
+    tempRepairedPath = path.join(
+      path.dirname(filePath),
+      `.repaired_${Date.now()}_${Math.random().toString(36).substring(2, 6)}.tmp`,
+    );
+    fs.writeFileSync(tempRepairedPath, repaired);
+    fs.renameSync(tempRepairedPath, filePath);
+    tempRepairedPath = null;
+
+    // 7. Validate with validateEpubContent
+    const validation = validateEpubContent(filePath);
+    return Boolean(validation.valid);
+  } catch {
+    if (tempRepairedPath) {
+      try {
+        fs.unlinkSync(tempRepairedPath);
+      } catch {}
+    }
+    return false;
   }
 }
 
