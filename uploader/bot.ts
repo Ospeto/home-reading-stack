@@ -27,6 +27,16 @@ import {
   getBsdtarPath,
   getUnzipPath,
 } from "./security";
+import {
+  runDuplicateCleaner,
+  type CleanDuplicatesOptions,
+  type CleanDuplicatesReport,
+} from "../scripts/clean-duplicates";
+
+let _duplicateCleanerRunner: (options: CleanDuplicatesOptions) => Promise<CleanDuplicatesReport> = runDuplicateCleaner;
+export function setDuplicateCleanerRunnerForTest(runner: typeof runDuplicateCleaner | null) {
+  _duplicateCleanerRunner = runner || runDuplicateCleaner;
+}
 
 export function getDropDir(): string {
   if (process.env.BOOKS_DROP_DIR) return process.env.BOOKS_DROP_DIR;
@@ -1680,7 +1690,10 @@ export function getMainMenuKeyboard() {
         { text: "📖 Currently Reading", callback_data: "menu:reading" },
         { text: "⚡ Server Status", callback_data: "refresh_status" },
       ],
-      [{ text: "💾 Hot Backup", callback_data: "menu:backup" }],
+      [
+        { text: "💾 Hot Backup", callback_data: "menu:backup" },
+        { text: "🧹 Deduplicate", callback_data: "rescan_dedup" },
+      ],
     ],
   };
 }
@@ -1695,7 +1708,8 @@ export function getMainMenuText(): string {
     `• *Recent Books:* View newest additions to your library (\`/recent\`).\n` +
     `• *Ingest:* Send eBook files (\`.epub\`, \`.pdf\`, \`.cbz\`, etc.) or paste any article URL.\n` +
     `• *Server Status:* Monitor WAN edge, reverse tunnel, and host metrics (\`/status\`).\n` +
-    `• *Hot Backup:* Snapshot reading databases to Telegram (\`/backup\`).`
+    `• *Hot Backup:* Snapshot reading databases to Telegram (\`/backup\`).\n` +
+    `• *Deduplicate:* Inspect and clean duplicate books (\`/dedup\`).`
   );
 }
 
@@ -1710,7 +1724,8 @@ export function getHelpMessage(): string {
     `• \`/get <id>\` - Download any book by ID\n` +
     `• \`/app\` - Launch Reading HQ Mini App\n` +
     `• \`/status\` (or \`/health\`) - System health dashboard\n` +
-    `• \`/backup\` - Hot backup of SQLite databases\n\n` +
+    `• \`/backup\` - Hot backup of SQLite databases\n` +
+    `• \`/dedup\` (or \`/duplicates\`) - Inspect and clean duplicate books\n\n` +
     `*KOReader Connection Guide*\n\n` +
     `*1. KOSync Progress Sync*\n` +
     `• In KOReader: open any book → Top menu → *Tools* (wrench icon) → *Progress sync*\n` +
@@ -2161,6 +2176,85 @@ export function getRecentBooks(limit: number = 5): {
   return { books, card, keyboard: { inline_keyboard: keyboardRows } };
 }
 
+export function formatDuplicateCleanerCard(report: CleanDuplicatesReport): {
+  card: string;
+  keyboard: any;
+} {
+  if (report.duplicateGroupsCount === 0 || report.groups.length === 0) {
+    const card =
+      `\u2705 *Library is Clean: No duplicates detected across your books.*\n\n` +
+      `\u2022 *Books Scanned:* ${report.totalBooksScanned}\n` +
+      `\u2022 *Duplicates Detected:* 0\n\n` +
+      `_All books in your Calibre library are distinct._`;
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: "\ud83d\udd04 Rescan", callback_data: "rescan_dedup" },
+          { text: "\ud83d\udcd6 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } },
+        ],
+        [{ text: "\ud83c\udfe0 Main Menu", callback_data: "menu:main" }],
+      ],
+    };
+    return { card, keyboard };
+  }
+
+  let card =
+    `\ud83e\uddf9 *Calibre Duplicate Detection Summary*\n\n` +
+    `\u2022 *Books Scanned:* ${report.totalBooksScanned}\n` +
+    `\u2022 *Duplicate Groups Detected:* ${report.duplicateGroupsCount}\n` +
+    `\u2022 *Total Identified Duplicates:* ${report.totalDuplicatesFound}\n\n` +
+    `*Detected Duplicate Groups (Top ${Math.min(report.groups.length, 5)}):*\n\n`;
+
+  const displayLimit = Math.min(report.groups.length, 5);
+  for (let i = 0; i < displayLimit; i++) {
+    const g = report.groups[i];
+    const keeper = g.books.find((b) => b.id === g.keeperId);
+    const keeperTitle = keeper ? keeper.title : `Book #${g.keeperId}`;
+    const keeperAuthors = keeper?.authors || "Unknown";
+    const keeperSeries = keeper?.series
+      ? ` \u2022 \ud83c\udff7\ufe0f _${escapeTelegramMarkdown(keeper.series)}${keeper.series_index ? ` (#${keeper.series_index})` : ""}_`
+      : "";
+    const keeperFormats = (keeper?.formats || []).join(", ") || "None";
+
+    card += `*Group ${i + 1}/${report.groups.length}:* ${escapeTelegramMarkdown(keeperTitle)}\n`;
+    card += `\u2b50 *Keeper (#${g.keeperId}):* ${escapeTelegramMarkdown(keeperTitle)}\n`;
+    card += `   \ud83d\udc64 _${escapeTelegramMarkdown(keeperAuthors)}_${keeperSeries}\n`;
+    card += `   \ud83d\udce6 Formats: \`${escapeTelegramMarkdown(keeperFormats)}\` \u2022 Rationale: _${escapeTelegramMarkdown(g.keeperReason)}_\n`;
+
+    card += `\ud83d\uddd1\ufe0f *Duplicates to Prune:*\n`;
+    for (const dId of g.duplicateIds) {
+      const d = g.books.find((b) => b.id === dId);
+      const dTitle = d ? d.title : `Book #${dId}`;
+      const dAuthors = d?.authors || "Unknown";
+      const dFormats = (d?.formats || []).join(", ") || "None";
+      card += `   \u274c *#${dId}:* ${escapeTelegramMarkdown(dTitle)} (${escapeTelegramMarkdown(dAuthors)})\n`;
+      card += `      \ud83d\udce6 Formats: \`${escapeTelegramMarkdown(dFormats)}\`\n`;
+    }
+    card += `\n`;
+  }
+
+  if (report.groups.length > displayLimit) {
+    card += `_...and ${report.groups.length - displayLimit} more duplicate group(s)._\n\n`;
+  }
+
+  card += `\u26a0\ufe0f _Tap [Prune Duplicates] to safely prune redundant copies while preserving reading progress & annotations on keepers._`;
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "\ud83e\uddf9 Prune Duplicates", callback_data: "apply_dedup_confirm" },
+        { text: "\ud83d\udd04 Rescan", callback_data: "rescan_dedup" },
+      ],
+      [
+        { text: "\ud83d\udcd6 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } },
+        { text: "\ud83c\udfe0 Main Menu", callback_data: "menu:main" },
+      ],
+    ],
+  };
+
+  return { card, keyboard };
+}
+
 export async function triggerBackup(chatId: number): Promise<boolean> {
   const statusMsgId = await sendMessage(
     chatId,
@@ -2251,6 +2345,13 @@ export async function handleCallbackQuery(cq: any): Promise<void> {
   else if (data === "menu:backup") answerText = "Starting backup...";
   else if (data === "menu:main") answerText = "Loading menu...";
   else if (data === "menu:search") answerText = "Search Library...";
+  else if (data === "rescan_dedup")
+    answerText = "Scanning library for duplicates...";
+  else if (data === "apply_dedup_confirm")
+    answerText = "Confirming duplicate pruning...";
+  else if (data === "apply_dedup_confirmed")
+    answerText = "Pruning duplicate books...";
+  else if (data === "cancel_dedup") answerText = "Cancelled.";
   else if (data.startsWith("delete_book:")) answerText = "Deleting book...";
   else if (data.startsWith("send_book:")) answerText = "Retrieving book...";
   else if (data.startsWith("retry:") || data.startsWith("retry_file:")) answerText = "Retrying import...";
@@ -2340,6 +2441,98 @@ export async function handleCallbackQuery(cq: any): Promise<void> {
 
   if (data === "menu:backup") {
     await triggerBackup(chatId);
+    return;
+  }
+
+  if (data === "rescan_dedup") {
+    const report = await _duplicateCleanerRunner({ dryRun: true });
+    const { card, keyboard } = formatDuplicateCleanerCard(report);
+    await editOrSendMessage(chatId, messageId, card, "Markdown", keyboard);
+    return;
+  }
+
+  if (data === "apply_dedup_confirm") {
+    const confirmPrompt =
+      `\u26a0\ufe0f *Confirm Duplicate Pruning*\n\n` +
+      `Are you sure you want to remove duplicate books from Calibre?\n` +
+      `- Reading progress & annotations are preserved on keepers.\n` +
+      `- Audit log written to data/duplicate-pruning-audit.log.`;
+    const confirmKeyboard = {
+      inline_keyboard: [
+        [
+          { text: "✅ Confirm & Prune", callback_data: "apply_dedup_confirmed" },
+          { text: "❌ Cancel", callback_data: "cancel_dedup" },
+        ],
+      ],
+    };
+    await editOrSendMessage(
+      chatId,
+      messageId,
+      confirmPrompt,
+      "Markdown",
+      confirmKeyboard,
+    );
+    return;
+  }
+
+  if (data === "apply_dedup_confirmed") {
+    const report = await _duplicateCleanerRunner({ apply: true });
+    let resultCard =
+      `✅ *Duplicate Pruning Complete*\n\n` +
+      `• *Books Scanned:* ${report.totalBooksScanned}\n` +
+      `• *Duplicate Books Pruned:* ${report.totalPruned}\n` +
+      `• *Duplicate Groups Resolved:* ${report.duplicateGroupsCount}\n`;
+
+    if (report.auditLogPath) {
+      resultCard += `• *Audit Log:* \`${escapeTelegramMarkdown(report.auditLogPath)}\`\n`;
+    }
+
+    if (report.errors.length > 0) {
+      resultCard += `\n⚠️ *Encountered ${report.errors.length} error(s):*\n`;
+      for (const err of report.errors.slice(0, 3)) {
+        resultCard += `- ${escapeTelegramMarkdown(err.message)}\n`;
+      }
+    } else {
+      resultCard += `\n_Your library is now deduplicated. Keepers retain all metadata and reading progress._`;
+    }
+
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: "🔄 Rescan", callback_data: "rescan_dedup" },
+          { text: "📖 Open Reading HQ", web_app: { url: READING_WEBAPP_URL } },
+        ],
+        [{ text: "🏠 Main Menu", callback_data: "menu:main" }],
+      ],
+    };
+
+    await editOrSendMessage(
+      chatId,
+      messageId,
+      resultCard,
+      "Markdown",
+      keyboard,
+    );
+    return;
+  }
+
+  if (data === "cancel_dedup") {
+    const cancelMsg = "❌ *Duplicate pruning cancelled. No books were modified.*";
+    const cancelKeyboard = {
+      inline_keyboard: [
+        [
+          { text: "🔄 Rescan", callback_data: "rescan_dedup" },
+          { text: "🏠 Main Menu", callback_data: "menu:main" },
+        ],
+      ],
+    };
+    await editOrSendMessage(
+      chatId,
+      messageId,
+      cancelMsg,
+      "Markdown",
+      cancelKeyboard,
+    );
     return;
   }
 
@@ -3324,105 +3517,11 @@ export function startJobWorker(intervalMs = 1000) {
   return q;
 }
 
-async function pollTelegram() {
-  const token = getTelegramBotToken();
-  if (!token) {
-    console.error("[TelegramBot] Missing TELEGRAM_BOT_TOKEN. Exiting.");
-    process.exit(1);
-  }
-  startJobWorker(1000);
-  log(
-    `Polling started via proxy ${PROXY_URL} for bot: ${token.substring(0, 10)}...`,
-  );
-
-  await initChatMenuButton();
-
-  while (isPollingRunning) {
-    try {
-      const res = await tgFetch(
-        `getUpdates?offset=${offset}&timeout=${POLL_TIMEOUT_SECONDS}`,
-        {
-          timeoutMs: POLL_REQUEST_TIMEOUT_MS,
-        },
-      );
-
-      if (!res.ok) {
-        const errText = await res.text().catch(() => "");
-        logError(
-          `getUpdates returned HTTP ${res.status}: ${errText}. Retrying in ${Math.round(backoffMs / 1000)}s...`,
-        );
-        await new Promise((r) => setTimeout(r, backoffMs));
-        backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
-        continue;
-      }
-
-      const json = (await res.json()) as any;
-      // On successful polling response, reset backoff to initial delay
-      backoffMs = INITIAL_BACKOFF_MS;
-
-      if (json.ok && json.result && json.result.length > 0) {
-        for (const update of json.result) {
-          offset = update.update_id + 1;
-
-          if (update.callback_query) {
-            await handleCallbackQuery(update.callback_query);
-            continue;
-          }
-
-          const msg = update.message;
-          if (!msg) continue;
-          const chatId = msg.chat.id;
-          const sender =
-            msg.from?.username || msg.from?.first_name || `ID ${chatId}`;
-
-          if (msg.document) {
-            const doc = msg.document;
-            const fileName = doc.file_name || "telegram_book.epub";
-            const fileSize = doc.file_size || 0;
-
-            if (fileSize > MAX_TELEGRAM_FILE_SIZE) {
-              const sizeMB = (fileSize / (1024 * 1024)).toFixed(1);
-              log(
-                `File "${fileName}" exceeds 20MB (${sizeMB} MB). Sending instant Web Uploader redirect to chat ${chatId}`,
-              );
-              await sendMessage(
-                chatId,
-                `⚠️ *File Exceeds Telegram Bot Limit*\n\n` +
-                  `*${fileName}* is *${sizeMB} MB*, which exceeds Telegram Bot API's *20 MB* download ceiling.\n\n` +
-                  `👉 *Upload directly via Reading HQ Mini App or Web Uploader:*\n` +
-                  `[Reading HQ](${READING_WEBAPP_URL}) • [Web Uploader](${WEB_UPLOADER_URL})\n\n` +
-                  `_The Web Uploader accepts books of any size and automatically synchronizes with Calibre._`,
-                "Markdown",
-                {
-                  inline_keyboard: [
-                    [
-                      {
-                        text: "📖 Open Reading HQ",
-                        web_app: { url: READING_WEBAPP_URL },
-                      },
-                    ],
-                  ],
-                },
-              );
-              continue;
-            }
-
-            let batch = pendingBatches.get(chatId);
-            if (!batch) {
-              batch = { docs: [], timer: null };
-              pendingBatches.set(chatId, batch);
-            }
-            batch.docs.push({ doc, fileName, fileSize, chatId, sender });
-
-            if (batch.timer) clearTimeout(batch.timer);
-            batch.timer = setTimeout(() => {
-              const currentDocs = [...batch.docs];
-              pendingBatches.delete(chatId);
-              processBatch(chatId, currentDocs);
-            }, 1800); // 1.8s debounce collects files sent in a burst
-          } else if (msg.text) {
-            const text = msg.text.trim();
-            log(`Received text: "${text}" from ${sender}`);
+export async function handleTextMessage(
+  chatId: number,
+  text: string,
+  sender: string = "user",
+): Promise<void> {
 
             // Status Dashboard: /status or /health
             if (
@@ -3464,7 +3563,7 @@ async function pollTelegram() {
                 "Markdown",
                 inlineKeyboard,
               );
-              continue;
+              return;
             }
 
             if (
@@ -3476,7 +3575,7 @@ async function pollTelegram() {
                 `Handling /backup command from ${sender} (chatId: ${chatId})`,
               );
               await triggerBackup(chatId);
-              continue;
+              return;
             }
 
             // Currently Reading Shelf: /reading
@@ -3490,7 +3589,7 @@ async function pollTelegram() {
               );
               const { card, keyboard } = getCurrentlyReadingShelf(5);
               await sendMessage(chatId, card, "Markdown", keyboard);
-              continue;
+              return;
             }
 
             // Recent Books: /recent
@@ -3504,7 +3603,83 @@ async function pollTelegram() {
               );
               const { card, keyboard } = getRecentBooks(5);
               await sendMessage(chatId, card, "Markdown", keyboard);
-              continue;
+              return;
+            }
+
+            // Deduplication & Cleaning: /dedup, /duplicates, /clean_duplicates, /clean
+            const dedupMatch = text.match(
+              /^\/(?:dedup|duplicates|clean_duplicates|clean)(?:@\w+)?(?:\s+(.*))?$/i,
+            );
+            if (dedupMatch) {
+              const arg = (dedupMatch[1] || "").trim().toLowerCase();
+              const isApply = arg === "apply" || arg === "confirm";
+              log(
+                `Handling deduplication command "${text}" (isApply: ${isApply}) from ${sender} (chatId: ${chatId})`,
+              );
+
+              if (isApply) {
+                const statusMsgId = await sendMessage(
+                  chatId,
+                  `⏳ *Pruning duplicate books from Calibre...*`,
+                  "Markdown",
+                );
+                const report = await _duplicateCleanerRunner({ apply: true });
+                let resultCard =
+                  `✅ *Duplicate Pruning Complete*\n\n` +
+                  `• *Books Scanned:* ${report.totalBooksScanned}\n` +
+                  `• *Duplicate Books Pruned:* ${report.totalPruned}\n` +
+                  `• *Duplicate Groups Resolved:* ${report.duplicateGroupsCount}\n`;
+
+                if (report.auditLogPath) {
+                  resultCard += `• *Audit Log:* \`${escapeTelegramMarkdown(report.auditLogPath)}\`\n`;
+                }
+
+                if (report.errors.length > 0) {
+                  resultCard += `\n⚠️ *Encountered ${report.errors.length} error(s):*\n`;
+                  for (const err of report.errors.slice(0, 3)) {
+                    resultCard += `- ${escapeTelegramMarkdown(err.message)}\n`;
+                  }
+                } else {
+                  resultCard += `\n_Your library is now deduplicated. Keepers retain all metadata and reading progress._`;
+                }
+
+                const keyboard = {
+                  inline_keyboard: [
+                    [
+                      { text: "🔄 Rescan", callback_data: "rescan_dedup" },
+                      {
+                        text: "📖 Open Reading HQ",
+                        web_app: { url: READING_WEBAPP_URL },
+                      },
+                    ],
+                    [{ text: "🏠 Main Menu", callback_data: "menu:main" }],
+                  ],
+                };
+
+                await editOrSendMessage(
+                  chatId,
+                  statusMsgId,
+                  resultCard,
+                  "Markdown",
+                  keyboard,
+                );
+              } else {
+                const statusMsgId = await sendMessage(
+                  chatId,
+                  `⏳ *Scanning Calibre library for duplicates...*`,
+                  "Markdown",
+                );
+                const report = await _duplicateCleanerRunner({ dryRun: true });
+                const { card, keyboard } = formatDuplicateCleanerCard(report);
+                await editOrSendMessage(
+                  chatId,
+                  statusMsgId,
+                  card,
+                  "Markdown",
+                  keyboard,
+                );
+              }
+              return;
             }
 
             // Main Menu Dashboard: /menu
@@ -3521,7 +3696,7 @@ async function pollTelegram() {
                 getMainMenuKeyboard(),
               );
               initChatMenuButton(chatId).catch(() => {});
-              continue;
+              return;
             }
 
             // Library Search: /find <query>, /search <query>, /f <query>
@@ -3541,7 +3716,7 @@ async function pollTelegram() {
                     `• \`/f Isaac Asimov\``,
                   "Markdown",
                 );
-                continue;
+                return;
               }
 
               log(`Searching library for "${query}" from ${sender}`);
@@ -3553,7 +3728,7 @@ async function pollTelegram() {
                   `🔍 *No books found matching "${escapeTelegramMarkdown(query)}".*\n\nTry searching by title, author name, or series name.`,
                   "Markdown",
                 );
-                continue;
+                return;
               }
 
               await sendMessage(
@@ -3600,7 +3775,7 @@ async function pollTelegram() {
 
                 await sendMessage(chatId, card, "Markdown", inlineKeyboard);
               }
-              continue;
+              return;
             }
 
             // Book Retrieval: /get <id> or /get_<id>
@@ -3609,7 +3784,7 @@ async function pollTelegram() {
               const bookId = parseInt(getMatch[1], 10);
               log(`Handling /get command for book #${bookId} from ${sender}`);
               await retrieveAndSendBook(chatId, bookId);
-              continue;
+              return;
             }
             if (/^\/get(?:@\w+)?$/i.test(text)) {
               await sendMessage(
@@ -3617,7 +3792,7 @@ async function pollTelegram() {
                 `ℹ️ *Book Retrieval*\n\nPlease specify a book ID:\nUsage: \`/get <id>\`\nExample: \`/get 6\``,
                 "Markdown",
               );
-              continue;
+              return;
             }
 
             // Telegram Mini App: /app or /webapp
@@ -3648,7 +3823,7 @@ async function pollTelegram() {
                 },
               );
               initChatMenuButton(chatId).catch(() => {});
-              continue;
+              return;
             }
 
             const articleUrl = extractUrlFromText(text);
@@ -3733,7 +3908,7 @@ async function pollTelegram() {
                     "Markdown",
                   );
                 }
-                continue;
+                return;
               }
 
               log(
@@ -3871,6 +4046,109 @@ async function pollTelegram() {
                 getMainMenuKeyboard(),
               );
             }
+
+}
+
+async function pollTelegram() {
+  const token = getTelegramBotToken();
+  if (!token) {
+    console.error("[TelegramBot] Missing TELEGRAM_BOT_TOKEN. Exiting.");
+    process.exit(1);
+  }
+  startJobWorker(1000);
+  log(
+    `Polling started via proxy ${PROXY_URL} for bot: ${token.substring(0, 10)}...`,
+  );
+
+  await initChatMenuButton();
+
+  while (isPollingRunning) {
+    try {
+      const res = await tgFetch(
+        `getUpdates?offset=${offset}&timeout=${POLL_TIMEOUT_SECONDS}`,
+        {
+          timeoutMs: POLL_REQUEST_TIMEOUT_MS,
+        },
+      );
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        logError(
+          `getUpdates returned HTTP ${res.status}: ${errText}. Retrying in ${Math.round(backoffMs / 1000)}s...`,
+        );
+        await new Promise((r) => setTimeout(r, backoffMs));
+        backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+        continue;
+      }
+
+      const json = (await res.json()) as any;
+      // On successful polling response, reset backoff to initial delay
+      backoffMs = INITIAL_BACKOFF_MS;
+
+      if (json.ok && json.result && json.result.length > 0) {
+        for (const update of json.result) {
+          offset = update.update_id + 1;
+
+          if (update.callback_query) {
+            await handleCallbackQuery(update.callback_query);
+            continue;
+          }
+
+          const msg = update.message;
+          if (!msg) continue;
+          const chatId = msg.chat.id;
+          const sender =
+            msg.from?.username || msg.from?.first_name || `ID ${chatId}`;
+
+          if (msg.document) {
+            const doc = msg.document;
+            const fileName = doc.file_name || "telegram_book.epub";
+            const fileSize = doc.file_size || 0;
+
+            if (fileSize > MAX_TELEGRAM_FILE_SIZE) {
+              const sizeMB = (fileSize / (1024 * 1024)).toFixed(1);
+              log(
+                `File "${fileName}" exceeds 20MB (${sizeMB} MB). Sending instant Web Uploader redirect to chat ${chatId}`,
+              );
+              await sendMessage(
+                chatId,
+                `⚠️ *File Exceeds Telegram Bot Limit*\n\n` +
+                  `*${fileName}* is *${sizeMB} MB*, which exceeds Telegram Bot API's *20 MB* download ceiling.\n\n` +
+                  `👉 *Upload directly via Reading HQ Mini App or Web Uploader:*\n` +
+                  `[Reading HQ](${READING_WEBAPP_URL}) • [Web Uploader](${WEB_UPLOADER_URL})\n\n` +
+                  `_The Web Uploader accepts books of any size and automatically synchronizes with Calibre._`,
+                "Markdown",
+                {
+                  inline_keyboard: [
+                    [
+                      {
+                        text: "📖 Open Reading HQ",
+                        web_app: { url: READING_WEBAPP_URL },
+                      },
+                    ],
+                  ],
+                },
+              );
+              continue;
+            }
+
+            let batch = pendingBatches.get(chatId);
+            if (!batch) {
+              batch = { docs: [], timer: null };
+              pendingBatches.set(chatId, batch);
+            }
+            batch.docs.push({ doc, fileName, fileSize, chatId, sender });
+
+            if (batch.timer) clearTimeout(batch.timer);
+            batch.timer = setTimeout(() => {
+              const currentDocs = [...batch.docs];
+              pendingBatches.delete(chatId);
+              processBatch(chatId, currentDocs);
+            }, 1800); // 1.8s debounce collects files sent in a burst
+          } else if (msg.text) {
+            const text = msg.text.trim();
+            log(`Received text: "${text}" from ${sender}`);
+            await handleTextMessage(chatId, text, sender);
           }
         }
       }
