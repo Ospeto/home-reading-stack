@@ -23,21 +23,24 @@
       --tg-viewport-height: 100vh;
     }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Inter', "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       -webkit-tap-highlight-color: transparent;
       min-height: var(--tg-viewport-height, 100vh);
-      padding-bottom: calc(1.5rem + env(safe-area-inset-bottom));
+      padding-bottom: max(1.5rem, calc(1.5rem + env(safe-area-inset-bottom, 0px))); /* env(safe-area-inset-bottom) */
       -webkit-overflow-scrolling: touch;
+      background-color: #09090b;
+      color: #f4f4f5;
     }
     .font-mono {
       font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-variant-numeric: tabular-nums;
     }
     .ui-card {
       background: var(--tg-theme-secondary-bg-color, #121216);
       border: 1px solid #23232a;
     }
-    .ui-card:hover { border-color: #3f3f46; }
-    .ui-card-active { border-color: #52525b; background: #18181f; }
+    .ui-card:hover { border-color: rgba(255, 255, 255, 0.2); }
+    .ui-card-active { border-color: #38bdf8; background: #18181f; }
     @media (hover: hover) {
       .book-card:hover .action-bar { opacity: 1; transform: translateY(0); pointer-events: auto; }
     }
@@ -92,52 +95,52 @@
     }
   
 
-    /* macOS App Design Tokens & Styles */
+    /* OLED Minimal Design Tokens & Utility Mappings */
     :root {
-      --mac-bg: #0c0d10;
-      --mac-sidebar: #121418;
-      --mac-surface: #181a20;
-      --mac-card: #1e2129;
-      --mac-cardHover: #252932;
-      --mac-border: rgba(255, 255, 255, 0.08);
+      --mac-bg: #09090b;
+      --mac-sidebar: #121216;
+      --mac-surface: #121216;
+      --mac-card: #121216;
+      --mac-cardHover: #18181f;
+      --mac-border: #23232a;
       --mac-borderLight: rgba(255, 255, 255, 0.15);
-      --mac-accent: #0A84FF;
-      --mac-accentHover: #0071E3;
+      --mac-accent: #38bdf8;
+      --mac-accentHover: #0284c7;
       --mac-green: #30D158;
       --mac-orange: #FF9F0A;
       --mac-purple: #BF5AF2;
       --mac-red: #FF453A;
     }
 
-    .bg-mac-bg { background-color: #0c0d10; }
-    .bg-mac-sidebar { background-color: #121418; }
-    .bg-mac-sidebar\/70 { background-color: rgba(18, 20, 24, 0.7); }
-    .bg-mac-sidebar\/80 { background-color: rgba(18, 20, 24, 0.8); }
-    .bg-mac-sidebar\/90 { background-color: rgba(18, 20, 24, 0.9); }
-    .bg-mac-sidebar\/95 { background-color: rgba(18, 20, 24, 0.95); }
-    .bg-mac-surface { background-color: #181a20; }
-    .bg-mac-surface\/50 { background-color: rgba(24, 26, 32, 0.5); }
-    .bg-mac-surface\/80 { background-color: rgba(24, 26, 32, 0.8); }
-    .bg-mac-surface\/95 { background-color: rgba(24, 26, 32, 0.95); }
-    .bg-mac-card { background-color: #1e2129; }
-    .bg-mac-cardHover { background-color: #252932; }
-    .bg-mac-accent { background-color: #0A84FF; }
-    .bg-mac-accent\/20 { background-color: rgba(10, 132, 255, 0.2); }
-    .bg-mac-accent\/30 { background-color: rgba(10, 132, 255, 0.3); }
+    .bg-mac-bg { background-color: #09090b; }
+    .bg-mac-sidebar { background-color: #121216; }
+    .bg-mac-sidebar\/70 { background-color: rgba(18, 18, 22, 0.7); }
+    .bg-mac-sidebar\/80 { background-color: rgba(18, 18, 22, 0.8); }
+    .bg-mac-sidebar\/90 { background-color: rgba(18, 18, 22, 0.9); }
+    .bg-mac-sidebar\/95 { background-color: rgba(18, 18, 22, 0.95); }
+    .bg-mac-surface { background-color: #121216; }
+    .bg-mac-surface\/50 { background-color: rgba(18, 18, 22, 0.5); }
+    .bg-mac-surface\/80 { background-color: rgba(18, 18, 22, 0.8); }
+    .bg-mac-surface\/95 { background-color: rgba(18, 18, 22, 0.95); }
+    .bg-mac-card { background-color: #121216; }
+    .bg-mac-cardHover { background-color: #18181f; }
+    .bg-mac-accent { background-color: #38bdf8; }
+    .bg-mac-accent\/20 { background-color: rgba(56, 189, 248, 0.2); }
+    .bg-mac-accent\/30 { background-color: rgba(56, 189, 248, 0.3); }
     .bg-mac-red { background-color: #FF453A; }
 
-    .border-mac-border { border-color: rgba(255, 255, 255, 0.08); }
-    .border-mac-border\/60 { border-color: rgba(255, 255, 255, 0.048); }
+    .border-mac-border { border-color: #23232a; }
+    .border-mac-border\/60 { border-color: rgba(35, 35, 42, 0.6); }
     .border-mac-borderLight { border-color: rgba(255, 255, 255, 0.15); }
-    .border-mac-accent { border-color: #0A84FF; }
-    .border-mac-accent\/30 { border-color: rgba(10, 132, 255, 0.3); }
+    .border-mac-accent { border-color: #38bdf8; }
+    .border-mac-accent\/30 { border-color: rgba(56, 189, 248, 0.3); }
 
-    .text-mac-accent { color: #0A84FF; }
-    .text-mac-subtext { color: rgba(255, 255, 255, 0.45); }
-    .hover\:bg-mac-accent:hover { background-color: #0A84FF; }
-    .hover\:bg-mac-accentHover:hover { background-color: #0071E3; }
-    .focus\:ring-mac-accent:focus { --tw-ring-color: #0A84FF; }
-    .focus\:border-mac-accent:focus { border-color: #0A84FF; }
+    .text-mac-accent { color: #38bdf8; }
+    .text-mac-subtext { color: #a1a1aa; }
+    .hover\:bg-mac-accent:hover { background-color: #38bdf8; }
+    .hover\:bg-mac-accentHover:hover { background-color: #0284c7; }
+    .focus\:ring-mac-accent:focus { --tw-ring-color: #38bdf8; }
+    .focus\:border-mac-accent:focus { border-color: #38bdf8; }
 
     /* Custom subtle scrollbars for native macOS look */
     ::-webkit-scrollbar {
@@ -238,20 +241,6 @@
     .touch-pan-y { -webkit-overflow-scrolling: touch; }
     .overflow-y-auto { -webkit-overflow-scrolling: touch; }
 
-    /* macOS Traffic Light Colors & Subtle Dark Borders */
-    .traffic-light-close {
-      background-color: #FF5F56 !important;
-      border-color: rgba(0, 0, 0, 0.25) !important;
-    }
-    .traffic-light-minimize {
-      background-color: #FFBD2E !important;
-      border-color: rgba(0, 0, 0, 0.25) !important;
-    }
-    .traffic-light-maximize {
-      background-color: #27C93F !important;
-      border-color: rgba(0, 0, 0, 0.25) !important;
-    }
-
     /* Responsive Sidebar & Grid Utility Rules */
     @media (min-width: 768px) {
       .md\:flex { display: flex; }
@@ -283,7 +272,7 @@
     }
   </style>
 </head>
-<body class="bg-[#09090b] text-neutral-200 antialiased min-h-screen flex flex-col font-sans selection:bg-zinc-800 selection:text-white pb-12 sm:pb-6">
+<body class="bg-[#09090b] text-[#f4f4f5] antialiased min-h-screen flex flex-col font-sans selection:bg-zinc-800 selection:text-white pb-12 sm:pb-6" style="padding-bottom: max(1.5rem, calc(1.5rem + env(safe-area-inset-bottom, 0px)));">
 
   <!-- SVG ICON SPRITE -->
   <svg style="display:none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -398,26 +387,26 @@
   </svg>
 
   <!-- SLEEK COMPACT HEADER (TMA & DESKTOP) -->
-  <header class="sticky top-0 z-40 bg-[#09090b]/95 backdrop-blur-md border-b border-white/10 px-3 sm:px-6 py-2.5 transition-all shrink-0">
+  <header class="sticky top-0 z-40 bg-[#09090b]/95 backdrop-blur-md border-b border-[#23232a] px-3 sm:px-6 transition-all shrink-0" style="padding-top: max(0.6rem, env(safe-area-inset-top, 0px)); padding-bottom: 0.6rem;">
     <div class="max-w-[1600px] mx-auto flex items-center justify-between gap-2.5 sm:gap-4">
       
       <!-- Brand & Status -->
       <div class="flex items-center gap-2.5 sm:gap-3 shrink-0">
-        <div class="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center font-bold text-sm shadow-sm border border-white/10">
+        <div class="w-10 h-10 rounded-xl bg-[#121216] text-[#38bdf8] flex items-center justify-center font-bold text-sm shadow-sm border border-[#23232a]">
           <svg class="w-4 h-4"><use href="#icon-book"/></svg>
         </div>
         <div class="flex flex-col">
           <div class="flex items-center gap-1.5 sm:gap-2">
-            <span class="text-sm font-bold tracking-tight text-white">Reading HQ</span>
+            <span class="text-sm font-bold tracking-tight text-[#f4f4f5]">Reading HQ</span>
             <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-950/60 text-emerald-400 border border-emerald-800/40">
               <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
               <span>OPDS Live</span>
             </span>
           </div>
-          <div class="hidden sm:flex items-center gap-1 text-[11px] text-neutral-500">
+          <div class="hidden sm:flex items-center gap-1 text-[11px] text-[#71717a]">
             <button onclick="setFilter('all', null)" class="hover:text-white transition-colors cursor-pointer">Library</button>
             <span>/</span>
-            <span id="breadcrumbCategory" class="text-neutral-400 truncate max-w-[140px]">All Books</span>
+            <span id="breadcrumbCategory" class="text-[#a1a1aa] truncate max-w-[140px]">All Books</span>
           </div>
         </div>
       </div>
@@ -425,40 +414,40 @@
       <!-- Search Input (Desktop & Mobile Unified) -->
       <div class="flex-1 max-w-md mx-1 sm:mx-4">
         <div class="relative">
-          <div class="absolute inset-y-0 left-0 pl-2.5 sm:pl-3 flex items-center pointer-events-none text-neutral-500">
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" x2="16.65" y1="21" y2="16.65"></line></svg>
+          <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-zinc-500">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" x2="16.65" y1="21" y2="16.65"></line></svg>
           </div>
-          <input id="searchInputDesktop" class="w-full pl-8 pr-10 sm:pr-12 py-1.5 bg-white/5 text-xs rounded-lg border border-white/10 text-neutral-200 placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-mac-accent focus:border-mac-accent focus:bg-white/10 transition-all font-sans" placeholder="Search titles, authors..." type="text" oninput="syncSearch(this.value)"/>
-          <div class="absolute inset-y-0 right-0 pr-2 flex items-center gap-1">
-            <button onclick="clearSearch()" class="clear-search-btn hidden text-neutral-500 hover:text-neutral-200 p-0.5 cursor-pointer">
-              <svg class="w-3 h-3"><use href="#icon-xmark"/></svg>
+          <input id="searchInputDesktop" class="w-full h-11 min-h-[44px] pl-9 pr-10 sm:pr-12 py-2.5 bg-[#121216] text-xs rounded-xl border border-[#23232a] text-[#f4f4f5] placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-sky-400 focus:border-sky-400 transition-all font-sans" placeholder="Search titles, authors..." type="text" oninput="syncSearch(this.value)"/>
+          <div class="absolute inset-y-0 right-0 pr-1 flex items-center gap-1">
+            <button onclick="clearSearch()" class="clear-search-btn hidden text-zinc-400 hover:text-white min-w-[44px] min-h-[44px] w-11 h-11 flex items-center justify-center cursor-pointer active:scale-[0.98] transition-transform duration-150" title="Clear search">
+              <svg class="w-3.5 h-3.5"><use href="#icon-xmark"/></svg>
             </button>
-            <kbd class="hidden sm:inline-block text-[9px] text-neutral-500 font-mono pointer-events-none border border-white/10 rounded px-1 py-0.5 bg-white/5">⌘K</kbd>
+            <kbd class="hidden sm:inline-block text-[9px] text-zinc-500 font-mono pointer-events-none border border-[#23232a] rounded px-1.5 py-0.5 bg-zinc-900/60 mr-2">⌘K</kbd>
           </div>
         </div>
       </div>
 
       <!-- Actions Bar -->
-      <div class="flex items-center gap-1.5 sm:gap-2 shrink-0">
+      <div class="flex items-center gap-2 shrink-0">
         <!-- Mobile Filter Toggle Button -->
-        <button id="filterBtn" onclick="openFilterDrawer()" class="md:hidden w-8 h-8 rounded-lg text-neutral-400 hover:text-white hover:bg-white/10 transition-colors flex items-center justify-center cursor-pointer relative border border-white/5" title="Filter Library">
+        <button id="filterBtn" onclick="openFilterDrawer()" class="md:hidden w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl text-zinc-300 hover:text-white bg-[#121216] hover:bg-zinc-800 border border-[#23232a] hover:border-white/20 active:scale-[0.98] transition-all duration-150 flex items-center justify-center cursor-pointer relative" title="Filter Library">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"></path></svg>
-          <span id="mobileFilterBadgeCount" class="hidden absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-mac-accent"></span>
+          <span id="mobileFilterBadgeCount" class="hidden absolute top-2 right-2 w-2 h-2 rounded-full bg-sky-400"></span>
         </button>
 
         <!-- Clean Metadata (Desktop) -->
-        <button onclick="cleanLibraryMetadata()" class="hidden sm:flex w-8 h-8 rounded-lg text-neutral-400 hover:text-amber-300 hover:bg-white/10 transition-colors items-center justify-center cursor-pointer border border-white/5" title="Sanitize Titles &amp; Strip Junk Tags">
+        <button onclick="cleanLibraryMetadata()" class="hidden sm:flex w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl text-zinc-300 hover:text-amber-300 bg-[#121216] hover:bg-zinc-800 border border-[#23232a] hover:border-white/20 active:scale-[0.98] transition-all duration-150 items-center justify-center cursor-pointer" title="Sanitize Titles &amp; Strip Junk Tags">
           <svg class="w-4 h-4 text-amber-400"><use href="#icon-broom"/></svg>
         </button>
 
         <!-- KOReader Connection Manual -->
-        <button onclick="openGuideModal()" class="w-8 h-8 rounded-lg text-neutral-400 hover:text-amber-300 hover:bg-white/10 transition-colors flex items-center justify-center cursor-pointer border border-white/5" title="KOReader & Manual">
+        <button onclick="openGuideModal()" class="w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl text-zinc-300 hover:text-amber-300 bg-[#121216] hover:bg-zinc-800 border border-[#23232a] hover:border-white/20 active:scale-[0.98] transition-all duration-150 flex items-center justify-center cursor-pointer" title="KOReader & Manual">
           <svg class="w-4 h-4 text-amber-400"><use href="#icon-book-open"/></svg>
         </button>
 
         <!-- Add Book Button -->
-        <button onclick="openUploadModal()" class="px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/10 hover:bg-white/15 text-neutral-200 transition-colors flex items-center gap-1.5 cursor-pointer border border-white/10 active:scale-95 shadow-sm">
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        <button onclick="openUploadModal()" class="min-h-[44px] h-11 px-3.5 py-2.5 rounded-xl text-xs font-semibold bg-white hover:bg-zinc-200 text-zinc-950 transition-all duration-150 flex items-center gap-2 cursor-pointer border border-white/10 active:scale-[0.98] shadow-sm">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
           <span class="hidden xs:inline">Add</span>
         </button>
       </div>
@@ -466,18 +455,31 @@
     </div>
   </header>
 
-  <!-- QUICK FILTER CHIPS (MOBILE & TMA SWIPEABLE STRIP) -->
-  <div class="px-3 sm:px-6 py-2 flex items-center gap-1.5 overflow-x-auto no-scrollbar border-b border-white/5 text-xs bg-[#09090b]/80 backdrop-blur-md sticky top-[53px] z-30 md:hidden">
-    <button onclick="setFilter('all', null)" id="chip-all" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-white text-neutral-950 shrink-0 transition-colors">
-      All Books (<span id="quickTotalBooks">0</span>)
+  <!-- QUICK FILTER PILLS (HORIZONTAL SWIPEABLE RAIL) -->
+  <div class="overflow-x-auto no-scrollbar py-2 px-3 flex gap-2 items-center border-b border-[#23232a] text-xs bg-[#09090b]/90 backdrop-blur-md sticky top-[61px] z-30">
+    <button onclick="setFilter('all', null)" id="chip-all" class="min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5 shadow-sm">
+      <span>All Books</span>
+      <span id="quickTotalBooks" class="text-[10px] font-mono text-zinc-600">0</span>
     </button>
-    <button onclick="setFilter('status', 'reading')" id="chip-reading" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-white/5 border border-white/10 text-emerald-400 hover:text-white shrink-0 transition-colors flex items-center gap-1.5 cursor-pointer">
-      <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+    <button onclick="setFilter('category', 'light_novels')" id="chip-ln" class="min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-zinc-400 hover:text-zinc-200 hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
+      <span>Light Novels</span>
+    </button>
+    <button onclick="setFilter('format', 'EPUB')" id="chip-epub" class="min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-zinc-400 hover:text-zinc-200 hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
+      <span>EPUB</span>
+    </button>
+    <button onclick="setFilter('category', 'series')" id="chip-series" class="min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-zinc-400 hover:text-zinc-200 hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
+      <span>Series</span>
+    </button>
+    <button onclick="setFilter('category', 'recently_added')" id="chip-recent" class="min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-zinc-400 hover:text-zinc-200 hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
+      <span>Recently Added</span>
+    </button>
+    <button onclick="setFilter('status', 'reading')" id="chip-reading" class="min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-emerald-400 hover:text-white hover:border-white/20 shrink-0 transition-all duration-150 ease-out flex items-center gap-1.5 cursor-pointer active:scale-[0.98]">
+      <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
       <span>Reading</span>
-      <span id="quickReadingCount" class="text-[10px] text-neutral-500 font-mono">0</span>
+      <span id="quickReadingCount" class="text-[10px] text-zinc-500 font-mono">0</span>
     </button>
-    <div id="quickSeriesChips" class="flex items-center gap-1.5 shrink-0"></div>
-    <div id="quickFormatChips" class="flex items-center gap-1.5 shrink-0"></div>
+    <div id="quickSeriesChips" class="flex items-center gap-2 shrink-0"></div>
+    <div id="quickFormatChips" class="flex items-center gap-2 shrink-0"></div>
   </div>
 
   <!-- MAIN WORKSPACE: SIDEBAR + CONTENT -->
@@ -669,15 +671,15 @@
 
   <!-- MOBILE FILTER SLIDE-OVER DRAWER -->
   <div id="filterDrawer" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex justify-end">
-    <div class="ui-card w-full max-w-xs h-full p-4 border-l border-zinc-800 flex flex-col justify-between overflow-y-auto space-y-4 shadow-2xl animate-slide-left">
+    <div class="ui-card w-full max-w-xs h-full p-4 border-l border-[#23232a] flex flex-col justify-between overflow-y-auto space-y-4 shadow-2xl animate-slide-left bg-[#121216]">
       <div class="space-y-4">
-        <div class="flex items-center justify-between pb-2 border-b border-zinc-800">
+        <div class="flex items-center justify-between pb-2 border-b border-[#23232a]">
           <div class="text-sm font-bold text-white flex items-center gap-2">
             <svg class="w-4 h-4 text-zinc-400"><use href="#icon-filter"/></svg>
             <span>Filter Library</span>
           </div>
-          <button onclick="closeFilterDrawer()" class="w-7 h-7 rounded-lg bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer">
-            <svg class="w-3.5 h-3.5"><use href="#icon-xmark"/></svg>
+          <button onclick="closeFilterDrawer()" class="w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl bg-[#18181f] text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer active:scale-[0.98] transition-transform duration-150" title="Close">
+            <svg class="w-4 h-4"><use href="#icon-xmark"/></svg>
           </button>
         </div>
 
@@ -712,69 +714,90 @@
         </div>
 
         <!-- Manual / Guide in Drawer -->
-        <div class="pt-2 border-t border-zinc-800">
-          <button onclick="closeFilterDrawer(); openGuideModal();" class="w-full px-3 py-2 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-xs font-semibold rounded-lg flex items-center justify-center gap-2 border border-zinc-800 transition-colors cursor-pointer active:scale-95">
-            <svg class="w-3.5 h-3.5 text-amber-400"><use href="#icon-book-open"/></svg>
+        <div class="pt-2 border-t border-[#23232a]">
+          <button onclick="closeFilterDrawer(); openGuideModal();" class="w-full min-h-[44px] px-3.5 py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-200 text-xs font-semibold rounded-xl flex items-center justify-center gap-2 border border-[#23232a] transition-all duration-150 cursor-pointer active:scale-[0.98]">
+            <svg class="w-4 h-4 text-amber-400"><use href="#icon-book-open"/></svg>
             <span>KOReader & Stack Manual</span>
           </button>
         </div>
       </div>
 
-      <div class="pt-3 border-t border-zinc-800 flex gap-2">
-        <button onclick="clearAllFilters(); closeFilterDrawer();" class="flex-1 py-2 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-semibold text-xs rounded-lg border border-zinc-800 cursor-pointer">Reset</button>
-        <button onclick="closeFilterDrawer()" class="flex-1 py-2 bg-white text-zinc-950 font-bold text-xs rounded-lg shadow-sm cursor-pointer">Done</button>
+      <div class="pt-3 border-t border-[#23232a] flex gap-2">
+        <button onclick="clearAllFilters(); closeFilterDrawer();" class="flex-1 min-h-[44px] py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-300 font-semibold text-xs rounded-xl border border-[#23232a] cursor-pointer active:scale-[0.98] transition-all duration-150">Reset</button>
+        <button onclick="closeFilterDrawer()" class="flex-1 min-h-[44px] py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl shadow-sm cursor-pointer active:scale-[0.98] transition-all duration-150">Done</button>
       </div>
     </div>
   </div>
 
   <!-- BOOK DETAIL MODAL / BOTTOM SHEET (MOBILE & DESKTOP) -->
   <div id="bookDetailModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
-    <div class="ui-card w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-5 border border-zinc-800 space-y-4 shadow-2xl max-h-[88vh] overflow-y-auto animate-slide-up sm:animate-none">
+    <div class="ui-card w-full sm:max-w-md rounded-t-2xl sm:rounded-xl bg-[#121216] border-t sm:border border-zinc-800 p-4 max-h-[85vh] overflow-y-auto space-y-4 shadow-2xl animate-slide-up sm:animate-none">
       
       <!-- Top Bar: Close & Selection -->
       <div class="flex items-center justify-between">
-        <span id="detailSeriesTag" class="px-2 py-0.5 rounded text-[10px] font-bold bg-zinc-800 text-zinc-300 border border-zinc-700"></span>
-        <button onclick="closeBookDetailModal()" class="w-7 h-7 rounded-lg bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer">
-          <svg class="w-3.5 h-3.5"><use href="#icon-xmark"/></svg>
+        <span id="detailSeriesTag" class="px-2.5 py-1 rounded text-[10px] font-bold bg-[#18181f] text-zinc-300 border border-[#23232a]"></span>
+        <button onclick="closeBookDetailModal()" class="w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl bg-[#18181f] text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer active:scale-[0.98] transition-transform duration-150" title="Close">
+          <svg class="w-4 h-4"><use href="#icon-xmark"/></svg>
         </button>
       </div>
 
       <!-- Hero Header: Cover + Info -->
       <div class="flex gap-4">
-        <div class="w-24 h-36 bg-zinc-950 rounded-xl overflow-hidden shadow-lg border border-zinc-800 shrink-0">
+        <div class="w-24 h-36 bg-zinc-950 rounded-xl overflow-hidden shadow-lg border border-[#23232a] shrink-0">
           <img id="detailCover" src="" class="w-full h-full object-cover" loading="lazy" decoding="async">
         </div>
         <div class="flex-1 min-w-0 flex flex-col justify-between py-0.5">
-          <div class="space-y-1">
-            <h3 id="detailTitle" class="text-sm font-bold text-white line-clamp-2 leading-tight"></h3>
-            <p id="detailAuthor" class="text-xs text-zinc-400 truncate"></p>
+          <div class="space-y-1.5">
+            <h3 id="detailTitle" class="text-sm sm:text-base font-bold text-[#f4f4f5] line-clamp-2 leading-tight"></h3>
+            <p id="detailAuthor" class="text-xs text-[#a1a1aa] line-clamp-1"></p>
             <div id="detailTags" class="flex flex-wrap gap-1 pt-1"></div>
           </div>
-          <div class="text-[10px] text-zinc-500 font-mono" id="detailId"></div>
+          <div class="text-[10px] text-[#71717a] font-mono tabular-nums" id="detailId"></div>
         </div>
       </div>
 
       <!-- Synopsis / Comments -->
-      <div id="detailCommentsBox" class="hidden p-3 bg-zinc-900/60 rounded-xl border border-zinc-800/80 text-xs text-zinc-300 max-h-28 overflow-y-auto leading-relaxed"></div>
+      <div id="detailCommentsBox" class="hidden p-3 bg-[#18181f] rounded-xl border border-[#23232a] text-xs text-[#a1a1aa] max-h-28 overflow-y-auto leading-relaxed"></div>
 
-      <!-- Direct Downloads -->
-      <div class="space-y-1.5">
-        <div class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Download to Device</div>
-        <div id="detailDownloadButtons" class="grid grid-cols-2 gap-2"></div>
+      <!-- Direct Downloads: Primary Action Button for EPUB & Formats -->
+      <div class="space-y-2">
+        <div class="text-[10px] font-bold text-[#71717a] uppercase tracking-wider">Download to Device</div>
+        <div id="detailDownloadButtons" class="space-y-2"></div>
+      </div>
+
+      <!-- Quick Wireless Sync & OPDS URLs -->
+      <div class="space-y-2 pt-1">
+        <div class="text-[10px] font-bold text-[#71717a] uppercase tracking-wider">Wireless Reader Sync &amp; OPDS</div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <button type="button" onclick="copyToClipboard('https://kosync.wavypremium.xyz')" class="min-h-[44px] h-11 px-3 py-2 bg-[#18181f] hover:bg-zinc-800 text-zinc-200 text-xs font-semibold rounded-xl border border-[#23232a] flex items-center justify-between gap-2 active:scale-[0.98] transition-all duration-150 cursor-pointer">
+            <span class="flex items-center gap-2 truncate">
+              <svg class="w-4 h-4 text-sky-400 shrink-0"><use href="#icon-arrows-rotate"/></svg>
+              <span class="truncate">KOSync Server</span>
+            </span>
+            <span class="text-[10px] font-mono text-[#71717a] px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 shrink-0">Copy</span>
+          </button>
+          <button type="button" onclick="copyToClipboard('http://192.168.31.15:8088/opds')" class="min-h-[44px] h-11 px-3 py-2 bg-[#18181f] hover:bg-zinc-800 text-zinc-200 text-xs font-semibold rounded-xl border border-[#23232a] flex items-center justify-between gap-2 active:scale-[0.98] transition-all duration-150 cursor-pointer">
+            <span class="flex items-center gap-2 truncate">
+              <svg class="w-4 h-4 text-emerald-400 shrink-0"><use href="#icon-rss"/></svg>
+              <span class="truncate">OPDS Catalog</span>
+            </span>
+            <span class="text-[10px] font-mono text-[#71717a] px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 shrink-0">Copy</span>
+          </button>
+        </div>
       </div>
 
       <!-- Action Buttons -->
-      <div class="grid grid-cols-3 gap-2 pt-2 border-t border-zinc-800">
-        <a id="detailObsidianBtn" href="#" download class="py-2 bg-zinc-900 hover:bg-purple-950/60 text-zinc-300 hover:text-purple-300 font-semibold text-xs rounded-xl border border-zinc-800 text-center flex items-center justify-center gap-1.5 transition-colors">
-          <svg class="w-3 h-3 text-purple-400"><use href="#icon-file-pen"/></svg>
+      <div class="grid grid-cols-3 gap-2 pt-2 border-t border-[#23232a]">
+        <a id="detailObsidianBtn" href="#" download class="min-h-[44px] h-11 py-2 bg-[#18181f] hover:bg-purple-950/60 text-zinc-300 hover:text-purple-300 font-semibold text-xs rounded-xl border border-[#23232a] text-center flex items-center justify-center gap-1.5 transition-all duration-150 active:scale-[0.98]">
+          <svg class="w-3.5 h-3.5 text-purple-400"><use href="#icon-file-pen"/></svg>
           <span>Obsidian</span>
         </a>
-        <button id="detailEditBtn" onclick="" class="py-2 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-semibold text-xs rounded-xl border border-zinc-800 flex items-center justify-center gap-1.5 transition-colors cursor-pointer">
-          <svg class="w-3 h-3 text-zinc-400"><use href="#icon-pen"/></svg>
+        <button id="detailEditBtn" onclick="" class="min-h-[44px] h-11 py-2 bg-[#18181f] hover:bg-zinc-800 text-zinc-300 font-semibold text-xs rounded-xl border border-[#23232a] flex items-center justify-center gap-1.5 transition-all duration-150 cursor-pointer active:scale-[0.98]">
+          <svg class="w-3.5 h-3.5 text-zinc-400"><use href="#icon-pen"/></svg>
           <span>Edit</span>
         </button>
-        <button id="detailDeleteBtn" onclick="" class="py-2 bg-zinc-900 hover:bg-rose-950/60 text-zinc-300 hover:text-rose-400 font-semibold text-xs rounded-xl border border-zinc-800 flex items-center justify-center gap-1.5 transition-colors cursor-pointer">
-          <svg class="w-3 h-3 text-rose-400"><use href="#icon-trash"/></svg>
+        <button id="detailDeleteBtn" onclick="" class="min-h-[44px] h-11 py-2 bg-[#18181f] hover:bg-rose-950/60 text-zinc-300 hover:text-rose-400 font-semibold text-xs rounded-xl border border-[#23232a] flex items-center justify-center gap-1.5 transition-all duration-150 cursor-pointer active:scale-[0.98]">
+          <svg class="w-3.5 h-3.5 text-rose-400"><use href="#icon-trash"/></svg>
           <span>Delete</span>
         </button>
       </div>
@@ -784,37 +807,37 @@
 
   <!-- URL ARTICLE INGESTION MODAL -->
   <div id="urlModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
-    <div class="ui-card w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl p-5 border border-zinc-700 space-y-4 shadow-2xl">
+    <div class="ui-card w-full sm:max-w-lg rounded-t-2xl sm:rounded-xl p-5 border border-[#23232a] space-y-4 shadow-2xl bg-[#121216]">
       
       <div class="flex items-center justify-between">
         <h3 class="text-sm font-bold text-white flex items-center gap-2">
           <svg class="w-4 h-4 text-sky-400"><use href="#icon-globe"/></svg> Ingest Web Article (Read Later EPUB)
         </h3>
-        <button onclick="closeUrlModal()" class="w-7 h-7 rounded-lg bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer">
-          <svg class="w-3.5 h-3.5"><use href="#icon-xmark"/></svg>
+        <button onclick="closeUrlModal()" class="w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl bg-[#18181f] text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer active:scale-[0.98] transition-transform duration-150" title="Close">
+          <svg class="w-4 h-4"><use href="#icon-xmark"/></svg>
         </button>
       </div>
 
-      <p class="text-xs text-zinc-400 leading-relaxed">
+      <p class="text-xs text-[#a1a1aa] leading-relaxed">
         Paste any article, essay, or blog post URL. Reading HQ will clean and extract the text, format it with comfortable Kindle typography, convert it to an EPUB, and sync to your library and KOReader.
       </p>
 
       <form onsubmit="handleUrlIngest(event)" class="space-y-3">
         <div>
-          <label for="articleUrlInput" class="block text-[11px] font-semibold text-zinc-300 mb-1">Article Web URL</label>
+          <label for="articleUrlInput" class="block text-[11px] font-semibold text-zinc-300 mb-1.5">Article Web URL</label>
           <div class="relative">
-            <svg class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500"><use href="#icon-link"/></svg>
+            <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500"><use href="#icon-link"/></svg>
             <input type="url" id="articleUrlInput" required placeholder="https://example.com/article..."
-              class="w-full pl-8 pr-3 py-2 bg-zinc-900 border border-zinc-700 rounded-lg text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-sky-500 transition-colors">
+              class="w-full h-11 min-h-[44px] pl-9 pr-3 py-2.5 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-sky-400 transition-colors">
           </div>
         </div>
 
-        <div id="urlIngestStatus" class="hidden text-xs p-3 rounded-lg border"></div>
+        <div id="urlIngestStatus" class="hidden text-xs p-3 rounded-xl border"></div>
 
         <div class="flex items-center justify-end gap-2 pt-2">
-          <button type="button" onclick="closeUrlModal()" class="px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold rounded-lg cursor-pointer">Cancel</button>
-          <button type="submit" id="urlIngestBtn" class="px-4 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs rounded-lg transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50">
-            <svg class="w-3.5 h-3.5"><use href="#icon-file-arrow-down"/></svg>
+          <button type="button" onclick="closeUrlModal()" class="min-h-[44px] px-4 py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-300 text-xs font-semibold rounded-xl border border-[#23232a] cursor-pointer active:scale-[0.98] transition-all duration-150">Cancel</button>
+          <button type="submit" id="urlIngestBtn" class="min-h-[44px] px-4 py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl shadow-sm transition-all duration-150 flex items-center gap-2 cursor-pointer active:scale-[0.98] disabled:opacity-50">
+            <svg class="w-4 h-4 text-zinc-950"><use href="#icon-file-arrow-down"/></svg>
             <span>Convert & Ingest</span>
           </button>
         </div>
@@ -825,52 +848,52 @@
 
   <!-- UPLOAD MODAL -->
   <div id="uploadModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
-    <div class="ui-card w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl p-5 border border-zinc-700 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+    <div class="ui-card w-full sm:max-w-lg rounded-t-2xl sm:rounded-xl p-5 border border-[#23232a] space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto bg-[#121216]">
       
       <div class="flex items-center justify-between">
         <h3 class="text-sm font-bold text-white flex items-center gap-2">
           <svg class="w-4 h-4 text-zinc-400"><use href="#icon-cloud-arrow-up"/></svg> Upload Books to Calibre
         </h3>
-        <button onclick="closeUploadModal()" class="w-7 h-7 rounded-lg bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer">
-          <svg class="w-3.5 h-3.5"><use href="#icon-xmark"/></svg>
+        <button onclick="closeUploadModal()" class="w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl bg-[#18181f] text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer active:scale-[0.98] transition-transform duration-150" title="Close">
+          <svg class="w-4 h-4"><use href="#icon-xmark"/></svg>
         </button>
       </div>
 
       <!-- Telegram Ingestion Banner -->
-      <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 flex items-center justify-between gap-3">
+      <div class="p-3.5 rounded-xl bg-[#18181f] border border-[#23232a] flex items-center justify-between gap-3">
         <div class="flex items-center gap-2.5">
-          <div class="w-7 h-7 rounded-lg bg-sky-500/20 text-sky-400 flex items-center justify-center text-xs shrink-0">
+          <div class="w-8 h-8 rounded-lg bg-sky-500/20 text-sky-400 flex items-center justify-center text-xs shrink-0">
             <svg class="w-4 h-4 text-sky-400"><use href="#icon-telegram"/></svg>
           </div>
           <div>
             <div class="text-xs font-bold text-white">Telegram Ingestion Bot Active</div>
-            <div class="text-[10px] text-zinc-400">Send files or paste article URLs directly on Telegram.</div>
+            <div class="text-[10px] text-[#a1a1aa]">Send files or paste article URLs directly on Telegram.</div>
           </div>
         </div>
-        <a href="https://t.me/saroat_ospeto_bot" target="_blank" class="px-2.5 py-1 bg-sky-600 hover:bg-sky-500 text-white text-[10px] font-bold rounded-lg transition-colors shrink-0">
+        <a href="https://t.me/saroat_ospeto_bot" target="_blank" class="min-h-[36px] px-3 py-2 bg-white hover:bg-zinc-200 text-zinc-950 text-xs font-bold rounded-lg transition-all active:scale-[0.98] shrink-0 flex items-center">
           Open Bot
         </a>
       </div>
 
       <!-- Web Article Read Later Quick Action -->
-      <div class="p-3 rounded-xl bg-zinc-900/50 border border-zinc-800/80 flex items-center justify-between gap-3">
+      <div class="p-3.5 rounded-xl bg-[#18181f] border border-[#23232a] flex items-center justify-between gap-3">
         <div class="flex items-center gap-2.5">
-          <div class="w-7 h-7 rounded-lg bg-sky-500/20 text-sky-400 flex items-center justify-center text-xs shrink-0">
+          <div class="w-8 h-8 rounded-lg bg-sky-500/20 text-sky-400 flex items-center justify-center text-xs shrink-0">
             <svg class="w-4 h-4 text-sky-400"><use href="#icon-globe"/></svg>
           </div>
           <div>
             <div class="text-xs font-bold text-white">Save Online Article as EPUB</div>
-            <div class="text-[10px] text-zinc-400">Ingest web essays and blog posts directly from URL.</div>
+            <div class="text-[10px] text-[#a1a1aa]">Ingest web essays and blog posts directly from URL.</div>
           </div>
         </div>
-        <button type="button" onclick="closeUploadModal(); openUrlModal();" class="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[10px] font-bold rounded-lg transition-colors shrink-0 border border-zinc-700 cursor-pointer">
+        <button type="button" onclick="closeUploadModal(); openUrlModal();" class="min-h-[36px] px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold rounded-lg transition-all shrink-0 border border-zinc-700 cursor-pointer active:scale-[0.98]">
           Add from URL
         </button>
       </div>
 
       <!-- Drag & Drop / Folder Picker Area -->
-      <div id="dropzone" class="border-2 border-dashed border-zinc-700 hover:border-zinc-500 rounded-xl p-6 text-center transition-colors space-y-3">
-        <div class="w-12 h-12 mx-auto rounded-full bg-zinc-900/90 flex items-center justify-center text-zinc-400 border border-zinc-800 shadow-inner">
+      <div id="dropzone" class="border-2 border-dashed border-[#23232a] hover:border-zinc-500 rounded-xl p-6 text-center transition-colors space-y-3 bg-[#18181f]/40">
+        <div class="w-12 h-12 mx-auto rounded-full bg-[#18181f] flex items-center justify-center text-zinc-400 border border-[#23232a] shadow-inner">
           <svg class="w-6 h-6"><use href="#icon-cloud-arrow-up"/></svg>
         </div>
         <div>
@@ -879,12 +902,12 @@
         </div>
 
         <div class="flex items-center justify-center gap-2 pt-1 flex-wrap">
-          <button type="button" onclick="event.stopPropagation(); document.getElementById('fileInput').click();" class="px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold text-xs rounded-lg border border-zinc-700 transition-colors flex items-center gap-1.5 cursor-pointer active:scale-95 shadow-xs">
-            <svg class="w-3.5 h-3.5 text-sky-400"><use href="#icon-file"/></svg>
+          <button type="button" onclick="event.stopPropagation(); document.getElementById('fileInput').click();" class="min-h-[44px] px-4 py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-200 font-semibold text-xs rounded-xl border border-[#23232a] transition-all duration-150 flex items-center gap-2 cursor-pointer active:scale-[0.98] shadow-xs">
+            <svg class="w-4 h-4 text-sky-400"><use href="#icon-file"/></svg>
             <span>Choose Files</span>
           </button>
-          <button type="button" onclick="event.stopPropagation(); document.getElementById('folderInput').click();" class="px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold text-xs rounded-lg border border-zinc-700 transition-colors flex items-center gap-1.5 cursor-pointer active:scale-95 shadow-xs">
-            <svg class="w-3.5 h-3.5 text-amber-400"><use href="#icon-folder-open"/></svg>
+          <button type="button" onclick="event.stopPropagation(); document.getElementById('folderInput').click();" class="min-h-[44px] px-4 py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-200 font-semibold text-xs rounded-xl border border-[#23232a] transition-all duration-150 flex items-center gap-2 cursor-pointer active:scale-[0.98] shadow-xs">
+            <svg class="w-4 h-4 text-amber-400"><use href="#icon-folder-open"/></svg>
             <span>Choose Folder</span>
           </button>
         </div>
@@ -896,21 +919,21 @@
       <div id="uploadQueue" class="max-h-44 overflow-y-auto space-y-1.5"></div>
 
       <div class="flex justify-end pt-2">
-        <button onclick="closeUploadModal()" class="w-full sm:w-auto px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold text-xs rounded-lg cursor-pointer">Done</button>
+        <button onclick="closeUploadModal()" class="w-full sm:w-auto min-h-[44px] px-5 py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl shadow-sm cursor-pointer active:scale-[0.98] transition-all duration-150">Done</button>
       </div>
     </div>
   </div>
 
   <!-- METADATA & COVER EDITOR MODAL -->
   <div id="editModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
-    <div class="ui-card w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl p-5 border border-zinc-700 space-y-4 shadow-2xl max-h-[92vh] overflow-y-auto">
+    <div class="ui-card w-full sm:max-w-2xl rounded-t-2xl sm:rounded-xl p-5 border border-[#23232a] space-y-4 shadow-2xl max-h-[92vh] overflow-y-auto bg-[#121216]">
       
       <div class="flex items-center justify-between">
         <h3 class="text-sm font-bold text-white flex items-center gap-2">
           <svg class="w-4 h-4 text-zinc-400"><use href="#icon-pen-to-square"/></svg> Edit Book Metadata
         </h3>
-        <button onclick="closeEditModal()" class="w-7 h-7 rounded-lg bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer">
-          <svg class="w-3.5 h-3.5"><use href="#icon-xmark"/></svg>
+        <button onclick="closeEditModal()" class="w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl bg-[#18181f] text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer active:scale-[0.98] transition-transform duration-150" title="Close">
+          <svg class="w-4 h-4"><use href="#icon-xmark"/></svg>
         </button>
       </div>
 
@@ -919,60 +942,60 @@
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
         <!-- Cover Preview -->
         <div class="space-y-2 flex flex-col items-center md:items-stretch">
-          <div class="w-32 md:w-full aspect-[2/3] bg-zinc-950 rounded-xl overflow-hidden border border-zinc-800 flex items-center justify-center shadow">
+          <div class="w-32 md:w-full aspect-[2/3] bg-zinc-950 rounded-xl overflow-hidden border border-[#23232a] flex items-center justify-center shadow">
             <img id="editCoverPreview" src="" class="w-full h-full object-cover" loading="lazy" decoding="async">
           </div>
-          <input type="text" id="editCoverUrl" placeholder="Paste Cover Image URL..." class="w-full px-2.5 py-1.5 bg-zinc-900 border border-zinc-800 rounded text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-zinc-500">
+          <input type="text" id="editCoverUrl" placeholder="Paste Cover Image URL..." class="w-full h-11 min-h-[44px] px-3 py-2 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-sky-400">
         </div>
 
         <!-- Form Fields -->
         <div class="md:col-span-2 space-y-3">
           <div>
-            <label class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Title</label>
-            <input type="text" id="editTitle" class="w-full px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-zinc-500">
+            <label class="text-[10px] font-bold text-[#71717a] uppercase tracking-wider block mb-1">Title</label>
+            <input type="text" id="editTitle" class="w-full h-11 min-h-[44px] px-3.5 py-2.5 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 focus:outline-none focus:border-sky-400">
           </div>
 
           <div>
-            <label class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Author(s)</label>
-            <input type="text" id="editAuthors" class="w-full px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-zinc-500">
+            <label class="text-[10px] font-bold text-[#71717a] uppercase tracking-wider block mb-1">Author(s)</label>
+            <input type="text" id="editAuthors" class="w-full h-11 min-h-[44px] px-3.5 py-2.5 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 focus:outline-none focus:border-sky-400">
           </div>
 
           <!-- Series & Number -->
           <div class="grid grid-cols-3 gap-2">
             <div class="col-span-2">
-              <label class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Series</label>
-              <input type="text" id="editSeries" placeholder="e.g. One Piece" class="w-full px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-zinc-500">
+              <label class="text-[10px] font-bold text-[#71717a] uppercase tracking-wider block mb-1">Series</label>
+              <input type="text" id="editSeries" placeholder="e.g. One Piece" class="w-full h-11 min-h-[44px] px-3.5 py-2.5 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 focus:outline-none focus:border-sky-400">
             </div>
             <div>
-              <label class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Index #</label>
-              <input type="number" id="editSeriesIndex" step="0.1" placeholder="1" class="w-full px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-zinc-500">
+              <label class="text-[10px] font-bold text-[#71717a] uppercase tracking-wider block mb-1">Index #</label>
+              <input type="number" id="editSeriesIndex" step="0.1" placeholder="1" class="w-full h-11 min-h-[44px] px-3.5 py-2.5 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 focus:outline-none focus:border-sky-400">
             </div>
           </div>
 
           <div>
-            <label class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Tags (Comma-separated)</label>
-            <input type="text" id="editTags" class="w-full px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-zinc-500">
+            <label class="text-[10px] font-bold text-[#71717a] uppercase tracking-wider block mb-1">Tags (Comma-separated)</label>
+            <input type="text" id="editTags" class="w-full h-11 min-h-[44px] px-3.5 py-2.5 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 focus:outline-none focus:border-sky-400">
           </div>
 
           <div>
-            <label class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Summary / Comments</label>
-            <textarea id="editComments" rows="3" class="w-full px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-zinc-500 resize-none"></textarea>
+            <label class="text-[10px] font-bold text-[#71717a] uppercase tracking-wider block mb-1">Summary / Comments</label>
+            <textarea id="editComments" rows="3" class="w-full px-3.5 py-2.5 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 focus:outline-none focus:border-sky-400 resize-none"></textarea>
           </div>
         </div>
       </div>
 
       <!-- AUTO-SCRAPER SECTION -->
-      <div class="p-3 bg-zinc-900/60 rounded-xl border border-zinc-800 space-y-2.5">
+      <div class="p-3.5 bg-[#18181f] rounded-xl border border-[#23232a] space-y-2.5">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-2">
             <div class="text-xs font-bold text-white flex items-center gap-1.5">
-              <svg class="w-3.5 h-3.5 text-purple-400"><use href="#icon-wand-magic-sparkles"/></svg>
+              <svg class="w-4 h-4 text-purple-400"><use href="#icon-wand-magic-sparkles"/></svg>
               <span>Multi-Source Metadata Lookup</span>
             </div>
-            <span class="text-[10px] text-zinc-400 font-normal hidden sm:inline">(RanobeDB, Google Books, MangaDex, Bangumi, OpenLibrary)</span>
+            <span class="text-[10px] text-[#a1a1aa] font-normal hidden sm:inline">(RanobeDB, Google Books, MangaDex, Bangumi, OpenLibrary)</span>
           </div>
-          <button onclick="lookupMetadata()" id="lookupBtn" class="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg border border-zinc-700 transition-colors flex items-center gap-1.5 cursor-pointer">
-            <svg class="w-3 h-3"><use href="#icon-magnifying-glass"/></svg> Search Online
+          <button onclick="lookupMetadata()" id="lookupBtn" class="min-h-[44px] px-4 py-2 bg-white hover:bg-zinc-200 text-zinc-950 text-xs font-bold rounded-xl transition-all flex items-center gap-2 cursor-pointer active:scale-[0.98] shadow-sm">
+            <svg class="w-3.5 h-3.5 text-zinc-950"><use href="#icon-magnifying-glass"/></svg> <span>Search Online</span>
           </button>
         </div>
 
@@ -980,31 +1003,31 @@
       </div>
 
       <div class="flex justify-end gap-2 pt-2">
-        <button onclick="closeEditModal()" class="px-3.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-semibold text-xs rounded-lg border border-zinc-800 cursor-pointer">Cancel</button>
-        <button onclick="saveMetadata()" class="px-4 py-1.5 bg-white hover:bg-zinc-100 text-zinc-950 font-bold text-xs rounded-lg shadow-sm cursor-pointer">Save Changes</button>
+        <button onclick="closeEditModal()" class="min-h-[44px] px-4 py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-300 font-semibold text-xs rounded-xl border border-[#23232a] cursor-pointer active:scale-[0.98] transition-all duration-150">Cancel</button>
+        <button onclick="saveMetadata()" class="min-h-[44px] px-5 py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl shadow-sm cursor-pointer active:scale-[0.98] transition-all duration-150">Save Changes</button>
       </div>
     </div>
   </div>
 
   <!-- MANUAL & KOREADER CONNECTION GUIDE MODAL -->
   <div id="guideModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4" onclick="if(event.target === this) closeGuideModal()">
-    <div class="ui-card w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl p-4 sm:p-6 border border-zinc-700 space-y-5 shadow-2xl max-h-[90vh] overflow-y-auto">
+    <div class="ui-card w-full sm:max-w-2xl rounded-t-2xl sm:rounded-xl p-4 sm:p-6 border border-[#23232a] space-y-5 shadow-2xl max-h-[90vh] overflow-y-auto bg-[#121216]">
       
       <!-- Top Bar: Title & Close -->
-      <div class="flex items-center justify-between pb-3 border-b border-zinc-800">
+      <div class="flex items-center justify-between pb-3 border-b border-[#23232a]">
         <div class="flex items-center gap-2.5">
-          <div class="w-8 h-8 rounded-lg bg-amber-400 text-zinc-950 flex items-center justify-center text-sm font-bold shrink-0 shadow-sm">
+          <div class="w-10 h-10 rounded-xl bg-amber-400 text-zinc-950 flex items-center justify-center text-sm font-bold shrink-0 shadow-sm">
             <svg class="w-4 h-4"><use href="#icon-book-open"/></svg>
           </div>
           <div>
             <h3 class="text-sm font-bold text-white flex items-center gap-2">
               KOReader & Stack Connection Manual
             </h3>
-            <p class="text-[11px] text-zinc-400">Step-by-step connection guide and one-click copyable stack endpoints</p>
+            <p class="text-[11px] text-[#a1a1aa]">Step-by-step connection guide and one-click copyable stack endpoints</p>
           </div>
         </div>
-        <button onclick="closeGuideModal()" class="w-7 h-7 rounded-lg bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer transition-colors" title="Close">
-          <svg class="w-3.5 h-3.5"><use href="#icon-xmark"/></svg>
+        <button onclick="closeGuideModal()" class="w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl bg-[#18181f] text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer active:scale-[0.98] transition-transform duration-150" title="Close">
+          <svg class="w-4 h-4"><use href="#icon-xmark"/></svg>
         </button>
       </div>
 
@@ -1429,8 +1452,8 @@
       </div>
 
       <!-- Modal Footer -->
-      <div class="flex items-center justify-end pt-2 border-t border-zinc-800">
-        <button onclick="closeGuideModal()" class="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold text-xs rounded-lg cursor-pointer transition-colors">
+      <div class="flex items-center justify-end pt-2 border-t border-[#23232a]">
+        <button onclick="closeGuideModal()" class="min-h-[44px] px-5 py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl cursor-pointer transition-all duration-150 active:scale-[0.98] shadow-sm">
           Close Manual
         </button>
       </div>
@@ -1762,20 +1785,31 @@
       const formatContainer = document.getElementById('quickFormatChips');
 
       // Top 3 Series
-      setHtml(seriesContainer, facets.series.slice(0, 3).map(s => `
-        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="series" data-filter-value="${escapeHtml(s.name)}" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white hover:border-zinc-600 shrink-0 transition-colors flex items-center gap-1 cursor-pointer">
-          ${svgIcon('bookmark', 'w-2.5 h-2.5 text-amber-400/80')}
+      setHtml(seriesContainer, (facets.series || []).slice(0, 3).map(s => {
+        const isActive = activeFilter.type === 'series' && activeFilter.value === s.name;
+        const cls = isActive
+          ? 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] flex items-center gap-1.5 shadow-sm cursor-pointer'
+          : 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-zinc-300 hover:text-white hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] flex items-center gap-1.5 cursor-pointer';
+        return `
+        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="series" data-filter-value="${escapeHtml(s.name)}" class="${cls}">
+          ${svgIcon('bookmark', 'w-3 h-3 text-amber-400/80')}
           <span>${escapeHtml(s.name)}</span>
-          <span class="text-[9px] text-zinc-500 font-mono">${s.count}</span>
+          <span class="text-[10px] ${isActive ? 'text-zinc-600' : 'text-zinc-500'} font-mono">${s.count}</span>
         </button>
-      `).join(''));
+      `}).join(''));
 
-      // Formats
-      setHtml(formatContainer, facets.formats.map(f => `
-        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="format" data-filter-value="${escapeHtml(f.name)}" class="px-2 py-1 rounded-full text-xs font-semibold bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white shrink-0 transition-colors cursor-pointer">
+      // Formats (excluding EPUB which has dedicated pill)
+      const otherFormats = (facets.formats || []).filter(f => f.name.toUpperCase() !== 'EPUB');
+      setHtml(formatContainer, otherFormats.map(f => {
+        const isActive = activeFilter.type === 'format' && activeFilter.value === f.name;
+        const cls = isActive
+          ? 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] flex items-center gap-1.5 shadow-sm cursor-pointer'
+          : 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-zinc-400 hover:text-white hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] flex items-center gap-1.5 cursor-pointer';
+        return `
+        <button onclick="setFilter(this.dataset.filterType, this.dataset.filterValue)" data-filter-type="format" data-filter-value="${escapeHtml(f.name)}" class="${cls}">
           ${escapeHtml(f.name)}
         </button>
-      `).join(''));
+      `}).join(''));
     }
 
     function renderFacets() {
@@ -1841,6 +1875,7 @@
     }
 
     function setFilter(type, value) {
+      try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
       tgHaptic.light();
       activeFilter = { type, value };
       const box = document.getElementById('activeFilterBox');
@@ -1851,7 +1886,12 @@
       const navReading = document.getElementById('nav-reading');
       const navWant = document.getElementById('nav-want-to-read');
       const navFinished = document.getElementById('nav-finished');
+
       const chipAll = document.getElementById('chip-all');
+      const chipLn = document.getElementById('chip-ln');
+      const chipEpub = document.getElementById('chip-epub');
+      const chipSeries = document.getElementById('chip-series');
+      const chipRecent = document.getElementById('chip-recent');
       const chipReading = document.getElementById('chip-reading');
 
       const navInactive = 'w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left';
@@ -1862,11 +1902,19 @@
       if (navWant) navWant.className = (type === 'status' && value === 'want_to_read') ? navActive : navInactive;
       if (navFinished) navFinished.className = (type === 'status' && value === 'finished') ? navActive : navInactive;
 
-      if (chipAll) {
-        chipAll.className = (type === 'all') ? 'px-2.5 py-1 rounded-full text-xs font-semibold bg-white text-neutral-950 shrink-0 transition-colors' : 'px-2.5 py-1 rounded-full text-xs font-semibold bg-white/5 border border-white/10 text-neutral-400 hover:text-white shrink-0 transition-colors';
-      }
+      const chipActiveCls = 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5 shadow-sm';
+      const chipInactiveCls = 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-zinc-400 hover:text-zinc-200 hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5';
+
+      if (chipAll) chipAll.className = (type === 'all') ? chipActiveCls : chipInactiveCls;
+      if (chipLn) chipLn.className = (type === 'category' && value === 'light_novels') ? chipActiveCls : chipInactiveCls;
+      if (chipEpub) chipEpub.className = (type === 'format' && value === 'EPUB') ? chipActiveCls : chipInactiveCls;
+      if (chipSeries) chipSeries.className = (type === 'category' && value === 'series') ? chipActiveCls : chipInactiveCls;
+      if (chipRecent) chipRecent.className = (type === 'category' && value === 'recently_added') ? chipActiveCls : chipInactiveCls;
+
       if (chipReading) {
-        chipReading.className = (type === 'status' && value === 'reading') ? 'px-2.5 py-1 rounded-full text-xs font-semibold bg-white/15 border border-emerald-500 text-emerald-400 shrink-0 transition-colors flex items-center gap-1.5 cursor-pointer' : 'px-2.5 py-1 rounded-full text-xs font-semibold bg-white/5 border border-white/10 text-neutral-400 hover:text-white shrink-0 transition-colors flex items-center gap-1.5 cursor-pointer';
+        chipReading.className = (type === 'status' && value === 'reading')
+          ? 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5'
+          : 'min-h-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-[#121216] border border-[#23232a] text-emerald-400 hover:text-white hover:border-white/20 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5';
       }
 
       const breadcrumb = document.getElementById('breadcrumbCategory');
@@ -1885,6 +1933,12 @@
           if (value === 'reading') label = 'Reading Now';
           else if (value === 'want_to_read') label = 'Want to Read';
           else if (value === 'finished') label = 'Finished';
+        } else if (type === 'category') {
+          if (value === 'light_novels') label = 'Light Novels';
+          else if (value === 'series') label = 'Series Collections';
+          else if (value === 'recently_added') label = 'Recently Added';
+        } else if (type === 'format') {
+          label = `${value} Books`;
         }
         if (breadcrumb) breadcrumb.textContent = label;
         if (headerTitle) headerTitle.textContent = label;
@@ -1895,6 +1949,7 @@
       }
 
       renderFacets();
+      renderQuickFilterChips();
       applyFilters();
     }
 
@@ -1937,6 +1992,19 @@
         if (activeFilter.type === 'author') return (b.authors || '').includes(activeFilter.value);
         if (activeFilter.type === 'tag') return (b.tags || []).includes(activeFilter.value);
         if (activeFilter.type === 'format') return (b.formats || []).includes(activeFilter.value);
+        if (activeFilter.type === 'category') {
+          if (activeFilter.value === 'light_novels') {
+            const hasLnTag = (b.tags || []).some(t => /light novel|ln|novel|ranobe/i.test(t));
+            const hasLnTitle = /vol|volume|\bvol\b/i.test(b.title || '');
+            return hasLnTag || hasLnTitle;
+          }
+          if (activeFilter.value === 'series') {
+            return Boolean(b.series && b.series.trim());
+          }
+          if (activeFilter.value === 'recently_added') {
+            return true;
+          }
+        }
         if (activeFilter.type === 'status') {
           const sync = kosyncMap.get(b.id);
           const pct = sync?.percentage || 0;
@@ -1954,7 +2022,9 @@
         return true;
       });
 
-      if (sort === 'title') filtered.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+      if (activeFilter.type === 'category' && activeFilter.value === 'recently_added') {
+        filtered.sort((a, b) => (b.id || 0) - (a.id || 0));
+      } else if (sort === 'title') filtered.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
       else if (sort === 'author') filtered.sort((a, b) => (a.authors || '').localeCompare(b.authors || ''));
       else if (sort === 'series') filtered.sort((a, b) => (a.series_index || 0) - (b.series_index || 0));
       else if (sort === 'progress') {
@@ -2039,13 +2109,13 @@
         ` : '');
 
         return `
-          <div onclick="openBookDetail(${book.id})" class="book-card group relative flex flex-col cursor-pointer">
-            <div class="relative aspect-[1/1.48] rounded-xl overflow-hidden shadow-book group-hover:shadow-book-hover transition-all duration-300 group-hover:-translate-y-1.5 bg-neutral-900 border ${isSelected ? 'border-mac-accent ring-1 ring-mac-accent' : 'border-white/10'} skeleton-shimmer">
+          <div onclick="openBookDetail(${book.id})" class="book-card group relative flex flex-col cursor-pointer active:scale-[0.98] transition-transform duration-150">
+            <div class="relative aspect-[1/1.48] rounded-xl overflow-hidden shadow-book group-hover:shadow-book-hover transition-all duration-300 group-hover:-translate-y-1.5 bg-[#121216] border ${isSelected ? 'border-sky-400 ring-1 ring-sky-400' : 'border-[#23232a] hover:border-white/20'} skeleton-shimmer">
               ${seriesIndexBadge}
 
               <!-- Selection Checkbox -->
-              <button onclick="event.stopPropagation(); toggleSelect(${book.id})" class="absolute top-2 right-2 z-20 w-6 h-6 rounded-lg bg-black/60 text-white flex items-center justify-center border border-white/20 backdrop-blur-sm ${isSelected ? 'bg-mac-accent text-white border-mac-accent' : 'sm:opacity-0 sm:group-hover:opacity-100'} transition-all cursor-pointer" title="Select Book">
-                ${svgIcon('check', `w-3 h-3 ${isSelected ? 'opacity-100' : 'opacity-0'}`)}
+              <button onclick="event.stopPropagation(); toggleSelect(${book.id})" class="absolute top-2 right-2 z-20 min-w-[36px] min-h-[36px] w-9 h-9 rounded-lg bg-black/60 text-white flex items-center justify-center border border-white/20 backdrop-blur-sm ${isSelected ? 'bg-sky-500 text-white border-sky-400' : 'sm:opacity-0 sm:group-hover:opacity-100'} transition-all cursor-pointer active:scale-[0.98]" title="Select Book">
+                ${svgIcon('check', `w-3.5 h-3.5 ${isSelected ? 'opacity-100' : 'opacity-0'}`)}
               </button>
 
               <img src="${coverSrc}" class="w-full h-full object-cover object-center relative z-0" loading="lazy" decoding="async" onload="this.parentElement.classList.add('loaded')" onerror="this.parentElement.classList.add('loaded')" alt="${escapeHtml(book.title)}">
@@ -2057,22 +2127,22 @@
               ${progressBar}
 
               <!-- Desktop Hover Action Overlay -->
-              <div class="action-bar absolute inset-0 bg-black/75 backdrop-blur-xs opacity-0 translate-y-1 pointer-events-none group-hover:pointer-events-auto transition-all duration-150 p-2.5 flex flex-col justify-between hidden sm:flex z-20">
-                <div class="flex justify-end gap-1">
-                  <a href="/api/books/${book.id}/obsidian.md" download onclick="event.stopPropagation()" class="w-7 h-7 rounded bg-white/10 hover:bg-purple-600 text-neutral-300 hover:text-white flex items-center justify-center text-xs transition-colors" title="Export Obsidian Notes">
+              <div class="action-bar absolute inset-0 bg-black/75 backdrop-blur-xs opacity-0 translate-y-1 pointer-events-none group-hover:pointer-events-auto transition-all duration-150 p-3 flex flex-col justify-between hidden sm:flex z-20">
+                <div class="flex justify-end gap-2">
+                  <a href="/api/books/${book.id}/obsidian.md" download onclick="event.stopPropagation()" class="w-8 h-8 rounded-lg bg-white/10 hover:bg-purple-600 text-neutral-300 hover:text-white flex items-center justify-center text-xs transition-colors" title="Export Obsidian Notes">
                     ${svgIcon('file-pen', 'w-3.5 h-3.5')}
                   </a>
-                  <button onclick="event.stopPropagation(); openEditModal(${book.id})" class="w-7 h-7 rounded bg-white/10 hover:bg-white/20 text-neutral-300 hover:text-white flex items-center justify-center text-xs transition-colors cursor-pointer" title="Edit Metadata">
-                    ${svgIcon('pen', 'w-3 h-3')}
+                  <button onclick="event.stopPropagation(); openEditModal(${book.id})" class="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 text-neutral-300 hover:text-white flex items-center justify-center text-xs transition-colors cursor-pointer" title="Edit Metadata">
+                    ${svgIcon('pen', 'w-3.5 h-3.5')}
                   </button>
-                  <button onclick="event.stopPropagation(); deleteBook(${book.id})" class="w-7 h-7 rounded bg-white/10 hover:bg-rose-600 text-neutral-300 hover:text-white flex items-center justify-center text-xs transition-colors cursor-pointer" title="Delete">
-                    ${svgIcon('trash', 'w-3 h-3')}
+                  <button onclick="event.stopPropagation(); deleteBook(${book.id})" class="w-8 h-8 rounded-lg bg-white/10 hover:bg-rose-600 text-neutral-300 hover:text-white flex items-center justify-center text-xs transition-colors cursor-pointer" title="Delete">
+                    ${svgIcon('trash', 'w-3.5 h-3.5')}
                   </button>
                 </div>
                 
-                <div class="space-y-1">
+                <div class="space-y-1.5">
                   ${(book.formats || []).map(f => `
-                    <a href="/api/books/${book.id}/download/${f.toLowerCase()}" onclick="event.stopPropagation()" class="block w-full py-1 text-center bg-white/10 hover:bg-white text-neutral-200 hover:text-neutral-950 text-[11px] font-bold rounded transition-colors">
+                    <a href="/api/books/${book.id}/download/${f.toLowerCase()}" onclick="event.stopPropagation()" class="block w-full py-2 text-center bg-white hover:bg-zinc-200 text-zinc-950 text-xs font-bold rounded-lg transition-colors active:scale-[0.98]">
                       Download ${f}
                     </a>
                   `).join('')}
@@ -2081,9 +2151,9 @@
             </div>
 
             <!-- Title & Status Subtitle -->
-            <div class="mt-2.5 space-y-0.5">
-              <h4 class="text-xs font-medium text-neutral-200 truncate group-hover:text-white transition-colors" title="${escapeHtml(book.title)}">${escapeHtml(book.title)}</h4>
-              <p class="text-[11px] text-neutral-500 truncate">${statusText}</p>
+            <div class="mt-2 space-y-0.5">
+              <h4 class="line-clamp-2 text-xs font-semibold leading-tight text-zinc-100 group-hover:text-white transition-colors" title="${escapeHtml(book.title)}">${escapeHtml(book.title)}</h4>
+              <p class="line-clamp-1 text-[11px] text-zinc-400">${statusText}</p>
             </div>
           </div>
         `;
@@ -2186,14 +2256,34 @@
         commentsBox.classList.add('hidden');
       }
 
-      // Download Buttons
+      // Download Buttons: prominent 44px primary action button for EPUB, secondary buttons for other formats
       const dlContainer = document.getElementById('detailDownloadButtons');
-      setHtml(dlContainer, (book.formats || []).map(f => `
-        <a href="/api/books/${book.id}/download/${f.toLowerCase()}" class="py-2 px-3 bg-zinc-900 hover:bg-zinc-800 text-white font-bold text-xs rounded-xl border border-zinc-800 text-center flex items-center justify-center gap-2 transition-colors active:scale-98">
-          ${svgIcon('download', 'w-3.5 h-3.5 text-zinc-400')}
-          <span>${f}</span>
-        </a>
-      `).join(''));
+      const formats = book.formats || [];
+      const hasEpub = formats.some(f => f.toUpperCase() === 'EPUB') || formats.length === 0;
+      const otherFormats = formats.filter(f => f.toUpperCase() !== 'EPUB');
+
+      let dlHtml = '';
+      if (hasEpub) {
+        dlHtml += `
+          <a href="/api/books/${book.id}/download/epub" class="w-full h-11 min-h-[44px] bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-sm rounded-xl flex items-center justify-center gap-2 shadow-sm transition-all duration-150 active:scale-[0.98] cursor-pointer">
+            ${svgIcon('download', 'w-4 h-4 text-zinc-950')}
+            <span>Download EPUB</span>
+          </a>
+        `;
+      }
+      if (otherFormats.length > 0) {
+        dlHtml += `
+          <div class="grid grid-cols-2 gap-2 pt-1">
+            ${otherFormats.map(f => `
+              <a href="/api/books/${book.id}/download/${f.toLowerCase()}" class="min-h-[44px] h-11 px-3 py-2 bg-[#18181f] hover:bg-zinc-800 text-zinc-200 font-semibold text-xs rounded-xl border border-[#23232a] text-center flex items-center justify-center gap-2 transition-all duration-150 active:scale-[0.98]">
+                ${svgIcon('download', 'w-3.5 h-3.5 text-zinc-400')}
+                <span>Download ${f}</span>
+              </a>
+            `).join('')}
+          </div>
+        `;
+      }
+      setHtml(dlContainer, dlHtml);
 
       // Wire Actions
       document.getElementById('detailObsidianBtn').href = `/api/books/${book.id}/obsidian.md`;
@@ -2713,6 +2803,7 @@
             throw new Error('execCommand copy failed');
           }
         }
+        try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
         tgHaptic.success();
         showToast('Copied to clipboard!');
       } catch (e) {
