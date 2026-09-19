@@ -792,6 +792,47 @@ export async function initChatMenuButton(chatId?: number): Promise<boolean> {
   }
 }
 
+export const BOT_COMMANDS = [
+  { command: "menu", description: "Interactive dashboard with one-tap access" },
+  { command: "reading", description: "Currently reading shelf with progress bars" },
+  { command: "recent", description: "5 newest books in Calibre library" },
+  { command: "find", description: "Search library by title, author, or series" },
+  { command: "get", description: "Download any book by ID" },
+  { command: "dedup", description: "Inspect and clean duplicate books" },
+  { command: "status", description: "System health and tunnel status" },
+  { command: "backup", description: "Hot backup of SQLite databases" },
+  { command: "help", description: "KOReader setup and stack guide" },
+];
+
+export async function initBotCommands(): Promise<boolean> {
+  try {
+    const payload = {
+      commands: BOT_COMMANDS,
+    };
+    const res = await tgFetch("setMyCommands", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      timeoutMs: 15000,
+    });
+    const data = (await res.json()) as any;
+    if (data.ok) {
+      log(
+        `Registered ${BOT_COMMANDS.length} Telegram bot commands via setMyCommands`,
+      );
+      return true;
+    } else {
+      logError(
+        `Failed to set Telegram bot commands: ${data.description || "Unknown error"}`,
+      );
+      return false;
+    }
+  } catch (err: any) {
+    logError(`Exception in setMyCommands: ${err.message}`);
+    return false;
+  }
+}
+
 export interface DatabaseBackupResult {
   stagingDir: string;
   archivePath: string;
@@ -1725,7 +1766,7 @@ export function getHelpMessage(): string {
     `• \`/app\` - Launch Reading HQ Mini App\n` +
     `• \`/status\` (or \`/health\`) - System health dashboard\n` +
     `• \`/backup\` - Hot backup of SQLite databases\n` +
-    `• \`/dedup\` (or \`/duplicates\`) - Inspect and clean duplicate books\n\n` +
+    `• \`/dedup\` (or \`/dedupe\`, \`/duplicates\`, \`/clean\`, \`/clean_duplicates\`) - Inspect and clean duplicate books\n\n` +
     `*KOReader Connection Guide*\n\n` +
     `*1. KOSync Progress Sync*\n` +
     `• In KOReader: open any book → Top menu → *Tools* (wrench icon) → *Progress sync*\n` +
@@ -1740,9 +1781,9 @@ export function getHelpMessage(): string {
     `• In KOReader: top menu → *Search* (magnifying glass) → *OPDS catalog*\n` +
     `• Tap *Add new catalog*:\n` +
     `  • Catalog Name: \`Mac Mini Library\`\n` +
-    `  • Catalog URL: \`http://192.168.31.15:8088/opds\`\n` +
+    `  • Catalog URL: \`https://reading.wavypremium.xyz/opds\` (WAN) and \`http://192.168.31.15:8088/opds\` or \`http://192.168.31.15:8086/opds\` (LAN)\n` +
     `  • (Standby VPS: \`https://calibre-198-46-146-17.sslip.io/opds\`)\n` +
-    `• Tap *Connect* (no login required on local LAN)\n\n` +
+    `• Tap *Connect* (no login required on local LAN or WAN)\n\n` +
     `*3. Kindle Wi-Fi Proxy (GFW / DPI Bypass)*\n` +
     `• If Kindle displays connection errors reaching external servers:\n` +
     `• Wi-Fi Settings → connected network → Advanced → HTTP Proxy:\n` +
@@ -1753,7 +1794,8 @@ export function getHelpMessage(): string {
     `  • WAN (Production): \`https://kosync.wavypremium.xyz\`\n` +
     `  • Standby VPS: \`https://kosync-198-46-146-17.sslip.io\`\n` +
     `• *Calibre OPDS Feed:*\n` +
-    `  • Local: \`http://192.168.31.15:8088/opds\`\n` +
+    `  • WAN (Production): \`https://reading.wavypremium.xyz/opds\`\n` +
+    `  • Local: \`http://192.168.31.15:8088/opds\` or \`http://192.168.31.15:8086/opds\`\n` +
     `  • Standby VPS: \`https://calibre-198-46-146-17.sslip.io/opds\`\n` +
     `• *Calibre Web Reader:*\n` +
     `  • Local: \`http://192.168.31.15:8088\`\n` +
@@ -3606,9 +3648,9 @@ export async function handleTextMessage(
               return;
             }
 
-            // Deduplication & Cleaning: /dedup, /duplicates, /clean_duplicates, /clean
+            // Deduplication & Cleaning: /dedup, /dedupe, /duplicates, /clean_duplicates, /clean
             const dedupMatch = text.match(
-              /^\/(?:dedup|duplicates|clean_duplicates|clean)(?:@\w+)?(?:\s+(.*))?$/i,
+              /^\/(?:dedup|dedupe|duplicates|clean_duplicates|clean)(?:@\w+)?(?:\s+(.*))?$/i,
             );
             if (dedupMatch) {
               const arg = (dedupMatch[1] || "").trim().toLowerCase();
@@ -4061,6 +4103,7 @@ async function pollTelegram() {
   );
 
   await initChatMenuButton();
+  await initBotCommands();
 
   while (isPollingRunning) {
     try {

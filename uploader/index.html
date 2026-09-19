@@ -1173,6 +1173,16 @@
               <div>Enter Catalog URL:</div>
               <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1">
                 <div class="flex-1 flex items-center justify-between bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
+                  <span class="text-[10px] text-emerald-400 uppercase font-semibold mr-2">WAN (Global)</span>
+                  <code class="text-xs font-mono text-zinc-100 select-all truncate">https://reading.wavypremium.xyz/opds</code>
+                </div>
+                <button onclick="copyToClipboard('https://reading.wavypremium.xyz/opds')" class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 text-xs font-semibold rounded-xl border border-zinc-700/60 transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
+                  <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+                  <span>Copy WAN</span>
+                </button>
+              </div>
+              <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                <div class="flex-1 flex items-center justify-between bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
                   <span class="text-[10px] text-zinc-500 uppercase font-semibold mr-2">Local LAN</span>
                   <code class="text-xs font-mono text-zinc-100 select-all truncate">http://192.168.31.15:8088/opds</code>
                 </div>
@@ -1307,6 +1317,24 @@
             <div class="flex items-center gap-2 pt-1">
               <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://kosync-198-46-146-17.sslip.io</code>
               <button onclick="copyToClipboard('https://kosync-198-46-146-17.sslip.io')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- OPDS WAN -->
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+                <span>Calibre OPDS Feed (WAN)</span>
+              </span>
+              <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-emerald-400 font-mono border border-zinc-700">WAN</span>
+            </div>
+            <div class="text-[11px] text-zinc-400">Global wireless book catalog for KOReader &amp; OPDS clients</div>
+            <div class="flex items-center gap-2 pt-1">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://reading.wavypremium.xyz/opds</code>
+              <button onclick="copyToClipboard('https://reading.wavypremium.xyz/opds')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>

@@ -18,6 +18,8 @@ import {
   getRecentBooks,
   deleteBookFromLibrary,
   getHelpMessage,
+  BOT_COMMANDS,
+  initBotCommands,
   getRetryImportKeyboard,
   handleCallbackQuery,
   batchProcessFiles,
@@ -511,8 +513,15 @@ describe("Telegram Bot /help Command & KOReader Connection Guide", () => {
     expect(msg).toContain("OPDS catalog");
     expect(msg).toContain("Add new catalog");
     expect(msg).toContain("Mac Mini Library");
+    expect(msg).toContain("https://reading.wavypremium.xyz/opds");
     expect(msg).toContain("http://192.168.31.15:8088/opds");
+    expect(msg).toContain("http://192.168.31.15:8086/opds");
     expect(msg).toContain("https://calibre-198-46-146-17.sslip.io/opds");
+    expect(msg).toContain("/dedup");
+    expect(msg).toContain("/dedupe");
+    expect(msg).toContain("/duplicates");
+    expect(msg).toContain("/clean");
+    expect(msg).toContain("/clean_duplicates");
 
     // Kindle Wi-Fi Proxy
     expect(msg).toContain("Kindle Wi-Fi Proxy");
@@ -530,6 +539,44 @@ describe("Telegram Bot /help Command & KOReader Connection Guide", () => {
     expect(msg).toContain("https://reading.wavypremium.xyz");
     expect(msg).toContain("LAN Proxy Gateway:");
     expect(msg).toContain("@saroat_ospeto_bot");
+  });
+
+  it("initBotCommands registers all 9 Telegram commands with setMyCommands", async () => {
+    expect(Array.isArray(BOT_COMMANDS)).toBe(true);
+    const cmdNames = BOT_COMMANDS.map((c) => c.command);
+    expect(cmdNames).toContain("menu");
+    expect(cmdNames).toContain("reading");
+    expect(cmdNames).toContain("recent");
+    expect(cmdNames).toContain("find");
+    expect(cmdNames).toContain("get");
+    expect(cmdNames).toContain("dedup");
+    expect(cmdNames).toContain("status");
+    expect(cmdNames).toContain("backup");
+    expect(cmdNames).toContain("help");
+
+    let registeredPayload: any = null;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("setMyCommands")) {
+        registeredPayload = JSON.parse(init?.body || "{}");
+        return new Response(JSON.stringify({ ok: true, result: true }), {
+          status: 200,
+        });
+      }
+      return origFetch(input, init);
+    }) as any;
+
+    try {
+      const success = await initBotCommands();
+      expect(success).toBe(true);
+      expect(registeredPayload).not.toBeNull();
+      expect(Array.isArray(registeredPayload.commands)).toBe(true);
+      expect(registeredPayload.commands.length).toBe(9);
+      expect(registeredPayload.commands.map((c: any) => c.command)).toEqual(cmdNames);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 });
 
@@ -566,6 +613,7 @@ describe("Webpage Manual & KOReader Connection Section (index.html)", () => {
       "copyToClipboard('https://kosync-198-46-146-17.sslip.io')",
     );
     // 2. Calibre OPDS (Local & Standby VPS)
+    expect(html).toContain("copyToClipboard('https://reading.wavypremium.xyz/opds')");
     expect(html).toContain("copyToClipboard('http://192.168.31.15:8088/opds')");
     expect(html).toContain(
       "copyToClipboard('https://calibre-198-46-146-17.sslip.io/opds')",
@@ -1543,6 +1591,24 @@ describe("Library Deduplication Bot Commands & Callbacks (/dedup, /clean_duplica
       expect(sentMessages.length).toBeGreaterThanOrEqual(1);
       const dupMsg = sentMessages[sentMessages.length - 1];
       expect(dupMsg.text).toContain("Library is Clean");
+
+      sentMessages.length = 0;
+      await handleTextMessage(123456, "/dedupe", "tester");
+      expect(sentMessages.length).toBeGreaterThanOrEqual(1);
+      const dedupeMsg = sentMessages[sentMessages.length - 1];
+      expect(dedupeMsg.text).toContain("Library is Clean");
+
+      sentMessages.length = 0;
+      await handleTextMessage(123456, "/clean", "tester");
+      expect(sentMessages.length).toBeGreaterThanOrEqual(1);
+      const cleanMsg = sentMessages[sentMessages.length - 1];
+      expect(cleanMsg.text).toContain("Library is Clean");
+
+      sentMessages.length = 0;
+      await handleTextMessage(123456, "/clean_duplicates", "tester");
+      expect(sentMessages.length).toBeGreaterThanOrEqual(1);
+      const cleanDupsMsg = sentMessages[sentMessages.length - 1];
+      expect(cleanDupsMsg.text).toContain("Library is Clean");
     } finally {
       setDuplicateCleanerRunnerForTest(null);
       globalThis.fetch = origFetch;
@@ -1564,7 +1630,7 @@ describe("Library Deduplication Bot Commands & Callbacks (/dedup, /clean_duplica
       return origFetch(input, init);
     }) as typeof fetch;
 
-    setDuplicateCleanerRunnerForTest(async (options) => ({
+    setDuplicateCleanerRunnerForTest(async (_options) => ({
       timestamp: new Date().toISOString(),
       dryRun: false,
       totalBooksScanned: 100,
