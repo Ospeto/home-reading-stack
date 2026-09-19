@@ -14,6 +14,7 @@ import {
   readResponseTextWithLimit,
   streamResponseToFile,
   downloadLnoriEpub,
+  fetchLnoriHtml,
   ingestLnoriSeries,
   throwOnSubprocessTimeout,
   validateDownloadedEpub,
@@ -503,6 +504,62 @@ describe("Lnori Light Novel Ingestion Module", () => {
             fetch: async () => new Response("unavailable", { status: 503 }),
           }),
         ).rejects.toThrow("Failed to download EPUB from Lnori storage (503)");
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("retries Lnori HTML fetch directly after a proxy network error", async () => {
+      let calls = 0;
+      const html = await fetchLnoriHtml("https://lnori.com/series/8046/test-series", {
+        fetch: async () => {
+          calls++;
+          if (calls === 1) throw new Error("proxy unavailable");
+          return new Response("<html>direct response</html>");
+        },
+      });
+      expect(html).toBe("<html>direct response</html>");
+      expect(calls).toBe(2);
+    });
+
+    it("retries EPUB download directly after a proxy network error", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      let calls = 0;
+      try {
+        await expect(
+          downloadLnoriEpub("volume.epub", path.join(workDir, "volume.epub"), undefined, {
+            fetch: async () => {
+              calls++;
+              if (calls === 1) throw new Error("proxy unavailable");
+              return new Response("unavailable", { status: 503 });
+            },
+          }),
+        ).rejects.toThrow("Failed to download EPUB from Lnori storage (503)");
+        expect(calls).toBe(2);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("retries cover fetch directly after a proxy network error", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      let calls = 0;
+      const jpegPath = path.join(workDir, "cover.jpg");
+      try {
+        const converted = await fetchAndConvertCover("23021", undefined, workDir, {
+          fetch: async () => {
+            calls++;
+            if (calls === 1) throw new Error("proxy unavailable");
+            return new Response(new Uint8Array([1, 2, 3]));
+          },
+          sipsPath: "fake-sips",
+          spawnSync: (_command: string, args: string[]) => {
+            fs.writeFileSync(args[args.length - 1], "jpeg");
+            return { status: 0, stdout: "", stderr: "" };
+          },
+        });
+        expect(converted).toBe(jpegPath);
+        expect(calls).toBe(2);
       } finally {
         await fs.promises.rm(workDir, { recursive: true, force: true });
       }
