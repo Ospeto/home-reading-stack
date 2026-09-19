@@ -1248,7 +1248,7 @@ export async function getStatusDashboard(): Promise<string> {
   let proxyStatus = "🔴 `Disconnected`";
   try {
     const pCheck = spawnSync("nc", ["-z", "127.0.0.1", "7890"], {
-      timeout: 1500,
+      timeout: SUBPROCESS_TIMEOUT_MS,
       maxBuffer: SUBPROCESS_MAX_BUFFER,
     });
     throwOnSubprocessTimeout(pCheck, "nc proxy check");
@@ -1370,7 +1370,7 @@ export async function getStatusDashboard(): Promise<string> {
   try {
     const mp = spawnSync("memory_pressure", ["-Q"], {
       encoding: "utf8",
-      timeout: 2000,
+      timeout: SUBPROCESS_TIMEOUT_MS,
       maxBuffer: SUBPROCESS_MAX_BUFFER,
     });
     throwOnSubprocessTimeout(mp, "memory_pressure");
@@ -1395,7 +1395,7 @@ export async function getStatusDashboard(): Promise<string> {
   try {
     const df = spawnSync("df", ["-h", path.dirname(getCalibreDbPath())], {
       encoding: "utf8",
-      timeout: 2000,
+      timeout: SUBPROCESS_TIMEOUT_MS,
       maxBuffer: SUBPROCESS_MAX_BUFFER,
     });
     throwOnSubprocessTimeout(df, "df internal disk");
@@ -1416,7 +1416,7 @@ export async function getStatusDashboard(): Promise<string> {
     try {
       const df = spawnSync("df", ["-h", ssdMount], {
         encoding: "utf8",
-        timeout: 2000,
+        timeout: SUBPROCESS_TIMEOUT_MS,
         maxBuffer: SUBPROCESS_MAX_BUFFER,
       });
       throwOnSubprocessTimeout(df, "df SSD disk");
