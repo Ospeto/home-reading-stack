@@ -357,9 +357,16 @@ export async function validateUrlForSSRF(
         process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088"
       ).toLowerCase();
       const targetOrigin = `${u.protocol}//${u.host}`.toLowerCase();
+      const isCalibreOrigin =
+        targetOrigin === serverOrigin.replace(/\/+$/, "") ||
+        targetOrigin.replace("localhost", "127.0.0.1") ===
+          serverOrigin.replace("localhost", "127.0.0.1").replace(/\/+$/, "");
       if (
-        targetOrigin === serverOrigin.replace(/\/$/, "") &&
-        u.pathname.startsWith("/get/")
+        isCalibreOrigin &&
+        (u.pathname === "/opds" ||
+          u.pathname.startsWith("/opds/") ||
+          u.pathname.startsWith("/get/") ||
+          u.pathname === "/favicon.png")
       ) {
         return {
           safe: true,

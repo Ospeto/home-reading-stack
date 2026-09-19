@@ -48,6 +48,7 @@ A self-hosted, private reading infrastructure designed for jailbroken and standa
 | **Reading HQ Dashboard** | `http://192.168.31.15:8086` | Web SPA | Modern Flash UI library manager, live KOSync telemetry (real titles), Series/Author facets, multi-source scraper, Obsidian export |
 | **WAN Mini App / Dashboard** | `https://reading.wavypremium.xyz` | HTTPS | Global secure access to Reading HQ via VLESS SSH reverse tunnel + Caddy TLS |
 | **Telegram Ingest Bot** | `@saroat_ospeto_bot` | Telegram API | Send/forward `.epub`, `.pdf`, `/find` search, `/backup`, and integrated Telegram Mini App button |
+| **WAN OPDS Feed** | `https://reading.wavypremium.xyz/opds` | HTTPS / Atom | Global wireless OPDS catalog for KOReader & mobile readers |
 | **Local KOSync** | `http://192.168.31.15:7200` | HTTP / JSON | High-performance Bun/SQLite progress sync |
 | **Local OPDS Feed** | `http://192.168.31.15:8088/opds` | Atom / XML | Direct book catalog for KOReader search & downloads |
 | **Local Calibre Reader** | `http://192.168.31.15:8088` | Web UI | In-browser reading & library management |
@@ -91,10 +92,12 @@ A self-hosted, private reading infrastructure designed for jailbroken and standa
 3. **Catalog URL:**
 
    ```text
-   http://192.168.31.15:8088/opds
+   https://reading.wavypremium.xyz/opds
    ```
 
-4. Tap **Connect** (no credentials required on local LAN).
+   *(Or local LAN: `http://192.168.31.15:8088/opds` or `http://192.168.31.15:8086/opds`)*
+
+4. Tap **Connect** (no credentials required on local LAN or WAN).
 
 ---
 

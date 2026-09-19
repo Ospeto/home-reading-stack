@@ -1445,6 +1445,157 @@ export async function handleRequest(
     return new Response("Bad Request", { status: 400 });
   }
 
+  // Calibre OPDS Server & Download Reverse Proxy (WAN & LAN)
+  // Proxies /opds, /opds/*, /get/*, and /favicon.png to Calibre server (SERVER_URL)
+  const isOpdsProxyRoute =
+    url.pathname === "/opds" ||
+    url.pathname.startsWith("/opds/") ||
+    url.pathname.startsWith("/get/") ||
+    url.pathname === "/favicon.png";
+
+  if (isOpdsProxyRoute) {
+    // Restrict proxy to GET and HEAD methods
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      const notAllowedHeaders: Record<string, string> = {
+        Allow: "GET, HEAD",
+        "X-Content-Type-Options": "nosniff",
+      };
+      if (corsOrigin) {
+        notAllowedHeaders["Access-Control-Allow-Origin"] = corsOrigin;
+        notAllowedHeaders["Access-Control-Allow-Credentials"] = "true";
+        notAllowedHeaders["Vary"] = "Origin";
+      }
+      return new Response("Method Not Allowed", {
+        status: 405,
+        headers: notAllowedHeaders,
+      });
+    }
+
+    const serverBase = (process.env.CALIBRE_SERVER_URL || SERVER_URL).replace(
+      /\/+$/,
+      "",
+    );
+    const targetUrl = `${serverBase}${url.pathname}${url.search}`;
+
+    const forwardedHeaders = new Headers();
+    for (const [key, value] of req.headers.entries()) {
+      const lower = key.toLowerCase();
+      if (
+        lower === "host" ||
+        lower === "connection" ||
+        lower === "keep-alive" ||
+        lower === "transfer-encoding" ||
+        lower === "te" ||
+        lower === "upgrade"
+      ) {
+        continue;
+      }
+      forwardedHeaders.set(key, value);
+    }
+
+    forwardedHeaders.set("x-forwarded-host", url.host);
+    forwardedHeaders.set("x-forwarded-proto", url.protocol.replace(":", ""));
+    const clientIp = server?.requestIP?.(req)?.address;
+    if (clientIp) {
+      const existingXff = req.headers.get("x-forwarded-for");
+      forwardedHeaders.set(
+        "x-forwarded-for",
+        existingXff ? `${existingXff}, ${clientIp}` : clientIp,
+      );
+    }
+
+    try {
+      const upstreamRes = await safeFetchWithSsrf(
+        targetUrl,
+        {
+          method: req.method,
+          headers: forwardedHeaders,
+          redirect: "manual",
+        },
+        5,
+        { allowCalibreServer: true },
+      );
+
+      const proxyHeaders = new Headers();
+      for (const [key, value] of upstreamRes.headers.entries()) {
+        const lower = key.toLowerCase();
+        if (
+          lower === "connection" ||
+          lower === "keep-alive" ||
+          lower === "transfer-encoding"
+        ) {
+          continue;
+        }
+        proxyHeaders.set(key, value);
+      }
+
+      // Rewrite Location header if Calibre server issues a redirect to its internal origin
+      const location = proxyHeaders.get("location");
+      if (location) {
+        try {
+          const locUrl = new URL(location, targetUrl);
+          const upstreamOrigin = new URL(serverBase).origin.toLowerCase();
+          if (locUrl.origin.toLowerCase() === upstreamOrigin) {
+            proxyHeaders.set(
+              "location",
+              locUrl.pathname + locUrl.search + locUrl.hash,
+            );
+          }
+        } catch {
+          // preserve original location if unparseable
+        }
+      }
+
+      // Ensure proper CORS and security headers
+      if (corsOrigin && isAllowedOrigin(corsOrigin)) {
+        proxyHeaders.set("Access-Control-Allow-Origin", corsOrigin);
+        proxyHeaders.set("Access-Control-Allow-Credentials", "true");
+        const existingVary = proxyHeaders.get("Vary");
+        proxyHeaders.set(
+          "Vary",
+          existingVary ? `${existingVary}, Origin` : "Origin",
+        );
+      }
+      if (!proxyHeaders.has("X-Content-Type-Options")) {
+        proxyHeaders.set("X-Content-Type-Options", "nosniff");
+      }
+
+      if (
+        req.method === "HEAD" ||
+        upstreamRes.status === 204 ||
+        upstreamRes.status === 304
+      ) {
+        return new Response(null, {
+          status: upstreamRes.status,
+          statusText: upstreamRes.statusText,
+          headers: proxyHeaders,
+        });
+      }
+
+      // Stream body responses for large file downloads (ReadableStream from fetch)
+      return new Response(upstreamRes.body, {
+        status: upstreamRes.status,
+        statusText: upstreamRes.statusText,
+        headers: proxyHeaders,
+      });
+    } catch (err: any) {
+      console.error(`[Server] OPDS reverse proxy error for ${targetUrl}:`, err);
+      const errorHeaders: Record<string, string> = {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Content-Type-Options": "nosniff",
+      };
+      if (corsOrigin) {
+        errorHeaders["Access-Control-Allow-Origin"] = corsOrigin;
+        errorHeaders["Access-Control-Allow-Credentials"] = "true";
+        errorHeaders["Vary"] = "Origin";
+      }
+      return new Response("Bad Gateway: Unable to connect to Calibre server", {
+        status: 502,
+        headers: errorHeaders,
+      });
+    }
+  }
+
   const isMutating = ["POST", "PUT", "DELETE", "PATCH"].includes(
     req.method.toUpperCase(),
   );
