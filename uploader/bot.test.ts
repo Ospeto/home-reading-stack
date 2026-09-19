@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
+import zlib from "node:zlib";
 import { spawnSync } from "node:child_process";
 import {
   READING_WEBAPP_URL,
@@ -1051,6 +1053,132 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
     expect(htmlContent).toContain("retry-upload-btn");
     expect(htmlContent).toContain("Retry");
     expect(htmlContent).toContain("uploadQueue");
+  });
+
+  it("batchProcessFiles auto-heals truncated EPUB missing central directory and proceeds with ingestion", async () => {
+    function buildSyntheticTruncatedEpub(): Buffer {
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+
+      const uniqueTitle = `Healed Book ${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const opfXml = Buffer.from(
+        `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>${uniqueTitle}</dc:title></metadata><manifest/><spine/></package>`,
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+
+      // Omit Central Directory and EOCD, append trailing null bytes
+      return Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+    }
+
+    const syntheticEpub = buildSyntheticTruncatedEpub();
+    const mockCalibre = path.join(os.tmpdir(), `mock_calibre_${Date.now()}.sh`);
+    fs.writeFileSync(
+      mockCalibre,
+      '#!/bin/sh\nif [ "$1" = "add" ]; then echo "Added book ids: 777"; exit 0; fi\nexit 0\n',
+    );
+    fs.chmodSync(mockCalibre, 0o755);
+
+    const origCalibredb = process.env.CALIBREDB_PATH;
+    process.env.CALIBREDB_PATH = mockCalibre;
+
+    const fileId = "test_truncated_file_id";
+    const sentMessages: any[] = [];
+    const origFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+
+      if (url.includes(`getFile?file_id=${fileId}`)) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            result: {
+              file_id: fileId,
+              file_path: "documents/truncated.epub",
+              file_size: syntheticEpub.length,
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      if (url.includes("truncated.epub")) {
+        return new Response(syntheticEpub, { status: 200 });
+      }
+
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentMessages.push(body);
+        return new Response(
+          JSON.stringify({ ok: true, result: { message_id: 101 } }),
+          { status: 200 },
+        );
+      }
+
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      await batchProcessFiles(123456, [
+        {
+          doc: { file_id: fileId, file_name: "truncated.epub", file_size: syntheticEpub.length },
+          fileName: "truncated.epub",
+          fileSize: syntheticEpub.length,
+          sender: "testuser",
+          chatId: 123456,
+        },
+      ]);
+
+      // Verify that failure message was NOT sent (auto-heal succeeded)
+      const failedMessage = sentMessages.find(
+        (m) => m.text?.includes("Invalid EPUB file") || m.text?.includes("Import Failed"),
+      );
+      expect(failedMessage).toBeUndefined();
+
+      // Verify success or duplicate confirmation was sent (not an error)
+      const confirmedMessage = sentMessages.find(
+        (m) =>
+          m.text?.includes("Book Ingested Successfully") ||
+          m.text?.includes("Already in Library") ||
+          m.text?.includes("Healed Book"),
+      );
+      expect(confirmedMessage).toBeDefined();
+    } finally {
+      globalThis.fetch = origFetch;
+      if (origCalibredb !== undefined) {
+        process.env.CALIBREDB_PATH = origCalibredb;
+      } else {
+        delete process.env.CALIBREDB_PATH;
+      }
+      if (fs.existsSync(mockCalibre)) {
+        fs.unlinkSync(mockCalibre);
+      }
+    }
   });
 });
 

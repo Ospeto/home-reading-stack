@@ -271,15 +271,16 @@ export function isVolumeAlreadyInCalibre(
   return false;
 }
 
-export function getCalibredbPath(): string {
+export function getCalibredbPath(dependencies?: LnoriDependencies): string {
   if (process.env.CALIBREDB_PATH) return process.env.CALIBREDB_PATH;
-  const probe = spawnSync("which", ["calibredb"], {
+  const runSpawnSync = dependencies?.spawnSync ?? spawnSync;
+  const probe = runSpawnSync("which", ["calibredb"], {
     encoding: "utf8",
     timeout: SUBPROCESS_TIMEOUT_MS,
     maxBuffer: SUBPROCESS_MAX_BUFFER,
   });
   throwOnSubprocessTimeout(probe, "which calibredb");
-  if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
+  if (probe?.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
   const candidates = [
     "/opt/homebrew/bin/calibredb",
     "/usr/local/bin/calibredb",
@@ -319,7 +320,8 @@ export function runCalibredb(
   env.PATH = `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${env.PATH || ""}`;
 
   const runSpawnSync = dependencies?.spawnSync ?? spawnSync;
-  const res = runSpawnSync(getCalibredbPath(), args, {
+  const calibredbBin = getCalibredbPath(dependencies);
+  const res = runSpawnSync(calibredbBin, args, {
     encoding: "utf8",
     env,
     timeout: SUBPROCESS_TIMEOUT_MS,
@@ -711,7 +713,7 @@ export async function downloadLnoriEpub(
   const fetcher = dependencies?.fetch ?? safeFetchWithSsrf;
   const downloadUrl = `https://files.lnori.com/${encodeURIComponent(epubFilename)}`;
   const isTestEnv =
-    process.argv.some((a) => a.includes(".test.") || a.includes("test")) ||
+    process.argv.some((a: string) => a.includes(".test.") || a.includes("test")) ||
     process.env.NODE_ENV === "test";
   const sleep =
     dependencies?.sleep ??

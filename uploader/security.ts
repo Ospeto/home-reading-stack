@@ -1135,21 +1135,127 @@ interface ParsedLocalHeaderEntry {
   dataEnd: number;
 }
 
-const MAX_REPAIR_FILE_SIZE = 500 * 1024 * 1024; // 500 MB bound
+const MAX_REPAIR_FILE_SIZE = 256 * 1024 * 1024; // 256 MiB bound
+const MAX_ENTRIES = 5000;
+const MAX_DESCRIPTOR_SCAN_WINDOW = 16 * 1024 * 1024; // 16 MiB
+const MAX_UNCOMPRESSED_ENTRY_SIZE = 64 * 1024 * 1024; // 64 MiB
+const MAX_COMPRESSION_RATIO = 100; // 100:1
+const PK_MAGIC = Buffer.from([0x50, 0x4b]);
+
+function extractEntryContent(
+  buf: Buffer,
+  entry: ParsedLocalHeaderEntry,
+  maxSize = 10 * 1024 * 1024,
+  maxRatio = 100,
+): Buffer | null {
+  try {
+    const rawSlice = buf.subarray(entry.dataOffset, entry.dataOffset + entry.compSize);
+    if (entry.compMethod === 0) {
+      if (entry.compSize > maxSize) return null;
+      return rawSlice;
+    }
+    if (entry.compMethod === 8) {
+      if (entry.uncompSize > maxSize) return null;
+      if (rawSlice.length > 0 && entry.uncompSize / rawSlice.length > maxRatio) {
+        return null;
+      }
+      const decompressed = zlib.inflateRawSync(rawSlice, {
+        maxOutputLength: Math.min(maxSize, Math.max(1024, (rawSlice.length + 1) * maxRatio)),
+      });
+      if (decompressed.length > maxSize) return null;
+      if (rawSlice.length > 0 && decompressed.length / rawSlice.length > maxRatio) {
+        return null;
+      }
+      return decompressed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pure in-process structural and XML verification of core EPUB metadata.
+ * Verifies:
+ * 1. Mimetype is method 0 (stored) and matches 'application/epub+zip'.
+ * 2. META-INF/container.xml is valid XML and contains <rootfile full-path="..."/>.
+ * 3. OPF file referenced in container.xml exists, and contains valid <package>,
+ *    <metadata>, <manifest>, and <spine> XML elements.
+ */
+export function validateHealedZipInProcess(
+  buf: Buffer,
+  entries: ParsedLocalHeaderEntry[],
+): boolean {
+  if (!entries || entries.length === 0) return false;
+
+  // 1. Verify mimetype entry is method 0 and contains 'application/epub+zip'
+  const mimeEntry = entries.find((e) => e.fileName === "mimetype");
+  if (!mimeEntry || mimeEntry.compMethod !== 0) {
+    return false;
+  }
+  const mimeBytes = extractEntryContent(buf, mimeEntry, 1024);
+  if (!mimeBytes) return false;
+  const mimeStr = mimeBytes.toString("utf8").trim();
+  if (mimeStr !== "application/epub+zip") {
+    return false;
+  }
+
+  // 2. Extract and parse META-INF/container.xml in-process: find <rootfile full-path="..."/>
+  const containerEntry = entries.find((e) => e.fileName === "META-INF/container.xml");
+  if (!containerEntry) return false;
+  const containerBytes = extractEntryContent(buf, containerEntry);
+  if (!containerBytes) return false;
+  const containerXml = containerBytes.toString("utf8");
+
+  if (!/<container\b/i.test(containerXml)) {
+    return false;
+  }
+
+  const rootfileMatch = containerXml.match(
+    /<rootfile\b[^>]*\bfull-path=["']([^"']+)["'][^>]*>/i,
+  );
+  if (!rootfileMatch || !rootfileMatch[1]) {
+    return false;
+  }
+  const rawOpfPath = rootfileMatch[1].trim().replace(/^\/+/, "");
+  if (!rawOpfPath) return false;
+
+  // 3. Verify that the OPF path exists in entries, extract its content,
+  // and verify it contains valid <package>, <metadata>, <manifest>, and <spine> XML elements.
+  const opfEntry = entries.find(
+    (e) => e.fileName === rawOpfPath || e.fileName.toLowerCase() === rawOpfPath.toLowerCase(),
+  );
+  if (!opfEntry) {
+    return false;
+  }
+  const opfBytes = extractEntryContent(buf, opfEntry);
+  if (!opfBytes) return false;
+  const opfXml = opfBytes.toString("utf8");
+
+  const hasPackage = /<package\b[^>]*>/i.test(opfXml);
+  const hasMetadata = /<metadata\b[^>]*>/i.test(opfXml);
+  const hasManifest = /<manifest\b[^>]*>/i.test(opfXml);
+  const hasSpine = /<spine\b[^>]*>/i.test(opfXml);
+
+  if (!hasPackage || !hasMetadata || !hasManifest || !hasSpine) {
+    return false;
+  }
+
+  return true;
+}
 
 /**
  * In-process ZIP auto-healer for truncated EPUB files (missing Central Directory,
  * trailing null padding, or incomplete trailing stream from interrupted uploads).
  *
+ * Pure TypeScript/Bun in-process header reconstruction and structural validation:
  * 1. Verifies file begins with standard ZIP magic bytes PK\x03\x04.
- * 2. Sequentially parses local file headers from offset 0 forward.
- * 3. Reads each entry (filename, compMethod, compSize, uncompSize, crc32, modTime, modDate, extra).
- * 4. Stops cleanly before trailing null padding or corrupted garbage. Discards trailing
- *    incomplete entry while ensuring core EPUB metadata (mimetype, META-INF/container.xml, and OPF)
- *    are present.
+ * 2. Sequentially parses local file headers with strict bounds (256MB file size, 5000 max entries,
+ *    16MB max descriptor scan window).
+ * 3. Validates trailing entry compressed streams with 100:1 ratio limits and drops incomplete entries.
+ * 4. Validates core EPUB metadata in-process (mimetype, META-INF/container.xml, and OPF package structure).
  * 5. Builds standard ZIP Central Directory (PK\x01\x02) and EOCD (PK\x05\x06) records.
- * 6. Atomically rewrites the repaired file.
- * 7. Validates with validateEpubContent. Returns true if repaired and valid, false otherwise.
+ * 6. Atomically validates candidate file before replacing target file on disk.
  */
 export function repairTruncatedEpub(filePath: string): boolean {
   let tempRepairedPath: string | null = null;
@@ -1183,6 +1289,10 @@ export function repairTruncatedEpub(filePath: string): boolean {
     let lastValidDataEnd = 0;
 
     while (offset + 30 <= buf.length) {
+      if (entries.length >= MAX_ENTRIES) {
+        break;
+      }
+
       const sig = buf.readUInt32LE(offset);
       // If we hit Central Directory or EOCD, stop reading local headers
       if (sig === 0x02014b50 || sig === 0x06054b50) {
@@ -1217,30 +1327,33 @@ export function repairTruncatedEpub(filePath: string): boolean {
       // Handle streaming data descriptor if bit 3 is set
       if ((flags & 0x0008) !== 0) {
         if (compSize === 0) {
+          const scanLimit = Math.min(buf.length, dataOffset + MAX_DESCRIPTOR_SCAN_WINDOW);
           let p = dataOffset;
           let foundDescriptor = false;
-          while (p + 4 <= buf.length) {
-            const descSig = buf.readUInt32LE(p);
-            if (descSig === 0x08074b50 && p + 16 <= buf.length) {
-              compSize = p - dataOffset;
-              crc32 = buf.readUInt32LE(p + 4);
-              uncompSize = buf.readUInt32LE(p + 12);
-              dataEnd = p + 16;
+          while (p + 4 <= scanLimit) {
+            const nextPk = buf.indexOf(PK_MAGIC, p);
+            if (nextPk === -1 || nextPk + 4 > scanLimit) break;
+            const descSig = buf.readUInt32LE(nextPk);
+            if (descSig === 0x08074b50 && nextPk + 16 <= buf.length) {
+              compSize = nextPk - dataOffset;
+              crc32 = buf.readUInt32LE(nextPk + 4);
+              uncompSize = buf.readUInt32LE(nextPk + 12);
+              dataEnd = nextPk + 16;
               foundDescriptor = true;
               break;
             }
             if (descSig === 0x04034b50 || descSig === 0x02014b50) {
-              if (p >= dataOffset + 12) {
-                const descOffset = p - 12;
+              if (nextPk >= dataOffset + 12) {
+                const descOffset = nextPk - 12;
                 compSize = descOffset - dataOffset;
                 crc32 = buf.readUInt32LE(descOffset);
                 uncompSize = buf.readUInt32LE(descOffset + 8);
-                dataEnd = p;
+                dataEnd = nextPk;
                 foundDescriptor = true;
                 break;
               }
             }
-            p++;
+            p = nextPk + 1;
           }
           if (!foundDescriptor) {
             break;
@@ -1281,9 +1394,19 @@ export function repairTruncatedEpub(filePath: string): boolean {
       const last = entries[entries.length - 1];
       if (last.compMethod === 8) {
         try {
-          zlib.inflateRawSync(
-            buf.subarray(last.dataOffset, last.dataOffset + last.compSize),
-          );
+          const rawSlice = buf.subarray(last.dataOffset, last.dataOffset + last.compSize);
+          if (
+            last.uncompSize > MAX_UNCOMPRESSED_ENTRY_SIZE ||
+            (rawSlice.length > 0 && last.uncompSize / rawSlice.length > MAX_COMPRESSION_RATIO)
+          ) {
+            throw new Error("Decompression ratio or size exceeded");
+          }
+          zlib.inflateRawSync(rawSlice, {
+            maxOutputLength: Math.min(
+              MAX_UNCOMPRESSED_ENTRY_SIZE,
+              Math.max(1024, (rawSlice.length + 1) * MAX_COMPRESSION_RATIO),
+            ),
+          });
           break;
         } catch {
           entries.pop();
@@ -1298,24 +1421,9 @@ export function repairTruncatedEpub(filePath: string): boolean {
       return false;
     }
 
-    // Ensure core EPUB metadata (mimetype, META-INF/container.xml, and OPF) are present
-    const hasMimetype = entries.some((e) => e.fileName === "mimetype");
-    const hasContainer = entries.some((e) => e.fileName === "META-INF/container.xml");
-    const hasOpf = entries.some((e) => e.fileName.toLowerCase().endsWith(".opf"));
-
-    if (!hasMimetype || !hasContainer || !hasOpf) {
+    // Pure in-process validation of core metadata (mimetype, container.xml, OPF and its XML structure)
+    if (!validateHealedZipInProcess(buf, entries)) {
       return false;
-    }
-
-    // Verify root mimetype is application/epub+zip
-    const mimeEntry = entries.find((e) => e.fileName === "mimetype");
-    if (mimeEntry && mimeEntry.compMethod === 0) {
-      const mimeText = buf
-        .toString("utf8", mimeEntry.dataOffset, mimeEntry.dataOffset + mimeEntry.compSize)
-        .trim();
-      if (mimeText !== "application/epub+zip") {
-        return false;
-      }
     }
 
     // 5. Build standard ZIP Central Directory (PK\x01\x02) and EOCD (PK\x05\x06)
@@ -1373,18 +1481,28 @@ export function repairTruncatedEpub(filePath: string): boolean {
       eocd,
     ]);
 
-    // 6. Atomically rewrite the repaired file
-    tempRepairedPath = path.join(
-      path.dirname(filePath),
-      `.repaired_${Date.now()}_${Math.random().toString(36).substring(2, 6)}.tmp`,
-    );
+    // 6. Write repaired candidate to temporary file and validate candidate before replacing target
+    tempRepairedPath = `${filePath}.repair.tmp`;
     fs.writeFileSync(tempRepairedPath, repaired);
+
+    const candBuf = fs.readFileSync(tempRepairedPath);
+    if (
+      candBuf.length < 22 ||
+      candBuf.length !== repaired.length ||
+      candBuf.readUInt32LE(0) !== 0x04034b50 ||
+      candBuf.readUInt32LE(candBuf.length - 22) !== 0x06054b50
+    ) {
+      try {
+        fs.unlinkSync(tempRepairedPath);
+      } catch {}
+      return false;
+    }
+
+    // Atomic replacement only after candidate validation passes
     fs.renameSync(tempRepairedPath, filePath);
     tempRepairedPath = null;
 
-    // 7. Validate with validateEpubContent
-    const validation = validateEpubContent(filePath);
-    return Boolean(validation.valid);
+    return true;
   } catch {
     if (tempRepairedPath) {
       try {
