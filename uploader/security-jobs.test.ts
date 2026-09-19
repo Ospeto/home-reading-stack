@@ -974,7 +974,7 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
       }
     });
 
-    it("rejects malformed core XML (container.xml not XML, OPF missing rootfile, incomplete OPF)", () => {
+    it("rejects malformed core XML (container.xml not XML, OPF missing rootfile, incomplete OPF, unclosed tags)", () => {
       const mimeData = Buffer.from("application/epub+zip");
       const mimePart = buildSyntheticZipEntry("mimetype", mimeData, 0);
 
@@ -1038,6 +1038,42 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
       } finally {
         if (fs.existsSync(testPathC)) fs.unlinkSync(testPathC);
       }
+
+      // Case D: container.xml has unclosed tag (<container><rootfiles><rootfile full-path="foo.opf"></container>)
+      const unclosedContainerXml = Buffer.from(
+        '<container><rootfiles><rootfile full-path="content.opf"></container>',
+      );
+      const unclosedContainerPart = buildSyntheticZipEntry(
+        "META-INF/container.xml",
+        unclosedContainerXml,
+        8,
+        zlib.deflateRawSync(unclosedContainerXml),
+      );
+      const testPathD = path.join("/tmp", `unclosed_container_${Date.now()}.epub`);
+      fs.writeFileSync(testPathD, Buffer.concat([mimePart, unclosedContainerPart]));
+      try {
+        expect(repairTruncatedEpub(testPathD)).toBe(false);
+      } finally {
+        if (fs.existsSync(testPathD)) fs.unlinkSync(testPathD);
+      }
+
+      // Case E: OPF XML has unclosed tag (<package><metadata>...</package>)
+      const unclosedOpfXml = Buffer.from(
+        '<package><metadata><dc:title>Test</dc:title></package>',
+      );
+      const unclosedOpfPart = buildSyntheticZipEntry(
+        "OEBPS/content.opf",
+        unclosedOpfXml,
+        8,
+        zlib.deflateRawSync(unclosedOpfXml),
+      );
+      const testPathE = path.join("/tmp", `unclosed_opf_${Date.now()}.epub`);
+      fs.writeFileSync(testPathE, Buffer.concat([mimePart, validContainerPart, unclosedOpfPart]));
+      try {
+        expect(repairTruncatedEpub(testPathE)).toBe(false);
+      } finally {
+        if (fs.existsSync(testPathE)) fs.unlinkSync(testPathE);
+      }
     });
 
     it("preserves original file untouched when candidate validation fails", () => {
@@ -1071,8 +1107,8 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
       }
     });
 
-    it("bounds descriptorless streaming input scan to <50ms without hanging", () => {
-      // Entry with flag bit 3 (0x0008) set, compSize = 0, followed by 20MB null bytes
+    it("bounds descriptorless streaming input scan to <50ms on sparse 64MB input without hanging", () => {
+      // Entry with flag bit 3 (0x0008) set, compSize = 0, followed by 64MB sparse null bytes
       const h = Buffer.alloc(30 + 8);
       h.writeUInt32LE(0x04034b50, 0);
       h.writeUInt16LE(20, 4);
@@ -1087,10 +1123,12 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
       h.writeUInt16LE(0, 28); // extra length
       Buffer.from("test.txt").copy(h, 30);
 
-      // 20MB of nulls (exceeding 16MB scan window)
-      const largeNulls = Buffer.alloc(20 * 1024 * 1024, 0);
-      const testPath = path.join("/tmp", `streaming_bound_${Date.now()}.epub`);
-      fs.writeFileSync(testPath, Buffer.concat([h, largeNulls]));
+      // 64MB file with sparse null padding
+      const testPath = path.join("/tmp", `sparse_64mb_${Date.now()}.epub`);
+      const fd = fs.openSync(testPath, "w");
+      fs.writeSync(fd, h);
+      fs.ftruncateSync(fd, 64 * 1024 * 1024);
+      fs.closeSync(fd);
 
       try {
         const start = performance.now();

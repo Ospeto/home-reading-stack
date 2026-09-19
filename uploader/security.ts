@@ -1135,12 +1135,90 @@ interface ParsedLocalHeaderEntry {
   dataEnd: number;
 }
 
-const MAX_REPAIR_FILE_SIZE = 256 * 1024 * 1024; // 256 MiB bound
+export interface XmlElement {
+  name: string;
+  attributes: Record<string, string>;
+  children: XmlElement[];
+}
+
+const MAX_REPAIR_FILE_SIZE = 64 * 1024 * 1024; // 64 MiB bound
+const MAX_GLOBAL_DECOMPRESSED_BUDGET = 128 * 1024 * 1024; // 128 MiB global budget
 const MAX_ENTRIES = 5000;
 const MAX_DESCRIPTOR_SCAN_WINDOW = 16 * 1024 * 1024; // 16 MiB
 const MAX_UNCOMPRESSED_ENTRY_SIZE = 64 * 1024 * 1024; // 64 MiB
 const MAX_COMPRESSION_RATIO = 100; // 100:1
 const PK_MAGIC = Buffer.from([0x50, 0x4b]);
+
+/**
+ * Strict well-formed XML parser in pure TypeScript.
+ * - Enforces balanced, closed tags (rejects unclosed elements like '<container><rootfile></container>').
+ * - Parses tag attributes and builds a DOM tree.
+ * - Rejects multiple roots, mismatched closing tags, or invalid tag syntax.
+ */
+export function parseStrictXml(xmlStr: string): XmlElement | null {
+  if (!xmlStr || typeof xmlStr !== "string") return null;
+
+  // Strip XML declarations, comments, CDATA, and DOCTYPE before tag validation
+  let src = xmlStr.replace(/<\?xml\b[^>]*\?>/gi, "");
+  src = src.replace(/<!--[\s\S]*?-->/g, "");
+  src = src.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "");
+  src = src.replace(/<!DOCTYPE\b[^>]*>/gi, "");
+
+  const tagRegex = /<(\/)?([a-zA-Z0-9_:.-]+)([^>]*?)(\/)?>/g;
+  const stack: XmlElement[] = [];
+  let root: XmlElement | null = null;
+  let match: RegExpExecArray | null;
+
+  while ((match = tagRegex.exec(src)) !== null) {
+    const isClosing = Boolean(match[1]);
+    const tagName = match[2];
+    const rawAttrs = match[3];
+    const isSelfClosing = Boolean(match[4]);
+
+    if (isClosing) {
+      if (isSelfClosing) return null; // Invalid: </tag/>
+      if (rawAttrs.trim().length > 0) return null; // Invalid: </tag attr="val">
+      if (stack.length === 0) return null; // Unbalanced closing tag
+
+      const top = stack.pop()!;
+      if (top.name !== tagName && top.name.toLowerCase() !== tagName.toLowerCase()) {
+        return null; // Mismatched tag nesting: e.g. <rootfile>...</container>
+      }
+    } else {
+      const attributes: Record<string, string> = {};
+      const attrRegex = /([a-zA-Z0-9_:.-]+)\s*=\s*(["'])([\s\S]*?)\2/g;
+      let attrMatch: RegExpExecArray | null;
+      while ((attrMatch = attrRegex.exec(rawAttrs)) !== null) {
+        attributes[attrMatch[1]] = attrMatch[3];
+      }
+
+      const element: XmlElement = {
+        name: tagName,
+        attributes,
+        children: [],
+      };
+
+      if (stack.length === 0) {
+        if (root !== null) {
+          return null; // Multiple root elements
+        }
+        root = element;
+      } else {
+        stack[stack.length - 1].children.push(element);
+      }
+
+      if (!isSelfClosing) {
+        stack.push(element);
+      }
+    }
+  }
+
+  if (stack.length > 0) {
+    return null; // Unclosed tags remaining on stack
+  }
+
+  return root;
+}
 
 function extractEntryContent(
   buf: Buffer,
@@ -1175,12 +1253,13 @@ function extractEntryContent(
 }
 
 /**
- * Pure in-process structural and XML verification of core EPUB metadata.
+ * Pure in-process structural and strict XML verification of core EPUB metadata.
  * Verifies:
  * 1. Mimetype is method 0 (stored) and matches 'application/epub+zip'.
- * 2. META-INF/container.xml is valid XML and contains <rootfile full-path="..."/>.
- * 3. OPF file referenced in container.xml exists, and contains valid <package>,
- *    <metadata>, <manifest>, and <spine> XML elements.
+ * 2. META-INF/container.xml is well-formed XML with root <container>, inside it <rootfiles>,
+ *    and inside that <rootfile full-path="...">.
+ * 3. OPF file referenced in container.xml exists, is well-formed XML with root <package>,
+ *    and contains child elements <metadata>, <manifest>, and <spine> with matching closing tags.
  */
 export function validateHealedZipInProcess(
   buf: Buffer,
@@ -1200,28 +1279,33 @@ export function validateHealedZipInProcess(
     return false;
   }
 
-  // 2. Extract and parse META-INF/container.xml in-process: find <rootfile full-path="..."/>
+  // 2. Extract and strictly parse META-INF/container.xml:
+  // Must have root element <container>, inside it <rootfiles>, inside that <rootfile full-path="...">
   const containerEntry = entries.find((e) => e.fileName === "META-INF/container.xml");
   if (!containerEntry) return false;
   const containerBytes = extractEntryContent(buf, containerEntry);
   if (!containerBytes) return false;
   const containerXml = containerBytes.toString("utf8");
 
-  if (!/<container\b/i.test(containerXml)) {
+  const containerTree = parseStrictXml(containerXml);
+  if (!containerTree || containerTree.name.toLowerCase() !== "container") {
+    return false;
+  }
+  const rootfiles = containerTree.children.find((c) => c.name.toLowerCase() === "rootfiles");
+  if (!rootfiles) {
+    return false;
+  }
+  const rootfile = rootfiles.children.find((c) => c.name.toLowerCase() === "rootfile");
+  if (!rootfile) {
+    return false;
+  }
+  const rawOpfPath = (rootfile.attributes["full-path"] || "").trim().replace(/^\/+/, "");
+  if (!rawOpfPath) {
     return false;
   }
 
-  const rootfileMatch = containerXml.match(
-    /<rootfile\b[^>]*\bfull-path=["']([^"']+)["'][^>]*>/i,
-  );
-  if (!rootfileMatch || !rootfileMatch[1]) {
-    return false;
-  }
-  const rawOpfPath = rootfileMatch[1].trim().replace(/^\/+/, "");
-  if (!rawOpfPath) return false;
-
-  // 3. Verify that the OPF path exists in entries, extract its content,
-  // and verify it contains valid <package>, <metadata>, <manifest>, and <spine> XML elements.
+  // 3. Verify that the OPF path exists in entries, strictly parse it:
+  // Must have root element <package>, and contain child elements <metadata>, <manifest>, and <spine>
   const opfEntry = entries.find(
     (e) => e.fileName === rawOpfPath || e.fileName.toLowerCase() === rawOpfPath.toLowerCase(),
   );
@@ -1232,16 +1316,87 @@ export function validateHealedZipInProcess(
   if (!opfBytes) return false;
   const opfXml = opfBytes.toString("utf8");
 
-  const hasPackage = /<package\b[^>]*>/i.test(opfXml);
-  const hasMetadata = /<metadata\b[^>]*>/i.test(opfXml);
-  const hasManifest = /<manifest\b[^>]*>/i.test(opfXml);
-  const hasSpine = /<spine\b[^>]*>/i.test(opfXml);
+  const opfTree = parseStrictXml(opfXml);
+  if (!opfTree || opfTree.name.toLowerCase() !== "package") {
+    return false;
+  }
 
-  if (!hasPackage || !hasMetadata || !hasManifest || !hasSpine) {
+  const hasMetadata = opfTree.children.some((c) => c.name.toLowerCase() === "metadata");
+  const hasManifest = opfTree.children.some((c) => c.name.toLowerCase() === "manifest");
+  const hasSpine = opfTree.children.some((c) => c.name.toLowerCase() === "spine");
+
+  if (!hasMetadata || !hasManifest || !hasSpine) {
     return false;
   }
 
   return true;
+}
+
+/**
+ * Parses Central Directory records from a standard ZIP buffer to extract entries.
+ */
+export function parseCentralDirectoryEntries(buf: Buffer): ParsedLocalHeaderEntry[] | null {
+  if (buf.length < 22) return null;
+  const eocdOffset = buf.length - 22;
+  if (buf.readUInt32LE(eocdOffset) !== 0x06054b50) return null;
+
+  const totalEntries = buf.readUInt16LE(eocdOffset + 10);
+  const cdSize = buf.readUInt32LE(eocdOffset + 12);
+  const cdOffset = buf.readUInt32LE(eocdOffset + 16);
+
+  if (cdOffset + cdSize > eocdOffset) return null;
+
+  const entries: ParsedLocalHeaderEntry[] = [];
+  let pos = cdOffset;
+
+  for (let i = 0; i < totalEntries; i++) {
+    if (pos + 46 > cdOffset + cdSize) return null;
+    if (buf.readUInt32LE(pos) !== 0x02014b50) return null;
+
+    const versionNeeded = buf.readUInt16LE(pos + 6);
+    const flags = buf.readUInt16LE(pos + 8);
+    const compMethod = buf.readUInt16LE(pos + 10);
+    const modTime = buf.readUInt16LE(pos + 12);
+    const modDate = buf.readUInt16LE(pos + 14);
+    const crc32 = buf.readUInt32LE(pos + 16);
+    const compSize = buf.readUInt32LE(pos + 20);
+    const uncompSize = buf.readUInt32LE(pos + 24);
+    const fileNameLen = buf.readUInt16LE(pos + 28);
+    const extraLen = buf.readUInt16LE(pos + 30);
+    const commentLen = buf.readUInt16LE(pos + 32);
+    const localHeaderOffset = buf.readUInt32LE(pos + 42);
+
+    if (pos + 46 + fileNameLen + extraLen + commentLen > cdOffset + cdSize) return null;
+    const fileName = buf.toString("utf8", pos + 46, pos + 46 + fileNameLen);
+
+    if (localHeaderOffset + 30 > buf.length) return null;
+    if (buf.readUInt32LE(localHeaderOffset) !== 0x04034b50) return null;
+    const localFileNameLen = buf.readUInt16LE(localHeaderOffset + 26);
+    const localExtraLen = buf.readUInt16LE(localHeaderOffset + 28);
+    const dataOffset = localHeaderOffset + 30 + localFileNameLen + localExtraLen;
+    const dataEnd = dataOffset + compSize;
+
+    entries.push({
+      offset: localHeaderOffset,
+      versionNeeded,
+      flags,
+      compMethod,
+      modTime,
+      modDate,
+      crc32,
+      compSize,
+      uncompSize,
+      fileNameLen,
+      extraLen,
+      fileName,
+      dataOffset,
+      dataEnd,
+    });
+
+    pos += 46 + fileNameLen + extraLen + commentLen;
+  }
+
+  return entries;
 }
 
 /**
@@ -1250,12 +1405,12 @@ export function validateHealedZipInProcess(
  *
  * Pure TypeScript/Bun in-process header reconstruction and structural validation:
  * 1. Verifies file begins with standard ZIP magic bytes PK\x03\x04.
- * 2. Sequentially parses local file headers with strict bounds (256MB file size, 5000 max entries,
- *    16MB max descriptor scan window).
+ * 2. Sequentially parses local file headers with strict bounds (64MB file size, 5000 max entries,
+ *    16MB max descriptor scan window, 128MB global decompression budget).
  * 3. Validates trailing entry compressed streams with 100:1 ratio limits and drops incomplete entries.
- * 4. Validates core EPUB metadata in-process (mimetype, META-INF/container.xml, and OPF package structure).
+ * 4. Validates core EPUB metadata in-process (strict XML parse of container.xml and OPF package structure).
  * 5. Builds standard ZIP Central Directory (PK\x01\x02) and EOCD (PK\x05\x06) records.
- * 6. Atomically validates candidate file before replacing target file on disk.
+ * 6. Atomically validates candidate file on disk before replacing target file.
  */
 export function repairTruncatedEpub(filePath: string): boolean {
   let tempRepairedPath: string | null = null;
@@ -1268,7 +1423,19 @@ export function repairTruncatedEpub(filePath: string): boolean {
       return false;
     }
 
-    const buf = fs.readFileSync(filePath);
+    let buf: Buffer;
+    // SAFETY: Inspect globalThis for Bun runtime mmap API without introducing external type dependencies
+    const bunGlobal = (globalThis as unknown as { Bun?: { mmap?: (p: string) => Uint8Array } }).Bun;
+    if (bunGlobal && typeof bunGlobal.mmap === "function") {
+      try {
+        const m = bunGlobal.mmap(filePath);
+        buf = Buffer.from(m.buffer, m.byteOffset, m.byteLength);
+      } catch {
+        buf = fs.readFileSync(filePath);
+      }
+    } else {
+      buf = fs.readFileSync(filePath);
+    }
     if (buf.length < 30) {
       return false;
     }
@@ -1390,6 +1557,7 @@ export function repairTruncatedEpub(filePath: string): boolean {
     }
 
     // 4. Validate compressed stream of trailing entries and discard if incomplete
+    let totalDecompressedBytes = 0;
     while (entries.length > 0) {
       const last = entries[entries.length - 1];
       if (last.compMethod === 8) {
@@ -1397,16 +1565,18 @@ export function repairTruncatedEpub(filePath: string): boolean {
           const rawSlice = buf.subarray(last.dataOffset, last.dataOffset + last.compSize);
           if (
             last.uncompSize > MAX_UNCOMPRESSED_ENTRY_SIZE ||
+            totalDecompressedBytes + last.uncompSize > MAX_GLOBAL_DECOMPRESSED_BUDGET ||
             (rawSlice.length > 0 && last.uncompSize / rawSlice.length > MAX_COMPRESSION_RATIO)
           ) {
-            throw new Error("Decompression ratio or size exceeded");
+            throw new Error("Decompression ratio or budget exceeded");
           }
-          zlib.inflateRawSync(rawSlice, {
+          const decomp = zlib.inflateRawSync(rawSlice, {
             maxOutputLength: Math.min(
               MAX_UNCOMPRESSED_ENTRY_SIZE,
               Math.max(1024, (rawSlice.length + 1) * MAX_COMPRESSION_RATIO),
             ),
           });
+          totalDecompressedBytes += decomp.length;
           break;
         } catch {
           entries.pop();
@@ -1421,7 +1591,7 @@ export function repairTruncatedEpub(filePath: string): boolean {
       return false;
     }
 
-    // Pure in-process validation of core metadata (mimetype, container.xml, OPF and its XML structure)
+    // Pure in-process validation of core metadata (mimetype, container.xml, OPF and strict XML structure)
     if (!validateHealedZipInProcess(buf, entries)) {
       return false;
     }
@@ -1481,7 +1651,7 @@ export function repairTruncatedEpub(filePath: string): boolean {
       eocd,
     ]);
 
-    // 6. Write repaired candidate to temporary file and validate candidate before replacing target
+    // 6. Write repaired candidate to temporary file and perform full semantic validation
     tempRepairedPath = `${filePath}.repair.tmp`;
     fs.writeFileSync(tempRepairedPath, repaired);
 
@@ -1498,7 +1668,16 @@ export function repairTruncatedEpub(filePath: string): boolean {
       return false;
     }
 
-    // Atomic replacement only after candidate validation passes
+    // Full semantic verification on candidate buffer directly
+    const candEntries = parseCentralDirectoryEntries(candBuf);
+    if (!candEntries || !validateHealedZipInProcess(candBuf, candEntries)) {
+      try {
+        fs.unlinkSync(tempRepairedPath);
+      } catch {}
+      return false;
+    }
+
+    // Atomic replacement only after full candidate validation passes
     fs.renameSync(tempRepairedPath, filePath);
     tempRepairedPath = null;
 
