@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en" class="dark h-full">
+<html lang="en" class="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>Reading HQ — macOS Calibre &amp; OPDS Library</title>
+  <title>Reading HQ — Home Library &amp; OPDS</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -26,7 +26,8 @@
       font-family: -apple-system, BlinkMacSystemFont, 'Inter', "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       -webkit-tap-highlight-color: transparent;
       min-height: var(--tg-viewport-height, 100vh);
-      padding-bottom: max(1rem, env(safe-area-inset-bottom, 0px));
+      padding-bottom: calc(1.5rem + env(safe-area-inset-bottom));
+      -webkit-overflow-scrolling: touch;
     }
     .font-mono {
       font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -282,7 +283,7 @@
     }
   </style>
 </head>
-<body class="bg-black text-neutral-200 antialiased flex flex-col font-sans p-0 sm:p-2 lg:p-3 selection:bg-zinc-800 selection:text-white">
+<body class="bg-[#09090b] text-neutral-200 antialiased min-h-screen flex flex-col font-sans selection:bg-zinc-800 selection:text-white pb-12 sm:pb-6">
 
   <!-- SVG ICON SPRITE -->
   <svg style="display:none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -396,283 +397,263 @@
     </defs>
   </svg>
 
-  <!-- BEGIN: macOS App Window Container -->
-  <div class="flex-1 min-h-0 flex flex-col w-full h-full rounded-none sm:rounded-2xl overflow-hidden bg-mac-bg border-0 sm:border border-mac-border shadow-mac-window" data-purpose="macos-window-frame">
-    
-    <!-- BEGIN: macOS Unified Window Toolbar -->
-    <header class="h-14 bg-mac-sidebar/95 acrylic border-b border-mac-border flex items-center justify-between px-3 sm:px-4 z-30 shrink-0" data-purpose="window-toolbar">
+  <!-- SLEEK COMPACT HEADER (TMA & DESKTOP) -->
+  <header class="sticky top-0 z-40 bg-[#09090b]/95 backdrop-blur-md border-b border-white/10 px-3 sm:px-6 py-2.5 transition-all shrink-0">
+    <div class="max-w-[1600px] mx-auto flex items-center justify-between gap-2.5 sm:gap-4">
       
-      <!-- Traffic Light Controls & Breadcrumb -->
-      <div class="flex items-center gap-4 sm:gap-6 min-w-[180px] sm:min-w-[220px]">
-        <div class="flex items-center space-x-2 shrink-0">
-          <span class="w-3 h-3 rounded-full bg-[#FF5F56] traffic-light-close border border-[#E0443E] border-black/20 cursor-pointer hover:opacity-80 transition-opacity" title="Close All Modals" onclick="closeAllModals()"></span>
-          <span class="w-3 h-3 rounded-full bg-[#FFBD2E] traffic-light-minimize border border-[#DEA123] border-black/20 cursor-pointer hover:opacity-80 transition-opacity" title="Refresh Library" onclick="tgHaptic.light(); init();"></span>
-          <span class="w-3 h-3 rounded-full bg-[#27C93F] traffic-light-maximize border border-[#1AAB29] border-black/20 cursor-pointer hover:opacity-80 transition-opacity" title="Toggle Fullscreen" onclick="toggleFullscreen()"></span>
+      <!-- Brand & Status -->
+      <div class="flex items-center gap-2.5 sm:gap-3 shrink-0">
+        <div class="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center font-bold text-sm shadow-sm border border-white/10">
+          <svg class="w-4 h-4"><use href="#icon-book"/></svg>
         </div>
-        <div class="flex items-center gap-2 text-xs">
-          <button onclick="setFilter('all', null)" class="font-medium text-xs tracking-tight text-neutral-200 hover:text-white transition-colors cursor-pointer">Library</button>
-          <span class="text-neutral-600 text-xs">/</span>
-          <span id="breadcrumbCategory" class="text-xs text-neutral-400 font-normal truncate max-w-[130px] sm:max-w-xs">All Books</span>
+        <div class="flex flex-col">
+          <div class="flex items-center gap-1.5 sm:gap-2">
+            <span class="text-sm font-bold tracking-tight text-white">Reading HQ</span>
+            <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-950/60 text-emerald-400 border border-emerald-800/40">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+              <span>OPDS Live</span>
+            </span>
+          </div>
+          <div class="hidden sm:flex items-center gap-1 text-[11px] text-neutral-500">
+            <button onclick="setFilter('all', null)" class="hover:text-white transition-colors cursor-pointer">Library</button>
+            <span>/</span>
+            <span id="breadcrumbCategory" class="text-neutral-400 truncate max-w-[140px]">All Books</span>
+          </div>
         </div>
       </div>
 
-      <!-- Search Bar with ⌘K Badge -->
-      <div class="flex-1 max-w-md mx-2 sm:mx-4 lg:mx-6">
+      <!-- Search Input (Desktop & Mobile Unified) -->
+      <div class="flex-1 max-w-md mx-1 sm:mx-4">
         <div class="relative">
-          <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-neutral-500">
+          <div class="absolute inset-y-0 left-0 pl-2.5 sm:pl-3 flex items-center pointer-events-none text-neutral-500">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" x2="16.65" y1="21" y2="16.65"></line></svg>
           </div>
-          <input id="searchInputDesktop" class="w-full pl-8 pr-12 py-1.5 bg-white/5 text-xs rounded-lg border border-white/10 text-neutral-200 placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-mac-accent focus:border-mac-accent focus:bg-white/10 transition-all font-sans" placeholder="Search titles, authors, passages..." type="text" oninput="syncSearch(this.value)"/>
-          <div class="absolute inset-y-0 right-0 pr-2.5 flex items-center gap-1">
+          <input id="searchInputDesktop" class="w-full pl-8 pr-10 sm:pr-12 py-1.5 bg-white/5 text-xs rounded-lg border border-white/10 text-neutral-200 placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-mac-accent focus:border-mac-accent focus:bg-white/10 transition-all font-sans" placeholder="Search titles, authors..." type="text" oninput="syncSearch(this.value)"/>
+          <div class="absolute inset-y-0 right-0 pr-2 flex items-center gap-1">
             <button onclick="clearSearch()" class="clear-search-btn hidden text-neutral-500 hover:text-neutral-200 p-0.5 cursor-pointer">
               <svg class="w-3 h-3"><use href="#icon-xmark"/></svg>
             </button>
-            <kbd class="text-[9px] text-neutral-500 font-mono pointer-events-none border border-white/10 rounded px-1 py-0.5 bg-white/5">⌘K</kbd>
+            <kbd class="hidden sm:inline-block text-[9px] text-neutral-500 font-mono pointer-events-none border border-white/10 rounded px-1 py-0.5 bg-white/5">⌘K</kbd>
           </div>
         </div>
       </div>
 
-      <!-- Action Buttons -->
-      <div class="flex items-center gap-2 sm:gap-2.5 shrink-0">
+      <!-- Actions Bar -->
+      <div class="flex items-center gap-1.5 sm:gap-2 shrink-0">
         <!-- Mobile Filter Toggle Button -->
-        <button onclick="openFilterDrawer()" class="md:hidden w-7 h-7 sm:w-8 sm:h-8 rounded-lg text-neutral-400 hover:text-white hover:bg-white/10 transition-colors flex items-center justify-center cursor-pointer relative" title="Filter Library">
+        <button id="filterBtn" onclick="openFilterDrawer()" class="md:hidden w-8 h-8 rounded-lg text-neutral-400 hover:text-white hover:bg-white/10 transition-colors flex items-center justify-center cursor-pointer relative border border-white/5" title="Filter Library">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"></path></svg>
           <span id="mobileFilterBadgeCount" class="hidden absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-mac-accent"></span>
         </button>
 
-        <!-- OPDS Sync Status Badge (Emerald Pulse) -->
-        <button onclick="openGuideModal()" class="w-7 h-7 sm:w-8 sm:h-8 rounded-lg text-neutral-400 hover:text-white hover:bg-white/10 transition-colors flex items-center justify-center cursor-pointer relative" title="OPDS Wireless &amp; Sync Status">
-          <span class="relative flex h-2 w-2">
-            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-            <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-400"></span>
-          </span>
-        </button>
-
-        <!-- Sanitize Titles & Strip Junk Tags -->
-        <button onclick="cleanLibraryMetadata()" class="hidden sm:flex w-7 h-7 sm:w-8 sm:h-8 rounded-lg text-neutral-400 hover:text-amber-300 hover:bg-white/10 transition-colors items-center justify-center cursor-pointer" title="Sanitize Titles &amp; Strip Junk Tags">
+        <!-- Clean Metadata (Desktop) -->
+        <button onclick="cleanLibraryMetadata()" class="hidden sm:flex w-8 h-8 rounded-lg text-neutral-400 hover:text-amber-300 hover:bg-white/10 transition-colors items-center justify-center cursor-pointer border border-white/5" title="Sanitize Titles &amp; Strip Junk Tags">
           <svg class="w-4 h-4 text-amber-400"><use href="#icon-broom"/></svg>
         </button>
 
         <!-- KOReader Connection Manual -->
-        <button onclick="openGuideModal()" class="hidden sm:flex w-7 h-7 sm:w-8 sm:h-8 rounded-lg text-neutral-400 hover:text-amber-300 hover:bg-white/10 transition-colors items-center justify-center cursor-pointer" title="KOReader & Manual">
+        <button onclick="openGuideModal()" class="w-8 h-8 rounded-lg text-neutral-400 hover:text-amber-300 hover:bg-white/10 transition-colors flex items-center justify-center cursor-pointer border border-white/5" title="KOReader & Manual">
           <svg class="w-4 h-4 text-amber-400"><use href="#icon-book-open"/></svg>
         </button>
 
-        <!-- Add Button (+ Add) -->
-        <button onclick="openUploadModal()" class="px-3 py-1 sm:py-1.5 rounded-lg text-xs font-semibold bg-white/10 hover:bg-white/15 text-neutral-200 transition-colors flex items-center gap-1.5 cursor-pointer border border-white/10 active:scale-95 shadow-sm">
+        <!-- Add Book Button -->
+        <button onclick="openUploadModal()" class="px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/10 hover:bg-white/15 text-neutral-200 transition-colors flex items-center gap-1.5 cursor-pointer border border-white/10 active:scale-95 shadow-sm">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-          <span>Add</span>
+          <span class="hidden xs:inline">Add</span>
         </button>
       </div>
 
-    </header>
-    <!-- END: macOS Unified Window Toolbar -->
-
-    <!-- BEGIN: Main Workspace Body (Sidebar + Content) -->
-    <div class="flex-1 min-h-0 flex overflow-hidden">
-      
-      <!-- BEGIN: Left macOS Translucent Sidebar -->
-      <aside class="w-64 xl:w-72 bg-mac-sidebar/70 acrylic border-r border-mac-border hidden md:flex md:w-64 shrink-0 flex-col justify-between overflow-y-auto" data-purpose="macos-library-sidebar">
-        
-        <div class="p-4 space-y-5">
-          
-          <!-- Library Navigation Section -->
-          <div class="space-y-1">
-            <div class="px-2.5 pb-1 text-[11px] font-medium tracking-wide text-neutral-500 uppercase">Library</div>
-            <nav class="space-y-0.5 text-xs">
-              <button onclick="setFilter('all', null)" id="nav-all" class="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-white/10 text-white font-medium transition-colors cursor-pointer text-left">
-                <span class="flex items-center gap-2.5">
-                  <svg class="w-4 h-4 text-neutral-400" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
-                  <span>All Books</span>
-                </span>
-                <span id="facetTotalBooks" class="text-[11px] text-neutral-400 font-mono">0</span>
-              </button>
-              <button onclick="setFilter('status', 'reading')" id="nav-reading" class="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left">
-                <span class="flex items-center gap-2.5">
-                  <svg class="w-4 h-4 text-neutral-400" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                  <span>Reading Now</span>
-                </span>
-                <span class="flex items-center gap-1.5">
-                  <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                  <span id="sidebarReadingCount" class="text-[11px] text-neutral-500 font-mono">0</span>
-                </span>
-              </button>
-              <button onclick="setFilter('status', 'want_to_read')" id="nav-want-to-read" class="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left">
-                <span class="flex items-center gap-2.5">
-                  <svg class="w-4 h-4 text-neutral-400" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"></path></svg>
-                  <span>Want to Read</span>
-                </span>
-                <span id="sidebarWantToReadCount" class="text-[11px] text-neutral-500 font-mono">0</span>
-              </button>
-              <button onclick="setFilter('status', 'finished')" id="nav-finished" class="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left">
-                <span class="flex items-center gap-2.5">
-                  <svg class="w-4 h-4 text-neutral-400" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                  <span>Finished</span>
-                </span>
-                <span id="sidebarFinishedCount" class="text-[11px] text-neutral-500 font-mono">0</span>
-              </button>
-              <button onclick="openGuideModal()" class="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left group">
-                <span class="flex items-center gap-2.5">
-                  <svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><use href="#icon-book-open"/></svg>
-                  <span>KOReader & Manual</span>
-                </span>
-                <span class="text-[10px] text-neutral-500 font-mono">Guide</span>
-              </button>
-            </nav>
-          </div>
-
-          <!-- Active Filter Badge -->
-          <div id="activeFilterBox" class="hidden px-2.5 py-2 rounded-lg bg-white/5 border border-white/10 space-y-1">
-            <div class="flex items-center justify-between">
-              <span class="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Active Filter</span>
-              <button onclick="clearAllFilters()" class="text-[10px] text-mac-accent hover:underline cursor-pointer">Clear</button>
-            </div>
-            <div id="activeFilterBadge" class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-semibold bg-mac-accent/20 text-mac-accent border border-mac-accent/30 truncate max-w-full"></div>
-          </div>
-
-          <!-- Collections (Series) -->
-          <div class="space-y-1">
-            <div class="px-2.5 pb-1 flex items-center justify-between text-[11px] font-medium tracking-wide text-neutral-500 uppercase">
-              <span>Collections</span>
-              <span id="seriesCountLabel" class="font-mono text-[10px]">0</span>
-            </div>
-            <div id="seriesList" class="space-y-0.5 text-xs max-h-44 overflow-y-auto pr-1"></div>
-          </div>
-
-          <!-- Authors -->
-          <div class="space-y-1">
-            <div class="px-2.5 pb-1 flex items-center justify-between text-[11px] font-medium tracking-wide text-neutral-500 uppercase">
-              <span>Authors</span>
-              <span id="authorCountLabel" class="font-mono text-[10px]">0</span>
-            </div>
-            <div id="authorList" class="space-y-0.5 text-xs max-h-36 overflow-y-auto pr-1"></div>
-          </div>
-
-          <!-- Tags & Formats -->
-          <div class="space-y-1.5">
-            <div class="px-2.5 pb-0.5 text-[11px] font-medium tracking-wide text-neutral-500 uppercase">Tags &amp; Formats</div>
-            <div id="tagPills" class="flex flex-wrap gap-1 px-2.5 max-h-24 overflow-y-auto"></div>
-            <div id="formatList" class="flex flex-wrap gap-1 px-2.5 pt-1"></div>
-          </div>
-
-        </div>
-
-        <!-- Sidebar Footer: OPDS Wireless Ready -->
-        <div class="p-4 border-t border-white/5">
-          <div class="flex items-center justify-between text-xs text-neutral-500 cursor-pointer hover:text-neutral-300 transition-colors" onclick="openGuideModal()" title="KOReader & Stack Connection Guide">
-            <span class="flex items-center gap-2">
-              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400/80 animate-pulse"></span>
-              <span>OPDS Wireless</span>
-            </span>
-            <span class="text-[10px] font-mono text-emerald-400 bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/40">Ready</span>
-          </div>
-        </div>
-
-      </aside>
-      <!-- END: Left macOS Translucent Sidebar -->
-
-      <!-- BEGIN: Right Primary Workspace -->
-      <main class="flex-1 min-h-0 flex flex-col overflow-y-auto bg-mac-bg">
-        
-        <!-- Library Content Header: Series title, count, view toggle & sort -->
-        <div class="px-4 sm:px-6 py-3.5 sm:py-4 flex items-center justify-between border-b border-mac-border shrink-0" data-purpose="library-grid-header">
-          <div class="flex items-baseline gap-3 min-w-0">
-            <h2 id="contentHeaderTitle" class="text-base font-semibold text-white tracking-tight truncate max-w-sm sm:max-w-md">All Books</h2>
-            <span id="contentHeaderSubtitle" class="text-xs text-neutral-500 font-normal shrink-0">0 volumes</span>
-          </div>
-          <div class="flex items-center gap-3 sm:gap-4 text-xs text-neutral-400 shrink-0">
-            <div class="flex items-center gap-2">
-              <span class="text-neutral-500 text-xs hidden sm:inline">Sort:</span>
-              <select id="sortSelect" onchange="tgHaptic.light(); applyFilters()" class="bg-transparent border border-white/10 sm:border-none rounded-lg text-xs text-neutral-300 focus:outline-none cursor-pointer px-2 py-1 sm:p-0">
-                <option value="recent">Recent</option>
-                <option value="series">Volume</option>
-                <option value="progress">Progress</option>
-                <option value="title">Title (A-Z)</option>
-                <option value="author">Author (A-Z)</option>
-              </select>
-            </div>
-            <div class="flex items-center bg-white/5 p-0.5 rounded-lg border border-white/5">
-              <button onclick="setViewMode('grid')" id="gridBtn" class="p-1 rounded bg-white/10 text-white cursor-pointer" title="Grid View">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect height="7" rx="1" width="7" x="3" y="3"></rect><rect height="7" rx="1" width="7" x="14" y="3"></rect><rect height="7" rx="1" width="7" x="14" y="14"></rect><rect height="7" rx="1" width="7" x="3" y="14"></rect></svg>
-              </button>
-              <button onclick="setViewMode('table')" id="tableBtn" class="p-1 rounded text-neutral-500 hover:text-neutral-300 transition-colors cursor-pointer" title="List View">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="8" x2="21" y1="6" y2="6"></line><line x1="8" x2="21" y1="12" y2="12"></line><line x1="8" x2="21" y1="18" y2="18"></line><line x1="3" x2="3.01" y1="6" y2="6"></line><line x1="3" x2="3.01" y1="12" y2="12"></line><line x1="3" x2="3.01" y1="18" y2="18"></line></svg>
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Quick Pill Nav Strip for Mobile -->
-        <div class="px-4 py-2 flex items-center gap-1.5 overflow-x-auto no-scrollbar border-b border-mac-border/60 text-xs md:hidden">
-          <button onclick="setFilter('all', null)" id="chip-all" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-white text-neutral-950 shrink-0 transition-colors">
-            All Books (<span id="quickTotalBooks">0</span>)
-          </button>
-          <button onclick="setFilter('status', 'reading')" id="chip-reading" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-white/5 border border-white/10 text-emerald-400 hover:text-white shrink-0 transition-colors flex items-center gap-1.5 cursor-pointer">
-            <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span>Reading</span>
-            <span id="quickReadingCount" class="text-[10px] text-neutral-500 font-mono">0</span>
-          </button>
-          <div id="quickSeriesChips" class="flex items-center gap-1.5 shrink-0"></div>
-          <div id="quickFormatChips" class="flex items-center gap-1.5 shrink-0"></div>
-        </div>
-
-        <!-- Hidden Compatibility Counters -->
-        <div class="hidden">
-          <span id="totalBooksStat">0</span>
-          <span id="totalAuthorsStat">0</span>
-          <span id="totalSeriesStat">0</span>
-          <span id="filteredCountBadge">0 Books</span>
-          <input type="text" id="searchInputMobile" oninput="syncSearch(this.value)">
-        </div>
-
-        <!-- Content Area: Book Grid & Table View -->
-        <div class="p-4 sm:p-6 lg:p-8 flex-1 min-h-0">
-          <!-- BEGIN: High-Fidelity Book Grid -->
-          <div id="libraryGridView" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-4 sm:gap-6 max-w-[1600px] mx-auto w-full" data-purpose="books-cover-grid"></div>
-          <!-- END: High-Fidelity Book Grid -->
-
-          <!-- BEGIN: Compact Table View -->
-          <div id="libraryTableView" class="hidden rounded-xl overflow-x-auto border border-mac-border bg-mac-surface/50">
-            <table class="w-full text-left text-xs text-neutral-300 min-w-[600px]">
-              <thead class="bg-mac-sidebar/90 border-b border-mac-border text-[10px] font-medium text-neutral-400 uppercase tracking-wider">
-                <tr>
-                  <th class="px-4 py-2.5 w-10 text-center"><input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll()" class="rounded bg-white/10 border-white/20 text-mac-accent cursor-pointer"></th>
-                  <th class="px-4 py-2.5 w-14">Cover</th>
-                  <th class="px-4 py-2.5">Title &amp; Series</th>
-                  <th class="px-4 py-2.5">Author</th>
-                  <th class="px-4 py-2.5">Formats</th>
-                  <th class="px-4 py-2.5">Tags</th>
-                  <th class="px-4 py-2.5 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody id="libraryTableBody" class="divide-y divide-white/5"></tbody>
-            </table>
-          </div>
-          <!-- END: Compact Table View -->
-        </div>
-
-      </main>
-      <!-- END: Right Primary Workspace -->
-
     </div>
-    <!-- END: Main Workspace Body -->
+  </header>
 
-    <!-- BEGIN: Native macOS Bottom Status Bar -->
-    <footer class="h-7 bg-mac-sidebar/95 border-t border-mac-border px-4 flex items-center justify-between text-[11px] text-neutral-400 shrink-0" data-purpose="macos-status-bar">
-      <div class="flex items-center gap-3 text-neutral-500 text-[11px]">
-        <span class="flex items-center gap-1.5 cursor-pointer" onclick="openGuideModal()">
-          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400/80 animate-pulse"></span>
-          <span class="text-neutral-300 font-medium">Calibre Synced</span>
-        </span>
-        <span class="text-neutral-700">•</span>
-        <span id="statusStorageInfo" class="text-neutral-400 cursor-pointer" onclick="copyToClipboard('http://192.168.31.15:8088/opds')">OPDS &amp; KOSync Wireless Ready</span>
-      </div>
-      <div id="statusVolumeCount" class="text-neutral-500 text-[11px]">0 volumes</div>
-    </footer>
-    <!-- END: Native macOS Bottom Status Bar -->
-
+  <!-- QUICK FILTER CHIPS (MOBILE & TMA SWIPEABLE STRIP) -->
+  <div class="px-3 sm:px-6 py-2 flex items-center gap-1.5 overflow-x-auto no-scrollbar border-b border-white/5 text-xs bg-[#09090b]/80 backdrop-blur-md sticky top-[53px] z-30 md:hidden">
+    <button onclick="setFilter('all', null)" id="chip-all" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-white text-neutral-950 shrink-0 transition-colors">
+      All Books (<span id="quickTotalBooks">0</span>)
+    </button>
+    <button onclick="setFilter('status', 'reading')" id="chip-reading" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-white/5 border border-white/10 text-emerald-400 hover:text-white shrink-0 transition-colors flex items-center gap-1.5 cursor-pointer">
+      <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+      <span>Reading</span>
+      <span id="quickReadingCount" class="text-[10px] text-neutral-500 font-mono">0</span>
+    </button>
+    <div id="quickSeriesChips" class="flex items-center gap-1.5 shrink-0"></div>
+    <div id="quickFormatChips" class="flex items-center gap-1.5 shrink-0"></div>
   </div>
-  <!-- END: macOS App Window Container -->
+
+  <!-- MAIN WORKSPACE: SIDEBAR + CONTENT -->
+  <div class="max-w-[1600px] w-full mx-auto flex-1 flex flex-col md:flex-row min-h-0">
+    
+    <!-- DESKTOP SIDEBAR -->
+    <aside class="w-64 xl:w-72 bg-[#121418]/60 border-r border-white/5 hidden md:flex shrink-0 flex-col justify-between p-4 space-y-5" data-purpose="macos-library-sidebar">
+      <div class="space-y-5">
+        <!-- Navigation -->
+        <div class="space-y-1">
+          <div class="px-2.5 pb-1 text-[11px] font-medium tracking-wide text-neutral-500 uppercase">Library</div>
+          <nav class="space-y-0.5 text-xs">
+            <button onclick="setFilter('all', null)" id="nav-all" class="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-white/10 text-white font-medium transition-colors cursor-pointer text-left">
+              <span class="flex items-center gap-2.5">
+                <svg class="w-4 h-4 text-neutral-400" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+                <span>All Books</span>
+              </span>
+              <span id="facetTotalBooks" class="text-[11px] text-neutral-400 font-mono">0</span>
+            </button>
+            <button onclick="setFilter('status', 'reading')" id="nav-reading" class="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left">
+              <span class="flex items-center gap-2.5">
+                <svg class="w-4 h-4 text-neutral-400" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                <span>Reading Now</span>
+              </span>
+              <span class="flex items-center gap-1.5">
+                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span id="sidebarReadingCount" class="text-[11px] text-neutral-500 font-mono">0</span>
+              </span>
+            </button>
+            <button onclick="setFilter('status', 'want_to_read')" id="nav-want-to-read" class="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left">
+              <span class="flex items-center gap-2.5">
+                <svg class="w-4 h-4 text-neutral-400" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"></path></svg>
+                <span>Want to Read</span>
+              </span>
+              <span id="sidebarWantToReadCount" class="text-[11px] text-neutral-500 font-mono">0</span>
+            </button>
+            <button onclick="setFilter('status', 'finished')" id="nav-finished" class="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left">
+              <span class="flex items-center gap-2.5">
+                <svg class="w-4 h-4 text-neutral-400" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                <span>Finished</span>
+              </span>
+              <span id="sidebarFinishedCount" class="text-[11px] text-neutral-500 font-mono">0</span>
+            </button>
+            <button onclick="openGuideModal()" class="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left group">
+              <span class="flex items-center gap-2.5">
+                <svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><use href="#icon-book-open"/></svg>
+                <span>KOReader &amp; Manual</span>
+              </span>
+              <span class="text-[10px] text-neutral-500 font-mono">Guide</span>
+            </button>
+          </nav>
+        </div>
+
+        <!-- Active Filter Badge -->
+        <div id="activeFilterBox" class="hidden px-2.5 py-2 rounded-lg bg-white/5 border border-white/10 space-y-1">
+          <div class="flex items-center justify-between">
+            <span class="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Active Filter</span>
+            <button onclick="clearAllFilters()" class="text-[10px] text-mac-accent hover:underline cursor-pointer">Clear</button>
+          </div>
+          <div id="activeFilterBadge" class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-semibold bg-mac-accent/20 text-mac-accent border border-mac-accent/30 truncate max-w-full"></div>
+        </div>
+
+        <!-- Collections (Series) -->
+        <div class="space-y-1">
+          <div class="px-2.5 pb-1 flex items-center justify-between text-[11px] font-medium tracking-wide text-neutral-500 uppercase">
+            <span>Collections</span>
+            <span id="seriesCountLabel" class="font-mono text-[10px]">0</span>
+          </div>
+          <div id="seriesList" class="space-y-0.5 text-xs max-h-44 overflow-y-auto pr-1"></div>
+        </div>
+
+        <!-- Authors -->
+        <div class="space-y-1">
+          <div class="px-2.5 pb-1 flex items-center justify-between text-[11px] font-medium tracking-wide text-neutral-500 uppercase">
+            <span>Authors</span>
+            <span id="authorCountLabel" class="font-mono text-[10px]">0</span>
+          </div>
+          <div id="authorList" class="space-y-0.5 text-xs max-h-36 overflow-y-auto pr-1"></div>
+        </div>
+
+        <!-- Tags & Formats -->
+        <div class="space-y-1.5">
+          <div class="px-2.5 pb-0.5 text-[11px] font-medium tracking-wide text-neutral-500 uppercase">Tags &amp; Formats</div>
+          <div id="tagPills" class="flex flex-wrap gap-1 px-2.5 max-h-24 overflow-y-auto"></div>
+          <div id="formatList" class="flex flex-wrap gap-1 px-2.5 pt-1"></div>
+        </div>
+      </div>
+
+      <!-- Sidebar Footer: OPDS Wireless Ready -->
+      <div class="pt-4 border-t border-white/5">
+        <div class="flex items-center justify-between text-xs text-neutral-500 cursor-pointer hover:text-neutral-300 transition-colors" onclick="openGuideModal()" title="KOReader &amp; Stack Connection Guide">
+          <span class="flex items-center gap-2">
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-400/80 animate-pulse"></span>
+            <span>OPDS Wireless</span>
+          </span>
+          <span class="text-[10px] font-mono text-emerald-400 bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/40">Ready</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- MAIN CONTENT -->
+    <main class="flex-1 flex flex-col p-3 sm:p-6 min-w-0">
+      
+      <!-- Content Header -->
+      <div class="pb-3 sm:pb-4 flex items-center justify-between border-b border-white/5 mb-4 shrink-0" data-purpose="library-grid-header">
+        <div class="flex items-baseline gap-3 min-w-0">
+          <h2 id="contentHeaderTitle" class="text-base sm:text-lg font-semibold text-white tracking-tight truncate max-w-sm sm:max-w-md">All Books</h2>
+          <span id="contentHeaderSubtitle" class="text-xs text-neutral-500 font-normal shrink-0">0 volumes</span>
+        </div>
+        <div class="flex items-center gap-2.5 sm:gap-4 text-xs text-neutral-400 shrink-0">
+          <div class="flex items-center gap-2">
+            <span class="text-neutral-500 text-xs hidden sm:inline">Sort:</span>
+            <select id="sortSelect" onchange="tgHaptic.light(); applyFilters()" class="bg-white/5 border border-white/10 rounded-lg text-xs text-neutral-300 focus:outline-none cursor-pointer px-2 py-1">
+              <option value="recent">Recent</option>
+              <option value="series">Volume</option>
+              <option value="progress">Progress</option>
+              <option value="title">Title (A-Z)</option>
+              <option value="author">Author (A-Z)</option>
+            </select>
+          </div>
+          <div class="flex items-center bg-white/5 p-0.5 rounded-lg border border-white/5">
+            <button onclick="setViewMode('grid')" id="gridBtn" class="p-1 rounded bg-white/10 text-white cursor-pointer" title="Grid View">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect height="7" rx="1" width="7" x="3" y="3"></rect><rect height="7" rx="1" width="7" x="14" y="3"></rect><rect height="7" rx="1" width="7" x="14" y="14"></rect><rect height="7" rx="1" width="7" x="3" y="14"></rect></svg>
+            </button>
+            <button onclick="setViewMode('table')" id="tableBtn" class="p-1 rounded text-neutral-500 hover:text-neutral-300 transition-colors cursor-pointer" title="List View">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="8" x2="21" y1="6" y2="6"></line><line x1="8" x2="21" y1="12" y2="12"></line><line x1="8" x2="21" y1="18" y2="18"></line><line x1="3" x2="3.01" y1="6" y2="6"></line><line x1="3" x2="3.01" y1="12" y2="12"></line><line x1="3" x2="3.01" y1="18" y2="18"></line></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Hidden Compatibility Counters -->
+      <div class="hidden">
+        <span id="totalBooksStat">0</span>
+        <span id="totalAuthorsStat">0</span>
+        <span id="totalSeriesStat">0</span>
+        <span id="filteredCountBadge">0 Books</span>
+        <input type="text" id="searchInputMobile" oninput="syncSearch(this.value)">
+      </div>
+
+      <!-- Book Grid -->
+      <div id="libraryGridView" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-5 w-full" data-purpose="books-cover-grid"></div>
+
+      <!-- Table View -->
+      <div id="libraryTableView" class="hidden rounded-xl overflow-x-auto border border-white/5 bg-white/5">
+        <table class="w-full text-left text-xs text-neutral-300 min-w-[600px]">
+          <thead class="bg-white/5 border-b border-white/5 text-[10px] font-medium text-neutral-400 uppercase tracking-wider">
+            <tr>
+              <th class="px-4 py-2.5 w-10 text-center"><input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll()" class="rounded bg-white/10 border-white/20 text-mac-accent cursor-pointer"></th>
+              <th class="px-4 py-2.5 w-14">Cover</th>
+              <th class="px-4 py-2.5">Title &amp; Series</th>
+              <th class="px-4 py-2.5">Author</th>
+              <th class="px-4 py-2.5">Formats</th>
+              <th class="px-4 py-2.5">Tags</th>
+              <th class="px-4 py-2.5 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="libraryTableBody" class="divide-y divide-white/5"></tbody>
+        </table>
+      </div>
+
+      <!-- Bottom Status Bar -->
+      <footer class="mt-8 pt-4 pb-2 border-t border-white/5 flex items-center justify-between text-xs text-neutral-500" data-purpose="macos-status-bar">
+        <div class="flex items-center gap-3 text-[11px]">
+          <span class="flex items-center gap-1.5 cursor-pointer hover:text-neutral-300 transition-colors" onclick="openGuideModal()">
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-400/80 animate-pulse"></span>
+            <span class="text-neutral-300 font-medium">Calibre Synced</span>
+          </span>
+          <span class="text-neutral-700">•</span>
+          <span id="statusStorageInfo" class="text-neutral-400 cursor-pointer hover:text-neutral-300 transition-colors" onclick="copyToClipboard('http://192.168.31.15:8088/opds')">OPDS &amp; KOSync Wireless Ready</span>
+        </div>
+        <div id="statusVolumeCount" class="text-neutral-500 text-[11px]">0 volumes</div>
+      </footer>
+
+    </main>
+  </div>
 
   <!-- FLOATING BULK ACTIONS TOOLBAR -->
   <div id="bulkToolbar" class="hidden fixed bottom-5 left-4 right-4 sm:left-1/2 sm:-translate-x-1/2 sm:w-auto z-40 bg-zinc-900/95 backdrop-blur-md border border-zinc-700 shadow-2xl rounded-2xl px-4 py-3 flex items-center justify-between sm:justify-start gap-3.5 text-xs">
@@ -1466,59 +1447,6 @@
   <!-- APPLICATION JAVASCRIPT -->
   <script>
 
-    function updateLibraryCounters() {
-      let readingCount = 0;
-      let finishedCount = 0;
-      let wantToReadCount = 0;
-      for (const b of allBooks) {
-        const sync = kosyncMap.get(b.id);
-        const pct = sync?.percentage || 0;
-        if (pct >= 0.99) finishedCount++;
-        else if (pct > 0) readingCount++;
-        else wantToReadCount++;
-      }
-      const facetTotal = document.getElementById('facetTotalBooks');
-      if (facetTotal) facetTotal.textContent = allBooks.length.toLocaleString();
-
-      const readingEl = document.getElementById('sidebarReadingCount');
-      if (readingEl) readingEl.textContent = readingCount;
-
-      const wantEl = document.getElementById('sidebarWantToReadCount');
-      if (wantEl) wantEl.textContent = wantToReadCount;
-
-      const finishEl = document.getElementById('sidebarFinishedCount');
-      if (finishEl) finishEl.textContent = finishedCount;
-
-      const quickReading = document.getElementById('quickReadingCount');
-      if (quickReading) quickReading.textContent = readingCount;
-    }
-
-    function toggleFullscreen() {
-      if (!document.fullscreenElement) {
-        document.documentElement.requestFullscreen().catch(() => {});
-      } else {
-        document.exitFullscreen().catch(() => {});
-      }
-    }
-
-    window.addEventListener('keydown', (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        const input = document.getElementById('searchInputDesktop') || document.getElementById('searchInputMobile');
-        if (input) {
-          input.focus();
-          input.select();
-        }
-      }
-      if (e.key === 'Escape') {
-        if (hasActiveModal()) {
-          closeAllModals();
-        } else {
-          clearSearch();
-        }
-      }
-    });
-
 
     function updateLibraryCounters() {
       let readingCount = 0;
@@ -2214,7 +2142,7 @@
                 renderBooks();
               }
             }
-          }, { root: document.querySelector('main'), rootMargin: '400px' });
+          }, { rootMargin: '600px' });
         }
         const sentinelEl = document.getElementById('catalogSentinel');
         if (sentinelEl) {
