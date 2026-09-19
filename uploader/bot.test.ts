@@ -28,7 +28,11 @@ import {
   getEpubContentSignature,
   ingestBookFile,
   getCacheDb,
+  formatDuplicateCleanerCard,
+  handleTextMessage,
+  setDuplicateCleanerRunnerForTest,
 } from "./bot";
+import { type CleanDuplicatesReport } from "../scripts/clean-duplicates";
 
 describe("Telegram Mini App (TMA) Integration", () => {
   it("exports READING_WEBAPP_URL defaulting to production WAN domain", () => {
@@ -326,10 +330,12 @@ describe("Interactive Main Menu Dashboard (/menu & /start)", () => {
     expect(kb.inline_keyboard[2][1].text).toContain("Server Status");
     expect(kb.inline_keyboard[2][1].callback_data).toBe("refresh_status");
 
-    // Row 4: Hot Backup
-    expect(kb.inline_keyboard[3].length).toBe(1);
+    // Row 4: Hot Backup & Deduplicate
+    expect(kb.inline_keyboard[3].length).toBe(2);
     expect(kb.inline_keyboard[3][0].text).toContain("Hot Backup");
     expect(kb.inline_keyboard[3][0].callback_data).toBe("menu:backup");
+    expect(kb.inline_keyboard[3][1].text).toContain("Deduplicate");
+    expect(kb.inline_keyboard[3][1].callback_data).toBe("rescan_dedup");
   });
 
   it("getMainMenuText returns formatted dashboard overview", () => {
@@ -342,6 +348,7 @@ describe("Interactive Main Menu Dashboard (/menu & /start)", () => {
     expect(text).toContain("/recent");
     expect(text).toContain("/status");
     expect(text).toContain("/backup");
+    expect(text).toContain("/dedup");
   });
 });
 
@@ -1412,3 +1419,256 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
   });
 });
 
+describe("Library Deduplication Bot Commands & Callbacks (/dedup, /clean_duplicates)", () => {
+  it("formatDuplicateCleanerCard renders clean library card when no duplicates found", () => {
+    const cleanReport: CleanDuplicatesReport = {
+      timestamp: new Date().toISOString(),
+      dryRun: true,
+      totalBooksScanned: 142,
+      duplicateGroupsCount: 0,
+      totalDuplicatesFound: 0,
+      totalPruned: 0,
+      groups: [],
+      errors: [],
+    };
+
+    const { card, keyboard } = formatDuplicateCleanerCard(cleanReport);
+    expect(card).toContain("Library is Clean: No duplicates detected across your books.");
+    expect(card).toContain("Books Scanned:* 142");
+    expect(card).toContain("Duplicates Detected:* 0");
+
+    expect(keyboard).toBeDefined();
+    expect(Array.isArray(keyboard.inline_keyboard)).toBe(true);
+    const buttons = keyboard.inline_keyboard.flat();
+    const rescanBtn = buttons.find((b: any) => b.callback_data === "rescan_dedup");
+    expect(rescanBtn).toBeDefined();
+    expect(rescanBtn.text).toContain("Rescan");
+    const menuBtn = buttons.find((b: any) => b.callback_data === "menu:main");
+    expect(menuBtn).toBeDefined();
+  });
+
+  it("formatDuplicateCleanerCard renders duplicate groups and prune confirmation keyboard", () => {
+    const dupReport: CleanDuplicatesReport = {
+      timestamp: new Date().toISOString(),
+      dryRun: true,
+      totalBooksScanned: 50,
+      duplicateGroupsCount: 1,
+      totalDuplicatesFound: 1,
+      totalPruned: 0,
+      groups: [
+        {
+          id: "group_1",
+          matchType: "series_volume",
+          reason: "Series \"Overlord\" Volume 1",
+          keeperId: 10,
+          keeperReason: "EPUB format, Explicit series metadata",
+          books: [
+            {
+              id: 10,
+              title: "Overlord, Vol. 1",
+              authors: "Kugane Maruyama",
+              series: "Overlord",
+              series_index: 1,
+              formats: ["EPUB"],
+            },
+            {
+              id: 20,
+              title: "Overlord Vol 1 [Retail]",
+              authors: "Kugane Maruyama",
+              series: "Overlord",
+              series_index: 1,
+              formats: ["EPUB"],
+            },
+          ],
+          duplicateIds: [20],
+        },
+      ],
+      errors: [],
+    };
+
+    const { card, keyboard } = formatDuplicateCleanerCard(dupReport);
+    expect(card).toContain("Calibre Duplicate Detection Summary");
+    expect(card).toContain("Books Scanned:* 50");
+    expect(card).toContain("Duplicate Groups Detected:* 1");
+    expect(card).toContain("Total Identified Duplicates:* 1");
+    expect(card).toContain("Keeper (#10):* Overlord, Vol. 1");
+    expect(card).toContain("Duplicates to Prune:");
+    expect(card).toContain("#20:* Overlord Vol 1");
+
+    expect(keyboard).toBeDefined();
+    const buttons = keyboard.inline_keyboard.flat();
+    const pruneBtn = buttons.find((b: any) => b.callback_data === "apply_dedup_confirm");
+    expect(pruneBtn).toBeDefined();
+    expect(pruneBtn.text).toContain("Prune Duplicates");
+    const rescanBtn = buttons.find((b: any) => b.callback_data === "rescan_dedup");
+    expect(rescanBtn).toBeDefined();
+  });
+
+  it("handleTextMessage handles /dedup and /duplicates in dry-run mode", async () => {
+    const sentMessages: any[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentMessages.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 1001 } }), {
+          status: 200,
+        });
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    setDuplicateCleanerRunnerForTest(async (options) => ({
+      timestamp: new Date().toISOString(),
+      dryRun: options.apply ? false : true,
+      totalBooksScanned: 88,
+      duplicateGroupsCount: 0,
+      totalDuplicatesFound: 0,
+      totalPruned: 0,
+      groups: [],
+      errors: [],
+    }));
+
+    try {
+      await handleTextMessage(123456, "/dedup", "tester");
+      expect(sentMessages.length).toBeGreaterThanOrEqual(1);
+      const lastMsg = sentMessages[sentMessages.length - 1];
+      expect(lastMsg.chat_id).toBe(123456);
+      expect(lastMsg.text).toContain("Library is Clean");
+      expect(lastMsg.text).toContain("88");
+
+      sentMessages.length = 0;
+      await handleTextMessage(123456, "/duplicates", "tester");
+      expect(sentMessages.length).toBeGreaterThanOrEqual(1);
+      const dupMsg = sentMessages[sentMessages.length - 1];
+      expect(dupMsg.text).toContain("Library is Clean");
+    } finally {
+      setDuplicateCleanerRunnerForTest(null);
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it("handleTextMessage handles /clean_duplicates apply directly", async () => {
+    const sentMessages: any[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentMessages.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 1002 } }), {
+          status: 200,
+        });
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    setDuplicateCleanerRunnerForTest(async (options) => ({
+      timestamp: new Date().toISOString(),
+      dryRun: false,
+      totalBooksScanned: 100,
+      duplicateGroupsCount: 2,
+      totalDuplicatesFound: 2,
+      totalPruned: 2,
+      auditLogPath: "data/duplicate-pruning-audit.log",
+      groups: [],
+      errors: [],
+    }));
+
+    try {
+      await handleTextMessage(123456, "/clean_duplicates apply", "tester");
+      expect(sentMessages.length).toBeGreaterThanOrEqual(1);
+      const finishMsg = sentMessages[sentMessages.length - 1];
+      expect(finishMsg.text).toContain("Duplicate Pruning Complete");
+      expect(finishMsg.text).toContain("Books Scanned:* 100");
+      expect(finishMsg.text).toContain("Duplicate Books Pruned:* 2");
+      expect(finishMsg.text).toContain("Audit Log:");
+    } finally {
+      setDuplicateCleanerRunnerForTest(null);
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it("handleCallbackQuery handles dedup callbacks (apply_dedup_confirm, cancel_dedup, rescan_dedup)", async () => {
+    const answeredQueries: any[] = [];
+    const sentMessages: any[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("answerCallbackQuery")) {
+        answeredQueries.push(JSON.parse(init?.body || "{}"));
+        return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+      }
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        sentMessages.push(JSON.parse(init?.body || "{}"));
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 2001 } }), { status: 200 });
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    setDuplicateCleanerRunnerForTest(async (options) => ({
+      timestamp: new Date().toISOString(),
+      dryRun: options.apply ? false : true,
+      totalBooksScanned: 120,
+      duplicateGroupsCount: options.apply ? 1 : 0,
+      totalDuplicatesFound: options.apply ? 1 : 0,
+      totalPruned: options.apply ? 1 : 0,
+      auditLogPath: options.apply ? "data/duplicate-pruning-audit.log" : undefined,
+      groups: [],
+      errors: [],
+    }));
+
+    try {
+      // 1. apply_dedup_confirm prompt
+      await handleCallbackQuery({
+        id: "cq_confirm",
+        data: "apply_dedup_confirm",
+        message: { chat: { id: 889900 }, message_id: 555 },
+        from: { username: "tester", id: 889900 },
+      });
+      expect(answeredQueries.some(q => q.callback_query_id === "cq_confirm")).toBe(true);
+      const confirmPromptMsg = sentMessages.find(m => m.text?.includes("Confirm Duplicate Pruning"));
+      expect(confirmPromptMsg).toBeDefined();
+      expect(confirmPromptMsg.reply_markup.inline_keyboard[0][0].callback_data).toBe("apply_dedup_confirmed");
+      expect(confirmPromptMsg.reply_markup.inline_keyboard[0][1].callback_data).toBe("cancel_dedup");
+
+      // 2. cancel_dedup
+      sentMessages.length = 0;
+      await handleCallbackQuery({
+        id: "cq_cancel",
+        data: "cancel_dedup",
+        message: { chat: { id: 889900 }, message_id: 555 },
+        from: { username: "tester", id: 889900 },
+      });
+      const cancelMsg = sentMessages.find(m => m.text?.includes("Duplicate pruning cancelled"));
+      expect(cancelMsg).toBeDefined();
+
+      // 3. rescan_dedup
+      sentMessages.length = 0;
+      await handleCallbackQuery({
+        id: "cq_rescan",
+        data: "rescan_dedup",
+        message: { chat: { id: 889900 }, message_id: 555 },
+        from: { username: "tester", id: 889900 },
+      });
+      const rescanMsg = sentMessages.find(m => m.text?.includes("Library is Clean"));
+      expect(rescanMsg).toBeDefined();
+
+      // 4. apply_dedup_confirmed
+      sentMessages.length = 0;
+      await handleCallbackQuery({
+        id: "cq_pruned",
+        data: "apply_dedup_confirmed",
+        message: { chat: { id: 889900 }, message_id: 555 },
+        from: { username: "tester", id: 889900 },
+      });
+      const prunedMsg = sentMessages.find(m => m.text?.includes("Duplicate Pruning Complete"));
+      expect(prunedMsg).toBeDefined();
+      expect(prunedMsg.text).toContain("Duplicate Books Pruned:* 1");
+    } finally {
+      setDuplicateCleanerRunnerForTest(null);
+      globalThis.fetch = origFetch;
+    }
+  });
+});
