@@ -1,9 +1,16 @@
 import { describe, it, expect } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   isLnoriUrl,
   parseLnoriUrl,
   extractManifestFromHtml,
   parseVolumeAppData,
+  MAX_EPUB_BYTES,
+  streamResponseToFile,
+  validateDownloadedEpub,
+  validateLnoriBookId,
   type ParsedLnoriUrl,
 } from "./lnori";
 
@@ -308,6 +315,44 @@ describe("Lnori Light Novel Ingestion Module", () => {
         </script>
       `;
       expect(parseVolumeAppData(mockHtmlWithoutEpub)).toBeNull();
+    });
+  });
+
+  describe("Security and resource bounds", () => {
+    it("rejects non-numeric Lnori book IDs", () => {
+      expect(() => validateLnoriBookId("23021")).not.toThrow();
+      expect(() => validateLnoriBookId("23021/../../escape")).toThrow(
+        "Invalid non-numeric book ID",
+      );
+    });
+
+    it("aborts and removes files that exceed the configured byte cap", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "oversized.epub");
+      try {
+        const response = new Response(new Uint8Array(5));
+        await expect(
+          streamResponseToFile(response, destPath, 4, "Test EPUB"),
+        ).rejects.toThrow("Test EPUB exceeds maximum size of 4 bytes");
+        expect(fs.existsSync(destPath)).toBe(false);
+        expect(MAX_EPUB_BYTES).toBe(256 * 1024 * 1024);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("throws validation errors and unlinks invalid EPUB files", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "invalid.epub");
+      await fs.promises.writeFile(destPath, "not an epub");
+      try {
+        expect(() => validateDownloadedEpub(destPath)).toThrow(
+          "Downloaded EPUB failed validation: File size too small for a valid EPUB",
+        );
+        expect(fs.existsSync(destPath)).toBe(false);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
     });
   });
 

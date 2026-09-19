@@ -3320,7 +3320,7 @@ async function pollTelegram() {
                   `Detected Lnori light novel URL in message: "${articleUrl}" from ${sender}`,
                 );
                 const initialStatus =
-                  `📖 *Detected Lnori Light Novel Series*\n\`${articleUrl}\`\n\n` +
+                  `📖 *Detected Lnori Light Novel Series*\n\`${escapeTelegramMarkdown(articleUrl)}\`\n\n` +
                   `⏳ _Fetching volume manifest..._`;
                 const statusMsgId = await sendMessage(
                   chatId,
@@ -3344,10 +3344,10 @@ async function pollTelegram() {
                   if (result.success) {
                     const confirmation =
                       `✅ *Light Novel Series Imported Successfully!*\n\n` +
-                      `📚 *Series:* ${result.seriesTitle}\n` +
-                      `✍️ *Author:* ${result.author}\n` +
-                      `📦 *Volumes Imported:* ${result.importedCount}/${result.totalCount}\n` +
-                      `🏷️ *Tags:* ${result.tags}\n\n` +
+                      `📚 *Series:* ${escapeTelegramMarkdown(result.seriesTitle)}\n` +
+                      `✍️ *Author:* ${escapeTelegramMarkdown(result.author)}\n` +
+                      `📦 *Volumes Imported:* ${escapeTelegramMarkdown(String(result.importedCount))}/${escapeTelegramMarkdown(String(result.totalCount))}\n` +
+                      `🏷️ *Tags:* ${escapeTelegramMarkdown(result.tags)}\n\n` +
                       `_Ready in your library and syncable to KOReader._`;
 
                     await editOrSendMessage(
@@ -3371,7 +3371,7 @@ async function pollTelegram() {
                       chatId,
                       statusMsgId,
                       `⚠️ *Lnori Ingestion Incomplete*\n\n` +
-                        `🔗 *URL:* \`${articleUrl}\`\n` +
+                        `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
                         `❌ *Error:* No volumes could be imported from Lnori.\n\n` +
                         `_Please verify the link and try again._`,
                       "Markdown",
@@ -3385,8 +3385,8 @@ async function pollTelegram() {
                     chatId,
                     statusMsgId,
                     `⚠️ *Lnori Ingestion Failed*\n\n` +
-                      `🔗 *URL:* \`${articleUrl}\`\n` +
-                      `❌ *Error:* ${err.message || "Failed to import Lnori series"}\n\n` +
+                      `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
+                      `❌ *Error:* ${escapeTelegramMarkdown(err.message || "Failed to import Lnori series")}\n\n` +
                       `_Please verify the link is accessible and try again._`,
                     "Markdown",
                   );

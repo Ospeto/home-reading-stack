@@ -2,16 +2,144 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import { validateEpubContent, safeFetchWithSsrf } from "./security";
 
 const PROXY_URL = "http://127.0.0.1:7890";
+export const MAX_EPUB_BYTES = 256 * 1024 * 1024;
+export const MAX_COVER_BYTES = 16 * 1024 * 1024;
+export const MAX_HTML_BYTES = 8 * 1024 * 1024;
+export const MAX_VOLUMES_PER_REQUEST = 50;
+const SUBPROCESS_TIMEOUT_MS = 60_000;
+const SUBPROCESS_MAX_BUFFER = 16 * 1024 * 1024;
+
+export function escapeTelegramMarkdown(text: string): string {
+  if (!text) return "";
+  return text.replace(/([_*`[\]\\])/g, "\\$1");
+}
+
+function throwOnSubprocessTimeout(
+  result: { error?: { code?: string; message?: string } },
+  command: string,
+): void {
+  if (result.error?.code === "ETIMEDOUT") {
+    throw new Error(`${command} timed out after ${SUBPROCESS_TIMEOUT_MS}ms`);
+  }
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // The response is already being discarded.
+  }
+}
+
+export async function streamResponseToFile(
+  response: Response,
+  destPath: string,
+  maxBytes: number,
+  label: string,
+  onProgress?: (progressPercent: number) => void,
+): Promise<void> {
+  const contentLength = response.headers.get("content-length");
+  const declaredLength = contentLength ? Number.parseInt(contentLength, 10) : NaN;
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    await cancelResponseBody(response);
+    await fs.promises.rm(destPath, { force: true });
+    throw new Error(`${label} exceeds maximum size of ${maxBytes} bytes`);
+  }
+
+  if (!response.body) {
+    await fs.promises.rm(destPath, { force: true });
+    throw new Error(`${label} response contained no body`);
+  }
+
+  let receivedBytes = 0;
+  let file: fs.promises.FileHandle | undefined;
+  try {
+    file = await fs.promises.open(destPath, "w");
+    for await (const chunk of response.body as AsyncIterable<Uint8Array>) {
+      const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+      receivedBytes += bytes.byteLength;
+      if (receivedBytes > maxBytes) {
+        await cancelResponseBody(response);
+        throw new Error(`${label} exceeds maximum size of ${maxBytes} bytes`);
+      }
+      await file.write(bytes);
+      if (onProgress && declaredLength > 0) {
+        onProgress(Math.min(100, Math.round((receivedBytes / declaredLength) * 100)));
+      }
+    }
+  } catch (err) {
+    await fs.promises.rm(destPath, { force: true });
+    throw err;
+  } finally {
+    await file?.close();
+  }
+}
+
+export async function readResponseTextWithLimit(
+  response: Response,
+  maxBytes: number,
+  label: string,
+): Promise<string> {
+  const contentLength = response.headers.get("content-length");
+  const declaredLength = contentLength ? Number.parseInt(contentLength, 10) : NaN;
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    await cancelResponseBody(response);
+    throw new Error(`${label} exceeds maximum size of ${maxBytes} bytes`);
+  }
+  if (!response.body) throw new Error(`${label} response contained no body`);
+
+  const chunks: Uint8Array[] = [];
+  let receivedBytes = 0;
+  try {
+    for await (const chunk of response.body as AsyncIterable<Uint8Array>) {
+      const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+      receivedBytes += bytes.byteLength;
+      if (receivedBytes > maxBytes) {
+        await cancelResponseBody(response);
+        throw new Error(`${label} exceeds maximum size of ${maxBytes} bytes`);
+      }
+      chunks.push(bytes);
+    }
+  } catch (err) {
+    await cancelResponseBody(response);
+    throw err;
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8");
+}
+
+export function validateLnoriBookId(bookId: unknown): string {
+  if (!/^[0-9]+$/.test(String(bookId))) throw new Error("Invalid non-numeric book ID");
+  return String(bookId);
+}
+
+export function validateDownloadedEpub(destPath: string): void {
+  const validation = validateEpubContent(destPath) as { valid?: boolean; isValid?: boolean; error?: string };
+  const isValid = validation.valid ?? validation.isValid ?? false;
+  if (!isValid) {
+    try {
+      fs.unlinkSync(destPath);
+    } catch {
+      // Preserve the validation error if the file was already removed.
+    }
+    throw new Error(`Downloaded EPUB failed validation: ${validation.error || "invalid EPUB"}`);
+  }
+}
 const SERVER_URL = "http://127.0.0.1:8088";
 const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 export function getCalibredbPath(): string {
   if (process.env.CALIBREDB_PATH) return process.env.CALIBREDB_PATH;
-  const probe = spawnSync("which", ["calibredb"], { encoding: "utf8" });
+  const probe = spawnSync("which", ["calibredb"], {
+    encoding: "utf8",
+    timeout: SUBPROCESS_TIMEOUT_MS,
+    maxBuffer: SUBPROCESS_MAX_BUFFER,
+  });
+  throwOnSubprocessTimeout(probe, "which calibredb");
   if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
   const candidates = [
     "/opt/homebrew/bin/calibredb",
@@ -27,7 +155,12 @@ export function getCalibredbPath(): string {
 
 export function getSipsPath(): string {
   if (process.env.SIPS_PATH) return process.env.SIPS_PATH;
-  const probe = spawnSync("which", ["sips"], { encoding: "utf8" });
+  const probe = spawnSync("which", ["sips"], {
+    encoding: "utf8",
+    timeout: SUBPROCESS_TIMEOUT_MS,
+    maxBuffer: SUBPROCESS_MAX_BUFFER,
+  });
+  throwOnSubprocessTimeout(probe, "which sips");
   if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
   if (fs.existsSync("/usr/bin/sips")) return "/usr/bin/sips";
   return "sips";
@@ -41,12 +174,18 @@ export function runCalibredb(args: string[]): { status: number | null; stdout: s
   delete env.https_proxy;
   delete env.ALL_PROXY;
   delete env.all_proxy;
-  env.PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
+  env.PATH = `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${env.PATH || ""}`;
 
   const res = spawnSync(getCalibredbPath(), args, {
     encoding: "utf8",
     env,
+    timeout: SUBPROCESS_TIMEOUT_MS,
+    maxBuffer: SUBPROCESS_MAX_BUFFER,
   });
+  throwOnSubprocessTimeout(res, "calibredb");
+  if (res.error) {
+    throw new Error(`Failed to run calibredb: ${res.error.message}`);
+  }
 
   return {
     status: res.status,
@@ -229,8 +368,6 @@ export function extractManifestFromHtml(
   } else {
     // Book URL: treat as 1-volume series
     let bookName = "";
-    let epubFilename = "";
-    let seriesSlug = "";
 
     const data = appData || schemaData;
     if (data) {
@@ -251,12 +388,6 @@ export function extractManifestFromHtml(
         for (const prop of data.additionalProperty) {
           if (prop.name === "series_title" && prop.value) {
             seriesTitle = prop.value;
-          }
-          if (prop.name === "series_slug" && prop.value) {
-            seriesSlug = prop.value;
-          }
-          if (prop.name === "epub_filename" && prop.value) {
-            epubFilename = prop.value;
           }
         }
       }
@@ -330,7 +461,7 @@ export function parseVolumeAppData(html: string, fallbackBookId?: string): Lnori
 
     // Infer volume number from book name, epub filename, or part
     let volumeNumber: number | undefined;
-    const volMatch = (name + " " + epubFilename).match(
+    const volMatch = `${name} ${epubFilename}`.match(
       /(?:vol(?:ume)?\.?|#)\s*([0-9]+(?:\.[0-9]+)?)/i,
     );
     if (volMatch) {
@@ -366,7 +497,7 @@ export async function fetchLnoriHtml(targetUrl: string): Promise<string> {
       proxy: PROXY_URL,
       signal: AbortSignal.timeout(30000),
     } as any);
-  } catch (err: any) {
+  } catch {
     // If proxy failed or threw, retry without proxy
     res = await safeFetchWithSsrf(targetUrl, {
       headers: {
@@ -400,7 +531,7 @@ export async function fetchLnoriHtml(targetUrl: string): Promise<string> {
           } as any);
         }
         if (sRes.ok) {
-          const xml = await sRes.text();
+          const xml = await readResponseTextWithLimit(sRes, MAX_HTML_BYTES, "Lnori sitemap");
           const regex = new RegExp(
             `<loc>(https://lnori\\.com/${parsed.type}/${parsed.id}[^<]*)</loc>`,
             "i",
@@ -421,7 +552,7 @@ export async function fetchLnoriHtml(targetUrl: string): Promise<string> {
     throw new Error(`Failed to fetch Lnori URL (${res.status}): ${targetUrl}`);
   }
 
-  return await res.text();
+  return await readResponseTextWithLimit(res, MAX_HTML_BYTES, "Lnori HTML");
 }
 
 export async function downloadLnoriEpub(
@@ -456,33 +587,33 @@ export async function downloadLnoriEpub(
     );
   }
 
-  const arrayBuf = await res.arrayBuffer();
-  fs.writeFileSync(destPath, Buffer.from(arrayBuf));
-
-  // Verify ZIP integrity
-  const validation = validateEpubContent(destPath);
-  if (!validation.isValid) {
-    // Also try unzip -tq
-    const unzipProbe = spawnSync("unzip", ["-tq", destPath], { encoding: "utf8" });
-    if (unzipProbe.status !== 0) {
-      if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
-      throw new Error(
-        `Downloaded EPUB failed integrity verification: ${validation.error || unzipProbe.stderr || "Corrupted ZIP"}`,
-      );
-    }
+  try {
+    await streamResponseToFile(
+      res,
+      destPath,
+      MAX_EPUB_BYTES,
+      "Downloaded EPUB",
+      onProgress,
+    );
+    validateDownloadedEpub(destPath);
+  } catch (err) {
+    await fs.promises.rm(destPath, { force: true });
+    throw err;
   }
 }
 
 export async function fetchAndConvertCover(
   lnoriBookId: string,
   fallbackCoverUrl?: string,
+  workDir?: string,
 ): Promise<string | null> {
-  const tempDir = os.tmpdir();
-  const rawCoverPath = path.join(tempDir, `lnori_cover_${lnoriBookId}_${Date.now()}.raw`);
-  const jpegCoverPath = path.join(tempDir, `lnori_cover_${lnoriBookId}_${Date.now()}.jpg`);
+  const bookId = validateLnoriBookId(lnoriBookId);
+  const coverDir = workDir || (await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-cover-")));
+  const rawCoverPath = path.join(coverDir, "cover.raw");
+  const jpegCoverPath = path.join(coverDir, "cover.jpg");
 
   const urlsToTry = [
-    `https://cdn.lnori.com/cover/${lnoriBookId}.webp`,
+    `https://cdn.lnori.com/cover/${bookId}.webp`,
     fallbackCoverUrl,
   ].filter(Boolean) as string[];
 
@@ -510,8 +641,7 @@ export async function fetchAndConvertCover(
       }
 
       if (res.ok) {
-        const buf = await res.arrayBuffer();
-        fs.writeFileSync(rawCoverPath, Buffer.from(buf));
+        await streamResponseToFile(res, rawCoverPath, MAX_COVER_BYTES, "Lnori cover");
         downloaded = true;
         break;
       }
@@ -521,28 +651,33 @@ export async function fetchAndConvertCover(
   }
 
   if (!downloaded || !fs.existsSync(rawCoverPath)) {
+    if (!workDir) await fs.promises.rm(coverDir, { recursive: true, force: true });
     return null;
   }
 
-  // Convert to JPEG via sips -s format jpeg
-  const sipsBin = getSipsPath();
-  const sipsRes = spawnSync(
-    sipsBin,
-    ["-s", "format", "jpeg", rawCoverPath, "--out", jpegCoverPath],
-    { encoding: "utf8" },
-  );
+  try {
+    const sipsBin = getSipsPath();
+    const sipsRes = spawnSync(
+      sipsBin,
+      ["-s", "format", "jpeg", rawCoverPath, "--out", jpegCoverPath],
+      {
+        encoding: "utf8",
+        timeout: SUBPROCESS_TIMEOUT_MS,
+        maxBuffer: SUBPROCESS_MAX_BUFFER,
+      },
+    );
+    throwOnSubprocessTimeout(sipsRes, "sips");
+    if (sipsRes.error) {
+      throw new Error(`Failed to run sips: ${sipsRes.error.message}`);
+    }
 
-  if (fs.existsSync(rawCoverPath)) {
-    try {
-      fs.unlinkSync(rawCoverPath);
-    } catch {}
+    if (sipsRes.status === 0 && fs.existsSync(jpegCoverPath)) {
+      return jpegCoverPath;
+    }
+    return null;
+  } finally {
+    await fs.promises.rm(rawCoverPath, { force: true });
   }
-
-  if (sipsRes.status === 0 && fs.existsSync(jpegCoverPath)) {
-    return jpegCoverPath;
-  }
-
-  return null;
 }
 
 export interface IngestLnoriResult {
@@ -575,14 +710,20 @@ export async function ingestLnoriSeries(
   if (manifest.volumePaths.length === 0) {
     throw new Error(`No volumes found in Lnori ${manifest.type} manifest for: ${url}`);
   }
+  if (manifest.volumePaths.length > MAX_VOLUMES_PER_REQUEST) {
+    throw new Error(
+      `Lnori manifest contains ${manifest.volumePaths.length} volumes; maximum allowed is ${MAX_VOLUMES_PER_REQUEST} per request`,
+    );
+  }
 
   const totalCount = manifest.volumePaths.length;
   let importedCount = 0;
   const calibreBookIds: number[] = [];
 
-  const tempDir = os.tmpdir();
+  const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-"));
 
-  for (let idx = 0; idx < totalCount; idx++) {
+  try {
+    for (let idx = 0; idx < totalCount; idx++) {
     const volPath = manifest.volumePaths[idx];
     const fullVolUrl = volPath.startsWith("http")
       ? volPath
@@ -591,7 +732,7 @@ export async function ingestLnoriSeries(
 
     if (onProgress) {
       await onProgress(
-        `⏳ _[Volume ${volNum}/${totalCount}] Inspecting volume metadata..._\n\`${fullVolUrl}\``,
+        `⏳ _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Inspecting volume metadata..._\n\`${escapeTelegramMarkdown(fullVolUrl)}\``,
       );
     }
 
@@ -609,25 +750,23 @@ export async function ingestLnoriSeries(
       continue;
     }
 
+    const bookId = validateLnoriBookId(volMeta.bookId);
     const assignedIndex = volMeta.volumeNumber === undefined ? volNum : volMeta.volumeNumber;
 
     if (onProgress) {
       await onProgress(
-        `⬇️ _[Volume ${volNum}/${totalCount}] Downloading EPUB..._\n*${volMeta.epubFilename}*`,
+        `⬇️ _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Downloading EPUB..._\n*${escapeTelegramMarkdown(volMeta.epubFilename)}*`,
       );
     }
 
-    const tempEpubPath = path.join(
-      tempDir,
-      `lnori_${volMeta.bookId || Date.now()}_vol${volNum}.epub`,
-    );
+    const tempEpubPath = path.join(workDir, `volume-${volNum}.epub`);
 
     try {
       await downloadLnoriEpub(volMeta.epubFilename, tempEpubPath);
 
       if (onProgress) {
         await onProgress(
-          `📦 _[Volume ${volNum}/${totalCount}] Ingesting into Calibre library..._\n*Volume ${assignedIndex}*`,
+          `📦 _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Ingesting into Calibre library..._\n*Volume ${escapeTelegramMarkdown(String(assignedIndex))}*`,
         );
       }
 
@@ -681,7 +820,7 @@ export async function ingestLnoriSeries(
       // Download and convert master cover art
       let coverPath: string | null = null;
       try {
-        coverPath = await fetchAndConvertCover(volMeta.bookId, volMeta.coverImageUrl);
+        coverPath = await fetchAndConvertCover(bookId, volMeta.coverImageUrl, workDir);
         if (coverPath && fs.existsSync(coverPath)) {
           setArgs.push("--field", `cover:${coverPath}`);
         }
@@ -710,6 +849,9 @@ export async function ingestLnoriSeries(
         } catch {}
       }
     }
+    }
+  } finally {
+    await fs.promises.rm(workDir, { recursive: true, force: true });
   }
 
   const tagsFormatted = ["Light Novel", ...manifest.tags].join(", ");
