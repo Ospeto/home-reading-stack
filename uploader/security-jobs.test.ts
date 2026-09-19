@@ -1074,6 +1074,51 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
       } finally {
         if (fs.existsSync(testPathE)) fs.unlinkSync(testPathE);
       }
+
+      // Case F: container.xml has trailing unparsed tag fragment (<container>...</container><broken)
+      const trailingBrokenContainerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container><broken',
+      );
+      const trailingBrokenContainerPart = buildSyntheticZipEntry(
+        "META-INF/container.xml",
+        trailingBrokenContainerXml,
+        8,
+        zlib.deflateRawSync(trailingBrokenContainerXml),
+      );
+      const validOpfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const validOpfPart = buildSyntheticZipEntry(
+        "OEBPS/content.opf",
+        validOpfXml,
+        8,
+        zlib.deflateRawSync(validOpfXml),
+      );
+      const testPathF = path.join("/tmp", `trailing_broken_container_${Date.now()}.epub`);
+      fs.writeFileSync(testPathF, Buffer.concat([mimePart, trailingBrokenContainerPart, validOpfPart]));
+      try {
+        expect(repairTruncatedEpub(testPathF)).toBe(false);
+      } finally {
+        if (fs.existsSync(testPathF)) fs.unlinkSync(testPathF);
+      }
+
+      // Case G: OPF XML has trailing unparsed tag fragment (<package>...</package><broken)
+      const trailingBrokenOpfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package><broken',
+      );
+      const trailingBrokenOpfPart = buildSyntheticZipEntry(
+        "OEBPS/content.opf",
+        trailingBrokenOpfXml,
+        8,
+        zlib.deflateRawSync(trailingBrokenOpfXml),
+      );
+      const testPathG = path.join("/tmp", `trailing_broken_opf_${Date.now()}.epub`);
+      fs.writeFileSync(testPathG, Buffer.concat([mimePart, validContainerPart, trailingBrokenOpfPart]));
+      try {
+        expect(repairTruncatedEpub(testPathG)).toBe(false);
+      } finally {
+        if (fs.existsSync(testPathG)) fs.unlinkSync(testPathG);
+      }
     });
 
     it("preserves original file untouched when candidate validation fails", () => {
@@ -1137,6 +1182,45 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
 
         expect(res).toBe(false);
         expect(elapsed).toBeLessThan(50); // Under 50ms bound
+      } finally {
+        if (fs.existsSync(testPath)) fs.unlinkSync(testPath);
+      }
+    });
+
+    it("bounds marker-dense 64MB repeated PK input search to <50ms with probe cap", () => {
+      // Create local header with bit 3 set, followed by repeated PK bytes (adversarial dense pattern)
+      const h = Buffer.alloc(30 + 8);
+      h.writeUInt32LE(0x04034b50, 0);
+      h.writeUInt16LE(20, 4);
+      h.writeUInt16LE(0x0008, 6); // flag bit 3 set
+      h.writeUInt16LE(8, 8);
+      h.writeUInt16LE(0, 10);
+      h.writeUInt16LE(0, 12);
+      h.writeUInt32LE(0, 14);
+      h.writeUInt32LE(0, 18); // compSize = 0
+      h.writeUInt32LE(0, 22); // uncompSize = 0
+      h.writeUInt16LE(8, 26);
+      h.writeUInt16LE(0, 28);
+      Buffer.from("test.txt").copy(h, 30);
+
+      // Create 64MB file with dense PK markers: repeated [0x50, 0x4b, 0x00, 0x00]
+      const densePkBuf = Buffer.alloc(64 * 1024 * 1024);
+      h.copy(densePkBuf, 0);
+      for (let i = 38; i < densePkBuf.length; i += 4) {
+        densePkBuf[i] = 0x50;
+        densePkBuf[i + 1] = 0x4b;
+      }
+
+      const testPath = path.join("/tmp", `dense_pk_${Date.now()}.epub`);
+      fs.writeFileSync(testPath, densePkBuf);
+
+      try {
+        const start = performance.now();
+        const res = repairTruncatedEpub(testPath);
+        const elapsed = performance.now() - start;
+
+        expect(res).toBe(false);
+        expect(elapsed).toBeLessThan(50); // Under 50ms bound guaranteed by MAX_DESCRIPTOR_PROBES = 128
       } finally {
         if (fs.existsSync(testPath)) fs.unlinkSync(testPath);
       }

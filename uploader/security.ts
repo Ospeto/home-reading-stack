@@ -1150,71 +1150,167 @@ const MAX_COMPRESSION_RATIO = 100; // 100:1
 const PK_MAGIC = Buffer.from([0x50, 0x4b]);
 
 /**
- * Strict well-formed XML parser in pure TypeScript.
+ * Strict well-formed XML parser in pure TypeScript with full-input cursor tracking.
+ * - Tracks a position cursor from 0 to text.length.
+ * - Verifies that all characters outside tags are valid whitespace/text and contain no unparsed '<'.
+ * - Validates attribute tokens strictly (requires name="value" or name='value'; rejects unquoted/malformed tokens).
  * - Enforces balanced, closed tags (rejects unclosed elements like '<container><rootfile></container>').
- * - Parses tag attributes and builds a DOM tree.
- * - Rejects multiple roots, mismatched closing tags, or invalid tag syntax.
+ * - Returns null if the cursor does not consume the entire input (e.g. trailing '<' or '<broken').
  */
 export function parseStrictXml(xmlStr: string): XmlElement | null {
   if (!xmlStr || typeof xmlStr !== "string") return null;
 
-  // Strip XML declarations, comments, CDATA, and DOCTYPE before tag validation
-  let src = xmlStr.replace(/<\?xml\b[^>]*\?>/gi, "");
+  // Strip well-formed XML declarations, comments, CDATA, and DOCTYPE before tag parsing
+  let src = xmlStr.replace(/<\?xml\b[\s\S]*?\?>/gi, "");
   src = src.replace(/<!--[\s\S]*?-->/g, "");
   src = src.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "");
-  src = src.replace(/<!DOCTYPE\b[^>]*>/gi, "");
+  src = src.replace(/<!DOCTYPE\b[\s\S]*?>/gi, "");
 
-  const tagRegex = /<(\/)?([a-zA-Z0-9_:.-]+)([^>]*?)(\/)?>/g;
   const stack: XmlElement[] = [];
   let root: XmlElement | null = null;
-  let match: RegExpExecArray | null;
+  let cursor = 0;
 
-  while ((match = tagRegex.exec(src)) !== null) {
-    const isClosing = Boolean(match[1]);
-    const tagName = match[2];
-    const rawAttrs = match[3];
-    const isSelfClosing = Boolean(match[4]);
-
-    if (isClosing) {
-      if (isSelfClosing) return null; // Invalid: </tag/>
-      if (rawAttrs.trim().length > 0) return null; // Invalid: </tag attr="val">
-      if (stack.length === 0) return null; // Unbalanced closing tag
-
-      const top = stack.pop()!;
-      if (top.name !== tagName && top.name.toLowerCase() !== tagName.toLowerCase()) {
-        return null; // Mismatched tag nesting: e.g. <rootfile>...</container>
+  while (cursor < src.length) {
+    const nextLt = src.indexOf("<", cursor);
+    if (nextLt === -1) {
+      // No more tags. Check remainder for valid whitespace/text outside tags.
+      const remaining = src.slice(cursor);
+      if (stack.length === 0 && root !== null && remaining.trim().length > 0) {
+        return null; // Non-whitespace trailing text after root element
       }
-    } else {
-      const attributes: Record<string, string> = {};
-      const attrRegex = /([a-zA-Z0-9_:.-]+)\s*=\s*(["'])([\s\S]*?)\2/g;
-      let attrMatch: RegExpExecArray | null;
-      while ((attrMatch = attrRegex.exec(rawAttrs)) !== null) {
-        attributes[attrMatch[1]] = attrMatch[3];
+      cursor = src.length;
+      break;
+    }
+
+    // Outside root element, only whitespace is allowed before opening tag
+    const textBetween = src.slice(cursor, nextLt);
+    if (stack.length === 0 && textBetween.trim().length > 0) {
+      return null;
+    }
+
+    const nextGt = src.indexOf(">", nextLt);
+    if (nextGt === -1) {
+      // Malformed: unclosed '<...' without '>'
+      return null;
+    }
+
+    const inner = src.slice(nextLt + 1, nextGt);
+    if (inner.includes("<")) {
+      // Malformed tag containing nested '<'
+      return null;
+    }
+
+    const tagContent = inner.trim();
+    if (tagContent.length === 0) {
+      return null; // Empty tag: <>
+    }
+
+    cursor = nextGt + 1;
+
+    // Closing tag: </tagName>
+    if (tagContent.startsWith("/")) {
+      const closingName = tagContent.slice(1).trim();
+      if (!/^[a-zA-Z0-9_:.-]+$/.test(closingName)) {
+        return null; // Invalid tag name or attributes in closing tag
       }
-
-      const element: XmlElement = {
-        name: tagName,
-        attributes,
-        children: [],
-      };
-
       if (stack.length === 0) {
-        if (root !== null) {
-          return null; // Multiple root elements
-        }
-        root = element;
-      } else {
-        stack[stack.length - 1].children.push(element);
+        return null; // Unbalanced closing tag
       }
+      const top = stack.pop()!;
+      if (top.name.toLowerCase() !== closingName.toLowerCase()) {
+        return null; // Mismatched tag nesting
+      }
+      continue;
+    }
 
-      if (!isSelfClosing) {
-        stack.push(element);
+    // Opening or self-closing tag
+    let isSelfClosing = false;
+    let body = tagContent;
+    if (body.endsWith("/")) {
+      isSelfClosing = true;
+      body = body.slice(0, -1).trim();
+    }
+
+    const spaceIdx = body.search(/\s/);
+    let tagName = "";
+    let rawAttrs = "";
+    if (spaceIdx === -1) {
+      tagName = body;
+    } else {
+      tagName = body.slice(0, spaceIdx);
+      rawAttrs = body.slice(spaceIdx).trim();
+    }
+
+    if (!/^[a-zA-Z0-9_:.-]+$/.test(tagName)) {
+      return null; // Invalid tag name
+    }
+
+    // Strictly validate all attribute tokens (must be name="value" or name='value')
+    const attributes: Record<string, string> = {};
+    if (rawAttrs.length > 0) {
+      let attrPos = 0;
+      while (attrPos < rawAttrs.length) {
+        while (attrPos < rawAttrs.length && /\s/.test(rawAttrs[attrPos])) {
+          attrPos++;
+        }
+        if (attrPos >= rawAttrs.length) break;
+
+        const eqIdx = rawAttrs.indexOf("=", attrPos);
+        if (eqIdx === -1) {
+          return null; // Malformed attribute: missing '='
+        }
+
+        const attrName = rawAttrs.slice(attrPos, eqIdx).trim();
+        if (!/^[a-zA-Z0-9_:.-]+$/.test(attrName)) {
+          return null; // Invalid attribute identifier
+        }
+
+        let valStart = eqIdx + 1;
+        while (valStart < rawAttrs.length && /\s/.test(rawAttrs[valStart])) {
+          valStart++;
+        }
+        if (valStart >= rawAttrs.length) {
+          return null; // Missing attribute value
+        }
+
+        const quote = rawAttrs[valStart];
+        if (quote !== '"' && quote !== "'") {
+          return null; // Unquoted attribute value
+        }
+
+        const valEnd = rawAttrs.indexOf(quote, valStart + 1);
+        if (valEnd === -1) {
+          return null; // Unclosed attribute quote
+        }
+
+        attributes[attrName] = rawAttrs.slice(valStart + 1, valEnd);
+        attrPos = valEnd + 1;
       }
+    }
+
+    const element: XmlElement = {
+      name: tagName,
+      attributes,
+      children: [],
+    };
+
+    if (stack.length === 0) {
+      if (root !== null) {
+        return null; // Multiple root elements
+      }
+      root = element;
+    } else {
+      stack[stack.length - 1].children.push(element);
+    }
+
+    if (!isSelfClosing) {
+      stack.push(element);
     }
   }
 
-  if (stack.length > 0) {
-    return null; // Unclosed tags remaining on stack
+  // Full-input consumption check: stack must be empty and root element present
+  if (stack.length > 0 || root === null || cursor < src.length) {
+    return null;
   }
 
   return root;
@@ -1495,11 +1591,14 @@ export function repairTruncatedEpub(filePath: string): boolean {
       if ((flags & 0x0008) !== 0) {
         if (compSize === 0) {
           const scanLimit = Math.min(buf.length, dataOffset + MAX_DESCRIPTOR_SCAN_WINDOW);
+          const MAX_DESCRIPTOR_PROBES = 128;
+          let probes = 0;
           let p = dataOffset;
           let foundDescriptor = false;
           while (p + 4 <= scanLimit) {
             const nextPk = buf.indexOf(PK_MAGIC, p);
             if (nextPk === -1 || nextPk + 4 > scanLimit) break;
+            if (++probes > MAX_DESCRIPTOR_PROBES) break;
             const descSig = buf.readUInt32LE(nextPk);
             if (descSig === 0x08074b50 && nextPk + 16 <= buf.length) {
               compSize = nextPk - dataOffset;
