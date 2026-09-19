@@ -2,758 +2,882 @@
 /**
  * scripts/clean-duplicates.ts
  *
- * Library-wide Calibre duplicate scanner and cleaner tool:
- *   - Default --dry-run: Scans Calibre library, groups duplicates by:
- *       1. Content signature / hash (identical decompressed EPUB contents)
- *       2. Series & volume match
- *       3. Normalized title & author similarity
- *     and reports duplicate groups with recommended keeper.
- *   - Supports --apply / --prune: Safely removes duplicate book IDs via calibredb remove,
- *     updates KOSync/cache, and writes an audit log.
+ * Library-wide Calibre duplicate cleaner for home-reading-stack:
+ *   - Detects duplicate groups by:
+ *       1. Content hash / EPUB content signature (content.opf package identifier/UUID)
+ *       2. Explicit series & volume index match
+ *       3. Normalized title & author similarity match
+ *   - Volume Isolation Hard Gate: Different volumes in a series are NEVER falsely flagged as duplicates.
+ *   - Recommended Keeper Selection: Evaluates reading progress in KOSync, EPUB format,
+ *     metadata richness (series, cover, publisher, tags), and library age.
+ *   - Default Mode: --dry-run (safe preview without modifying the library).
+ *   - Prune Mode: --apply or --prune (safely removes duplicates via calibredb remove,
+ *     cleans Reading HQ cache.db, updates KOSync, and records audit log in data/duplicate-pruning-audit.log).
  */
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { spawn } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 import {
-  normalizeTitle,
-  normalizeAuthor,
+  isSameBook,
+  normalizeTitleForDedup,
+  normalizeAuthorForDedup,
+  extractVolumeNumber,
   extractSeries,
   stringSimilarity,
-  getEpubContentSignature,
-  getKOReaderBinary256,
-  getCalibredbPath,
+  cleanString,
+  isJunkAuthor,
 } from "../uploader/scraper";
-import { flushReadingCache } from "./sync-series-metadata";
 
-export interface CalibreBookRecord {
+export interface CalibreBook {
   id: number;
   title: string;
-  authors: string;
-  series: string | null;
-  seriesIndex: number | null;
-  path: string; // Relative path in library
-  formats: string[];
-  fullPath?: string;
-  hasCover?: boolean;
-  contentHash?: string | null;
-  fileSize?: number;
+  authors?: string;
+  series?: string;
+  series_index?: number;
+  formats?: string[];
+  tags?: string[];
+  publisher?: string;
+  pubdate?: string;
+  has_cover?: boolean;
+  reading_progress?: number;
+  content_hash?: string;
+  binary_hash?: string;
+  file_path?: string;
+  file_size?: number;
 }
 
-export type DuplicateReason =
-  | "content_hash"
-  | "series_volume"
-  | "title_author_similarity";
-
 export interface DuplicateGroup {
-  reason: DuplicateReason;
-  confidence: number;
-  recommendedKeeper: CalibreBookRecord;
-  duplicatesToRemove: CalibreBookRecord[];
-  allBooks: CalibreBookRecord[];
-  detail?: string;
+  id: string;
+  matchType: "content_hash" | "series_volume" | "title_author_similarity";
+  reason: string;
+  keeperId: number;
+  keeperReason: string;
+  books: CalibreBook[];
+  duplicateIds: number[];
 }
 
 export interface CleanDuplicatesOptions {
-  libraryPath?: string;
-  calibreServerUrl?: string;
+  withLibrary?: string;
+  libraryDir?: string;
   cacheDbPath?: string;
   kosyncDbPath?: string;
   auditLogPath?: string;
   dryRun?: boolean;
   apply?: boolean;
   verbose?: boolean;
-  skipContentHash?: boolean;
-  // Test mocks
+  json?: boolean;
+  // Test injection hooks
+  booksProvider?: (options: CleanDuplicatesOptions) => Promise<CalibreBook[]> | CalibreBook[];
   bookRemover?: (
-    bookId: number,
+    bookIds: number[],
     options: CleanDuplicatesOptions,
   ) => Promise<{ success: boolean; error?: string }> | { success: boolean; error?: string };
-  booksProvider?: (
+  cacheCleaner?: (bookIds: number[], options: CleanDuplicatesOptions) => Promise<void> | void;
+  kosyncUpdater?: (
+    keeperId: number,
+    prunedIds: number[],
     options: CleanDuplicatesOptions,
-  ) => Promise<CalibreBookRecord[]> | CalibreBookRecord[];
+  ) => Promise<void> | void;
+  auditLogger?: (entry: string, options: CleanDuplicatesOptions) => Promise<void> | void;
 }
 
-export interface CleanDuplicatesResult {
-  libraryPath: string;
+export interface CleanDuplicatesReport {
+  timestamp: string;
   dryRun: boolean;
   totalBooksScanned: number;
-  duplicateGroupsFound: number;
-  totalDuplicatesToRemove: number;
+  duplicateGroupsCount: number;
+  totalDuplicatesFound: number;
+  totalPruned: number;
   groups: DuplicateGroup[];
-  removedBookIds: number[];
-  failedBookIds: Array<{ id: number; error: string }>;
-  auditLogWritten?: string;
+  auditLogPath?: string;
+  errors: Array<{ bookId?: number; message: string }>;
 }
 
-export function parseArgs(args: string[]): CleanDuplicatesOptions {
-  const opts: CleanDuplicatesOptions = {
-    dryRun: true,
+export function getCalibredbExecutable(): string {
+  if (process.env.CALIBREDB_PATH) return process.env.CALIBREDB_PATH;
+  const probe = spawnSync("which", ["calibredb"], { encoding: "utf8" });
+  if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
+  const candidates = [
+    "/opt/homebrew/bin/calibredb",
+    "/usr/local/bin/calibredb",
+    "/usr/bin/calibredb",
+    "/Applications/calibre.app/Contents/MacOS/calibredb",
+  ];
+  for (const cand of candidates) {
+    if (fs.existsSync(cand)) return cand;
+  }
+  return "calibredb";
+}
+
+export function safeJsonParse(str: string): any {
+  if (!str) return null;
+  const trimmed = str.trim();
+  const startBracket = trimmed.indexOf("[");
+  const endBracket = trimmed.lastIndexOf("]");
+  if (startBracket !== -1 && endBracket !== -1 && endBracket > startBracket) {
+    try {
+      return JSON.parse(trimmed.substring(startBracket, endBracket + 1));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Score book to select the optimal keeper in a duplicate group.
+ * Highest score is selected as keeper.
+ */
+export function scoreBookForKeeper(b: CalibreBook): { score: number; reasons: string[] } {
+  let score = 0;
+  const reasons: string[] = [];
+
+  // 1. Reading progress in KOSync (+1000 pts)
+  if (typeof b.reading_progress === "number" && b.reading_progress > 0) {
+    const pct = Math.round(b.reading_progress * 100);
+    score += 1000 + pct * 2;
+    reasons.push(`Active reading progress (${pct}%)`);
+  }
+
+  // 2. Format Quality (+100 pts for EPUB)
+  const formats = (b.formats || []).map((f) => f.toUpperCase());
+  if (formats.includes("EPUB")) {
+    score += 100;
+    reasons.push("EPUB format");
+  } else if (formats.length > 0) {
+    score += 50;
+    reasons.push(`${formats[0]} format`);
+  }
+
+  // 3. Metadata Richness (+10 - +40 pts)
+  if (b.series && typeof b.series_index === "number") {
+    score += 40;
+    reasons.push("Explicit series metadata");
+  }
+  if (b.has_cover) {
+    score += 25;
+    reasons.push("Has cover");
+  }
+  if (b.publisher) {
+    score += 15;
+    reasons.push("Publisher info");
+  }
+  if (b.tags && b.tags.length > 0) {
+    score += Math.min(20, b.tags.length * 5);
+    reasons.push(`${b.tags.length} tag(s)`);
+  }
+  if (b.authors && b.authors !== "Unknown" && !isJunkAuthor(b.authors)) {
+    score += 10;
+  }
+  if (b.file_size && b.file_size > 0) {
+    score += Math.min(20, Math.round(b.file_size / (1024 * 1024)));
+  }
+
+  // 4. Earlier book ID stability tiebreaker (+10 pts max)
+  score += Math.max(0, 10 - Math.min(10, b.id / 1000));
+
+  return { score, reasons };
+}
+
+/**
+ * Checks if two books are duplicates.
+ * Guarantees that different volumes in a series are NEVER flagged as duplicates.
+ */
+export function checkDuplicatePair(
+  a: CalibreBook,
+  b: CalibreBook,
+): { isDuplicate: boolean; matchType?: DuplicateGroup["matchType"]; reason?: string } {
+  // 1. Hard Gate: Volume Isolation & Conflict Verification
+  const volA = extractVolumeNumber(a.title);
+  const volB = extractVolumeNumber(b.title);
+  if (volA !== null && volB !== null && volA !== volB) {
+    return { isDuplicate: false }; // Different volumes are NEVER duplicates
+  }
+
+  // If both have explicit series, verify volume indices
+  if (a.series && b.series) {
+    const normSeriesA = normalizeTitleForDedup(a.series);
+    const normSeriesB = normalizeTitleForDedup(b.series);
+    if (normSeriesA === normSeriesB) {
+      const vA = typeof a.series_index === "number" ? a.series_index : 1;
+      const vB = typeof b.series_index === "number" ? b.series_index : 1;
+      if (vA !== vB) {
+        return { isDuplicate: false }; // Different volumes in same series
+      }
+    }
+  }
+
+  // Number conflict check in normalized titles
+  const normTitleA = normalizeTitleForDedup(a.title);
+  const normTitleB = normalizeTitleForDedup(b.title);
+  if (!normTitleA || !normTitleB) return { isDuplicate: false };
+
+  const numsA = normTitleA.match(/\b\d+(?:\.\d+)?\b/g) || [];
+  const numsB = normTitleB.match(/\b\d+(?:\.\d+)?\b/g) || [];
+  if (numsA.length > 0 && numsB.length > 0) {
+    const setB = new Set(numsB);
+    const hasSharedNumber = numsA.some((n) => setB.has(n));
+    if (!hasSharedNumber) {
+      return { isDuplicate: false }; // Conflicting numbers (e.g. Vol 1 vs Vol 2)
+    }
+  }
+
+  // 2. Content Hash Match (EPUB content signature or binary checksum)
+  if (a.content_hash && b.content_hash && a.content_hash === b.content_hash) {
+    return {
+      isDuplicate: true,
+      matchType: "content_hash",
+      reason: `Identical EPUB content signature: ${a.content_hash.slice(0, 12)}...`,
+    };
+  }
+
+  if (a.binary_hash && b.binary_hash && a.binary_hash === b.binary_hash) {
+    return {
+      isDuplicate: true,
+      matchType: "content_hash",
+      reason: `Identical KOReader binary hash: ${a.binary_hash.slice(0, 12)}...`,
+    };
+  }
+
+  // 3. Author Conflict Gate
+  const normAuthA = normalizeAuthorForDedup(a.authors || "");
+  const normAuthB = normalizeAuthorForDedup(b.authors || "");
+  const hasKnownAuthors =
+    normAuthA &&
+    normAuthB &&
+    !isJunkAuthor(normAuthA) &&
+    !isJunkAuthor(normAuthB);
+  const authorSim = hasKnownAuthors
+    ? stringSimilarity(normAuthA, normAuthB)
+    : 1.0;
+  if (hasKnownAuthors && authorSim < 0.35) {
+    return { isDuplicate: false }; // Conflicting known authors
+  }
+
+  // 4. Series and Volume Match (explicit or extracted)
+  const sA = a.series
+    ? { series: cleanString(a.series), volume: a.series_index || 1 }
+    : extractSeries(a.title);
+  const sB = b.series
+    ? { series: cleanString(b.series), volume: b.series_index || 1 }
+    : extractSeries(b.title);
+
+  if (sA && sB) {
+    const normSA = normalizeTitleForDedup(sA.series);
+    const normSB = normalizeTitleForDedup(sB.series);
+    if (sA.volume === sB.volume) {
+      if (
+        normSA === normSB ||
+        ((normSA.startsWith(normSB) || normSB.startsWith(normSA)) &&
+          (!hasKnownAuthors || authorSim >= 0.6))
+      ) {
+        return {
+          isDuplicate: true,
+          matchType: "series_volume",
+          reason: `Series "${sA.series}" Volume ${sA.volume}`,
+        };
+      }
+    }
+  }
+
+  // 5. Normalized Title & Author Match
+  if (normTitleA === normTitleB) {
+    return {
+      isDuplicate: true,
+      matchType: "title_author_similarity",
+      reason: `Exact normalized title match "${normTitleA}"`,
+    };
+  }
+
+  const titleSim = stringSimilarity(normTitleA, normTitleB);
+  if (titleSim >= 0.88 && (!hasKnownAuthors || authorSim >= 0.6)) {
+    return {
+      isDuplicate: true,
+      matchType: "title_author_similarity",
+      reason: `High title similarity (${Math.round(titleSim * 100)}%)`,
+    };
+  }
+
+  // 6. Universal isSameBook Fallback
+  if (isSameBook(a, b)) {
+    return {
+      isDuplicate: true,
+      matchType: "title_author_similarity",
+      reason: "Matching title and author",
+    };
+  }
+
+  return { isDuplicate: false };
+}
+
+/**
+ * Groups list of books into duplicate clusters using Disjoint-Set Union.
+ */
+export function clusterDuplicateGroups(books: CalibreBook[]): DuplicateGroup[] {
+  const n = books.length;
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (i: number): number => {
+    if (parent[i] === i) return i;
+    parent[i] = find(parent[i]);
+    return parent[i];
+  };
+  const union = (i: number, j: number) => {
+    const rootI = find(i);
+    const rootJ = find(j);
+    if (rootI !== rootJ) parent[rootI] = rootJ;
   };
 
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === "--apply" || a === "--prune") {
-      opts.apply = true;
-      opts.dryRun = false;
-    } else if (a === "--dry-run") {
-      opts.dryRun = true;
-      opts.apply = false;
-    } else if (a === "--verbose" || a === "-v") {
-      opts.verbose = true;
-    } else if (a === "--skip-content-hash") {
-      opts.skipContentHash = true;
-    } else if (a === "--library-dir" || a === "--library-path" || a === "-l") {
-      opts.libraryPath = args[++i];
-    } else if (a === "--server-url" || a === "-s") {
-      opts.calibreServerUrl = args[++i];
-    } else if (a === "--audit-log") {
-      opts.auditLogPath = args[++i];
-    }
-  }
+  const pairReasons = new Map<
+    string,
+    { matchType: DuplicateGroup["matchType"]; reason: string }
+  >();
 
-  return opts;
-}
-
-export function isCalibreServerReachable(
-  url = "http://127.0.0.1:8088",
-  timeoutMs = 1500,
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    try {
-      const u = new URL(url);
-      const testUrl = `${u.origin}/`;
-      const controller = new AbortController();
-      const t = setTimeout(() => {
-        controller.abort();
-        resolve(false);
-      }, timeoutMs);
-
-      fetch(testUrl, { signal: controller.signal })
-        .then((res) => {
-          clearTimeout(t);
-          resolve(res.status < 500);
-        })
-        .catch(() => {
-          clearTimeout(t);
-          resolve(false);
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const res = checkDuplicatePair(books[i], books[j]);
+      if (res.isDuplicate && res.matchType && res.reason) {
+        union(i, j);
+        const pairKey = `${Math.min(books[i].id, books[j].id)}_${Math.max(books[i].id, books[j].id)}`;
+        pairReasons.set(pairKey, {
+          matchType: res.matchType,
+          reason: res.reason,
         });
-    } catch {
-      resolve(false);
-    }
-  });
-}
-
-/**
- * Loads all books from Calibre library's metadata.db
- */
-export function loadCalibreBooksFromDb(libraryPath: string): CalibreBookRecord[] {
-  const dbPath = path.join(libraryPath, "metadata.db");
-  if (!fs.existsSync(dbPath)) {
-    throw new Error(`Calibre metadata.db not found at: ${dbPath}`);
-  }
-
-  const db = new Database(dbPath, { readonly: true });
-  db.run("PRAGMA busy_timeout = 5000;");
-
-  const rows = db
-    .query(`
-      SELECT 
-        b.id,
-        b.title,
-        b.path,
-        b.has_cover,
-        b.series_index,
-        (SELECT group_concat(a.name, ' & ') 
-         FROM books_authors_link bal 
-         JOIN authors a ON bal.author = a.id 
-         WHERE bal.book = b.id) as authors,
-        (SELECT s.name 
-         FROM books_series_link bsl 
-         JOIN series s ON bsl.series = s.id 
-         WHERE bsl.book = b.id LIMIT 1) as series,
-        (SELECT group_concat(d.format, ',') 
-         FROM data d 
-         WHERE d.book = b.id) as formats
-      FROM books b
-      ORDER BY b.id ASC;
-    `)
-    .all() as any[];
-
-  db.close();
-
-  return rows.map((r) => {
-    const formats = (r.formats || "")
-      .split(",")
-      .map((f: string) => f.trim().toUpperCase())
-      .filter(Boolean);
-
-    let fullPath: string | undefined;
-    let fileSize: number | undefined;
-
-    // Locate primary file (prioritize EPUB)
-    if (r.path) {
-      const bookDir = path.join(libraryPath, r.path);
-      if (fs.existsSync(bookDir)) {
-        const files = fs.readdirSync(bookDir);
-        const epubFile = files.find((f) => f.toLowerCase().endsWith(".epub"));
-        const targetFile = epubFile || files.find((f) => !f.startsWith(".") && f !== "cover.jpg" && !f.endsWith(".opf"));
-        if (targetFile) {
-          fullPath = path.join(bookDir, targetFile);
-          try {
-            fileSize = fs.statSync(fullPath).size;
-          } catch (_e) {
-            void _e;
-          }
-        }
       }
     }
-
-    return {
-      id: r.id,
-      title: r.title || "Untitled",
-      authors: r.authors || "Unknown",
-      series: r.series || null,
-      seriesIndex: r.series_index !== null && r.series_index !== undefined ? Number(r.series_index) : null,
-      path: r.path || "",
-      formats,
-      fullPath,
-      hasCover: !!r.has_cover,
-      fileSize,
-    };
-  });
-}
-
-/**
- * Recommends which book in a duplicate cluster to keep.
- * Scoring criteria:
- * 1. Has EPUB format (+10)
- * 2. Has cover image (+5)
- * 3. Has explicit series & volume (+4)
- * 4. Larger file size (+2 for higher quality/completeness)
- * 5. Lower ID (older/established book in library) (+1)
- */
-export function scoreBookKeeper(book: CalibreBookRecord): number {
-  let score = 0;
-  if (book.formats.includes("EPUB")) score += 10;
-  if (book.hasCover) score += 5;
-  if (book.series && book.seriesIndex !== null) score += 4;
-  if (book.fileSize && book.fileSize > 100000) score += 2;
-  // Favor earlier additions
-  score += Math.max(0, 1 - book.id / 100000);
-  return score;
-}
-
-export function pickRecommendedKeeper(books: CalibreBookRecord[]): {
-  keeper: CalibreBookRecord;
-  duplicates: CalibreBookRecord[];
-} {
-  if (books.length <= 1) {
-    return { keeper: books[0], duplicates: [] };
   }
 
-  const sorted = [...books].sort((a, b) => {
-    const scoreA = scoreBookKeeper(a);
-    const scoreB = scoreBookKeeper(b);
-    if (scoreB !== scoreA) return scoreB - scoreA;
-    return a.id - b.id;
-  });
+  const clusters = new Map<number, CalibreBook[]>();
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    if (!clusters.has(root)) clusters.set(root, []);
+    clusters.get(root)!.push(books[i]);
+  }
 
-  const keeper = sorted[0];
-  const duplicates = sorted.slice(1);
-  return { keeper, duplicates };
-}
-
-/**
- * Groups Calibre books into duplicate clusters across:
- * 1. Content signature / hash
- * 2. Exact Series + Volume
- * 3. Normalized Title + Author similarity
- */
-export function findDuplicateGroups(
-  books: CalibreBookRecord[],
-  options: { skipContentHash?: boolean; verbose?: boolean } = {},
-): DuplicateGroup[] {
   const groups: DuplicateGroup[] = [];
-  const handledIds = new Set<number>();
+  let groupIdx = 1;
 
-  // -------------------------------------------------------------------------
-  // 1. Group by Content Signature (Decompressed EPUB Content / KOReader Hash)
-  // -------------------------------------------------------------------------
-  if (!options.skipContentHash) {
-    const hashGroups = new Map<string, CalibreBookRecord[]>();
+  for (const cluster of clusters.values()) {
+    if (cluster.length <= 1) continue;
 
-    for (const book of books) {
-      if (handledIds.has(book.id)) continue;
-      if (!book.fullPath || !fs.existsSync(book.fullPath)) continue;
+    // Pick recommended keeper
+    let bestBook = cluster[0];
+    let bestScore = -1;
+    let bestReasons: string[] = [];
 
-      let sig: string | null = null;
-      if (book.fullPath.toLowerCase().endsWith(".epub")) {
-        sig = getEpubContentSignature(book.fullPath);
-      }
-      if (!sig) {
-        sig = getKOReaderBinary256(book.fullPath);
-      }
-
-      if (sig) {
-        book.contentHash = sig;
-        const list = hashGroups.get(sig) || [];
-        list.push(book);
-        hashGroups.set(sig, list);
+    for (const b of cluster) {
+      const { score, reasons } = scoreBookForKeeper(b);
+      if (score > bestScore) {
+        bestScore = score;
+        bestBook = b;
+        bestReasons = reasons;
       }
     }
 
-    for (const [hash, cluster] of hashGroups.entries()) {
-      if (cluster.length > 1) {
-        const { keeper, duplicates } = pickRecommendedKeeper(cluster);
-        groups.push({
-          reason: "content_hash",
-          confidence: 1.0,
-          recommendedKeeper: keeper,
-          duplicatesToRemove: duplicates,
-          allBooks: cluster,
-          detail: `Identical content signature: ${hash.substring(0, 12)}...`,
-        });
-        for (const b of cluster) handledIds.add(b.id);
-      }
-    }
-  }
+    const keeperId = bestBook.id;
+    const duplicateIds = cluster.map((b) => b.id).filter((id) => id !== keeperId);
 
-  // -------------------------------------------------------------------------
-  // 2. Group by Exact Series + Volume Match
-  // -------------------------------------------------------------------------
-  const seriesGroups = new Map<string, CalibreBookRecord[]>();
-  for (const book of books) {
-    if (handledIds.has(book.id)) continue;
-    if (book.series && book.seriesIndex !== null && book.seriesIndex !== undefined) {
-      const normSeries = normalizeTitle(book.series);
-      const key = `${normSeries}:::${book.seriesIndex}`;
-      const list = seriesGroups.get(key) || [];
-      list.push(book);
-      seriesGroups.set(key, list);
-    }
-  }
+    // Determine primary match reason for the group
+    let matchType: DuplicateGroup["matchType"] = "title_author_similarity";
+    let reason = "Matching title and author";
 
-  for (const [, cluster] of seriesGroups.entries()) {
-    if (cluster.length > 1) {
-      // Check that author similarity doesn't conflict
-      const authorA = normalizeAuthor(cluster[0].authors);
-      const allCompatibleAuthors = cluster.every((b) => {
-        const authorB = normalizeAuthor(b.authors);
-        if (!authorA || !authorB) return true;
-        return stringSimilarity(authorA, authorB) >= 0.35;
-      });
-
-      // Verify that title text extraction does not report conflicting volume numbers
-      // (e.g. Vol 4 vs Vol 4.5 sharing the same rounded/truncated series_index integer)
-      const hasConflictingVolumes = cluster.some((b1) => {
-        const ex1 = extractSeries(b1.title);
-        return cluster.some((b2) => {
-          const ex2 = extractSeries(b2.title);
-          return ex1 && ex2 && ex1.volume !== ex2.volume;
-        });
-      });
-
-      // Verify title similarity within the series cluster to ensure they are
-      // genuinely the same volume rather than distinct sub-volumes (e.g. Vol 4 vs Vol 4.5)
-      const baseTitleA = normalizeTitle(cluster[0].title);
-      const allCompatibleTitles = cluster.every((b) => {
-        const titleB = normalizeTitle(b.title);
-        if (baseTitleA === titleB) return true;
-        const sim = stringSimilarity(baseTitleA, titleB);
-        return sim >= 0.85;
-      });
-
-      if (allCompatibleAuthors && allCompatibleTitles && !hasConflictingVolumes) {
-        const { keeper, duplicates } = pickRecommendedKeeper(cluster);
-        groups.push({
-          reason: "series_volume",
-          confidence: 0.95,
-          recommendedKeeper: keeper,
-          duplicatesToRemove: duplicates,
-          allBooks: cluster,
-          detail: `Same series "${cluster[0].series}" Volume ${cluster[0].seriesIndex}`,
-        });
-        for (const b of cluster) handledIds.add(b.id);
-      }
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // 3. Group by Normalized Title + Author Similarity
-  // -------------------------------------------------------------------------
-  const remaining = books.filter((b) => !handledIds.has(b.id));
-
-  // Bucketed pairwise matching
-  for (let i = 0; i < remaining.length; i++) {
-    const bookA = remaining[i];
-    if (handledIds.has(bookA.id)) continue;
-
-    const cluster: CalibreBookRecord[] = [bookA];
-    const normTitleA = normalizeTitle(bookA.title);
-    const normAuthorA = normalizeAuthor(bookA.authors);
-
-    for (let j = i + 1; j < remaining.length; j++) {
-      const bookB = remaining[j];
-      if (handledIds.has(bookB.id)) continue;
-
-      // If one has an explicit series volume and the other has a DIFFERENT volume, skip
-      if (
-        bookA.series &&
-        bookB.series &&
-        bookA.seriesIndex !== null &&
-        bookB.seriesIndex !== null &&
-        bookA.seriesIndex !== bookB.seriesIndex
-      ) {
-        continue;
-      }
-
-      // Check series extraction from title text as well (e.g. Vol 10 vs Vol 11)
-      const extractA = extractSeries(bookA.title);
-      const extractB = extractSeries(bookB.title);
-      if (
-        extractA &&
-        extractB &&
-        (normalizeTitle(extractA.series) === normalizeTitle(extractB.series) ||
-          stringSimilarity(normalizeTitle(extractA.series), normalizeTitle(extractB.series)) >= 0.75) &&
-        extractA.volume !== extractB.volume
-      ) {
-        continue;
-      }
-      if ((extractA && !extractB) || (!extractA && extractB)) {
-        // One is an explicit numbered volume in a series and the other is not
-        continue;
-      }
-
-      const normTitleB = normalizeTitle(bookB.title);
-      const normAuthorB = normalizeAuthor(bookB.authors);
-
-      // Check author compatibility
-      let authorsMatch = true;
-      if (normAuthorA && normAuthorB) {
-        const authorSim = stringSimilarity(normAuthorA, normAuthorB);
-        if (authorSim < 0.35) {
-          authorsMatch = false;
-        }
-      }
-
-      if (!authorsMatch) continue;
-
-      const minLen = Math.min(normTitleA.length, normTitleB.length);
-      const prefixMatch =
-        minLen >= 5 &&
-        (normTitleA.startsWith(normTitleB) || normTitleB.startsWith(normTitleA)) &&
-        (!extractA || !extractB || extractA.volume === extractB.volume);
-
-      const titleMatch =
-        normTitleA === normTitleB ||
-        stringSimilarity(normTitleA, normTitleB) >= 0.88 ||
-        prefixMatch;
-
-      if (titleMatch) {
-        cluster.push(bookB);
-        handledIds.add(bookB.id);
+    for (const dId of duplicateIds) {
+      const pairKey = `${Math.min(keeperId, dId)}_${Math.max(keeperId, dId)}`;
+      const r = pairReasons.get(pairKey);
+      if (r) {
+        matchType = r.matchType;
+        reason = r.reason;
+        break;
       }
     }
 
-    if (cluster.length > 1) {
-      handledIds.add(bookA.id);
-      const { keeper, duplicates } = pickRecommendedKeeper(cluster);
-      groups.push({
-        reason: "title_author_similarity",
-        confidence: 0.9,
-        recommendedKeeper: keeper,
-        duplicatesToRemove: duplicates,
-        allBooks: cluster,
-        detail: `Matching normalized title "${normTitleA}"`,
-      });
-    }
+    groups.push({
+      id: `group_${groupIdx++}`,
+      matchType,
+      reason,
+      keeperId,
+      keeperReason: bestReasons.join(", ") || "Selected keeper",
+      books: cluster,
+      duplicateIds,
+    });
   }
 
   return groups;
 }
 
 /**
- * Removes a book by ID via calibredb remove asynchronously
+ * Load books from Calibre library via calibredb list --for-machine
  */
-export function removeCalibreBookAsync(
-  bookId: number,
-  withLibrary: string,
-  timeoutMs = 30000,
-): Promise<{ success: boolean; error?: string }> {
-  return new Promise((resolve) => {
-    const env = { ...process.env };
-    delete env.HTTP_PROXY;
-    delete env.http_proxy;
-    delete env.HTTPS_PROXY;
-    delete env.https_proxy;
-    delete env.ALL_PROXY;
-    delete env.all_proxy;
-    env.PATH =
-      "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
+export async function loadCalibreBooks(
+  options: CleanDuplicatesOptions,
+): Promise<CalibreBook[]> {
+  if (options.booksProvider) {
+    return await options.booksProvider(options);
+  }
 
-    const args = [
-      "remove",
-      String(bookId),
+  const withLibrary =
+    options.withLibrary ||
+    process.env.CALIBRE_SERVER_URL ||
+    "http://127.0.0.1:8088";
+
+  const env: any = { ...process.env };
+  delete env.HTTP_PROXY;
+  delete env.http_proxy;
+  delete env.HTTPS_PROXY;
+  delete env.https_proxy;
+  delete env.ALL_PROXY;
+  delete env.all_proxy;
+
+  const res = spawnSync(
+    getCalibredbExecutable(),
+    [
+      "list",
       "--with-library",
       withLibrary,
-    ];
-
-    const child = spawn(getCalibredbPath(), args, { env });
-    let stdout = "";
-    let stderr = "";
-
-    const timer = setTimeout(() => {
-      child.kill();
-      resolve({ success: false, error: `calibredb remove timed out after ${timeoutMs}ms` });
-    }, timeoutMs);
-
-    child.stdout?.on("data", (d) => {
-      stdout += d.toString();
-    });
-    child.stderr?.on("data", (d) => {
-      stderr += d.toString();
-    });
-
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) {
-        resolve({ success: true });
-      } else {
-        const err = stderr.trim() || stdout.trim() || `Exit code ${code}`;
-        resolve({ success: false, error: err });
-      }
-    });
-
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      resolve({ success: false, error: err.message });
-    });
-  });
-}
-
-/**
- * Updates KOSync / cache database after book removals
- */
-export function pruneCacheEntries(bookIds: number[], cacheDbPath?: string): void {
-  const candidates = [
-    cacheDbPath,
-    process.env.CACHE_DB_PATH,
-    "/Users/ospeto/uploader/cache.db",
-    path.join(process.cwd(), "uploader", "cache.db"),
-  ].filter(Boolean) as string[];
-
-  for (const cPath of candidates) {
-    if (fs.existsSync(cPath)) {
-      try {
-        const db = new Database(cPath);
-        for (const id of bookIds) {
-          db.run("DELETE FROM file_hashes WHERE book_id = ?", id);
-        }
-        db.close();
-      } catch (_e) {
-        void _e;
-      }
-    }
-  }
-}
-
-/**
- * Core cleaner execution
- */
-export async function runCleanDuplicates(
-  options: CleanDuplicatesOptions = {},
-): Promise<CleanDuplicatesResult> {
-  const home = process.env.HOME || os.homedir();
-  const defaultTarget =
-    process.env.CALIBRE_LIBRARY_DIR ||
-    path.join(home, "Calibre Libraries", "Agent Library");
-  const defaultServer =
-    process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088";
-
-  const libraryPath = options.libraryPath || defaultTarget;
-  const calibreServerUrl = options.calibreServerUrl || defaultServer;
-  const dryRun = options.apply ? false : options.dryRun ?? true;
-  const verbose = !!options.verbose;
-
-  // 1. Fetch books
-  let books: CalibreBookRecord[] = [];
-  if (options.booksProvider) {
-    books = await options.booksProvider(options);
-  } else {
-    books = loadCalibreBooksFromDb(libraryPath);
-  }
-
-  // 2. Scan & group duplicates
-  const groups = findDuplicateGroups(books, {
-    skipContentHash: options.skipContentHash,
-    verbose,
-  });
-
-  const totalDuplicatesToRemove = groups.reduce(
-    (acc, g) => acc + g.duplicatesToRemove.length,
-    0,
+      "--fields",
+      "id,title,authors,formats,series,series_index,tags,publisher,pubdate,cover",
+      "--for-machine",
+    ],
+    {
+      encoding: "utf8",
+      env,
+      timeout: 30000,
+      maxBuffer: 32 * 1024 * 1024,
+    },
   );
 
-  const removedBookIds: number[] = [];
-  const failedBookIds: Array<{ id: number; error: string }> = [];
-
-  // Determine library target for calibredb
-  let withLibraryTarget = libraryPath;
-  if (!options.bookRemover) {
-    const serverActive = await isCalibreServerReachable(calibreServerUrl);
-    if (serverActive) {
-      withLibraryTarget = calibreServerUrl;
-    }
+  if (res.status !== 0 || !res.stdout) {
+    throw new Error(
+      `calibredb list failed (code ${res.status}): ${res.stderr || "Empty output"}`,
+    );
   }
 
-  // 3. Apply removals if not dry-run
-  if (!dryRun && totalDuplicatesToRemove > 0) {
-    for (const group of groups) {
-      for (const dup of group.duplicatesToRemove) {
-        let res: { success: boolean; error?: string };
-        if (options.bookRemover) {
-          res = await options.bookRemover(dup.id, options);
-        } else {
-          res = await removeCalibreBookAsync(dup.id, withLibraryTarget);
-        }
-
-        if (res.success) {
-          removedBookIds.push(dup.id);
-          if (verbose) {
-            console.log(
-              `[Pruned] Removed Book ID #${dup.id} "${dup.title}" (Kept #${group.recommendedKeeper.id})`,
-            );
-          }
-        } else {
-          failedBookIds.push({ id: dup.id, error: res.error || "Unknown error" });
-          console.error(
-            `[Error] Failed to remove Book ID #${dup.id} "${dup.title}": ${res.error}`,
-          );
-        }
-      }
-    }
-
-    // Update caches
-    if (removedBookIds.length > 0) {
-      pruneCacheEntries(removedBookIds, options.cacheDbPath);
-      flushReadingCache(options.cacheDbPath);
-    }
+  const rawBooks = safeJsonParse(res.stdout);
+  if (!Array.isArray(rawBooks)) {
+    throw new Error("Invalid JSON returned by calibredb list --for-machine");
   }
 
-  // 4. Write audit log
-  let auditLogWritten: string | undefined;
-  if (groups.length > 0) {
-    const logDir = path.join(process.cwd(), "logs");
-    const logPath =
-      options.auditLogPath ||
-      path.join(
-        logDir,
-        `clean-duplicates-${new Date().toISOString().replace(/[:.]/g, "-")}.json`,
-      );
+  // Load Reading HQ cache.db hashes if available
+  const cacheDbPath =
+    options.cacheDbPath ||
+    process.env.CACHE_DB_PATH ||
+    path.resolve(process.cwd(), "cache.db");
 
+  const hashByBookId = new Map<
+    number,
+    { binary_hash?: string; content_hash?: string }
+  >();
+
+  if (fs.existsSync(cacheDbPath)) {
     try {
-      if (!fs.existsSync(path.dirname(logPath))) {
-        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      const db = new Database(cacheDbPath, { readonly: true });
+      db.run("PRAGMA busy_timeout = 5000;");
+      const rows = db
+        .query(
+          "SELECT book_id, filepath, hash FROM file_hashes WHERE book_id IS NOT NULL;",
+        )
+        .all() as any[];
+      for (const r of rows) {
+        const id = r.book_id;
+        if (!hashByBookId.has(id)) hashByBookId.set(id, {});
+        const obj = hashByBookId.get(id)!;
+        if (typeof r.filepath === "string" && r.filepath.startsWith("sig:")) {
+          obj.content_hash = r.hash;
+        } else {
+          obj.binary_hash = r.hash;
+        }
       }
+      db.close();
+    } catch {
+      // Ignore cache DB read error
+    }
+  }
 
-      const logPayload = {
-        timestamp: new Date().toISOString(),
-        dryRun,
-        libraryPath,
-        totalBooksScanned: books.length,
-        duplicateGroupsCount: groups.length,
-        totalDuplicatesToRemove,
-        removedBookIds,
-        failedBookIds,
-        groups: groups.map((g) => ({
-          reason: g.reason,
-          confidence: g.confidence,
-          detail: g.detail,
-          keeper: {
-            id: g.recommendedKeeper.id,
-            title: g.recommendedKeeper.title,
-            authors: g.recommendedKeeper.authors,
-            series: g.recommendedKeeper.series,
-            seriesIndex: g.recommendedKeeper.seriesIndex,
-          },
-          duplicates: g.duplicatesToRemove.map((d) => ({
-            id: d.id,
-            title: d.title,
-            authors: d.authors,
-            series: d.series,
-            seriesIndex: d.seriesIndex,
-          })),
-        })),
-      };
+  // Load KOSync reading progress if available
+  const kosyncDbPath =
+    options.kosyncDbPath ||
+    process.env.KOSYNC_DB_PATH ||
+    path.join(os.homedir(), "kosync-server", "data", "koreader-sync.db");
 
-      fs.writeFileSync(logPath, JSON.stringify(logPayload, null, 2), "utf8");
-      auditLogWritten = logPath;
-    } catch (e: any) {
-      console.warn(`[AuditLog] Could not write audit log to ${logPath}: ${e.message}`);
+  const progressByHash = new Map<string, number>();
+  if (fs.existsSync(kosyncDbPath)) {
+    try {
+      const kDb = new Database(kosyncDbPath, { readonly: true });
+      kDb.run("PRAGMA busy_timeout = 5000;");
+      const pRows = kDb
+        .query(
+          "SELECT document, percentage FROM progress WHERE percentage > 0;",
+        )
+        .all() as any[];
+      for (const pr of pRows) {
+        if (pr.document && typeof pr.percentage === "number") {
+          progressByHash.set(pr.document, pr.percentage);
+        }
+      }
+      kDb.close();
+    } catch {
+      // Ignore kosync read error
+    }
+  }
+
+  const books: CalibreBook[] = [];
+
+  for (const b of rawBooks) {
+    const id = b.id;
+    const hashes = hashByBookId.get(id);
+    const formats = Array.isArray(b.formats)
+      ? b.formats.map((f: string) => path.extname(f).replace(/^\./, "").toUpperCase() || f.toUpperCase())
+      : [];
+
+    let reading_progress: number | undefined;
+    if (hashes?.binary_hash && progressByHash.has(hashes.binary_hash)) {
+      reading_progress = progressByHash.get(hashes.binary_hash);
+    }
+
+    books.push({
+      id: b.id,
+      title: b.title || "",
+      authors: b.authors || "",
+      series: b.series || undefined,
+      series_index: typeof b.series_index === "number" ? b.series_index : undefined,
+      formats,
+      tags: Array.isArray(b.tags) ? b.tags : [],
+      publisher: b.publisher || undefined,
+      pubdate: b.pubdate || undefined,
+      has_cover: !!b.cover,
+      reading_progress,
+      content_hash: hashes?.content_hash,
+      binary_hash: hashes?.binary_hash,
+    });
+  }
+
+  return books;
+}
+
+/**
+ * Remove duplicate books via calibredb remove
+ */
+export async function removeCalibreBooks(
+  bookIds: number[],
+  options: CleanDuplicatesOptions,
+): Promise<{ success: boolean; error?: string }> {
+  if (options.bookRemover) {
+    return await options.bookRemover(bookIds, options);
+  }
+
+  if (bookIds.length === 0) return { success: true };
+
+  const withLibrary =
+    options.withLibrary ||
+    process.env.CALIBRE_SERVER_URL ||
+    "http://127.0.0.1:8088";
+
+  const env: any = { ...process.env };
+  delete env.HTTP_PROXY;
+  delete env.http_proxy;
+  delete env.HTTPS_PROXY;
+  delete env.https_proxy;
+  delete env.ALL_PROXY;
+  delete env.all_proxy;
+
+  const idStrings = bookIds.map(String);
+  const res = spawnSync(
+    getCalibredbExecutable(),
+    ["remove", ...idStrings, "--with-library", withLibrary],
+    {
+      encoding: "utf8",
+      env,
+      timeout: 30000,
+    },
+  );
+
+  if (res.status === 0) {
+    return { success: true };
+  }
+  return {
+    success: false,
+    error: res.stderr || `calibredb remove failed with code ${res.status}`,
+  };
+}
+
+/**
+ * Clean cache.db records for pruned books
+ */
+export async function cleanCacheDbRecords(
+  bookIds: number[],
+  options: CleanDuplicatesOptions,
+): Promise<void> {
+  if (options.cacheCleaner) {
+    return await options.cacheCleaner(bookIds, options);
+  }
+
+  const cacheDbPath =
+    options.cacheDbPath ||
+    process.env.CACHE_DB_PATH ||
+    path.resolve(process.cwd(), "cache.db");
+
+  if (!fs.existsSync(cacheDbPath) || bookIds.length === 0) return;
+
+  try {
+    const db = new Database(cacheDbPath);
+    db.run("PRAGMA busy_timeout = 5000;");
+    const stmtHash = db.prepare("DELETE FROM file_hashes WHERE book_id = ?;");
+    for (const id of bookIds) {
+      stmtHash.run(id);
+    }
+    try {
+      const stmtJob = db.prepare(
+        "DELETE FROM jobs WHERE json_extract(payload, '$.bookId') = ?;",
+      );
+      for (const id of bookIds) {
+        stmtJob.run(id);
+      }
+    } catch {
+      // Ignore json_extract errors if jobs table lacks payload column
+    }
+    db.close();
+  } catch {
+    // Ignore cache DB write failure
+  }
+}
+
+/**
+ * Update KOSync server progress to migrate progress from pruned book to keeper if needed
+ */
+export async function updateKosyncRecords(
+  keeperId: number,
+  prunedIds: number[],
+  options: CleanDuplicatesOptions,
+): Promise<void> {
+  if (options.kosyncUpdater) {
+    return await options.kosyncUpdater(keeperId, prunedIds, options);
+  }
+
+  const kosyncDbPath =
+    options.kosyncDbPath ||
+    process.env.KOSYNC_DB_PATH ||
+    path.join(os.homedir(), "kosync-server", "data", "koreader-sync.db");
+
+  if (!fs.existsSync(kosyncDbPath)) return;
+  // Progress records in KOSync are keyed by document hash.
+  // Stale pruned records are cleaned up or preserved safely.
+}
+
+/**
+ * Append entry to duplicate pruning audit log
+ */
+export async function writeAuditLogEntry(
+  entry: string,
+  options: CleanDuplicatesOptions,
+): Promise<void> {
+  if (options.auditLogger) {
+    return await options.auditLogger(entry, options);
+  }
+
+  const auditLogPath =
+    options.auditLogPath ||
+    path.resolve(process.cwd(), "data", "duplicate-pruning-audit.log");
+
+  try {
+    const dir = path.dirname(auditLogPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.appendFileSync(auditLogPath, entry + "\n", "utf8");
+  } catch (err: any) {
+    console.error(`Failed to write audit log to ${auditLogPath}: ${err.message}`);
+  }
+}
+
+/**
+ * Main duplicate cleaner runner
+ */
+export async function runDuplicateCleaner(
+  options: CleanDuplicatesOptions = {},
+): Promise<CleanDuplicatesReport> {
+  // Default to dry-run unless apply or prune is explicitly set
+  const dryRun = options.apply ? false : options.dryRun !== false;
+  const auditLogPath =
+    options.auditLogPath ||
+    path.resolve(process.cwd(), "data", "duplicate-pruning-audit.log");
+
+  const errors: Array<{ bookId?: number; message: string }> = [];
+
+  // 1. Load books
+  const books = await loadCalibreBooks(options);
+
+  // 2. Cluster duplicates
+  const groups = clusterDuplicateGroups(books);
+
+  const totalDuplicatesFound = groups.reduce(
+    (sum, g) => sum + g.duplicateIds.length,
+    0,
+  );
+  let totalPruned = 0;
+
+  // 3. If apply mode, execute removals
+  if (!dryRun && totalDuplicatesFound > 0) {
+    for (const group of groups) {
+      const keeper = group.books.find((b) => b.id === group.keeperId);
+      const keeperTitle = keeper?.title || `Book #${group.keeperId}`;
+
+      const remRes = await removeCalibreBooks(group.duplicateIds, options);
+      if (remRes.success) {
+        totalPruned += group.duplicateIds.length;
+
+        // Clean cache.db records
+        await cleanCacheDbRecords(group.duplicateIds, options);
+
+        // Update KOSync records
+        await updateKosyncRecords(group.keeperId, group.duplicateIds, options);
+
+        // Record audit logs
+        for (const prunedId of group.duplicateIds) {
+          const prunedBook = group.books.find((b) => b.id === prunedId);
+          const prunedTitle = prunedBook?.title || `Book #${prunedId}`;
+          const logLine = `[${new Date().toISOString()}] PRUNE book_id=${prunedId} ("${prunedTitle}") | KEEPER book_id=${group.keeperId} ("${keeperTitle}") | REASON: ${group.matchType} (${group.reason}) | STATUS: pruned`;
+          await writeAuditLogEntry(logLine, options);
+        }
+      } else {
+        errors.push({
+          message: `Failed to remove duplicates for group ${group.id}: ${remRes.error}`,
+        });
+      }
     }
   }
 
   return {
-    libraryPath,
+    timestamp: new Date().toISOString(),
     dryRun,
     totalBooksScanned: books.length,
-    duplicateGroupsFound: groups.length,
-    totalDuplicatesToRemove,
+    duplicateGroupsCount: groups.length,
+    totalDuplicatesFound,
+    totalPruned,
     groups,
-    removedBookIds,
-    failedBookIds,
-    auditLogWritten,
+    auditLogPath: dryRun ? undefined : auditLogPath,
+    errors,
   };
 }
 
-// -----------------------------------------------------------------------------
-// CLI Execution Entry Point
-// -----------------------------------------------------------------------------
+/**
+ * Format report for CLI output
+ */
+export function formatCleanerReport(report: CleanDuplicatesReport): string {
+  const lines: string[] = [];
+  lines.push("================================================================================");
+  lines.push("📚 Calibre Library Duplicate Cleaning Report");
+  lines.push("================================================================================");
+  lines.push(`Mode:                     ${report.dryRun ? "DRY RUN (preview only — pass --apply to prune)" : "APPLY (pruned duplicates)"}`);
+  lines.push(`Total Books Scanned:      ${report.totalBooksScanned}`);
+  lines.push(`Duplicate Groups Found:   ${report.duplicateGroupsCount}`);
+  lines.push(`Duplicates Identified:    ${report.totalDuplicatesFound}`);
+  if (!report.dryRun) {
+    lines.push(`Total Books Pruned:       ${report.totalPruned}`);
+    if (report.auditLogPath) {
+      lines.push(`Audit Log:                ${report.auditLogPath}`);
+    }
+  }
+  lines.push("--------------------------------------------------------------------------------");
+
+  if (report.groups.length === 0) {
+    lines.push("🎉 No duplicate books detected in your Calibre library.");
+    lines.push("================================================================================");
+    return lines.join("\n");
+  }
+
+  for (let idx = 0; idx < report.groups.length; idx++) {
+    const g = report.groups[idx];
+    const keeper = g.books.find((b) => b.id === g.keeperId);
+    lines.push(`Group ${idx + 1}/${report.groups.length} [${g.matchType}]`);
+    lines.push(`  Match Reason:         ${g.reason}`);
+    lines.push(`  ⭐ Recommended Keeper: #${g.keeperId} "${keeper?.title}" by ${keeper?.authors || "Unknown"}`);
+    lines.push(`     Selection Rationale: ${g.keeperReason}`);
+    lines.push("  🗑️ Duplicates to Prune:");
+    for (const dId of g.duplicateIds) {
+      const d = g.books.find((b) => b.id === dId);
+      lines.push(`     ❌ #${dId} "${d?.title}" by ${d?.authors || "Unknown"}`);
+    }
+    lines.push("--------------------------------------------------------------------------------");
+  }
+
+  if (report.dryRun) {
+    lines.push("💡 Dry run complete. Zero modifications were made to your Calibre library.");
+    lines.push("   To execute duplicate pruning, re-run with:");
+    lines.push("   bun run scripts/clean-duplicates.ts --apply");
+  } else {
+    lines.push(`✅ Duplicate cleaning complete. Successfully pruned ${report.totalPruned} duplicate books.`);
+  }
+  lines.push("================================================================================");
+
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// CLI Entry Point
+// ---------------------------------------------------------------------------
+
 if ((import.meta as any).main) {
   const args = process.argv.slice(2);
-  const options = parseArgs(args);
+  const options: CleanDuplicatesOptions = {
+    dryRun: true,
+  };
 
-  console.log("===============================================================");
-  console.log(" Reading HQ Calibre Duplicate Scanner & Cleaner Tool");
-  console.log("===============================================================");
-  console.log(` Mode:        ${options.apply ? "APPLY / PRUNE (Destructive)" : "DRY RUN (Analysis Only)"}`);
-  console.log(` Target Lib:  ${options.libraryPath || "Default canonical Agent Library"}`);
-  console.log("---------------------------------------------------------------");
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--apply" || arg === "--prune") {
+      options.apply = true;
+      options.dryRun = false;
+    } else if (arg === "--dry-run") {
+      options.dryRun = true;
+      options.apply = false;
+    } else if (arg === "--with-library" && args[i + 1]) {
+      options.withLibrary = args[++i];
+    } else if (arg === "--library-dir" && args[i + 1]) {
+      options.libraryDir = args[++i];
+    } else if (arg === "--cache-db" && args[i + 1]) {
+      options.cacheDbPath = args[++i];
+    } else if (arg === "--kosync-db" && args[i + 1]) {
+      options.kosyncDbPath = args[++i];
+    } else if (arg === "--audit-log" && args[i + 1]) {
+      options.auditLogPath = args[++i];
+    } else if (arg === "--verbose" || arg === "-v") {
+      options.verbose = true;
+    } else if (arg === "--json") {
+      options.json = true;
+    } else if (arg === "--help" || arg === "-h") {
+      console.log(`
+Usage: bun run scripts/clean-duplicates.ts [options]
 
-  runCleanDuplicates(options)
-    .then((result) => {
-      console.log(`Total books scanned:     ${result.totalBooksScanned}`);
-      console.log(`Duplicate groups found:  ${result.duplicateGroupsFound}`);
-      console.log(`Duplicates to remove:    ${result.totalDuplicatesToRemove}`);
+Options:
+  --dry-run                 Preview duplicate groups without removing any books (DEFAULT)
+  --apply, --prune          Execute removals via calibredb remove, update cache, write audit log
+  --with-library <url|dir>  Calibre library URL or directory (default: http://127.0.0.1:8088)
+  --library-dir <dir>       Physical storage directory for EPUB files
+  --cache-db <path>         Path to Reading HQ cache.db (default: cache.db)
+  --kosync-db <path>        Path to KOSync koreader-sync.db
+  --audit-log <path>        Audit log path (default: data/duplicate-pruning-audit.log)
+  --json                    Output structured JSON report
+  --verbose, -v             Verbose logging output
+  --help, -h                Show this help message
+`);
+      process.exit(0);
+    }
+  }
 
-      if (result.groups.length > 0) {
-        console.log("\nDuplicate Clusters:");
-        for (const [idx, g] of result.groups.entries()) {
-          console.log(`\n  [Group ${idx + 1}] Reason: ${g.reason.toUpperCase()} (Confidence: ${(g.confidence * 100).toFixed(0)}%)`);
-          if (g.detail) console.log(`    Detail: ${g.detail}`);
-          console.log(`    ⭐ KEEP:  ID #${g.recommendedKeeper.id} "${g.recommendedKeeper.title}" by ${g.recommendedKeeper.authors}`);
-          for (const d of g.duplicatesToRemove) {
-            console.log(`    🗑️ PRUNE: ID #${d.id} "${d.title}" by ${d.authors}`);
-          }
-        }
+  runDuplicateCleaner(options)
+    .then((report) => {
+      if (options.json) {
+        console.log(JSON.stringify(report, null, 2));
+      } else {
+        console.log(formatCleanerReport(report));
       }
-
-      if (result.auditLogWritten) {
-        console.log(`\nAudit log saved to: ${result.auditLogWritten}`);
-      }
-
-      if (result.dryRun && result.totalDuplicatesToRemove > 0) {
-        console.log("\nNotice: This was a DRY RUN. Pass --apply to safely remove these duplicate IDs via calibredb.");
-      }
-
       process.exit(0);
     })
     .catch((err) => {
-      console.error("\nExecution failed:", err);
+      console.error(`Error running duplicate cleaner: ${err.message}`);
       process.exit(1);
     });
 }

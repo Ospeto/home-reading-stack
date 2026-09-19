@@ -1,7 +1,4 @@
 import { describe, it, expect } from "bun:test";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import {
   formatRanobeDate,
   parseRanobeBook,
@@ -10,11 +7,12 @@ import {
   isAllowedCoverUrl,
   KNOWN_COVER_DOMAINS,
   searchUniversalMetadata,
-  normalizeTitle,
-  normalizeAuthor,
+  normalizeTitleForDedup,
+  normalizeAuthorForDedup,
+  extractVolumeNumber,
   isSameBook,
   isSameBookAsync,
-  getEpubContentSignature,
+  classifyDuplicateWithJev,
   type ScrapedMetadata,
 } from "./scraper";
 
@@ -469,192 +467,294 @@ describe("RanobeDB Scraper & Light Novel Metadata Engine", () => {
     });
   });
 
-  describe("Enhanced Ingestion Deduplication & Normalization", () => {
-    describe("normalizeTitle", () => {
-      it("strips release metadata tags like [Light Novel], (EPUB), [Official], [v01]", () => {
-        expect(normalizeTitle("Overlord [Light Novel] [Official] (EPUB)")).toBe(
-          "overlord",
+  describe("Enhanced Ingestion Duplicate Detection & Normalization", () => {
+    describe("normalizeTitleForDedup", () => {
+      it("strips release metadata tags and pirate/domain watermarks", () => {
+        const t1 = normalizeTitleForDedup(
+          "Overlord [Light Novel] [Official] [Digital] (EPUB)",
         );
-        expect(normalizeTitle("Mushoku Tensei [v01] (Retail) [Digital]")).toBe(
-          "mushoku tensei",
+        expect(t1).toBe("overlord");
+
+        const t2 = normalizeTitleForDedup(
+          "Mushoku Tensei (Retail) [Seven Seas] [v01]",
         );
-        expect(normalizeTitle("Sword Art Online (Fan-Translated) [Raw]")).toBe(
-          "sword art online",
+        expect(t2).toBe("mushoku tensei vol 1");
+
+        const t3 = normalizeTitleForDedup(
+          "86 - EIGHTY-SIX (Light Novel) [Digital] [Premium]",
         );
+        expect(t3).toBe("86 eighty six");
       });
 
-      it("strips punctuation variance (: - — ~ |)", () => {
-        expect(normalizeTitle("Re:Zero - Starting Life — in Another World ~ Vol 1 | Special")).toBe(
-          "re zero starting life in another world vol 1 special",
-        );
-      });
-
-      it("normalizes volume and chapter numbering (Vol 1, Volume 01, v1, #1, Book 1)", () => {
-        expect(normalizeTitle("Overlord Vol 1")).toBe("overlord vol 1");
-        expect(normalizeTitle("Overlord Volume 01")).toBe("overlord vol 1");
-        expect(normalizeTitle("Overlord v1")).toBe("overlord vol 1");
-        expect(normalizeTitle("Overlord #1")).toBe("overlord vol 1");
-        expect(normalizeTitle("Overlord Book 1")).toBe("overlord vol 1");
-        expect(normalizeTitle("Overlord Bk. 01")).toBe("overlord vol 1");
-        expect(normalizeTitle("Solo Leveling Chapter 05")).toBe("solo leveling ch 5");
-        expect(normalizeTitle("Solo Leveling Ch. 5")).toBe("solo leveling ch 5");
-      });
-    });
-
-    describe("normalizeAuthor", () => {
-      it("strips role tags like (Author), (Artist), (Illustrator)", () => {
-        expect(normalizeAuthor("Reki Kawahara (Author)")).toBe("reki kawahara");
-        expect(normalizeAuthor("abec (Artist)")).toBe("abec");
-        expect(normalizeAuthor("Fuse (Story), Mitz Vah (Art)")).toBe("fuse, mitz vah");
-      });
-
-      it("sorts multi-author lists alphabetically", () => {
-        expect(normalizeAuthor("Robert Jordan, Brandon Sanderson")).toBe(
-          "brandon sanderson, robert jordan",
-        );
-        expect(normalizeAuthor("Brandon Sanderson & Robert Jordan")).toBe(
-          "brandon sanderson, robert jordan",
-        );
-        expect(normalizeAuthor("abec (Illustrator) and Reki Kawahara (Author)")).toBe(
-          "abec, reki kawahara",
-        );
-      });
-    });
-
-    describe("getEpubContentSignature", () => {
-      it("returns identical signature for recompressed EPUBs with same internal files", () => {
-        const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "epubsig-test-"));
-        try {
-          const zip1Path = path.join(testDir, "book1.epub");
-          const zip2Path = path.join(testDir, "book2.epub");
-
-          // Build two zip files in python to guarantee different timestamps/compression
-          const proc = (globalThis as any).Bun.spawnSync([
-            "python3",
-            "-c",
-            `
-import zipfile
-with zipfile.ZipFile("${zip1Path}", "w") as z:
-    z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
-    z.writestr("META-INF/container.xml", "<container/>", compress_type=zipfile.ZIP_STORED)
-    z.writestr("OEBPS/text.xhtml", "<html><body>Book text</body></html>", compress_type=zipfile.ZIP_STORED)
-
-with zipfile.ZipFile("${zip2Path}", "w") as z:
-    z.comment = b"recompressed"
-    z.writestr("OEBPS/text.xhtml", "<html><body>Book text</body></html>", compress_type=zipfile.ZIP_DEFLATED)
-    z.writestr("META-INF/container.xml", "<container/>", compress_type=zipfile.ZIP_DEFLATED)
-    z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
-`,
-          ]);
-          expect(proc.exitCode).toBe(0);
-
-          const sig1 = getEpubContentSignature(zip1Path);
-          const sig2 = getEpubContentSignature(zip2Path);
-
-          expect(sig1).not.toBeNull();
-          expect(sig2).not.toBeNull();
-          expect(sig1).toBe(sig2);
-        } finally {
-          fs.rmSync(testDir, { recursive: true, force: true });
+      it("strips punctuation variance (: - — – ~ |)", () => {
+        const variants = [
+          "Spice and Wolf: Vol 1",
+          "Spice and Wolf - Vol 1",
+          "Spice and Wolf — Vol 1",
+          "Spice and Wolf – Vol 1",
+          "Spice and Wolf ~ Vol 1",
+          "Spice and Wolf | Vol 1",
+        ];
+        const normalized = variants.map(normalizeTitleForDedup);
+        const first = normalized[0];
+        expect(first).toBe("spice and wolf vol 1");
+        for (const n of normalized) {
+          expect(n).toBe(first);
         }
       });
-    });
 
-    describe("isSameBook & isSameBookAsync with Jev arbitration", () => {
-      it("detects same book with punctuation and release tag variance", () => {
-        const bookA = {
-          title: "Overlord, Vol. 1: The Undead King",
-          authors: "Kugane Maruyama",
-        };
-        const bookB = {
-          title: "Overlord [Light Novel] Volume 01 — The Undead King (EPUB)",
-          author: "Kugane Maruyama",
-        };
-        expect(isSameBook(bookA, bookB)).toBe(true);
+      it("normalizes volume numbering (Vol 1, Volume 01, v1, #1, Book 1)", () => {
+        const variants = [
+          "Overlord Vol 1",
+          "Overlord Volume 01",
+          "Overlord v1",
+          "Overlord #1",
+          "Overlord Book 1",
+          "Overlord [v01]",
+          "Overlord (Vol. 01)",
+        ];
+        const normalized = variants.map(normalizeTitleForDedup);
+        expect(normalized[0]).toBe("overlord vol 1");
+        for (const n of normalized) {
+          expect(n).toBe("overlord vol 1");
+        }
       });
 
-      it("differentiates different volumes in the same series", () => {
-        const bookA = {
+      it("handles Burmese volume numbering accurately", () => {
+        expect(normalizeTitleForDedup("စစ်နှင့်ငြိမ်းချမ်းရေး အတွဲ ၁")).toBe(
+          "စစ်နှင့်ငြိမ်းချမ်းရေး vol 1",
+        );
+        expect(normalizeTitleForDedup("ရွှေဥဒေါင်း အပိုင်း 2")).toBe(
+          "ရွှေဥဒေါင်း vol 2",
+        );
+      });
+
+      it("preserves publication year in parentheses while normalizing volume", () => {
+        const title = "The Hitchhiker's Guide to the Galaxy (1979) Vol 1";
+        expect(normalizeTitleForDedup(title)).toBe(
+          "the hitchhiker s guide to the galaxy vol 1",
+        );
+      });
+    });
+
+    describe("normalizeAuthorForDedup", () => {
+      it("strips role tags like (Author), (Artist), [Illustrator]", () => {
+        expect(normalizeAuthorForDedup("Kugane Maruyama (Author)")).toBe(
+          "kugane maruyama",
+        );
+        expect(normalizeAuthorForDedup("so-bin [Artist]")).toBe("so-bin");
+        expect(normalizeAuthorForDedup("Shirabii (Illustrator)")).toBe(
+          "shirabii",
+        );
+      });
+
+      it("sorts multi-author lists alphabetically regardless of input ordering", () => {
+        const order1 = normalizeAuthorForDedup(
+          "Kugane Maruyama (Author), so-bin (Artist)",
+        );
+        const order2 = normalizeAuthorForDedup(
+          "so-bin (Illustrator) & Kugane Maruyama (Author)",
+        );
+        expect(order1).toBe("kugane maruyama, so-bin");
+        expect(order2).toBe("kugane maruyama, so-bin");
+        expect(order1).toBe(order2);
+      });
+
+      it("handles single authors and cleans watermarks/junk", () => {
+        expect(normalizeAuthorForDedup("Brandon Sanderson")).toBe(
+          "brandon sanderson",
+        );
+        expect(normalizeAuthorForDedup("admin")).toBe("");
+        expect(normalizeAuthorForDedup("unknown")).toBe("");
+      });
+    });
+
+    describe("extractVolumeNumber", () => {
+      it("extracts volume number across diverse notations", () => {
+        expect(extractVolumeNumber("Overlord Vol. 14")).toBe(14);
+        expect(extractVolumeNumber("Overlord Volume 01")).toBe(1);
+        expect(extractVolumeNumber("Overlord [v05]")).toBe(5);
+        expect(extractVolumeNumber("Series #3")).toBe(3);
+        expect(extractVolumeNumber("Book 2 - The Return")).toBe(2);
+        expect(extractVolumeNumber("စစ်နှင့်ငြိမ်းချမ်းရေး အတွဲ ၄")).toBe(4);
+      });
+
+      it("returns null for non-volume standalone numbers and years", () => {
+        expect(extractVolumeNumber("George Orwell 1984")).toBeNull();
+        expect(extractVolumeNumber("A Space Odyssey (2001)")).toBeNull();
+        expect(extractVolumeNumber("Clean Code")).toBeNull();
+      });
+    });
+
+    describe("isSameBook deterministic matching & volume isolation", () => {
+      it("NEVER merges different volumes in a series as duplicates", () => {
+        const vol1 = {
           title: "Overlord, Vol. 1: The Undead King",
           authors: "Kugane Maruyama",
+          series: "Overlord",
+          series_index: 1,
         };
-        const bookB = {
+        const vol2 = {
           title: "Overlord, Vol. 2: The Dark Warrior",
+          authors: "Kugane Maruyama",
+          series: "Overlord",
+          series_index: 2,
+        };
+        expect(isSameBook(vol1, vol2)).toBe(false);
+
+        // Titles with volume in string but no explicit series field
+        expect(
+          isSameBook(
+            { title: "Sword Art Online 01 - Aincrad", authors: "Reki Kawahara" },
+            { title: "Sword Art Online 02 - Aincrad", authors: "Reki Kawahara" },
+          ),
+        ).toBe(false);
+
+        expect(
+          isSameBook(
+            { title: "Mushoku Tensei Vol 1", authors: "Rifujin na Magonote" },
+            { title: "Mushoku Tensei Vol 2", authors: "Rifujin na Magonote" },
+          ),
+        ).toBe(false);
+      });
+
+      it("matches duplicate books across different release tags and punctuation", () => {
+        const existing = {
+          title: "Overlord: Volume 01 [Official] [Digital]",
+          authors: "Kugane Maruyama",
+        };
+        const incoming = {
+          title: "Overlord - Vol 1 (Retail) (EPUB)",
+          author: "Kugane Maruyama (Author)",
+        };
+        expect(isSameBook(existing, incoming)).toBe(true);
+      });
+
+      it("matches books with multi-author ordering variations", () => {
+        const b1 = {
+          title: "No Game No Life, Vol. 1",
+          authors: "Yuu Kamiya & Mashiro Hiiragi",
+        };
+        const b2 = {
+          title: "No Game No Life - Volume 01 [Light Novel]",
+          author: "Mashiro Hiiragi (Artist), Yuu Kamiya (Author)",
+        };
+        expect(isSameBook(b1, b2)).toBe(true);
+      });
+
+      it("rejects books with conflicting authors even if titles match", () => {
+        const b1 = {
+          title: "The Hobbit",
+          authors: "J.R.R. Tolkien",
+        };
+        const b2 = {
+          title: "The Hobbit",
+          author: "Completely Different Person",
+        };
+        expect(isSameBook(b1, b2)).toBe(false);
+      });
+    });
+
+    describe("Jev System-1 Triage Arbitration (classifyDuplicateWithJev & isSameBookAsync)", () => {
+      it("classifies duplicate with Jev System-1 when in ambiguous similarity zone", async () => {
+        // Mock global fetch / safeFetchWithSsrf via custom handler
+        const origFetch = globalThis.fetch;
+        let calledJev = false;
+        (globalThis as any).fetch = async (url: string, init?: any) => {
+          if (typeof url === "string" && url.includes("typesafe.ai")) {
+            calledJev = true;
+            return new Response(
+              JSON.stringify({
+                model: "jev-latest",
+                answers: {
+                  is_duplicate: {
+                    choice: "duplicate",
+                    confidence: 0.95,
+                  },
+                },
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          return origFetch(url as any, init);
+        };
+
+        try {
+          // Titles in the ambiguous zone (0.65 <= sim < 0.88)
+          const b1 = {
+            title: "Re:Zero Starting Life in Another World Prologue Chapter",
+            authors: "Tappei Nagatsuki",
+          };
+          const b2 = {
+            title: "Re:Zero Life in Another World - Prologue Arc Edition",
+            author: "Tappei Nagatsuki",
+          };
+
+          const isDup = await isSameBookAsync(b1, b2, {
+            jevApiKey: "test_jev_api_key_123",
+          });
+          expect(calledJev).toBe(true);
+          expect(isDup).toBe(true);
+        } finally {
+          (globalThis as any).fetch = origFetch;
+        }
+      });
+
+      it("respects distinct verdict from Jev System-1 for subtle subtitle differences", async () => {
+        const origFetch = globalThis.fetch;
+        let calledJev = false;
+        (globalThis as any).fetch = async (url: string, init?: any) => {
+          if (typeof url === "string" && url.includes("typesafe.ai")) {
+            calledJev = true;
+            return new Response(
+              JSON.stringify({
+                model: "jev-latest",
+                answers: {
+                  is_duplicate: {
+                    choice: "distinct",
+                    confidence: 0.92,
+                  },
+                },
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          return origFetch(url as any, init);
+        };
+
+        try {
+          const b1 = {
+            title: "Re:Zero Starting Life in Another World: Sanctuary Arc",
+            authors: "Tappei Nagatsuki",
+          };
+          const b2 = {
+            title: "Re:Zero Life in Another World - Witch Cult Arc",
+            author: "Tappei Nagatsuki",
+          };
+
+          const isDup = await isSameBookAsync(b1, b2, {
+            jevApiKey: "test_jev_api_key_123",
+          });
+          expect(calledJev).toBe(true);
+          expect(isDup).toBe(false);
+        } finally {
+          (globalThis as any).fetch = origFetch;
+        }
+      });
+
+      it("gracefully falls back when Jev API key is missing", async () => {
+        const b1 = {
+          title: "Overlord: Volume 01 [Official] [Digital]",
+          authors: "Kugane Maruyama",
+        };
+        const b2 = {
+          title: "Overlord - Vol 1 (Retail) (EPUB)",
           author: "Kugane Maruyama",
         };
-        expect(isSameBook(bookA, bookB)).toBe(false);
-      });
 
-      it("arbitrates ambiguous pairs via Jev System-1 arbitration hook", async () => {
-        // Create an ambiguous pair with similarity in the 0.65 - 0.88 range
-        const bookA = {
-          title: "Classroom of the Elite: Year 1",
-          authors: "Shougo Kinugasa",
-        };
-        const bookB = {
-          title: "Classroom of the Elite: First Year Arc",
-          author: "Shougo Kinugasa",
-        };
-
-        // Hermetic mock test for isSameBookAsync with custom Jev response
-        const origFetch = globalThis.fetch;
-        try {
-          (globalThis as any).fetch = async () =>
-            Response.json({
-              answers: {
-                is_duplicate: {
-                  type: "choice",
-                  choice: "duplicate",
-                  confidence: 0.95,
-                  probabilities: { duplicate: 0.95, distinct: 0.05 },
-                },
-              },
-            });
-
-          const isMatch = await isSameBookAsync(
-            bookA,
-            bookB,
-            { jevApiKey: "test_key" },
-          );
-          expect(isMatch).toBe(true);
-        } finally {
-          globalThis.fetch = origFetch;
-        }
-      });
-
-      it("respects Jev distinct arbitration for subtle false positives", async () => {
-        const bookA = {
-          title: "The Ancient Magus Bride Supplement",
-          authors: "Kore Yamazaki",
-        };
-        const bookB = {
-          title: "The Ancient Magus Bride Official Guide",
-          author: "Kore Yamazaki",
-        };
-
-        const origFetch = globalThis.fetch;
-        try {
-          (globalThis as any).fetch = async () =>
-            Response.json({
-              answers: {
-                is_duplicate: {
-                  type: "choice",
-                  choice: "distinct",
-                  confidence: 0.92,
-                  probabilities: { duplicate: 0.08, distinct: 0.92 },
-                },
-              },
-            });
-
-          const isMatch = await isSameBookAsync(
-            bookA,
-            bookB,
-            { jevApiKey: "test_key" },
-          );
-          expect(isMatch).toBe(false);
-        } finally {
-          globalThis.fetch = origFetch;
-        }
+        // Without Jev key, deterministic high-similarity/exact normalized match still succeeds
+        const isDup = await isSameBookAsync(b1, b2, { jevApiKey: "" });
+        expect(isDup).toBe(true);
       });
     });
   });

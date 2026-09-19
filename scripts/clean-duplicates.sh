@@ -2,11 +2,8 @@
 # ==============================================================================
 # scripts/clean-duplicates.sh
 #
-# Scans the Calibre library for duplicates (by content hash, series/volume match,
-# or normalized title/author similarity).
-#
-# Usage:
-#   scripts/clean-duplicates.sh [--dry-run] [--apply] [--library-dir <path>]
+# Library-wide Calibre duplicate cleaner for home-reading-stack.
+# Defaults to --dry-run; pass --apply or --prune to execute removals.
 # ==============================================================================
 
 set -euo pipefail

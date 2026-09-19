@@ -24,6 +24,10 @@ import {
   pendingRetries,
   cleanExpiredRetries,
   registerPendingRetry,
+  getKOReaderBinary256,
+  getEpubContentSignature,
+  ingestBookFile,
+  getCacheDb,
 } from "./bot";
 
 describe("Telegram Mini App (TMA) Integration", () => {
@@ -1181,66 +1185,135 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
     }
   });
 
-  describe("Enhanced Ingestion Deduplication in Telegram Bot", () => {
-    it("recognizes recompressed duplicate EPUB via EPUB content signature", async () => {
-      const { ingestBookFile, getCacheDb } = await import("./bot");
-      const cacheDb = getCacheDb();
+  describe("EPUB Content-Signature Fingerprint & Deduplication", () => {
+    it("getKOReaderBinary256 computes consistent MD5 hash and returns null on missing file", () => {
+      const tmpFile = path.join(os.tmpdir(), `koreader_test_${Date.now()}.bin`);
+      fs.writeFileSync(tmpFile, Buffer.alloc(4096, 0x42));
+      try {
+        const hash1 = getKOReaderBinary256(tmpFile);
+        const hash2 = getKOReaderBinary256(tmpFile);
+        expect(hash1).not.toBeNull();
+        expect(hash1).toBe(hash2);
 
-      const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "bot-dedup-test-"));
-      const zip1 = path.join(testDir, "book_orig.epub");
-      const zip2 = path.join(testDir, "book_recompressed.epub");
+        expect(getKOReaderBinary256("/non/existent/path/book.epub")).toBeNull();
+      } finally {
+        if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+      }
+    });
 
-      // Create two zip files with different zip metadata but identical entry contents
-      const proc = (globalThis as any).Bun.spawnSync([
-        "python3",
-        "-c",
-        `
-import zipfile
-with zipfile.ZipFile("${zip1}", "w") as z:
-    z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
-    z.writestr("META-INF/container.xml", "<container/>", compress_type=zipfile.ZIP_STORED)
-    z.writestr("OEBPS/text.xhtml", "<html><body>Content Identical</body></html>", compress_type=zipfile.ZIP_STORED)
+    it("getEpubContentSignature computes identical hash for recompressed variants with same package identifier", () => {
+      const testDir = path.join(os.tmpdir(), `epub_sig_test_${Date.now()}`);
+      fs.mkdirSync(testDir, { recursive: true });
 
-with zipfile.ZipFile("${zip2}", "w") as z:
-    z.comment = b"recompressed comment"
-    z.writestr("OEBPS/text.xhtml", "<html><body>Content Identical</body></html>", compress_type=zipfile.ZIP_DEFLATED)
-    z.writestr("META-INF/container.xml", "<container/>", compress_type=zipfile.ZIP_DEFLATED)
-    z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
-`,
-      ]);
-      expect(proc.exitCode).toBe(0);
+      const srcDir1 = path.join(testDir, "src1");
+      const srcDir2 = path.join(testDir, "src2");
+      fs.mkdirSync(path.join(srcDir1, "META-INF"), { recursive: true });
+      fs.mkdirSync(path.join(srcDir2, "META-INF"), { recursive: true });
 
-      const mockCalibre = path.join(testDir, "mock-calibredb.sh");
-      fs.writeFileSync(
-        mockCalibre,
-        '#!/bin/sh\nif [ "$1" = "add" ]; then echo "Added book ids: 991"; exit 0; fi\nif [ "$1" = "list" ]; then echo "[]"; exit 0; fi\nexit 0\n',
-      );
-      fs.chmodSync(mockCalibre, 0o755);
+      const containerXml = `<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>`;
+      fs.writeFileSync(path.join(srcDir1, "META-INF", "container.xml"), containerXml);
+      fs.writeFileSync(path.join(srcDir2, "META-INF", "container.xml"), containerXml);
+      fs.writeFileSync(path.join(srcDir1, "mimetype"), "application/epub+zip");
+      fs.writeFileSync(path.join(srcDir2, "mimetype"), "application/epub+zip");
 
-      const origCalibredb = process.env.CALIBREDB_PATH;
-      process.env.CALIBREDB_PATH = mockCalibre;
+      fs.mkdirSync(path.join(srcDir1, "OEBPS"), { recursive: true });
+      fs.mkdirSync(path.join(srcDir2, "OEBPS"), { recursive: true });
+
+      const testUuid = "urn:uuid:e8b1b590-7e61-4fa3-9f12-9c3f4123abcd";
+      const opfXml = `<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Test Deduplication Book</dc:title>
+    <dc:creator>Test Author</dc:creator>
+    <dc:identifier id="BookId">${testUuid}</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="chapter1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="chapter1"/>
+  </spine>
+</package>`;
+      fs.writeFileSync(path.join(srcDir1, "OEBPS", "content.opf"), opfXml);
+      fs.writeFileSync(path.join(srcDir2, "OEBPS", "content.opf"), opfXml);
+      fs.writeFileSync(path.join(srcDir1, "OEBPS", "chapter1.xhtml"), "<html><body>Chapter 1 Content</body></html>");
+      fs.writeFileSync(path.join(srcDir2, "OEBPS", "chapter1.xhtml"), "<html><body>Chapter 1 Content</body></html>");
+
+      // Variant 2 includes extra dummy comment or different file to change binary checksum
+      fs.writeFileSync(path.join(srcDir2, "OEBPS", "notes.txt"), "Recompressed release variant with extra notes");
+
+      const epub1 = path.join(testDir, "book_standard.epub");
+      const epub2 = path.join(testDir, "book_recompressed.epub");
+
+      // Package epub1 with compression level 9
+      spawnSync("zip", ["-9", "-q", "-r", epub1, "mimetype", "META-INF", "OEBPS"], {
+        cwd: srcDir1,
+      });
+
+      // Package epub2 with compression level 0 (store only)
+      spawnSync("zip", ["-0", "-q", "-r", epub2, "mimetype", "META-INF", "OEBPS"], {
+        cwd: srcDir2,
+      });
 
       try {
-        // First ingest book1
-        const res1 = ingestBookFile(zip1, "Book One.epub");
-        expect(res1.success).toBe(true);
-        expect(res1.duplicate).toBe(false);
-        expect(res1.bookId).toBe(991);
+        expect(fs.existsSync(epub1)).toBe(true);
+        expect(fs.existsSync(epub2)).toBe(true);
 
-        // Second ingest book2 (recompressed, different binary hash)
-        const res2 = ingestBookFile(zip2, "Book Recompressed.epub");
-        expect(res2.success).toBe(true);
-        expect(res2.duplicate).toBe(true);
-        expect(res2.bookId).toBe(991);
-        expect(res2.message).toContain("identical EPUB content");
+        // Binary KOReader hash should differ because zip compression/structure differs
+        const binHash1 = getKOReaderBinary256(epub1);
+        const binHash2 = getKOReaderBinary256(epub2);
+        expect(binHash1).not.toBeNull();
+        expect(binHash2).not.toBeNull();
+        expect(binHash1).not.toBe(binHash2);
+
+        // Content signature from content.opf package identifier MUST MATCH identically
+        const sig1 = getEpubContentSignature(epub1);
+        const sig2 = getEpubContentSignature(epub2);
+        expect(sig1).not.toBeNull();
+        expect(sig2).not.toBeNull();
+        expect(sig1).toBe(sig2);
+
+        // Verify fallback duplicate detection using SQLite file_hashes cache
+        const cacheDb = getCacheDb();
+        // Insert entry using epub1's content signature
+        cacheDb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          `sig:${epub1}`,
+          Date.now(),
+          sig1,
+          999,
+          "Test Deduplication Book",
+          "Test Author",
+          0,
+        );
+
+        // Ingesting epub2 (which has different binary hash binHash2) should hit content signature fallback
+        const match = cacheDb
+          .query(
+            "SELECT book_id, title, authors FROM file_hashes WHERE hash = ? LIMIT 1",
+          )
+          .get(sig2) as any;
+
+        expect(match).not.toBeNull();
+        expect(match.book_id).toBe(999);
+        expect(match.title).toBe("Test Deduplication Book");
       } finally {
-        if (origCalibredb !== undefined) {
-          process.env.CALIBREDB_PATH = origCalibredb;
-        } else {
-          delete process.env.CALIBREDB_PATH;
-        }
-        cacheDb.run("DELETE FROM file_hashes WHERE book_id = 991");
         fs.rmSync(testDir, { recursive: true, force: true });
+      }
+    });
+
+    it("returns null for non-EPUB files or corrupted archives missing OPF", () => {
+      const nonEpub = path.join(os.tmpdir(), `non_epub_${Date.now()}.txt`);
+      fs.writeFileSync(nonEpub, "Plain text file");
+      try {
+        expect(getEpubContentSignature(nonEpub)).toBeNull();
+      } finally {
+        if (fs.existsSync(nonEpub)) fs.unlinkSync(nonEpub);
       }
     });
   });

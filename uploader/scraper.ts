@@ -1,10 +1,7 @@
-import zlib from "node:zlib";
-import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { homedir } from "node:os";
 import { safeFetchWithSsrf, isPrivateOrInternalIp } from "./security";
 
 export function getCalibredbPath(): string {
@@ -49,6 +46,10 @@ export interface ScrapedMetadata {
 export const WATERMARK_BRACKET_REGEX =
   /\[.*?(?:z-?lib|libgen|annas?-archive|anna[\x27\u2019`]?s?\s*archive|oceanofpdf|vk\.com|thebookr|bookr|e-?book|pdf|epub|mobi|azw\d*|cbz|cbr|scan|retail|channel|myanmar|tg|t\.me|download|share|hq|raw|rip|\.[a-z]{2,4}).*?\]|\(.*?(?:z-?lib|libgen|annas?-archive|anna[\x27\u2019`]?s?\s*archive|oceanofpdf|vk\.com|thebookr|bookr|e-?book|pdf|epub|mobi|azw\d*|cbz|cbr|scan|retail|channel|myanmar|tg|t\.me|download|share|hq|raw|rip|\.[a-z]{2,4}).*?\)/gi;
 
+// Release metadata tags and edition markers in brackets or parentheses
+export const RELEASE_METADATA_REGEX =
+  /[\[\(]\s*(?:light\s*novel|manga|web\s*novel|ln|wn|novel|epub|pdf|mobi|azw\d*|cbz|cbr|official|digital|retail|scan(?:lation)?|raw|hq|hd|rip|premium|complete|uncensored|special|bonus|repack|exclusive|remaster(?:ed)?|seven\s*seas|yen\s*press|j-?novel(?:\s*club)?|kodansha|viz(?:\s*media)?|square\s*enix)\s*[\]\)]/gi;
+
 // Standalone digital library / pirate domains and tokens
 export const STANDALONE_WATERMARKS_REGEX =
   /\b(?:z-?lib(?:rary)?(?:\.[a-z]{2,4})?|libgen(?:\.[a-z]{2,4})?|annas?-archive(?:\.[a-z]{2,4})?|anna[\x27\u2019`]?s?\s*archive|oceanofpdf(?:\.[a-z]{2,4})?|thebookr|vk\.com)\b/gi;
@@ -79,8 +80,9 @@ export function cleanString(str: string): string {
   s = s.replace(WWW_REGEX, " ");
   // Strip standalone watermark domains and tokens
   s = s.replace(STANDALONE_WATERMARKS_REGEX, " ");
-  // Strip eBook format extensions
+  // Strip eBook format extensions and version tags
   s = s.replace(FORMAT_EXT_REGEX, " ");
+  s = s.replace(/\bv[0-9]+(?:\.[0-9]+)?\b/gi, " ");
   s = s.replace(/\[\s*\]|\(\s*\)/g, " ");
   s = s.replace(/\([0-9]+\)$/g, " ");
   // Collapse whitespace
@@ -88,51 +90,6 @@ export function cleanString(str: string): string {
   // Strip leading and trailing punctuation / delimiters
   s = s.replace(/^[-–—:_.\s]+|[-–—:_.\s]+$/g, "").trim();
   return s;
-}
-
-export function normalizeTitle(str: string): string {
-  if (!str) return "";
-  let s = cleanString(str);
-
-  // 1. Strip release metadata tags: [Light Novel], (EPUB), [Official], [v01], etc.
-  const RELEASE_TAGS_REGEX =
-    /\[\s*(?:light\s*novel|web\s*novel|official(?:\s*edition)?|retail|digital|epub|pdf|scan|raw|fan(?:-|\s*)translated|v\d+(?:\.\d+)?)\s*\]|\(\s*(?:light\s*novel|web\s*novel|official(?:\s*edition)?|retail|digital|epub|pdf|scan|raw|fan(?:-|\s*)translated|v\d+(?:\.\d+)?)\s*\)/gi;
-  s = s.replace(RELEASE_TAGS_REGEX, " ");
-
-  // 2. Normalize volume/chapter numbering: Vol 1, Volume 01, v1, #1, Book 1 -> vol 1
-  s = s.replace(/\b(?:vol(?:ume)?|v|book|bk)\.?\s*0*(\d+(?:\.\d+)?)\b/gi, "vol $1");
-  s = s.replace(/#\s*0*(\d+(?:\.\d+)?)\b/g, "vol $1");
-  s = s.replace(/\b(?:chapter|ch)\.?\s*0*(\d+(?:\.\d+)?)\b/gi, "ch $1");
-
-  // 3. Strip punctuation variance: : - — ~ |
-  s = s.replace(/[:\-–—~|]+/g, " ");
-
-  // Normalize standalone '&' to 'and' for title consistency
-  s = s.replace(/\s*&\s*/g, " and ");
-
-  // 4. Collapse whitespace & lowercase
-  s = s.replace(/\s+/g, " ").trim().toLowerCase();
-  return s;
-}
-
-export function normalizeAuthor(str: string): string {
-  if (!str) return "";
-  let s = cleanString(str);
-
-  // 1. Strip role tags: (Author), (Artist), (Illustrator), (Story), etc.
-  const ROLE_TAGS_REGEX =
-    /\s*\((?:author|artist|illustrator|story|writer|art|trans(?:lator)?|editor|cover|original\s*story)\)/gi;
-  s = s.replace(ROLE_TAGS_REGEX, " ");
-
-  // 2. Split multi-author lists on comma, semicolon, &, or 'and'
-  const authors = s
-    .split(/[,;&]|\band\b/i)
-    .map((a) => cleanString(a).trim().toLowerCase())
-    .filter((a) => a.length > 0 && !isJunkAuthor(a));
-
-  // Sort alphabetically
-  authors.sort((a, b) => a.localeCompare(b));
-  return authors.join(", ");
 }
 
 /**
@@ -215,6 +172,187 @@ export function sanitizeMetadata(
 }
 
 /**
+ * Parse a standard ASCII or Burmese numeral string to number.
+ */
+export function parseBurmeseOrAsciiNumber(str: string): number | null {
+  if (!str) return null;
+  const burmeseDigits: Record<string, string> = {
+    "၀": "0",
+    "၁": "1",
+    "၂": "2",
+    "၃": "3",
+    "၄": "4",
+    "၅": "5",
+    "၆": "6",
+    "၇": "7",
+    "၈": "8",
+    "၉": "9",
+  };
+  let converted = "";
+  for (const ch of str) {
+    if (burmeseDigits[ch]) {
+      converted += burmeseDigits[ch];
+    } else {
+      converted += ch;
+    }
+  }
+  const num = parseFloat(converted);
+  return !isNaN(num) ? num : null;
+}
+
+/**
+ * Extract volume number from title or filename.
+ */
+export function extractVolumeNumber(title: string): number | null {
+  if (!title) return null;
+  const s = title.trim();
+
+  const patterns = [
+    /[\[\(]\s*(?:vol(?:ume)?|v|book|bk|part|pt)?\.?\s*0*(\d+(?:\.\d+)?)\s*[\]\)]/i,
+    /\b(?:vol(?:ume)?|v|book|bk|part|pt)\.?\s*0*(\d+(?:\.\d+)?)\b/i,
+    /#\s*0*(\d+(?:\.\d+)?)\b/i,
+    /(?:အတွဲ|အပိုင်း|အခန်း)\s*([၀-၉]+|\d+(?:\.\d+)?)/,
+    /(?<=[a-zA-Z\u00A0-\uFFFF]\s+)0*(\d{1,3})\s*[-–—:]/i,
+    /(?<=[a-zA-Z\u00A0-\uFFFF]\s+)0*(\d{1,3})$/i,
+  ];
+
+  for (const p of patterns) {
+    const m = s.match(p);
+    if (m) {
+      if (
+        m[0].startsWith("(") &&
+        m[1].length === 4 &&
+        parseInt(m[1], 10) >= 1900 &&
+        parseInt(m[1], 10) <= 2100 &&
+        !/[vb#]/i.test(m[0])
+      ) {
+        continue;
+      }
+      const val = parseBurmeseOrAsciiNumber(m[1]);
+      if (val !== null && !isNaN(val)) return val;
+    }
+  }
+  return null;
+}
+
+/**
+ * Normalize title for deduplication:
+ * - Strips release metadata tags ([Light Novel], [Manga], (EPUB), [Official], [Digital], (Retail), [v01], etc.)
+ * - Strips punctuation variance (:, -, —, –, ~, |, /, \, _, ,, ., ;, !, ?, etc.)
+ * - Normalizes volume numbering (Vol 1, Volume 01, v1, #1, Book 1) to canonical "vol <N>"
+ */
+export function normalizeTitleForDedup(title: string): string {
+  if (!title) return "";
+  let s = title;
+
+  // Replace underscores with space
+  s = s.replace(/_/g, " ");
+
+  // Strip file/revision version tags like [v1.0], [v2.1], (v1.0)
+  s = s.replace(/[\[\(]\s*v\d+\.\d+(?:\.\d+)?\s*[\]\)]/gi, " ");
+
+  // Standardize bracketed volume notations like [v01], [Vol 1], (Volume 02) into standard "vol <N>"
+  s = s.replace(
+    /[\[\(]\s*(?:vol(?:ume)?|v|book|bk|part|pt)?\.?\s*0*(\d+(?:\.\d+)?)\s*[\]\)]/gi,
+    (match, num) => {
+      if (
+        num.length === 4 &&
+        parseInt(num, 10) >= 1900 &&
+        parseInt(num, 10) <= 2100 &&
+        !/[vb#]/i.test(match)
+      ) {
+        return " ";
+      }
+      const val = parseBurmeseOrAsciiNumber(num);
+      return val !== null && !isNaN(val) ? ` vol ${val} ` : " ";
+    },
+  );
+
+  // Strip release metadata tags and pirate/domain watermarks
+  s = s.replace(RELEASE_METADATA_REGEX, " ");
+  s = s.replace(WATERMARK_BRACKET_REGEX, " ");
+  s = s.replace(STANDALONE_WATERMARKS_REGEX, " ");
+  s = s.replace(URL_REGEX, " ");
+  s = s.replace(TELEGRAM_LINK_REGEX, " ");
+  s = s.replace(VK_LINK_REGEX, " ");
+  s = s.replace(MENTION_REGEX, " ");
+  s = s.replace(WWW_REGEX, " ");
+  s = s.replace(FORMAT_EXT_REGEX, " ");
+
+  // Normalize standalone volume number after words before delimiter: "Sword Art Online 01 - Aincrad" -> "Sword Art Online vol 1 - Aincrad"
+  s = s.replace(/(?<=[a-zA-Z\u00A0-\uFFFF]\s+)0*(\d{1,3})\s*[-–—:]/g, (_, num) => {
+    const val = parseFloat(num);
+    return !isNaN(val) ? ` vol ${val} - ` : ` ${num} - `;
+  });
+
+  // Normalize explicit volume notations in the text to "vol <N>"
+  s = s.replace(
+    /\b(?:vol(?:ume)?|v|book|bk|part|pt)\.?\s*0*(\d+(?:\.\d+)?)\b/gi,
+    (_, num) => {
+      const val = parseFloat(num);
+      return !isNaN(val) ? ` vol ${val} ` : " ";
+    },
+  );
+  s = s.replace(/#\s*0*(\d+(?:\.\d+)?)\b/g, (_, num) => {
+    const val = parseFloat(num);
+    return !isNaN(val) ? ` vol ${val} ` : " ";
+  });
+
+  // Burmese volume notations
+  s = s.replace(
+    /(?:အတွဲ|အပိုင်း|အခန်း)\s*([၀-၉]+|\d+(?:\.\d+)?)/g,
+    (_, num) => {
+      const val = parseBurmeseOrAsciiNumber(num);
+      return val !== null && !isNaN(val) ? ` vol ${val} ` : " ";
+    },
+  );
+
+  // Strip punctuation variance: :, -, —, –, ~, |, /, \, _, ,, ., ;, !, ?, etc.
+  s = s.replace(/[:\-—–~|\/\\_.,;!?"'’“”`\(\)\[\]{}<>+*^&%$#@]+/g, " ");
+
+  // Lowercase and collapse whitespace
+  s = s.toLowerCase().replace(/\s+/g, " ").trim();
+
+  return s;
+}
+
+/**
+ * Normalize author list for deduplication:
+ * - Strips role tags ((Author), (Artist), (Illustrator), etc.)
+ * - Splits multi-author lists and sorts names alphabetically
+ * - Cleans and standardizes whitespace
+ */
+export function normalizeAuthorForDedup(authors: string): string {
+  if (!authors) return "";
+  let s = authors;
+
+  // Strip role tags in parentheses or brackets
+  s = s.replace(
+    /[\(\[]\s*(?:author|artist|illustrator|writer|story|art|translator|editor|creator|contributor)\s*[\)\]]/gi,
+    " ",
+  );
+
+  // Strip watermarks/junk from authors
+  s = cleanString(s);
+
+  // Split by multi-author delimiters: &, and, ;, /, |, or commas separating distinct names
+  const parts = s
+    .split(/(?:\s*(?:&|\band\b|;|\/|\|)\s*|,\s*(?=[A-Z\u00A0-\uFFFFa-z]))/i)
+    .map((p) =>
+      p
+        .replace(/[,\.:—_~|]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim(),
+    )
+    .filter((p) => p.length > 0 && !isJunkAuthor(p));
+
+  // Lowercase, deduplicate, and sort alphabetically
+  const unique = Array.from(new Set(parts.map((p) => p.toLowerCase()))).sort();
+
+  return unique.join(", ");
+}
+
+/**
  * Extract series name and volume number from title or filename.
  */
 export function extractSeries(
@@ -227,22 +365,31 @@ export function extractSeries(
   ].filter(Boolean);
 
   const patterns = [
-    /^(.*?)[,_\s-]+(?:vol(?:ume)?|v)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
-    /^(.*?)[,_\s-]+(?:book|bk)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
-    /^(.*?)[,_\s-]+#\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
-    /^(.*?)[,_\s-]+(?:part|pt)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
+    /^(.*?)[,_\s-]+(?:vol(?:ume)?|v)\.?\s*([၀-၉]+|\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
+    /^(.*?)[,_\s-]+(?:book|bk)\.?\s*([၀-၉]+|\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
+    /^(.*?)[,_\s-]+#\s*([၀-၉]+|\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
+    /^(.*?)[,_\s-]+(?:part|pt)\.?\s*([၀-၉]+|\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
+    /^(.*?)\s*[\[\(]\s*(?:vol(?:ume)?|v|book|bk|part|pt)?\.?\s*([၀-၉]+|\d+(?:\.\d+)?)\s*[\]\)](?:[\s-–—:].*)?$/i,
+    /^(.*?)[,_\s-]+(?:အတွဲ|အပိုင်း|အခန်း)\s*([၀-၉]+|\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/,
   ];
 
-  for (const str of candidates) {
-    for (const p of patterns) {
-      const m = str.match(p);
-      if (m) {
-        const series = cleanString(m[1])
-          .replace(/[,_–—:-]+$/, "")
-          .trim();
-        const vol = parseFloat(m[2]);
-        if (series.length >= 2 && !isNaN(vol)) {
-          return { series, volume: vol };
+  for (const rawStr of candidates) {
+    const strVariants = [
+      rawStr,
+      rawStr.replace(RELEASE_METADATA_REGEX, " ").replace(/\s+/g, " ").trim(),
+    ];
+
+    for (const str of strVariants) {
+      for (const p of patterns) {
+        const m = str.match(p);
+        if (m) {
+          const series = cleanString(m[1])
+            .replace(/[,_–—:-]+$/, "")
+            .trim();
+          const vol = parseBurmeseOrAsciiNumber(m[2]);
+          if (series.length >= 2 && vol !== null && !isNaN(vol)) {
+            return { series, volume: vol };
+          }
         }
       }
     }
@@ -294,259 +441,9 @@ export function stringSimilarity(a: string, b: string): number {
 }
 
 /**
- * Computes an EPUB content-signature fallback by hashing decompressed entry names
- * and bytes, ignoring container timestamps and zip comments, so recompressed
- * identical books match even if raw zip SHA256 / KOReader binary sample differs.
- */
-export function getEpubContentSignature(filePath: string): string | null {
-  try {
-    if (!fs.existsSync(filePath)) return null;
-    const stat = fs.statSync(filePath);
-    if (stat.size < 58) return null;
-
-    const buf = fs.readFileSync(filePath);
-    if (buf.length < 22) return null;
-
-    // Locate EOCD signature (0x06054b50) scanning backwards from end
-    let eocdOffset = -1;
-    for (
-      let i = buf.length - 22;
-      i >= Math.max(0, buf.length - 65536 - 22);
-      i--
-    ) {
-      if (buf.readUInt32LE(i) === 0x06054b50) {
-        eocdOffset = i;
-        break;
-      }
-    }
-    if (eocdOffset === -1) return null;
-
-    const totalEntries = buf.readUInt16LE(eocdOffset + 10);
-    const cdSize = buf.readUInt32LE(eocdOffset + 12);
-    const cdOffset = buf.readUInt32LE(eocdOffset + 16);
-
-    if (cdOffset + cdSize > eocdOffset) return null;
-
-    const entries: Array<{
-      fileName: string;
-      compMethod: number;
-      compSize: number;
-      dataOffset: number;
-    }> = [];
-
-    let pos = cdOffset;
-    for (let i = 0; i < totalEntries; i++) {
-      if (pos + 46 > cdOffset + cdSize) return null;
-      if (buf.readUInt32LE(pos) !== 0x02014b50) return null;
-
-      const compMethod = buf.readUInt16LE(pos + 10);
-      const compSize = buf.readUInt32LE(pos + 20);
-      const fileNameLen = buf.readUInt16LE(pos + 28);
-      const extraLen = buf.readUInt16LE(pos + 30);
-      const commentLen = buf.readUInt16LE(pos + 32);
-      const localHeaderOffset = buf.readUInt32LE(pos + 42);
-
-      const fileName = buf.toString("utf8", pos + 46, pos + 46 + fileNameLen);
-      pos += 46 + fileNameLen + extraLen + commentLen;
-
-      if (fileName.endsWith("/") || fileName === "mimetype") continue;
-
-      if (localHeaderOffset + 30 > buf.length) return null;
-      if (buf.readUInt32LE(localHeaderOffset) !== 0x04034b50) return null;
-      const localFileNameLen = buf.readUInt16LE(localHeaderOffset + 26);
-      const localExtraLen = buf.readUInt16LE(localHeaderOffset + 28);
-      const dataOffset = localHeaderOffset + 30 + localFileNameLen + localExtraLen;
-
-      entries.push({
-        fileName,
-        compMethod,
-        compSize,
-        dataOffset,
-      });
-    }
-
-    if (entries.length === 0) return null;
-    entries.sort((a, b) => a.fileName.localeCompare(b.fileName));
-
-    const hasher = crypto.createHash("sha256");
-    for (const entry of entries) {
-      hasher.update(entry.fileName);
-      const rawSlice = buf.subarray(
-        entry.dataOffset,
-        entry.dataOffset + entry.compSize,
-      );
-      if (entry.compMethod === 0) {
-        hasher.update(rawSlice);
-      } else if (entry.compMethod === 8) {
-        const decompressed = zlib.inflateRawSync(rawSlice);
-        hasher.update(decompressed);
-      } else {
-        hasher.update(rawSlice);
-      }
-    }
-    return hasher.digest("hex");
-  } catch (_e) {
-    void _e;
-    return null;
-  }
-}
-
-/**
- * Computes KOReader binary checksum (MD5 of sparse 1KB blocks).
- * If the file is an EPUB, falls back to EPUB content signature if KOReader hash
- * is computed.
- */
-export function getKOReaderBinary256(filePath: string): string | null {
-  try {
-    const stats = fs.statSync(filePath);
-    const fd = fs.openSync(filePath, "r");
-    const KOREADER_HASH_ALGO = "md5";
-    const hasher = crypto.createHash(KOREADER_HASH_ALGO);
-    const size = 1024;
-    for (let i = -1; i <= 10; i++) {
-      const offset = i === -1 ? 256 : 1024 * 4 ** i;
-      if (offset >= stats.size) break;
-      const buf = new Uint8Array(size);
-      const bytesRead = fs.readSync(fd, buf, 0, size, offset);
-      if (bytesRead > 0) hasher.update(buf.subarray(0, bytesRead));
-    }
-    fs.closeSync(fd);
-    return hasher.digest("hex");
-  } catch (_err) {
-    void _err;
-    return null;
-  }
-}
-
-export function resolveJevApiKey(): string | null {
-  const directKey = (
-    process.env.JEV_API_KEY ||
-    process.env.TYPESAFE_API_KEY ||
-    ""
-  ).trim();
-  if (directKey) return directKey;
-
-  const globalConfigPath = path.join(
-    homedir(),
-    ".pi",
-    "agent",
-    "compact-adviser.json",
-  );
-  if (fs.existsSync(globalConfigPath)) {
-    try {
-      const cfg = JSON.parse(fs.readFileSync(globalConfigPath, "utf8"));
-      if (cfg.typesafeApiKey && typeof cfg.typesafeApiKey === "string" && cfg.typesafeApiKey.trim()) {
-        return cfg.typesafeApiKey.trim();
-      }
-    } catch {}
-  }
-
-  const candidateEnvs = [
-    path.join(process.cwd(), ".env"),
-    path.join(homedir(), ".firstmate", "homes", "reading-mate", ".env"),
-    path.join(homedir(), "coding_projects", "firstmate", ".env"),
-  ];
-
-  for (const envPath of candidateEnvs) {
-    if (fs.existsSync(envPath)) {
-      try {
-        const text = fs.readFileSync(envPath, "utf8");
-        for (const line of text.split("\n")) {
-          const trimmed = line.trim();
-          if (trimmed.startsWith("JEV_API_KEY=") || trimmed.startsWith("TYPESAFE_API_KEY=")) {
-            const val = trimmed.split("=").slice(1).join("=").trim().replace(/^["']|["']$/g, "");
-            if (val) return val;
-          }
-        }
-      } catch {}
-    }
-  }
-
-  return null;
-}
-
-const JEV_SYSTEM1_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
-const JEV_MODEL = "jev-latest";
-
-export interface JevArbitrationResult {
-  isDuplicate: boolean;
-  confidence: number;
-  reason?: string;
-  probabilities?: { duplicate?: number; distinct?: number };
-}
-
-/**
- * Arbitrate ambiguous book duplicate pairs using Jev System-1 (~200ms).
- */
-export async function arbitrateWithJev(
-  bookA: { title: string; authors?: string },
-  bookB: { title: string; authors?: string },
-  apiKeyOverride?: string,
-): Promise<JevArbitrationResult | null> {
-  const apiKey = (apiKeyOverride || resolveJevApiKey() || "").trim();
-  if (!apiKey) return null;
-
-  const state = `Compare two books for duplicate detection:
-Book A:
-Title: ${bookA.title}
-Author: ${bookA.authors || "Unknown"}
-
-Book B:
-Title: ${bookB.title}
-Author: ${bookB.authors || "Unknown"}`;
-
-  const questions = {
-    is_duplicate: {
-      type: "choice",
-      instructions:
-        "Determine whether Book A and Book B refer to the exact same book/edition/volume or are different volumes/distinct works.",
-      criteria: {
-        duplicate:
-          "Book A and Book B are the same book, same volume, or minor title/author variations of the same release.",
-        distinct:
-          "Book A and Book B are different volumes in a series (e.g. Vol 1 vs Vol 2), different books, or unrelated works.",
-      },
-    },
-  };
-
-  try {
-    const res = await safeFetchWithSsrf(JEV_SYSTEM1_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: JEV_MODEL,
-        state: state.slice(0, 4000),
-        questions,
-      }),
-      signal: AbortSignal.timeout(5000),
-    } as any);
-
-    if (!res.ok) return null;
-    const data: any = await res.json();
-    const answer = data.answers?.is_duplicate;
-    if (!answer) return null;
-
-    const choice = answer.choice;
-    const confidence = answer.confidence ?? 0;
-    const probs = answer.probabilities || {};
-
-    return {
-      isDuplicate: choice === "duplicate",
-      confidence,
-      probabilities: probs,
-    };
-  } catch (_e) {
-    void _e;
-    return null;
-  }
-}
-
-/**
  * Robust check if an incoming book is the same logical work as an existing book.
  * Checks series/volume consistency, author similarity, and title similarity.
+ * Volume differences are guaranteed to NEVER match as duplicates.
  */
 export function isSameBook(
   existing: {
@@ -558,81 +455,216 @@ export function isSameBook(
   incoming: {
     title: string;
     author?: string;
-    series?: { series: string; volume: number } | null;
+    authors?: string;
+    series?: { series: string; volume: number } | null | string;
+    series_index?: number;
   },
 ): boolean {
-  const bTitle = cleanString(existing.title).toLowerCase();
-  const sTitle = cleanString(incoming.title).toLowerCase();
-  if (!bTitle || !sTitle) return false;
+  const normExistingTitle = normalizeTitleForDedup(existing.title);
+  const normIncomingTitle = normalizeTitleForDedup(incoming.title);
+  if (!normExistingTitle || !normIncomingTitle) return false;
 
-  const bAuthor = cleanString(existing.authors || "");
-  const sAuthor = cleanString(incoming.author || "");
+  const existingAuthor = existing.authors || "";
+  const incomingAuthor = incoming.author || incoming.authors || "";
+  const normExistingAuthor = normalizeAuthorForDedup(existingAuthor);
+  const normIncomingAuthor = normalizeAuthorForDedup(incomingAuthor);
+  const hasKnownAuthors =
+    normExistingAuthor &&
+    normIncomingAuthor &&
+    !isJunkAuthor(normExistingAuthor) &&
+    !isJunkAuthor(normIncomingAuthor);
+  const authorSim = hasKnownAuthors
+    ? stringSimilarity(normExistingAuthor, normIncomingAuthor)
+    : 1.0;
 
-  // 1. Series comparison
-  const bSeries = existing.series
+  // 1. Series and Volume verification (deterministic gate)
+  const existingSeries = existing.series
     ? {
         series: cleanString(existing.series),
         volume: existing.series_index || 1,
       }
     : extractSeries(existing.title);
-  const sSeries = incoming.series || extractSeries(incoming.title);
 
-  if (bSeries && sSeries) {
+  const incomingSeries =
+    typeof incoming.series === "object" && incoming.series !== null
+      ? incoming.series
+      : typeof incoming.series === "string" && incoming.series
+        ? {
+            series: cleanString(incoming.series),
+            volume: incoming.series_index || 1,
+          }
+        : extractSeries(incoming.title);
+
+  if (existingSeries && incomingSeries) {
+    const normES = normalizeTitleForDedup(existingSeries.series);
+    const normIS = normalizeTitleForDedup(incomingSeries.series);
     const sameSeries =
-      normalizeTitle(bSeries.series) === normalizeTitle(sSeries.series) ||
-      cleanString(bSeries.series).toLowerCase() ===
-        cleanString(sSeries.series).toLowerCase();
+      normES === normIS ||
+      ((normES.startsWith(normIS) || normIS.startsWith(normES)) &&
+        (!hasKnownAuthors || authorSim >= 0.6));
     if (sameSeries) {
-      return bSeries.volume === sSeries.volume;
+      return existingSeries.volume === incomingSeries.volume;
     }
     return false;
-  } else if (bSeries || sSeries) {
-    // One is explicitly numbered volume/book in a series and the other is not
-    return false;
+  } else {
+    // Check volume numbers extracted from titles
+    const volA = extractVolumeNumber(existing.title);
+    const volB = extractVolumeNumber(incoming.title);
+    if (volA !== null && volB !== null && volA !== volB) {
+      return false; // Different volumes are NEVER duplicates
+    }
+    if (existingSeries && !incomingSeries) {
+      const vol = extractVolumeNumber(incoming.title);
+      if (vol !== null && vol !== existingSeries.volume) return false;
+    } else if (incomingSeries && !existingSeries) {
+      const vol = extractVolumeNumber(existing.title);
+      if (vol !== null && vol !== incomingSeries.volume) return false;
+    }
+  }
+
+  // Check all numbers in normalized titles: different numbers mean distinct volumes/works
+  const numsA = normExistingTitle.match(/\b\d+(?:\.\d+)?\b/g) || [];
+  const numsB = normIncomingTitle.match(/\b\d+(?:\.\d+)?\b/g) || [];
+  if (numsA.length > 0 && numsB.length > 0) {
+    const setB = new Set(numsB);
+    const hasSharedNumber = numsA.some((n) => setB.has(n));
+    if (!hasSharedNumber) {
+      return false; // Conflicting numbers indicate distinct volumes/entries
+    }
   }
 
   // 2. Author conflict check
-  const hasKnownAuthors =
-    bAuthor && sAuthor && !isJunkAuthor(bAuthor) && !isJunkAuthor(sAuthor);
-  const normBAuthor = normalizeAuthor(bAuthor);
-  const normSAuthor = normalizeAuthor(sAuthor);
-  const authorSim = hasKnownAuthors
-    ? normBAuthor && normSAuthor && normBAuthor === normSAuthor
-      ? 1.0
-      : stringSimilarity(bAuthor, sAuthor)
-    : 1.0;
   if (hasKnownAuthors && authorSim < 0.35) {
-    // Both books have explicit authors, but they are clearly different people
     return false;
   }
 
-  // 3. Title comparison with normalized titles
-  const normBTitle = normalizeTitle(existing.title);
-  const normSTitle = normalizeTitle(incoming.title);
+  // 3. Title comparison
+  if (normExistingTitle === normIncomingTitle) return true;
 
-  if (bTitle === sTitle || normBTitle === normSTitle) return true;
+  const titleSim = stringSimilarity(normExistingTitle, normIncomingTitle);
+  if (titleSim >= 0.88 && (!hasKnownAuthors || authorSim >= 0.6)) return true;
 
-  const titleSim = Math.max(
-    stringSimilarity(bTitle, sTitle),
-    stringSimilarity(normBTitle, normSTitle),
-  );
-  if (titleSim >= 0.85) return true;
+  if (titleSim < 0.65) return false;
 
   // Subtitle / prefix match with length guard
-  const minLen = Math.min(normBTitle.length, normSTitle.length);
+  const minLen = Math.min(normExistingTitle.length, normIncomingTitle.length);
   if (
-    minLen >= 5 &&
-    (normBTitle.startsWith(normSTitle) || normSTitle.startsWith(normBTitle))
+    minLen >= 10 &&
+    (normExistingTitle.startsWith(normIncomingTitle) ||
+      normIncomingTitle.startsWith(normExistingTitle))
   ) {
-    if (!hasKnownAuthors || authorSim >= 0.6) return true;
+    if (!hasKnownAuthors || authorSim >= 0.6) {
+      if (titleSim >= 0.8) return true;
+    }
   }
 
   return false;
 }
 
 /**
- * Async version of isSameBook with Jev System-1 arbitration when similarity
- * is ambiguous (between 0.65 and 0.88).
+ * Arbitrate ambiguous duplicate candidates using Jev System-1 triage model.
+ * Endpoint: https://api.typesafe.ai/v1/systemone
+ */
+export async function classifyDuplicateWithJev(
+  bookA: {
+    title: string;
+    authors?: string;
+    series?: string;
+    series_index?: number;
+  },
+  bookB: {
+    title: string;
+    author?: string;
+    authors?: string;
+    series?: { series: string; volume: number } | null | string;
+    series_index?: number;
+  },
+  options: { apiKey?: string; timeoutMs?: number } = {},
+): Promise<{ isDuplicate: boolean; confidence: number } | null> {
+  const apiKey = (
+    options.apiKey ||
+    process.env.JEV_API_KEY ||
+    process.env.TYPESAFE_API_KEY ||
+    ""
+  ).trim();
+
+  if (!apiKey) return null;
+
+  const authorB = bookB.author || bookB.authors || "Unknown";
+  const seriesB =
+    typeof bookB.series === "object" && bookB.series !== null
+      ? `${bookB.series.series} #${bookB.series.volume}`
+      : bookB.series
+        ? `${bookB.series} #${bookB.series_index || 1}`
+        : "";
+  const seriesA = bookA.series
+    ? `${bookA.series} #${bookA.series_index || 1}`
+    : "";
+
+  const stateText = `Compare these two books to determine if they are the exact same logical book / duplicate edition, or distinct works / different volumes:
+
+Book 1:
+- Title: ${bookA.title}
+- Author: ${bookA.authors || "Unknown"}
+${seriesA ? `- Series: ${seriesA}` : ""}
+
+Book 2:
+- Title: ${bookB.title}
+- Author: ${authorB}
+${seriesB ? `- Series: ${seriesB}` : ""}
+
+Task: Classify whether Book 1 and Book 2 are duplicates (same book/edition) or distinct (different books, different volumes in a series, or different works). Note: Different volumes in a series are NEVER duplicates.`;
+
+  const timeout = options.timeoutMs || 3000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const res = await safeFetchWithSsrf("https://api.typesafe.ai/v1/systemone", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "jev-latest",
+        state: stateText,
+        questions: {
+          is_duplicate: {
+            type: "choice",
+            instructions:
+              "Decide whether Book 1 and Book 2 are the exact same logical work / duplicate edition, or distinct books / different volumes in a series.",
+            criteria: {
+              duplicate:
+                "Identical book or identical volume of the same work, even if title subtitle punctuation or release tags vary.",
+              distinct:
+                "Different volumes in a series (e.g. Vol 1 vs Vol 2), different subtitles representing different entries, or entirely different works.",
+            },
+          },
+        },
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+
+    if (!res.ok) return null;
+    const json = (await res.json()) as any;
+    const ans = json?.answers?.is_duplicate;
+    if (ans && ans.choice) {
+      return {
+        isDuplicate: ans.choice === "duplicate",
+        confidence: typeof ans.confidence === "number" ? ans.confidence : 0.85,
+      };
+    }
+  } catch {
+    clearTimeout(timer);
+  }
+
+  return null;
+}
+
+/**
+ * Async book duplicate checker with Jev System-1 arbitration for ambiguous similarity.
  */
 export async function isSameBookAsync(
   existing: {
@@ -644,85 +676,117 @@ export async function isSameBookAsync(
   incoming: {
     title: string;
     author?: string;
-    series?: { series: string; volume: number } | null;
+    authors?: string;
+    series?: { series: string; volume: number } | null | string;
+    series_index?: number;
   },
-  options: { jevApiKey?: string } = {},
+  options: { jevApiKey?: string; timeoutMs?: number } = {},
 ): Promise<boolean> {
-  const bTitle = cleanString(existing.title).toLowerCase();
-  const sTitle = cleanString(incoming.title).toLowerCase();
-  if (!bTitle || !sTitle) return false;
+  const normExistingTitle = normalizeTitleForDedup(existing.title);
+  const normIncomingTitle = normalizeTitleForDedup(incoming.title);
+  if (!normExistingTitle || !normIncomingTitle) return false;
 
-  const bAuthor = cleanString(existing.authors || "");
-  const sAuthor = cleanString(incoming.author || "");
+  const existingAuthor = existing.authors || "";
+  const incomingAuthor = incoming.author || incoming.authors || "";
+  const normExistingAuthor = normalizeAuthorForDedup(existingAuthor);
+  const normIncomingAuthor = normalizeAuthorForDedup(incomingAuthor);
 
-  // 1. Series comparison
-  const bSeries = existing.series
+  // 1. Series and Volume verification (deterministic gate)
+  const existingSeries = existing.series
     ? {
         series: cleanString(existing.series),
         volume: existing.series_index || 1,
       }
     : extractSeries(existing.title);
-  const sSeries = incoming.series || extractSeries(incoming.title);
 
-  if (bSeries && sSeries) {
+  const incomingSeries =
+    typeof incoming.series === "object" && incoming.series !== null
+      ? incoming.series
+      : typeof incoming.series === "string" && incoming.series
+        ? {
+            series: cleanString(incoming.series),
+            volume: incoming.series_index || 1,
+          }
+        : extractSeries(incoming.title);
+
+  if (existingSeries && incomingSeries) {
     const sameSeries =
-      normalizeTitle(bSeries.series) === normalizeTitle(sSeries.series) ||
-      cleanString(bSeries.series).toLowerCase() ===
-        cleanString(sSeries.series).toLowerCase();
+      normalizeTitleForDedup(existingSeries.series) ===
+      normalizeTitleForDedup(incomingSeries.series);
     if (sameSeries) {
-      return bSeries.volume === sSeries.volume;
+      return existingSeries.volume === incomingSeries.volume;
     }
     return false;
-  } else if (bSeries || sSeries) {
-    // One is explicitly numbered volume/book in a series and the other is not
-    return false;
+  } else {
+    // Check volume numbers extracted from titles
+    const volA = extractVolumeNumber(existing.title);
+    const volB = extractVolumeNumber(incoming.title);
+    if (volA !== null && volB !== null && volA !== volB) {
+      return false; // Different volumes are NEVER duplicates
+    }
+    if (existingSeries && !incomingSeries) {
+      const vol = extractVolumeNumber(incoming.title);
+      if (vol !== null && vol !== existingSeries.volume) return false;
+    } else if (incomingSeries && !existingSeries) {
+      const vol = extractVolumeNumber(existing.title);
+      if (vol !== null && vol !== incomingSeries.volume) return false;
+    }
   }
 
-  // 2. Author conflict check
+  // Check all numbers in normalized titles: different numbers mean distinct volumes/works
+  const numsA = normExistingTitle.match(/\b\d+(?:\.\d+)?\b/g) || [];
+  const numsB = normIncomingTitle.match(/\b\d+(?:\.\d+)?\b/g) || [];
+  if (numsA.length > 0 && numsB.length > 0) {
+    const setB = new Set(numsB);
+    const hasSharedNumber = numsA.some((n) => setB.has(n));
+    if (!hasSharedNumber) {
+      return false; // Conflicting numbers indicate distinct volumes/entries
+    }
+  }
+
+  // 2. Author conflict check (deterministic gate)
   const hasKnownAuthors =
-    bAuthor && sAuthor && !isJunkAuthor(bAuthor) && !isJunkAuthor(sAuthor);
-  const normBAuthor = normalizeAuthor(bAuthor);
-  const normSAuthor = normalizeAuthor(sAuthor);
+    normExistingAuthor &&
+    normIncomingAuthor &&
+    !isJunkAuthor(normExistingAuthor) &&
+    !isJunkAuthor(normIncomingAuthor);
   const authorSim = hasKnownAuthors
-    ? normBAuthor && normSAuthor && normBAuthor === normSAuthor
-      ? 1.0
-      : stringSimilarity(bAuthor, sAuthor)
+    ? stringSimilarity(normExistingAuthor, normIncomingAuthor)
     : 1.0;
   if (hasKnownAuthors && authorSim < 0.35) {
     return false;
   }
 
-  // 3. Title comparison with normalized titles
-  const normBTitle = normalizeTitle(existing.title);
-  const normSTitle = normalizeTitle(incoming.title);
+  // 3. Exact normalized title match
+  if (normExistingTitle === normIncomingTitle) return true;
 
-  if (bTitle === sTitle || normBTitle === normSTitle) return true;
+  // 4. Similarity calculation
+  const titleSim = stringSimilarity(normExistingTitle, normIncomingTitle);
 
-  const titleSim = Math.max(
-    stringSimilarity(bTitle, sTitle),
-    stringSimilarity(normBTitle, normSTitle),
-  );
+  // Definitively NOT a duplicate (< 0.65)
+  if (titleSim < 0.65) return false;
 
-  if (titleSim >= 0.88) return true;
+  // Definitively a duplicate (>= 0.88 with compatible author)
+  if (titleSim >= 0.88 && (!hasKnownAuthors || authorSim >= 0.6)) return true;
 
-  // Subtitle / prefix match
-  const minLen = Math.min(normBTitle.length, normSTitle.length);
-  if (
-    minLen >= 5 &&
-    (normBTitle.startsWith(normSTitle) || normSTitle.startsWith(normBTitle))
-  ) {
-    if (!hasKnownAuthors || authorSim >= 0.6) return true;
+  // 5. Ambiguous Zone: 0.65 <= titleSim < 0.88 -> Query Jev System-1
+  const jevVerdict = await classifyDuplicateWithJev(existing, incoming, {
+    apiKey: options.jevApiKey,
+    timeoutMs: options.timeoutMs,
+  });
+  if (jevVerdict && jevVerdict.confidence >= 0.7) {
+    return jevVerdict.isDuplicate;
   }
 
-  // Jev arbitration for ambiguous similarity window (0.65 to 0.88)
-  if (titleSim >= 0.65 && titleSim < 0.88) {
-    const jevRes = await arbitrateWithJev(
-      { title: existing.title, authors: existing.authors },
-      { title: incoming.title, authors: incoming.author },
-      options.jevApiKey,
-    );
-    if (jevRes && jevRes.confidence >= 0.7) {
-      return jevRes.isDuplicate;
+  // Graceful fallback if Jev unavailable or inconclusive
+  const minLen = Math.min(normExistingTitle.length, normIncomingTitle.length);
+  if (
+    minLen >= 10 &&
+    (normExistingTitle.startsWith(normIncomingTitle) ||
+      normIncomingTitle.startsWith(normExistingTitle))
+  ) {
+    if (!hasKnownAuthors || authorSim >= 0.6) {
+      if (titleSim >= 0.8) return true;
     }
   }
 

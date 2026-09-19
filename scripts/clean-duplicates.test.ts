@@ -1,329 +1,538 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { Database } from "bun:sqlite";
+import { describe, it, expect } from "bun:test";
 import {
-  scoreBookKeeper,
-  pickRecommendedKeeper,
-  findDuplicateGroups,
-  runCleanDuplicates,
-  parseArgs,
-  type CalibreBookRecord,
-  type CleanDuplicatesOptions,
+  CalibreBook,
+  DuplicateGroup,
+  scoreBookForKeeper,
+  checkDuplicatePair,
+  clusterDuplicateGroups,
+  runDuplicateCleaner,
+  formatCleanerReport,
+  safeJsonParse,
 } from "./clean-duplicates";
 
-describe("Calibre Library-Wide Duplicate Cleaner Tool", () => {
-  describe("scoreBookKeeper & pickRecommendedKeeper", () => {
-    it("favors books with EPUB format, cover, series, and larger file size", () => {
-      const b1: CalibreBookRecord = {
+describe("Calibre Library Duplicate Scanner & Pruning Tool", () => {
+  describe("scoreBookForKeeper", () => {
+    it("heavily prioritizes active reading progress from KOSync", () => {
+      const bookReading: CalibreBook = {
         id: 10,
-        title: "Test Book",
-        authors: "Author A",
-        series: null,
-        seriesIndex: null,
-        path: "Author A/Test Book (10)",
-        formats: ["PDF"],
-        hasCover: false,
-        fileSize: 50000,
-      };
-
-      const b2: CalibreBookRecord = {
-        id: 20,
-        title: "Test Book",
-        authors: "Author A",
-        series: "Test Series",
-        seriesIndex: 1,
-        path: "Author A/Test Book (20)",
+        title: "Dune",
+        authors: "Frank Herbert",
         formats: ["EPUB"],
-        hasCover: true,
-        fileSize: 250000,
+        reading_progress: 0.45,
       };
 
-      expect(scoreBookKeeper(b2)).toBeGreaterThan(scoreBookKeeper(b1));
+      const bookUnread: CalibreBook = {
+        id: 20,
+        title: "Dune",
+        authors: "Frank Herbert",
+        formats: ["EPUB"],
+        has_cover: true,
+        series: "Dune",
+        series_index: 1,
+      };
 
-      const { keeper, duplicates } = pickRecommendedKeeper([b1, b2]);
-      expect(keeper.id).toBe(20);
-      expect(duplicates.length).toBe(1);
-      expect(duplicates[0].id).toBe(10);
+      const scoreReading = scoreBookForKeeper(bookReading);
+      const scoreUnread = scoreBookForKeeper(bookUnread);
+
+      expect(scoreReading.score).toBeGreaterThan(scoreUnread.score);
+      expect(scoreReading.reasons).toContain("Active reading progress (45%)");
     });
 
-    it("favors earlier book ID as tiebreaker when metadata is identical", () => {
-      const b1: CalibreBookRecord = {
+    it("evaluates EPUB format and metadata richness (series, cover, tags, publisher)", () => {
+      const richBook: CalibreBook = {
+        id: 1,
+        title: "Overlord, Vol. 14",
+        authors: "Kugane Maruyama",
+        series: "Overlord",
+        series_index: 14,
+        formats: ["EPUB"],
+        has_cover: true,
+        publisher: "Yen Press",
+        tags: ["Light Novel", "Fantasy", "Isekai"],
+        file_size: 5 * 1024 * 1024,
+      };
+
+      const bareBook: CalibreBook = {
+        id: 2,
+        title: "Overlord 14",
+        authors: "Unknown",
+        formats: ["PDF"],
+      };
+
+      const scoreRich = scoreBookForKeeper(richBook);
+      const scoreBare = scoreBookForKeeper(bareBook);
+
+      expect(scoreRich.score).toBeGreaterThan(scoreBare.score);
+      expect(scoreRich.reasons).toContain("EPUB format");
+      expect(scoreRich.reasons).toContain("Explicit series metadata");
+      expect(scoreRich.reasons).toContain("Has cover");
+      expect(scoreRich.reasons).toContain("Publisher info");
+      expect(scoreRich.reasons).toContain("3 tag(s)");
+    });
+
+    it("uses earlier book ID as stability tiebreaker when metadata is identical", () => {
+      const bookOlder: CalibreBook = {
         id: 5,
-        title: "Same Book",
-        authors: "Same Author",
-        series: null,
-        seriesIndex: null,
-        path: "Same Author/Same Book (5)",
+        title: "Clean Code",
+        authors: "Robert C. Martin",
         formats: ["EPUB"],
-        hasCover: true,
       };
 
-      const b2: CalibreBookRecord = {
-        id: 15,
-        title: "Same Book",
-        authors: "Same Author",
-        series: null,
-        seriesIndex: null,
-        path: "Same Author/Same Book (15)",
+      const bookNewer: CalibreBook = {
+        id: 950,
+        title: "Clean Code",
+        authors: "Robert C. Martin",
         formats: ["EPUB"],
-        hasCover: true,
       };
 
-      const { keeper, duplicates } = pickRecommendedKeeper([b1, b2]);
-      expect(keeper.id).toBe(5);
-      expect(duplicates[0].id).toBe(15);
+      const scoreOlder = scoreBookForKeeper(bookOlder);
+      const scoreNewer = scoreBookForKeeper(bookNewer);
+
+      expect(scoreOlder.score).toBeGreaterThan(scoreNewer.score);
     });
   });
 
-  describe("findDuplicateGroups", () => {
-    it("groups books with identical series and volume index", () => {
-      const books: CalibreBookRecord[] = [
-        {
-          id: 1,
-          title: "Overlord, Vol. 1",
-          authors: "Kugane Maruyama",
-          series: "Overlord",
-          seriesIndex: 1,
-          path: "path1",
-          formats: ["EPUB"],
-          hasCover: true,
-        },
-        {
-          id: 2,
-          title: "Overlord Volume 01 [Official]",
-          authors: "Maruyama Kugane",
-          series: "Overlord",
-          seriesIndex: 1,
-          path: "path2",
-          formats: ["EPUB"],
-          hasCover: false,
-        },
-        {
-          id: 3,
-          title: "Overlord, Vol. 2",
-          authors: "Kugane Maruyama",
-          series: "Overlord",
-          seriesIndex: 2,
-          path: "path3",
-          formats: ["EPUB"],
-          hasCover: true,
-        },
-      ];
-
-      const groups = findDuplicateGroups(books, { skipContentHash: true });
-      expect(groups.length).toBe(1);
-      expect(groups[0].reason).toBe("series_volume");
-      expect(groups[0].recommendedKeeper.id).toBe(1);
-      expect(groups[0].duplicatesToRemove.length).toBe(1);
-      expect(groups[0].duplicatesToRemove[0].id).toBe(2);
-    });
-
-    it("groups books by normalized title and author similarity", () => {
-      const books: CalibreBookRecord[] = [
-        {
+  describe("checkDuplicatePair", () => {
+    describe("Volume Isolation Hard Gate", () => {
+      it("NEVER flags different volumes in the same series as duplicates", () => {
+        const vol1: CalibreBook = {
           id: 101,
-          title: "Clean Code: A Handbook of Agile Software Craftsmanship",
-          authors: "Robert C. Martin",
-          series: null,
-          seriesIndex: null,
-          path: "path101",
-          formats: ["EPUB"],
-          hasCover: true,
-        },
-        {
-          id: 102,
-          title: "Clean Code [Retail] (EPUB)",
-          authors: "Robert C. Martin",
-          series: null,
-          seriesIndex: null,
-          path: "path102",
-          formats: ["EPUB"],
-          hasCover: false,
-        },
-      ];
+          title: "Overlord, Vol. 1: The Undead King",
+          authors: "Kugane Maruyama",
+          series: "Overlord",
+          series_index: 1,
+        };
 
-      const groups = findDuplicateGroups(books, { skipContentHash: true });
-      expect(groups.length).toBe(1);
-      expect(groups[0].reason).toBe("title_author_similarity");
-      expect(groups[0].recommendedKeeper.id).toBe(101);
-      expect(groups[0].duplicatesToRemove[0].id).toBe(102);
+        const vol2: CalibreBook = {
+          id: 102,
+          title: "Overlord, Vol. 2: The Dark Warrior",
+          authors: "Kugane Maruyama",
+          series: "Overlord",
+          series_index: 2,
+        };
+
+        const vol14: CalibreBook = {
+          id: 114,
+          title: "Overlord, Vol. 14: The Witch of the Ruined Kingdom",
+          authors: "Kugane Maruyama",
+          series: "Overlord",
+          series_index: 14,
+        };
+
+        expect(checkDuplicatePair(vol1, vol2).isDuplicate).toBe(false);
+        expect(checkDuplicatePair(vol1, vol14).isDuplicate).toBe(false);
+        expect(checkDuplicatePair(vol2, vol14).isDuplicate).toBe(false);
+      });
+
+      it("NEVER flags different volume numbers in titles without explicit series", () => {
+        const bookV1: CalibreBook = {
+          id: 201,
+          title: "Sword Art Online 01 Aincrad",
+          authors: "Reki Kawahara",
+        };
+
+        const bookV2: CalibreBook = {
+          id: 202,
+          title: "Sword Art Online 02 Aincrad",
+          authors: "Reki Kawahara",
+        };
+
+        expect(checkDuplicatePair(bookV1, bookV2).isDuplicate).toBe(false);
+      });
+
+      it("NEVER flags books with conflicting number patterns in titles as duplicates", () => {
+        const bookA: CalibreBook = {
+          id: 301,
+          title: "Mushoku Tensei Book 10",
+          authors: "Rifujin na Magonote",
+        };
+
+        const bookB: CalibreBook = {
+          id: 302,
+          title: "Mushoku Tensei Book 11",
+          authors: "Rifujin na Magonote",
+        };
+
+        expect(checkDuplicatePair(bookA, bookB).isDuplicate).toBe(false);
+      });
     });
 
-    it("does not group different volumes of the same series", () => {
-      const books: CalibreBookRecord[] = [
+    describe("Duplicate Detection Rules", () => {
+      it("detects duplicates matching content hash or EPUB content signature", () => {
+        const a: CalibreBook = {
+          id: 1,
+          title: "Book with altered title",
+          authors: "Some Author",
+          content_hash: "urn:uuid:550e8400-e29b-41d4-a716-446655440000",
+        };
+
+        const b: CalibreBook = {
+          id: 2,
+          title: "Original Title",
+          authors: "Different Author Tag",
+          content_hash: "urn:uuid:550e8400-e29b-41d4-a716-446655440000",
+        };
+
+        const res = checkDuplicatePair(a, b);
+        expect(res.isDuplicate).toBe(true);
+        expect(res.matchType).toBe("content_hash");
+      });
+
+      it("detects duplicates matching identical KOReader binary checksum", () => {
+        const a: CalibreBook = {
+          id: 3,
+          title: "Book Alpha",
+          binary_hash: "abc123def4567890",
+        };
+
+        const b: CalibreBook = {
+          id: 4,
+          title: "Book Beta",
+          binary_hash: "abc123def4567890",
+        };
+
+        const res = checkDuplicatePair(a, b);
+        expect(res.isDuplicate).toBe(true);
+        expect(res.matchType).toBe("content_hash");
+      });
+
+      it("detects duplicates matching explicit series AND same volume index", () => {
+        const a: CalibreBook = {
+          id: 5,
+          title: "Re:Zero Vol. 1",
+          authors: "Tappei Nagatsuki",
+          series: "Re:ZERO -Starting Life in Another World-",
+          series_index: 1,
+        };
+
+        const b: CalibreBook = {
+          id: 6,
+          title: "Re:ZERO: Volume 01 [Digital]",
+          authors: "Tappei Nagatsuki",
+          series: "Re:ZERO -Starting Life in Another World-",
+          series_index: 1,
+        };
+
+        const res = checkDuplicatePair(a, b);
+        expect(res.isDuplicate).toBe(true);
+        expect(res.matchType).toBe("series_volume");
+      });
+
+      it("detects duplicates with watermark brackets, release tags, and punctuation variations", () => {
+        const a: CalibreBook = {
+          id: 7,
+          title: "Dune [Z-Library] [v1.0]",
+          authors: "Frank Herbert",
+        };
+
+        const b: CalibreBook = {
+          id: 8,
+          title: "Dune",
+          authors: "Frank Herbert",
+        };
+
+        const res = checkDuplicatePair(a, b);
+        expect(res.isDuplicate).toBe(true);
+        expect(res.matchType).toBe("title_author_similarity");
+      });
+
+      it("rejects books with conflicting known authors even with matching titles", () => {
+        const a: CalibreBook = {
+          id: 9,
+          title: "The Odyssey",
+          authors: "Homer",
+        };
+
+        const b: CalibreBook = {
+          id: 10,
+          title: "The Odyssey",
+          authors: "Stephen Fry",
+        };
+
+        const res = checkDuplicatePair(a, b);
+        expect(res.isDuplicate).toBe(false);
+      });
+
+      it("rejects distinct books by the same author", () => {
+        const a: CalibreBook = {
+          id: 11,
+          title: "Clean Code",
+          authors: "Robert C. Martin",
+        };
+
+        const b: CalibreBook = {
+          id: 12,
+          title: "Clean Architecture",
+          authors: "Robert C. Martin",
+        };
+
+        expect(checkDuplicatePair(a, b).isDuplicate).toBe(false);
+      });
+    });
+  });
+
+  describe("clusterDuplicateGroups", () => {
+    it("returns empty array for empty or single-book list", () => {
+      expect(clusterDuplicateGroups([])).toEqual([]);
+      expect(
+        clusterDuplicateGroups([
+          { id: 1, title: "Solo Book", authors: "Author" },
+        ]),
+      ).toEqual([]);
+    });
+
+    it("clusters 2 duplicate books into 1 group, picks optimal keeper, and lists duplicates", () => {
+      const books: CalibreBook[] = [
+        {
+          id: 10,
+          title: "Mushoku Tensei Vol. 1",
+          authors: "Rifujin na Magonote",
+          series: "Mushoku Tensei",
+          series_index: 1,
+          formats: ["EPUB"],
+          has_cover: true,
+          publisher: "Seven Seas",
+        },
         {
           id: 11,
-          title: "Sword Art Online 1: Aincrad",
-          authors: "Reki Kawahara",
-          series: "Sword Art Online",
-          seriesIndex: 1,
-          path: "path11",
-          formats: ["EPUB"],
-        },
-        {
-          id: 12,
-          title: "Sword Art Online 2: Aincrad",
-          authors: "Reki Kawahara",
-          series: "Sword Art Online",
-          seriesIndex: 2,
-          path: "path12",
+          title: "Mushoku Tensei: Jobless Reincarnation Volume 01 [EPUB]",
+          authors: "Rifujin na Magonote",
           formats: ["EPUB"],
         },
       ];
 
-      const groups = findDuplicateGroups(books, { skipContentHash: true });
-      expect(groups.length).toBe(0);
-    });
-  });
-
-  describe("parseArgs", () => {
-    it("defaults to dryRun: true", () => {
-      const opts = parseArgs([]);
-      expect(opts.dryRun).toBe(true);
-      expect(opts.apply).toBeUndefined();
+      const groups = clusterDuplicateGroups(books);
+      expect(groups.length).toBe(1);
+      expect(groups[0].keeperId).toBe(10);
+      expect(groups[0].duplicateIds).toEqual([11]);
+      expect(groups[0].books.length).toBe(2);
+      expect(groups[0].keeperReason).toContain("Explicit series metadata");
     });
 
-    it("sets apply: true and dryRun: false on --apply or --prune", () => {
-      const opts1 = parseArgs(["--apply"]);
-      expect(opts1.apply).toBe(true);
-      expect(opts1.dryRun).toBe(false);
-
-      const opts2 = parseArgs(["--prune"]);
-      expect(opts2.apply).toBe(true);
-      expect(opts2.dryRun).toBe(false);
-    });
-
-    it("parses options like --library-dir and --audit-log", () => {
-      const opts = parseArgs([
-        "--library-dir",
-        "/tmp/test-calibre",
-        "--audit-log",
-        "/tmp/audit.json",
-        "--verbose",
-      ]);
-      expect(opts.libraryPath).toBe("/tmp/test-calibre");
-      expect(opts.auditLogPath).toBe("/tmp/audit.json");
-      expect(opts.verbose).toBe(true);
-    });
-  });
-
-  describe("runCleanDuplicates Hermetic Unit Test", () => {
-    let testDir: string;
-    let mockAuditPath: string;
-
-    beforeEach(() => {
-      testDir = fs.mkdtempSync(path.join(os.tmpdir(), "clean-dups-test-"));
-      mockAuditPath = path.join(testDir, "audit.json");
-    });
-
-    afterEach(() => {
-      if (fs.existsSync(testDir)) {
-        fs.rmSync(testDir, { recursive: true, force: true });
-      }
-    });
-
-    it("runs in --dry-run mode without removing any books", async () => {
-      const mockBooks: CalibreBookRecord[] = [
+    it("clusters 3 duplicate books into a single group with 1 keeper and 2 duplicates", () => {
+      const books: CalibreBook[] = [
         {
           id: 1,
           title: "Dune",
           authors: "Frank Herbert",
-          series: null,
-          seriesIndex: null,
-          path: "path1",
           formats: ["EPUB"],
-          hasCover: true,
+          has_cover: true,
         },
         {
           id: 2,
-          title: "Dune [Official Edition]",
+          title: "Dune [z-lib.org]",
           authors: "Frank Herbert",
-          series: null,
-          seriesIndex: null,
-          path: "path2",
           formats: ["EPUB"],
-          hasCover: false,
+        },
+        {
+          id: 3,
+          title: "Dune (Retail)",
+          authors: "Frank Herbert",
+          formats: ["EPUB"],
         },
       ];
 
-      const removed: number[] = [];
-      const mockRemover = async (id: number) => {
-        removed.push(id);
-        return { success: true };
-      };
-
-      const result = await runCleanDuplicates({
-        dryRun: true,
-        booksProvider: () => mockBooks,
-        bookRemover: mockRemover,
-        auditLogPath: mockAuditPath,
-        skipContentHash: true,
-      });
-
-      expect(result.dryRun).toBe(true);
-      expect(result.duplicateGroupsFound).toBe(1);
-      expect(result.totalDuplicatesToRemove).toBe(1);
-      expect(result.removedBookIds.length).toBe(0); // Nothing removed in dry run
-      expect(removed.length).toBe(0);
-      expect(fs.existsSync(mockAuditPath)).toBe(true);
-
-      const auditData = JSON.parse(fs.readFileSync(mockAuditPath, "utf8"));
-      expect(auditData.dryRun).toBe(true);
-      expect(auditData.duplicateGroupsCount).toBe(1);
-      expect(auditData.groups[0].keeper.id).toBe(1);
-      expect(auditData.groups[0].duplicates[0].id).toBe(2);
+      const groups = clusterDuplicateGroups(books);
+      expect(groups.length).toBe(1);
+      expect(groups[0].keeperId).toBe(1);
+      expect(groups[0].duplicateIds.sort()).toEqual([2, 3]);
+      expect(groups[0].books.length).toBe(3);
     });
 
-    it("runs in --apply mode and safely removes duplicate IDs via remover", async () => {
-      const mockBooks: CalibreBookRecord[] = [
+    it("maintains strict volume isolation in multi-book collections", () => {
+      const books: CalibreBook[] = [
+        // Volume 1 and its duplicate
         {
-          id: 10,
-          title: "Spice and Wolf Vol. 1",
-          authors: "Isuna Hasekura",
-          series: "Spice and Wolf",
-          seriesIndex: 1,
-          path: "path10",
+          id: 101,
+          title: "Overlord, Vol. 1",
+          authors: "Kugane Maruyama",
+          series: "Overlord",
+          series_index: 1,
           formats: ["EPUB"],
-          hasCover: true,
+          has_cover: true,
         },
         {
-          id: 11,
-          title: "Spice & Wolf Volume 01 [Official]",
-          authors: "Isuna Hasekura",
-          series: "Spice and Wolf",
-          seriesIndex: 1,
-          path: "path11",
+          id: 102,
+          title: "Overlord Volume 01 [v1.0]",
+          authors: "Kugane Maruyama",
           formats: ["EPUB"],
-          hasCover: false,
+        },
+        // Volume 2 (standalone, distinct)
+        {
+          id: 201,
+          title: "Overlord, Vol. 2",
+          authors: "Kugane Maruyama",
+          series: "Overlord",
+          series_index: 2,
+          formats: ["EPUB"],
         },
       ];
 
-      const removed: number[] = [];
-      const mockRemover = async (id: number) => {
-        removed.push(id);
-        return { success: true };
-      };
+      const groups = clusterDuplicateGroups(books);
+      expect(groups.length).toBe(1);
+      expect(groups[0].keeperId).toBe(101);
+      expect(groups[0].duplicateIds).toEqual([102]);
+      // Volume 2 (201) is NEVER touched or merged into the duplicate group
+      const allGroupBookIds = groups[0].books.map((b) => b.id);
+      expect(allGroupBookIds).not.toContain(201);
+    });
+  });
 
-      const result = await runCleanDuplicates({
-        apply: true,
+  describe("runDuplicateCleaner execution modes", () => {
+    const mockBooks: CalibreBook[] = [
+      {
+        id: 50,
+        title: "Clean Code",
+        authors: "Robert C. Martin",
+        formats: ["EPUB"],
+        has_cover: true,
+      },
+      {
+        id: 51,
+        title: "Clean Code [v1.0] [EPUB]",
+        authors: "Robert C. Martin",
+        formats: ["EPUB"],
+      },
+    ];
+
+    it("operates in safe read-only preview under default --dry-run", async () => {
+      let removerCalled = false;
+      let cleanerCalled = false;
+      let auditLogWritten = false;
+
+      const report = await runDuplicateCleaner({
+        dryRun: true,
         booksProvider: () => mockBooks,
-        bookRemover: mockRemover,
-        auditLogPath: mockAuditPath,
-        skipContentHash: true,
+        bookRemover: async () => {
+          removerCalled = true;
+          return { success: true };
+        },
+        cacheCleaner: () => {
+          cleanerCalled = true;
+        },
+        auditLogger: () => {
+          auditLogWritten = true;
+        },
       });
 
-      expect(result.dryRun).toBe(false);
-      expect(result.duplicateGroupsFound).toBe(1);
-      expect(result.totalDuplicatesToRemove).toBe(1);
-      expect(result.removedBookIds).toEqual([11]);
-      expect(removed).toEqual([11]);
-      expect(fs.existsSync(mockAuditPath)).toBe(true);
+      expect(report.dryRun).toBe(true);
+      expect(report.totalBooksScanned).toBe(2);
+      expect(report.duplicateGroupsCount).toBe(1);
+      expect(report.totalDuplicatesFound).toBe(1);
+      expect(report.totalPruned).toBe(0);
+      expect(removerCalled).toBe(false);
+      expect(cleanerCalled).toBe(false);
+      expect(auditLogWritten).toBe(false);
+      expect(report.groups[0].keeperId).toBe(50);
+      expect(report.groups[0].duplicateIds).toEqual([51]);
+    });
 
-      const auditData = JSON.parse(fs.readFileSync(mockAuditPath, "utf8"));
-      expect(auditData.dryRun).toBe(false);
-      expect(auditData.removedBookIds).toEqual([11]);
+    it("actively executes duplicate removals and cache cleanup under --apply", async () => {
+      const removedIds: number[] = [];
+      const cleanedIds: number[] = [];
+      const auditEntries: string[] = [];
+
+      const report = await runDuplicateCleaner({
+        apply: true,
+        booksProvider: () => mockBooks,
+        bookRemover: async (ids) => {
+          removedIds.push(...ids);
+          return { success: true };
+        },
+        cacheCleaner: (ids) => {
+          cleanedIds.push(...ids);
+        },
+        auditLogger: (entry) => {
+          auditEntries.push(entry);
+        },
+      });
+
+      expect(report.dryRun).toBe(false);
+      expect(report.totalBooksScanned).toBe(2);
+      expect(report.duplicateGroupsCount).toBe(1);
+      expect(report.totalDuplicatesFound).toBe(1);
+      expect(report.totalPruned).toBe(1);
+      expect(report.errors.length).toBe(0);
+
+      // Verifies ONLY the duplicate was removed, NOT the keeper
+      expect(removedIds).toEqual([51]);
+      expect(cleanedIds).toEqual([51]);
+      expect(auditEntries.length).toBe(1);
+      expect(auditEntries[0]).toContain("PRUNE book_id=51");
+      expect(auditEntries[0]).toContain("KEEPER book_id=50");
+    });
+
+    it("records removal errors without crashing the cleaner", async () => {
+      const report = await runDuplicateCleaner({
+        apply: true,
+        booksProvider: () => mockBooks,
+        bookRemover: async () => {
+          return { success: false, error: "calibredb lock timeout" };
+        },
+        cacheCleaner: () => {},
+        auditLogger: () => {},
+      });
+
+      expect(report.dryRun).toBe(false);
+      expect(report.totalPruned).toBe(0);
+      expect(report.errors.length).toBe(1);
+      expect(report.errors[0].message).toContain("calibredb lock timeout");
+    });
+  });
+
+  describe("formatCleanerReport & safeJsonParse helpers", () => {
+    it("formats clean report when no duplicates exist", () => {
+      const output = formatCleanerReport({
+        timestamp: "2026-09-20T00:00:00.000Z",
+        dryRun: true,
+        totalBooksScanned: 100,
+        duplicateGroupsCount: 0,
+        totalDuplicatesFound: 0,
+        totalPruned: 0,
+        groups: [],
+        errors: [],
+      });
+
+      expect(output).toContain("No duplicate books detected");
+      expect(output).toContain("DRY RUN");
+    });
+
+    it("formats duplicate groups with keeper and prune badges", () => {
+      const group: DuplicateGroup = {
+        id: "group_1",
+        matchType: "series_volume",
+        reason: "Series Overlord Volume 1",
+        keeperId: 10,
+        keeperReason: "Explicit series metadata, Has cover",
+        books: [
+          { id: 10, title: "Overlord Vol. 1", authors: "Kugane Maruyama" },
+          { id: 11, title: "Overlord 01", authors: "Kugane Maruyama" },
+        ],
+        duplicateIds: [11],
+      };
+
+      const output = formatCleanerReport({
+        timestamp: "2026-09-20T00:00:00.000Z",
+        dryRun: true,
+        totalBooksScanned: 2,
+        duplicateGroupsCount: 1,
+        totalDuplicatesFound: 1,
+        totalPruned: 0,
+        groups: [group],
+        errors: [],
+      });
+
+      expect(output).toContain("Recommended Keeper: #10");
+      expect(output).toContain("Duplicates to Prune:");
+      expect(output).toContain("#11");
+      expect(output).toContain("bun run scripts/clean-duplicates.ts --apply");
+    });
+
+    it("parses JSON arrays embedded within noisy command output", () => {
+      expect(safeJsonParse("")).toBeNull();
+      expect(safeJsonParse("Some prefix text [1, 2, 3] trailing logs")).toEqual([1, 2, 3]);
+      expect(safeJsonParse("[{\"id\": 1, \"title\": \"Book\"}]")).toEqual([{ id: 1, title: "Book" }]);
+      expect(safeJsonParse("No brackets here")).toBeNull();
     });
   });
 });
