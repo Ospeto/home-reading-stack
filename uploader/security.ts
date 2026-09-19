@@ -2046,7 +2046,7 @@ export async function safeFetchWithSsrf(
     const hostIsIp = net.isIP(normalizeIpString(parsed.hostname));
     const fetchOpts: any = {
       ...init,
-      redirect: "manual",
+      redirect: init.redirect === "error" ? "error" : "manual",
     };
 
     // IP binding uses a supported dispatcher/connector rather than replacing

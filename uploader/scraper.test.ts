@@ -756,6 +756,38 @@ describe("RanobeDB Scraper & Light Novel Metadata Engine", () => {
         const isDup = await isSameBookAsync(b1, b2, { jevApiKey: "" });
         expect(isDup).toBe(true);
       });
+
+      it("enforces redirect: 'error' and timeout coverage through response parsing", async () => {
+        const origFetch = globalThis.fetch;
+        let capturedInit: any = null;
+        (globalThis as any).fetch = async (url: string, init?: any) => {
+          if (typeof url === "string" && url.includes("typesafe.ai")) {
+            capturedInit = init;
+            return new Response(
+              JSON.stringify({
+                model: "jev-latest",
+                answers: {
+                  is_duplicate: { choice: "duplicate", confidence: 0.99 },
+                },
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          return origFetch(url as any, init);
+        };
+
+        try {
+          const b1 = { title: "Book One Title", authors: "Author" };
+          const b2 = { title: "Book Two Title", author: "Author" };
+          await classifyDuplicateWithJev(b1, b2, { apiKey: "test_key_123" });
+
+          expect(capturedInit).not.toBeNull();
+          expect(capturedInit.redirect).toBe("error");
+          expect(capturedInit.signal).toBeDefined();
+        } finally {
+          (globalThis as any).fetch = origFetch;
+        }
+      });
     });
   });
 });
