@@ -15,12 +15,15 @@ import {
   validateBookFormat,
   isCanonicalEpub,
   validateEpubContent,
+  repairTruncatedEpub,
+  parseStrictXml,
   sanitizeFilename,
   getDownloadFilename,
   sanitizeErrorMessage,
   validateTelegramWebAppData,
   getBsdtarPath,
 } from "./security";
+import zlib from "node:zlib";
 import {
   inspectArchiveSafety,
   unpackArchive,
@@ -798,6 +801,460 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
         fs.unlinkSync(nonZipFile);
       }
     }
+  });
+
+  describe("In-Process ZIP Auto-Healer (repairTruncatedEpub)", () => {
+    function buildSyntheticZipEntry(
+      name: string,
+      data: Buffer,
+      compMethod = 0,
+      compData: Buffer | null = null,
+    ): Buffer {
+      const nameBuf = Buffer.from(name);
+      const payload = compData || data;
+      const crc = zlib.crc32(data);
+      const h = Buffer.alloc(30 + nameBuf.length);
+      h.writeUInt32LE(0x04034b50, 0);
+      h.writeUInt16LE(20, 4);
+      h.writeUInt16LE(0, 6);
+      h.writeUInt16LE(compMethod, 8);
+      h.writeUInt16LE(0, 10);
+      h.writeUInt16LE(0, 12);
+      h.writeUInt32LE(crc, 14);
+      h.writeUInt32LE(payload.length, 18);
+      h.writeUInt32LE(data.length, 22);
+      h.writeUInt16LE(nameBuf.length, 26);
+      h.writeUInt16LE(0, 28);
+      nameBuf.copy(h, 30);
+      return Buffer.concat([h, payload]);
+    }
+
+    function buildCoreEpubEntries(): Buffer[] {
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = buildSyntheticZipEntry("mimetype", mimeData, 0);
+
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerDef = zlib.deflateRawSync(containerXml);
+      const containerPart = buildSyntheticZipEntry(
+        "META-INF/container.xml",
+        containerXml,
+        8,
+        containerDef,
+      );
+
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test Title</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfDef = zlib.deflateRawSync(opfXml);
+      const opfPart = buildSyntheticZipEntry("content.opf", opfXml, 8, opfDef);
+
+      return [mimePart, containerPart, opfPart];
+    }
+
+    it("auto-heals a synthetic EPUB missing its central directory and validates successfully", () => {
+      const parts = buildCoreEpubEntries();
+      const testPath = path.join("/tmp", `test_autoheal_${Date.now()}.epub`);
+      // Concatenate entries with NO Central Directory or EOCD
+      fs.writeFileSync(testPath, Buffer.concat(parts));
+
+      try {
+        // Initial validation fails due to missing central directory
+        const initialVal = validateEpubContent(testPath);
+        expect(initialVal.valid).toBe(false);
+        expect(initialVal.error).toContain("Failed to read EPUB ZIP entries");
+
+        // Repair in-process
+        const start = performance.now();
+        const healed = repairTruncatedEpub(testPath);
+        const durationMs = performance.now() - start;
+
+        expect(healed).toBe(true);
+        expect(durationMs).toBeLessThan(50); // fast <50ms bound
+
+        // Validation now passes
+        const afterVal = validateEpubContent(testPath);
+        expect(afterVal.valid).toBe(true);
+      } finally {
+        if (fs.existsSync(testPath)) fs.unlinkSync(testPath);
+      }
+    });
+
+    it("auto-heals a synthetic EPUB with trailing zero padding from interrupted upload", () => {
+      const parts = buildCoreEpubEntries();
+      const testPath = path.join("/tmp", `test_padding_${Date.now()}.epub`);
+      // Entries + 4KB trailing null bytes
+      fs.writeFileSync(
+        testPath,
+        Buffer.concat([...parts, Buffer.alloc(4096, 0)]),
+      );
+
+      try {
+        const initialVal = validateEpubContent(testPath);
+        expect(initialVal.valid).toBe(false);
+
+        const healed = repairTruncatedEpub(testPath);
+        expect(healed).toBe(true);
+
+        const afterVal = validateEpubContent(testPath);
+        expect(afterVal.valid).toBe(true);
+      } finally {
+        if (fs.existsSync(testPath)) fs.unlinkSync(testPath);
+      }
+    });
+
+    it("discards trailing incomplete compressed entry while keeping core EPUB metadata", () => {
+      const parts = buildCoreEpubEntries();
+
+      // Create an incomplete/corrupted trailing chapter
+      const chapXml = Buffer.from('<!DOCTYPE html><html><body><h1>Chapter 1</h1></body></html>');
+      const chapDef = zlib.deflateRawSync(chapXml);
+      // Cut compressed stream to only 4 bytes (truncated deflate stream)
+      const chapIncomplete = chapDef.subarray(0, 4);
+      const chapPart = buildSyntheticZipEntry("chapter1.xhtml", chapXml, 8, chapIncomplete);
+
+      const testPath = path.join("/tmp", `test_trailing_incomplete_${Date.now()}.epub`);
+      fs.writeFileSync(
+        testPath,
+        Buffer.concat([...parts, chapPart, Buffer.alloc(1024, 0)]),
+      );
+
+      try {
+        const initialVal = validateEpubContent(testPath);
+        expect(initialVal.valid).toBe(false);
+
+        const healed = repairTruncatedEpub(testPath);
+        expect(healed).toBe(true);
+
+        const afterVal = validateEpubContent(testPath);
+        expect(afterVal.valid).toBe(true);
+      } finally {
+        if (fs.existsSync(testPath)) fs.unlinkSync(testPath);
+      }
+    });
+
+    it("fails cleanly without hanging on non-zip, corrupted, or non-EPUB files", () => {
+      // 1. Non-existent file
+      expect(repairTruncatedEpub("/tmp/nonexistent_file_12345.epub")).toBe(false);
+
+      // 2. Non-ZIP text file
+      const textPath = path.join("/tmp", `text_${Date.now()}.epub`);
+      fs.writeFileSync(textPath, "Just plain text");
+      try {
+        const start = performance.now();
+        expect(repairTruncatedEpub(textPath)).toBe(false);
+        expect(performance.now() - start).toBeLessThan(20);
+      } finally {
+        if (fs.existsSync(textPath)) fs.unlinkSync(textPath);
+      }
+
+      // 3. Null bytes starting with PK magic but no valid entries
+      const corruptPath = path.join("/tmp", `corrupt_${Date.now()}.epub`);
+      fs.writeFileSync(
+        corruptPath,
+        Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.alloc(100, 0)]),
+      );
+      try {
+        const start = performance.now();
+        expect(repairTruncatedEpub(corruptPath)).toBe(false);
+        expect(performance.now() - start).toBeLessThan(20);
+      } finally {
+        if (fs.existsSync(corruptPath)) fs.unlinkSync(corruptPath);
+      }
+
+      // 4. Valid ZIP entries but missing core EPUB metadata (missing container.xml and opf)
+      const nonEpubPath = path.join("/tmp", `non_epub_${Date.now()}.epub`);
+      const fooData = Buffer.from("hello world");
+      const fooPart = buildSyntheticZipEntry("foo.txt", fooData, 0);
+      fs.writeFileSync(nonEpubPath, fooPart);
+      try {
+        expect(repairTruncatedEpub(nonEpubPath)).toBe(false);
+      } finally {
+        if (fs.existsSync(nonEpubPath)) fs.unlinkSync(nonEpubPath);
+      }
+    });
+
+    it("rejects malformed core XML (container.xml not XML, OPF missing rootfile, incomplete OPF, unclosed tags)", () => {
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = buildSyntheticZipEntry("mimetype", mimeData, 0);
+
+      // Case A: container.xml is non-XML plaintext
+      const badContainerXml = Buffer.from("Not XML container data");
+      const badContainerPart = buildSyntheticZipEntry(
+        "META-INF/container.xml",
+        badContainerXml,
+        8,
+        zlib.deflateRawSync(badContainerXml),
+      );
+      const testPathA = path.join("/tmp", `bad_container_${Date.now()}.epub`);
+      fs.writeFileSync(testPathA, Buffer.concat([mimePart, badContainerPart]));
+      try {
+        expect(repairTruncatedEpub(testPathA)).toBe(false);
+      } finally {
+        if (fs.existsSync(testPathA)) fs.unlinkSync(testPathA);
+      }
+
+      // Case B: container.xml is valid XML but lacks <rootfile full-path="..."/>
+      const noRootfileXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles></rootfiles></container>',
+      );
+      const noRootfilePart = buildSyntheticZipEntry(
+        "META-INF/container.xml",
+        noRootfileXml,
+        8,
+        zlib.deflateRawSync(noRootfileXml),
+      );
+      const testPathB = path.join("/tmp", `no_rootfile_${Date.now()}.epub`);
+      fs.writeFileSync(testPathB, Buffer.concat([mimePart, noRootfilePart]));
+      try {
+        expect(repairTruncatedEpub(testPathB)).toBe(false);
+      } finally {
+        if (fs.existsSync(testPathB)) fs.unlinkSync(testPathB);
+      }
+
+      // Case C: OPF XML lacks required <spine> element
+      const validContainerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>',
+      );
+      const validContainerPart = buildSyntheticZipEntry(
+        "META-INF/container.xml",
+        validContainerXml,
+        8,
+        zlib.deflateRawSync(validContainerXml),
+      );
+      const incompleteOpfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/></package>',
+      );
+      const incompleteOpfPart = buildSyntheticZipEntry(
+        "OEBPS/content.opf",
+        incompleteOpfXml,
+        8,
+        zlib.deflateRawSync(incompleteOpfXml),
+      );
+      const testPathC = path.join("/tmp", `incomplete_opf_${Date.now()}.epub`);
+      fs.writeFileSync(testPathC, Buffer.concat([mimePart, validContainerPart, incompleteOpfPart]));
+      try {
+        expect(repairTruncatedEpub(testPathC)).toBe(false);
+      } finally {
+        if (fs.existsSync(testPathC)) fs.unlinkSync(testPathC);
+      }
+
+      // Case D: container.xml has unclosed tag (<container><rootfiles><rootfile full-path="foo.opf"></container>)
+      const unclosedContainerXml = Buffer.from(
+        '<container><rootfiles><rootfile full-path="content.opf"></container>',
+      );
+      const unclosedContainerPart = buildSyntheticZipEntry(
+        "META-INF/container.xml",
+        unclosedContainerXml,
+        8,
+        zlib.deflateRawSync(unclosedContainerXml),
+      );
+      const testPathD = path.join("/tmp", `unclosed_container_${Date.now()}.epub`);
+      fs.writeFileSync(testPathD, Buffer.concat([mimePart, unclosedContainerPart]));
+      try {
+        expect(repairTruncatedEpub(testPathD)).toBe(false);
+      } finally {
+        if (fs.existsSync(testPathD)) fs.unlinkSync(testPathD);
+      }
+
+      // Case E: OPF XML has unclosed tag (<package><metadata>...</package>)
+      const unclosedOpfXml = Buffer.from(
+        '<package><metadata><dc:title>Test</dc:title></package>',
+      );
+      const unclosedOpfPart = buildSyntheticZipEntry(
+        "OEBPS/content.opf",
+        unclosedOpfXml,
+        8,
+        zlib.deflateRawSync(unclosedOpfXml),
+      );
+      const testPathE = path.join("/tmp", `unclosed_opf_${Date.now()}.epub`);
+      fs.writeFileSync(testPathE, Buffer.concat([mimePart, validContainerPart, unclosedOpfPart]));
+      try {
+        expect(repairTruncatedEpub(testPathE)).toBe(false);
+      } finally {
+        if (fs.existsSync(testPathE)) fs.unlinkSync(testPathE);
+      }
+
+      // Case F: container.xml has trailing unparsed tag fragment (<container>...</container><broken)
+      const trailingBrokenContainerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container><broken',
+      );
+      const trailingBrokenContainerPart = buildSyntheticZipEntry(
+        "META-INF/container.xml",
+        trailingBrokenContainerXml,
+        8,
+        zlib.deflateRawSync(trailingBrokenContainerXml),
+      );
+      const validOpfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const validOpfPart = buildSyntheticZipEntry(
+        "OEBPS/content.opf",
+        validOpfXml,
+        8,
+        zlib.deflateRawSync(validOpfXml),
+      );
+      const testPathF = path.join("/tmp", `trailing_broken_container_${Date.now()}.epub`);
+      fs.writeFileSync(testPathF, Buffer.concat([mimePart, trailingBrokenContainerPart, validOpfPart]));
+      try {
+        expect(repairTruncatedEpub(testPathF)).toBe(false);
+      } finally {
+        if (fs.existsSync(testPathF)) fs.unlinkSync(testPathF);
+      }
+
+      // Case G: OPF XML has trailing unparsed tag fragment (<package>...</package><broken)
+      const trailingBrokenOpfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package><broken',
+      );
+      const trailingBrokenOpfPart = buildSyntheticZipEntry(
+        "OEBPS/content.opf",
+        trailingBrokenOpfXml,
+        8,
+        zlib.deflateRawSync(trailingBrokenOpfXml),
+      );
+      const testPathG = path.join("/tmp", `trailing_broken_opf_${Date.now()}.epub`);
+      fs.writeFileSync(testPathG, Buffer.concat([mimePart, validContainerPart, trailingBrokenOpfPart]));
+      try {
+        expect(repairTruncatedEpub(testPathG)).toBe(false);
+      } finally {
+        if (fs.existsSync(testPathG)) fs.unlinkSync(testPathG);
+      }
+    });
+
+    it("preserves original file untouched when candidate validation fails", () => {
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = buildSyntheticZipEntry("mimetype", mimeData, 0);
+      const badContainerXml = Buffer.from("Corrupted container data");
+      const badContainerPart = buildSyntheticZipEntry(
+        "META-INF/container.xml",
+        badContainerXml,
+        8,
+        zlib.deflateRawSync(badContainerXml),
+      );
+
+      const originalBuffer = Buffer.concat([mimePart, badContainerPart]);
+      const targetPath = path.join("/tmp", `candidate_fail_${Date.now()}.epub`);
+      fs.writeFileSync(targetPath, originalBuffer);
+
+      try {
+        const repaired = repairTruncatedEpub(targetPath);
+        expect(repaired).toBe(false);
+
+        // Target file must remain untouched with original content
+        expect(fs.existsSync(targetPath)).toBe(true);
+        const onDisk = fs.readFileSync(targetPath);
+        expect(Buffer.compare(onDisk, originalBuffer)).toBe(0);
+
+        // No leftover .repair.tmp file
+        expect(fs.existsSync(`${targetPath}.repair.tmp`)).toBe(false);
+      } finally {
+        if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
+      }
+    });
+
+    it("bounds descriptorless streaming input scan to <50ms on sparse 64MB input without hanging", () => {
+      // Entry with flag bit 3 (0x0008) set, compSize = 0, followed by 64MB sparse null bytes
+      const h = Buffer.alloc(30 + 8);
+      h.writeUInt32LE(0x04034b50, 0);
+      h.writeUInt16LE(20, 4);
+      h.writeUInt16LE(0x0008, 6); // flag bit 3 set
+      h.writeUInt16LE(8, 8);
+      h.writeUInt16LE(0, 10);
+      h.writeUInt16LE(0, 12);
+      h.writeUInt32LE(0, 14);
+      h.writeUInt32LE(0, 18); // compSize = 0
+      h.writeUInt32LE(0, 22); // uncompSize = 0
+      h.writeUInt16LE(8, 26); // name length
+      h.writeUInt16LE(0, 28); // extra length
+      Buffer.from("test.txt").copy(h, 30);
+
+      // 64MB file with sparse null padding
+      const testPath = path.join("/tmp", `sparse_64mb_${Date.now()}.epub`);
+      const fd = fs.openSync(testPath, "w");
+      fs.writeSync(fd, h);
+      fs.ftruncateSync(fd, 64 * 1024 * 1024);
+      fs.closeSync(fd);
+
+      try {
+        const start = performance.now();
+        const res = repairTruncatedEpub(testPath);
+        const elapsed = performance.now() - start;
+
+        expect(res).toBe(false);
+        expect(elapsed).toBeLessThan(50); // Under 50ms bound
+      } finally {
+        if (fs.existsSync(testPath)) fs.unlinkSync(testPath);
+      }
+    });
+
+    it("bounds marker-dense 64MB repeated PK input search to <50ms with probe cap", () => {
+      // Create local header with bit 3 set, followed by repeated PK bytes (adversarial dense pattern)
+      const h = Buffer.alloc(30 + 8);
+      h.writeUInt32LE(0x04034b50, 0);
+      h.writeUInt16LE(20, 4);
+      h.writeUInt16LE(0x0008, 6); // flag bit 3 set
+      h.writeUInt16LE(8, 8);
+      h.writeUInt16LE(0, 10);
+      h.writeUInt16LE(0, 12);
+      h.writeUInt32LE(0, 14);
+      h.writeUInt32LE(0, 18); // compSize = 0
+      h.writeUInt32LE(0, 22); // uncompSize = 0
+      h.writeUInt16LE(8, 26);
+      h.writeUInt16LE(0, 28);
+      Buffer.from("test.txt").copy(h, 30);
+
+      // Create 64MB file with dense PK markers: repeated [0x50, 0x4b, 0x00, 0x00]
+      const densePkBuf = Buffer.alloc(64 * 1024 * 1024);
+      h.copy(densePkBuf, 0);
+      for (let i = 38; i < densePkBuf.length; i += 4) {
+        densePkBuf[i] = 0x50;
+        densePkBuf[i + 1] = 0x4b;
+      }
+
+      const testPath = path.join("/tmp", `dense_pk_${Date.now()}.epub`);
+      fs.writeFileSync(testPath, densePkBuf);
+
+      try {
+        const start = performance.now();
+        const res = repairTruncatedEpub(testPath);
+        const elapsed = performance.now() - start;
+
+        expect(res).toBe(false);
+        expect(elapsed).toBeLessThan(50); // Under 50ms bound guaranteed by MAX_DESCRIPTOR_PROBES = 128
+      } finally {
+        if (fs.existsSync(testPath)) fs.unlinkSync(testPath);
+      }
+    });
+
+    it("strictly parses XML tags, attributes, and declaration positions", () => {
+      // 1. Tag-end scanning is quote-aware: '>' inside attribute values is allowed
+      expect(parseStrictXml('<root a="x>y"/>')).not.toBeNull();
+      expect(parseStrictXml('<root a="x>y"></root>')).not.toBeNull();
+
+      // 2. Attribute tokenizer requires whitespace before each attribute (rejects glued attributes)
+      expect(parseStrictXml('<root a="1"b="2"/>')).toBeNull();
+
+      // 3. Rejects duplicate attribute names on the same element
+      expect(parseStrictXml('<root a="1" a="2"/>')).toBeNull();
+
+      // 4. Rejects duplicate __proto__ attributes while accepting valid single __proto__
+      expect(parseStrictXml('<root __proto__="1" __proto__="2"/>')).toBeNull();
+      expect(parseStrictXml('<root __proto__="1"/>')).not.toBeNull();
+
+      // 5. Allows valid CDATA containing '<?xml'
+      expect(parseStrictXml('<root><![CDATA[<?xml fake?>]]></root>')).not.toBeNull();
+
+      // 6. Rejects <?xml ...?> with leading whitespace or placed inside elements
+      expect(parseStrictXml('\n<?xml version="1.0"?><root/>')).toBeNull();
+      expect(parseStrictXml('<root><?xml version="1.0"?></root>')).toBeNull();
+
+      // 7. Rejects malformed processing instructions like <?xml-stuff?>
+      expect(parseStrictXml('<?xml-stuff?><root/>')).toBeNull();
+
+      // 8. Allows valid <?xml ...?> strictly at index 0
+      expect(parseStrictXml('<?xml version="1.0"?><root a="1" b="2"/>')).not.toBeNull();
+    });
   });
 });
 

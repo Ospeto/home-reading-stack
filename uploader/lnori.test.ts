@@ -1,7 +1,9 @@
 import { describe, it, expect } from "bun:test";
+import { Database } from "bun:sqlite";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import {
   isLnoriUrl,
   parseLnoriUrl,
@@ -19,6 +21,7 @@ import {
   throwOnSubprocessTimeout,
   validateDownloadedEpub,
   validateLnoriBookId,
+  isVolumeAlreadyInCalibre,
   type ParsedLnoriUrl,
 } from "./lnori";
 
@@ -522,20 +525,23 @@ describe("Lnori Light Novel Ingestion Module", () => {
       expect(calls).toBe(2);
     });
 
-    it("retries EPUB download directly after a proxy network error", async () => {
+    it("retries EPUB download over proxy with backoff and fails after exhausting retries", async () => {
       const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
       let calls = 0;
+      const proxyUsed: (string | undefined)[] = [];
       try {
         await expect(
           downloadLnoriEpub("volume.epub", path.join(workDir, "volume.epub"), undefined, {
-            fetch: async () => {
+            fetch: async (_url: string, init: any) => {
               calls++;
+              proxyUsed.push(init?.proxy);
               if (calls === 1) throw new Error("proxy unavailable");
               return new Response("unavailable", { status: 503 });
             },
           }),
         ).rejects.toThrow("Failed to download EPUB from Lnori storage (503)");
-        expect(calls).toBe(2);
+        expect(calls).toBe(4); // 1 initial attempt + 3 retries
+        expect(proxyUsed.every((p) => p === "http://127.0.0.1:7890")).toBe(true);
       } finally {
         await fs.promises.rm(workDir, { recursive: true, force: true });
       }
@@ -649,6 +655,201 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
       } finally {
         await fs.promises.rm(workDir, { recursive: true, force: true });
       }
+    });
+
+    it("validateDownloadedEpub heals truncated files missing central directory and preserves the file", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "truncated.epub");
+
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+
+      // File without central directory and trailing zero padding
+      fs.writeFileSync(destPath, Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]));
+
+      try {
+        expect(() => validateDownloadedEpub(destPath)).not.toThrow();
+        expect(fs.existsSync(destPath)).toBe(true);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("Pre-Download Duplicate Detection", () => {
+    it("isVolumeAlreadyInCalibre returns true when matching series and volume index in SQLite", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "calibre-test-"));
+      const dbPath = path.join(workDir, "metadata.db");
+      const db = new Database(dbPath);
+      db.run(`
+        CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, series_index REAL);
+        CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+        INSERT INTO books VALUES (1, "Test Series: Volume 1", 1);
+        INSERT INTO series VALUES (1, "Test Series");
+        INSERT INTO books_series_link VALUES (1, 1, 1);
+      `);
+      db.close();
+
+      try {
+        expect(
+          isVolumeAlreadyInCalibre("Test Series", 1, "Test Series: Volume 1", { calibreDbPath: dbPath }),
+        ).toBe(true);
+        expect(
+          isVolumeAlreadyInCalibre("Test Series", 2, "Test Series: Volume 2", { calibreDbPath: dbPath }),
+        ).toBe(false);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("isVolumeAlreadyInCalibre returns true when matching title in SQLite", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "calibre-test-"));
+      const dbPath = path.join(workDir, "metadata.db");
+      const db = new Database(dbPath);
+      db.run(`
+        CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, series_index REAL);
+        CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+        INSERT INTO books VALUES (1, "Some Light Novel: Volume 3", 3);
+      `);
+      db.close();
+
+      try {
+        expect(
+          isVolumeAlreadyInCalibre("Different Series", 3, "Some Light Novel: Volume 3", { calibreDbPath: dbPath }),
+        ).toBe(true);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("isVolumeAlreadyInCalibre respects isVolumeInLibrary dependency hook", () => {
+      const isVolumeInLibrary = (seriesTitle: string, volIdx: number) => {
+        return seriesTitle === "Mock Series" && volIdx === 1;
+      };
+      expect(isVolumeAlreadyInCalibre("Mock Series", 1, "Mock Series: Volume 1", { isVolumeInLibrary })).toBe(true);
+      expect(isVolumeAlreadyInCalibre("Mock Series", 2, "Mock Series: Volume 2", { isVolumeInLibrary })).toBe(false);
+    });
+
+    it("ingestLnoriSeries skips downloading existing volumes and reports counts", async () => {
+      const manifestHtml = `<title>Ingest Test Series</title>
+        <a href="/book/101/vol-1">Volume 1</a>
+        <a href="/book/102/vol-2">Volume 2</a>`;
+      const vol1Html = `<script id="app-data" type="application/ld+json">${JSON.stringify({
+        name: "Volume 1",
+        additionalProperty: [
+          { name: "epub_filename", value: "vol1.epub" },
+          { name: "book_id", value: "101" },
+          { name: "series_title", value: "Ingest Test Series" },
+        ],
+      })}</script>`;
+      const vol2Html = `<script id="app-data" type="application/ld+json">${JSON.stringify({
+        name: "Volume 2",
+        additionalProperty: [
+          { name: "epub_filename", value: "vol2.epub" },
+          { name: "book_id", value: "102" },
+          { name: "series_title", value: "Ingest Test Series" },
+        ],
+      })}</script>`;
+
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+      const syntheticEpub = Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+
+      let vol2Downloaded = false;
+      const result = await ingestLnoriSeries(
+        "https://lnori.com/series/9999/ingest-test-series",
+        undefined,
+        {
+          fetch: async (url: string) => {
+            if (url.includes("/series/9999")) return new Response(manifestHtml);
+            if (url.includes("/book/101")) return new Response(vol1Html);
+            if (url.includes("/book/102")) return new Response(vol2Html);
+            if (url.includes("files.lnori.com")) {
+              vol2Downloaded = true;
+              return new Response(syntheticEpub, { status: 200 });
+            }
+            if (url.includes("cdn.lnori.com")) {
+              return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+            }
+            return new Response("Not found", { status: 404 });
+          },
+          // Mock isVolumeInLibrary: Volume 1 already exists, Volume 2 does NOT
+          isVolumeInLibrary: (_series: string, index: number) => {
+            return index === 1;
+          },
+          spawnSync: (_cmd: string, args: string[]) => {
+            if (args[0] === "add") {
+              return { status: 0, stdout: "Added book ids: 123", stderr: "" };
+            }
+            return { status: 0, stdout: "", stderr: "" };
+          },
+        },
+      );
+
+      expect(result.totalCount).toBe(2);
+      expect(result.skippedCount).toBe(1);
+      expect(result.duplicateCount).toBe(1);
+      expect(result.importedCount).toBe(1);
+      expect(result.success).toBe(true);
+      expect(vol2Downloaded).toBe(true);
     });
   });
 

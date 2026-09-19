@@ -18,7 +18,7 @@ import { extractUrlFromText, ingestArticleFromUrl } from "./article";
 import { isLnoriUrl, ingestLnoriSeries } from "./lnori";
 import { generateMetadataFilename } from "./filename";
 import { getJobQueue } from "./jobs";
-import { validateEpubContent, safeFetchWithSsrf } from "./security";
+import { validateEpubContent, repairTruncatedEpub, safeFetchWithSsrf } from "./security";
 
 export function getDropDir(): string {
   if (process.env.BOOKS_DROP_DIR) return process.env.BOOKS_DROP_DIR;
@@ -2705,14 +2705,41 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
       fs.writeFileSync(destPath, new Uint8Array(arrayBuf));
 
       if (!isArchiveFile(fileName)) {
-        const contentValidation = validateEpubContent(destPath);
+        let contentValidation = validateEpubContent(destPath);
+        if (!contentValidation.valid) {
+          const errStr = (contentValidation.error || "").toLowerCase();
+          const isMissingCentralDir =
+            errStr.includes("failed to read epub zip entries") ||
+            errStr.includes("central directory") ||
+            errStr.includes("end-of-central-directory") ||
+            errStr.includes("unreadable") ||
+            errStr.includes("truncated") ||
+            errStr.includes("damaged") ||
+            errStr.includes("cannot find zipfile directory");
+
+          if (isMissingCentralDir) {
+            log(
+              `[TelegramBot] Attempting in-process auto-heal for "${fileName}" after initial validation failure (${contentValidation.error})...`,
+            );
+            const repaired = repairTruncatedEpub(destPath);
+            if (repaired) {
+              log(
+                `[TelegramBot] Successfully auto-healed truncated EPUB "${fileName}" via in-process repair`,
+              );
+              contentValidation = validateEpubContent(destPath);
+            }
+          }
+        }
+
         if (!contentValidation.valid) {
           logError(
             `[TelegramBot] EPUB validation failed for "${fileName}": ${contentValidation.error}`,
           );
           try {
             fs.unlinkSync(destPath);
-          } catch {}
+          } catch {
+            // ignore unlink error
+          }
           results.push({
             name: fileName,
             format,
@@ -3379,14 +3406,17 @@ async function pollTelegram() {
                   );
 
                   if (result.success) {
+                    const skipText =
+                      result.skippedCount > 0
+                        ? ` (${result.skippedCount} already in library)`
+                        : "";
                     const confirmation =
                       `✅ *Light Novel Series Imported Successfully!*\n\n` +
-                      `📚 *Series:* ${escapeTelegramMarkdown(result.seriesTitle)}\n` +
+                      `📖 *Series:* ${escapeTelegramMarkdown(result.seriesTitle)}\n` +
                       `✍️ *Author:* ${escapeTelegramMarkdown(result.author)}\n` +
-                      `📦 *Volumes Imported:* ${escapeTelegramMarkdown(String(result.importedCount))}/${escapeTelegramMarkdown(String(result.totalCount))}\n` +
+                      `📚 *Volumes Imported:* ${escapeTelegramMarkdown(String(result.importedCount))}/${escapeTelegramMarkdown(String(result.totalCount))}${escapeTelegramMarkdown(skipText)}\n` +
                       `🏷️ *Tags:* ${escapeTelegramMarkdown(result.tags)}\n\n` +
                       `_Ready in your library and syncable to KOReader._`;
-
                     await editOrSendMessage(
                       chatId,
                       statusMsgId,
