@@ -604,13 +604,13 @@ export async function downloadLnoriEpub(
 
 export async function fetchAndConvertCover(
   lnoriBookId: string,
-  fallbackCoverUrl?: string,
-  workDir?: string,
+  fallbackCoverUrl: string | undefined,
+  workDir: string | undefined,
 ): Promise<string | null> {
   const bookId = validateLnoriBookId(lnoriBookId);
-  const coverDir = workDir || (await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-cover-")));
-  const rawCoverPath = path.join(coverDir, "cover.raw");
-  const jpegCoverPath = path.join(coverDir, "cover.jpg");
+  if (!workDir) throw new Error("Lnori cover work directory is required");
+  const rawCoverPath = path.join(workDir, "cover.raw");
+  const jpegCoverPath = path.join(workDir, "cover.jpg");
 
   const urlsToTry = [
     `https://cdn.lnori.com/cover/${bookId}.webp`,
@@ -651,7 +651,6 @@ export async function fetchAndConvertCover(
   }
 
   if (!downloaded || !fs.existsSync(rawCoverPath)) {
-    if (!workDir) await fs.promises.rm(coverDir, { recursive: true, force: true });
     return null;
   }
 

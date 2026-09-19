@@ -8,6 +8,10 @@ import {
   extractManifestFromHtml,
   parseVolumeAppData,
   MAX_EPUB_BYTES,
+  MAX_COVER_BYTES,
+  MAX_HTML_BYTES,
+  fetchAndConvertCover,
+  readResponseTextWithLimit,
   streamResponseToFile,
   validateDownloadedEpub,
   validateLnoriBookId,
@@ -330,12 +334,110 @@ describe("Lnori Light Novel Ingestion Module", () => {
       const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
       const destPath = path.join(workDir, "oversized.epub");
       try {
-        const response = new Response(new Uint8Array(5));
+        const response = new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array([1, 2, 3]));
+              controller.enqueue(new Uint8Array([4, 5]));
+              controller.close();
+            },
+          }),
+        );
         await expect(
           streamResponseToFile(response, destPath, 4, "Test EPUB"),
         ).rejects.toThrow("Test EPUB exceeds maximum size of 4 bytes");
         expect(fs.existsSync(destPath)).toBe(false);
         expect(MAX_EPUB_BYTES).toBe(256 * 1024 * 1024);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects declared lengths before reading the response body", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "declared-large.epub");
+      await fs.promises.writeFile(destPath, "stale file");
+      try {
+        const response = new Response(new Uint8Array([1]), {
+          headers: { "content-length": "5" },
+        });
+        await expect(
+          streamResponseToFile(response, destPath, 4, "Declared EPUB"),
+        ).rejects.toThrow("Declared EPUB exceeds maximum size of 4 bytes");
+        expect(fs.existsSync(destPath)).toBe(false);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("enforces chunked HTML and cover byte caps", async () => {
+      const chunkedResponse = (chunks: number[]) =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              for (const size of chunks) controller.enqueue(new Uint8Array(size));
+              controller.close();
+            },
+          }),
+        );
+
+      await expect(
+        readResponseTextWithLimit(
+          chunkedResponse([3, 3]),
+          4,
+          "Chunked HTML",
+        ),
+      ).rejects.toThrow("Chunked HTML exceeds maximum size of 4 bytes");
+
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "cover.raw");
+      try {
+        await expect(
+          streamResponseToFile(
+            chunkedResponse([3, 3]),
+            destPath,
+            4,
+            "Chunked cover",
+          ),
+        ).rejects.toThrow("Chunked cover exceeds maximum size of 4 bytes");
+        expect(fs.existsSync(destPath)).toBe(false);
+        expect(MAX_COVER_BYTES).toBe(16 * 1024 * 1024);
+        expect(MAX_HTML_BYTES).toBe(8 * 1024 * 1024);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("requires a caller-owned work directory for cover conversion", async () => {
+      const before = new Set(
+        fs.readdirSync(os.tmpdir()).filter((entry: string) => entry.startsWith("lnori-cover-")),
+      );
+      await expect(
+        (fetchAndConvertCover as any)("23021", undefined, undefined),
+      ).rejects.toThrow("Lnori cover work directory is required");
+      const after = fs
+        .readdirSync(os.tmpdir())
+        .filter((entry: string) => entry.startsWith("lnori-cover-"));
+      expect(after.filter((entry) => !before.has(entry))).toEqual([]);
+    });
+
+    it("rejects path-traversal ZIP entries and unlinks the EPUB", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "traversal.epub");
+      const pythonScript = `
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as z:
+    z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+    z.writestr("META-INF/container.xml", "<container/>")
+    z.writestr("../../escape.txt", "payload")
+`;
+      try {
+        const result = Bun.spawnSync(["python3", "-c", pythonScript, destPath]);
+        expect(result.exitCode).toBe(0);
+        expect(() => validateDownloadedEpub(destPath)).toThrow(
+          "Downloaded EPUB failed validation",
+        );
+        expect(fs.existsSync(destPath)).toBe(false);
       } finally {
         await fs.promises.rm(workDir, { recursive: true, force: true });
       }
