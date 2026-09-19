@@ -107,7 +107,12 @@ const KOSYNC_DB_PATH = getKosyncDbPath();
 
 export function getCalibredbPath(): string {
   if (process.env.CALIBREDB_PATH) return process.env.CALIBREDB_PATH;
-  const probe = spawnSync("which", ["calibredb"], { encoding: "utf8" });
+  const probe = spawnSync("which", ["calibredb"], {
+    encoding: "utf8",
+    timeout: SUBPROCESS_TIMEOUT_MS,
+    maxBuffer: SUBPROCESS_MAX_BUFFER,
+  });
+  throwOnSubprocessTimeout(probe, "which calibredb");
   if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
   const candidates = [
     "/opt/homebrew/bin/calibredb",
@@ -170,6 +175,8 @@ const INITIAL_BACKOFF_MS = 2000;
 const MAX_BACKOFF_MS = 60000;
 const POLL_TIMEOUT_SECONDS = 25;
 const POLL_REQUEST_TIMEOUT_MS = 35000;
+const SUBPROCESS_TIMEOUT_MS = 60_000;
+const SUBPROCESS_MAX_BUFFER = 16 * 1024 * 1024;
 
 // Lazy singleton cacheDb proxy for backward-compatible call-sites
 // SAFETY: Proxy delegates Database methods to dynamically initialized Database instance
@@ -221,6 +228,15 @@ function logError(msg: string, err?: any) {
   console.error(`[${ts}] [TelegramBot] ERROR: ${msg}`, err || "");
 }
 
+function throwOnSubprocessTimeout(
+  result: { error?: { code?: string; message?: string } },
+  command: string,
+): void {
+  if (result.error?.code === "ETIMEDOUT") {
+    throw new Error(`${command} timed out after ${SUBPROCESS_TIMEOUT_MS}ms`);
+  }
+}
+
 function getKOReaderBinary256(filePath: string): string | null {
   try {
     const stats = fs.statSync(filePath);
@@ -254,10 +270,14 @@ function runCalibredb(args: string[]) {
   env.PATH =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
 
-  return spawnSync(getCalibredbPath(), args, {
+  const result = spawnSync(getCalibredbPath(), args, {
     encoding: "utf8",
     env,
+    timeout: SUBPROCESS_TIMEOUT_MS,
+    maxBuffer: SUBPROCESS_MAX_BUFFER,
   });
+  throwOnSubprocessTimeout(result, "calibredb");
+  return result;
 }
 
 function safeParseJson(str: string): any {
@@ -657,8 +677,11 @@ export function createHotDatabaseBackup(): DatabaseBackupResult | null {
         {
           encoding: "utf8",
           env,
+          timeout: SUBPROCESS_TIMEOUT_MS,
+          maxBuffer: SUBPROCESS_MAX_BUFFER,
         },
       );
+      throwOnSubprocessTimeout(backupRes, "sqlite3 backup");
 
       if (backupRes.status === 0 && fs.existsSync(destPath)) {
         backedUpFiles.push(target.fileName);
@@ -694,8 +717,11 @@ export function createHotDatabaseBackup(): DatabaseBackupResult | null {
       {
         encoding: "utf8",
         env,
+        timeout: SUBPROCESS_TIMEOUT_MS,
+        maxBuffer: SUBPROCESS_MAX_BUFFER,
       },
     );
+    throwOnSubprocessTimeout(tarRes, "tar backup");
 
     if (tarRes.status !== 0 || !fs.existsSync(archivePath)) {
       logError(
@@ -1209,7 +1235,10 @@ export async function getStatusDashboard(): Promise<string> {
   try {
     const pg = spawnSync("pgrep", ["-f", "ssh.*0.0.0.0:8086"], {
       encoding: "utf8",
+      timeout: SUBPROCESS_TIMEOUT_MS,
+      maxBuffer: SUBPROCESS_MAX_BUFFER,
     });
+    throwOnSubprocessTimeout(pg, "pgrep tunnel");
     const pid = (pg.stdout || "").trim().split("\n")[0];
     if (pid) tunnelStatus = `🟢 \`Active\` (PID ${pid})`;
   } catch (_e) {
@@ -1219,8 +1248,10 @@ export async function getStatusDashboard(): Promise<string> {
   let proxyStatus = "🔴 `Disconnected`";
   try {
     const pCheck = spawnSync("nc", ["-z", "127.0.0.1", "7890"], {
-      timeout: 1500,
+      timeout: SUBPROCESS_TIMEOUT_MS,
+      maxBuffer: SUBPROCESS_MAX_BUFFER,
     });
+    throwOnSubprocessTimeout(pCheck, "nc proxy check");
     if (pCheck.status === 0) proxyStatus = "🟢 `Connected` (127.0.0.1:7890)";
   } catch (_e) {
     void _e;
@@ -1339,8 +1370,10 @@ export async function getStatusDashboard(): Promise<string> {
   try {
     const mp = spawnSync("memory_pressure", ["-Q"], {
       encoding: "utf8",
-      timeout: 2000,
+      timeout: SUBPROCESS_TIMEOUT_MS,
+      maxBuffer: SUBPROCESS_MAX_BUFFER,
     });
+    throwOnSubprocessTimeout(mp, "memory_pressure");
     const match = mp.stdout?.match(
       /System-wide memory free percentage:\s*(\d+)%/i,
     );
@@ -1362,8 +1395,10 @@ export async function getStatusDashboard(): Promise<string> {
   try {
     const df = spawnSync("df", ["-h", path.dirname(getCalibreDbPath())], {
       encoding: "utf8",
-      timeout: 2000,
+      timeout: SUBPROCESS_TIMEOUT_MS,
+      maxBuffer: SUBPROCESS_MAX_BUFFER,
     });
+    throwOnSubprocessTimeout(df, "df internal disk");
     const lines = (df.stdout || "").trim().split("\n");
     if (lines.length > 1) {
       const parts = lines[1].split(/\s+/);
@@ -1381,8 +1416,10 @@ export async function getStatusDashboard(): Promise<string> {
     try {
       const df = spawnSync("df", ["-h", ssdMount], {
         encoding: "utf8",
-        timeout: 2000,
+        timeout: SUBPROCESS_TIMEOUT_MS,
+        maxBuffer: SUBPROCESS_MAX_BUFFER,
       });
+      throwOnSubprocessTimeout(df, "df SSD disk");
       const lines = (df.stdout || "").trim().split("\n");
       if (lines.length > 1) {
         const parts = lines[1].split(/\s+/);
@@ -3320,7 +3357,7 @@ async function pollTelegram() {
                   `Detected Lnori light novel URL in message: "${articleUrl}" from ${sender}`,
                 );
                 const initialStatus =
-                  `📖 *Detected Lnori Light Novel Series*\n\`${articleUrl}\`\n\n` +
+                  `📖 *Detected Lnori Light Novel Series*\n\`${escapeTelegramMarkdown(articleUrl)}\`\n\n` +
                   `⏳ _Fetching volume manifest..._`;
                 const statusMsgId = await sendMessage(
                   chatId,
@@ -3344,10 +3381,10 @@ async function pollTelegram() {
                   if (result.success) {
                     const confirmation =
                       `✅ *Light Novel Series Imported Successfully!*\n\n` +
-                      `📚 *Series:* ${result.seriesTitle}\n` +
-                      `✍️ *Author:* ${result.author}\n` +
-                      `📦 *Volumes Imported:* ${result.importedCount}/${result.totalCount}\n` +
-                      `🏷️ *Tags:* ${result.tags}\n\n` +
+                      `📚 *Series:* ${escapeTelegramMarkdown(result.seriesTitle)}\n` +
+                      `✍️ *Author:* ${escapeTelegramMarkdown(result.author)}\n` +
+                      `📦 *Volumes Imported:* ${escapeTelegramMarkdown(String(result.importedCount))}/${escapeTelegramMarkdown(String(result.totalCount))}\n` +
+                      `🏷️ *Tags:* ${escapeTelegramMarkdown(result.tags)}\n\n` +
                       `_Ready in your library and syncable to KOReader._`;
 
                     await editOrSendMessage(
@@ -3371,7 +3408,7 @@ async function pollTelegram() {
                       chatId,
                       statusMsgId,
                       `⚠️ *Lnori Ingestion Incomplete*\n\n` +
-                        `🔗 *URL:* \`${articleUrl}\`\n` +
+                        `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
                         `❌ *Error:* No volumes could be imported from Lnori.\n\n` +
                         `_Please verify the link and try again._`,
                       "Markdown",
@@ -3385,8 +3422,8 @@ async function pollTelegram() {
                     chatId,
                     statusMsgId,
                     `⚠️ *Lnori Ingestion Failed*\n\n` +
-                      `🔗 *URL:* \`${articleUrl}\`\n` +
-                      `❌ *Error:* ${err.message || "Failed to import Lnori series"}\n\n` +
+                      `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
+                      `❌ *Error:* ${escapeTelegramMarkdown(err.message || "Failed to import Lnori series")}\n\n` +
                       `_Please verify the link is accessible and try again._`,
                     "Markdown",
                   );
