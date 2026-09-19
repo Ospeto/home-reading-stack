@@ -1318,12 +1318,21 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
     });
 
     it("enforces archive size bounds (<256MB) and escapes regex identifiers", () => {
-      // Mock statSync to simulate oversized file
+      // Mock statSync to simulate oversized and boundary-case file
       const originalStatSync = fs.statSync;
       const tmpFile = path.join(os.tmpdir(), `oversized_test_${Date.now()}.epub`);
       fs.writeFileSync(tmpFile, "dummy");
       try {
-        // Test >256MB bound
+        // Test exactly 256MB boundary (must be rejected for strict <256MB)
+        (fs as any).statSync = (p: string) => {
+          if (p === tmpFile) {
+            return { size: 256 * 1024 * 1024 };
+          }
+          return originalStatSync(p);
+        };
+        expect(getEpubContentSignature(tmpFile)).toBeNull();
+
+        // Test >256MB
         (fs as any).statSync = (p: string) => {
           if (p === tmpFile) {
             return { size: 300 * 1024 * 1024 };

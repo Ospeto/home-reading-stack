@@ -275,9 +275,9 @@ export function getEpubContentSignature(filePath: string): string | null {
   try {
     if (!fs.existsSync(filePath)) return null;
 
-    // Archive Bounds: reject files exceeding 256MB or empty files
+    // Archive Bounds: reject files reaching/exceeding 256MB or empty files (<256MB required)
     const stat = fs.statSync(filePath);
-    if (stat.size <= 0 || stat.size > 256 * 1024 * 1024) {
+    if (stat.size <= 0 || stat.size >= 256 * 1024 * 1024) {
       return null;
     }
 
