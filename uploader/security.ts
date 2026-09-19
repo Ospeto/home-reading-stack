@@ -1152,16 +1152,29 @@ const PK_MAGIC = Buffer.from([0x50, 0x4b]);
 /**
  * Strict well-formed XML parser in pure TypeScript with full-input cursor tracking.
  * - Tracks a position cursor from 0 to text.length.
+ * - Allows optional <?xml ...?> strictly at the start of the document (rejects <?xml?> inside elements).
+ * - Quote-aware tag-end scanning so '>' inside attribute values (e.g. <root a="x>y"/>) is not treated as tag end.
+ * - Requires whitespace before every attribute token (rejects '<root a="1"b="2"/>').
+ * - Rejects duplicate attribute names on the same element (rejects '<root a="1" a="2"/>').
  * - Verifies that all characters outside tags are valid whitespace/text and contain no unparsed '<'.
- * - Validates attribute tokens strictly (requires name="value" or name='value'; rejects unquoted/malformed tokens).
  * - Enforces balanced, closed tags (rejects unclosed elements like '<container><rootfile></container>').
  * - Returns null if the cursor does not consume the entire input (e.g. trailing '<' or '<broken').
  */
 export function parseStrictXml(xmlStr: string): XmlElement | null {
   if (!xmlStr || typeof xmlStr !== "string") return null;
 
-  // Strip well-formed XML declarations, comments, CDATA, and DOCTYPE before tag parsing
-  let src = xmlStr.replace(/<\?xml\b[\s\S]*?\?>/gi, "");
+  // Allow optional <?xml ...?> strictly at the start of the document
+  let src = xmlStr;
+  const trimmedLeading = src.match(/^\s*<\?xml\b[\s\S]*?\?>/i);
+  if (trimmedLeading) {
+    src = src.slice(trimmedLeading[0].length);
+  }
+  // Reject any <?xml ...?> placed inside elements or later in the document
+  if (/<\?xml\b/i.test(src)) {
+    return null;
+  }
+
+  // Strip well-formed comments, CDATA, and DOCTYPE before tag parsing
   src = src.replace(/<!--[\s\S]*?-->/g, "");
   src = src.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "");
   src = src.replace(/<!DOCTYPE\b[\s\S]*?>/gi, "");
@@ -1188,18 +1201,33 @@ export function parseStrictXml(xmlStr: string): XmlElement | null {
       return null;
     }
 
-    const nextGt = src.indexOf(">", nextLt);
-    if (nextGt === -1) {
-      // Malformed: unclosed '<...' without '>'
+    // Quote-aware scan for closing '>' so '>' inside attribute values is ignored
+    let nextGt = -1;
+    let inQuote: '"' | "'" | null = null;
+    for (let i = nextLt + 1; i < src.length; i++) {
+      const ch = src[i];
+      if (inQuote !== null) {
+        if (ch === inQuote) {
+          inQuote = null;
+        }
+      } else {
+        if (ch === '"' || ch === "'") {
+          inQuote = ch;
+        } else if (ch === "<") {
+          return null; // Malformed tag containing nested unescaped '<'
+        } else if (ch === ">") {
+          nextGt = i;
+          break;
+        }
+      }
+    }
+
+    if (nextGt === -1 || inQuote !== null) {
+      // Malformed: unclosed '<...' without '>' or unclosed quote
       return null;
     }
 
     const inner = src.slice(nextLt + 1, nextGt);
-    if (inner.includes("<")) {
-      // Malformed tag containing nested '<'
-      return null;
-    }
-
     const tagContent = inner.trim();
     if (tagContent.length === 0) {
       return null; // Empty tag: <>
@@ -1238,22 +1266,29 @@ export function parseStrictXml(xmlStr: string): XmlElement | null {
       tagName = body;
     } else {
       tagName = body.slice(0, spaceIdx);
-      rawAttrs = body.slice(spaceIdx).trim();
+      rawAttrs = body.slice(spaceIdx);
     }
 
     if (!/^[a-zA-Z0-9_:.-]+$/.test(tagName)) {
       return null; // Invalid tag name
     }
 
-    // Strictly validate all attribute tokens (must be name="value" or name='value')
+    // Strictly validate all attribute tokens (require whitespace before each token, reject duplicates)
     const attributes: Record<string, string> = {};
     if (rawAttrs.length > 0) {
       let attrPos = 0;
       while (attrPos < rawAttrs.length) {
+        let hasLeadingWhitespace = false;
         while (attrPos < rawAttrs.length && /\s/.test(rawAttrs[attrPos])) {
+          hasLeadingWhitespace = true;
           attrPos++;
         }
         if (attrPos >= rawAttrs.length) break;
+
+        // Reject glued attributes like <root a="1"b="2"/>
+        if (!hasLeadingWhitespace) {
+          return null;
+        }
 
         const eqIdx = rawAttrs.indexOf("=", attrPos);
         if (eqIdx === -1) {
@@ -1263,6 +1298,11 @@ export function parseStrictXml(xmlStr: string): XmlElement | null {
         const attrName = rawAttrs.slice(attrPos, eqIdx).trim();
         if (!/^[a-zA-Z0-9_:.-]+$/.test(attrName)) {
           return null; // Invalid attribute identifier
+        }
+
+        // Reject duplicate attribute names on the same element
+        if (Object.prototype.hasOwnProperty.call(attributes, attrName)) {
+          return null;
         }
 
         let valStart = eqIdx + 1;

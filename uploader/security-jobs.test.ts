@@ -16,6 +16,7 @@ import {
   isCanonicalEpub,
   validateEpubContent,
   repairTruncatedEpub,
+  parseStrictXml,
   sanitizeFilename,
   getDownloadFilename,
   sanitizeErrorMessage,
@@ -1224,6 +1225,24 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
       } finally {
         if (fs.existsSync(testPath)) fs.unlinkSync(testPath);
       }
+    });
+
+    it("strictly parses XML tags, attributes, and declaration positions", () => {
+      // 1. Tag-end scanning is quote-aware: '>' inside attribute values is allowed
+      expect(parseStrictXml('<root a="x>y"/>')).not.toBeNull();
+      expect(parseStrictXml('<root a="x>y"></root>')).not.toBeNull();
+
+      // 2. Attribute tokenizer requires whitespace before each attribute (rejects glued attributes)
+      expect(parseStrictXml('<root a="1"b="2"/>')).toBeNull();
+
+      // 3. Rejects duplicate attribute names on the same element
+      expect(parseStrictXml('<root a="1" a="2"/>')).toBeNull();
+
+      // 4. Rejects <?xml ...?> placed inside elements or not at root start
+      expect(parseStrictXml('<root><?xml version="1.0"?></root>')).toBeNull();
+
+      // 5. Allows valid <?xml ...?> at the start of document
+      expect(parseStrictXml('<?xml version="1.0"?><root a="1" b="2"/>')).not.toBeNull();
     });
   });
 });
