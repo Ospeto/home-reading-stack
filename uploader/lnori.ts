@@ -14,12 +14,18 @@ export const MAX_VOLUMES_PER_REQUEST = 50;
 const SUBPROCESS_TIMEOUT_MS = 60_000;
 const SUBPROCESS_MAX_BUFFER = 16 * 1024 * 1024;
 
+export interface LnoriDependencies {
+  fetch?: (url: string, init?: RequestInit) => Promise<Response>;
+  spawnSync?: (...args: any[]) => any;
+  sipsPath?: string;
+}
+
 export function escapeTelegramMarkdown(text: string): string {
   if (!text) return "";
   return text.replace(/([_*`[\]\\])/g, "\\$1");
 }
 
-function throwOnSubprocessTimeout(
+export function throwOnSubprocessTimeout(
   result: { error?: { code?: string; message?: string } },
   command: string,
 ): void {
@@ -486,10 +492,14 @@ export function parseVolumeAppData(html: string, fallbackBookId?: string): Lnori
   }
 }
 
-export async function fetchLnoriHtml(targetUrl: string): Promise<string> {
+export async function fetchLnoriHtml(
+  targetUrl: string,
+  dependencies?: LnoriDependencies,
+): Promise<string> {
+  const fetcher = dependencies?.fetch ?? safeFetchWithSsrf;
   let res: Response;
   try {
-    res = await safeFetchWithSsrf(targetUrl, {
+    res = await fetcher(targetUrl, {
       headers: {
         "User-Agent": USER_AGENT,
         Referer: "https://lnori.com/",
@@ -499,7 +509,7 @@ export async function fetchLnoriHtml(targetUrl: string): Promise<string> {
     } as any);
   } catch {
     // If proxy failed or threw, retry without proxy
-    res = await safeFetchWithSsrf(targetUrl, {
+    res = await fetcher(targetUrl, {
       headers: {
         "User-Agent": USER_AGENT,
         Referer: "https://lnori.com/",
@@ -519,13 +529,13 @@ export async function fetchLnoriHtml(targetUrl: string): Promise<string> {
       try {
         let sRes: Response;
         try {
-          sRes = await safeFetchWithSsrf(sitemapPath, {
+          sRes = await fetcher(sitemapPath, {
             headers: { "User-Agent": USER_AGENT },
             proxy: PROXY_URL,
             signal: AbortSignal.timeout(20000),
           } as any);
         } catch {
-          sRes = await safeFetchWithSsrf(sitemapPath, {
+          sRes = await fetcher(sitemapPath, {
             headers: { "User-Agent": USER_AGENT },
             signal: AbortSignal.timeout(20000),
           } as any);
@@ -538,7 +548,7 @@ export async function fetchLnoriHtml(targetUrl: string): Promise<string> {
           );
           const smMatch = xml.match(regex);
           if (smMatch && smMatch[1] && smMatch[1] !== targetUrl) {
-            return await fetchLnoriHtml(smMatch[1]);
+            return await fetchLnoriHtml(smMatch[1], dependencies);
           }
         }
       } catch {
@@ -559,11 +569,13 @@ export async function downloadLnoriEpub(
   epubFilename: string,
   destPath: string,
   onProgress?: (progressPercent: number) => void,
+  dependencies?: LnoriDependencies,
 ): Promise<void> {
+  const fetcher = dependencies?.fetch ?? safeFetchWithSsrf;
   const downloadUrl = `https://files.lnori.com/${encodeURIComponent(epubFilename)}`;
   let res: Response;
   try {
-    res = await safeFetchWithSsrf(downloadUrl, {
+    res = await fetcher(downloadUrl, {
       headers: {
         Referer: "https://lnori.com/",
         "User-Agent": USER_AGENT,
@@ -572,7 +584,7 @@ export async function downloadLnoriEpub(
       signal: AbortSignal.timeout(120000),
     } as any);
   } catch {
-    res = await safeFetchWithSsrf(downloadUrl, {
+    res = await fetcher(downloadUrl, {
       headers: {
         Referer: "https://lnori.com/",
         "User-Agent": USER_AGENT,
@@ -606,7 +618,10 @@ export async function fetchAndConvertCover(
   lnoriBookId: string,
   fallbackCoverUrl: string | undefined,
   workDir: string | undefined,
+  dependencies?: LnoriDependencies,
 ): Promise<string | null> {
+  const fetcher = dependencies?.fetch ?? safeFetchWithSsrf;
+  const runSpawnSync = dependencies?.spawnSync ?? spawnSync;
   const bookId = validateLnoriBookId(lnoriBookId);
   if (!workDir) throw new Error("Lnori cover work directory is required");
   const rawCoverPath = path.join(workDir, "cover.raw");
@@ -622,7 +637,7 @@ export async function fetchAndConvertCover(
     try {
       let res: Response;
       try {
-        res = await safeFetchWithSsrf(cUrl, {
+        res = await fetcher(cUrl, {
           headers: {
             Referer: "https://lnori.com/",
             "User-Agent": USER_AGENT,
@@ -631,7 +646,7 @@ export async function fetchAndConvertCover(
           signal: AbortSignal.timeout(20000),
         } as any);
       } catch {
-        res = await safeFetchWithSsrf(cUrl, {
+        res = await fetcher(cUrl, {
           headers: {
             Referer: "https://lnori.com/",
             "User-Agent": USER_AGENT,
@@ -655,8 +670,8 @@ export async function fetchAndConvertCover(
   }
 
   try {
-    const sipsBin = getSipsPath();
-    const sipsRes = spawnSync(
+    const sipsBin = dependencies?.sipsPath ?? getSipsPath();
+    const sipsRes = runSpawnSync(
       sipsBin,
       ["-s", "format", "jpeg", rawCoverPath, "--out", jpegCoverPath],
       {
@@ -693,6 +708,7 @@ export interface IngestLnoriResult {
 export async function ingestLnoriSeries(
   url: string,
   onProgress?: (text: string) => Promise<void>,
+  dependencies?: LnoriDependencies,
 ): Promise<IngestLnoriResult> {
   const parsed = parseLnoriUrl(url);
   if (!parsed) {
@@ -703,7 +719,7 @@ export async function ingestLnoriSeries(
     await onProgress(`⏳ _Fetching volume manifest for Lnori ${parsed.type}..._`);
   }
 
-  const html = await fetchLnoriHtml(url);
+  const html = await fetchLnoriHtml(url, dependencies);
   const manifest = extractManifestFromHtml(html, url, parsed);
 
   if (manifest.volumePaths.length === 0) {
@@ -737,7 +753,7 @@ export async function ingestLnoriSeries(
 
     let volMeta: LnoriVolumeMetadata | null = null;
     try {
-      const volHtml = await fetchLnoriHtml(fullVolUrl);
+      const volHtml = await fetchLnoriHtml(fullVolUrl, dependencies);
       const volParsedUrl = parseLnoriUrl(fullVolUrl);
       volMeta = parseVolumeAppData(volHtml, volParsedUrl?.id);
     } catch (err: any) {
@@ -761,7 +777,7 @@ export async function ingestLnoriSeries(
     const tempEpubPath = path.join(workDir, `volume-${volNum}.epub`);
 
     try {
-      await downloadLnoriEpub(volMeta.epubFilename, tempEpubPath);
+      await downloadLnoriEpub(volMeta.epubFilename, tempEpubPath, undefined, dependencies);
 
       if (onProgress) {
         await onProgress(
@@ -819,7 +835,7 @@ export async function ingestLnoriSeries(
       // Download and convert master cover art
       let coverPath: string | null = null;
       try {
-        coverPath = await fetchAndConvertCover(bookId, volMeta.coverImageUrl, workDir);
+        coverPath = await fetchAndConvertCover(bookId, volMeta.coverImageUrl, workDir, dependencies);
         if (coverPath && fs.existsSync(coverPath)) {
           setArgs.push("--field", `cover:${coverPath}`);
         }

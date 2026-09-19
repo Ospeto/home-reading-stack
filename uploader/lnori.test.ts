@@ -13,6 +13,9 @@ import {
   fetchAndConvertCover,
   readResponseTextWithLimit,
   streamResponseToFile,
+  downloadLnoriEpub,
+  ingestLnoriSeries,
+  throwOnSubprocessTimeout,
   validateDownloadedEpub,
   validateLnoriBookId,
   type ParsedLnoriUrl,
@@ -409,15 +412,149 @@ describe("Lnori Light Novel Ingestion Module", () => {
     });
 
     it("requires a caller-owned work directory for cover conversion", async () => {
+      const coverPrefixes = ["lnori_cover_", "lnori-"];
       const before = new Set(
-        fs.readdirSync(os.tmpdir()).filter((entry: string) => entry.startsWith("lnori-cover-")),
+        fs.readdirSync(os.tmpdir()).filter((entry: string) =>
+          coverPrefixes.some((prefix) => entry.startsWith(prefix)),
+        ),
       );
       await expect(
-        (fetchAndConvertCover as any)("23021", undefined, undefined),
+        fetchAndConvertCover("23021", undefined, undefined),
       ).rejects.toThrow("Lnori cover work directory is required");
       const after = fs
         .readdirSync(os.tmpdir())
-        .filter((entry: string) => entry.startsWith("lnori-cover-"));
+        .filter((entry: string) => coverPrefixes.some((prefix) => entry.startsWith(prefix)));
+      expect(after.filter((entry) => !before.has(entry))).toEqual([]);
+    });
+
+    it("cleans cover.raw after successful conversion and sips failure", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const rawPath = path.join(workDir, "cover.raw");
+      const jpegPath = path.join(workDir, "cover.jpg");
+      const coverResponse = () => new Response(new Uint8Array([1, 2, 3]));
+      try {
+        const success = await fetchAndConvertCover("23021", undefined, workDir, {
+          fetch: async () => coverResponse(),
+          sipsPath: "fake-sips",
+          spawnSync: (_command: string, args: string[]) => {
+            fs.writeFileSync(args[args.length - 1], "jpeg");
+            return { status: 0, stdout: "", stderr: "" };
+          },
+        });
+        expect(success).toBe(jpegPath);
+        expect(fs.existsSync(rawPath)).toBe(false);
+        expect(fs.existsSync(jpegPath)).toBe(true);
+        await fs.promises.rm(jpegPath, { force: true });
+
+        const failed = await fetchAndConvertCover("23021", undefined, workDir, {
+          fetch: async () => coverResponse(),
+          sipsPath: "fake-sips",
+          spawnSync: () => ({ status: 1, stdout: "", stderr: "conversion failed" }),
+        });
+        expect(failed).toBeNull();
+        expect(fs.existsSync(rawPath)).toBe(false);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("cleans cover.raw when sips times out", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const rawPath = path.join(workDir, "cover.raw");
+      try {
+        await expect(
+          fetchAndConvertCover("23021", undefined, workDir, {
+            fetch: async () => new Response(new Uint8Array([1, 2, 3])),
+            sipsPath: "fake-sips",
+            spawnSync: () => ({ error: { code: "ETIMEDOUT" } }),
+          }),
+        ).rejects.toThrow("sips timed out after 60000ms");
+        expect(fs.existsSync(rawPath)).toBe(false);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects responses without bodies and declared oversized HTML", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "empty.epub");
+      try {
+        await expect(
+          streamResponseToFile(new Response(null), destPath, 4, "Empty EPUB"),
+        ).rejects.toThrow("Empty EPUB response contained no body");
+        expect(fs.existsSync(destPath)).toBe(false);
+        await expect(
+          readResponseTextWithLimit(
+            new Response(new Uint8Array([1]), { headers: { "content-length": "5" } }),
+            4,
+            "Declared HTML",
+          ),
+        ).rejects.toThrow("Declared HTML exceeds maximum size of 4 bytes");
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects non-OK EPUB downloads", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      try {
+        await expect(
+          downloadLnoriEpub("volume.epub", path.join(workDir, "volume.epub"), undefined, {
+            fetch: async () => new Response("unavailable", { status: 503 }),
+          }),
+        ).rejects.toThrow("Failed to download EPUB from Lnori storage (503)");
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("throws on subprocess timeouts", () => {
+      expect(() =>
+        throwOnSubprocessTimeout({ error: { code: "ETIMEDOUT" } }, "test-command"),
+      ).toThrow("test-command timed out after 60000ms");
+      expect(() => throwOnSubprocessTimeout({}, "test-command")).not.toThrow();
+    });
+
+    it("rejects manifests over the per-request volume limit", async () => {
+      const links = Array.from(
+        { length: 51 },
+        (_, index) => `<a href="/book/${index + 1}/volume-${index + 1}">Volume ${index + 1}</a>`,
+      ).join("\n");
+      await expect(
+        ingestLnoriSeries("https://lnori.com/series/8046/test-series", undefined, {
+          fetch: async () => new Response(`<title>Test Series</title>${links}`),
+        }),
+      ).rejects.toThrow("maximum allowed is 50 per request");
+    });
+
+    it("cleans the ingestion work directory when a volume download fails", async () => {
+      const before = new Set(
+        fs.readdirSync(os.tmpdir()).filter((entry: string) => entry.startsWith("lnori-")),
+      );
+      let requestCount = 0;
+      const volumeHtml = `<script id="app-data" type="application/ld+json">${JSON.stringify({
+        name: "Volume 1",
+        additionalProperty: [
+          { name: "epub_filename", value: "volume-1.epub" },
+          { name: "book_id", value: "23021" },
+        ],
+      })}</script>`;
+      await expect(
+        ingestLnoriSeries("https://lnori.com/series/8046/test-series", undefined, {
+          fetch: async (url: string) => {
+            requestCount++;
+            if (requestCount === 1) {
+              return new Response('<title>Test Series</title><a href="/book/23021/volume-1">Volume 1</a>');
+            }
+            if (requestCount === 2) return new Response(volumeHtml);
+            expect(url).toContain("files.lnori.com");
+            return new Response("unavailable", { status: 503 });
+          },
+        }),
+      ).rejects.toThrow("Failed to download EPUB from Lnori storage (503)");
+      const after = fs
+        .readdirSync(os.tmpdir())
+        .filter((entry: string) => entry.startsWith("lnori-"));
       expect(after.filter((entry) => !before.has(entry))).toEqual([]);
     });
 
