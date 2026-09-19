@@ -2046,7 +2046,7 @@ export async function safeFetchWithSsrf(
     const hostIsIp = net.isIP(normalizeIpString(parsed.hostname));
     const fetchOpts: any = {
       ...init,
-      redirect: "manual",
+      redirect: init.redirect === "error" ? "error" : "manual",
     };
 
     // IP binding uses a supported dispatcher/connector rather than replacing
@@ -2082,6 +2082,14 @@ export async function safeFetchWithSsrf(
     }
 
     if (res.status >= 300 && res.status < 400) {
+      if (init.redirect === "error") {
+        throw new Error(
+          `Redirect blocked: request specified redirect: "error" (status ${res.status})`,
+        );
+      }
+      if (init.redirect === "manual") {
+        return res;
+      }
       const loc = res.headers.get("location");
       if (!loc) {
         throw new Error(`HTTP ${res.status} redirect without Location header`);

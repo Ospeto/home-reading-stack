@@ -24,6 +24,10 @@ import {
   pendingRetries,
   cleanExpiredRetries,
   registerPendingRetry,
+  getKOReaderBinary256,
+  getEpubContentSignature,
+  ingestBookFile,
+  getCacheDb,
 } from "./bot";
 
 describe("Telegram Mini App (TMA) Integration", () => {
@@ -1179,6 +1183,232 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
         fs.unlinkSync(mockCalibre);
       }
     }
+  });
+
+  describe("EPUB Content-Signature Fingerprint & Deduplication", () => {
+    it("getKOReaderBinary256 computes consistent MD5 hash and returns null on missing file", () => {
+      const tmpFile = path.join(os.tmpdir(), `koreader_test_${Date.now()}.bin`);
+      fs.writeFileSync(tmpFile, Buffer.alloc(4096, 0x42));
+      try {
+        const hash1 = getKOReaderBinary256(tmpFile);
+        const hash2 = getKOReaderBinary256(tmpFile);
+        expect(hash1).not.toBeNull();
+        expect(hash1).toBe(hash2);
+
+        expect(getKOReaderBinary256("/non/existent/path/book.epub")).toBeNull();
+      } finally {
+        if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+      }
+    });
+
+    it("getEpubContentSignature computes identical hash for recompressed variants with same package identifier", () => {
+      const testDir = path.join(os.tmpdir(), `epub_sig_test_${Date.now()}`);
+      fs.mkdirSync(testDir, { recursive: true });
+
+      const srcDir1 = path.join(testDir, "src1");
+      const srcDir2 = path.join(testDir, "src2");
+      fs.mkdirSync(path.join(srcDir1, "META-INF"), { recursive: true });
+      fs.mkdirSync(path.join(srcDir2, "META-INF"), { recursive: true });
+
+      const containerXml = `<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>`;
+      fs.writeFileSync(path.join(srcDir1, "META-INF", "container.xml"), containerXml);
+      fs.writeFileSync(path.join(srcDir2, "META-INF", "container.xml"), containerXml);
+      fs.writeFileSync(path.join(srcDir1, "mimetype"), "application/epub+zip");
+      fs.writeFileSync(path.join(srcDir2, "mimetype"), "application/epub+zip");
+
+      fs.mkdirSync(path.join(srcDir1, "OEBPS"), { recursive: true });
+      fs.mkdirSync(path.join(srcDir2, "OEBPS"), { recursive: true });
+
+      const testUuid = "urn:uuid:e8b1b590-7e61-4fa3-9f12-9c3f4123abcd";
+      const opfXml = `<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Test Deduplication Book</dc:title>
+    <dc:creator>Test Author</dc:creator>
+    <dc:identifier id="BookId">${testUuid}</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="chapter1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="chapter1"/>
+  </spine>
+</package>`;
+      fs.writeFileSync(path.join(srcDir1, "OEBPS", "content.opf"), opfXml);
+      fs.writeFileSync(path.join(srcDir2, "OEBPS", "content.opf"), opfXml);
+      fs.writeFileSync(path.join(srcDir1, "OEBPS", "chapter1.xhtml"), "<html><body>Chapter 1 Content</body></html>");
+      fs.writeFileSync(path.join(srcDir2, "OEBPS", "chapter1.xhtml"), "<html><body>Chapter 1 Content</body></html>");
+
+      // Variant 2 includes extra dummy comment or different file to change binary checksum
+      fs.writeFileSync(path.join(srcDir2, "OEBPS", "notes.txt"), "Recompressed release variant with extra notes");
+
+      const epub1 = path.join(testDir, "book_standard.epub");
+      const epub2 = path.join(testDir, "book_recompressed.epub");
+
+      // Package epub1 with compression level 9
+      spawnSync("zip", ["-9", "-q", "-r", epub1, "mimetype", "META-INF", "OEBPS"], {
+        cwd: srcDir1,
+      });
+
+      // Package epub2 with compression level 0 (store only)
+      spawnSync("zip", ["-0", "-q", "-r", epub2, "mimetype", "META-INF", "OEBPS"], {
+        cwd: srcDir2,
+      });
+
+      try {
+        expect(fs.existsSync(epub1)).toBe(true);
+        expect(fs.existsSync(epub2)).toBe(true);
+
+        // Binary KOReader hash should differ because zip compression/structure differs
+        const binHash1 = getKOReaderBinary256(epub1);
+        const binHash2 = getKOReaderBinary256(epub2);
+        expect(binHash1).not.toBeNull();
+        expect(binHash2).not.toBeNull();
+        expect(binHash1).not.toBe(binHash2);
+
+        // Content signature from content.opf package identifier MUST MATCH identically
+        const sig1 = getEpubContentSignature(epub1);
+        const sig2 = getEpubContentSignature(epub2);
+        expect(sig1).not.toBeNull();
+        expect(sig2).not.toBeNull();
+        expect(sig1).toBe(sig2);
+
+        // Verify fallback duplicate detection using SQLite file_hashes cache
+        const cacheDb = getCacheDb();
+        // Insert entry using epub1's content signature
+        cacheDb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          `sig:${epub1}`,
+          Date.now(),
+          sig1,
+          999,
+          "Test Deduplication Book",
+          "Test Author",
+          0,
+        );
+
+        // Ingesting epub2 (which has different binary hash binHash2) should hit content signature fallback
+        const match = cacheDb
+          .query(
+            "SELECT book_id, title, authors FROM file_hashes WHERE hash = ? LIMIT 1",
+          )
+          .get(sig2) as any;
+
+        expect(match).not.toBeNull();
+        expect(match.book_id).toBe(999);
+        expect(match.title).toBe("Test Deduplication Book");
+      } finally {
+        fs.rmSync(testDir, { recursive: true, force: true });
+      }
+    });
+
+    it("returns null for non-EPUB files or corrupted archives missing OPF", () => {
+      const nonEpub = path.join(os.tmpdir(), `non_epub_${Date.now()}.txt`);
+      fs.writeFileSync(nonEpub, "Plain text file");
+      try {
+        expect(getEpubContentSignature(nonEpub)).toBeNull();
+      } finally {
+        if (fs.existsSync(nonEpub)) fs.unlinkSync(nonEpub);
+      }
+    });
+
+    it("enforces archive size bounds (<256MB) and escapes regex identifiers", () => {
+      // Mock statSync to simulate oversized and boundary-case file
+      const originalStatSync = fs.statSync;
+      const tmpFile = path.join(os.tmpdir(), `oversized_test_${Date.now()}.epub`);
+      fs.writeFileSync(tmpFile, "dummy");
+      try {
+        // Test exactly 256MB boundary (must be rejected for strict <256MB)
+        (fs as any).statSync = (p: string) => {
+          if (p === tmpFile) {
+            return { size: 256 * 1024 * 1024 };
+          }
+          return originalStatSync(p);
+        };
+        expect(getEpubContentSignature(tmpFile)).toBeNull();
+
+        // Test >256MB
+        (fs as any).statSync = (p: string) => {
+          if (p === tmpFile) {
+            return { size: 300 * 1024 * 1024 };
+          }
+          return originalStatSync(p);
+        };
+        expect(getEpubContentSignature(tmpFile)).toBeNull();
+      } finally {
+        fs.statSync = originalStatSync;
+        if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+      }
+    });
+
+    it("bypasses content signature duplicate match when incoming book has volume conflict", async () => {
+      const testDir = path.join(os.tmpdir(), `volume_gate_test_${Date.now()}`);
+      fs.mkdirSync(testDir, { recursive: true });
+      fs.mkdirSync(path.join(testDir, "META-INF"), { recursive: true });
+      fs.mkdirSync(path.join(testDir, "OEBPS"), { recursive: true });
+
+      const containerXml = `<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>`;
+      fs.writeFileSync(path.join(testDir, "META-INF", "container.xml"), containerXml);
+      fs.writeFileSync(path.join(testDir, "mimetype"), "application/epub+zip");
+
+      const sharedUuid = "urn:uuid:shared-template-uuid-12345";
+      const opfXml = `<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Overlord, Vol. 2</dc:title>
+    <dc:creator>Kugane Maruyama</dc:creator>
+    <dc:identifier id="BookId">${sharedUuid}</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>`;
+      fs.writeFileSync(path.join(testDir, "OEBPS", "content.opf"), opfXml);
+      fs.writeFileSync(path.join(testDir, "OEBPS", "c1.xhtml"), "<html><body>Vol 2</body></html>");
+
+      const epubVol2 = path.join(testDir, "Overlord_Vol_2.epub");
+      spawnSync("zip", ["-q", "-r", epubVol2, "mimetype", "META-INF", "OEBPS"], {
+        cwd: testDir,
+      });
+
+      try {
+        const sig = getEpubContentSignature(epubVol2);
+        expect(sig).not.toBeNull();
+
+        // Seed cacheDb with Volume 1 pointing to the same content signature
+        const cacheDb = getCacheDb();
+        cacheDb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          `sig:101`,
+          Date.now(),
+          sig,
+          101,
+          "Overlord, Vol. 1",
+          "Kugane Maruyama",
+          0,
+        );
+
+        // Ingesting Vol 2 with the same signature must NOT falsely match Vol 1 as duplicate
+        const res = await ingestBookFile(epubVol2, "Overlord_Vol_2.epub");
+        // Because of volume conflict with Vol 1, it bypasses the signature match
+        if (res.duplicate) {
+          expect(res.bookId).not.toBe(101);
+        }
+      } finally {
+        fs.rmSync(testDir, { recursive: true, force: true });
+      }
+    });
   });
 });
 

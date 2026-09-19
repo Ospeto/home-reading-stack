@@ -8,7 +8,9 @@ import { Database } from "bun:sqlite";
 import {
   sanitizeMetadata,
   extractSeries,
-  isSameBook,
+  extractVolumeNumber,
+  normalizeTitleForDedup,
+  isSameBookAsync,
   normalizeFormat,
   searchUniversalMetadata,
   applyMetadataToCalibre,
@@ -18,7 +20,13 @@ import { extractUrlFromText, ingestArticleFromUrl } from "./article";
 import { isLnoriUrl, ingestLnoriSeries } from "./lnori";
 import { generateMetadataFilename } from "./filename";
 import { getJobQueue } from "./jobs";
-import { validateEpubContent, repairTruncatedEpub, safeFetchWithSsrf } from "./security";
+import {
+  validateEpubContent,
+  repairTruncatedEpub,
+  safeFetchWithSsrf,
+  getBsdtarPath,
+  getUnzipPath,
+} from "./security";
 
 export function getDropDir(): string {
   if (process.env.BOOKS_DROP_DIR) return process.env.BOOKS_DROP_DIR;
@@ -237,7 +245,7 @@ function throwOnSubprocessTimeout(
   }
 }
 
-function getKOReaderBinary256(filePath: string): string | null {
+export function getKOReaderBinary256(filePath: string): string | null {
   try {
     const stats = fs.statSync(filePath);
     const fd = fs.openSync(filePath, "r");
@@ -253,6 +261,178 @@ function getKOReaderBinary256(filePath: string): string | null {
     }
     fs.closeSync(fd);
     return hasher.digest("hex");
+  } catch (_err) {
+    void _err;
+    return null;
+  }
+}
+
+/**
+ * Computes a content hash fingerprint from the EPUB's content.opf package identifier/UUID.
+ * This guarantees that recompressed identical books match even if raw zip checksum differs.
+ */
+export function getEpubContentSignature(filePath: string): string | null {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+
+    // Archive Bounds: reject files reaching/exceeding 256MB or empty files (<256MB required)
+    const stat = fs.statSync(filePath);
+    if (stat.size <= 0 || stat.size >= 256 * 1024 * 1024) {
+      return null;
+    }
+
+    const ARCHIVE_TIMEOUT_MS = 15000;
+    const ARCHIVE_MAX_BUFFER = 16 * 1024 * 1024;
+    const execOpts = {
+      encoding: "utf8" as const,
+      timeout: ARCHIVE_TIMEOUT_MS,
+      maxBuffer: ARCHIVE_MAX_BUFFER,
+    };
+
+    // 1. Read META-INF/container.xml to locate the OPF rootfile
+    let containerXml = "";
+    const bsdtar = spawnSync(
+      getBsdtarPath(),
+      ["-xOf", filePath, "META-INF/container.xml"],
+      execOpts,
+    );
+    if (bsdtar.status === 0 && bsdtar.stdout) {
+      containerXml = bsdtar.stdout;
+    } else {
+      const unzip = spawnSync(
+        getUnzipPath(),
+        ["-p", filePath, "META-INF/container.xml"],
+        execOpts,
+      );
+      if ((unzip.status === 0 || unzip.status === 1) && unzip.stdout) {
+        containerXml = unzip.stdout;
+      }
+    }
+
+    // 2. Resolve OPF path
+    let opfPath = "content.opf";
+    if (containerXml) {
+      const match = containerXml.match(/full-path=["']([^"']+)["']/i);
+      if (match && match[1]) {
+        opfPath = match[1].trim();
+      }
+    }
+
+    // 3. Read OPF XML content
+    let opfXml = "";
+    const bsdtarOpf = spawnSync(
+      getBsdtarPath(),
+      ["-xOf", filePath, opfPath],
+      execOpts,
+    );
+    if (bsdtarOpf.status === 0 && bsdtarOpf.stdout) {
+      opfXml = bsdtarOpf.stdout;
+    } else {
+      const unzipOpf = spawnSync(
+        getUnzipPath(),
+        ["-p", filePath, opfPath],
+        execOpts,
+      );
+      if ((unzipOpf.status === 0 || unzipOpf.status === 1) && unzipOpf.stdout) {
+        opfXml = unzipOpf.stdout;
+      }
+    }
+
+    // Fallbacks if specified opfPath was not found
+    if (!opfXml && opfPath !== "content.opf") {
+      const alt = spawnSync(
+        getBsdtarPath(),
+        ["-xOf", filePath, "content.opf"],
+        execOpts,
+      );
+      if (alt.status === 0 && alt.stdout) opfXml = alt.stdout;
+    }
+    if (!opfXml && opfPath !== "OEBPS/content.opf") {
+      const alt2 = spawnSync(
+        getBsdtarPath(),
+        ["-xOf", filePath, "OEBPS/content.opf"],
+        execOpts,
+      );
+      if (alt2.status === 0 && alt2.stdout) opfXml = alt2.stdout;
+    }
+
+    if (!opfXml) return null;
+
+    // 4. Extract Package Identifier / UUID
+    let identifier = "";
+
+    // Pattern A: Match unique-identifier attribute in <package> and find corresponding <dc:identifier id="...">
+    const uidMatch = opfXml.match(
+      /<package[^>]+unique-identifier=["']([^"']+)["']/i,
+    );
+    if (uidMatch && uidMatch[1]) {
+      const idAttr = uidMatch[1].trim();
+      const allIdMatches = opfXml.matchAll(
+        /<dc:identifier([^>]*)>([\s\S]*?)<\/dc:identifier>/gi,
+      );
+      for (const m of allIdMatches) {
+        const attrs = m[1];
+        const val = m[2].replace(/<[^>]+>/g, "").trim();
+        const attrMatch = attrs.match(/id=["']([^"']+)["']/i);
+        if (attrMatch && attrMatch[1].trim() === idAttr) {
+          identifier = val;
+          break;
+        }
+      }
+    }
+
+    // Pattern B: Look for UUID pattern inside any dc:identifier
+    if (!identifier) {
+      const uuidMatch = opfXml.match(
+        /<dc:identifier[^>]*>[\s\S]*?(?:urn:uuid:)?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})[\s\S]*?<\/dc:identifier>/i,
+      );
+      if (uuidMatch && uuidMatch[1]) {
+        identifier = uuidMatch[1].toLowerCase().trim();
+      }
+    }
+
+    // Pattern C: Any non-empty dc:identifier
+    if (!identifier) {
+      const anyIdMatch = opfXml.match(
+        /<dc:identifier[^>]*>([\s\S]*?)<\/dc:identifier>/i,
+      );
+      if (anyIdMatch && anyIdMatch[1]) {
+        const candidate = anyIdMatch[1].replace(/<[^>]+>/g, "").trim();
+        if (candidate.length > 3) {
+          identifier = candidate;
+        }
+      }
+    }
+
+    // Pattern D: Core metadata fallback (title + author)
+    if (!identifier) {
+      const titleMatch = opfXml.match(
+        /<dc:title[^>]*>([\s\S]*?)<\/dc:title>/i,
+      );
+      const creatorMatch = opfXml.match(
+        /<dc:creator[^>]*>([\s\S]*?)<\/dc:creator>/i,
+      );
+      if (titleMatch && titleMatch[1]) {
+        const t = titleMatch[1].replace(/<[^>]+>/g, "").trim().toLowerCase();
+        const c = creatorMatch
+          ? creatorMatch[1].replace(/<[^>]+>/g, "").trim().toLowerCase()
+          : "";
+        identifier = `meta:${t}:::${c}`;
+      }
+    }
+
+    if (!identifier) return null;
+
+    // Standardize and compute SHA-256 fingerprint
+    const cleanId = identifier
+      .replace(/^urn:uuid:/i, "")
+      .replace(/[\s\-_]+/g, "")
+      .toLowerCase();
+
+    return crypto
+      .createHash("sha256")
+      .update(`epub-content-sig:${cleanId}`)
+      .digest("hex");
   } catch (_err) {
     void _err;
     return null;
@@ -2294,11 +2474,11 @@ export interface IngestResult {
   error?: string;
 }
 
-function ingestBookFile(
+export async function ingestBookFile(
   filePath: string,
   originalFileName: string,
   chatId?: number,
-): IngestResult {
+): Promise<IngestResult> {
   const ext = path.extname(originalFileName).toLowerCase();
   const format = normalizeFormat(ext);
   const preliminary = sanitizeMetadata("", "", [], originalFileName);
@@ -2317,27 +2497,102 @@ function ingestBookFile(
 
   // 1. Level 1: KOReader Binary Checksum Deduplication
   const fileHash = getKOReaderBinary256(filePath);
+  let hashMatch: any = null;
   if (fileHash) {
-    const hashMatch = cacheDb
+    hashMatch = cacheDb
       .query(
         "SELECT book_id, title, authors FROM file_hashes WHERE hash = ? LIMIT 1",
       )
       .get(fileHash) as any;
+  }
 
-    if (hashMatch && hashMatch.book_id) {
-      log(
-        `Duplicate detected via KOReader binary hash: "${hashMatch.title}" (ID: ${hashMatch.book_id})`,
-      );
-      return {
-        success: true,
-        duplicate: true,
-        bookId: hashMatch.book_id,
-        displayTitle: hashMatch.title || preliminary.title,
-        author: hashMatch.authors || preliminary.author,
-        format,
-        message: "Already in your library (identical content)",
-      };
+  // 1b. Content-Signature Fingerprint: fallback if binary SHA-256 is a cache miss
+  const contentSig = getEpubContentSignature(filePath);
+  if (!hashMatch && contentSig) {
+    const candidateMatch = cacheDb
+      .query(
+        "SELECT book_id, title, authors FROM file_hashes WHERE hash = ? LIMIT 1",
+      )
+      .get(contentSig) as any;
+
+    if (candidateMatch && candidateMatch.book_id) {
+      // Validate volume compatibility before accepting content signature duplicates
+      const volIncoming = extractVolumeNumber(preliminary.title);
+      const volMatch = extractVolumeNumber(candidateMatch.title || "");
+      const seriesIncoming = extractSeries(preliminary.title, originalFileName);
+      const seriesMatch = extractSeries(candidateMatch.title || "");
+
+      let hasVolumeConflict = false;
+      if (volIncoming !== null && volMatch !== null && volIncoming !== volMatch) {
+        hasVolumeConflict = true;
+      } else if (
+        seriesIncoming &&
+        seriesMatch &&
+        seriesIncoming.volume !== seriesMatch.volume
+      ) {
+        const normSI = normalizeTitleForDedup(seriesIncoming.series);
+        const normSM = normalizeTitleForDedup(seriesMatch.series);
+        if (normSI === normSM || normSI.startsWith(normSM) || normSM.startsWith(normSI)) {
+          hasVolumeConflict = true;
+        }
+      }
+
+      if (hasVolumeConflict) {
+        log(
+          `[Dedup] Content signature matched ID ${candidateMatch.book_id} ("${candidateMatch.title}") but volume conflicts with incoming ("${preliminary.title}"). Bypassing signature match.`,
+        );
+      } else {
+        hashMatch = candidateMatch;
+        log(
+          `Duplicate detected via EPUB content signature: "${hashMatch.title}" (ID: ${hashMatch.book_id})`,
+        );
+      }
     }
+  }
+
+  // Final Volume Gate on any hash-based duplicate match
+  if (hashMatch && hashMatch.book_id) {
+    const volIncoming = extractVolumeNumber(preliminary.title);
+    const volMatch = extractVolumeNumber(hashMatch.title || "");
+    const seriesIncoming = extractSeries(preliminary.title, originalFileName);
+    const seriesMatch = extractSeries(hashMatch.title || "");
+
+    let hasVolumeConflict = false;
+    if (volIncoming !== null && volMatch !== null && volIncoming !== volMatch) {
+      hasVolumeConflict = true;
+    } else if (
+      seriesIncoming &&
+      seriesMatch &&
+      seriesIncoming.volume !== seriesMatch.volume
+    ) {
+      const normSI = normalizeTitleForDedup(seriesIncoming.series);
+      const normSM = normalizeTitleForDedup(seriesMatch.series);
+      if (normSI === normSM || normSI.startsWith(normSM) || normSM.startsWith(normSI)) {
+        hasVolumeConflict = true;
+      }
+    }
+
+    if (hasVolumeConflict) {
+      log(
+        `[Dedup] Hash match found ID ${hashMatch.book_id} ("${hashMatch.title}") but volume conflicts with incoming ("${preliminary.title}"). Bypassing hash match.`,
+      );
+      hashMatch = null;
+    }
+  }
+
+  if (hashMatch && hashMatch.book_id) {
+    log(
+      `Duplicate detected via hash/signature: "${hashMatch.title}" (ID: ${hashMatch.book_id})`,
+    );
+    return {
+      success: true,
+      duplicate: true,
+      bookId: hashMatch.book_id,
+      displayTitle: hashMatch.title || preliminary.title,
+      author: hashMatch.authors || preliminary.author,
+      format,
+      message: "Already in your library (identical content)",
+    };
   }
 
   // 2. Level 2: Semantic Title, Serialization & Format Deduplication
@@ -2359,21 +2614,27 @@ function ingestBookFile(
       if (Array.isArray(parsed)) books = parsed;
     }
 
-    const existingBook = books.find((b: any) =>
-      isSameBook(
-        {
-          title: b.title,
-          authors: b.authors,
-          series: b.series,
-          series_index: b.series_index,
-        },
-        {
-          title: preliminary.title,
-          author: preliminary.author,
-          series: incomingSeries,
-        },
-      ),
-    );
+    let existingBook: any = null;
+    for (const b of books) {
+      if (
+        await isSameBookAsync(
+          {
+            title: b.title,
+            authors: b.authors,
+            series: b.series,
+            series_index: b.series_index,
+          },
+          {
+            title: preliminary.title,
+            author: preliminary.author,
+            series: incomingSeries,
+          },
+        )
+      ) {
+        existingBook = b;
+        break;
+      }
+    }
 
     if (existingBook) {
       log(
@@ -2481,6 +2742,20 @@ function ingestBookFile(
             filePath,
             Date.now(),
             fileHash,
+            newId,
+            finalTitle,
+            finalAuthor,
+            0,
+          );
+        }
+
+        // Cache content signature for recompressed identical copies deduplication
+        if (contentSig && contentSig !== fileHash) {
+          cacheDb.run(
+            "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            `sig:${newId}`,
+            Date.now(),
+            contentSig,
             newId,
             finalTitle,
             finalAuthor,
@@ -2794,7 +3069,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
           }
         }
         for (const b of unp.books) {
-          const r = ingestBookFile(b.tempPath, b.originalName, chatId);
+          const r = await ingestBookFile(b.tempPath, b.originalName, chatId);
           results.push({
             name: b.originalName,
             title: r.displayTitle,
@@ -2810,7 +3085,7 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
         continue;
       }
 
-      const res = ingestBookFile(destPath, fileName, chatId);
+      const res = await ingestBookFile(destPath, fileName, chatId);
       try {
         fs.unlinkSync(destPath);
       } catch {}
