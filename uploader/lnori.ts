@@ -233,7 +233,7 @@ export function isVolumeAlreadyInCalibre(
       "--search",
       `series:"="${safeSeries}"" and series_index:=${assignedIndex}`,
       "--for-machine",
-    ]);
+    ], dependencies);
     if (listRes.status === 0 && listRes.stdout) {
       try {
         const parsed = JSON.parse(listRes.stdout);
@@ -253,7 +253,7 @@ export function isVolumeAlreadyInCalibre(
       "--search",
       `title:"="${safeTitle}""`,
       "--for-machine",
-    ]);
+    ], dependencies);
     if (titleRes.status === 0 && titleRes.stdout) {
       try {
         const parsed = JSON.parse(titleRes.stdout);
@@ -305,7 +305,10 @@ export function getSipsPath(): string {
   return "sips";
 }
 
-export function runCalibredb(args: string[]): { status: number | null; stdout: string; stderr: string } {
+export function runCalibredb(
+  args: string[],
+  dependencies?: LnoriDependencies,
+): { status: number | null; stdout: string; stderr: string } {
   const env: any = { ...process.env };
   delete env.HTTP_PROXY;
   delete env.http_proxy;
@@ -315,7 +318,8 @@ export function runCalibredb(args: string[]): { status: number | null; stdout: s
   delete env.all_proxy;
   env.PATH = `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${env.PATH || ""}`;
 
-  const res = spawnSync(getCalibredbPath(), args, {
+  const runSpawnSync = dependencies?.spawnSync ?? spawnSync;
+  const res = runSpawnSync(getCalibredbPath(), args, {
     encoding: "utf8",
     env,
     timeout: SUBPROCESS_TIMEOUT_MS,
@@ -976,7 +980,7 @@ export async function ingestLnoriSeries(
         "--with-library",
         SERVER_URL,
         tempEpubPath,
-      ]);
+      ], dependencies);
 
       let calibreId: number | null = null;
       if (addRes.status === 0 && addRes.stdout) {
@@ -1028,7 +1032,7 @@ export async function ingestLnoriSeries(
         console.warn(`[Lnori] Cover download failed for book ${volMeta.bookId}:`, covErr?.message || covErr);
       }
 
-      const setRes = runCalibredb(setArgs);
+      const setRes = runCalibredb(setArgs, dependencies);
       if (setRes.status !== 0) {
         console.warn(
           `[Lnori] Warning: set_metadata failed for Calibre #${calibreId}: ${setRes.stderr}`,

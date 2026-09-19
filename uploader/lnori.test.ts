@@ -837,7 +837,7 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
           },
           spawnSync: (_cmd: string, args: string[]) => {
             if (args[0] === "add") {
-              return { status: 0, stdout: "Added book ids: 42", stderr: "" };
+              return { status: 0, stdout: "Added book ids: 123", stderr: "" };
             }
             return { status: 0, stdout: "", stderr: "" };
           },
