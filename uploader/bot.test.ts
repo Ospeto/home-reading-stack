@@ -542,9 +542,11 @@ describe("Telegram Bot /help Command & KOReader Connection Guide", () => {
     expect(msg).toContain("moe");
     expect(msg).toContain("Automatically keep documents in sync");
     expect(msg).toContain("http://192.168.31.15:7200");
-    expect(msg).toContain("https://kosync.wavypremium.xyz");
+    expect(msg).toContain("http://kosync-sg.wavypremium.xyz");
+    expect(msg).toContain("https://kosync-sg.wavypremium.xyz:8443");
     expect(msg).toContain("https://kosync-198-46-146-17.sslip.io");
-    expect(msg).toContain("WAN (Production): `https://kosync.wavypremium.xyz`");
+    expect(msg).toContain("Singapore WAN (HTTP): `http://kosync-sg.wavypremium.xyz`");
+    expect(msg).toContain("Singapore WAN (HTTPS): `https://kosync-sg.wavypremium.xyz:8443`");
 
     // KOReader Connection Guide: OPDS
     expect(msg).toContain("OPDS Book Catalog");
@@ -552,7 +554,8 @@ describe("Telegram Bot /help Command & KOReader Connection Guide", () => {
     expect(msg).toContain("OPDS catalog");
     expect(msg).toContain("Add new catalog");
     expect(msg).toContain("Mac Mini Library");
-    expect(msg).toContain("https://reading.wavypremium.xyz/opds");
+    expect(msg).toContain("http://opds.wavypremium.xyz/opds");
+    expect(msg).toContain("https://opds.wavypremium.xyz:8443/opds");
     expect(msg).toContain("http://192.168.31.15:8088/opds");
     expect(msg).toContain("http://192.168.31.15:8086/opds");
     expect(msg).toContain("https://calibre-198-46-146-17.sslip.io/opds");
@@ -643,16 +646,20 @@ describe("Webpage Manual & KOReader Connection Section (index.html)", () => {
     expect(html).toContain('<symbol id="icon-server"');
 
     // All Stack Endpoints with one-click copy buttons
-    // 1. KOSync (Local, Canonical Production WAN, and Standby VPS)
+    // 1. KOSync (Local, Singapore WAN HTTP/HTTPS, and Standby VPS)
     expect(html).toContain("copyToClipboard('http://192.168.31.15:7200')");
     expect(html).toContain(
-      "copyToClipboard('https://kosync.wavypremium.xyz')",
+      "copyToClipboard('http://kosync-sg.wavypremium.xyz')",
+    );
+    expect(html).toContain(
+      "copyToClipboard('https://kosync-sg.wavypremium.xyz:8443')",
     );
     expect(html).toContain(
       "copyToClipboard('https://kosync-198-46-146-17.sslip.io')",
     );
-    // 2. Calibre OPDS (Local & Standby VPS)
-    expect(html).toContain("copyToClipboard('https://reading.wavypremium.xyz/opds')");
+    // 2. Calibre OPDS (Singapore WAN HTTP/HTTPS, Local & Standby VPS)
+    expect(html).toContain("copyToClipboard('http://opds.wavypremium.xyz/opds')");
+    expect(html).toContain("copyToClipboard('https://opds.wavypremium.xyz:8443/opds')");
     expect(html).toContain("copyToClipboard('http://192.168.31.15:8088/opds')");
     expect(html).toContain(
       "copyToClipboard('https://calibre-198-46-146-17.sslip.io/opds')",
