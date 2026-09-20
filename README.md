@@ -48,16 +48,18 @@ A self-hosted, private reading infrastructure designed for jailbroken and standa
 | **Reading HQ Dashboard** | `http://192.168.31.15:8086` | Web SPA | Modern Flash UI library manager, live KOSync telemetry (real titles), Series/Author facets, multi-source scraper, Obsidian export |
 | **WAN Mini App / Dashboard** | `https://reading.wavypremium.xyz` | HTTPS | Global secure access to Reading HQ via VLESS SSH reverse tunnel + Caddy TLS |
 | **Telegram Ingest Bot** | `@saroat_ospeto_bot` | Telegram API | Send/forward `.epub`, `.pdf`, `/find` search, `/backup`, and integrated Telegram Mini App button |
-| **WAN OPDS Feed** | `https://reading.wavypremium.xyz/opds` | HTTPS / Atom | Global wireless OPDS catalog for KOReader & mobile readers |
+| **Singapore WAN KOSync (Default)** | `http://kosync-sg.wavypremium.xyz` | HTTP (Port 80) | High-speed Singapore WAN KOSync progress sync (Recommended for KOReader/Kindle) |
+| **Singapore WAN KOSync (TLS)** | `https://kosync-sg.wavypremium.xyz:8443` | HTTPS (8443) | Encrypted Singapore WAN KOSync progress sync on alternate port 8443 |
+| **Singapore WAN OPDS Feed (Default)** | `http://opds.wavypremium.xyz/opds` | HTTP / Atom | High-speed Singapore wireless OPDS catalog for KOReader & mobile readers |
+| **Singapore WAN OPDS Feed (TLS)** | `https://opds.wavypremium.xyz:8443/opds` | HTTPS (8443) | Encrypted Singapore wireless OPDS catalog on alternate port 8443 |
 | **Local KOSync** | `http://192.168.31.15:7200` | HTTP / JSON | High-performance Bun/SQLite progress sync |
 | **Local OPDS Feed** | `http://192.168.31.15:8088/opds` | Atom / XML | Direct book catalog for KOReader search & downloads |
 | **Local Calibre Reader** | `http://192.168.31.15:8088` | Web UI | In-browser reading & library management |
 | **Manga Auto-Packer** | `/Volumes/Ospeto_SSD/Manga` | Background Daemon | Auto-packs image folders into uncompressed `.cbz` with ComicInfo right-to-left metadata |
 | **Daily Snapshot Backup** | `/Users/ospeto/.backups/reading-stack` | 04:00 AM LaunchAgent | Online SQLite snapshots of KOSync, Calibre, Uploader, and Manga DBs with 7-day retention + Telegram delivery |
 | **Local Proxy Gateway** | `http://192.168.31.15:7890` | HTTP / SOCKS5 | sing-box background tunnel via Remnawave VLESS |
+| **Singapore Reverse Tunnel** | `com.ospeto.reading-sg-tunnel` | SSH | Persistent LaunchAgent reverse tunnel binding Mac Mini `:8086` and `:7200` to `sg-vps` |
 | **VLESS SSH Reverse Tunnel** | `com.ospeto.reading-vless-tunnel` | SSH / SOCKS5 | Persistent LaunchAgent reverse tunnel binding Mac Mini `:8086` to VPS `:8086` |
-| **Standby VPS KOSync** | `https://kosync-198-46-146-17.sslip.io` | HTTPS | Remote sync server (requires VPN / Proxy) |
-| **Standby VPS OPDS** | `https://calibre-198-46-146-17.sslip.io` | HTTPS | Remote Calibre-Web (requires VPN / Proxy) |
 
 ---
 
@@ -78,8 +80,10 @@ A self-hosted, private reading infrastructure designed for jailbroken and standa
 2. Tap **Custom sync server** → enter:
 
    ```text
-   http://192.168.31.15:7200
+   http://kosync-sg.wavypremium.xyz
    ```
+
+   *(Or TLS: `https://kosync-sg.wavypremium.xyz:8443` | Local LAN: `http://192.168.31.15:7200`)*
 
 3. Tap **Login** → enter Username (`moe`) and Password.
 4. Check **"Automatically keep documents in sync"**.
@@ -92,10 +96,10 @@ A self-hosted, private reading infrastructure designed for jailbroken and standa
 3. **Catalog URL:**
 
    ```text
-   https://reading.wavypremium.xyz/opds
+   http://opds.wavypremium.xyz/opds
    ```
 
-   *(Or local LAN: `http://192.168.31.15:8088/opds` or `http://192.168.31.15:8086/opds`)*
+   *(Or TLS: `https://opds.wavypremium.xyz:8443/opds` | Local LAN: `http://192.168.31.15:8088/opds` or `http://192.168.31.15:8086/opds`)*
 
 4. Tap **Connect** (no credentials required on local LAN or WAN).
 
@@ -246,7 +250,7 @@ The public WAN edge (`https://reading.wavypremium.xyz`) is hardened against unau
    - **Credential transport:** API keys and TMA/session credentials are accepted only in their header or cookie channels. Query-string `token`/`auth` values are rejected because URLs leak through history, logs, Referer headers, and analytics.
 
 2. **CORS & CSRF Origin Protection:**
-   - CORS is locked down from wildcard `*` to permitted origins: `https://reading.wavypremium.xyz`, `https://kosync.wavypremium.xyz`, local LAN origins, and custom entries in `ALLOWED_ORIGINS`.
+   - CORS is locked down from wildcard `*` to permitted origins: `https://reading.wavypremium.xyz`, `https://kosync.wavypremium.xyz`, `http://kosync-sg.wavypremium.xyz`, `https://kosync-sg.wavypremium.xyz:8443`, `http://opds.wavypremium.xyz`, `https://opds.wavypremium.xyz:8443`, local LAN origins, and custom entries in `ALLOWED_ORIGINS`.
    - Mutating routes validate `Origin`, `Referer`, and `Sec-Fetch-Site` to prevent cross-site request forgery attacks.
 
 3. **SSRF (Server-Side Request Forgery) Protection:**

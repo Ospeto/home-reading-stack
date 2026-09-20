@@ -812,7 +812,11 @@ export function isAllowedOrigin(
   // Allow standard production WAN domains
   if (
     lower === "https://reading.wavypremium.xyz" ||
-    lower === "https://kosync.wavypremium.xyz"
+    lower === "https://kosync.wavypremium.xyz" ||
+    lower === "http://kosync-sg.wavypremium.xyz" ||
+    lower === "https://kosync-sg.wavypremium.xyz:8443" ||
+    lower === "http://opds.wavypremium.xyz" ||
+    lower === "https://opds.wavypremium.xyz:8443"
   ) {
     return true;
   }

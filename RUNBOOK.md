@@ -553,8 +553,8 @@ ssh sg-vps "systemctl reload caddy || docker exec caddy caddy reload --config /e
 3. Tap **Custom sync server**.
 4. Check **Use custom sync server**.
 5. Set **Server URL**:
-   - **High-Speed Singapore WAN (Recommended):** `http://kosync-sg.wavypremium.xyz` (or `https://kosync-sg.wavypremium.xyz:8443`)
-   - **Main US WAN:** `https://kosync.wavypremium.xyz`
+   - **High-Speed Singapore WAN (Default & Recommended):** `http://kosync-sg.wavypremium.xyz` (Plain HTTP Port 80, no port required)
+   - **Encrypted Singapore WAN:** `https://kosync-sg.wavypremium.xyz:8443` (Alternate TLS Port 8443)
    - **Local LAN (Home Wi-Fi):** `http://192.168.31.15:7200`
 6. Tap **Register / Login**:
    - ⚠️ **CRITICAL LOGIN STEP**: Existing users must tap **"Login"** (NOT "Register").
@@ -575,7 +575,7 @@ The Readest mobile eReader supports native KOSync progress synchronization:
 1. Open **Readest** on your mobile device.
 2. Open **Settings** -> **Sync** -> **KOSync / KOReader Progress Sync**.
 3. Configure connection parameters:
-   - **Server URL**: `http://kosync-sg.wavypremium.xyz` (or `https://kosync-sg.wavypremium.xyz:8443`, or LAN `http://192.168.31.15:7200`)
+   - **Server URL**: `http://kosync-sg.wavypremium.xyz` (Plain HTTP Port 80, recommended) or `https://kosync-sg.wavypremium.xyz:8443` (TLS), or LAN `http://192.168.31.15:7200`
    - **Username**: `moe`
    - **Password**: your account password
 4. Tap **Connect / Test Sync**.
@@ -588,12 +588,14 @@ Both KOReader and Readest use client-side MD5 password hashing:
 1. **Client Hash**: The client hashes the plain-text password locally:
    $$\text{userkey} = \text{md5}(\text{password})$$
 2. **Network Transmission**: The client sends `userkey` in the `X-Auth-Key` HTTP header alongside `X-Auth-User: <username>`:
+
    ```http
    GET /users/auth HTTP/1.1
    Host: kosync-sg.wavypremium.xyz
    X-Auth-User: moe
    X-Auth-Key: 8b03a82761fae0ee6cd5a23700361e74
    ```
+
 3. **Server Verification**:
    - The Bun server retrieves `PASSWORD_SALT` from the environment.
    - It concatenates `userkey + salt` and checks against the stored bcrypt hash using `await Bun.password.verify(userkey + salt, user.password)`.
@@ -634,10 +636,9 @@ To securely expose Calibre OPDS catalogs and EPUB downloads over the WAN without
 
 | Scope | Method | Endpoint URL | Target Service |
 | --- | --- | --- | --- |
-| **High-Speed Singapore WAN** | HTTP (Port 80) | `http://opds.wavypremium.xyz/opds` | Web Uploader `:8086` -> Calibre `:8088` |
-| **High-Speed Singapore WAN** | HTTPS (Port 8443) | `https://opds.wavypremium.xyz:8443/opds` | Web Uploader `:8086` -> Calibre `:8088` |
-| **Main US WAN** | HTTPS | `https://reading.wavypremium.xyz/opds` | Web Uploader `:8086` -> Calibre `:8088` |
-| **Home LAN** | HTTP | `http://192.168.31.15:8086/opds` | Web Uploader `:8086` -> Calibre `:8088` |
+| **High-Speed Singapore WAN (Default)** | HTTP (Port 80) | `http://opds.wavypremium.xyz/opds` | Web Uploader `:8086` -> Calibre `:8088` (Recommended for KOReader/Kindle) |
+| **High-Speed Singapore WAN (TLS)** | HTTPS (Port 8443) | `https://opds.wavypremium.xyz:8443/opds` | Web Uploader `:8086` -> Calibre `:8088` |
+| **Home LAN** | HTTP | `http://192.168.31.15:8088/opds` or `http://192.168.31.15:8086/opds` | Calibre `:8088` / Web Uploader `:8086` |
 | **Local Machine** | HTTP | `http://127.0.0.1:8086/opds` | Calibre `:8088` |
 
 #### 2. Architecture & Security Hardening
@@ -700,6 +701,7 @@ To keep the Calibre library clean and prevent duplicate book imports, the stack 
 #### 1. Telegram Bot Deduplication Commands
 
 In `@saroat_ospeto_bot`, use any of the following command aliases:
+
 - `/dedup`
 - `/dedupe`
 - `/clean`
@@ -936,7 +938,7 @@ Verify each reading stack integration point after import:
    - Send `/find <title>` to verify instant search.
    - Tap `[Send File]` on a migrated book to verify metadata-derived delivery.
 4. **KOReader Device Sync:**
-   - Trigger sync from device or check `https://kosync.wavypremium.xyz`.
+   - Trigger sync from device or check `http://kosync-sg.wavypremium.xyz/health`.
 
 ---
 

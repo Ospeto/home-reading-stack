@@ -528,6 +528,10 @@ describe("Public WAN & API Surface Hardening — CORS & CSRF Guards", () => {
   it("allows configured production WAN and local LAN origins", () => {
     expect(isAllowedOrigin("https://reading.wavypremium.xyz")).toBe(true);
     expect(isAllowedOrigin("https://kosync.wavypremium.xyz")).toBe(true);
+    expect(isAllowedOrigin("http://kosync-sg.wavypremium.xyz")).toBe(true);
+    expect(isAllowedOrigin("https://kosync-sg.wavypremium.xyz:8443")).toBe(true);
+    expect(isAllowedOrigin("http://opds.wavypremium.xyz")).toBe(true);
+    expect(isAllowedOrigin("https://opds.wavypremium.xyz:8443")).toBe(true);
     expect(isAllowedOrigin("http://localhost:8086")).toBe(true);
     expect(isAllowedOrigin("http://127.0.0.1:8086")).toBe(true);
     expect(isAllowedOrigin("http://192.168.31.15:8086")).toBe(true);
@@ -742,10 +746,10 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
       const resFallback = validateEpubContent(testEpub);
       expect(resFallback.valid).toBe(true);
     } finally {
-      if (origBsdtar !== undefined) {
-        process.env.BSDTAR_PATH = origBsdtar;
-      } else {
+      if (origBsdtar === undefined) {
         delete process.env.BSDTAR_PATH;
+      } else {
+        process.env.BSDTAR_PATH = origBsdtar;
       }
       if (fs.existsSync(mockBsdtarScript)) {
         fs.unlinkSync(mockBsdtarScript);
