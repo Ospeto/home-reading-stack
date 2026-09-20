@@ -451,29 +451,44 @@ Manage and verify the tunnel auto-healing watchdog and in-chat diagnostics:
 The auto-healing watchdog (`scripts/tunnel-watchdog.sh`) runs via LaunchAgent `com.ospeto.reading-tunnel-watchdog` every 120 seconds:
 
 1. **Local Health Checks**: Verifies `nc -z 127.0.0.1 7890` (Sing-box proxy), `127.0.0.1:8086` (Reading HQ), and `127.0.0.1:7200` (KOSync).
-2. **WAN Probe**: Checks `https://reading.wavypremium.xyz` through the local VLESS proxy.
+2. **Dual Remote WAN Probes**:
+   - **US VLESS Tunnel (`panel`)**: Probes `https://reading.wavypremium.xyz` via local Sing-box proxy (`127.0.0.1:7890`). Also inspects recent daemon logs (`reading-vless-tunnel.log`) for remote port forwarding collision markers (`remote port forwarding failed for listen port`).
+   - **Singapore Tunnel (`sg-vps`)**: Probes `http://opds.wavypremium.xyz/opds`, `https://opds.wavypremium.xyz:8443/opds`, and `http://kosync-sg.wavypremium.xyz/health`. Also inspects recent daemon logs (`reading-sg-tunnel.log`) for remote port forwarding collision markers.
 3. **Auto-Healing**:
-   - If unreachable or returning HTTP 502/000:
-     - Kills hanging local SSH forward processes (`pkill -f "ssh.*0.0.0.0:8086"`).
-     - Clears orphaned remote listeners holding ports 8086/7200 on VPS `panel` via `ssh panel "fuser -k 8086/tcp 7200/tcp"`.
-     - Kickstarts `gui/$(id -u)/com.ospeto.reading-vless-tunnel`.
+   - **US Tunnel Auto-Healing**:
+     - Kills hanging local SSH forward processes (`pkill -f "ssh.*8086.*panel" || true`).
+     - Clears orphaned remote listeners holding ports 8086/7200 on VPS `panel` via `ssh -o ProxyCommand="nc -X 5 -x 127.0.0.1:7890 %h %p" panel "fuser -k 8086/tcp 7200/tcp || true"`.
+     - Kickstarts `com.ospeto.reading-vless-tunnel` via `launchctl kickstart -k gui/$(id -u)/com.ospeto.reading-vless-tunnel`.
      - Re-probes after a 4-second delay.
+   - **Singapore Tunnel Auto-Healing**:
+     - Kills hanging local SSH forward processes (`pkill -f "ssh.*8086.*sg-vps" || true`).
+     - Clears orphaned remote listeners holding ports 8086/7200 on `sg-vps` via `ssh -o BatchMode=yes -o ConnectTimeout=5 sg-vps "fuser -k 8086/tcp 7200/tcp || true"`.
+     - Kickstarts `com.ospeto.reading-sg-tunnel` via `launchctl kickstart -k gui/$(id -u)/com.ospeto.reading-sg-tunnel`.
+     - Re-probes all Singapore endpoints after a 4-second delay.
 4. **Telegram Escalation**:
-   - Maintains failure count in `/tmp/reading-tunnel-failures`.
-   - If consecutive failures reach 3, dispatches an alert card to the captain via `TELEGRAM_BACKUP_CHAT_ID`.
-   - Automatically resets counter to 0 on any healthy probe.
+   - Maintains failure counts in `/tmp/reading-tunnel-failures-us` and `/tmp/reading-tunnel-failures-sg`.
+   - If consecutive failures on either tunnel reach 3, dispatches an alert card to the captain via `TELEGRAM_BACKUP_CHAT_ID`.
+   - Automatically resets counters to 0 on healthy probes.
 
-#### Manual Watchdog Operations
+#### Manual Watchdog Operations & Collision Recovery
 
 ```bash
-# 1. Trigger manual watchdog run
+# 1. Trigger manual watchdog run (checks & heals both US and Singapore tunnels)
 /Users/ospeto/uploader/scripts/tunnel-watchdog.sh
 
 # 2. Inspect watchdog logs
 tail -f ~/Library/Logs/reading-tunnel-watchdog.log
 
-# 3. Check LaunchAgent status
-launchctl list | grep com.ospeto.reading-tunnel-watchdog
+# 3. Check LaunchAgent status for both tunnels and watchdog
+launchctl list | grep -E "com.ospeto.reading-(vless|sg|tunnel-watchdog)"
+
+# 4. Immediate manual auto-clear and recovery for Singapore tunnel port collision:
+ssh -o BatchMode=yes -o ConnectTimeout=5 sg-vps "fuser -k 8086/tcp 7200/tcp || true"
+launchctl kickstart -k gui/$(id -u)/com.ospeto.reading-sg-tunnel
+
+# 5. Immediate manual auto-clear and recovery for US VLESS tunnel:
+ssh -o ProxyCommand="nc -X 5 -x 127.0.0.1:7890 %h %p" panel "fuser -k 8086/tcp 7200/tcp || true"
+launchctl kickstart -k gui/$(id -u)/com.ospeto.reading-vless-tunnel
 ```
 
 #### In-Chat Health Dashboard (`/status` and `/health`)
