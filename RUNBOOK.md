@@ -19,7 +19,8 @@ All services on the Mac mini run as native macOS LaunchAgents under `/Users/ospe
 | `com.ospeto.reading-stack-backup` | `~/Library/LaunchAgents/com.ospeto.reading-stack-backup.plist` | — | `/Users/ospeto/kosync-server` |
 | `com.ospeto.kosync-watchdog` | `~/Library/LaunchAgents/com.ospeto.kosync-watchdog.plist` | — | `/Users/ospeto/kosync-server` |
 | `com.ospeto.singbox-proxy` | `~/Library/LaunchAgents/com.ospeto.singbox-proxy.plist` | `7890` | `/Users/ospeto/.config/sing-box` |
-| `com.ospeto.reading-vless-tunnel` | `~/Library/LaunchAgents/com.ospeto.reading-vless-tunnel.plist` | `8086, 7200 (remote)` | `/Users/ospeto` |
+| `com.ospeto.reading-vless-tunnel` | `~/Library/LaunchAgents/com.ospeto.reading-vless-tunnel.plist` | `8086, 7200 (remote panel)` | `/Users/ospeto` |
+| `com.ospeto.reading-sg-tunnel` | `~/Library/LaunchAgents/com.ospeto.reading-sg-tunnel.plist` | `8086, 7200 (remote sg-vps)` | `/Users/ospeto` |
 | `com.ospeto.reading-tunnel-watchdog` | `~/Library/LaunchAgents/com.ospeto.reading-tunnel-watchdog.plist` | — | `/Users/ospeto/uploader` |
 
 ---
@@ -44,8 +45,16 @@ curl -s --proxy http://192.168.31.15:7890 https://ipinfo.io/json
 # 5. Check WAN Reading HQ Public Endpoint & TLS
 curl -s -I https://reading.wavypremium.xyz
 
-# 6. Check Persistent Reverse Tunnel LaunchAgent Status
-launchctl list | grep com.ospeto.reading-vless-tunnel
+# 6. Check High-Speed Singapore WAN OPDS Feed & Endpoints
+curl -s -I http://opds.wavypremium.xyz/opds
+curl -s -I -k https://opds.wavypremium.xyz:8443/opds
+
+# 7. Check High-Speed Singapore WAN KOSync Health
+curl -i http://kosync-sg.wavypremium.xyz/health
+curl -i -k https://kosync-sg.wavypremium.xyz:8443/health
+
+# 8. Check Persistent Reverse Tunnel LaunchAgent Status (Main & Singapore)
+launchctl list | grep -E "com.ospeto.reading-(vless|sg)-tunnel"
 ```
 
 ---
@@ -73,6 +82,9 @@ ssh mac-mini "
 
   launchctl unload ~/Library/LaunchAgents/com.ospeto.reading-vless-tunnel.plist 2>/dev/null || true
   launchctl load -w ~/Library/LaunchAgents/com.ospeto.reading-vless-tunnel.plist
+
+  launchctl unload ~/Library/LaunchAgents/com.ospeto.reading-sg-tunnel.plist 2>/dev/null || true
+  launchctl load -w ~/Library/LaunchAgents/com.ospeto.reading-sg-tunnel.plist
 "
 ```
 
@@ -91,8 +103,11 @@ ssh mac-mini "tail -f ~/Library/Logs/uploader.log ~/Library/Logs/uploader-error.
 # Sing-box Proxy logs
 ssh mac-mini "tail -f ~/Library/Logs/sing-box/stderr.log"
 
-# VLESS SSH Reverse Tunnel logs
+# VLESS SSH Reverse Tunnel logs (Main US panel)
 ssh mac-mini "tail -f ~/Library/Logs/reading-vless-tunnel.log"
+
+# Singapore SSH Reverse Tunnel logs (Low-latency sg-vps)
+ssh mac-mini "tail -f ~/Library/Logs/reading-sg-tunnel.log"
 ```
 
 ---
@@ -112,6 +127,65 @@ ssh mac-mini "tail -f ~/Library/Logs/reading-vless-tunnel.log"
   print('Syncs:', con.execute('SELECT document, percentage, device FROM progress;').fetchall())
   \""
   ```
+
+#### KOSync Client Authentication Protocol
+
+KOSync client authentication in KOReader and Readest adheres to the following specification:
+
+1. **Client-Side Hashing (`md5`)**:
+   - The user inputs their plain-text password into KOReader or Readest.
+   - The client never transmits the raw password over the network. Instead, it computes an MD5 digest:
+     $$\text{userkey} = \text{md5}(\text{password})$$
+   - The client sends this 32-character lowercase hex string as `password` (on registration/login) or in the `X-Auth-Key` HTTP header (on synced reads/updates) alongside `X-Auth-User: <username>`.
+
+2. **Server-Side Salted Hash (`Bun.password.hash`)**:
+   - The KOSync server (running Bun) retrieves `PASSWORD_SALT` from the environment (defaulting to the configured secret salt).
+   - The server concatenates the client userkey and salt:
+     $$\text{saltedPassword} = \text{userkey} + \text{PASSWORD\_SALT}$$
+   - The server stores and verifies this using Bun's native bcrypt implementation (`await Bun.password.hash(saltedPassword)` and `await Bun.password.verify(saltedPassword, user.password)`).
+
+3. **Important Client Behavior (Login vs Register)**:
+   - When configuring KOReader or Readest for an existing account, **always tap "Login"** (NOT "Register").
+   - Tapping "Register" sends a user creation request to `/users/create`, which fails with HTTP 409 `"Username already exists"`.
+
+#### Emergency Password Recovery & Reset Runbook
+
+If a user forgets their password or cannot log in, reset the password directly in SQLite using Bun:
+
+```bash
+# 1. Reset user password in SQLite directly on Mac mini
+ssh mac-mini "bun -e '
+  import { Database } from \"bun:sqlite\";
+  import crypto from \"node:crypto\";
+
+  const dbPath = \"/Users/ospeto/kosync-server/data/koreader-sync.db\";
+  const salt = process.env.PASSWORD_SALT || \"747aa604e460376f174d9e73240f9d768b06b02dfa63a0b4\";
+  const username = \"moe\";
+  const newPlainPassword = \"YOUR_NEW_PASSWORD_HERE\";
+
+  // Step A: Calculate client-side MD5 userkey
+  const clientUserKey = crypto.createHash(\"md5\").update(newPlainPassword).digest(\"hex\");
+
+  // Step B: Calculate server-side salted bcrypt hash
+  const hashedPassword = await Bun.password.hash(clientUserKey + salt);
+
+  // Step C: Update database record
+  const db = new Database(dbPath);
+  const res = db.prepare(\"UPDATE users SET password = ? WHERE username = ?\").run(hashedPassword, username);
+  console.log(\"Reset password for\", username, \"- affected rows:\", res.changes);
+'"
+
+# 2. Verify authentication using curl
+ssh mac-mini "bun -e '
+  import crypto from \"node:crypto\";
+  const pass = \"YOUR_NEW_PASSWORD_HERE\";
+  const userkey = crypto.createHash(\"md5\").update(pass).digest(\"hex\");
+  const res = await fetch(\"http://127.0.0.1:7200/users/auth\", {
+    headers: { \"x-auth-user\": \"moe\", \"x-auth-key\": userkey }
+  });
+  console.log(\"Auth check status:\", res.status, await res.json());
+'"
+```
 
 ### 2. Calibre Library Database
 
@@ -273,35 +347,89 @@ bun -e '
 
 ---
 
-### 8. WAN Reverse Tunnel & Telegram Mini App Operations
+### 8. WAN Reverse Tunnels & Public Edge Operations
 
-Manage and verify the persistent reverse tunnel and Telegram Mini App integration:
+The reading stack employs a dual-tunnel reverse proxy architecture to provide global resilience, Telegram Mini App integration, and ultra-low-latency synchronization across regions.
 
-#### Tunnel Lifecycle on Mac Mini
+#### 1. Dual Reverse Tunnel Topology
+
+| Tunnel LaunchAgent | Remote Endpoint | Target Host | Forwarded Ports | Primary Role |
+| --- | --- | --- | --- | --- |
+| `com.ospeto.reading-vless-tunnel` | `panel` (US VPS) | `198.46.146.17` | `8086, 7200` | Reading HQ Telegram Mini App & US/Global Fallback |
+| `com.ospeto.reading-sg-tunnel` | `sg-vps` (Singapore VPS) | `sg-vps` | `8086, 7200` | High-speed, low-latency regional OPDS downloads & KOSync |
+
+#### 2. High-Speed Singapore WAN Endpoints
+
+The Singapore edge VPS (`sg-vps`) provides high-throughput, low-latency connectivity for Southeast Asian and Pacific clients:
+
+- **OPDS Catalog & Book Downloads**:
+  - Plain HTTP (Standard Port 80): `http://opds.wavypremium.xyz/opds`
+  - Encrypted TLS (Alternate Port 8443): `https://opds.wavypremium.xyz:8443/opds`
+- **KOSync Real-Time Reading Progress Sync**:
+  - Plain HTTP (Standard Port 80): `http://kosync-sg.wavypremium.xyz`
+  - Encrypted TLS (Alternate Port 8443): `https://kosync-sg.wavypremium.xyz:8443`
+
+##### Port Allocation Rationale (Ports 80 & 8443 vs 443)
+
+- Port `443` on `sg-vps` is exclusively bound to the **Remnawave Xray** VPN and proxy infrastructure.
+- To prevent port collisions and guarantee zero disruption to Remnawave Xray, reading stack services route through:
+  1. **Port 80 (Plain HTTP)**: Ideal for eReaders (Kindle, Kobo, Boox) and KOReader because it requires no port specification in client URLs and avoids TLS handshake overhead on low-power e-ink hardware.
+  2. **Port 8443 (HTTPS/TLS)**: Provides full TLS encryption for mobile or WAN clients that require secure transit without conflicting with port 443.
+
+##### VPS SSH Server Configuration (`sg-vps`)
+
+To prevent orphaned reverse port forwarding locks when the Mac Mini reconnects or reloads the tunnel daemon, the SSH server on `sg-vps` is configured with keepalives and stream unlinking:
+
+```sshconfig
+# /etc/ssh/sshd_config.d/reading-tunnel.conf on sg-vps
+ClientAliveInterval 15
+ClientAliveCountMax 3
+StreamLocalBindUnlink yes
+GatewayPorts yes
+```
+
+- **`ClientAliveInterval 15`**: Probes client connectivity every 15 seconds. If the Mac Mini drops offline unexpectedly (e.g. Wi-Fi blip or sleep), the VPS kernel reaps the dead session within 45 seconds.
+- **`StreamLocalBindUnlink yes`**: Automatically unlinks and recycles any lingering Unix domain sockets or forwarded TCP port bindings when a new SSH connection requests the same port. This completely prevents `Error: remote port forwarding failed for listen port 8086/7200` errors.
+
+#### 3. Tunnel Lifecycle Management on Mac Mini
 
 ```bash
-# Check LaunchAgent job status
-launchctl list | grep com.ospeto.reading-vless-tunnel
+# Check status of both reverse tunnels
+launchctl list | grep -E "com.ospeto.reading-(vless|sg)-tunnel"
 
-# View tunnel output logs
+# View tunnel logs
 tail -n 50 ~/Library/Logs/reading-vless-tunnel.log
+tail -n 50 ~/Library/Logs/reading-sg-tunnel.log
 
-# Manually reload the LaunchAgent
+# Reload US VLESS tunnel LaunchAgent
 launchctl unload ~/Library/LaunchAgents/com.ospeto.reading-vless-tunnel.plist
 launchctl load -w ~/Library/LaunchAgents/com.ospeto.reading-vless-tunnel.plist
+
+# Reload Singapore tunnel LaunchAgent
+launchctl unload ~/Library/LaunchAgents/com.ospeto.reading-sg-tunnel.plist
+launchctl load -w ~/Library/LaunchAgents/com.ospeto.reading-sg-tunnel.plist
 ```
 
-#### Test WAN Endpoint & Edge Proxy
+#### 4. Test WAN Endpoints & Edge Proxies
 
 ```bash
-# Check public HTTPS response from WAN
+# Check US WAN Reading HQ endpoint
 curl -s -I https://reading.wavypremium.xyz
 
-# Check reverse proxy routing on VPS (panel)
+# Check Singapore WAN OPDS endpoints (Port 80 & Port 8443)
+curl -s -I http://opds.wavypremium.xyz/opds
+curl -s -I -k https://opds.wavypremium.xyz:8443/opds
+
+# Check Singapore WAN KOSync health endpoints
+curl -i http://kosync-sg.wavypremium.xyz/health
+curl -i -k https://kosync-sg.wavypremium.xyz:8443/health
+
+# Verify reverse proxy routing on VPS hosts directly
 ssh panel "curl -s -I http://172.18.0.1:8086"
+ssh sg-vps "curl -s -I http://127.0.0.1:8086"
 ```
 
-#### Test Telegram Mini App Menu Button Registration
+#### 5. Test Telegram Mini App Menu Button Registration
 
 ```bash
 bun -e '
@@ -361,13 +489,15 @@ Send `/status` or `/health` to the Telegram bot to inspect:
 
 ---
 
-### 10. KOSync WAN Setup & KOReader Client Configuration
+### 10. KOSync WAN Setup, KOReader & Readest Client Configuration, and Auth Protocol
 
-To access KOSync over the WAN (cellular / remote WiFi) without VPN:
+To synchronize reading progress across devices over the WAN (cellular / remote Wi-Fi) or local LAN:
 
-#### 1. VPS Caddy Configuration (`panel`)
+#### 1. VPS Edge Caddy Configuration
 
-Add the following site block to `/etc/caddy/Caddyfile` on VPS `panel` (or inside the Caddy container):
+##### Main US VPS (`panel`)
+
+Add the following site block to `/etc/caddy/Caddyfile` on VPS `panel`:
 
 ```caddy
 https://kosync.wavypremium.xyz {
@@ -375,10 +505,30 @@ https://kosync.wavypremium.xyz {
 }
 ```
 
-Reload Caddy:
+Reload Caddy on `panel`:
 
 ```bash
 ssh panel "systemctl reload caddy || docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
+```
+
+##### Low-Latency Singapore VPS (`sg-vps`)
+
+Add the following site blocks to Caddy on `sg-vps` (using Ports 80 and 8443 to preserve Port 443 for Remnawave Xray):
+
+```caddy
+http://kosync-sg.wavypremium.xyz {
+    reverse_proxy * http://127.0.0.1:7200
+}
+
+https://kosync-sg.wavypremium.xyz:8443 {
+    reverse_proxy * http://127.0.0.1:7200
+}
+```
+
+Reload Caddy on `sg-vps`:
+
+```bash
+ssh sg-vps "systemctl reload caddy || docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
 ```
 
 #### 2. KOReader Client Setup (Kindle / Android / Kobo)
@@ -388,21 +538,242 @@ ssh panel "systemctl reload caddy || docker exec caddy caddy reload --config /et
 3. Tap **Custom sync server**.
 4. Check **Use custom sync server**.
 5. Set **Server URL**:
-   - **WAN (Everywhere):** `https://kosync.wavypremium.xyz`
-   - **LAN (Home WiFi):** `http://192.168.31.15:7200`
+   - **High-Speed Singapore WAN (Recommended):** `http://kosync-sg.wavypremium.xyz` (or `https://kosync-sg.wavypremium.xyz:8443`)
+   - **Main US WAN:** `https://kosync.wavypremium.xyz`
+   - **Local LAN (Home Wi-Fi):** `http://192.168.31.15:7200`
 6. Tap **Register / Login**:
-   - Username: your KOSync username (e.g. `moe`)
-   - Password: your user password
+   - ⚠️ **CRITICAL LOGIN STEP**: Existing users must tap **"Login"** (NOT "Register").
+   - Tapping "Register" attempts to register a new account and is rejected by the server with HTTP 409 `"Username already exists"`.
+   - **Username**: your KOSync username (e.g. `moe`)
+   - **Password**: your account password
 7. Enable **Auto sync**:
    - Check **Auto sync reading progress when opening and closing books**.
 8. Verify sync:
-   - Read a page on your Kindle/eReader.
-   - Send `/status` to the Telegram bot or check `/Users/ospeto/kosync-server/data/koreader-sync.db`.
+   - Read a page on your Kindle/eReader and close the book.
+   - Send `/reading` or `/status` to the Telegram bot or check `/Users/ospeto/kosync-server/data/koreader-sync.db`.
    - The updated progress record and timestamp appear immediately.
+
+#### 3. Readest App Setup (iOS / iPadOS / Android)
+
+The Readest mobile eReader supports native KOSync progress synchronization:
+
+1. Open **Readest** on your mobile device.
+2. Open **Settings** -> **Sync** -> **KOSync / KOReader Progress Sync**.
+3. Configure connection parameters:
+   - **Server URL**: `http://kosync-sg.wavypremium.xyz` (or `https://kosync-sg.wavypremium.xyz:8443`, or LAN `http://192.168.31.15:7200`)
+   - **Username**: `moe`
+   - **Password**: your account password
+4. Tap **Connect / Test Sync**.
+5. Enable **Background Progress Sync**. Reading position, percentage, and timestamps now sync bidirectionally between Readest and KOReader.
+
+#### 4. KOSync Client Authentication Protocol
+
+Both KOReader and Readest use client-side MD5 password hashing:
+
+1. **Client Hash**: The client hashes the plain-text password locally:
+   $$\text{userkey} = \text{md5}(\text{password})$$
+2. **Network Transmission**: The client sends `userkey` in the `X-Auth-Key` HTTP header alongside `X-Auth-User: <username>`:
+   ```http
+   GET /users/auth HTTP/1.1
+   Host: kosync-sg.wavypremium.xyz
+   X-Auth-User: moe
+   X-Auth-Key: 8b03a82761fae0ee6cd5a23700361e74
+   ```
+3. **Server Verification**:
+   - The Bun server retrieves `PASSWORD_SALT` from the environment.
+   - It concatenates `userkey + salt` and checks against the stored bcrypt hash using `await Bun.password.verify(userkey + salt, user.password)`.
+
+#### 5. Password Recovery / Reset Runbook in SQLite
+
+If you forget your password or need an emergency reset, update the hash directly in `/Users/ospeto/kosync-server/data/koreader-sync.db`:
+
+```bash
+# Reset password directly on Mac mini
+ssh mac-mini "bun -e '
+  import { Database } from \"bun:sqlite\";
+  import crypto from \"node:crypto\";
+
+  const dbPath = \"/Users/ospeto/kosync-server/data/koreader-sync.db\";
+  const salt = process.env.PASSWORD_SALT || \"747aa604e460376f174d9e73240f9d768b06b02dfa63a0b4\";
+  const username = \"moe\";
+  const newPlainPassword = \"YOUR_NEW_PASSWORD_HERE\";
+
+  // Client-side MD5 simulation (what KOReader / Readest transmits)
+  const clientUserKey = crypto.createHash(\"md5\").update(newPlainPassword).digest(\"hex\");
+  // Server-side salted bcrypt hash
+  const hashedPassword = await Bun.password.hash(clientUserKey + salt);
+
+  const db = new Database(dbPath);
+  const info = db.prepare(\"UPDATE users SET password = ? WHERE username = ?\").run(hashedPassword, username);
+  console.log(\"Reset password for\", username, \"- modified rows:\", info.changes);
+'"
+```
 
 ---
 
-### 11. Public WAN Security & Job Queue Operational Verification
+### 11. Calibre OPDS Reverse Proxy via Web Uploader (:8086)
+
+To securely expose Calibre OPDS catalogs and EPUB downloads over the WAN without exposing raw `calibre-server` (:8088), the Web Uploader service on port `8086` acts as a unified reverse proxy (PR #32).
+
+#### 1. Unified OPDS Access Endpoints
+
+| Scope | Method | Endpoint URL | Target Service |
+| --- | --- | --- | --- |
+| **High-Speed Singapore WAN** | HTTP (Port 80) | `http://opds.wavypremium.xyz/opds` | Web Uploader `:8086` -> Calibre `:8088` |
+| **High-Speed Singapore WAN** | HTTPS (Port 8443) | `https://opds.wavypremium.xyz:8443/opds` | Web Uploader `:8086` -> Calibre `:8088` |
+| **Main US WAN** | HTTPS | `https://reading.wavypremium.xyz/opds` | Web Uploader `:8086` -> Calibre `:8088` |
+| **Home LAN** | HTTP | `http://192.168.31.15:8086/opds` | Web Uploader `:8086` -> Calibre `:8088` |
+| **Local Machine** | HTTP | `http://127.0.0.1:8086/opds` | Calibre `:8088` |
+
+#### 2. Architecture & Security Hardening
+
+1. **SSRF Loopback-Only Target Enforcement**:
+   - The proxy strictly routes to `CALIBRE_SERVER_URL` (default: `http://127.0.0.1:8088`).
+   - Guarded by `safeFetchWithSsrf(targetUrl, init, maxRedirects, { allowCalibreServer: true })`.
+   - The security guard explicitly validates that the configured Calibre server target resolves exclusively to loopback addresses (`127.0.0.1`, `::1`), preventing any intranet SSRF pivoting.
+
+2. **Strict Path Canonicalization & Segment Validation**:
+   - The proxy only accepts specific, canonical routes:
+     - `/favicon.png`
+     - `/opds` or `/opds/<path>` (all segments must match `^[a-zA-Z0-9_\-\.~%!$&'()*+,;=:@]+$`)
+     - `/get/<format>/<id>/<library>` (strictly validates format, numeric book ID, and library string)
+   - Disallowed characters, directory traversal attempts (`..`), backslashes, or unencoded illegal characters immediately return `HTTP 400 Bad Request`.
+
+3. **HTTP Method Gating**:
+   - Only `GET` and `HEAD` requests are permitted.
+   - Any mutating requests (`POST`, `PUT`, `DELETE`) return `HTTP 405 Method Not Allowed` with `Allow: GET, HEAD`.
+
+4. **Header Forwarding Allowlist**:
+   - To prevent credential and cookie leakage from external clients to internal servers, client headers are strictly filtered.
+   - **Allowed Request Headers**: `range`, `if-none-match`, `if-modified-since`, `accept`, `accept-encoding`, `user-agent`.
+   - **Stripped Request Headers**: Client `cookie`, `authorization`, `forwarded`, and untrusted `x-forwarded-*` headers are stripped.
+   - **Injected Headers**: Injects verified `x-forwarded-host`, `x-forwarded-proto`, and peer socket `x-forwarded-for`.
+
+5. **Response Sanitization & Location Rewriting**:
+   - Strips upstream `set-cookie` headers to prevent session fixation.
+   - Strips hop-by-hop headers: `connection`, `keep-alive`, `transfer-encoding`, `trailer`, `upgrade`.
+   - Rewrites internal `Location` redirects issued by Calibre server to ensure clients remain on the unified public proxy origin.
+   - Enforces `X-Content-Type-Options: nosniff`.
+
+6. **High-Throughput Streaming**:
+   - Large EPUB binary downloads stream directly using native `ReadableStream` response bodies without buffering entire books in memory.
+
+#### 3. Operational Verification
+
+```bash
+# 1. Fetch OPDS root catalog via Web Uploader proxy
+curl -s http://127.0.0.1:8086/opds | head -n 25
+
+# 2. Verify HEAD request support
+curl -s -I http://127.0.0.1:8086/opds
+
+# 3. Verify mutating methods are blocked (HTTP 405)
+curl -s -I -X POST http://127.0.0.1:8086/opds
+# Expected: HTTP/1.1 405 Method Not Allowed (Allow: GET, HEAD)
+
+# 4. Verify path traversal rejection (HTTP 400)
+curl -s -I "http://127.0.0.1:8086/opds/..%2fadmin"
+# Expected: HTTP/1.1 400 Bad Request
+```
+
+---
+
+### 12. Telegram Bot Library Deduplication & Calibre Cleaner Tools (PR #30, #31)
+
+To keep the Calibre library clean and prevent duplicate book imports, the stack provides automated ingestion deduplication, interactive Telegram bot cleaning commands, and a standalone CLI cleaner script.
+
+#### 1. Telegram Bot Deduplication Commands
+
+In `@saroat_ospeto_bot`, use any of the following command aliases:
+- `/dedup`
+- `/dedupe`
+- `/clean`
+- `/clean_duplicates`
+- `/duplicates`
+
+##### Interactive Dry-Run Inspection Workflow
+
+1. Send `/dedup` (or `/clean`) in Telegram.
+2. The bot runs a non-destructive analysis and returns a rich summary card:
+   - **Total Books Scanned** in Calibre.
+   - **Duplicate Groups Detected** and total identified duplicate books.
+   - **Top 5 Duplicate Groups Breakdown**:
+     - ⭐ **Keeper**: Book ID, title, author, series/volume info, formats, and selection rationale.
+     - 🗑️ **Duplicates to Prune**: Book ID, title, author, formats.
+3. **Interactive Inline Controls**:
+   - `[🧹 Prune Duplicates]` (`apply_dedup_confirm`): Prompts confirmation and executes removal of duplicate copies via `calibredb remove`.
+   - `[🔄 Rescan]` (`rescan_dedup`): Re-runs the duplicate scanner and refreshes the card in-place.
+   - `[📖 Open Reading HQ]`: Launches the Telegram Mini App.
+   - `[🏠 Main Menu]`: Returns to the bot main dashboard.
+
+##### Direct Apply Mode
+
+Send `/dedup apply` or `/clean apply` to immediately execute pruning without the interactive confirmation step.
+
+#### 2. Standalone Duplicate Cleaner CLI Tool
+
+The CLI cleaner is available in `scripts/clean-duplicates.ts` and via shell wrapper `scripts/clean-duplicates.sh`:
+
+```bash
+# 1. Safe dry-run preview (DEFAULT: zero changes to Calibre library)
+bun run scripts/clean-duplicates.ts --dry-run
+# Or using the shell wrapper:
+./scripts/clean-duplicates.sh --dry-run
+
+# 2. Execute duplicate pruning (removes duplicates via calibredb remove)
+bun run scripts/clean-duplicates.ts --apply
+# Or:
+./scripts/clean-duplicates.sh --apply
+
+# 3. Custom library or database paths with verbose logging
+bun run scripts/clean-duplicates.ts \
+  --with-library http://127.0.0.1:8088 \
+  --cache-db /Users/ospeto/uploader/cache.db \
+  --kosync-db /Users/ospeto/kosync-server/data/koreader-sync.db \
+  --audit-log data/duplicate-pruning-audit.log \
+  --verbose
+
+# 4. Structured JSON output for scripting or automation
+bun run scripts/clean-duplicates.ts --dry-run --json
+```
+
+##### Command-Line Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--dry-run` | Analyze library and preview duplicate groups without modifications | `true` |
+| `--apply`, `--prune` | Actively remove duplicates via `calibredb remove` and update cache | `false` |
+| `--with-library <url\|dir>` | Calibre library URL or directory | `http://127.0.0.1:8088` |
+| `--library-dir <dir>` | Physical directory containing Calibre books | Auto-discovered |
+| `--cache-db <path>` | Path to Reading HQ SQLite cache | `cache.db` |
+| `--kosync-db <path>` | Path to KOSync `koreader-sync.db` | `~/kosync-server/data/koreader-sync.db` |
+| `--audit-log <path>` | Path for the permanent audit trail | `data/duplicate-pruning-audit.log` |
+| `--json` | Output structured JSON report | `false` |
+| `--verbose`, `-v` | Enable detailed debug logging | `false` |
+
+#### 3. Deduplication Architecture & Safety Guarantees
+
+1. **Volume Isolation Hard Gate**:
+   - Volume and chapter markers are isolated across titles, series volume indices, and subtitle variations.
+   - **Safety Guarantee**: Different volumes in a series (e.g. *Volume 1* vs *Volume 2* vs *Volume 14*) are **NEVER** grouped as duplicates, even when series title and author names are identical.
+
+2. **Multi-Tier Matching Engine**:
+   - **Tier 1 (Content Signature)**: Identifies books sharing identical EPUB OPF package identifiers / UUIDs or content hashes, even if files were recompressed.
+   - **Tier 2 (Series & Volume Match)**: Explicit series name and volume number matches.
+   - **Tier 3 (Normalized Title & Author Similarity)**: Computes Dice coefficient similarity on normalized titles (stripping release tags, bracket garbage, publisher noise) and sorted author lists. Ambiguous similarity pairs (0.65–0.88) invoke Jev System-1 arbitration (`isSameBookAsync`).
+
+3. **Keeper Selection Hierarchy**:
+   - **Reading Progress**: Books with active reading progress in KOSync (`koreader-sync.db`) receive top priority to prevent losing reading history.
+   - **Canonical EPUB Format**: Prioritizes EPUB files over non-canonical or legacy formats.
+   - **Metadata Richness**: Scores presence of series metadata, volume indices, custom covers, publishers, and descriptive tags.
+   - **Library Longevity**: Preserves the older Calibre book ID / creation date.
+
+4. **Audit Trail Logging**:
+   - Every execution of `--apply` writes a permanent audit record to `data/duplicate-pruning-audit.log` containing timestamps, keeper IDs, pruned duplicate IDs, match types, and rationale for auditability.
+
+---
+
+### 13. Public WAN Security & Job Queue Operational Verification
 
 #### 1. Public WAN Security & Authentication
 
@@ -459,7 +830,7 @@ sqlite3 /Users/ospeto/uploader/cache.db "SELECT id, type, status, retries, creat
 
 ---
 
-### 12. Safe EPUB-Only Library Collection & SSD Migration Preflight
+### 14. Safe EPUB-Only Library Collection & SSD Migration Preflight
 
 Home Reading Stack operates as a clean, unified **EPUB-only library collection**. This guarantees uniform rendering, typography, reading progress synchronization via KOReader, and seamless OPDS delivery across all eReader devices.
 
@@ -554,7 +925,7 @@ Verify each reading stack integration point after import:
 
 ---
 
-### 13. Security, Secret Hygiene & Credential Rotation Protocol
+### 15. Security, Secret Hygiene & Credential Rotation Protocol
 
 - **Placeholders in Configuration Templates:** `.env.example` contains non-functional dummy placeholders only (`your_kosync_password_salt_here`, `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`). Real secrets, salts, and tokens must never be committed to source control.
 - **Exposed Credentials Policy:** If production credentials (such as `TELEGRAM_BOT_TOKEN`, `KOSYNC_PASSWORD_SALT`, or `READING_API_KEY`) are ever exposed or committed to repository history, they require captain-authorized live credential rotation and repository history remediation (e.g. via `git filter-repo` or BFG Repo-Cleaner). Crewmate agents must not rewrite git history or perform live credential rotation autonomously without explicit captain authorization.
