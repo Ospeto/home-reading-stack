@@ -52,6 +52,12 @@ log() {
   echo "[${NOW}] [TunnelWatchdog] $1" | tee -a "$LOG_FILE"
 }
 
+# Strict input validation: port numbers must be positive integers between 1 and 65535
+case "$LOCAL_HTTP_PORT" in ''|*[!0-9]*) log "ERROR: Invalid LOCAL_HTTP_PORT"; exit 1 ;; esac
+case "$LOCAL_KOSYNC_PORT" in ''|*[!0-9]*) log "ERROR: Invalid LOCAL_KOSYNC_PORT"; exit 1 ;; esac
+[ "$LOCAL_HTTP_PORT" -ge 1 ] && [ "$LOCAL_HTTP_PORT" -le 65535 ] || { log "ERROR: LOCAL_HTTP_PORT out of range"; exit 1; }
+[ "$LOCAL_KOSYNC_PORT" -ge 1 ] && [ "$LOCAL_KOSYNC_PORT" -le 65535 ] || { log "ERROR: LOCAL_KOSYNC_PORT out of range"; exit 1; }
+
 restart_launchagent() {
   local LABEL="$1"
   local PLIST="/Users/ospeto/Library/LaunchAgents/${LABEL}.plist"
@@ -133,12 +139,15 @@ fi
 # Ensure log directory exists
 mkdir -p "$(dirname "$LOG_FILE")"
 
-# 2. Check Local Prerequisites
+# 2. Check Local Prerequisites & Failure Domain Isolation
+# If local prerequisites fail, restart them and exit 0 for this cycle so local restarts do not falsely kill remote tunnels.
+LOCAL_FAILURE=0
+
 # A. Local Sing-box proxy (:7890)
 if ! nc -z 127.0.0.1 7890 2>/dev/null; then
   log "WARNING: Sing-box proxy gateway (127.0.0.1:7890) is not listening. Kickstarting..."
   restart_launchagent "com.ospeto.singbox-proxy"
-  sleep 1
+  LOCAL_FAILURE=1
 fi
 
 # B. Local Web Uploader (:8086)
@@ -146,7 +155,7 @@ LOCAL_8086_CODE=$(probe_http_status "http://127.0.0.1:${LOCAL_HTTP_PORT}/api/boo
 if [ "$LOCAL_8086_CODE" != "200" ]; then
   log "WARNING: Local Reading HQ (:8086) returned HTTP ${LOCAL_8086_CODE}. Kickstarting uploader..."
   restart_launchagent "com.ospeto.book-uploader"
-  sleep 1
+  LOCAL_FAILURE=1
 fi
 
 # C. Local KOSync Server (:7200)
@@ -154,7 +163,12 @@ LOCAL_7200_CODE=$(probe_http_status "http://127.0.0.1:${LOCAL_KOSYNC_PORT}/" "" 
 if [ "$LOCAL_7200_CODE" != "200" ]; then
   log "WARNING: Local KOSync server (:7200) returned HTTP ${LOCAL_7200_CODE}. Kickstarting kosync..."
   restart_launchagent "com.ospeto.kosync"
-  sleep 1
+  LOCAL_FAILURE=1
+fi
+
+if [ "$LOCAL_FAILURE" -eq 1 ]; then
+  log "NOTICE: Local prerequisite services were restarted. Deferring remote tunnel checks to next cycle to avoid false tunnel restarts."
+  exit 0
 fi
 
 # ==============================================================================
@@ -243,8 +257,9 @@ fi
 # ==============================================================================
 # 4. Monitor & Auto-Heal: Singapore Reverse Tunnel (sg-vps)
 # ==============================================================================
+# Strict TLS validation on port 8443 (INSECURE_FLAG = 0)
 SG_80_CODE=$(probe_http_status "$SG_OPDS_80_URL" "" 0 8)
-SG_8443_CODE=$(probe_http_status "$SG_OPDS_8443_URL" "" 1 8)
+SG_8443_CODE=$(probe_http_status "$SG_OPDS_8443_URL" "" 0 8)
 SG_KOSYNC_CODE=$(probe_http_status "$SG_KOSYNC_URL" "" 0 8)
 
 # Check for collision marker in recent logs
@@ -284,10 +299,10 @@ else
   log "Auto-healing (Singapore): Kickstarting ${SG_TUNNEL_LABEL}..."
   restart_launchagent "$SG_TUNNEL_LABEL"
 
-  # Step D: Allow connection to establish, then re-probe
+  # Step D: Allow connection to establish, then re-probe with strict TLS
   sleep 4
   SG_RE_80_CODE=$(probe_http_status "$SG_OPDS_80_URL" "" 0 8)
-  SG_RE_8443_CODE=$(probe_http_status "$SG_OPDS_8443_URL" "" 1 8)
+  SG_RE_8443_CODE=$(probe_http_status "$SG_OPDS_8443_URL" "" 0 8)
   SG_RE_KOSYNC_CODE=$(probe_http_status "$SG_KOSYNC_URL" "" 0 8)
 
   if [ "$SG_RE_80_CODE" = "200" ] && [ "$SG_RE_8443_CODE" = "200" ] && [ "$SG_RE_KOSYNC_CODE" = "200" ]; then

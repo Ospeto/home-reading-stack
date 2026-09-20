@@ -18,6 +18,10 @@
         <string>ServerAliveCountMax=3</string>
         <string>-o</string>
         <string>ExitOnForwardFailure=yes</string>
+        <string>-o</string>
+        <string>BatchMode=yes</string>
+        <string>-o</string>
+        <string>ConnectTimeout=8</string>
         <string>sg-vps</string>
     </array>
     <key>EnvironmentVariables</key>

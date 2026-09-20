@@ -89,6 +89,8 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(content).toContain("ServerAliveInterval=15");
     expect(content).toContain("ServerAliveCountMax=3");
     expect(content).toContain("ExitOnForwardFailure=yes");
+    expect(content).toContain("BatchMode=yes");
+    expect(content).toContain("ConnectTimeout=8");
     expect(content).toContain("<string>sg-vps</string>");
     expect(content).toContain("<key>RunAtLoad</key>");
     expect(content).toContain("<true/>");
@@ -251,6 +253,9 @@ describe("Reverse SSH Tunnel Auto-Healing Watchdog", () => {
     expect(scriptContent).toContain("restart_launchagent");
     expect(scriptContent).toContain("sg-vps");
     expect(scriptContent).toContain("panel");
+    // Input validation and failure domain isolation
+    expect(scriptContent).toContain("LOCAL_HTTP_PORT out of range");
+    expect(scriptContent).toContain("LOCAL_FAILURE");
     // Port forwarding collision detection
     expect(scriptContent).toContain("remote port forwarding failed for listen port");
     // Failure counting and alerting
@@ -1263,10 +1268,10 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
       expect(confirmedMessage).toBeDefined();
     } finally {
       globalThis.fetch = origFetch;
-      if (origCalibredb !== undefined) {
-        process.env.CALIBREDB_PATH = origCalibredb;
-      } else {
+      if (origCalibredb === undefined) {
         delete process.env.CALIBREDB_PATH;
+      } else {
+        process.env.CALIBREDB_PATH = origCalibredb;
       }
       if (fs.existsSync(mockCalibre)) {
         fs.unlinkSync(mockCalibre);
