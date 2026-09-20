@@ -173,7 +173,7 @@ const CALIBRE_WEB_URL = "http://192.168.31.15:8088";
 export const READING_WEBAPP_URL =
   process.env.READING_WEBAPP_URL || "https://reading.wavypremium.xyz";
 export const KOSYNC_WAN_URL =
-  process.env.KOSYNC_WAN_URL || "https://kosync.wavypremium.xyz";
+  process.env.KOSYNC_WAN_URL || "http://kosync-sg.wavypremium.xyz";
 const MAX_TELEGRAM_FILE_SIZE = 20 * 1024 * 1024; // 20MB Telegram Bot API limit
 export const ALLOWED_EXTS = [".epub", ".zip", ".rar", ".7z", ".tar"];
 export const REJECTED_EXTS = [
@@ -1771,10 +1771,9 @@ export function getHelpMessage(): string {
     `*1. KOSync Progress Sync*\n` +
     `• In KOReader: open any book → Top menu → *Tools* (wrench icon) → *Progress sync*\n` +
     `• Tap *Custom sync server* → enter server address:\n` +
-    `  • Local: \`http://192.168.31.15:7200\`\n` +
-    `  • Singapore WAN (HTTP): \`http://kosync-sg.wavypremium.xyz\`\n` +
-    `  • Singapore WAN (HTTPS): \`https://kosync-sg.wavypremium.xyz:8443\`\n` +
-    `  • Standby VPS: \`https://kosync-198-46-146-17.sslip.io\`\n` +
+    `  • Plain HTTP (Port 80 - Recommended): \`http://kosync-sg.wavypremium.xyz\`\n` +
+    `  • Encrypted TLS (Port 8443): \`https://kosync-sg.wavypremium.xyz:8443\`\n` +
+    `  • Local LAN: \`http://192.168.31.15:7200\`\n` +
     `• Tap *Login* → enter Username: \`moe\` (password as configured)\n` +
     `• Check *"Automatically keep documents in sync"*\n` +
     `• Tap *"Pull progress to this device now"* to test sync\n\n` +
@@ -1782,11 +1781,9 @@ export function getHelpMessage(): string {
     `• In KOReader: top menu → *Search* (magnifying glass) → *OPDS catalog*\n` +
     `• Tap *Add new catalog*:\n` +
     `  • Catalog Name: \`Mac Mini Library\`\n` +
-    `  • Catalog URL:\n` +
-    `    • Singapore WAN (HTTP): \`http://opds.wavypremium.xyz/opds\`\n` +
-    `    • Singapore WAN (HTTPS): \`https://opds.wavypremium.xyz:8443/opds\`\n` +
-    `    • Local LAN: \`http://192.168.31.15:8088/opds\` or \`http://192.168.31.15:8086/opds\`\n` +
-    `    • (Standby VPS: \`https://calibre-198-46-146-17.sslip.io/opds\`)\n` +
+    `  • Plain HTTP (Port 80 - Recommended): \`http://opds.wavypremium.xyz/opds\`\n` +
+    `  • Encrypted TLS (Port 8443): \`https://opds.wavypremium.xyz:8443/opds\`\n` +
+    `  • Local LAN: \`http://192.168.31.15:8088/opds\` or \`http://192.168.31.15:8086/opds\`\n` +
     `• Tap *Connect* (no login required on local LAN or WAN)\n\n` +
     `*3. Kindle Wi-Fi Proxy (GFW / DPI Bypass)*\n` +
     `• If Kindle displays connection errors reaching external servers:\n` +
@@ -1794,18 +1791,15 @@ export function getHelpMessage(): string {
     `  • Host: \`192.168.31.15\` | Port: \`7890\`\n\n` +
     `*Stack Endpoints Reference*\n` +
     `• *KOSync Server:*\n` +
-    `  • Local: \`http://192.168.31.15:7200\`\n` +
-    `  • Singapore WAN (HTTP): \`http://kosync-sg.wavypremium.xyz\`\n` +
-    `  • Singapore WAN (HTTPS): \`https://kosync-sg.wavypremium.xyz:8443\`\n` +
-    `  • Standby VPS: \`https://kosync-198-46-146-17.sslip.io\`\n` +
+    `  • Plain HTTP (Port 80 - Recommended): \`http://kosync-sg.wavypremium.xyz\`\n` +
+    `  • Encrypted TLS (Port 8443): \`https://kosync-sg.wavypremium.xyz:8443\`\n` +
+    `  • Local LAN: \`http://192.168.31.15:7200\`\n` +
     `• *Calibre OPDS Feed:*\n` +
-    `  • Singapore WAN (HTTP): \`http://opds.wavypremium.xyz/opds\`\n` +
-    `  • Singapore WAN (HTTPS): \`https://opds.wavypremium.xyz:8443/opds\`\n` +
-    `  • Local: \`http://192.168.31.15:8088/opds\` or \`http://192.168.31.15:8086/opds\`\n` +
-    `  • Standby VPS: \`https://calibre-198-46-146-17.sslip.io/opds\`\n` +
+    `  • Plain HTTP (Port 80 - Recommended): \`http://opds.wavypremium.xyz/opds\`\n` +
+    `  • Encrypted TLS (Port 8443): \`https://opds.wavypremium.xyz:8443/opds\`\n` +
+    `  • Local LAN: \`http://192.168.31.15:8088/opds\` or \`http://192.168.31.15:8086/opds\`\n` +
     `• *Calibre Web Reader:*\n` +
     `  • Local: \`http://192.168.31.15:8088\`\n` +
-    `  • Standby VPS: \`https://calibre-198-46-146-17.sslip.io\`\n` +
     `• *Reading HQ Dashboard:*\n` +
     `  • Local: \`http://192.168.31.15:8086\`\n` +
     `  • WAN / Mini App: \`https://reading.wavypremium.xyz\`\n` +

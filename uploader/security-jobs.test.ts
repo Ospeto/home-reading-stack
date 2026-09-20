@@ -396,6 +396,31 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
     });
     expect(isWanRequest(wanReq3, { remoteAddress: "127.0.0.1" })).toBe(true);
 
+    // WAN requests via Singapore default WAN domains
+    const wanReqSgKosync = new Request("http://127.0.0.1:8086/api/books", {
+      headers: { host: "kosync-sg.wavypremium.xyz" },
+    });
+    expect(isWanRequest(wanReqSgKosync, { remoteAddress: "127.0.0.1" })).toBe(
+      true,
+    );
+
+    const wanReqSgOpds = new Request("http://127.0.0.1:8086/api/books", {
+      headers: { host: "opds.wavypremium.xyz" },
+    });
+    expect(isWanRequest(wanReqSgOpds, { remoteAddress: "127.0.0.1" })).toBe(
+      true,
+    );
+
+    const wanReqSgForwarded = new Request("http://127.0.0.1:8086/api/books", {
+      headers: {
+        host: "127.0.0.1:8086",
+        "x-forwarded-host": "kosync-sg.wavypremium.xyz:8443",
+      },
+    });
+    expect(isWanRequest(wanReqSgForwarded, { remoteAddress: "127.0.0.1" })).toBe(
+      true,
+    );
+
     // Direct public client (93.184.216.34) fails closed to WAN
     expect(isWanRequest(lanReq, { remoteAddress: "93.184.216.34" })).toBe(true);
   });
@@ -528,6 +553,10 @@ describe("Public WAN & API Surface Hardening — CORS & CSRF Guards", () => {
   it("allows configured production WAN and local LAN origins", () => {
     expect(isAllowedOrigin("https://reading.wavypremium.xyz")).toBe(true);
     expect(isAllowedOrigin("https://kosync.wavypremium.xyz")).toBe(true);
+    expect(isAllowedOrigin("http://kosync-sg.wavypremium.xyz")).toBe(true);
+    expect(isAllowedOrigin("https://kosync-sg.wavypremium.xyz:8443")).toBe(true);
+    expect(isAllowedOrigin("http://opds.wavypremium.xyz")).toBe(true);
+    expect(isAllowedOrigin("https://opds.wavypremium.xyz:8443")).toBe(true);
     expect(isAllowedOrigin("http://localhost:8086")).toBe(true);
     expect(isAllowedOrigin("http://127.0.0.1:8086")).toBe(true);
     expect(isAllowedOrigin("http://192.168.31.15:8086")).toBe(true);
@@ -742,10 +771,10 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
       const resFallback = validateEpubContent(testEpub);
       expect(resFallback.valid).toBe(true);
     } finally {
-      if (origBsdtar !== undefined) {
-        process.env.BSDTAR_PATH = origBsdtar;
-      } else {
+      if (origBsdtar === undefined) {
         delete process.env.BSDTAR_PATH;
+      } else {
+        process.env.BSDTAR_PATH = origBsdtar;
       }
       if (fs.existsSync(mockBsdtarScript)) {
         fs.unlinkSync(mockBsdtarScript);
