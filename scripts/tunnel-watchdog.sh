@@ -201,8 +201,7 @@ else
 
   # Step A: Terminate hanging local SSH process for US tunnel using precise port-forwarding pattern
   log "Auto-healing (US): Terminating stale local tunnel process..."
-  pkill -f "ssh.*0.0.0.0:${LOCAL_HTTP_PORT}:127.0.0.1:${LOCAL_HTTP_PORT}.*${US_REMOTE_HOST}" 2>/dev/null || true
-  pkill -f "ssh.*0.0.0.0:${LOCAL_HTTP_PORT}" 2>/dev/null || true
+  pkill -f "ssh.*0.0.0.0:${LOCAL_HTTP_PORT}.*${US_REMOTE_HOST}" 2>/dev/null || true
 
   # Step B: Clear orphaned listeners on remote VPS panel holding port 8086 or 7200
   log "Auto-healing (US): Clearing orphaned sockets on remote host ${US_REMOTE_HOST}..."
@@ -284,8 +283,7 @@ else
 
   # Step A: Terminate hanging local SSH process for Singapore tunnel using precise port-forwarding pattern
   log "Auto-healing (Singapore): Terminating stale local tunnel process..."
-  pkill -f "ssh.*127.0.0.1:${LOCAL_HTTP_PORT}:127.0.0.1:${LOCAL_HTTP_PORT}.*${SG_REMOTE_HOST}" 2>/dev/null || true
-  pkill -f "ssh.*${LOCAL_HTTP_PORT}:127.0.0.1:${LOCAL_HTTP_PORT}.*${SG_REMOTE_HOST}" 2>/dev/null || true
+  pkill -f "ssh.*${LOCAL_HTTP_PORT}.*${SG_REMOTE_HOST}" 2>/dev/null || true
 
   # Step B: Clear orphaned listeners on remote Singapore VPS (sg-vps)
   log "Auto-healing (Singapore): Clearing orphaned sockets on remote host ${SG_REMOTE_HOST}..."

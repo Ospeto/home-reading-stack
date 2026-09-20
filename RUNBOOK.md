@@ -456,12 +456,12 @@ The auto-healing watchdog (`scripts/tunnel-watchdog.sh`) runs via LaunchAgent `c
    - **Singapore Tunnel (`sg-vps`)**: Probes `http://opds.wavypremium.xyz/opds`, `https://opds.wavypremium.xyz:8443/opds`, and `http://kosync-sg.wavypremium.xyz/health`. Also inspects recent daemon logs (`reading-sg-tunnel.log`) for remote port forwarding collision markers.
 3. **Auto-Healing**:
    - **US Tunnel Auto-Healing**:
-     - Kills hanging local SSH forward processes (`pkill -f "ssh.*0.0.0.0:8086"` and `pkill -f "ssh.*panel"`).
+     - Kills hanging local SSH forward processes (`pkill -f "ssh.*8086.*panel" || true`).
      - Clears orphaned remote listeners holding ports 8086/7200 on VPS `panel` via `ssh -o ProxyCommand="nc -X 5 -x 127.0.0.1:7890 %h %p" panel "fuser -k 8086/tcp 7200/tcp || true"`.
      - Kickstarts `com.ospeto.reading-vless-tunnel` via `launchctl kickstart -k gui/$(id -u)/com.ospeto.reading-vless-tunnel`.
      - Re-probes after a 4-second delay.
    - **Singapore Tunnel Auto-Healing**:
-     - Kills hanging local SSH forward processes (`pkill -f "ssh.*sg-vps"`).
+     - Kills hanging local SSH forward processes (`pkill -f "ssh.*8086.*sg-vps" || true`).
      - Clears orphaned remote listeners holding ports 8086/7200 on `sg-vps` via `ssh -o BatchMode=yes -o ConnectTimeout=5 sg-vps "fuser -k 8086/tcp 7200/tcp || true"`.
      - Kickstarts `com.ospeto.reading-sg-tunnel` via `launchctl kickstart -k gui/$(id -u)/com.ospeto.reading-sg-tunnel`.
      - Re-probes all Singapore endpoints after a 4-second delay.
