@@ -73,6 +73,31 @@ describe("Telegram Mini App (TMA) Integration", () => {
     );
   });
 
+  it("com.ospeto.reading-sg-tunnel.plist contains required flags and sg-vps remote target", () => {
+    const plistPath = path.join(
+      import.meta.dir,
+      "../scripts/com.ospeto.reading-sg-tunnel.plist",
+    );
+    expect(fs.existsSync(plistPath)).toBe(true);
+
+    const content = fs.readFileSync(plistPath, "utf8");
+    expect(content).toContain(
+      "<string>com.ospeto.reading-sg-tunnel</string>",
+    );
+    expect(content).toContain("<string>127.0.0.1:8086:127.0.0.1:8086</string>");
+    expect(content).toContain("<string>127.0.0.1:7200:127.0.0.1:7200</string>");
+    expect(content).toContain("ServerAliveInterval=15");
+    expect(content).toContain("ServerAliveCountMax=3");
+    expect(content).toContain("ExitOnForwardFailure=yes");
+    expect(content).toContain("<string>sg-vps</string>");
+    expect(content).toContain("<key>RunAtLoad</key>");
+    expect(content).toContain("<true/>");
+    expect(content).toContain("<key>KeepAlive</key>");
+    expect(content).toContain(
+      "<string>/Users/ospeto/Library/Logs/reading-sg-tunnel.log</string>",
+    );
+  });
+
   it("index.html includes Telegram WebApp SDK script and initialization", () => {
     const htmlPath = path.join(import.meta.dir, "index.html");
     expect(fs.existsSync(htmlPath)).toBe(true);
@@ -207,21 +232,30 @@ describe("Reverse SSH Tunnel Auto-Healing Watchdog", () => {
     expect(syntaxCheck.status).toBe(0);
   });
 
-  it("tunnel-watchdog.sh contains health probes, auto-healing, and Telegram alert escalation", () => {
+  it("tunnel-watchdog.sh contains health probes, auto-healing, and Telegram alert escalation across dual tunnels", () => {
     const scriptContent = fs.readFileSync(watchdogScriptPath, "utf8");
     // Local prerequisites
     expect(scriptContent).toContain("127.0.0.1 7890");
     expect(scriptContent).toContain("LOCAL_HTTP_PORT");
     expect(scriptContent).toContain("LOCAL_KOSYNC_PORT");
-    // Remote probe
-    expect(scriptContent).toContain("WAN_HQ_URL");
-    expect(scriptContent).toContain("PROBE_HTTP_CODE");
-    // Auto-healing
+    // Dual remote tunnel configurations & probes
+    expect(scriptContent).toContain("US_WAN_HQ_URL");
+    expect(scriptContent).toContain("US_TUNNEL_LABEL");
+    expect(scriptContent).toContain("SG_TUNNEL_LABEL");
+    expect(scriptContent).toContain("SG_OPDS_80_URL");
+    expect(scriptContent).toContain("SG_OPDS_8443_URL");
+    expect(scriptContent).toContain("SG_KOSYNC_URL");
+    // Auto-healing for both US panel and Singapore sg-vps
     expect(scriptContent).toContain("pkill -f");
     expect(scriptContent).toContain("fuser -k");
     expect(scriptContent).toContain("restart_launchagent");
+    expect(scriptContent).toContain("sg-vps");
+    expect(scriptContent).toContain("panel");
+    // Port forwarding collision detection
+    expect(scriptContent).toContain("remote port forwarding failed for listen port");
     // Failure counting and alerting
-    expect(scriptContent).toContain("FAIL_COUNT_FILE");
+    expect(scriptContent).toContain("US_FAIL_COUNT_FILE");
+    expect(scriptContent).toContain("SG_FAIL_COUNT_FILE");
     expect(scriptContent).toContain("TELEGRAM_BACKUP_CHAT_ID");
     expect(scriptContent).toContain("sendMessage");
   });
