@@ -160,15 +160,17 @@ fi
 # ==============================================================================
 # 3. Monitor & Auto-Heal: US VLESS Reverse Tunnel (panel)
 # ==============================================================================
+US_PROBE_CODE=$(probe_http_status "$US_WAN_HQ_URL" "$PROXY_URL" 0 8)
+
 # Check for collision marker in recent logs
 US_COLLISION=0
 if [ -f "$US_LOG_FILE" ] && tail -n 15 "$US_LOG_FILE" 2>/dev/null | grep -q "remote port forwarding failed for listen port"; then
   US_COLLISION=1
 fi
 
-US_PROBE_CODE=$(probe_http_status "$US_WAN_HQ_URL" "$PROXY_URL" 0 8)
-
-if [ "$US_PROBE_CODE" = "200" ] && [ "$US_COLLISION" -eq 0 ]; then
+# Tunnel is healthy if remote probe returns 200.
+# Only treat port collision as actionable if the probe has ALSO failed (probe status != 200).
+if [ "$US_PROBE_CODE" = "200" ]; then
   PREV_US_FAILURES=$(cat "$US_FAIL_COUNT_FILE" 2>/dev/null || echo 0)
   if [ "$PREV_US_FAILURES" -gt 0 ]; then
     log "US Tunnel recovered! Remote probe returned HTTP 200. Resetting US failure counter (was ${PREV_US_FAILURES})."
@@ -183,10 +185,10 @@ else
   echo "$US_FAILURES" > /tmp/reading-tunnel-failures 2>/dev/null || true
   log "WARNING: US tunnel probe to ${US_WAN_HQ_URL} failed (HTTP ${US_PROBE_CODE}, collision=${US_COLLISION}). Consecutive failures: ${US_FAILURES}."
 
-  # Step A: Terminate hanging local SSH process for US tunnel (0.0.0.0 bind or panel target)
+  # Step A: Terminate hanging local SSH process for US tunnel using precise port-forwarding pattern
   log "Auto-healing (US): Terminating stale local tunnel process..."
+  pkill -f "ssh.*0.0.0.0:${LOCAL_HTTP_PORT}:127.0.0.1:${LOCAL_HTTP_PORT}.*${US_REMOTE_HOST}" 2>/dev/null || true
   pkill -f "ssh.*0.0.0.0:${LOCAL_HTTP_PORT}" 2>/dev/null || true
-  pkill -f "ssh.*${US_REMOTE_HOST}" 2>/dev/null || true
 
   # Step B: Clear orphaned listeners on remote VPS panel holding port 8086 or 7200
   log "Auto-healing (US): Clearing orphaned sockets on remote host ${US_REMOTE_HOST}..."
@@ -241,18 +243,19 @@ fi
 # ==============================================================================
 # 4. Monitor & Auto-Heal: Singapore Reverse Tunnel (sg-vps)
 # ==============================================================================
+SG_80_CODE=$(probe_http_status "$SG_OPDS_80_URL" "" 0 8)
+SG_8443_CODE=$(probe_http_status "$SG_OPDS_8443_URL" "" 1 8)
+SG_KOSYNC_CODE=$(probe_http_status "$SG_KOSYNC_URL" "" 0 8)
+
 # Check for collision marker in recent logs
 SG_COLLISION=0
 if [ -f "$SG_LOG_FILE" ] && tail -n 15 "$SG_LOG_FILE" 2>/dev/null | grep -q "remote port forwarding failed for listen port"; then
   SG_COLLISION=1
 fi
 
-SG_80_CODE=$(probe_http_status "$SG_OPDS_80_URL" "" 0 8)
-SG_8443_CODE=$(probe_http_status "$SG_OPDS_8443_URL" "" 1 8)
-SG_KOSYNC_CODE=$(probe_http_status "$SG_KOSYNC_URL" "" 0 8)
-
-# Singapore tunnel is healthy when all endpoints respond 200 and no port forward collision is detected
-if [ "$SG_80_CODE" = "200" ] && [ "$SG_8443_CODE" = "200" ] && [ "$SG_KOSYNC_CODE" = "200" ] && [ "$SG_COLLISION" -eq 0 ]; then
+# Singapore tunnel is healthy when all endpoints respond 200.
+# Only trigger auto-healing if at least one endpoint probe has ALSO failed (probe status != 200).
+if [ "$SG_80_CODE" = "200" ] && [ "$SG_8443_CODE" = "200" ] && [ "$SG_KOSYNC_CODE" = "200" ]; then
   PREV_SG_FAILURES=$(cat "$SG_FAIL_COUNT_FILE" 2>/dev/null || echo 0)
   if [ "$PREV_SG_FAILURES" -gt 0 ]; then
     log "Singapore Tunnel recovered! All endpoints healthy. Resetting SG failure counter (was ${PREV_SG_FAILURES})."
@@ -264,9 +267,10 @@ else
   echo "$SG_FAILURES" > "$SG_FAIL_COUNT_FILE"
   log "WARNING: Singapore tunnel health check failed (OPDS :80=${SG_80_CODE}, OPDS :8443=${SG_8443_CODE}, KOSync=${SG_KOSYNC_CODE}, collision=${SG_COLLISION}). Consecutive failures: ${SG_FAILURES}."
 
-  # Step A: Terminate hanging local SSH process for Singapore tunnel
+  # Step A: Terminate hanging local SSH process for Singapore tunnel using precise port-forwarding pattern
   log "Auto-healing (Singapore): Terminating stale local tunnel process..."
-  pkill -f "ssh.*${SG_REMOTE_HOST}" 2>/dev/null || true
+  pkill -f "ssh.*127.0.0.1:${LOCAL_HTTP_PORT}:127.0.0.1:${LOCAL_HTTP_PORT}.*${SG_REMOTE_HOST}" 2>/dev/null || true
+  pkill -f "ssh.*${LOCAL_HTTP_PORT}:127.0.0.1:${LOCAL_HTTP_PORT}.*${SG_REMOTE_HOST}" 2>/dev/null || true
 
   # Step B: Clear orphaned listeners on remote Singapore VPS (sg-vps)
   log "Auto-healing (Singapore): Clearing orphaned sockets on remote host ${SG_REMOTE_HOST}..."
