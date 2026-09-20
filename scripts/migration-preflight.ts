@@ -420,7 +420,7 @@ if (import.meta.main) {
       "   • Telegram Bot:    Send /recent and /reading to verify catalog refresh",
     );
     console.log(
-      "   • KOReader Sync:   Verify synchronization at https://kosync.wavypremium.xyz\n",
+      "   • KOReader Sync:   Verify synchronization at http://kosync-sg.wavypremium.xyz\n",
     );
 
     console.log(

@@ -396,6 +396,31 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
     });
     expect(isWanRequest(wanReq3, { remoteAddress: "127.0.0.1" })).toBe(true);
 
+    // WAN requests via Singapore default WAN domains
+    const wanReqSgKosync = new Request("http://127.0.0.1:8086/api/books", {
+      headers: { host: "kosync-sg.wavypremium.xyz" },
+    });
+    expect(isWanRequest(wanReqSgKosync, { remoteAddress: "127.0.0.1" })).toBe(
+      true,
+    );
+
+    const wanReqSgOpds = new Request("http://127.0.0.1:8086/api/books", {
+      headers: { host: "opds.wavypremium.xyz" },
+    });
+    expect(isWanRequest(wanReqSgOpds, { remoteAddress: "127.0.0.1" })).toBe(
+      true,
+    );
+
+    const wanReqSgForwarded = new Request("http://127.0.0.1:8086/api/books", {
+      headers: {
+        host: "127.0.0.1:8086",
+        "x-forwarded-host": "kosync-sg.wavypremium.xyz:8443",
+      },
+    });
+    expect(isWanRequest(wanReqSgForwarded, { remoteAddress: "127.0.0.1" })).toBe(
+      true,
+    );
+
     // Direct public client (93.184.216.34) fails closed to WAN
     expect(isWanRequest(lanReq, { remoteAddress: "93.184.216.34" })).toBe(true);
   });

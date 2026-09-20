@@ -250,7 +250,7 @@ The public WAN edge (`https://reading.wavypremium.xyz`) is hardened against unau
    - **Credential transport:** API keys and TMA/session credentials are accepted only in their header or cookie channels. Query-string `token`/`auth` values are rejected because URLs leak through history, logs, Referer headers, and analytics.
 
 2. **CORS & CSRF Origin Protection:**
-   - CORS is locked down from wildcard `*` to permitted origins: `https://reading.wavypremium.xyz`, `https://kosync.wavypremium.xyz`, `http://kosync-sg.wavypremium.xyz`, `https://kosync-sg.wavypremium.xyz:8443`, `http://opds.wavypremium.xyz`, `https://opds.wavypremium.xyz:8443`, local LAN origins, and custom entries in `ALLOWED_ORIGINS`.
+   - CORS is locked down from wildcard `*` to permitted origins: `https://reading.wavypremium.xyz`, `http://kosync-sg.wavypremium.xyz`, `https://kosync-sg.wavypremium.xyz:8443`, `http://opds.wavypremium.xyz`, `https://opds.wavypremium.xyz:8443`, local LAN origins, and custom entries in `ALLOWED_ORIGINS`.
    - Mutating routes validate `Origin`, `Referer`, and `Sec-Fetch-Site` to prevent cross-site request forgery attacks.
 
 3. **SSRF (Server-Side Request Forgery) Protection:**

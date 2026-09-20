@@ -510,23 +510,7 @@ To synchronize reading progress across devices over the WAN (cellular / remote W
 
 #### 1. VPS Edge Caddy Configuration
 
-##### Main US VPS (`panel`)
-
-Add the following site block to `/etc/caddy/Caddyfile` on VPS `panel`:
-
-```caddy
-https://kosync.wavypremium.xyz {
-    reverse_proxy * http://172.18.0.1:7200
-}
-```
-
-Reload Caddy on `panel`:
-
-```bash
-ssh panel "systemctl reload caddy || docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
-```
-
-##### Low-Latency Singapore VPS (`sg-vps`)
+##### Low-Latency Singapore VPS (`sg-vps` - Default)
 
 Add the following site blocks to Caddy on `sg-vps` (using Ports 80 and 8443 to preserve Port 443 for Remnawave Xray):
 

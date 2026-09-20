@@ -12,6 +12,8 @@ import { Agent, buildConnector } from "undici";
 // Default production WAN domain and ports
 export const DEFAULT_WAN_DOMAIN = "reading.wavypremium.xyz";
 export const KOSYNC_WAN_DOMAIN = "kosync.wavypremium.xyz";
+export const KOSYNC_SG_WAN_DOMAIN = "kosync-sg.wavypremium.xyz";
+export const OPDS_SG_WAN_DOMAIN = "opds.wavypremium.xyz";
 
 // ---------------------------------------------------------------------------
 // 1. IP & SSRF Protection
@@ -544,10 +546,19 @@ export function isWanRequest(
     .split("/")[0]
     .toLowerCase();
 
-  const kosyncWanDomain = (process.env.KOSYNC_WAN_URL || KOSYNC_WAN_DOMAIN)
+  const kosyncWanDomain = (process.env.KOSYNC_WAN_URL || KOSYNC_SG_WAN_DOMAIN)
     .replace(/^https?:\/\//i, "")
     .split("/")[0]
     .toLowerCase();
+
+  // Standard recognized WAN domains
+  const defaultWanDomains = new Set([
+    wanDomain,
+    kosyncWanDomain,
+    KOSYNC_WAN_DOMAIN,
+    KOSYNC_SG_WAN_DOMAIN,
+    OPDS_SG_WAN_DOMAIN,
+  ]);
 
   // Extract socket address from server or options
   let socketIp = options.remoteAddress || options.clientIp || "";
@@ -573,7 +584,7 @@ export function isWanRequest(
       .toLowerCase()
       .split(":")[0];
 
-    if (hostHeader === wanDomain || hostHeader === kosyncWanDomain) {
+    if (defaultWanDomains.has(hostHeader)) {
       return true;
     }
 
