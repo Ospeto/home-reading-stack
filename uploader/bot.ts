@@ -1772,7 +1772,8 @@ export function getHelpMessage(): string {
     `• In KOReader: open any book → Top menu → *Tools* (wrench icon) → *Progress sync*\n` +
     `• Tap *Custom sync server* → enter server address:\n` +
     `  • Local: \`http://192.168.31.15:7200\`\n` +
-    `  • WAN (Production): \`https://kosync.wavypremium.xyz\`\n` +
+    `  • Singapore WAN (HTTP): \`http://kosync-sg.wavypremium.xyz\`\n` +
+    `  • Singapore WAN (HTTPS): \`https://kosync-sg.wavypremium.xyz:8443\`\n` +
     `  • Standby VPS: \`https://kosync-198-46-146-17.sslip.io\`\n` +
     `• Tap *Login* → enter Username: \`moe\` (password as configured)\n` +
     `• Check *"Automatically keep documents in sync"*\n` +
@@ -1781,8 +1782,11 @@ export function getHelpMessage(): string {
     `• In KOReader: top menu → *Search* (magnifying glass) → *OPDS catalog*\n` +
     `• Tap *Add new catalog*:\n` +
     `  • Catalog Name: \`Mac Mini Library\`\n` +
-    `  • Catalog URL: \`https://reading.wavypremium.xyz/opds\` (WAN) and \`http://192.168.31.15:8088/opds\` or \`http://192.168.31.15:8086/opds\` (LAN)\n` +
-    `  • (Standby VPS: \`https://calibre-198-46-146-17.sslip.io/opds\`)\n` +
+    `  • Catalog URL:\n` +
+    `    • Singapore WAN (HTTP): \`http://opds.wavypremium.xyz/opds\`\n` +
+    `    • Singapore WAN (HTTPS): \`https://opds.wavypremium.xyz:8443/opds\`\n` +
+    `    • Local LAN: \`http://192.168.31.15:8088/opds\` or \`http://192.168.31.15:8086/opds\`\n` +
+    `    • (Standby VPS: \`https://calibre-198-46-146-17.sslip.io/opds\`)\n` +
     `• Tap *Connect* (no login required on local LAN or WAN)\n\n` +
     `*3. Kindle Wi-Fi Proxy (GFW / DPI Bypass)*\n` +
     `• If Kindle displays connection errors reaching external servers:\n` +
@@ -1791,10 +1795,12 @@ export function getHelpMessage(): string {
     `*Stack Endpoints Reference*\n` +
     `• *KOSync Server:*\n` +
     `  • Local: \`http://192.168.31.15:7200\`\n` +
-    `  • WAN (Production): \`https://kosync.wavypremium.xyz\`\n` +
+    `  • Singapore WAN (HTTP): \`http://kosync-sg.wavypremium.xyz\`\n` +
+    `  • Singapore WAN (HTTPS): \`https://kosync-sg.wavypremium.xyz:8443\`\n` +
     `  • Standby VPS: \`https://kosync-198-46-146-17.sslip.io\`\n` +
     `• *Calibre OPDS Feed:*\n` +
-    `  • WAN (Production): \`https://reading.wavypremium.xyz/opds\`\n` +
+    `  • Singapore WAN (HTTP): \`http://opds.wavypremium.xyz/opds\`\n` +
+    `  • Singapore WAN (HTTPS): \`https://opds.wavypremium.xyz:8443/opds\`\n` +
     `  • Local: \`http://192.168.31.15:8088/opds\` or \`http://192.168.31.15:8086/opds\`\n` +
     `  • Standby VPS: \`https://calibre-198-46-146-17.sslip.io/opds\`\n` +
     `• *Calibre Web Reader:*\n` +
