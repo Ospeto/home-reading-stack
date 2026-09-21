@@ -139,6 +139,7 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       );
       expect(uploaderContent).toContain(REPO_ROOT);
       expect(uploaderContent).toContain("server.ts");
+      expect(uploaderContent).toContain("--env-file=");
 
       // Validate each plist using plutil if on macOS
       if (os.platform() === "darwin") {
@@ -162,7 +163,7 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
           cwd: REPO_ROOT,
           env: {
             ...process.env,
-            LIGHTHOUSE_DAEMON_PREFIX: "com.test&evil<tag>",
+            LOG_DIR: path.join(tempTestDir, "logs&more<dir>"),
           },
         },
       );
@@ -173,8 +174,26 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(uploaderPlist).toBeDefined();
 
       const content = fs.readFileSync(path.join(outputDir, uploaderPlist!), "utf8");
-      expect(content).toContain("com.test&amp;evil&lt;tag&gt;");
-      expect(content).not.toContain("com.test&evil<tag>");
+      expect(content).toContain("logs&amp;more&lt;dir&gt;");
+      expect(content).not.toContain("logs&more<dir>");
+    });
+
+    it("rejects DAEMON_PREFIX containing slashes or path traversal", () => {
+      const outputDir = path.join(tempTestDir, "bad_prefix_agents");
+      const res = spawnSync(
+        LIGHTHOUSE_BIN,
+        ["install-daemons", "--dry-run", "--output-dir", outputDir],
+        {
+          encoding: "utf8",
+          cwd: REPO_ROOT,
+          env: {
+            ...process.env,
+            LIGHTHOUSE_DAEMON_PREFIX: "../evil/prefix",
+          },
+        },
+      );
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain("Invalid DAEMON_PREFIX");
     });
   });
 
@@ -492,6 +511,77 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(books.length).toBe(1);
       expect(books[0].title).toBe("Source Book Clean");
       verifyDb.close();
+    }, 30000);
+
+    it("daily backup produced by scripts/backup-daily.sh restores cleanly via bin/lighthouse restore", () => {
+      const mockCalibre = path.join(tempTestDir, "daily_calibre", "metadata.db");
+      const mockKosync = path.join(tempTestDir, "daily_kosync", "koreader-sync.db");
+      const mockCache = path.join(tempTestDir, "daily_cache.db");
+      const backupDir = path.join(tempTestDir, "daily_backups");
+      const restoreDir = path.join(tempTestDir, "daily_restored");
+
+      fs.mkdirSync(path.dirname(mockCalibre), { recursive: true });
+      fs.mkdirSync(path.dirname(mockKosync), { recursive: true });
+      fs.mkdirSync(restoreDir, { recursive: true });
+
+      const cDb = new Database(mockCalibre);
+      cDb.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT);");
+      cDb.run("INSERT INTO books (title) VALUES ('Daily Book A'), ('Daily Book B');");
+      cDb.close();
+
+      const kDb = new Database(mockKosync);
+      kDb.run("CREATE TABLE progress (document TEXT PRIMARY KEY, percentage REAL);");
+      kDb.run("INSERT INTO progress VALUES ('doc_daily', 0.99);");
+      kDb.close();
+
+      const chDb = new Database(mockCache);
+      chDb.run("CREATE TABLE jobs (id INTEGER PRIMARY KEY, status TEXT);");
+      chDb.run("INSERT INTO jobs (status) VALUES ('completed');");
+      chDb.close();
+
+      // 1. Run scripts/backup-daily.sh
+      const dailyScript = path.join(REPO_ROOT, "scripts", "backup-daily.sh");
+      const backupRes = spawnSync(dailyScript, [], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          LOCAL_BACKUP_DIR: backupDir,
+          CALIBRE_DB_PATH: mockCalibre,
+          KOSYNC_DB_PATH: mockKosync,
+          CACHE_DB_PATH: mockCache,
+          LOG_DIR: path.join(tempTestDir, "daily_logs"),
+        },
+      });
+      expect(backupRes.status).toBe(0);
+
+      // Find the created backup archive
+      const files = fs.readdirSync(backupDir);
+      const bundle = files.find((f: string) => f.startsWith("reading-stack-backup-") && !f.endsWith(".sha256"));
+      expect(bundle).toBeDefined();
+      const bundlePath = path.join(backupDir, bundle!);
+
+      // 2. Restore with bin/lighthouse restore --target
+      const restoreRes = spawnSync(
+        LIGHTHOUSE_BIN,
+        ["restore", bundlePath, "--force", "--target", restoreDir],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CALIBRE_DB_PATH: path.join(restoreDir, "metadata.db"),
+            KOSYNC_DB_PATH: path.join(restoreDir, "koreader-sync.db"),
+            CACHE_DB_PATH: path.join(restoreDir, "cache.db"),
+          },
+        },
+      );
+      expect(restoreRes.status).toBe(0);
+      expect(restoreRes.stdout).toContain("Restoration complete");
+
+      // Verify restored content
+      const rCdb = new Database(path.join(restoreDir, "metadata.db"), { readonly: true });
+      const books = rCdb.query("SELECT title FROM books;").all() as any[];
+      expect(books.length).toBe(2);
+      rCdb.close();
     }, 30000);
   });
 

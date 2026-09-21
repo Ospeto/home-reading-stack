@@ -3020,15 +3020,19 @@ export async function handleRequest(
 
 // Start Server & Background Job Queue Worker when run directly
 if ((import.meta as any).main) {
+  const listenPort = parseInt(
+    process.env.UPLOADER_PORT || process.env.PORT || "8086",
+    10,
+  );
   jobQueue.startWorker(1000);
   (globalThis as any).Bun.serve({
-    port: 8086,
+    port: listenPort,
     hostname: "0.0.0.0",
     fetch(req: any, server: any) {
       return handleRequest(req, server);
     },
   });
   console.log(
-    "[Server] Reading HQ Web Uploader listening on http://0.0.0.0:8086",
+    `[Server] Reading HQ Web Uploader listening on http://0.0.0.0:${listenPort}`,
   );
 }

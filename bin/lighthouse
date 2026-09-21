@@ -56,6 +56,14 @@ validate_hostname() {
   fi
 }
 
+validate_daemon_prefix() {
+  local prefix="$1"
+  if [[ "$prefix" =~ / ]] || [[ "$prefix" =~ \.\. ]] || ! [[ "$prefix" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "Error: Invalid DAEMON_PREFIX: '${prefix}'. Must match '^[A-Za-z0-9._-]+$' and contain no slashes or '..'" >&2
+    exit 1
+  fi
+}
+
 xml_escape() {
   local s="$1"
   s="${s//&/&amp;}"
@@ -671,6 +679,7 @@ cmd_install_daemons() {
   validate_port "$PROXY_PORT" "PROXY_PORT"
   validate_hostname "$US_REMOTE_HOST" "US_REMOTE_HOST"
   validate_hostname "$SG_REMOTE_HOST" "SG_REMOTE_HOST"
+  validate_daemon_prefix "$DAEMON_PREFIX"
 
   # XML escape all interpolated values
   local P_PREFIX
@@ -718,6 +727,7 @@ cmd_install_daemons() {
     <key>ProgramArguments</key>
     <array>
         <string>${P_BUN}</string>
+        <string>--env-file=${P_ROOT}/.env</string>
         <string>run</string>
         <string>server.ts</string>
     </array>
@@ -756,6 +766,7 @@ EOF
     <key>ProgramArguments</key>
     <array>
         <string>${P_BUN}</string>
+        <string>--env-file=${P_ROOT}/.env</string>
         <string>run</string>
         <string>bot.ts</string>
     </array>
@@ -1364,9 +1375,11 @@ cmd_restore() {
     esac
   fi
 
-  # 7. Stop Services to Prevent Active SQLite Lock Contention
-  echo "Stopping services before database restoration..."
-  cmd_down
+  # 7. Stop Services to Prevent Active SQLite Lock Contention (only for in-place live restore)
+  if [ -z "$target_override" ]; then
+    echo "Stopping live services before in-place database restoration..."
+    cmd_down
+  fi
 
   # 8. Apply Restoration with WAL Checkpoint, Rollback Copies, and .restore Primitive
   local restore_timestamp

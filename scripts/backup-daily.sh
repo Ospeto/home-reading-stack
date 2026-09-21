@@ -84,10 +84,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log "Starting Daily Reading Stack Backup..."
-
 mkdir -p "$LOCAL_BACKUP_DIR"
 mkdir -p "$(dirname "$LOG_FILE")"
+
+log "Starting Daily Reading Stack Backup..."
 
 BACKED_UP_DBS=()
 
@@ -186,6 +186,13 @@ if [ ${#BACKED_UP_DBS[@]} -eq 0 ]; then
   log "Error: No databases found or backed up. Aborting archive creation."
   exit 1
 fi
+
+# Checkpoint all staged DBs and remove ephemeral WAL/SHM artifacts before packing
+for db_f in "${TEMP_DIR}"/*.db; do
+  [ -f "$db_f" ] || continue
+  sqlite3 "$db_f" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
+done
+rm -f "${TEMP_DIR}"/*-wal "${TEMP_DIR}"/*-shm "${TEMP_DIR}"/*-journal
 
 # 5. Archive and Compress to Local Safe Storage
 ARCHIVE_NAME="reading-stack-backup-${TIMESTAMP}.tar.gz"
