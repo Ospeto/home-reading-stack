@@ -313,12 +313,18 @@ export function setCalibreMetadataAsync(
  * Flushes Reading HQ cache.db and kickstarts book-uploader if active.
  */
 export function flushReadingCache(cacheDbPath?: string): void {
+  const lighthouseRoot =
+    process.env.LIGHTHOUSE_ROOT ||
+    path.resolve(import.meta.dir, "..");
   const candidates = [
     cacheDbPath,
     process.env.CACHE_DB_PATH,
-    "/Users/ospeto/uploader/cache.db",
+    process.env.JOBS_DB_PATH,
+    path.join(lighthouseRoot, "uploader", "cache.db"),
+    path.join(lighthouseRoot, "cache.db"),
     path.join(process.cwd(), "uploader", "cache.db"),
     path.join(process.cwd(), "cache.db"),
+    "/Users/ospeto/uploader/cache.db",
   ].filter(Boolean) as string[];
 
   for (const p of candidates) {

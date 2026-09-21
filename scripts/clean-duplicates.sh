@@ -9,6 +9,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIGHTHOUSE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export LIGHTHOUSE_ROOT
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 

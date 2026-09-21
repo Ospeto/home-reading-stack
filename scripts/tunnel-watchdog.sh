@@ -3,8 +3,15 @@ set -u
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
-LOG_FILE="${LOG_FILE:-/Users/ospeto/Library/Logs/reading-tunnel-watchdog.log}"
-ENV_FILE="${ENV_FILE:-/Users/ospeto/uploader/.env}"
+LIGHTHOUSE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export LIGHTHOUSE_ROOT
+
+LOG_DIR="${LOG_DIR:-${HOME}/Library/Logs}"
+LOG_FILE="${LOG_FILE:-${LOG_DIR}/reading-tunnel-watchdog.log}"
+ENV_FILE="${ENV_FILE:-${LIGHTHOUSE_ROOT}/.env}"
+if [ ! -f "$ENV_FILE" ] && [ -f "${LIGHTHOUSE_ROOT}/uploader/.env" ]; then
+  ENV_FILE="${LIGHTHOUSE_ROOT}/uploader/.env"
+fi
 UID_NUM=$(id -u)
 
 # Local prerequisite services
@@ -34,7 +41,7 @@ fi
 if [ -n "${WAN_HQ_URL:-}" ]; then
   US_WAN_HQ_URL="$WAN_HQ_URL"
 fi
-US_LOG_FILE="${US_LOG_FILE:-/Users/ospeto/Library/Logs/reading-vless-tunnel.log}"
+US_LOG_FILE="${US_LOG_FILE:-${LOG_DIR}/reading-vless-tunnel.log}"
 
 # --- Singapore Tunnel Configurations ---
 SG_TUNNEL_LABEL="${SG_TUNNEL_LABEL:-com.ospeto.reading-sg-tunnel}"
@@ -44,7 +51,7 @@ SG_OPDS_8443_URL="${SG_OPDS_8443_URL:-https://opds.wavypremium.xyz:8443/opds}"
 SG_KOSYNC_URL="${SG_KOSYNC_URL:-http://kosync-sg.wavypremium.xyz/health}"
 SG_FAIL_COUNT_FILE="${SG_FAIL_COUNT_FILE:-/tmp/reading-tunnel-failures-sg}"
 SG_ALERT_TRACK_FILE="${SG_ALERT_TRACK_FILE:-/tmp/reading-tunnel-alerted-sg}"
-SG_LOG_FILE="${SG_LOG_FILE:-/Users/ospeto/Library/Logs/reading-sg-tunnel.log}"
+SG_LOG_FILE="${SG_LOG_FILE:-${LOG_DIR}/reading-sg-tunnel.log}"
 
 log() {
   local NOW
@@ -60,7 +67,7 @@ case "$LOCAL_KOSYNC_PORT" in ''|*[!0-9]*) log "ERROR: Invalid LOCAL_KOSYNC_PORT"
 
 restart_launchagent() {
   local LABEL="$1"
-  local PLIST="/Users/ospeto/Library/LaunchAgents/${LABEL}.plist"
+  local PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
   log "Restarting LaunchAgent ${LABEL}..."
   if launchctl print "gui/${UID_NUM}/${LABEL}" >/dev/null 2>&1; then
     launchctl kickstart -k "gui/${UID_NUM}/${LABEL}" 2>/dev/null || true

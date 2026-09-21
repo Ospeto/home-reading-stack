@@ -56,10 +56,16 @@ export function getDropDir(): string {
   }
 }
 
+export const LIGHTHOUSE_ROOT =
+  process.env.LIGHTHOUSE_ROOT ||
+  path.resolve((import.meta as { dir?: string }).dir || process.cwd(), "..");
+
 const SERVER_URL = "http://127.0.0.1:8088";
 const ENV_PATH =
   process.env.ENV_PATH ||
-  path.resolve((import.meta as any).dir || process.cwd(), ".env");
+  (fs.existsSync(path.resolve((import.meta as { dir?: string }).dir || process.cwd(), ".env"))
+    ? path.resolve((import.meta as { dir?: string }).dir || process.cwd(), ".env")
+    : path.resolve(LIGHTHOUSE_ROOT, ".env"));
 
 export function getCoverCacheDir(): string {
   if (process.env.COVER_CACHE_DIR) return process.env.COVER_CACHE_DIR;

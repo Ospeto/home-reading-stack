@@ -1,15 +1,59 @@
 #!/bin/bash
 set -euo pipefail
 
+LIGHTHOUSE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export LIGHTHOUSE_ROOT
+
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
-LOCAL_BACKUP_DIR="${LOCAL_BACKUP_DIR:-/Users/ospeto/.backups/reading-stack}"
+ENV_FILE="${ENV_FILE:-${LIGHTHOUSE_ROOT}/.env}"
+if [ ! -f "$ENV_FILE" ] && [ -f "${LIGHTHOUSE_ROOT}/uploader/.env" ]; then
+  ENV_FILE="${LIGHTHOUSE_ROOT}/uploader/.env"
+fi
+
+# Load environment configuration if available
+TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+TELEGRAM_BACKUP_CHAT_ID="${TELEGRAM_BACKUP_CHAT_ID:-}"
+BACKUP_DIR="${BACKUP_DIR:-}"
+CALIBRE_LIBRARY_DIR="${CALIBRE_LIBRARY_DIR:-}"
+CALIBRE_DB_PATH="${CALIBRE_DB_PATH:-}"
+KOSYNC_DB_PATH="${KOSYNC_DB_PATH:-}"
+CACHE_DB_PATH="${CACHE_DB_PATH:-}"
+JOBS_DB_PATH="${JOBS_DB_PATH:-}"
+MANGA_DB_PATH="${MANGA_DB_PATH:-}"
+
+if [ -f "$ENV_FILE" ]; then
+  while IFS='=' read -r key val || [ -n "$key" ]; do
+    key=$(echo "$key" | tr -d '[:space:]')
+    [[ "$key" =~ ^#.*$ ]] && continue
+    [ -z "$key" ] && continue
+    val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")
+    # Evaluate $HOME or ~ if present
+    val="${val/#\~/$HOME}"
+    val="${val//\$\{HOME\}/$HOME}"
+    val="${val//\$HOME/$HOME}"
+    case "$key" in
+      TELEGRAM_BOT_TOKEN) [ -z "$TELEGRAM_BOT_TOKEN" ] && TELEGRAM_BOT_TOKEN="$val" ;;
+      TELEGRAM_BACKUP_CHAT_ID) [ -z "$TELEGRAM_BACKUP_CHAT_ID" ] && TELEGRAM_BACKUP_CHAT_ID="$val" ;;
+      BACKUP_DIR) [ -z "$BACKUP_DIR" ] && BACKUP_DIR="$val" ;;
+      CALIBRE_LIBRARY_DIR) [ -z "$CALIBRE_LIBRARY_DIR" ] && CALIBRE_LIBRARY_DIR="$val" ;;
+      CALIBRE_DB_PATH) [ -z "$CALIBRE_DB_PATH" ] && CALIBRE_DB_PATH="$val" ;;
+      KOSYNC_DB_PATH) [ -z "$KOSYNC_DB_PATH" ] && KOSYNC_DB_PATH="$val" ;;
+      CACHE_DB_PATH) [ -z "$CACHE_DB_PATH" ] && CACHE_DB_PATH="$val" ;;
+      JOBS_DB_PATH) [ -z "$JOBS_DB_PATH" ] && JOBS_DB_PATH="$val" ;;
+      MANGA_DB_PATH) [ -z "$MANGA_DB_PATH" ] && MANGA_DB_PATH="$val" ;;
+      PROXY_URL) [ -z "${PROXY_URL:-}" ] && PROXY_URL="$val" ;;
+    esac
+  done < "$ENV_FILE"
+fi
+
+LOG_DIR="${LOG_DIR:-${HOME}/Library/Logs}"
+LOG_FILE="${LOG_FILE:-${LOG_DIR}/reading-stack-backup.log}"
+LOCAL_BACKUP_DIR="${LOCAL_BACKUP_DIR:-${BACKUP_DIR:-${HOME}/.backups/reading-stack}}"
 SSD_BACKUP_DIR="${SSD_BACKUP_DIR:-/Volumes/Ospeto_SSD/backups/reading-stack}"
 TEMP_DIR=$(mktemp -d /tmp/reading-stack-backup-XXXXXX)
 TIMESTAMP=$(date "+%Y-%m-%d_%H%M%S")
 DISPLAY_DATE=$(date "+%Y-%m-%d %H:%M:%S")
-LOG_FILE="${LOG_FILE:-/Users/ospeto/Library/Logs/reading-stack-backup.log}"
-ENV_FILE="${ENV_FILE:-/Users/ospeto/uploader/.env}"
 PROXY_URL="${PROXY_URL:-http://127.0.0.1:7890}"
 
 log() {
@@ -31,7 +75,7 @@ mkdir -p "$(dirname "$LOG_FILE")"
 BACKED_UP_DBS=()
 
 # 1. Hot SQLite Backup KOSync DB
-KOSYNC_DB="${KOSYNC_DB:-/Users/ospeto/kosync-server/data/koreader-sync.db}"
+KOSYNC_DB="${KOSYNC_DB:-${KOSYNC_DB_PATH:-${HOME}/kosync-server/data/koreader-sync.db}}"
 if [ -f "$KOSYNC_DB" ]; then
   if sqlite3 "$KOSYNC_DB" ".backup '${TEMP_DIR}/koreader-sync.db'"; then
     log "Backed up KOSync database"
@@ -44,7 +88,14 @@ else
 fi
 
 # 2. Hot SQLite Backup Calibre Library metadata.db
-CALIBRE_DB="${CALIBRE_DB:-/Users/ospeto/Calibre Libraries/Agent Library/metadata.db}"
+CALIBRE_DB="${CALIBRE_DB:-${CALIBRE_DB_PATH:-}}"
+if [ -z "$CALIBRE_DB" ]; then
+  if [ -n "$CALIBRE_LIBRARY_DIR" ] && [ -f "${CALIBRE_LIBRARY_DIR}/metadata.db" ]; then
+    CALIBRE_DB="${CALIBRE_LIBRARY_DIR}/metadata.db"
+  else
+    CALIBRE_DB="${HOME}/Calibre Libraries/Agent Library/metadata.db"
+  fi
+fi
 if [ -f "$CALIBRE_DB" ]; then
   if sqlite3 "$CALIBRE_DB" ".backup '${TEMP_DIR}/metadata.db'"; then
     log "Backed up Calibre metadata database"
@@ -57,7 +108,14 @@ else
 fi
 
 # 3. Hot SQLite Backup Uploader Cache DB
-CACHE_DB="${CACHE_DB:-/Users/ospeto/uploader/cache.db}"
+CACHE_DB="${CACHE_DB:-${CACHE_DB_PATH:-${JOBS_DB_PATH:-}}}"
+if [ -z "$CACHE_DB" ]; then
+  if [ -f "${LIGHTHOUSE_ROOT}/cache.db" ]; then
+    CACHE_DB="${LIGHTHOUSE_ROOT}/cache.db"
+  else
+    CACHE_DB="${LIGHTHOUSE_ROOT}/uploader/cache.db"
+  fi
+fi
 if [ -f "$CACHE_DB" ]; then
   if sqlite3 "$CACHE_DB" ".backup '${TEMP_DIR}/cache.db'"; then
     log "Backed up Uploader cache database"
@@ -70,7 +128,7 @@ else
 fi
 
 # 4. Hot SQLite Backup Manga Processor DB (if present)
-MANGA_DB="${MANGA_DB:-/Users/ospeto/manga-processor/manga.db}"
+MANGA_DB="${MANGA_DB:-${MANGA_DB_PATH:-${HOME}/manga-processor/manga.db}}"
 if [ -f "$MANGA_DB" ]; then
   if sqlite3 "$MANGA_DB" ".backup '${TEMP_DIR}/manga.db'"; then
     log "Backed up Manga processor database"
@@ -113,11 +171,11 @@ PRUNED=$(find "$LOCAL_BACKUP_DIR" -name "reading-stack-backup-*.tar.gz" -mtime +
 log "Pruned ${PRUNED} local backup(s) older than 7 days."
 
 # 8. Log Hygiene: Cap active log files at 10MB
-for logf in /Users/ospeto/Library/Logs/telegram-bot.log \
-            /Users/ospeto/Library/Logs/uploader.log \
-            /Users/ospeto/Library/Logs/calibre-server.log \
-            /Users/ospeto/Library/Logs/kosync.log \
-            /Users/ospeto/Library/Logs/manga-processor.log; do
+for logf in "${LOG_DIR}/telegram-bot.log" \
+            "${LOG_DIR}/uploader.log" \
+            "${LOG_DIR}/calibre-server.log" \
+            "${LOG_DIR}/kosync.log" \
+            "${LOG_DIR}/manga-processor.log"; do
   if [ -f "$logf" ] && [ "$(stat -f%z "$logf" 2>/dev/null || echo 0)" -gt 10485760 ]; then
     tail -n 2000 "$logf" > "${logf}.tmp" && mv "${logf}.tmp" "$logf"
     log "Rotated log: $(basename "$logf") (>10MB)"
@@ -125,31 +183,13 @@ for logf in /Users/ospeto/Library/Logs/telegram-bot.log \
 done
 
 # 9. Deliver Daily Backup to Telegram if configured
-TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
-TELEGRAM_BACKUP_CHAT_ID="${TELEGRAM_BACKUP_CHAT_ID:-}"
-
-if [ -f "$ENV_FILE" ]; then
-  while IFS='=' read -r key val || [ -n "$key" ]; do
-    key=$(echo "$key" | tr -d '[:space:]')
-    [[ "$key" =~ ^#.*$ ]] && continue
-    [ -z "$key" ] && continue
-    val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")
-    if [ "$key" = "TELEGRAM_BOT_TOKEN" ] && [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-      TELEGRAM_BOT_TOKEN="$val"
-    fi
-    if [ "$key" = "TELEGRAM_BACKUP_CHAT_ID" ] && [ -z "$TELEGRAM_BACKUP_CHAT_ID" ]; then
-      TELEGRAM_BACKUP_CHAT_ID="$val"
-    fi
-  done < "$ENV_FILE"
-fi
-
 if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_BACKUP_CHAT_ID" ]; then
   DB_LIST=$(printf ", %s" "${BACKED_UP_DBS[@]}")
   DB_LIST="${DB_LIST:2}"
   CAPTION=$(cat << EOF
-📦 *Reading Stack Database Backup*
+📊 *Reading Stack Database Backup*
 📅 *Date:* ${DISPLAY_DATE}
-📊 *Size:* ${ARCHIVE_SIZE_KB} KB
+💾 *Size:* ${ARCHIVE_SIZE_KB} KB
 🗄️ *Databases:* ${DB_LIST}
 ✨ _Secure offline snapshot stored in your Telegram history._
 EOF

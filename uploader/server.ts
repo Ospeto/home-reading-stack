@@ -53,7 +53,7 @@ export function getDropDir(): string {
 export function getCoverCacheDir(): string {
   const defaultDir =
     process.env.COVER_CACHE_DIR ||
-    path.resolve((import.meta as any).dir || process.cwd(), "cache", "covers");
+    path.resolve((import.meta as { dir?: string }).dir || process.cwd(), "cache", "covers");
   try {
     if (!fs.existsSync(defaultDir)) {
       fs.mkdirSync(defaultDir, { recursive: true });
@@ -67,6 +67,10 @@ export function getCoverCacheDir(): string {
     return fallback;
   }
 }
+
+export const LIGHTHOUSE_ROOT =
+  process.env.LIGHTHOUSE_ROOT ||
+  path.resolve((import.meta as { dir?: string }).dir || process.cwd(), "..");
 
 const SERVER_URL = process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088";
 

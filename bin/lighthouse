@@ -1,0 +1,1210 @@
+#!/bin/bash
+# ==============================================================================
+# bin/lighthouse
+#
+# Unified Control CLI for the LightHouse Reading Stack architecture.
+# Dynamic path resolution, service lifecycle, auto-healing, and 1-command backup.
+# ==============================================================================
+
+set -euo pipefail
+
+LIGHTHOUSE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export LIGHTHOUSE_ROOT
+
+# Ensure standard binaries and Homebrew are available on PATH
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+VERSION="1.0.0"
+
+# ------------------------------------------------------------------------------
+# 1. Environment Loading & Path Defaults
+# ------------------------------------------------------------------------------
+ENV_FILE="${ENV_FILE:-${LIGHTHOUSE_ROOT}/.env}"
+if [ ! -f "$ENV_FILE" ] && [ -f "${LIGHTHOUSE_ROOT}/uploader/.env" ]; then
+  ENV_FILE="${LIGHTHOUSE_ROOT}/uploader/.env"
+fi
+
+# Load variables from .env if present
+UPLOADER_PORT="${UPLOADER_PORT:-8086}"
+KOSYNC_PORT="${KOSYNC_PORT:-7200}"
+CALIBRE_PORT="${CALIBRE_PORT:-8088}"
+PROXY_PORT="${PROXY_PORT:-7890}"
+PROXY_URL="${PROXY_URL:-http://127.0.0.1:${PROXY_PORT}}"
+CALIBRE_SERVER_URL="${CALIBRE_SERVER_URL:-http://127.0.0.1:${CALIBRE_PORT}}"
+US_WAN_HQ_URL="${US_WAN_HQ_URL:-https://reading.wavypremium.xyz}"
+SG_OPDS_80_URL="${SG_OPDS_80_URL:-http://opds.wavypremium.xyz/opds}"
+SG_KOSYNC_URL="${SG_KOSYNC_URL:-http://kosync-sg.wavypremium.xyz}"
+US_REMOTE_HOST="${US_REMOTE_HOST:-panel}"
+SG_REMOTE_HOST="${SG_REMOTE_HOST:-sg-vps}"
+CURRENT_USER="$(id -un 2>/dev/null || echo "$USER")"
+CURRENT_UID="$(id -u 2>/dev/null || echo 501)"
+DAEMON_PREFIX="${LIGHTHOUSE_DAEMON_PREFIX:-com.${CURRENT_USER}}"
+
+CALIBRE_LIBRARY_DIR="${CALIBRE_LIBRARY_DIR:-}"
+CALIBRE_DB_PATH="${CALIBRE_DB_PATH:-}"
+KOSYNC_DB_PATH="${KOSYNC_DB_PATH:-}"
+CACHE_DB_PATH="${CACHE_DB_PATH:-}"
+JOBS_DB_PATH="${JOBS_DB_PATH:-}"
+MANGA_DB_PATH="${MANGA_DB_PATH:-}"
+BACKUP_DIR="${BACKUP_DIR:-}"
+LOG_DIR="${LOG_DIR:-${HOME}/Library/Logs}"
+
+if [ -f "$ENV_FILE" ]; then
+  while IFS='=' read -r key val || [ -n "$key" ]; do
+    key=$(echo "$key" | tr -d '[:space:]')
+    [[ "$key" =~ ^#.*$ ]] && continue
+    [ -z "$key" ] && continue
+    val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")
+    val="${val/#\~/$HOME}"
+    val="${val//\$\{HOME\}/$HOME}"
+    val="${val//\$HOME/$HOME}"
+    case "$key" in
+      UPLOADER_PORT) UPLOADER_PORT="$val" ;;
+      KOSYNC_PORT) KOSYNC_PORT="$val" ;;
+      CALIBRE_PORT) CALIBRE_PORT="$val" ;;
+      PROXY_PORT) PROXY_PORT="$val" ;;
+      PROXY_URL) PROXY_URL="$val" ;;
+      CALIBRE_SERVER_URL) CALIBRE_SERVER_URL="$val" ;;
+      US_WAN_HQ_URL) US_WAN_HQ_URL="$val" ;;
+      SG_OPDS_80_URL) SG_OPDS_80_URL="$val" ;;
+      SG_KOSYNC_URL) SG_KOSYNC_URL="$val" ;;
+      US_REMOTE_HOST) US_REMOTE_HOST="$val" ;;
+      SG_REMOTE_HOST) SG_REMOTE_HOST="$val" ;;
+      LIGHTHOUSE_DAEMON_PREFIX) DAEMON_PREFIX="$val" ;;
+      CALIBRE_LIBRARY_DIR) CALIBRE_LIBRARY_DIR="$val" ;;
+      CALIBRE_DB_PATH) CALIBRE_DB_PATH="$val" ;;
+      KOSYNC_DB_PATH) KOSYNC_DB_PATH="$val" ;;
+      CACHE_DB_PATH) CACHE_DB_PATH="$val" ;;
+      JOBS_DB_PATH) JOBS_DB_PATH="$val" ;;
+      MANGA_DB_PATH) MANGA_DB_PATH="$val" ;;
+      BACKUP_DIR) BACKUP_DIR="$val" ;;
+      LOG_DIR) LOG_DIR="$val" ;;
+    esac
+  done < "$ENV_FILE"
+fi
+
+# Fallback path resolutions
+if [ -z "$CALIBRE_LIBRARY_DIR" ]; then
+  if [ -d "${HOME}/Calibre Libraries/Agent Library" ]; then
+    CALIBRE_LIBRARY_DIR="${HOME}/Calibre Libraries/Agent Library"
+  elif [ -d "${LIGHTHOUSE_ROOT}/data/calibre-library" ]; then
+    CALIBRE_LIBRARY_DIR="${LIGHTHOUSE_ROOT}/data/calibre-library"
+  else
+    CALIBRE_LIBRARY_DIR="${HOME}/Calibre Libraries/Agent Library"
+  fi
+fi
+
+if [ -z "$CALIBRE_DB_PATH" ]; then
+  CALIBRE_DB_PATH="${CALIBRE_LIBRARY_DIR}/metadata.db"
+fi
+
+if [ -z "$KOSYNC_DB_PATH" ]; then
+  if [ -f "${HOME}/kosync-server/data/koreader-sync.db" ]; then
+    KOSYNC_DB_PATH="${HOME}/kosync-server/data/koreader-sync.db"
+  elif [ -f "${LIGHTHOUSE_ROOT}/data/kosync/koreader-sync.db" ]; then
+    KOSYNC_DB_PATH="${LIGHTHOUSE_ROOT}/data/kosync/koreader-sync.db"
+  else
+    KOSYNC_DB_PATH="${HOME}/kosync-server/data/koreader-sync.db"
+  fi
+fi
+
+if [ -z "$CACHE_DB_PATH" ]; then
+  if [ -n "$JOBS_DB_PATH" ]; then
+    CACHE_DB_PATH="$JOBS_DB_PATH"
+  elif [ -f "${LIGHTHOUSE_ROOT}/cache.db" ]; then
+    CACHE_DB_PATH="${LIGHTHOUSE_ROOT}/cache.db"
+  else
+    CACHE_DB_PATH="${LIGHTHOUSE_ROOT}/uploader/cache.db"
+  fi
+fi
+
+if [ -z "$MANGA_DB_PATH" ]; then
+  MANGA_DB_PATH="${HOME}/manga-processor/manga.db"
+fi
+
+if [ -z "$BACKUP_DIR" ]; then
+  BACKUP_DIR="${HOME}/.backups/reading-stack"
+fi
+
+# ------------------------------------------------------------------------------
+# 2. Terminal Styling & Color Helpers
+# ------------------------------------------------------------------------------
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  COLOR_RESET="\033[0m"
+  COLOR_BOLD="\033[1m"
+  COLOR_DIM="\033[2m"
+  COLOR_GREEN="\033[32m"
+  COLOR_RED="\033[31m"
+  COLOR_YELLOW="\033[33m"
+  COLOR_CYAN="\033[36m"
+else
+  COLOR_RESET=""
+  COLOR_BOLD=""
+  COLOR_DIM=""
+  COLOR_GREEN=""
+  COLOR_RED=""
+  COLOR_YELLOW=""
+  COLOR_CYAN=""
+fi
+
+badge_active()   { echo -e "${COLOR_GREEN}[ACTIVE]${COLOR_RESET}"; }
+badge_inactive() { echo -e "${COLOR_RED}[INACTIVE]${COLOR_RESET}"; }
+badge_connected(){ echo -e "${COLOR_GREEN}[CONNECTED]${COLOR_RESET}"; }
+badge_running()  { echo -e "${COLOR_GREEN}[RUNNING]${COLOR_RESET}"; }
+badge_stopped()  { echo -e "${COLOR_DIM}[STOPPED]${COLOR_RESET}"; }
+badge_warn()     { echo -e "${COLOR_YELLOW}[WARN]${COLOR_RESET}"; }
+
+# ------------------------------------------------------------------------------
+# 3. System Inspection Primitives
+# ------------------------------------------------------------------------------
+is_port_listening() {
+  local port="$1"
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1 && return 0
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -iTCP:"$port" -sTCP:LISTEN -P -n >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+get_port_pid() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    local pid
+    pid=$(lsof -iTCP:"$port" -sTCP:LISTEN -Fp 2>/dev/null | head -n 1 | tr -d 'p' || true)
+    if [ -n "$pid" ]; then
+      echo "$pid"
+      return 0
+    fi
+  fi
+  echo "-"
+}
+
+get_launchagent_status() {
+  local label="$1"
+  if command -v launchctl >/dev/null 2>&1; then
+    local out
+    out=$(launchctl print "gui/${CURRENT_UID}/${label}" 2>&1 || true)
+    if echo "$out" | grep -q "state = running"; then
+      local pid
+      pid=$(echo "$out" | grep "pid =" | grep -oE '[0-9]+' | head -n 1 || echo "")
+      if [ -n "$pid" ]; then
+        echo "RUNNING:${pid}"
+        return 0
+      fi
+      echo "RUNNING"
+      return 0
+    fi
+  fi
+  echo "STOPPED"
+}
+
+probe_http_code() {
+  local url="$1"
+  local timeout="${2:-3}"
+  local proxy="${3:-}"
+  local cmd=(curl -s -o /dev/null -w "%{http_code}" -m "$timeout")
+  if [ -n "$proxy" ]; then
+    cmd+=(--proxy "$proxy")
+  fi
+  cmd+=("$url")
+  local res
+  res=$("${cmd[@]}" 2>/dev/null || echo "000")
+  echo "$res" | grep -oE '[0-9]{3}' | head -n 1 || echo "000"
+}
+
+# ------------------------------------------------------------------------------
+# 4. Command: status
+# ------------------------------------------------------------------------------
+cmd_status() {
+  local now
+  now=$(date "+%Y-%m-%d %H:%M:%S")
+
+  echo -e "${COLOR_BOLD}========================================================================${COLOR_RESET}"
+  echo -e "  ${COLOR_CYAN}${COLOR_BOLD}LightHouse Reading Stack — System Status${COLOR_RESET}"
+  echo -e "  ${COLOR_DIM}Root: ${LIGHTHOUSE_ROOT} | User: ${CURRENT_USER} | ${now}${COLOR_RESET}"
+  echo -e "${COLOR_BOLD}========================================================================${COLOR_RESET}"
+  echo ""
+
+  # 1. Local Ports
+  echo -e "  ${COLOR_BOLD}LOCAL PORT LISTENERS${COLOR_RESET}"
+  echo -e "  ${COLOR_DIM}----------------------------------------------------------------------${COLOR_RESET}"
+
+  # Reading HQ (8086)
+  if is_port_listening "$UPLOADER_PORT"; then
+    local pid
+    pid=$(get_port_pid "$UPLOADER_PORT")
+    echo -e "  Port ${UPLOADER_PORT}  $(badge_active)   Reading HQ Dashboard        PID: ${pid}"
+  else
+    echo -e "  Port ${UPLOADER_PORT}  $(badge_inactive) Reading HQ Dashboard        PID: -"
+  fi
+
+  # KOSync (7200)
+  if is_port_listening "$KOSYNC_PORT"; then
+    local pid
+    pid=$(get_port_pid "$KOSYNC_PORT")
+    echo -e "  Port ${KOSYNC_PORT}  $(badge_active)   KOSync Server               PID: ${pid}"
+  else
+    echo -e "  Port ${KOSYNC_PORT}  $(badge_inactive) KOSync Server               PID: -"
+  fi
+
+  # Calibre (8088)
+  if is_port_listening "$CALIBRE_PORT"; then
+    local pid
+    pid=$(get_port_pid "$CALIBRE_PORT")
+    echo -e "  Port ${CALIBRE_PORT}  $(badge_active)   Calibre Content Server      PID: ${pid}"
+  else
+    echo -e "  Port ${CALIBRE_PORT}  $(badge_inactive) Calibre Content Server      PID: -"
+  fi
+
+  # Sing-box Proxy (7890)
+  if is_port_listening "$PROXY_PORT"; then
+    local pid
+    pid=$(get_port_pid "$PROXY_PORT")
+    echo -e "  Port ${PROXY_PORT}  $(badge_active)   Sing-box SOCKS5 Proxy       PID: ${pid}"
+  else
+    echo -e "  Port ${PROXY_PORT}  $(badge_inactive) Sing-box SOCKS5 Proxy       PID: -"
+  fi
+  echo ""
+
+  # 2. WAN Reverse Tunnels
+  echo -e "  ${COLOR_BOLD}WAN REVERSE TUNNELS${COLOR_RESET}"
+  echo -e "  ${COLOR_DIM}----------------------------------------------------------------------${COLOR_RESET}"
+
+  # US Tunnel Check
+  local us_status
+  us_status=$(get_launchagent_status "${DAEMON_PREFIX}.reading-vless-tunnel")
+  local us_http
+  us_http=$(probe_http_code "$US_WAN_HQ_URL" 4)
+  if [[ "$us_status" =~ ^RUNNING ]] || [ "$us_http" = "200" ] || [ "$us_http" = "302" ]; then
+    echo -e "  US Tunnel (${US_REMOTE_HOST})    $(badge_connected)  ${US_WAN_HQ_URL} (HTTP ${us_http})"
+  else
+    echo -e "  US Tunnel (${US_REMOTE_HOST})    $(badge_inactive)   ${US_WAN_HQ_URL} (HTTP ${us_http})"
+  fi
+
+  # Singapore Tunnel Check
+  local sg_status
+  sg_status=$(get_launchagent_status "${DAEMON_PREFIX}.reading-sg-tunnel")
+  local sg_http
+  sg_http=$(probe_http_code "$SG_OPDS_80_URL" 4)
+  if [[ "$sg_status" =~ ^RUNNING ]] || [ "$sg_http" = "200" ] || [ "$sg_http" = "302" ]; then
+    echo -e "  SG Tunnel (${SG_REMOTE_HOST})    $(badge_connected)  ${SG_OPDS_80_URL} (HTTP ${sg_http})"
+  else
+    echo -e "  SG Tunnel (${SG_REMOTE_HOST})    $(badge_inactive)   ${SG_OPDS_80_URL} (HTTP ${sg_http})"
+  fi
+  echo ""
+
+  # 3. Background Daemons (macOS launchd)
+  if command -v launchctl >/dev/null 2>&1; then
+    echo -e "  ${COLOR_BOLD}BACKGROUND DAEMONS (launchd)${COLOR_RESET}"
+    echo -e "  ${COLOR_DIM}----------------------------------------------------------------------${COLOR_RESET}"
+    local daemons=(
+      "${DAEMON_PREFIX}.book-uploader"
+      "${DAEMON_PREFIX}.reading-telegram-bot"
+      "${DAEMON_PREFIX}.reading-tunnel-watchdog"
+      "${DAEMON_PREFIX}.reading-vless-tunnel"
+      "${DAEMON_PREFIX}.reading-sg-tunnel"
+      "${DAEMON_PREFIX}.reading-stack-backup"
+    )
+    for d in "${daemons[@]}"; do
+      local st
+      st=$(get_launchagent_status "$d")
+      if [[ "$st" =~ ^RUNNING:(.+) ]]; then
+        local p="${BASH_REMATCH[1]}"
+        printf "  %-36s $(badge_running)  PID: %s\n" "$d" "$p"
+      elif [ "$st" = "RUNNING" ]; then
+        printf "  %-36s $(badge_running)  Active\n" "$d"
+      else
+        printf "  %-36s $(badge_stopped)  -\n" "$d"
+      fi
+    done
+    echo ""
+  fi
+
+  # 4. Storage & Databases
+  echo -e "  ${COLOR_BOLD}STORAGE & DATABASES${COLOR_RESET}"
+  echo -e "  ${COLOR_DIM}----------------------------------------------------------------------${COLOR_RESET}"
+
+  # Calibre Database
+  if [ -f "$CALIBRE_DB_PATH" ]; then
+    local count
+    count=$(sqlite3 "$CALIBRE_DB_PATH" "SELECT count(*) FROM books;" 2>/dev/null || echo "error")
+    echo -e "  Calibre DB:   ${CALIBRE_DB_PATH} (${count} books)"
+  else
+    echo -e "  Calibre DB:   ${CALIBRE_DB_PATH} ${COLOR_YELLOW}(Not found)${COLOR_RESET}"
+  fi
+
+  # KOSync Database
+  if [ -f "$KOSYNC_DB_PATH" ]; then
+    local count
+    count=$(sqlite3 "$KOSYNC_DB_PATH" "SELECT count(*) FROM progress;" 2>/dev/null || echo "error")
+    echo -e "  KOSync DB:    ${KOSYNC_DB_PATH} (${count} progress records)"
+  else
+    echo -e "  KOSync DB:    ${KOSYNC_DB_PATH} ${COLOR_YELLOW}(Not found)${COLOR_RESET}"
+  fi
+
+  # Cache Database
+  if [ -f "$CACHE_DB_PATH" ]; then
+    local count
+    count=$(sqlite3 "$CACHE_DB_PATH" "SELECT count(*) FROM jobs;" 2>/dev/null || echo "0")
+    echo -e "  Cache DB:     ${CACHE_DB_PATH} (${count} jobs tracked)"
+  else
+    echo -e "  Cache DB:     ${CACHE_DB_PATH} ${COLOR_YELLOW}(Not found)${COLOR_RESET}"
+  fi
+
+  echo -e "${COLOR_BOLD}========================================================================${COLOR_RESET}"
+}
+
+# ------------------------------------------------------------------------------
+# 5. Command: up & down (Lifecycle in dependency order)
+# ------------------------------------------------------------------------------
+cmd_up() {
+  echo -e "${COLOR_BOLD}Starting LightHouse Reading Stack in dependency order...${COLOR_RESET}"
+
+  if ! command -v launchctl >/dev/null 2>&1; then
+    echo "Warning: launchctl not found. Standby mode: please run via docker compose or manual runners."
+    exit 0
+  fi
+
+  local agents_dir="${HOME}/Library/LaunchAgents"
+
+  # Dependency order:
+  # 1. Proxy
+  # 2. KOSync & Calibre server
+  # 3. Reading HQ
+  # 4. Telegram Bot & Watchdog
+  # 5. Reverse Tunnels
+  local startup_services=(
+    "${DAEMON_PREFIX}.singbox-proxy"
+    "${DAEMON_PREFIX}.kosync"
+    "${DAEMON_PREFIX}.calibre-server"
+    "${DAEMON_PREFIX}.book-uploader"
+    "${DAEMON_PREFIX}.reading-telegram-bot"
+    "${DAEMON_PREFIX}.reading-tunnel-watchdog"
+    "${DAEMON_PREFIX}.reading-vless-tunnel"
+    "${DAEMON_PREFIX}.reading-sg-tunnel"
+  )
+
+  for service in "${startup_services[@]}"; do
+    local plist="${agents_dir}/${service}.plist"
+    if [ -f "$plist" ]; then
+      echo -e "  Starting ${COLOR_CYAN}${service}${COLOR_RESET}..."
+      launchctl unload "$plist" 2>/dev/null || true
+      launchctl load -w "$plist" 2>/dev/null || true
+      if launchctl print "gui/${CURRENT_UID}/${service}" >/dev/null 2>&1; then
+        launchctl kickstart -k "gui/${CURRENT_UID}/${service}" 2>/dev/null || true
+      fi
+    fi
+  done
+
+  echo -e "${COLOR_GREEN}Stack startup sequence completed.${COLOR_RESET}"
+  cmd_status
+}
+
+cmd_down() {
+  echo -e "${COLOR_BOLD}Stopping LightHouse Reading Stack gracefully...${COLOR_RESET}"
+
+  if ! command -v launchctl >/dev/null 2>&1; then
+    echo "Warning: launchctl not found."
+    exit 0
+  fi
+
+  local agents_dir="${HOME}/Library/LaunchAgents"
+
+  # Reverse dependency order
+  local shutdown_services=(
+    "${DAEMON_PREFIX}.reading-sg-tunnel"
+    "${DAEMON_PREFIX}.reading-vless-tunnel"
+    "${DAEMON_PREFIX}.reading-tunnel-watchdog"
+    "${DAEMON_PREFIX}.reading-telegram-bot"
+    "${DAEMON_PREFIX}.book-uploader"
+    "${DAEMON_PREFIX}.calibre-server"
+    "${DAEMON_PREFIX}.kosync"
+  )
+
+  for service in "${shutdown_services[@]}"; do
+    local plist="${agents_dir}/${service}.plist"
+    if [ -f "$plist" ] || launchctl print "gui/${CURRENT_UID}/${service}" >/dev/null 2>&1; then
+      echo -e "  Stopping ${COLOR_YELLOW}${service}${COLOR_RESET}..."
+      launchctl unload "$plist" 2>/dev/null || true
+    fi
+  done
+
+  echo -e "${COLOR_GREEN}Stack shutdown sequence completed.${COLOR_RESET}"
+}
+
+# ------------------------------------------------------------------------------
+# 6. Command: health (Automated probes & auto-healing)
+# ------------------------------------------------------------------------------
+cmd_health() {
+  echo -e "${COLOR_BOLD}Running LightHouse Health & Auto-Healing Probes...${COLOR_RESET}"
+  local failures=0
+  local healed=0
+
+  # 1. Local Ports Probe
+  echo -n "  Checking Reading HQ (port ${UPLOADER_PORT})... "
+  if is_port_listening "$UPLOADER_PORT"; then
+    echo -e "$(badge_active)"
+  else
+    echo -e "$(badge_inactive)"
+    failures=$((failures + 1))
+    if command -v launchctl >/dev/null 2>&1; then
+      echo -e "  ${COLOR_YELLOW}Auto-healing: Kickstarting ${DAEMON_PREFIX}.book-uploader...${COLOR_RESET}"
+      launchctl kickstart -k "gui/${CURRENT_UID}/${DAEMON_PREFIX}.book-uploader" 2>/dev/null || true
+      sleep 1
+      if is_port_listening "$UPLOADER_PORT"; then
+        echo -e "  ${COLOR_GREEN}Successfully healed Reading HQ.${COLOR_RESET}"
+        healed=$((healed + 1))
+      fi
+    fi
+  fi
+
+  echo -n "  Checking KOSync Server (port ${KOSYNC_PORT})... "
+  if is_port_listening "$KOSYNC_PORT"; then
+    echo -e "$(badge_active)"
+  else
+    echo -e "$(badge_warn) (Offline or containerized)"
+  fi
+
+  echo -n "  Checking Calibre Server (port ${CALIBRE_PORT})... "
+  if is_port_listening "$CALIBRE_PORT"; then
+    echo -e "$(badge_active)"
+  else
+    echo -e "$(badge_warn) (Offline or containerized)"
+  fi
+
+  # 2. WAN Probes & Tunnel Auto-Healing
+  echo -n "  Probing US WAN Endpoint (${US_WAN_HQ_URL})... "
+  local us_code
+  us_code=$(probe_http_code "$US_WAN_HQ_URL" 5)
+  if [ "$us_code" = "200" ] || [ "$us_code" = "302" ]; then
+    echo -e "${COLOR_GREEN}HTTP ${us_code} OK${COLOR_RESET}"
+  else
+    echo -e "${COLOR_RED}HTTP ${us_code} FAIL${COLOR_RESET}"
+    failures=$((failures + 1))
+    # Auto-heal: attempt stale remote port clearing and local tunnel restart
+    echo -e "  ${COLOR_YELLOW}Auto-healing US Tunnel: clearing remote listeners on ${US_REMOTE_HOST}...${COLOR_RESET}"
+    ssh -o ConnectTimeout=5 -o BatchMode=yes "$US_REMOTE_HOST" "fuser -k ${UPLOADER_PORT}/tcp ${KOSYNC_PORT}/tcp" 2>/dev/null || true
+    if command -v launchctl >/dev/null 2>&1; then
+      launchctl kickstart -k "gui/${CURRENT_UID}/${DAEMON_PREFIX}.reading-vless-tunnel" 2>/dev/null || true
+      healed=$((healed + 1))
+    fi
+  fi
+
+  echo -n "  Probing Singapore OPDS Endpoint (${SG_OPDS_80_URL})... "
+  local sg_code
+  sg_code=$(probe_http_code "$SG_OPDS_80_URL" 5)
+  if [ "$sg_code" = "200" ] || [ "$sg_code" = "302" ]; then
+    echo -e "${COLOR_GREEN}HTTP ${sg_code} OK${COLOR_RESET}"
+  else
+    echo -e "${COLOR_RED}HTTP ${sg_code} FAIL${COLOR_RESET}"
+    failures=$((failures + 1))
+    echo -e "  ${COLOR_YELLOW}Auto-healing SG Tunnel: clearing remote listeners on ${SG_REMOTE_HOST}...${COLOR_RESET}"
+    ssh -o ConnectTimeout=5 -o BatchMode=yes "$SG_REMOTE_HOST" "fuser -k ${UPLOADER_PORT}/tcp ${KOSYNC_PORT}/tcp" 2>/dev/null || true
+    if command -v launchctl >/dev/null 2>&1; then
+      launchctl kickstart -k "gui/${CURRENT_UID}/${DAEMON_PREFIX}.reading-sg-tunnel" 2>/dev/null || true
+      healed=$((healed + 1))
+    fi
+  fi
+
+  echo ""
+  if [ "$failures" -eq 0 ]; then
+    echo -e "${COLOR_GREEN}${COLOR_BOLD}Health check passed: All services healthy.${COLOR_RESET}"
+    return 0
+  else
+    echo -e "${COLOR_YELLOW}Health check completed with ${failures} issue(s) detected, ${healed} healing action(s) triggered.${COLOR_RESET}"
+    return 0
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# 7. Command: install-daemons (Dynamic launchd generation)
+# ------------------------------------------------------------------------------
+cmd_install_daemons() {
+  local dry_run=0
+  local output_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry_run=1; shift ;;
+      --output-dir) output_dir="$2"; shift 2 ;;
+      *) echo "Unknown option for install-daemons: $1"; exit 1 ;;
+    esac
+  done
+
+  local target_dir="${output_dir:-${HOME}/Library/LaunchAgents}"
+  local bun_path
+  bun_path=$(which bun 2>/dev/null || echo "/opt/homebrew/bin/bun")
+  local bash_path
+  bash_path=$(which bash 2>/dev/null || echo "/bin/bash")
+  local ssh_path
+  ssh_path=$(which ssh 2>/dev/null || echo "/usr/bin/ssh")
+
+  echo -e "${COLOR_BOLD}Generating dynamic launchd plists for User: ${CURRENT_USER}...${COLOR_RESET}"
+  echo -e "  Root:       ${LIGHTHOUSE_ROOT}"
+  echo -e "  Target Dir: ${target_dir}"
+  echo -e "  Bun:        ${bun_path}"
+
+  mkdir -p "$target_dir"
+  mkdir -p "$LOG_DIR"
+
+  # 1. Reading HQ Uploader Plist
+  local uploader_plist="${target_dir}/${DAEMON_PREFIX}.book-uploader.plist"
+  cat << EOF > "$uploader_plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${DAEMON_PREFIX}.book-uploader</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${bun_path}</string>
+        <string>run</string>
+        <string>server.ts</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${LIGHTHOUSE_ROOT}/uploader</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>LIGHTHOUSE_ROOT</key>
+        <string>${LIGHTHOUSE_ROOT}</string>
+        <key>HOME</key>
+        <string>${HOME}</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/uploader.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/uploader.log</string>
+</dict>
+</plist>
+EOF
+
+  # 2. Telegram Bot Plist
+  local bot_plist="${target_dir}/${DAEMON_PREFIX}.reading-telegram-bot.plist"
+  cat << EOF > "$bot_plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${DAEMON_PREFIX}.reading-telegram-bot</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${bun_path}</string>
+        <string>run</string>
+        <string>bot.ts</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${LIGHTHOUSE_ROOT}/uploader</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>LIGHTHOUSE_ROOT</key>
+        <string>${LIGHTHOUSE_ROOT}</string>
+        <key>HOME</key>
+        <string>${HOME}</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/telegram-bot.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/telegram-bot.log</string>
+</dict>
+</plist>
+EOF
+
+  # 3. Tunnel Watchdog Plist
+  local watchdog_plist="${target_dir}/${DAEMON_PREFIX}.reading-tunnel-watchdog.plist"
+  cat << EOF > "$watchdog_plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${DAEMON_PREFIX}.reading-tunnel-watchdog</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${bash_path}</string>
+        <string>${LIGHTHOUSE_ROOT}/scripts/tunnel-watchdog.sh</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>LIGHTHOUSE_ROOT</key>
+        <string>${LIGHTHOUSE_ROOT}</string>
+        <key>HOME</key>
+        <string>${HOME}</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>120</integer>
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/reading-tunnel-watchdog.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/reading-tunnel-watchdog.log</string>
+</dict>
+</plist>
+EOF
+
+  # 4. US VLESS Tunnel Plist
+  local vless_plist="${target_dir}/${DAEMON_PREFIX}.reading-vless-tunnel.plist"
+  cat << EOF > "$vless_plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${DAEMON_PREFIX}.reading-vless-tunnel</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${ssh_path}</string>
+        <string>-N</string>
+        <string>-R</string>
+        <string>0.0.0.0:${UPLOADER_PORT}:127.0.0.1:${UPLOADER_PORT}</string>
+        <string>-R</string>
+        <string>0.0.0.0:${KOSYNC_PORT}:127.0.0.1:${KOSYNC_PORT}</string>
+        <string>-o</string>
+        <string>ProxyCommand=nc -X 5 -x 127.0.0.1:${PROXY_PORT} %h %p</string>
+        <string>-o</string>
+        <string>ServerAliveInterval=15</string>
+        <string>-o</string>
+        <string>ServerAliveCountMax=3</string>
+        <string>-o</string>
+        <string>ExitOnForwardFailure=yes</string>
+        <string>${US_REMOTE_HOST}</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/reading-vless-tunnel.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/reading-vless-tunnel.log</string>
+</dict>
+</plist>
+EOF
+
+  # 5. Singapore Tunnel Plist
+  local sg_plist="${target_dir}/${DAEMON_PREFIX}.reading-sg-tunnel.plist"
+  cat << EOF > "$sg_plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${DAEMON_PREFIX}.reading-sg-tunnel</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${ssh_path}</string>
+        <string>-N</string>
+        <string>-R</string>
+        <string>127.0.0.1:${UPLOADER_PORT}:127.0.0.1:${UPLOADER_PORT}</string>
+        <string>-R</string>
+        <string>127.0.0.1:${KOSYNC_PORT}:127.0.0.1:${KOSYNC_PORT}</string>
+        <string>-o</string>
+        <string>ServerAliveInterval=15</string>
+        <string>-o</string>
+        <string>ServerAliveCountMax=3</string>
+        <string>-o</string>
+        <string>ExitOnForwardFailure=yes</string>
+        <string>-o</string>
+        <string>BatchMode=yes</string>
+        <string>-o</string>
+        <string>ConnectTimeout=8</string>
+        <string>${SG_REMOTE_HOST}</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/reading-sg-tunnel.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/reading-sg-tunnel.log</string>
+</dict>
+</plist>
+EOF
+
+  # 6. Daily Backup Plist
+  local backup_plist="${target_dir}/${DAEMON_PREFIX}.reading-stack-backup.plist"
+  cat << EOF > "$backup_plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${DAEMON_PREFIX}.reading-stack-backup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${bash_path}</string>
+        <string>${LIGHTHOUSE_ROOT}/scripts/backup-daily.sh</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>LIGHTHOUSE_ROOT</key>
+        <string>${LIGHTHOUSE_ROOT}</string>
+        <key>HOME</key>
+        <string>${HOME}</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/reading-stack-backup.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/reading-stack-backup.log</string>
+</dict>
+</plist>
+EOF
+
+  # Validate all generated plists with plutil if available
+  local all_plists=("$uploader_plist" "$bot_plist" "$watchdog_plist" "$vless_plist" "$sg_plist" "$backup_plist")
+  for p in "${all_plists[@]}"; do
+    if command -v plutil >/dev/null 2>&1; then
+      plutil -lint "$p" >/dev/null
+    fi
+    echo -e "  ${COLOR_GREEN}✓${COLOR_RESET} Generated: $(basename "$p")"
+  done
+
+  if [ "$dry_run" -eq 1 ]; then
+    echo -e "${COLOR_YELLOW}Dry run: Plists generated but not registered with launchctl.${COLOR_RESET}"
+    return 0
+  fi
+
+  if [ -z "$output_dir" ] && command -v launchctl >/dev/null 2>&1; then
+    echo "Registering LaunchAgents with launchctl..."
+    for p in "${all_plists[@]}"; do
+      launchctl unload "$p" 2>/dev/null || true
+      launchctl load -w "$p" 2>/dev/null || true
+    done
+    echo -e "${COLOR_GREEN}LaunchAgents registered and active.${COLOR_RESET}"
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# 8. Command: backup (Hot SQLite backup, WAL checkpoint, checksum & compression)
+# ------------------------------------------------------------------------------
+cmd_backup() {
+  local out_file=""
+  local out_dir="${BACKUP_DIR}"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --output|-o) out_file="$2"; shift 2 ;;
+      --output-dir) out_dir="$2"; shift 2 ;;
+      *) echo "Unknown option for backup: $1"; exit 1 ;;
+    esac
+  done
+
+  local timestamp
+  timestamp=$(date "+%Y-%m-%d_%H%M%S")
+  local iso_time
+  iso_time=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date "+%Y-%m-%dT%H:%M:%SZ")
+
+  mkdir -p "$out_dir"
+
+  local temp_dir
+  temp_dir=$(mktemp -d /tmp/lighthouse-backup-XXXXXX)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$temp_dir'" EXIT
+
+  echo -e "${COLOR_BOLD}Starting LightHouse Hot SQLite Backup...${COLOR_RESET}"
+
+  local backed_up_count=0
+  local calibre_count=0
+  local kosync_count=0
+  local cache_count=0
+  local manga_count=0
+
+  # 1. Calibre Library metadata.db
+  if [ -f "$CALIBRE_DB_PATH" ]; then
+    echo -n "  Backing up Calibre metadata (WAL checkpoint + .backup)... "
+    sqlite3 "$CALIBRE_DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
+    if sqlite3 "$CALIBRE_DB_PATH" ".backup '${temp_dir}/metadata.db'"; then
+      calibre_count=$(sqlite3 "${temp_dir}/metadata.db" "SELECT count(*) FROM books;" 2>/dev/null || echo 0)
+      echo -e "${COLOR_GREEN}OK${COLOR_RESET} (${calibre_count} books)"
+      backed_up_count=$((backed_up_count + 1))
+    else
+      echo -e "${COLOR_RED}FAILED${COLOR_RESET}"
+    fi
+  else
+    echo -e "  Notice: Calibre metadata.db not found at ${CALIBRE_DB_PATH}"
+  fi
+
+  # 2. KOSync Progress koreader-sync.db
+  if [ -f "$KOSYNC_DB_PATH" ]; then
+    echo -n "  Backing up KOSync database (WAL checkpoint + .backup)... "
+    sqlite3 "$KOSYNC_DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
+    if sqlite3 "$KOSYNC_DB_PATH" ".backup '${temp_dir}/koreader-sync.db'"; then
+      kosync_count=$(sqlite3 "${temp_dir}/koreader-sync.db" "SELECT count(*) FROM progress;" 2>/dev/null || echo 0)
+      echo -e "${COLOR_GREEN}OK${COLOR_RESET} (${kosync_count} progress records)"
+      backed_up_count=$((backed_up_count + 1))
+    else
+      echo -e "${COLOR_RED}FAILED${COLOR_RESET}"
+    fi
+  else
+    echo -e "  Notice: KOSync database not found at ${KOSYNC_DB_PATH}"
+  fi
+
+  # 3. Uploader Cache & Jobs cache.db
+  if [ -f "$CACHE_DB_PATH" ]; then
+    echo -n "  Backing up Uploader cache (WAL checkpoint + .backup)... "
+    sqlite3 "$CACHE_DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
+    if sqlite3 "$CACHE_DB_PATH" ".backup '${temp_dir}/cache.db'"; then
+      cache_count=$(sqlite3 "${temp_dir}/cache.db" "SELECT count(*) FROM jobs;" 2>/dev/null || echo 0)
+      echo -e "${COLOR_GREEN}OK${COLOR_RESET} (${cache_count} jobs)"
+      backed_up_count=$((backed_up_count + 1))
+    else
+      echo -e "${COLOR_RED}FAILED${COLOR_RESET}"
+    fi
+  fi
+
+  # 4. Manga Processor DB (if present)
+  if [ -f "$MANGA_DB_PATH" ]; then
+    echo -n "  Backing up Manga database... "
+    sqlite3 "$MANGA_DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
+    if sqlite3 "$MANGA_DB_PATH" ".backup '${temp_dir}/manga.db'"; then
+      manga_count=$(sqlite3 "${temp_dir}/manga.db" "SELECT count(*) FROM sqlite_master;" 2>/dev/null || echo 0)
+      echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
+      backed_up_count=$((backed_up_count + 1))
+    fi
+  fi
+
+  # 5. Credentials & Configuration
+  if [ -f "$ENV_FILE" ]; then
+    cp "$ENV_FILE" "${temp_dir}/.env"
+    chmod 600 "${temp_dir}/.env"
+    echo -e "  Included environment credentials: ${COLOR_CYAN}$(basename "$ENV_FILE")${COLOR_RESET}"
+  fi
+
+  if [ "$backed_up_count" -eq 0 ] && [ ! -f "${temp_dir}/.env" ]; then
+    echo -e "${COLOR_RED}Error: No databases or configuration found to back up.${COLOR_RESET}"
+    exit 1
+  fi
+
+  # 6. Generate Manifest
+  local hostname_str
+  hostname_str=$(hostname 2>/dev/null || echo "unknown")
+  cat << EOF > "${temp_dir}/manifest.json"
+{
+  "version": "${VERSION}",
+  "timestamp": "${iso_time}",
+  "hostname": "${hostname_str}",
+  "databases": {
+    "calibre": { "books": ${calibre_count} },
+    "kosync": { "progress": ${kosync_count} },
+    "cache": { "jobs": ${cache_count} },
+    "manga": { "tables": ${manga_count} }
+  }
+}
+EOF
+
+  # 7. Compression
+  local bundle_ext="tar.gz"
+  local use_zstd=0
+  if command -v zstd >/dev/null 2>&1 && tar --help 2>&1 | grep -q zstd; then
+    bundle_ext="tar.zst"
+    use_zstd=1
+  fi
+
+  local target_bundle="${out_file}"
+  if [ -z "$target_bundle" ]; then
+    target_bundle="${out_dir}/lighthouse-backup-${timestamp}.${bundle_ext}"
+  fi
+
+  if [ "$use_zstd" -eq 1 ]; then
+    tar --zstd -cf "$target_bundle" -C "$temp_dir" .
+  else
+    tar -czf "$target_bundle" -C "$temp_dir" .
+  fi
+  chmod 600 "$target_bundle"
+
+  # 8. Checksum Calculation
+  local sha_file="${target_bundle}.sha256"
+  if command -v shasum >/dev/null 2>&1; then
+    (cd "$(dirname "$target_bundle")" && shasum -a 256 "$(basename "$target_bundle")" > "$(basename "$sha_file")")
+  elif command -v sha256sum >/dev/null 2>&1; then
+    (cd "$(dirname "$target_bundle")" && sha256sum "$(basename "$target_bundle")" > "$(basename "$sha_file")")
+  fi
+
+  local bundle_size
+  bundle_size=$(stat -f%z "$target_bundle" 2>/dev/null || stat -c%s "$target_bundle" 2>/dev/null || echo 0)
+  local bundle_size_kb=$(( (bundle_size + 1023) / 1024 ))
+
+  echo ""
+  echo -e "${COLOR_GREEN}${COLOR_BOLD}✓ Backup successfully completed!${COLOR_RESET}"
+  echo -e "  Bundle:   ${COLOR_BOLD}${target_bundle}${COLOR_RESET} (${bundle_size_kb} KB)"
+  echo -e "  Checksum: ${sha_file}"
+}
+
+# ------------------------------------------------------------------------------
+# 9. Command: restore (Verified restoration & integrity verification)
+# ------------------------------------------------------------------------------
+cmd_restore() {
+  if [ $# -eq 0 ]; then
+    echo "Usage: bin/lighthouse restore <bundle-file> [--target <dir>] [--dry-run] [--force]"
+    exit 1
+  fi
+
+  local bundle="$1"
+  shift
+
+  local target_override=""
+  local dry_run=0
+  local force=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --target) target_override="$2"; shift 2 ;;
+      --dry-run) dry_run=1; shift ;;
+      --force|-f) force=1; shift ;;
+      *) echo "Unknown option for restore: $1"; exit 1 ;;
+    esac
+  done
+
+  if [ ! -f "$bundle" ]; then
+    echo -e "${COLOR_RED}Error: Backup bundle not found: ${bundle}${COLOR_RESET}"
+    exit 1
+  fi
+
+  echo -e "${COLOR_BOLD}Verifying LightHouse Backup Bundle: ${bundle}...${COLOR_RESET}"
+
+  # 1. Verify Checksum if .sha256 is present
+  local sha_file="${bundle}.sha256"
+  if [ -f "$sha_file" ]; then
+    echo -n "  Verifying SHA256 checksum... "
+    local sha_verified=0
+    if command -v shasum >/dev/null 2>&1; then
+      if (cd "$(dirname "$bundle")" && shasum -a 256 -c "$(basename "$sha_file")" >/dev/null 2>&1); then
+        sha_verified=1
+      fi
+    elif command -v sha256sum >/dev/null 2>&1; then
+      if (cd "$(dirname "$bundle")" && sha256sum -c "$(basename "$sha_file")" >/dev/null 2>&1); then
+        sha_verified=1
+      fi
+    fi
+    if [ "$sha_verified" -eq 1 ]; then
+      echo -e "${COLOR_GREEN}VERIFIED${COLOR_RESET}"
+    else
+      echo -e "${COLOR_RED}FAILED (Checksum mismatch!)${COLOR_RESET}"
+      exit 1
+    fi
+  fi
+
+  # 2. Extract to temporary staging sandbox
+  local staging_dir
+  staging_dir=$(mktemp -d /tmp/lighthouse-restore-XXXXXX)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$staging_dir'" EXIT
+
+  echo -n "  Decompressing and verifying archive format... "
+  if [[ "$bundle" =~ \.zst$ ]]; then
+    tar --zstd -xf "$bundle" -C "$staging_dir"
+  else
+    tar -xzf "$bundle" -C "$staging_dir"
+  fi
+  echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
+
+  # 3. SQLite Integrity Checks on all extracted DBs
+  echo "  Running SQLite integrity checks on staged databases:"
+  for db_file in "${staging_dir}"/*.db; do
+    [ -f "$db_file" ] || continue
+    local db_name
+    db_name=$(basename "$db_file")
+    echo -n "    - ${db_name}: "
+    local check_res
+    check_res=$(sqlite3 "$db_file" "PRAGMA integrity_check;" 2>&1 || echo "failed")
+    if [ "$check_res" = "ok" ]; then
+      echo -e "${COLOR_GREEN}INTEGRITY OK${COLOR_RESET}"
+    else
+      echo -e "${COLOR_RED}CORRUPTED (${check_res})${COLOR_RESET}"
+      echo -e "${COLOR_RED}Restoration aborted: Database corruption detected in backup.${COLOR_RESET}"
+      exit 1
+    fi
+  done
+
+  # 4. Dry run check
+  if [ "$dry_run" -eq 1 ]; then
+    echo ""
+    echo -e "${COLOR_YELLOW}${COLOR_BOLD}Dry-run mode: All verification checks passed.${COLOR_RESET}"
+    echo "  Staged files verified:"
+    (cd "$staging_dir" && ls -la)
+    return 0
+  fi
+
+  # 5. Confirm restoration if not forced
+  if [ "$force" -eq 0 ]; then
+    echo ""
+    echo -e "${COLOR_YELLOW}Warning: Restoring will overwrite existing databases with data from this bundle.${COLOR_RESET}"
+    read -r -p "Do you wish to proceed? [y/N] " response
+    case "$response" in
+      [yY][eE][sS]|[yY]) ;;
+      *) echo "Restoration cancelled."; exit 0 ;;
+    esac
+  fi
+
+  # 6. Apply Restoration with Safety Snapshots
+  local restore_timestamp
+  restore_timestamp=$(date "+%Y%m%d_%H%M%S")
+
+  # Restore Calibre metadata.db
+  if [ -f "${staging_dir}/metadata.db" ]; then
+    local target_calibre="${CALIBRE_DB_PATH}"
+    if [ -n "$target_override" ]; then
+      target_calibre="${target_override}/metadata.db"
+    fi
+    mkdir -p "$(dirname "$target_calibre")"
+    if [ -f "$target_calibre" ]; then
+      cp "$target_calibre" "${target_calibre}.bak.${restore_timestamp}"
+      echo -e "  Created safety backup: ${target_calibre}.bak.${restore_timestamp}"
+    fi
+    cp "${staging_dir}/metadata.db" "$target_calibre"
+    sqlite3 "$target_calibre" "PRAGMA quick_check;" >/dev/null 2>&1
+    echo -e "  ${COLOR_GREEN}✓${COLOR_RESET} Restored Calibre DB: ${target_calibre}"
+  fi
+
+  # Restore KOSync koreader-sync.db
+  if [ -f "${staging_dir}/koreader-sync.db" ]; then
+    local target_kosync="${KOSYNC_DB_PATH}"
+    if [ -n "$target_override" ]; then
+      target_kosync="${target_override}/koreader-sync.db"
+    fi
+    mkdir -p "$(dirname "$target_kosync")"
+    if [ -f "$target_kosync" ]; then
+      cp "$target_kosync" "${target_kosync}.bak.${restore_timestamp}"
+      echo -e "  Created safety backup: ${target_kosync}.bak.${restore_timestamp}"
+    fi
+    cp "${staging_dir}/koreader-sync.db" "$target_kosync"
+    sqlite3 "$target_kosync" "PRAGMA quick_check;" >/dev/null 2>&1
+    echo -e "  ${COLOR_GREEN}✓${COLOR_RESET} Restored KOSync DB: ${target_kosync}"
+  fi
+
+  # Restore Cache cache.db
+  if [ -f "${staging_dir}/cache.db" ]; then
+    local target_cache="${CACHE_DB_PATH}"
+    if [ -n "$target_override" ]; then
+      target_cache="${target_override}/cache.db"
+    fi
+    mkdir -p "$(dirname "$target_cache")"
+    if [ -f "$target_cache" ]; then
+      cp "$target_cache" "${target_cache}.bak.${restore_timestamp}"
+    fi
+    cp "${staging_dir}/cache.db" "$target_cache"
+    sqlite3 "$target_cache" "PRAGMA quick_check;" >/dev/null 2>&1
+    echo -e "  ${COLOR_GREEN}✓${COLOR_RESET} Restored Cache DB: ${target_cache}"
+  fi
+
+  # Restore .env if target doesn't have one
+  local env_dest="${LIGHTHOUSE_ROOT}/.env"
+  if [ -n "$target_override" ]; then
+    env_dest="${target_override}/.env"
+  fi
+  if [ -f "${staging_dir}/.env" ] && [ ! -f "$env_dest" ]; then
+    cp "${staging_dir}/.env" "$env_dest"
+    chmod 600 "$env_dest"
+    echo -e "  ${COLOR_GREEN}✓${COLOR_RESET} Restored configuration: ${env_dest}"
+  fi
+
+  echo ""
+  echo -e "${COLOR_GREEN}${COLOR_BOLD}✓ Restoration complete! All databases restored and verified.${COLOR_RESET}"
+  echo "Run 'bin/lighthouse status' or 'bin/lighthouse up' to verify or start the stack."
+}
+
+# ------------------------------------------------------------------------------
+# 10. Command: help
+# ------------------------------------------------------------------------------
+cmd_help() {
+  cat << EOF
+LightHouse Reading Stack CLI (v${VERSION})
+Portable management, health auto-healing, and migration kit.
+
+Usage:
+  bin/lighthouse <command> [options]
+
+Commands:
+  status                   Display a one-screen dashboard of all ports, tunnels, and services
+  up                       Start all services gracefully in dependency order
+  down                     Stop all services gracefully in reverse dependency order
+  restart                  Restart all services (down followed by up)
+  health                   Run automated probes and auto-heal stale listeners/workers
+  install-daemons          Dynamically generate and register macOS LaunchAgents for current user
+  backup [options]         Create hot SQLite backup with WAL checkpoint, checksum, and manifest
+  restore <file> [options] Verified restoration of complete stack with integrity checks
+  version                  Print CLI version
+  help                     Show this help message
+
+Backup Options:
+  --output, -o <path>      Explicit archive file path
+  --output-dir <dir>       Directory to store backup bundle (default: ${BACKUP_DIR})
+
+Restore Options:
+  --target <dir>           Base directory to restore databases into
+  --dry-run                Verify checksum and integrity without modifying files
+  --force, -f              Bypass confirmation prompt
+
+Install-Daemons Options:
+  --dry-run                Generate plists without loading into launchctl
+  --output-dir <dir>       Write plists to custom directory (default: ~/Library/LaunchAgents)
+
+EOF
+}
+
+# ------------------------------------------------------------------------------
+# Main Dispatcher
+# ------------------------------------------------------------------------------
+if [ $# -eq 0 ]; then
+  cmd_status
+  exit 0
+fi
+
+ACTION="$1"
+shift
+
+case "$ACTION" in
+  status) cmd_status "$@" ;;
+  up) cmd_up "$@" ;;
+  down) cmd_down "$@" ;;
+  restart) cmd_down "$@"; sleep 1; cmd_up "$@" ;;
+  health) cmd_health "$@" ;;
+  install-daemons) cmd_install_daemons "$@" ;;
+  backup) cmd_backup "$@" ;;
+  restore) cmd_restore "$@" ;;
+  version|--version|-v) echo "lighthouse version ${VERSION}" ;;
+  help|--help|-h) cmd_help ;;
+  *)
+    echo "Unknown command: ${ACTION}"
+    echo "Run 'bin/lighthouse help' for usage."
+    exit 1
+    ;;
+esac
