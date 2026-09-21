@@ -63,7 +63,7 @@ services:
       - "${UPLOADER_PORT:-8086}:8086"
     environment:
       - PORT=8086
-      - CALIBRE_SERVER_URL=${CALIBRE_SERVER_URL:-http://calibre-web:8083}
+      - CALIBRE_SERVER_URL=http://calibre-web:8083
       - CALIBRE_LIBRARY_DIR=/books
       - CALIBRE_DB_PATH=/books/metadata.db
       - KOSYNC_DB_PATH=/data/kosync/koreader-sync.db
@@ -96,13 +96,14 @@ services:
     image: oven/bun:1-alpine
     container_name: reading-bot
     restart: unless-stopped
+    profiles: ["bot"]
     working_dir: /app
     command: ["bun", "run", "bot.ts"]
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - HTTP_PROXY=${HTTP_PROXY:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
-      - CALIBRE_SERVER_URL=${CALIBRE_SERVER_URL:-http://calibre-web:8083}
+      - CALIBRE_SERVER_URL=http://calibre-web:8083
       - CALIBRE_LIBRARY_DIR=/books
       - CALIBRE_DB_PATH=/books/metadata.db
       - KOSYNC_DB_PATH=/data/kosync/koreader-sync.db

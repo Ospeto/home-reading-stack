@@ -60,7 +60,7 @@ export const LIGHTHOUSE_ROOT =
   process.env.LIGHTHOUSE_ROOT ||
   path.resolve((import.meta as { dir?: string }).dir || process.cwd(), "..");
 
-const SERVER_URL = "http://127.0.0.1:8088";
+const SERVER_URL = process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088";
 const ENV_PATH =
   process.env.ENV_PATH ||
   (fs.existsSync(path.resolve((import.meta as { dir?: string }).dir || process.cwd(), ".env"))
@@ -78,10 +78,12 @@ export function getCoverCacheDir(): string {
 
 export function getCacheDbPath(): string {
   if (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH) {
-    return (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH)!;
+    const raw = (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH)!;
+    return path.isAbsolute(raw) ? raw : path.resolve(LIGHTHOUSE_ROOT, raw);
   }
   const defaultPath = path.resolve(
-    (import.meta as any).dir || process.cwd(),
+    LIGHTHOUSE_ROOT,
+    "uploader",
     "cache.db",
   );
   try {
@@ -1645,9 +1647,7 @@ export async function getStatusDashboard(): Promise<string> {
     void _e;
   }
 
-  const ssdMount =
-    process.env.STORAGE_MOUNT ||
-    (fs.existsSync("/Volumes/Ospeto_SSD") ? "/Volumes/Ospeto_SSD" : null);
+  const ssdMount = process.env.STORAGE_MOUNT || null;
   let ssdDiskStr = "";
   if (ssdMount && fs.existsSync(ssdMount)) {
     try {

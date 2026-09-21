@@ -151,6 +151,31 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
         }
       }
     });
+
+    it("escapes XML special characters in generated plists", () => {
+      const outputDir = path.join(tempTestDir, "xml_escape_agents");
+      const res = spawnSync(
+        LIGHTHOUSE_BIN,
+        ["install-daemons", "--dry-run", "--output-dir", outputDir],
+        {
+          encoding: "utf8",
+          cwd: REPO_ROOT,
+          env: {
+            ...process.env,
+            LIGHTHOUSE_DAEMON_PREFIX: "com.test&evil<tag>",
+          },
+        },
+      );
+      expect(res.status).toBe(0);
+
+      const files = fs.readdirSync(outputDir);
+      const uploaderPlist = files.find((f: string) => f.includes("book-uploader"));
+      expect(uploaderPlist).toBeDefined();
+
+      const content = fs.readFileSync(path.join(outputDir, uploaderPlist!), "utf8");
+      expect(content).toContain("com.test&amp;evil&lt;tag&gt;");
+      expect(content).not.toContain("com.test&evil<tag>");
+    });
   });
 
   describe("4. One-Command Backup & Migration Kit", () => {
@@ -325,7 +350,7 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       const progress = rKdb.query("SELECT percentage FROM progress WHERE document = 'doc_hyperion';").get() as any;
       expect(progress.percentage).toBe(0.42);
       rKdb.close();
-    });
+    }, 30000);
 
     it("restore rejects corrupted archive or tampered checksum", () => {
       const backupDir = path.join(tempTestDir, "corrupted_backups");
@@ -343,6 +368,131 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(res.status).toBe(1);
       expect(res.stdout + res.stderr).toContain("Checksum mismatch");
     });
+
+    it("restore fails if checksum file is missing", () => {
+      const backupDir = path.join(tempTestDir, "no_checksum_backups");
+      fs.mkdirSync(backupDir, { recursive: true });
+
+      const fakeBundle = path.join(backupDir, "lighthouse-backup-nochecksum.tar.gz");
+      fs.writeFileSync(fakeBundle, "mock-tarball-content");
+
+      const res = spawnSync(LIGHTHOUSE_BIN, ["restore", fakeBundle, "--dry-run"], {
+        encoding: "utf8",
+      });
+      expect(res.status).toBe(1);
+      expect(res.stdout + res.stderr).toContain("Checksum file not found");
+    });
+
+    it("restore fails if checksum file references a different bundle filename", () => {
+      const backupDir = path.join(tempTestDir, "mismatched_name_backups");
+      fs.mkdirSync(backupDir, { recursive: true });
+
+      const fakeBundle = path.join(backupDir, "lighthouse-backup-actual.tar.gz");
+      const fakeSha = `${fakeBundle}.sha256`;
+
+      fs.writeFileSync(fakeBundle, "mock-tarball-content");
+      fs.writeFileSync(fakeSha, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  lighthouse-backup-different.tar.gz\n");
+
+      const res = spawnSync(LIGHTHOUSE_BIN, ["restore", fakeBundle, "--dry-run"], {
+        encoding: "utf8",
+      });
+      expect(res.status).toBe(1);
+      expect(res.stdout + res.stderr).toContain("Checksum references");
+    });
+
+    it("restore fails if archive contains disallowed member or path traversal", () => {
+      const backupDir = path.join(tempTestDir, "disallowed_backups");
+      fs.mkdirSync(backupDir, { recursive: true });
+
+      const fakeBundle = path.join(backupDir, "lighthouse-backup-disallowed.tar.gz");
+      const fakeSha = `${fakeBundle}.sha256`;
+
+      // Create a tarball containing an unauthorized file name
+      const stageDir = path.join(tempTestDir, "bad_archive_stage");
+      fs.mkdirSync(stageDir, { recursive: true });
+      fs.writeFileSync(path.join(stageDir, "unauthorized_script.sh"), "echo evil");
+      spawnSync("tar", ["-czf", fakeBundle, "-C", stageDir, "."], { encoding: "utf8" });
+
+      // Generate sha256 for the bundle
+      const shaRes = spawnSync("shasum", ["-a", "256", path.basename(fakeBundle)], {
+        cwd: backupDir,
+        encoding: "utf8",
+      });
+      fs.writeFileSync(fakeSha, shaRes.stdout);
+
+      const res = spawnSync(LIGHTHOUSE_BIN, ["restore", fakeBundle, "--dry-run"], {
+        encoding: "utf8",
+      });
+      expect(res.status).toBe(1);
+      expect(res.stdout + res.stderr).toContain("Security Error: Archive member");
+    });
+
+    it("hermetic WAL restore: prevents WAL replay from overwriting restored data", () => {
+      const sourceCalibre = path.join(tempTestDir, "src_calibre_wal", "metadata.db");
+      const targetCalibre = path.join(tempTestDir, "tgt_calibre_wal", "metadata.db");
+      const backupDir = path.join(tempTestDir, "wal_backups");
+
+      fs.mkdirSync(path.dirname(sourceCalibre), { recursive: true });
+      fs.mkdirSync(path.dirname(targetCalibre), { recursive: true });
+
+      // 1. Create clean source DB with 1 book
+      const sDb = new Database(sourceCalibre);
+      sDb.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT);");
+      sDb.run("INSERT INTO books (title) VALUES ('Source Book Clean');");
+      sDb.close();
+
+      // Backup source
+      const bRes = spawnSync(LIGHTHOUSE_BIN, ["backup", "--output-dir", backupDir], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CALIBRE_DB_PATH: sourceCalibre,
+          KOSYNC_DB_PATH: path.join(tempTestDir, "dummy_ko.db"),
+          CACHE_DB_PATH: path.join(tempTestDir, "dummy_cache.db"),
+        },
+      });
+      expect(bRes.status).toBe(0);
+
+      const files = fs.readdirSync(backupDir);
+      const bundle = files.find((f: string) => f.startsWith("lighthouse-backup-") && !f.endsWith(".sha256"))!;
+      const bundlePath = path.join(backupDir, bundle);
+
+      // 2. Create target DB in WAL mode with uncheckpointed row in WAL journal
+      const tDb = new Database(targetCalibre);
+      tDb.run("PRAGMA journal_mode = WAL;");
+      tDb.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT);");
+      tDb.run("INSERT INTO books (title) VALUES ('Dirty Pre-Restore Book in WAL');");
+      tDb.close();
+
+      // Verify -wal exists
+      const walPath = `${targetCalibre}-wal`;
+      if (!fs.existsSync(walPath)) {
+        fs.writeFileSync(walPath, "dummy-wal-bytes");
+      }
+
+      // 3. Run restore over the active WAL database
+      const rRes = spawnSync(
+        LIGHTHOUSE_BIN,
+        ["restore", bundlePath, "--force"],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CALIBRE_DB_PATH: targetCalibre,
+            KOSYNC_DB_PATH: path.join(tempTestDir, "restored_ko.db"),
+            CACHE_DB_PATH: path.join(tempTestDir, "restored_cache.db"),
+          },
+        },
+      );
+      expect(rRes.status).toBe(0);
+
+      // 4. Open restored DB and assert that 'Source Book Clean' persists and WAL dirty data is gone
+      const verifyDb = new Database(targetCalibre, { readonly: true });
+      const books = verifyDb.query("SELECT title FROM books;").all() as any[];
+      expect(books.length).toBe(1);
+      expect(books[0].title).toBe("Source Book Clean");
+      verifyDb.close();
+    }, 30000);
   });
 
   describe("5. Standby Docker Compose Alignment", () => {

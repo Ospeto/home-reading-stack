@@ -203,10 +203,12 @@ const HTML_PATH = resolveHtmlPath();
 
 export function getCacheDbPath(): string {
   if (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH) {
-    return (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH)!;
+    const raw = (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH)!;
+    return path.isAbsolute(raw) ? raw : path.resolve(LIGHTHOUSE_ROOT, raw);
   }
   const defaultPath = path.resolve(
-    (import.meta as any).dir || process.cwd(),
+    LIGHTHOUSE_ROOT,
+    "uploader",
     "cache.db",
   );
   const p = defaultPath;
