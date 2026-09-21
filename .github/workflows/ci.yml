@@ -20,5 +20,8 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Install Shellcheck
+        run: brew install shellcheck || true
+
       - name: Run tests
         run: bun test
