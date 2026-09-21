@@ -33,7 +33,14 @@ if [ -f "$ENV_FILE" ]; then
     key=$(echo "$key" | tr -d '[:space:]')
     [[ "$key" =~ ^#.*$ ]] && continue
     [ -z "$key" ] && continue
-    val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")
+    if [[ "$val" =~ ^\"(.*)\"[[:space:]]*(#.*)?$ ]]; then
+      val="${BASH_REMATCH[1]}"
+    elif [[ "$val" =~ ^\'(.*)\'[[:space:]]*(#.*)?$ ]]; then
+      val="${BASH_REMATCH[1]}"
+    else
+      val="${val%%#*}"
+      val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    fi
     case "$key" in
       UPLOADER_PORT) LOCAL_HTTP_PORT="${LOCAL_HTTP_PORT:-$val}" ;;
       KOSYNC_PORT) LOCAL_KOSYNC_PORT="${LOCAL_KOSYNC_PORT:-$val}" ;;

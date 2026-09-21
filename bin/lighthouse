@@ -135,7 +135,14 @@ if [ -f "$ENV_FILE" ]; then
     key=$(echo "$key" | tr -d '[:space:]')
     [[ "$key" =~ ^#.*$ ]] && continue
     [ -z "$key" ] && continue
-    val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")
+    if [[ "$val" =~ ^\"(.*)\"[[:space:]]*(#.*)?$ ]]; then
+      val="${BASH_REMATCH[1]}"
+    elif [[ "$val" =~ ^\'(.*)\'[[:space:]]*(#.*)?$ ]]; then
+      val="${BASH_REMATCH[1]}"
+    else
+      val="${val%%#*}"
+      val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    fi
     val="${val/#\~/$HOME}"
     val="${val//\$\{HOME\}/$HOME}"
     val="${val//\$HOME/$HOME}"
@@ -450,6 +457,7 @@ cmd_status() {
 # 5. Command: up & down (Readiness-aware lifecycle)
 # ------------------------------------------------------------------------------
 cmd_up() {
+  validate_daemon_prefix "$DAEMON_PREFIX"
   echo -e "${COLOR_BOLD}Starting LightHouse Reading Stack in dependency order...${COLOR_RESET}"
 
   if ! command -v launchctl >/dev/null 2>&1; then
@@ -516,6 +524,7 @@ cmd_up() {
 }
 
 cmd_down() {
+  validate_daemon_prefix "$DAEMON_PREFIX"
   echo -e "${COLOR_BOLD}Stopping LightHouse Reading Stack gracefully...${COLOR_RESET}"
 
   if ! command -v launchctl >/dev/null 2>&1; then
@@ -551,6 +560,7 @@ cmd_down() {
 # 6. Command: health (Automated probes & auto-healing with validation)
 # ------------------------------------------------------------------------------
 cmd_health() {
+  validate_daemon_prefix "$DAEMON_PREFIX"
   validate_port "$UPLOADER_PORT" "UPLOADER_PORT"
   validate_port "$KOSYNC_PORT" "KOSYNC_PORT"
   validate_hostname "$US_REMOTE_HOST" "US_REMOTE_HOST"

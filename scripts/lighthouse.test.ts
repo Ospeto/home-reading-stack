@@ -489,7 +489,9 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
         fs.writeFileSync(walPath, "dummy-wal-bytes");
       }
 
-      // 3. Run restore over the active WAL database
+      // 3. Run restore over the active WAL database with isolated fake HOME
+      const fakeHome = path.join(tempTestDir, "fake_home");
+      fs.mkdirSync(fakeHome, { recursive: true });
       const rRes = spawnSync(
         LIGHTHOUSE_BIN,
         ["restore", bundlePath, "--force"],
@@ -497,6 +499,7 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
           encoding: "utf8",
           env: {
             ...process.env,
+            HOME: fakeHome,
             CALIBRE_DB_PATH: targetCalibre,
             KOSYNC_DB_PATH: path.join(tempTestDir, "restored_ko.db"),
             CACHE_DB_PATH: path.join(tempTestDir, "restored_cache.db"),
