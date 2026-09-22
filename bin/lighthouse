@@ -677,6 +677,9 @@ cmd_install_daemons() {
   done
 
   local target_dir="${output_dir:-${HOME}/Library/LaunchAgents}"
+  if [ "$dry_run" -eq 1 ] && [ -z "$output_dir" ]; then
+    target_dir=$(mktemp -d /tmp/lighthouse-daemons-dryrun-XXXXXX)
+  fi
   local bun_path
   bun_path=$(which bun 2>/dev/null || echo "/opt/homebrew/bin/bun")
   local bash_path
