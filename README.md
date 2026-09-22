@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="LightHouse Logo" width="128" height="128" />
+</p>
+
 # LightHouse Reading Stack
 
 > Unified, self-hosted private reading infrastructure for Kindle and mobile devices running [KOReader](https://github.com/koreader/koreader).

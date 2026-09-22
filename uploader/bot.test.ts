@@ -446,7 +446,7 @@ describe("Interactive Main Menu Dashboard (/menu & /start)", () => {
   it("getMainMenuText returns formatted dashboard overview", () => {
     const text = getMainMenuText();
     expect(typeof text).toBe("string");
-    expect(text).toContain("Reading HQ Dashboard");
+    expect(text).toContain("LightHouse — Your self-hosted reading beacon");
     expect(text).toContain("Open Reading HQ");
     expect(text).toContain("/f <query>");
     expect(text).toContain("/reading");
@@ -588,7 +588,7 @@ describe("Telegram Bot /help Command & KOReader Connection Guide", () => {
     expect(typeof msg).toBe("string");
 
     // Command reference
-    expect(msg).toContain("Reading HQ Commands & Guide");
+    expect(msg).toContain("LightHouse — Your self-hosted reading beacon");
     expect(msg).toContain("/menu");
     expect(msg).toContain("/reading");
     expect(msg).toContain("/recent");
@@ -757,6 +757,70 @@ describe("Webpage Manual & KOReader Connection Section (index.html)", () => {
     expect(html).toContain("Kindle Wi-Fi Proxy Gateway (GFW Bypass)");
     expect(html).toContain("192.168.31.15");
     expect(html).toContain("7890");
+  });
+});
+
+describe("LightHouse Brand Logo & Visual Identity Integration", () => {
+  const htmlPath = path.join((import.meta as any).dir, "index.html");
+  const html = fs.readFileSync(htmlPath, "utf8");
+
+  it("defines #icon-lighthouse symbol in SVG sprite defs and integrates into header brand", () => {
+    // 1. Symbol definition in SVG defs
+    expect(html).toContain('<symbol id="icon-lighthouse" viewBox="0 0 320 380">');
+    expect(html).toContain('id="markBeacon"');
+    expect(html).toContain('id="markLeftBeam"');
+    expect(html).toContain('id="markRightBeam"');
+
+    // 2. Top header brand block replaces icon-book with #icon-lighthouse (w-5 h-5)
+    expect(html).toContain('<svg class="w-5 h-5"><use href="#icon-lighthouse"/></svg>');
+
+    // 3. Connection guide modal header displays glowing emblem
+    expect(html).toContain('<svg class="w-6 h-6"><use href="#icon-lighthouse"/></svg>');
+
+    // 4. Empty state watermark renders lighthouse tower and quiet library message
+    expect(html).toContain("Your LightHouse library is quiet");
+    expect(html).toContain('<svg class="w-16 h-16 opacity-30 drop-shadow-[0_0_12px_rgba(255,179,0,0.25)]"><use href="#icon-lighthouse"/></svg>');
+  });
+
+  it("includes SVG favicon data URI and apple-touch-icon in index.html head", () => {
+    // SVG Favicon with URL-encoded mark SVG
+    expect(html).toContain('<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,');
+    expect(html).toContain('href="data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20320%20380%22');
+    // Apple Touch Icon
+    expect(html).toContain('<link rel="apple-touch-icon" href="assets/logo.svg">');
+  });
+
+  it("commits repository brand assets assets/logo.svg and assets/mark.svg", () => {
+    const logoPath = path.join((import.meta as any).dir, "../assets/logo.svg");
+    const markPath = path.join((import.meta as any).dir, "../assets/mark.svg");
+    expect(fs.existsSync(logoPath)).toBe(true);
+    expect(fs.existsSync(markPath)).toBe(true);
+
+    const logoSvg = fs.readFileSync(logoPath, "utf8");
+    const markSvg = fs.readFileSync(markPath, "utf8");
+    expect(logoSvg).toContain('viewBox="0 0 512 512"');
+    expect(markSvg).toContain('viewBox="0 0 320 380"');
+  });
+
+  it("ensures root assets/ and uploader/assets/ trees are in sync", () => {
+    const rootAssets = path.join((import.meta as any).dir, "../assets");
+    const uploaderAssets = path.join((import.meta as any).dir, "assets");
+    const filenames = [
+      "logo.svg",
+      "mark.svg",
+      "logo.png",
+      "apple-touch-icon.png",
+    ];
+
+    for (const file of filenames) {
+      const rootFile = path.join(rootAssets, file);
+      const uploaderFile = path.join(uploaderAssets, file);
+      expect(fs.existsSync(rootFile)).toBe(true);
+      expect(fs.existsSync(uploaderFile)).toBe(true);
+      const rootBuf = fs.readFileSync(rootFile);
+      const uploaderBuf = fs.readFileSync(uploaderFile);
+      expect(rootBuf.equals(uploaderBuf)).toBe(true);
+    }
   });
 });
 

@@ -1,0 +1,201 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background Squircle Gradient -->
+    <radialGradient id="bgGlow" cx="50%" cy="32%" r="65%">
+      <stop offset="0%" stop-color="#1f2638" />
+      <stop offset="45%" stop-color="#11141c" />
+      <stop offset="100%" stop-color="#090b10" />
+    </radialGradient>
+
+    <!-- Glass Rim Highlight -->
+    <linearGradient id="rimLight" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="rgba(255, 255, 255, 0.22)" />
+      <stop offset="25%" stop-color="rgba(255, 255, 255, 0.06)" />
+      <stop offset="100%" stop-color="rgba(255, 255, 255, 0.0)" />
+    </linearGradient>
+
+    <!-- Lantern Core Light -->
+    <radialGradient id="beaconLight" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="25%" stop-color="#ffecb3" />
+      <stop offset="60%" stop-color="#ffb300" />
+      <stop offset="100%" stop-color="rgba(255, 153, 0, 0)" />
+    </radialGradient>
+
+    <!-- Ambient Beacon Aura -->
+    <radialGradient id="ambientAura" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="rgba(255, 183, 77, 0.45)" />
+      <stop offset="50%" stop-color="rgba(255, 152, 0, 0.15)" />
+      <stop offset="100%" stop-color="rgba(0, 0, 0, 0)" />
+    </radialGradient>
+
+    <!-- Left Light Beam (Cyan-Atmospheric) -->
+    <linearGradient id="leftBeam" x1="85%" y1="20%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="rgba(255, 224, 130, 0.4)" />
+      <stop offset="40%" stop-color="rgba(77, 208, 225, 0.2)" />
+      <stop offset="100%" stop-color="rgba(38, 198, 218, 0)" />
+    </linearGradient>
+
+    <!-- Right Light Beam (Warm Amber) -->
+    <linearGradient id="rightBeam" x1="15%" y1="20%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="rgba(255, 236, 179, 0.5)" />
+      <stop offset="45%" stop-color="rgba(255, 167, 38, 0.22)" />
+      <stop offset="100%" stop-color="rgba(255, 143, 0, 0)" />
+    </linearGradient>
+
+    <!-- Roof Dome Gradient -->
+    <linearGradient id="roofGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3d4454" />
+      <stop offset="50%" stop-color="#242834" />
+      <stop offset="100%" stop-color="#141720" />
+    </linearGradient>
+
+    <!-- Book Spine Styles -->
+    <linearGradient id="spineNavy1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#181c26" />
+      <stop offset="25%" stop-color="#2c3448" />
+      <stop offset="70%" stop-color="#202636" />
+      <stop offset="100%" stop-color="#141722" />
+    </linearGradient>
+
+    <linearGradient id="spineNavy2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#202534" />
+      <stop offset="30%" stop-color="#3b4660" />
+      <stop offset="75%" stop-color="#282f42" />
+      <stop offset="100%" stop-color="#191c28" />
+    </linearGradient>
+
+    <linearGradient id="spineTeal" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#132328" />
+      <stop offset="30%" stop-color="#23424c" />
+      <stop offset="75%" stop-color="#192e35" />
+      <stop offset="100%" stop-color="#101c20" />
+    </linearGradient>
+
+    <!-- Gold Foil Page Edges -->
+    <linearGradient id="goldPages" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#fff8e1" />
+      <stop offset="30%" stop-color="#ffe082" />
+      <stop offset="70%" stop-color="#ffca28" />
+      <stop offset="100%" stop-color="#ffa000" />
+    </linearGradient>
+
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="12" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="lightConeBlur" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" />
+    </filter>
+  </defs>
+
+  <!-- 1. Apple Squircle Container (macOS Standard Corner Radius) -->
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bgGlow)" stroke="#262c3d" stroke-width="1.5" />
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="none" stroke="url(#rimLight)" stroke-width="2" />
+
+  <!-- 2. Dual Beams of Light Radiation -->
+  <!-- Left atmospheric cone -->
+  <polygon points="256,155 105,385 60,370 240,150" fill="url(#leftBeam)" filter="url(#lightConeBlur)" />
+  <!-- Right warm amber cone -->
+  <polygon points="256,155 407,385 452,370 272,150" fill="url(#rightBeam)" filter="url(#lightConeBlur)" />
+
+  <!-- Ambient Beacon Bloom -->
+  <circle cx="256" cy="155" r="95" fill="url(#ambientAura)" filter="url(#softGlow)" />
+
+  <!-- Ground Shadow under Book Tower -->
+  <ellipse cx="256" cy="426" rx="140" ry="18" fill="rgba(0, 0, 0, 0.65)" filter="url(#lightConeBlur)" />
+
+  <!-- 3. THE BOOK TOWER (Lighthouse Body) -->
+
+  <!-- Book 1 (Base Foundation - Broad Folio) -->
+  <g id="book-tier-1">
+    <!-- Main spine curve -->
+    <path d="M168,390 C168,390 256,380 344,390 C352,390 358,396 358,404 L358,416 C358,424 352,430 344,430 C256,420 168,430 168,430 C160,430 154,424 154,416 L154,404 C154,396 160,390 168,390 Z" fill="url(#spineNavy1)" />
+    <!-- Page edge reveal on the right -->
+    <path d="M336,393 C348,394 354,398 354,404 L354,414 C354,420 348,424 336,425 Z" fill="url(#goldPages)" opacity="0.9" />
+    <!-- Gold decorative spine ribs -->
+    <line x1="172" y1="400" x2="172" y2="420" stroke="#d4af37" stroke-width="2" stroke-linecap="round" opacity="0.8" />
+    <line x1="178" y1="400" x2="178" y2="420" stroke="#d4af37" stroke-width="2" stroke-linecap="round" opacity="0.8" />
+  </g>
+
+  <!-- Book 2 (Lower Mid - Angled Spined Volume) -->
+  <g id="book-tier-2">
+    <path d="M178,345 C178,345 256,338 334,345 C341,345 347,351 347,358 L347,370 C347,377 341,383 334,383 C256,375 178,383 178,383 C171,383 165,377 165,370 L165,358 C165,351 171,345 178,345 Z" fill="url(#spineNavy2)" />
+    <!-- Gilded pages on the left (spiral shift) -->
+    <path d="M176,349 C168,351 166,355 166,359 L166,368 C166,373 169,376 176,378 Z" fill="url(#goldPages)" opacity="0.95" />
+    <!-- Spine tooling -->
+    <line x1="330" y1="353" x2="330" y2="375" stroke="#d4af37" stroke-width="2" stroke-linecap="round" opacity="0.75" />
+    <line x1="324" y1="353" x2="324" y2="375" stroke="#d4af37" stroke-width="2" stroke-linecap="round" opacity="0.75" />
+  </g>
+
+  <!-- Book 3 (Mid Tower - Classic Cloth Spine) -->
+  <g id="book-tier-3">
+    <path d="M190,302 C190,302 256,296 322,302 C329,302 335,307 335,314 L335,326 C335,333 329,338 322,338 C256,331 190,338 190,338 C183,338 177,333 177,326 L177,314 C177,307 183,302 190,302 Z" fill="url(#spineTeal)" />
+    <!-- Page reveal on right -->
+    <path d="M312,305 C324,307 329,311 329,316 L329,324 C329,329 324,333 312,334 Z" fill="url(#goldPages)" opacity="0.9" />
+    <!-- Center gold emblem on spine -->
+    <circle cx="210" cy="320" r="3" fill="#ffe082" opacity="0.8" />
+  </g>
+
+  <!-- Book 4 (Upper Mid - Tapered Volume) -->
+  <g id="book-tier-4">
+    <path d="M202,260 C202,260 256,255 310,260 C316,260 322,265 322,272 L322,283 C322,290 316,295 310,295 C256,289 202,295 202,295 C196,295 190,290 190,283 L190,272 C190,265 196,260 202,260 Z" fill="url(#spineNavy1)" />
+    <!-- Page reveal on left -->
+    <path d="M200,263 C192,265 191,269 191,273 L191,281 C191,286 193,289 200,291 Z" fill="url(#goldPages)" opacity="0.95" />
+    <line x1="304" y1="267" x2="304" y2="288" stroke="#d4af37" stroke-width="1.5" stroke-linecap="round" opacity="0.8" />
+  </g>
+
+  <!-- Book 5 (Tower Collar - Top Volume) -->
+  <g id="book-tier-5">
+    <path d="M214,220 C214,220 256,216 298,220 C304,220 309,225 309,231 L309,242 C309,248 304,253 298,253 C256,248 214,253 214,253 C208,253 203,248 203,242 L203,231 C203,225 208,220 214,220 Z" fill="url(#spineNavy2)" />
+    <!-- Page reveal on right -->
+    <path d="M290,223 C298,225 303,228 303,232 L303,239 C303,243 298,246 290,248 Z" fill="url(#goldPages)" opacity="0.9" />
+  </g>
+
+  <!-- 4. LANTERN GALLERY DECK & RAILING -->
+  <!-- Stone/metal gallery deck plate -->
+  <path d="M204,214 L308,214 L314,220 L198,220 Z" fill="#2d3345" stroke="#424b63" stroke-width="1" />
+  
+  <!-- Balcony Railing -->
+  <g stroke="#64748b" stroke-width="1.5" opacity="0.85">
+    <line x1="202" y1="208" x2="310" y2="208" />
+    <line x1="210" y1="208" x2="210" y2="214" />
+    <line x1="225" y1="208" x2="225" y2="214" />
+    <line x1="240" y1="208" x2="240" y2="214" />
+    <line x1="256" y1="208" x2="256" y2="214" />
+    <line x1="272" y1="208" x2="272" y2="214" />
+    <line x1="287" y1="208" x2="287" y2="214" />
+    <line x1="302" y1="208" x2="302" y2="214" />
+  </g>
+
+  <!-- 5. LANTERN ROOM & BEACON LIGHT -->
+  <!-- Glass chamber frame -->
+  <rect x="220" y="152" width="72" height="56" rx="2" fill="#0d1017" stroke="#333b4e" stroke-width="2" opacity="0.95" />
+
+  <!-- Intense Glowing Light Core inside Glass -->
+  <circle cx="256" cy="180" r="32" fill="url(#beaconLight)" filter="url(#softGlow)" />
+  <circle cx="256" cy="180" r="14" fill="#ffffff" />
+
+  <!-- Glass Astragals / Panes -->
+  <g stroke="#2c3345" stroke-width="2">
+    <line x1="220" y1="152" x2="220" y2="208" />
+    <line x1="244" y1="152" x2="244" y2="208" />
+    <line x1="268" y1="152" x2="268" y2="208" />
+    <line x1="292" y1="152" x2="292" y2="208" />
+    <line x1="220" y1="180" x2="292" y2="180" stroke-width="1.5" stroke="#3d465d" />
+  </g>
+
+  <!-- 6. CUPOLA ROOF & SPIRE -->
+  <!-- Eaves trim -->
+  <path d="M212,152 L300,152 L294,148 L218,148 Z" fill="#475569" />
+  
+  <!-- Classic Dome Roof -->
+  <path d="M216,148 C216,148 230,118 256,112 C282,118 296,148 296,148 Z" fill="url(#roofGrad)" stroke="#475569" stroke-width="1.5" />
+  
+  <!-- Top Vent Ball & Spire -->
+  <circle cx="256" cy="108" r="5" fill="#f59e0b" />
+  <line x1="256" y1="103" x2="256" y2="88" stroke="#f59e0b" stroke-width="2.5" stroke-linecap="round" />
+  <!-- Small Star Sparkle at Spire Peak -->
+  <circle cx="256" cy="88" r="2.5" fill="#ffffff" filter="url(#softGlow)" />
+</svg>

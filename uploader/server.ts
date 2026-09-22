@@ -1710,6 +1710,72 @@ export async function handleRequest(
     return new Response("Bad Request", { status: 400 });
   }
 
+  // Static Brand Assets (LightHouse Logo, Vector Mark & Touch Icons)
+  if (url.pathname.startsWith("/assets/")) {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      return new Response("Method Not Allowed", {
+        status: 405,
+        headers: {
+          Allow: "GET, HEAD",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
+
+    const filename = path.basename(url.pathname);
+    const allowedAssets: Record<string, string> = {
+      "logo.svg": "image/svg+xml",
+      "mark.svg": "image/svg+xml",
+      "logo.png": "image/png",
+      "apple-touch-icon.png": "image/png",
+    };
+
+    const mime = allowedAssets[filename];
+    if (!mime || filename !== url.pathname.slice("/assets/".length)) {
+      return new Response("Not Found", {
+        status: 404,
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
+
+    const candidatePaths = [
+      path.resolve((import.meta as any).dir, "assets", filename),
+      path.resolve(LIGHTHOUSE_ROOT, "assets", filename),
+      path.resolve(LIGHTHOUSE_ROOT, "uploader", "assets", filename),
+    ];
+    const assetPath = candidatePaths.find((p) => fs.existsSync(p));
+
+    if (!assetPath) {
+      return new Response("Not Found", {
+        status: 404,
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
+
+    const headers = {
+      "Content-Type": mime,
+      "Cache-Control": "public, max-age=86400",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'",
+    } as Record<string, string>;
+
+    if (corsOrigin && isAllowedOrigin(corsOrigin)) {
+      headers["Access-Control-Allow-Origin"] = corsOrigin;
+      headers["Vary"] = "Origin";
+    }
+
+    if (req.method === "HEAD") {
+      return new Response(null, { headers });
+    }
+    return new Response(fs.readFileSync(assetPath), { headers });
+  }
+
   // Calibre OPDS Server & Download Reverse Proxy (WAN & LAN)
   // Proxies /opds, /opds/*, /get/*, and /favicon.png to Calibre server (SERVER_URL)
   const isOpdsProxyRoute =

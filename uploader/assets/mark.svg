@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 380" width="100%" height="100%">
+  <defs>
+    <!-- Lantern Core Light -->
+    <radialGradient id="markBeacon" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="30%" stop-color="#ffecb3" />
+      <stop offset="70%" stop-color="#ffb300" />
+      <stop offset="100%" stop-color="rgba(255, 153, 0, 0)" />
+    </radialGradient>
+
+    <!-- Beams of Light -->
+    <linearGradient id="markLeftBeam" x1="100%" y1="20%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="rgba(255, 236, 179, 0.45)" />
+      <stop offset="50%" stop-color="rgba(77, 208, 225, 0.18)" />
+      <stop offset="100%" stop-color="rgba(38, 198, 218, 0)" />
+    </linearGradient>
+
+    <linearGradient id="markRightBeam" x1="0%" y1="20%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="rgba(255, 236, 179, 0.55)" />
+      <stop offset="50%" stop-color="rgba(255, 167, 38, 0.22)" />
+      <stop offset="100%" stop-color="rgba(255, 143, 0, 0)" />
+    </linearGradient>
+
+    <!-- Book Spine Styles -->
+    <linearGradient id="markSpine1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#181c26" />
+      <stop offset="30%" stop-color="#2c3448" />
+      <stop offset="70%" stop-color="#202636" />
+      <stop offset="100%" stop-color="#141722" />
+    </linearGradient>
+
+    <linearGradient id="markSpine2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#202534" />
+      <stop offset="30%" stop-color="#3b4660" />
+      <stop offset="75%" stop-color="#282f42" />
+      <stop offset="100%" stop-color="#191c28" />
+    </linearGradient>
+
+    <linearGradient id="markSpineTeal" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#132328" />
+      <stop offset="30%" stop-color="#23424c" />
+      <stop offset="75%" stop-color="#192e35" />
+      <stop offset="100%" stop-color="#101c20" />
+    </linearGradient>
+
+    <!-- Gilded Pages -->
+    <linearGradient id="markGoldPages" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#fff8e1" />
+      <stop offset="40%" stop-color="#ffe082" />
+      <stop offset="80%" stop-color="#ffca28" />
+      <stop offset="100%" stop-color="#ffa000" />
+    </linearGradient>
+
+    <linearGradient id="markRoof" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3d4454" />
+      <stop offset="50%" stop-color="#242834" />
+      <stop offset="100%" stop-color="#141720" />
+    </linearGradient>
+
+    <filter id="markGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Light Cones -->
+  <polygon points="160,85 20,330 0,315 145,80" fill="url(#markLeftBeam)" />
+  <polygon points="160,85 300,330 320,315 175,80" fill="url(#markRightBeam)" />
+
+  <!-- Base Shadow -->
+  <ellipse cx="160" cy="355" rx="120" ry="12" fill="rgba(0, 0, 0, 0.4)" />
+
+  <!-- Book 1 (Base) -->
+  <path d="M72,320 C72,320 160,310 248,320 C256,320 262,326 262,334 L262,346 C262,354 256,360 248,360 C160,350 72,360 72,360 C64,360 58,354 58,346 L58,334 C58,326 64,320 72,320 Z" fill="url(#markSpine1)" />
+  <path d="M240,323 C252,324 258,328 258,334 L258,344 C258,350 252,354 240,355 Z" fill="url(#markGoldPages)" opacity="0.95" />
+  <line x1="76" y1="330" x2="76" y2="350" stroke="#d4af37" stroke-width="2" stroke-linecap="round" opacity="0.8" />
+  <line x1="82" y1="330" x2="82" y2="350" stroke="#d4af37" stroke-width="2" stroke-linecap="round" opacity="0.8" />
+
+  <!-- Book 2 -->
+  <path d="M82,275 C82,275 160,268 238,275 C245,275 251,281 251,288 L251,300 C251,307 245,313 238,313 C160,305 82,313 82,313 C75,313 69,307 69,300 L69,288 C69,281 75,275 82,275 Z" fill="url(#markSpine2)" />
+  <path d="M80,279 C72,281 70,285 70,289 L70,298 C70,303 73,306 80,308 Z" fill="url(#markGoldPages)" opacity="0.95" />
+  <line x1="234" y1="283" x2="234" y2="305" stroke="#d4af37" stroke-width="2" stroke-linecap="round" opacity="0.75" />
+
+  <!-- Book 3 -->
+  <path d="M94,232 C94,232 160,226 226,232 C233,232 239,237 239,244 L239,256 C239,263 233,268 226,268 C160,261 94,268 94,268 C87,268 81,263 81,256 L81,244 C81,237 87,232 94,232 Z" fill="url(#markSpineTeal)" />
+  <path d="M216,235 C228,237 233,241 233,246 L233,254 C233,259 228,263 216,264 Z" fill="url(#markGoldPages)" opacity="0.9" />
+
+  <!-- Book 4 -->
+  <path d="M106,190 C106,190 160,185 214,190 C220,190 226,195 226,202 L226,213 C226,220 220,225 214,225 C160,219 106,225 106,225 C100,225 94,220 94,213 L94,202 C94,195 100,190 106,190 Z" fill="url(#markSpine1)" />
+  <path d="M104,193 C96,195 95,199 95,203 L95,211 C95,216 97,219 104,221 Z" fill="url(#markGoldPages)" opacity="0.95" />
+
+  <!-- Book 5 -->
+  <path d="M118,150 C118,150 160,146 202,150 C208,150 213,155 213,161 L213,172 C213,178 208,183 202,183 C160,178 118,183 118,183 C112,183 107,178 107,172 L107,161 C107,155 112,150 118,150 Z" fill="url(#markSpine2)" />
+  <path d="M194,153 C202,155 207,158 207,162 L207,169 C207,173 202,176 194,178 Z" fill="url(#markGoldPages)" opacity="0.9" />
+
+  <!-- Balcony Deck & Railing -->
+  <path d="M108,144 L212,144 L218,150 L102,150 Z" fill="#2d3345" stroke="#424b63" stroke-width="1" />
+  <line x1="106" y1="138" x2="214" y2="138" stroke="#64748b" stroke-width="1.5" />
+  <line x1="120" y1="138" x2="120" y2="144" stroke="#64748b" stroke-width="1.5" />
+  <line x1="140" y1="138" x2="140" y2="144" stroke="#64748b" stroke-width="1.5" />
+  <line x1="160" y1="138" x2="160" y2="144" stroke="#64748b" stroke-width="1.5" />
+  <line x1="180" y1="138" x2="180" y2="144" stroke="#64748b" stroke-width="1.5" />
+  <line x1="200" y1="138" x2="200" y2="144" stroke="#64748b" stroke-width="1.5" />
+
+  <!-- Lantern Chamber & Glowing Beacon -->
+  <rect x="124" y="82" width="72" height="56" rx="2" fill="#0d1017" stroke="#333b4e" stroke-width="2" opacity="0.95" />
+  <circle cx="160" cy="110" r="30" fill="url(#markBeacon)" filter="url(#markGlow)" />
+  <circle cx="160" cy="110" r="12" fill="#ffffff" />
+  <line x1="124" y1="82" x2="124" y2="138" stroke="#2c3345" stroke-width="2" />
+  <line x1="148" y1="82" x2="148" y2="138" stroke="#2c3345" stroke-width="2" />
+  <line x1="172" y1="82" x2="172" y2="138" stroke="#2c3345" stroke-width="2" />
+  <line x1="196" y1="82" x2="196" y2="138" stroke="#2c3345" stroke-width="2" />
+  <line x1="124" y1="110" x2="196" y2="110" stroke="#3d465d" stroke-width="1.5" />
+
+  <!-- Cupola Roof & Spire -->
+  <path d="M116,82 L204,82 L198,78 L122,78 Z" fill="#475569" />
+  <path d="M120,78 C120,78 134,48 160,42 C186,48 200,78 200,78 Z" fill="url(#markRoof)" stroke="#475569" stroke-width="1.5" />
+  <circle cx="160" cy="38" r="4.5" fill="#f59e0b" />
+  <line x1="160" y1="33" x2="160" y2="18" stroke="#f59e0b" stroke-width="2.5" stroke-linecap="round" />
+  <circle cx="160" cy="18" r="2.5" fill="#ffffff" filter="url(#markGlow)" />
+</svg>

@@ -190,6 +190,62 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
     }
   });
 
+  it("serves brand static assets /assets/logo.svg and /assets/mark.svg with proper headers", async () => {
+    const logoReq = new Request(
+      "https://reading.wavypremium.xyz/assets/logo.svg",
+      {
+        method: "GET",
+      },
+    );
+    const logoRes = await handleRequest(logoReq);
+    expect(logoRes.status).toBe(200);
+    expect(logoRes.headers.get("Content-Type")).toBe("image/svg+xml");
+    expect(logoRes.headers.get("Cache-Control")).toContain("max-age=86400");
+    expect(logoRes.headers.get("Content-Security-Policy")).toBe(
+      "default-src 'none'",
+    );
+    const logoText = await logoRes.text();
+    expect(logoText).toContain('viewBox="0 0 512 512"');
+
+    const markReq = new Request(
+      "https://reading.wavypremium.xyz/assets/mark.svg",
+      {
+        method: "HEAD",
+      },
+    );
+    const markRes = await handleRequest(markReq);
+    expect(markRes.status).toBe(200);
+    expect(markRes.headers.get("Content-Type")).toBe("image/svg+xml");
+    const markBody = await markRes.text();
+    expect(markBody).toBe("");
+
+    // Serves PNG touch icons
+    const pngReq = new Request(
+      "https://reading.wavypremium.xyz/assets/apple-touch-icon.png",
+      { method: "GET" },
+    );
+    const pngRes = await handleRequest(pngReq);
+    expect(pngRes.status).toBe(200);
+    expect(pngRes.headers.get("Content-Type")).toBe("image/png");
+
+    // Restricts non-GET/HEAD methods with 405
+    const postReq = new Request(
+      "https://reading.wavypremium.xyz/assets/logo.svg",
+      { method: "POST" },
+    );
+    const postRes = await handleRequest(postReq);
+    expect(postRes.status).toBe(405);
+    expect(postRes.headers.get("Allow")).toBe("GET, HEAD");
+
+    // Returns 404 for missing or disallowed assets
+    const notFoundReq = new Request(
+      "https://reading.wavypremium.xyz/assets/secret.txt",
+      { method: "GET" },
+    );
+    const notFoundRes = await handleRequest(notFoundReq);
+    expect(notFoundRes.status).toBe(404);
+  });
+
   it("restricts /opds, /get/*, and /favicon.png to GET and HEAD methods with 405", async () => {
     const methods = ["POST", "PUT", "DELETE", "PATCH"];
 

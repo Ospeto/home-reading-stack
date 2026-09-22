@@ -1775,7 +1775,7 @@ export function getMainMenuKeyboard() {
 
 export function getMainMenuText(): string {
   return (
-    `📚 *Reading HQ Dashboard*\n\n` +
+    `🏮 *LightHouse — Your self-hosted reading beacon*\n\n` +
     `Welcome to your personal library and reading companion.\n\n` +
     `• *Mini App:* Tap *[📖 Open Reading HQ]* to explore your visual catalog.\n` +
     `• *Search Library:* Find any book by title, author, or series (\`/f <query>\`).\n` +
@@ -1790,7 +1790,7 @@ export function getMainMenuText(): string {
 
 export function getHelpMessage(): string {
   return (
-    `📖 *Reading HQ Commands & Guide*\n\n` +
+    `🏮 *LightHouse — Your self-hosted reading beacon*\n\n` +
     `*Command Reference*\n` +
     `• \`/menu\` - Interactive dashboard with one-tap access\n` +
     `• \`/reading\` - Currently reading shelf with progress bars\n` +
