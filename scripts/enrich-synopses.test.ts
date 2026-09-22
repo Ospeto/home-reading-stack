@@ -394,6 +394,7 @@ describe("LightHouse Batch Synopsis Enrichment Tool", () => {
           }
           return { success: true };
         },
+        cacheFlusher: () => {},
       });
 
       expect(result.totalUpdated).toBe(1);
@@ -563,6 +564,173 @@ describe("LightHouse Batch Synopsis Enrichment Tool", () => {
       expect(report).toContain("Total Books Needing Update:     865");
       expect(report).toContain("The Legendary Moonlight Sculptor");
       expect(report).toContain("bin/lighthouse enrich-synopsis --apply");
+    });
+  });
+
+  // ==========================================================================
+  // 6. Series Synopsis Inheritance & AniList Fallback
+  // ==========================================================================
+  describe("6. Series Synopsis Inheritance & AniList Fallback", () => {
+    it("isCommentsEmpty detects placeholder text like 'No synopsis available for this volume.'", () => {
+      expect(isCommentsEmpty("No synopsis available for this volume.")).toBe(true);
+      expect(isCommentsEmpty("<p>No synopsis available for this volume.</p>")).toBe(true);
+      expect(isCommentsEmpty("No synopsis available.")).toBe(true);
+      expect(isCommentsEmpty("*No synopsis available.*")).toBe(true);
+      expect(isCommentsEmpty("")).toBe(true);
+      expect(isCommentsEmpty(null)).toBe(true);
+      expect(isCommentsEmpty("   ")).toBe(true);
+      expect(isCommentsEmpty("<p>&nbsp;</p>")).toBe(true);
+      expect(isCommentsEmpty("A rich, compelling story of an adventurer.")).toBe(false);
+    });
+
+    it("inherits series overview across all volumes in a series via seriesCache", async () => {
+      const candidates: EnrichBookCandidate[] = [
+        {
+          id: 101,
+          title: "The Legendary Moonlight Sculptor, Vol. 1",
+          series: "The Legendary Moonlight Sculptor",
+          series_index: 1,
+          has_cover: 0,
+        },
+        {
+          id: 102,
+          title: "The Legendary Moonlight Sculptor, Vol. 2",
+          series: "The Legendary Moonlight Sculptor",
+          series_index: 2,
+          has_cover: 0,
+        },
+        {
+          id: 103,
+          title: "The Legendary Moonlight Sculptor, Vol. 3",
+          series: "The Legendary Moonlight Sculptor",
+          series_index: 3,
+          has_cover: 0,
+        },
+      ];
+
+      let fetchCount = 0;
+      const mockOnlineFetcher = async (_book: EnrichBookCandidate) => {
+        fetchCount++;
+        return {
+          description: "<p>Lee Hyun enters the Royal Road virtual reality MMORPG to carve his own destiny.</p>",
+          coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/b85869.png",
+          source: "AniList",
+        };
+      };
+
+      const result = await runEnrichSynopses({
+        booksProvider: () => candidates,
+        epubExtractor: () => null,
+        onlineFetcher: mockOnlineFetcher,
+        dryRun: true,
+      });
+
+      // Volume 1 called fetcher; Volume 2 & 3 inherited from seriesCache!
+      expect(fetchCount).toBe(1);
+      expect(result.totalBooksScanned).toBe(3);
+      expect(result.synopsesFoundOnline).toBe(3);
+      expect(result.totalNeedingUpdate).toBe(3);
+
+      for (const item of result.items) {
+        expect(item.sourceType).toBe("online");
+        expect(item.synopsis).toContain("Lee Hyun enters the Royal Road");
+        expect(item.coverUrl).toBe("https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/b85869.png");
+      }
+    });
+
+    it("falls back to AniList series lookup when individual volume query returns no description", async () => {
+      const origFetch = globalThis.fetch;
+      let requestedSearch = "";
+
+      (globalThis as any).fetch = async (url: any, init: any) => {
+        const urlStr = typeof url === "string" ? url : url.toString();
+        if (urlStr.includes("graphql.anilist.co")) {
+          const body = JSON.parse(init?.body || "{}");
+          requestedSearch = body.variables?.search || "";
+
+          return new Response(
+            JSON.stringify({
+              data: {
+                Media: {
+                  id: 999,
+                  title: { english: "Trapped in a Dating Sim" },
+                  description: "Leon was reincarnated into the world of an otome game.<br><br>He uses his game knowledge to survive.",
+                  coverImage: { extraLarge: "https://s4.anilist.co/file/anilistcdn/cover/dating.jpg" },
+                  format: "NOVEL",
+                  staff: { edges: [{ role: "Original Story", node: { name: { full: "Yomu Mishima" } } }] },
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      };
+
+      try {
+        const book: EnrichBookCandidate = {
+          id: 50,
+          title: "Trapped in a Dating Sim Volume 2",
+          // series is not defined in Calibre, derived from title!
+        };
+
+        const res = await fetchOnlineSynopsis(book);
+        expect(res).not.toBeNull();
+        expect(res?.source).toBe("AniList");
+        expect(res?.description).toContain("Leon was reincarnated into the world of an otome game.");
+        expect(res?.coverUrl).toBe("https://s4.anilist.co/file/anilistcdn/cover/dating.jpg");
+        expect(requestedSearch).toBe("Trapped in a Dating Sim");
+      } finally {
+        (globalThis as any).fetch = origFetch;
+      }
+    });
+
+    it("queries AniList using Calibre series field when defined", async () => {
+      const origFetch = globalThis.fetch;
+      let searchedVariables: any = null;
+
+      (globalThis as any).fetch = async (url: any, init: any) => {
+        const urlStr = typeof url === "string" ? url : url.toString();
+        if (urlStr.includes("graphql.anilist.co")) {
+          const body = JSON.parse(init?.body || "{}");
+          searchedVariables = body.variables;
+
+          return new Response(
+            JSON.stringify({
+              data: {
+                Media: {
+                  id: 888,
+                  title: { english: "I'm the Evil Lord of an Intergalactic Empire!" },
+                  description: "Liam is reborn into an aristocratic family ruling an interstellar empire.",
+                  coverImage: { extraLarge: "https://s4.anilist.co/file/anilistcdn/cover/evil.jpg" },
+                  format: "NOVEL",
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      };
+
+      try {
+        const book: EnrichBookCandidate = {
+          id: 77,
+          title: "Volume 01",
+          series: "I'm the Evil Lord of an Intergalactic Empire!",
+          series_index: 1,
+        };
+
+        const res = await fetchOnlineSynopsis(book);
+        expect(res).not.toBeNull();
+        expect(res?.source).toBe("AniList");
+        expect(res?.description).toContain("Liam is reborn into an aristocratic family");
+        expect(String(searchedVariables?.search)).toContain("Evil Lord of an Intergalactic Empire");
+      } finally {
+        (globalThis as any).fetch = origFetch;
+      }
     });
   });
 });
