@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { safeFetchWithSsrf, isPrivateOrInternalIp } from "./security";
+import { isJunkAuthorExtended } from "./jev-shelf";
 
 export function getCalibredbPath(): string {
   if (process.env.CALIBREDB_PATH) return process.env.CALIBREDB_PATH;
@@ -129,12 +130,7 @@ export function isJunkTag(tag: string): boolean {
  * Check whether an author string is promotional / watermark junk.
  */
 export function isJunkAuthor(author: string): boolean {
-  if (!author) return true;
-  const a = author.trim();
-  if (a.length < 2) return true;
-  return /http|t\.me|telegram|channel|admin|unknown|anonymous|\.com|\.org|\.li|\.is|\.pub|thebookr|z-?lib|libgen|annas?-archive|oceanofpdf|vk\.com/i.test(
-    a,
-  );
+  return isJunkAuthorExtended(author);
 }
 
 /**

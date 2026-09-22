@@ -7,6 +7,11 @@ import process from "node:process";
 import { Buffer } from "node:buffer";
 import { cleanString, isAllowedCoverUrl } from "./scraper";
 import { validateUrlForSSRF, safeFetchWithSsrf } from "./security";
+import {
+  evaluateJunkGate,
+  moveToQuarantine,
+  detectBookLanguage,
+} from "./jev-shelf";
 
 export function getDropDir(): string {
   if (process.env.BOOKS_DROP_DIR) return process.env.BOOKS_DROP_DIR;
@@ -1147,11 +1152,7 @@ export async function extractArticleViaJina(
     Accept: "text/markdown, text/plain, */*",
   };
 
-  const apiKey = (
-    process.env.JINA_API_KEY ||
-    process.env.JEV_API_KEY ||
-    ""
-  ).trim();
+  const apiKey = (process.env.JINA_API_KEY || "").trim();
   if (apiKey) {
     headers["x-api-key"] = apiKey;
     headers["Authorization"] = `Bearer ${apiKey}`;
@@ -1917,6 +1918,27 @@ export async function ingestArticleFromUrl(
         .replace(/\s+/g, "_")
         .substring(0, 60)
         .trim() || "Web_Article";
+
+    // Gate: Check Junk Ingest Gate on article title and author before writing into Books_Drop or adding to Calibre
+    const junkCheck = await evaluateJunkGate(
+      article.title,
+      "",
+      article.author,
+    );
+    if (junkCheck.quarantined) {
+      moveToQuarantine(tempEpub, `${safeFilenameBase}.epub`);
+      return {
+        success: false,
+        title: article.title,
+        authors: article.author,
+        siteName: article.siteName,
+        wordCount: article.wordCount,
+        readTimeMinutes: article.readTimeMinutes,
+        format: "EPUB",
+        error: `Quarantined by junk ingest gate: ${junkCheck.reason || "Artifact quarantined"}`,
+      };
+    }
+
     const dropFileName = `${safeFilenameBase}_${Date.now()}.epub`;
     const dropFilePath = path.join(getDropDir(), dropFileName);
 
@@ -1928,6 +1950,7 @@ export async function ingestArticleFromUrl(
     }
 
     // 4. Ingest into Calibre via calibredb
+    const lang = await detectBookLanguage(article.title, "");
     const tagsStr = ["Web Article", "Read Later", article.siteName]
       .filter(Boolean)
       .join(",");
@@ -1945,6 +1968,9 @@ export async function ingestArticleFromUrl(
       "--automerge",
       "ignore",
     ];
+    if (lang) {
+      addArgs.push("--languages", lang);
+    }
     if (article.coverImagePath && fs.existsSync(article.coverImagePath)) {
       addArgs.push("--cover", article.coverImagePath);
     }
