@@ -15,8 +15,45 @@ export interface JevSystemOneChoiceResponse {
 export type JunkTriageVerdict = "real_book" | "test_artifact" | "truncated_download";
 export type SeriesTriageVerdict = "series_volume" | "subtitle_same_book" | "unrelated";
 export type AuthorTriageVerdict = "keep" | "mark_unknown";
-export type LanguageTriageVerdict = "my" | "en" | "other";
+export type LanguageTriageVerdict = "mya" | "eng" | "other" | "my" | "en";
 export type BookSourceCategory = "light_novel" | "manga" | "general_book" | "burmese" | "other";
+
+export const STANDARDIZED_CATEGORIES = [
+  "Light Novel",
+  "Manga",
+  "Fiction",
+  "Non-Fiction",
+  "Technology",
+  "Business",
+  "History",
+  "Philosophy",
+  "Burmese Literature",
+] as const;
+
+export type StandardCategory = (typeof STANDARDIZED_CATEGORIES)[number];
+
+export interface BookMetadataInput {
+  id?: number;
+  title: string;
+  author?: string;
+  comments?: string;
+  series?: string;
+  filename?: string;
+  tags?: string[];
+  currentLanguages?: string[];
+  embeddedLanguage?: string;
+}
+
+export interface BookClassificationResult {
+  language: "mya" | "eng" | "other";
+  tags: string[];
+  addedTags: string[];
+  removedTags: string[];
+  category?: StandardCategory;
+  isBurmese: boolean;
+  needsLanguageUpdate: boolean;
+  needsTagsUpdate: boolean;
+}
 
 export interface JunkGateResult {
   quarantined: boolean;
@@ -659,60 +696,173 @@ export async function cleanAuthorWithJev(
 }
 
 // ============================================================================
-// 4. Language Shelf Detection
+// 4. Language Shelf Detection & Standardized Categorization
 // ============================================================================
 
 /**
- * Myanmar Unicode block: \u1000-\u109F, \uA9E0-\uA9FF, \uAA60-\uAA7F
+ * Myanmar Unicode blocks:
+ * - Basic Myanmar: \u1000-\u109F (includes consonants [က-႟] and digits [၀-၉])
+ * - Myanmar Extended-A: \uA9E0-\uA9FF
+ * - Myanmar Extended-B: \uAA60-\uAA7F
  */
-const MYANMAR_UNICODE_REGEX = /[\u1000-\u109F\uA9E0-\uA9FF\uAA60-\uAA7F]/;
-const LATIN_LETTER_REGEX = /[a-zA-Z]/;
+export const MYANMAR_UNICODE_REGEX = /[\u1000-\u109F\uA9E0-\uA9FF\uAA60-\uAA7F]/;
+export const LATIN_LETTER_REGEX = /[a-zA-Z]/;
+
+export const BURMESE_TRANSLITERATED_TOKENS = new Set([
+  "u", "daw", "ko", "ma", "mg", "maung", "min", "thakin", "sayadaw", "bo", "saya",
+  "ashin", "lu", "win", "aung", "kyaw", "myint", "tun", "swe", "soe", "naing",
+  "lwin", "moe", "oo", "zin", "htun", "aye", "san", "nu", "ni", "sein", "tin",
+  "pe", "khin", "thant", "thaw", "yin", "cho", "mon", "gyi", "lay", "hla",
+  "hlaing", "thein", "shwe", "nyo", "thura", "zayar", "nanda", "myanmar", "burma",
+  "burmese", "pyi", "myaing", "kaba", "tha", "htar",
+]);
+
+/**
+ * Checks whether Latin text matches transliterated Burmese names or terminology,
+ * indicating an ambiguous candidate that requires Jev System-1 arbitration.
+ */
+export function isTransliteratedBurmeseCandidate(title: string, author: string = ""): boolean {
+  const combined = `${title} ${author}`.toLowerCase();
+  const words = combined.match(/[a-z]+/g) || [];
+  if (words.length === 0) return false;
+
+  let matchCount = 0;
+  for (const w of words) {
+    if (BURMESE_TRANSLITERATED_TOKENS.has(w)) {
+      matchCount++;
+      if (["burma", "burmese", "myanmar", "sayadaw", "thakin"].includes(w)) {
+        return true;
+      }
+    }
+  }
+
+  if (matchCount >= 2) return true;
+  if (matchCount >= 1 && words.length <= 3) return true;
+
+  return false;
+}
+
+/**
+ * Detects whether a tag is promotional junk, watermarking, or file format noise.
+ */
+export function isJunkTag(tag: string): boolean {
+  if (!tag) return true;
+  const t = tag.trim().toLowerCase();
+  if (t.length < 2) return true;
+
+  // Single file formats
+  if (/^(?:epub|pdf|mobi|azw3?|cbz|cbr|txt|rtf|docx?|zip|rar)$/i.test(t)) {
+    return true;
+  }
+
+  // Watermark phrases & pirate branding
+  if (/^(?:z-?lib(?:rary)?|oceanofpdf|libgen|annas?-archive|vk\.com|thebookr|mmebooks)$/i.test(t)) {
+    return true;
+  }
+  if (/^(?:do not post elsewhere|do not translate|fan translated|fan translation|unknown|various|various authors|n\/a|none|admin)$/i.test(t)) {
+    return true;
+  }
+  if (/(?:downloaded from|uploaded by|scanned by|released by)/i.test(t)) {
+    return true;
+  }
+
+  // Telegram / Social channels: t.me/..., @channel, telegram
+  if (/(?:t\.me\/|@\w+|telegram\.me|telegram)/i.test(t)) {
+    return true;
+  }
+
+  // URLs or website domains
+  if (/^(?:https?:\/\/|www\.)/i.test(t) || /\.(?:com|org|net|xyz|li|is|pub|me|info|biz|ru|cc|to)(?:\/.*)?$/i.test(t)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Strips promotional watermarks, junk tags, and formats from book tags list.
+ * Deduplicates case-insensitively while preserving clean casing.
+ */
+export function cleanBookTags(tags: string[]): string[] {
+  if (!tags || !Array.isArray(tags)) return [];
+  const seen = new Set<string>();
+  const cleaned: string[] = [];
+
+  for (const raw of tags) {
+    if (!raw || typeof raw !== "string") continue;
+    const trimmed = cleanString(raw).replace(/^[\[\(]+|[\]\)]+$/g, "").trim();
+    if (!trimmed || isJunkTag(trimmed)) continue;
+
+    const lower = trimmed.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    cleaned.push(trimmed);
+  }
+
+  return cleaned;
+}
+
+/**
+ * Checks whether a book tags list contains at least one standardized category.
+ */
+export function hasMeaningfulCategoryTag(tags: string[]): boolean {
+  if (!tags || !Array.isArray(tags) || tags.length === 0) return false;
+  const standardSet = new Set(STANDARDIZED_CATEGORIES.map((c) => c.toLowerCase()));
+  return tags.some((t) => standardSet.has(t.trim().toLowerCase()));
+}
 
 /**
  * Deterministic language detection:
- * - Myanmar Unicode in title/filename -> 'my' (Burmese)
- * - Latin letters with NO Myanmar Unicode -> 'en' (English)
- * - Returns null when ambiguous or mixed (e.g. mixed Latin + Burmese, non-Latin non-Myanmar like Japanese/Chinese, or pure digits)
+ * - Deterministic rule: If title, author, or comments contain Myanmar Unicode characters
+ *   ([က-႟] or [၀-၉]), classify as 'mya' (Burmese).
+ * - Pure Latin titles without Burmese: 'eng' (English).
+ * - Returns null when ambiguous or mixed (e.g. non-Latin non-Myanmar like Japanese/Chinese,
+ *   pure digits, or transliterated candidates requiring Jev).
  */
 export function detectLanguageDeterministic(
   title: string,
   filename: string = "",
-): "my" | "en" | null {
-  const combined = `${title} ${filename}`.trim();
+  author: string = "",
+  comments: string = "",
+): "mya" | "eng" | null {
+  const combined = `${title} ${filename} ${author} ${comments}`.trim();
   if (!combined) return null;
 
-  const hasMyanmar = MYANMAR_UNICODE_REGEX.test(combined);
-  const hasLatin = LATIN_LETTER_REGEX.test(combined);
-
-  // Pure Myanmar (or Myanmar with only digits/punctuation)
-  if (hasMyanmar && !hasLatin) {
-    return "my";
+  // 1. Myanmar script anywhere in title, author, or comments -> 'mya' (Burmese)
+  if (MYANMAR_UNICODE_REGEX.test(combined)) {
+    return "mya";
   }
 
-  // Pure Latin (English) with NO Myanmar characters
-  if (hasLatin && !hasMyanmar) {
-    // Check if there are other CJK scripts (Chinese/Japanese/Korean)
-    const hasCjk = /[\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF]/.test(combined);
-    if (!hasCjk) {
-      return "en";
-    }
-    // Mixed Latin + CJK is ambiguous
+  // 2. Ambiguous transliterated Burmese candidates -> query Jev System-1
+  if (isTransliteratedBurmeseCandidate(title, author)) {
     return null;
   }
 
-  // Mixed or neither
+  // 3. Pure Latin titles without Burmese -> 'eng' (English)
+  const textToCheck = `${title} ${filename}`.trim();
+  const hasLatin = LATIN_LETTER_REGEX.test(textToCheck);
+  const hasCjk = /[\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF]/.test(textToCheck);
+  const hasCyrillic = /[\u0400-\u04FF]/.test(textToCheck);
+  const hasArabic = /[\u0600-\u06FF]/.test(textToCheck);
+
+  if (hasLatin && !hasCjk && !hasCyrillic && !hasArabic) {
+    return "eng";
+  }
+
+  // Ambiguous, non-Latin, or neither
   return null;
 }
 
 /**
  * Call Jev to classify language for mixed or ambiguous text.
  * Choices: 'my', 'en', 'other'.
+ * Resolves to Calibre 3-letter codes: 'mya' (Burmese), 'eng' (English), or 'other'.
  */
 export async function triageLanguageWithJev(
   title: string,
   filename: string = "",
   options: JevClientOptions = {},
-): Promise<{ language: LanguageTriageVerdict; confidence: number } | null> {
+): Promise<{ language: "mya" | "eng" | "other"; confidence: number } | null> {
   const stateText = `Determine the primary reading language of this book based on its title and filename:
 
 - Title: ${title || "(empty)"}
@@ -734,10 +884,18 @@ Task: Classify whether the content is primarily Burmese ('my'), English ('en'), 
 
   if (!res) return null;
 
-  const validLangs: LanguageTriageVerdict[] = ["my", "en", "other"];
-  if (validLangs.includes(res.choice as LanguageTriageVerdict)) {
+  let langCode: "mya" | "eng" | "other" | null = null;
+  if (res.choice === "my" || res.choice === "mya") {
+    langCode = "mya";
+  } else if (res.choice === "en" || res.choice === "eng") {
+    langCode = "eng";
+  } else if (res.choice === "other") {
+    langCode = "other";
+  }
+
+  if (langCode) {
     return {
-      language: res.choice as LanguageTriageVerdict,
+      language: langCode,
       confidence: res.confidence,
     };
   }
@@ -746,17 +904,93 @@ Task: Classify whether the content is primarily Burmese ('my'), English ('en'), 
 }
 
 /**
+ * Call Jev System-1 to assign one of the standardized categories:
+ * 'Light Novel', 'Manga', 'Fiction', 'Non-Fiction', 'Technology', 'Business', 'History', 'Philosophy', 'Burmese Literature'.
+ */
+export async function triageCategoryWithJev(
+  title: string,
+  author: string = "",
+  series: string = "",
+  description: string = "",
+  options: JevClientOptions = {},
+): Promise<{ category: StandardCategory; confidence: number } | null> {
+  const stateText = `Inspect the following book metadata to determine its primary standardized category:
+
+- Title: ${title || "(empty)"}
+- Author: ${author || "(unknown)"}
+- Series: ${series || "(none)"}
+- Description: ${description ? cleanString(description).slice(0, 500) : "(none)"}
+
+Task: Assign one standardized category: Light Novel, Manga, Fiction, Non-Fiction, Technology, Business, History, Philosophy, or Burmese Literature.`;
+
+  const criteria: Record<StandardCategory, string> = {
+    "Light Novel": "Japanese or East-Asian light novel, web novel, or ranobe series.",
+    "Manga": "Manga, comic, graphic novel, or manhua/manhwa.",
+    "Fiction": "General fiction, novel, fantasy, sci-fi, thriller, mystery, romance, or literary fiction.",
+    "Non-Fiction": "General non-fiction, biographies, memoirs, essays, self-help, or educational books.",
+    "Technology": "Computer science, programming, software engineering, AI, tech guides, or computing.",
+    "Business": "Business, economics, finance, entrepreneurship, investing, or leadership.",
+    "History": "World history, military history, historical events, biographies of historical figures.",
+    "Philosophy": "Philosophy, ethics, logic, epistemology, or existential philosophy.",
+    "Burmese Literature": "Burmese (Myanmar) literature, novels, poetry, traditional writings, or Burmese translations.",
+  };
+
+  const res = await callJevSystemOneChoice(
+    stateText,
+    "book_category",
+    "Assign the single best standardized category.",
+    criteria,
+    options,
+  );
+
+  if (!res) return null;
+
+  const valid = STANDARDIZED_CATEGORIES.find(
+    (c) => c.toLowerCase() === res.choice.toLowerCase(),
+  );
+  if (valid) {
+    return {
+      category: valid,
+      confidence: res.confidence,
+    };
+  }
+
+  return null;
+}
+
+export interface DetectLanguageOptions extends JevClientOptions {
+  author?: string;
+  comments?: string;
+}
+
+/**
  * High-level language resolver:
- * 1. Deterministic first: Myanmar Unicode -> 'my'; Latin without Myanmar -> 'en'.
+ * 1. Deterministic first: Myanmar Unicode in title, author, or comments -> 'mya'; Latin without Myanmar -> 'eng'.
  * 2. Jev triage for mixed or ambiguous text ('my', 'en', 'other') only if confidence >= 0.7.
  * 3. Fail open: returns null if Jev fails or confidence < 0.7 (do not store unconfident language).
  */
 export async function detectBookLanguage(
   title: string,
   filename: string = "",
-  options: JevClientOptions = {},
-): Promise<LanguageTriageVerdict | null> {
-  const det = detectLanguageDeterministic(title, filename);
+  optionsOrAuthor: DetectLanguageOptions | string = {},
+  commentsArg: string = "",
+  optionsArg: JevClientOptions = {},
+): Promise<"mya" | "eng" | "other" | null> {
+  let author = "";
+  let comments = "";
+  let options: JevClientOptions = {};
+
+  if (typeof optionsOrAuthor === "string") {
+    author = optionsOrAuthor;
+    comments = commentsArg;
+    options = optionsArg;
+  } else if (optionsOrAuthor && typeof optionsOrAuthor === "object") {
+    author = optionsOrAuthor.author || "";
+    comments = optionsOrAuthor.comments || "";
+    options = optionsOrAuthor;
+  }
+
+  const det = detectLanguageDeterministic(title, filename, author, comments);
   if (det) {
     return det;
   }
@@ -766,8 +1000,141 @@ export async function detectBookLanguage(
     return jevRes.language;
   }
 
-  // Fail open: leave language unset rather than guessing
   return null;
+}
+
+/**
+ * Comprehensive book classification helper:
+ * - Detects language (deterministic or Jev).
+ * - Burmese script deterministically resolves to 'mya' with 'Burmese Literature' tag.
+ * - English script resolves to 'eng'.
+ * - Assigns standardized category via Jev System-1 for books missing meaningful tags.
+ * - Strips junk tags and promotional watermarks.
+ */
+export async function resolveBookLanguageAndTags(
+  book: BookMetadataInput,
+  options: JevClientOptions = {},
+): Promise<BookClassificationResult> {
+  const title = book.title || "";
+  const author = book.author || "";
+  const comments = book.comments || "";
+  const filename = book.filename || "";
+  const origTags = book.tags || [];
+
+  // 1. Clean junk tags and promotional watermarks
+  const cleanedTags = cleanBookTags(origTags);
+  const removedTags = origTags.filter(
+    (ot) => !cleanedTags.some((ct) => ct.toLowerCase() === ot.trim().toLowerCase()),
+  );
+
+  // 2. Language Detection
+  let lang: "mya" | "eng" | "other" | null = null;
+
+  // Step 2a: Hard Myanmar script evidence anywhere in metadata -> 'mya'
+  const combined = `${title} ${filename} ${author} ${comments}`;
+  if (MYANMAR_UNICODE_REGEX.test(combined)) {
+    lang = "mya";
+  }
+
+  // Step 2b: Explicit OPF embedded dc:language declaration
+  if (!lang && book.embeddedLanguage) {
+    const rawEmb = book.embeddedLanguage.trim().toLowerCase();
+    if (/^(?:my|mya|bur|burmese)$/i.test(rawEmb)) {
+      lang = "mya";
+    } else if (/^(?:ja|jpn|japanese|zh|zho|chi|chinese|ko|kor|korean|fr|fra|fre|french|de|deu|ger|german|es|spa|spanish|ru|rus|russian)$/i.test(rawEmb)) {
+      lang = "other";
+    } else if (/^(?:en|eng|english)$/i.test(rawEmb) && !isTransliteratedBurmeseCandidate(title, author)) {
+      lang = "eng";
+    }
+  }
+
+  // Step 2c: Pure Latin script check (no transliterated Burmese tokens)
+  if (!lang) {
+    lang = detectLanguageDeterministic(title, filename, author, comments);
+  }
+
+  // Step 2d: Ambiguous / transliterated candidates -> query Jev System-1
+  if (!lang) {
+    const jevLang = await triageLanguageWithJev(title, filename, options);
+    if (jevLang && jevLang.confidence >= 0.7) {
+      lang = jevLang.language;
+    } else {
+      // Fail open: mark 'other' so callers DO NOT force 'eng' or corrupt Calibre metadata
+      lang = "other";
+    }
+  }
+
+  const isBurmese = lang === "mya";
+  const finalTags = [...cleanedTags];
+
+  // 3. Burmese tag rule
+  if (isBurmese) {
+    if (!finalTags.some((t) => t.toLowerCase() === "burmese literature")) {
+      finalTags.push("Burmese Literature");
+    }
+  }
+
+  // 4. Standardized Category Assignment
+  let category: StandardCategory | undefined;
+  const existingCategory = STANDARDIZED_CATEGORIES.find((cat) =>
+    finalTags.some((t) => t.toLowerCase() === cat.toLowerCase()),
+  );
+
+  if (existingCategory) {
+    category = existingCategory;
+  } else {
+    // Missing meaningful category: assign one
+    if (isBurmese) {
+      category = "Burmese Literature";
+      // Burmese Literature is already added to finalTags
+    } else {
+      // Query Jev System-1 for standardized category
+      const jevCat = await triageCategoryWithJev(
+        title,
+        author,
+        book.series || "",
+        comments,
+        options,
+      );
+      if (jevCat && jevCat.confidence >= 0.7) {
+        category = jevCat.category;
+        finalTags.push(jevCat.category);
+      } else {
+        // Deterministic format / bracket fallback
+        const lowerFile = filename.toLowerCase();
+        if (lowerFile.endsWith(".cbz") || lowerFile.endsWith(".cbr") || /\[(?:manga|comic)\]/i.test(title)) {
+          category = "Manga";
+          finalTags.push("Manga");
+        } else if (/\[(?:ln|light\s*novel|web\s*novel|wn|ranobe)\]/i.test(title)) {
+          category = "Light Novel";
+          finalTags.push("Light Novel");
+        }
+      }
+    }
+  }
+
+  // 5. Compare with current book state
+  const addedTags = finalTags.filter(
+    (ft) => !origTags.some((ot) => ot.toLowerCase() === ft.toLowerCase()),
+  );
+
+  const currentLangs = (book.currentLanguages || []).map((l) =>
+    String(l).trim().toLowerCase(),
+  );
+  const needsLanguageUpdate =
+    lang !== "other" && !currentLangs.includes(lang.toLowerCase());
+  const needsTagsUpdate = addedTags.length > 0 || removedTags.length > 0;
+
+  return {
+    language: lang,
+    tags: finalTags,
+    addedTags,
+    removedTags,
+    category,
+    isBurmese,
+    needsLanguageUpdate,
+    needsTagsUpdate,
+  };
 }
 
 // ============================================================================

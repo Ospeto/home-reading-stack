@@ -28,6 +28,7 @@ import {
   getDownloadFilename,
   sanitizeErrorMessage,
   cleanString,
+  extractEpubMetadata,
 } from "./security";
 import { getJobQueue, DurableJobQueue } from "./jobs";
 import { generateMetadataFilename, buildContentDisposition } from "./filename";
@@ -36,7 +37,7 @@ import {
   moveToQuarantine,
   extractSeriesWithJev,
   cleanAuthorWithJev,
-  detectBookLanguage,
+  resolveBookLanguageAndTags,
   classifyBookSourceCategoryDeterministic,
 } from "./jev-shelf";
 
@@ -1119,12 +1120,19 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
   }
 
   const sanitized = sanitizeMetadata("", "", [], originalFileName);
+  const epubMeta = extractEpubMetadata(filePath);
+  const candidateTitle = epubMeta.title || sanitized.title;
+  const candidateAuthor =
+    epubMeta.author && epubMeta.author !== "Unknown"
+      ? epubMeta.author
+      : sanitized.author;
+  const candidateComments = epubMeta.description || "";
 
-  // Junk Ingest Gate: check before calibredb add
+  // Junk Ingest Gate: check before calibredb add using candidate metadata
   const junkCheck = await evaluateJunkGate(
-    sanitized.title,
+    candidateTitle,
     originalFileName,
-    sanitized.author,
+    candidateAuthor,
   );
   if (junkCheck.quarantined) {
     moveToQuarantine(filePath, path.basename(originalFileName));
@@ -1152,11 +1160,11 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
   }
 
   // 2. Check if normalized title already exists
-  const incomingSeries = await extractSeriesWithJev(sanitized.title, originalFileName, extractSeries);
+  const incomingSeries = await extractSeriesWithJev(candidateTitle, originalFileName, extractSeries);
 
   const existingBook = books.find((b: any) => {
     const bTitle = cleanString(b.title).toLowerCase();
-    const sTitle = sanitized.title.toLowerCase();
+    const sTitle = candidateTitle.toLowerCase();
 
     const bSeries = extractSeries(b.title, "");
     const bActualSeries = b.series
@@ -1192,8 +1200,34 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
     };
   }
 
-  // 3. Brand new book: Add to Calibre
-  const addRes = runCalibredb(["add", filePath, "--with-library", SERVER_URL]);
+  // 3. Brand new book: Categorize & detect language before adding to Calibre
+  const preClassification = await resolveBookLanguageAndTags({
+    title: candidateTitle,
+    author: candidateAuthor,
+    comments: candidateComments,
+    filename: originalFileName,
+    tags: sanitized.tags || [],
+    embeddedLanguage: epubMeta.language,
+  });
+
+  const addArgs = [
+    "add",
+    filePath,
+    "--with-library",
+    SERVER_URL,
+    "--automerge",
+    "ignore",
+  ];
+  if (preClassification.language && preClassification.language !== "other") {
+    addArgs.push("--languages", preClassification.language);
+  }
+  if (preClassification.tags.length > 0)
+    addArgs.push("--tags", preClassification.tags.join(","));
+  if (epubMeta.title) addArgs.push("--title", epubMeta.title);
+  if (epubMeta.author && epubMeta.author !== "Unknown")
+    addArgs.push("--authors", epubMeta.author);
+
+  const addRes = runCalibredb(addArgs);
 
   if (addRes.status === 0) {
     const match = addRes.stdout?.match(/Added book ids?:?\s*([0-9]+)/i);
@@ -1210,7 +1244,14 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
           originalFileName,
         );
         const finalAuthor = await cleanAuthorWithJev(clean.author || newBook.authors, clean.title || newBook.title);
-        const lang = await detectBookLanguage(clean.title || newBook.title, originalFileName);
+        const finalClassification = await resolveBookLanguageAndTags({
+          title: clean.title || newBook.title || candidateTitle,
+          author: finalAuthor || candidateAuthor,
+          comments: candidateComments,
+          filename: originalFileName,
+          tags: clean.tags || [],
+          embeddedLanguage: epubMeta.language,
+        });
 
         const setArgs = [
           "set_metadata",
@@ -1222,9 +1263,10 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
           setArgs.push("--field", `title:${clean.title}`);
         if (finalAuthor && finalAuthor !== newBook.authors)
           setArgs.push("--field", `authors:${finalAuthor}`);
-        if (clean.tags) setArgs.push("--field", `tags:${clean.tags.join(",")}`);
-        if (lang) {
-          setArgs.push("--field", `languages:${lang}`);
+        if (finalClassification.tags.length)
+          setArgs.push("--field", `tags:${finalClassification.tags.join(",")}`);
+        if (finalClassification.language !== "other") {
+          setArgs.push("--field", `languages:${finalClassification.language}`);
         }
         if (!newBook.series && incomingSeries) {
           setArgs.push("--field", `series:${incomingSeries.series}`);
@@ -1238,13 +1280,13 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
         const isManga =
           format === "CBZ" ||
           format === "CBR" ||
-          (clean.tags || []).some((t) => /manga|comic/i.test(t));
+          (finalClassification.tags || []).some((t) => /manga|comic/i.test(t));
         jobQueue.enqueue("metadata_enrich", {
           bookId: newId,
           title: clean.title,
           author: finalAuthor,
           filename: originalFileName,
-          tags: clean.tags || [],
+          tags: finalClassification.tags || [],
           isManga,
         });
       }

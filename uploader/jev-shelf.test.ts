@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,14 +14,17 @@ import {
   cleanAuthorWithJev,
   detectLanguageDeterministic,
   detectBookLanguage,
+  cleanBookTags,
+  isJunkTag,
+  resolveBookLanguageAndTags,
   classifyBookSourceCategoryDeterministic,
-  triageSourceCategoryWithJev,
   classifyBookSourceCategory,
   getQuarantineDir,
   moveToQuarantine,
   callJevSystemOneChoice,
 } from "./jev-shelf";
 import { extractSeries } from "./scraper";
+import { extractEpubMetadata, getBsdtarPath } from "./security";
 
 describe("Jev System-1 Four Use Cases & Shelf Integration", () => {
   const origFetch = globalThis.fetch;
@@ -444,28 +448,61 @@ describe("Jev System-1 Four Use Cases & Shelf Integration", () => {
   });
 
   // ==========================================================================
-  // 4. Language Shelf Detection
+  // 4. Language Shelf Detection & Library Categorization
   // ==========================================================================
-  describe("4. Language Shelf Detection", () => {
-    it("detects Burmese ('my') deterministically when Myanmar Unicode is present", () => {
-      expect(detectLanguageDeterministic("လေပြည်ကလေး၏တေးဆိုသံ")).toBe("my");
-      expect(detectLanguageDeterministic("စာဖတ်သူ")).toBe("my");
-      expect(detectLanguageDeterministic("အတွဲ ၁ အခန်း ၂")).toBe("my");
+  describe("4. Language Shelf Detection & Library Categorization", () => {
+    it("detects Burmese ('mya') deterministically when Myanmar Unicode is present", () => {
+      expect(detectLanguageDeterministic("လေပြည်ကလေး၏တေးဆိုသံ")).toBe("mya");
+      expect(detectLanguageDeterministic("စာဖတ်သူ")).toBe("mya");
+      expect(detectLanguageDeterministic("အတွဲ ၁ အခန်း ၂")).toBe("mya");
+      // Mixed Latin + Myanmar Unicode deterministically resolves to 'mya'
+      expect(detectLanguageDeterministic("Burmese Book မြန်မာစာ")).toBe("mya");
+      expect(detectLanguageDeterministic("Harry Potter", "", "ကောင်းမြတ်လွန်းသော်")).toBe("mya");
+      expect(detectLanguageDeterministic("The Reader", "", "", "<p>မြန်မာဘာသာပြန်</p>")).toBe("mya");
     });
 
-    it("detects English ('en') deterministically for pure Latin characters with no Myanmar", () => {
-      expect(detectLanguageDeterministic("The Great Gatsby")).toBe("en");
-      expect(detectLanguageDeterministic("Overlord Vol 1")).toBe("en");
-      expect(detectLanguageDeterministic("Clean Code: A Handbook")).toBe("en");
+    it("Burmese script deterministically resolves to 'mya' with 'Burmese Literature' tag", async () => {
+      const res = await resolveBookLanguageAndTags({
+        title: "စာဖတ်သူ",
+        author: "သူရိန်ဝင်း",
+        tags: ["ဘာသာပြန်"],
+        currentLanguages: ["eng"],
+      });
+
+      expect(res.language).toBe("mya");
+      expect(res.isBurmese).toBe(true);
+      expect(res.tags).toContain("Burmese Literature");
+      expect(res.tags).toContain("ဘာသာပြန်");
+      expect(res.needsLanguageUpdate).toBe(true);
+      expect(res.needsTagsUpdate).toBe(true);
     });
 
-    it("returns null for ambiguous, mixed, or other scripts", () => {
-      expect(detectLanguageDeterministic("Burmese Book မြန်မာစာ")).toBeNull(); // Mixed Latin + Myanmar
+    it("detects English ('eng') deterministically for pure Latin characters with no Myanmar", () => {
+      expect(detectLanguageDeterministic("The Great Gatsby")).toBe("eng");
+      expect(detectLanguageDeterministic("Overlord Vol 1")).toBe("eng");
+      expect(detectLanguageDeterministic("Clean Code: A Handbook")).toBe("eng");
+    });
+
+    it("English script resolves to 'eng'", async () => {
+      const res = await resolveBookLanguageAndTags({
+        title: "The Great Gatsby",
+        author: "F. Scott Fitzgerald",
+        tags: ["Classic"],
+        currentLanguages: ["eng"],
+      });
+
+      expect(res.language).toBe("eng");
+      expect(res.isBurmese).toBe(false);
+      expect(res.tags).not.toContain("Burmese Literature");
+      expect(res.needsLanguageUpdate).toBe(false);
+    });
+
+    it("returns null for ambiguous, non-Latin non-Myanmar, or numeric scripts", () => {
       expect(detectLanguageDeterministic("無職転生")).toBeNull(); // Japanese Kanji/Kana
       expect(detectLanguageDeterministic("12345678")).toBeNull(); // Pure digits
     });
 
-    it("calls Jev for mixed/ambiguous text and classifies correctly", async () => {
+    it("ambiguous text calls Jev System-1 mock and resolves to 'mya' with 'Burmese Literature' tag", async () => {
       globalThis.fetch = async () => {
         return new Response(
           JSON.stringify({
@@ -480,10 +517,24 @@ describe("Jev System-1 Four Use Cases & Shelf Integration", () => {
         );
       };
 
-      const lang = await detectBookLanguage("Burmese Novel မြန်မာဝတ္ထု", "burmese.epub", {
+      const lang = await detectBookLanguage("Min Lu - One Autumn", "novel.epub", {
         apiKey: "test-key",
       });
-      expect(lang).toBe("my");
+      expect(lang).toBe("mya");
+
+      const res = await resolveBookLanguageAndTags(
+        {
+          title: "Min Lu - One Autumn",
+          author: "Min Lu",
+          filename: "novel.epub",
+          tags: [],
+          currentLanguages: ["eng"],
+        },
+        { apiKey: "test-key" },
+      );
+      expect(res.language).toBe("mya");
+      expect(res.tags).toContain("Burmese Literature");
+      expect(res.needsLanguageUpdate).toBe(true);
     });
 
     it("classifies other languages via Jev", async () => {
@@ -507,16 +558,177 @@ describe("Jev System-1 Four Use Cases & Shelf Integration", () => {
       expect(lang).toBe("other");
     });
 
-    it("fails open (returns null) on mixed text if Jev fails or confidence < 0.7", async () => {
+    it("fails open (returns null) on ambiguous non-Burmese text if Jev fails or confidence < 0.7", async () => {
       globalThis.fetch = async () => {
         throw new Error("Network offline");
       };
 
-      const lang = await detectBookLanguage("Mystery Novel မြန်မာ", "novel.epub", {
+      const lang = await detectBookLanguage("無職転生", "mushoku.epub", {
         apiKey: "test-key",
       });
-      // Mixed text fails open when Jev fails
       expect(lang).toBeNull();
+    });
+
+    it("fails open on transliterated Burmese when Jev is offline without forcing 'eng'", async () => {
+      globalThis.fetch = async () => {
+        throw new Error("Jev offline");
+      };
+
+      const res = await resolveBookLanguageAndTags({
+        title: "Min Lu - One Autumn",
+        author: "Min Lu",
+        filename: "novel.epub",
+        tags: [],
+        currentLanguages: ["eng"],
+      });
+
+      // Does NOT force 'eng'; fails open to 'other' and sets needsLanguageUpdate to false
+      expect(res.language).toBe("other");
+      expect(res.needsLanguageUpdate).toBe(false);
+      expect(res.isBurmese).toBe(false);
+    });
+
+    it("respects embedded OPF dc:language when present", async () => {
+      // 1. Embedded 'bur' / 'mya' resolves to 'mya' with 'Burmese Literature' tag
+      const resBurmese = await resolveBookLanguageAndTags({
+        title: "Min Lu - One Autumn",
+        author: "Min Lu",
+        embeddedLanguage: "bur",
+        currentLanguages: ["eng"],
+      });
+      expect(resBurmese.language).toBe("mya");
+      expect(resBurmese.isBurmese).toBe(true);
+      expect(resBurmese.tags).toContain("Burmese Literature");
+
+      // 2. Embedded 'jpn' resolves to 'other' without forcing 'eng'
+      const resJpn = await resolveBookLanguageAndTags({
+        title: "Mushoku Tensei",
+        embeddedLanguage: "jpn",
+      });
+      expect(resJpn.language).toBe("other");
+      expect(resJpn.needsLanguageUpdate).toBe(false);
+    });
+
+    it("strips junk tags, watermarks, and formats cleanly", () => {
+      const dirtyTags = [
+        "zlib",
+        "https://t.me/mmebooks",
+        "Fiction",
+        "@channels",
+        "epub",
+        "pdf",
+        "oceanofpdf",
+        "DO NOT POST ELSEWHERE",
+        "Do Not Translate",
+        "Technology",
+        "Burmese Literature",
+        "https://t.me/TheBookR",
+        "   ",
+        "x",
+      ];
+
+      const cleaned = cleanBookTags(dirtyTags);
+      expect(cleaned).toEqual(["Fiction", "Technology", "Burmese Literature"]);
+
+      expect(isJunkTag("zlib")).toBe(true);
+      expect(isJunkTag("z-lib")).toBe(true);
+      expect(isJunkTag("epub")).toBe(true);
+      expect(isJunkTag("https://t.me/TheBookR")).toBe(true);
+      expect(isJunkTag("@somechannel")).toBe(true);
+      expect(isJunkTag("DO NOT POST ELSEWHERE")).toBe(true);
+      expect(isJunkTag("Burmese Literature")).toBe(false);
+      expect(isJunkTag("Fiction")).toBe(false);
+      expect(isJunkTag("Light Novel")).toBe(false);
+    });
+
+    it("assigns standardized category via Jev System-1 for books missing meaningful tags", async () => {
+      globalThis.fetch = async () => {
+        return new Response(
+          JSON.stringify({
+            answers: {
+              book_category: {
+                choice: "Technology",
+                confidence: 0.95,
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const res = await resolveBookLanguageAndTags(
+        {
+          title: "Designing Data-Intensive Applications",
+          author: "Martin Kleppmann",
+          tags: ["zlib", "epub"], // Only junk tags
+          currentLanguages: ["eng"],
+        },
+        { apiKey: "test-key" },
+      );
+
+      expect(res.language).toBe("eng");
+      expect(res.tags).toContain("Technology");
+      expect(res.tags).not.toContain("zlib");
+      expect(res.tags).not.toContain("epub");
+      expect(res.category).toBe("Technology");
+    });
+
+    it("extracts embedded Burmese title and author from EPUB container, preventing generic filename mislabeling as 'eng'", async () => {
+      // Build a minimal valid EPUB with generic filename but embedded Burmese OPF
+      const epubStaging = path.join(tempTestDir, "epub_src");
+      const metaDir = path.join(epubStaging, "META-INF");
+      fs.mkdirSync(metaDir, { recursive: true });
+
+      fs.writeFileSync(path.join(epubStaging, "mimetype"), "application/epub+zip");
+      fs.writeFileSync(
+        path.join(metaDir, "container.xml"),
+        '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      fs.writeFileSync(
+        path.join(epubStaging, "content.opf"),
+        `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>စာဖတ်သူ</dc:title><dc:creator>သူရိန်ဝင်း</dc:creator><dc:description>ဘာသာပြန်ဝတ္ထု</dc:description></metadata><manifest/><spine/></package>`,
+      );
+
+      const genericEpubPath = path.join(tempTestDir, "987654321.epub");
+      spawnSync(getBsdtarPath(), [
+        "--format",
+        "zip",
+        "-cf",
+        genericEpubPath,
+        "-C",
+        epubStaging,
+        "mimetype",
+        "META-INF",
+        "content.opf",
+      ]);
+
+      // 1. Verify extractEpubMetadata extracts embedded Burmese metadata despite generic filename
+      const extracted = extractEpubMetadata(genericEpubPath);
+      expect(extracted.title).toBe("စာဖတ်သူ");
+      expect(extracted.author).toBe("သူရိန်ဝင်း");
+
+      // 2. Verify evaluateJunkGate with extracted metadata is NOT flagged as suspicious digits or junk
+      const junkCheck = await evaluateJunkGate(
+        extracted.title || "987654321",
+        "987654321.epub",
+        extracted.author || "Unknown",
+      );
+      expect(junkCheck.quarantined).toBe(false);
+
+      // 3. Verify resolveBookLanguageAndTags uses the extracted metadata and resolves to 'mya' with 'Burmese Literature'
+      const res = await resolveBookLanguageAndTags({
+        title: extracted.title || "987654321",
+        author: extracted.author || "Unknown",
+        comments: extracted.description || "",
+        filename: "987654321.epub",
+        tags: [],
+        currentLanguages: ["eng"],
+      });
+
+      expect(res.language).toBe("mya");
+      expect(res.isBurmese).toBe(true);
+      expect(res.tags).toContain("Burmese Literature");
+      expect(res.needsLanguageUpdate).toBe(true);
     });
   });
 
