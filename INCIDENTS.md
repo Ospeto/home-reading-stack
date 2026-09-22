@@ -8,7 +8,7 @@ This document chronicles the technical challenges encountered during the Kindle 
 
 | ID | Title | Root Cause | Resolution | Impact |
 |---|---|---|---|---|
-| **INC-01** | Myanmar GFW/DPI Blocking Raw Kindle HTTPS | Myanmar ISPs filter dynamic DNS, `.sslip.io`, and raw VPS IP ranges on standard HTTPS ports | Transitioned primary stack to local Mac mini home server (`192.168.31.15`); set up sing-box VLESS proxy for external fallback | Resolved |
+| **INC-01** | Myanmar GFW/DPI Blocking Raw Kindle HTTPS | Myanmar ISPs filter dynamic DNS and raw VPS IP ranges on standard HTTPS ports | Transitioned primary stack to local Mac mini home server (`192.168.31.15`); set up sing-box VLESS proxy for external fallback | Resolved |
 | **INC-02** | KOReader Cross-Device Sync Mismatch | Different book file encodings generated conflicting partial MD5 document hashes | Unified book delivery via central OPDS catalog ensuring byte-identical copies | Resolved |
 | **INC-03** | KOReader Localhost Port 8321 Refusal | Proxy request destination misconfigured to localhost loopback `127.0.0.1:8321` | Separated Network Proxy settings from Custom Sync Server settings | Resolved |
 | **INC-04** | Calibre SQLite Multi-Process Lock Contention | Direct filesystem mutation conflicted with active `calibre-server` process | Enabled `--enable-local-write` and switched CLI tools to server URL `http://127.0.0.1:8088` | Resolved |
@@ -23,9 +23,9 @@ This document chronicles the technical challenges encountered during the Kindle 
 ## 🔍 Detailed Post-Mortems
 
 ### INC-01: Myanmar GFW Dropping Direct Kindle HTTPS
-- **Symptom:** Kindle displayed *"Check your network connection"* when accessing `https://kosync-198-46-146-17.sslip.io` and `https://calibre-198-46-146-17.sslip.io`, while laptop/phone succeeded.
-- **Root Cause:** Laptop and phone were tunneled through Happ VPN (VLESS Reality camouflage). Kindle lacked VPN capabilities and sent raw HTTPS packets to overseas IPs. Deep Packet Inspection (DPI) in Myanmar dropped direct TLS handshakes to international IP ranges and blocked `.sslip.io` SNI.
-- **Solution:** Moved sync server and book catalog directly onto Mac mini (`192.168.31.15`) on the local Wi-Fi subnet. Kindle now talks directly to Mac mini with zero GFW exposure.
+- **Symptom:** Kindle displayed *"Check your network connection"* when accessing overseas endpoints directly, while laptop/phone succeeded.
+- **Root Cause:** Laptop and phone were tunneled through Happ VPN (VLESS Reality camouflage). Kindle lacked VPN capabilities and sent raw HTTPS packets to overseas IPs. Deep Packet Inspection (DPI) in Myanmar dropped direct TLS handshakes to international IP ranges.
+- **Solution:** Moved sync server and book catalog directly onto Mac mini (`192.168.31.15`) on the local Wi-Fi subnet, and routed external connections through Singapore custom domains (`kosync-sg.wavypremium.xyz` and `opds.wavypremium.xyz`) and local Sing-box proxy (`0.0.0.0:7890`). Kindle now connects seamlessly with zero GFW exposure.
 
 ---
 
