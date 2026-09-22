@@ -17,8 +17,12 @@ import {
   isSameBook,
   isSameBookAsync,
   classifyDuplicateWithJev,
-  classifyBookSourceCategory,
   searchAllSources,
+  ANILIST_MIN_INTERVAL_MS,
+  MAX_RETRY_AFTER_MS,
+  parseRetryAfterMs,
+  paceAniListRequest,
+  resetAniListPacing,
   type ScrapedMetadata,
 } from "./scraper";
 
@@ -1470,6 +1474,251 @@ describe("RanobeDB Scraper & Light Novel Metadata Engine", () => {
       } finally {
         (globalThis as any).fetch = origFetch;
       }
+    });
+
+    describe("AniList Request Pacing & HTTP 429 Backoff", () => {
+      it("parseRetryAfterMs correctly parses integer seconds, floats, HTTP dates, and defaults", () => {
+        expect(parseRetryAfterMs("5")).toBe(5000);
+        expect(parseRetryAfterMs("60")).toBe(60000);
+        expect(parseRetryAfterMs("0")).toBe(0);
+        expect(parseRetryAfterMs("1.5")).toBe(1500);
+        expect(parseRetryAfterMs("  3  ")).toBe(3000);
+        expect(parseRetryAfterMs(null)).toBe(2000);
+        expect(parseRetryAfterMs(undefined)).toBe(2000);
+        expect(parseRetryAfterMs("")).toBe(2000);
+        expect(parseRetryAfterMs("invalid-header")).toBe(2000);
+        expect(parseRetryAfterMs("-10", 3000)).toBe(3000);
+        expect(parseRetryAfterMs("Infinity")).toBe(2000);
+        expect(parseRetryAfterMs("-Infinity")).toBe(2000);
+        expect(parseRetryAfterMs("NaN")).toBe(2000);
+
+        // Clamps to MAX_RETRY_AFTER_MS (60s)
+        expect(parseRetryAfterMs("120")).toBe(MAX_RETRY_AFTER_MS);
+        expect(parseRetryAfterMs("999999")).toBe(MAX_RETRY_AFTER_MS);
+
+        // Future HTTP-date
+        const futureDate = new Date(Date.now() + 5000).toUTCString();
+        const diff = parseRetryAfterMs(futureDate);
+        expect(diff).toBeGreaterThan(3000);
+        expect(diff).toBeLessThanOrEqual(5100);
+      });
+
+      it("searchAniList parses Retry-After header, sleeps, retries once, and returns hits on success", async () => {
+        resetAniListPacing();
+        let callCount = 0;
+        const recordedSleeps: number[] = [];
+
+        const mockFetch = async () => {
+          callCount++;
+          if (callCount === 1) {
+            // First attempt: return 429 with Retry-After: 3
+            return new Response("Too Many Requests", {
+              status: 429,
+              headers: { "Retry-After": "3" },
+            });
+          }
+          // Second attempt (retry): return 200 OK with media
+          return new Response(
+            JSON.stringify({
+              data: {
+                Media: {
+                  id: 999,
+                  title: { english: "Classroom of the Elite" },
+                  description: "Kiyotaka Ayanokoji enters Tokyo Metropolitan Advanced Nurturing High School.",
+                  format: "NOVEL",
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        };
+
+        const mockSleep = async (ms: number) => {
+          recordedSleeps.push(ms);
+        };
+
+        const hits = await searchAniList("Classroom of the Elite", {
+          fetchFn: mockFetch,
+          sleepFn: mockSleep,
+        });
+
+        expect(callCount).toBe(2);
+        expect(recordedSleeps).toContain(3000);
+        expect(hits.length).toBe(1);
+        expect(hits[0].title).toBe("Classroom of the Elite");
+        expect(hits[0].source).toBe("AniList");
+      });
+
+      it("searchAniList backs off on 429 without Retry-After header and stops after 1 retry if 429 persists", async () => {
+        resetAniListPacing();
+        let callCount = 0;
+        const recordedSleeps: number[] = [];
+
+        const persistent429Fetch = async () => {
+          callCount++;
+          return new Response("Too Many Requests", { status: 429 });
+        };
+
+        const mockSleep = async (ms: number) => {
+          recordedSleeps.push(ms);
+        };
+
+        const hits = await searchAniList("Persistent Rate Limit", {
+          fetchFn: persistent429Fetch,
+          sleepFn: mockSleep,
+        });
+
+        expect(callCount).toBe(2); // Exactly 1 retry
+        expect(recordedSleeps).toContain(2000); // Default 2000ms backoff
+        expect(hits).toEqual([]);
+      });
+
+      it("searchAniList enforces at least 700ms request pacing between consecutive calls", async () => {
+        resetAniListPacing();
+        const recordedSleeps: number[] = [];
+        const mockSleep = async (ms: number) => {
+          recordedSleeps.push(ms);
+        };
+
+        const dummyFetch = async () => {
+          return new Response(
+            JSON.stringify({
+              data: {
+                Media: {
+                  id: 1001,
+                  title: { english: "Overlord" },
+                  format: "NOVEL",
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        };
+
+        // First call (initial)
+        await searchAniList("Overlord 1", {
+          fetchFn: dummyFetch,
+          sleepFn: mockSleep,
+        });
+
+        // Immediate second call should be paced by ~700ms
+        await searchAniList("Overlord 2", {
+          fetchFn: dummyFetch,
+          sleepFn: mockSleep,
+        });
+
+        // Pacing should have triggered for the second call
+        expect(recordedSleeps.length).toBeGreaterThanOrEqual(1);
+        expect(recordedSleeps[0]).toBeGreaterThanOrEqual(650);
+        expect(recordedSleeps[0]).toBeLessThanOrEqual(ANILIST_MIN_INTERVAL_MS);
+      });
+
+      it("paceAniListRequest directly paces requests and respects custom minIntervalMs", async () => {
+        resetAniListPacing();
+        const recordedSleeps: number[] = [];
+        const mockSleep = async (ms: number) => {
+          recordedSleeps.push(ms);
+        };
+
+        // First call
+        await paceAniListRequest(500, mockSleep);
+        expect(recordedSleeps.length).toBe(0);
+
+        // Immediate second call
+        await paceAniListRequest(500, mockSleep);
+        expect(recordedSleeps.length).toBe(1);
+        expect(recordedSleeps[0]).toBeGreaterThanOrEqual(450);
+        expect(recordedSleeps[0]).toBeLessThanOrEqual(500);
+      });
+
+      it("enforces serial process-wide queue during 429 backoff preventing concurrency stampedes", async () => {
+        resetAniListPacing();
+        const callOrder: string[] = [];
+        const recordedSleeps: { query: string; ms: number }[] = [];
+        let inFlight = 0;
+        let maxParallel = 0;
+
+        let attempt1 = 0;
+        const fetch1 = async () => {
+          inFlight++;
+          maxParallel = Math.max(maxParallel, inFlight);
+          attempt1++;
+          callOrder.push(`fetch1_attempt_${attempt1}`);
+          const isFirst = attempt1 === 1;
+          inFlight--;
+          if (isFirst) {
+            return new Response("Too Many Requests", {
+              status: 429,
+              headers: { "Retry-After": "2" }, // 2000ms backoff
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              data: {
+                Media: {
+                  id: 1,
+                  title: { english: "Overlord" },
+                  description: "A dark fantasy novel series.",
+                  format: "NOVEL",
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        };
+
+        const fetch2 = async () => {
+          inFlight++;
+          maxParallel = Math.max(maxParallel, inFlight);
+          callOrder.push("fetch2");
+          inFlight--;
+          return new Response(
+            JSON.stringify({
+              data: {
+                Media: {
+                  id: 2,
+                  title: { english: "Danmachi" },
+                  description: "Is it wrong to try to pick up girls in a dungeon?",
+                  format: "NOVEL",
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        };
+
+        const sleep1 = async (ms: number) => {
+          recordedSleeps.push({ query: "q1", ms });
+        };
+
+        const sleep2 = async (ms: number) => {
+          recordedSleeps.push({ query: "q2", ms });
+        };
+
+        // Fire both queries concurrently
+        const p1 = searchAniList("Overlord", { fetchFn: fetch1, sleepFn: sleep1 });
+        const p2 = searchAniList("Danmachi", { fetchFn: fetch2, sleepFn: sleep2 });
+
+        const [r1, r2] = await Promise.all([p1, p2]);
+
+        // Both calls succeed and return results
+        expect(r1.length).toBe(1);
+        expect(r1[0].title).toBe("Overlord");
+        expect(r2.length).toBe(1);
+        expect(r2[0].title).toBe("Danmachi");
+
+        // Concurrency is strictly 1: no parallel fetches occurred at any time
+        expect(maxParallel).toBe(1);
+
+        // Call order proves that fetch2 waited for fetch1's 429 backoff and retry to finish!
+        expect(callOrder).toEqual(["fetch1_attempt_1", "fetch1_attempt_2", "fetch2"]);
+
+        // Q1 slept 2000ms for 429 backoff
+        expect(recordedSleeps.some((s) => s.query === "q1" && s.ms === 2000)).toBe(true);
+
+        // Q2 was held behind Q1, and when released, enforced the minimum 700ms interval
+        expect(recordedSleeps.some((s) => s.query === "q2")).toBe(true);
+      });
     });
   });
 });

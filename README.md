@@ -320,10 +320,10 @@ LightHouse integrates [TypeSafe Jev System-1](https://api.typesafe.ai/v1/systemo
      - **Other:** Japanese light novels, manga, and foreign language editions.
 5. **Intelligent Multi-Source Metadata & Cover Routing:**
    - Automatically determines book category and prioritizes specialized metadata engines:
-     - **Light Novels & Web Novels:** Queries [RanobeDB API](https://ranobedb.org/api/v0), [AniList GraphQL API](https://graphql.anilist.co), and Bangumi first, extracting rich plot summaries, series-level overviews for Korean web novels and light novels, high-resolution cover art, and staff metadata before falling back to Google Books.
+     - **Light Novels & Web Novels:** Queries [RanobeDB API](https://ranobedb.org/api/v0), [AniList GraphQL API](https://graphql.anilist.co), and Bangumi first (with request pacing enforcing >= 700ms intervals and HTTP 429 `Retry-After` backoff protecting quotas), extracting rich plot summaries, series-level overviews for Korean web novels and light novels, high-resolution cover art, and staff metadata before falling back to Google Books.
      - **Manga:** Queries MangaDex API, AniList GraphQL API, and Bangumi.
      - **General Literature:** Queries Google Books and OpenLibrary.
-     - **Burmese Literature:** Bypasses overseas providers and applies localized typographic cover synthesis and Burmese font styling.
+     - **Burmese Literature:** Hardened source classification unconditionally routes any title containing Myanmar Unicode to `burmese` (even with Latin authors), bypassing overseas providers and applying localized typographic cover synthesis and Burmese font styling.
 
 ---
 

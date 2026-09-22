@@ -40,6 +40,7 @@ import {
   cleanAuthorWithJev,
   resolveBookLanguageAndTags,
   classifyBookSourceCategoryDeterministic,
+  containsBurmese,
 } from "./jev-shelf";
 
 let _duplicateCleanerRunner: (options: CleanDuplicatesOptions) => Promise<CleanDuplicatesReport> = runDuplicateCleaner;
@@ -3684,7 +3685,7 @@ export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
         payload.filename || "",
         payload.tags || [],
       );
-      if (detCat === "burmese") {
+      if (detCat === "burmese" || containsBurmese(payload.title)) {
         let hasExistingCover = false;
         try {
           const db = new Database(getCalibreDbPath(), { readonly: true });
