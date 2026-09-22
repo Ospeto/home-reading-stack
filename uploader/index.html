@@ -2355,7 +2355,7 @@
 
       // High-Fidelity Book Grid View Render
       const gridCards = visibleList.map(book => {
-        const coverSrc = book.cover ? `/api/books/${book.id}/cover?w=360` : 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="120" height="178" fill="%23181a20"><rect width="120" height="178"/><text x="50%" y="50%" fill="%23737373" text-anchor="middle" font-family="sans-serif" font-size="12">No Cover</text></svg>';
+        const coverSrc = book.cover ? `/api/books/${book.id}/cover?w=360` : "data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='178' fill='%23181a20'%3E%3Crect width='120' height='178'/%3E%3Ctext x='50%25' y='50%25' fill='%23737373' text-anchor='middle' font-family='sans-serif' font-size='12'%3ENo Cover%3C/text%3E%3C/svg%3E";
         const isSelected = selectedBookIds.has(book.id);
 
         const sync = kosyncMap.get(book.id);
