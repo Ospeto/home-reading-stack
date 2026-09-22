@@ -253,7 +253,7 @@
         position: sticky;
         top: var(--header-height, 9.5rem);
         align-self: flex-start;
-        max-height: calc(100vh - var(--header-height, 9.5rem));
+        max-height: calc(var(--tg-viewport-height, 100vh) - var(--header-height, 9.5rem));
         overflow-y: auto;
       }
     }
@@ -1760,6 +1760,7 @@
       const tg = window.Telegram?.WebApp;
       const height = tg?.viewportHeight ? `${tg.viewportHeight}px` : '100vh';
       document.documentElement.style.setProperty('--tg-viewport-height', height);
+      updateHeaderHeight();
     }
 
     // STATE & CLIENT CACHE (STALE-WHILE-REVALIDATE)
