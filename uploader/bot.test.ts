@@ -1164,6 +1164,19 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
     expect(htmlContent).toContain("uploadQueue");
   });
 
+  it("index.html uses properly encoded SVG data URI without unescaped double quotes for fallback cover", () => {
+    const htmlPath = path.join(import.meta.dir, "index.html");
+    const htmlContent = fs.readFileSync(htmlPath, "utf8");
+
+    const match = htmlContent.match(/const coverSrc = book\.cover \? [^:]+ : ("[^"]+"|\'[^\']+\');/);
+    expect(match).not.toBeNull();
+    const fallbackLiteral = match![1];
+    expect(fallbackLiteral).toContain("data:image/svg+xml;utf8,%3Csvg");
+    const inner = fallbackLiteral.slice(1, -1);
+    expect(inner).not.toContain('"');
+    expect(htmlContent).not.toContain('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg"');
+  });
+
   it("batchProcessFiles auto-heals truncated EPUB missing central directory and proceeds with ingestion", async () => {
     function buildSyntheticTruncatedEpub(): Buffer {
       function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
@@ -1214,6 +1227,11 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
 
     const origCalibredb = process.env.CALIBREDB_PATH;
     process.env.CALIBREDB_PATH = mockCalibre;
+
+    const testDropDir = path.join(os.tmpdir(), "test_books_drop_" + Date.now());
+    fs.mkdirSync(testDropDir, { recursive: true });
+    const origDropDir = process.env.BOOKS_DROP_DIR;
+    process.env.BOOKS_DROP_DIR = testDropDir;
 
     const fileId = "test_truncated_file_id";
     const sentMessages: any[] = [];
@@ -1284,9 +1302,21 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
       } else {
         process.env.CALIBREDB_PATH = origCalibredb;
       }
-      if (fs.existsSync(mockCalibre)) {
-        fs.unlinkSync(mockCalibre);
+      if (origDropDir === undefined) {
+        delete process.env.BOOKS_DROP_DIR;
+      } else {
+        process.env.BOOKS_DROP_DIR = origDropDir;
       }
+      try {
+        if (fs.existsSync(testDropDir)) {
+          fs.rmSync(testDropDir, { recursive: true, force: true });
+        }
+      } catch {}
+      try {
+        if (fs.existsSync(mockCalibre)) {
+          fs.unlinkSync(mockCalibre);
+        }
+      } catch {}
     }
   });
 
