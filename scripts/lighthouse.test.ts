@@ -42,6 +42,7 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(stdout).toContain("down");
       expect(stdout).toContain("health");
       expect(stdout).toContain("categorize");
+      expect(stdout).toContain("enrich-synopsis");
       expect(stdout).toContain("install-daemons");
       expect(stdout).toContain("backup");
       expect(stdout).toContain("restore");
@@ -57,6 +58,19 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(res.stdout).toContain("--dry-run");
       expect(res.stdout).toContain("--apply");
       expect(res.stdout).toContain("--limit");
+    });
+
+    it("bin/lighthouse enrich-synopsis --help outputs enrich-synopsis options", () => {
+      const res = spawnSync(LIGHTHOUSE_BIN, ["enrich-synopsis", "--help"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain("LightHouse Synopsis Enrichment Tool");
+      expect(res.stdout).toContain("--dry-run");
+      expect(res.stdout).toContain("--apply");
+      expect(res.stdout).toContain("--limit");
+      expect(res.stdout).toContain("--source");
     });
 
     it("bin/lighthouse version outputs current version", () => {
@@ -86,6 +100,7 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       const scripts = [
         "backup-daily.sh",
         "clean-duplicates.sh",
+        "enrich-synopses.sh",
         "migration-preflight.sh",
         "sync-series-metadata.sh",
         "tunnel-watchdog.sh",

@@ -104,6 +104,8 @@ LightHouse includes a portable management CLI (`bin/lighthouse`) for service lif
 | `bin/lighthouse down` | Stops all services gracefully in reverse dependency order without leaving orphaned processes. |
 | `bin/lighthouse restart` | Performs safe sequential stop and restart of reading stack services (`down; sleep 1; up`). |
 | `bin/lighthouse health` | Probes HTTP/TCP endpoints, checks response codes, and auto-heals stale remote listeners (`fuser -k`). |
+| `bin/lighthouse categorize` | Classifies book languages (`mya`, `eng`, `other`), assigns standardized category tags, and prunes promotional tags. |
+| `bin/lighthouse enrich-synopsis` | Populates missing descriptions for Calibre books combining local EPUB metadata extraction with online APIs (RanobeDB, Bangumi, Google Books). |
 | `bin/lighthouse install-daemons` | Dynamically generates and registers macOS LaunchAgents for the current user and repository root. |
 | `bin/lighthouse backup` | Flushes SQLite WAL frames and creates an atomic snapshot bundle with SHA-256 checksum and manifest. |
 | `bin/lighthouse restore <archive>` | Performs verified disaster recovery with cryptographic checksum verification and integrity scan. |
@@ -123,6 +125,15 @@ bin/lighthouse restart
 
 # Run automated health probes and auto-heal stale listeners/workers
 bin/lighthouse health
+
+# Preview missing synopsis enrichment across library (safe dry-run)
+bin/lighthouse enrich-synopsis
+
+# Apply enriched synopses and missing covers via Calibre server metadata update
+bin/lighthouse enrich-synopsis --apply
+
+# Limit enrichment to first 20 books or restrict source strategy (epub, online, all)
+bin/lighthouse enrich-synopsis --apply --limit 20 --source=online
 
 # Dynamically generate and register macOS LaunchAgents for the current user
 bin/lighthouse install-daemons

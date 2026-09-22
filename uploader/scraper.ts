@@ -931,11 +931,25 @@ export async function searchGoogleBooks(
   query: string,
 ): Promise<ScrapedMetadata[]> {
   const results: ScrapedMetadata[] = [];
-  const cleanQ = cleanQuery(query);
-  if (!cleanQ) return results;
+  const trimmed = (query || "").trim();
+  const isIsbn =
+    /^isbn:\s*(?:97[89][\d-]{10,14}|\d[\d-]{8,12}[\dX])$/i.test(trimmed) ||
+    /^(?:97[89]\d{10}|\d{9}[\dX])$/i.test(trimmed.replace(/[\s-]/g, ""));
+
+  let cleanQ: string;
+  let url: string;
+
+  if (isIsbn) {
+    const rawIsbn = trimmed.replace(/^isbn:\s*/i, "").replace(/[^0-9Xx]/g, "");
+    cleanQ = `isbn:${rawIsbn}`;
+    url = `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(rawIsbn)}&maxResults=3`;
+  } else {
+    cleanQ = cleanQuery(query);
+    if (!cleanQ) return results;
+    url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(cleanQ)}&maxResults=3`;
+  }
 
   try {
-    const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(cleanQ)}&maxResults=3`;
     const res = await safeFetchWithSsrf(url, {
       headers: { "User-Agent": "ReadingHQ/1.0" },
       signal: AbortSignal.timeout(SCRAPER_TIMEOUT_MS),
@@ -960,7 +974,7 @@ export async function searchGoogleBooks(
             : "";
           const tags: string[] = (info.categories || []).slice(0, 4);
 
-          const sim = stringSimilarity(cleanQ, title);
+          const sim = isIsbn ? 1.0 : stringSimilarity(cleanQ, title);
           results.push({
             title,
             authors: authors || "Unknown",
@@ -990,11 +1004,25 @@ export async function searchOpenLibrary(
   query: string,
 ): Promise<ScrapedMetadata[]> {
   const results: ScrapedMetadata[] = [];
-  const cleanQ = cleanQuery(query);
-  if (!cleanQ) return results;
+  const trimmed = (query || "").trim();
+  const isIsbn =
+    /^isbn:\s*(?:97[89][\d-]{10,14}|\d[\d-]{8,12}[\dX])$/i.test(trimmed) ||
+    /^(?:97[89]\d{10}|\d{9}[\dX])$/i.test(trimmed.replace(/[\s-]/g, ""));
+
+  let cleanQ: string;
+  let url: string;
+
+  if (isIsbn) {
+    const rawIsbn = trimmed.replace(/^isbn:\s*/i, "").replace(/[^0-9Xx]/g, "");
+    cleanQ = `isbn:${rawIsbn}`;
+    url = `https://openlibrary.org/search.json?isbn=${encodeURIComponent(rawIsbn)}&limit=3`;
+  } else {
+    cleanQ = cleanQuery(query);
+    if (!cleanQ) return results;
+    url = `https://openlibrary.org/search.json?q=${encodeURIComponent(cleanQ)}&limit=3`;
+  }
 
   try {
-    const url = `https://openlibrary.org/search.json?q=${encodeURIComponent(cleanQ)}&limit=3`;
     const res = await safeFetchWithSsrf(url, {
       signal: AbortSignal.timeout(SCRAPER_TIMEOUT_MS),
       proxy: PROXY,
@@ -1014,7 +1042,7 @@ export async function searchOpenLibrary(
             : "";
           const tags = doc.subject ? doc.subject.slice(0, 4) : [];
 
-          const sim = stringSimilarity(cleanQ, title);
+          const sim = isIsbn ? 1.0 : stringSimilarity(cleanQ, title);
           results.push({
             title,
             authors: authors || "Unknown",
@@ -1133,7 +1161,12 @@ export function parseRanobeBook(
     publishedDate: formatRanobeDate(
       book.c_release_date ?? fallbackHit?.c_release_date,
     ),
-    description: book.description || book.description_ja || "",
+    description:
+      book.description ||
+      book.description_ja ||
+      book.series?.description ||
+      fallbackHit?.series?.description ||
+      "",
     coverUrl,
     tags,
     source: "RanobeDB",
