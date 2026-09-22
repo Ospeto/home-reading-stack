@@ -32,6 +32,14 @@ import {
   type CleanDuplicatesOptions,
   type CleanDuplicatesReport,
 } from "../scripts/clean-duplicates";
+import {
+  evaluateJunkGate,
+  moveToQuarantine,
+  getQuarantineDir,
+  extractSeriesWithJev,
+  cleanAuthorWithJev,
+  detectBookLanguage,
+} from "./jev-shelf";
 
 let _duplicateCleanerRunner: (options: CleanDuplicatesOptions) => Promise<CleanDuplicatesReport> = runDuplicateCleaner;
 export function setDuplicateCleanerRunnerForTest(runner: typeof runDuplicateCleaner | null) {
@@ -2756,6 +2764,25 @@ export async function ingestBookFile(
     };
   }
 
+  // Junk Ingest Gate: check before proceeding with Calibre add
+  const junkCheck = await evaluateJunkGate(
+    preliminary.title,
+    originalFileName,
+    preliminary.author,
+  );
+  if (junkCheck.quarantined) {
+    log(`[TelegramBot] Quarantined book "${originalFileName}": ${junkCheck.reason}`);
+    moveToQuarantine(filePath, path.basename(originalFileName));
+    return {
+      success: false,
+      duplicate: false,
+      format,
+      displayTitle: preliminary.title,
+      author: preliminary.author,
+      error: `Quarantined by junk ingest gate: ${junkCheck.reason || "Invalid artifact"}`,
+    };
+  }
+
   // 1. Level 1: KOReader Binary Checksum Deduplication
   const fileHash = getKOReaderBinary256(filePath);
   let hashMatch: any = null;
@@ -2857,7 +2884,11 @@ export async function ingestBookFile(
   }
 
   // 2. Level 2: Semantic Title, Serialization & Format Deduplication
-  const incomingSeries = extractSeries(preliminary.title, originalFileName);
+  const incomingSeries = await extractSeriesWithJev(
+    preliminary.title,
+    originalFileName,
+    extractSeries,
+  );
 
   try {
     const listRes = runCalibredb([
@@ -2965,6 +2996,9 @@ export async function ingestBookFile(
         );
         finalTitle = clean.title || preliminary.title;
         finalAuthor = clean.author || preliminary.author;
+        finalAuthor = await cleanAuthorWithJev(finalAuthor, finalTitle);
+
+        const lang = await detectBookLanguage(finalTitle, originalFileName);
 
         const setArgs = [
           "set_metadata",
@@ -2975,13 +3009,16 @@ export async function ingestBookFile(
         if (clean.title && clean.title !== rawTitle)
           setArgs.push("--field", `title:${clean.title}`);
         if (
-          clean.author &&
-          clean.author !== rawAuthors &&
-          clean.author !== "Unknown"
+          finalAuthor &&
+          finalAuthor !== rawAuthors &&
+          finalAuthor !== "Unknown"
         )
-          setArgs.push("--field", `authors:${clean.author}`);
+          setArgs.push("--field", `authors:${finalAuthor}`);
         if (clean.tags && clean.tags.length)
           setArgs.push("--field", `tags:${clean.tags.join(",")}`);
+        if (lang) {
+          setArgs.push("--field", `languages:${lang}`);
+        }
 
         // Serialization auto-tagging
         if (!rawSeries && incomingSeries) {
@@ -3233,6 +3270,32 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
         });
         continue;
       }
+      // Junk Ingest Gate: check before writing into Books_Drop or performing heavy work
+      const preliminaryCheck = sanitizeMetadata("", "", [], fileName);
+      const preJunk = await evaluateJunkGate(
+        preliminaryCheck.title,
+        fileName,
+        preliminaryCheck.author,
+      );
+      if (preJunk.quarantined) {
+        log(`[TelegramBot] Quarantined download "${fileName}": ${preJunk.reason}`);
+        const qPath = path.join(getQuarantineDir(), fileName);
+        fs.writeFileSync(qPath, new Uint8Array(arrayBuf));
+        await sendMessage(
+          chatId,
+          `⚠️ *File Quarantined*\nFile "${fileName}" was quarantined by Junk Ingest Gate (${preJunk.reason || "Invalid artifact"}).`,
+          "Markdown",
+        );
+        results.push({
+          name: fileName,
+          format,
+          status: "error",
+          note: `Quarantined: ${preJunk.reason || "Invalid artifact"}`,
+          fileId: doc?.file_id,
+        });
+        continue;
+      }
+
       const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
       const safeBase = path.basename(fileName, ext);
       const tempFileName = `${safeBase}_${uniqueSuffix}${ext}`;

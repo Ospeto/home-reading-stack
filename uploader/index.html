@@ -743,12 +743,20 @@
     <main class="flex-1 flex flex-col p-3 sm:p-6 min-w-0">
       
       <!-- Content Header -->
-      <div class="pb-3 sm:pb-4 flex items-center justify-between border-b border-white/5 mb-4 shrink-0" data-purpose="library-grid-header">
+      <div class="pb-3 sm:pb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/5 mb-4 shrink-0" data-purpose="library-grid-header">
         <div class="flex items-baseline gap-3 min-w-0">
           <h2 id="contentHeaderTitle" class="text-base sm:text-lg font-semibold text-white tracking-tight truncate max-w-sm sm:max-w-md">All Books</h2>
           <span id="contentHeaderSubtitle" class="text-xs text-neutral-500 font-normal shrink-0">0 volumes</span>
         </div>
-        <div class="flex items-center gap-2.5 sm:gap-4 text-xs text-neutral-400 shrink-0">
+        <div class="flex flex-wrap items-center gap-2.5 sm:gap-4 text-xs text-neutral-400 shrink-0">
+          <!-- Language Shelf Filter -->
+          <div id="languageShelfFilter" class="flex items-center bg-white/5 p-0.5 rounded-lg border border-white/5 text-[11px]">
+            <button onclick="setLanguageShelf('all')" id="langShelf-all" class="px-2 py-0.5 rounded bg-white/10 text-white font-medium transition-colors cursor-pointer" title="All Languages">All</button>
+            <button onclick="setLanguageShelf('my')" id="langShelf-my" class="px-2 py-0.5 rounded text-neutral-400 hover:text-neutral-200 transition-colors cursor-pointer" title="Burmese Books">Burmese</button>
+            <button onclick="setLanguageShelf('en')" id="langShelf-en" class="px-2 py-0.5 rounded text-neutral-400 hover:text-neutral-200 transition-colors cursor-pointer" title="English Books">English</button>
+            <button onclick="setLanguageShelf('other')" id="langShelf-other" class="px-2 py-0.5 rounded text-neutral-400 hover:text-neutral-200 transition-colors cursor-pointer" title="Other Languages">Other</button>
+          </div>
+
           <div class="flex items-center gap-2">
             <span class="text-neutral-500 text-xs hidden sm:inline">Sort:</span>
             <select id="sortSelect" onchange="tgHaptic.light(); applyFilters()" class="bg-white/5 border border-white/10 rounded-lg text-xs text-neutral-300 focus:outline-none cursor-pointer px-2 py-1">
@@ -1867,6 +1875,7 @@
     let allBooks = [];
     let facets = { authors: [], series: [], tags: [], formats: [] };
     let activeFilter = { type: 'all', value: null };
+    let activeLanguageShelf = 'all';
     let viewMode = 'grid';
     let selectedBookIds = new Set();
     let kosyncMap = new Map();
@@ -2243,6 +2252,27 @@
       applyFilters();
     }
 
+    function setLanguageShelf(lang) {
+      try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
+      tgHaptic.light();
+      activeLanguageShelf = lang;
+
+      const btnAll = document.getElementById('langShelf-all');
+      const btnMy = document.getElementById('langShelf-my');
+      const btnEn = document.getElementById('langShelf-en');
+      const btnOther = document.getElementById('langShelf-other');
+
+      const activeCls = 'px-2 py-0.5 rounded bg-white/10 text-white font-medium transition-colors cursor-pointer';
+      const inactiveCls = 'px-2 py-0.5 rounded text-neutral-400 hover:text-neutral-200 transition-colors cursor-pointer';
+
+      if (btnAll) btnAll.className = (lang === 'all') ? activeCls : inactiveCls;
+      if (btnMy) btnMy.className = (lang === 'my') ? activeCls : inactiveCls;
+      if (btnEn) btnEn.className = (lang === 'en') ? activeCls : inactiveCls;
+      if (btnOther) btnOther.className = (lang === 'other') ? activeCls : inactiveCls;
+
+      applyFilters();
+    }
+
     function clearSearch() {
       tgHaptic.light();
       syncSearch('');
@@ -2263,6 +2293,23 @@
           (b.tags || []).some(t => t.toLowerCase().includes(q))
         );
         if (!matchSearch) return false;
+
+        // Language Shelf Filter
+        if (activeLanguageShelf !== 'all') {
+          const rawLangs = (b.languages || []).map(l => String(l).toLowerCase().trim());
+          const titleText = b.title || '';
+          const hasMyanmarChars = /[\u1000-\u109F\uA9E0-\uA9FF\uAA60-\uAA7F]/.test(titleText);
+          const isBurmese = rawLangs.includes('my') || rawLangs.includes('mya') || rawLangs.includes('burmese') || (rawLangs.length === 0 && hasMyanmarChars);
+          const isEnglish = rawLangs.includes('en') || rawLangs.includes('eng') || rawLangs.includes('english') || (rawLangs.length === 0 && !hasMyanmarChars && /[a-zA-Z]/.test(titleText));
+
+          if (activeLanguageShelf === 'my') {
+            if (!isBurmese) return false;
+          } else if (activeLanguageShelf === 'en') {
+            if (!isEnglish) return false;
+          } else if (activeLanguageShelf === 'other') {
+            if (isBurmese || isEnglish) return false;
+          }
+        }
 
         if (activeFilter.type === 'series') return (b.series || '') === activeFilter.value;
         if (activeFilter.type === 'author') return (b.authors || '').includes(activeFilter.value);

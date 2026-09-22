@@ -7,6 +7,11 @@ import process from "node:process";
 import { Buffer } from "node:buffer";
 import { cleanString, isAllowedCoverUrl } from "./scraper";
 import { validateUrlForSSRF, safeFetchWithSsrf } from "./security";
+import {
+  evaluateJunkGate,
+  moveToQuarantine,
+  detectBookLanguage,
+} from "./jev-shelf";
 
 export function getDropDir(): string {
   if (process.env.BOOKS_DROP_DIR) return process.env.BOOKS_DROP_DIR;
@@ -1910,6 +1915,26 @@ export async function ingestArticleFromUrl(
       article.coverImagePath,
     );
 
+    // Gate: Check Junk Ingest Gate before writing into Books_Drop or adding to Calibre
+    const junkCheck = await evaluateJunkGate(
+      article.title,
+      dropFileName,
+      article.author,
+    );
+    if (junkCheck.quarantined) {
+      moveToQuarantine(tempEpub, dropFileName);
+      return {
+        success: false,
+        title: article.title,
+        authors: article.author,
+        siteName: article.siteName,
+        wordCount: article.wordCount,
+        readTimeMinutes: article.readTimeMinutes,
+        format: "EPUB",
+        error: `Quarantined by junk ingest gate: ${junkCheck.reason || "Artifact quarantined"}`,
+      };
+    }
+
     // 3. Save to Books_Drop with sanitized filename
     const safeFilenameBase =
       cleanString(article.title)
@@ -1928,6 +1953,7 @@ export async function ingestArticleFromUrl(
     }
 
     // 4. Ingest into Calibre via calibredb
+    const lang = await detectBookLanguage(article.title, dropFileName);
     const tagsStr = ["Web Article", "Read Later", article.siteName]
       .filter(Boolean)
       .join(",");
@@ -1942,6 +1968,8 @@ export async function ingestArticleFromUrl(
       article.author,
       "--tags",
       tagsStr,
+      "--languages",
+      lang,
       "--automerge",
       "ignore",
     ];

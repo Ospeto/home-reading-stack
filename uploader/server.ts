@@ -31,6 +31,13 @@ import {
 } from "./security";
 import { getJobQueue, DurableJobQueue } from "./jobs";
 import { generateMetadataFilename, buildContentDisposition } from "./filename";
+import {
+  evaluateJunkGate,
+  moveToQuarantine,
+  extractSeriesWithJev,
+  cleanAuthorWithJev,
+  detectBookLanguage,
+} from "./jev-shelf";
 
 export function getDropDir(): string {
   if (process.env.BOOKS_DROP_DIR) return process.env.BOOKS_DROP_DIR;
@@ -329,7 +336,7 @@ function registerJobHandlers(q: DurableJobQueue) {
       originalFileName: string;
       deleteAfterIngest?: boolean;
     }) => {
-      const result = ingestBookFile(payload.filePath, payload.originalFileName);
+      const result = await ingestBookFile(payload.filePath, payload.originalFileName);
       if (payload.deleteAfterIngest && fs.existsSync(payload.filePath)) {
         try {
           fs.unlinkSync(payload.filePath);
@@ -362,7 +369,7 @@ function registerJobHandlers(q: DurableJobQueue) {
       const results: any[] = [];
       try {
         for (const book of unp.books) {
-          const r = ingestBookFile(book.tempPath, book.originalName);
+          const r = await ingestBookFile(book.tempPath, book.originalName);
           results.push({ name: book.originalName, ...r });
         }
       } finally {
@@ -708,13 +715,42 @@ export function getCalibreBooks(forceFresh = false) {
       const db = new Database(dbPath, { readonly: true });
       try {
         db.run("PRAGMA busy_timeout = 3000;");
-        const rows = db
-          .query(`
+
+        // Check whether books_languages_link exists in this database schema
+        const hasLangTable = Boolean(
+          db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='books_languages_link' LIMIT 1").get()
+        );
+
+        const sqlQuery = hasLangTable
+          ? `
             SELECT b.id, b.title, b.path, b.has_cover as cover, b.pubdate,
                    GROUP_CONCAT(DISTINCT a.name) as authors,
                    s.name as series, b.series_index,
                    GROUP_CONCAT(DISTINCT t.name) as tags,
-                   pub.name as publisher
+                   pub.name as publisher,
+                   GROUP_CONCAT(DISTINCT l.lang_code) as languages
+            FROM books b
+            JOIN data d ON b.id = d.book AND UPPER(d.format) = 'EPUB'
+            LEFT JOIN books_authors_link bal ON b.id = bal.book
+            LEFT JOIN authors a ON bal.author = a.id
+            LEFT JOIN books_series_link bsl ON b.id = bsl.book
+            LEFT JOIN series s ON bsl.series = s.id
+            LEFT JOIN books_tags_link btl ON b.id = btl.book
+            LEFT JOIN tags t ON btl.tag = t.id
+            LEFT JOIN books_publishers_link bpl ON b.id = bpl.book
+            LEFT JOIN publishers pub ON bpl.publisher = pub.id
+            LEFT JOIN books_languages_link bll ON b.id = bll.book
+            LEFT JOIN languages l ON bll.lang_code = l.id
+            GROUP BY b.id
+            ORDER BY b.id DESC;
+          `
+          : `
+            SELECT b.id, b.title, b.path, b.has_cover as cover, b.pubdate,
+                   GROUP_CONCAT(DISTINCT a.name) as authors,
+                   s.name as series, b.series_index,
+                   GROUP_CONCAT(DISTINCT t.name) as tags,
+                   pub.name as publisher,
+                   NULL as languages
             FROM books b
             JOIN data d ON b.id = d.book AND UPPER(d.format) = 'EPUB'
             LEFT JOIN books_authors_link bal ON b.id = bal.book
@@ -727,8 +763,9 @@ export function getCalibreBooks(forceFresh = false) {
             LEFT JOIN publishers pub ON bpl.publisher = pub.id
             GROUP BY b.id
             ORDER BY b.id DESC;
-          `)
-          .all() as any[];
+          `;
+
+        const rows = db.query(sqlQuery).all() as any[];
 
         const epubBooks = rows.map((row) => ({
           id: row.id,
@@ -746,6 +783,12 @@ export function getCalibreBooks(forceFresh = false) {
                 .filter(Boolean)
             : [],
           publisher: row.publisher || null,
+          languages: row.languages
+            ? row.languages
+                .split(",")
+                .map((l: string) => l.trim().toLowerCase())
+                .filter(Boolean)
+            : [],
           formats: ["EPUB"],
         }));
 
@@ -775,7 +818,7 @@ export function getCalibreBooks(forceFresh = false) {
       "--search",
       "format:epub",
       "--fields",
-      "id,title,authors,formats,cover,tags,series,series_index,publisher,pubdate,comments,rating",
+      "id,title,authors,formats,cover,tags,series,series_index,publisher,pubdate,comments,rating,languages",
       "--for-machine",
     ]);
     if (res.status === 0 && res.stdout) {
@@ -790,6 +833,11 @@ export function getCalibreBooks(forceFresh = false) {
         })
         .map((b: any) => ({
           ...b,
+          languages: Array.isArray(b.languages)
+            ? b.languages.map((l: string) => String(l).trim().toLowerCase()).filter(Boolean)
+            : typeof b.languages === "string" && b.languages
+              ? b.languages.split(",").map((l: string) => l.trim().toLowerCase()).filter(Boolean)
+              : [],
           formats: ["EPUB"],
         }));
       calibreBooksCache = {
@@ -1012,7 +1060,7 @@ function getCalibreHashMap() {
  * Ingests a single book file into Calibre.
  * Strictly enforces canonical EPUB-only format policy.
  */
-export function ingestBookFile(filePath: string, originalFileName: string) {
+export async function ingestBookFile(filePath: string, originalFileName: string) {
   const ext = path.extname(originalFileName).toLowerCase();
   const format = ext.replace(/^\./, "").toUpperCase();
 
@@ -1036,6 +1084,25 @@ export function ingestBookFile(filePath: string, originalFileName: string) {
       error: `Invalid EPUB container "${originalFileName}": ${contentValidation.error}`,
     };
   }
+
+  const sanitized = sanitizeMetadata("", "", [], originalFileName);
+
+  // Junk Ingest Gate: check before calibredb add
+  const junkCheck = await evaluateJunkGate(
+    sanitized.title,
+    originalFileName,
+    sanitized.author,
+  );
+  if (junkCheck.quarantined) {
+    moveToQuarantine(filePath, path.basename(originalFileName));
+    return {
+      success: false,
+      rejected: true,
+      format,
+      error: `Quarantined by junk ingest gate: ${junkCheck.reason || "Invalid artifact"}`,
+    };
+  }
+
   const books = getCalibreBooks(true);
   const fileHash = getKOReaderBinary256(filePath);
 
@@ -1052,8 +1119,7 @@ export function ingestBookFile(filePath: string, originalFileName: string) {
   }
 
   // 2. Check if normalized title already exists
-  const sanitized = sanitizeMetadata("", "", [], originalFileName);
-  const incomingSeries = extractSeries(sanitized.title, originalFileName);
+  const incomingSeries = await extractSeriesWithJev(sanitized.title, originalFileName, extractSeries);
 
   const existingBook = books.find((b: any) => {
     const bTitle = cleanString(b.title).toLowerCase();
@@ -1110,6 +1176,9 @@ export function ingestBookFile(filePath: string, originalFileName: string) {
           newBook.tags,
           originalFileName,
         );
+        const finalAuthor = await cleanAuthorWithJev(clean.author || newBook.authors, clean.title || newBook.title);
+        const lang = await detectBookLanguage(clean.title || newBook.title, originalFileName);
+
         const setArgs = [
           "set_metadata",
           String(newId),
@@ -1118,9 +1187,12 @@ export function ingestBookFile(filePath: string, originalFileName: string) {
         ];
         if (clean.title && clean.title !== newBook.title)
           setArgs.push("--field", `title:${clean.title}`);
-        if (clean.author && clean.author !== newBook.authors)
-          setArgs.push("--field", `authors:${clean.author}`);
+        if (finalAuthor && finalAuthor !== newBook.authors && finalAuthor !== "Unknown")
+          setArgs.push("--field", `authors:${finalAuthor}`);
         if (clean.tags) setArgs.push("--field", `tags:${clean.tags.join(",")}`);
+        if (lang) {
+          setArgs.push("--field", `languages:${lang}`);
+        }
         if (!newBook.series && incomingSeries) {
           setArgs.push("--field", `series:${incomingSeries.series}`);
           setArgs.push("--field", `series_index:${incomingSeries.volume}`);
@@ -2712,7 +2784,7 @@ export async function handleRequest(
         );
         const results: any[] = [];
         for (const book of unp.books) {
-          const r = ingestBookFile(book.tempPath, book.originalName);
+          const r = await ingestBookFile(book.tempPath, book.originalName);
           results.push({ name: book.originalName, ...r });
         }
         unp.cleanup();
@@ -2754,7 +2826,7 @@ export async function handleRequest(
         );
       }
 
-      const result = ingestBookFile(destPath, fileName);
+      const result = await ingestBookFile(destPath, fileName);
       try {
         fs.unlinkSync(destPath);
       } catch {}
