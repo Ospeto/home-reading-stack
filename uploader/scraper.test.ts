@@ -3,6 +3,10 @@ import {
   formatRanobeDate,
   parseRanobeBook,
   searchRanobeDB,
+  searchAniList,
+  cleanAniListDescription,
+  cleanSeriesTitle,
+  ANILIST_GRAPHQL_QUERY,
   isLightNovelQuery,
   isAllowedCoverUrl,
   KNOWN_COVER_DOMAINS,
@@ -1201,6 +1205,268 @@ describe("RanobeDB Scraper & Light Novel Metadata Engine", () => {
         // Both primary (Google/OpenLib) and secondary fallback (RanobeDB) were attempted
         expect(requestedUrls.some((u) => u.includes("googleapis.com/books"))).toBe(true);
         expect(requestedUrls.some((u) => u.includes("ranobedb.org"))).toBe(true);
+      } finally {
+        (globalThis as any).fetch = origFetch;
+      }
+    });
+  });
+
+  // ==========================================================================
+  // AniList Scraper & GraphQL Integration
+  // ==========================================================================
+  describe("AniList Scraper & GraphQL Integration", () => {
+    it("exports ANILIST_GRAPHQL_QUERY containing Media search and NOVEL/MANGA formats", () => {
+      expect(ANILIST_GRAPHQL_QUERY).toContain("Media(search: $search, type: MANGA, format_in: [NOVEL, MANGA])");
+      expect(ANILIST_GRAPHQL_QUERY).toContain("coverImage");
+      expect(ANILIST_GRAPHQL_QUERY).toContain("extraLarge");
+      expect(ANILIST_GRAPHQL_QUERY).toContain("description");
+      expect(ANILIST_GRAPHQL_QUERY).toContain("staff");
+    });
+
+    it("cleanAniListDescription strips HTML tags and decodes entities cleanly", () => {
+      const raw = "Hyeon&rsquo;s story&mdash;an epic tale.<br><br>He fought <b>bravely</b> &amp; boldly.<br>(Source: Tapas, edited)";
+      const clean = cleanAniListDescription(raw);
+      expect(clean).toContain("Hyeon's story—an epic tale.");
+      expect(clean).toContain("He fought bravely & boldly.");
+      expect(clean).not.toContain("<b>");
+      expect(clean).not.toContain("<br>");
+      expect(clean).not.toContain("&rsquo;");
+      expect(clean).not.toContain("&amp;");
+    });
+
+    it("cleanSeriesTitle extracts canonical series title from diverse volume notations", () => {
+      expect(cleanSeriesTitle("The Legendary Moonlight Sculptor, Vol. 1")).toBe("The Legendary Moonlight Sculptor");
+      expect(cleanSeriesTitle("The Legendary Moonlight Sculptor Vol 02")).toBe("The Legendary Moonlight Sculptor");
+      expect(cleanSeriesTitle("Trapped in a Dating Sim: The World of Otome Games Is Tough for Mobs, Vol. 02")).toBe(
+        "Trapped in a Dating Sim The World of Otome Games Is Tough for Mobs",
+      );
+      expect(cleanSeriesTitle("I'm the Evil Lord of an Intergalactic Empire! Volume 1")).toBe(
+        "I'm the Evil Lord of an Intergalactic Empire",
+      );
+      expect(cleanSeriesTitle("Overlord 01 - The Undead King")).toBe("Overlord");
+      expect(cleanSeriesTitle("Sword Art Online #1")).toBe("Sword Art Online");
+      expect(cleanSeriesTitle("Solo Leveling Vol 03")).toBe("Solo Leveling");
+    });
+
+    it("validates anilistcdn and anilist.co in isAllowedCoverUrl and KNOWN_COVER_DOMAINS", () => {
+      expect(KNOWN_COVER_DOMAINS.has("anilist.co")).toBe(true);
+      expect(KNOWN_COVER_DOMAINS.has("s4.anilist.co")).toBe(true);
+      expect(KNOWN_COVER_DOMAINS.has("anilistcdn.com")).toBe(true);
+
+      expect(isAllowedCoverUrl("https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/b85869-MgqRdF3H3wek.png")).toBe(true);
+      expect(isAllowedCoverUrl("https://media.anilist.co/cover/large.jpg")).toBe(true);
+      expect(isAllowedCoverUrl("https://anilistcdn.com/cover.png")).toBe(true);
+      expect(isAllowedCoverUrl("https://img.anilistcdn.com/file/cover.jpg")).toBe(true);
+
+      // Negative SSRF cases: .local / .internal / private IP rejection must not be bypassed
+      expect(isAllowedCoverUrl("http://anilistcdn.local/cover.jpg")).toBe(false);
+      expect(isAllowedCoverUrl("http://anilistcdn.internal/cover.jpg")).toBe(false);
+      expect(isAllowedCoverUrl("http://s4.anilist.co.local/cover.jpg")).toBe(false);
+      expect(isAllowedCoverUrl("http://127.0.0.1/cover.jpg")).toBe(false);
+      expect(isAllowedCoverUrl("http://10.0.0.1/anilistcdn/cover.jpg")).toBe(false);
+    });
+
+    it("searchAniList executes GraphQL POST query and parses Media result", async () => {
+      let interceptedUrl = "";
+      let interceptedMethod = "";
+      let interceptedBody: any = null;
+
+      const mockFetch = async (url: string, init?: any) => {
+        interceptedUrl = url;
+        interceptedMethod = init?.method || "";
+        interceptedBody = JSON.parse(init?.body || "{}");
+
+        return new Response(
+          JSON.stringify({
+            data: {
+              Media: {
+                id: 85869,
+                title: {
+                  english: "The Legendary Moonlight Sculptor",
+                  romaji: "Dalbitjogaksa",
+                  native: "달빛조각사",
+                },
+                description: "Hyeon is resourceful and thrifty.<br><br>He enters Royal Road.",
+                coverImage: {
+                  extraLarge: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/b85869-MgqRdF3H3wek.png",
+                  large: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/b85869.png",
+                },
+                genres: ["Action", "Adventure", "Fantasy"],
+                tags: [{ name: "Virtual Reality" }, { name: "MMORPG" }],
+                startDate: { year: 2007, month: 1, day: 15 },
+                format: "NOVEL",
+                status: "FINISHED",
+                staff: {
+                  edges: [
+                    {
+                      role: "Original Story",
+                      node: { name: { full: "Hui-Seong Nam" } },
+                    },
+                  ],
+                },
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const hits = await searchAniList("The Legendary Moonlight Sculptor", {
+        fetchFn: mockFetch,
+      });
+
+      expect(interceptedUrl).toBe("https://graphql.anilist.co");
+      expect(interceptedMethod).toBe("POST");
+      expect(interceptedBody.query).toContain("Media(search: $search, type: MANGA, format_in: [NOVEL, MANGA])");
+      expect(interceptedBody.variables.search).toBe("The Legendary Moonlight Sculptor");
+
+      expect(hits.length).toBe(1);
+      const hit = hits[0];
+      expect(hit.source).toBe("AniList");
+      expect(hit.title).toBe("The Legendary Moonlight Sculptor");
+      expect(hit.authors).toBe("Hui-Seong Nam");
+      expect(hit.description).toContain("Hyeon is resourceful and thrifty.");
+      expect(hit.description).not.toContain("<br>");
+      expect(hit.coverUrl).toBe("https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/b85869-MgqRdF3H3wek.png");
+      expect(hit.tags).toContain("Light Novel");
+      expect(hit.tags).toContain("Action");
+      expect(hit.tags).toContain("Virtual Reality");
+      expect(hit.publishedDate).toBe("2007-01-15");
+      expect(hit.confidence).toBeGreaterThanOrEqual(0.9);
+      expect(hit.isManga).toBe(false);
+    });
+
+    it("searchAniList handles Page-wrapped results and manga format", async () => {
+      const mockFetch = async () => {
+        return new Response(
+          JSON.stringify({
+            data: {
+              Page: {
+                media: [
+                  {
+                    id: 12345,
+                    title: {
+                      english: "Solo Leveling",
+                      romaji: "Na Honjaman Level Up",
+                    },
+                    description: "Sung Jin-Woo awakens as a player.",
+                    coverImage: {
+                      extraLarge: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/sl.jpg",
+                    },
+                    genres: ["Action", "Supernatural"],
+                    tags: [{ name: "Dungeon" }],
+                    format: "MANGA",
+                    staff: {
+                      edges: [
+                        {
+                          role: "Story",
+                          node: { name: { full: "Chugong" } },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const hits = await searchAniList("Solo Leveling", { fetchFn: mockFetch });
+      expect(hits.length).toBe(1);
+      expect(hits[0].title).toBe("Solo Leveling");
+      expect(hits[0].authors).toBe("Chugong");
+      expect(hits[0].isManga).toBe(true);
+      expect(hits[0].tags).toContain("Manga");
+      expect(hits[0].tags).toContain("Action");
+    });
+
+    it("searchAniList handles network errors, HTTP 429/500, and GraphQL errors gracefully", async () => {
+      const failingFetch = async () => {
+        throw new Error("Network timeout connecting to AniList");
+      };
+
+      const hits = await searchAniList("Failing Query", { fetchFn: failingFetch });
+      expect(hits).toEqual([]);
+
+      const nullMediaFetch = async () => {
+        return new Response(JSON.stringify({ data: { Media: null } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      };
+      const emptyHits = await searchAniList("Unknown Work", { fetchFn: nullMediaFetch });
+      expect(emptyHits).toEqual([]);
+
+      const graphQLErrorFetch = async () => {
+        return new Response(
+          JSON.stringify({
+            errors: [{ message: "Not Found.", status: 404 }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+      const errorHits = await searchAniList("Nonexistent Book", { fetchFn: graphQLErrorFetch });
+      expect(errorHits).toEqual([]);
+
+      const rateLimitFetch = async () => {
+        return new Response("Too Many Requests", {
+          status: 429,
+          headers: { "Retry-After": "60" },
+        });
+      };
+      const rateLimitHits = await searchAniList("Rate Limited", { fetchFn: rateLimitFetch });
+      expect(rateLimitHits).toEqual([]);
+
+      const serverErrorFetch = async () => {
+        return new Response("Internal Server Error", { status: 500 });
+      };
+      const serverErrorHits = await searchAniList("Server Error", { fetchFn: serverErrorFetch });
+      expect(serverErrorHits).toEqual([]);
+    });
+
+    it("searchUniversalMetadata includes searchAniList for light_novel and manga categories", async () => {
+      const origFetch = globalThis.fetch;
+      const requestedUrls: string[] = [];
+
+      (globalThis as any).fetch = async (url: any, _init: any) => {
+        const urlStr = typeof url === "string" ? url : url.toString();
+        requestedUrls.push(urlStr);
+
+        if (urlStr.includes("graphql.anilist.co")) {
+          return new Response(
+            JSON.stringify({
+              data: {
+                Media: {
+                  id: 111,
+                  title: { english: "Trapped in a Dating Sim" },
+                  description: "Leon gets reincarnated into an otome game world.",
+                  coverImage: { extraLarge: "https://s4.anilist.co/cover/dating.jpg" },
+                  format: "NOVEL",
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      };
+
+      try {
+        const lnResults = await searchUniversalMetadata("Trapped in a Dating Sim", {
+          category: "light_novel",
+        });
+        expect(requestedUrls.some((u) => u.includes("graphql.anilist.co"))).toBe(true);
+        expect(lnResults.some((r) => r.source === "AniList")).toBe(true);
+
+        requestedUrls.length = 0;
+        const mangaResults = await searchUniversalMetadata("Trapped in a Dating Sim", {
+          category: "manga",
+        });
+        expect(requestedUrls.some((u) => u.includes("graphql.anilist.co"))).toBe(true);
+        expect(mangaResults.some((r) => r.source === "AniList")).toBe(true);
       } finally {
         (globalThis as any).fetch = origFetch;
       }

@@ -105,7 +105,7 @@ LightHouse includes a portable management CLI (`bin/lighthouse`) for service lif
 | `bin/lighthouse restart` | Performs safe sequential stop and restart of reading stack services (`down; sleep 1; up`). |
 | `bin/lighthouse health` | Probes HTTP/TCP endpoints, checks response codes, and auto-heals stale remote listeners (`fuser -k`). |
 | `bin/lighthouse categorize` | Classifies book languages (`mya`, `eng`, `other`), assigns standardized category tags, and prunes promotional tags. |
-| `bin/lighthouse enrich-synopsis` | Populates missing descriptions for Calibre books combining local EPUB metadata extraction with online APIs (RanobeDB, Bangumi, Google Books). |
+| `bin/lighthouse enrich-synopsis` | Populates missing descriptions for Calibre books combining local EPUB metadata extraction with online APIs (RanobeDB, AniList, Bangumi, Google Books) and series synopsis inheritance across volumes. |
 | `bin/lighthouse sync-obsidian` | Syncs highlights, notes, and progress from KOReader/Kindle to Obsidian with idempotent markers. |
 | `bin/lighthouse install-daemons` | Dynamically generates and registers macOS LaunchAgents for the current user and repository root. |
 | `bin/lighthouse backup` | Flushes SQLite WAL frames and creates an atomic snapshot bundle with SHA-256 checksum and manifest. |
@@ -320,8 +320,8 @@ LightHouse integrates [TypeSafe Jev System-1](https://api.typesafe.ai/v1/systemo
      - **Other:** Japanese light novels, manga, and foreign language editions.
 5. **Intelligent Multi-Source Metadata & Cover Routing:**
    - Automatically determines book category and prioritizes specialized metadata engines:
-     - **Light Novels:** Queries [RanobeDB API](https://ranobedb.org/api/v0) and Bangumi first, extracting high-resolution cover art and staff metadata before falling back to Google Books.
-     - **Manga:** Queries MangaDex API and Bangumi.
+     - **Light Novels & Web Novels:** Queries [RanobeDB API](https://ranobedb.org/api/v0), [AniList GraphQL API](https://graphql.anilist.co), and Bangumi first, extracting rich plot summaries, series-level overviews for Korean web novels and light novels, high-resolution cover art, and staff metadata before falling back to Google Books.
+     - **Manga:** Queries MangaDex API, AniList GraphQL API, and Bangumi.
      - **General Literature:** Queries Google Books and OpenLibrary.
      - **Burmese Literature:** Bypasses overseas providers and applies localized typographic cover synthesis and Burmese font styling.
 

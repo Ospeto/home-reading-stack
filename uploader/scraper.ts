@@ -105,6 +105,71 @@ export function cleanString(str: string): string {
   return s;
 }
 
+export function decodeHtmlEntities(str: string): string {
+  if (!str) return "";
+  return str
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&lsquo;/g, "'")
+    .replace(/&rsquo;/g, "'")
+    .replace(/&ldquo;/g, '"')
+    .replace(/&rdquo;/g, '"')
+    .replace(/&mdash;/g, "—")
+    .replace(/&ndash;/g, "–")
+    .replace(/&hellip;/g, "...")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&#(\d+);/g, (_, dec) => {
+      try {
+        return String.fromCharCode(parseInt(dec, 10));
+      } catch {
+        return "";
+      }
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
+      try {
+        return String.fromCharCode(parseInt(hex, 16));
+      } catch {
+        return "";
+      }
+    });
+}
+
+/**
+ * Strips volume indicators, subtitles, and numbering to extract clean series title.
+ * e.g. "The Legendary Moonlight Sculptor, Vol. 1" -> "The Legendary Moonlight Sculptor"
+ *      "Trapped in a Dating Sim: The World of Otome Games Is Tough for Mobs, Vol. 02" -> "Trapped in a Dating Sim The World of Otome Games Is Tough for Mobs"
+ *      "I'm the Evil Lord of an Intergalactic Empire! Volume 1" -> "I'm the Evil Lord of an Intergalactic Empire"
+ *      "Overlord 01 - The Undead King" -> "Overlord"
+ */
+export function cleanSeriesTitle(title: string): string {
+  if (!title) return "";
+  let s = title.replace(/_/g, " ");
+  s = s.replace(
+    /[\[\(]\s*(?:vol(?:ume)?|v|book|bk|part|pt|#)?\.?\s*0*\d+(?:\.\d+)?\s*[\]\)]/gi,
+    " ",
+  );
+  s = s.replace(
+    /[,:\-–—\s]+(?:vol(?:ume)?|v|book|bk|part|pt|#)\.?\s*0*\d+(?:\.\d+)?.*$/gi,
+    " ",
+  );
+  s = s.replace(
+    /\b(?:vol(?:ume)?|v|book|bk|part|pt)\.?\s*0*\d+(?:\.\d+)?\b.*$/gi,
+    " ",
+  );
+  s = s.replace(/#\s*0*\d+\b.*$/gi, " ");
+  s = s.replace(
+    /(?<=[a-zA-Z\u00A0-\uFFFF]\s+)0*\d{1,3}(?:\s*[-–—:].*)?$/g,
+    " ",
+  );
+  s = cleanQuery(s);
+  return s.replace(/^[-–—:_.,;!\s]+|[-–—:_.,;!\s]+$/g, "").trim();
+}
+
 /**
  * Clean search query for metadata APIs:
  * Applies cleanString, then strips all remaining brackets, chapter/vol numbers, and normalizes separators.
@@ -121,7 +186,7 @@ export function cleanQuery(str: string): string {
     " ",
   );
   // Normalize punctuation separators to spaces
-  s = s.replace(/[-_–—:]+/g, " ");
+  s = s.replace(/[-_–—:,;]+/g, " ");
   s = s.replace(/\s+/g, " ").trim();
   return s;
 }
@@ -1285,6 +1350,231 @@ export async function searchRanobeDB(
   return results;
 }
 
+// ---------------------------------------------------------------------------
+// 6. AniList Scraper (GraphQL API for Light Novels, Korean Web Novels & Manga)
+// ---------------------------------------------------------------------------
+
+export const ANILIST_GRAPHQL_QUERY = `
+query ($search: String) {
+  Media(search: $search, type: MANGA, format_in: [NOVEL, MANGA]) {
+    id
+    title {
+      english
+      romaji
+      native
+    }
+    description
+    coverImage {
+      extraLarge
+      large
+      medium
+    }
+    genres
+    tags {
+      name
+      rank
+    }
+    startDate {
+      year
+      month
+      day
+    }
+    format
+    status
+    staff {
+      edges {
+        role
+        node {
+          name {
+            full
+          }
+        }
+      }
+    }
+  }
+}
+`;
+
+export function cleanAniListDescription(raw: string): string {
+  if (!raw) return "";
+  let s = raw;
+  // Convert line breaks and block elements to newlines
+  s = s.replace(/<br\s*\/?>/gi, "\n");
+  s = s.replace(/<\/(?:p|div|li|blockquote)>/gi, "\n\n");
+  // Strip all remaining HTML tags
+  s = s.replace(/<[^>]+>/g, "");
+  // Decode HTML entities
+  s = decodeHtmlEntities(s);
+  // Normalize whitespace
+  s = s.replace(/\r\n/g, "\n").replace(/[ \t]+/g, " ");
+  s = s.replace(/\n{3,}/g, "\n\n").trim();
+  return s;
+}
+
+export async function searchAniList(
+  query: string,
+  options?: {
+    baseUrl?: string;
+    timeoutMs?: number;
+    fetchFn?: (url: string, init?: any) => Promise<Response>;
+  },
+): Promise<ScrapedMetadata[]> {
+  const results: ScrapedMetadata[] = [];
+  const cleanQ = cleanQuery(query);
+  if (!cleanQ) return results;
+
+  const apiEndpoint = options?.baseUrl || "https://graphql.anilist.co";
+  const timeoutMs = options?.timeoutMs || SCRAPER_TIMEOUT_MS;
+  const doFetch =
+    options?.fetchFn ||
+    ((url: string, init?: any) =>
+      safeFetchWithSsrf(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "User-Agent": "ReadingHQ/1.0",
+        },
+        signal: AbortSignal.timeout(timeoutMs),
+        proxy: PROXY,
+        ...init,
+      } as any));
+
+  try {
+    const res = await doFetch(apiEndpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "User-Agent": "ReadingHQ/1.0",
+      },
+      body: JSON.stringify({
+        query: ANILIST_GRAPHQL_QUERY,
+        variables: { search: cleanQ },
+      }),
+    });
+
+    if (res.status === 429) {
+      console.warn(
+        `[Scraper:AniList] Rate limit (HTTP 429) encountered for query "${cleanQ}".`,
+      );
+      return results;
+    }
+
+    if (!res.ok) {
+      console.debug(
+        `[Scraper:AniList] HTTP error ${res.status} (${res.statusText}) for query "${cleanQ}"`,
+      );
+      return results;
+    }
+
+    const json: any = await res.json();
+    if (Array.isArray(json.errors) && json.errors.length > 0) {
+      console.debug(
+        `[Scraper:AniList] GraphQL error for query "${cleanQ}":`,
+        json.errors[0]?.message || json.errors[0],
+      );
+      return results;
+    }
+    const mediaList: any[] = [];
+    if (json.data?.Media) {
+      mediaList.push(json.data.Media);
+    } else if (Array.isArray(json.data?.Page?.media)) {
+      mediaList.push(...json.data.Page.media);
+    } else if (Array.isArray(json.data?.media)) {
+      mediaList.push(...json.data.media);
+    }
+
+    for (const media of mediaList) {
+        if (!media || !media.id) continue;
+        const titleEn = media.title?.english?.trim() || "";
+        const titleRomaji = media.title?.romaji?.trim() || "";
+        const titleNative = media.title?.native?.trim() || "";
+        const title = titleEn || titleRomaji || titleNative;
+        if (!title) continue;
+
+        let author = "";
+        if (Array.isArray(media.staff?.edges)) {
+          const storyEdge = media.staff.edges.find((e: any) =>
+            /original\s*story|story|author|creator/i.test(e.role || ""),
+          );
+          if (storyEdge?.node?.name?.full) {
+            author = storyEdge.node.name.full;
+          } else if (media.staff.edges[0]?.node?.name?.full) {
+            author = media.staff.edges[0].node.name.full;
+          }
+        }
+
+        const rawDesc = media.description || "";
+        const description = cleanAniListDescription(rawDesc);
+
+        const rawCover =
+          media.coverImage?.extraLarge ||
+          media.coverImage?.large ||
+          media.coverImage?.medium ||
+          "";
+        const coverUrl =
+          rawCover && isAllowedCoverUrl(rawCover) ? rawCover : "";
+
+        const genres: string[] = Array.isArray(media.genres) ? media.genres : [];
+        const tagNames: string[] = Array.isArray(media.tags)
+          ? media.tags
+              .map((t: any) => (typeof t === "string" ? t : t?.name))
+              .filter(Boolean)
+          : [];
+
+        const isNovel = media.format === "NOVEL";
+        const isManga = media.format === "MANGA" || !isNovel;
+        const allTags: string[] = isNovel ? ["Light Novel"] : ["Manga"];
+        for (const g of genres) {
+          if (!allTags.includes(g)) allTags.push(g);
+        }
+        for (const t of tagNames) {
+          if (!allTags.includes(t)) allTags.push(t);
+        }
+
+        let publishedDate = "";
+        if (media.startDate?.year) {
+          const y = media.startDate.year;
+          const m = media.startDate.month
+            ? String(media.startDate.month).padStart(2, "0")
+            : "";
+          const d = media.startDate.day
+            ? String(media.startDate.day).padStart(2, "0")
+            : "";
+          publishedDate =
+            y && m && d ? `${y}-${m}-${d}` : y && m ? `${y}-${m}` : String(y);
+        }
+
+        const sim = Math.max(
+          stringSimilarity(cleanQ, title),
+          stringSimilarity(cleanQ, titleEn),
+          stringSimilarity(cleanQ, titleRomaji),
+          stringSimilarity(cleanQ, titleNative),
+        );
+
+        results.push({
+          title,
+          authors: author || "Unknown",
+          description,
+          publishedDate,
+          coverUrl,
+          tags: allTags,
+          source: "AniList",
+          confidence: Math.round(sim * 100) / 100,
+          isManga,
+        });
+      }
+  } catch (err: any) {
+    console.debug(
+      `[Scraper:AniList] Query "${cleanQ}" failed:`,
+      err?.message || err,
+    );
+  }
+
+  return results;
+}
+
 // Unified Search with Multi-Source Fallback & Jev-Powered Smart Routing
 export async function searchUniversalMetadata(
   query: string,
@@ -1365,10 +1655,11 @@ export async function searchUniversalMetadata(
   const isLnTarget = category === "light_novel";
 
   // Category-specific source routing:
-  // 1. 'light_novel': Query RanobeDB + Bangumi first, fallback to Google Books
+  // 1. 'light_novel': Query RanobeDB + AniList + Bangumi first, fallback to Google Books
   if (category === "light_novel") {
     const lnSettled = await Promise.allSettled([
       searchRanobeDB(query),
+      searchAniList(query),
       searchBangumi(query),
     ]);
     for (const res of lnSettled) {
@@ -1386,10 +1677,11 @@ export async function searchUniversalMetadata(
       }
     }
   }
-  // 2. 'manga': Query MangaDex + Bangumi first
+  // 2. 'manga': Query MangaDex + AniList + Bangumi first
   else if (category === "manga") {
     const mangaSettled = await Promise.allSettled([
       searchMangaDex(query),
+      searchAniList(query),
       searchBangumi(query),
     ]);
     for (const res of mangaSettled) {
@@ -1442,9 +1734,10 @@ export async function searchUniversalMetadata(
         }
       }
     } else if (category === "general_book" || category === "other") {
-      // General book fallback: try RanobeDB + Bangumi + MangaDex
+      // General book fallback: try RanobeDB + AniList + Bangumi + MangaDex
       const fallbackSettled = await Promise.allSettled([
         searchRanobeDB(query),
+        searchAniList(query),
         searchBangumi(query),
         searchMangaDex(query),
       ]);
@@ -1506,6 +1799,10 @@ export const KNOWN_COVER_DOMAINS = new Set([
   "books.googleusercontent.com",
   "api.bgm.tv",
   "lain.bgm.tv",
+  "anilist.co",
+  "s4.anilist.co",
+  "media.anilist.co",
+  "anilistcdn.com",
 ]);
 
 export function isAllowedCoverUrl(rawUrl: string): boolean {
@@ -1514,7 +1811,6 @@ export function isAllowedCoverUrl(rawUrl: string): boolean {
     if (u.protocol !== "http:" && u.protocol !== "https:") return false;
     if (u.username || u.password) return false;
     const h = u.hostname.toLowerCase();
-    if (KNOWN_COVER_DOMAINS.has(h)) return true;
     if (
       h === "localhost" ||
       h === "127.0.0.1" ||
@@ -1523,13 +1819,22 @@ export function isAllowedCoverUrl(rawUrl: string): boolean {
       h.endsWith(".internal")
     )
       return false;
-    if (isPrivateOrInternalIp(h)) return false;
     if (
       h.startsWith("10.") ||
       h.startsWith("192.168.") ||
       /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h)
     )
       return false;
+    if (
+      KNOWN_COVER_DOMAINS.has(h) ||
+      h === "anilist.co" ||
+      h.endsWith(".anilist.co") ||
+      h === "anilistcdn.com" ||
+      h.endsWith(".anilistcdn.com")
+    ) {
+      return true;
+    }
+    if (isPrivateOrInternalIp(h)) return false;
     return true;
   } catch {
     return false;

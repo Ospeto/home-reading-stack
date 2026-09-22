@@ -3,19 +3,24 @@
  * scripts/enrich-synopses.ts
  *
  * LightHouse Batch Synopsis Enrichment Tool:
- *   - Scans Calibre database (metadata.db) for books where comments is NULL or empty.
+ *   - Scans Calibre database (metadata.db) for books where comments is NULL, empty, or placeholder.
  *   - Tier 1: Local EPUB Inspection (Zero Network):
  *       * Locates physical .epub file from Calibre book.path and data table.
  *       * Inspects content.opf (or OEBPS/content.opf) for <dc:description> or <meta property="schema:description">.
  *       * Sanitizes HTML (strips script, style, boilerplate, cleans whitespace).
- *   - Tier 2: Online Light Novel & Book Providers (Intelligent Source Routing):
+ *   - Tier 2: Online Light Novel, Web Novel & Book Providers (Intelligent Source Routing):
  *       * Uses classifyBookSourceCategory to route:
- *           - Light Novels: Queries RanobeDB (books and series detail) and Bangumi (subject summary),
- *             falling back to Google Books.
+ *           - Light Novels & Web Novels: Queries RanobeDB, AniList GraphQL API (rich English plot summaries
+ *             and high-res covers for light novels & Korean web novels), and Bangumi, falling back to Google Books.
+ *           - Manga: Queries MangaDex, AniList GraphQL API, and Bangumi.
  *           - General Books: Queries Google Books (using ISBN identifier from Calibre identifiers
  *             table if available, else clean title/author) and OpenLibrary.
- *           - Manga: Queries MangaDex and Bangumi.
  *           - Burmese: Skips overseas searches.
+ *       * Series Synopsis Inheritance:
+ *           - When individual volume queries have no description (or when book has a series defined in Calibre),
+ *             queries AniList using the cleaned series title.
+ *           - Inherits the series overview across all volumes in that series via an in-memory seriesCache
+ *             so that every volume in the library displays a rich, compelling synopsis instead of placeholder text.
  *       * Strips watermarks, promotional links (zlib, t.me, etc.).
  *   - Batch Updates:
  *       * Updates Calibre comments via calibredb set_metadata with --with-library http://127.0.0.1:8088.
@@ -30,14 +35,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 import {
   cleanQuery,
+  cleanSeriesTitle,
   isAllowedCoverUrl,
   searchGoogleBooks,
   searchOpenLibrary,
   searchUniversalMetadata,
+  searchAniList,
   getCalibredbPath,
   WATERMARK_BRACKET_REGEX,
   STANDALONE_WATERMARKS_REGEX,
@@ -54,6 +61,14 @@ import {
 
 export const MIN_CONFIDENCE_THRESHOLD = 0.85;
 
+/**
+ * Minimum confidence threshold for series-level fallback overviews (AniList series query).
+ * Set to 0.70 to accommodate subtitle variations and translation naming differences
+ * (e.g. Korean web novel titles like "Dalbitjogaksa" vs "The Legendary Moonlight Sculptor")
+ * while ensuring accurate franchise series mapping.
+ */
+export const SERIES_FALLBACK_MIN_CONFIDENCE = 0.7;
+
 export function isCommentsEmpty(text?: string | null): boolean {
   if (!text) return true;
   const stripped = text
@@ -61,7 +76,22 @@ export function isCommentsEmpty(text?: string | null): boolean {
     .replace(/&nbsp;/gi, " ")
     .replace(/\s+/g, "")
     .trim();
-  return stripped.length === 0;
+  if (stripped.length === 0) return true;
+  const clean = text
+    .replace(/<[^>]+>/g, " ")
+    .replace(/[*_#]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  if (
+    clean === "no synopsis available for this volume." ||
+    clean === "no synopsis available for this volume" ||
+    clean === "no synopsis available." ||
+    clean === "no synopsis available"
+  ) {
+    return true;
+  }
+  return false;
 }
 
 export type SynopsisSourceFilter = "all" | "epub" | "online";
@@ -78,6 +108,10 @@ export interface EnrichSynopsesOptions {
   verbose?: boolean;
   json?: boolean;
   skipCacheFlush?: boolean;
+  seriesCache?: Map<
+    string,
+    { description: string; coverUrl?: string; source?: string }
+  >;
   // Test injection hooks
   booksProvider?: (
     options: EnrichSynopsesOptions,
@@ -585,6 +619,18 @@ export async function fetchOnlineSynopsis(
   const cleanAuthor =
     book.author && book.author !== "Unknown" ? cleanQuery(book.author) : "";
   const seriesQuery = book.series ? cleanQuery(book.series) : "";
+  const derivedSeries = cleanSeriesTitle(book.series || book.title);
+  const seriesKey = derivedSeries ? cleanSeriesTitle(derivedSeries).toLowerCase() : "";
+
+  // Check series cache first if provided
+  if (seriesKey && _options.seriesCache?.has(seriesKey)) {
+    const cached = _options.seriesCache.get(seriesKey)!;
+    return {
+      description: cached.description,
+      coverUrl: cached.coverUrl,
+      source: cached.source || "Online",
+    };
+  }
 
   // 1. ISBN Exact Match path for general books / other
   if (book.isbn) {
@@ -623,6 +669,13 @@ export async function fetchOnlineSynopsis(
   }
   if (seriesQuery && seriesQuery !== primaryTitle) {
     queriesToSearch.push(seriesQuery);
+  }
+  if (
+    derivedSeries &&
+    derivedSeries !== primaryTitle &&
+    derivedSeries !== seriesQuery
+  ) {
+    queriesToSearch.push(derivedSeries);
   }
 
   const searchResults: Array<{
@@ -671,11 +724,50 @@ export async function fetchOnlineSynopsis(
     const clean = sanitizeSynopsis(hit.description || "");
     const plainLen = clean.replace(/<[^>]+>/g, "").trim().length;
     if (plainLen >= 15) {
-      return {
+      const res = {
         description: clean,
         coverUrl: hit.coverUrl,
         source: hit.source,
       };
+      if (seriesKey && _options.seriesCache) {
+        _options.seriesCache.set(seriesKey, res);
+      }
+      return res;
+    }
+  }
+
+  // 3. Series Synopsis Fallback via AniList:
+  // When a book's individual volume title query has no description (or when book has a series defined in Calibre),
+  // query AniList using the cleaned series title (e.g. 'The Legendary Moonlight Sculptor', 'Trapped in a Dating Sim', 'I'm the Evil Lord of an Intergalactic Empire').
+  const seriesLookupTarget = book.series?.trim() || cleanSeriesTitle(book.title);
+  if (seriesLookupTarget) {
+    try {
+      const aniQuery = cleanSeriesTitle(seriesLookupTarget);
+      if (aniQuery) {
+        const aniHits = await searchAniList(aniQuery);
+        for (const hit of aniHits) {
+          if (hit.description && hit.confidence >= SERIES_FALLBACK_MIN_CONFIDENCE) {
+            const clean = sanitizeSynopsis(hit.description);
+            const plainLen = clean.replace(/<[^>]+>/g, "").trim().length;
+            if (plainLen >= 15) {
+              const res = {
+                description: clean,
+                coverUrl: hit.coverUrl,
+                source: hit.source || "AniList",
+              };
+              if (seriesKey && _options.seriesCache) {
+                _options.seriesCache.set(seriesKey, res);
+              }
+              return res;
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      console.debug(
+        `[EnrichSynopsis:AniList] Series query "${seriesLookupTarget}" failed:`,
+        err?.message || err,
+      );
     }
   }
 
@@ -855,6 +947,7 @@ export async function runEnrichSynopses(
         c.text IS NULL 
         OR trim(c.text) = ''
         OR trim(replace(replace(replace(replace(c.text, '<p>', ''), '</p>', ''), '<br>', ''), '&nbsp;', '')) = ''
+        OR lower(trim(replace(replace(replace(replace(replace(c.text, '<p>', ''), '</p>', ''), '*', ''), '.', ''), ' ', ''))) IN ('nosynopsisavailable', 'nosynopsisavailableforthisvolume')
       )
       GROUP BY b.id
       ORDER BY b.id ASC;
@@ -876,6 +969,14 @@ export async function runEnrichSynopses(
   let synopsesFoundOnline = 0;
   let synopsesNotFound = 0;
 
+  const seriesCache =
+    options.seriesCache ||
+    new Map<
+      string,
+      { description: string; coverUrl?: string; source?: string }
+    >();
+  options.seriesCache = seriesCache;
+
   // 1. Process candidate books to find descriptions with per-book error isolation
   for (const b of rawCandidates) {
     try {
@@ -883,6 +984,11 @@ export async function runEnrichSynopses(
       let foundCoverUrl: string | undefined;
       let sourceType: "epub" | "online" | "none" = "none";
       let foundSource: string | undefined;
+
+      const seriesName = b.series?.trim() || cleanSeriesTitle(b.title);
+      const seriesKey = seriesName
+        ? cleanSeriesTitle(seriesName).toLowerCase()
+        : "";
 
       // Tier 1: Local EPUB Inspection
       if (sourceStrategy === "all" || sourceStrategy === "epub") {
@@ -907,7 +1013,28 @@ export async function runEnrichSynopses(
         }
       }
 
-      // Tier 2: Online Light Novel & Book Providers (if Tier 1 had no description)
+      // Check series cache before online query if Tier 1 had no description
+      if (
+        !foundSynopsis &&
+        seriesKey &&
+        seriesCache.has(seriesKey) &&
+        (sourceStrategy === "all" || sourceStrategy === "online")
+      ) {
+        const cached = seriesCache.get(seriesKey)!;
+        foundSynopsis = cached.description;
+        foundCoverUrl =
+          b.has_cover === 0 || !b.has_cover ? cached.coverUrl : undefined;
+        sourceType = "online";
+        foundSource = cached.source || "Online";
+        synopsesFoundOnline++;
+        if (verbose) {
+          console.log(
+            `[Tier 2: Series Inherited] #${b.id} "${b.title}" -> Inherited series synopsis for "${seriesKey}" from ${foundSource}`,
+          );
+        }
+      }
+
+      // Tier 2: Online Light Novel & Book Providers (if Tier 1 and seriesCache had no description)
       if (
         !foundSynopsis &&
         (sourceStrategy === "all" || sourceStrategy === "online")
@@ -930,6 +1057,13 @@ export async function runEnrichSynopses(
           sourceType = "online";
           foundSource = onlineRes.source || "Online";
           synopsesFoundOnline++;
+          if (seriesKey) {
+            seriesCache.set(seriesKey, {
+              description: onlineRes.description,
+              coverUrl: onlineRes.coverUrl,
+              source: onlineRes.source || "Online",
+            });
+          }
           if (verbose) {
             console.log(
               `[Tier 2: Online] #${b.id} "${b.title}" -> Found description via ${foundSource}${foundCoverUrl ? " (+cover)" : ""}`,
