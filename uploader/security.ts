@@ -2020,6 +2020,133 @@ export function cleanString(str: string): string {
   return s;
 }
 
+export interface ExtractedEpubMetadata {
+  title?: string;
+  author?: string;
+  description?: string;
+  language?: string;
+}
+
+/**
+ * Extracts embedded metadata (title, author, description, language) directly from an EPUB container.
+ * Inspects META-INF/container.xml and the rootfile OPF XML without depending on filename heuristics.
+ */
+export function extractEpubMetadata(filePath: string): ExtractedEpubMetadata {
+  try {
+    if (!fs.existsSync(filePath)) return {};
+    const stat = fs.statSync(filePath);
+    if (stat.size <= 0 || stat.size >= 256 * 1024 * 1024) return {};
+
+    const execOpts = {
+      encoding: "utf8" as const,
+      timeout: 15000,
+      maxBuffer: 16 * 1024 * 1024,
+    };
+
+    // 1. Locate the OPF rootfile path via container.xml
+    let containerXml = "";
+    const bsdtar = spawnSync(
+      getBsdtarPath(),
+      ["-xOf", filePath, "META-INF/container.xml"],
+      execOpts,
+    );
+    if (bsdtar.status === 0 && bsdtar.stdout) {
+      containerXml = bsdtar.stdout;
+    } else {
+      const unzip = spawnSync(
+        getUnzipPath(),
+        ["-p", filePath, "META-INF/container.xml"],
+        execOpts,
+      );
+      if ((unzip.status === 0 || unzip.status === 1) && unzip.stdout) {
+        containerXml = unzip.stdout;
+      }
+    }
+
+    let opfPath = "content.opf";
+    if (containerXml) {
+      const match = containerXml.match(/full-path=["']([^"']+)["']/i);
+      if (match && match[1]) {
+        opfPath = match[1].trim();
+      }
+    }
+
+    // 2. Read OPF XML content
+    let opfXml = "";
+    const bsdtarOpf = spawnSync(
+      getBsdtarPath(),
+      ["-xOf", filePath, opfPath],
+      execOpts,
+    );
+    if (bsdtarOpf.status === 0 && bsdtarOpf.stdout) {
+      opfXml = bsdtarOpf.stdout;
+    } else {
+      const unzipOpf = spawnSync(
+        getUnzipPath(),
+        ["-p", filePath, opfPath],
+        execOpts,
+      );
+      if ((unzipOpf.status === 0 || unzipOpf.status === 1) && unzipOpf.stdout) {
+        opfXml = unzipOpf.stdout;
+      }
+    }
+
+    if (!opfXml && opfPath !== "content.opf") {
+      const alt = spawnSync(
+        getBsdtarPath(),
+        ["-xOf", filePath, "content.opf"],
+        execOpts,
+      );
+      if (alt.status === 0 && alt.stdout) opfXml = alt.stdout;
+    }
+    if (!opfXml && opfPath !== "OEBPS/content.opf") {
+      const alt2 = spawnSync(
+        getBsdtarPath(),
+        ["-xOf", filePath, "OEBPS/content.opf"],
+        execOpts,
+      );
+      if (alt2.status === 0 && alt2.stdout) opfXml = alt2.stdout;
+    }
+
+    if (!opfXml) return {};
+
+    const cleanTag = (str: string) =>
+      cleanString(str.replace(/<[^>]+>/g, "")).trim();
+
+    let title: string | undefined;
+    const titleMatch = opfXml.match(/<dc:title[^>]*>([\s\S]*?)<\/dc:title>/i);
+    if (titleMatch && titleMatch[1]) {
+      const t = cleanTag(titleMatch[1]);
+      if (t) title = t;
+    }
+
+    let author: string | undefined;
+    const creatorMatch = opfXml.match(/<dc:creator[^>]*>([\s\S]*?)<\/dc:creator>/i);
+    if (creatorMatch && creatorMatch[1]) {
+      const a = cleanTag(creatorMatch[1]);
+      if (a) author = a;
+    }
+
+    let description: string | undefined;
+    const descMatch = opfXml.match(/<dc:description[^>]*>([\s\S]*?)<\/dc:description>/i);
+    if (descMatch && descMatch[1]) {
+      const d = cleanTag(descMatch[1]);
+      if (d) description = d;
+    }
+
+    let language: string | undefined;
+    const langMatch = opfXml.match(/<dc:language[^>]*>([\s\S]*?)<\/dc:language>/i);
+    if (langMatch && langMatch[1]) {
+      const l = cleanTag(langMatch[1]);
+      if (l) language = l;
+    }
+
+    return { title, author, description, language };
+  } catch {
+    return {};
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 7. Safe Error Handling
 // ---------------------------------------------------------------------------

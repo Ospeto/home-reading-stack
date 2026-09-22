@@ -10,7 +10,7 @@ import { validateUrlForSSRF, safeFetchWithSsrf } from "./security";
 import {
   evaluateJunkGate,
   moveToQuarantine,
-  detectBookLanguage,
+  resolveBookLanguageAndTags,
 } from "./jev-shelf";
 
 export function getDropDir(): string {
@@ -22,7 +22,7 @@ export function getDropDir(): string {
       fs.mkdirSync(dir, { recursive: true });
     }
     return dir;
-  } catch (_e) {
+  } catch {
     const fallback = path.join(os.tmpdir(), "Books_Drop");
     if (!fs.existsSync(fallback)) {
       fs.mkdirSync(fallback, { recursive: true });
@@ -1951,11 +1951,14 @@ export async function ingestArticleFromUrl(
       void _err;
     }
 
-    // 4. Ingest into Calibre via calibredb
-    const lang = await detectBookLanguage(article.title, "");
-    const tagsStr = ["Web Article", "Read Later", article.siteName]
-      .filter(Boolean)
-      .join(",");
+    // 4. Ingest into Calibre via calibredb with pre-add language & category detection
+    const classification = await resolveBookLanguageAndTags({
+      title: article.title,
+      author: article.author,
+      comments: article.styledDocument,
+      tags: ["Web Article", "Read Later", article.siteName].filter(Boolean),
+    });
+    const tagsStr = classification.tags.join(",");
     const addArgs = [
       "add",
       dropFilePath,
@@ -1970,8 +1973,8 @@ export async function ingestArticleFromUrl(
       "--automerge",
       "ignore",
     ];
-    if (lang) {
-      addArgs.push("--languages", lang);
+    if (classification.language && classification.language !== "other") {
+      addArgs.push("--languages", classification.language);
     }
     if (article.coverImagePath && fs.existsSync(article.coverImagePath)) {
       addArgs.push("--cover", article.coverImagePath);

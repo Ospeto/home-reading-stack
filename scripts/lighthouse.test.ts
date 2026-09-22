@@ -41,9 +41,22 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(stdout).toContain("up");
       expect(stdout).toContain("down");
       expect(stdout).toContain("health");
+      expect(stdout).toContain("categorize");
       expect(stdout).toContain("install-daemons");
       expect(stdout).toContain("backup");
       expect(stdout).toContain("restore");
+    });
+
+    it("bin/lighthouse categorize --help outputs categorize options", () => {
+      const res = spawnSync(LIGHTHOUSE_BIN, ["categorize", "--help"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain("LightHouse Library Categorization & Language Fix Tool");
+      expect(res.stdout).toContain("--dry-run");
+      expect(res.stdout).toContain("--apply");
+      expect(res.stdout).toContain("--limit");
     });
 
     it("bin/lighthouse version outputs current version", () => {

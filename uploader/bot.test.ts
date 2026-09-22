@@ -1357,7 +1357,7 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
       );
       const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
 
-      const uniqueTitle = `Healed Book ${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const uniqueTitle = `Repaired Novel ${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       const opfXml = Buffer.from(
         `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>${uniqueTitle}</dc:title></metadata><manifest/><spine/></package>`,
       );
