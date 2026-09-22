@@ -139,15 +139,22 @@ function ensureDirExists(dir: string) {
 }
 
 export function moveToQuarantine(srcPath: string, fileName?: string): string {
-  const qDir = getQuarantineDir();
+  const qDir = path.resolve(getQuarantineDir());
   ensureDirExists(qDir);
-  const rawTargetName = fileName || path.basename(srcPath);
-  // Always strip directory traversal, slashes, and illegal chars from targetName
-  const sanitizedTargetName = path
-    .basename(rawTargetName)
-    .replace(/[/\\]/g, "_")
-    .trim() || "quarantined_file.epub";
-  const destPath = path.join(qDir, sanitizedTargetName);
+  const rawTargetName = (fileName || path.basename(srcPath)).trim();
+
+  // Strip path traversal, slashes, nulls, dots
+  let safeName = path.basename(rawTargetName).replace(/[/\\]/g, "_").trim();
+  if (!safeName || safeName === "." || safeName === ".." || /^\.+$/.test(safeName)) {
+    safeName = "quarantined_file.epub";
+  }
+
+  let destPath = path.resolve(qDir, safeName);
+  // Guarantee destination stays strictly inside quarantine directory
+  if (!destPath.startsWith(qDir + path.sep)) {
+    destPath = path.join(qDir, "quarantined_file.epub");
+  }
+
   try {
     fs.renameSync(srcPath, destPath);
   } catch {

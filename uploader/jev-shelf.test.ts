@@ -182,6 +182,37 @@ describe("Jev System-1 Four Use Cases & Shelf Integration", () => {
       expect(qPath).toContain("quarantine");
       expect(fs.readFileSync(qPath, "utf8")).toBe("dummy epub bytes");
     });
+
+    it("moveToQuarantine strictly prevents directory traversal attacks (../, absolute, dots)", () => {
+      const qDir = path.resolve(getQuarantineDir());
+
+      // 1. Path traversal with parent directory
+      const dummy1 = path.join(tempTestDir, "t1.epub");
+      fs.writeFileSync(dummy1, "data1");
+      const p1 = moveToQuarantine(dummy1, "../../../etc/passwd");
+      expect(p1.startsWith(qDir + path.sep)).toBe(true);
+      expect(path.basename(p1)).not.toContain("/");
+
+      // 2. Traversal with relative prefix
+      const dummy2 = path.join(tempTestDir, "t2.epub");
+      fs.writeFileSync(dummy2, "data2");
+      const p2 = moveToQuarantine(dummy2, "../escape.epub");
+      expect(p2.startsWith(qDir + path.sep)).toBe(true);
+      expect(path.basename(p2)).toBe("escape.epub");
+
+      // 3. Dot and double-dot names
+      const dummy3 = path.join(tempTestDir, "t3.epub");
+      fs.writeFileSync(dummy3, "data3");
+      const p3 = moveToQuarantine(dummy3, "..");
+      expect(p3.startsWith(qDir + path.sep)).toBe(true);
+      expect(path.basename(p3)).toBe("quarantined_file.epub");
+
+      const dummy4 = path.join(tempTestDir, "t4.epub");
+      fs.writeFileSync(dummy4, "data4");
+      const p4 = moveToQuarantine(dummy4, ".");
+      expect(p4.startsWith(qDir + path.sep)).toBe(true);
+      expect(path.basename(p4)).toBe("quarantined_file.epub");
+    });
   });
 
   // ==========================================================================
