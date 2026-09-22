@@ -59,6 +59,11 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
         encoding: "utf8",
         cwd: tempTestDir, // running from /tmp
+        env: {
+          ...process.env,
+          US_WAN_HQ_URL: "http://127.0.0.1:1",
+          SG_OPDS_80_URL: "http://127.0.0.1:1",
+        },
       });
       expect(res.status).toBe(0);
       expect(res.stdout).toContain(`Root: ${REPO_ROOT}`);
@@ -86,6 +91,11 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
         encoding: "utf8",
         cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          US_WAN_HQ_URL: "http://127.0.0.1:1",
+          SG_OPDS_80_URL: "http://127.0.0.1:1",
+        },
       });
       expect(res.status).toBe(0);
       const out = res.stdout;
