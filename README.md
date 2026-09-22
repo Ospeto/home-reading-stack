@@ -106,6 +106,7 @@ LightHouse includes a portable management CLI (`bin/lighthouse`) for service lif
 | `bin/lighthouse health` | Probes HTTP/TCP endpoints, checks response codes, and auto-heals stale remote listeners (`fuser -k`). |
 | `bin/lighthouse categorize` | Classifies book languages (`mya`, `eng`, `other`), assigns standardized category tags, and prunes promotional tags. |
 | `bin/lighthouse enrich-synopsis` | Populates missing descriptions for Calibre books combining local EPUB metadata extraction with online APIs (RanobeDB, Bangumi, Google Books). |
+| `bin/lighthouse sync-obsidian` | Syncs highlights, notes, and progress from KOReader/Kindle to Obsidian with idempotent markers. |
 | `bin/lighthouse install-daemons` | Dynamically generates and registers macOS LaunchAgents for the current user and repository root. |
 | `bin/lighthouse backup` | Flushes SQLite WAL frames and creates an atomic snapshot bundle with SHA-256 checksum and manifest. |
 | `bin/lighthouse restore <archive>` | Performs verified disaster recovery with cryptographic checksum verification and integrity scan. |
@@ -134,6 +135,11 @@ bin/lighthouse enrich-synopsis --apply
 
 # Limit enrichment to first 20 books or restrict source strategy (epub, online, all)
 bin/lighthouse enrich-synopsis --apply --limit 20 --source=online
+# Synchronize KOReader/Kindle highlights and reading notes to Obsidian vault
+bin/lighthouse sync-obsidian --apply
+
+# Watch Calibre library and KOSync DB for continuous live Obsidian sync
+bin/lighthouse sync-obsidian --apply --watch
 
 # Dynamically generate and register macOS LaunchAgents for the current user
 bin/lighthouse install-daemons
@@ -244,6 +250,49 @@ LightHouse provides an app-like catalog experience across mobile devices and des
   https://reading.wavypremium.xyz
   ```
 - **Telegram Native Mini App:** Tap the persistent **Menu** button or send `/app` inside `@saroat_ospeto_bot` to open the full catalog interface inside Telegram with native haptics.
+
+---
+
+## 📝 Automated KOReader & Kindle to Obsidian Highlight Sync
+
+LightHouse bridges your reading devices (KOReader on Kobo/Kindle/Android, native Kindle clippings, and KOSync progress) directly into your Obsidian second brain:
+
+1. **Structured Note Generation:**
+   - Notes are written to `<vault>/Books/<Sanitized_Title>.md` (default vault: `OBSIDIAN_VAULT_PATH` or `~/Obsidian`).
+   - Every note is generated with rich YAML frontmatter:
+     ```yaml
+     ---
+     title: "Atomic Habits: An Easy & Proven Way to Build Good Habits & Break Bad Ones"
+     author: "James Clear"
+     series: ""
+     progress: 65
+     status: reading
+     tags:
+       - book-notes
+       - lighthouse
+       - reading
+     date_synced: 2026-09-23T01:23:45.000Z
+     ---
+     ```
+   - Formatted book synopsis extracted from Calibre library comments.
+   - Dynamic reading progress bar (`**Progress:** 65% [█████░░░]`) and last read timestamp from KOSync (`koreader-sync.db`).
+
+2. **Idempotent Preservation Guarantee:**
+   - Highlights and captured notes are bounded by marker comments:
+     ```markdown
+     ## Highlights & Notes
+     <!-- lighthouse:highlights:start -->
+     > Desire is the difference between where you are now and where you want to be in the future.
+     — *Chapter 10*, Page 189 • 2025-01-30 16:52:58
+     **Note:** Fundamental motive behind habits.
+     <!-- lighthouse:highlights:end -->
+     ```
+   - On repeated syncs, only the block inside the markers is updated; any manual user reflections, synthesis notes, or custom frontmatter properties outside the markers are 100% preserved.
+
+3. **Three Seamless Synchronization Pathways:**
+   - **Wireless Over-The-Air Ingest (`POST /api/highlights/sync`):** Configure KOReader's bundled **Export highlights** plugin to send JSON/Markdown exports directly to `http://192.168.31.15:8086/api/highlights/sync` on LAN or `https://reading-sg.wavypremium.xyz:8443/api/highlights/sync` on WAN.
+   - **CLI Batch & Continuous Watch (`bin/lighthouse sync-obsidian`):** Auto-discovers connected Kindle / KOReader storage mounts (`/Volumes/*/`) and sidecar `.sdr` folders (`metadata.epub.lua`), merging with live KOSync databases. Pass `--watch` for continuous auto-syncing.
+   - **One-Tap Web UI Sync:** Tap **Sync to Obsidian** in the book detail modal on Reading HQ or Telegram Mini App to immediately trigger note creation/update.
 
 ---
 
