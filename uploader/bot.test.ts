@@ -39,7 +39,7 @@ import { type CleanDuplicatesReport } from "../scripts/clean-duplicates";
 describe("Telegram Mini App (TMA) Integration", () => {
   it("exports READING_WEBAPP_URL defaulting to production WAN domain", () => {
     expect(READING_WEBAPP_URL).toBeDefined();
-    expect(READING_WEBAPP_URL).toBe("https://reading.wavypremium.xyz");
+    expect(READING_WEBAPP_URL).toBe("https://reading-sg.wavypremium.xyz:8443");
   });
 
   it("exports KOSYNC_WAN_URL defaulting to production KOSync WAN domain", () => {
@@ -275,6 +275,21 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain("@media (prefers-reduced-transparency: reduce)");
     expect(html).toContain("background-color: #121418");
     expect(html).not.toContain("cdn.tailwindcss.com");
+
+    // 6. Desktop Book Hover Preview Popover
+    expect(html).toContain('id="bookHoverPopover"');
+    expect(html).toContain("book-hover-popover");
+    expect(html).toContain('id="popoverCover"');
+    expect(html).toContain('id="popoverTitle"');
+    expect(html).toContain('id="popoverMeta"');
+    expect(html).toContain('id="popoverSynopsis"');
+    expect(html).toContain("initHoverPopover");
+    expect(html).toContain("showPopoverForCard");
+    expect(html).toContain("data-book-id");
+    expect(html).toContain("setTimeout(() => {\n            showPopoverForCard(card);\n          }, 180);"); // 180ms hover debounce timer
+    expect(html).toContain("setTimeout(() => {\n            hidePopover();\n          }, 100);"); // 100ms dismissal timer
+    expect(html).toContain("matchMedia('(hover: hover)')");
+    expect(html).toContain("No synopsis available for this volume.");
   });
 });
 
@@ -355,7 +370,9 @@ describe("Unified In-Chat Health Dashboard (/status)", () => {
       const u = typeof input === "string" ? input : input?.url || "";
       if (
         u.includes("reading.wavypremium.xyz") ||
+        u.includes("reading-sg.wavypremium.xyz") ||
         u.includes("kosync.wavypremium.xyz") ||
+        u.includes("kosync-sg.wavypremium.xyz") ||
         u.includes("8086") ||
         u.includes("8088") ||
         u.includes("7200")

@@ -749,10 +749,16 @@ export function getCalibreBooks(forceFresh = false) {
       try {
         db.run("PRAGMA busy_timeout = 3000;");
 
-        // Check whether books_languages_link exists in this database schema
+        // Check whether optional tables exist in this database schema
         const hasLangTable = Boolean(
           db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='books_languages_link' LIMIT 1").get()
         );
+        const hasCommentsTable = Boolean(
+          db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='comments' LIMIT 1").get()
+        );
+
+        const commentsSelect = hasCommentsTable ? "c.text as comments" : "NULL as comments";
+        const commentsJoin = hasCommentsTable ? "LEFT JOIN comments c ON b.id = c.book" : "";
 
         const sqlQuery = hasLangTable
           ? `
@@ -761,7 +767,8 @@ export function getCalibreBooks(forceFresh = false) {
                    s.name as series, b.series_index,
                    GROUP_CONCAT(DISTINCT t.name) as tags,
                    pub.name as publisher,
-                   GROUP_CONCAT(DISTINCT l.lang_code) as languages
+                   GROUP_CONCAT(DISTINCT l.lang_code) as languages,
+                   ${commentsSelect}
             FROM books b
             JOIN data d ON b.id = d.book AND UPPER(d.format) = 'EPUB'
             LEFT JOIN books_authors_link bal ON b.id = bal.book
@@ -774,6 +781,7 @@ export function getCalibreBooks(forceFresh = false) {
             LEFT JOIN publishers pub ON bpl.publisher = pub.id
             LEFT JOIN books_languages_link bll ON b.id = bll.book
             LEFT JOIN languages l ON bll.lang_code = l.id
+            ${commentsJoin}
             GROUP BY b.id
             ORDER BY b.id DESC;
           `
@@ -783,7 +791,8 @@ export function getCalibreBooks(forceFresh = false) {
                    s.name as series, b.series_index,
                    GROUP_CONCAT(DISTINCT t.name) as tags,
                    pub.name as publisher,
-                   NULL as languages
+                   NULL as languages,
+                   ${commentsSelect}
             FROM books b
             JOIN data d ON b.id = d.book AND UPPER(d.format) = 'EPUB'
             LEFT JOIN books_authors_link bal ON b.id = bal.book
@@ -794,6 +803,7 @@ export function getCalibreBooks(forceFresh = false) {
             LEFT JOIN tags t ON btl.tag = t.id
             LEFT JOIN books_publishers_link bpl ON b.id = bpl.book
             LEFT JOIN publishers pub ON bpl.publisher = pub.id
+            ${commentsJoin}
             GROUP BY b.id
             ORDER BY b.id DESC;
           `;
@@ -816,6 +826,7 @@ export function getCalibreBooks(forceFresh = false) {
                 .filter(Boolean)
             : [],
           publisher: row.publisher || null,
+          comments: row.comments || null,
           languages: row.languages
             ? row.languages
                 .split(",")

@@ -823,6 +823,8 @@ export function isAllowedOrigin(
   // Allow standard production WAN domains
   if (
     lower === "https://reading.wavypremium.xyz" ||
+    lower === "https://reading-sg.wavypremium.xyz:8443" ||
+    lower === "https://reading-sg.wavypremium.xyz" ||
     lower === "https://kosync.wavypremium.xyz" ||
     lower === "http://kosync-sg.wavypremium.xyz" ||
     lower === "https://kosync-sg.wavypremium.xyz:8443" ||
