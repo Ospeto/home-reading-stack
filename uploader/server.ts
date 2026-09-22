@@ -44,6 +44,7 @@ import {
   cleanAuthorWithJev,
   resolveBookLanguageAndTags,
   classifyBookSourceCategoryDeterministic,
+  containsBurmese,
 } from "./jev-shelf";
 
 export function getDropDir(): string {
@@ -349,7 +350,7 @@ function registerJobHandlers(q: DurableJobQueue) {
         payload.filename || "",
         payload.tags || [],
       );
-      if (detCat === "burmese") {
+      if (detCat === "burmese" || containsBurmese(payload.title)) {
         const freshBooks = getCalibreBooks(true);
         const book = freshBooks.find((b: any) => b.id === payload.bookId);
         const hasExistingCover = book && book.cover && book.cover !== 0 && book.cover !== false;

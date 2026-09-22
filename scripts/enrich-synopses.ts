@@ -51,6 +51,7 @@ import {
 } from "../uploader/scraper";
 import {
   classifyBookSourceCategory,
+  containsBurmese,
   type BookSourceCategory,
 } from "../uploader/jev-shelf";
 import {
@@ -599,6 +600,11 @@ export async function fetchOnlineSynopsis(
   book: EnrichBookCandidate,
   _options: EnrichSynopsesOptions = {},
 ): Promise<{ description?: string; coverUrl?: string; source?: string } | null> {
+  // Fast path: Burmese literature skips overseas search to avoid unnecessary 404s and rate-limit burn
+  if (containsBurmese(book.title)) {
+    return null;
+  }
+
   const filename = book.data_name ? `${book.data_name}.epub` : "";
   const tags = book.tags ? book.tags.split(",").map((t) => t.trim()) : [];
 

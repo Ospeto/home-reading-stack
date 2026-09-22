@@ -19,6 +19,7 @@ import {
   resolveBookLanguageAndTags,
   classifyBookSourceCategoryDeterministic,
   classifyBookSourceCategory,
+  containsBurmese,
   getQuarantineDir,
   moveToQuarantine,
   callJevSystemOneChoice,
@@ -914,6 +915,45 @@ describe("Jev System-1 Four Use Cases & Shelf Integration", () => {
         if (origKey !== undefined) process.env.JEV_API_KEY = origKey;
         if (origTypesafeKey !== undefined) process.env.TYPESAFE_API_KEY = origTypesafeKey;
       }
+    });
+
+    it("hardened Burmese classification unconditionally classifies titles with Myanmar Unicode as 'burmese' even with Latin authors", async () => {
+      // Unit test asserting Burmese title with Latin author ('ပါရီကျဆုံးခန်း', 'Mya Than Tint') returns 'burmese'
+      expect(containsBurmese("ပါရီကျဆုံးခန်း")).toBe(true);
+      expect(containsBurmese("Mya Than Tint")).toBe(false);
+      expect(containsBurmese("The Great Gatsby")).toBe(false);
+
+      // Jev fetch should NOT be called at all for Burmese titles
+      let jevCalled = false;
+      globalThis.fetch = async () => {
+        jevCalled = true;
+        throw new Error("Jev should not be called for Burmese titles");
+      };
+
+      const cat1 = await classifyBookSourceCategory(
+        "ပါရီကျဆုံးခန်း",
+        "Mya Than Tint",
+        "pari.epub",
+        [],
+        { apiKey: "test-key" },
+      );
+      expect(cat1).toBe("burmese");
+      expect(jevCalled).toBe(false);
+
+      // Additional author variations with Latin script (e.g. Min Theim Kha, Khin Khin Htoo)
+      const cat2 = await classifyBookSourceCategory(
+        "သူတော်စင်တို့ ရွာ",
+        "Min Theim Kha",
+        "village.epub",
+      );
+      expect(cat2).toBe("burmese");
+
+      const cat3 = await classifyBookSourceCategory(
+        "ဆရာဝန်တယောက်ရဲ့ မှတ်တမ်း",
+        "Khin Khin Htoo",
+        "doctor.epub",
+      );
+      expect(cat3).toBe("burmese");
     });
   });
 });

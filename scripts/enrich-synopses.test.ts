@@ -522,6 +522,29 @@ describe("LightHouse Batch Synopsis Enrichment Tool", () => {
         globalThis.fetch = origFetch;
       }
     });
+
+    it("immediately returns null and bypasses online fetch for Burmese books even with Latin authors", async () => {
+      const origFetch = globalThis.fetch;
+      let onlineFetchCalled = false;
+      try {
+        globalThis.fetch = (async () => {
+          onlineFetchCalled = true;
+          throw new Error("Online API should NOT be queried for Burmese books");
+        }) as any;
+
+        const burmeseCandidate: EnrichBookCandidate = {
+          id: 1234,
+          title: "ပါရီကျဆုံးခန်း",
+          author: "Mya Than Tint",
+        };
+
+        const res = await fetchOnlineSynopsis(burmeseCandidate);
+        expect(res).toBeNull();
+        expect(onlineFetchCalled).toBe(false);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
   });
 
   // ==========================================================================

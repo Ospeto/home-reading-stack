@@ -1411,17 +1411,120 @@ export function cleanAniListDescription(raw: string): string {
   return s;
 }
 
-export async function searchAniList(
-  query: string,
+/**
+ * Builds standard POST RequestInit for AniList GraphQL searches.
+ */
+function buildAniListInit(cleanQ: string) {
+  return {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "User-Agent": "ReadingHQ/1.0",
+    },
+    body: JSON.stringify({
+      query: ANILIST_GRAPHQL_QUERY,
+      variables: { search: cleanQ },
+    }),
+  };
+}
+
+/**
+ * AniList Rate Limiter & Request Pacing
+ * Minimum interval between consecutive AniList queries (defaults to 700ms, ~85 req/min).
+ * Quota maximum cap for single Retry-After backoff sleep (60s).
+ */
+export const ANILIST_MIN_INTERVAL_MS = 700;
+export const MAX_RETRY_AFTER_MS = 60_000;
+
+let lastAniListCallTimestamp = 0;
+let aniListExecutionQueue: Promise<void> = Promise.resolve();
+
+export function resetAniListPacing(): void {
+  lastAniListCallTimestamp = 0;
+  aniListExecutionQueue = Promise.resolve();
+}
+
+/**
+ * Resolves the sleep function to use. If not supplied, defaults to setTimeout,
+ * resolving immediately in test environments unless explicitly injected.
+ */
+function resolveSleepFn(
+  sleepFn?: (ms: number) => Promise<void>,
+): (ms: number) => Promise<void> {
+  if (sleepFn) return sleepFn;
+  const isTestEnv =
+    process.env.NODE_ENV === "test" ||
+    typeof (globalThis as any).it === "function";
+  return (ms: number) =>
+    new Promise((resolve) => setTimeout(resolve, isTestEnv ? 0 : ms));
+}
+
+/**
+ * Parse Retry-After header from an HTTP 429 response.
+ * Handles integer seconds, floats, or HTTP-date format, returning bounded milliseconds.
+ */
+export function parseRetryAfterMs(
+  header?: string | null,
+  defaultMs: number = 2000,
+  maxMs: number = MAX_RETRY_AFTER_MS,
+): number {
+  if (!header) return defaultMs;
+  const trimmed = header.trim();
+  if (!trimmed) return defaultMs;
+
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds)) {
+    if (seconds < 0) return defaultMs;
+    return Math.min(Math.round(seconds * 1000), maxMs);
+  }
+
+  const timestamp = Date.parse(trimmed);
+  if (Number.isFinite(timestamp)) {
+    const diff = timestamp - Date.now();
+    if (diff < 0) return defaultMs;
+    return Math.min(diff, maxMs);
+  }
+
+  return defaultMs;
+}
+
+/**
+ * Enforces request pacing between consecutive AniList API calls (min 700ms).
+ */
+export async function paceAniListRequest(
+  minIntervalMs: number = ANILIST_MIN_INTERVAL_MS,
+  sleepFn?: (ms: number) => Promise<void>,
+): Promise<void> {
+  const doSleep = resolveSleepFn(sleepFn);
+  const now = Date.now();
+  const elapsed = now - lastAniListCallTimestamp;
+  const waitTime = minIntervalMs - elapsed;
+  if (waitTime > 0) {
+    await doSleep(waitTime);
+  }
+  lastAniListCallTimestamp = Date.now();
+}
+
+/**
+ * Internal single-request execution within the serialized process-wide queue.
+ */
+async function executeAniListSearch(
+  cleanQ: string,
   options?: {
     baseUrl?: string;
     timeoutMs?: number;
     fetchFn?: (url: string, init?: any) => Promise<Response>;
+    minIntervalMs?: number;
+    sleepFn?: (ms: number) => Promise<void>;
   },
 ): Promise<ScrapedMetadata[]> {
   const results: ScrapedMetadata[] = [];
-  const cleanQ = cleanQuery(query);
-  if (!cleanQ) return results;
+  const minIntervalMs = options?.minIntervalMs ?? ANILIST_MIN_INTERVAL_MS;
+  const doSleep = resolveSleepFn(options?.sleepFn);
+
+  // Enforce minimum spacing (700ms) after the previous call (or retry)
+  await paceAniListRequest(minIntervalMs, options?.sleepFn);
 
   const apiEndpoint = options?.baseUrl || "https://graphql.anilist.co";
   const timeoutMs = options?.timeoutMs || SCRAPER_TIMEOUT_MS;
@@ -1441,24 +1544,36 @@ export async function searchAniList(
       } as any));
 
   try {
-    const res = await doFetch(apiEndpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "User-Agent": "ReadingHQ/1.0",
-      },
-      body: JSON.stringify({
-        query: ANILIST_GRAPHQL_QUERY,
-        variables: { search: cleanQ },
-      }),
-    });
+    let res = await doFetch(apiEndpoint, buildAniListInit(cleanQ));
+    lastAniListCallTimestamp = Date.now();
 
     if (res.status === 429) {
+      const retryAfterHeader =
+        (typeof res.headers?.get === "function"
+          ? res.headers.get("Retry-After") || res.headers.get("retry-after")
+          : undefined);
+      const backoffMs = parseRetryAfterMs(retryAfterHeader, 2000);
+
       console.warn(
-        `[Scraper:AniList] Rate limit (HTTP 429) encountered for query "${cleanQ}".`,
+        `[Scraper:AniList] Rate limit (HTTP 429) encountered for query "${cleanQ}". Backing off for ${backoffMs}ms before retry...`,
       );
-      return results;
+
+      // Sleep for backoff duration while holding the process-wide queue
+      await doSleep(backoffMs);
+
+      // Enforce minIntervalMs before the retry dispatch
+      await paceAniListRequest(minIntervalMs, options?.sleepFn);
+
+      // Retry once after backoff
+      res = await doFetch(apiEndpoint, buildAniListInit(cleanQ));
+      lastAniListCallTimestamp = Date.now();
+
+      if (res.status === 429) {
+        console.warn(
+          `[Scraper:AniList] Rate limit (HTTP 429) persisted on retry for query "${cleanQ}".`,
+        );
+        return results;
+      }
     }
 
     if (!res.ok) {
@@ -1573,6 +1688,36 @@ export async function searchAniList(
   }
 
   return results;
+}
+
+export async function searchAniList(
+  query: string,
+  options?: {
+    baseUrl?: string;
+    timeoutMs?: number;
+    fetchFn?: (url: string, init?: any) => Promise<Response>;
+    minIntervalMs?: number;
+    sleepFn?: (ms: number) => Promise<void>;
+  },
+): Promise<ScrapedMetadata[]> {
+  const cleanQ = cleanQuery(query);
+  if (!cleanQ) return [];
+
+  // Serialize all AniList calls process-wide:
+  // Each call waits for any preceding call (and its possible 429 backoff + retry) to fully complete,
+  // enforces at least 700ms spacing after the last request, and holds the queue during its own backoff/retry.
+  const prevQueue = aniListExecutionQueue;
+  let releaseQueue: () => void = () => {};
+  aniListExecutionQueue = new Promise<void>((resolve) => {
+    releaseQueue = resolve;
+  });
+
+  await prevQueue;
+  try {
+    return await executeAniListSearch(cleanQ, options);
+  } finally {
+    releaseQueue();
+  }
 }
 
 // Unified Search with Multi-Source Fallback & Jev-Powered Smart Routing

@@ -708,6 +708,14 @@ export async function cleanAuthorWithJev(
 export const MYANMAR_UNICODE_REGEX = /[\u1000-\u109F\uA9E0-\uA9FF\uAA60-\uAA7F]/;
 export const LATIN_LETTER_REGEX = /[a-zA-Z]/;
 
+/**
+ * Checks whether a text contains Myanmar Unicode characters.
+ */
+export function containsBurmese(text?: string | null): boolean {
+  if (!text) return false;
+  return MYANMAR_UNICODE_REGEX.test(text);
+}
+
 export const BURMESE_TRANSLITERATED_TOKENS = new Set([
   "u", "daw", "ko", "ma", "mg", "maung", "min", "thakin", "sayadaw", "bo", "saya",
   "ashin", "lu", "win", "aung", "kyaw", "myint", "tun", "swe", "soe", "naing",
@@ -1246,15 +1254,18 @@ Task: Classify whether this book is a Japanese/Asian Light Novel ('light_novel')
 
 /**
  * High-level Book Source Category Classifier:
- * 1. Deterministic first:
+ * 1. Hardened Burmese check:
+ *    - If title contains Myanmar Unicode characters, immediately return 'burmese' unconditionally
+ *      (skips overseas APIs even when author is written in Latin characters).
+ * 2. Deterministic rules:
  *    - .cbz/.cbr -> 'manga'
  *    - [LN], [Light Novel], [Web Novel], [WN] -> 'light_novel'
  *    - [Manga], [Comic] -> 'manga'
  *    - Burmese Unicode without English/Japanese indicators -> 'burmese'
- * 2. Jev System-1 arbitration when deterministic rules are inconclusive:
+ * 3. Jev System-1 arbitration when deterministic rules are inconclusive:
  *    - Query Jev choice: 'light_novel' | 'manga' | 'general_book' | 'other'
  *    - Confidence threshold >= 0.7
- * 3. Fails open to 'general_book' if Jev is unavailable, key is missing, or confidence < 0.7.
+ * 4. Fails open to 'general_book' if Jev is unavailable, key is missing, or confidence < 0.7.
  */
 export async function classifyBookSourceCategory(
   title: string,
@@ -1263,6 +1274,12 @@ export async function classifyBookSourceCategory(
   tags: string[] = [],
   options: JevClientOptions = {},
 ): Promise<BookSourceCategory> {
+  // If title contains Myanmar Unicode characters, immediately return 'burmese' unconditionally.
+  // Do not let an English author name (e.g. 'Mya Than Tint', 'Min Theim Kha') cause a Burmese book to be classified as 'general_book'.
+  if (containsBurmese(title)) {
+    return "burmese";
+  }
+
   const det = classifyBookSourceCategoryDeterministic(title, author, filename, tags);
   if (det) {
     return det;
