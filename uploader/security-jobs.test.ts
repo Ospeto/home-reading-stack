@@ -552,6 +552,7 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
 describe("Public WAN & API Surface Hardening — CORS & CSRF Guards", () => {
   it("allows configured production WAN and local LAN origins", () => {
     expect(isAllowedOrigin("https://reading.wavypremium.xyz")).toBe(true);
+    expect(isAllowedOrigin("https://reading-sg.wavypremium.xyz:8443")).toBe(true);
     expect(isAllowedOrigin("https://kosync.wavypremium.xyz")).toBe(true);
     expect(isAllowedOrigin("http://kosync-sg.wavypremium.xyz")).toBe(true);
     expect(isAllowedOrigin("https://kosync-sg.wavypremium.xyz:8443")).toBe(true);

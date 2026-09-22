@@ -559,6 +559,17 @@
       border-top: 1px solid rgba(255, 255, 255, 0.12);
     }
 
+    .hover-synopsis-preview {
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      overflow: hidden;
+      min-height: 0;
+      line-height: 1.25;
+      user-select: none;
+    }
+
     /* Optical Typography: Size-Specific Tracking & Leading */
     h1, h2, h3, h4,
     .tracking-display,
@@ -1606,6 +1617,9 @@
         <button id="guide-tab-opds" onclick="setGuideTab('opds')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
           OPDS Catalog
         </button>
+        <button id="guide-tab-features" onclick="setGuideTab('features')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
+          Features Guide
+        </button>
         <button id="guide-tab-cli" onclick="setGuideTab('cli')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
           CLI Reference
         </button>
@@ -1753,6 +1767,49 @@
           <div class="flex items-start gap-2.5">
             <span class="w-5 h-5 rounded-full bg-zinc-800 text-zinc-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">5</span>
             <div>Tap <strong>Connect</strong> (no username or password needed on your home LAN).</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SECTION 2.5: FEATURES GUIDE (LANGUAGE SHELVES & HOVER SYNOPSIS PREVIEWS) -->
+      <div id="guide-features" class="space-y-3 pt-1 hidden">
+        <div class="flex items-center justify-between">
+          <h4 class="text-xs font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5"><use href="#icon-layer-group"/></svg>
+            <span>Language Shelves &amp; Desktop Previews</span>
+          </h4>
+          <span class="text-[10px] px-2 py-0.5 rounded font-mono bg-zinc-800 text-sky-400 border border-zinc-700">UI Features</span>
+        </div>
+        <p class="text-xs text-zinc-300 leading-relaxed">
+          LightHouse features automated language triage shelves and instant desktop synopsis previews built on the Apple WWDC fluid interface design system.
+        </p>
+        <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-3 text-xs text-zinc-300">
+          <div class="space-y-1">
+            <div class="font-bold text-white flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+              <span>Dynamic Language Shelves (All / Burmese / English / Other)</span>
+            </div>
+            <p class="text-[11px] text-zinc-400 leading-relaxed">
+              Quickly filter the library view using the language shelf tabs (<code class="text-zinc-200">All</code>, <code class="text-zinc-200">Burmese</code>, <code class="text-zinc-200">English</code>, <code class="text-zinc-200">Other</code>). Powered by Calibre metadata tags, Burmese character detection (<code class="text-zinc-200">[\u1000-\u109F]</code>), and Jev System-1 linguistic triage to neatly segregate literature without manual tagging.
+            </p>
+          </div>
+          <div class="space-y-1 pt-1 border-t border-zinc-800/80">
+            <div class="font-bold text-white flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-sky-400"></span>
+              <span>Desktop Hover Synopsis Preview &amp; Quick Actions</span>
+            </div>
+            <p class="text-[11px] text-zinc-400 leading-relaxed">
+              Hovering over any book card on desktop instantly reveals an Apple glassmorphism overlay featuring a multi-line synopsis summary preview, one-click EPUB download, direct Obsidian Markdown note export, metadata editing, and book deletion. Click the card anytime to open the full modal details.
+            </p>
+          </div>
+          <div class="space-y-1 pt-1 border-t border-zinc-800/80">
+            <div class="font-bold text-white flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-purple-400"></span>
+              <span>Apple WWDC Fluid Interface &amp; Keyboard Control</span>
+            </div>
+            <p class="text-[11px] text-zinc-400 leading-relaxed">
+              Engineered with dark translucent materials (<code class="text-zinc-200">blur(20px) saturate(180%)</code>), optical typography, tactile active press feedback (<code class="text-zinc-200">scale(0.98)</code>), 3D spine curvature simulation, and keyboard navigation (<kbd class="px-1 py-0.5 bg-zinc-950 border border-zinc-700 rounded text-[10px] font-mono text-zinc-200">Cmd/Ctrl+K</kbd> to search, <kbd class="px-1 py-0.5 bg-zinc-950 border border-zinc-700 rounded text-[10px] font-mono text-zinc-200">Esc</kbd> to close).
+            </p>
           </div>
         </div>
       </div>
@@ -2050,7 +2107,25 @@
             </div>
           </div>
 
-          <!-- LightHouse WAN / Mini App -->
+          <!-- LightHouse Singapore WAN (Mini App & Web App) -->
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-sky-400"></span>
+                <span>LightHouse Singapore (Mini App &amp; Web)</span>
+              </span>
+              <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-sky-400 font-mono border border-zinc-700">WAN Port 8443</span>
+            </div>
+            <div class="text-[11px] text-zinc-400">Low-latency Singapore WAN Mini App &amp; Web App</div>
+            <div class="flex items-center gap-2 pt-1">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://reading-sg.wavypremium.xyz:8443</code>
+              <button onclick="copyToClipboard('https://reading-sg.wavypremium.xyz:8443')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- LightHouse WAN / Mini App (Caddy Global Edge) -->
           <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
@@ -2967,6 +3042,13 @@
           statusText = escapeHtml(book.authors || 'Unread');
         }
 
+        const cleanSynopsis = book.comments ? escapeHtml(book.comments.replace(/<[^>]*>?/gm, '')).trim() : '';
+        const synopsisPreviewHtml = cleanSynopsis ? `
+          <div class="hover-synopsis-preview text-[10px] text-zinc-300 px-1 py-0.5 opacity-90 my-auto" title="${cleanSynopsis}">
+            ${cleanSynopsis}
+          </div>
+        ` : '';
+
         const seriesIndexBadge = (book.series && book.series_index) ? `
           <div class="absolute top-2 left-2 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-black/70 text-white/90 border border-white/10 backdrop-blur-sm max-w-[80%] truncate">
             Vol ${book.series_index}
@@ -3009,6 +3091,8 @@
                   </button>
                 </div>
                 
+                ${synopsisPreviewHtml}
+
                 <div class="space-y-1.5">
                   ${(book.formats || []).map(f => `
                     <a href="/api/books/${book.id}/download/${f.toLowerCase()}" onclick="event.stopPropagation()" class="block w-full py-2 text-center bg-white hover:bg-zinc-200 text-zinc-950 text-xs font-bold rounded-lg transition-colors active:scale-[0.98]">
@@ -3517,7 +3601,9 @@
     // GUIDE MODAL TABS
     function setGuideTab(tab) {
       try { tgHaptic.light(); } catch {}
-      const tabs = ['kosync', 'opds', 'cli', 'proxy', 'all'];
+      const modalScroll = document.querySelector('#guideModal .overflow-y-auto');
+      if (modalScroll) modalScroll.scrollTop = 0;
+      const tabs = ['kosync', 'opds', 'features', 'cli', 'proxy', 'all'];
       tabs.forEach(t => {
         const btn = document.getElementById(`guide-tab-${t}`);
         if (btn) {
@@ -3530,6 +3616,7 @@
       });
       const secKosync = document.getElementById('guide-kosync');
       const secOpds = document.getElementById('guide-opds');
+      const secFeatures = document.getElementById('guide-features');
       const secCli = document.getElementById('guide-cli');
       const secProxy = document.getElementById('guide-proxy');
       const secEndpoints = document.getElementById('guide-endpoints');
@@ -3537,30 +3624,42 @@
       if (tab === 'kosync') {
         secKosync?.classList.remove('hidden');
         secOpds?.classList.add('hidden');
+        secFeatures?.classList.add('hidden');
         secCli?.classList.add('hidden');
         secProxy?.classList.add('hidden');
         secEndpoints?.classList.add('hidden');
       } else if (tab === 'opds') {
         secKosync?.classList.add('hidden');
         secOpds?.classList.remove('hidden');
+        secFeatures?.classList.add('hidden');
+        secCli?.classList.add('hidden');
+        secProxy?.classList.add('hidden');
+        secEndpoints?.classList.add('hidden');
+      } else if (tab === 'features') {
+        secKosync?.classList.add('hidden');
+        secOpds?.classList.add('hidden');
+        secFeatures?.classList.remove('hidden');
         secCli?.classList.add('hidden');
         secProxy?.classList.add('hidden');
         secEndpoints?.classList.add('hidden');
       } else if (tab === 'cli') {
         secKosync?.classList.add('hidden');
         secOpds?.classList.add('hidden');
+        secFeatures?.classList.add('hidden');
         secCli?.classList.remove('hidden');
         secProxy?.classList.add('hidden');
         secEndpoints?.classList.add('hidden');
       } else if (tab === 'proxy') {
         secKosync?.classList.add('hidden');
         secOpds?.classList.add('hidden');
+        secFeatures?.classList.add('hidden');
         secCli?.classList.add('hidden');
         secProxy?.classList.remove('hidden');
         secEndpoints?.classList.add('hidden');
       } else {
         secKosync?.classList.remove('hidden');
         secOpds?.classList.remove('hidden');
+        secFeatures?.classList.remove('hidden');
         secCli?.classList.remove('hidden');
         secProxy?.classList.remove('hidden');
         secEndpoints?.classList.remove('hidden');
