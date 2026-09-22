@@ -207,7 +207,7 @@ const PROXY_URL = "http://127.0.0.1:7890";
 const WEB_UPLOADER_URL = "http://192.168.31.15:8086";
 const CALIBRE_WEB_URL = "http://192.168.31.15:8088";
 export const READING_WEBAPP_URL =
-  process.env.READING_WEBAPP_URL || "https://reading.wavypremium.xyz";
+  process.env.READING_WEBAPP_URL || "https://reading-sg.wavypremium.xyz:8443";
 export const KOSYNC_WAN_URL =
   process.env.KOSYNC_WAN_URL || "http://kosync-sg.wavypremium.xyz";
 const MAX_TELEGRAM_FILE_SIZE = 20 * 1024 * 1024; // 20MB Telegram Bot API limit

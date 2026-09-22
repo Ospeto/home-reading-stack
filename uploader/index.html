@@ -51,6 +51,50 @@
     @media (hover: hover) {
       .book-card:hover .action-bar { opacity: 1; transform: translateY(0); pointer-events: auto; }
     }
+
+    /* Apple Dark Glass Floating Popover Card for Desktop Hover */
+    .book-hover-popover {
+      position: fixed;
+      z-index: 45;
+      width: 440px;
+      max-width: calc(100vw - 24px);
+      max-height: 360px;
+      background: rgba(18, 20, 26, 0.94);
+      -webkit-backdrop-filter: blur(24px) saturate(180%);
+      backdrop-filter: blur(24px) saturate(180%);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 16px;
+      box-shadow: 0 24px 48px -12px rgba(0, 0, 0, 0.75);
+      pointer-events: auto;
+      transition: opacity 150ms cubic-bezier(0.16, 1, 0.3, 1), transform 150ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .book-hover-popover.popover-hidden {
+      opacity: 0;
+      pointer-events: none;
+      transform: scale(0.98);
+    }
+    .book-hover-popover.popover-visible {
+      opacity: 1;
+      transform: scale(1);
+    }
+    .popover-cover-col {
+      width: 120px;
+      min-width: 120px;
+      max-width: 120px;
+    }
+    .line-clamp-6 {
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 6;
+    }
+    .leading-snug {
+      line-height: 1.375;
+    }
+    .my-2 {
+      margin-top: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
     .no-scrollbar::-webkit-scrollbar { display: none; }
     .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
     ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -636,7 +680,8 @@
       #uploadModal,
       #editModal,
       #guideModal,
-      #bulkToolbar {
+      #bulkToolbar,
+      #bookHoverPopover {
         -webkit-backdrop-filter: none !important;
         backdrop-filter: none !important;
         background-color: #121418 !important;
@@ -2072,6 +2117,30 @@
     </div>
   </div>
 
+  <!-- DESKTOP BOOK HOVER PREVIEW POPOVER -->
+  <div id="bookHoverPopover" class="book-hover-popover popover-hidden hidden overflow-hidden" role="tooltip" aria-hidden="true">
+    <div class="p-4 flex gap-4 h-full" style="max-height: 360px;">
+      <!-- Left: Book Cover Image (~120px wide, aspect ratio 2:3, rounded-xl, shadow, object-cover) -->
+      <div class="popover-cover-col shrink-0">
+        <div class="relative aspect-[2/3] w-[120px] rounded-xl overflow-hidden shadow-book bg-[#121216] border border-[#23232a] skeleton-shimmer">
+          <img id="popoverCover" alt="Book Cover" class="w-full h-full object-cover object-center relative z-0" onload="this.parentElement.classList.add('loaded')" onerror="this.parentElement.classList.add('loaded')">
+          <div class="absolute inset-0 book-spine-effect pointer-events-none z-10"></div>
+        </div>
+      </div>
+      <!-- Right: Book Metadata & Synopsis -->
+      <div class="flex-1 min-w-0 flex flex-col justify-start">
+        <div class="space-y-1">
+          <h3 id="popoverTitle" class="text-base font-bold text-white tracking-tight leading-snug line-clamp-2"></h3>
+          <div id="popoverMeta" class="text-xs text-neutral-400 font-medium truncate"></div>
+        </div>
+        <div class="border-b border-white/10 my-2"></div>
+        <div class="flex-1 min-h-0 overflow-y-auto pr-1">
+          <p id="popoverSynopsis" class="text-xs text-neutral-300 leading-relaxed line-clamp-6"></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- TOAST FEEDBACK NOTIFICATION -->
   <div id="toastNotification" class="hidden fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-zinc-100 text-zinc-950 px-4 py-2 rounded-xl text-xs font-bold shadow-2xl flex items-center gap-2 border border-white/20 transition-all duration-300">
     <span id="toastIcon"><svg class="w-3.5 h-3.5 text-emerald-600"><use href="#icon-check"/></svg></span>
@@ -2167,6 +2236,9 @@
 
     // APPLE FLUID MODAL & SHEET SPATIAL TRANSITIONS
     function openModalAnimated(modalId, isSidePanel = false) {
+      if (typeof hideHoverPopover === 'function') {
+        hideHoverPopover();
+      }
       const modal = document.getElementById(modalId);
       if (!modal) return;
       modal._animToken = (modal._animToken || 0) + 1;
@@ -2321,7 +2393,7 @@
     }
 
     // STATE & CLIENT CACHE (STALE-WHILE-REVALIDATE)
-    const CACHE_KEY_BOOKS = 'reading_hq_books_cache';
+    const CACHE_KEY_BOOKS = 'reading_hq_books_cache_v2';
     const CACHE_KEY_FACETS = 'reading_hq_facets_cache';
     const PAGE_SIZE = 36;
 
@@ -2825,6 +2897,9 @@
 
     // PROGRESSIVE CATALOG RENDERING
     function renderBooks() {
+      if (typeof hideHoverPopover === 'function') {
+        hideHoverPopover();
+      }
       const countText = `${currentFilteredList.length} Books`;
       const badge = document.getElementById('filteredCountBadge');
       if (badge) badge.textContent = countText;
@@ -2903,7 +2978,7 @@
         ` : '');
 
         return `
-          <div onclick="openBookDetail(${book.id})" class="book-card group relative flex flex-col cursor-pointer active:scale-[0.98] transition-transform duration-150">
+          <div data-book-id="${book.id}" onclick="openBookDetail(${book.id})" class="book-card group relative flex flex-col cursor-pointer active:scale-[0.98] transition-transform duration-150">
             <div class="relative aspect-[1/1.48] rounded-xl overflow-hidden shadow-book group-hover:shadow-book-hover transition-all duration-300 group-hover:-translate-y-1.5 bg-[#121216] border ${isSelected ? 'border-sky-400 ring-1 ring-sky-400' : 'border-[#23232a] hover:border-white/20'} skeleton-shimmer">
               ${seriesIndexBadge}
 
@@ -3020,6 +3095,9 @@
 
     // BOOK DETAIL MODAL HANDLERS
     function openBookDetail(bookId) {
+      if (typeof hideHoverPopover === 'function') {
+        hideHoverPopover();
+      }
       tgHaptic.light();
       const book = allBooks.find(b => b.id === bookId);
       if (!book) return;
@@ -3102,6 +3180,9 @@
 
     // VIEW MODE
     function setViewMode(mode) {
+      if (typeof hideHoverPopover === 'function') {
+        hideHoverPopover();
+      }
       tgHaptic.light();
       viewMode = mode;
       if (mode === 'grid') {
@@ -3686,6 +3767,227 @@
       }
     }
 
+    // DESKTOP BOOK HOVER PREVIEW POPOVER CONTROLLER
+    let hoverTimer = null;
+    let dismissTimer = null;
+    let activePopoverCard = null;
+
+    function hideHoverPopover() {
+      if (hoverTimer) {
+        clearTimeout(hoverTimer);
+        hoverTimer = null;
+      }
+      if (dismissTimer) {
+        clearTimeout(dismissTimer);
+        dismissTimer = null;
+      }
+      activePopoverCard = null;
+      const popover = document.getElementById('bookHoverPopover');
+      if (popover) {
+        popover.classList.remove('popover-visible');
+        popover.classList.add('popover-hidden');
+        popover.setAttribute('aria-hidden', 'true');
+        setTimeout(() => {
+          if (!activePopoverCard) {
+            popover.classList.add('hidden');
+          }
+        }, 150);
+      }
+    }
+
+    function initHoverPopover() {
+      // Touch safety: disabled on touch / mobile devices (only binds on matchMedia('(hover: hover)').matches)
+      if (!window.matchMedia || !window.matchMedia('(hover: hover)').matches) {
+        return;
+      }
+
+      const popover = document.getElementById('bookHoverPopover');
+      if (!popover) return;
+
+      const clearAllPopoverTimers = () => {
+        if (hoverTimer) {
+          clearTimeout(hoverTimer);
+          hoverTimer = null;
+        }
+        if (dismissTimer) {
+          clearTimeout(dismissTimer);
+          dismissTimer = null;
+        }
+      };
+
+      const hidePopover = () => {
+        hideHoverPopover();
+      };
+
+      const showPopoverForCard = (card) => {
+        if (hasActiveModal()) {
+          hidePopover();
+          return;
+        }
+
+        const bookId = parseInt(card.getAttribute('data-book-id'), 10);
+        if (Number.isNaN(bookId)) return;
+        const book = allBooks.find(b => b.id === bookId);
+        if (!book) return;
+
+        activePopoverCard = card;
+
+        // Populate popover content
+        const coverEl = document.getElementById('popoverCover');
+        const titleEl = document.getElementById('popoverTitle');
+        const metaEl = document.getElementById('popoverMeta');
+        const synopsisEl = document.getElementById('popoverSynopsis');
+
+        const coverUrl = book.cover ? `/api/books/${book.id}/cover?w=360` : "data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='178' fill='%23181a20'%3E%3Crect width='120' height='178'/%3E%3Ctext x='50%25' y='50%25' fill='%23737373' text-anchor='middle' font-family='sans-serif' font-size='12'%3ENo Cover%3C/text%3E%3C/svg%3E";
+        if (coverEl) {
+          if (coverEl.getAttribute('src') !== coverUrl) {
+            coverEl.parentElement?.classList.remove('loaded');
+            coverEl.src = coverUrl;
+          } else if (coverEl.complete) {
+            coverEl.parentElement?.classList.add('loaded');
+          }
+        }
+
+        if (titleEl) {
+          titleEl.textContent = book.title || 'Untitled';
+        }
+
+        if (metaEl) {
+          let seriesPart = '';
+          if (book.series) {
+            seriesPart = book.series_index ? `${book.series} #${book.series_index}` : book.series;
+          }
+          const authorPart = book.authors || 'Unknown Author';
+          metaEl.textContent = seriesPart ? `${seriesPart} • ${authorPart}` : authorPart;
+        }
+
+        if (synopsisEl) {
+          if (book.comments && typeof book.comments === 'string') {
+            const cleanText = book.comments
+              .replace(/<[^>]*>?/gm, ' ')
+              .replace(/&nbsp;/g, ' ')
+              .replace(/&amp;/g, '&')
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>')
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'")
+              .replace(/\s+/g, ' ')
+              .trim();
+            synopsisEl.textContent = cleanText || 'No synopsis available for this volume.';
+          } else {
+            synopsisEl.textContent = 'No synopsis available for this volume.';
+          }
+        }
+
+        // Make popover temporarily visible to measure dimensions accurately
+        popover.classList.remove('hidden');
+
+        // Smart Viewport Collision Detection & Positioning
+        const rect = card.getBoundingClientRect();
+        const popoverWidth = popover.offsetWidth || 440;
+        const popoverHeight = popover.offsetHeight || 300;
+        const padding = 12;
+
+        let left = 0;
+        if (rect.right + popoverWidth > window.innerWidth - 20) {
+          // Position popover to the LEFT of the card
+          left = Math.max(padding, rect.left - popoverWidth - padding);
+        } else {
+          // Position popover to the RIGHT of the card
+          left = rect.right + padding;
+        }
+
+        // Align top with card top, clamping within viewport bounds
+        let top = rect.top;
+        if (top + popoverHeight > window.innerHeight - padding) {
+          top = Math.max(padding, window.innerHeight - popoverHeight - padding);
+        }
+        if (top < padding) {
+          top = padding;
+        }
+
+        popover.style.left = `${Math.round(left)}px`;
+        popover.style.top = `${Math.round(top)}px`;
+
+        popover.classList.remove('popover-hidden');
+        popover.classList.add('popover-visible');
+        popover.setAttribute('aria-hidden', 'false');
+      };
+
+      // Event delegation on document for dynamic .book-card elements
+      document.addEventListener('mouseenter', (e) => {
+        const card = e.target.closest && e.target.closest('.book-card');
+        if (card) {
+          // Ignore internal descendant transitions within the same card
+          if (e.relatedTarget && card.contains(e.relatedTarget)) {
+            return;
+          }
+          if (dismissTimer) {
+            clearTimeout(dismissTimer);
+            dismissTimer = null;
+          }
+          if (activePopoverCard === card && popover.classList.contains('popover-visible')) {
+            return;
+          }
+          // If hovering a different card while popover is open, immediately switch or clear
+          if (hoverTimer) {
+            clearTimeout(hoverTimer);
+          }
+          hoverTimer = setTimeout(() => {
+            showPopoverForCard(card);
+          }, 180);
+        }
+      }, true);
+
+      document.addEventListener('mouseleave', (e) => {
+        const card = e.target.closest && e.target.closest('.book-card');
+        if (card) {
+          // Ignore internal descendant transitions within the same card
+          if (e.relatedTarget && card.contains(e.relatedTarget)) {
+            return;
+          }
+          if (hoverTimer) {
+            clearTimeout(hoverTimer);
+            hoverTimer = null;
+          }
+          if (dismissTimer) {
+            clearTimeout(dismissTimer);
+          }
+          dismissTimer = setTimeout(() => {
+            hidePopover();
+          }, 100);
+        }
+      }, true);
+
+      // Popover hover persistence: mouseenter clears dismissal timer
+      popover.addEventListener('mouseenter', (e) => {
+        if (e.relatedTarget && popover.contains(e.relatedTarget)) {
+          return;
+        }
+        if (dismissTimer) {
+          clearTimeout(dismissTimer);
+          dismissTimer = null;
+        }
+      });
+
+      // Popover mouseleave hides it
+      popover.addEventListener('mouseleave', (e) => {
+        if (e.relatedTarget && popover.contains(e.relatedTarget)) {
+          return;
+        }
+        if (dismissTimer) {
+          clearTimeout(dismissTimer);
+        }
+        dismissTimer = setTimeout(() => {
+          hidePopover();
+        }, 100);
+      });
+
+      // Close popover immediately on scroll, resize, or modal open
+      window.addEventListener('scroll', hidePopover, { passive: true });
+      window.addEventListener('resize', hidePopover, { passive: true });
+    }
+
     function updateHeaderHeight() {
       const header = document.querySelector('header');
       if (header) {
@@ -3697,6 +3999,7 @@
     }
 
     init();
+    initHoverPopover();
     updateHeaderHeight();
     window.addEventListener('resize', updateHeaderHeight);
   
