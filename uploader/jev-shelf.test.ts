@@ -13,6 +13,9 @@ import {
   cleanAuthorWithJev,
   detectLanguageDeterministic,
   detectBookLanguage,
+  classifyBookSourceCategoryDeterministic,
+  triageSourceCategoryWithJev,
+  classifyBookSourceCategory,
   getQuarantineDir,
   moveToQuarantine,
   callJevSystemOneChoice,
@@ -558,6 +561,147 @@ describe("Jev System-1 Four Use Cases & Shelf Integration", () => {
       expect(requestBody.state).toContain("Author Name");
       expect(requestBody.state).not.toContain("Buffer");
       expect(requestBody.state).not.toContain("Uint8Array");
+    });
+  });
+
+  // ==========================================================================
+  // 6. Source Category Classification & Smart Routing
+  // ==========================================================================
+  describe("6. Source Category Classification & Smart Routing", () => {
+    it("deterministic classification routes .cbz and .cbr to 'manga'", () => {
+      expect(classifyBookSourceCategoryDeterministic("One Piece", "Oda", "vol01.cbz")).toBe("manga");
+      expect(classifyBookSourceCategoryDeterministic("Berserk", "Miura", "berserk_ch1.cbr")).toBe("manga");
+      expect(classifyBookSourceCategoryDeterministic("Attack on Titan", "Isayama", "AOT.CBZ")).toBe("manga");
+    });
+
+    it("deterministic classification routes explicit LN tags and tokens to 'light_novel'", () => {
+      expect(classifyBookSourceCategoryDeterministic("Sword Art Online [LN]", "Reki Kawahara")).toBe("light_novel");
+      expect(classifyBookSourceCategoryDeterministic("Overlord [Light Novel]", "Maruyama")).toBe("light_novel");
+      expect(classifyBookSourceCategoryDeterministic("Solo Leveling [WN]", "Chugong")).toBe("light_novel");
+      expect(classifyBookSourceCategoryDeterministic("Mushoku Tensei [Web Novel]", "Rifujin")).toBe("light_novel");
+      expect(
+        classifyBookSourceCategoryDeterministic("Title Without Marker", "Author", "book.epub", ["Light Novel"]),
+      ).toBe("light_novel");
+      expect(
+        classifyBookSourceCategoryDeterministic("Title", "Author", "book.epub", ["LN"]),
+      ).toBe("light_novel");
+    });
+
+    it("deterministic classification routes explicit Manga tags and tokens to 'manga'", () => {
+      expect(classifyBookSourceCategoryDeterministic("Naruto [Manga]", "Kishimoto")).toBe("manga");
+      expect(classifyBookSourceCategoryDeterministic("Spider-Man [Comic]", "Stan Lee")).toBe("manga");
+      expect(
+        classifyBookSourceCategoryDeterministic("Unknown Comic", "Author", "file.epub", ["Manga"]),
+      ).toBe("manga");
+      expect(
+        classifyBookSourceCategoryDeterministic("Batman", "Author", "file.epub", ["Comic"]),
+      ).toBe("manga");
+    });
+
+    it("deterministic classification routes Burmese Unicode to 'burmese' when no English/Japanese indicators", () => {
+      // Pure Burmese characters
+      expect(classifyBookSourceCategoryDeterministic("သခင်ကိုယ်တော်မှိုင်း", "စာရေးဆရာ", "book.epub")).toBe("burmese");
+      // Burmese with numbers / punctuation
+      expect(classifyBookSourceCategoryDeterministic("မြန်မာ့သမိုင်း အတွဲ ၁", "ဒေါက်တာသန်းထွန်း", "history.epub")).toBe("burmese");
+      // Burmese with English letters is inconclusive -> null (requires Jev or general fallback)
+      expect(classifyBookSourceCategoryDeterministic("Burmese Novel မြန်မာဝတ္ထု", "Author", "burmese.epub")).toBeNull();
+    });
+
+    it("deterministic classification returns null for inconclusive general queries", () => {
+      expect(classifyBookSourceCategoryDeterministic("The Great Gatsby", "F. Scott Fitzgerald", "gatsby.epub")).toBeNull();
+      expect(classifyBookSourceCategoryDeterministic("Clean Code", "Robert C. Martin", "cleancode.epub")).toBeNull();
+      expect(classifyBookSourceCategoryDeterministic("Sapiens", "Yuval Noah Harari", "sapiens.epub")).toBeNull();
+    });
+
+    it("bypasses Jev when deterministic classification matches", async () => {
+      let fetchCalled = false;
+      globalThis.fetch = async () => {
+        fetchCalled = true;
+        throw new Error("Jev should not be called for deterministic classification");
+      };
+
+      const category = await classifyBookSourceCategory("Overlord [LN]", "Maruyama", "overlord.epub", [], {
+        apiKey: "test-key",
+      });
+      expect(category).toBe("light_novel");
+      expect(fetchCalled).toBe(false);
+    });
+
+    it("calls Jev when deterministic classification is inconclusive and classifies correctly with conf >= 0.7", async () => {
+      globalThis.fetch = async () => {
+        return new Response(
+          JSON.stringify({
+            answers: {
+              source_category_verdict: {
+                choice: "light_novel",
+                confidence: 0.95,
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const category = await classifyBookSourceCategory("Re:Zero", "Tappei Nagatsuki", "rezero.epub", [], {
+        apiKey: "test-key",
+      });
+      expect(category).toBe("light_novel");
+    });
+
+    it("fails open to 'general_book' when Jev returns confidence < 0.7", async () => {
+      globalThis.fetch = async () => {
+        return new Response(
+          JSON.stringify({
+            answers: {
+              source_category_verdict: {
+                choice: "light_novel",
+                confidence: 0.55,
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const category = await classifyBookSourceCategory("Ambiguous Title", "Unknown", "book.epub", [], {
+        apiKey: "test-key",
+      });
+      expect(category).toBe("general_book");
+    });
+
+    it("deterministic classification does not false-positive on unbracketed common words", () => {
+      // "LN Tolstoy", "A Comic Novel", "Kadokawa Bunko Classics" should be inconclusive (null), not LN or Manga
+      expect(classifyBookSourceCategoryDeterministic("LN Tolstoy: War and Peace", "Leo Tolstoy")).toBeNull();
+      expect(classifyBookSourceCategoryDeterministic("A Comic Novel", "Author")).toBeNull();
+      expect(classifyBookSourceCategoryDeterministic("Kadokawa Bunko Classics", "Author")).toBeNull();
+    });
+
+    it("fails open to 'general_book' when Jev API key is missing or network fails", async () => {
+      const origKey = process.env.JEV_API_KEY;
+      const origTypesafeKey = process.env.TYPESAFE_API_KEY;
+      try {
+        delete process.env.JEV_API_KEY;
+        delete process.env.TYPESAFE_API_KEY;
+
+        const categoryNoKey = await classifyBookSourceCategory("The Great Gatsby", "Fitzgerald", "gatsby.epub");
+        expect(categoryNoKey).toBe("general_book");
+
+        globalThis.fetch = async () => {
+          throw new Error("Network down");
+        };
+
+        const categoryNetError = await classifyBookSourceCategory(
+          "Some Book",
+          "Author",
+          "book.epub",
+          [],
+          { apiKey: "valid-key" },
+        );
+        expect(categoryNetError).toBe("general_book");
+      } finally {
+        if (origKey !== undefined) process.env.JEV_API_KEY = origKey;
+        if (origTypesafeKey !== undefined) process.env.TYPESAFE_API_KEY = origTypesafeKey;
+      }
     });
   });
 });

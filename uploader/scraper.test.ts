@@ -13,6 +13,8 @@ import {
   isSameBook,
   isSameBookAsync,
   classifyDuplicateWithJev,
+  classifyBookSourceCategory,
+  searchAllSources,
   type ScrapedMetadata,
 } from "./scraper";
 
@@ -788,6 +790,420 @@ describe("RanobeDB Scraper & Light Novel Metadata Engine", () => {
           (globalThis as any).fetch = origFetch;
         }
       });
+    });
+  });
+
+  describe("Jev-Powered Source Category Classification & Smart Routing (searchAllSources)", () => {
+    it("exports searchAllSources as an alias to searchUniversalMetadata", () => {
+      expect(searchAllSources).toBe(searchUniversalMetadata);
+    });
+
+    it("routes light novel queries to RanobeDB + Bangumi and then Google Books", async () => {
+      const origFetch = globalThis.fetch;
+      const requestedUrls: string[] = [];
+
+      (globalThis as any).fetch = async (url: string) => {
+        const urlStr = String(url);
+        requestedUrls.push(urlStr);
+
+        if (urlStr.includes("typesafe.ai")) {
+          return new Response(
+            JSON.stringify({
+              answers: {
+                source_category_verdict: { choice: "light_novel", confidence: 0.95 },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        if (urlStr.includes("ranobedb.org/api/v0/books")) {
+          return new Response(
+            JSON.stringify({
+              books: [
+                {
+                  id: 101,
+                  title: "Overlord, Vol. 1",
+                  image: { filename: "overlord.jpg" },
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        if (urlStr.includes("ranobedb.org/api/v0/book/101")) {
+          return new Response(
+            JSON.stringify({
+              book: {
+                id: 101,
+                title: "Overlord, Vol. 1",
+                image: { filename: "overlord.jpg" },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        if (urlStr.includes("api.bgm.tv")) {
+          return new Response(
+            JSON.stringify({ list: [] }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      };
+
+      try {
+        const results = await searchAllSources("Overlord [LN]");
+        expect(results.length).toBeGreaterThan(0);
+        expect(results[0].source).toBe("RanobeDB");
+
+        // Verify RanobeDB and Bangumi were called
+        expect(requestedUrls.some((u) => u.includes("ranobedb.org"))).toBe(true);
+        expect(requestedUrls.some((u) => u.includes("api.bgm.tv"))).toBe(true);
+        // Did not call MangaDex first
+        expect(requestedUrls.some((u) => u.includes("mangadex.org"))).toBe(false);
+      } finally {
+        (globalThis as any).fetch = origFetch;
+      }
+    });
+
+    it("routes manga queries to MangaDex + Bangumi first", async () => {
+      const origFetch = globalThis.fetch;
+      const requestedUrls: string[] = [];
+
+      (globalThis as any).fetch = async (url: string) => {
+        const urlStr = String(url);
+        requestedUrls.push(urlStr);
+
+        if (urlStr.includes("typesafe.ai")) {
+          return new Response(
+            JSON.stringify({
+              answers: {
+                source_category_verdict: { choice: "manga", confidence: 0.95 },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        if (urlStr.includes("mangadex.org")) {
+          return new Response(
+            JSON.stringify({
+              data: [
+                {
+                  id: "manga-1",
+                  attributes: {
+                    title: { en: "Berserk" },
+                    description: { en: "Dark fantasy manga" },
+                  },
+                  relationships: [],
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        if (urlStr.includes("api.bgm.tv")) {
+          return new Response(
+            JSON.stringify({ list: [] }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      };
+
+      try {
+        const results = await searchAllSources("Berserk [Manga]");
+        expect(results.length).toBeGreaterThan(0);
+        expect(results[0].source).toBe("MangaDex");
+
+        // Verify MangaDex was queried
+        expect(requestedUrls.some((u) => u.includes("mangadex.org"))).toBe(true);
+        // Did not query RanobeDB for manga
+        expect(requestedUrls.some((u) => u.includes("ranobedb.org"))).toBe(false);
+      } finally {
+        (globalThis as any).fetch = origFetch;
+      }
+    });
+
+    it("routes general books to Google Books + OpenLibrary first", async () => {
+      const origFetch = globalThis.fetch;
+      const requestedUrls: string[] = [];
+
+      (globalThis as any).fetch = async (url: string) => {
+        const urlStr = String(url);
+        requestedUrls.push(urlStr);
+
+        if (urlStr.includes("typesafe.ai")) {
+          return new Response(
+            JSON.stringify({
+              answers: {
+                source_category_verdict: { choice: "general_book", confidence: 0.95 },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        if (urlStr.includes("googleapis.com/books")) {
+          return new Response(
+            JSON.stringify({
+              items: [
+                {
+                  volumeInfo: {
+                    title: "The Great Gatsby",
+                    authors: ["F. Scott Fitzgerald"],
+                    categories: ["Fiction"],
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        if (urlStr.includes("openlibrary.org")) {
+          return new Response(
+            JSON.stringify({ docs: [] }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      };
+
+      try {
+        const results = await searchAllSources("The Great Gatsby", {
+          category: "general_book",
+        });
+        expect(results.length).toBeGreaterThan(0);
+        expect(results[0].source).toBe("GoogleBooks");
+
+        expect(requestedUrls.some((u) => u.includes("googleapis.com/books"))).toBe(true);
+        // Did not query RanobeDB or MangaDex primarily
+        expect(requestedUrls.some((u) => u.includes("ranobedb.org"))).toBe(false);
+        expect(requestedUrls.some((u) => u.includes("mangadex.org"))).toBe(false);
+      } finally {
+        (globalThis as any).fetch = origFetch;
+      }
+    });
+
+    it("skips overseas searches entirely for 'burmese' category", async () => {
+      const origFetch = globalThis.fetch;
+      const requestedUrls: string[] = [];
+
+      (globalThis as any).fetch = async (url: string) => {
+        requestedUrls.push(String(url));
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      };
+
+      try {
+        const results = await searchAllSources("မြန်မာ့သမိုင်း အတွဲ ၁");
+        expect(results.length).toBe(0);
+        // Overseas APIs are skipped
+        expect(requestedUrls.some((u) => u.includes("ranobedb.org"))).toBe(false);
+        expect(requestedUrls.some((u) => u.includes("mangadex.org"))).toBe(false);
+        expect(requestedUrls.some((u) => u.includes("googleapis.com/books"))).toBe(false);
+        expect(requestedUrls.some((u) => u.includes("openlibrary.org"))).toBe(false);
+      } finally {
+        (globalThis as any).fetch = origFetch;
+      }
+    });
+
+    it("routes 'other' category directly to Google Books + OpenLibrary first", async () => {
+      const origFetch = globalThis.fetch;
+      const requestedUrls: string[] = [];
+
+      (globalThis as any).fetch = async (url: string) => {
+        const urlStr = String(url);
+        requestedUrls.push(urlStr);
+
+        if (urlStr.includes("googleapis.com/books")) {
+          return new Response(
+            JSON.stringify({
+              items: [
+                {
+                  volumeInfo: {
+                    title: "Les Misérables",
+                    authors: ["Victor Hugo"],
+                    categories: ["Classic Literature"],
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      };
+
+      try {
+        const results = await searchAllSources("Les Misérables", {
+          category: "other",
+        });
+        expect(results.length).toBeGreaterThan(0);
+        expect(results[0].source).toBe("GoogleBooks");
+
+        // Primary general book hosts were queried for 'other'
+        expect(requestedUrls.some((u) => u.includes("googleapis.com/books"))).toBe(true);
+        // Did not query RanobeDB or MangaDex primarily
+        expect(requestedUrls.some((u) => u.includes("ranobedb.org"))).toBe(false);
+      } finally {
+        (globalThis as any).fetch = origFetch;
+      }
+    });
+
+    it("never overrides explicit or deterministic manga with light novel franchise rule", async () => {
+      const origFetch = globalThis.fetch;
+      const requestedUrls: string[] = [];
+
+      (globalThis as any).fetch = async (url: string) => {
+        const urlStr = String(url);
+        requestedUrls.push(urlStr);
+
+        if (urlStr.includes("mangadex.org")) {
+          return new Response(
+            JSON.stringify({
+              data: [
+                {
+                  id: "manga-overlord",
+                  attributes: {
+                    title: { en: "Overlord" },
+                    description: { en: "Manga adaptation of Overlord" },
+                  },
+                  relationships: [],
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      };
+
+      try {
+        // "Overlord" has a franchise name, but filename is .cbz (manga)
+        const results = await searchAllSources("Overlord", {
+          filename: "overlord.cbz",
+        });
+        expect(results.length).toBeGreaterThan(0);
+        expect(results[0].source).toBe("MangaDex");
+
+        // MangaDex was queried first, NOT RanobeDB
+        expect(requestedUrls.some((u) => u.includes("mangadex.org"))).toBe(true);
+        expect(requestedUrls.some((u) => u.includes("ranobedb.org"))).toBe(false);
+      } finally {
+        (globalThis as any).fetch = origFetch;
+      }
+    });
+
+    it("routes franchise titles like Re:Zero or Overlord to Light Novel sources even if unbracketed", async () => {
+      const origFetch = globalThis.fetch;
+      const requestedUrls: string[] = [];
+
+      (globalThis as any).fetch = async (url: string) => {
+        const urlStr = String(url);
+        requestedUrls.push(urlStr);
+
+        if (urlStr.includes("ranobedb.org/api/v0/books")) {
+          return new Response(
+            JSON.stringify({
+              books: [
+                {
+                  id: 202,
+                  title: "Re:Zero Starting Life in Another World",
+                  image: { filename: "rezero.jpg" },
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        if (urlStr.includes("ranobedb.org/api/v0/book/202")) {
+          return new Response(
+            JSON.stringify({
+              book: {
+                id: 202,
+                title: "Re:Zero Starting Life in Another World",
+                image: { filename: "rezero.jpg" },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      };
+
+      try {
+        const results = await searchAllSources("Re:Zero");
+        expect(results.length).toBeGreaterThan(0);
+        expect(results[0].source).toBe("RanobeDB");
+
+        expect(requestedUrls.some((u) => u.includes("ranobedb.org"))).toBe(true);
+        // Did not query Google Books first
+        expect(requestedUrls.some((u) => u.includes("googleapis.com/books"))).toBe(false);
+      } finally {
+        (globalThis as any).fetch = origFetch;
+      }
+    });
+
+    it("falls back to secondary search when primary returns 0 results so no book is left without metadata", async () => {
+      const origFetch = globalThis.fetch;
+      const requestedUrls: string[] = [];
+
+      (globalThis as any).fetch = async (url: string) => {
+        const urlStr = String(url);
+        requestedUrls.push(urlStr);
+
+        // Primary general book returns 0
+        if (urlStr.includes("googleapis.com/books") || urlStr.includes("openlibrary.org")) {
+          return new Response(JSON.stringify({ items: [], docs: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        // Secondary fallback hits RanobeDB
+        if (urlStr.includes("ranobedb.org")) {
+          return new Response(
+            JSON.stringify({
+              books: [
+                {
+                  id: 999,
+                  title: "Obscure Title",
+                  image: { filename: "obscure.jpg" },
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      };
+
+      try {
+        const results = await searchAllSources("Obscure Title", {
+          category: "general_book",
+        });
+        expect(results.length).toBeGreaterThan(0);
+        expect(results[0].source).toBe("RanobeDB");
+
+        // Both primary (Google/OpenLib) and secondary fallback (RanobeDB) were attempted
+        expect(requestedUrls.some((u) => u.includes("googleapis.com/books"))).toBe(true);
+        expect(requestedUrls.some((u) => u.includes("ranobedb.org"))).toBe(true);
+      } finally {
+        (globalThis as any).fetch = origFetch;
+      }
     });
   });
 });

@@ -37,6 +37,7 @@ import {
   extractSeriesWithJev,
   cleanAuthorWithJev,
   detectBookLanguage,
+  classifyBookSourceCategoryDeterministic,
 } from "./jev-shelf";
 
 export function getDropDir(): string {
@@ -294,14 +295,23 @@ let _serverJobQueue: DurableJobQueue | null = null;
 function registerJobHandlers(q: DurableJobQueue) {
   q.registerHandler(
     "metadata_enrich",
-    async (payload: { bookId: number; title: string; isManga?: boolean }) => {
+    async (payload: {
+      bookId: number;
+      title: string;
+      author?: string;
+      filename?: string;
+      tags?: string[];
+      isManga?: boolean;
+    }) => {
       console.log(
         `[JobQueue:MetadataEnrich] Background enrichment for book ID ${payload.bookId} ("${payload.title}")...`,
       );
-      const matches = await searchUniversalMetadata(
-        payload.title,
-        payload.isManga || false,
-      );
+      const matches = await searchUniversalMetadata(payload.title, {
+        isManga: payload.isManga,
+        author: payload.author,
+        filename: payload.filename,
+        tags: payload.tags,
+      });
       if (matches.length > 0) {
         const top = matches[0];
         console.log(
@@ -325,6 +335,55 @@ function registerJobHandlers(q: DurableJobQueue) {
           };
         }
       }
+
+      // Check if this book is Burmese: if so, generate local typographic cover if missing
+      const detCat = classifyBookSourceCategoryDeterministic(
+        payload.title,
+        payload.author || "",
+        payload.filename || "",
+        payload.tags || [],
+      );
+      if (detCat === "burmese") {
+        const freshBooks = getCalibreBooks(true);
+        const book = freshBooks.find((b: any) => b.id === payload.bookId);
+        const hasExistingCover = book && book.cover && book.cover !== 0 && book.cover !== false;
+
+        if (!hasExistingCover) {
+          try {
+            const coverPath = generateTypographicCover(
+              payload.title,
+              payload.author || "Unknown",
+              "Burmese Literature",
+            );
+            if (fs.existsSync(coverPath)) {
+              const calRes = runCalibredb([
+                "set_metadata",
+                String(payload.bookId),
+                "--with-library",
+                SERVER_URL,
+                "--field",
+                `cover:${coverPath}`,
+              ]);
+              try {
+                fs.unlinkSync(coverPath);
+              } catch (_unlinkErr) {
+                void _unlinkErr;
+              }
+              if (calRes.status === 0) {
+                getCalibreBooks(true);
+                return {
+                  success: true,
+                  message: "Generated local typographic cover for Burmese literature.",
+                  source: "Local Typography",
+                };
+              }
+            }
+          } catch (coverErr: any) {
+            console.error(`Failed to generate Burmese typographic cover:`, coverErr);
+          }
+        }
+      }
+
       return { success: true, message: "No external metadata matches found." };
     },
   );
@@ -1183,6 +1242,9 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
         jobQueue.enqueue("metadata_enrich", {
           bookId: newId,
           title: clean.title,
+          author: finalAuthor,
+          filename: originalFileName,
+          tags: clean.tags || [],
           isManga,
         });
       }
@@ -2949,14 +3011,12 @@ export async function handleRequest(
       const query = body.query;
       if (!query) return jsonResponse({ results: [] }, 200, corsOrigin);
 
-      const isManga =
-        req.url.includes("manga=true") ||
-        /manga|comic|chapter|one piece|naruto|bleach/i.test(query);
+      const isManga = req.url.includes("manga=true");
       const isLn =
         req.url.includes("ln=true") || req.url.includes("lightnovel=true");
       const results = await searchUniversalMetadata(query, {
-        isManga,
-        isLightNovel: isLn,
+        isManga: isManga ? true : undefined,
+        isLightNovel: isLn ? true : undefined,
       });
       return jsonResponse({ results }, 200, corsOrigin);
     } catch (err: any) {

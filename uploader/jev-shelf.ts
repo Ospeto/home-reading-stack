@@ -16,6 +16,7 @@ export type JunkTriageVerdict = "real_book" | "test_artifact" | "truncated_downl
 export type SeriesTriageVerdict = "series_volume" | "subtitle_same_book" | "unrelated";
 export type AuthorTriageVerdict = "keep" | "mark_unknown";
 export type LanguageTriageVerdict = "my" | "en" | "other";
+export type BookSourceCategory = "light_novel" | "manga" | "general_book" | "burmese" | "other";
 
 export interface JunkGateResult {
   quarantined: boolean;
@@ -768,3 +769,144 @@ export async function detectBookLanguage(
   // Fail open: leave language unset rather than guessing
   return null;
 }
+
+// ============================================================================
+// 5. Source Category Classification & Smart Routing
+// ============================================================================
+
+/**
+ * Deterministic rules for classifying book source category:
+ * - File extension is .cbz or .cbr -> 'manga'
+ * - Explicit tags or bracketed title tokens ([LN], [Light Novel], [Web Novel], [WN]) -> 'light_novel'
+ * - Explicit tags or bracketed title tokens ([Manga], [Comic]) -> 'manga'
+ * - Burmese Unicode characters without English/Japanese indicators -> 'burmese'
+ * - Returns null when inconclusive.
+ */
+export function classifyBookSourceCategoryDeterministic(
+  title: string,
+  author: string = "",
+  filename: string = "",
+  tags: string[] = [],
+): BookSourceCategory | null {
+  // 1. File extension is .cbz / .cbr -> manga
+  const lowerFile = (filename || "").toLowerCase();
+  if (lowerFile.endsWith(".cbz") || lowerFile.endsWith(".cbr")) {
+    return "manga";
+  }
+
+  // 2. Explicit tags or bracketed title tokens: [LN], [Light Novel], [Web Novel], [WN]
+  // Use bracket patterns or exact tag checks to prevent false matches on words like 'Tolstoy LN' or 'A Comic Novel'
+  const lnBracketPattern = /[\[\(]\s*(?:ln|light\s*novel|web\s*novel|wn|ranobe|bunko)\s*[\]\)]/i;
+  const explicitLnTag = tags.some((t) =>
+    /^(?:light[\s_-]?novel|ln|web[\s_-]?novel|wn|ranobe|bunko)$/i.test(t.trim()),
+  );
+  if (explicitLnTag || lnBracketPattern.test(title) || lnBracketPattern.test(filename)) {
+    return "light_novel";
+  }
+
+  // 3. Explicit tags or bracketed title tokens: [Manga], [Comic]
+  const mangaBracketPattern = /[\[\(]\s*(?:manga|comic)\s*[\]\)]/i;
+  const explicitMangaTag = tags.some((t) =>
+    /^(?:manga|comic)$/i.test(t.trim()),
+  );
+  if (explicitMangaTag || mangaBracketPattern.test(title) || mangaBracketPattern.test(filename)) {
+    return "manga";
+  }
+
+  // 4. Burmese Unicode characters without English/Japanese indicators
+  // Ignore placeholder/generic author strings like "Unknown", "Various", "N/A"
+  const cleanAuth = /^(?:unknown|various|n\/a|none|anonymous|admin)?$/i.test(author.trim())
+    ? ""
+    : author.trim();
+  const textToCheck = `${title} ${cleanAuth}`.trim();
+  const hasMyanmar = MYANMAR_UNICODE_REGEX.test(title) || MYANMAR_UNICODE_REGEX.test(textToCheck);
+  if (hasMyanmar) {
+    const hasEnglish = LATIN_LETTER_REGEX.test(textToCheck);
+    const hasJapanese = /[\u3040-\u309F\u30A0-\u30FF]/.test(textToCheck);
+    if (!hasEnglish && !hasJapanese) {
+      return "burmese";
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Call Jev System-1 to classify book source category when deterministic rules are inconclusive.
+ * Choices: 'light_novel' | 'manga' | 'general_book' | 'other'
+ */
+export async function triageSourceCategoryWithJev(
+  title: string,
+  author: string = "",
+  filename: string = "",
+  tags: string[] = [],
+  options: JevClientOptions = {},
+): Promise<{ category: "light_novel" | "manga" | "general_book" | "other"; confidence: number } | null> {
+  const stateText = `Inspect this book metadata and determine its source category for metadata & cover search:
+
+- Title: ${title || "(empty)"}
+- Author: ${author || "(empty)"}
+- Filename: ${filename || "(empty)"}
+- Tags: ${tags.length > 0 ? tags.join(", ") : "(none)"}
+
+Task: Classify whether this book is a Japanese/Asian Light Novel ('light_novel'), a Manga or Comic ('manga'), a General/Western Book or Non-fiction/Fiction novel ('general_book'), or Other/Unsure ('other').`;
+
+  const res = await callJevSystemOneChoice(
+    stateText,
+    "source_category_verdict",
+    "Classify the book source category as light_novel, manga, general_book, or other.",
+    {
+      light_novel: "Japanese or East-Asian light novel or web novel series (e.g. Overlord, Re:Zero, Danmachi, SAO, Classroom of the Elite).",
+      manga: "Manga, comic, graphic novel, or manhua/manhwa (e.g. One Piece, Berserk, Naruto).",
+      general_book: "Standard Western novel, non-fiction, textbook, literature, or trade book (e.g. The Great Gatsby, Clean Code, Sapiens).",
+      other: "Unrecognized, miscellaneous, or cannot be confidently placed into the other categories.",
+    },
+    options,
+  );
+
+  if (!res) return null;
+
+  const validCategories = ["light_novel", "manga", "general_book", "other"] as const;
+  if ((validCategories as readonly string[]).includes(res.choice)) {
+    return {
+      category: res.choice as "light_novel" | "manga" | "general_book" | "other",
+      confidence: res.confidence,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * High-level Book Source Category Classifier:
+ * 1. Deterministic first:
+ *    - .cbz/.cbr -> 'manga'
+ *    - [LN], [Light Novel], [Web Novel], [WN] -> 'light_novel'
+ *    - [Manga], [Comic] -> 'manga'
+ *    - Burmese Unicode without English/Japanese indicators -> 'burmese'
+ * 2. Jev System-1 arbitration when deterministic rules are inconclusive:
+ *    - Query Jev choice: 'light_novel' | 'manga' | 'general_book' | 'other'
+ *    - Confidence threshold >= 0.7
+ * 3. Fails open to 'general_book' if Jev is unavailable, key is missing, or confidence < 0.7.
+ */
+export async function classifyBookSourceCategory(
+  title: string,
+  author: string = "",
+  filename: string = "",
+  tags: string[] = [],
+  options: JevClientOptions = {},
+): Promise<BookSourceCategory> {
+  const det = classifyBookSourceCategoryDeterministic(title, author, filename, tags);
+  if (det) {
+    return det;
+  }
+
+  const jevRes = await triageSourceCategoryWithJev(title, author, filename, tags, options);
+  if (jevRes && jevRes.confidence >= 0.7) {
+    return jevRes.category;
+  }
+
+  // Fail open to 'general_book'
+  return "general_book";
+}
+
