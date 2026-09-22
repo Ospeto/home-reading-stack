@@ -4,7 +4,7 @@
  *
  * Synchronizes series and volume metadata across the Calibre library:
  *   - Part A: Maps explicit series links and volume indices from the source Calibre
- *             library (/Volumes/Ospeto_SSD/Calibre Library) by matching file size
+ *             library ($CALIBRE_SOURCE_LIBRARY_DIR) by matching file size
  *             and relative path.
  *   - Part B: Extracts series names and volume numbers from book titles for remaining
  *             books using heuristic regex patterns (<Series> Vol(ume) <N>, <Series> #<N>,

@@ -3,7 +3,7 @@
 # scripts/sync-series-metadata.sh
 #
 # Synchronizes series and volume metadata across the Calibre library using
-# source DB mapping (/Volumes/Ospeto_SSD/Calibre Library) and title heuristics.
+# source DB mapping ($CALIBRE_SOURCE_LIBRARY_DIR) and title heuristics.
 # ==============================================================================
 
 set -euo pipefail

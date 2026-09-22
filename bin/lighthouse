@@ -494,7 +494,7 @@ cmd_up() {
   local wait_count=0
   while [ "$wait_count" -lt 10 ]; do
     if is_port_listening "$UPLOADER_PORT"; then
-      echo -e "${COLOR_GREEN}Ready (:8086 listening)${COLOR_RESET}"
+      echo -e "${COLOR_GREEN}Ready (:${UPLOADER_PORT} listening)${COLOR_RESET}"
       break
     fi
     sleep 1
@@ -1150,6 +1150,7 @@ EOF
     target_bundle="${out_dir}/lighthouse-backup-${timestamp}.${bundle_ext}"
   fi
 
+  export COPYFILE_DISABLE=1
   if [ "$use_zstd" -eq 1 ]; then
     tar --zstd -cf "$target_bundle" -C "$temp_dir" .
   else
@@ -1164,10 +1165,17 @@ EOF
   local bundle_dir
   bundle_dir=$(dirname "$target_bundle")
 
+  local sha_calculated=0
   if command -v shasum >/dev/null 2>&1; then
     (cd "$bundle_dir" && shasum -a 256 "$bundle_base" > "$(basename "$sha_file")")
+    sha_calculated=1
   elif command -v sha256sum >/dev/null 2>&1; then
     (cd "$bundle_dir" && sha256sum "$bundle_base" > "$(basename "$sha_file")")
+    sha_calculated=1
+  fi
+  if [ "$sha_calculated" -eq 0 ]; then
+    echo -e "${COLOR_RED}Error: Neither shasum nor sha256sum found on PATH. Checksum generation failed.${COLOR_RESET}" >&2
+    exit 1
   fi
 
   local bundle_size
@@ -1197,13 +1205,14 @@ restore_single_db() {
   # a) Checkpoint destination if present
   if [ -f "$dest" ]; then
     sqlite3 "$dest" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
-    # b) Save rollback copies of main DB, -wal, and -shm
     cp "$dest" "${dest}.bak.${ts}"
-    [ -f "${dest}-wal" ] && cp "${dest}-wal" "${dest}-wal.bak.${ts}"
-    [ -f "${dest}-shm" ] && cp "${dest}-shm" "${dest}-shm.bak.${ts}"
-    # c) Remove existing destination DB, -wal, and -shm to prevent replay of stale WAL
-    rm -f "$dest" "${dest}-wal" "${dest}-shm"
   fi
+  # b) Save rollback copies of any existing sidecars
+  [ -f "${dest}-wal" ] && cp "${dest}-wal" "${dest}-wal.bak.${ts}"
+  [ -f "${dest}-shm" ] && cp "${dest}-shm" "${dest}-shm.bak.${ts}"
+
+  # c) Unconditionally remove existing destination DB, -wal, and -shm to prevent replay of stale WAL
+  rm -f "$dest" "${dest}-wal" "${dest}-shm"
 
   # d) Restore using .restore primitive
   sqlite3 "$dest" ".restore '${src}'"
@@ -1301,18 +1310,26 @@ cmd_restore() {
     exit 1
   fi
 
+  # Pre-screen archive member types for symlinks before extraction
+  if tar -tvf "$bundle" 2>/dev/null | grep -E '^l|[[:space:]]->[[:space:]]'; then
+    echo -e "${COLOR_RED}FAILED${COLOR_RESET}" >&2
+    echo -e "${COLOR_RED}Security Error: Archive contains symbolic links. Restore aborted.${COLOR_RESET}" >&2
+    exit 1
+  fi
+
   while IFS= read -r member; do
     [ -z "$member" ] && continue
+
+    # Reject path traversal markers or absolute paths on raw member name
+    if [[ "$member" =~ ^/ ]] || [[ "$member" =~ \.\. ]]; then
+      echo -e "${COLOR_RED}FAILED${COLOR_RESET}" >&2
+      echo -e "${COLOR_RED}Security Error: Archive member '${member}' contains illegal traversal markers.${COLOR_RESET}" >&2
+      exit 1
+    fi
+
     local clean_member="${member#./}"
     clean_member="${clean_member#/}"
     [ -z "$clean_member" ] && continue
-
-    # Reject path traversal markers
-    if [[ "$clean_member" =~ \.\. ]] || [[ "$clean_member" =~ ^/ ]]; then
-      echo -e "${COLOR_RED}FAILED${COLOR_RESET}" >&2
-      echo -e "${COLOR_RED}Security Error: Archive member '${clean_member}' contains illegal traversal markers.${COLOR_RESET}" >&2
-      exit 1
-    fi
 
     # Enforce strict allowlist
     case "$clean_member" in
@@ -1320,7 +1337,7 @@ cmd_restore() {
         ;;
       *)
         echo -e "${COLOR_RED}FAILED${COLOR_RESET}" >&2
-        echo -e "${COLOR_RED}Security Error: Archive member '${clean_member}' is not in the permitted allowlist.${COLOR_RESET}" >&2
+        echo -e "${COLOR_RED}Security Error: Archive member '${member}' is not in the permitted allowlist.${COLOR_RESET}" >&2
         exit 1
         ;;
     esac

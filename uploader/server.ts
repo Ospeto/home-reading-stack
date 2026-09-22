@@ -75,9 +75,16 @@ export const LIGHTHOUSE_ROOT =
 const SERVER_URL = process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088";
 
 export function getCalibreDbPath(): string {
-  if (process.env.CALIBRE_DB_PATH) return process.env.CALIBRE_DB_PATH;
+  if (process.env.CALIBRE_DB_PATH) {
+    return path.isAbsolute(process.env.CALIBRE_DB_PATH)
+      ? process.env.CALIBRE_DB_PATH
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_DB_PATH);
+  }
   if (process.env.CALIBRE_LIBRARY_DIR) {
-    return path.join(process.env.CALIBRE_LIBRARY_DIR, "metadata.db");
+    const libDir = path.isAbsolute(process.env.CALIBRE_LIBRARY_DIR)
+      ? process.env.CALIBRE_LIBRARY_DIR
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_LIBRARY_DIR);
+    return path.join(libDir, "metadata.db");
   }
   const home = process.env.HOME || os.homedir();
   return path.join(
@@ -89,8 +96,12 @@ export function getCalibreDbPath(): string {
 }
 
 export function getCalibreLibraryDir(): string {
-  if (process.env.CALIBRE_LIBRARY_DIR) return process.env.CALIBRE_LIBRARY_DIR;
-  if (process.env.CALIBRE_DB_PATH) return path.dirname(process.env.CALIBRE_DB_PATH);
+  if (process.env.CALIBRE_LIBRARY_DIR) {
+    return path.isAbsolute(process.env.CALIBRE_LIBRARY_DIR)
+      ? process.env.CALIBRE_LIBRARY_DIR
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_LIBRARY_DIR);
+  }
+  if (process.env.CALIBRE_DB_PATH) return path.dirname(getCalibreDbPath());
   const home = process.env.HOME || os.homedir();
   return path.join(home, "Calibre Libraries", "Agent Library");
 }
@@ -120,7 +131,11 @@ export function getCalibreDbETag(): string {
 }
 
 export function getKosyncDbPath(): string {
-  if (process.env.KOSYNC_DB_PATH) return process.env.KOSYNC_DB_PATH;
+  if (process.env.KOSYNC_DB_PATH) {
+    return path.isAbsolute(process.env.KOSYNC_DB_PATH)
+      ? process.env.KOSYNC_DB_PATH
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.KOSYNC_DB_PATH);
+  }
   const home = process.env.HOME || os.homedir();
   return path.join(home, "kosync-server", "data", "koreader-sync.db");
 }

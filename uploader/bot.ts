@@ -125,7 +125,11 @@ export function getCacheDb(): Database {
   return _cacheDbInstance;
 }
 export function getKosyncDbPath(): string {
-  if (process.env.KOSYNC_DB_PATH) return process.env.KOSYNC_DB_PATH;
+  if (process.env.KOSYNC_DB_PATH) {
+    return path.isAbsolute(process.env.KOSYNC_DB_PATH)
+      ? process.env.KOSYNC_DB_PATH
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.KOSYNC_DB_PATH);
+  }
   const home = process.env.HOME || os.homedir();
   return path.join(home, "kosync-server", "data", "koreader-sync.db");
 }
@@ -153,9 +157,16 @@ export function getCalibredbPath(): string {
 }
 
 export function getCalibreDbPath(): string {
-  if (process.env.CALIBRE_DB_PATH) return process.env.CALIBRE_DB_PATH;
+  if (process.env.CALIBRE_DB_PATH) {
+    return path.isAbsolute(process.env.CALIBRE_DB_PATH)
+      ? process.env.CALIBRE_DB_PATH
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_DB_PATH);
+  }
   if (process.env.CALIBRE_LIBRARY_DIR) {
-    return path.join(process.env.CALIBRE_LIBRARY_DIR, "metadata.db");
+    const libDir = path.isAbsolute(process.env.CALIBRE_LIBRARY_DIR)
+      ? process.env.CALIBRE_LIBRARY_DIR
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_LIBRARY_DIR);
+    return path.join(libDir, "metadata.db");
   }
   const home = process.env.HOME || os.homedir();
   return path.join(
@@ -166,11 +177,20 @@ export function getCalibreDbPath(): string {
   );
 }
 export function getCalibreLibraryDir(): string {
-  return process.env.CALIBRE_LIBRARY_DIR || path.dirname(getCalibreDbPath());
+  if (process.env.CALIBRE_LIBRARY_DIR) {
+    return path.isAbsolute(process.env.CALIBRE_LIBRARY_DIR)
+      ? process.env.CALIBRE_LIBRARY_DIR
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_LIBRARY_DIR);
+  }
+  return path.dirname(getCalibreDbPath());
 }
 
 export function getMangaDbPath(): string {
-  if (process.env.MANGA_DB_PATH) return process.env.MANGA_DB_PATH;
+  if (process.env.MANGA_DB_PATH) {
+    return path.isAbsolute(process.env.MANGA_DB_PATH)
+      ? process.env.MANGA_DB_PATH
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.MANGA_DB_PATH);
+  }
   const home = process.env.HOME || os.homedir();
   return path.join(home, "manga-processor", "manga.db");
 }

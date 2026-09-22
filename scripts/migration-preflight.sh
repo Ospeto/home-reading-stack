@@ -2,8 +2,8 @@
 # ==============================================================================
 # scripts/migration-preflight.sh
 #
-# Preflight analysis and dry-run inventory for migrating EPUBs from Mac Mini
-# (/Volumes/Ospeto_SSD/Calibre Library) into canonical library (/Users/ospeto/Calibre Libraries/Agent Library).
+# Preflight analysis and dry-run inventory for migrating EPUBs from source library
+# ($CALIBRE_SOURCE_LIBRARY_DIR) into canonical library ($CALIBRE_LIBRARY_DIR).
 #
 # CRITICAL SAFETY GUARANTEE:
 # Strictly READ-ONLY. Does not copy, rename, delete, or merge live Calibre folders.

@@ -456,6 +456,32 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(res.stdout + res.stderr).toContain("Security Error: Archive member");
     });
 
+    it("restore rejects archive containing symbolic links", () => {
+      const backupDir = path.join(tempTestDir, "symlink_backups");
+      fs.mkdirSync(backupDir, { recursive: true });
+
+      const fakeBundle = path.join(backupDir, "lighthouse-backup-symlink.tar.gz");
+      const fakeSha = `${fakeBundle}.sha256`;
+
+      const stageDir = path.join(tempTestDir, "symlink_stage");
+      fs.mkdirSync(stageDir, { recursive: true });
+      fs.writeFileSync(path.join(stageDir, "manifest.json"), "{}");
+      fs.symlinkSync("manifest.json", path.join(stageDir, "metadata.db"));
+      spawnSync("tar", ["-czf", fakeBundle, "-C", stageDir, "."], { encoding: "utf8" });
+
+      const shaRes = spawnSync("shasum", ["-a", "256", path.basename(fakeBundle)], {
+        cwd: backupDir,
+        encoding: "utf8",
+      });
+      fs.writeFileSync(fakeSha, shaRes.stdout);
+
+      const res = spawnSync(LIGHTHOUSE_BIN, ["restore", fakeBundle, "--dry-run"], {
+        encoding: "utf8",
+      });
+      expect(res.status).toBe(1);
+      expect(res.stdout + res.stderr).toContain("Security Error: Archive contains symbolic links");
+    });
+
     it("hermetic WAL restore: prevents WAL replay from overwriting restored data", () => {
       const sourceCalibre = path.join(tempTestDir, "src_calibre_wal", "metadata.db");
       const targetCalibre = path.join(tempTestDir, "tgt_calibre_wal", "metadata.db");
@@ -518,11 +544,73 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       );
       expect(rRes.status).toBe(0);
 
-      // 4. Open restored DB and assert that 'Source Book Clean' persists and WAL dirty data is gone
+      // Verify orphan wal and shm files were deleted and not left to corrupt/replay
+      expect(fs.existsSync(targetCalibre)).toBe(true);
       const verifyDb = new Database(targetCalibre, { readonly: true });
       const books = verifyDb.query("SELECT title FROM books;").all() as any[];
       expect(books.length).toBe(1);
       expect(books[0].title).toBe("Source Book Clean");
+      verifyDb.close();
+    }, 30000);
+
+    it("removes orphaned WAL/SHM sidecars even when destination main DB is missing", () => {
+      const sourceCalibre = path.join(tempTestDir, "src_calibre_orphan", "metadata.db");
+      const targetCalibre = path.join(tempTestDir, "tgt_calibre_orphan", "metadata.db");
+      const backupDir = path.join(tempTestDir, "orphan_backups");
+
+      fs.mkdirSync(path.dirname(sourceCalibre), { recursive: true });
+      fs.mkdirSync(path.dirname(targetCalibre), { recursive: true });
+
+      const sDb = new Database(sourceCalibre);
+      sDb.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT);");
+      sDb.run("INSERT INTO books (title) VALUES ('Restored From Backup');");
+      sDb.close();
+
+      const bRes = spawnSync(LIGHTHOUSE_BIN, ["backup", "--output-dir", backupDir], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CALIBRE_DB_PATH: sourceCalibre,
+          KOSYNC_DB_PATH: path.join(tempTestDir, "dummy_ko.db"),
+          CACHE_DB_PATH: path.join(tempTestDir, "dummy_cache.db"),
+        },
+      });
+      expect(bRes.status).toBe(0);
+
+      const files = fs.readdirSync(backupDir);
+      const bundle = files.find((f: string) => f.startsWith("lighthouse-backup-") && !f.endsWith(".sha256"))!;
+      const bundlePath = path.join(backupDir, bundle);
+
+      // Create target directory with NO metadata.db, but orphan -wal and -shm files
+      fs.writeFileSync(`${targetCalibre}-wal`, "orphaned-wal-data");
+      fs.writeFileSync(`${targetCalibre}-shm`, "orphaned-shm-data");
+      expect(fs.existsSync(targetCalibre)).toBe(false);
+      expect(fs.existsSync(`${targetCalibre}-wal`)).toBe(true);
+
+      const rRes = spawnSync(
+        LIGHTHOUSE_BIN,
+        ["restore", bundlePath, "--force", "--target", path.dirname(targetCalibre)],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CALIBRE_DB_PATH: targetCalibre,
+            KOSYNC_DB_PATH: path.join(tempTestDir, "restored_ko.db"),
+            CACHE_DB_PATH: path.join(tempTestDir, "restored_cache.db"),
+          },
+        },
+      );
+      expect(rRes.status).toBe(0);
+
+      // Verify orphan wal and shm files were deleted and not left to corrupt/replay
+      expect(fs.existsSync(targetCalibre)).toBe(true);
+      expect(fs.existsSync(`${targetCalibre}-wal`)).toBe(false);
+      expect(fs.existsSync(`${targetCalibre}-shm`)).toBe(false);
+
+      const verifyDb = new Database(targetCalibre, { readonly: true });
+      const books = verifyDb.query("SELECT title FROM books;").all() as any[];
+      expect(books.length).toBe(1);
+      expect(books[0].title).toBe("Restored From Backup");
       verifyDb.close();
     }, 30000);
 
