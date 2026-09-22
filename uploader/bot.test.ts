@@ -221,6 +221,61 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain("Calibre Synced");
     expect(html).toContain("statusVolumeCount");
   });
+
+  it("index.html applies Apple WWDC fluid interface design principles (materials, typography, tactile active press, fluid motion, accessibility)", () => {
+    const htmlPath = path.join((import.meta as any).dir, "index.html");
+    const html = fs.readFileSync(htmlPath, "utf8");
+
+    // 1. Apple-grade dark translucent materials with depth hierarchy
+    expect(html).toContain("backdrop-filter: blur(20px) saturate(180%)");
+    expect(html).toContain("-webkit-backdrop-filter: blur(20px) saturate(180%)");
+    expect(html).toContain("rgba(18, 20, 24, 0.75)");
+    expect(html).toContain("border-top: 1px solid rgba(255, 255, 255, 0.15)");
+    expect(html).toContain("apple-material-header");
+    expect(html).toContain("apple-material-sidebar");
+    expect(html).toContain("apple-material-modal");
+    expect(html).toContain("apple-material-sheet");
+    expect(html).toContain("apple-material-glass-light");
+
+    // 2. Optical Typography with Size-Dependent Tracking
+    expect(html).toContain(
+      '-apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif',
+    );
+    expect(html).toContain("letter-spacing: -0.02em");
+    expect(html).toContain("letter-spacing: 0.025em");
+    expect(html).toContain(".tracking-optical-display { letter-spacing: -0.02em; }");
+    expect(html).toContain(".tracking-optical-micro { letter-spacing: 0.025em; }");
+    expect(html).toContain("leading-tight");
+
+    // 3. Immediate Tactile Active Press & Zero Tap Delay
+    expect(html).toContain("-webkit-tap-highlight-color: transparent");
+    expect(html).toContain("transform: scale(0.97)");
+    expect(html).toContain("transition: transform 120ms cubic-bezier(0.2, 0, 0, 1)");
+
+    // 4. Critically Damped Motion & Symmetric Spatial Transitions
+    expect(html).toContain("cubic-bezier(0.16, 1, 0.3, 1)");
+    expect(html).toContain("@keyframes slideUp");
+    expect(html).toContain("@keyframes slideDown");
+    expect(html).toContain("@keyframes slideLeft");
+    expect(html).toContain("@keyframes slideRight");
+    expect(html).toContain("@keyframes scaleIn");
+    expect(html).toContain("@keyframes scaleOut");
+    expect(html).toContain("animate-slide-up");
+    expect(html).toContain("animate-slide-down");
+    expect(html).toContain("animate-slide-left");
+    expect(html).toContain("animate-slide-right");
+    expect(html).toContain("openModalAnimated");
+    expect(html).toContain("closeModalAnimated");
+    expect(html).toContain("_animToken");
+
+    // 5. Accessibility & Invariants (reduced-motion & reduced-transparency)
+    expect(html).toContain("@media (prefers-reduced-motion: reduce)");
+    expect(html).toContain("transition: opacity 150ms ease");
+    expect(html).toContain("button:active:not(:disabled)");
+    expect(html).toContain("@media (prefers-reduced-transparency: reduce)");
+    expect(html).toContain("background-color: #121418");
+    expect(html).not.toContain("cdn.tailwindcss.com");
+  });
 });
 
 describe("Reverse SSH Tunnel Auto-Healing Watchdog", () => {
