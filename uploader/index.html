@@ -251,17 +251,19 @@
     @media (min-width: 768px) {
       .desktop-sticky-sidebar {
         position: sticky;
-        top: 4.5rem;
-        height: calc(100vh - 4.5rem);
-        max-height: calc(100vh - 4.5rem);
+        top: var(--header-height, 9.5rem);
+        align-self: flex-start;
+        max-height: calc(100vh - var(--header-height, 9.5rem));
         overflow-y: auto;
       }
     }
 
     /* Missing Utility Classes & Audited Rules */
+    .w-2 { width: 0.5rem; }
     .w-5 { width: 1.25rem; }
     .w-11 { width: 2.75rem; }
     .w-auto { width: auto; }
+    .h-2 { height: 0.5rem; }
     .h-5 { height: 1.25rem; }
     .h-10 { height: 2.5rem; }
     .h-13 { height: 3.25rem; }
@@ -288,6 +290,7 @@
     .mr-2 { margin-right: 0.5rem; }
     .mt-8 { margin-top: 2rem; }
     .pb-0\.5 { padding-bottom: 0.125rem; }
+    .pb-1 { padding-bottom: 0.25rem; }
     .pb-3 { padding-bottom: 0.75rem; }
     .pb-4 { padding-bottom: 1rem; }
     .pb-6 { padding-bottom: 1.5rem; }
@@ -307,7 +310,8 @@
     .flex-row { flex-direction: row; }
     .object-center { object-position: center; }
     .font-normal { font-weight: 400; }
-    .font-sans { font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji"; }
+    .font-sans { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .tracking-wide { letter-spacing: 0.025em; }
     .text-base { font-size: 1rem; line-height: 1.5rem; }
     .text-lg { font-size: 1.125rem; line-height: 1.75rem; }
     .text-\[\#71717a\] { color: #71717a; }
@@ -378,6 +382,7 @@
     @media (min-width: 1024px) {
       .lg\:flex { display: flex; }
       .lg\:hidden { display: none; }
+      .lg\:max-w-3xl { max-width: 48rem; }
       .lg\:grid-cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
       .lg\:grid-cols-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
       .lg\:p-3 { padding: 0.75rem; }
@@ -586,7 +591,7 @@
       </div>
 
       <!-- Second Row (Desktop-Bounded Search Bar) -->
-      <div class="w-full max-w-2xl lg:max-w-3xl">
+      <div class="w-full md:max-w-2xl lg:max-w-3xl">
         <div class="relative flex items-center">
           <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-500">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" x2="16.65" y1="21" y2="16.65"></line></svg>
@@ -3065,7 +3070,19 @@
       }
     }
 
+    function updateHeaderHeight() {
+      const header = document.querySelector('header');
+      if (header) {
+        const h = header.offsetHeight;
+        if (h > 0) {
+          document.documentElement.style.setProperty('--header-height', `${h}px`);
+        }
+      }
+    }
+
     init();
+    updateHeaderHeight();
+    window.addEventListener('resize', updateHeaderHeight);
   
   
   </script>
