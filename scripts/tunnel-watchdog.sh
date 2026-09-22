@@ -3,9 +3,60 @@ set -u
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
-LOG_FILE="${LOG_FILE:-/Users/ospeto/Library/Logs/reading-tunnel-watchdog.log}"
-ENV_FILE="${ENV_FILE:-/Users/ospeto/uploader/.env}"
+# Robust symlink resolution loop
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+LIGHTHOUSE_ROOT="$(cd -P "$DIR/.." && pwd)"
+export LIGHTHOUSE_ROOT
+
+LOG_DIR="${LOG_DIR:-${HOME}/Library/Logs}"
+LOG_FILE="${LOG_FILE:-${LOG_DIR}/reading-tunnel-watchdog.log}"
+ENV_FILE="${ENV_FILE:-${LIGHTHOUSE_ROOT}/.env}"
+if [ ! -f "$ENV_FILE" ] && [ -f "${LIGHTHOUSE_ROOT}/uploader/.env" ]; then
+  ENV_FILE="${LIGHTHOUSE_ROOT}/uploader/.env"
+fi
 UID_NUM=$(id -u)
+CURRENT_USER="$(id -un 2>/dev/null || echo "$USER")"
+DAEMON_PREFIX="${LIGHTHOUSE_DAEMON_PREFIX:-com.${CURRENT_USER}}"
+
+# Load environment configuration if available
+TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+TELEGRAM_BACKUP_CHAT_ID="${TELEGRAM_BACKUP_CHAT_ID:-}"
+
+if [ -f "$ENV_FILE" ]; then
+  while IFS='=' read -r key val || [ -n "$key" ]; do
+    key=$(echo "$key" | tr -d '[:space:]')
+    [[ "$key" =~ ^#.*$ ]] && continue
+    [ -z "$key" ] && continue
+    if [[ "$val" =~ ^\"(.*)\"[[:space:]]*(#.*)?$ ]]; then
+      val="${BASH_REMATCH[1]}"
+    elif [[ "$val" =~ ^\'(.*)\'[[:space:]]*(#.*)?$ ]]; then
+      val="${BASH_REMATCH[1]}"
+    else
+      val="${val%%#*}"
+      val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    fi
+    case "$key" in
+      UPLOADER_PORT) LOCAL_HTTP_PORT="${LOCAL_HTTP_PORT:-$val}" ;;
+      KOSYNC_PORT) LOCAL_KOSYNC_PORT="${LOCAL_KOSYNC_PORT:-$val}" ;;
+      PROXY_URL) PROXY_URL="${PROXY_URL:-$val}" ;;
+      US_REMOTE_HOST) US_REMOTE_HOST="${US_REMOTE_HOST:-$val}" ;;
+      SG_REMOTE_HOST) SG_REMOTE_HOST="${SG_REMOTE_HOST:-$val}" ;;
+      US_WAN_HQ_URL) US_WAN_HQ_URL="${US_WAN_HQ_URL:-$val}" ;;
+      SG_OPDS_80_URL) SG_OPDS_80_URL="${SG_OPDS_80_URL:-$val}" ;;
+      SG_OPDS_8443_URL) SG_OPDS_8443_URL="${SG_OPDS_8443_URL:-$val}" ;;
+      SG_KOSYNC_URL) SG_KOSYNC_URL="${SG_KOSYNC_URL:-$val}" ;;
+      LIGHTHOUSE_DAEMON_PREFIX) DAEMON_PREFIX="$val" ;;
+      TELEGRAM_BOT_TOKEN) [ -z "$TELEGRAM_BOT_TOKEN" ] && TELEGRAM_BOT_TOKEN="$val" ;;
+      TELEGRAM_BACKUP_CHAT_ID) [ -z "$TELEGRAM_BACKUP_CHAT_ID" ] && TELEGRAM_BACKUP_CHAT_ID="$val" ;;
+    esac
+  done < "$ENV_FILE"
+fi
 
 # Local prerequisite services
 PROXY_URL="${PROXY_URL:-http://127.0.0.1:7890}"
@@ -13,7 +64,7 @@ LOCAL_HTTP_PORT="${LOCAL_HTTP_PORT:-8086}"
 LOCAL_KOSYNC_PORT="${LOCAL_KOSYNC_PORT:-7200}"
 
 # --- US VLESS Tunnel Configurations ---
-US_TUNNEL_LABEL="${US_TUNNEL_LABEL:-com.ospeto.reading-vless-tunnel}"
+US_TUNNEL_LABEL="${US_TUNNEL_LABEL:-${DAEMON_PREFIX}.reading-vless-tunnel}"
 US_REMOTE_HOST="${US_REMOTE_HOST:-panel}"
 US_WAN_HQ_URL="${US_WAN_HQ_URL:-https://reading.wavypremium.xyz}"
 US_FAIL_COUNT_FILE="${US_FAIL_COUNT_FILE:-/tmp/reading-tunnel-failures-us}"
@@ -34,17 +85,17 @@ fi
 if [ -n "${WAN_HQ_URL:-}" ]; then
   US_WAN_HQ_URL="$WAN_HQ_URL"
 fi
-US_LOG_FILE="${US_LOG_FILE:-/Users/ospeto/Library/Logs/reading-vless-tunnel.log}"
+US_LOG_FILE="${US_LOG_FILE:-${LOG_DIR}/reading-vless-tunnel.log}"
 
 # --- Singapore Tunnel Configurations ---
-SG_TUNNEL_LABEL="${SG_TUNNEL_LABEL:-com.ospeto.reading-sg-tunnel}"
+SG_TUNNEL_LABEL="${SG_TUNNEL_LABEL:-${DAEMON_PREFIX}.reading-sg-tunnel}"
 SG_REMOTE_HOST="${SG_REMOTE_HOST:-sg-vps}"
 SG_OPDS_80_URL="${SG_OPDS_80_URL:-http://opds.wavypremium.xyz/opds}"
 SG_OPDS_8443_URL="${SG_OPDS_8443_URL:-https://opds.wavypremium.xyz:8443/opds}"
 SG_KOSYNC_URL="${SG_KOSYNC_URL:-http://kosync-sg.wavypremium.xyz/health}"
 SG_FAIL_COUNT_FILE="${SG_FAIL_COUNT_FILE:-/tmp/reading-tunnel-failures-sg}"
 SG_ALERT_TRACK_FILE="${SG_ALERT_TRACK_FILE:-/tmp/reading-tunnel-alerted-sg}"
-SG_LOG_FILE="${SG_LOG_FILE:-/Users/ospeto/Library/Logs/reading-sg-tunnel.log}"
+SG_LOG_FILE="${SG_LOG_FILE:-${LOG_DIR}/reading-sg-tunnel.log}"
 
 log() {
   local NOW
@@ -60,7 +111,7 @@ case "$LOCAL_KOSYNC_PORT" in ''|*[!0-9]*) log "ERROR: Invalid LOCAL_KOSYNC_PORT"
 
 restart_launchagent() {
   local LABEL="$1"
-  local PLIST="/Users/ospeto/Library/LaunchAgents/${LABEL}.plist"
+  local PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
   log "Restarting LaunchAgent ${LABEL}..."
   if launchctl print "gui/${UID_NUM}/${LABEL}" >/dev/null 2>&1; then
     launchctl kickstart -k "gui/${UID_NUM}/${LABEL}" 2>/dev/null || true
@@ -126,7 +177,14 @@ if [ -f "$ENV_FILE" ]; then
     key=$(echo "$key" | tr -d '[:space:]')
     [[ "$key" =~ ^#.*$ ]] && continue
     [ -z "$key" ] && continue
-    val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")
+    if [[ "$val" =~ ^\"(.*)\"[[:space:]]*(#.*)?$ ]]; then
+      val="${BASH_REMATCH[1]}"
+    elif [[ "$val" =~ ^\'(.*)\'[[:space:]]*(#.*)?$ ]]; then
+      val="${BASH_REMATCH[1]}"
+    else
+      val="${val%%#*}"
+      val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    fi
     if [ "$key" = "TELEGRAM_BOT_TOKEN" ] && [ -z "$TELEGRAM_BOT_TOKEN" ]; then
       TELEGRAM_BOT_TOKEN="$val"
     fi
@@ -146,7 +204,7 @@ LOCAL_FAILURE=0
 # A. Local Sing-box proxy (:7890)
 if ! nc -z 127.0.0.1 7890 2>/dev/null; then
   log "WARNING: Sing-box proxy gateway (127.0.0.1:7890) is not listening. Kickstarting..."
-  restart_launchagent "com.ospeto.singbox-proxy"
+  restart_launchagent "${DAEMON_PREFIX}.singbox-proxy"
   LOCAL_FAILURE=1
 fi
 
@@ -154,7 +212,7 @@ fi
 LOCAL_8086_CODE=$(probe_http_status "http://127.0.0.1:${LOCAL_HTTP_PORT}/api/books" "" 0 3)
 if [ "$LOCAL_8086_CODE" != "200" ]; then
   log "WARNING: Local Reading HQ (:8086) returned HTTP ${LOCAL_8086_CODE}. Kickstarting uploader..."
-  restart_launchagent "com.ospeto.book-uploader"
+  restart_launchagent "${DAEMON_PREFIX}.book-uploader"
   LOCAL_FAILURE=1
 fi
 
@@ -162,7 +220,7 @@ fi
 LOCAL_7200_CODE=$(probe_http_status "http://127.0.0.1:${LOCAL_KOSYNC_PORT}/" "" 0 3)
 if [ "$LOCAL_7200_CODE" != "200" ]; then
   log "WARNING: Local KOSync server (:7200) returned HTTP ${LOCAL_7200_CODE}. Kickstarting kosync..."
-  restart_launchagent "com.ospeto.kosync"
+  restart_launchagent "${DAEMON_PREFIX}.kosync"
   LOCAL_FAILURE=1
 fi
 

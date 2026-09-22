@@ -3,8 +3,8 @@
  * scripts/migration-preflight.ts
  *
  * Safe, read-only preflight analysis and inventory tool for migrating EPUBs
- * from the Mac Mini library (/Volumes/Ospeto_SSD/Calibre Library) into the
- * canonical Calibre library (/Users/ospeto/Calibre Libraries/Agent Library).
+ * from the source library ($CALIBRE_SOURCE_LIBRARY_DIR) into the
+ * canonical Calibre library ($CALIBRE_LIBRARY_DIR).
  *
  * CRITICAL SAFETY INVARIANT:
  * This script is strictly READ-ONLY. It will NEVER copy, rename, delete,
@@ -99,7 +99,7 @@ export function runMigrationPreflight(
   const home = process.env.HOME || os.homedir();
   const defaultSource =
     process.env.CALIBRE_SOURCE_LIBRARY_DIR ||
-    "/Volumes/Ospeto_SSD/Calibre Library";
+    path.join(home, "Calibre Source Library");
   const defaultTarget =
     process.env.CALIBRE_LIBRARY_DIR ||
     path.join(home, "Calibre Libraries", "Agent Library");

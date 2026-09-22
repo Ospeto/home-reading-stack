@@ -53,7 +53,7 @@ export function getDropDir(): string {
 export function getCoverCacheDir(): string {
   const defaultDir =
     process.env.COVER_CACHE_DIR ||
-    path.resolve((import.meta as any).dir || process.cwd(), "cache", "covers");
+    path.resolve((import.meta as { dir?: string }).dir || process.cwd(), "cache", "covers");
   try {
     if (!fs.existsSync(defaultDir)) {
       fs.mkdirSync(defaultDir, { recursive: true });
@@ -68,12 +68,23 @@ export function getCoverCacheDir(): string {
   }
 }
 
+export const LIGHTHOUSE_ROOT =
+  process.env.LIGHTHOUSE_ROOT ||
+  path.resolve((import.meta as { dir?: string }).dir || process.cwd(), "..");
+
 const SERVER_URL = process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088";
 
 export function getCalibreDbPath(): string {
-  if (process.env.CALIBRE_DB_PATH) return process.env.CALIBRE_DB_PATH;
+  if (process.env.CALIBRE_DB_PATH) {
+    return path.isAbsolute(process.env.CALIBRE_DB_PATH)
+      ? process.env.CALIBRE_DB_PATH
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_DB_PATH);
+  }
   if (process.env.CALIBRE_LIBRARY_DIR) {
-    return path.join(process.env.CALIBRE_LIBRARY_DIR, "metadata.db");
+    const libDir = path.isAbsolute(process.env.CALIBRE_LIBRARY_DIR)
+      ? process.env.CALIBRE_LIBRARY_DIR
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_LIBRARY_DIR);
+    return path.join(libDir, "metadata.db");
   }
   const home = process.env.HOME || os.homedir();
   return path.join(
@@ -85,8 +96,12 @@ export function getCalibreDbPath(): string {
 }
 
 export function getCalibreLibraryDir(): string {
-  if (process.env.CALIBRE_LIBRARY_DIR) return process.env.CALIBRE_LIBRARY_DIR;
-  if (process.env.CALIBRE_DB_PATH) return path.dirname(process.env.CALIBRE_DB_PATH);
+  if (process.env.CALIBRE_LIBRARY_DIR) {
+    return path.isAbsolute(process.env.CALIBRE_LIBRARY_DIR)
+      ? process.env.CALIBRE_LIBRARY_DIR
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_LIBRARY_DIR);
+  }
+  if (process.env.CALIBRE_DB_PATH) return path.dirname(getCalibreDbPath());
   const home = process.env.HOME || os.homedir();
   return path.join(home, "Calibre Libraries", "Agent Library");
 }
@@ -116,7 +131,11 @@ export function getCalibreDbETag(): string {
 }
 
 export function getKosyncDbPath(): string {
-  if (process.env.KOSYNC_DB_PATH) return process.env.KOSYNC_DB_PATH;
+  if (process.env.KOSYNC_DB_PATH) {
+    return path.isAbsolute(process.env.KOSYNC_DB_PATH)
+      ? process.env.KOSYNC_DB_PATH
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.KOSYNC_DB_PATH);
+  }
   const home = process.env.HOME || os.homedir();
   return path.join(home, "kosync-server", "data", "koreader-sync.db");
 }
@@ -199,10 +218,12 @@ const HTML_PATH = resolveHtmlPath();
 
 export function getCacheDbPath(): string {
   if (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH) {
-    return (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH)!;
+    const raw = (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH)!;
+    return path.isAbsolute(raw) ? raw : path.resolve(LIGHTHOUSE_ROOT, raw);
   }
   const defaultPath = path.resolve(
-    (import.meta as any).dir || process.cwd(),
+    LIGHTHOUSE_ROOT,
+    "uploader",
     "cache.db",
   );
   const p = defaultPath;
@@ -3014,15 +3035,19 @@ export async function handleRequest(
 
 // Start Server & Background Job Queue Worker when run directly
 if ((import.meta as any).main) {
+  const listenPort = parseInt(
+    process.env.UPLOADER_PORT || process.env.PORT || "8086",
+    10,
+  );
   jobQueue.startWorker(1000);
   (globalThis as any).Bun.serve({
-    port: 8086,
+    port: listenPort,
     hostname: "0.0.0.0",
     fetch(req: any, server: any) {
       return handleRequest(req, server);
     },
   });
   console.log(
-    "[Server] Reading HQ Web Uploader listening on http://0.0.0.0:8086",
+    `[Server] Reading HQ Web Uploader listening on http://0.0.0.0:${listenPort}`,
   );
 }

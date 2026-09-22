@@ -2,8 +2,8 @@
 # ==============================================================================
 # scripts/migration-preflight.sh
 #
-# Preflight analysis and dry-run inventory for migrating EPUBs from Mac Mini
-# (/Volumes/Ospeto_SSD/Calibre Library) into canonical library (/Users/ospeto/Calibre Libraries/Agent Library).
+# Preflight analysis and dry-run inventory for migrating EPUBs from source library
+# ($CALIBRE_SOURCE_LIBRARY_DIR) into canonical library ($CALIBRE_LIBRARY_DIR).
 #
 # CRITICAL SAFETY GUARANTEE:
 # Strictly READ-ONLY. Does not copy, rename, delete, or merge live Calibre folders.
@@ -11,7 +11,15 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+LIGHTHOUSE_ROOT="$(cd -P "$SCRIPT_DIR/.." && pwd)"
+export LIGHTHOUSE_ROOT
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 

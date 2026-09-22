@@ -1,9 +1,13 @@
-# Home Reading Stack — Standby Docker Compose Architecture
-# Designed for portable hardware migration, disaster recovery, or containerized execution.
+# ==============================================================================
+# LightHouse Reading Stack — Standby Containerized Compose
+# ==============================================================================
+# Designed for portable multi-host migration, containerized deployment,
+# and disaster recovery. Synchronized with native macOS LaunchAgent architecture.
 #
 # Usage:
 #   cp .env.example .env
 #   docker compose up -d
+# ==============================================================================
 
 services:
   # 1. KOSync Server — Real-time KOReader Progress Synchronization
@@ -28,7 +32,7 @@ services:
       timeout: 5s
       retries: 3
 
-  # 2. Calibre Server & OPDS Feed — Book Catalog for Kindle OTA Downloads
+  # 2. Calibre Server & OPDS Feed — Book Catalog & Kindle OTA Downloads
   calibre-web:
     image: lscr.io/linuxserver/calibre-web:latest
     container_name: reading-calibre-web
@@ -48,7 +52,7 @@ services:
     depends_on:
       - kosync
 
-  # 3. Reading HQ Dashboard & Telegram Bot — Ingestion, Metadata Scraper, & Manga Pipe
+  # 3. Reading HQ Dashboard & Ingestion Server
   reading-hq:
     image: oven/bun:1-alpine
     container_name: reading-hq
@@ -59,20 +63,59 @@ services:
       - "${UPLOADER_PORT:-8086}:8086"
     environment:
       - PORT=8086
-      - SERVER_URL=http://calibre-web:8083
+      - CALIBRE_SERVER_URL=http://calibre-web:8083
+      - CALIBRE_LIBRARY_DIR=/books
+      - CALIBRE_DB_PATH=/books/metadata.db
+      - KOSYNC_DB_PATH=/data/kosync/koreader-sync.db
+      - JOBS_DB_PATH=/app/data/cache.db
+      - COVER_CACHE_DIR=/app/data/covers
+      - BOOKS_DROP_DIR=/import
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - HTTP_PROXY=${HTTP_PROXY:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - READING_API_KEY=${READING_API_KEY:-}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
+      - JINA_API_KEY=${JINA_API_KEY:-}
+      - JEV_API_KEY=${JEV_API_KEY:-}
+      - READING_WEBAPP_URL=${READING_WEBAPP_URL:-https://reading.wavypremium.xyz}
+      - KOSYNC_WAN_URL=${KOSYNC_WAN_URL:-http://kosync-sg.wavypremium.xyz}
       - NODE_ENV=production
     volumes:
-      - ${UPLOADER_DIR:-./src/uploader}:/app
+      - ${UPLOADER_DIR:-./uploader}:/app
       - ./data/uploader:/app/data
       - ${CALIBRE_LIBRARY_DIR:-./data/calibre-library}:/books
+      - ${BOOKS_DROP_DIR:-./data/books-drop}:/import
+      - ./data/kosync:/data/kosync:ro
       - ${MANGA_DIR:-./data/manga}:/manga
     depends_on:
       - calibre-web
       - kosync
 
-volumes:
-  kosync_data:
-  calibre_config:
+  # 4. Telegram Ingestion Bot (Optional standby worker for containerized setups)
+  reading-bot:
+    image: oven/bun:1-alpine
+    container_name: reading-bot
+    restart: unless-stopped
+    profiles: ["bot"]
+    working_dir: /app
+    command: ["bun", "run", "bot.ts"]
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - CALIBRE_SERVER_URL=http://calibre-web:8083
+      - CALIBRE_LIBRARY_DIR=/books
+      - CALIBRE_DB_PATH=/books/metadata.db
+      - KOSYNC_DB_PATH=/data/kosync/koreader-sync.db
+      - JOBS_DB_PATH=/app/data/cache.db
+      - COVER_CACHE_DIR=/app/data/covers
+      - BOOKS_DROP_DIR=/import
+      - NODE_ENV=production
+    volumes:
+      - ${UPLOADER_DIR:-./uploader}:/app
+      - ./data/uploader:/app/data
+      - ${CALIBRE_LIBRARY_DIR:-./data/calibre-library}:/books
+      - ${BOOKS_DROP_DIR:-./data/books-drop}:/import
+      - ./data/kosync:/data/kosync:ro
+    depends_on:
+      - reading-hq

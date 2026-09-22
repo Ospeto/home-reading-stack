@@ -4,7 +4,7 @@
  *
  * Synchronizes series and volume metadata across the Calibre library:
  *   - Part A: Maps explicit series links and volume indices from the source Calibre
- *             library (/Volumes/Ospeto_SSD/Calibre Library) by matching file size
+ *             library ($CALIBRE_SOURCE_LIBRARY_DIR) by matching file size
  *             and relative path.
  *   - Part B: Extracts series names and volume numbers from book titles for remaining
  *             books using heuristic regex patterns (<Series> Vol(ume) <N>, <Series> #<N>,
@@ -313,10 +313,15 @@ export function setCalibreMetadataAsync(
  * Flushes Reading HQ cache.db and kickstarts book-uploader if active.
  */
 export function flushReadingCache(cacheDbPath?: string): void {
+  const lighthouseRoot =
+    process.env.LIGHTHOUSE_ROOT ||
+    path.resolve(import.meta.dir, "..");
   const candidates = [
     cacheDbPath,
     process.env.CACHE_DB_PATH,
-    "/Users/ospeto/uploader/cache.db",
+    process.env.JOBS_DB_PATH,
+    path.join(lighthouseRoot, "uploader", "cache.db"),
+    path.join(lighthouseRoot, "cache.db"),
     path.join(process.cwd(), "uploader", "cache.db"),
     path.join(process.cwd(), "cache.db"),
   ].filter(Boolean) as string[];
@@ -344,12 +349,15 @@ export function flushReadingCache(cacheDbPath?: string): void {
   // Kickstart LaunchAgent if on macOS
   try {
     const uid = process.getuid ? process.getuid() : 501;
+    const prefix =
+      process.env.LIGHTHOUSE_DAEMON_PREFIX ||
+      `com.${process.env.USER || "ospeto"}`;
     spawnSync("launchctl", [
       "kickstart",
       "-k",
-      `gui/${uid}/com.ospeto.book-uploader`,
+      `gui/${uid}/${prefix}.book-uploader`,
     ]);
-  } catch (_e) {
+  } catch {
     // Non-fatal if launchd service not found or running in test container
   }
 }
@@ -363,7 +371,7 @@ export async function syncSeriesMetadata(
   const home = process.env.HOME || os.homedir();
   const defaultSource =
     process.env.CALIBRE_SOURCE_LIBRARY_DIR ||
-    "/Volumes/Ospeto_SSD/Calibre Library";
+    path.join(home, "Calibre Source Library");
   const defaultTarget =
     process.env.CALIBRE_LIBRARY_DIR ||
     path.join(home, "Calibre Libraries", "Agent Library");
@@ -660,8 +668,8 @@ if ((import.meta as any).main) {
 Usage: bun run scripts/sync-series-metadata.ts [options]
 
 Options:
-  --source <path>        Source Calibre library directory (default: /Volumes/Ospeto_SSD/Calibre Library)
-  --target <path>        Target Calibre library directory (default: /Users/ospeto/Calibre Libraries/Agent Library)
+  --source <path>        Source Calibre library directory (default: $CALIBRE_SOURCE_LIBRARY_DIR or ~/Calibre Source Library)
+  --target <path>        Target Calibre library directory (default: $CALIBRE_LIBRARY_DIR or ~/Calibre Libraries/Agent Library)
   --server-url <url>     Calibre Content Server URL (default: http://127.0.0.1:8088)
   --cache-db <path>      Path to cache.db
   --concurrency <N>      Worker concurrency for calibredb commands (default: 4)

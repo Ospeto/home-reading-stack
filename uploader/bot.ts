@@ -56,10 +56,16 @@ export function getDropDir(): string {
   }
 }
 
-const SERVER_URL = "http://127.0.0.1:8088";
+export const LIGHTHOUSE_ROOT =
+  process.env.LIGHTHOUSE_ROOT ||
+  path.resolve((import.meta as { dir?: string }).dir || process.cwd(), "..");
+
+const SERVER_URL = process.env.CALIBRE_SERVER_URL || "http://127.0.0.1:8088";
 const ENV_PATH =
   process.env.ENV_PATH ||
-  path.resolve((import.meta as any).dir || process.cwd(), ".env");
+  (fs.existsSync(path.resolve((import.meta as { dir?: string }).dir || process.cwd(), ".env"))
+    ? path.resolve((import.meta as { dir?: string }).dir || process.cwd(), ".env")
+    : path.resolve(LIGHTHOUSE_ROOT, ".env"));
 
 export function getCoverCacheDir(): string {
   if (process.env.COVER_CACHE_DIR) return process.env.COVER_CACHE_DIR;
@@ -72,10 +78,12 @@ export function getCoverCacheDir(): string {
 
 export function getCacheDbPath(): string {
   if (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH) {
-    return (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH)!;
+    const raw = (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH)!;
+    return path.isAbsolute(raw) ? raw : path.resolve(LIGHTHOUSE_ROOT, raw);
   }
   const defaultPath = path.resolve(
-    (import.meta as any).dir || process.cwd(),
+    LIGHTHOUSE_ROOT,
+    "uploader",
     "cache.db",
   );
   try {
@@ -117,7 +125,11 @@ export function getCacheDb(): Database {
   return _cacheDbInstance;
 }
 export function getKosyncDbPath(): string {
-  if (process.env.KOSYNC_DB_PATH) return process.env.KOSYNC_DB_PATH;
+  if (process.env.KOSYNC_DB_PATH) {
+    return path.isAbsolute(process.env.KOSYNC_DB_PATH)
+      ? process.env.KOSYNC_DB_PATH
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.KOSYNC_DB_PATH);
+  }
   const home = process.env.HOME || os.homedir();
   return path.join(home, "kosync-server", "data", "koreader-sync.db");
 }
@@ -145,9 +157,16 @@ export function getCalibredbPath(): string {
 }
 
 export function getCalibreDbPath(): string {
-  if (process.env.CALIBRE_DB_PATH) return process.env.CALIBRE_DB_PATH;
+  if (process.env.CALIBRE_DB_PATH) {
+    return path.isAbsolute(process.env.CALIBRE_DB_PATH)
+      ? process.env.CALIBRE_DB_PATH
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_DB_PATH);
+  }
   if (process.env.CALIBRE_LIBRARY_DIR) {
-    return path.join(process.env.CALIBRE_LIBRARY_DIR, "metadata.db");
+    const libDir = path.isAbsolute(process.env.CALIBRE_LIBRARY_DIR)
+      ? process.env.CALIBRE_LIBRARY_DIR
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_LIBRARY_DIR);
+    return path.join(libDir, "metadata.db");
   }
   const home = process.env.HOME || os.homedir();
   return path.join(
@@ -158,11 +177,20 @@ export function getCalibreDbPath(): string {
   );
 }
 export function getCalibreLibraryDir(): string {
-  return process.env.CALIBRE_LIBRARY_DIR || path.dirname(getCalibreDbPath());
+  if (process.env.CALIBRE_LIBRARY_DIR) {
+    return path.isAbsolute(process.env.CALIBRE_LIBRARY_DIR)
+      ? process.env.CALIBRE_LIBRARY_DIR
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_LIBRARY_DIR);
+  }
+  return path.dirname(getCalibreDbPath());
 }
 
 export function getMangaDbPath(): string {
-  if (process.env.MANGA_DB_PATH) return process.env.MANGA_DB_PATH;
+  if (process.env.MANGA_DB_PATH) {
+    return path.isAbsolute(process.env.MANGA_DB_PATH)
+      ? process.env.MANGA_DB_PATH
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.MANGA_DB_PATH);
+  }
   const home = process.env.HOME || os.homedir();
   return path.join(home, "manga-processor", "manga.db");
 }
@@ -1639,9 +1667,7 @@ export async function getStatusDashboard(): Promise<string> {
     void _e;
   }
 
-  const ssdMount =
-    process.env.STORAGE_MOUNT ||
-    (fs.existsSync("/Volumes/Ospeto_SSD") ? "/Volumes/Ospeto_SSD" : null);
+  const ssdMount = process.env.STORAGE_MOUNT || null;
   let ssdDiskStr = "";
   if (ssdMount && fs.existsSync(ssdMount)) {
     try {
