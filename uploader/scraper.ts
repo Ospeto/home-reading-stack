@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { safeFetchWithSsrf, isPrivateOrInternalIp, cleanString } from "./security";
+import { safeFetchWithSsrf, isPrivateOrInternalIp } from "./security";
 import { isJunkAuthorExtended } from "./jev-shelf";
 
 export function getCalibredbPath(): string {

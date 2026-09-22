@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { searchUniversalMetadata, applyMetadataToCalibre } from "./scraper";
+import { searchUniversalMetadata, applyMetadataToCalibre, extractSeries as scraperExtractSeries } from "./scraper";
 import {
   isArchiveFile,
   unpackArchive,
@@ -555,33 +555,7 @@ function extractSeries(
   title: string,
   filename?: string,
 ): { series: string; volume: number } | null {
-  const candidates = [
-    title,
-    filename ? path.basename(filename, path.extname(filename)) : "",
-  ].filter(Boolean);
-
-  const patterns = [
-    /^(.*?)[,_\s-]+(?:vol(?:ume)?|v)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
-    /^(.*?)[,_\s-]+(?:book|bk)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
-    /^(.*?)[,_\s-]+#\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
-    /^(.*?)[,_\s-]+(?:part|pt)\.?\s*(\d+(?:\.\d+)?)(?:[\s-–—:].*)?$/i,
-  ];
-
-  for (const str of candidates) {
-    for (const p of patterns) {
-      const m = str.match(p);
-      if (m) {
-        const series = cleanString(m[1])
-          .replace(/[,_–—:-]+$/, "")
-          .trim();
-        const vol = parseFloat(m[2]);
-        if (series.length >= 2 && !isNaN(vol)) {
-          return { series, volume: vol };
-        }
-      }
-    }
-  }
-  return null;
+  return scraperExtractSeries(title, filename || "");
 }
 
 function sanitizeMetadata(
@@ -1187,7 +1161,7 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
         ];
         if (clean.title && clean.title !== newBook.title)
           setArgs.push("--field", `title:${clean.title}`);
-        if (finalAuthor && finalAuthor !== newBook.authors && finalAuthor !== "Unknown")
+        if (finalAuthor && finalAuthor !== newBook.authors)
           setArgs.push("--field", `authors:${finalAuthor}`);
         if (clean.tags) setArgs.push("--field", `tags:${clean.tags.join(",")}`);
         if (lang) {
@@ -2752,10 +2726,36 @@ export async function handleRequest(
         );
       }
 
+      const arrayBuffer = await file.arrayBuffer();
+
+      // Check Junk Ingest Gate on single file uploads before writing into Books_Drop
+      if (!isArchive) {
+        const preliminaryCheck = sanitizeMetadata("", "", [], fileName);
+        const preJunk = await evaluateJunkGate(
+          preliminaryCheck.title,
+          fileName,
+          preliminaryCheck.author,
+        );
+        if (preJunk.quarantined) {
+          const tempPreFile = path.join(os.tmpdir(), `pre_q_upload_${Date.now()}_${path.basename(fileName)}`);
+          fs.writeFileSync(tempPreFile, Buffer.from(arrayBuffer));
+          moveToQuarantine(tempPreFile, path.basename(fileName));
+          return jsonResponse(
+            {
+              success: false,
+              rejected: true,
+              format: ext.replace(/^\./, "").toUpperCase() || "UNKNOWN",
+              error: `Quarantined by junk ingest gate: ${preJunk.reason || "Invalid artifact"}`,
+            },
+            400,
+            corsOrigin,
+          );
+        }
+      }
+
       const safeBase = path.basename(fileName, ext);
       const tempName = `${safeBase}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}${ext}`;
       const destPath = path.join(getDropDir(), tempName);
-      const arrayBuffer = await file.arrayBuffer();
       fs.writeFileSync(destPath, Buffer.from(arrayBuffer));
 
       if (isArchive) {

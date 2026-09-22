@@ -92,7 +92,7 @@ export async function callJevSystemOneChoice(
     if (ans && ans.choice) {
       return {
         choice: ans.choice,
-        confidence: typeof ans.confidence === "number" ? ans.confidence : 0.85,
+        confidence: typeof ans.confidence === "number" && !Number.isNaN(ans.confidence) ? ans.confidence : 0,
       };
     }
   } catch {
@@ -735,14 +735,14 @@ Task: Classify whether the content is primarily Burmese ('my'), English ('en'), 
 /**
  * High-level language resolver:
  * 1. Deterministic first: Myanmar Unicode -> 'my'; Latin without Myanmar -> 'en'.
- * 2. Jev triage for mixed or ambiguous text.
- * 3. Fallback to 'en' or 'other' if Jev fails.
+ * 2. Jev triage for mixed or ambiguous text ('my', 'en', 'other') only if confidence >= 0.7.
+ * 3. Fail open: returns null if Jev fails or confidence < 0.7 (do not store unconfident language).
  */
 export async function detectBookLanguage(
   title: string,
   filename: string = "",
   options: JevClientOptions = {},
-): Promise<LanguageTriageVerdict> {
+): Promise<LanguageTriageVerdict | null> {
   const det = detectLanguageDeterministic(title, filename);
   if (det) {
     return det;
@@ -753,9 +753,6 @@ export async function detectBookLanguage(
     return jevRes.language;
   }
 
-  // Deterministic fallback if Jev failed or was low confidence
-  const combined = `${title} ${filename}`.trim();
-  if (MYANMAR_UNICODE_REGEX.test(combined)) return "my";
-  if (LATIN_LETTER_REGEX.test(combined)) return "en";
-  return "other";
+  // Fail open: leave language unset rather than guessing
+  return null;
 }

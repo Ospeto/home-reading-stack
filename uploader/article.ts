@@ -1152,11 +1152,7 @@ export async function extractArticleViaJina(
     Accept: "text/markdown, text/plain, */*",
   };
 
-  const apiKey = (
-    process.env.JINA_API_KEY ||
-    process.env.JEV_API_KEY ||
-    ""
-  ).trim();
+  const apiKey = (process.env.JINA_API_KEY || "").trim();
   if (apiKey) {
     headers["x-api-key"] = apiKey;
     headers["Authorization"] = `Bearer ${apiKey}`;
@@ -1915,14 +1911,14 @@ export async function ingestArticleFromUrl(
       article.coverImagePath,
     );
 
-    // Gate: Check Junk Ingest Gate before writing into Books_Drop or adding to Calibre
+    // Gate: Check Junk Ingest Gate on article title and author before writing into Books_Drop or adding to Calibre
     const junkCheck = await evaluateJunkGate(
       article.title,
-      dropFileName,
+      "",
       article.author,
     );
     if (junkCheck.quarantined) {
-      moveToQuarantine(tempEpub, dropFileName);
+      moveToQuarantine(tempEpub, `${article.title || "quarantined_article"}.epub`);
       return {
         success: false,
         title: article.title,
@@ -1953,7 +1949,7 @@ export async function ingestArticleFromUrl(
     }
 
     // 4. Ingest into Calibre via calibredb
-    const lang = await detectBookLanguage(article.title, dropFileName);
+    const lang = await detectBookLanguage(article.title, "");
     const tagsStr = ["Web Article", "Read Later", article.siteName]
       .filter(Boolean)
       .join(",");
@@ -1968,11 +1964,12 @@ export async function ingestArticleFromUrl(
       article.author,
       "--tags",
       tagsStr,
-      "--languages",
-      lang,
       "--automerge",
       "ignore",
     ];
+    if (lang) {
+      addArgs.push("--languages", lang);
+    }
     if (article.coverImagePath && fs.existsSync(article.coverImagePath)) {
       addArgs.push("--cover", article.coverImagePath);
     }

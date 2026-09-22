@@ -473,7 +473,7 @@ describe("Jev System-1 Four Use Cases & Shelf Integration", () => {
       expect(lang).toBe("other");
     });
 
-    it("falls open deterministically if Jev fails", async () => {
+    it("fails open (returns null) on mixed text if Jev fails or confidence < 0.7", async () => {
       globalThis.fetch = async () => {
         throw new Error("Network offline");
       };
@@ -481,8 +481,8 @@ describe("Jev System-1 Four Use Cases & Shelf Integration", () => {
       const lang = await detectBookLanguage("Mystery Novel မြန်မာ", "novel.epub", {
         apiKey: "test-key",
       });
-      // Fallback sees Myanmar characters, resolves to 'my'
-      expect(lang).toBe("my");
+      // Mixed text fails open when Jev fails
+      expect(lang).toBeNull();
     });
   });
 

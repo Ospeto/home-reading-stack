@@ -15,6 +15,7 @@ import {
   generateTypographicCover,
   parseJinaMarkdown,
   convertHtmlToEpub,
+  ingestArticleFromUrl,
 } from "./article";
 
 const originalFetch = globalThis.fetch;
@@ -479,7 +480,7 @@ describe("Jina Reader API Key Authentication (JINA_API_KEY & JEV_API_KEY)", () =
     );
   });
 
-  test("attaches x-api-key and Authorization Bearer headers when JEV_API_KEY is configured as fallback", async () => {
+  test("does not reuse Jev key as Jina article key", async () => {
     delete process.env.JINA_API_KEY;
     process.env.JEV_API_KEY = "jev_test_secret_456";
 
@@ -488,15 +489,12 @@ describe("Jina Reader API Key Authentication (JINA_API_KEY & JEV_API_KEY)", () =
     );
     expect(article.title).toBe("Authenticated Article Title");
     expect(lastJinaRequest).not.toBeNull();
-    expect(getHeaderValue(lastJinaRequest?.headers, "x-api-key")).toBe(
-      "jev_test_secret_456",
-    );
-    expect(getHeaderValue(lastJinaRequest?.headers, "authorization")).toBe(
-      "Bearer jev_test_secret_456",
-    );
+    // JEV key should NOT be attached to Jina request
+    expect(getHeaderValue(lastJinaRequest?.headers, "x-api-key")).toBeNull();
+    expect(getHeaderValue(lastJinaRequest?.headers, "authorization")).toBeNull();
   });
 
-  test("prioritizes JINA_API_KEY over JEV_API_KEY when both are set", async () => {
+  test("prioritizes JINA_API_KEY and ignores JEV_API_KEY", async () => {
     process.env.JINA_API_KEY = "primary_jina_key";
     process.env.JEV_API_KEY = "secondary_jev_key";
 
@@ -540,6 +538,22 @@ describe("Jina Reader API Key Authentication (JINA_API_KEY & JEV_API_KEY)", () =
     expect(getHeaderValue(lastJinaRequest?.headers, "authorization")).toBe(
       "Bearer trimmed_key_789",
     );
+  });
+
+  test("ingestArticleFromUrl executes end-to-end and respects junk gate quarantine", async () => {
+    // Generate >150 words of real prose content
+    const prose = "Cloud computing and distributed architectures require resilient service design. ".repeat(25);
+    globalThis.fetch = async () => {
+      return new Response(
+        `<html><head><title>truncated_12345678_abcd</title></head><body><article><p>${prose}</p></article></body></html>`,
+        { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } },
+      );
+    };
+
+    const junkUrl = "https://example.com/truncated_12345678_abcd";
+    const res = await ingestArticleFromUrl(junkUrl);
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("Quarantined by junk ingest gate");
   });
 });
 

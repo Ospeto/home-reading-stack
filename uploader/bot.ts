@@ -35,7 +35,6 @@ import {
 import {
   evaluateJunkGate,
   moveToQuarantine,
-  getQuarantineDir,
   extractSeriesWithJev,
   cleanAuthorWithJev,
   detectBookLanguage,
@@ -3010,8 +3009,7 @@ export async function ingestBookFile(
           setArgs.push("--field", `title:${clean.title}`);
         if (
           finalAuthor &&
-          finalAuthor !== rawAuthors &&
-          finalAuthor !== "Unknown"
+          finalAuthor !== rawAuthors
         )
           setArgs.push("--field", `authors:${finalAuthor}`);
         if (clean.tags && clean.tags.length)
@@ -3279,8 +3277,10 @@ async function processBatch(chatId: number, items: QueuedDoc[]) {
       );
       if (preJunk.quarantined) {
         log(`[TelegramBot] Quarantined download "${fileName}": ${preJunk.reason}`);
-        const qPath = path.join(getQuarantineDir(), fileName);
-        fs.writeFileSync(qPath, new Uint8Array(arrayBuf));
+        const safeBaseName = path.basename(fileName);
+        const tempPreFile = path.join(os.tmpdir(), `pre_q_${Date.now()}_${safeBaseName}`);
+        fs.writeFileSync(tempPreFile, new Uint8Array(arrayBuf));
+        moveToQuarantine(tempPreFile, safeBaseName);
         await sendMessage(
           chatId,
           `⚠️ *File Quarantined*\nFile "${fileName}" was quarantined by Junk Ingest Gate (${preJunk.reason || "Invalid artifact"}).`,
