@@ -1365,19 +1365,25 @@
       </div>
 
       <!-- Action Buttons -->
-      <div class="grid grid-cols-3 gap-2 pt-2 border-t border-[#23232a]">
-        <a id="detailObsidianBtn" href="#" download class="min-h-[44px] h-11 py-2 bg-[#18181f] hover:bg-purple-950/60 text-zinc-300 hover:text-purple-300 font-semibold text-xs rounded-xl border border-[#23232a] text-center flex items-center justify-center gap-1.5 transition-all duration-150 active:scale-[0.98]">
-          <svg class="w-3.5 h-3.5 text-purple-400"><use href="#icon-file-pen"/></svg>
-          <span>Obsidian</span>
-        </a>
-        <button id="detailEditBtn" onclick="" class="min-h-[44px] h-11 py-2 bg-[#18181f] hover:bg-zinc-800 text-zinc-300 font-semibold text-xs rounded-xl border border-[#23232a] flex items-center justify-center gap-1.5 transition-all duration-150 cursor-pointer active:scale-[0.98]">
-          <svg class="w-3.5 h-3.5 text-zinc-400"><use href="#icon-pen"/></svg>
-          <span>Edit</span>
+      <div class="space-y-2 pt-2 border-t border-[#23232a]">
+        <button id="detailSyncObsidianBtn" onclick="syncCurrentBookToObsidian()" class="w-full min-h-[44px] h-11 py-2 bg-purple-950/40 hover:bg-purple-900/60 text-purple-200 hover:text-purple-100 font-semibold text-xs rounded-xl border border-purple-800/50 flex items-center justify-center gap-2 transition-all duration-150 cursor-pointer active:scale-[0.98]" title="Sync highlights and notes directly to Obsidian">
+          <svg class="w-4 h-4 text-purple-400"><use href="#icon-arrows-rotate"/></svg>
+          <span>Sync to Obsidian</span>
         </button>
-        <button id="detailDeleteBtn" onclick="" class="min-h-[44px] h-11 py-2 bg-[#18181f] hover:bg-rose-950/60 text-zinc-300 hover:text-rose-400 font-semibold text-xs rounded-xl border border-[#23232a] flex items-center justify-center gap-1.5 transition-all duration-150 cursor-pointer active:scale-[0.98]">
-          <svg class="w-3.5 h-3.5 text-rose-400"><use href="#icon-trash"/></svg>
-          <span>Delete</span>
-        </button>
+        <div class="grid grid-cols-3 gap-2">
+          <a id="detailObsidianBtn" href="#" download class="min-h-[44px] h-11 py-2 bg-[#18181f] hover:bg-purple-950/60 text-zinc-300 hover:text-purple-300 font-semibold text-xs rounded-xl border border-[#23232a] text-center flex items-center justify-center gap-1.5 transition-all duration-150 active:scale-[0.98]" title="Export Markdown Note">
+            <svg class="w-3.5 h-3.5 text-purple-400"><use href="#icon-file-pen"/></svg>
+            <span>Export Note</span>
+          </a>
+          <button id="detailEditBtn" onclick="" class="min-h-[44px] h-11 py-2 bg-[#18181f] hover:bg-zinc-800 text-zinc-300 font-semibold text-xs rounded-xl border border-[#23232a] flex items-center justify-center gap-1.5 transition-all duration-150 cursor-pointer active:scale-[0.98]">
+            <svg class="w-3.5 h-3.5 text-zinc-400"><use href="#icon-pen"/></svg>
+            <span>Edit</span>
+          </button>
+          <button id="detailDeleteBtn" onclick="" class="min-h-[44px] h-11 py-2 bg-[#18181f] hover:bg-rose-950/60 text-zinc-300 hover:text-rose-400 font-semibold text-xs rounded-xl border border-[#23232a] flex items-center justify-center gap-1.5 transition-all duration-150 cursor-pointer active:scale-[0.98]">
+            <svg class="w-3.5 h-3.5 text-rose-400"><use href="#icon-trash"/></svg>
+            <span>Delete</span>
+          </button>
+        </div>
       </div>
 
     </div>
@@ -1609,10 +1615,13 @@
         </button>
       </div>
 
-      <!-- Tab Pills for Quick Switching (KOSync, OPDS Catalog, CLI Reference, Kindle Proxy, All Endpoints) -->
+      <!-- Tab Pills for Quick Switching (KOSync, Obsidian Sync, OPDS Catalog, Features Guide, CLI Reference, Kindle Proxy, All Endpoints) -->
       <div class="flex items-center gap-2 overflow-x-auto no-scrollbar py-1">
         <button id="guide-tab-kosync" onclick="setGuideTab('kosync')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-white text-zinc-950 shadow-sm cursor-pointer transition-all shrink-0">
           KOSync
+        </button>
+        <button id="guide-tab-obsidian" onclick="setGuideTab('obsidian')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
+          Obsidian Sync
         </button>
         <button id="guide-tab-opds" onclick="setGuideTab('opds')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
           OPDS Catalog
@@ -1699,6 +1708,88 @@
           <div class="flex items-start gap-2.5">
             <span class="w-5 h-5 rounded-full bg-zinc-800 text-zinc-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">6</span>
             <div>Tap <strong>Pull progress to this device now</strong> to verify synchronization with LightHouse.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SECTION: OBSIDIAN & HIGHLIGHT SYNC -->
+      <div id="guide-obsidian" class="space-y-3 pt-1 hidden">
+        <div class="flex items-center justify-between">
+          <h4 class="text-xs font-bold uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5"><use href="#icon-file-pen"/></svg>
+            <span>KOReader &amp; Kindle to Obsidian Highlight Sync</span>
+          </h4>
+          <span class="text-[10px] px-2 py-0.5 rounded font-mono bg-zinc-800 text-purple-400 border border-zinc-700">Obsidian Sync</span>
+        </div>
+        <p class="text-xs text-zinc-300 leading-relaxed">
+          Automatically synchronize your quotes, highlights, page numbers, chapters, and personal notes from KOReader and Kindle into structured Obsidian Markdown notes with YAML frontmatter, book synopsis, and live reading progress bars.
+        </p>
+
+        <!-- Method 1: Wireless OTA Export from KOReader -->
+        <div class="p-3.5 bg-zinc-900/80 rounded-xl border border-zinc-800 space-y-2 text-xs text-zinc-300">
+          <div class="font-bold text-white flex items-center gap-1.5">
+            <span class="w-5 h-5 rounded-full bg-purple-950 text-purple-400 border border-purple-800/60 flex items-center justify-center text-[11px] font-mono font-bold shrink-0">1</span>
+            <span>Wireless Over-The-Air Export (KOReader Webhook / Export)</span>
+          </div>
+          <div class="text-[11px] text-zinc-400 space-y-1 pl-7 leading-relaxed">
+            <div>1. In KOReader, open any book &rarr; tap the top menu &rarr; <strong>Tools (wrench icon)</strong>.</div>
+            <div>2. Select <strong>Export highlights</strong> &rarr; choose <strong>JSON</strong> or <strong>Markdown</strong>.</div>
+            <div>3. Point the export target / webhook to LightHouse:</div>
+            <div class="flex items-center gap-2 pt-0.5">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-purple-300 truncate select-all">http://192.168.31.15:8086/api/highlights/sync</code>
+              <button onclick="copyToClipboard('http://192.168.31.15:8086/api/highlights/sync')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+            <div class="pt-0.5">Over public WAN (Singapore proxy):</div>
+            <div class="flex items-center gap-2 pt-0.5">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-purple-300 truncate select-all">https://reading-sg.wavypremium.xyz:8443/api/highlights/sync</code>
+              <button onclick="copyToClipboard('https://reading-sg.wavypremium.xyz:8443/api/highlights/sync')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+            <div class="pt-1">4. Tap <strong>Export now</strong>. Highlights and notes are immediately written into your Obsidian vault at <code class="text-zinc-200">Books/&lt;Title&gt;.md</code>.</div>
+          </div>
+        </div>
+
+        <!-- Method 2: Automatic USB / Sidecar CLI Sync -->
+        <div class="p-3.5 bg-zinc-900/80 rounded-xl border border-zinc-800 space-y-2 text-xs text-zinc-300">
+          <div class="font-bold text-white flex items-center gap-1.5">
+            <span class="w-5 h-5 rounded-full bg-purple-950 text-purple-400 border border-purple-800/60 flex items-center justify-center text-[11px] font-mono font-bold shrink-0">2</span>
+            <span>CLI Batch &amp; Continuous Watch Sync (bin/lighthouse sync-obsidian)</span>
+          </div>
+          <div class="text-[11px] text-zinc-400 space-y-1.5 pl-7 leading-relaxed">
+            <div>Plug in your Kindle / KOReader device or keep sidecar <code class="text-zinc-200">.sdr</code> folders in Calibre:</div>
+            <div class="flex items-center gap-2 pt-0.5">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-purple-300 truncate select-all">bin/lighthouse sync-obsidian --apply</code>
+              <button onclick="copyToClipboard('bin/lighthouse sync-obsidian --apply')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+            <div>To keep auto-syncing continuously in background: <code class="text-zinc-200">bin/lighthouse sync-obsidian --apply --watch</code></div>
+            <div>Specify custom vault path: <code class="text-zinc-200">bin/lighthouse sync-obsidian --vault-path ~/Obsidian --apply</code></div>
+          </div>
+        </div>
+
+        <!-- Method 3: One-Tap Web UI Sync -->
+        <div class="p-3.5 bg-zinc-900/80 rounded-xl border border-zinc-800 space-y-2 text-xs text-zinc-300">
+          <div class="font-bold text-white flex items-center gap-1.5">
+            <span class="w-5 h-5 rounded-full bg-purple-950 text-purple-400 border border-purple-800/60 flex items-center justify-center text-[11px] font-mono font-bold shrink-0">3</span>
+            <span>One-Tap Web App Sync</span>
+          </div>
+          <div class="text-[11px] text-zinc-400 pl-7 leading-relaxed">
+            Open any book in LightHouse Web App or Telegram Mini App, tap <strong>Sync to Obsidian</strong> in the details modal. The server immediately enriches highlights with Calibre synopsis, KOSync progress, and writes your Obsidian note!
+          </div>
+        </div>
+
+        <!-- Idempotent Preservation Guarantee -->
+        <div class="p-3.5 bg-purple-950/20 rounded-xl border border-purple-800/40 text-xs text-purple-200 space-y-1">
+          <div class="font-bold flex items-center gap-1.5 text-purple-300">
+            <svg class="w-3.5 h-3.5 text-purple-400"><use href="#icon-check"/></svg>
+            <span>Idempotent Marker Preservation Guarantee</span>
+          </div>
+          <div class="text-[11px] text-purple-300/80 leading-relaxed">
+            All extracted highlights are bounded by <code class="text-purple-200">&lt;!-- lighthouse:highlights:start --&gt;</code> and <code class="text-purple-200">&lt;!-- lighthouse:highlights:end --&gt;</code>. Any personal thoughts, reflections, or custom markdown sections you write outside these markers are completely preserved across repeated syncs.
           </div>
         </div>
       </div>
@@ -1886,6 +1977,25 @@
 
           <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
+              <span class="font-bold text-zinc-200">Obsidian Highlight &amp; Note Sync</span>
+              <span class="text-[10px] font-mono text-purple-400">sync-obsidian</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse sync-obsidian --apply</code>
+              <button onclick="copyToClipboard('bin/lighthouse sync-obsidian --apply')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse sync-obsidian --apply --watch</code>
+              <button onclick="copyToClipboard('bin/lighthouse sync-obsidian --apply --watch')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+            <div class="flex items-center justify-between">
               <span class="font-bold text-zinc-200">Hot Backup &amp; Migration Kit</span>
               <span class="text-[10px] font-mono text-zinc-400">backup / restore</span>
             </div>
@@ -2001,6 +2111,24 @@
             <div class="flex items-center gap-2 pt-1">
               <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">http://192.168.31.15:7200</code>
               <button onclick="copyToClipboard('http://192.168.31.15:7200')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- Obsidian Wireless Highlight Sync Endpoint -->
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-purple-400"></span>
+                <span>Obsidian Highlights Sync (POST /api/highlights/sync)</span>
+              </span>
+              <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-purple-400 font-mono border border-zinc-700">OTA Ingest</span>
+            </div>
+            <div class="text-[11px] text-zinc-400">Receives KOReader JSON/Markdown exports directly into Obsidian vault</div>
+            <div class="flex items-center gap-2 pt-1">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">http://192.168.31.15:8086/api/highlights/sync</code>
+              <button onclick="copyToClipboard('http://192.168.31.15:8086/api/highlights/sync')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
@@ -3267,11 +3395,50 @@
       setHtml(dlContainer, dlHtml);
 
       // Wire Actions
+      currentDetailBookId = book.id;
       document.getElementById('detailObsidianBtn').href = `/api/books/${book.id}/obsidian.md`;
       document.getElementById('detailEditBtn').onclick = () => { closeBookDetailModal(); openEditModal(book.id); };
       document.getElementById('detailDeleteBtn').onclick = () => { closeBookDetailModal(); deleteBook(book.id); };
 
       openModalAnimated('bookDetailModal', false);
+    }
+
+    let currentDetailBookId = null;
+
+    async function syncCurrentBookToObsidian() {
+      if (!currentDetailBookId) return;
+      const btn = document.getElementById('detailSyncObsidianBtn');
+      const originalHtml = btn ? btn.innerHTML : '';
+      try {
+        tgHaptic.light();
+        if (btn) {
+          btn.disabled = true;
+          btn.classList.add('opacity-70');
+          setHtml(btn, `<svg class="w-4 h-4 text-purple-400 animate-spin"><use href="#icon-arrows-rotate"/></svg><span>Syncing to Obsidian...</span>`);
+        }
+        const res = await fetch('/api/highlights/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bookId: currentDetailBookId })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          tgHaptic.notification('success');
+          showToast(`✅ Synced to Obsidian (${data.count || 0} highlights)!`);
+        } else {
+          tgHaptic.notification('error');
+          showToast('Obsidian sync failed: ' + (data.error || 'Server error'), 'error');
+        }
+      } catch (err) {
+        tgHaptic.notification('error');
+        showToast('Network error syncing to Obsidian', 'error');
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.classList.remove('opacity-70');
+          setHtml(btn, originalHtml);
+        }
+      }
     }
 
     function closeBookDetailModal() {
@@ -3628,7 +3795,7 @@
       try { tgHaptic.light(); } catch {}
       const modalScroll = document.querySelector('#guideModal .overflow-y-auto');
       if (modalScroll) modalScroll.scrollTop = 0;
-      const tabs = ['kosync', 'opds', 'features', 'cli', 'proxy', 'all'];
+      const tabs = ['kosync', 'obsidian', 'opds', 'features', 'cli', 'proxy', 'all'];
       tabs.forEach(t => {
         const btn = document.getElementById(`guide-tab-${t}`);
         if (btn) {
@@ -3640,6 +3807,7 @@
         }
       });
       const secKosync = document.getElementById('guide-kosync');
+      const secObsidian = document.getElementById('guide-obsidian');
       const secOpds = document.getElementById('guide-opds');
       const secFeatures = document.getElementById('guide-features');
       const secCli = document.getElementById('guide-cli');
@@ -3648,6 +3816,15 @@
 
       if (tab === 'kosync') {
         secKosync?.classList.remove('hidden');
+        secObsidian?.classList.add('hidden');
+        secOpds?.classList.add('hidden');
+        secFeatures?.classList.add('hidden');
+        secCli?.classList.add('hidden');
+        secProxy?.classList.add('hidden');
+        secEndpoints?.classList.add('hidden');
+      } else if (tab === 'obsidian') {
+        secKosync?.classList.add('hidden');
+        secObsidian?.classList.remove('hidden');
         secOpds?.classList.add('hidden');
         secFeatures?.classList.add('hidden');
         secCli?.classList.add('hidden');
@@ -3655,6 +3832,7 @@
         secEndpoints?.classList.add('hidden');
       } else if (tab === 'opds') {
         secKosync?.classList.add('hidden');
+        secObsidian?.classList.add('hidden');
         secOpds?.classList.remove('hidden');
         secFeatures?.classList.add('hidden');
         secCli?.classList.add('hidden');
@@ -3662,6 +3840,7 @@
         secEndpoints?.classList.add('hidden');
       } else if (tab === 'features') {
         secKosync?.classList.add('hidden');
+        secObsidian?.classList.add('hidden');
         secOpds?.classList.add('hidden');
         secFeatures?.classList.remove('hidden');
         secCli?.classList.add('hidden');
@@ -3669,6 +3848,7 @@
         secEndpoints?.classList.add('hidden');
       } else if (tab === 'cli') {
         secKosync?.classList.add('hidden');
+        secObsidian?.classList.add('hidden');
         secOpds?.classList.add('hidden');
         secFeatures?.classList.add('hidden');
         secCli?.classList.remove('hidden');
@@ -3676,6 +3856,7 @@
         secEndpoints?.classList.add('hidden');
       } else if (tab === 'proxy') {
         secKosync?.classList.add('hidden');
+        secObsidian?.classList.add('hidden');
         secOpds?.classList.add('hidden');
         secFeatures?.classList.add('hidden');
         secCli?.classList.add('hidden');
@@ -3683,6 +3864,7 @@
         secEndpoints?.classList.add('hidden');
       } else {
         secKosync?.classList.remove('hidden');
+        secObsidian?.classList.remove('hidden');
         secOpds?.classList.remove('hidden');
         secFeatures?.classList.remove('hidden');
         secCli?.classList.remove('hidden');

@@ -1465,6 +1465,14 @@ cmd_enrich_synopsis() {
   fi
   exec bun run "$script_path" "$@"
 }
+cmd_sync_obsidian() {
+  local script_path="${LIGHTHOUSE_ROOT}/scripts/sync-obsidian.ts"
+  if [ ! -f "$script_path" ]; then
+    echo "Error: ${script_path} not found" >&2
+    exit 1
+  fi
+  exec bun run "$script_path" "$@"
+}
 
 # ------------------------------------------------------------------------------
 # 10. Command: help
@@ -1485,6 +1493,7 @@ Commands:
   health                   Run automated probes and auto-heal stale listeners/workers
   categorize [options]     Categorize, tag, and correct book languages in Calibre library
   enrich-synopsis [options] Batch enrich missing book synopses from local EPUBs and online APIs
+sync-obsidian [options]  Sync highlights and reading notes from KOReader/Kindle to Obsidian
   install-daemons          Dynamically generate and register macOS LaunchAgents for current user
   backup [options]         Create hot SQLite backup with WAL checkpoint, checksum, and manifest
   restore <file> [options] Verified restoration of complete stack with integrity checks
@@ -1502,6 +1511,11 @@ Enrich-Synopsis Options:
   --limit <N>              Limit processing to N books
   --source <type>          Source strategy: all (default), epub, or online
   --verbose                Enable verbose logging of search and extraction steps
+Sync-Obsidian Options:
+  --vault-path <path>      Obsidian vault path (default: \$OBSIDIAN_VAULT_PATH or ~/Obsidian)
+  --dry-run                Preview changes without writing to disk (default)
+  --apply                  Write/update markdown notes in <vault>/Books/
+  --watch                  Watch library and KOSync DB for changes and auto-sync
 
 Backup Options:
   --output, -o <path>      Explicit archive file path
@@ -1538,6 +1552,7 @@ case "$ACTION" in
   health) cmd_health "$@" ;;
   categorize) cmd_categorize "$@" ;;
   enrich-synopsis) cmd_enrich_synopsis "$@" ;;
+sync-obsidian) cmd_sync_obsidian "$@" ;;
   install-daemons) cmd_install_daemons "$@" ;;
   backup) cmd_backup "$@" ;;
   restore) cmd_restore "$@" ;;

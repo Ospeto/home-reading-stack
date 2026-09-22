@@ -2051,7 +2051,7 @@ describe("Documentation, Manual Sync & Standing Invariant Verification", () => {
     expect(html).toContain("Apple WWDC Fluid Interface &amp; Keyboard Control");
 
     // Tab wiring in setGuideTab
-    expect(html).toContain("const tabs = ['kosync', 'opds', 'features', 'cli', 'proxy', 'all'];");
+    expect(html).toContain("const tabs = ['kosync', 'obsidian', 'opds', 'features', 'cli', 'proxy', 'all'];");
     expect(html).toContain("secFeatures?.classList.remove('hidden');");
     expect(html).toContain("modalScroll.scrollTop = 0;");
 

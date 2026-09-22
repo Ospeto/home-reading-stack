@@ -33,6 +33,11 @@ import {
 import { getJobQueue, DurableJobQueue } from "./jobs";
 import { generateMetadataFilename, buildContentDisposition } from "./filename";
 import {
+  syncObsidian,
+  extractHighlightsFromLua,
+  type HighlightEntry,
+} from "../scripts/sync-obsidian";
+import {
   evaluateJunkGate,
   moveToQuarantine,
   extractSeriesWithJev,
@@ -1432,59 +1437,66 @@ function getKosyncProgress() {
 
 function extractHighlightsFromSdr(
   bookId: number,
-): Array<{ text: string; notes: string; datetime: string; page?: number }> {
+): Array<{ text: string; notes: string; datetime: string; page?: number; chapter?: string }> {
   const highlights: Array<{
     text: string;
     notes: string;
     datetime: string;
     page?: number;
+    chapter?: string;
   }> = [];
   try {
     const books = getCalibreBooks();
     const book = books.find((b: any) => b.id === bookId);
     if (!book) return highlights;
 
-    function searchSdr(dir: string) {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const e of entries) {
-        const full = path.join(dir, e.name);
-        if (e.isDirectory()) {
-          if (e.name.endsWith(".sdr")) {
-            const files = fs.readdirSync(full);
-            for (const f of files) {
-              if (f.endsWith(".lua")) {
-                const luaContent = fs.readFileSync(path.join(full, f), "utf8");
-                const bookmarkMatches = luaContent.matchAll(
-                  /\{[^}]*\["text"\]\s*=\s*"([^"]*)"[^}]*\}/gs,
-                );
-                for (const bm of bookmarkMatches) {
-                  const chunk = bm[0];
-                  const textMatch = chunk.match(/\["text"\]\s*=\s*"([^"]*)"/);
-                  const notesMatch = chunk.match(/\["notes"\]\s*=\s*"([^"]*)"/);
-                  const dtMatch = chunk.match(/\["datetime"\]\s*=\s*"([^"]*)"/);
-                  const pageMatch = chunk.match(/\["page"\]\s*=\s*([0-9]+)/);
+    const parseLuaFile = (filePath: string) => {
+      try {
+        const luaContent = fs.readFileSync(filePath, "utf8");
+        const parsed = extractHighlightsFromLua(luaContent);
+        for (const h of parsed.highlights) {
+          let pageNum: number | undefined;
+          if (typeof h.page === "number") {
+            pageNum = h.page;
+          } else if (h.page) {
+            const n = parseInt(String(h.page), 10);
+            if (!Number.isNaN(n)) pageNum = n;
+          }
+          highlights.push({
+            text: h.text,
+            notes: h.notes || "",
+            datetime: h.datetime || new Date().toISOString(),
+            page: pageNum,
+            chapter: h.chapter,
+          });
+        }
+      } catch (_parseErr) {
+        void _parseErr;
+      }
+    };
 
-                  if (textMatch && textMatch[1]) {
-                    highlights.push({
-                      text: textMatch[1]
-                        .replace(/\\"/g, '"')
-                        .replace(/\\n/g, " "),
-                      notes: notesMatch ? notesMatch[1] : "",
-                      datetime: dtMatch ? dtMatch[1] : new Date().toISOString(),
-                      page: pageMatch ? parseInt(pageMatch[1], 10) : undefined,
-                    });
-                  }
-                }
+    // 1. Direct targeted check in book directory
+    if (book.path) {
+      const bookFolder = path.join(LIBRARY_DIR, book.path);
+      if (fs.existsSync(bookFolder)) {
+        const entries = fs.readdirSync(bookFolder, { withFileTypes: true });
+        for (const e of entries) {
+          if (e.isDirectory() && e.name.endsWith(".sdr")) {
+            const sdrDir = path.join(bookFolder, e.name);
+            const sdrFiles = fs.readdirSync(sdrDir);
+            for (const f of sdrFiles) {
+              if (f.endsWith(".lua")) {
+                parseLuaFile(path.join(sdrDir, f));
               }
             }
-          } else {
-            searchSdr(full);
           }
         }
       }
     }
 
-    searchSdr(LIBRARY_DIR);
+    if (highlights.length > 0) {
+      return highlights;
+    }
   } catch (e) {
     console.error("Error extracting SDR highlights:", e);
   }
@@ -2670,6 +2682,216 @@ export async function handleRequest(
         "X-Content-Type-Options": "nosniff",
       },
     });
+  }
+
+  // API: Wireless Over-The-Air Highlights & Note Sync to Obsidian
+  if (url.pathname === "/api/highlights/sync" && req.method === "POST") {
+    try {
+      const MAX_BODY_BYTES = 5 * 1024 * 1024; // 5MB
+      const contentLength = req.headers.get("content-length");
+      if (contentLength && parseInt(contentLength, 10) > MAX_BODY_BYTES) {
+        return jsonResponse(
+          { success: false, error: "Payload too large (max 5MB)" },
+          413,
+          corsOrigin,
+        );
+      }
+
+      const contentType = req.headers.get("content-type") || "";
+      let title: string | undefined;
+      let author: string | undefined;
+      let highlights: HighlightEntry[] = [];
+      let bookId: number | undefined;
+      let progress: number | undefined;
+
+      const rawText = await req.text();
+      if (Buffer.byteLength(rawText, "utf8") > MAX_BODY_BYTES) {
+        return jsonResponse(
+          { success: false, error: "Payload too large (max 5MB)" },
+          413,
+          corsOrigin,
+        );
+      }
+
+      if (contentType.includes("application/json") || rawText.trim().startsWith("{") || rawText.trim().startsWith("[")) {
+        let body: any;
+        try {
+          body = JSON.parse(rawText);
+        } catch (_jsonErr) {
+          void _jsonErr;
+          return jsonResponse(
+            { success: false, error: "Invalid JSON payload" },
+            400,
+            corsOrigin,
+          );
+        }
+
+        if (body.bookId !== undefined) {
+          const validId = validateIntegerId(body.bookId);
+          if (!validId) {
+            return jsonResponse(
+              { success: false, error: "Invalid bookId" },
+              400,
+              corsOrigin,
+            );
+          }
+          bookId = validId;
+          const books = getCalibreBooks();
+          const book = books.find((b: any) => b.id === bookId);
+          if (!book) {
+            return jsonResponse(
+              { success: false, error: "Book not found in Calibre" },
+              404,
+              corsOrigin,
+            );
+          }
+          title = book.title;
+          author = book.authors;
+          highlights = extractHighlightsFromSdr(bookId);
+        } else if (body.all) {
+          const syncRes = await syncObsidian({ apply: true });
+          return jsonResponse(
+            {
+              success: true,
+              message: "Synced all books to Obsidian",
+              count: syncRes.totalHighlightsFound,
+              booksProcessed: syncRes.totalBooksScanned,
+            },
+            200,
+            corsOrigin,
+          );
+        } else if (Array.isArray(body.documents)) {
+          let totalSynced = 0;
+          for (const doc of body.documents) {
+            const docParsed = extractHighlightsFromLua(doc);
+            if (docParsed.title || doc.title) {
+              const res = await syncObsidian({
+                apply: true,
+                books: [
+                  {
+                    title: docParsed.title || doc.title,
+                    author: docParsed.author || doc.author || "Unknown",
+                    highlights:
+                      docParsed.highlights.length > 0
+                        ? docParsed.highlights
+                        : (doc.entries || []).map((e: any) => ({
+                            text: e.text || e.highlight || "",
+                            notes: e.notes || e.note,
+                            chapter: e.chapter,
+                            page: e.page || e.pageno,
+                            datetime: e.datetime || e.time,
+                          })),
+                    progress:
+                      docParsed.percentFinished !== undefined
+                        ? docParsed.percentFinished
+                        : doc.progress,
+                  },
+                ],
+              });
+              totalSynced += res.totalHighlightsFound;
+            }
+          }
+          return jsonResponse(
+            {
+              success: true,
+              message: `Processed ${body.documents.length} document(s)`,
+              count: totalSynced,
+            },
+            200,
+            corsOrigin,
+          );
+        } else if (body.title || body.entries || body.highlights) {
+          title = body.title;
+          author = body.author;
+          progress =
+            typeof body.progress === "number" ? body.progress : undefined;
+          const rawEntries = body.entries || body.highlights || [];
+          if (Array.isArray(rawEntries)) {
+            for (const e of rawEntries) {
+              const text = (e.text || e.highlight || e.quote || "").trim();
+              const notes = (e.notes || e.note || e.comment || "").trim();
+              if (text || notes) {
+                highlights.push({
+                  text,
+                  notes: notes || undefined,
+                  chapter: e.chapter,
+                  page: e.page ?? e.pageno,
+                  datetime: e.datetime || e.time,
+                });
+              }
+            }
+          }
+        } else if (typeof body.markdown === "string") {
+          const lines = body.markdown.split("\n");
+          for (const l of lines) {
+            const trimmed = l.trim();
+            if (trimmed.startsWith("# ") && !title) {
+              title = trimmed.slice(2).trim();
+            } else if (trimmed.startsWith("> ")) {
+              highlights.push({ text: trimmed.slice(2).trim() });
+            }
+          }
+          title = title || body.title;
+          author = body.author;
+        }
+      } else {
+        const lines = rawText.split("\n");
+        for (const l of lines) {
+          const trimmed = l.trim();
+          if (trimmed.startsWith("# ") && !title) {
+            title = trimmed.slice(2).trim();
+          } else if (trimmed.startsWith("> ")) {
+            highlights.push({ text: trimmed.slice(2).trim() });
+          }
+        }
+      }
+
+      if (!title && highlights.length === 0 && !bookId) {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              "Payload must contain book title, bookId, or highlight entries",
+          },
+          400,
+          corsOrigin,
+        );
+      }
+
+      const syncResult = await syncObsidian({
+        apply: true,
+        books: [
+          {
+            title: title || "Untitled",
+            author: author || "Unknown",
+            bookId,
+            progress,
+            highlights,
+          },
+        ],
+      });
+
+      const syncedItem = syncResult.items[0];
+      const relPath = syncedItem?.filename ? path.join("Books", syncedItem.filename) : "";
+      return jsonResponse(
+        {
+          success: true,
+          count: syncResult.totalHighlightsFound,
+          bookTitle: syncedItem?.title || title || "Untitled",
+          filename: syncedItem?.filename,
+          path: relPath,
+          action: syncedItem?.action || "updated",
+        },
+        200,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
   }
 
   // API: Link Unmapped KOSync Document to Calibre Book
