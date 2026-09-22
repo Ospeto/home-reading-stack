@@ -1,10 +1,12 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="LightHouse Logo" width="128" height="128" />
+  <img src="assets/logo.svg" alt="LightHouse Spiral Book Tower Logo" width="144" height="144" />
 </p>
 
-# LightHouse Reading Stack
+<h1 align="center">LightHouse Reading Stack</h1>
 
-> Unified, self-hosted private reading infrastructure for Kindle and mobile devices running [KOReader](https://github.com/koreader/koreader).
+<p align="center">
+  <strong>Unified, self-hosted private reading infrastructure for Kindle and mobile devices running <a href="https://github.com/koreader/koreader">KOReader</a>.</strong>
+</p>
 
 LightHouse turns a home Mac mini or Linux host into an always-on personal reading command center. It bridges physical e-ink readers (Kindle Paperwhite, Basic, Oasis) and mobile devices to a centralized Calibre library, real-time reading progress synchronization, automated web article extraction, and secure worldwide remote access—completely bypassing restrictive firewalls (GFW/DPI) without needing VPN apps installed on e-ink devices.
 
@@ -41,7 +43,7 @@ LightHouse turns a home Mac mini or Linux host into an always-on personal readin
 │         Singapore Edge (`sg-vps`) & US Edge (`panel.wavypremium.xyz`)  │
 │  - Caddy TLS Reverse Proxy (https://reading.wavypremium.xyz)           │
 │  - Low-latency Singapore WAN: KOSync (:80/:8443) & OPDS (:80/:8443)    │
-│  - Telegram Mini App (TMA) & Web App Menu Button target                │
+│  - Singapore Web App & TMA (:8443) / Caddy Edge (https://reading...)   │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -77,8 +79,9 @@ Singapore WAN endpoints are the **primary recommended routes** for low-latency p
 | **Singapore WAN KOSync (TLS)** | `https://kosync-sg.wavypremium.xyz:8443` | HTTPS (8443) | Encrypted Singapore WAN KOSync progress sync |
 | **Singapore WAN OPDS Feed (Recommended)** | `http://opds.wavypremium.xyz/opds` | HTTP / Atom | High-speed wireless OPDS catalog for KOReader & mobile devices |
 | **Singapore WAN OPDS Feed (TLS)** | `https://opds.wavypremium.xyz:8443/opds` | HTTPS (8443) | Encrypted Singapore wireless OPDS catalog |
+| **Singapore WAN Web & Mini App** | `https://reading-sg.wavypremium.xyz:8443` | HTTPS (8443) | Low-latency Singapore WAN Telegram Mini App & Web App |
+| **Global WAN Dashboard & Mini App** | `https://reading.wavypremium.xyz` | HTTPS | Global secure access to LightHouse via SSH reverse tunnel + Caddy TLS |
 | **LightHouse Dashboard (Local)** | `http://192.168.31.15:8086` | Web SPA | Fast catalog manager, KOSync reading telemetry, facets, and upload manager |
-| **LightHouse Dashboard (WAN)** | `https://reading.wavypremium.xyz` | HTTPS | Global secure access to LightHouse via SSH reverse tunnel + Caddy TLS |
 | **Telegram Bot & Mini App** | `@saroat_ospeto_bot` | Telegram API | Ingest books, search catalog (`/find`), view shelf (`/reading`), hot backups (`/backup`) |
 | **Local KOSync** | `http://192.168.31.15:7200` | HTTP / JSON | Direct LAN progress sync for KOReader |
 | **Local Calibre OPDS Feed** | `http://192.168.31.15:8088/opds` | Atom / XML | Direct home LAN book catalog |
@@ -92,7 +95,18 @@ Singapore WAN endpoints are the **primary recommended routes** for low-latency p
 
 ## ⚡ Unified Control CLI (`bin/lighthouse`)
 
-LightHouse includes a portable management CLI (`bin/lighthouse`) for service lifecycle, health probes, automated daemon registration, and hot database migrations.
+LightHouse includes a portable management CLI (`bin/lighthouse`) for service lifecycle, health diagnostics, automated daemon installation, and hot database backup/restore.
+
+| Command | Description |
+| --- | --- |
+| `bin/lighthouse status` | Displays full one-screen dashboard of all ports (8086, 7200, 8088, 7890), tunnels, launchd daemons, and database record counts (books, progress, and jobs). |
+| `bin/lighthouse up` | Starts all services gracefully in strict dependency order (Calibre, KOSync, LightHouse UI, LAN proxy, reverse tunnels). |
+| `bin/lighthouse down` | Stops all services gracefully in reverse dependency order without leaving orphaned processes. |
+| `bin/lighthouse restart` | Performs safe sequential stop and restart of reading stack services (`down; sleep 1; up`). |
+| `bin/lighthouse health` | Probes HTTP/TCP endpoints, checks response codes, and auto-heals stale remote listeners (`fuser -k`). |
+| `bin/lighthouse install-daemons` | Dynamically generates and registers macOS LaunchAgents for the current user and repository root. |
+| `bin/lighthouse backup` | Flushes SQLite WAL frames and creates an atomic snapshot bundle with SHA-256 checksum and manifest. |
+| `bin/lighthouse restore <archive>` | Performs verified disaster recovery with cryptographic checksum verification and integrity scan. |
 
 ```bash
 # Display full one-screen status dashboard of all ports, tunnels, and services
@@ -206,6 +220,75 @@ If your Kindle displays *"Check your network connection"* when connecting to ove
    - **Proxy Host:** `192.168.31.15`
    - **Proxy Port:** `7890`
 3. Save network settings. All Kindle network requests will now route through the home host's sing-box proxy gateway.
+
+### 4. Telegram Mini App & Web App Access
+
+LightHouse provides an app-like catalog experience across mobile devices and desktop browsers:
+- **Singapore WAN Web App (Low-Latency Port 8443):**
+  ```text
+  https://reading-sg.wavypremium.xyz:8443
+  ```
+- **Global Caddy Edge:**
+  ```text
+  https://reading.wavypremium.xyz
+  ```
+- **Telegram Native Mini App:** Tap the persistent **Menu** button or send `/app` inside `@saroat_ospeto_bot` to open the full catalog interface inside Telegram with native haptics.
+
+---
+
+## 🧠 Jev System-1 Ingestion Intelligence
+
+LightHouse integrates [TypeSafe Jev System-1](https://api.typesafe.ai/v1/systemone) fast linguistic triage across all ingestion pathways (file uploads, archive extractions, and web article conversions):
+
+1. **Junk Ingest Gate (`Books_Quarantine`):**
+   - Protects the Calibre library against corrupt downloads, broken test artifacts, and truncated files.
+   - Deterministic filters catch truncated ZIP artifacts missing central directories and auto-healed dummy files.
+   - Suspicious candidates (e.g. titles with >60% digits, sample upload tokens, or missing authors with timestamp titles) undergo fast Jev System-1 triage (`real_book`, `test_artifact`, or `truncated_download`).
+   - Non-book artifacts are automatically moved outside the Calibre auto-import queue into `~/Books_Quarantine` (`Books_Quarantine/`), ensuring library metadata remains pristine.
+2. **Series & Volume Detection:**
+   - Multi-pattern parsing extracts volume indices from standard numbering (`Vol 1`, `v2`, `#3`), Roman numerals (`Vol. IV`, `Book II`), written English numbers (`Volume One`, `Volume Two`), and Burmese volume markers (`အတွဲ ၁`).
+   - When pattern regexes miss but candidate number tokens remain, `extractSeriesWithJev` invokes Jev System-1 classification (`series_volume` vs. `subtitle_same_book` vs. `unrelated`) requiring confidence `>= 0.7`.
+   - Ingestion deduplication (`uploader/scraper.ts`, `uploader/bot.ts`) isolates volume numbering so distinct volumes in a series are never merged, while invoking Jev System-1 arbitration (`isSameBookAsync`) for ambiguous title similarity scores (0.65–0.88).
+3. **Author Field Sanitization:**
+   - Strips noisy release tags, pirate channel watermarks, and role annotations (e.g. `[Illustrator]`, `(Artist)`).
+   - Resolves ambiguous multi-author orderings alphabetically for deterministic library deduplication and queries Jev when author identity is suspect.
+4. **Bilingual & Multilingual Language Shelves:**
+   - Automatically classifies and filters books into four dedicated shelves:
+     - **All:** Entire reading library.
+     - **Burmese (မြန်မာ):** Dedicated shelf for Burmese literature, detected via Calibre language tags (`my`, `mya`, `burmese`) and Myanmar Unicode range (`[\u1000-\u109F]`).
+     - **English:** English books and international releases.
+     - **Other:** Japanese light novels, manga, and foreign language editions.
+5. **Intelligent Multi-Source Metadata & Cover Routing:**
+   - Automatically determines book category and prioritizes specialized metadata engines:
+     - **Light Novels:** Queries [RanobeDB API](https://ranobedb.org/api/v0) and Bangumi first, extracting high-resolution cover art and staff metadata before falling back to Google Books.
+     - **Manga:** Queries MangaDex API and Bangumi.
+     - **General Literature:** Queries Google Books and OpenLibrary.
+     - **Burmese Literature:** Bypasses overseas providers and applies localized typographic cover synthesis and Burmese font styling.
+
+---
+
+## 🎨 Apple WWDC Fluid Interface Design System
+
+The LightHouse web interface (`uploader/index.html`) is built according to Apple WWDC fluid interface design principles:
+
+1. **Materials & Translucency:**
+   - Multi-tier dark translucent glass surfaces including modals and sheet panels (`apple-material-modal`, `apple-material-sheet`) utilizing `backdrop-filter: blur(20px) saturate(180%)`, and action overlay glass (`apple-material-glass-light`) utilizing `backdrop-filter: blur(12px) saturate(150%)`.
+   - Subtle top-edge light catch highlight (`border-top: 1px solid rgba(255, 255, 255, 0.12)`) and strict material weight hierarchy without blur stacking.
+2. **Optical Typography & Display Hierarchy:**
+   - Native Apple system font stack (`SF Pro Display`, `SF Pro Text`, `-apple-system`).
+   - Size-dependent optical tracking (`.tracking-optical-display` at `-0.02em` with tight leading on display titles, `.tracking-optical-micro` at `0.025em` on micro-labels/tags/pills, `0` on body text).
+3. **Tactile Feedback & Immediate Response:**
+   - Zero tap delay (`-webkit-tap-highlight-color: transparent`).
+   - Instant pointer-down active press state (`scale(0.97) !important` with `120ms cubic-bezier(0.2, 0, 0, 1)` physics).
+   - Seamless Telegram WebApp HapticFeedback integration (`tgHaptic.light()`, `tgHaptic.selection()`).
+4. **Fluid Springs & Spatial Motion:**
+   - Critically damped physics-based easing (`cubic-bezier(0.16, 1, 0.3, 1)` ~`0.35s`).
+   - Symmetric spatial transitions (bottom sheets slideUp/slideDown, modals scaleIn/scaleOut, drawers slideLeft/slideRight).
+5. **Desktop Hover Synopsis Preview & Quick Actions:**
+   - Hovering over any book card on desktop immediately reveals an Apple glassmorphism overlay featuring a multi-line clamped synopsis preview, one-click EPUB download, direct Obsidian Markdown note export, metadata editing, and book deletion.
+6. **3D Skeuomorphic Depth & Accessibility:**
+   - 3D book spine curvature overlay (`.book-spine-effect`), multi-layer shadows (`.shadow-book`, `.shadow-book-hover`), and skeleton shimmer loading states.
+   - Comprehensive accessibility support respecting `prefers-reduced-motion` (instant 150ms opacity fades, scale suppression) and `prefers-reduced-transparency` (solid opaque dark surfaces).
 
 ---
 

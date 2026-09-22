@@ -745,15 +745,29 @@ describe("Webpage Manual & KOReader Connection Section (index.html)", () => {
     expect(html).toContain("copyToClipboard('http://192.168.31.15:8088/opds')");
     // 3. Calibre Web reader (Local)
     expect(html).toContain("copyToClipboard('http://192.168.31.15:8088')");
-    // 4. Reading HQ Dashboard (Local & WAN)
+    // 4. Reading HQ Dashboard (Local, WAN & Singapore Mini App)
     expect(html).toContain("copyToClipboard('http://192.168.31.15:8086')");
     expect(html).toContain(
       "copyToClipboard('https://reading.wavypremium.xyz')",
+    );
+    expect(html).toContain(
+      "copyToClipboard('https://reading-sg.wavypremium.xyz:8443')",
     );
     // 5. LAN Proxy Gateway
     expect(html).toContain("copyToClipboard('192.168.31.15:7890')");
     // 6. Telegram Bot
     expect(html).toContain("copyToClipboard('@saroat_ospeto_bot')");
+
+    // Features Guide Tab and Sections (Language Shelves & Desktop Previews)
+    expect(html).toContain('id="guide-tab-features"');
+    expect(html).toContain('id="guide-features"');
+    expect(html).toContain("Language Shelves &amp; Desktop Previews");
+    expect(html).toContain("Dynamic Language Shelves (All / Burmese / English / Other)");
+    expect(html).toContain("Desktop Hover Synopsis Preview &amp; Quick Actions");
+    expect(html).toContain("Apple WWDC Fluid Interface &amp; Keyboard Control");
+
+    // Desktop hover synopsis preview on book cards
+    expect(html).toContain("synopsisPreviewHtml");
 
     // Step-by-step KOReader setup instructions
     expect(html).toContain("KOReader Progress Sync (KOSync)");
@@ -1954,3 +1968,110 @@ describe("Library Deduplication Bot Commands & Callbacks (/dedup, /clean_duplica
     }
   });
 });
+
+describe("Documentation, Manual Sync & Standing Invariant Verification", () => {
+  it("AGENTS.md defines permanent Documentation & Manual Sync Invariant rule", () => {
+    const agentsPath = path.join(import.meta.dir, "../AGENTS.md");
+    expect(fs.existsSync(agentsPath)).toBe(true);
+
+    const agentsContent = fs.readFileSync(agentsPath, "utf8");
+    expect(agentsContent).toContain("Documentation & Manual Sync Invariant");
+    expect(agentsContent).toContain(
+      "For EVERY feature change, new capability, or infrastructure update, always update `README.md` and the built-in Connection Guide / Manual on the website (`uploader/index.html` / `openGuideModal`) to reflect current commands, endpoints, and behaviors.",
+    );
+    expect(agentsContent).toContain(
+      "Never leave documentation or user manuals stale after landing code changes.",
+    );
+  });
+
+  it("README.md contains centered LightHouse logo banner, CLI commands, Singapore endpoints, Jev intelligence, and WWDC design system", () => {
+    const readmePath = path.join(import.meta.dir, "../README.md");
+    expect(fs.existsSync(readmePath)).toBe(true);
+
+    const readme = fs.readFileSync(readmePath, "utf8");
+
+    // 1. Prominent centered logo banner
+    expect(readme).toContain('<img src="assets/logo.svg" alt="LightHouse Spiral Book Tower Logo"');
+    expect(readme).toContain('<h1 align="center">LightHouse Reading Stack</h1>');
+
+    // 2. Unified CLI commands
+    expect(readme).toContain("bin/lighthouse status");
+    expect(readme).toContain("bin/lighthouse up");
+    expect(readme).toContain("bin/lighthouse down");
+    expect(readme).toContain("bin/lighthouse restart");
+    expect(readme).toContain("bin/lighthouse health");
+    expect(readme).toContain("bin/lighthouse install-daemons");
+    expect(readme).toContain("bin/lighthouse backup");
+    expect(readme).toContain("bin/lighthouse restore");
+
+    // 3. Singapore WAN endpoints
+    expect(readme).toContain("http://kosync-sg.wavypremium.xyz");
+    expect(readme).toContain("https://kosync-sg.wavypremium.xyz:8443");
+    expect(readme).toContain("http://opds.wavypremium.xyz/opds");
+    expect(readme).toContain("https://opds.wavypremium.xyz:8443/opds");
+    expect(readme).toContain("https://reading-sg.wavypremium.xyz:8443");
+
+    // 4. Jev System-1 Ingestion Intelligence
+    expect(readme).toContain("Jev System-1 Ingestion Intelligence");
+    expect(readme).toContain("Junk Ingest Gate (`Books_Quarantine`)");
+    expect(readme).toContain("Series & Volume Detection");
+    expect(readme).toContain("Author Field Sanitization");
+    expect(readme).toContain("Bilingual & Multilingual Language Shelves");
+    expect(readme).toContain("Intelligent Multi-Source Metadata & Cover Routing");
+    expect(readme).toContain("RanobeDB API");
+    expect(readme).toContain("MangaDex API");
+    expect(readme).toContain("Google Books");
+
+    // 5. Apple WWDC Fluid Interface Design System
+    expect(readme).toContain("Apple WWDC Fluid Interface Design System");
+    expect(readme).toContain("Materials & Translucency");
+    expect(readme).toContain("Optical Typography");
+    expect(readme).toContain("Tactile Feedback & Immediate Response");
+    expect(readme).toContain("Fluid Springs & Spatial Motion");
+    expect(readme).toContain("Desktop Hover Synopsis Preview & Quick Actions");
+    expect(readme).toContain("3D Skeuomorphic Depth & Accessibility");
+  });
+
+  it("uploader/index.html connection guide modal includes all Singapore endpoints and features guide", () => {
+    const htmlPath = path.join(import.meta.dir, "index.html");
+    const html = fs.readFileSync(htmlPath, "utf8");
+
+    // Singapore endpoints with copy actions
+    expect(html).toContain("copyToClipboard('http://kosync-sg.wavypremium.xyz')");
+    expect(html).toContain("copyToClipboard('https://kosync-sg.wavypremium.xyz:8443')");
+    expect(html).toContain("copyToClipboard('http://opds.wavypremium.xyz/opds')");
+    expect(html).toContain("copyToClipboard('https://opds.wavypremium.xyz:8443/opds')");
+    expect(html).toContain("copyToClipboard('https://reading-sg.wavypremium.xyz:8443')");
+
+    // Features tab and quick guide section
+    expect(html).toContain('id="guide-tab-features"');
+    expect(html).toContain('id="guide-features"');
+    expect(html).toContain("Dynamic Language Shelves (All / Burmese / English / Other)");
+    expect(html).toContain("Desktop Hover Synopsis Preview &amp; Quick Actions");
+    expect(html).toContain("Apple WWDC Fluid Interface &amp; Keyboard Control");
+
+    // Tab wiring in setGuideTab
+    expect(html).toContain("const tabs = ['kosync', 'opds', 'features', 'cli', 'proxy', 'all'];");
+    expect(html).toContain("secFeatures?.classList.remove('hidden');");
+    expect(html).toContain("modalScroll.scrollTop = 0;");
+
+    // Book card hover synopsis preview integration & CSS
+    expect(html).toContain(".hover-synopsis-preview");
+    expect(html).toContain("-webkit-line-clamp: 2;");
+    expect(html).toContain("line-clamp: 2;");
+    expect(html).toContain("overflow: hidden;");
+    expect(html).toContain("min-height: 0;");
+    expect(html).toContain("user-select: none;");
+    expect(html).toContain("cleanSynopsis");
+    expect(html).toContain("synopsisPreviewHtml");
+
+    // CSS rules for Apple WWDC glass materials and optical tracking
+    expect(html).toContain(".apple-material-glass-light {");
+    expect(html).toContain("backdrop-filter: blur(12px) saturate(150%);");
+    expect(html).toContain(".apple-material-modal {");
+    expect(html).toContain("backdrop-filter: blur(20px) saturate(180%);");
+    expect(html).toContain(".tracking-optical-micro { letter-spacing: 0.025em; }");
+    expect(html).toContain("transform: scale(0.97) !important;");
+  });
+});
+
