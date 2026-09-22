@@ -172,7 +172,7 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain("#09090b");
 
     // Sleek top app bar & search
-    expect(html).toContain("Reading HQ");
+    expect(html).toContain("LightHouse");
     expect(html).toContain('id="searchInputDesktop"');
     expect(html).toContain('id="filterBtn"');
     expect(html).toContain("breadcrumbCategory");
@@ -635,6 +635,15 @@ describe("Webpage Manual & KOReader Connection Section (index.html)", () => {
     expect(html).toContain("openGuideModal()");
     expect(html).toContain("KOReader & Manual");
     expect(html).toContain("KOReader & Stack Manual");
+
+    // LightHouse CLI reference tab & panel
+    expect(html).toContain('id="guide-tab-cli"');
+    expect(html).toContain('id="guide-cli"');
+    expect(html).toContain("bin/lighthouse status");
+    expect(html).toContain("bin/lighthouse up");
+    expect(html).toContain("bin/lighthouse down");
+    expect(html).toContain("bin/lighthouse install-daemons");
+    expect(html).toContain("bin/lighthouse backup");
 
     // SVG icons
     expect(html).toContain('<symbol id="icon-book-open"');

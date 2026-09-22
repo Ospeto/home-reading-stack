@@ -1,12 +1,14 @@
-# Home Reading Stack (KOReader Sync + Calibre OPDS + Web Uploader)
+# LightHouse Reading Stack
 
-A self-hosted, private reading infrastructure designed for jailbroken and standard Kindle devices running [KOReader](https://github.com/koreader/koreader). Hosted 24/7 on the local home network (Mac mini `192.168.31.15`), completely bypassing national firewall (GFW) restrictions without requiring VPN clients on e-ink devices.
+> Unified, self-hosted private reading infrastructure for Kindle and mobile devices running [KOReader](https://github.com/koreader/koreader).
+
+LightHouse turns a home Mac mini or Linux host into an always-on personal reading command center. It bridges physical e-ink readers (Kindle Paperwhite, Basic, Oasis) and mobile devices to a centralized Calibre library, real-time reading progress synchronization, automated web article extraction, and secure worldwide remote access—completely bypassing restrictive firewalls (GFW/DPI) without needing VPN apps installed on e-ink devices.
 
 ---
 
 ## 🏗️ Architecture & Topology
 
-```
+```text
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        Local Home Network (Wi-Fi)                     │
 │                                                                        │
@@ -23,275 +25,239 @@ A self-hosted, private reading infrastructure designed for jailbroken and standa
 │         ├───────────────────────────┤                                  │
 │         │ 1. KOSync Server (:7200)  │ ◄── Real-time progress/bookmark  │
 │         │ 2. OPDS Server   (:8088)  │ ◄── OTA Book Catalog & Downloads │
-│         │ 3. Reading HQ    (:8086)  │ ◄── Catalog UI & Web Uploader    │
-│         │ 4. LAN Proxy     (:7890)  │ ◄── SOCKS5 / VLESS gateway       │
-│         │ 5. Tunnel Agent  (plist)  │ ──┐ Persistent SSH reverse tunnel│
+│         │ 3. LightHouse UI (:8086)  │ ◄── Catalog Manager & Ingestion  │
+│         │ 4. LAN Proxy     (:7890)  │ ◄── sing-box SOCKS5 / VLESS      │
+│         │ 5. Tunnel Agents (launchd)│ ──┐ Persistent SSH Tunnels       │
 │         └───────────────────────────┘   │                              │
 └─────────────────────────────────────────┼──────────────────────────────┘
-                                          │ ssh -R 0.0.0.0:8086:127.0.0.1:8086
+                                          │ ssh reverse tunnels
                                           │ via ProxyCommand (SOCKS5 :7890)
                                           ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                VPS Cloud Edge (`panel.wavypremium.xyz`)                │
+│         Singapore Edge (`sg-vps`) & US Edge (`panel.wavypremium.xyz`)  │
 │  - Caddy TLS Reverse Proxy (https://reading.wavypremium.xyz)           │
-│  - Reverse proxied to 172.18.0.1:8086 (Mac Mini Reading HQ)            │
+│  - Low-latency Singapore WAN: KOSync (:80/:8443) & OPDS (:80/:8443)    │
 │  - Telegram Mini App (TMA) & Web App Menu Button target                │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Core Components
+
+1. **LightHouse Web Manager (`uploader/server.ts`, port `8086`):**
+   - High-performance Bun/TypeScript server with in-process SQLite queries.
+   - Minimalist, responsive Telegram Mini App (TMA) and desktop catalog interface (`uploader/index.html`).
+   - Durable SQLite-backed ingestion job queue (`cache.db`) and EPUB-only canonical enforcement.
+   - Built-in OPDS feed reverse proxy forwarding `/opds` and `/get/*` directly to Calibre with range requests.
+2. **KOSync Server (`kosync/`, port `7200`):**
+   - Lightweight, self-hosted KOReader synchronization backend backed by SQLite (`koreader-sync.db`).
+   - Syncs reading positions, progress percentage, and timestamps across devices instantly.
+3. **Calibre Content & OPDS Server (port `8088`):**
+   - Native Calibre library server running over `metadata.db` in WAL mode.
+   - Provides Open Publication Distribution System (OPDS) XML/Atom catalog feeds for direct wireless book downloads.
+4. **sing-box LAN Proxy Gateway (port `7890`):**
+   - Inbound HTTP & SOCKS5 proxy routing outbound external requests through low-latency VLESS nodes.
+   - Serves as the Wi-Fi HTTP proxy for Kindle devices needing to bypass GFW/DPI firewalls.
+5. **Reverse SSH Tunnels & Auto-Healing Watchdog:**
+   - Dual WAN tunnels routing traffic through Singapore (`sg-vps`) and US (`panel`) edge nodes.
+   - Monitored by `scripts/tunnel-watchdog.sh` every 120s with automatic remote port collision recovery (`fuser -k`).
+
 ---
 
-## 🚀 Services & Endpoints
+## 🌐 Services & Endpoints Reference
+
+Singapore WAN endpoints are the **primary recommended routes** for low-latency progress sync and wireless book downloads on KOReader.
 
 | Service | Address | Protocol | Description |
 | --- | --- | --- | --- |
-| **Reading HQ Dashboard** | `http://192.168.31.15:8086` | Web SPA | Modern Flash UI library manager, live KOSync telemetry (real titles), Series/Author facets, multi-source scraper, Obsidian export |
-| **WAN Mini App / Dashboard** | `https://reading.wavypremium.xyz` | HTTPS | Global secure access to Reading HQ via VLESS SSH reverse tunnel + Caddy TLS |
-| **Telegram Ingest Bot** | `@saroat_ospeto_bot` | Telegram API | Send/forward `.epub`, `.pdf`, `/find` search, `/backup`, and integrated Telegram Mini App button |
-| **Singapore WAN KOSync (Default)** | `http://kosync-sg.wavypremium.xyz` | HTTP (Port 80) | High-speed Singapore WAN KOSync progress sync (Recommended for KOReader/Kindle) |
-| **Singapore WAN KOSync (TLS)** | `https://kosync-sg.wavypremium.xyz:8443` | HTTPS (8443) | Encrypted Singapore WAN KOSync progress sync on alternate port 8443 |
-| **Singapore WAN OPDS Feed (Default)** | `http://opds.wavypremium.xyz/opds` | HTTP / Atom | High-speed Singapore wireless OPDS catalog for KOReader & mobile readers |
-| **Singapore WAN OPDS Feed (TLS)** | `https://opds.wavypremium.xyz:8443/opds` | HTTPS (8443) | Encrypted Singapore wireless OPDS catalog on alternate port 8443 |
-| **Local KOSync** | `http://192.168.31.15:7200` | HTTP / JSON | High-performance Bun/SQLite progress sync |
-| **Local OPDS Feed** | `http://192.168.31.15:8088/opds` | Atom / XML | Direct book catalog for KOReader search & downloads |
-| **Local Calibre Reader** | `http://192.168.31.15:8088` | Web UI | In-browser reading & library management |
-| **Manga Auto-Packer** | `/Volumes/Ospeto_SSD/Manga` | Background Daemon | Auto-packs image folders into uncompressed `.cbz` with ComicInfo right-to-left metadata |
-| **Daily Snapshot Backup** | `/Users/ospeto/.backups/reading-stack` | 04:00 AM LaunchAgent | Online SQLite snapshots of KOSync, Calibre, Uploader, and Manga DBs with 7-day retention + Telegram delivery |
-| **Local Proxy Gateway** | `http://192.168.31.15:7890` | HTTP / SOCKS5 | sing-box background tunnel via Remnawave VLESS |
-| **Singapore Reverse Tunnel** | `com.ospeto.reading-sg-tunnel` | SSH | Persistent LaunchAgent reverse tunnel binding Mac Mini `:8086` and `:7200` to `sg-vps` |
-| **VLESS SSH Reverse Tunnel** | `com.ospeto.reading-vless-tunnel` | SSH / SOCKS5 | Persistent LaunchAgent reverse tunnel binding Mac Mini `:8086` to VPS `:8086` |
+| **Singapore WAN KOSync (Recommended)** | `http://kosync-sg.wavypremium.xyz` | HTTP (Port 80) | High-speed Singapore WAN KOSync progress sync (KOReader default) |
+| **Singapore WAN KOSync (TLS)** | `https://kosync-sg.wavypremium.xyz:8443` | HTTPS (8443) | Encrypted Singapore WAN KOSync progress sync |
+| **Singapore WAN OPDS Feed (Recommended)** | `http://opds.wavypremium.xyz/opds` | HTTP / Atom | High-speed wireless OPDS catalog for KOReader & mobile devices |
+| **Singapore WAN OPDS Feed (TLS)** | `https://opds.wavypremium.xyz:8443/opds` | HTTPS (8443) | Encrypted Singapore wireless OPDS catalog |
+| **LightHouse Dashboard (Local)** | `http://192.168.31.15:8086` | Web SPA | Fast catalog manager, KOSync reading telemetry, facets, and upload manager |
+| **LightHouse Dashboard (WAN)** | `https://reading.wavypremium.xyz` | HTTPS | Global secure access to LightHouse via SSH reverse tunnel + Caddy TLS |
+| **Telegram Bot & Mini App** | `@saroat_ospeto_bot` | Telegram API | Ingest books, search catalog (`/find`), view shelf (`/reading`), hot backups (`/backup`) |
+| **Local KOSync** | `http://192.168.31.15:7200` | HTTP / JSON | Direct LAN progress sync for KOReader |
+| **Local Calibre OPDS Feed** | `http://192.168.31.15:8088/opds` | Atom / XML | Direct home LAN book catalog |
+| **Local Calibre Web Reader** | `http://192.168.31.15:8088` | Web UI | In-browser reading and Calibre catalog manager |
+| **Local LAN Proxy Gateway** | `http://192.168.31.15:7890` | HTTP / SOCKS5 | sing-box proxy gateway for Kindle GFW bypass |
+| **Singapore Reverse Tunnel Daemon** | `com.ospeto.reading-sg-tunnel` | SSH | LaunchAgent binding Mac Mini `:8086` and `:7200` to `sg-vps` |
+| **VLESS Reverse Tunnel Daemon** | `com.ospeto.reading-vless-tunnel` | SSH / SOCKS5 | LaunchAgent binding Mac Mini `:8086` to VPS `panel` via ProxyCommand |
+| **Tunnel Watchdog Daemon** | `com.ospeto.reading-tunnel-watchdog` | Bash Script | Periodic health watchdog executing `scripts/tunnel-watchdog.sh` every 120s |
 
 ---
 
-## 🛡️ Deduplication & Metadata Sanitizer
+## ⚡ Unified Control CLI (`bin/lighthouse`)
 
-1. **Automatic Deduplication:**
-   - Pre-computes KOReader document checksum and checks existing Calibre titles.
-   - If an identical book exists: attaches new format (`.pdf`, `.mobi`) to the existing book without creating duplicate IDs.
-   - If the exact format already exists: prevents duplicate creation and returns clean notification.
+LightHouse includes a portable management CLI (`bin/lighthouse`) for service lifecycle, health probes, automated daemon registration, and hot database migrations.
 
-2. **Metadata Sanitizer:**
-   - Automatically strips advertising URLs, telegram channel links (`t.me/...`, `@channel`), bracket garbage (`[Ebook]`, `[Myanmar Book]`, `_v1`, `(1)`), and junk tags on ingestion.
-   - 1-Click **"Clean Tags"** button in Reading HQ header sweeps and sanitizes the entire library.
+```bash
+# Display full one-screen status dashboard of all ports, tunnels, and services
+bin/lighthouse status
 
-### 1. Progress Synchronization
+# Start all services gracefully in dependency order
+bin/lighthouse up
 
-1. Open any book → Top menu → **Tools (wrench icon)** → **Progress sync**.
-2. Tap **Custom sync server** → enter:
+# Stop all services gracefully in reverse dependency order
+bin/lighthouse down
 
+# Restart the entire stack
+bin/lighthouse restart
+
+# Run automated health probes and auto-heal stale listeners/workers
+bin/lighthouse health
+
+# Dynamically generate and register macOS LaunchAgents for the current user
+bin/lighthouse install-daemons
+
+# Create a hot SQLite backup bundle with checksum and manifest
+bin/lighthouse backup
+
+# Perform verified restoration of complete stack from backup bundle
+bin/lighthouse restore ~/.backups/reading-stack/lighthouse-backup-YYYY-MM-DD_HHMMSS.tar.gz --dry-run
+```
+
+---
+
+## 💾 Hot SQLite Backup & Restore Kit
+
+LightHouse protects all critical reading databases (progress sync, library catalog metadata, ingestion hash cache, manga state) using zero-downtime hot SQLite online snapshots with integrity checksums and WAL truncation.
+
+### 1. Backup Producers
+
+The reading stack supports three complementary backup workflows:
+- **Unified CLI (`bin/lighthouse backup`):**
+  1. Runs `sqlite3 <db> "PRAGMA wal_checkpoint(TRUNCATE);"` to flush pending transactions from WAL files back into the primary database pages.
+  2. Creates atomic snapshots via `sqlite3 <db> ".backup <dest>"` across all four databases:
+     - KOSync Database (`koreader-sync.db`)
+     - Calibre Library Metadata (`metadata.db`)
+     - Ingestion Job & Hash Cache (`cache.db`)
+     - Manga State Database (`manga.db`, if present)
+  3. Packages snapshots into `~/.backups/reading-stack/lighthouse-backup-YYYY-MM-DD_HHMMSS.tar.gz` (or `.tar.zst` if `zstd` is installed).
+  4. Generates a sibling SHA-256 integrity checksum file (`.sha256`) and an embedded JSON backup manifest (`manifest.json`).
+- **Automated Scheduled Daily Snapshots (`scripts/backup-daily.sh`):**
+  - Runs automatically every morning at 04:00 AM via LaunchAgent `com.ospeto.reading-stack-backup`.
+  - Produces `reading-stack-backup-YYYY-MM-DD_HHMMSS.tar.gz` with 7-day rolling retention and mirrors to external SSD when mounted.
+  - Automatically delivers backup archives to Telegram when `TELEGRAM_BACKUP_CHAT_ID` is set.
+- **In-Chat Telegram On-Demand Backups (`/backup`):**
+  - Instant online backup created by the Telegram bot producing `reading-stack-backup-YYYY-MM-DD_HHMMSS.tar.gz` and delivered directly to the chat as a `.tar.gz` document.
+
+### 2. Verified Restore Engine (`bin/lighthouse restore`)
+
+The restore engine in `bin/lighthouse restore` automates safe, verified disaster recovery:
+
+```bash
+# 1. First verify archive integrity and checksum without modifying any files
+bin/lighthouse restore ~/.backups/reading-stack/lighthouse-backup-2026-03-24_120000.tar.gz --dry-run
+
+# 2. Execute verified restore (stops services, cleans sidecars, restores, and verifies SQLite integrity)
+bin/lighthouse restore ~/.backups/reading-stack/lighthouse-backup-2026-03-24_120000.tar.gz --force
+
+# 3. Bring services back online
+bin/lighthouse up
+bin/lighthouse status
+```
+
+*Note: The restore engine can restore bundles created by `bin/lighthouse backup` as well as daily archives produced by `scripts/backup-daily.sh`.*
+
+**Automated Safety Guarantees:**
+- **Cryptographic Checksum Verification:** Verifies the archive matches its SHA-256 checksum before extracting.
+- **Archive Safety Scan:** Inspects archive members to reject symlinks and directory traversal (`..`) sequences.
+- **Automatic Service Quiescence:** Calls `cmd_down` to safely stop running services before modifying destination databases.
+- **Hermetic WAL Cleanup:** Automatically unlinks preexisting `.db-wal` and `.db-shm` sidecars to prevent stale WAL frames from replaying over restored databases.
+
+---
+
+## 📖 KOReader Device Setup Guide
+
+### 1. Progress Synchronization (KOSync)
+
+1. Open any book in KOReader → tap top of screen for menu bar.
+2. Tap the **Tools (wrench icon)** tab → select **Progress sync**.
+3. Tap **Custom sync server** and enter the Singapore WAN endpoint:
    ```text
    http://kosync-sg.wavypremium.xyz
    ```
+   *(Encrypted TLS: `https://kosync-sg.wavypremium.xyz:8443` | Local LAN: `http://192.168.31.15:7200`)*
+4. Tap **Login** → enter Username (`moe`) and password.
+5. Enable **"Automatically keep documents in sync"**.
+6. Tap **"Pull progress to this device now"** to verify connection.
 
-   *(Or TLS: `https://kosync-sg.wavypremium.xyz:8443` | Local LAN: `http://192.168.31.15:7200`)*
+### 2. OPDS Wireless Book Catalog
 
-3. Tap **Login** → enter Username (`moe`) and Password.
-4. Check **"Automatically keep documents in sync"**.
-5. Tap **Pull progress to this device now**.
-
-### 2. OPDS Book Catalog
-
-1. Top menu → **Search icon (magnifying glass)** → **OPDS catalog** → **Add new catalog**.
-2. **Catalog Name:** `Mac Mini Library`
-3. **Catalog URL:**
-
+1. In KOReader, tap top menu → **Search icon (magnifying glass)** → **OPDS catalog**.
+2. Tap **Add new catalog**.
+3. Set Catalog Name to: `LightHouse Library` (or `Mac Mini Library`).
+4. Enter Catalog URL:
    ```text
    http://opds.wavypremium.xyz/opds
    ```
+   *(Encrypted TLS: `https://opds.wavypremium.xyz:8443/opds` | Local LAN: `http://192.168.31.15:8088/opds`)*
+5. Tap **Connect** (no credentials required). Books can now be browsed, searched, and downloaded directly over Wi-Fi.
 
-   *(Or TLS: `https://opds.wavypremium.xyz:8443/opds` | Local LAN: `http://192.168.31.15:8088/opds` or `http://192.168.31.15:8086/opds`)*
+### 3. Kindle Wi-Fi Proxy Gateway (GFW / DPI Bypass)
 
-4. Tap **Connect** (no credentials required on local LAN or WAN).
-
----
-
-## 💻 How to Upload Books
-
-1. Open **`http://192.168.31.15:8086`** in any browser on your home network.
-2. Drag and drop `.epub`, `.pdf`, `.mobi`, `.azw3`, `.cbz`, or `.zip` / `.rar` archive packs (or click **"Choose Folder"** to upload an entire directory).
-3. Books and extracted archive contents are immediately imported into Calibre, de-duplicated, scraped for metadata, and broadcast on the OPDS feed.
-4. Or send/forward book files and `.zip` packs directly to the **Telegram Bot (`@saroat_ospeto_bot`)** from anywhere.
+If your Kindle displays *"Check your network connection"* when connecting to overseas servers:
+1. On Kindle: Go to **Settings** → **Wi-Fi Networks** → select your Wi-Fi network → tap **Advanced**.
+2. Configure **HTTP Proxy**:
+   - **Proxy Host:** `192.168.31.15`
+   - **Proxy Port:** `7890`
+3. Save network settings. All Kindle network requests will now route through the home host's sing-box proxy gateway.
 
 ---
 
-## 🌐 WAN Remote Access & Telegram Mini App (TMA)
+## 📚 Canonical EPUB-Only Collection Policy
 
-The reading stack provides seamless global access to Reading HQ from outside the local network without port forwarding, dynamic DNS, or exposing home IP addresses:
+LightHouse standardizes on **EPUB-only** for its canonical reading collection:
 
-```
-[Telegram Client / Browser]
-            │
-            ▼  HTTPS (Port 443)
-[Cloudflare DNS / Caddy on VPS] (https://reading.wavypremium.xyz)
-            │
-            ▼  HTTP reverse_proxy to http://172.18.0.1:8086
-[Remote SSH Daemon on VPS] (0.0.0.0:8086)
-            ▲
-            │  Persistent SSH Reverse Tunnel (-R 0.0.0.0:8086:127.0.0.1:8086)
-            │  via ProxyCommand (nc -X 5 -x 127.0.0.1:7890 %h %p)
-[Mac Mini LaunchAgent: com.ospeto.reading-vless-tunnel]
-            │
-            ▼  Local HTTP
-[Reading HQ Dashboard & Web Uploader] (127.0.0.1:8086)
-```
-
-### 1. Telegram Mini App (TMA) Integration
-
-- **Chat Menu Button:** On bot startup, the bot registers a native Web App menu button labeled **"📖 Reading HQ"** pointing to `https://reading.wavypremium.xyz` via `setChatMenuButton`.
-- **Commands `/app` and `/webapp`:** Respond with an inline keyboard button **[📖 Open Reading HQ]** that opens the mobile-responsive reading dashboard inside Telegram's embedded browser.
-- **Telegram WebApp SDK:** `uploader/index.html` loads the official `telegram-web-app.js` SDK and calls `Telegram.WebApp.ready()` and `Telegram.WebApp.expand()` for a full-height, native app experience.
-
-### 2. Persistent VLESS Reverse Tunnel (LaunchAgent)
-
-- Managed by `com.ospeto.reading-vless-tunnel.plist` installed in `~/Library/LaunchAgents/` (tracked in `scripts/com.ospeto.reading-vless-tunnel.plist`).
-- Executes:
-
-  ```bash
-  ssh -N -R 0.0.0.0:8086:127.0.0.1:8086 \
-    -o 'ProxyCommand=nc -X 5 -x 127.0.0.1:7890 %h %p' \
-    -o ServerAliveInterval=15 \
-    -o ServerAliveCountMax=3 \
-    -o ExitOnForwardFailure=yes \
-    panel
-  ```
-
-- Uses `nc` over local Sing-box SOCKS5 (`127.0.0.1:7890`) to maintain a persistent reverse tunnel through censorship firewalls to the VPS (`panel`).
-- Configured with `RunAtLoad: true` and `KeepAlive: true` for automatic re-connection after network drops or reboot.
-
-### 3. VPS Edge Proxy (Caddy)
-
-- Caddy configuration on VPS (`/opt/remnawave/caddy/Caddyfile`):
-
-  ```caddyfile
-  https://reading.wavypremium.xyz {
-      reverse_proxy * http://172.18.0.1:8086
-  }
-  ```
-
-- Automatically provisions and renews Let's Encrypt / ZeroSSL TLS certificates.
+1. **Format Enforcement:**
+   - Ingestion strictly accepts `.epub` files (and `.zip` / `.7z` archives containing `.epub` files).
+   - Non-canonical eBook formats (`.pdf`, `.mobi`, `.azw3`, `.cbz`, etc.) are automatically rejected or quarantined with descriptive notifications.
+   - Web article extractions compile directly into clean, serif-styled `.epub` containers with embedded typographic covers.
+2. **Storage Path Immutability:**
+   - Physical Calibre library directory structures (`Author/Title (id)/Title - Author.epub`) are immutable and never renamed by hand.
+   - User downloads and Telegram file deliveries dynamically derive sanitized, human-friendly filenames (`Title - Author.epub` or `Series 01 - Title - Author.epub`) via RFC 5987 / RFC 6266 `Content-Disposition` headers.
 
 ---
 
-## 🔍 In-Chat Library Search & Retrieval (`/find`, `/search`, `/get`)
+## 🔒 Security, SSRF & Edge Hardening
 
-Search your entire Calibre catalog directly within Telegram and retrieve books on the go:
+The LightHouse WAN edge (`https://reading.wavypremium.xyz`) is hardened against unauthorized mutations and network attacks while keeping local LAN access completely friction-free:
 
-1. **Commands:**
-   - `/find <query>`, `/search <query>`, or `/f <query>`: Fast multi-term search across book titles, authors, and series names.
-   - `/get <id>`: Direct instant file download by Calibre book ID.
-
-2. **Interactive Results:**
-   - Displays top 3–5 matching books with Title, Author, Series index, and available formats (`[EPUB]`, `[PDF]`, `[CBZ]`).
-   - Under each match, inline keyboard buttons provide 1-tap actions:
-     - `[📥 Send File]` (or command `/get <id>`): Instantly extracts the book file (`.epub` preferred) from Calibre storage and delivers it directly to your Telegram chat via `sendDocument`.
-     - `[📖 Read Online]`: Direct link to Calibre Web online reader (`/read/<id>/epub`).
-     - `[ℹ️ Details]`: Direct link to full book metadata panel in Calibre Web.
-   - Files exceeding Telegram's 20MB limit trigger an informative message with direct Web Uploader and Calibre Web reader links.
-
----
-
-## 🛡️ Paywall & Bot-Wall Fallback (Jina Reader)
-
-When ingesting web articles (`/epub <url>` or pasting URLs):
-
-1. **Cloudflare & Paywall Detection:**
-   - Checks HTTP status (401, 403) and response bodies for anti-bot / challenge signatures (`Just a moment...`, `cf-browser-verification`, `Attention Required! | Cloudflare`).
-2. **Jina Reader Routing:**
-   - Transparently re-routes blocked URLs through `https://r.jina.ai/<url>` via the local Sing-box proxy gateway (`http://127.0.0.1:7890`).
-   - Extracts title, author, publication timestamp, and clean markdown content.
-3. **Kindle Typography Compilation:**
-   - Converts markdown into structured, serif-styled HTML (`Charter`, `Georgia`) optimized for e-ink readability.
-   - Invokes `ebook-convert` to package the article as `.epub`, registers it in Calibre, and sends a copy directly back to your Telegram chat.
-
----
-
-## 📨 Resilient Telegram Delivery (Safe Plain-Text Fallback)
-
-To prevent unclosed Markdown characters (`_`, `*`, `[`) in book titles or error messages from dropping messages:
-
-- `sendMessage`, `editOrSendMessage`, and `sendDocument` inspect API responses for HTTP 400 entity parsing errors.
-- Any Markdown formatting failure automatically triggers an immediate retry in plain text, ensuring status messages and book notifications are never dropped.
-
----
-
-## 💾 Database Backups & Offsite Delivery
-
-The reading stack protects all critical reading databases (progress sync, library catalog metadata, ingestion hash cache, manga state) using hot SQLite online snapshots:
-
-1. **On-Demand Hot Backup (`/backup` in Telegram):**
-   - Send `/backup` to the Telegram bot (`@saroat_ospeto_bot`) at any time.
-   - The bot creates a live online snapshot (`sqlite3 .backup`) across:
-     - KOSync Database (`koreader-sync.db`)
-     - Calibre Library Metadata (`metadata.db`)
-     - Uploader Ingestion Cache (`cache.db`)
-     - Manga Processor DB (`manga.db`, if present)
-   - Compresses all snapshots into a timestamped `.tar.gz` archive (~85 KB) and delivers it directly to your Telegram chat.
-   - Automatically registers your chat ID as `TELEGRAM_BACKUP_CHAT_ID` in `/Users/ospeto/uploader/.env` for scheduled backups.
-
-2. **Daily Scheduled Offsite Backup Delivery:**
-   - Managed via LaunchAgent `com.ospeto.reading-stack-backup` running `scripts/backup-daily.sh` every morning at 04:00 AM.
-   - Backs up databases, saves local copies to `~/.backups/reading-stack/` (7-day rolling retention), and mirrors to external SSD if mounted.
-   - When `TELEGRAM_BACKUP_CHAT_ID` and `TELEGRAM_BOT_TOKEN` are configured in `.env`, automatically pushes the fresh `.tar.gz` archive directly to your Telegram chat through the local proxy.
-
----
-
-## 🛡️ Public WAN & API Surface Hardening
-
-The public WAN edge (`https://reading.wavypremium.xyz`) is hardened against unauthorized mutations and network exploitation while preserving friction-free local LAN usage:
-
-1. **WAN vs LAN Differentiation & Authentication:**
-   - **Local LAN Requests:** Direct requests from home devices (`192.168.x.x`, `127.0.0.1`, `10.x.x.x`, etc.) do not require authentication credentials, maintaining zero-friction usage on home Wi-Fi.
-   - **WAN Reverse-Tunnel Requests:** Requests arriving through the reverse tunnel or public edge are identified via Host headers (`reading.wavypremium.xyz`), `X-Forwarded-Host`, and non-internal `X-Forwarded-For` IPs.
-   - **Mutating Route Authentication:** All mutating endpoints (`POST`, `PUT`, `DELETE`) from WAN require either:
-     - Bearer token or `X-API-Key` matching `READING_API_KEY` in `.env`.
-     - Valid Telegram WebApp `initData` cryptographically verified with `TELEGRAM_BOT_TOKEN` via HMAC-SHA256.
-     - Authenticated session cookie (`reading_token`).
-   - **Captain-approved public reads:** Read-only library, covers/downloads, telemetry, export, and reading-data endpoints remain public on WAN. Authentication is not added to `GET /api/books`, library facets, read-only job inspection, or equivalent read routes; only state-changing routes are protected.
-   - **Credential transport:** API keys and TMA/session credentials are accepted only in their header or cookie channels. Query-string `token`/`auth` values are rejected because URLs leak through history, logs, Referer headers, and analytics.
-
-2. **CORS & CSRF Origin Protection:**
-   - CORS is locked down from wildcard `*` to permitted origins: `https://reading.wavypremium.xyz`, `http://kosync-sg.wavypremium.xyz`, `https://kosync-sg.wavypremium.xyz:8443`, `http://opds.wavypremium.xyz`, `https://opds.wavypremium.xyz:8443`, local LAN origins, and custom entries in `ALLOWED_ORIGINS`.
-   - Mutating routes validate `Origin`, `Referer`, and `Sec-Fetch-Site` to prevent cross-site request forgery attacks.
-
-3. **SSRF (Server-Side Request Forgery) Protection:**
+1. **WAN vs LAN Authentication:**
+   - **Local LAN Requests:** Home network requests (`192.168.x.x`, `127.0.0.1`, `10.x.x.x`) pass with zero friction.
+   - **WAN Reverse-Tunnel Requests:** Mutating endpoints (`POST`, `PUT`, `DELETE`) require either a Bearer token or `X-API-Key` matching `READING_API_KEY`, cryptographically verified Telegram WebApp `initData` HMAC-SHA256 credentials, or session cookies (`reading_token`).
+   - **Query-String Credential Rejection:** Query-string `token`/`auth` parameters are strictly rejected to prevent secret leakage via browser history, server access logs, and `Referer` headers.
+   - **Public Read Access:** Read-only library views (`GET /api/books`), book covers, and OPDS feeds remain accessible on WAN for authorized reader devices without credentials.
+2. **SSRF (Server-Side Request Forgery) Protection:**
    - Outbound network requests (URL article ingestion, cover art downloads, external metadata scraping) strictly block internal IP ranges:
      - Loopback (`127.0.0.0/8`, `::1`)
      - RFC 1918 private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
      - Cloud metadata & link-local (`169.254.0.0/16`, `169.254.169.254`)
-     - Decimal/hex/octal IP representations, IPv6 multicast/reserved ranges, and local hostnames (`localhost`, `*.internal`, `*.lan`)
-   - Every A and AAAA result is validated, then each redirect hop reconnects through a pinned connector using the original hostname for Host/TLS SNI semantics; DNS is never re-resolved by the connector.
-
-4. **Decompression & Resource Limits:**
-   - Maximum upload payload: 100 MB.
-   - Archive extraction limits: max 500 entries, max 150 MB single file, max 500 MB total uncompressed, and 100:1 compression ratio limit to prevent zip/tar bombs.
-   - Path traversal `/..` guards reject any archive entry containing directory escape sequences.
-
-5. **Safe Error Responses & Metadata Filenames:**
-   - Public API error responses redact internal filesystem paths and stack traces (`sanitizeErrorMessage`).
-   - Download endpoints return clean metadata-derived filenames (`Title - Author.epub` or `[Series 1] Title - Author.epub`), never leaking Calibre internal storage directory paths.
-
-6. **Secret Hygiene & Credential Rotation Protocol:**
-   - `.env.example` contains non-functional dummy placeholders only. Never commit production tokens, salts, or API keys to the repository.
-   - Any exposed or leaked credentials require captain-authorized live credential rotation and repository history remediation (such as `git filter-repo` or BFG Repo-Cleaner). Autonomous agents must not rewrite git history or perform live credential rotation without explicit captain authorization.
+     - Decimal, hex, and octal IP representations, IPv6 multicast/reserved ranges, and local hostnames (`localhost`, `*.internal`, `*.lan`)
+   - Every DNS A and AAAA record is validated before socket creation; redirect hops reconnect through pinned connectors using the original hostname for SNI/Host semantics so DNS is never re-resolved.
+3. **CORS & CSRF Origin Protection:**
+   - CORS is locked down to allowed origins: `https://reading.wavypremium.xyz`, Singapore endpoints, local LAN origins, and custom entries in `ALLOWED_ORIGINS`.
+   - Mutating routes validate `Origin`, `Referer`, and `Sec-Fetch-Site` headers to reject cross-site forgery attempts.
+4. **Decompression & Resource Protections:**
+   - 100 MB maximum upload payload limit.
+   - Archive extraction limits: max 500 entries, 150 MB single file, 500 MB total uncompressed, and 100:1 compression ratio limit to prevent zip/tar bombs. Path traversal `/..` guards reject archive escape sequences.
 
 ---
 
-## ⚡ Durable SQLite Ingestion Job Queue
+## ⚡ Durable Ingestion Job Queue (`cache.db`)
 
-Background tasks and asynchronous workflows are backed by a durable SQLite job queue (`jobs` table in `cache.db`) rather than unmonitored in-memory timeouts:
+Background tasks and asynchronous workflows run via a durable SQLite job queue (`jobs` table in `cache.db`):
 
 1. **Job Types:**
-   - `file_ingest`: Ingest single book file into Calibre with format validation and deduplication.
+   - `file_ingest`: Single book file ingestion into Calibre with format validation and deduplication.
    - `archive_extract`: Safe extraction of archive packages, importing canonical EPUB files.
    - `url_article_ingest`: Web article extraction, conversion to EPUB, and Calibre ingestion.
    - `metadata_enrich`: Background metadata and cover art scraping for newly imported books.
    - `cover_backfill`: Batch generation of typographic covers for web articles lacking covers.
-
 2. **Resilience & Crash Recovery:**
    - Bounded exponential backoff: Failed jobs auto-retry up to 3 times (2s, 4s, 8s backoff) before entering `failed` status.
-   - Crash recovery on startup: Interrupted jobs left in `processing` state during a process restart or server reboot are automatically recovered back to `pending` on startup.
-   - Calibre lock safety: Single-worker sequential execution prevents Calibre SQLite locking collisions.
-
+   - Interrupted jobs left in `processing` state across process restarts are recovered back to `pending`.
+   - Single-worker sequential execution prevents Calibre SQLite locking collisions.
 3. **Observability API:**
    - `GET /api/jobs/recent`: List recent jobs with optional `?limit=`, `?status=`, `?type=` filters.
    - `GET /api/jobs/:id`: Retrieve single job status, payload, result, and sanitized error.
@@ -299,15 +265,20 @@ Background tasks and asynchronous workflows are backed by a durable SQLite job q
 
 ---
 
-## 📖 Canonical EPUB-Only Collection Policy
+## 🤖 Telegram Bot & Automation
 
-The home reading stack standardizes on **EPUB-only** for the canonical reading collection:
+Search your library and retrieve books anywhere via Telegram (`@saroat_ospeto_bot`):
+- **Search & Retrieval (`/find`, `/search`, `/f`):** Fast multi-term search across titles, authors, and series. Delivers results with 1-tap interactive buttons: `[📥 Send File]` (or command `/get <id>`), `[📖 Read Online]`, and `[ℹ️ Details]`. Files over 20MB trigger an informative message with direct Web Uploader links.
+- **Paywall & Cloudflare Bypass:** Web article extraction (`/epub <url>` or pasted links) transparently re-routes blocked pages through Jina Reader (`https://r.jina.ai`) via sing-box proxy with Kindle typography formatting.
+- **Formatting Resilience:** Automatic plain-text retry on Telegram HTTP 400 parsing errors prevents dropped notifications from unescaped characters.
 
-1. **Canonical Format:**
-   - All direct uploads and archive extractions accept `.epub` as the canonical format.
-   - Web article extractions compile directly into clean, styled `.epub` files.
-   - Non-canonical formats (`.pdf`, `.mobi`, `.azw3`, `.cbz`, etc.) are rejected or quarantined with clear notification messages rather than mixed into the primary collection.
+---
 
-2. **Calibre Storage Preservation:**
-   - Calibre-managed storage paths and database ownership are strictly preserved. Internal files are never renamed or relocated by hand.
-   - User-facing downloads and Telegram deliveries derive filenames dynamically from sanitized book metadata (`getDownloadFilename`).
+## 📋 Operational Runbooks & Documentation
+
+- [RUNBOOK.md](RUNBOOK.md) — Comprehensive operations manual, health troubleshooting, system migration, and daemon lifecycle.
+  - [Service Architecture on Mac Mini](RUNBOOK.md#%EF%B8%8F-service-architecture-on-mac-mini-1921683115)
+  - [WAN Reverse Tunnels & Public Edge Operations](RUNBOOK.md#8-wan-reverse-tunnels--public-edge-operations)
+  - [Database Snapshot Backups & Restoring](RUNBOOK.md#4-database-snapshot-backups-telegram-delivery--wal-durability)
+  - [Safe EPUB-Only Library Collection](RUNBOOK.md#14-safe-epub-only-library-collection--ssd-migration-preflight)
+- [INCIDENTS.md](INCIDENTS.md) — Incident postmortems, root cause analysis, and architectural learnings.
