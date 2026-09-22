@@ -1457,6 +1457,15 @@ cmd_categorize() {
   exec bun run "$script_path" "$@"
 }
 
+cmd_enrich_synopsis() {
+  local script_path="${LIGHTHOUSE_ROOT}/scripts/enrich-synopses.ts"
+  if [ ! -f "$script_path" ]; then
+    echo "Error: ${script_path} not found" >&2
+    exit 1
+  fi
+  exec bun run "$script_path" "$@"
+}
+
 # ------------------------------------------------------------------------------
 # 10. Command: help
 # ------------------------------------------------------------------------------
@@ -1475,6 +1484,7 @@ Commands:
   restart                  Restart all services (down followed by up)
   health                   Run automated probes and auto-heal stale listeners/workers
   categorize [options]     Categorize, tag, and correct book languages in Calibre library
+  enrich-synopsis [options] Batch enrich missing book synopses from local EPUBs and online APIs
   install-daemons          Dynamically generate and register macOS LaunchAgents for current user
   backup [options]         Create hot SQLite backup with WAL checkpoint, checksum, and manifest
   restore <file> [options] Verified restoration of complete stack with integrity checks
@@ -1485,6 +1495,13 @@ Categorize Options:
   --dry-run                Preview language and category updates without modifying library (default)
   --apply                  Apply metadata updates via calibredb set_metadata
   --limit <N>              Limit processing to N books
+
+Enrich-Synopsis Options:
+  --dry-run                Preview synopses without modifying library (default)
+  --apply                  Apply metadata updates via calibredb set_metadata
+  --limit <N>              Limit processing to N books
+  --source <type>          Source strategy: all (default), epub, or online
+  --verbose                Enable verbose logging of search and extraction steps
 
 Backup Options:
   --output, -o <path>      Explicit archive file path
@@ -1520,6 +1537,7 @@ case "$ACTION" in
   restart) cmd_down "$@"; sleep 1; cmd_up "$@" ;;
   health) cmd_health "$@" ;;
   categorize) cmd_categorize "$@" ;;
+  enrich-synopsis) cmd_enrich_synopsis "$@" ;;
   install-daemons) cmd_install_daemons "$@" ;;
   backup) cmd_backup "$@" ;;
   restore) cmd_restore "$@" ;;
