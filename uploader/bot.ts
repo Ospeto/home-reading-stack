@@ -16,7 +16,7 @@ import {
   applyMetadataToCalibre,
 } from "./scraper";
 import { isArchiveFile, unpackArchive, isCanonicalEpub } from "./archive";
-import { extractUrlFromText, ingestArticleFromUrl } from "./article";
+import { extractUrlFromText, ingestArticleFromUrl, generateTypographicCover } from "./article";
 import { isLnoriUrl, ingestLnoriSeries } from "./lnori";
 import { generateMetadataFilename } from "./filename";
 import { getJobQueue } from "./jobs";
@@ -38,6 +38,7 @@ import {
   extractSeriesWithJev,
   cleanAuthorWithJev,
   detectBookLanguage,
+  classifyBookSourceCategoryDeterministic,
 } from "./jev-shelf";
 
 let _duplicateCleanerRunner: (options: CleanDuplicatesOptions) => Promise<CleanDuplicatesReport> = runDuplicateCleaner;
@@ -3067,6 +3068,9 @@ export async function ingestBookFile(
         getJobQueue(getCacheDb()).enqueue("metadata_enrich", {
           bookId: newId,
           title: finalTitle,
+          author: finalAuthor,
+          filename: originalFileName,
+          tags: clean.tags || [],
           isManga,
           chatId,
         });
@@ -3588,16 +3592,21 @@ export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
     async (payload: {
       bookId: number;
       title: string;
+      author?: string;
+      filename?: string;
+      tags?: string[];
       isManga?: boolean;
       chatId?: number;
     }) => {
       log(
         `[JobQueue:MetadataEnrich] Background enrichment for book ID ${payload.bookId} ("${payload.title}")...`,
       );
-      const matches = await searchUniversalMetadata(
-        payload.title,
-        payload.isManga || false,
-      );
+      const matches = await searchUniversalMetadata(payload.title, {
+        isManga: payload.isManga,
+        author: payload.author,
+        filename: payload.filename,
+        tags: payload.tags,
+      });
       if (matches.length > 0) {
         const top = matches[0];
         log(
@@ -3636,6 +3645,60 @@ export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
           };
         }
       }
+
+      // Check if this book is Burmese: if so, generate local typographic cover if missing
+      const detCat = classifyBookSourceCategoryDeterministic(
+        payload.title,
+        payload.author || "",
+        payload.filename || "",
+        payload.tags || [],
+      );
+      if (detCat === "burmese") {
+        let hasExistingCover = false;
+        try {
+          const db = new Database(getCalibreDbPath(), { readonly: true });
+          const row = db.prepare("SELECT has_cover FROM books WHERE id = ?").get(payload.bookId) as any;
+          db.close();
+          hasExistingCover = Boolean(row?.has_cover);
+        } catch (_dbErr) {
+          void _dbErr;
+        }
+
+        if (!hasExistingCover) {
+          try {
+            const coverPath = generateTypographicCover(
+              payload.title,
+              payload.author || "Unknown",
+              "Burmese Literature",
+            );
+            if (fs.existsSync(coverPath)) {
+              const calRes = runCalibredb([
+                "set_metadata",
+                String(payload.bookId),
+                "--with-library",
+                SERVER_URL,
+                "--field",
+                `cover:${coverPath}`,
+              ]);
+              try {
+                fs.unlinkSync(coverPath);
+              } catch (_unlinkErr) {
+                void _unlinkErr;
+              }
+              if (calRes.status === 0) {
+                return {
+                  success: true,
+                  message: "Generated local typographic cover for Burmese literature.",
+                  source: "Local Typography",
+                };
+              }
+            }
+          } catch (coverErr: any) {
+            log(`Failed to generate Burmese typographic cover: ${coverErr?.message || coverErr}`);
+          }
+        }
+      }
+
       return { success: true, message: "No external metadata matches found." };
     },
   );

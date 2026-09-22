@@ -966,9 +966,11 @@ export function generateTypographicCover(
   const safeTitle = cleanString(title) || "Web Article";
   const safeAuthor = cleanString(author) || "Unknown Author";
   const safeSite = (cleanString(siteName) || "Web Article").toUpperCase();
-  const readInfo = readTimeMinutes
-    ? `${readTimeMinutes} MIN READ • WEB ARTICLE`
-    : "WEB ARTICLE";
+  const isBurmeseLit = safeSite.includes("BURMESE");
+  let readInfo = isBurmeseLit ? "BURMESE LITERATURE" : "WEB ARTICLE";
+  if (readTimeMinutes) {
+    readInfo = `${readTimeMinutes} MIN READ • ${readInfo}`;
+  }
 
   const titleLines = wrapText(safeTitle, 22, 5);
   const fontSize =

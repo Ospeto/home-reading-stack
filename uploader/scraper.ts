@@ -3,7 +3,19 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { safeFetchWithSsrf, isPrivateOrInternalIp } from "./security";
-import { isJunkAuthorExtended } from "./jev-shelf";
+import {
+  isJunkAuthorExtended,
+  classifyBookSourceCategory,
+  classifyBookSourceCategoryDeterministic,
+  triageSourceCategoryWithJev,
+  type BookSourceCategory,
+} from "./jev-shelf";
+export {
+  classifyBookSourceCategory,
+  classifyBookSourceCategoryDeterministic,
+  triageSourceCategoryWithJev,
+  type BookSourceCategory,
+};
 
 export function getCalibredbPath(): string {
   if (process.env.CALIBREDB_PATH) return process.env.CALIBREDB_PATH;
@@ -1055,9 +1067,11 @@ export function formatRanobeDate(rawDate?: number | string | null): string {
 
 export function isLightNovelQuery(query: string): boolean {
   if (!query) return false;
-  return /\b(?:light[\s_-]?novel|ln|web[\s_-]?novel|wn|ranobe|bunko|isekai|reincarnat(?:ed|ion)?|danmachi|(?:\w+)?monogatari|oregairu|tensura|konosuba|sword\s*art\s*online|overlord|mushoku\s*tensei|classroom\s*of\s*the\s*elite|re:?zero|toaru|mahouka|no\s*game\s*no\s*life|spice\s*and\s*wolf|rascal\s*does\s*not\s*dream)\b/i.test(
-    query,
-  );
+  // Check both raw query and query with punctuation normalized/space-collapsed
+  const normalized = query.replace(/[:_\-]+/g, " ");
+  const pattern =
+    /\b(?:light[\s_-]?novel|ln|web[\s_-]?novel|wn|ranobe|bunko|isekai|reincarnat(?:ed|ion)?|danmachi|(?:\w+)?monogatari|oregairu|tensura|konosuba|sword\s*art\s*online|overlord|mushoku\s*tensei|classroom\s*of\s*the\s*elite|re:?\s*zero|toaru|mahouka|no\s*game\s*no\s*life|spice\s*and\s*wolf|rascal\s*does\s*not\s*dream)\b/i;
+  return pattern.test(query) || pattern.test(normalized);
 }
 
 export function parseRanobeBook(
@@ -1238,13 +1252,21 @@ export async function searchRanobeDB(
   return results;
 }
 
-// Unified Search with Multi-Source Fallback
+// Unified Search with Multi-Source Fallback & Jev-Powered Smart Routing
 export async function searchUniversalMetadata(
   query: string,
   hint?:
     | boolean
     | string
-    | { isManga?: boolean; isLightNovel?: boolean; isLn?: boolean },
+    | {
+        isManga?: boolean;
+        isLightNovel?: boolean;
+        isLn?: boolean;
+        author?: string;
+        filename?: string;
+        tags?: string[];
+        category?: BookSourceCategory;
+      },
 ): Promise<ScrapedMetadata[]> {
   const results: ScrapedMetadata[] = [];
   const cleanQ = cleanQuery(query);
@@ -1252,6 +1274,10 @@ export async function searchUniversalMetadata(
 
   let hintManga = false;
   let hintLn = false;
+  let hintAuthor = "";
+  let hintFilename = "";
+  let hintTags: string[] = [];
+  let explicitCategory: BookSourceCategory | undefined;
 
   if (typeof hint === "boolean") {
     hintManga = hint;
@@ -1259,30 +1285,76 @@ export async function searchUniversalMetadata(
     hintManga = /manga|comic/i.test(hint);
     hintLn = /light[\s_-]?novel|ln|ranobe|bunko/i.test(hint);
   } else if (hint && typeof hint === "object") {
-    hintManga = !!hint.isManga;
-    hintLn = !!(hint.isLightNovel || hint.isLn);
+    hintManga = Boolean(hint.isManga);
+    hintLn = Boolean(hint.isLightNovel || hint.isLn);
+    hintAuthor = hint.author || "";
+    hintFilename = hint.filename || "";
+    hintTags = hint.tags || [];
+    explicitCategory = hint.category;
   }
 
-  const isLnTarget = hintLn || isLightNovelQuery(cleanQ);
-  const isMangaTarget =
-    !isLnTarget &&
-    (hintManga ||
-      /manga|comic|chapter|ch\.|c0|one piece|naruto|bleach|berserk/i.test(
-        cleanQ,
-      ));
+  // Determine source category using classifyBookSourceCategory (deterministic + Jev arbitration)
+  let category: BookSourceCategory;
+  if (explicitCategory) {
+    category = explicitCategory;
+  } else if (hintLn) {
+    category = "light_novel";
+  } else if (hintManga) {
+    category = "manga";
+  } else {
+    // Replaces brittle hardcoded isLightNovelQuery list with classifyBookSourceCategory.
+    // Check raw query and cleanQ to preserve explicit bracket tokens like [LN] or [Manga]
+    category = await classifyBookSourceCategory(
+      query,
+      hintAuthor,
+      hintFilename,
+      hintTags,
+    );
 
-  if (isLnTarget) {
+    // If still general/unclassified, check if isLightNovelQuery matches.
+    // Check known franchise titles and light novel keywords, but ONLY if category is still
+    // general/unclassified (do NOT override an explicit manga/burmese classification).
+    if (category === "general_book" || category === "other") {
+      const isFranchiseLn =
+        /\b(?:danmachi|(?:\w+)?monogatari|oregairu|tensura|konosuba|sword\s*art\s*online|overlord|mushoku\s*tensei|classroom\s*of\s*the\s*elite|re:?\s*zero|toaru|mahouka|no\s*game\s*no\s*life|spice\s*and\s*wolf|rascal\s*does\s*not\s*dream)\b/i.test(
+          query,
+        ) ||
+        /\b(?:danmachi|(?:\w+)?monogatari|oregairu|tensura|konosuba|sword\s*art\s*online|overlord|mushoku\s*tensei|classroom\s*of\s*the\s*elite|re:?\s*zero|toaru|mahouka|no\s*game\s*no\s*life|spice\s*and\s*wolf|rascal\s*does\s*not\s*dream)\b/i.test(
+          cleanQ,
+        );
+
+      if (isFranchiseLn) {
+        category = "light_novel";
+      }
+    }
+  }
+
+  const isLnTarget = category === "light_novel";
+
+  // Category-specific source routing:
+  // 1. 'light_novel': Query RanobeDB + Bangumi first, fallback to Google Books
+  if (category === "light_novel") {
     const lnSettled = await Promise.allSettled([
       searchRanobeDB(query),
       searchBangumi(query),
-      searchGoogleBooks(query),
     ]);
     for (const res of lnSettled) {
       if (res.status === "fulfilled") {
         results.push(...res.value);
       }
     }
-  } else if (isMangaTarget) {
+    // If primary light novel sources returned 0 results, query secondary Google Books
+    if (results.length === 0) {
+      try {
+        const gbResults = await searchGoogleBooks(query);
+        results.push(...gbResults);
+      } catch (err) {
+        console.debug(`[Scraper] Google Books secondary search error:`, err);
+      }
+    }
+  }
+  // 2. 'manga': Query MangaDex + Bangumi first
+  else if (category === "manga") {
     const mangaSettled = await Promise.allSettled([
       searchMangaDex(query),
       searchBangumi(query),
@@ -1293,29 +1365,60 @@ export async function searchUniversalMetadata(
       }
     }
   }
-
-  if (results.length === 0) {
-    const bookSettled = await Promise.allSettled([
-      searchRanobeDB(query),
+  // 3. 'general_book' or 'other': Query Google Books + OpenLibrary first
+  else if (category === "general_book" || category === "other") {
+    const generalSettled = await Promise.allSettled([
       searchGoogleBooks(query),
       searchOpenLibrary(query),
     ]);
-    for (const res of bookSettled) {
+    for (const res of generalSettled) {
       if (res.status === "fulfilled") {
         results.push(...res.value);
       }
     }
   }
+  // 4. 'burmese': Skip overseas metadata searches that will 404
+  else if (category === "burmese") {
+    // Burmese literature skips overseas search to avoid unnecessary 404s/waterfalls.
+    // Calibre local metadata & typographic cover are used.
+    return results;
+  }
 
-  // If still empty and was not initially marked manga or LN, try manga scrapers as last resort
-  if (results.length === 0 && !isMangaTarget && !isLnTarget) {
-    const fallbackSettled = await Promise.allSettled([
-      searchMangaDex(query),
-      searchBangumi(query),
-    ]);
-    for (const res of fallbackSettled) {
-      if (res.status === "fulfilled") {
-        results.push(...res.value);
+  // 5. Fallback if primary category returns 0 results: run secondary search so no book is left without metadata
+  if (results.length === 0) {
+    if (category === "light_novel") {
+      // Light novel secondary already tried Google Books; try OpenLibrary + MangaDex
+      const fallbackSettled = await Promise.allSettled([
+        searchOpenLibrary(query),
+        searchMangaDex(query),
+      ]);
+      for (const res of fallbackSettled) {
+        if (res.status === "fulfilled") {
+          results.push(...res.value);
+        }
+      }
+    } else if (category === "manga") {
+      // Manga fallback: try Google Books + OpenLibrary
+      const fallbackSettled = await Promise.allSettled([
+        searchGoogleBooks(query),
+        searchOpenLibrary(query),
+      ]);
+      for (const res of fallbackSettled) {
+        if (res.status === "fulfilled") {
+          results.push(...res.value);
+        }
+      }
+    } else if (category === "general_book" || category === "other") {
+      // General book fallback: try RanobeDB + Bangumi + MangaDex
+      const fallbackSettled = await Promise.allSettled([
+        searchRanobeDB(query),
+        searchBangumi(query),
+        searchMangaDex(query),
+      ]);
+      for (const res of fallbackSettled) {
+        if (res.status === "fulfilled") {
+          results.push(...res.value);
+        }
       }
     }
   }
@@ -1358,6 +1461,9 @@ export async function searchUniversalMetadata(
 
   return results;
 }
+
+// Alias for searchUniversalMetadata matching spec naming
+export const searchAllSources = searchUniversalMetadata;
 
 export const KNOWN_COVER_DOMAINS = new Set([
   "images.ranobedb.org",
