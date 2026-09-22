@@ -1911,6 +1911,14 @@ export async function ingestArticleFromUrl(
       article.coverImagePath,
     );
 
+    // 3. Save to Books_Drop with sanitized filename
+    const safeFilenameBase =
+      cleanString(article.title)
+        .replace(/[^a-zA-Z0-9_\u00A0-\uFFFF -]/g, "")
+        .replace(/\s+/g, "_")
+        .substring(0, 60)
+        .trim() || "Web_Article";
+
     // Gate: Check Junk Ingest Gate on article title and author before writing into Books_Drop or adding to Calibre
     const junkCheck = await evaluateJunkGate(
       article.title,
@@ -1918,7 +1926,7 @@ export async function ingestArticleFromUrl(
       article.author,
     );
     if (junkCheck.quarantined) {
-      moveToQuarantine(tempEpub, `${article.title || "quarantined_article"}.epub`);
+      moveToQuarantine(tempEpub, `${safeFilenameBase}.epub`);
       return {
         success: false,
         title: article.title,
@@ -1931,13 +1939,6 @@ export async function ingestArticleFromUrl(
       };
     }
 
-    // 3. Save to Books_Drop with sanitized filename
-    const safeFilenameBase =
-      cleanString(article.title)
-        .replace(/[^a-zA-Z0-9_\u00A0-\uFFFF -]/g, "")
-        .replace(/\s+/g, "_")
-        .substring(0, 60)
-        .trim() || "Web_Article";
     const dropFileName = `${safeFilenameBase}_${Date.now()}.epub`;
     const dropFilePath = path.join(getDropDir(), dropFileName);
 

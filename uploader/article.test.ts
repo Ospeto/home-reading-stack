@@ -541,19 +541,52 @@ describe("Jina Reader API Key Authentication (JINA_API_KEY & JEV_API_KEY)", () =
   });
 
   test("ingestArticleFromUrl executes end-to-end and respects junk gate quarantine", async () => {
-    // Generate >150 words of real prose content
-    const prose = "Cloud computing and distributed architectures require resilient service design. ".repeat(25);
-    globalThis.fetch = async () => {
-      return new Response(
-        `<html><head><title>truncated_12345678_abcd</title></head><body><article><p>${prose}</p></article></body></html>`,
-        { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } },
-      );
-    };
+    const testTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "article-quarantine-test-"));
+    const testDropDir = path.join(testTempDir, "drop");
+    const testQuarantineDir = path.join(testTempDir, "quarantine");
+    fs.mkdirSync(testDropDir, { recursive: true });
+    fs.mkdirSync(testQuarantineDir, { recursive: true });
 
-    const junkUrl = "https://example.com/truncated_12345678_abcd";
-    const res = await ingestArticleFromUrl(junkUrl);
-    expect(res.success).toBe(false);
-    expect(res.error).toContain("Quarantined by junk ingest gate");
+    const prevDropEnv = process.env.BOOKS_DROP_DIR;
+    const prevQuarantineEnv = process.env.BOOKS_QUARANTINE_DIR;
+    process.env.BOOKS_DROP_DIR = testDropDir;
+    process.env.BOOKS_QUARANTINE_DIR = testQuarantineDir;
+
+    try {
+      // Generate >150 words of real prose content
+      const prose = "Cloud computing and distributed architectures require resilient service design. ".repeat(25);
+      globalThis.fetch = async () => {
+        return new Response(
+          `<html><head><title>truncated_12345678_abcd</title></head><body><article><p>${prose}</p></article></body></html>`,
+          { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } },
+        );
+      };
+
+      const junkUrl = "https://example.com/truncated_12345678_abcd";
+      const res = await ingestArticleFromUrl(junkUrl);
+      expect(res.success).toBe(false);
+      expect(res.error).toContain("Quarantined by junk ingest gate");
+
+      // Verify files stayed out of Books_Drop
+      const dropFiles = fs.readdirSync(testDropDir);
+      expect(dropFiles.length).toBe(0);
+
+      // Verify quarantined file is in test quarantine directory
+      const quarantineFiles = fs.readdirSync(testQuarantineDir);
+      expect(quarantineFiles.length).toBe(1);
+      expect(quarantineFiles[0]).toContain("truncated_12345678_abcd");
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (prevDropEnv !== undefined) process.env.BOOKS_DROP_DIR = prevDropEnv;
+      else delete process.env.BOOKS_DROP_DIR;
+      if (prevQuarantineEnv !== undefined) process.env.BOOKS_QUARANTINE_DIR = prevQuarantineEnv;
+      else delete process.env.BOOKS_QUARANTINE_DIR;
+      try {
+        fs.rmSync(testTempDir, { recursive: true, force: true });
+      } catch (_err) {
+        void _err;
+      }
+    }
   });
 });
 
