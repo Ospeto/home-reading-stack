@@ -209,10 +209,12 @@ describe("Telegram Mini App (TMA) Integration", () => {
 
     // Desktop 2-column layout and locked sidebar width
     expect(html).toContain(".md\\:flex-row { flex-direction: row; }");
+    expect(html).toContain(".md\\:max-w-2xl { max-width: 42rem; }");
+    expect(html).toContain(".lg\\:max-w-3xl { max-width: 48rem; }");
     expect(html).toContain(".w-64 { width: 16rem; }");
     expect(html).toContain(".xl\\:w-72 { width: 18rem; }");
     expect(html).toContain("desktop-sticky-sidebar");
-    expect(html).toContain("max-w-2xl lg:max-w-3xl");
+    expect(html).toContain("md:max-w-2xl lg:max-w-3xl");
 
     // Bottom Status Bar
     expect(html).toContain('data-purpose="macos-status-bar"');
