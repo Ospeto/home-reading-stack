@@ -3,7 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>Reading HQ — Home Library &amp; OPDS</title>
+  <meta name="description" content="LightHouse — Unified, self-hosted private reading infrastructure for Kindle and KOReader devices.">
+  <meta property="og:title" content="LightHouse — Home Library &amp; OPDS">
+  <meta property="og:description" content="Unified, self-hosted private reading infrastructure for Kindle and KOReader devices.">
+  <meta property="og:type" content="website">
+  <title>LightHouse — Home Library &amp; OPDS</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -410,7 +414,7 @@
             <svg class="w-4 h-4"><use href="#icon-book"/></svg>
           </div>
           <div class="flex flex-col">
-            <span class="text-sm font-bold tracking-tight text-zinc-100">Reading HQ</span>
+            <span class="text-sm font-bold tracking-tight text-zinc-100">LightHouse</span>
             <div class="hidden sm:flex items-center gap-1 text-[11px] text-zinc-500">
               <button onclick="setFilter('all', null)" class="hover:text-white transition-colors cursor-pointer">Library</button>
               <span>/</span>
@@ -591,7 +595,7 @@
 
       <!-- Sidebar Footer: OPDS Wireless Ready -->
       <div class="pt-4 border-t border-white/5">
-        <div class="flex items-center justify-between text-xs text-neutral-500 cursor-pointer hover:text-neutral-300 transition-colors" onclick="openGuideModal()" title="KOReader &amp; Stack Connection Guide">
+        <div class="flex items-center justify-between text-xs text-neutral-500 cursor-pointer hover:text-neutral-300 transition-colors" onclick="openGuideModal()" title="LightHouse &amp; KOReader Connection Guide">
           <span class="flex items-center gap-2">
             <span class="w-1.5 h-1.5 rounded-full bg-emerald-400/80 animate-pulse"></span>
             <span>OPDS Wireless</span>
@@ -842,7 +846,7 @@
       </div>
 
       <p class="text-xs text-[#a1a1aa] leading-relaxed">
-        Paste any article, essay, or blog post URL. Reading HQ will clean and extract the text, format it with comfortable Kindle typography, convert it to an EPUB, and sync to your library and KOReader.
+        Paste any article, essay, or blog post URL. LightHouse will clean and extract the text, format it with comfortable Kindle typography, convert it to an EPUB, and sync to your library and KOReader.
       </p>
 
       <form onsubmit="handleUrlIngest(event)" class="space-y-3">
@@ -1044,7 +1048,7 @@
           </div>
           <div>
             <h3 class="text-sm font-bold text-zinc-100 flex items-center gap-2">
-              KOReader & Stack Connection Manual
+              LightHouse KOReader &amp; Connection Manual
             </h3>
             <p class="text-[11px] text-zinc-400">Step-by-step connection guide and one-click copyable stack endpoints</p>
           </div>
@@ -1054,13 +1058,16 @@
         </button>
       </div>
 
-      <!-- Tab Pills for Quick Switching (KOSync, OPDS Catalog, Kindle Proxy, All Endpoints) -->
+      <!-- Tab Pills for Quick Switching (KOSync, OPDS Catalog, CLI Reference, Kindle Proxy, All Endpoints) -->
       <div class="flex items-center gap-2 overflow-x-auto no-scrollbar py-1">
         <button id="guide-tab-kosync" onclick="setGuideTab('kosync')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-white text-zinc-950 shadow-sm cursor-pointer transition-all shrink-0">
           KOSync
         </button>
         <button id="guide-tab-opds" onclick="setGuideTab('opds')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
           OPDS Catalog
+        </button>
+        <button id="guide-tab-cli" onclick="setGuideTab('cli')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
+          CLI Reference
         </button>
         <button id="guide-tab-proxy" onclick="setGuideTab('proxy')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
           Kindle Proxy
@@ -1080,7 +1087,7 @@
           <span class="text-[10px] px-2 py-0.5 rounded font-mono bg-zinc-800 text-emerald-400 border border-zinc-700">Sync Engine</span>
         </div>
         <p class="text-xs text-zinc-300 leading-relaxed">
-          Sync your reading positions, percentage, and timestamps seamlessly between your Kindle / e-Reader and Reading HQ.
+          Sync your reading positions, percentage, and timestamps seamlessly between your Kindle / e-Reader and LightHouse.
         </p>
         <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2.5 text-xs text-zinc-300">
           <div class="flex items-start gap-2.5">
@@ -1137,7 +1144,7 @@
           </div>
           <div class="flex items-start gap-2.5">
             <span class="w-5 h-5 rounded-full bg-zinc-800 text-zinc-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">6</span>
-            <div>Tap <strong>Pull progress to this device now</strong> to verify synchronization with Reading HQ.</div>
+            <div>Tap <strong>Pull progress to this device now</strong> to verify synchronization with LightHouse.</div>
           </div>
         </div>
       </div>
@@ -1210,7 +1217,98 @@
         </div>
       </div>
 
-      <!-- SECTION 3: HOME LAN PROXY FOR KINDLE -->
+      <!-- SECTION 3: LIGHTHOUSE CLI REFERENCE -->
+      <div id="guide-cli" class="space-y-3 pt-1">
+        <div class="flex items-center justify-between">
+          <h4 class="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+            <span>LightHouse Unified CLI Control</span>
+          </h4>
+          <span class="text-[10px] px-2 py-0.5 rounded font-mono bg-zinc-800 text-amber-400 border border-zinc-700">bin/lighthouse</span>
+        </div>
+        <p class="text-xs text-zinc-300 leading-relaxed">
+          Manage your reading infrastructure, run health auto-healing probes, and perform zero-downtime hot database backups from the command line:
+        </p>
+        <div class="space-y-2 text-xs">
+          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-zinc-200">System Dashboard &amp; Health</span>
+              <span class="text-[10px] font-mono text-zinc-400">status / health</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse status</code>
+              <button onclick="copyToClipboard('bin/lighthouse status')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse health</code>
+              <button onclick="copyToClipboard('bin/lighthouse health')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-zinc-200">Service Lifecycle</span>
+              <span class="text-[10px] font-mono text-zinc-400">up / down / restart</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse up</code>
+              <button onclick="copyToClipboard('bin/lighthouse up')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse down</code>
+              <button onclick="copyToClipboard('bin/lighthouse down')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse restart</code>
+              <button onclick="copyToClipboard('bin/lighthouse restart')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-zinc-200">macOS LaunchAgents Installation</span>
+              <span class="text-[10px] font-mono text-zinc-400">install-daemons</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse install-daemons</code>
+              <button onclick="copyToClipboard('bin/lighthouse install-daemons')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-zinc-200">Hot Backup &amp; Migration Kit</span>
+              <span class="text-[10px] font-mono text-zinc-400">backup / restore</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse backup</code>
+              <button onclick="copyToClipboard('bin/lighthouse backup')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse restore &lt;backup.tar.gz&gt; --dry-run</code>
+              <button onclick="copyToClipboard('bin/lighthouse restore <backup.tar.gz> --dry-run')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SECTION 4: HOME LAN PROXY FOR KINDLE -->
       <div id="guide-proxy" class="space-y-3 pt-1">
         <div class="flex items-center justify-between">
           <h4 class="text-xs font-bold uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
@@ -1357,8 +1455,6 @@
               </button>
             </div>
           </div>
-            </div>
-          </div>
 
           <!-- OPDS Local -->
           <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
@@ -1396,12 +1492,12 @@
             </div>
           </div>
 
-          <!-- Reading HQ Dashboard Local -->
+          <!-- LightHouse Dashboard Local -->
           <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-blue-400"></span>
-                <span>Reading HQ Dashboard (Local)</span>
+                <span>LightHouse Dashboard (Local)</span>
               </span>
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-emerald-400 font-mono border border-zinc-700">LAN</span>
             </div>
@@ -1414,12 +1510,12 @@
             </div>
           </div>
 
-          <!-- Reading HQ WAN / Mini App -->
+          <!-- LightHouse WAN / Mini App -->
           <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-blue-400"></span>
-                <span>Reading HQ (WAN / Mini App)</span>
+                <span>LightHouse (WAN / Mini App)</span>
               </span>
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-sky-400 font-mono border border-zinc-700">Global</span>
             </div>
@@ -1778,7 +1874,7 @@
         console.error('Failed to load books:', e);
         const grid = document.getElementById('libraryGridView');
         if (grid && allBooks.length === 0) {
-          setHtml(grid, `<div class="col-span-full text-center py-12 px-4 ui-card rounded-xl text-xs space-y-2"><div class="text-rose-400 font-bold">⚠️ Failed to connect to Reading HQ API (${escapeHtml(e.message)})</div><div class="text-zinc-500 text-[11px]">Please check connection or tap below to reload.</div><button onclick="init()" class="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-semibold mt-2">Retry</button></div>`);
+          setHtml(grid, `<div class="col-span-full text-center py-12 px-4 ui-card rounded-xl text-xs space-y-2"><div class="text-rose-400 font-bold">⚠️ Failed to connect to LightHouse API (${escapeHtml(e.message)})</div><div class="text-zinc-500 text-[11px]">Please check connection or tap below to reload.</div><button onclick="init()" class="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-semibold mt-2">Retry</button></div>`);
         }
       }
     }
@@ -2574,7 +2670,7 @@
       dropzone.classList.remove('border-zinc-400');
       const files = await scanFilesFromDataTransfer(e.dataTransfer);
       if (files.length) handleUploads(files);
-      else showToast("No EPUB files (.epub) or archives (.zip, .7z) found in dropped items. Reading HQ is an EPUB-only library.", "error");
+      else showToast("No EPUB files (.epub) or archives (.zip, .7z) found in dropped items. LightHouse is an EPUB-only library.", "error");
     });
 
     fileInput.addEventListener('change', () => {
@@ -2586,7 +2682,7 @@
     folderInput.addEventListener('change', () => {
       const files = Array.from(folderInput.files || []).filter(f => isSupportedBook(f.name));
       if (files.length) handleUploads(files);
-      else showToast("No EPUB files (.epub) or archives (.zip, .7z) found in chosen folder. Reading HQ is an EPUB-only library.", "error");
+      else showToast("No EPUB files (.epub) or archives (.zip, .7z) found in chosen folder. LightHouse is an EPUB-only library.", "error");
       folderInput.value = '';
     });
 
@@ -2698,7 +2794,7 @@
     // GUIDE MODAL TABS
     function setGuideTab(tab) {
       try { tgHaptic.light(); } catch {}
-      const tabs = ['kosync', 'opds', 'proxy', 'all'];
+      const tabs = ['kosync', 'opds', 'cli', 'proxy', 'all'];
       tabs.forEach(t => {
         const btn = document.getElementById(`guide-tab-${t}`);
         if (btn) {
@@ -2711,27 +2807,38 @@
       });
       const secKosync = document.getElementById('guide-kosync');
       const secOpds = document.getElementById('guide-opds');
+      const secCli = document.getElementById('guide-cli');
       const secProxy = document.getElementById('guide-proxy');
       const secEndpoints = document.getElementById('guide-endpoints');
 
       if (tab === 'kosync') {
         secKosync?.classList.remove('hidden');
         secOpds?.classList.add('hidden');
+        secCli?.classList.add('hidden');
         secProxy?.classList.add('hidden');
         secEndpoints?.classList.add('hidden');
       } else if (tab === 'opds') {
         secKosync?.classList.add('hidden');
         secOpds?.classList.remove('hidden');
+        secCli?.classList.add('hidden');
+        secProxy?.classList.add('hidden');
+        secEndpoints?.classList.add('hidden');
+      } else if (tab === 'cli') {
+        secKosync?.classList.add('hidden');
+        secOpds?.classList.add('hidden');
+        secCli?.classList.remove('hidden');
         secProxy?.classList.add('hidden');
         secEndpoints?.classList.add('hidden');
       } else if (tab === 'proxy') {
         secKosync?.classList.add('hidden');
         secOpds?.classList.add('hidden');
+        secCli?.classList.add('hidden');
         secProxy?.classList.remove('hidden');
         secEndpoints?.classList.add('hidden');
       } else {
         secKosync?.classList.remove('hidden');
         secOpds?.classList.remove('hidden');
+        secCli?.classList.remove('hidden');
         secProxy?.classList.remove('hidden');
         secEndpoints?.classList.remove('hidden');
       }
