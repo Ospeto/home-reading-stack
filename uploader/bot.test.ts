@@ -276,20 +276,84 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain("background-color: #121418");
     expect(html).not.toContain("cdn.tailwindcss.com");
 
-    // 6. Desktop Book Hover Preview Popover
-    expect(html).toContain('id="bookHoverPopover"');
-    expect(html).toContain("book-hover-popover");
-    expect(html).toContain('id="popoverCover"');
-    expect(html).toContain('id="popoverTitle"');
-    expect(html).toContain('id="popoverMeta"');
-    expect(html).toContain('id="popoverSynopsis"');
-    expect(html).toContain("initHoverPopover");
-    expect(html).toContain("showPopoverForCard");
+    // 6. Desktop Book Hover Preview Card Expansion (lnori-style anchored wing)
+    expect(html).toContain("card-popup");
+    expect(html).toContain("popup-left");
+    expect(html).toContain("popup-right");
+    expect(html).toContain("card-popup-title");
+    expect(html).toContain("card-popup-subtitle");
+    expect(html).toContain("card-popup-synopsis");
+    expect(html).toContain("initCardHoverExpansion");
+    expect(html).toContain("renderBookCard");
     expect(html).toContain("data-book-id");
-    expect(html).toContain("setTimeout(() => {\n            showPopoverForCard(card);\n          }, 180);"); // 180ms hover debounce timer
-    expect(html).toContain("setTimeout(() => {\n            hidePopover();\n          }, 100);"); // 100ms dismissal timer
-    expect(html).toContain("matchMedia('(hover: hover)')");
+    expect(html).toContain("var(--popup-bg-image)");
+    expect(html).toContain("filter: blur(40px) saturate(1.4)");
+    expect(html).toContain("backdrop-filter: blur(20px)");
+    expect(html).toContain("transform: scale(0.85)");
+    expect(html).toContain("width: calc(100% + 320px)");
+    expect(html).toContain("min-width: 480px");
+    expect(html).toContain("padding-left: calc(100% + 1.5rem)");
+    expect(html).toContain("padding-right: calc(100% + 1.5rem)");
+    expect(html).toContain("overflowRight > 0 && overflowLeft <= overflowRight");
+    expect(html).toContain("isDesktopHover()");
     expect(html).toContain("No synopsis available for this volume.");
+    expect(html).not.toContain('id="bookHoverPopover"');
+  });
+
+  it("implements card-anchored wing expansion with lnori.com geometry, editorial hierarchy, and edge detection", () => {
+    const htmlPath = path.join((import.meta as any).dir, "index.html");
+    const html = fs.readFileSync(htmlPath, "utf8");
+
+    // Detached popover eliminated
+    expect(html).not.toContain('id="bookHoverPopover"');
+    expect(html).not.toContain("book-hover-popover");
+    expect(html).toContain("card-popup");
+    expect(html).toContain("<aside class=\"card-popup");
+
+    // Materials, glow, and transitions
+    expect(html).toContain("background: rgba(24, 24, 27, 0.92)");
+    expect(html).toContain("backdrop-filter: blur(20px)");
+    expect(html).toContain("border: 1px solid rgba(255, 255, 255, 0.12)");
+    expect(html).toContain("border-radius: 1rem");
+    expect(html).toContain("var(--popup-bg-image)");
+    expect(html).toContain("filter: blur(40px) saturate(1.4)");
+    expect(html).toContain("opacity: 0.4");
+    expect(html).toContain("transition: opacity 0.2s ease, transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)");
+    expect(html).toContain("transform: scale(0.85)");
+    expect(html).toContain("width: calc(100% + 320px)");
+    expect(html).toContain("min-width: 480px");
+
+    // Clean artwork without dual hover chrome
+    expect(html).toContain(".action-bar {\n        display: none !important;\n      }");
+
+    // Screen-edge directionality & bilateral recalculation
+    expect(html).toContain(".card-popup.popup-left");
+    expect(html).toContain("padding-left: calc(100% + 1.5rem)");
+    expect(html).toContain(".card-popup.popup-right");
+    expect(html).toContain("padding-right: calc(100% + 1.5rem)");
+    expect(html).toContain("overflowRight > 0 && overflowLeft <= overflowRight");
+    expect(html).toContain("updateCardDirection");
+
+    // Editorial layout & typography
+    expect(html).toContain("card-popup-title");
+    expect(html).toContain("font-weight: 800");
+    expect(html).toContain("font-size: 1.15rem");
+    expect(html).toContain("card-popup-subtitle");
+    expect(html).toContain("card-popup-synopsis");
+    expect(html).toContain("line-height: 1.6");
+    expect(html).toContain("font-size: 0.85rem");
+    expect(html).toContain("line-clamp: 6");
+
+    // Accessibility: non-focusable at rest, inert management, reduced motion/transparency
+    expect(html).toContain("visibility: hidden;");
+    expect(html).toContain("visibility: visible;");
+    expect(html).toContain("inert");
+    expect(html).toContain("@media (hover: hover) and (min-width: 768px)");
+    expect(html).toContain("@media (prefers-reduced-motion: reduce)");
+    expect(html).toContain("@media (prefers-reduced-transparency: reduce)");
+
+    // Safe CSS variable for cover glow: never wraps unescaped SVG data URIs
+    expect(html).not.toContain("style=\"--popup-bg-image: url('data:image");
   });
 });
 
