@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { handleRequest, validateAndCanonicalizeProxyPath } from "./server";
+import {
+  handleRequest,
+  validateAndCanonicalizeProxyPath,
+  setServerDependenciesForTest,
+  resetServerDependenciesForTest,
+} from "./server";
 import { validateUrlForSSRF } from "./security";
 
 describe("Calibre OPDS & Asset Reverse Proxy", () => {
@@ -618,6 +623,272 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
         expect(check.resolvedIp).toBe("127.0.0.1");
       } finally {
         process.env.CALIBRE_SERVER_URL = origEnv;
+      }
+    });
+  });
+
+  describe("POST /api/lnori/ingest", () => {
+    const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+
+    it("returns 400 on missing or invalid URL payload", async () => {
+      // Empty body
+      const req1 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const res1 = await handleRequest(req1, localServer);
+      expect(res1.status).toBe(400);
+      const data1 = (await res1.json()) as any;
+      expect(data1.success).toBe(false);
+      expect(data1.error).toContain("Missing or invalid 'url' parameter");
+
+      // Non-string URL
+      const req2 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: 12345 }),
+      });
+      const res2 = await handleRequest(req2, localServer);
+      expect(res2.status).toBe(400);
+      const data2 = (await res2.json()) as any;
+      expect(data2.success).toBe(false);
+      expect(data2.error).toContain("Missing or invalid 'url' parameter");
+
+      // Empty string URL
+      const req3 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: "   " }),
+      });
+      const res3 = await handleRequest(req3, localServer);
+      expect(res3.status).toBe(400);
+      const data3 = (await res3.json()) as any;
+      expect(data3.success).toBe(false);
+      expect(data3.error).toContain("Missing or invalid 'url' parameter");
+
+      // Malformed non-JSON body
+      const req4 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "not-json",
+      });
+      const res4 = await handleRequest(req4, localServer);
+      expect(res4.status).toBe(400);
+      const data4 = (await res4.json()) as any;
+      expect(data4.success).toBe(false);
+      expect(data4.error).toContain("Missing or invalid 'url' parameter");
+    });
+
+    it("returns 400 on non-Lnori URL", async () => {
+      // Different domain
+      const req1 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: "https://example.com/series/8046" }),
+      });
+      const res1 = await handleRequest(req1, localServer);
+      expect(res1.status).toBe(400);
+      const data1 = (await res1.json()) as any;
+      expect(data1.success).toBe(false);
+      expect(data1.error).toContain("Target URL must be a valid lnori.com series or book URL");
+
+      // Lnori domain but invalid path (not /series/ or /book/)
+      const req2 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: "https://lnori.com/genre/fantasy" }),
+      });
+      const res2 = await handleRequest(req2, localServer);
+      expect(res2.status).toBe(400);
+      const data2 = (await res2.json()) as any;
+      expect(data2.success).toBe(false);
+      expect(data2.error).toContain("Target URL must be a valid lnori.com series or book URL");
+    });
+
+    it("blocks unauthenticated WAN requests with 401", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+        method: "POST",
+        headers: {
+          host: "reading.wavypremium.xyz",
+          origin: "https://reading.wavypremium.xyz",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ url: "https://lnori.com/series/8046" }),
+      });
+      const res = await handleRequest(req);
+      expect(res.status).toBe(401);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("Authentication required");
+    });
+
+    it("returns 200 and refreshes Calibre cache on successful ingest", async () => {
+      let refreshed = false;
+      let targetPassed = "";
+
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async (url: string) => {
+          targetPassed = url;
+          return {
+            success: true,
+            seriesTitle: "The Genius Prince's Guide",
+            author: "Toru Toba",
+            importedCount: 3,
+            skippedCount: 1,
+            duplicateCount: 1,
+            totalCount: 4,
+            tags: "Light Novel, Fantasy",
+            calibreBookIds: [101, 102, 103],
+          };
+        },
+        getCalibreBooks: (forceFresh?: boolean) => {
+          if (forceFresh) refreshed = true;
+          return [];
+        },
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/the-genius-princes-guide",
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        const data = (await res.json()) as any;
+
+        expect(data.success).toBe(true);
+        expect(data.seriesTitle).toBe("The Genius Prince's Guide");
+        expect(data.author).toBe("Toru Toba");
+        expect(data.importedCount).toBe(3);
+        expect(data.skippedCount).toBe(1);
+        expect(data.totalCount).toBe(4);
+        expect(data.tags).toBe("Light Novel, Fantasy");
+
+        expect(targetPassed).toBe("https://lnori.com/series/8046/the-genius-princes-guide");
+        expect(refreshed).toBe(true);
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("returns 500 with sanitized error when ingestLnoriSeries returns success: false", async () => {
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async () => ({
+          success: false,
+          error: "Failed to download volume 2 EPUB from /Users/ospeto/secret/storage",
+          seriesTitle: "",
+          author: "",
+          tags: "",
+          importedCount: 0,
+          skippedCount: 0,
+          duplicateCount: 0,
+          totalCount: 2,
+          calibreBookIds: [],
+        }),
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/book/23021/the-genius-prince-vol-1",
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(500);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(false);
+        expect(data.error).toContain("Failed to download volume 2 EPUB");
+        expect(data.error).not.toContain("/Users/ospeto/secret/storage");
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("accepts www.lnori.com series and book URLs", async () => {
+      let passed = "";
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async (url: string) => {
+          passed = url;
+          return {
+            success: true,
+            seriesTitle: "Test Series",
+            author: "Author",
+            importedCount: 1,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 1,
+            tags: "Light Novel",
+            calibreBookIds: [999],
+          };
+        },
+        getCalibreBooks: () => [],
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://www.lnori.com/book/12345/test-vol-1",
+          }),
+        });
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        expect(passed).toBe("https://www.lnori.com/book/12345/test-vol-1");
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("blocks mutating requests with untrusted origin with 403", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://malicious-site.com",
+        },
+        body: JSON.stringify({ url: "https://lnori.com/series/8046" }),
+      });
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(403);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("Origin");
+    });
+
+    it("returns 500 with sanitized error when ingestLnoriSeries throws an exception", async () => {
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async () => {
+          throw new Error("Lnori CDN connection timeout after 60000ms (/Users/ospeto/secret/path)");
+        },
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/timeout-test",
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(500);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(false);
+        expect(data.error).toContain("Lnori CDN connection timeout");
+        // Server paths are sanitized
+        expect(data.error).not.toContain("/Users/ospeto/secret/path");
+      } finally {
+        resetServerDependenciesForTest();
       }
     });
   });

@@ -691,6 +691,7 @@
       #uploadModal,
       #editModal,
       #guideModal,
+      #lnoriModal,
       #bulkToolbar,
       #bookHoverPopover {
         -webkit-backdrop-filter: none !important;
@@ -702,7 +703,8 @@
       #urlModal .ui-card,
       #uploadModal .ui-card,
       #editModal .ui-card,
-      #guideModal .ui-card {
+      #guideModal .ui-card,
+      #lnoriModal .ui-card {
         background-color: #121418 !important;
         border-color: #27272a !important;
       }
@@ -1430,6 +1432,47 @@
     </div>
   </div>
 
+  <!-- LNORI LIGHT NOVEL INGESTION MODAL -->
+  <div id="lnoriModal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center p-0 sm:p-4" onclick="if(event.target === this) closeLnoriModal()">
+    <div class="ui-card apple-material-modal w-full sm:max-w-lg rounded-t-2xl sm:rounded-xl p-5 border border-[#23232a] space-y-4 shadow-2xl">
+      
+      <div class="flex items-center justify-between">
+        <h3 class="tracking-optical-display text-sm font-bold text-white flex items-center gap-2 leading-tight">
+          <svg class="w-4 h-4 text-indigo-400"><use href="#icon-book-open"/></svg> Download Light Novel from Lnori
+        </h3>
+        <button onclick="closeLnoriModal()" class="w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl bg-[#18181f] text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer active:scale-[0.98] transition-transform duration-150" title="Close">
+          <svg class="w-4 h-4"><use href="#icon-xmark"/></svg>
+        </button>
+      </div>
+
+      <p class="text-xs text-[#a1a1aa] leading-relaxed">
+        Paste any series URL (<code class="text-zinc-300 font-mono text-[11px]">https://lnori.com/series/...</code>) or individual volume URL (<code class="text-zinc-300 font-mono text-[11px]">https://lnori.com/book/...</code>). LightHouse extracts the manifest, downloads EPUBs, converts high-res WebP covers, auto-heals truncated ZIPs, indexes series volumes, and syncs directly into Calibre.
+      </p>
+
+      <form onsubmit="handleLnoriIngest(event)" class="space-y-3">
+        <div>
+          <label for="lnoriUrlInput" class="block text-[11px] font-semibold text-zinc-300 mb-1.5">Lnori Series or Book URL</label>
+          <div class="relative">
+            <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500"><use href="#icon-link"/></svg>
+            <input type="url" id="lnoriUrlInput" required placeholder="https://lnori.com/series/8046/..."
+              class="w-full h-11 min-h-[44px] pl-9 pr-3 py-2.5 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-400 transition-colors">
+          </div>
+        </div>
+
+        <div id="lnoriIngestStatus" class="hidden text-xs p-3 rounded-xl border"></div>
+
+        <div class="flex items-center justify-end gap-2 pt-2">
+          <button type="button" onclick="closeLnoriModal()" class="min-h-[44px] px-4 py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-300 text-xs font-semibold rounded-xl border border-[#23232a] cursor-pointer active:scale-[0.98] transition-all duration-150">Cancel</button>
+          <button type="submit" id="lnoriIngestBtn" class="min-h-[44px] px-4 py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl shadow-sm transition-all duration-150 flex items-center gap-2 cursor-pointer active:scale-[0.98] disabled:opacity-50">
+            <svg class="w-4 h-4 text-zinc-950"><use href="#icon-download"/></svg>
+            <span>Download &amp; Ingest</span>
+          </button>
+        </div>
+      </form>
+
+    </div>
+  </div>
+
   <!-- UPLOAD MODAL -->
   <div id="uploadModal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center p-0 sm:p-4" onclick="if(event.target === this) closeUploadModal()">
     <div class="ui-card apple-material-modal w-full sm:max-w-lg rounded-t-2xl sm:rounded-xl p-5 border border-[#23232a] space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
@@ -1472,6 +1515,22 @@
         </div>
         <button type="button" onclick="closeUploadModal(); openUrlModal();" class="min-h-[36px] px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold rounded-lg transition-all shrink-0 border border-zinc-700 cursor-pointer active:scale-[0.98]">
           Add from URL
+        </button>
+      </div>
+
+      <!-- Lnori Light Novel Series Quick Action -->
+      <div class="p-3.5 rounded-xl bg-[#18181f] border border-[#23232a] flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center text-xs shrink-0">
+            <svg class="w-4 h-4 text-indigo-400"><use href="#icon-book-open"/></svg>
+          </div>
+          <div>
+            <div class="text-xs font-bold text-white">Download Light Novel from Lnori</div>
+            <div class="text-[10px] text-[#a1a1aa]">Ingest light novel series or volumes directly from lnori.com URL.</div>
+          </div>
+        </div>
+        <button type="button" onclick="closeUploadModal(); openLnoriModal();" class="min-h-[36px] px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold rounded-lg transition-all shrink-0 border border-zinc-700 cursor-pointer active:scale-[0.98]">
+          Add from Lnori
         </button>
       </div>
 
@@ -1902,6 +1961,15 @@
               Engineered with dark translucent materials (<code class="text-zinc-200">blur(20px) saturate(180%)</code>), optical typography, tactile active press feedback (<code class="text-zinc-200">scale(0.98)</code>), 3D spine curvature simulation, and keyboard navigation (<kbd class="px-1 py-0.5 bg-zinc-950 border border-zinc-700 rounded text-[10px] font-mono text-zinc-200">Cmd/Ctrl+K</kbd> to search, <kbd class="px-1 py-0.5 bg-zinc-950 border border-zinc-700 rounded text-[10px] font-mono text-zinc-200">Esc</kbd> to close).
             </p>
           </div>
+          <div class="space-y-1 pt-1 border-t border-zinc-800/80">
+            <div class="font-bold text-white flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-indigo-400"></span>
+              <span>Lnori Light Novel &amp; Series Ingestion</span>
+            </div>
+            <p class="text-[11px] text-zinc-400 leading-relaxed">
+              Download and ingest light novel series or individual volumes directly from <code class="text-zinc-200">lnori.com</code> via the Web UI (Upload Modal &rarr; <code class="text-zinc-200">Add from Lnori</code>) or Telegram Bot. Accepts series URLs (<code class="text-zinc-200">https://lnori.com/series/...</code>) and book URLs (<code class="text-zinc-200">https://lnori.com/book/...</code>). Automatically fetches manifests, skips existing volumes via series index deduplication, downloads EPUBs, converts high-res WebP covers to JPEG via <code class="text-zinc-200">sips</code>, auto-heals truncated ZIPs, and updates Calibre without duplicate imports.
+            </p>
+          </div>
         </div>
       </div>
 
@@ -2314,6 +2382,24 @@
             </div>
           </div>
 
+          <!-- Lnori Ingestion API -->
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-indigo-400"></span>
+                <span>Lnori Ingest (POST /api/lnori/ingest)</span>
+              </span>
+              <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-indigo-400 font-mono border border-zinc-700">API</span>
+            </div>
+            <div class="text-[11px] text-zinc-400">Downloads and imports series or book from lnori.com</div>
+            <div class="flex items-center gap-2 pt-1">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://reading-sg.wavypremium.xyz:8443/api/lnori/ingest</code>
+              <button onclick="copyToClipboard('https://reading-sg.wavypremium.xyz:8443/api/lnori/ingest')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+          </div>
+
           <!-- Telegram Bot -->
           <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
@@ -2566,7 +2652,7 @@
     }
 
     function hasActiveModal() {
-      const modalIds = ['filterDrawer', 'bookDetailModal', 'urlModal', 'uploadModal', 'editModal', 'guideModal'];
+      const modalIds = ['filterDrawer', 'bookDetailModal', 'urlModal', 'uploadModal', 'editModal', 'guideModal', 'lnoriModal'];
       return modalIds.some(id => {
         const el = document.getElementById(id);
         return el && !el.classList.contains('hidden');
@@ -2590,6 +2676,7 @@
       closeUploadModal();
       closeEditModal();
       closeGuideModal();
+      closeLnoriModal();
       updateBackButton();
     }
 
@@ -3582,6 +3669,22 @@
       const targetUrl = input.value.trim();
       if (!targetUrl) return;
 
+      const isLnori = (() => {
+        try {
+          const u = new URL(targetUrl.includes('://') ? targetUrl : `https://${targetUrl}`);
+          const h = u.hostname.toLowerCase();
+          return (h === 'lnori.com' || h === 'www.lnori.com') && /^\/(series|book)\/[a-zA-Z0-9_-]+/i.test(u.pathname);
+        } catch {
+          return false;
+        }
+      })();
+      if (isLnori) {
+        closeUrlModal();
+        openLnoriModal(targetUrl);
+        showToast('Switched to Lnori Light Novel Ingestion');
+        return;
+      }
+
       btn.disabled = true;
       setHtml(btn, `${svgIcon('spinner', 'w-3.5 h-3.5 animate-spin')} <span>Extracting...</span>`);
       status.className = 'text-xs p-3 rounded-lg border bg-zinc-900 border-zinc-700 text-zinc-300';
@@ -3614,6 +3717,66 @@
       } finally {
         btn.disabled = false;
         setHtml(btn, `${svgIcon('file-arrow-down', 'w-3.5 h-3.5')} <span>Convert & Ingest</span>`);
+      }
+    }
+
+    // LNORI LIGHT NOVEL INGESTION MODAL
+    function openLnoriModal(initialUrl) {
+      tgHaptic.light();
+      openModalAnimated('lnoriModal', false);
+      const input = document.getElementById('lnoriUrlInput');
+      const status = document.getElementById('lnoriIngestStatus');
+      input.value = initialUrl || '';
+      status.className = 'hidden text-xs p-3 rounded-xl border';
+      status.innerHTML = '';
+      setTimeout(() => input.focus(), 60);
+    }
+
+    function closeLnoriModal() {
+      closeModalAnimated('lnoriModal', false);
+    }
+
+    async function handleLnoriIngest(e) {
+      e.preventDefault();
+      const input = document.getElementById('lnoriUrlInput');
+      const btn = document.getElementById('lnoriIngestBtn');
+      const status = document.getElementById('lnoriIngestStatus');
+      const targetUrl = input.value.trim();
+      if (!targetUrl) return;
+
+      btn.disabled = true;
+      setHtml(btn, `${svgIcon('spinner', 'w-3.5 h-3.5 animate-spin')} <span>Ingesting...</span>`);
+      status.className = 'text-xs p-3 rounded-xl border bg-zinc-900 border-zinc-700 text-zinc-300';
+      setHtml(status, `<div class="flex items-center gap-2">${svgIcon('spinner', 'w-4 h-4 animate-spin text-indigo-400')} <span>Fetching Lnori manifest, downloading EPUBs &amp; converting covers...</span></div>`);
+      status.classList.remove('hidden');
+
+      try {
+        const res = await fetch('/api/lnori/ingest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: targetUrl })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          tgHaptic.success();
+          invalidateCatalogCache();
+          status.className = 'text-xs p-3 rounded-xl border bg-emerald-950/40 border-emerald-800 text-emerald-300';
+          const stats = `Imported: ${data.importedCount || 0}, Skipped/Existing: ${data.skippedCount || 0}, Total: ${data.totalCount || 0}`;
+          const authorText = data.author ? ` by <em>${escapeHtml(data.author)}</em>` : '';
+          setHtml(status, `<div><strong>✅ Light Novel Ingested Successfully!</strong><div class="mt-1 text-[11px] text-zinc-300">"${escapeHtml(data.seriesTitle || 'Series')}"${authorText} (${stats}).</div></div>`);
+          showToast(`Ingested "${data.seriesTitle || 'Light Novel'}"!`);
+          input.value = '';
+          await init();
+        } else {
+          throw new Error(data.error || 'Failed to ingest light novel from Lnori');
+        }
+      } catch (err) {
+        tgHaptic.error();
+        status.className = 'text-xs p-3 rounded-xl border bg-rose-950/40 border-rose-800 text-rose-300';
+        setHtml(status, `<div><strong>❌ Ingestion Failed:</strong><div class="mt-1 text-[11px] text-rose-200">${escapeHtml(err.message)}</div></div>`);
+      } finally {
+        btn.disabled = false;
+        setHtml(btn, `${svgIcon('download', 'w-3.5 h-3.5')} <span>Download &amp; Ingest</span>`);
       }
     }
 
