@@ -368,7 +368,9 @@ The LightHouse web interface (`uploader/index.html`) is built according to Apple
    - Critically damped physics-based easing (`cubic-bezier(0.16, 1, 0.3, 1)` ~`0.35s`).
    - Symmetric spatial transitions (bottom sheets slideUp/slideDown, modals scaleIn/scaleOut, drawers slideLeft/slideRight).
 5. **Desktop Hover Synopsis Preview & Quick Actions:**
-   - Hovering over any book card on desktop immediately reveals an Apple glassmorphism overlay featuring a multi-line clamped synopsis preview, one-click EPUB download, direct Obsidian Markdown note export, metadata editing, and book deletion.
+   - Hovering over any book card on desktop smoothly scales down the cover artwork (`transform: scale(0.85)`) and triggers a card-anchored horizontal wing expansion (`min-width: 480px`).
+   - Styled with ambient blurred cover glow (`filter: blur(40px) saturate(1.4)` via `var(--popup-bg-image)`), Apple-grade dark frosted glass (`background: rgba(24, 24, 27, 0.92); backdrop-filter: blur(20px)`), bold editorial title, volume subtitle, 6-line clamped synopsis, category and language tag pills, and instant one-click EPUB download, Obsidian export, metadata editing, and book deletion.
+   - Built-in smart screen-edge detection dynamically expands rightward (`.popup-left`) or leftward (`.popup-right`) to prevent viewport clipping with zero mouse-leave jitter.
 6. **3D Skeuomorphic Depth & Accessibility:**
    - 3D book spine curvature overlay (`.book-spine-effect`), multi-layer shadows (`.shadow-book`, `.shadow-book-hover`), and skeleton shimmer loading states.
    - Comprehensive accessibility support respecting `prefers-reduced-motion` (instant 150ms opacity fades, scale suppression) and `prefers-reduced-transparency` (solid opaque dark surfaces).

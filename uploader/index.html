@@ -48,39 +48,162 @@
     }
     .ui-card:hover { border-color: rgba(255, 255, 255, 0.2); }
     .ui-card-active { border-color: #38bdf8; background: #18181f; }
-    @media (hover: hover) {
+    @media (hover: hover) and (max-width: 767px) {
       .book-card:hover .action-bar { opacity: 1; transform: translateY(0); pointer-events: auto; }
     }
 
-    /* Apple Dark Glass Floating Popover Card for Desktop Hover */
-    .book-hover-popover {
-      position: fixed;
-      z-index: 45;
-      width: 440px;
-      max-width: calc(100vw - 24px);
-      max-height: 360px;
-      background: rgba(18, 20, 26, 0.94);
-      -webkit-backdrop-filter: blur(24px) saturate(180%);
-      backdrop-filter: blur(24px) saturate(180%);
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 16px;
-      box-shadow: 0 24px 48px -12px rgba(0, 0, 0, 0.75);
-      pointer-events: auto;
-      transition: opacity 150ms cubic-bezier(0.16, 1, 0.3, 1), transform 150ms cubic-bezier(0.16, 1, 0.3, 1);
+    /* Lnori-Style Integrated Book Card & Horizontal Wing Hover Expansion */
+    .book-card {
+      position: relative;
+      max-width: 220px;
+      width: 100%;
+      margin-left: auto;
+      margin-right: auto;
     }
-    .book-hover-popover.popover-hidden {
-      opacity: 0;
-      pointer-events: none;
-      transform: scale(0.98);
+
+    /* Mobile / touch fallback: keep card popup hidden on touch or small screens */
+    .card-popup {
+      display: none;
     }
-    .book-hover-popover.popover-visible {
-      opacity: 1;
-      transform: scale(1);
+
+    /* Desktop Hover Fluid Interaction & Apple Materials */
+    @media (hover: hover) and (min-width: 768px) {
+      .book-card {
+        isolation: isolate;
+      }
+      .book-card:hover,
+      .book-card:focus-within {
+        z-index: 35;
+      }
+
+      /* Suppress legacy full-cover action bar on desktop so scaled cover artwork stays pristine */
+      .action-bar {
+        display: none !important;
+      }
+
+      /* Book cover smoothly scales down on hover */
+      .book-cover-container {
+        transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        transform-origin: center center;
+      }
+      .book-card:hover .book-cover-container,
+      .book-card:focus-within .book-cover-container {
+        transform: scale(0.85);
+        will-change: transform;
+      }
+
+      /* Subtle fade for title info below cover on hover so scaled cover is cleanly framed */
+      .book-card-info {
+        transition: opacity 0.2s ease;
+      }
+      .book-card:hover .book-card-info,
+      .book-card:focus-within .book-card-info {
+        opacity: 0;
+      }
+
+      /* Integrated Card Popup Wing Overlay */
+      .card-popup {
+        display: flex;
+        flex-direction: column;
+        position: absolute;
+        top: -0.75rem;
+        bottom: -0.75rem;
+        width: calc(100% + 320px);
+        min-width: 480px;
+        max-width: calc(100vw - 32px);
+        background: rgba(24, 24, 27, 0.92);
+        -webkit-backdrop-filter: blur(20px);
+        backdrop-filter: blur(20px);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 1rem;
+        box-shadow: 0 24px 48px -12px rgba(0, 0, 0, 0.8), 0 0 1px 1px rgba(255, 255, 255, 0.08);
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+        transition: opacity 0.2s ease, transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), visibility 0.2s ease;
+        z-index: 5;
+        overflow: hidden;
+        box-sizing: border-box;
+      }
+
+      /* Ambient Background Cover Glow */
+      .card-popup::before {
+        content: "";
+        position: absolute;
+        inset: -20px;
+        background-image: var(--popup-bg-image);
+        background-size: cover;
+        background-position: center;
+        filter: blur(40px) saturate(1.4);
+        opacity: 0.4;
+        border-radius: inherit;
+        z-index: -1;
+        pointer-events: none;
+      }
+
+      /* Directionality: popup-left expands rightward */
+      .card-popup.popup-left,
+      .book-card.popup-left .card-popup {
+        left: 0;
+        right: auto;
+        padding-left: calc(100% + 1.5rem);
+        padding-right: 1.25rem;
+        padding-top: 1.25rem;
+        padding-bottom: 1.25rem;
+        transform: translateX(-8px) scale(0.98);
+        transform-origin: left center;
+      }
+
+      /* Directionality: popup-right expands leftward for rightmost columns */
+      .card-popup.popup-right,
+      .book-card.popup-right .card-popup {
+        right: 0;
+        left: auto;
+        padding-right: calc(100% + 1.5rem);
+        padding-left: 1.25rem;
+        padding-top: 1.25rem;
+        padding-bottom: 1.25rem;
+        transform: translateX(8px) scale(0.98);
+        transform-origin: right center;
+      }
+
+      /* Hover & Focus Activation */
+      .book-card:hover .card-popup,
+      .book-card:focus-within .card-popup {
+        opacity: 1;
+        visibility: visible;
+        pointer-events: auto;
+        transform: translateX(0) scale(1);
+      }
+
+      /* Force immediate dismissal on modal open or scroll */
+      .book-card.popup-suppressed .card-popup {
+        opacity: 0 !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
+      }
     }
-    .popover-cover-col {
-      width: 120px;
-      min-width: 120px;
-      max-width: 120px;
+
+    /* Editorial Typography & Layout inside Card Popup */
+    .card-popup-title {
+      font-weight: 800;
+      font-size: 1.15rem;
+      line-height: 1.25;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      overflow: hidden;
+      letter-spacing: -0.02em;
+    }
+    .card-popup-synopsis {
+      line-height: 1.6;
+      font-size: 0.85rem;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 6;
+      line-clamp: 6;
+      overflow: hidden;
     }
     .line-clamp-6 {
       overflow: hidden;
@@ -670,6 +793,17 @@
         transform: none !important;
         transition: none !important;
       }
+      .card-popup {
+        animation: none !important;
+        transform: none !important;
+        transition: opacity 150ms ease !important;
+      }
+      .book-cover-container,
+      .book-card:hover .book-cover-container,
+      .book-card:focus-within .book-cover-container {
+        transform: none !important;
+        transition: none !important;
+      }
     }
 
     /* Accessibility: Reduced Transparency */
@@ -693,10 +827,13 @@
       #guideModal,
       #lnoriModal,
       #bulkToolbar,
-      #bookHoverPopover {
+      .card-popup {
         -webkit-backdrop-filter: none !important;
         backdrop-filter: none !important;
         background-color: #121418 !important;
+      }
+      .card-popup::before {
+        display: none !important;
       }
       #filterDrawer .ui-card,
       #bookDetailModal .ui-card,
@@ -1949,7 +2086,7 @@
               <span>Desktop Hover Synopsis Preview &amp; Quick Actions</span>
             </div>
             <p class="text-[11px] text-zinc-400 leading-relaxed">
-              Hovering over any book card on desktop instantly reveals an Apple glassmorphism overlay featuring a multi-line synopsis summary preview, one-click EPUB download, direct Obsidian Markdown note export, metadata editing, and book deletion. Click the card anytime to open the full modal details.
+              Hovering over any book card on desktop smoothly scales down the book cover (<code class="text-zinc-200">scale(0.85)</code>) and seamlessly expands an integrated card-anchored wing panel (<code class="text-zinc-200">min-width: 480px</code>). Features ambient blurred cover glow (<code class="text-zinc-200">blur(40px) saturate(1.4)</code>), dark frosted glass (<code class="text-zinc-200">blur(20px)</code>), bold editorial title, volume subtitle, multi-line clamped synopsis, category and language pills, and instant one-click EPUB download, Obsidian export, metadata editing, and deletion. Built with smart screen-edge detection (<code class="text-zinc-200">.popup-left</code> / <code class="text-zinc-200">.popup-right</code>) to eliminate viewport overflow and mouse-leave jitter.
             </p>
           </div>
           <div class="space-y-1 pt-1 border-t border-zinc-800/80">
@@ -2428,30 +2565,6 @@
         </button>
       </div>
 
-    </div>
-  </div>
-
-  <!-- DESKTOP BOOK HOVER PREVIEW POPOVER -->
-  <div id="bookHoverPopover" class="book-hover-popover popover-hidden hidden overflow-hidden" role="tooltip" aria-hidden="true">
-    <div class="p-4 flex gap-4 h-full" style="max-height: 360px;">
-      <!-- Left: Book Cover Image (~120px wide, aspect ratio 2:3, rounded-xl, shadow, object-cover) -->
-      <div class="popover-cover-col shrink-0">
-        <div class="relative aspect-[2/3] w-[120px] rounded-xl overflow-hidden shadow-book bg-[#121216] border border-[#23232a] skeleton-shimmer">
-          <img id="popoverCover" alt="Book Cover" class="w-full h-full object-cover object-center relative z-0" onload="this.parentElement.classList.add('loaded')" onerror="this.parentElement.classList.add('loaded')">
-          <div class="absolute inset-0 book-spine-effect pointer-events-none z-10"></div>
-        </div>
-      </div>
-      <!-- Right: Book Metadata & Synopsis -->
-      <div class="flex-1 min-w-0 flex flex-col justify-start">
-        <div class="space-y-1">
-          <h3 id="popoverTitle" class="text-base font-bold text-white tracking-tight leading-snug line-clamp-2"></h3>
-          <div id="popoverMeta" class="text-xs text-neutral-400 font-medium truncate"></div>
-        </div>
-        <div class="border-b border-white/10 my-2"></div>
-        <div class="flex-1 min-h-0 overflow-y-auto pr-1">
-          <p id="popoverSynopsis" class="text-xs text-neutral-300 leading-relaxed line-clamp-6"></p>
-        </div>
-      </div>
     </div>
   </div>
 
@@ -3210,6 +3323,175 @@
       renderBooks();
     }
 
+    function renderBookCard(book) {
+      const coverSrc = book.cover ? `/api/books/${book.id}/cover?w=360` : "data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='178' fill='%23181a20'%3E%3Crect width='120' height='178'/%3E%3Ctext x='50%25' y='50%25' fill='%23737373' text-anchor='middle' font-family='sans-serif' font-size='12'%3ENo Cover%3C/text%3E%3C/svg%3E";
+      const isSelected = selectedBookIds.has(book.id);
+
+      const sync = kosyncMap.get(book.id);
+      const pct = sync ? Math.min(100, Math.round((sync.percentage || 0) * 100)) : 0;
+      let statusText = '';
+      let progressBar = '';
+
+      if (sync && sync.percentage >= 0.99) {
+        statusText = '<span class="text-emerald-400 font-medium">Finished</span>';
+      } else if (sync && sync.percentage > 0) {
+        statusText = `<span class="text-mac-accent font-medium">${pct}% completed</span>`;
+        progressBar = `<div class="absolute bottom-0 inset-x-0 h-1 bg-black/50 z-10"><div class="bg-mac-accent h-full transition-all" style="width: ${pct}%"></div></div>`;
+      } else if (book.series && book.series_index) {
+        statusText = `Volume ${book.series_index}`;
+      } else {
+        statusText = escapeHtml(book.authors || 'Unread');
+      }
+
+      const cleanSynopsis = book.comments ? escapeHtml(book.comments.replace(/<[^>]*>?/gm, '')).trim() : '';
+      const synopsisPreviewHtml = cleanSynopsis ? `
+        <div class="hover-synopsis-preview text-[10px] text-zinc-300 px-1 py-0.5 opacity-90 my-auto" title="${cleanSynopsis}">
+          ${cleanSynopsis}
+        </div>
+      ` : '';
+
+      const seriesIndexBadge = (book.series && book.series_index) ? `
+        <div class="absolute top-2 left-2 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-black/70 text-white/90 border border-white/10 backdrop-blur-sm max-w-[80%] truncate">
+          Vol ${book.series_index}
+        </div>
+      ` : (book.series ? `
+        <div class="absolute top-2 left-2 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-black/70 text-white/90 border border-white/10 backdrop-blur-sm max-w-[80%] truncate">
+          ${escapeHtml(book.series)}
+        </div>
+      ` : '');
+
+      // Subtitle for card popup: Author and volume/series number
+      let subtitleParts = [];
+      if (book.authors) subtitleParts.push(escapeHtml(book.authors));
+      if (book.series) {
+        subtitleParts.push(book.series_index ? `${escapeHtml(book.series)} #${book.series_index}` : escapeHtml(book.series));
+      }
+      const popupSubtitle = subtitleParts.join(' • ') || 'Unknown Author';
+
+      // Category and Language Tag Pills
+      const rawLangs = (book.languages || []).map(l => String(l).toLowerCase().trim());
+      const titleText = book.title || '';
+      const hasMyanmarChars = /[\u1000-\u109F\uA9E0-\uA9FF\uAA60-\uAA7F]/.test(titleText);
+      const isBurmese = rawLangs.includes('my') || rawLangs.includes('mya') || rawLangs.includes('burmese') || (rawLangs.length === 0 && hasMyanmarChars);
+      const isEnglish = rawLangs.includes('en') || rawLangs.includes('eng') || rawLangs.includes('english') || (rawLangs.length === 0 && !hasMyanmarChars && /[a-zA-Z]/.test(titleText));
+      const langLabel = isBurmese ? 'Burmese' : (isEnglish ? 'English' : (rawLangs[0] || ''));
+
+      const tagPills = [];
+      if (langLabel) {
+        tagPills.push(`<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-white/10 text-neutral-300 border border-white/10 backdrop-blur-sm">${escapeHtml(langLabel)}</span>`);
+      }
+      (book.tags || []).slice(0, 3).forEach(t => {
+        tagPills.push(`<span class="px-2 py-0.5 rounded-full text-[10px] font-medium bg-white/5 text-neutral-400 border border-white/10">#${escapeHtml(t)}</span>`);
+      });
+      const tagsHtml = tagPills.join('');
+
+      const formats = book.formats || [];
+      const primaryFormat = formats.find(f => f.toUpperCase() === 'EPUB') || formats[0] || 'EPUB';
+      const downloadButtonHtml = `
+        <a href="/api/books/${book.id}/download/${primaryFormat.toLowerCase()}" onclick="event.stopPropagation()" class="px-2.5 py-1 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-[11px] rounded-lg transition-colors active:scale-[0.98] inline-flex items-center gap-1 shadow-sm">
+          ${svgIcon('download', 'w-3 h-3 text-zinc-950')}
+          <span>Download ${primaryFormat}</span>
+        </a>
+      `;
+
+      // Safe CSS variable for cover glow: only point to authenticated cover image route; never pass raw data URIs
+      const popupBgStyle = book.cover ? `--popup-bg-image: url('/api/books/${book.id}/cover?w=360');` : '';
+
+      return `
+        <div data-book-id="${book.id}" onclick="openBookDetail(${book.id})" class="book-card popup-left group relative flex flex-col cursor-pointer active:scale-[0.98] transition-transform duration-150">
+          <!-- Card-Anchored Horizontal Wing Expansion (lnori-style) -->
+          <aside class="card-popup popup-left" inert ${popupBgStyle ? `style="${popupBgStyle}"` : ''}>
+            <div class="card-popup-content flex flex-col justify-between h-full">
+              <!-- Top Header & Synopsis -->
+              <div class="space-y-2">
+                <div class="pb-2 border-b border-white/10">
+                  <h3 class="card-popup-title font-extrabold text-[1.15rem] text-white leading-tight line-clamp-2" title="${escapeHtml(book.title)}">
+                    ${escapeHtml(book.title)}
+                  </h3>
+                  <div class="card-popup-subtitle text-xs text-neutral-400 font-medium truncate mt-1">
+                    ${popupSubtitle}
+                  </div>
+                </div>
+                <p class="card-popup-synopsis text-[0.85rem] text-neutral-300 leading-[1.6] line-clamp-6">
+                  ${cleanSynopsis || 'No synopsis available for this volume.'}
+                </p>
+              </div>
+
+              <!-- Bottom Footer: Tags & Quick Actions -->
+              <div class="pt-3 border-t border-white/10 flex flex-col gap-2 mt-auto">
+                <div class="flex flex-wrap items-center gap-1.5">
+                  ${tagsHtml}
+                </div>
+                <div class="flex items-center justify-between pt-1">
+                  <div class="flex items-center gap-1.5">
+                    <a href="/api/books/${book.id}/obsidian.md" download onclick="event.stopPropagation()" class="w-7 h-7 rounded-lg bg-white/10 hover:bg-purple-600 text-neutral-300 hover:text-white flex items-center justify-center text-xs transition-colors" title="Export Obsidian Notes">
+                      ${svgIcon('file-pen', 'w-3.5 h-3.5')}
+                    </a>
+                    <button onclick="event.stopPropagation(); openEditModal(${book.id})" class="w-7 h-7 rounded-lg bg-white/10 hover:bg-white/20 text-neutral-300 hover:text-white flex items-center justify-center text-xs transition-colors cursor-pointer" title="Edit Metadata">
+                      ${svgIcon('pen', 'w-3.5 h-3.5')}
+                    </button>
+                    <button onclick="event.stopPropagation(); deleteBook(${book.id})" class="w-7 h-7 rounded-lg bg-white/10 hover:bg-rose-600 text-neutral-300 hover:text-white flex items-center justify-center text-xs transition-colors cursor-pointer" title="Delete">
+                      ${svgIcon('trash', 'w-3.5 h-3.5')}
+                    </button>
+                  </div>
+                  ${downloadButtonHtml}
+                </div>
+              </div>
+            </div>
+          </aside>
+
+          <!-- Book Cover Container -->
+          <div class="book-cover-container relative aspect-[1/1.48] rounded-xl overflow-hidden shadow-book group-hover:shadow-book-hover transition-all duration-300 bg-[#121216] border ${isSelected ? 'border-sky-400 ring-1 ring-sky-400' : 'border-[#23232a] hover:border-white/20'} skeleton-shimmer z-10">
+            ${seriesIndexBadge}
+
+            <!-- Selection Checkbox -->
+            <button onclick="event.stopPropagation(); toggleSelect(${book.id})" class="absolute top-2 right-2 z-20 min-w-[36px] min-h-[36px] w-9 h-9 rounded-lg bg-black/60 text-white flex items-center justify-center border border-white/20 backdrop-blur-sm ${isSelected ? 'bg-sky-500 text-white border-sky-400' : 'sm:opacity-0 sm:group-hover:opacity-100'} transition-all cursor-pointer active:scale-[0.98]" title="Select Book">
+              ${svgIcon('check', `w-3.5 h-3.5 ${isSelected ? 'opacity-100' : 'opacity-0'}`)}
+            </button>
+
+            <img src="${coverSrc}" class="w-full h-full object-cover object-center relative z-0" loading="lazy" decoding="async" onload="this.parentElement.classList.add('loaded')" onerror="this.parentElement.classList.add('loaded')" alt="${escapeHtml(book.title)}">
+
+            <!-- 3D Book Spine Curvature Simulation Overlay -->
+            <div class="absolute inset-0 book-spine-effect pointer-events-none z-10"></div>
+
+            <!-- KOSync Live Progress Bar Overlay -->
+            ${progressBar}
+
+            <!-- Desktop Hover Action Overlay -->
+            <div class="action-bar absolute inset-0 apple-material-glass-light opacity-0 translate-y-1 pointer-events-none group-hover:pointer-events-auto transition-all duration-150 p-3 flex flex-col justify-between hidden sm:flex z-20">
+              <div class="flex justify-end gap-2">
+                <a href="/api/books/${book.id}/obsidian.md" download onclick="event.stopPropagation()" class="w-8 h-8 rounded-lg bg-white/10 hover:bg-purple-600 text-neutral-300 hover:text-white flex items-center justify-center text-xs transition-colors" title="Export Obsidian Notes">
+                  ${svgIcon('file-pen', 'w-3.5 h-3.5')}
+                </a>
+                <button onclick="event.stopPropagation(); openEditModal(${book.id})" class="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 text-neutral-300 hover:text-white flex items-center justify-center text-xs transition-colors cursor-pointer" title="Edit Metadata">
+                  ${svgIcon('pen', 'w-3.5 h-3.5')}
+                </button>
+                <button onclick="event.stopPropagation(); deleteBook(${book.id})" class="w-8 h-8 rounded-lg bg-white/10 hover:bg-rose-600 text-neutral-300 hover:text-white flex items-center justify-center text-xs transition-colors cursor-pointer" title="Delete">
+                  ${svgIcon('trash', 'w-3.5 h-3.5')}
+                </button>
+              </div>
+              
+              ${synopsisPreviewHtml}
+
+              <div class="space-y-1.5">
+                ${(book.formats || []).map(f => `
+                  <a href="/api/books/${book.id}/download/${f.toLowerCase()}" onclick="event.stopPropagation()" class="block w-full py-2 text-center bg-white hover:bg-zinc-200 text-zinc-950 text-xs font-bold rounded-lg transition-colors active:scale-[0.98]">
+                    Download ${f}
+                  </a>
+                `).join('')}
+              </div>
+            </div>
+          </div>
+
+          <!-- Title & Status Subtitle -->
+          <div class="book-card-info mt-2 space-y-0.5">
+            <h4 class="line-clamp-2 text-xs font-semibold leading-tight text-zinc-100 group-hover:text-white transition-colors" title="${escapeHtml(book.title)}">${escapeHtml(book.title)}</h4>
+            <p class="line-clamp-1 text-[11px] text-zinc-400">${statusText}</p>
+          </div>
+        </div>
+      `;
+    }
+
     // PROGRESSIVE CATALOG RENDERING
     function renderBooks() {
       if (typeof hideHoverPopover === 'function') {
@@ -3262,95 +3544,7 @@
       const hasMore = currentRenderLimit < currentFilteredList.length;
 
       // High-Fidelity Book Grid View Render
-      const gridCards = visibleList.map(book => {
-        const coverSrc = book.cover ? `/api/books/${book.id}/cover?w=360` : "data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='178' fill='%23181a20'%3E%3Crect width='120' height='178'/%3E%3Ctext x='50%25' y='50%25' fill='%23737373' text-anchor='middle' font-family='sans-serif' font-size='12'%3ENo Cover%3C/text%3E%3C/svg%3E";
-        const isSelected = selectedBookIds.has(book.id);
-
-        const sync = kosyncMap.get(book.id);
-        const pct = sync ? Math.min(100, Math.round((sync.percentage || 0) * 100)) : 0;
-        let statusText = '';
-        let progressBar = '';
-
-        if (sync && sync.percentage >= 0.99) {
-          statusText = '<span class="text-emerald-400 font-medium">Finished</span>';
-        } else if (sync && sync.percentage > 0) {
-          statusText = `<span class="text-mac-accent font-medium">${pct}% completed</span>`;
-          progressBar = `<div class="absolute bottom-0 inset-x-0 h-1 bg-black/50 z-10"><div class="bg-mac-accent h-full transition-all" style="width: ${pct}%"></div></div>`;
-        } else if (book.series && book.series_index) {
-          statusText = `Volume ${book.series_index}`;
-        } else {
-          statusText = escapeHtml(book.authors || 'Unread');
-        }
-
-        const cleanSynopsis = book.comments ? escapeHtml(book.comments.replace(/<[^>]*>?/gm, '')).trim() : '';
-        const synopsisPreviewHtml = cleanSynopsis ? `
-          <div class="hover-synopsis-preview text-[10px] text-zinc-300 px-1 py-0.5 opacity-90 my-auto" title="${cleanSynopsis}">
-            ${cleanSynopsis}
-          </div>
-        ` : '';
-
-        const seriesIndexBadge = (book.series && book.series_index) ? `
-          <div class="absolute top-2 left-2 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-black/70 text-white/90 border border-white/10 backdrop-blur-sm max-w-[80%] truncate">
-            Vol ${book.series_index}
-          </div>
-        ` : (book.series ? `
-          <div class="absolute top-2 left-2 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-black/70 text-white/90 border border-white/10 backdrop-blur-sm max-w-[80%] truncate">
-            ${escapeHtml(book.series)}
-          </div>
-        ` : '');
-
-        return `
-          <div data-book-id="${book.id}" onclick="openBookDetail(${book.id})" class="book-card group relative flex flex-col cursor-pointer active:scale-[0.98] transition-transform duration-150">
-            <div class="relative aspect-[1/1.48] rounded-xl overflow-hidden shadow-book group-hover:shadow-book-hover transition-all duration-300 group-hover:-translate-y-1.5 bg-[#121216] border ${isSelected ? 'border-sky-400 ring-1 ring-sky-400' : 'border-[#23232a] hover:border-white/20'} skeleton-shimmer">
-              ${seriesIndexBadge}
-
-              <!-- Selection Checkbox -->
-              <button onclick="event.stopPropagation(); toggleSelect(${book.id})" class="absolute top-2 right-2 z-20 min-w-[36px] min-h-[36px] w-9 h-9 rounded-lg bg-black/60 text-white flex items-center justify-center border border-white/20 backdrop-blur-sm ${isSelected ? 'bg-sky-500 text-white border-sky-400' : 'sm:opacity-0 sm:group-hover:opacity-100'} transition-all cursor-pointer active:scale-[0.98]" title="Select Book">
-                ${svgIcon('check', `w-3.5 h-3.5 ${isSelected ? 'opacity-100' : 'opacity-0'}`)}
-              </button>
-
-              <img src="${coverSrc}" class="w-full h-full object-cover object-center relative z-0" loading="lazy" decoding="async" onload="this.parentElement.classList.add('loaded')" onerror="this.parentElement.classList.add('loaded')" alt="${escapeHtml(book.title)}">
-
-              <!-- 3D Book Spine Curvature Simulation Overlay -->
-              <div class="absolute inset-0 book-spine-effect pointer-events-none z-10"></div>
-
-              <!-- KOSync Live Progress Bar Overlay -->
-              ${progressBar}
-
-              <!-- Desktop Hover Action Overlay -->
-              <div class="action-bar absolute inset-0 apple-material-glass-light opacity-0 translate-y-1 pointer-events-none group-hover:pointer-events-auto transition-all duration-150 p-3 flex flex-col justify-between hidden sm:flex z-20">
-                <div class="flex justify-end gap-2">
-                  <a href="/api/books/${book.id}/obsidian.md" download onclick="event.stopPropagation()" class="w-8 h-8 rounded-lg bg-white/10 hover:bg-purple-600 text-neutral-300 hover:text-white flex items-center justify-center text-xs transition-colors" title="Export Obsidian Notes">
-                    ${svgIcon('file-pen', 'w-3.5 h-3.5')}
-                  </a>
-                  <button onclick="event.stopPropagation(); openEditModal(${book.id})" class="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 text-neutral-300 hover:text-white flex items-center justify-center text-xs transition-colors cursor-pointer" title="Edit Metadata">
-                    ${svgIcon('pen', 'w-3.5 h-3.5')}
-                  </button>
-                  <button onclick="event.stopPropagation(); deleteBook(${book.id})" class="w-8 h-8 rounded-lg bg-white/10 hover:bg-rose-600 text-neutral-300 hover:text-white flex items-center justify-center text-xs transition-colors cursor-pointer" title="Delete">
-                    ${svgIcon('trash', 'w-3.5 h-3.5')}
-                  </button>
-                </div>
-                
-                ${synopsisPreviewHtml}
-
-                <div class="space-y-1.5">
-                  ${(book.formats || []).map(f => `
-                    <a href="/api/books/${book.id}/download/${f.toLowerCase()}" onclick="event.stopPropagation()" class="block w-full py-2 text-center bg-white hover:bg-zinc-200 text-zinc-950 text-xs font-bold rounded-lg transition-colors active:scale-[0.98]">
-                      Download ${f}
-                    </a>
-                  `).join('')}
-                </div>
-              </div>
-            </div>
-
-            <!-- Title & Status Subtitle -->
-            <div class="mt-2 space-y-0.5">
-              <h4 class="line-clamp-2 text-xs font-semibold leading-tight text-zinc-100 group-hover:text-white transition-colors" title="${escapeHtml(book.title)}">${escapeHtml(book.title)}</h4>
-              <p class="line-clamp-1 text-[11px] text-zinc-400">${statusText}</p>
-            </div>
-          </div>
-        `;
-      }).join('');
+      const gridCards = visibleList.map(book => renderBookCard(book)).join('');
 
       const sentinelHtml = hasMore ? `
         <div id="catalogSentinel" class="col-span-full py-6 text-center text-xs text-neutral-500 flex items-center justify-center gap-2">
@@ -4237,225 +4431,126 @@
       }
     }
 
-    // DESKTOP BOOK HOVER PREVIEW POPOVER CONTROLLER
-    let hoverTimer = null;
-    let dismissTimer = null;
-    let activePopoverCard = null;
-
+    // DESKTOP BOOK HOVER PREVIEW CONTROLLER (LNORI-STYLE HORIZONTAL EXPANSION)
     function hideHoverPopover() {
-      if (hoverTimer) {
-        clearTimeout(hoverTimer);
-        hoverTimer = null;
-      }
-      if (dismissTimer) {
-        clearTimeout(dismissTimer);
-        dismissTimer = null;
-      }
-      activePopoverCard = null;
-      const popover = document.getElementById('bookHoverPopover');
-      if (popover) {
-        popover.classList.remove('popover-visible');
-        popover.classList.add('popover-hidden');
-        popover.setAttribute('aria-hidden', 'true');
-        setTimeout(() => {
-          if (!activePopoverCard) {
-            popover.classList.add('hidden');
-          }
-        }, 150);
+      const activeCards = document.querySelectorAll('.book-card.popup-active, .book-card:focus-within, .book-card:hover');
+      activeCards.forEach(card => {
+        card.classList.add('popup-suppressed');
+        card.classList.remove('popup-active');
+        const popup = card.querySelector('.card-popup');
+        if (popup) popup.setAttribute('inert', '');
+      });
+    }
+
+    function isDesktopHover() {
+      return !!(window.matchMedia && window.matchMedia('(hover: hover) and (min-width: 768px)').matches);
+    }
+
+    function updateCardDirection(card) {
+      if (!card || !isDesktopHover()) return;
+      const rect = card.getBoundingClientRect();
+      const popup = card.querySelector('.card-popup');
+      const cardWidth = rect.width || card.offsetWidth || 200;
+      // Measured or computed popup width bounded by viewport
+      const popupWidth = Math.min(window.innerWidth - 32, Math.max(480, cardWidth + 320));
+
+      const rightEdge = rect.left + popupWidth;
+      const leftEdge = rect.right - popupWidth;
+      const overflowRight = Math.max(0, rightEdge - (window.innerWidth - 16));
+      const overflowLeft = Math.max(0, 16 - leftEdge);
+
+      // Bilateral check: expand leftward (.popup-right) only when rightward overflows and leftward clips less
+      const usePopupRight = overflowRight > 0 && overflowLeft <= overflowRight;
+
+      if (usePopupRight) {
+        card.classList.remove('popup-left');
+        card.classList.add('popup-right');
+        if (popup) {
+          popup.classList.remove('popup-left');
+          popup.classList.add('popup-right');
+        }
+      } else {
+        card.classList.remove('popup-right');
+        card.classList.add('popup-left');
+        if (popup) {
+          popup.classList.remove('popup-right');
+          popup.classList.add('popup-left');
+        }
       }
     }
 
-    function initHoverPopover() {
-      // Touch safety: disabled on touch / mobile devices (only binds on matchMedia('(hover: hover)').matches)
-      if (!window.matchMedia || !window.matchMedia('(hover: hover)').matches) {
-        return;
-      }
-
-      const popover = document.getElementById('bookHoverPopover');
-      if (!popover) return;
-
-      const clearAllPopoverTimers = () => {
-        if (hoverTimer) {
-          clearTimeout(hoverTimer);
-          hoverTimer = null;
-        }
-        if (dismissTimer) {
-          clearTimeout(dismissTimer);
-          dismissTimer = null;
-        }
-      };
-
-      const hidePopover = () => {
-        hideHoverPopover();
-      };
-
-      const showPopoverForCard = (card) => {
-        if (hasActiveModal()) {
-          hidePopover();
-          return;
-        }
-
-        const bookId = parseInt(card.getAttribute('data-book-id'), 10);
-        if (Number.isNaN(bookId)) return;
-        const book = allBooks.find(b => b.id === bookId);
-        if (!book) return;
-
-        activePopoverCard = card;
-
-        // Populate popover content
-        const coverEl = document.getElementById('popoverCover');
-        const titleEl = document.getElementById('popoverTitle');
-        const metaEl = document.getElementById('popoverMeta');
-        const synopsisEl = document.getElementById('popoverSynopsis');
-
-        const coverUrl = book.cover ? `/api/books/${book.id}/cover?w=360` : "data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='178' fill='%23181a20'%3E%3Crect width='120' height='178'/%3E%3Ctext x='50%25' y='50%25' fill='%23737373' text-anchor='middle' font-family='sans-serif' font-size='12'%3ENo Cover%3C/text%3E%3C/svg%3E";
-        if (coverEl) {
-          if (coverEl.getAttribute('src') !== coverUrl) {
-            coverEl.parentElement?.classList.remove('loaded');
-            coverEl.src = coverUrl;
-          } else if (coverEl.complete) {
-            coverEl.parentElement?.classList.add('loaded');
-          }
-        }
-
-        if (titleEl) {
-          titleEl.textContent = book.title || 'Untitled';
-        }
-
-        if (metaEl) {
-          let seriesPart = '';
-          if (book.series) {
-            seriesPart = book.series_index ? `${book.series} #${book.series_index}` : book.series;
-          }
-          const authorPart = book.authors || 'Unknown Author';
-          metaEl.textContent = seriesPart ? `${seriesPart} • ${authorPart}` : authorPart;
-        }
-
-        if (synopsisEl) {
-          if (book.comments && typeof book.comments === 'string') {
-            const cleanText = book.comments
-              .replace(/<[^>]*>?/gm, ' ')
-              .replace(/&nbsp;/g, ' ')
-              .replace(/&amp;/g, '&')
-              .replace(/&lt;/g, '<')
-              .replace(/&gt;/g, '>')
-              .replace(/&quot;/g, '"')
-              .replace(/&#39;/g, "'")
-              .replace(/\s+/g, ' ')
-              .trim();
-            synopsisEl.textContent = cleanText || 'No synopsis available for this volume.';
-          } else {
-            synopsisEl.textContent = 'No synopsis available for this volume.';
-          }
-        }
-
-        // Make popover temporarily visible to measure dimensions accurately
-        popover.classList.remove('hidden');
-
-        // Smart Viewport Collision Detection & Positioning
-        const rect = card.getBoundingClientRect();
-        const popoverWidth = popover.offsetWidth || 440;
-        const popoverHeight = popover.offsetHeight || 300;
-        const padding = 12;
-
-        let left = 0;
-        if (rect.right + popoverWidth > window.innerWidth - 20) {
-          // Position popover to the LEFT of the card
-          left = Math.max(padding, rect.left - popoverWidth - padding);
-        } else {
-          // Position popover to the RIGHT of the card
-          left = rect.right + padding;
-        }
-
-        // Align top with card top, clamping within viewport bounds
-        let top = rect.top;
-        if (top + popoverHeight > window.innerHeight - padding) {
-          top = Math.max(padding, window.innerHeight - popoverHeight - padding);
-        }
-        if (top < padding) {
-          top = padding;
-        }
-
-        popover.style.left = `${Math.round(left)}px`;
-        popover.style.top = `${Math.round(top)}px`;
-
-        popover.classList.remove('popover-hidden');
-        popover.classList.add('popover-visible');
-        popover.setAttribute('aria-hidden', 'false');
-      };
-
-      // Event delegation on document for dynamic .book-card elements
+    function initCardHoverExpansion() {
+      // Event delegation on document: dynamic registration ensures window resize across 768px activates seamlessly
       document.addEventListener('mouseenter', (e) => {
+        if (!isDesktopHover()) return;
         const card = e.target.closest && e.target.closest('.book-card');
         if (card) {
-          // Ignore internal descendant transitions within the same card
-          if (e.relatedTarget && card.contains(e.relatedTarget)) {
-            return;
-          }
-          if (dismissTimer) {
-            clearTimeout(dismissTimer);
-            dismissTimer = null;
-          }
-          if (activePopoverCard === card && popover.classList.contains('popover-visible')) {
-            return;
-          }
-          // If hovering a different card while popover is open, immediately switch or clear
-          if (hoverTimer) {
-            clearTimeout(hoverTimer);
-          }
-          hoverTimer = setTimeout(() => {
-            showPopoverForCard(card);
-          }, 180);
+          card.classList.remove('popup-suppressed');
+          card.classList.add('popup-active');
+          updateCardDirection(card);
+          const popup = card.querySelector('.card-popup');
+          if (popup) popup.removeAttribute('inert');
         }
       }, true);
 
       document.addEventListener('mouseleave', (e) => {
         const card = e.target.closest && e.target.closest('.book-card');
-        if (card) {
-          // Ignore internal descendant transitions within the same card
-          if (e.relatedTarget && card.contains(e.relatedTarget)) {
-            return;
-          }
-          if (hoverTimer) {
-            clearTimeout(hoverTimer);
-            hoverTimer = null;
-          }
-          if (dismissTimer) {
-            clearTimeout(dismissTimer);
-          }
-          dismissTimer = setTimeout(() => {
-            hidePopover();
-          }, 100);
+        if (card && (!e.relatedTarget || !card.contains(e.relatedTarget))) {
+          card.classList.remove('popup-active');
+          card.classList.remove('popup-suppressed');
+          const popup = card.querySelector('.card-popup');
+          if (popup) popup.setAttribute('inert', '');
         }
       }, true);
 
-      // Popover hover persistence: mouseenter clears dismissal timer
-      popover.addEventListener('mouseenter', (e) => {
-        if (e.relatedTarget && popover.contains(e.relatedTarget)) {
+      document.addEventListener('focusin', (e) => {
+        if (!isDesktopHover()) return;
+        const card = e.target.closest && e.target.closest('.book-card');
+        if (card) {
+          card.classList.remove('popup-suppressed');
+          card.classList.add('popup-active');
+          updateCardDirection(card);
+          const popup = card.querySelector('.card-popup');
+          if (popup) popup.removeAttribute('inert');
+        }
+      }, true);
+
+      document.addEventListener('focusout', (e) => {
+        const card = e.target.closest && e.target.closest('.book-card');
+        if (card && (!e.relatedTarget || !card.contains(e.relatedTarget))) {
+          card.classList.remove('popup-active');
+          card.classList.remove('popup-suppressed');
+          const popup = card.querySelector('.card-popup');
+          if (popup) popup.setAttribute('inert', '');
+        }
+      }, true);
+
+      const syncHoverState = () => {
+        if (!isDesktopHover()) {
+          hideHoverPopover();
           return;
         }
-        if (dismissTimer) {
-          clearTimeout(dismissTimer);
-          dismissTimer = null;
+        const activeCard = document.querySelector('.book-card:hover, .book-card.popup-active, .book-card:focus-within');
+        if (activeCard) {
+          activeCard.classList.remove('popup-suppressed');
+          activeCard.classList.add('popup-active');
+          updateCardDirection(activeCard);
+          const popup = activeCard.querySelector('.card-popup');
+          if (popup) popup.removeAttribute('inert');
         }
-      });
+      };
 
-      // Popover mouseleave hides it
-      popover.addEventListener('mouseleave', (e) => {
-        if (e.relatedTarget && popover.contains(e.relatedTarget)) {
-          return;
+      window.addEventListener('resize', syncHoverState, { passive: true });
+      if (window.matchMedia) {
+        try {
+          window.matchMedia('(hover: hover) and (min-width: 768px)').addEventListener('change', syncHoverState);
+        } catch {}
+      }
+      window.addEventListener('scroll', () => {
+        if (document.querySelector('.book-card.popup-active')) {
+          hideHoverPopover();
         }
-        if (dismissTimer) {
-          clearTimeout(dismissTimer);
-        }
-        dismissTimer = setTimeout(() => {
-          hidePopover();
-        }, 100);
-      });
-
-      // Close popover immediately on scroll, resize, or modal open
-      window.addEventListener('scroll', hidePopover, { passive: true });
-      window.addEventListener('resize', hidePopover, { passive: true });
+      }, { passive: true });
     }
 
     function updateHeaderHeight() {
@@ -4469,7 +4564,7 @@
     }
 
     init();
-    initHoverPopover();
+    initCardHoverExpansion();
     updateHeaderHeight();
     window.addEventListener('resize', updateHeaderHeight);
   
