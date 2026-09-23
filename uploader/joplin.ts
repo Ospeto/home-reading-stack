@@ -560,46 +560,28 @@ function isHighlightStructure(trimmed: string): boolean {
   return (
     isChapterHeading(trimmed) ||
     isPageHeading(trimmed) ||
-    trimmed.startsWith(">") ||
     trimmed.startsWith("==") ||
     /^---\s*$/.test(trimmed) ||
     /^[-*_]{3,}\s*$/.test(trimmed)
   );
 }
 
-function lineContainsPageHeading(trimmed: string): boolean {
-  return /###\s+Page\b/i.test(trimmed) || /###\s+\d+\b/.test(trimmed);
-}
-
 /**
- * A `##` heading continues highlights only when a KOReader entry follows.
- * A blockquote is a user reflection unless it, or the next content, contains
- * an explicit `### Page` heading.
+ * A `##` heading continues highlights only when the next non-empty line is an
+ * explicit `### Page` heading. That is the only shape KOReader's
+ * `template/md.lua` emits. Do not treat `>`, `==`, another `##`, or EOF as
+ * continuation, and do not scan past a blockquote. `### Page` text inside a
+ * blockquote is not a chapter signal.
  */
 function chapterContinuesHighlights(lines: string[], index: number): boolean {
   let j = index + 1;
   while (j < lines.length && !lines[j].trim()) j++;
-  if (j >= lines.length) return true;
-  const next = lines[j].trim();
-  if (isPageHeading(next) || next.startsWith("==") || isChapterHeading(next)) {
-    return true;
-  }
-  if (!next.startsWith(">")) return false;
+  if (j >= lines.length) return false;
+  return isPageHeading(lines[j].trim());
+}
 
-  while (j < lines.length) {
-    const trimmed = lines[j].trim();
-    if (!trimmed) {
-      j++;
-      continue;
-    }
-    if (trimmed.startsWith(">")) {
-      if (lineContainsPageHeading(trimmed)) return true;
-      j++;
-      continue;
-    }
-    return isPageHeading(trimmed);
-  }
-  return false;
+function stripHighlightMarkerComments(text: string): string {
+  return text.replace(/<!--\s*lighthouse:highlights:[^>]*-->/gi, "");
 }
 
 function joinOutsideRegions(parts: string[]): string {
@@ -653,11 +635,9 @@ export function splitUnclosedHighlightRegion(afterStart: string): {
       continue;
     }
 
-    if (
-      isPageHeading(trimmed) ||
-      trimmed.startsWith(">") ||
-      trimmed.startsWith("==")
-    ) {
+    // A bare `>` must not open a managed region. Keep it only when `inEntry`
+    // is already true from an open `### Page` entry.
+    if (isPageHeading(trimmed) || trimmed.startsWith("==")) {
       inEntry = true;
       managed.push(line);
       i++;
@@ -685,6 +665,26 @@ export function splitUnclosedHighlightRegion(afterStart: string): {
     managed: managed.join("\n").trim(),
     remainder: lines.slice(i).join("\n"),
   };
+}
+
+/**
+ * Rebuild one start/end pair after stripping every highlight marker comment
+ * from both sides of `## Highlights & Notes`. An old end marker above the
+ * header must not survive into the rebuilt note.
+ */
+function rebuildInvertedHighlightSection(restOfContent: string): string {
+  const header = "## Highlights & Notes";
+  const stripped = stripHighlightMarkerComments(restOfContent);
+  const hnIdx = stripped.indexOf(header);
+  if (hnIdx === -1) {
+    const recovered = stripped.trim();
+    return `${recovered}\n\n${header}\n${HIGHLIGHTS_START_MARKER}\n${HIGHLIGHTS_END_MARKER}\n`;
+  }
+  const beforeHn = stripped.slice(0, hnIdx + header.length);
+  const cleanAfterHn = stripped.slice(hnIdx + header.length);
+  const { managed, remainder } = splitUnclosedHighlightRegion(cleanAfterHn);
+  const tail = remainder.replace(/^\n*/, "");
+  return `${beforeHn}\n${HIGHLIGHTS_START_MARKER}\n${managed}\n${HIGHLIGHTS_END_MARKER}\n${tail}`;
 }
 
 export function renderHighlightEntries(entries: ParsedHighlightEntry[]): string {
@@ -1113,31 +1113,10 @@ export function mergeJoplinHighlights(
   let endIdx = restOfContent.indexOf(HIGHLIGHTS_END_MARKER);
 
   if (startIdx !== -1 && endIdx !== -1 && endIdx < startIdx) {
-    // Inverted markers: strip both and reconstruct under "## Highlights & Notes"
-    const hnIdx = restOfContent.indexOf("## Highlights & Notes");
-    if (hnIdx !== -1) {
-      const beforeHn = restOfContent.slice(
-        0,
-        hnIdx + "## Highlights & Notes".length,
-      );
-      const rawAfterHn = restOfContent.slice(
-        hnIdx + "## Highlights & Notes".length,
-      );
-      const cleanAfterHn = rawAfterHn
-        .replaceAll(HIGHLIGHTS_START_MARKER, "")
-        .replaceAll(HIGHLIGHTS_END_MARKER, "");
-      // Do not slice at the next `##`. User `###` sections and loose
-      // reflections before that heading must stay outside the markers.
-      const { managed, remainder } = splitUnclosedHighlightRegion(cleanAfterHn);
-      const tail = remainder.replace(/^\n*/, "");
-      restOfContent = `${beforeHn}\n${HIGHLIGHTS_START_MARKER}\n${managed}\n${HIGHLIGHTS_END_MARKER}\n${tail}`;
-    } else {
-      const recovered = restOfContent
-        .replaceAll(HIGHLIGHTS_START_MARKER, "")
-        .replaceAll(HIGHLIGHTS_END_MARKER, "")
-        .trim();
-      restOfContent = `${recovered}\n\n## Highlights & Notes\n${HIGHLIGHTS_START_MARKER}\n${HIGHLIGHTS_END_MARKER}\n`;
-    }
+    // Inverted markers: strip every marker comment before and after the
+    // highlights header, then rebuild exactly one ordered pair. Do not leave
+    // an old end marker above the new start marker.
+    restOfContent = rebuildInvertedHighlightSection(restOfContent);
     startIdx = restOfContent.indexOf(HIGHLIGHTS_START_MARKER);
     endIdx = restOfContent.indexOf(HIGHLIGHTS_END_MARKER);
   } else if (startIdx !== -1 && endIdx === -1) {
@@ -1222,6 +1201,10 @@ export function mergeJoplinHighlights(
     );
     const after = restOfContent.slice(endIdx);
     restOfContent = `${before}\n${finalHighlights}\n${after}`;
+  } else if (startIdx !== -1 && endIdx !== -1 && endIdx < startIdx) {
+    // Still inverted. Rebuild once more and do not fall through into a second
+    // wrap while an old end marker sits above the new start marker.
+    restOfContent = rebuildInvertedHighlightSection(restOfContent);
   } else {
     // Markers missing: merge into the existing section instead of leaving the
     // original quotes outside the new end marker.

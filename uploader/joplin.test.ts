@@ -981,10 +981,13 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
     }
 
     function expectPrivateSurvivesSync(note: string, snippets: string[]) {
+      const startPos = note.indexOf(HIGHLIGHTS_START_MARKER);
       const endPos = note.indexOf(HIGHLIGHTS_END_MARKER);
-      expect(endPos).toBeGreaterThan(-1);
+      expect(startPos).toBeGreaterThan(-1);
+      expect(endPos).toBeGreaterThan(startPos);
       const managed = betweenMarkers(note);
       for (const snippet of snippets) {
+        expect(note).toContain(snippet);
         expect(managed).not.toContain(snippet);
         expect(note.indexOf(snippet)).toBeGreaterThan(endPos);
       }
@@ -994,11 +997,16 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
         highlights: [{ text: "sidecar only" }],
         progress: 12,
       });
+      const syncedStart = synced.indexOf(HIGHLIGHTS_START_MARKER);
+      const syncedEnd = synced.indexOf(HIGHLIGHTS_END_MARKER);
+      const syncedManaged = betweenMarkers(synced);
+      expect(syncedEnd).toBeGreaterThan(syncedStart);
       for (const snippet of snippets) {
         expect(synced).toContain(snippet);
+        expect(syncedManaged).not.toContain(snippet);
+        expect(synced.indexOf(snippet)).toBeGreaterThan(syncedEnd);
       }
       expect(synced).toContain("sidecar only");
-      expect(betweenMarkers(synced)).not.toContain(snippets[0]);
     }
 
     it("does not pull a private subsection into markers when the start marker is missing", () => {
@@ -1090,6 +1098,195 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
       expectPrivateSurvivesSync(fixed, ["## Takeaways", "> my private thought"]);
       expect(betweenMarkers(fixed)).not.toContain("my private thought");
       expect(fixed).toContain("==kept quote==");
+    });
+
+    it("does not pull a reflection between quotes when a later page heading follows", () => {
+      const doc = [
+        "# Between",
+        "## Highlights & Notes",
+        HIGHLIGHTS_START_MARKER,
+        "### Page 1",
+        "==kept quote==",
+        "",
+        "## Takeaways",
+        "> my private thought",
+        "",
+        "### Page 2",
+        "==later quote==",
+      ].join("\n");
+      const fixed = mergeJoplinHighlights(
+        doc,
+        "### Page 3\n==incoming quote==",
+        "Between",
+        { calibreDbPath: missingCalibre() },
+      );
+      expectPrivateSurvivesSync(fixed, ["## Takeaways", "> my private thought"]);
+      expect(betweenMarkers(fixed)).not.toContain("my private thought");
+      expect(fixed).toContain("==kept quote==");
+    });
+
+    it("does not treat a page heading inside a blockquote as a chapter signal", () => {
+      const doc = [
+        "# QuotedPage",
+        "## Highlights & Notes",
+        HIGHLIGHTS_START_MARKER,
+        "### Page 1",
+        "==kept quote==",
+        "",
+        "## Takeaways",
+        "> I liked ### Page 4 of this chapter",
+      ].join("\n");
+      const fixed = mergeJoplinHighlights(
+        doc,
+        "### Page 3\n==incoming quote==",
+        "QuotedPage",
+        { calibreDbPath: missingCalibre() },
+      );
+      expectPrivateSurvivesSync(fixed, [
+        "## Takeaways",
+        "> I liked ### Page 4 of this chapter",
+      ]);
+    });
+
+    it("does not treat Obsidian emphasis under a user heading as a KOReader chapter", () => {
+      const doc = [
+        "# Emphasis",
+        "## Highlights & Notes",
+        HIGHLIGHTS_START_MARKER,
+        "### Page 1",
+        "==kept quote==",
+        "",
+        "## Takeaways",
+        "==this is my emphasis not a koreader quote==",
+        "",
+        "more reflection after a blank line",
+      ].join("\n");
+      const fixed = mergeJoplinHighlights(
+        doc,
+        "### Page 3\n==incoming quote==",
+        "Emphasis",
+        { calibreDbPath: missingCalibre() },
+      );
+      expectPrivateSurvivesSync(fixed, [
+        "## Takeaways",
+        "==this is my emphasis not a koreader quote==",
+        "more reflection after a blank line",
+      ]);
+    });
+
+    it("does not open a managed region for a bare blockquote reflection", () => {
+      const doc = [
+        "# Loose",
+        "## Highlights & Notes",
+        HIGHLIGHTS_START_MARKER,
+        "### Page 1",
+        "==kept quote==",
+        "",
+        "> a loose blockquote reflection with no heading",
+      ].join("\n");
+      const fixed = mergeJoplinHighlights(
+        doc,
+        "### Page 3\n==incoming quote==",
+        "Loose",
+        { calibreDbPath: missingCalibre() },
+      );
+      expectPrivateSurvivesSync(fixed, [
+        "> a loose blockquote reflection with no heading",
+      ]);
+      expect(betweenMarkers(fixed)).toContain("==kept quote==");
+    });
+
+    it("keeps a blockquote that is already inside an open page entry", () => {
+      const doc = [
+        "# InEntry",
+        "## Highlights & Notes",
+        HIGHLIGHTS_START_MARKER,
+        "### Page 1",
+        "==kept quote==",
+        "> still inside the page entry",
+      ].join("\n");
+      const fixed = mergeJoplinHighlights(
+        doc,
+        "### Page 1\n==kept quote==",
+        "InEntry",
+        { calibreDbPath: missingCalibre() },
+      );
+      expect(betweenMarkers(fixed)).toContain("> still inside the page entry");
+      expect(betweenMarkers(fixed)).toContain("==kept quote==");
+    });
+
+    it("does not consume an empty trailing user heading", () => {
+      const doc = [
+        "# EmptyHead",
+        "## Highlights & Notes",
+        HIGHLIGHTS_START_MARKER,
+        "### Page 1",
+        "==kept quote==",
+        "",
+        "## Takeaways",
+      ].join("\n");
+      const fixed = mergeJoplinHighlights(
+        doc,
+        "### Page 3\n==incoming quote==",
+        "EmptyHead",
+        { calibreDbPath: missingCalibre() },
+      );
+      expectPrivateSurvivesSync(fixed, ["## Takeaways"]);
+      expect(betweenMarkers(fixed)).toContain("==kept quote==");
+    });
+
+    it("repairs inverted markers when the end marker sits before the highlights header", () => {
+      const doc = [
+        "# InvBefore",
+        HIGHLIGHTS_END_MARKER,
+        "preface that must stay",
+        "## Highlights & Notes",
+        "### Page 1",
+        "==kept quote==",
+        "",
+        "### My private subsection",
+        "private text",
+        HIGHLIGHTS_START_MARKER,
+      ].join("\n");
+      const fixed = mergeJoplinHighlights(
+        doc,
+        "### Page 2\n==new quote==",
+        "InvBefore",
+        { calibreDbPath: missingCalibre() },
+      );
+      expect((fixed.match(/<!-- lighthouse:highlights:start -->/g) || []).length).toBe(1);
+      expect((fixed.match(/<!-- lighthouse:highlights:end -->/g) || []).length).toBe(1);
+      const startPos = fixed.indexOf(HIGHLIGHTS_START_MARKER);
+      const endPos = fixed.indexOf(HIGHLIGHTS_END_MARKER);
+      expect(endPos).toBeGreaterThan(startPos);
+      expect(fixed.indexOf("preface that must stay")).toBeGreaterThan(-1);
+      expect(fixed.indexOf("preface that must stay")).toBeLessThan(startPos);
+      expectPrivateSurvivesSync(fixed, ["### My private subsection", "private text"]);
+      const synced = mergeNoteContent(fixed, {
+        title: "InvBefore",
+        author: "Ada",
+        highlights: [{ text: "sidecar only" }],
+        progress: 12,
+      });
+      expect(synced).toContain("preface that must stay");
+      expect(synced.indexOf("preface that must stay")).toBeLessThan(
+        synced.indexOf(HIGHLIGHTS_START_MARKER),
+      );
+      const again = mergeJoplinHighlights(
+        fixed,
+        "### Page 2\n==new quote==",
+        "InvBefore",
+        { calibreDbPath: missingCalibre() },
+      );
+      expect((again.match(/<!-- lighthouse:highlights:start -->/g) || []).length).toBe(1);
+      expect((again.match(/<!-- lighthouse:highlights:end -->/g) || []).length).toBe(1);
+      expect(again.indexOf(HIGHLIGHTS_END_MARKER)).toBeGreaterThan(
+        again.indexOf(HIGHLIGHTS_START_MARKER),
+      );
+      expect(again).toContain("preface that must stay");
+      expect(again.indexOf("preface that must stay")).toBeLessThan(
+        again.indexOf(HIGHLIGHTS_START_MARKER),
+      );
     });
 
     it("strips newlines and highlight markers from note headings", async () => {
