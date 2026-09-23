@@ -361,6 +361,142 @@ describe("Reverse SSH Tunnel Auto-Healing Watchdog", () => {
     const lintRes = spawnSync("plutil", ["-lint", watchdogPlistPath]);
     expect(lintRes.status).toBe(0);
   });
+
+  it("tunnel-watchdog.sh gates US VLESS monitoring behind ENABLE_US_TUNNEL=1 and plist existence", () => {
+    const scriptContent = fs.readFileSync(watchdogScriptPath, "utf8");
+    expect(scriptContent).toContain('ENABLE_US_TUNNEL="${ENABLE_US_TUNNEL:-0}"');
+    expect(scriptContent).toContain(
+      'US_PLIST="${US_PLIST:-${HOME}/Library/LaunchAgents/${US_TUNNEL_LABEL}.plist}"',
+    );
+    expect(scriptContent).toContain(
+      '[ "$ENABLE_US_TUNNEL" != "1" ] || [ ! -f "$US_PLIST" ]',
+    );
+  });
+
+  it("tunnel-watchdog.sh purges lingering US failure markers when US tunnel is disabled or plist absent", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "watchdog-test-"));
+    const tempLog = path.join(tempDir, "watchdog.log");
+    const tempEnv = path.join(tempDir, ".env");
+    const testFailFile = path.join(tempDir, "test-us-failures");
+    const testAlertFile = path.join(tempDir, "test-us-alerted");
+
+    fs.writeFileSync(testFailFile, "5");
+    fs.writeFileSync(testAlertFile, "5");
+    fs.writeFileSync(
+      tempEnv,
+      "ENABLE_US_TUNNEL=0\nLOCAL_HTTP_PORT=8086\nLOCAL_KOSYNC_PORT=7200\n",
+    );
+
+    try {
+      const res = spawnSync(
+        "bash",
+        [
+          "-c",
+          `export LOCAL_HTTP_PORT=8086 LOCAL_KOSYNC_PORT=7200 ENV_FILE="${tempEnv}" LOG_FILE="${tempLog}" US_FAIL_COUNT_FILE="${testFailFile}" US_ALERT_TRACK_FILE="${testAlertFile}" US_PLIST="/nonexistent.plist"; sed -e '/^# 2\\. Check Local Prerequisites/,/^# ==============================================================================/ { /^# ==============================================================================/!d; }' "${watchdogScriptPath}" | sed '/^# 4\\. Monitor & Auto-Heal: Singapore/q' | bash`,
+        ],
+        { encoding: "utf8" },
+      );
+
+      expect(res.status).toBe(0);
+      // Verify that failure and alert files were purged
+      expect(fs.existsSync(testFailFile)).toBe(false);
+      expect(fs.existsSync(testAlertFile)).toBe(false);
+
+      // Verify log message indicates skip and cleanup
+      const logContent = fs.existsSync(tempLog)
+        ? fs.readFileSync(tempLog, "utf8")
+        : "";
+      expect(logContent).toContain(
+        "US VLESS tunnel monitoring skipped (ENABLE_US_TUNNEL=0, plist_exists=0)",
+      );
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("tunnel-watchdog.sh purges lingering US failure markers when ENABLE_US_TUNNEL=1 but plist is absent", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "watchdog-test-"));
+    const tempLog = path.join(tempDir, "watchdog.log");
+    const tempEnv = path.join(tempDir, ".env");
+    const testFailFile = path.join(tempDir, "test-us-failures");
+    const testAlertFile = path.join(tempDir, "test-us-alerted");
+
+    fs.writeFileSync(testFailFile, "10");
+    fs.writeFileSync(testAlertFile, "10");
+    fs.writeFileSync(
+      tempEnv,
+      "ENABLE_US_TUNNEL=1\nLOCAL_HTTP_PORT=8086\nLOCAL_KOSYNC_PORT=7200\n",
+    );
+
+    try {
+      const res = spawnSync(
+        "bash",
+        [
+          "-c",
+          `export LOCAL_HTTP_PORT=8086 LOCAL_KOSYNC_PORT=7200 ENV_FILE="${tempEnv}" LOG_FILE="${tempLog}" US_FAIL_COUNT_FILE="${testFailFile}" US_ALERT_TRACK_FILE="${testAlertFile}" US_PLIST="/nonexistent.plist"; sed -e '/^# 2\\. Check Local Prerequisites/,/^# ==============================================================================/ { /^# ==============================================================================/!d; }' "${watchdogScriptPath}" | sed '/^# 4\\. Monitor & Auto-Heal: Singapore/q' | bash`,
+        ],
+        { encoding: "utf8" },
+      );
+
+      expect(res.status).toBe(0);
+      // Verify that failure and alert files were purged
+      expect(fs.existsSync(testFailFile)).toBe(false);
+      expect(fs.existsSync(testAlertFile)).toBe(false);
+
+      // Verify log message indicates skip and cleanup
+      const logContent = fs.existsSync(tempLog)
+        ? fs.readFileSync(tempLog, "utf8")
+        : "";
+      expect(logContent).toContain(
+        "US VLESS tunnel monitoring skipped (ENABLE_US_TUNNEL=1, plist_exists=0)",
+      );
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("tunnel-watchdog.sh purges lingering US failure markers when ENABLE_US_TUNNEL=0 even if plist exists", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "watchdog-test-"));
+    const tempLog = path.join(tempDir, "watchdog.log");
+    const tempEnv = path.join(tempDir, ".env");
+    const testFailFile = path.join(tempDir, "test-us-failures");
+    const testAlertFile = path.join(tempDir, "test-us-alerted");
+    const testPlistFile = path.join(tempDir, "test.plist");
+
+    fs.writeFileSync(testFailFile, "7");
+    fs.writeFileSync(testAlertFile, "7");
+    fs.writeFileSync(testPlistFile, "<plist></plist>");
+    fs.writeFileSync(
+      tempEnv,
+      "ENABLE_US_TUNNEL=0\nLOCAL_HTTP_PORT=8086\nLOCAL_KOSYNC_PORT=7200\n",
+    );
+
+    try {
+      const res = spawnSync(
+        "bash",
+        [
+          "-c",
+          `export LOCAL_HTTP_PORT=8086 LOCAL_KOSYNC_PORT=7200 ENV_FILE="${tempEnv}" LOG_FILE="${tempLog}" US_FAIL_COUNT_FILE="${testFailFile}" US_ALERT_TRACK_FILE="${testAlertFile}" US_PLIST="${testPlistFile}"; sed -e '/^# 2\\. Check Local Prerequisites/,/^# ==============================================================================/ { /^# ==============================================================================/!d; }' "${watchdogScriptPath}" | sed '/^# 4\\. Monitor & Auto-Heal: Singapore/q' | bash`,
+        ],
+        { encoding: "utf8" },
+      );
+
+      expect(res.status).toBe(0);
+      // Verify that failure and alert files were purged
+      expect(fs.existsSync(testFailFile)).toBe(false);
+      expect(fs.existsSync(testAlertFile)).toBe(false);
+
+      // Verify log message indicates skip and cleanup
+      const logContent = fs.existsSync(tempLog)
+        ? fs.readFileSync(tempLog, "utf8")
+        : "";
+      expect(logContent).toContain(
+        "US VLESS tunnel monitoring skipped (ENABLE_US_TUNNEL=0, plist_exists=1)",
+      );
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("Unified In-Chat Health Dashboard (/status)", () => {
