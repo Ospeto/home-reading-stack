@@ -183,14 +183,19 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain('id="chip-reading"');
     expect(html).toContain('id="quickSeriesChips"');
 
-    // Desktop/tablet collapsible sidebar & navigation
-    expect(html).toContain('data-purpose="macos-library-sidebar"');
+    // Permanent left sidebar removed in favor of full-width grid and filter button sheet
+    expect(html).not.toContain('data-purpose="macos-library-sidebar"');
+
+    // Unified Filter button interaction & translucent filter sheet
+    expect(html).toContain('id="filterBtn"');
+    expect(html).toContain('id="filterActiveBadge"');
+    expect(html).toContain('id="filterDrawer"');
     expect(html).toContain("All Books");
     expect(html).toContain("Reading Now");
     expect(html).toContain("Want to Read");
     expect(html).toContain("Finished");
     expect(html).toContain("Collections");
-    expect(html).toContain("OPDS Wireless");
+    expect(html).toContain('id="drawerSortSelect"');
 
     // Content Header, Sort & View Switches
     expect(html).toContain('data-purpose="library-grid-header"');
@@ -200,21 +205,14 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain('id="gridBtn"');
     expect(html).toContain('id="tableBtn"');
 
-    // Bounded Book Grid with 3D Spine and Elevation Shadows
+    // Bounded Full-Width Book Grid with 3D Spine and Elevation Shadows
     expect(html).toContain('data-purpose="books-cover-grid"');
     expect(html).toContain("book-spine-effect");
     expect(html).toContain("shadow-book");
     expect(html).toContain("shadow-book-hover");
     expect(html).toContain("aspect-[1/1.48]");
-
-    // Desktop 2-column layout and locked sidebar width
-    expect(html).toContain(".md\\:flex-row { flex-direction: row; }");
-    expect(html).toContain(".md\\:max-w-2xl { max-width: 42rem; }");
-    expect(html).toContain(".lg\\:max-w-3xl { max-width: 48rem; }");
-    expect(html).toContain(".w-64 { width: 16rem; }");
-    expect(html).toContain(".xl\\:w-72 { width: 18rem; }");
-    expect(html).toContain("desktop-sticky-sidebar");
-    expect(html).toContain("md:max-w-2xl lg:max-w-3xl");
+    expect(html).toContain("books-grid");
+    expect(html).toContain("2xl:grid-cols-7");
 
     // Bottom Status Bar
     expect(html).toContain('data-purpose="macos-status-bar"');
@@ -298,6 +296,71 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain("isDesktopHover()");
     expect(html).toContain("No synopsis available for this volume.");
     expect(html).not.toContain('id="bookHoverPopover"');
+  });
+
+  it("removes permanent left sidebar and provides full-width grid with unified filter button modal/sheet", () => {
+    const htmlPath = path.join((import.meta as any).dir, "index.html");
+    const html = fs.readFileSync(htmlPath, "utf8");
+
+    // 1. Permanent left sidebar is removed
+    expect(html).not.toContain('data-purpose="macos-library-sidebar"');
+    expect(html).not.toContain('<aside class="w-64');
+
+    // 2. Full-width content & responsive grid
+    expect(html).toContain('id="libraryGridView"');
+    expect(html).toContain("books-grid");
+    expect(html).toContain("grid-cols-2");
+    expect(html).toContain("sm:grid-cols-3");
+    expect(html).toContain("md:grid-cols-4");
+    expect(html).toContain("lg:grid-cols-5");
+    expect(html).toContain("xl:grid-cols-6");
+    expect(html).toContain("2xl:grid-cols-7");
+
+    // 3. Top header search and category chips retained
+    expect(html).toContain('id="searchInputDesktop"');
+    expect(html).toContain('id="chip-all"');
+    expect(html).toContain('id="chip-series"');
+    expect(html).toContain('id="chip-ln"');
+    expect(html).toContain('id="chip-recent"');
+    expect(html).toContain('id="chip-reading"');
+    expect(html).toContain('id="chip-epub"');
+
+    // 4. Filter button interaction & active badge
+    expect(html).toContain('id="filterBtn"');
+    expect(html).toContain('onclick="openFilterDrawer()"');
+    expect(html).toContain('id="filterActiveBadge"');
+
+    // 5. Translucent Apple Fluid sheet/modal controls
+    expect(html).toContain('id="filterDrawer"');
+    expect(html).toContain("apple-material-sidebar");
+    expect(html).toContain('id="activeFilterBox"');
+    expect(html).toContain('id="activeFilterBadge"');
+    expect(html).toContain('onclick="clearAllFilters()"');
+
+    // Reading status controls inside filter sheet
+    expect(html).toContain('id="nav-all"');
+    expect(html).toContain('id="nav-reading"');
+    expect(html).toContain('id="nav-want-to-read"');
+    expect(html).toContain('id="nav-finished"');
+    expect(html).toContain('id="facetTotalBooks"');
+    expect(html).toContain('id="sidebarReadingCount"');
+    expect(html).toContain('id="sidebarWantToReadCount"');
+    expect(html).toContain('id="sidebarFinishedCount"');
+
+    // Sorting controls inside filter sheet
+    expect(html).toContain('id="drawerSortSelect"');
+    expect(html).toContain("syncSort");
+
+    // Facet chip lists inside filter sheet
+    expect(html).toContain('id="drawerSeriesList"');
+    expect(html).toContain('id="drawerAuthorList"');
+    expect(html).toContain('id="drawerFormatList"');
+    expect(html).toContain('id="drawerTagList"');
+
+    // Dismissal methods: dismiss button, backdrop click, Escape key
+    expect(html).toContain('onclick="closeFilterDrawer()"');
+    expect(html).toContain('if(event.target === this) closeFilterDrawer()');
+    expect(html).toContain("e.key === 'Escape'");
   });
 
   it("implements card-anchored wing expansion with lnori.com geometry, editorial hierarchy, and edge detection", () => {
@@ -2249,6 +2312,7 @@ describe("Documentation, Manual Sync & Standing Invariant Verification", () => {
     expect(html).toContain("Dynamic Language Shelves (All / Burmese / English / Other)");
     expect(html).toContain("Desktop Hover Synopsis Preview &amp; Quick Actions");
     expect(html).toContain("Apple WWDC Fluid Interface &amp; Keyboard Control");
+    expect(html).toContain("Full-Width Grid &amp; Fluid Filter Sheet");
 
     // Tab wiring in setGuideTab
     expect(html).toContain("const tabs = ['kosync', 'obsidian', 'opds', 'features', 'cli', 'proxy', 'all'];");

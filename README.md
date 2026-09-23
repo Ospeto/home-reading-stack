@@ -377,6 +377,10 @@ The LightHouse web interface (`uploader/index.html`) is built according to Apple
 6. **3D Skeuomorphic Depth & Accessibility:**
    - 3D book spine curvature overlay (`.book-spine-effect`), multi-layer shadows (`.shadow-book`, `.shadow-book-hover`), and skeleton shimmer loading states.
    - Comprehensive accessibility support respecting `prefers-reduced-motion` (instant 150ms opacity fades, scale suppression) and `prefers-reduced-transparency` (solid opaque dark surfaces).
+7. **Full-Width Responsive Grid & Unified Filter Sheet:**
+   - Permanent left sidebar filtering panel is completely removed in favor of an expansive, edge-to-edge full-width book card grid that smoothly adapts from mobile (2 columns), tablet (3-4 columns), desktop (5-6 columns), to ultra-wide viewports (7 columns).
+   - Comprehensive library facet filtering (full Collections/Series, Authors, Tags, Reading Status, Formats, and Sort Order) is centralized into an Apple Fluid translucent slide-over sheet (`backdrop-filter: blur(20px) saturate(180%)`), while top category chips and content header sort select remain available for instant shortcuts.
+   - Accessible via the top header `Filters` button featuring an active filter pill badge with live filter count, subtle top-edge light highlights (`border-top: 1px solid rgba(255, 255, 255, 0.15)`), and quick dismissal via dismiss button, outside backdrop click, or the Escape key.
 
 ---
 
