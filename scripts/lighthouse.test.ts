@@ -125,6 +125,28 @@ it("bin/lighthouse sync-obsidian --help outputs sync-obsidian options", () => {
         expect(content).toContain('LIGHTHOUSE_ROOT=');
       }
     });
+
+    it("creates defensive uploader symlink in flattened deployment layout", () => {
+      const flattenedDir = fs.mkdtempSync(path.join(os.tmpdir(), "lighthouse-flattened-"));
+      try {
+        fs.mkdirSync(path.join(flattenedDir, "bin"), { recursive: true });
+        fs.mkdirSync(path.join(flattenedDir, "scripts"), { recursive: true });
+        fs.copyFileSync(LIGHTHOUSE_BIN, path.join(flattenedDir, "bin", "lighthouse"));
+        fs.chmodSync(path.join(flattenedDir, "bin", "lighthouse"), 0o755);
+
+        const res = spawnSync(path.join(flattenedDir, "bin", "lighthouse"), ["version"], {
+          encoding: "utf8",
+          cwd: flattenedDir,
+        });
+        expect(res.status).toBe(0);
+        const linkPath = path.join(flattenedDir, "uploader");
+        expect(fs.existsSync(linkPath)).toBe(true);
+        expect(fs.lstatSync(linkPath).isSymbolicLink()).toBe(true);
+        expect(fs.readlinkSync(linkPath)).toBe(".");
+      } finally {
+        fs.rmSync(flattenedDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("2. Status Command Dashboard", () => {

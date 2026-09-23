@@ -16,8 +16,14 @@ import {
   formatEnrichReport,
   type EnrichBookCandidate,
 } from "./enrich-synopses";
-import { getBsdtarPath } from "../uploader/security";
+const securityMod: typeof import("../uploader/security") =
+  await import("../uploader/security").catch(
+    () => import("../security" as string) as Promise<typeof import("../uploader/security")>,
+  );
+const { getBsdtarPath } = securityMod;
 import { spawnSync } from "node:child_process";
+
+const REPO_ROOT = path.resolve((import.meta as any).dir, "..");
 
 describe("LightHouse Batch Synopsis Enrichment Tool", () => {
   let tempDir: string;
@@ -1046,6 +1052,106 @@ describe("LightHouse Batch Synopsis Enrichment Tool", () => {
         expect(res?.description).toContain("Disguised as an adventurer named Momon");
       } finally {
         (globalThis as any).fetch = origFetch;
+      }
+    });
+  });
+
+  // ==========================================================================
+  // 11. Deployment Path Resilience (Flattened Layout)
+  // ==========================================================================
+  describe("11. Deployment Path Resilience (Flattened Layout)", () => {
+    it("runs enrich-synopses --help cleanly from flattened production directory layout", () => {
+      const flattenedDir = fs.mkdtempSync(path.join(os.tmpdir(), "enrich-flattened-"));
+      try {
+        fs.mkdirSync(path.join(flattenedDir, "scripts"), { recursive: true });
+        // Copy deployment modules to flattenedDir root (production layout)
+        fs.copyFileSync(
+          path.join(REPO_ROOT, "uploader", "scraper.ts"),
+          path.join(flattenedDir, "scraper.ts"),
+        );
+        fs.copyFileSync(
+          path.join(REPO_ROOT, "uploader", "security.ts"),
+          path.join(flattenedDir, "security.ts"),
+        );
+        fs.copyFileSync(
+          path.join(REPO_ROOT, "uploader", "jev-shelf.ts"),
+          path.join(flattenedDir, "jev-shelf.ts"),
+        );
+        fs.copyFileSync(
+          path.join(REPO_ROOT, "scripts", "enrich-synopses.ts"),
+          path.join(flattenedDir, "scripts", "enrich-synopses.ts"),
+        );
+
+        const res = spawnSync("bun", ["run", path.join(flattenedDir, "scripts", "enrich-synopses.ts"), "--help"], {
+          encoding: "utf8",
+          cwd: flattenedDir,
+        });
+        expect(res.status).toBe(0);
+        expect(res.stdout).toContain("LightHouse Synopsis Enrichment Tool");
+        expect(res.stdout).toContain("--re-enrich-duplicates");
+      } finally {
+        fs.rmSync(flattenedDir, { recursive: true, force: true });
+      }
+    });
+
+    it("runs clean-duplicates --help cleanly from flattened production directory layout", () => {
+      const flattenedDir = fs.mkdtempSync(path.join(os.tmpdir(), "dedup-flattened-"));
+      try {
+        fs.mkdirSync(path.join(flattenedDir, "scripts"), { recursive: true });
+        fs.copyFileSync(
+          path.join(REPO_ROOT, "uploader", "scraper.ts"),
+          path.join(flattenedDir, "scraper.ts"),
+        );
+        fs.copyFileSync(
+          path.join(REPO_ROOT, "uploader", "security.ts"),
+          path.join(flattenedDir, "security.ts"),
+        );
+        fs.copyFileSync(
+          path.join(REPO_ROOT, "uploader", "jev-shelf.ts"),
+          path.join(flattenedDir, "jev-shelf.ts"),
+        );
+        fs.copyFileSync(
+          path.join(REPO_ROOT, "scripts", "clean-duplicates.ts"),
+          path.join(flattenedDir, "scripts", "clean-duplicates.ts"),
+        );
+
+        const res = spawnSync("bun", ["run", path.join(flattenedDir, "scripts", "clean-duplicates.ts"), "--help"], {
+          encoding: "utf8",
+          cwd: flattenedDir,
+        });
+        expect(res.status).toBe(0);
+        expect(res.stdout).toContain("clean-duplicates.ts");
+        expect(res.stdout).toContain("--dry-run");
+      } finally {
+        fs.rmSync(flattenedDir, { recursive: true, force: true });
+      }
+    });
+
+    it("runs categorize-library --help cleanly from flattened production directory layout", () => {
+      const flattenedDir = fs.mkdtempSync(path.join(os.tmpdir(), "cat-flattened-"));
+      try {
+        fs.mkdirSync(path.join(flattenedDir, "scripts"), { recursive: true });
+        fs.copyFileSync(
+          path.join(REPO_ROOT, "uploader", "security.ts"),
+          path.join(flattenedDir, "security.ts"),
+        );
+        fs.copyFileSync(
+          path.join(REPO_ROOT, "uploader", "jev-shelf.ts"),
+          path.join(flattenedDir, "jev-shelf.ts"),
+        );
+        fs.copyFileSync(
+          path.join(REPO_ROOT, "scripts", "categorize-library.ts"),
+          path.join(flattenedDir, "scripts", "categorize-library.ts"),
+        );
+
+        const res = spawnSync("bun", ["run", path.join(flattenedDir, "scripts", "categorize-library.ts"), "--help"], {
+          encoding: "utf8",
+          cwd: flattenedDir,
+        });
+        expect(res.status).toBe(0);
+        expect(res.stdout).toContain("LightHouse Library Categorization & Language Fix Tool");
+      } finally {
+        fs.rmSync(flattenedDir, { recursive: true, force: true });
       }
     });
   });

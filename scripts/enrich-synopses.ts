@@ -35,7 +35,11 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
-import {
+const scraperMod: typeof import("../uploader/scraper") =
+  await import("../uploader/scraper").catch(
+    () => import("../scraper" as string) as Promise<typeof import("../uploader/scraper")>,
+  );
+const {
   cleanQuery,
   cleanSeriesTitle,
   isAllowedCoverUrl,
@@ -49,7 +53,7 @@ import {
   fetchOnlineSynopsis,
   MIN_CONFIDENCE_THRESHOLD,
   SERIES_FALLBACK_MIN_CONFIDENCE,
-} from "../uploader/scraper";
+} = scraperMod;
 export {
   cleanQuery,
   isCommentsEmpty,
@@ -62,7 +66,11 @@ export {
   MIN_CONFIDENCE_THRESHOLD,
   SERIES_FALLBACK_MIN_CONFIDENCE,
 };
-import { safeFetchWithSsrf } from "../uploader/security";
+const securityMod: typeof import("../uploader/security") =
+  await import("../uploader/security").catch(
+    () => import("../security" as string) as Promise<typeof import("../uploader/security")>,
+  );
+const { safeFetchWithSsrf } = securityMod;
 
 export type SynopsisSourceFilter = "all" | "epub" | "online";
 

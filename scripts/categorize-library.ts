@@ -28,14 +28,20 @@ import path from "node:path";
 import process from "node:process";
 import { spawn, spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
-import {
-  STANDARDIZED_CATEGORIES,
-  type StandardCategory,
-  cleanBookTags,
+import type {
+  StandardCategory,
+  JevClientOptions,
+} from "../uploader/jev-shelf";
+
+const jevShelfMod: typeof import("../uploader/jev-shelf") =
+  await import("../uploader/jev-shelf").catch(
+    () => import("../jev-shelf" as string) as Promise<typeof import("../uploader/jev-shelf")>,
+  );
+
+const {
   hasMeaningfulCategoryTag,
   resolveBookLanguageAndTags,
-  type JevClientOptions,
-} from "../uploader/jev-shelf";
+} = jevShelfMod;
 
 export interface CategorizeLibraryOptions {
   libraryDir?: string;
@@ -246,10 +252,10 @@ export function setCalibreLanguageAndTagsAsync(
       resolve({ success: false, error: `Command timed out after ${timeoutMs}ms` });
     }, timeoutMs);
 
-    child.stdout?.on("data", (d: Buffer | string) => {
+    child.stdout?.on("data", (d: Uint8Array | string) => {
       stdout += d.toString();
     });
-    child.stderr?.on("data", (d: Buffer | string) => {
+    child.stderr?.on("data", (d: Uint8Array | string) => {
       stderr += d.toString();
     });
 
