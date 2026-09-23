@@ -6,7 +6,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { searchUniversalMetadata, applyMetadataToCalibre, extractSeries as scraperExtractSeries } from "./scraper";
+import {
+  searchUniversalMetadata,
+  applyMetadataToCalibre,
+  extractSeries as scraperExtractSeries,
+  isCommentsEmpty,
+  sanitizeSynopsis,
+  extractEpubDescription,
+  autoEnrichBookSynopsis,
+} from "./scraper";
 import {
   isArchiveFile,
   unpackArchive,
@@ -136,7 +144,6 @@ export function getCalibreLibraryDir(): string {
   const home = process.env.HOME || os.homedir();
   return path.join(home, "Calibre Libraries", "Agent Library");
 }
-const LIBRARY_DIR = getCalibreLibraryDir();
 
 export function getCalibreDbETag(): string {
   try {
@@ -343,6 +350,17 @@ function registerJobHandlers(q: DurableJobQueue) {
         if (top.confidence >= 0.85) {
           const applied = await applyMetadataToCalibre(payload.bookId, top);
           getCalibreBooks(true);
+          // Check if comments is still empty; if so, auto-populate synopsis
+          const fresh = getCalibreBooks(true).find((b: any) => b.id === payload.bookId);
+          if (!fresh || isCommentsEmpty(fresh.comments)) {
+            await autoEnrichBookSynopsis(payload.bookId, {
+              title: payload.title,
+              author: payload.author,
+              filename: payload.filename,
+              tags: payload.tags,
+            });
+            getCalibreBooks(true);
+          }
           return {
             success: applied,
             topMatch: top.title,
@@ -350,6 +368,14 @@ function registerJobHandlers(q: DurableJobQueue) {
             source: top.source,
           };
         } else {
+          // If match confidence < 0.85, still auto-populate synopsis if comments is empty
+          await autoEnrichBookSynopsis(payload.bookId, {
+            title: payload.title,
+            author: payload.author,
+            filename: payload.filename,
+            tags: payload.tags,
+          });
+          getCalibreBooks(true);
           return {
             success: true,
             message: `Match confidence ${top.confidence} < 0.85. Preserved original title.`,
@@ -358,6 +384,15 @@ function registerJobHandlers(q: DurableJobQueue) {
           };
         }
       }
+
+      // If no matches found, attempt synopsis auto-enrichment before Burmese check
+      await autoEnrichBookSynopsis(payload.bookId, {
+        title: payload.title,
+        author: payload.author,
+        filename: payload.filename,
+        tags: payload.tags,
+      });
+      getCalibreBooks(true);
 
       // Check if this book is Burmese: if so, generate local typographic cover if missing
       const detCat = classifyBookSourceCategoryDeterministic(
@@ -1119,7 +1154,7 @@ function getCalibreHashMap() {
     }
   }
 
-  scanDir(LIBRARY_DIR);
+  scanDir(getCalibreLibraryDir());
   return { map, books };
 }
 
@@ -1305,8 +1340,38 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
           setArgs.push("--field", `series:${incomingSeries.series}`);
           setArgs.push("--field", `series_index:${incomingSeries.volume}`);
         }
+
+        // Check if comments metadata is empty or placeholder and auto-populate
+        let synopsis: string | null = null;
+        if (isCommentsEmpty(newBook.comments)) {
+          synopsis = extractEpubDescription(filePath);
+          if (!synopsis && candidateComments && !isCommentsEmpty(candidateComments)) {
+            synopsis = sanitizeSynopsis(candidateComments);
+          }
+          if (synopsis && !isCommentsEmpty(synopsis)) {
+            setArgs.push("--field", `comments:${synopsis}`);
+          }
+        }
+
         if (setArgs.length > 4) {
           runCalibredb(setArgs);
+        }
+
+        // If comments was empty and EPUB had no synopsis, attempt online auto-enrichment in background
+        if (isCommentsEmpty(newBook.comments) && !synopsis) {
+          autoEnrichBookSynopsis(newId, {
+            filePath,
+            title: clean.title || newBook.title || candidateTitle,
+            author: finalAuthor || candidateAuthor,
+            series: incomingSeries?.series || newBook.series,
+            series_index: incomingSeries?.volume || newBook.series_index,
+            tags: finalClassification.tags || [],
+            filename: originalFileName,
+          })
+            .then((res) => {
+              if (res.enriched) getCalibreBooks(true);
+            })
+            .catch(() => {});
         }
 
         // Durable Metadata Enrichment via Job Queue (survives restarts, auto-retries)
@@ -1494,7 +1559,7 @@ function extractHighlightsFromSdr(
 
     // 1. Direct targeted check in book directory
     if (book.path) {
-      const bookFolder = path.join(LIBRARY_DIR, book.path);
+      const bookFolder = path.join(getCalibreLibraryDir(), book.path);
       if (fs.existsSync(bookFolder)) {
         const entries = fs.readdirSync(bookFolder, { withFileTypes: true });
         for (const e of entries) {

@@ -14,6 +14,10 @@ import {
   normalizeFormat,
   searchUniversalMetadata,
   applyMetadataToCalibre,
+  isCommentsEmpty,
+  sanitizeSynopsis,
+  extractEpubDescription,
+  autoEnrichBookSynopsis,
 } from "./scraper";
 import { isArchiveFile, unpackArchive, isCanonicalEpub } from "./archive";
 import { extractUrlFromText, ingestArticleFromUrl, generateTypographicCover } from "./article";
@@ -3060,8 +3064,30 @@ export async function ingestBookFile(
           );
         }
 
+        // Check if comments metadata is empty or placeholder and auto-populate
+        let synopsis = extractEpubDescription(filePath);
+        if (!synopsis && candidateComments && !isCommentsEmpty(candidateComments)) {
+          synopsis = sanitizeSynopsis(candidateComments);
+        }
+        if (synopsis && !isCommentsEmpty(synopsis)) {
+          setArgs.push("--field", `comments:${synopsis}`);
+        }
+
         if (setArgs.length > 4) {
           runCalibredb(setArgs);
+        }
+
+        // If EPUB did not have comments, attempt online synopsis auto-enrichment in background
+        if (!synopsis) {
+          autoEnrichBookSynopsis(newId, {
+            filePath,
+            title: finalTitle,
+            author: finalAuthor,
+            series: incomingSeries?.series || rawSeries,
+            series_index: incomingSeries?.volume,
+            tags: finalClassification.tags || [],
+            filename: originalFileName,
+          }).catch(() => {});
         }
 
         // Cache binary hash for instant future deduplication
@@ -3646,6 +3672,22 @@ export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
         );
         if (top.confidence >= 0.85) {
           const applied = await applyMetadataToCalibre(payload.bookId, top);
+          // Check if comments is still empty; if so, auto-populate synopsis
+          try {
+            const db = new Database(getCalibreDbPath(), { readonly: true });
+            const row = db.prepare("SELECT text FROM comments WHERE book = ?").get(payload.bookId) as any;
+            db.close();
+            if (isCommentsEmpty(row?.text)) {
+              await autoEnrichBookSynopsis(payload.bookId, {
+                title: payload.title,
+                author: payload.author,
+                filename: payload.filename,
+                tags: payload.tags,
+              });
+            }
+          } catch (_dbErr) {
+            void _dbErr;
+          }
           if (applied && payload.chatId) {
             try {
               await sendMessage(
@@ -3669,6 +3711,17 @@ export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
             source: top.source,
           };
         } else {
+          // If match confidence < 0.85, still auto-populate synopsis if comments is empty
+          try {
+            await autoEnrichBookSynopsis(payload.bookId, {
+              title: payload.title,
+              author: payload.author,
+              filename: payload.filename,
+              tags: payload.tags,
+            });
+          } catch (_enrichErr) {
+            void _enrichErr;
+          }
           return {
             success: true,
             message: `Match confidence ${top.confidence} < 0.85. Preserved original title.`,
@@ -3676,6 +3729,18 @@ export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
             source: top.source,
           };
         }
+      }
+
+      // If no matches found, attempt synopsis auto-enrichment before Burmese check
+      try {
+        await autoEnrichBookSynopsis(payload.bookId, {
+          title: payload.title,
+          author: payload.author,
+          filename: payload.filename,
+          tags: payload.tags,
+        });
+      } catch (_enrichErr) {
+        void _enrichErr;
       }
 
       // Check if this book is Burmese: if so, generate local typographic cover if missing

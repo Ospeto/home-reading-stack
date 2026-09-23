@@ -249,7 +249,7 @@ describe("Lnori Light Novel Ingestion Module", () => {
   });
 
   describe("Volume App-Data Parsing", () => {
-    it("parseVolumeAppData extracts epub_filename, book_id, series metadata, and cover", () => {
+    it("parseVolumeAppData extracts epub_filename, book_id, series metadata, cover, and description", () => {
       const mockVolumeHtml = `
         <!DOCTYPE html>
         <html>
@@ -260,6 +260,7 @@ describe("Lnori Light Novel Ingestion Module", () => {
             "@type": "Book",
             "name": "The Genius Prince’s Guide Vol. 1",
             "id": "23021",
+            "description": "It ain't easy being a genius prince! Wein is ready to commit treason and sell off his kingdom.",
             "image": "https://img.lnori.com/23021-01.jpg",
             "author": [
               { "@type": "Person", "name": "Toru Toba" },
@@ -312,6 +313,7 @@ describe("Lnori Light Novel Ingestion Module", () => {
       expect(meta?.authors).toEqual(["Toru Toba", "Falmaro"]);
       expect(meta?.coverImageUrl).toBe("https://img.lnori.com/23021-01.jpg");
       expect(meta?.volumeNumber).toBe(1);
+      expect(meta?.description).toContain("It ain't easy being a genius prince");
     });
 
     it("parseVolumeAppData returns null when epub_filename is absent", () => {
@@ -850,6 +852,104 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
       expect(result.importedCount).toBe(1);
       expect(result.success).toBe(true);
       expect(vol2Downloaded).toBe(true);
+    });
+
+    it("ingestLnoriSeries sets volume synopsis in calibredb set_metadata from volMeta.description", async () => {
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+      const syntheticEpub = Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+
+      const manifestHtml = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "Overlord",
+          "hasPart": [
+            { "@type": "Book", "url": "https://lnori.com/book/501/overlord-vol-1" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      const vol1Html = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "Overlord Vol. 1",
+          "id": "501",
+          "description": "Momonga is trapped in Yggdrasil as the undead sorcerer king.",
+          "additionalProperty": [
+            { "name": "epub_filename", "value": "Overlord_01.epub" },
+            { "name": "book_id", "value": "501" },
+            { "name": "series_title", "value": "Overlord" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      let capturedSetMetadataArgs: string[] = [];
+
+      await ingestLnoriSeries(
+        "https://lnori.com/series/500/overlord",
+        undefined,
+        {
+          fetch: async (url: string) => {
+            if (url.includes("/series/500")) return new Response(manifestHtml);
+            if (url.includes("/book/501")) return new Response(vol1Html);
+            if (url.includes("files.lnori.com")) {
+              return new Response(syntheticEpub, { status: 200 });
+            }
+            return new Response("Not found", { status: 404 });
+          },
+          isVolumeInLibrary: () => false,
+          spawnSync: (_cmd: string, args: string[]) => {
+            if (args[0] === "add") {
+              return { status: 0, stdout: "Added book ids: 501", stderr: "" };
+            }
+            if (args[0] === "set_metadata") {
+              capturedSetMetadataArgs = args;
+              return { status: 0, stdout: "", stderr: "" };
+            }
+            return { status: 0, stdout: "", stderr: "" };
+          },
+        },
+      );
+
+      const commentsArg = capturedSetMetadataArgs.find((a) => a.startsWith("comments:"));
+      expect(commentsArg).toBeDefined();
+      expect(commentsArg).toContain("Momonga is trapped in Yggdrasil");
     });
   });
 
