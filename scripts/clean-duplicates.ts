@@ -21,7 +21,12 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
-import {
+
+const scraperMod: typeof import("../uploader/scraper") =
+  await import("../uploader/scraper").catch(
+    () => import("../scraper" as string) as Promise<typeof import("../uploader/scraper")>,
+  );
+const {
   isSameBook,
   normalizeTitleForDedup,
   normalizeAuthorForDedup,
@@ -30,7 +35,7 @@ import {
   stringSimilarity,
   cleanString,
   isJunkAuthor,
-} from "../uploader/scraper";
+} = scraperMod;
 
 export interface CalibreBook {
   id: number;

@@ -526,7 +526,9 @@ My personal reflection on habits.
     const localServer = { requestIP: () => ({ address: "127.0.0.1" }) } as any;
 
     it("POST /api/highlights/sync accepts KOReader JSON export and writes to Obsidian vault", async () => {
-      const { handleRequest } = await import("../uploader/server");
+      const { handleRequest } = (await import("../uploader/server").catch(
+        () => import("../server" as string),
+      )) as typeof import("../uploader/server");
 
       const payload = {
         title: "Test KOReader Sync Book",
@@ -583,7 +585,9 @@ My personal reflection on habits.
     });
 
     it("POST /api/highlights/sync rejects empty payload or missing title with 400", async () => {
-      const { handleRequest } = await import("../uploader/server");
+      const { handleRequest } = (await import("../uploader/server").catch(
+        () => import("../server" as string),
+      )) as typeof import("../uploader/server");
 
       const req = new Request("http://127.0.0.1:8086/api/highlights/sync", {
         method: "POST",
@@ -602,7 +606,9 @@ My personal reflection on habits.
     });
 
     it("POST /api/highlights/sync rejects payloads exceeding 5MB with 413", async () => {
-      const { handleRequest } = await import("../uploader/server");
+      const { handleRequest } = (await import("../uploader/server").catch(
+        () => import("../server" as string),
+      )) as typeof import("../uploader/server");
 
       const req = new Request("http://127.0.0.1:8086/api/highlights/sync", {
         method: "POST",

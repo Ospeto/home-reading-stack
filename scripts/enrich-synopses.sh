@@ -18,6 +18,9 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 LIGHTHOUSE_ROOT="$(cd -P "$SCRIPT_DIR/.." && pwd)"
 export LIGHTHOUSE_ROOT
 
+# Ensure uploader alias exists for flattened deployment layouts
+[ ! -e "${LIGHTHOUSE_ROOT}/uploader" ] && ln -s . "${LIGHTHOUSE_ROOT}/uploader" 2>/dev/null || true
+
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 if command -v bun >/dev/null 2>&1; then
