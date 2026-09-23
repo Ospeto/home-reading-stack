@@ -567,17 +567,46 @@ function isHighlightStructure(trimmed: string): boolean {
   );
 }
 
+function lineContainsPageHeading(trimmed: string): boolean {
+  return /###\s+Page\b/i.test(trimmed) || /###\s+\d+\b/.test(trimmed);
+}
+
+/**
+ * A `##` heading continues highlights only when a KOReader entry follows.
+ * A blockquote is a user reflection unless it, or the next content, contains
+ * an explicit `### Page` heading.
+ */
 function chapterContinuesHighlights(lines: string[], index: number): boolean {
   let j = index + 1;
   while (j < lines.length && !lines[j].trim()) j++;
   if (j >= lines.length) return true;
   const next = lines[j].trim();
-  return (
-    isPageHeading(next) ||
-    next.startsWith(">") ||
-    next.startsWith("==") ||
-    isChapterHeading(next)
-  );
+  if (isPageHeading(next) || next.startsWith("==") || isChapterHeading(next)) {
+    return true;
+  }
+  if (!next.startsWith(">")) return false;
+
+  while (j < lines.length) {
+    const trimmed = lines[j].trim();
+    if (!trimmed) {
+      j++;
+      continue;
+    }
+    if (trimmed.startsWith(">")) {
+      if (lineContainsPageHeading(trimmed)) return true;
+      j++;
+      continue;
+    }
+    return isPageHeading(trimmed);
+  }
+  return false;
+}
+
+function joinOutsideRegions(parts: string[]): string {
+  return parts
+    .map((part) => part.replace(/^\n+/, "").replace(/\n+$/, ""))
+    .filter((part) => part.trim().length > 0)
+    .join("\n\n");
 }
 
 /**
@@ -1097,17 +1126,11 @@ export function mergeJoplinHighlights(
       const cleanAfterHn = rawAfterHn
         .replaceAll(HIGHLIGHTS_START_MARKER, "")
         .replaceAll(HIGHLIGHTS_END_MARKER, "");
-      const nextSectionIdx = cleanAfterHn.search(/\n##\s+/);
-
-      if (nextSectionIdx !== -1) {
-        const recovered = cleanAfterHn.slice(0, nextSectionIdx).trim();
-        const remainingDoc = cleanAfterHn.slice(nextSectionIdx);
-        restOfContent = `${beforeHn}\n${HIGHLIGHTS_START_MARKER}\n${recovered}\n${HIGHLIGHTS_END_MARKER}${remainingDoc}`;
-      } else {
-        const { managed, remainder } = splitUnclosedHighlightRegion(cleanAfterHn);
-        const tail = remainder.replace(/^\n*/, "");
-        restOfContent = `${beforeHn}\n${HIGHLIGHTS_START_MARKER}\n${managed}\n${HIGHLIGHTS_END_MARKER}\n${tail}`;
-      }
+      // Do not slice at the next `##`. User `###` sections and loose
+      // reflections before that heading must stay outside the markers.
+      const { managed, remainder } = splitUnclosedHighlightRegion(cleanAfterHn);
+      const tail = remainder.replace(/^\n*/, "");
+      restOfContent = `${beforeHn}\n${HIGHLIGHTS_START_MARKER}\n${managed}\n${HIGHLIGHTS_END_MARKER}\n${tail}`;
     } else {
       const recovered = restOfContent
         .replaceAll(HIGHLIGHTS_START_MARKER, "")
@@ -1135,29 +1158,39 @@ export function mergeJoplinHighlights(
       (tail ? `\n${tail}` : "\n");
     endIdx = restOfContent.indexOf(HIGHLIGHTS_END_MARKER);
   } else if (startIdx === -1 && endIdx !== -1) {
-    // Missing start marker: recover highlights preceding end marker
+    // Missing start marker: keep only highlight entries between the header
+    // and the end marker. User `###` headings and loose reflections stay out.
     const beforeEnd = restOfContent.slice(0, endIdx);
+    const afterOldEnd = restOfContent.slice(endIdx + HIGHLIGHTS_END_MARKER.length);
     const hnIdx = beforeEnd.lastIndexOf("## Highlights & Notes");
     if (hnIdx !== -1) {
       const headerEnd = hnIdx + "## Highlights & Notes".length;
-      const recoveredHighlights = beforeEnd.slice(headerEnd).trim();
+      const recoveredRaw = beforeEnd
+        .slice(headerEnd)
+        .replaceAll(HIGHLIGHTS_START_MARKER, "");
+      const { managed, remainder } = splitUnclosedHighlightRegion(recoveredRaw);
+      const outside = joinOutsideRegions([remainder, afterOldEnd]);
       restOfContent =
         beforeEnd.slice(0, headerEnd) +
         "\n" +
         HIGHLIGHTS_START_MARKER +
         "\n" +
-        recoveredHighlights +
+        managed +
         "\n" +
-        restOfContent.slice(endIdx);
+        HIGHLIGHTS_END_MARKER +
+        (outside ? `\n${outside}\n` : "\n");
     } else {
-      const recoveredHighlights = beforeEnd.trim();
+      const recoveredRaw = beforeEnd.replaceAll(HIGHLIGHTS_START_MARKER, "");
+      const { managed, remainder } = splitUnclosedHighlightRegion(recoveredRaw);
+      const outside = joinOutsideRegions([remainder, afterOldEnd]);
       restOfContent =
         "\n## Highlights & Notes\n" +
         HIGHLIGHTS_START_MARKER +
         "\n" +
-        recoveredHighlights +
+        managed +
         "\n" +
-        restOfContent.slice(endIdx);
+        HIGHLIGHTS_END_MARKER +
+        (outside ? `\n${outside}\n` : "\n");
     }
     startIdx = restOfContent.indexOf(HIGHLIGHTS_START_MARKER);
     endIdx = restOfContent.indexOf(HIGHLIGHTS_END_MARKER);

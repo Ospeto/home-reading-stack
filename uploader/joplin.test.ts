@@ -812,9 +812,18 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
       const readme = fs.readFileSync(readmePath, "utf8");
 
       expect(readme).toContain("KOReader Joplin Highlight Sync");
+      expect(readme).toContain("http://192.168.31.15:8086");
+      expect(readme).toContain("plain HTTP-only");
       expect(readme).toContain("opds.wavypremium.xyz");
+      expect(readme).toContain("Port `80`");
+      expect(readme).toContain("cleartext");
+      expect(readme).toContain("proxy access logs");
       expect(readme).toContain("JOPLIN_TOKEN");
-      expect(readme).toContain("8443");
+      const joplinLines = readme.split("\n").filter((line) => /Joplin/i.test(line));
+      expect(joplinLines.length).toBeGreaterThan(0);
+      for (const line of joplinLines) {
+        expect(line).not.toContain("8443");
+      }
       expect(readme).not.toContain("Token: `lighthouse`");
       expect(readme).not.toContain("Token `lighthouse`");
       expect(readme).toContain("Joplin Highlight & Note Export");
@@ -827,10 +836,25 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
       const html = fs.readFileSync(htmlPath, "utf8");
 
       expect(html).toContain("Native Joplin Clipper Exporter");
-      expect(html).toContain("copyToClipboard('opds.wavypremium.xyz')");
+      expect(html).toContain("copyToClipboard('192.168.31.15')");
+      expect(html).not.toContain("copyToClipboard('opds.wavypremium.xyz')");
       expect(html).not.toContain("copyToClipboard('lighthouse')");
       expect(html).toContain("JOPLIN_TOKEN");
-      expect(html).toContain("8443");
+      expect(html).toContain("plain HTTP-only");
+      expect(html).toContain("8086");
+      expect(html).toContain("plain HTTP port");
+      expect(html).toContain("cleartext");
+      expect(html).toContain("proxy access logs");
+      const guideStart = html.indexOf("Native Joplin Clipper Exporter");
+      const guideEnd = html.indexOf("Wireless Over-The-Air Export", guideStart);
+      const cardStart = html.indexOf("KOReader Joplin Exporter (Native Wi-Fi Sync)");
+      const cardEnd = html.indexOf("Obsidian Highlights Sync", cardStart);
+      expect(guideStart).toBeGreaterThan(-1);
+      expect(guideEnd).toBeGreaterThan(guideStart);
+      expect(cardStart).toBeGreaterThan(-1);
+      expect(cardEnd).toBeGreaterThan(cardStart);
+      expect(html.slice(guideStart, guideEnd)).not.toContain("8443");
+      expect(html.slice(cardStart, cardEnd)).not.toContain("8443");
       expect(html).toContain("KOReader Joplin Exporter (Native Wi-Fi Sync)");
     });
   });
@@ -947,6 +971,125 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
       expect(fixed.indexOf("A loose reflection that must stay outside.")).toBeGreaterThan(endPos);
       expect((fixed.match(/kept quote/g) || []).length).toBe(1);
       expect(fixed).toContain("==new quote==");
+    });
+
+    function betweenMarkers(note: string): string {
+      const start = note.indexOf(HIGHLIGHTS_START_MARKER);
+      const end = note.indexOf(HIGHLIGHTS_END_MARKER);
+      if (start === -1 || end === -1 || end < start) return "";
+      return note.slice(start + HIGHLIGHTS_START_MARKER.length, end);
+    }
+
+    function expectPrivateSurvivesSync(note: string, snippets: string[]) {
+      const endPos = note.indexOf(HIGHLIGHTS_END_MARKER);
+      expect(endPos).toBeGreaterThan(-1);
+      const managed = betweenMarkers(note);
+      for (const snippet of snippets) {
+        expect(managed).not.toContain(snippet);
+        expect(note.indexOf(snippet)).toBeGreaterThan(endPos);
+      }
+      const synced = mergeNoteContent(note, {
+        title: "Sync Check",
+        author: "Ada",
+        highlights: [{ text: "sidecar only" }],
+        progress: 12,
+      });
+      for (const snippet of snippets) {
+        expect(synced).toContain(snippet);
+      }
+      expect(synced).toContain("sidecar only");
+      expect(betweenMarkers(synced)).not.toContain(snippets[0]);
+    }
+
+    it("does not pull a private subsection into markers when the start marker is missing", () => {
+      const doc = [
+        "---",
+        'title: "Startless"',
+        "tags:",
+        "  - reading",
+        "---",
+        "# Startless",
+        "## Highlights & Notes",
+        "### Page 1",
+        "==kept quote==",
+        "",
+        "### My private subsection",
+        "private text",
+        "",
+        "A loose reflection that must stay outside.",
+        HIGHLIGHTS_END_MARKER,
+        "",
+        "## Takeaways",
+        "- keep me",
+      ].join("\n");
+      const fixed = mergeJoplinHighlights(
+        doc,
+        "### Page 2\n==new quote==",
+        "Startless",
+        { calibreDbPath: missingCalibre() },
+      );
+      expectPrivateSurvivesSync(fixed, [
+        "### My private subsection",
+        "private text",
+        "A loose reflection that must stay outside.",
+      ]);
+      expect(fixed).toContain("==kept quote==");
+      expect(fixed).toContain("==new quote==");
+      expect(fixed.indexOf("## Takeaways")).toBeGreaterThan(fixed.indexOf(HIGHLIGHTS_END_MARKER));
+    });
+
+    it("does not swallow a user ### section when markers are inverted", () => {
+      const doc = [
+        "---",
+        'title: "Inv"',
+        "tags:",
+        "  - reading",
+        "---",
+        "# Inv",
+        "## Highlights & Notes",
+        HIGHLIGHTS_END_MARKER,
+        "### Page 1",
+        "==kept quote==",
+        "",
+        "### My private subsection",
+        "private text",
+        "",
+        "## Takeaways",
+        "- keep me",
+        HIGHLIGHTS_START_MARKER,
+      ].join("\n");
+      const fixed = mergeJoplinHighlights(
+        doc,
+        "### Page 2\n==new quote==",
+        "Inv",
+        { calibreDbPath: missingCalibre() },
+      );
+      expectPrivateSurvivesSync(fixed, ["### My private subsection", "private text"]);
+      expect(fixed.indexOf("## Takeaways")).toBeGreaterThan(fixed.indexOf(HIGHLIGHTS_END_MARKER));
+      expect((fixed.match(new RegExp(HIGHLIGHTS_START_MARKER, "g")) || []).length).toBe(1);
+      expect((fixed.match(new RegExp(HIGHLIGHTS_END_MARKER, "g")) || []).length).toBe(1);
+    });
+
+    it("does not treat a blockquote under a user heading as a KOReader chapter", () => {
+      const doc = [
+        "# BQ",
+        "## Highlights & Notes",
+        HIGHLIGHTS_START_MARKER,
+        "### Page 1",
+        "==kept quote==",
+        "",
+        "## Takeaways",
+        "> my private thought",
+      ].join("\n");
+      const fixed = mergeJoplinHighlights(
+        doc,
+        "### Page 2\n==new quote==",
+        "BQ",
+        { calibreDbPath: missingCalibre() },
+      );
+      expectPrivateSurvivesSync(fixed, ["## Takeaways", "> my private thought"]);
+      expect(betweenMarkers(fixed)).not.toContain("my private thought");
+      expect(fixed).toContain("==kept quote==");
     });
 
     it("strips newlines and highlight markers from note headings", async () => {
