@@ -2132,7 +2132,10 @@ export async function handleRequest(
     remoteAddress: socketIp,
     isWan,
   };
-  // Joplin Clipper HTTP Compatibility (KOReader Highlights & Notes Exporter)
+  // Joplin Clipper (KOReader highlight export). These routes do not use
+  // READING_API_KEY: KOReader sends only its Joplin token. That token must be a
+  // private JOPLIN_TOKEN. handleJoplinRequest fails closed (503/401) before any
+  // note write, including on WAN. /ping stays unauthenticated for reachability.
   if (isJoplinRoute(url.pathname)) {
     return await handleJoplinRequest(req, url, { corsOrigin });
   }

@@ -1942,15 +1942,9 @@
                   <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
                 </button>
               </div>
-              <div class="text-[10px] text-zinc-500 font-medium">Port: <code class="text-zinc-300">80</code> (or <code class="text-zinc-300">8086</code> for local LAN IP <code class="text-zinc-300">192.168.31.15</code>)</div>
+              <div class="text-[10px] text-zinc-500 font-medium">Port: <code class="text-zinc-300">8443</code> (TLS) or <code class="text-zinc-300">8086</code> for local LAN IP <code class="text-zinc-300">192.168.31.15</code></div>
             </div>
-            <div>4. Tap <strong>Set authorization token</strong>:</div>
-            <div class="flex items-center gap-2 pt-0.5">
-              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-purple-300 truncate select-all">lighthouse</code>
-              <button onclick="copyToClipboard('lighthouse')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy Token">
-                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
-              </button>
-            </div>
+            <div>4. Set <code class="text-zinc-200">JOPLIN_TOKEN</code> in the uploader <code class="text-zinc-200">.env</code> to a private random secret, then enter that same value in KOReader under <strong>Set authorization token</strong>. Do not use a shared or published token. If <code class="text-zinc-200">JOPLIN_TOKEN</code> is unset, exports are rejected.</div>
             <div class="pt-1">5. Tap <strong>Export now</strong> &rarr; <strong>Export to Joplin</strong>. Highlights, chapters, and notes are formatted with clean YAML frontmatter and saved to <code class="text-zinc-200">Books/&lt;Title&gt;.md</code>. Re-exporting is 100% idempotent and never creates duplicate highlights!</div>
           </div>
         </div>
@@ -2372,20 +2366,14 @@
             </div>
             <div class="text-[11px] text-zinc-400">Syncs quotes, chapters, and notes wirelessly from KOReader into Obsidian Books/</div>
             <div class="space-y-1 pt-1">
-              <div class="text-[10px] text-zinc-500 font-medium">Joplin Server Host (Port 80):</div>
+              <div class="text-[10px] text-zinc-500 font-medium">Joplin Server Host (TLS port 8443, LAN port 8086):</div>
               <div class="flex items-center gap-2">
                 <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">opds.wavypremium.xyz</code>
                 <button onclick="copyToClipboard('opds.wavypremium.xyz')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy Host">
                   <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
                 </button>
               </div>
-              <div class="text-[10px] text-zinc-500 font-medium">Authorization Token:</div>
-              <div class="flex items-center gap-2">
-                <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">lighthouse</code>
-                <button onclick="copyToClipboard('lighthouse')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy Token">
-                  <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
-                </button>
-              </div>
+              <div class="text-[10px] text-zinc-500 font-medium">Authorization token: the private <code class="text-zinc-200">JOPLIN_TOKEN</code> from <code class="text-zinc-200">.env</code>. It is not published here.</div>
             </div>
           </div>
 

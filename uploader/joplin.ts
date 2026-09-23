@@ -11,9 +11,12 @@
  *   - POST /notes      -> 200 JSON { id, title } (writes/updates <vault>/Books/<SanitizedTitle>.md)
  *   - PUT  /notes/:id  -> 200 JSON { id, title } (updates <vault>/Books/<SanitizedTitle>.md)
  *
- * Formats notes with clean YAML frontmatter (tags: [reading, highlights, koreader], updated: <timestamp>, title: ...)
+ * Formats notes with clean YAML frontmatter (block-style tags, updated: <timestamp>, title: ...)
  * and idempotent highlight markers (<!-- lighthouse:highlights:start --> / <!-- lighthouse:highlights:end -->)
  * so re-exporting does not duplicate existing highlights while preserving user edits.
+ *
+ * Authentication fails closed: JOPLIN_TOKEN must be set in the environment. There is no
+ * published default. Unset or empty tokens reject every non-ping route before any note write.
  */
 
 import fs from "node:fs";
@@ -30,7 +33,6 @@ import { sanitizeErrorMessage } from "./security";
 // Constants & Markers
 // ----------------------------------------------------------------------------
 
-export const JOPLIN_DEFAULT_TOKEN = "lighthouse";
 export const JOPLIN_CLIPPER_PING_RESPONSE = "JoplinClipperServer";
 export const JOPLIN_FOLDER_ID = "koreader-notes";
 export const JOPLIN_FOLDER_TITLE = "KOReader Notes";
@@ -78,7 +80,15 @@ export interface ParsedHighlightEntry {
 // ----------------------------------------------------------------------------
 
 export function getJoplinToken(): string {
-  return process.env.JOPLIN_TOKEN || JOPLIN_DEFAULT_TOKEN;
+  const raw = process.env.JOPLIN_TOKEN;
+  if (typeof raw !== "string") return "";
+  return raw.trim();
+}
+
+/** Resolves the server token. An explicit empty override does not fall through to env. */
+export function configuredJoplinToken(expectedToken?: string): string {
+  if (expectedToken !== undefined) return expectedToken.trim();
+  return getJoplinToken();
 }
 
 export function isJoplinRoute(pathname: string): boolean {
@@ -104,8 +114,9 @@ export function validateJoplinToken(
   url: URL,
   expectedToken?: string,
 ): boolean {
-  const token = expectedToken || getJoplinToken();
-  if (!token) return true;
+  const token = configuredJoplinToken(expectedToken);
+  // Fail closed. An unset or empty token must never authenticate a request.
+  if (!token) return false;
 
   // 1. Query parameter ?token=...
   const queryToken = url.searchParams.get("token");
@@ -183,30 +194,122 @@ export function sanitizeTitle(title: string): string {
   return s || "Untitled";
 }
 
+export class JoplinPathError extends Error {
+  readonly statusCode = 400;
+  constructor(message: string) {
+    super(message);
+    this.name = "JoplinPathError";
+  }
+}
+
+/** Real path of the books directory. Creates it when missing so realpath can succeed. */
+export function resolveRealBooksDir(booksDir?: string): string {
+  const raw = path.resolve(getObsidianBooksDir(booksDir));
+  if (!fs.existsSync(raw)) {
+    fs.mkdirSync(raw, { recursive: true });
+  }
+  return fs.realpathSync(raw);
+}
+
+export function isInsideDir(realDir: string, candidate: string): boolean {
+  const rootPrefix = realDir.endsWith(path.sep) ? realDir : realDir + path.sep;
+  const resolved = path.resolve(candidate);
+  return resolved === realDir || resolved.startsWith(rootPrefix);
+}
+
+export function assertNotSymlink(notePath: string): void {
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(notePath);
+  } catch (err: any) {
+    if (err?.code === "ENOENT") return;
+    throw err;
+  }
+  if (st.isSymbolicLink()) {
+    throw new JoplinPathError("Refusing to write through a symlink");
+  }
+}
+
+/**
+ * Single-line title safe to interpolate into a Markdown heading.
+ * Strips newlines and highlight marker strings so a title cannot break out of `# title`.
+ */
+export function sanitizeNoteHeading(title: string): string {
+  let s = title || "";
+  s = s.replace(/\r\n|\r|\n|\u2028|\u2029/g, " ");
+  s = s.replace(/<!--\s*lighthouse:highlights:[^>]*-->/gi, " ");
+  s = s.replace(/\s+/g, " ").trim();
+  return s || "Untitled";
+}
+
 export function getBookNotePath(
   title: string,
   booksDir?: string,
-): { safeTitle: string; notePath: string } {
-  const dir = getObsidianBooksDir(booksDir);
+): { safeTitle: string; notePath: string; booksDir: string } {
+  const configured = path.resolve(getObsidianBooksDir(booksDir));
+  const realDir = fs.existsSync(configured)
+    ? fs.realpathSync(configured)
+    : configured;
   let safeTitle = sanitizeTitle(title);
 
   // Enforce NAME_MAX filesystem budget (<= 240 bytes) to prevent ENAMETOOLONG
   safeTitle = truncateUtf8Bytes(safeTitle, 240);
-  if (!safeTitle) safeTitle = "Untitled";
-
-  const safeFilename = path.basename(safeTitle) + ".md";
-  const resolvedDir = path.resolve(dir);
-  const notePath = path.resolve(resolvedDir, safeFilename);
-
-  // Strict prefix path traversal protection
-  const rootPrefix = resolvedDir.endsWith(path.sep)
-    ? resolvedDir
-    : resolvedDir + path.sep;
-  if (!notePath.startsWith(rootPrefix)) {
-    throw new Error("Invalid note path: potential path traversal detected");
+  if (!safeTitle || safeTitle === "." || safeTitle === "..") {
+    safeTitle = "Untitled";
   }
 
-  return { safeTitle, notePath };
+  const safeFilename = path.basename(safeTitle) + ".md";
+  const notePath = path.resolve(realDir, safeFilename);
+
+  if (!isInsideDir(realDir, notePath)) {
+    throw new JoplinPathError(
+      "Invalid note path: potential path traversal detected",
+    );
+  }
+
+  return { safeTitle, notePath, booksDir: realDir };
+}
+
+function writeNoteAtomically(
+  realDir: string,
+  notePath: string,
+  content: string,
+): void {
+  if (!isInsideDir(realDir, notePath)) {
+    throw new JoplinPathError(
+      "Invalid note path: potential path traversal detected",
+    );
+  }
+  assertNotSymlink(notePath);
+  const tmpPath = path.join(
+    realDir,
+    `.joplin-${crypto.randomBytes(8).toString("hex")}.tmp`,
+  );
+  if (!isInsideDir(realDir, tmpPath)) {
+    throw new JoplinPathError(
+      "Invalid note path: potential path traversal detected",
+    );
+  }
+  fs.writeFileSync(tmpPath, content, { encoding: "utf8", flag: "wx" });
+  try {
+    assertNotSymlink(notePath);
+    fs.renameSync(tmpPath, notePath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch (_unlinkErr) {
+      void _unlinkErr;
+    }
+    throw err;
+  }
+  const finalStat = fs.lstatSync(notePath);
+  if (finalStat.isSymbolicLink()) {
+    throw new JoplinPathError("Refusing to write through a symlink");
+  }
+  const realWritten = fs.realpathSync(notePath);
+  if (!isInsideDir(realDir, realWritten)) {
+    throw new JoplinPathError("Refusing to write outside the books directory");
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -385,39 +488,282 @@ export function splitHighlightEntries(
   return entries;
 }
 
+/** Exact normalized quote used for idempotent dedup, including 1–2 character quotes. */
+export function extractQuoteKey(raw: string): string {
+  if (!raw) return "";
+  const marked = raw.match(/==([\s\S]*?)==/);
+  if (marked) {
+    const key = normalizeQuote(marked[1]);
+    if (key) return key;
+  }
+  const quoteLines: string[] = [];
+  let inAnnotation = false;
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (/^#{1,6}\s+/.test(trimmed)) continue;
+    if (/^---\s*$/.test(trimmed) || /^[-*_]{3,}\s*$/.test(trimmed)) {
+      inAnnotation = true;
+      continue;
+    }
+    if (inAnnotation) continue;
+    quoteLines.push(trimmed.replace(/^>\s?/, ""));
+  }
+  return normalizeQuote(quoteLines.join(" "));
+}
+
+export function extractAnnotation(raw: string): string {
+  if (!raw) return "";
+  const lines: string[] = [];
+  let seen = false;
+  for (const line of raw.split("\n")) {
+    if (/^---\s*$/.test(line.trim()) || /^[-*_]{3,}\s*$/.test(line.trim())) {
+      seen = true;
+      continue;
+    }
+    if (seen) lines.push(line);
+  }
+  return lines.join("\n").trim();
+}
+
+function incomingDeclaresAnnotation(raw: string): boolean {
+  return raw.split("\n").some(
+    (line) => /^---\s*$/.test(line.trim()) || /^[-*_]{3,}\s*$/.test(line.trim()),
+  );
+}
+
+function replaceAnnotation(raw: string, annotation: string): string {
+  const head: string[] = [];
+  for (const line of raw.split("\n")) {
+    if (/^---\s*$/.test(line.trim()) || /^[-*_]{3,}\s*$/.test(line.trim())) break;
+    head.push(line);
+  }
+  const base = head.join("\n").trimEnd();
+  if (!annotation) return base;
+  return `${base}\n---\n${annotation}`;
+}
+
+function isPageHeading(trimmed: string): boolean {
+  return /^###\s+Page\b/i.test(trimmed) || /^###\s+\d+\b/.test(trimmed);
+}
+
+function isUserH3(trimmed: string): boolean {
+  return /^###\s+/.test(trimmed) && !isPageHeading(trimmed);
+}
+
+function isChapterHeading(trimmed: string): boolean {
+  return /^##\s+[^#]/.test(trimmed);
+}
+
+function isHighlightStructure(trimmed: string): boolean {
+  if (!trimmed) return false;
+  return (
+    isChapterHeading(trimmed) ||
+    isPageHeading(trimmed) ||
+    trimmed.startsWith(">") ||
+    trimmed.startsWith("==") ||
+    /^---\s*$/.test(trimmed) ||
+    /^[-*_]{3,}\s*$/.test(trimmed)
+  );
+}
+
+function chapterContinuesHighlights(lines: string[], index: number): boolean {
+  let j = index + 1;
+  while (j < lines.length && !lines[j].trim()) j++;
+  if (j >= lines.length) return true;
+  const next = lines[j].trim();
+  return (
+    isPageHeading(next) ||
+    next.startsWith(">") ||
+    next.startsWith("==") ||
+    isChapterHeading(next)
+  );
+}
+
+/**
+ * Keep only highlight entries in an unclosed marker region.
+ * User `###` headings and loose reflections stay in `remainder`.
+ */
+export function splitUnclosedHighlightRegion(afterStart: string): {
+  managed: string;
+  remainder: string;
+} {
+  const lines = (afterStart || "").replace(/\r\n/g, "\n").split("\n");
+  const managed: string[] = [];
+  let i = 0;
+  let inEntry = false;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      let j = i + 1;
+      while (j < lines.length && !lines[j].trim()) j++;
+      if (j >= lines.length) break;
+      const next = lines[j].trim();
+      if (isUserH3(next)) break;
+      if (isChapterHeading(next) && !chapterContinuesHighlights(lines, j)) break;
+      if (inEntry || isHighlightStructure(next)) {
+        if (!isHighlightStructure(next)) break;
+        managed.push(line);
+        inEntry = false;
+        i++;
+        continue;
+      }
+      break;
+    }
+
+    if (isUserH3(trimmed)) break;
+
+    if (isChapterHeading(trimmed)) {
+      if (!chapterContinuesHighlights(lines, i)) break;
+      inEntry = false;
+      managed.push(line);
+      i++;
+      continue;
+    }
+
+    if (
+      isPageHeading(trimmed) ||
+      trimmed.startsWith(">") ||
+      trimmed.startsWith("==")
+    ) {
+      inEntry = true;
+      managed.push(line);
+      i++;
+      continue;
+    }
+
+    if (/^---\s*$/.test(trimmed) || /^[-*_]{3,}\s*$/.test(trimmed)) {
+      if (!inEntry && managed.length === 0) break;
+      inEntry = true;
+      managed.push(line);
+      i++;
+      continue;
+    }
+
+    if (inEntry) {
+      managed.push(line);
+      i++;
+      continue;
+    }
+
+    break;
+  }
+
+  return {
+    managed: managed.join("\n").trim(),
+    remainder: lines.slice(i).join("\n"),
+  };
+}
+
+export function renderHighlightEntries(entries: ParsedHighlightEntry[]): string {
+  const parts: string[] = [];
+  let lastChapter: string | undefined;
+  for (const entry of entries) {
+    const chapter = entry.chapter ? sanitizeNoteHeading(entry.chapter) : "";
+    if (chapter && chapter !== "Untitled" && chapter !== lastChapter) {
+      parts.push(`## ${chapter}`);
+      lastChapter = chapter;
+    } else if (!chapter) {
+      lastChapter = undefined;
+    }
+    const raw = entry.raw.trim();
+    if (raw) parts.push(raw);
+  }
+  return parts.join("\n\n");
+}
+
+export function mergeHighlightEntries(
+  existingText: string,
+  incoming: ParsedHighlightEntry[],
+): ParsedHighlightEntry[] {
+  const result = splitHighlightEntries(existingText).map((entry) => ({ ...entry }));
+  const indexByKey = new Map<string, number>();
+  result.forEach((entry, index) => {
+    const key = extractQuoteKey(entry.raw);
+    if (key && !indexByKey.has(key)) indexByKey.set(key, index);
+  });
+
+  for (const inc of incoming) {
+    const key = extractQuoteKey(inc.raw);
+    if (!key) {
+      if (!result.some((entry) => entry.raw.trim() === inc.raw.trim())) {
+        result.push(inc);
+      }
+      continue;
+    }
+    const idx = indexByKey.get(key);
+    if (idx === undefined) {
+      indexByKey.set(key, result.length);
+      result.push(inc);
+      continue;
+    }
+    const prev = result[idx];
+    const prevAnn = extractAnnotation(prev.raw);
+    const nextAnn = extractAnnotation(inc.raw);
+    if (incomingDeclaresAnnotation(inc.raw) && prevAnn !== nextAnn) {
+      const updatedRaw = replaceAnnotation(prev.raw, nextAnn);
+      result[idx] = {
+        ...prev,
+        raw: updatedRaw,
+        normalized: normalizeQuote(updatedRaw),
+        chapter: inc.chapter || prev.chapter,
+      };
+    } else if (inc.chapter && !prev.chapter) {
+      result[idx] = { ...prev, chapter: inc.chapter };
+    }
+  }
+  return result;
+}
+
 export function isQuoteInExisting(
   normalizedQuote: string,
   existingHighlightsText: string,
 ): boolean {
-  if (!normalizedQuote || normalizedQuote.length < 3) return false;
-  const existingNormalized = normalizeQuote(existingHighlightsText);
-
-  if (existingNormalized.includes(normalizedQuote)) {
-    return true;
+  if (!normalizedQuote) return false;
+  const entries = splitHighlightEntries(existingHighlightsText);
+  for (const entry of entries) {
+    const key = extractQuoteKey(entry.raw);
+    if (key && key === normalizedQuote) return true;
   }
-
-  // Substring match for longer quotes: verify both prefix & suffix match within the SAME existing entry
-  if (normalizedQuote.length > 30) {
-    const prefix = normalizedQuote.slice(0, 30);
-    const suffix = normalizedQuote.slice(-30);
-    const existingEntries = splitHighlightEntries(existingHighlightsText);
-    for (const entry of existingEntries) {
-      if (entry.normalized.includes(normalizedQuote)) return true;
-      if (
-        entry.normalized.includes(prefix) &&
-        entry.normalized.includes(suffix)
-      ) {
-        return true;
-      }
-    }
-  }
-
   return false;
 }
 
 // ----------------------------------------------------------------------------
 // 4. Frontmatter & Note Merging Engine
 // ----------------------------------------------------------------------------
+
+function yamlScalar(raw: string): string {
+  const trimmed = raw.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    try {
+      return JSON.parse(
+        trimmed.startsWith("'")
+          ? `"${trimmed.slice(1, -1).replace(/"/g, '\\"')}"`
+          : trimmed,
+      );
+    } catch {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+
+function isBlankAuthor(value: string | undefined): boolean {
+  if (!value) return true;
+  const author = value.trim();
+  return (
+    !author ||
+    author === "Unknown" ||
+    author === "N/A" ||
+    author === "(Author not found in book's metadata)"
+  );
+}
 
 export function updateFrontmatter(
   existingFrontmatter: string | null,
@@ -441,7 +787,10 @@ export function updateFrontmatter(
       lines.push(`series: ${JSON.stringify(meta.series)}`);
     }
     lines.push(
-      "tags: [reading, highlights, koreader]",
+      "tags:",
+      "  - reading",
+      "  - highlights",
+      "  - koreader",
       `updated: ${JSON.stringify(updatedIso)}`,
       "---",
     );
@@ -516,7 +865,10 @@ export function updateFrontmatter(
 
     if (trimmed.startsWith("author:")) {
       hasAuthor = true;
-      if (meta.author && meta.author !== "Unknown") {
+      const existingAuthor = yamlScalar(line.slice(line.indexOf(":") + 1));
+      if (!isBlankAuthor(existingAuthor)) {
+        fmEntries.push({ key: "author", line });
+      } else if (meta.author && !isBlankAuthor(meta.author)) {
         fmEntries.push({
           key: "author",
           line: `author: ${JSON.stringify(meta.author)}`,
@@ -550,8 +902,10 @@ export function updateFrontmatter(
     result.push(entry.line);
   }
 
-  const tagList = Array.from(existingTags);
-  result.push(`tags: [${tagList.join(", ")}]`);
+  result.push("tags:");
+  for (const tag of existingTags) {
+    result.push(`  - ${tag}`);
+  }
 
   if (!hasUpdated) {
     result.push(`updated: ${JSON.stringify(updatedIso)}`);
@@ -664,24 +1018,24 @@ export function mergeJoplinHighlights(
     calibreComments = calibreMeta.comments;
   }
 
+  const headingTitle = sanitizeNoteHeading(title);
   const cleanedBody = cleanIncomingHighlightBody(newBody, title);
   const incomingEntries = splitHighlightEntries(cleanedBody);
+  const renderedIncoming =
+    incomingEntries.length > 0
+      ? renderHighlightEntries(incomingEntries)
+      : cleanedBody || "*No highlights recorded yet.*";
 
   // 1. If no existing content: generate complete new note
   if (!existingContent || !existingContent.trim()) {
     const fm = updateFrontmatter(null, {
-      title,
+      title: headingTitle,
       author,
       series,
       updated: updatedIso,
     });
 
-    const highlightsBlock =
-      incomingEntries.length > 0
-        ? incomingEntries.map((e) => e.raw).join("\n\n")
-        : cleanedBody || "*No highlights recorded yet.*";
-
-    const sections = [fm, "", `# ${title}`];
+    const sections = [fm, "", `# ${headingTitle}`];
 
     if (calibreComments) {
       const cleanComments = calibreComments
@@ -697,7 +1051,7 @@ export function mergeJoplinHighlights(
       "",
       "## Highlights & Notes",
       HIGHLIGHTS_START_MARKER,
-      highlightsBlock,
+      renderedIncoming,
       HIGHLIGHTS_END_MARKER,
       "",
     );
@@ -719,7 +1073,7 @@ export function mergeJoplinHighlights(
   }
 
   const updatedFm = updateFrontmatter(existingFm, {
-    title,
+    title: headingTitle,
     author,
     series,
     updated: updatedIso,
@@ -750,7 +1104,9 @@ export function mergeJoplinHighlights(
         const remainingDoc = cleanAfterHn.slice(nextSectionIdx);
         restOfContent = `${beforeHn}\n${HIGHLIGHTS_START_MARKER}\n${recovered}\n${HIGHLIGHTS_END_MARKER}${remainingDoc}`;
       } else {
-        restOfContent = `${beforeHn}\n${HIGHLIGHTS_START_MARKER}\n${cleanAfterHn.trim()}\n${HIGHLIGHTS_END_MARKER}\n`;
+        const { managed, remainder } = splitUnclosedHighlightRegion(cleanAfterHn);
+        const tail = remainder.replace(/^\n*/, "");
+        restOfContent = `${beforeHn}\n${HIGHLIGHTS_START_MARKER}\n${managed}\n${HIGHLIGHTS_END_MARKER}\n${tail}`;
       }
     } else {
       const recovered = restOfContent
@@ -762,35 +1118,21 @@ export function mergeJoplinHighlights(
     startIdx = restOfContent.indexOf(HIGHLIGHTS_START_MARKER);
     endIdx = restOfContent.indexOf(HIGHLIGHTS_END_MARKER);
   } else if (startIdx !== -1 && endIdx === -1) {
-    // Missing end marker: recover existing highlights after start marker
+    // Missing end marker: keep highlight entries only. User ### headings and
+    // loose reflections stay outside the repaired marker region.
     const afterStart = restOfContent.slice(
       startIdx + HIGHLIGHTS_START_MARKER.length,
     );
     const cleanAfterStart = afterStart.replaceAll(HIGHLIGHTS_END_MARKER, "");
-    const nextSectionIdx = cleanAfterStart.search(/\n##\s+/);
-
-    if (nextSectionIdx !== -1) {
-      const recoveredHighlights = cleanAfterStart
-        .slice(0, nextSectionIdx)
-        .trim();
-      const remainingDoc = cleanAfterStart.slice(nextSectionIdx);
-      restOfContent =
-        restOfContent.slice(0, startIdx + HIGHLIGHTS_START_MARKER.length) +
-        "\n" +
-        recoveredHighlights +
-        "\n" +
-        HIGHLIGHTS_END_MARKER +
-        remainingDoc;
-    } else {
-      const recoveredHighlights = cleanAfterStart.trim();
-      restOfContent =
-        restOfContent.slice(0, startIdx + HIGHLIGHTS_START_MARKER.length) +
-        "\n" +
-        recoveredHighlights +
-        "\n" +
-        HIGHLIGHTS_END_MARKER +
-        "\n";
-    }
+    const { managed, remainder } = splitUnclosedHighlightRegion(cleanAfterStart);
+    const tail = remainder.replace(/^\n*/, "");
+    restOfContent =
+      restOfContent.slice(0, startIdx + HIGHLIGHTS_START_MARKER.length) +
+      "\n" +
+      managed +
+      "\n" +
+      HIGHLIGHTS_END_MARKER +
+      (tail ? `\n${tail}` : "\n");
     endIdx = restOfContent.indexOf(HIGHLIGHTS_END_MARKER);
   } else if (startIdx === -1 && endIdx !== -1) {
     // Missing start marker: recover highlights preceding end marker
@@ -833,24 +1175,12 @@ export function mergeJoplinHighlights(
     let finalHighlights: string;
 
     if (isExistingEmpty) {
-      finalHighlights =
-        incomingEntries.length > 0
-          ? incomingEntries.map((e) => e.raw).join("\n\n")
-          : cleanedBody || "*No highlights recorded yet.*";
+      finalHighlights = renderedIncoming;
     } else {
-      // Deduplicate incoming entries against existing text
-      const newItems: string[] = [];
-      for (const entry of incomingEntries) {
-        if (!isQuoteInExisting(entry.normalized, existingHighlights)) {
-          newItems.push(entry.raw);
-        }
-      }
-
-      if (newItems.length > 0) {
-        finalHighlights = existingHighlights + "\n\n" + newItems.join("\n\n");
-      } else {
-        finalHighlights = existingHighlights;
-      }
+      finalHighlights =
+        renderHighlightEntries(
+          mergeHighlightEntries(existingHighlights, incomingEntries),
+        ) || existingHighlights;
     }
 
     const before = restOfContent.slice(
@@ -860,25 +1190,27 @@ export function mergeJoplinHighlights(
     const after = restOfContent.slice(endIdx);
     restOfContent = `${before}\n${finalHighlights}\n${after}`;
   } else {
-    // Markers missing: insert under existing "## Highlights & Notes" if present, or append
-    const highlightsBlock =
-      incomingEntries.length > 0
-        ? incomingEntries.map((e) => e.raw).join("\n\n")
-        : cleanedBody || "*No highlights recorded yet.*";
-
+    // Markers missing: merge into the existing section instead of leaving the
+    // original quotes outside the new end marker.
     const hnIdx = restOfContent.indexOf("## Highlights & Notes");
     if (hnIdx !== -1) {
       const headerEnd = hnIdx + "## Highlights & Notes".length;
       const before = restOfContent.slice(0, headerEnd);
       const after = restOfContent.slice(headerEnd);
-      restOfContent = `${before}\n${HIGHLIGHTS_START_MARKER}\n${highlightsBlock}\n${HIGHLIGHTS_END_MARKER}${after}`;
+      const { managed, remainder } = splitUnclosedHighlightRegion(after);
+      const mergedBlock =
+        renderHighlightEntries(
+          mergeHighlightEntries(managed, incomingEntries),
+        ) || renderedIncoming;
+      const tail = remainder.replace(/^\n*/, "");
+      restOfContent = `${before}\n${HIGHLIGHTS_START_MARKER}\n${mergedBlock}\n${HIGHLIGHTS_END_MARKER}\n${tail}`;
     } else {
       restOfContent =
         restOfContent.trimEnd() +
         "\n\n## Highlights & Notes\n" +
         HIGHLIGHTS_START_MARKER +
         "\n" +
-        highlightsBlock +
+        renderedIncoming +
         "\n" +
         HIGHLIGHTS_END_MARKER +
         "\n";
@@ -902,7 +1234,14 @@ export async function processJoplinNote(
 
   // 1. Derive title if omitted
   if (!title && payload.id) {
-    title = decodeURIComponent(payload.id).trim();
+    try {
+      title = decodeURIComponent(payload.id).trim();
+    } catch (err) {
+      if (err instanceof URIError) {
+        throw Object.assign(new Error("Malformed note id"), { statusCode: 400 });
+      }
+      throw err;
+    }
   }
   if (!title && rawBody) {
     const match = rawBody.match(/^#\s+([^\n]+)/m);
@@ -914,25 +1253,33 @@ export async function processJoplinNote(
     title = "Untitled";
   }
 
-  const { safeTitle, notePath } = getBookNotePath(title, options.booksDir);
+  const realDir = resolveRealBooksDir(options.booksDir);
+  const { safeTitle, notePath } = getBookNotePath(title, realDir);
 
-  // 2. Ensure destination directory exists
-  const booksDir = path.dirname(notePath);
-  if (!fs.existsSync(booksDir)) {
-    fs.mkdirSync(booksDir, { recursive: true });
+  let fileExisted = false;
+  let existingContent = "";
+  try {
+    const st = fs.lstatSync(notePath);
+    if (st.isSymbolicLink()) {
+      throw new JoplinPathError("Refusing to write through a symlink");
+    }
+    if (st.isDirectory()) {
+      throw new JoplinPathError("Refusing to overwrite a directory");
+    }
+    if (st.isFile()) {
+      fileExisted = true;
+      existingContent = fs.readFileSync(notePath, "utf8");
+    }
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") throw err;
   }
 
-  const fileExisted = fs.existsSync(notePath);
-  const existingContent = fileExisted
-    ? fs.readFileSync(notePath, "utf8")
-    : "";
-
   const merged = mergeJoplinHighlights(existingContent, rawBody, title, {
-    booksDir: options.booksDir,
+    booksDir: realDir,
     calibreDbPath: options.calibreDbPath,
   });
 
-  fs.writeFileSync(notePath, merged, "utf8");
+  writeNoteAtomically(realDir, notePath, merged);
 
   const parsedEntries = splitHighlightEntries(
     cleanIncomingHighlightBody(rawBody, title),
@@ -1035,7 +1382,21 @@ export async function handleJoplinRequest(
     );
   }
 
-  // 2. Validate Joplin Token for all other endpoints
+  // 2. Validate Joplin Token for all other endpoints before any note write.
+  // Unset JOPLIN_TOKEN fails closed (503). A wrong or missing request token is 401.
+  const configuredToken = configuredJoplinToken(options.expectedToken);
+  if (!configuredToken) {
+    return new Response(
+      JSON.stringify({ error: "Joplin token is not configured" }),
+      {
+        status: 503,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json; charset=utf-8",
+        },
+      },
+    );
+  }
   if (!validateJoplinToken(req, url, options.expectedToken)) {
     return new Response(
       JSON.stringify({ error: "Invalid or missing Joplin token" }),
@@ -1148,10 +1509,28 @@ export async function handleJoplinRequest(
           },
         );
       } else {
+        let decodedId = "Untitled";
+        try {
+          decodedId = decodeURIComponent(noteId || "Untitled");
+        } catch (err) {
+          if (err instanceof URIError) {
+            return new Response(
+              JSON.stringify({ error: "Malformed note id" }),
+              {
+                status: 400,
+                headers: {
+                  ...corsHeaders,
+                  "Content-Type": "application/json; charset=utf-8",
+                },
+              },
+            );
+          }
+          throw err;
+        }
         return new Response(
           JSON.stringify({
             id: noteId,
-            title: decodeURIComponent(noteId || "Untitled"),
+            title: decodedId,
           }),
           {
             status: 200,
@@ -1199,7 +1578,23 @@ export async function handleJoplinRequest(
       }
 
       if (noteId && !payload.id) {
-        payload.id = noteId;
+        try {
+          payload.id = decodeURIComponent(noteId);
+        } catch (err) {
+          if (err instanceof URIError) {
+            return new Response(
+              JSON.stringify({ error: "Malformed note id" }),
+              {
+                status: 400,
+                headers: {
+                  ...corsHeaders,
+                  "Content-Type": "application/json; charset=utf-8",
+                },
+              },
+            );
+          }
+          throw err;
+        }
       }
 
       try {
@@ -1215,13 +1610,15 @@ export async function handleJoplinRequest(
           },
         );
       } catch (err: any) {
+        const status =
+          err instanceof JoplinPathError || err?.statusCode === 400 ? 400 : 500;
         return new Response(
           JSON.stringify({
             error:
               sanitizeErrorMessage(err) || "Failed to process Joplin note",
           }),
           {
-            status: 500,
+            status,
             headers: {
               ...corsHeaders,
               "Content-Type": "application/json; charset=utf-8",

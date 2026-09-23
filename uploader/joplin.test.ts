@@ -6,6 +6,7 @@ import {
   handleJoplinRequest,
   isJoplinRoute,
   validateJoplinToken,
+  getJoplinToken,
   sanitizeTitle,
   normalizeQuote,
   splitHighlightEntries,
@@ -21,6 +22,9 @@ import {
   HIGHLIGHTS_END_MARKER,
 } from "./joplin";
 import { handleRequest } from "./server";
+import { mergeNoteContent } from "../scripts/sync-obsidian";
+
+const TEST_JOPLIN_TOKEN = "test-joplin-secret";
 
 describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
   let tempDir: string;
@@ -31,10 +35,14 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
     booksDir = path.join(tempDir, "Books");
     fs.mkdirSync(booksDir, { recursive: true });
     process.env.OBSIDIAN_BOOKS_DIR = booksDir;
+    process.env.JOPLIN_TOKEN = TEST_JOPLIN_TOKEN;
+    process.env.CALIBRE_DB_PATH = path.join(tempDir, "missing-calibre.db");
   });
 
   afterEach(() => {
     delete process.env.OBSIDIAN_BOOKS_DIR;
+    delete process.env.JOPLIN_TOKEN;
+    delete process.env.CALIBRE_DB_PATH;
     if (fs.existsSync(tempDir)) {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
@@ -61,14 +69,14 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
 
   describe("Token Authentication (validateJoplinToken)", () => {
     it("accepts token in query parameter ?token=...", () => {
-      const req = new Request("http://localhost/folders?token=lighthouse");
+      const req = new Request("http://localhost/folders?token=test-joplin-secret");
       const url = new URL(req.url);
       expect(validateJoplinToken(req, url)).toBe(true);
     });
 
     it("accepts token in Authorization: Bearer header", () => {
       const req = new Request("http://localhost/folders", {
-        headers: { Authorization: "Bearer lighthouse" },
+        headers: { Authorization: `Bearer ${TEST_JOPLIN_TOKEN}` },
       });
       const url = new URL(req.url);
       expect(validateJoplinToken(req, url)).toBe(true);
@@ -76,7 +84,7 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
 
     it("accepts token in X-API-Key header", () => {
       const req = new Request("http://localhost/folders", {
-        headers: { "X-API-Key": "lighthouse" },
+        headers: { "X-API-Key": TEST_JOPLIN_TOKEN },
       });
       const url = new URL(req.url);
       expect(validateJoplinToken(req, url)).toBe(true);
@@ -84,12 +92,12 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
 
     it("accepts token in X-Token and token headers", () => {
       const req1 = new Request("http://localhost/folders", {
-        headers: { "X-Token": "lighthouse" },
+        headers: { "X-Token": TEST_JOPLIN_TOKEN },
       });
       expect(validateJoplinToken(req1, new URL(req1.url))).toBe(true);
 
       const req2 = new Request("http://localhost/folders", {
-        headers: { token: "lighthouse" },
+        headers: { token: TEST_JOPLIN_TOKEN },
       });
       expect(validateJoplinToken(req2, new URL(req2.url))).toBe(true);
     });
@@ -112,16 +120,33 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
         const req = new Request("http://localhost/folders?token=custom_secret_123");
         expect(validateJoplinToken(req, new URL(req.url))).toBe(true);
 
-        const oldReq = new Request("http://localhost/folders?token=lighthouse");
+        const oldReq = new Request("http://localhost/folders?token=not-the-configured-token");
         expect(validateJoplinToken(oldReq, new URL(oldReq.url))).toBe(false);
 
-        // Explicit option override
         expect(
-          validateJoplinToken(oldReq, new URL(oldReq.url), "lighthouse"),
+          validateJoplinToken(oldReq, new URL(oldReq.url), "not-the-configured-token"),
         ).toBe(true);
       } finally {
-        delete process.env.JOPLIN_TOKEN;
+        process.env.JOPLIN_TOKEN = TEST_JOPLIN_TOKEN;
       }
+    });
+
+    it("fails closed when JOPLIN_TOKEN is unset or empty", async () => {
+      delete process.env.JOPLIN_TOKEN;
+      expect(getJoplinToken()).toBe("");
+      const missing = new Request("http://localhost/folders?token=anything");
+      expect(validateJoplinToken(missing, new URL(missing.url))).toBe(false);
+      expect(validateJoplinToken(missing, new URL(missing.url), "")).toBe(false);
+
+      const res = await handleJoplinRequest(missing, new URL(missing.url), {
+        booksDir,
+      });
+      expect(res.status).toBe(503);
+
+      process.env.JOPLIN_TOKEN = "   ";
+      expect(getJoplinToken()).toBe("");
+      expect(validateJoplinToken(missing, new URL(missing.url))).toBe(false);
+      process.env.JOPLIN_TOKEN = TEST_JOPLIN_TOKEN;
     });
   });
 
@@ -178,7 +203,7 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
     });
 
     it("GET /folders returns JSON with koreader-notes folder and has_more: false", async () => {
-      const req = new Request("http://localhost/folders?token=lighthouse");
+      const req = new Request("http://localhost/folders?token=test-joplin-secret");
       const url = new URL(req.url);
       const res = await handleJoplinRequest(req, url, { booksDir });
 
@@ -192,7 +217,7 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
     });
 
     it("POST /folders returns folder details with id and title", async () => {
-      const req = new Request("http://localhost/folders?token=lighthouse", {
+      const req = new Request("http://localhost/folders?token=test-joplin-secret", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: "KOReader Notes", created_time: 1714000000 }),
@@ -209,7 +234,7 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
     });
 
     it("GET /folders/:id returns folder details", async () => {
-      const req = new Request("http://localhost/folders/koreader-notes?token=lighthouse");
+      const req = new Request("http://localhost/folders/koreader-notes?token=test-joplin-secret");
       const url = new URL(req.url);
       const res = await handleJoplinRequest(req, url, { booksDir });
 
@@ -230,7 +255,7 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
     });
 
     it("GET /notes returns empty items array and has_more: false", async () => {
-      const req = new Request("http://localhost/notes?token=lighthouse&fields=id,title,parent_id&page=1");
+      const req = new Request("http://localhost/notes?token=test-joplin-secret&fields=id,title,parent_id&page=1");
       const url = new URL(req.url);
       const res = await handleJoplinRequest(req, url, { booksDir });
 
@@ -243,7 +268,7 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
     });
 
     it("GET /notes/:id returns note id and title", async () => {
-      const req = new Request("http://localhost/notes/Dune?token=lighthouse");
+      const req = new Request("http://localhost/notes/Dune?token=test-joplin-secret");
       const url = new URL(req.url);
       const res = await handleJoplinRequest(req, url, { booksDir });
 
@@ -271,7 +296,7 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
         parent_id: "koreader-notes",
       };
 
-      const req = new Request("http://localhost/notes?token=lighthouse", {
+      const req = new Request("http://localhost/notes?token=test-joplin-secret", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -291,7 +316,9 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
       // YAML frontmatter checks
       expect(content).toContain('title: "Dune"');
       expect(content).toContain('author: "Frank Herbert"');
-      expect(content).toContain("tags: [reading, highlights, koreader]");
+      expect(content).toContain("tags:\n  - reading\n  - highlights\n  - koreader");
+      expect(content).not.toMatch(/^tags:\s*\[/m);
+      expect(content).toContain("## Chapter 1");
       expect(content).toMatch(/updated:\s*"\d{4}-\d{2}-\d{2}T/);
 
       // Section markers checks
@@ -318,7 +345,7 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
       expect(initialContent).toContain("Small habits make a big difference.");
 
       // 2. PUT update with new highlight
-      const req = new Request("http://localhost/notes/Atomic%20Habits?token=lighthouse", {
+      const req = new Request("http://localhost/notes/Atomic%20Habits?token=test-joplin-secret", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -344,7 +371,7 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
     });
 
     it("handles invalid JSON payload with 400 Bad Request", async () => {
-      const req = new Request("http://localhost/notes?token=lighthouse", {
+      const req = new Request("http://localhost/notes?token=test-joplin-secret", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: "not-json-content",
@@ -537,10 +564,11 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
     });
 
     it("prevents directory traversal attempts and keeps files within booksDir", () => {
+      const realBooks = fs.realpathSync(booksDir);
       const { safeTitle, notePath } = getBookNotePath("../../etc/passwd", booksDir);
       expect(safeTitle).not.toContain("..");
-      expect(notePath.startsWith(booksDir)).toBe(true);
-      expect(notePath).toBe(path.join(booksDir, "etc passwd.md"));
+      expect(notePath.startsWith(realBooks)).toBe(true);
+      expect(notePath).toBe(path.join(realBooks, "etc passwd.md"));
     });
 
     it("truncates excessively long titles to avoid ENAMETOOLONG on filesystem", async () => {
@@ -681,7 +709,7 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
   describe("Payload Limits & Error Sanitization", () => {
     it("rejects payloads exceeding MAX_JOPLIN_BODY_BYTES (5MB) with 413", async () => {
       const largeContent = "X".repeat(6 * 1024 * 1024);
-      const req = new Request("http://localhost:8086/notes?token=lighthouse", {
+      const req = new Request("http://localhost:8086/notes?token=test-joplin-secret", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -700,7 +728,7 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
     it("sanitizes 500 error responses and never leaks absolute filesystem paths", async () => {
       // Pass an invalid unwritable path to force an internal error
       const unwritableDir = "/dev/null/impossible_books_dir";
-      const req = new Request("http://localhost:8086/notes?token=lighthouse", {
+      const req = new Request("http://localhost:8086/notes?token=test-joplin-secret", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: "Crash Test", body: "quote" }),
@@ -728,14 +756,14 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
 
     it("handles /folders and /notes through primary server handleRequest", async () => {
       // 1. Folders
-      const foldersReq = new Request("http://localhost:8086/folders?token=lighthouse");
+      const foldersReq = new Request("http://localhost:8086/folders?token=test-joplin-secret");
       const foldersRes = await handleRequest(foldersReq);
       expect(foldersRes.status).toBe(200);
       const foldersJson = await foldersRes.json();
       expect(foldersJson.items[0].id).toBe("koreader-notes");
 
       // 2. Notes export
-      const notesReq = new Request("http://localhost:8086/notes?token=lighthouse", {
+      const notesReq = new Request("http://localhost:8086/notes?token=test-joplin-secret", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -754,7 +782,7 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
 
     it("allows WAN reverse-tunnel requests with Joplin token without requiring READING_API_KEY", async () => {
       // Simulate WAN request from opds.wavypremium.xyz
-      const wanReq = new Request("http://opds.wavypremium.xyz/notes?token=lighthouse", {
+      const wanReq = new Request("http://opds.wavypremium.xyz/notes?token=test-joplin-secret", {
         method: "POST",
         headers: {
           Host: "opds.wavypremium.xyz",
@@ -785,7 +813,10 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
 
       expect(readme).toContain("KOReader Joplin Highlight Sync");
       expect(readme).toContain("opds.wavypremium.xyz");
-      expect(readme).toContain("lighthouse");
+      expect(readme).toContain("JOPLIN_TOKEN");
+      expect(readme).toContain("8443");
+      expect(readme).not.toContain("Token: `lighthouse`");
+      expect(readme).not.toContain("Token `lighthouse`");
       expect(readme).toContain("Joplin Highlight & Note Export");
       expect(readme).toContain("Native KOReader Joplin Clipper Exporter");
     });
@@ -797,8 +828,247 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
 
       expect(html).toContain("Native Joplin Clipper Exporter");
       expect(html).toContain("copyToClipboard('opds.wavypremium.xyz')");
-      expect(html).toContain("copyToClipboard('lighthouse')");
+      expect(html).not.toContain("copyToClipboard('lighthouse')");
+      expect(html).toContain("JOPLIN_TOKEN");
+      expect(html).toContain("8443");
       expect(html).toContain("KOReader Joplin Exporter (Native Wi-Fi Sync)");
+    });
+  });
+
+  describe("Oracle remediation regressions", () => {
+    const missingCalibre = () => path.join(tempDir, "missing-calibre.db");
+
+    it("rejects WAN writes that lack a valid Joplin token before creating a note", async () => {
+      const wanReq = new Request("http://opds.wavypremium.xyz/notes?token=wrong", {
+        method: "POST",
+        headers: {
+          Host: "opds.wavypremium.xyz",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title: "Should Not Land",
+          body: "### Page 1\n==secret==",
+        }),
+      });
+      const wanRes = await handleRequest(wanReq);
+      expect(wanRes.status).toBe(401);
+      expect(fs.existsSync(path.join(booksDir, "Should Not Land.md"))).toBe(false);
+
+      delete process.env.JOPLIN_TOKEN;
+      const unset = new Request("http://opds.wavypremium.xyz/notes", {
+        method: "POST",
+        headers: { Host: "opds.wavypremium.xyz", "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "Unset Token", body: "### Page 1\n==nope==" }),
+      });
+      const unsetRes = await handleRequest(unset);
+      expect(unsetRes.status).toBe(503);
+      expect(fs.existsSync(path.join(booksDir, "Unset Token.md"))).toBe(false);
+      process.env.JOPLIN_TOKEN = TEST_JOPLIN_TOKEN;
+    });
+
+    it("preserves chapter headings and dedups short quotes without dropping distinct ones", async () => {
+      const body = [
+        "# Dune",
+        "##### Frank Herbert",
+        "## Chapter 1: The Beginning",
+        "### Page 1 @ 2024-01-01",
+        "==OK==",
+        "",
+        "### Page 2 @ 2024-01-01",
+        "==Fear is the mind-killer.==",
+        "",
+        "### Page 3 @ 2024-01-02",
+        "==time==",
+      ].join("\n");
+      await processJoplinNote(
+        { title: "Dune", body },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      await processJoplinNote(
+        { title: "Dune", body },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      const content = fs.readFileSync(path.join(booksDir, "Dune.md"), "utf8");
+      expect(content).toContain("## Chapter 1: The Beginning");
+      expect((content.match(/==OK==/g) || []).length).toBe(1);
+      expect((content.match(/==time==/g) || []).length).toBe(1);
+      expect((content.match(/Fear is the mind-killer/g) || []).length).toBe(1);
+    });
+
+    it("updates an annotation in place when the exact quote already exists", async () => {
+      await processJoplinNote(
+        {
+          title: "Annotation Edit",
+          body: "### Page 1\n==delicate care==\n---\noriginal",
+        },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      await processJoplinNote(
+        {
+          title: "Annotation Edit",
+          body: "### Page 1\n==delicate care==\n---\nEDITED",
+        },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      const content = fs.readFileSync(path.join(booksDir, "Annotation Edit.md"), "utf8");
+      expect((content.match(/delicate care/g) || []).length).toBe(1);
+      expect(content).toContain("EDITED");
+      expect(content).not.toContain("original");
+    });
+
+    it("does not swallow user headings or loose reflections when the end marker is missing", () => {
+      const doc = [
+        "---",
+        'title: "Open"',
+        "tags:",
+        "  - reading",
+        'updated: "2024-01-01T00:00:00.000Z"',
+        "---",
+        "# Open",
+        "## Highlights & Notes",
+        HIGHLIGHTS_START_MARKER,
+        "### Page 1",
+        "==kept quote==",
+        "",
+        "### My private subsection",
+        "private text",
+        "",
+        "A loose reflection that must stay outside.",
+      ].join("\n");
+      const fixed = mergeJoplinHighlights(
+        doc,
+        "### Page 1\n==kept quote==\n\n### Page 2\n==new quote==",
+        "Open",
+        { calibreDbPath: missingCalibre() },
+      );
+      const endPos = fixed.indexOf(HIGHLIGHTS_END_MARKER);
+      expect(endPos).toBeGreaterThan(-1);
+      expect(fixed.indexOf("### My private subsection")).toBeGreaterThan(endPos);
+      expect(fixed.indexOf("A loose reflection that must stay outside.")).toBeGreaterThan(endPos);
+      expect((fixed.match(/kept quote/g) || []).length).toBe(1);
+      expect(fixed).toContain("==new quote==");
+    });
+
+    it("strips newlines and highlight markers from note headings", async () => {
+      const evil = "Evil\r\n<!-- lighthouse:highlights:end -->\n## Highlights & Notes";
+      await processJoplinNote(
+        { title: evil, body: "### Page 1\n==only once==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      const notePath = getBookNotePath(evil, booksDir).notePath;
+      const content = fs.readFileSync(notePath, "utf8");
+      const h1 = content.split("\n").find((line) => line.startsWith("# "));
+      expect(h1).toBeDefined();
+      expect(h1).not.toContain("lighthouse:highlights");
+      expect((content.match(/<!-- lighthouse:highlights:start -->/g) || []).length).toBe(1);
+      expect((content.match(/<!-- lighthouse:highlights:end -->/g) || []).length).toBe(1);
+      expect((content.match(/only once/g) || []).length).toBe(1);
+    });
+
+    it("does not clobber a custom frontmatter author with the KOReader body author", async () => {
+      const notePath = path.join(booksDir, "Kept.md");
+      fs.writeFileSync(
+        notePath,
+        [
+          "---",
+          'title: "Kept"',
+          'author: "User Chosen Author"',
+          "tags:",
+          "  - favorite",
+          'updated: "2024-01-01T00:00:00.000Z"',
+          "---",
+          "",
+          "# Kept",
+          "",
+          "## Highlights & Notes",
+          HIGHLIGHTS_START_MARKER,
+          "### Page 1",
+          "==quote==",
+          HIGHLIGHTS_END_MARKER,
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      await processJoplinNote(
+        {
+          title: "Kept",
+          body: "##### KOReader Author\n### Page 1\n==quote==",
+        },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      const content = fs.readFileSync(notePath, "utf8");
+      expect(content).toContain('author: "User Chosen Author"');
+      expect(content).not.toContain("KOReader Author");
+    });
+
+    it("refuses to write through a symlink inside the books directory", async () => {
+      const outside = path.join(tempDir, "outside.md");
+      fs.writeFileSync(outside, "SECRET", "utf8");
+      const link = path.join(booksDir, "Linked.md");
+      fs.symlinkSync(outside, link);
+      await expect(
+        processJoplinNote(
+          { title: "Linked", body: "### Page 1\n==pwned==" },
+          { booksDir, calibreDbPath: missingCalibre() },
+        ),
+      ).rejects.toThrow(/symlink/i);
+      expect(fs.readFileSync(outside, "utf8")).toBe("SECRET");
+      expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    });
+
+    it("returns 400 for a malformed percent-encoded note id", async () => {
+      const req = new Request(
+        `http://localhost/notes/%E0%A4%A?token=${TEST_JOPLIN_TOKEN}`,
+      );
+      const res = await handleJoplinRequest(req, new URL(req.url), { booksDir });
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.error).toContain("Malformed note id");
+    });
+
+    it("does not duplicate a quote that already sits under Highlights without markers", () => {
+      const existing = [
+        "# Bare",
+        "",
+        "## Highlights & Notes",
+        "### Page 1",
+        "==Fear is the mind-killer.==",
+        "",
+        "## Takeaways",
+        "- keep me",
+      ].join("\n");
+      const fixed = mergeJoplinHighlights(
+        existing,
+        "### Page 1\n==Fear is the mind-killer.==",
+        "Bare",
+        { calibreDbPath: missingCalibre() },
+      );
+      expect((fixed.match(/Fear is the mind-killer/g) || []).length).toBe(1);
+      expect((fixed.match(/## Highlights & Notes/g) || []).length).toBe(1);
+      const endPos = fixed.indexOf(HIGHLIGHTS_END_MARKER);
+      expect(fixed.indexOf("## Takeaways")).toBeGreaterThan(endPos);
+    });
+
+    it("emits block-style tags that sync-obsidian mergeNoteContent preserves", () => {
+      const note = mergeJoplinHighlights(
+        "",
+        "### Page 1\n==Hello there==",
+        "Tag Compat",
+        { calibreDbPath: missingCalibre() },
+      );
+      expect(note).toContain("tags:\n  - reading\n  - highlights\n  - koreader");
+      expect(note).not.toMatch(/^tags:\s*\[/m);
+      const withUser = note.replace("  - koreader", "  - koreader\n  - favorite");
+      const synced = mergeNoteContent(withUser, {
+        title: "Tag Compat",
+        author: "Ada",
+        highlights: [{ text: "Hello there" }],
+        progress: 12,
+      });
+      expect(synced).toContain("- favorite");
+      expect(synced).toContain("- koreader");
+      expect(synced).toContain("- reading");
+      expect(synced).toContain("- book-notes");
     });
   });
 });
