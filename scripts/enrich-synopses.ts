@@ -8,19 +8,17 @@
  *       * Locates physical .epub file from Calibre book.path and data table.
  *       * Inspects content.opf (or OEBPS/content.opf) for <dc:description> or <meta property="schema:description">.
  *       * Sanitizes HTML (strips script, style, boilerplate, cleans whitespace).
- *   - Tier 2: Online Light Novel, Web Novel & Book Providers (Intelligent Source Routing):
- *       * Uses classifyBookSourceCategory to route:
- *           - Light Novels & Web Novels: Queries RanobeDB, AniList GraphQL API (rich English plot summaries
- *             and high-res covers for light novels & Korean web novels), and Bangumi, falling back to Google Books.
- *           - Manga: Queries MangaDex, AniList GraphQL API, and Bangumi.
- *           - General Books: Queries Google Books (using ISBN identifier from Calibre identifiers
- *             table if available, else clean title/author) and OpenLibrary.
+ *   - Tier 2: Volume-Specific Online Lookups (Intelligent Source Routing):
+ *       * Uses classifyBookSourceCategory and cleanQuery with preserveVolume to route full volume titles:
+ *           - Light Novels & Web Novels: Queries RanobeDB and Bangumi using volume titles, falling back to Google Books and OpenLibrary.
+ *           - Manga: Queries MangaDex and Bangumi using volume titles.
+ *           - General Books: Queries Google Books and OpenLibrary using volume titles.
  *           - Burmese: Skips overseas searches.
- *       * Series Synopsis Inheritance:
- *           - When individual volume queries have no description (or when book has a series defined in Calibre),
- *             queries AniList using the cleaned series title.
- *           - Inherits the series overview across all volumes in that series via an in-memory seriesCache
- *             so that every volume in the library displays a rich, compelling synopsis instead of placeholder text.
+ *   - Tier 3: Series Synopsis Fallback (Last Resort Only):
+ *       * Only when individual volume queries and EPUB OPF inspection return no description:
+ *           - Queries AniList using the cleaned canonical series title.
+ *           - Caches the series overview in seriesCache as a fallback for other volumes that lack volume synopses.
+ *           - seriesCache strictly serves as the Tier 3 fallback and never short-circuits Tier 1 or Tier 2 volume lookups.
  *       * Strips watermarks, promotional links (zlib, t.me, etc.).
  *   - Batch Updates:
  *       * Updates Calibre comments via calibredb set_metadata with --with-library http://127.0.0.1:8088.
@@ -41,59 +39,30 @@ import {
   cleanQuery,
   cleanSeriesTitle,
   isAllowedCoverUrl,
-  searchGoogleBooks,
-  searchOpenLibrary,
-  searchUniversalMetadata,
-  searchAniList,
   getCalibredbPath,
-  WATERMARK_BRACKET_REGEX,
-  STANDALONE_WATERMARKS_REGEX,
+  isCommentsEmpty,
+  decodeHtmlEntities,
+  sanitizeSynopsis,
+  cleanVolumeQuery,
+  extractDescriptionFromOpfXml,
+  extractEpubDescription,
+  fetchOnlineSynopsis,
+  MIN_CONFIDENCE_THRESHOLD,
+  SERIES_FALLBACK_MIN_CONFIDENCE,
 } from "../uploader/scraper";
-import {
-  classifyBookSourceCategory,
-  containsBurmese,
-  type BookSourceCategory,
-} from "../uploader/jev-shelf";
-import {
-  getBsdtarPath,
-  getUnzipPath,
-  safeFetchWithSsrf,
-} from "../uploader/security";
-
-export const MIN_CONFIDENCE_THRESHOLD = 0.85;
-
-/**
- * Minimum confidence threshold for series-level fallback overviews (AniList series query).
- * Set to 0.70 to accommodate subtitle variations and translation naming differences
- * (e.g. Korean web novel titles like "Dalbitjogaksa" vs "The Legendary Moonlight Sculptor")
- * while ensuring accurate franchise series mapping.
- */
-export const SERIES_FALLBACK_MIN_CONFIDENCE = 0.7;
-
-export function isCommentsEmpty(text?: string | null): boolean {
-  if (!text) return true;
-  const stripped = text
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/\s+/g, "")
-    .trim();
-  if (stripped.length === 0) return true;
-  const clean = text
-    .replace(/<[^>]+>/g, " ")
-    .replace(/[*_#]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-  if (
-    clean === "no synopsis available for this volume." ||
-    clean === "no synopsis available for this volume" ||
-    clean === "no synopsis available." ||
-    clean === "no synopsis available"
-  ) {
-    return true;
-  }
-  return false;
-}
+export {
+  cleanQuery,
+  isCommentsEmpty,
+  decodeHtmlEntities,
+  sanitizeSynopsis,
+  cleanVolumeQuery,
+  extractDescriptionFromOpfXml,
+  extractEpubDescription,
+  fetchOnlineSynopsis,
+  MIN_CONFIDENCE_THRESHOLD,
+  SERIES_FALLBACK_MIN_CONFIDENCE,
+};
+import { safeFetchWithSsrf } from "../uploader/security";
 
 export type SynopsisSourceFilter = "all" | "epub" | "online";
 
@@ -109,6 +78,7 @@ export interface EnrichSynopsesOptions {
   verbose?: boolean;
   json?: boolean;
   skipCacheFlush?: boolean;
+  reEnrichDuplicates?: boolean;
   seriesCache?: Map<
     string,
     { description: string; coverUrl?: string; source?: string }
@@ -258,176 +228,6 @@ export async function isCalibreServerReachable(url: string): Promise<boolean> {
   }
 }
 
-// ----------------------------------------------------------------------------
-// HTML Entity & Synopsis Sanitization
-// ----------------------------------------------------------------------------
-
-export function decodeHtmlEntities(str: string): string {
-  if (!str) return "";
-  return str
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&#39;/g, "'")
-    .replace(/&#x27;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&#(\d+);/g, (_, dec) => {
-      try {
-        return String.fromCharCode(parseInt(dec, 10));
-      } catch {
-        return "";
-      }
-    })
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
-      try {
-        return String.fromCharCode(parseInt(hex, 16));
-      } catch {
-        return "";
-      }
-    });
-}
-
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-/**
- * Sanitizes raw HTML / text synopses:
- *   - Strips script, style, boilerplate, dangerous HTML tags
- *   - Strips digital library watermarks, pirate domains, telegram channel URLs
- *   - Normalizes whitespace into clean semantic HTML paragraphs (<p>...</p>)
- */
-export function sanitizeSynopsis(rawHtmlOrText: string): string {
-  if (!rawHtmlOrText) return "";
-
-  let s = rawHtmlOrText;
-
-  // 1. Unwrap CDATA blocks before tag or entity stripping
-  s = s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
-
-  // 2. Strip script and style blocks
-  s = s.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "");
-  s = s.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "");
-  s = s.replace(/<!--[\s\S]*?-->/g, "");
-
-  // 3. Decode entities to reveal any encoded tags or characters
-  s = decodeHtmlEntities(s);
-
-  // Repeat CDATA and script/style stripping in case encoded blocks were revealed
-  s = s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
-  s = s.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "");
-  s = s.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "");
-
-  // 4. Strip watermarks in brackets and standalone domain watermarks
-  s = s.replace(WATERMARK_BRACKET_REGEX, " ");
-  s = s.replace(STANDALONE_WATERMARKS_REGEX, " ");
-
-  // 5. Strip telegram channels, pirate URLs, and promotional links
-  s = s.replace(
-    /https?:\/\/(?:[a-zA-Z0-9-]+\.)*(?:t\.me|telegram\.me|z-?lib[a-z0-9.]*|libgen[a-z0-9.]*|annas?-archive[a-z0-9.]*|oceanofpdf[a-z0-9.]*|vk\.com)[^\s<>"')\]]*/gi,
-    " ",
-  );
-
-  // 6. Convert line breaks and block elements to linebreaks
-  s = s.replace(/<br\s*\/?>/gi, "\n");
-  s = s.replace(/<\/(?:p|div|li|h[1-6]|tr|blockquote|section|article)>/gi, "\n\n");
-
-  // 7. Strip all remaining HTML tags
-  s = s.replace(/<[^>]+>/g, "");
-
-  // 8. Split into paragraphs, clean whitespace and promotional trailing phrases
-  const rawParagraphs = s.split(/\n\s*\n/);
-  const cleanParas: string[] = [];
-
-  for (const rawP of rawParagraphs) {
-    let p = rawP.replace(/\s+/g, " ").trim();
-    if (!p) continue;
-
-    // Filter out lines that are purely promotional or scanlation credits
-    if (
-      /^(?:downloaded from|uploaded by|scanned by|converted by|visit (?:our )?telegram|join (?:our )?(?:telegram|channel)|channel:?|t\.me\/|https?:\/\/)\b/i.test(
-        p,
-      ) ||
-      /(?:join|visit|follow|subscribe to)\s+(?:our\s+)?(?:telegram|discord|channel|group|website)\b/i.test(
-        p,
-      ) ||
-      /^(?:more books on|free books at|provided by)\b/i.test(p) ||
-      /^[-*_=\s]{3,}$/.test(p) ||
-      /^(?:\*\*Note:\*\*|Note:?)\s*(?:because a takedown|due to a takedown|this title has been licensed|because of a dmca)\b/i.test(
-        p,
-      )
-    ) {
-      continue;
-    }
-
-    // Strip trailing prepositions/colons left over from stripped URLs (e.g. "Visit: ")
-    p = p
-      .replace(
-        /\s*(?:at|with|from|visit|join|link:?|channel:?)\s*[:.]?\s*$/i,
-        "",
-      )
-      .trim();
-
-    if (p.length > 0) {
-      cleanParas.push(escapeHtml(p));
-    }
-  }
-
-  if (cleanParas.length === 0) return "";
-  return cleanParas.map((p) => `<p>${p}</p>`).join("\n");
-}
-
-// ----------------------------------------------------------------------------
-// Tier 1: Local EPUB Extraction
-// ----------------------------------------------------------------------------
-
-export function extractDescriptionFromOpfXml(opfXml: string): string | null {
-  if (!opfXml) return null;
-
-  const plainLen = (s: string) => s.replace(/<[^>]+>/g, "").trim().length;
-
-  // 1. Check <dc:description>...</dc:description>
-  const dcMatch = opfXml.match(/<dc:description[^>]*>([\s\S]*?)<\/dc:description>/i);
-  if (dcMatch && dcMatch[1]) {
-    const s = sanitizeSynopsis(dcMatch[1]);
-    if (s && plainLen(s) >= 15) return s;
-  }
-
-  // 2. Check <meta property="schema:description">...</meta>
-  const metaElemMatch = opfXml.match(
-    /<meta[^>]+property=["'](?:schema:)?description["'][^>]*>([\s\S]*?)<\/meta>/i,
-  );
-  if (metaElemMatch && metaElemMatch[1]) {
-    const s = sanitizeSynopsis(metaElemMatch[1]);
-    if (s && plainLen(s) >= 15) return s;
-  }
-
-  // 3. Check <meta ... content="..." ...> with property or name description
-  const metaContentMatch = opfXml.match(
-    /<meta\s+[^>]*?(?:property|name)=["'](?:schema:)?description["'][^>]*?content=["']([^"']+)["'][^>]*>/i,
-  );
-  if (metaContentMatch && metaContentMatch[1]) {
-    const s = sanitizeSynopsis(metaContentMatch[1]);
-    if (s && plainLen(s) >= 15) return s;
-  }
-
-  // 4. Reverse attribute ordering: <meta content="..." property="schema:description">
-  const metaContentReverseMatch = opfXml.match(
-    /<meta\s+[^>]*?content=["']([^"']+)["'][^>]*?(?:property|name)=["'](?:schema:)?description["'][^>]*>/i,
-  );
-  if (metaContentReverseMatch && metaContentReverseMatch[1]) {
-    const s = sanitizeSynopsis(metaContentReverseMatch[1]);
-    if (s && plainLen(s) >= 15) return s;
-  }
-
-  return null;
-}
-
 export function resolveEpubFilePath(
   libraryDir: string,
   book: { path?: string; data_name?: string; data_format?: string },
@@ -476,307 +276,6 @@ export function resolveEpubFilePath(
   } catch {
     // Ignore directory read errors
   }
-  return null;
-}
-
-export function extractEpubDescription(filePath: string): string | null {
-  try {
-    if (!fs.existsSync(filePath)) return null;
-    const stat = fs.statSync(filePath);
-    if (stat.size <= 0 || stat.size >= 256 * 1024 * 1024) return null;
-
-    const execOpts = {
-      encoding: "utf8" as const,
-      timeout: 15000,
-      maxBuffer: 16 * 1024 * 1024,
-    };
-
-    // 1. Locate OPF path via META-INF/container.xml
-    let containerXml = "";
-    const bsdtar = spawnSync(
-      getBsdtarPath(),
-      ["-xOf", filePath, "META-INF/container.xml"],
-      execOpts,
-    );
-    if (bsdtar.status === 0 && bsdtar.stdout) {
-      containerXml = bsdtar.stdout;
-    } else {
-      const unzip = spawnSync(
-        getUnzipPath(),
-        ["-p", filePath, "META-INF/container.xml"],
-        execOpts,
-      );
-      if ((unzip.status === 0 || unzip.status === 1) && unzip.stdout) {
-        containerXml = unzip.stdout;
-      }
-    }
-
-    let opfPath = "content.opf";
-    if (containerXml) {
-      const match = containerXml.match(/full-path=["']([^"']+)["']/i);
-      if (match && match[1]) {
-        opfPath = match[1].trim();
-      }
-    }
-
-    // 2. Read OPF XML content
-    let opfXml = "";
-    const bsdtarOpf = spawnSync(
-      getBsdtarPath(),
-      ["-xOf", filePath, opfPath],
-      execOpts,
-    );
-    if (bsdtarOpf.status === 0 && bsdtarOpf.stdout) {
-      opfXml = bsdtarOpf.stdout;
-    } else {
-      const unzipOpf = spawnSync(
-        getUnzipPath(),
-        ["-p", filePath, opfPath],
-        execOpts,
-      );
-      if ((unzipOpf.status === 0 || unzipOpf.status === 1) && unzipOpf.stdout) {
-        opfXml = unzipOpf.stdout;
-      }
-    }
-
-    if (!opfXml && opfPath !== "content.opf") {
-      const alt = spawnSync(
-        getBsdtarPath(),
-        ["-xOf", filePath, "content.opf"],
-        execOpts,
-      );
-      if (alt.status === 0 && alt.stdout) {
-        opfXml = alt.stdout;
-      } else {
-        const altUnzip = spawnSync(
-          getUnzipPath(),
-          ["-p", filePath, "content.opf"],
-          execOpts,
-        );
-        if (
-          (altUnzip.status === 0 || altUnzip.status === 1) &&
-          altUnzip.stdout
-        ) {
-          opfXml = altUnzip.stdout;
-        }
-      }
-    }
-    if (!opfXml && opfPath !== "OEBPS/content.opf") {
-      const alt2 = spawnSync(
-        getBsdtarPath(),
-        ["-xOf", filePath, "OEBPS/content.opf"],
-        execOpts,
-      );
-      if (alt2.status === 0 && alt2.stdout) {
-        opfXml = alt2.stdout;
-      } else {
-        const alt2Unzip = spawnSync(
-          getUnzipPath(),
-          ["-p", filePath, "OEBPS/content.opf"],
-          execOpts,
-        );
-        if (
-          (alt2Unzip.status === 0 || alt2Unzip.status === 1) &&
-          alt2Unzip.stdout
-        ) {
-          opfXml = alt2Unzip.stdout;
-        }
-      }
-    }
-
-    if (!opfXml) return null;
-
-    return extractDescriptionFromOpfXml(opfXml);
-  } catch {
-    return null;
-  }
-}
-
-// ----------------------------------------------------------------------------
-// Tier 2: Online Light Novel & Book Providers
-// ----------------------------------------------------------------------------
-
-export async function fetchOnlineSynopsis(
-  book: EnrichBookCandidate,
-  _options: EnrichSynopsesOptions = {},
-): Promise<{ description?: string; coverUrl?: string; source?: string } | null> {
-  // Fast path: Burmese literature skips overseas search to avoid unnecessary 404s and rate-limit burn
-  if (containsBurmese(book.title)) {
-    return null;
-  }
-
-  const filename = book.data_name ? `${book.data_name}.epub` : "";
-  const tags = book.tags ? book.tags.split(",").map((t) => t.trim()) : [];
-
-  // Determine source category
-  const category: BookSourceCategory = await classifyBookSourceCategory(
-    book.title,
-    book.author,
-    filename,
-    tags,
-  );
-
-  if (category === "burmese") {
-    // Burmese literature skips overseas search to avoid unnecessary 404s
-    return null;
-  }
-
-  const primaryTitle = cleanQuery(book.title);
-  const cleanAuthor =
-    book.author && book.author !== "Unknown" ? cleanQuery(book.author) : "";
-  const seriesQuery = book.series ? cleanQuery(book.series) : "";
-  const derivedSeries = cleanSeriesTitle(book.series || book.title);
-  const seriesKey = derivedSeries ? cleanSeriesTitle(derivedSeries).toLowerCase() : "";
-
-  // Check series cache first if provided
-  if (seriesKey && _options.seriesCache?.has(seriesKey)) {
-    const cached = _options.seriesCache.get(seriesKey)!;
-    return {
-      description: cached.description,
-      coverUrl: cached.coverUrl,
-      source: cached.source || "Online",
-    };
-  }
-
-  // 1. ISBN Exact Match path for general books / other
-  if (book.isbn) {
-    const isbnQ = `isbn:${book.isbn.trim()}`;
-    const isbnSettled = await Promise.allSettled([
-      searchGoogleBooks(isbnQ),
-      searchOpenLibrary(isbnQ),
-    ]);
-    for (const res of isbnSettled) {
-      if (res.status === "fulfilled") {
-        for (const hit of res.value) {
-          if (hit.description && hit.confidence >= MIN_CONFIDENCE_THRESHOLD) {
-            const clean = sanitizeSynopsis(hit.description);
-            const plainLen = clean.replace(/<[^>]+>/g, "").trim().length;
-            if (plainLen >= 15) {
-              return {
-                description: clean,
-                coverUrl: hit.coverUrl,
-                source: hit.source,
-              };
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // 2. Multi-Source Discovery via Production Router searchUniversalMetadata
-  const queriesToSearch: string[] = [];
-
-  if (category === "general_book" && cleanAuthor && primaryTitle) {
-    queriesToSearch.push(`${primaryTitle} ${cleanAuthor}`);
-  }
-  if (primaryTitle) {
-    queriesToSearch.push(primaryTitle);
-  }
-  if (seriesQuery && seriesQuery !== primaryTitle) {
-    queriesToSearch.push(seriesQuery);
-  }
-  if (
-    derivedSeries &&
-    derivedSeries !== primaryTitle &&
-    derivedSeries !== seriesQuery
-  ) {
-    queriesToSearch.push(derivedSeries);
-  }
-
-  const searchResults: Array<{
-    title: string;
-    description?: string;
-    coverUrl?: string;
-    source: string;
-    confidence: number;
-  }> = [];
-
-  for (const q of queriesToSearch) {
-    try {
-      const hits = await searchUniversalMetadata(q, {
-        author: book.author,
-        filename,
-        tags,
-        category,
-        isLightNovel: category === "light_novel",
-        isManga: category === "manga",
-      });
-      searchResults.push(...hits);
-      // If we got high-confidence hits with descriptions, stop querying secondary search variants
-      if (
-        searchResults.some(
-          (h) => h.confidence >= MIN_CONFIDENCE_THRESHOLD && h.description,
-        )
-      ) {
-        break;
-      }
-    } catch {
-      // Continue to next query candidate
-    }
-  }
-
-  // Filter hits that meet the confidence floor (>= 0.85) and have a valid description
-  const validHits = searchResults
-    .filter(
-      (r) =>
-        r.confidence >= MIN_CONFIDENCE_THRESHOLD &&
-        r.description &&
-        r.description.trim().length > 15,
-    )
-    .sort((a, b) => b.confidence - a.confidence);
-
-  for (const hit of validHits) {
-    const clean = sanitizeSynopsis(hit.description || "");
-    const plainLen = clean.replace(/<[^>]+>/g, "").trim().length;
-    if (plainLen >= 15) {
-      const res = {
-        description: clean,
-        coverUrl: hit.coverUrl,
-        source: hit.source,
-      };
-      if (seriesKey && _options.seriesCache) {
-        _options.seriesCache.set(seriesKey, res);
-      }
-      return res;
-    }
-  }
-
-  // 3. Series Synopsis Fallback via AniList:
-  // When a book's individual volume title query has no description (or when book has a series defined in Calibre),
-  // query AniList using the cleaned series title (e.g. 'The Legendary Moonlight Sculptor', 'Trapped in a Dating Sim', 'I'm the Evil Lord of an Intergalactic Empire').
-  const seriesLookupTarget = book.series?.trim() || cleanSeriesTitle(book.title);
-  if (seriesLookupTarget) {
-    try {
-      const aniQuery = cleanSeriesTitle(seriesLookupTarget);
-      if (aniQuery) {
-        const aniHits = await searchAniList(aniQuery);
-        for (const hit of aniHits) {
-          if (hit.description && hit.confidence >= SERIES_FALLBACK_MIN_CONFIDENCE) {
-            const clean = sanitizeSynopsis(hit.description);
-            const plainLen = clean.replace(/<[^>]+>/g, "").trim().length;
-            if (plainLen >= 15) {
-              const res = {
-                description: clean,
-                coverUrl: hit.coverUrl,
-                source: hit.source || "AniList",
-              };
-              if (seriesKey && _options.seriesCache) {
-                _options.seriesCache.set(seriesKey, res);
-              }
-              return res;
-            }
-          }
-        }
-      }
-    } catch (err: any) {
-      console.debug(
-        `[EnrichSynopsis:AniList] Series query "${seriesLookupTarget}" failed:`,
-        err?.message || err,
-      );
-    }
-  }
-
   return null;
 }
 
@@ -954,6 +453,23 @@ export async function runEnrichSynopses(
         OR trim(c.text) = ''
         OR trim(replace(replace(replace(replace(c.text, '<p>', ''), '</p>', ''), '<br>', ''), '&nbsp;', '')) = ''
         OR lower(trim(replace(replace(replace(replace(replace(c.text, '<p>', ''), '</p>', ''), '*', ''), '.', ''), ' ', ''))) IN ('nosynopsisavailable', 'nosynopsisavailableforthisvolume')
+        ${
+          options.reEnrichDuplicates
+            ? `OR (
+          bsl.series IS NOT NULL 
+          AND c.text IS NOT NULL
+          AND trim(c.text) != ''
+          AND bsl.series IN (
+            SELECT bsl2.series
+            FROM books_series_link bsl2
+            JOIN comments c2 ON bsl2.book = c2.book
+            WHERE c2.text IS NOT NULL AND trim(c2.text) != ''
+            GROUP BY bsl2.series, trim(c2.text)
+            HAVING COUNT(DISTINCT bsl2.book) > 1
+          )
+        )`
+            : ""
+        }
       )
       GROUP BY b.id
       ORDER BY b.id ASC;
@@ -963,8 +479,22 @@ export async function runEnrichSynopses(
     db.close();
   }
 
-  // Ensure candidate books have empty comments (guards custom providers and edge-case DB rows)
-  rawCandidates = rawCandidates.filter((b) => isCommentsEmpty(b.comments));
+  // Ensure candidate books have empty comments or are duplicate series summaries if reEnrichDuplicates
+  rawCandidates = rawCandidates.filter((b) => {
+    if (isCommentsEmpty(b.comments)) return true;
+    if (options.reEnrichDuplicates && b.series?.trim() && b.comments) {
+      const sName = b.series.trim();
+      const hasDupe = rawCandidates.some(
+        (other) =>
+          other.id !== b.id &&
+          other.series?.trim() === sName &&
+          other.comments &&
+          other.comments === b.comments,
+      );
+      if (hasDupe) return true;
+    }
+    return false;
+  });
 
   if (typeof options.limit === "number" && options.limit > 0) {
     rawCandidates = rawCandidates.slice(0, options.limit);
@@ -996,7 +526,7 @@ export async function runEnrichSynopses(
         ? cleanSeriesTitle(seriesName).toLowerCase()
         : "";
 
-      // Tier 1: Local EPUB Inspection
+      // Tier 1: Local EPUB Inspection (Volume-specific)
       if (sourceStrategy === "all" || sourceStrategy === "epub") {
         if (options.epubExtractor) {
           foundSynopsis = await options.epubExtractor(b.path || "");
@@ -1019,28 +549,7 @@ export async function runEnrichSynopses(
         }
       }
 
-      // Check series cache before online query if Tier 1 had no description
-      if (
-        !foundSynopsis &&
-        seriesKey &&
-        seriesCache.has(seriesKey) &&
-        (sourceStrategy === "all" || sourceStrategy === "online")
-      ) {
-        const cached = seriesCache.get(seriesKey)!;
-        foundSynopsis = cached.description;
-        foundCoverUrl =
-          b.has_cover === 0 || !b.has_cover ? cached.coverUrl : undefined;
-        sourceType = "online";
-        foundSource = cached.source || "Online";
-        synopsesFoundOnline++;
-        if (verbose) {
-          console.log(
-            `[Tier 2: Series Inherited] #${b.id} "${b.title}" -> Inherited series synopsis for "${seriesKey}" from ${foundSource}`,
-          );
-        }
-      }
-
-      // Tier 2: Online Light Novel & Book Providers (if Tier 1 and seriesCache had no description)
+      // Tier 2: Volume-specific Online Lookup
       if (
         !foundSynopsis &&
         (sourceStrategy === "all" || sourceStrategy === "online")
@@ -1063,11 +572,11 @@ export async function runEnrichSynopses(
           sourceType = "online";
           foundSource = onlineRes.source || "Online";
           synopsesFoundOnline++;
-          if (seriesKey) {
+          if (seriesKey && (onlineRes.source === "AniList" || (onlineRes as any).isSeriesOverview)) {
             seriesCache.set(seriesKey, {
               description: onlineRes.description,
               coverUrl: onlineRes.coverUrl,
-              source: onlineRes.source || "Online",
+              source: onlineRes.source || "AniList",
             });
           }
           if (verbose) {
@@ -1075,6 +584,27 @@ export async function runEnrichSynopses(
               `[Tier 2: Online] #${b.id} "${b.title}" -> Found description via ${foundSource}${foundCoverUrl ? " (+cover)" : ""}`,
             );
           }
+        }
+      }
+
+      // Tier 3: Series Synopsis Fallback (Only if Tier 1 & Tier 2 returned no synopsis, and seriesCache has an overview)
+      if (
+        !foundSynopsis &&
+        seriesKey &&
+        seriesCache.has(seriesKey) &&
+        (sourceStrategy === "all" || sourceStrategy === "online")
+      ) {
+        const cached = seriesCache.get(seriesKey)!;
+        foundSynopsis = cached.description;
+        foundCoverUrl =
+          b.has_cover === 0 || !b.has_cover ? cached.coverUrl : undefined;
+        sourceType = "online";
+        foundSource = cached.source || "Online";
+        synopsesFoundOnline++;
+        if (verbose) {
+          console.log(
+            `[Tier 3: Series Inherited] #${b.id} "${b.title}" -> Inherited series synopsis for "${seriesKey}" from ${foundSource}`,
+          );
         }
       }
 
@@ -1113,9 +643,12 @@ export async function runEnrichSynopses(
     }
   }
 
-  const itemsNeedingUpdate = items.filter(
-    (i) => i.sourceType !== "none" && i.synopsis.length > 0,
-  );
+  const candidatesMap = new Map(rawCandidates.map((c) => [c.id, c]));
+  const itemsNeedingUpdate = items.filter((i) => {
+    if (i.sourceType === "none" || !i.synopsis) return false;
+    const c = candidatesMap.get(i.bookId);
+    return isCommentsEmpty(c?.comments) || i.synopsis !== c?.comments;
+  });
 
   let totalUpdated = 0;
   let coversUpdated = 0;
@@ -1169,6 +702,7 @@ export async function runEnrichSynopses(
             );
           }
         } else {
+          item.updated = false;
           item.error = res.error;
           errors.push({
             bookId: item.bookId,
@@ -1301,6 +835,7 @@ Options:
   --apply                   Execute metadata updates via calibredb set_metadata
   --limit <N>               Limit processing to first N books
   --source <type>           Source strategy: all (default), epub, or online
+  --re-enrich-duplicates    Re-enrich volumes holding duplicate series summaries when true volume synopsis is available
   --library-path <path>     Explicit path to Calibre library folder
   --calibre-server-url <url> Calibre server URL (default: http://127.0.0.1:8088)
   --concurrency <N>         Worker concurrency for updates (default: 4)
@@ -1349,6 +884,8 @@ if ((import.meta as any).main) {
       if (s === "all" || s === "epub" || s === "online") {
         options.source = s;
       }
+    } else if (a === "--re-enrich-duplicates" || a === "--re-enrich-series-duplicates") {
+      options.reEnrichDuplicates = true;
     } else if (a === "--library-path" && i + 1 < args.length) {
       options.libraryDir = args[++i];
     } else if (a.startsWith("--library-path=")) {

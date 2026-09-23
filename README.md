@@ -105,7 +105,7 @@ LightHouse includes a portable management CLI (`bin/lighthouse`) for service lif
 | `bin/lighthouse restart` | Performs safe sequential stop and restart of reading stack services (`down; sleep 1; up`). |
 | `bin/lighthouse health` | Probes HTTP/TCP endpoints, checks response codes, and auto-heals stale remote listeners (`fuser -k`). |
 | `bin/lighthouse categorize` | Classifies book languages (`mya`, `eng`, `other`), assigns standardized category tags, and prunes promotional tags. |
-| `bin/lighthouse enrich-synopsis` | Populates missing descriptions for Calibre books combining local EPUB metadata extraction with online APIs (RanobeDB, AniList, Bangumi, Google Books) and series synopsis inheritance across volumes. |
+| `bin/lighthouse enrich-synopsis` | Populates descriptions for Calibre books prioritizing per-volume lookups (EPUB metadata, online volume queries) with AniList series fallback and duplicate series overview re-enrichment. |
 | `bin/lighthouse sync-obsidian` | Syncs highlights, notes, and progress from KOReader/Kindle to Obsidian with idempotent markers. |
 | `bin/lighthouse install-daemons` | Dynamically generates and registers macOS LaunchAgents for the current user and repository root. |
 | `bin/lighthouse backup` | Flushes SQLite WAL frames and creates an atomic snapshot bundle with SHA-256 checksum and manifest. |
@@ -135,6 +135,9 @@ bin/lighthouse enrich-synopsis --apply
 
 # Limit enrichment to first 20 books or restrict source strategy (epub, online, all)
 bin/lighthouse enrich-synopsis --apply --limit 20 --source=online
+
+# Re-enrich volumes holding duplicate series overviews with true volume synopses
+bin/lighthouse enrich-synopsis --apply --re-enrich-duplicates
 # Synchronize KOReader/Kindle highlights and reading notes to Obsidian vault
 bin/lighthouse sync-obsidian --apply
 

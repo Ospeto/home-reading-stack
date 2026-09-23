@@ -6,6 +6,7 @@ import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 import { validateEpubContent, repairTruncatedEpub, safeFetchWithSsrf } from "./security";
+import { isCommentsEmpty, sanitizeSynopsis, extractEpubDescription } from "./scraper";
 
 const PROXY_URL = "http://127.0.0.1:7890";
 export const MAX_EPUB_BYTES = 256 * 1024 * 1024;
@@ -385,6 +386,7 @@ export interface LnoriVolumeMetadata {
   authors?: string[];
   coverImageUrl?: string;
   volumeNumber?: number;
+  description?: string;
 }
 
 export interface LnoriSeriesManifest {
@@ -394,6 +396,7 @@ export interface LnoriSeriesManifest {
   author: string;
   tags: string[];
   volumePaths: string[];
+  description?: string;
 }
 
 export function extractManifestFromHtml(
@@ -502,6 +505,16 @@ export function extractManifestFromHtml(
         : `Series ${parsedUrl.id}`;
     }
 
+    let description: string | undefined;
+    if (schemaData?.description) {
+      description = sanitizeSynopsis(schemaData.description);
+    } else if (appData?.description) {
+      description = sanitizeSynopsis(appData.description);
+    }
+    if (description && isCommentsEmpty(description)) {
+      description = undefined;
+    }
+
     return {
       type: "series",
       seriesId: parsedUrl.id,
@@ -509,14 +522,20 @@ export function extractManifestFromHtml(
       author: author || "Unknown",
       tags,
       volumePaths,
+      description,
     };
   } else {
     // Book URL: treat as 1-volume series
     let bookName = "";
+    let description: string | undefined;
 
     const data = appData || schemaData;
     if (data) {
       if (data.name) bookName = data.name;
+      if (data.description) {
+        description = sanitizeSynopsis(data.description);
+        if (isCommentsEmpty(description)) description = undefined;
+      }
       if (data.author) {
         if (typeof data.author === "string") {
           author = data.author;
@@ -556,6 +575,7 @@ export function extractManifestFromHtml(
       author: author || "Unknown",
       tags,
       volumePaths: [currentPath],
+      description,
     };
   }
 }
@@ -575,6 +595,31 @@ export function parseVolumeAppData(html: string, fallbackBookId?: string): Lnori
     let seriesTitle: string | undefined;
     let seriesSlug: string | undefined;
     let coverImageUrl: string | undefined = data.image;
+    let description: string | undefined = data.description
+      ? sanitizeSynopsis(data.description)
+      : undefined;
+
+    if (!description) {
+      const ldMatches = Array.from(
+        html.matchAll(
+          /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi,
+        ),
+      );
+      for (const m of ldMatches) {
+        try {
+          const parsed = JSON.parse(m[1]);
+          if (parsed.description) {
+            description = sanitizeSynopsis(parsed.description);
+            break;
+          }
+        } catch (_err) {
+          void _err;
+        }
+      }
+    }
+    if (description && isCommentsEmpty(description)) {
+      description = undefined;
+    }
 
     if (Array.isArray(data.additionalProperty)) {
       for (const prop of data.additionalProperty) {
@@ -625,6 +670,7 @@ export function parseVolumeAppData(html: string, fallbackBookId?: string): Lnori
       authors: authors.length > 0 ? authors : undefined,
       coverImageUrl,
       volumeNumber,
+      description,
     };
   } catch {
     return null;
@@ -1022,6 +1068,22 @@ export async function ingestLnoriSeries(
         "--field",
         `tags:${tagsStr}`,
       ];
+
+      // Extract synopsis from volMeta.description, or fallback to EPUB content.opf <dc:description>
+      let synopsis: string | null = null;
+      if (volMeta.description && !isCommentsEmpty(volMeta.description)) {
+        synopsis = volMeta.description;
+      }
+      if (!synopsis && fs.existsSync(tempEpubPath)) {
+        synopsis = extractEpubDescription(tempEpubPath);
+      }
+      if (!synopsis && manifest.description && !isCommentsEmpty(manifest.description)) {
+        synopsis = manifest.description;
+      }
+
+      if (synopsis && !isCommentsEmpty(synopsis)) {
+        setArgs.push("--field", `comments:${synopsis}`);
+      }
 
       // Download and convert master cover art
       let coverPath: string | null = null;

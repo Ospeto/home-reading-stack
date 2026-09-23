@@ -2,18 +2,20 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { safeFetchWithSsrf, isPrivateOrInternalIp } from "./security";
+import { safeFetchWithSsrf, isPrivateOrInternalIp, getBsdtarPath, getUnzipPath } from "./security";
 import {
   isJunkAuthorExtended,
   classifyBookSourceCategory,
   classifyBookSourceCategoryDeterministic,
   triageSourceCategoryWithJev,
+  containsBurmese,
   type BookSourceCategory,
 } from "./jev-shelf";
 export {
   classifyBookSourceCategory,
   classifyBookSourceCategoryDeterministic,
   triageSourceCategoryWithJev,
+  containsBurmese,
   type BookSourceCategory,
 };
 
@@ -174,17 +176,29 @@ export function cleanSeriesTitle(title: string): string {
  * Clean search query for metadata APIs:
  * Applies cleanString, then strips all remaining brackets, chapter/vol numbers, and normalizes separators.
  */
-export function cleanQuery(str: string): string {
+export function cleanQuery(
+  str: string,
+  options?: { preserveVolume?: boolean },
+): string {
   if (!str) return "";
-  let s = cleanString(str);
+  let s = options?.preserveVolume ? cleanVolumeQuery(str) : cleanString(str);
+  if (options?.preserveVolume) {
+    // Unwrap volume brackets/parentheses e.g. (Vol. 1), [Volume 02], (1), （1）, ［1］ into plain text
+    s = s.replace(
+      /[\[\(\uFF08\uFF3B]\s*((?:vol(?:ume)?|v|book|bk|ch|chapter|part|pt|#)?\.?\s*\d+(?:\.\d+)?)\s*[\]\)\uFF09\uFF3D]/gi,
+      " $1 ",
+    );
+  }
   // Strip any remaining brackets and parentheses
   s = s.replace(/\[.*?\]/g, " ");
   s = s.replace(/\(.*?\)/g, " ");
-  // Strip chapter / volume prefixes so search hits the canonical work
-  s = s.replace(
-    /\b(c[0-9]+|ch\.?\s*[0-9]+|chapter\s*[0-9]+|vol\.?\s*[0-9]+|volume\s*[0-9]+|book\s*[0-9]+|part\s*[0-9]+)\b/gi,
-    " ",
-  );
+  // Strip chapter / volume prefixes so search hits the canonical work (unless preserveVolume is requested)
+  if (!options?.preserveVolume) {
+    s = s.replace(
+      /\b(c[0-9]+|ch\.?\s*[0-9]+|chapter\s*[0-9]+|vol\.?\s*[0-9]+|volume\s*[0-9]+|book\s*[0-9]+|part\s*[0-9]+)\b/gi,
+      " ",
+    );
+  }
   // Normalize punctuation separators to spaces
   s = s.replace(/[-_–—:,;]+/g, " ");
   s = s.replace(/\s+/g, " ").trim();
@@ -877,9 +891,10 @@ export async function isSameBookAsync(
 // 1. MangaDex Scraper
 export async function searchMangaDex(
   query: string,
+  options?: { preserveVolume?: boolean },
 ): Promise<ScrapedMetadata[]> {
   const results: ScrapedMetadata[] = [];
-  const cleanQ = cleanQuery(query);
+  const cleanQ = cleanQuery(query, options);
   if (!cleanQ) return results;
 
   try {
@@ -944,9 +959,12 @@ export async function searchMangaDex(
 }
 
 // 2. Bangumi Scraper
-export async function searchBangumi(query: string): Promise<ScrapedMetadata[]> {
+export async function searchBangumi(
+  query: string,
+  options?: { preserveVolume?: boolean },
+): Promise<ScrapedMetadata[]> {
   const results: ScrapedMetadata[] = [];
-  const cleanQ = cleanQuery(query);
+  const cleanQ = cleanQuery(query, options);
   if (!cleanQ) return results;
 
   try {
@@ -964,9 +982,11 @@ export async function searchBangumi(query: string): Promise<ScrapedMetadata[]> {
           const title = item.name_cn || item.name || "";
           if (!title) continue;
 
+          const cleanTitle = cleanQuery(title, options);
           const sim = Math.max(
             stringSimilarity(cleanQ, item.name || ""),
             stringSimilarity(cleanQ, item.name_cn || ""),
+            cleanTitle ? stringSimilarity(cleanQ, cleanTitle) : 0,
           );
           results.push({
             title,
@@ -994,6 +1014,7 @@ export async function searchBangumi(query: string): Promise<ScrapedMetadata[]> {
 // 3. Google Books Scraper
 export async function searchGoogleBooks(
   query: string,
+  options?: { preserveVolume?: boolean },
 ): Promise<ScrapedMetadata[]> {
   const results: ScrapedMetadata[] = [];
   const trimmed = (query || "").trim();
@@ -1009,7 +1030,7 @@ export async function searchGoogleBooks(
     cleanQ = `isbn:${rawIsbn}`;
     url = `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(rawIsbn)}&maxResults=3`;
   } else {
-    cleanQ = cleanQuery(query);
+    cleanQ = cleanQuery(query, options);
     if (!cleanQ) return results;
     url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(cleanQ)}&maxResults=3`;
   }
@@ -1039,7 +1060,13 @@ export async function searchGoogleBooks(
             : "";
           const tags: string[] = (info.categories || []).slice(0, 4);
 
-          const sim = isIsbn ? 1.0 : stringSimilarity(cleanQ, title);
+          const cleanTitle = cleanQuery(title, options);
+          let sim = 1.0;
+          if (!isIsbn) {
+            const rawSim = stringSimilarity(cleanQ, title);
+            const cleanSim = cleanTitle ? stringSimilarity(cleanQ, cleanTitle) : 0;
+            sim = Math.max(rawSim, cleanSim);
+          }
           results.push({
             title,
             authors: authors || "Unknown",
@@ -1067,6 +1094,7 @@ export async function searchGoogleBooks(
 // 4. OpenLibrary Scraper
 export async function searchOpenLibrary(
   query: string,
+  options?: { preserveVolume?: boolean },
 ): Promise<ScrapedMetadata[]> {
   const results: ScrapedMetadata[] = [];
   const trimmed = (query || "").trim();
@@ -1082,7 +1110,7 @@ export async function searchOpenLibrary(
     cleanQ = `isbn:${rawIsbn}`;
     url = `https://openlibrary.org/search.json?isbn=${encodeURIComponent(rawIsbn)}&limit=3`;
   } else {
-    cleanQ = cleanQuery(query);
+    cleanQ = cleanQuery(query, options);
     if (!cleanQ) return results;
     url = `https://openlibrary.org/search.json?q=${encodeURIComponent(cleanQ)}&limit=3`;
   }
@@ -1107,7 +1135,13 @@ export async function searchOpenLibrary(
             : "";
           const tags = doc.subject ? doc.subject.slice(0, 4) : [];
 
-          const sim = isIsbn ? 1.0 : stringSimilarity(cleanQ, title);
+          const cleanTitle = cleanQuery(title, options);
+          let sim = 1.0;
+          if (!isIsbn) {
+            const rawSim = stringSimilarity(cleanQ, title);
+            const cleanSim = cleanTitle ? stringSimilarity(cleanQ, cleanTitle) : 0;
+            sim = Math.max(rawSim, cleanSim);
+          }
           results.push({
             title,
             authors: authors || "Unknown",
@@ -1246,10 +1280,11 @@ export async function searchRanobeDB(
     baseUrl?: string;
     timeoutMs?: number;
     fetchFn?: (url: string, init?: any) => Promise<Response>;
+    preserveVolume?: boolean;
   },
 ): Promise<ScrapedMetadata[]> {
   const results: ScrapedMetadata[] = [];
-  const cleanQ = cleanQuery(query);
+  const cleanQ = cleanQuery(query, { preserveVolume: options?.preserveVolume });
   if (!cleanQ) return results;
 
   const apiBase = options?.baseUrl || "https://ranobedb.org/api/v0";
@@ -1734,10 +1769,15 @@ export async function searchUniversalMetadata(
         filename?: string;
         tags?: string[];
         category?: BookSourceCategory;
+        preserveVolume?: boolean;
       },
 ): Promise<ScrapedMetadata[]> {
   const results: ScrapedMetadata[] = [];
-  const cleanQ = cleanQuery(query);
+  let hintPreserveVolume = false;
+  if (hint && typeof hint === "object") {
+    hintPreserveVolume = Boolean(hint.preserveVolume);
+  }
+  const cleanQ = cleanQuery(query, { preserveVolume: hintPreserveVolume });
   if (!cleanQ) return results;
 
   let hintManga = false;
@@ -1800,34 +1840,37 @@ export async function searchUniversalMetadata(
   const isLnTarget = category === "light_novel";
 
   // Category-specific source routing:
-  // 1. 'light_novel': Query RanobeDB + AniList + Bangumi first, fallback to Google Books
+  // 1. 'light_novel': Query RanobeDB + Bangumi (and AniList for series queries), fallback to Google Books
   if (category === "light_novel") {
     const lnSettled = await Promise.allSettled([
-      searchRanobeDB(query),
-      searchAniList(query),
-      searchBangumi(query),
+      searchRanobeDB(query, { preserveVolume: hintPreserveVolume }),
+      ...(hintPreserveVolume ? [] : [searchAniList(query)]),
+      searchBangumi(query, { preserveVolume: hintPreserveVolume }),
     ]);
     for (const res of lnSettled) {
       if (res.status === "fulfilled") {
         results.push(...res.value);
       }
     }
-    // If primary light novel sources returned 0 results, query secondary Google Books
-    if (results.length === 0) {
+    // If primary light novel sources returned 0 results (or no usable description when searching volume synopsis)
+    const hasUsableLn = hintPreserveVolume
+      ? results.some((r) => r.confidence >= 0.85 && r.description && r.description.trim().length > 15)
+      : results.length > 0;
+    if (!hasUsableLn) {
       try {
-        const gbResults = await searchGoogleBooks(query);
+        const gbResults = await searchGoogleBooks(query, { preserveVolume: hintPreserveVolume });
         results.push(...gbResults);
       } catch (err) {
         console.debug(`[Scraper] Google Books secondary search error:`, err);
       }
     }
   }
-  // 2. 'manga': Query MangaDex + AniList + Bangumi first
+  // 2. 'manga': Query MangaDex + Bangumi (and AniList for series queries)
   else if (category === "manga") {
     const mangaSettled = await Promise.allSettled([
       searchMangaDex(query),
-      searchAniList(query),
-      searchBangumi(query),
+      ...(hintPreserveVolume ? [] : [searchAniList(query)]),
+      searchBangumi(query, { preserveVolume: hintPreserveVolume }),
     ]);
     for (const res of mangaSettled) {
       if (res.status === "fulfilled") {
@@ -1838,8 +1881,8 @@ export async function searchUniversalMetadata(
   // 3. 'general_book' or 'other': Query Google Books + OpenLibrary first
   else if (category === "general_book" || category === "other") {
     const generalSettled = await Promise.allSettled([
-      searchGoogleBooks(query),
-      searchOpenLibrary(query),
+      searchGoogleBooks(query, { preserveVolume: hintPreserveVolume }),
+      searchOpenLibrary(query, { preserveVolume: hintPreserveVolume }),
     ]);
     for (const res of generalSettled) {
       if (res.status === "fulfilled") {
@@ -1854,13 +1897,16 @@ export async function searchUniversalMetadata(
     return results;
   }
 
-  // 5. Fallback if primary category returns 0 results: run secondary search so no book is left without metadata
-  if (results.length === 0) {
+  // 5. Fallback: run secondary search if primary returned 0 results (or if searching volume synopsis and no usable description found)
+  const hasUsableFallback = hintPreserveVolume
+    ? results.some((r) => r.confidence >= 0.85 && r.description && r.description.trim().length > 15)
+    : results.length > 0;
+  if (!hasUsableFallback) {
     if (category === "light_novel") {
       // Light novel secondary already tried Google Books; try OpenLibrary + MangaDex
       const fallbackSettled = await Promise.allSettled([
-        searchOpenLibrary(query),
-        searchMangaDex(query),
+        searchOpenLibrary(query, { preserveVolume: hintPreserveVolume }),
+        searchMangaDex(query, { preserveVolume: hintPreserveVolume }),
       ]);
       for (const res of fallbackSettled) {
         if (res.status === "fulfilled") {
@@ -1870,8 +1916,8 @@ export async function searchUniversalMetadata(
     } else if (category === "manga") {
       // Manga fallback: try Google Books + OpenLibrary
       const fallbackSettled = await Promise.allSettled([
-        searchGoogleBooks(query),
-        searchOpenLibrary(query),
+        searchGoogleBooks(query, { preserveVolume: hintPreserveVolume }),
+        searchOpenLibrary(query, { preserveVolume: hintPreserveVolume }),
       ]);
       for (const res of fallbackSettled) {
         if (res.status === "fulfilled") {
@@ -1881,10 +1927,10 @@ export async function searchUniversalMetadata(
     } else if (category === "general_book" || category === "other") {
       // General book fallback: try RanobeDB + AniList + Bangumi + MangaDex
       const fallbackSettled = await Promise.allSettled([
-        searchRanobeDB(query),
-        searchAniList(query),
-        searchBangumi(query),
-        searchMangaDex(query),
+        searchRanobeDB(query, { preserveVolume: hintPreserveVolume }),
+        ...(hintPreserveVolume ? [] : [searchAniList(query)]),
+        searchBangumi(query, { preserveVolume: hintPreserveVolume }),
+        searchMangaDex(query, { preserveVolume: hintPreserveVolume }),
       ]);
       for (const res of fallbackSettled) {
         if (res.status === "fulfilled") {
@@ -2047,3 +2093,623 @@ export async function applyMetadataToCalibre(
     return false;
   }
 }
+
+export function safeParseJson(str: string): any {
+  if (!str) return null;
+  const trimmed = str.trim();
+  const startBracket = trimmed.indexOf("[");
+  const endBracket = trimmed.lastIndexOf("]");
+  if (startBracket !== -1 && endBracket !== -1 && endBracket > startBracket) {
+    try {
+      return JSON.parse(trimmed.substring(startBracket, endBracket + 1));
+    } catch (_err) {
+      void _err;
+    }
+  }
+  const startBrace = trimmed.indexOf("{");
+  const endBrace = trimmed.lastIndexOf("}");
+  if (startBrace !== -1 && endBrace !== -1 && endBrace > startBrace) {
+    try {
+      return JSON.parse(trimmed.substring(startBrace, endBrace + 1));
+    } catch (_err) {
+      void _err;
+    }
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+export const MIN_CONFIDENCE_THRESHOLD = 0.85;
+export const SERIES_FALLBACK_MIN_CONFIDENCE = 0.7;
+
+export function isCommentsEmpty(text?: string | null): boolean {
+  if (!text) return true;
+  const stripped = text
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\s+/g, "")
+    .trim();
+  if (stripped.length === 0) return true;
+  const clean = text
+    .replace(/<[^>]+>/g, " ")
+    .replace(/[*_#]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  if (
+    clean === "no synopsis available for this volume." ||
+    clean === "no synopsis available for this volume" ||
+    clean === "no synopsis available." ||
+    clean === "no synopsis available"
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+export function sanitizeSynopsis(rawHtmlOrText: string): string {
+  if (!rawHtmlOrText) return "";
+
+  let s = rawHtmlOrText;
+
+  // 1. Unwrap CDATA blocks before tag or entity stripping
+  s = s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
+
+  // 2. Strip script and style blocks
+  s = s.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "");
+  s = s.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "");
+  s = s.replace(/<!--[\s\S]*?-->/g, "");
+
+  // 3. Decode entities to reveal any encoded tags or characters
+  s = decodeHtmlEntities(s);
+
+  // Repeat CDATA and script/style stripping in case encoded blocks were revealed
+  s = s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
+  s = s.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "");
+  s = s.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "");
+
+  // 4. Strip watermarks in brackets and standalone domain watermarks
+  s = s.replace(WATERMARK_BRACKET_REGEX, " ");
+  s = s.replace(STANDALONE_WATERMARKS_REGEX, " ");
+
+  // 5. Strip telegram channels, pirate URLs, and promotional links
+  s = s.replace(
+    /https?:\/\/(?:[a-zA-Z0-9-]+\.)*(?:t\.me|telegram\.me|z-?lib[a-z0-9.]*|libgen[a-z0-9.]*|annas?-archive[a-z0-9.]*|oceanofpdf[a-z0-9.]*|vk\.com)[^\s<>"')\]]*/gi,
+    " ",
+  );
+
+  // 6. Convert line breaks and block elements to linebreaks
+  s = s.replace(/<br\s*\/?>/gi, "\n");
+  s = s.replace(/<\/(?:p|div|li|h[1-6]|tr|blockquote|section|article)>/gi, "\n\n");
+
+  // 7. Strip all remaining HTML tags
+  s = s.replace(/<[^>]+>/g, "");
+
+  // 8. Split into paragraphs, clean whitespace and promotional trailing phrases
+  const rawParagraphs = s.split(/\n\s*\n/);
+  const cleanParas: string[] = [];
+
+  for (const rawP of rawParagraphs) {
+    let p = rawP.replace(/\s+/g, " ").trim();
+    if (!p) continue;
+
+    // Filter out lines that are purely promotional or scanlation credits
+    if (
+      /^(?:downloaded from|uploaded by|scanned by|converted by|visit (?:our )?telegram|join (?:our )?(?:telegram|channel)|channel:?|t\.me\/|https?:\/\/)\b/i.test(
+        p,
+      ) ||
+      /(?:join|visit|follow|subscribe to)\s+(?:our\s+)?(?:telegram|discord|channel|group|website)\b/i.test(
+        p,
+      ) ||
+      /^(?:more books on|free books at|provided by)\b/i.test(p) ||
+      /^[-*_=\s]{3,}$/.test(p) ||
+      /^(?:\*\*Note:\*\*|Note:?)\s*(?:because a takedown|due to a takedown|this title has been licensed|because of a dmca)\b/i.test(
+        p,
+      )
+    ) {
+      continue;
+    }
+
+    // Strip trailing prepositions/colons left over from stripped URLs (e.g. "Visit: ")
+    p = p
+      .replace(
+        /\s*(?:at|with|from|visit|join|link:?|channel:?)\s*[:.]?\s*$/i,
+        "",
+      )
+      .trim();
+
+    if (p.length > 0) {
+      cleanParas.push(escapeHtml(p));
+    }
+  }
+
+  if (cleanParas.length === 0) return "";
+  return cleanParas.map((p) => `<p>${p}</p>`).join("\n");
+}
+
+export function cleanVolumeQuery(title: string): string {
+  if (!title) return "";
+  let s = title;
+  s = s.replace(/_/g, " ");
+  s = s.replace(WATERMARK_BRACKET_REGEX, " ");
+  s = s.replace(URL_REGEX, " ");
+  s = s.replace(TELEGRAM_LINK_REGEX, " ");
+  s = s.replace(VK_LINK_REGEX, " ");
+  s = s.replace(MENTION_REGEX, " ");
+  s = s.replace(WWW_REGEX, " ");
+  s = s.replace(STANDALONE_WATERMARKS_REGEX, " ");
+  s = s.replace(FORMAT_EXT_REGEX, " ");
+  s = s.replace(/\[\s*\]|\(\s*\)/g, " ");
+  // Collapse whitespace
+  s = s.replace(/\s+/g, " ").trim();
+  s = s.replace(/^[-–—:_.\s]+|[-–—:_.\s]+$/g, "").trim();
+  return s;
+}
+
+export function extractDescriptionFromOpfXml(opfXml: string): string | null {
+  if (!opfXml) return null;
+
+  const plainLen = (s: string) => s.replace(/<[^>]+>/g, "").trim().length;
+
+  // 1. Check <dc:description>...</dc:description>
+  const dcMatch = opfXml.match(/<dc:description[^>]*>([\s\S]*?)<\/dc:description>/i);
+  if (dcMatch && dcMatch[1]) {
+    const s = sanitizeSynopsis(dcMatch[1]);
+    if (s && plainLen(s) >= 15) return s;
+  }
+
+  // 2. Check <meta property="schema:description">...</meta>
+  const metaElemMatch = opfXml.match(
+    /<meta[^>]+property=["'](?:schema:)?description["'][^>]*>([\s\S]*?)<\/meta>/i,
+  );
+  if (metaElemMatch && metaElemMatch[1]) {
+    const s = sanitizeSynopsis(metaElemMatch[1]);
+    if (s && plainLen(s) >= 15) return s;
+  }
+
+  // 3. Check <meta ... content="..." ...> with property or name description
+  const metaContentMatch = opfXml.match(
+    /<meta\s+[^>]*?(?:property|name)=["'](?:schema:)?description["'][^>]*?content=["']([^"']+)["'][^>]*>/i,
+  );
+  if (metaContentMatch && metaContentMatch[1]) {
+    const s = sanitizeSynopsis(metaContentMatch[1]);
+    if (s && plainLen(s) >= 15) return s;
+  }
+
+  // 4. Reverse attribute ordering: <meta content="..." property="schema:description">
+  const metaContentReverseMatch = opfXml.match(
+    /<meta\s+[^>]*?content=["']([^"']+)["'][^>]*?(?:property|name)=["'](?:schema:)?description["'][^>]*>/i,
+  );
+  if (metaContentReverseMatch && metaContentReverseMatch[1]) {
+    const s = sanitizeSynopsis(metaContentReverseMatch[1]);
+    if (s && plainLen(s) >= 15) return s;
+  }
+
+  return null;
+}
+
+export function extractEpubDescription(filePath: string): string | null {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const stat = fs.statSync(filePath);
+    if (stat.size <= 0 || stat.size >= 256 * 1024 * 1024) return null;
+
+    const execOpts = {
+      encoding: "utf8" as const,
+      timeout: 15000,
+      maxBuffer: 16 * 1024 * 1024,
+    };
+
+    // 1. Locate OPF path via META-INF/container.xml
+    let containerXml = "";
+    const bsdtar = spawnSync(
+      getBsdtarPath(),
+      ["-xOf", filePath, "META-INF/container.xml"],
+      execOpts,
+    );
+    if (bsdtar.status === 0 && bsdtar.stdout) {
+      containerXml = bsdtar.stdout;
+    } else {
+      const unzip = spawnSync(
+        getUnzipPath(),
+        ["-p", filePath, "META-INF/container.xml"],
+        execOpts,
+      );
+      if ((unzip.status === 0 || unzip.status === 1) && unzip.stdout) {
+        containerXml = unzip.stdout;
+      }
+    }
+
+    let opfPath = "content.opf";
+    if (containerXml) {
+      const match = containerXml.match(/full-path=["']([^"']+)["']/i);
+      if (match && match[1]) {
+        opfPath = match[1].trim();
+      }
+    }
+
+    // 2. Read OPF XML content
+    let opfXml = "";
+    const bsdtarOpf = spawnSync(
+      getBsdtarPath(),
+      ["-xOf", filePath, opfPath],
+      execOpts,
+    );
+    if (bsdtarOpf.status === 0 && bsdtarOpf.stdout) {
+      opfXml = bsdtarOpf.stdout;
+    } else {
+      const unzipOpf = spawnSync(
+        getUnzipPath(),
+        ["-p", filePath, opfPath],
+        execOpts,
+      );
+      if ((unzipOpf.status === 0 || unzipOpf.status === 1) && unzipOpf.stdout) {
+        opfXml = unzipOpf.stdout;
+      }
+    }
+
+    if (!opfXml && opfPath !== "content.opf") {
+      const alt = spawnSync(
+        getBsdtarPath(),
+        ["-xOf", filePath, "content.opf"],
+        execOpts,
+      );
+      if (alt.status === 0 && alt.stdout) {
+        opfXml = alt.stdout;
+      } else {
+        const altUnzip = spawnSync(
+          getUnzipPath(),
+          ["-p", filePath, "content.opf"],
+          execOpts,
+        );
+        if (
+          (altUnzip.status === 0 || altUnzip.status === 1) &&
+          altUnzip.stdout
+        ) {
+          opfXml = altUnzip.stdout;
+        }
+      }
+    }
+    if (!opfXml && opfPath !== "OEBPS/content.opf") {
+      const alt2 = spawnSync(
+        getBsdtarPath(),
+        ["-xOf", filePath, "OEBPS/content.opf"],
+        execOpts,
+      );
+      if (alt2.status === 0 && alt2.stdout) {
+        opfXml = alt2.stdout;
+      } else {
+        const alt2Unzip = spawnSync(
+          getUnzipPath(),
+          ["-p", filePath, "OEBPS/content.opf"],
+          execOpts,
+        );
+        if (
+          (alt2Unzip.status === 0 || alt2Unzip.status === 1) &&
+          alt2Unzip.stdout
+        ) {
+          opfXml = alt2Unzip.stdout;
+        }
+      }
+    }
+
+    if (!opfXml) return null;
+
+    return extractDescriptionFromOpfXml(opfXml);
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchOnlineSynopsis(
+  book: {
+    id?: number;
+    title: string;
+    author?: string;
+    series?: string;
+    series_index?: number;
+    tags?: string;
+    data_name?: string;
+    isbn?: string;
+    has_cover?: number;
+  },
+  options: {
+    seriesCache?: Map<string, { description: string; coverUrl?: string; source?: string }>;
+  } = {},
+): Promise<{ description?: string; coverUrl?: string; source?: string } | null> {
+  // Fast path: Burmese literature skips overseas search to avoid unnecessary 404s and rate-limit burn
+  if (containsBurmese(book.title)) {
+    return null;
+  }
+
+  const filename = book.data_name ? `${book.data_name}.epub` : "";
+  const tags = book.tags ? book.tags.split(",").map((t) => t.trim()) : [];
+
+  // Determine source category
+  const category: BookSourceCategory = await classifyBookSourceCategory(
+    book.title,
+    book.author,
+    filename,
+    tags,
+  );
+
+  if (category === "burmese") {
+    return null;
+  }
+
+  // 1. ISBN Exact Match path for general books / other
+  if (book.isbn) {
+    const isbnQ = `isbn:${book.isbn.trim()}`;
+    const isbnSettled = await Promise.allSettled([
+      searchGoogleBooks(isbnQ),
+      searchOpenLibrary(isbnQ),
+    ]);
+    for (const res of isbnSettled) {
+      if (res.status === "fulfilled") {
+        for (const hit of res.value) {
+          if (hit.description && hit.confidence >= MIN_CONFIDENCE_THRESHOLD) {
+            const clean = sanitizeSynopsis(hit.description);
+            const plainLen = clean.replace(/<[^>]+>/g, "").trim().length;
+            if (plainLen >= 15) {
+              return {
+                description: clean,
+                coverUrl: hit.coverUrl,
+                source: hit.source,
+              };
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Volume-Specific Online Discovery (Step 2: Prioritize volume-specific lookups)
+  const volTitle = cleanVolumeQuery(book.title);
+  const cleanAuthor =
+    book.author && book.author !== "Unknown" ? cleanQuery(book.author) : "";
+  const queriesToSearch: string[] = [];
+
+  if (category === "general_book" && cleanAuthor && volTitle) {
+    queriesToSearch.push(`${volTitle} ${cleanAuthor}`);
+  }
+  if (volTitle) {
+    queriesToSearch.push(volTitle);
+  }
+  if (book.series && book.series_index !== undefined) {
+    const seriesVol = `${cleanString(book.series)}, Vol. ${book.series_index}`;
+    if (seriesVol !== volTitle && !queriesToSearch.includes(seriesVol)) {
+      queriesToSearch.push(seriesVol);
+    }
+  }
+
+  const searchResults: Array<{
+    title: string;
+    description?: string;
+    coverUrl?: string;
+    source: string;
+    confidence: number;
+  }> = [];
+
+  for (const q of queriesToSearch) {
+    try {
+      const hits = await searchUniversalMetadata(q, {
+        author: book.author,
+        filename,
+        tags,
+        category,
+        isLightNovel: category === "light_novel",
+        isManga: category === "manga",
+        preserveVolume: true,
+      });
+      searchResults.push(...hits);
+      if (
+        searchResults.some(
+          (h) => h.confidence >= MIN_CONFIDENCE_THRESHOLD && h.description && h.source !== "AniList",
+        )
+      ) {
+        break;
+      }
+    } catch {
+      // Continue to next query candidate
+    }
+  }
+
+  // Filter hits that meet the confidence floor (>= 0.85) and have a valid description.
+  // In Step 2, hits must NOT be AniList series blurbs (AniList is strictly reserved for Step 3 series fallback).
+  const validHits = searchResults
+    .filter(
+      (r) =>
+        r.confidence >= MIN_CONFIDENCE_THRESHOLD &&
+        r.description &&
+        r.description.trim().length > 15 &&
+        r.source !== "AniList",
+    )
+    .sort((a, b) => b.confidence - a.confidence);
+
+  for (const hit of validHits) {
+    const clean = sanitizeSynopsis(hit.description || "");
+    const plainLen = clean.replace(/<[^>]+>/g, "").trim().length;
+    if (plainLen >= 15) {
+      // Note: Do NOT cache volume-specific synopses in seriesCache!
+      // Volume synopses belong strictly to this volume.
+      return {
+        description: clean,
+        coverUrl: hit.coverUrl,
+        source: hit.source,
+      };
+    }
+  }
+
+  // 3. Series Synopsis Fallback via AniList (Step 3: Only as a last resort if steps 1 and 2 return no description)
+  const seriesLookupTarget = book.series?.trim() || cleanSeriesTitle(book.title);
+  const derivedSeries = cleanSeriesTitle(seriesLookupTarget);
+  const seriesKey = derivedSeries ? derivedSeries.toLowerCase() : "";
+
+  // Check series cache as fallback only (never bypasses volume search above)
+  if (seriesKey && options.seriesCache?.has(seriesKey)) {
+    const cached = options.seriesCache.get(seriesKey)!;
+    return {
+      description: cached.description,
+      coverUrl: cached.coverUrl,
+      source: cached.source || "AniList",
+    };
+  }
+
+  if (seriesLookupTarget) {
+    try {
+      const aniQuery = cleanSeriesTitle(seriesLookupTarget);
+      if (aniQuery) {
+        const aniHits = await searchAniList(aniQuery);
+        for (const hit of aniHits) {
+          if (hit.description && hit.confidence >= SERIES_FALLBACK_MIN_CONFIDENCE) {
+            const clean = sanitizeSynopsis(hit.description);
+            const plainLen = clean.replace(/<[^>]+>/g, "").trim().length;
+            if (plainLen >= 15) {
+              const res = {
+                description: clean,
+                coverUrl: hit.coverUrl,
+                source: hit.source || "AniList",
+              };
+              if (seriesKey && options.seriesCache) {
+                options.seriesCache.set(seriesKey, res);
+              }
+              return res;
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      console.debug(
+        `[EnrichSynopsis:AniList] Series query "${seriesLookupTarget}" failed:`,
+        err?.message || err,
+      );
+    }
+  }
+
+  return null;
+}
+
+export async function autoEnrichBookSynopsis(
+  bookId: number,
+  options?: {
+    filePath?: string;
+    title?: string;
+    author?: string;
+    series?: string;
+    series_index?: number;
+    tags?: string[];
+    filename?: string;
+    withLibrary?: string;
+    calibredbRunner?: (args: string[]) => { status: number | null; stdout?: string; stderr?: string };
+  },
+): Promise<{ enriched: boolean; source?: string; synopsis?: string }> {
+  const withLibrary = options?.withLibrary || SERVER_URL;
+  const runner = options?.calibredbRunner || ((args: string[]) => {
+    const env = { ...process.env };
+    delete env.HTTP_PROXY;
+    delete env.http_proxy;
+    delete env.HTTPS_PROXY;
+    delete env.https_proxy;
+    delete env.ALL_PROXY;
+    delete env.all_proxy;
+    env.PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
+    return spawnSync(getCalibredbPath(), args, { encoding: "utf8", env, timeout: 30000 });
+  });
+
+  // 1. Check if comments in Calibre is already non-empty
+  let currentTitle = options?.title;
+  let currentAuthor = options?.author;
+  let currentSeries = options?.series;
+  let currentSeriesIndex = options?.series_index;
+
+  try {
+    const listRes = runner([
+      "list",
+      "--with-library",
+      withLibrary,
+      "--search",
+      `id:${bookId}`,
+      "--fields",
+      "id,title,authors,comments,series,series_index",
+    ]);
+    if (listRes.status === 0 && listRes.stdout) {
+      const parsed = safeParseJson(listRes.stdout);
+      if (Array.isArray(parsed) && parsed[0]) {
+        const book = parsed[0];
+        if (!isCommentsEmpty(book.comments)) {
+          return { enriched: false, synopsis: book.comments };
+        }
+        if (!currentTitle && book.title) currentTitle = book.title;
+        if (!currentAuthor && book.authors) currentAuthor = book.authors;
+        if (!currentSeries && book.series) currentSeries = book.series;
+        if (currentSeriesIndex === undefined && book.series_index !== undefined) {
+          currentSeriesIndex = book.series_index;
+        }
+      }
+    }
+  } catch (_err) {
+    void _err;
+  }
+
+  // Tier 1: Local EPUB Inspection
+  if (options?.filePath && fs.existsSync(options.filePath)) {
+    const epubSynopsis = extractEpubDescription(options.filePath);
+    if (epubSynopsis && !isCommentsEmpty(epubSynopsis)) {
+      const setRes = runner([
+        "set_metadata",
+        String(bookId),
+        "--with-library",
+        withLibrary,
+        "--field",
+        `comments:${epubSynopsis}`,
+      ]);
+      if (setRes.status === 0) {
+        return { enriched: true, source: "EPUB", synopsis: epubSynopsis };
+      }
+    }
+  }
+
+  // Tier 2 & 3: Online lookup (volume-specific query with AniList series fallback)
+  if (currentTitle) {
+    const onlineRes = await fetchOnlineSynopsis({
+      id: bookId,
+      title: currentTitle,
+      author: currentAuthor,
+      series: currentSeries,
+      series_index: currentSeriesIndex,
+      tags: (options?.tags || []).join(","),
+      data_name: options?.filename ? path.basename(options.filename, path.extname(options.filename)) : undefined,
+    });
+
+    if (onlineRes?.description && !isCommentsEmpty(onlineRes.description)) {
+      const setRes = runner([
+        "set_metadata",
+        String(bookId),
+        "--with-library",
+        withLibrary,
+        "--field",
+        `comments:${onlineRes.description}`,
+      ]);
+      if (setRes.status === 0) {
+        return {
+          enriched: true,
+          source: onlineRes.source || "Online",
+          synopsis: onlineRes.description,
+        };
+      }
+    }
+  }
+
+  return { enriched: false };
+}
+

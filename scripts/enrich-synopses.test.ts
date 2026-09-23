@@ -9,6 +9,7 @@ import {
   extractEpubDescription,
   resolveEpubFilePath,
   isCommentsEmpty,
+  cleanQuery,
   fetchOnlineSynopsis,
   MIN_CONFIDENCE_THRESHOLD,
   runEnrichSynopses,
@@ -383,7 +384,7 @@ describe("LightHouse Batch Synopsis Enrichment Tool", () => {
       expect(result.totalErrors).toBe(0);
     });
 
-    it("captures metadataSetter failures without aborting remaining books", async () => {
+    it("captures metadataSetter failures without aborting remaining books and marks item.updated as false", async () => {
       const result = await runEnrichSynopses({
         dryRun: false,
         booksProvider: () => sampleCandidates.slice(0, 2),
@@ -402,6 +403,11 @@ describe("LightHouse Batch Synopsis Enrichment Tool", () => {
       expect(result.errors.length).toBe(1);
       expect(result.errors[0].bookId).toBe(101);
       expect(result.errors[0].error).toContain("calibredb database is locked");
+      const failedItem = result.items.find((i) => i.bookId === 101);
+      expect(failedItem?.updated).toBe(false);
+      expect(failedItem?.error).toContain("calibredb database is locked");
+      const successItem = result.items.find((i) => i.bookId === 102);
+      expect(successItem?.updated).toBe(true);
     });
 
     it("filters out candidates that already possess non-empty comments", async () => {
@@ -606,7 +612,7 @@ describe("LightHouse Batch Synopsis Enrichment Tool", () => {
       expect(isCommentsEmpty("A rich, compelling story of an adventurer.")).toBe(false);
     });
 
-    it("inherits series overview across all volumes in a series via seriesCache", async () => {
+    it("prioritizes volume-specific synopses over seriesCache overview across volumes in a series", async () => {
       const candidates: EnrichBookCandidate[] = [
         {
           id: 101,
@@ -632,13 +638,26 @@ describe("LightHouse Batch Synopsis Enrichment Tool", () => {
       ];
 
       let fetchCount = 0;
-      const mockOnlineFetcher = async (_book: EnrichBookCandidate) => {
+      const mockOnlineFetcher = async (book: EnrichBookCandidate) => {
         fetchCount++;
-        return {
-          description: "<p>Lee Hyun enters the Royal Road virtual reality MMORPG to carve his own destiny.</p>",
-          coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/b85869.png",
-          source: "AniList",
-        };
+        // Volume 1 returns series fallback (from AniList)
+        if (book.series_index === 1) {
+          return {
+            description: "<p>Lee Hyun enters the Royal Road virtual reality MMORPG to carve his own destiny.</p>",
+            coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/b85869.png",
+            source: "AniList",
+          };
+        }
+        // Volume 2 has an individual volume synopsis from RanobeDB!
+        if (book.series_index === 2) {
+          return {
+            description: "<p>Weed journeys to the Plains of Despair and leads the Orcs to victory.</p>",
+            coverUrl: "https://images.ranobedb.org/covers/vol2.jpg",
+            source: "RanobeDB",
+          };
+        }
+        // Volume 3 has no volume-specific synopsis online (returns null -> falls back to seriesCache!)
+        return null;
       };
 
       const result = await runEnrichSynopses({
@@ -648,17 +667,114 @@ describe("LightHouse Batch Synopsis Enrichment Tool", () => {
         dryRun: true,
       });
 
-      // Volume 1 called fetcher; Volume 2 & 3 inherited from seriesCache!
-      expect(fetchCount).toBe(1);
+      // Volume-specific precedence: All 3 volumes were queried online (seriesCache did NOT short-circuit Volume 2 or 3!)
+      expect(fetchCount).toBe(3);
       expect(result.totalBooksScanned).toBe(3);
       expect(result.synopsesFoundOnline).toBe(3);
       expect(result.totalNeedingUpdate).toBe(3);
 
-      for (const item of result.items) {
-        expect(item.sourceType).toBe("online");
-        expect(item.synopsis).toContain("Lee Hyun enters the Royal Road");
-        expect(item.coverUrl).toBe("https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/b85869.png");
-      }
+      // Volume 1 received AniList series overview and cached it
+      expect(result.items[0].synopsis).toContain("Lee Hyun enters the Royal Road");
+      expect(result.items[0].foundSource).toBe("AniList");
+
+      // Volume 2 received its TRUE volume synopsis from RanobeDB, taking precedence over seriesCache!
+      expect(result.items[1].synopsis).toContain("Weed journeys to the Plains of Despair");
+      expect(result.items[1].foundSource).toBe("RanobeDB");
+
+      // Volume 3 had no volume synopsis online, so it fell back to seriesCache!
+      expect(result.items[2].synopsis).toContain("Lee Hyun enters the Royal Road");
+      expect(result.items[2].foundSource).toBe("AniList");
+    });
+
+    it("prioritizes local EPUB synopsis over online queries and seriesCache", async () => {
+      const candidates: EnrichBookCandidate[] = [
+        {
+          id: 201,
+          title: "Overlord, Vol. 1",
+          series: "Overlord",
+          series_index: 1,
+          path: "Overlord/Vol1",
+        },
+      ];
+
+      let onlineCalled = false;
+      const mockOnlineFetcher = async () => {
+        onlineCalled = true;
+        return {
+          description: "<p>Online description that should be superseded by EPUB.</p>",
+          source: "Online",
+        };
+      };
+
+      const result = await runEnrichSynopses({
+        booksProvider: () => candidates,
+        epubExtractor: () => "<p>Authentic EPUB embedded volume synopsis from content.opf.</p>",
+        onlineFetcher: mockOnlineFetcher,
+        dryRun: true,
+      });
+
+      expect(result.synopsesFoundEpub).toBe(1);
+      expect(result.synopsesFoundOnline).toBe(0);
+      expect(onlineCalled).toBe(false);
+      expect(result.items[0].sourceType).toBe("epub");
+      expect(result.items[0].synopsis).toContain("Authentic EPUB embedded volume synopsis");
+    });
+
+    it("reEnrichDuplicates re-enriches books holding duplicate series overviews when a true volume synopsis is available", async () => {
+      const duplicateOverview = "<p>Momonga gets trapped in Yggdrasil as the guild leader of Ainz Ooal Gown.</p>";
+      const candidates: EnrichBookCandidate[] = [
+        {
+          id: 301,
+          title: "Overlord, Vol. 1",
+          series: "Overlord",
+          series_index: 1,
+          comments: duplicateOverview,
+        },
+        {
+          id: 302,
+          title: "Overlord, Vol. 2",
+          series: "Overlord",
+          series_index: 2,
+          comments: duplicateOverview,
+        },
+      ];
+
+      // Without reEnrichDuplicates: neither book is scanned because comments is not empty
+      const dryResultWithoutFlag = await runEnrichSynopses({
+        booksProvider: () => candidates,
+        dryRun: true,
+      });
+      expect(dryResultWithoutFlag.totalBooksScanned).toBe(0);
+
+      // With reEnrichDuplicates: both duplicate-holding books are scanned
+      const resultWithFlag = await runEnrichSynopses({
+        booksProvider: () => candidates,
+        reEnrichDuplicates: true,
+        onlineFetcher: async (book) => {
+          if (book.series_index === 2) {
+            return {
+              description: "<p>The dark warrior Momon takes on a guild quest in E-Rantel.</p>",
+              source: "RanobeDB",
+            };
+          }
+          // Volume 1 only has the same series overview
+          return {
+            description: duplicateOverview,
+            source: "AniList",
+          };
+        },
+        metadataSetter: () => ({ success: true }),
+        dryRun: false,
+      });
+
+      expect(resultWithFlag.totalBooksScanned).toBe(2);
+      // Volume 1 found the same overview, so updated is false
+      expect(resultWithFlag.items[0].updated).toBe(false);
+      // Volume 2 found a TRUE volume synopsis, so updated is true!
+      expect(resultWithFlag.items[1].updated).toBe(true);
+      expect(resultWithFlag.items[1].synopsis).toContain("The dark warrior Momon takes on a guild quest");
+      expect(resultWithFlag.totalNeedingUpdate).toBe(1);
+      expect(resultWithFlag.totalUpdated).toBe(1);
     });
 
     it("falls back to AniList series lookup when individual volume query returns no description", async () => {
@@ -751,6 +867,183 @@ describe("LightHouse Batch Synopsis Enrichment Tool", () => {
         expect(res?.source).toBe("AniList");
         expect(res?.description).toContain("Liam is reborn into an aristocratic family");
         expect(String(searchedVariables?.search)).toContain("Evil Lord of an Intergalactic Empire");
+      } finally {
+        (globalThis as any).fetch = origFetch;
+      }
+    });
+
+    it("cleanQuery preserves volume tokens when preserveVolume is enabled", () => {
+      expect(cleanQuery("Overlord, Vol. 1", { preserveVolume: true })).toBe("Overlord Vol. 1");
+      expect(cleanQuery("Overlord (Vol. 1)", { preserveVolume: true })).toBe("Overlord Vol. 1");
+      expect(cleanQuery("Overlord [Vol. 1]", { preserveVolume: true })).toBe("Overlord Vol. 1");
+      expect(cleanQuery("Overlord - Volume 02 [Yen Press]", { preserveVolume: true })).toBe("Overlord Volume 02");
+      expect(cleanQuery("Slime v3", { preserveVolume: true })).toBe("Slime v3");
+      expect(cleanQuery("タイトル (1)", { preserveVolume: true })).toBe("タイトル 1");
+      expect(cleanQuery("タイトル （1）", { preserveVolume: true })).toBe("タイトル 1");
+      // Default without preserveVolume strips volume tokens for canonical series matching
+      expect(cleanQuery("Overlord, Vol. 1")).toBe("Overlord");
+      expect(cleanQuery("Overlord (Vol. 1)")).toBe("Overlord");
+      expect(cleanQuery("Overlord [Vol. 1]")).toBe("Overlord");
+      expect(cleanQuery("Overlord - Volume 02 [Yen Press]")).toBe("Overlord");
+    });
+
+    it("fetchOnlineSynopsis preserves full volume title in outbound online search and reserves AniList for Step 3 fallback", async () => {
+      const origFetch = globalThis.fetch;
+      const interceptedUrls: string[] = [];
+
+      (globalThis as any).fetch = async (url: any) => {
+        const urlStr = typeof url === "string" ? url : url.toString();
+        interceptedUrls.push(urlStr);
+
+        // RanobeDB volume query
+        if (urlStr.includes("ranobedb.org/api/v0/books")) {
+          return new Response(
+            JSON.stringify({
+              books: [
+                {
+                  id: "1001",
+                  title: "Overlord, Vol. 1: The Undead King",
+                  description: "Momonga is an ordinary salaryman who finds himself trapped in his favorite DMMO-RPG.",
+                  cover: "https://images.ranobedb.org/covers/overlord_1.jpg",
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        if (urlStr.includes("ranobedb.org/api/v0/book/1001")) {
+          return new Response(
+            JSON.stringify({
+              book: {
+                id: "1001",
+                title: "Overlord, Vol. 1: The Undead King",
+                description: "Momonga is an ordinary salaryman who finds himself trapped in his favorite DMMO-RPG.",
+                cover: "https://images.ranobedb.org/covers/overlord_1.jpg",
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        // AniList returns series-level blurb
+        if (urlStr.includes("graphql.anilist.co")) {
+          return new Response(
+            JSON.stringify({
+              data: {
+                Media: {
+                  id: 8888,
+                  title: { english: "Overlord" },
+                  description: "Franchise series overview: Momonga is trapped in Yggdrasil.",
+                  format: "NOVEL",
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        return new Response("{}", { status: 200 });
+      };
+
+      try {
+        const book: EnrichBookCandidate = {
+          id: 401,
+          title: "Overlord, Vol. 1: The Undead King",
+          series: "Overlord",
+          series_index: 1,
+        };
+
+        const res = await fetchOnlineSynopsis(book);
+        expect(res).not.toBeNull();
+        // True volume synopsis from RanobeDB won, NOT the AniList series overview!
+        expect(res?.source).toBe("RanobeDB");
+        expect(res?.description).toContain("Momonga is an ordinary salaryman");
+
+        // Verify outbound query to RanobeDB preserved volume token
+        const ranobeCall = interceptedUrls.find((u) => u.includes("ranobedb.org"));
+        expect(ranobeCall).toBeDefined();
+        const decodedUrl = decodeURIComponent(ranobeCall!);
+        expect(decodedUrl.toLowerCase()).toMatch(/vol|volume/);
+      } finally {
+        (globalThis as any).fetch = origFetch;
+      }
+    });
+
+    it("fetchOnlineSynopsis falls back to Google Books volume query when RanobeDB and Bangumi have no hit, without AniList blocking it in Step 2", async () => {
+      const origFetch = globalThis.fetch;
+      const interceptedUrls: string[] = [];
+
+      (globalThis as any).fetch = async (url: any) => {
+        const urlStr = typeof url === "string" ? url : url.toString();
+        interceptedUrls.push(urlStr);
+
+        // RanobeDB returns 0 hits for this volume
+        if (urlStr.includes("ranobedb.org/api/v0/books") || urlStr.includes("ranobedb.org/api/v0/series")) {
+          return new Response(JSON.stringify({ books: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+
+        // Bangumi returns a series hit with empty summary (must not block Google Books fallback!)
+        if (urlStr.includes("api.bgm.tv")) {
+          return new Response(
+            JSON.stringify({ list: [{ name: "Overlord", summary: "" }] }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        // Google Books returns volume-specific entry
+        if (urlStr.includes("googleapis.com/books/v1/volumes")) {
+          return new Response(
+            JSON.stringify({
+              items: [
+                {
+                  volumeInfo: {
+                    title: "Overlord, Vol. 2 (light novel): The Dark Warrior",
+                    authors: ["Kugane Maruyama"],
+                    description: "It has been a week since Momonga transported to another world. Disguised as an adventurer named Momon...",
+                    imageLinks: { thumbnail: "https://books.google.com/overlord_2.jpg" },
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        // AniList returns series-level blurb
+        if (urlStr.includes("graphql.anilist.co")) {
+          return new Response(
+            JSON.stringify({
+              data: {
+                Media: {
+                  id: 8888,
+                  title: { english: "Overlord" },
+                  description: "Franchise series overview: Momonga is trapped in Yggdrasil.",
+                  format: "NOVEL",
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        return new Response("{}", { status: 200 });
+      };
+
+      try {
+        const book: EnrichBookCandidate = {
+          id: 402,
+          title: "Overlord, Vol. 2: The Dark Warrior",
+          series: "Overlord",
+          series_index: 2,
+          tags: "Light Novel",
+        };
+
+        const res = await fetchOnlineSynopsis(book);
+        expect(res).not.toBeNull();
+        // True volume synopsis from Google Books won despite Bangumi empty hit!
+        expect(res?.source).toBe("GoogleBooks");
+        expect(res?.description).toContain("Disguised as an adventurer named Momon");
       } finally {
         (globalThis as any).fetch = origFetch;
       }

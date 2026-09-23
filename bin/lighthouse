@@ -1510,6 +1510,7 @@ Enrich-Synopsis Options:
   --apply                  Apply metadata updates via calibredb set_metadata
   --limit <N>              Limit processing to N books
   --source <type>          Source strategy: all (default), epub, or online
+  --re-enrich-duplicates   Re-enrich volumes holding duplicate series summaries
   --verbose                Enable verbose logging of search and extraction steps
 Sync-Obsidian Options:
   --vault-path <path>      Obsidian vault path (default: \$OBSIDIAN_VAULT_PATH or ~/Obsidian)

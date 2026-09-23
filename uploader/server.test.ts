@@ -1,11 +1,18 @@
 import { describe, expect, it } from "bun:test";
+import { Database } from "bun:sqlite";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
 import {
   handleRequest,
   validateAndCanonicalizeProxyPath,
   setServerDependenciesForTest,
   resetServerDependenciesForTest,
+  ingestBookFile,
 } from "./server";
-import { validateUrlForSSRF } from "./security";
+import { validateUrlForSSRF, getBsdtarPath } from "./security";
+import { autoEnrichBookSynopsis } from "./scraper";
 
 describe("Calibre OPDS & Asset Reverse Proxy", () => {
   it("proxies /opds GET to Calibre server and preserves XML streaming body", async () => {
@@ -889,6 +896,240 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
         expect(data.error).not.toContain("/Users/ospeto/secret/path");
       } finally {
         resetServerDependenciesForTest();
+      }
+    });
+  });
+
+  describe("Auto-Populate Synopses on Ingest", () => {
+    it("autoEnrichBookSynopsis extracts synopsis from local EPUB and sets comments in Calibre", async () => {
+      const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "server-enrich-test-"));
+      try {
+        const staging = path.join(tempDir, "epub-staging");
+        fs.mkdirSync(path.join(staging, "META-INF"), { recursive: true });
+        fs.mkdirSync(path.join(staging, "OEBPS"), { recursive: true });
+        fs.writeFileSync(path.join(staging, "mimetype"), "application/epub+zip");
+        fs.writeFileSync(
+          path.join(staging, "META-INF", "container.xml"),
+          `<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`,
+        );
+        fs.writeFileSync(
+          path.join(staging, "OEBPS", "content.opf"),
+          `<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Royal Road</dc:title><dc:description>A gripping tale of virtual reality and sculpted destiny.</dc:description></metadata></package>`,
+        );
+
+        const testEpubPath = path.join(tempDir, "test.epub");
+        const bsdtar = spawnSync(getBsdtarPath(), ["-cf", testEpubPath, "-C", staging, "."]);
+        expect(bsdtar.status).toBe(0);
+
+        let capturedSetArgs: string[] = [];
+        const mockRunner = (args: string[]) => {
+          if (args[0] === "list") {
+            // Book has empty comments
+            return {
+              status: 0,
+              stdout: JSON.stringify([{ id: 101, title: "Royal Road", comments: "" }]),
+              stderr: "",
+            };
+          }
+          if (args[0] === "set_metadata") {
+            capturedSetArgs = args;
+            return { status: 0, stdout: "", stderr: "" };
+          }
+          return { status: 0, stdout: "", stderr: "" };
+        };
+
+        const res = await autoEnrichBookSynopsis(101, {
+          filePath: testEpubPath,
+          title: "Royal Road",
+          calibredbRunner: mockRunner,
+        });
+
+        expect(res.enriched).toBe(true);
+        expect(res.source).toBe("EPUB");
+        expect(res.synopsis).toContain("A gripping tale of virtual reality");
+
+        const commentsArg = capturedSetArgs.find((a) => a.startsWith("comments:"));
+        expect(commentsArg).toBeDefined();
+        expect(commentsArg).toContain("A gripping tale of virtual reality");
+      } finally {
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("autoEnrichBookSynopsis runs online enrichment when EPUB has no description", async () => {
+      const origFetch = globalThis.fetch;
+      try {
+        (globalThis as any).fetch = async (url: any, _init: any) => {
+          const urlStr = typeof url === "string" ? url : url.toString();
+          if (urlStr.includes("graphql.anilist.co")) {
+            return new Response(
+              JSON.stringify({
+                data: {
+                  Media: {
+                    id: 8888,
+                    title: { english: "Overlord" },
+                    description: "Momonga rules the Great Tomb of Nazarick with his loyal Floor Guardians.",
+                    coverImage: { extraLarge: "https://s4.anilist.co/file/anilistcdn/cover/overlord.jpg" },
+                    format: "NOVEL",
+                  },
+                },
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          return new Response("{}", { status: 200 });
+        };
+
+        let capturedSetArgs: string[] = [];
+        const mockRunner = (args: string[]) => {
+          if (args[0] === "list") {
+            return {
+              status: 0,
+              stdout: JSON.stringify([{ id: 202, title: "Overlord, Vol. 1", comments: "" }]),
+              stderr: "",
+            };
+          }
+          if (args[0] === "set_metadata") {
+            capturedSetArgs = args;
+            return { status: 0, stdout: "", stderr: "" };
+          }
+          return { status: 0, stdout: "", stderr: "" };
+        };
+
+        const res = await autoEnrichBookSynopsis(202, {
+          title: "Overlord, Vol. 1",
+          author: "Kugane Maruyama",
+          calibredbRunner: mockRunner,
+        });
+
+        expect(res.enriched).toBe(true);
+        expect(res.synopsis).toContain("Momonga rules the Great Tomb of Nazarick");
+
+        const commentsArg = capturedSetArgs.find((a) => a.startsWith("comments:"));
+        expect(commentsArg).toBeDefined();
+        expect(commentsArg).toContain("Momonga rules the Great Tomb of Nazarick");
+      } finally {
+        (globalThis as any).fetch = origFetch;
+      }
+    });
+
+    it("autoEnrichBookSynopsis preserves existing non-empty comments without overwriting", async () => {
+      let setMetadataCalled = false;
+      const mockRunner = (args: string[]) => {
+        if (args[0] === "list") {
+          return {
+            status: 0,
+            stdout: JSON.stringify([{ id: 303, title: "Existing Book", comments: "<p>Already rich synopsis.</p>" }]),
+            stderr: "",
+          };
+        }
+        if (args[0] === "set_metadata") {
+          setMetadataCalled = true;
+          return { status: 0, stdout: "", stderr: "" };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      };
+
+      const res = await autoEnrichBookSynopsis(303, {
+        title: "Existing Book",
+        calibredbRunner: mockRunner,
+      });
+
+      expect(res.enriched).toBe(false);
+      expect(res.synopsis).toBe("<p>Already rich synopsis.</p>");
+      expect(setMetadataCalled).toBe(false);
+    });
+
+    it("ingestBookFile extracts synopsis from uploaded EPUB and sets comments in Calibre metadata", async () => {
+      const origFetch = globalThis.fetch;
+      (globalThis as any).fetch = async () => new Response("{}", { status: 404 });
+      const origJevKey = process.env.JEV_API_KEY;
+      const origTypesafeKey = process.env.TYPESAFE_API_KEY;
+      delete process.env.JEV_API_KEY;
+      delete process.env.TYPESAFE_API_KEY;
+      const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "upload-seam-test-"));
+      const libDir = path.join(tempDir, "calibre-lib");
+      const dropDir = path.join(tempDir, "drop");
+      fs.mkdirSync(libDir, { recursive: true });
+      fs.mkdirSync(dropDir, { recursive: true });
+
+      const origCalibredbPath = process.env.CALIBREDB_PATH;
+      const origCalibreDbPath = process.env.CALIBRE_DB_PATH;
+      const origLibraryDir = process.env.CALIBRE_LIBRARY_DIR;
+      process.env.CALIBRE_LIBRARY_DIR = libDir;
+      try {
+        const staging = path.join(tempDir, "epub-staging");
+        fs.mkdirSync(path.join(staging, "META-INF"), { recursive: true });
+        fs.mkdirSync(path.join(staging, "OEBPS"), { recursive: true });
+        fs.writeFileSync(path.join(staging, "mimetype"), "application/epub+zip");
+        fs.writeFileSync(
+          path.join(staging, "META-INF", "container.xml"),
+          `<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`,
+        );
+        fs.writeFileSync(
+          path.join(staging, "OEBPS", "content.opf"),
+          `<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>The Faraway Paladin, Vol. 1</dc:title><dc:description>Synopsis from uploaded EPUB container.</dc:description></metadata></package>`,
+        );
+
+        const testEpubPath = path.join(dropDir, "faraway_paladin_1.epub");
+        const zipRes = spawnSync("zip", ["-q", "-X", "-0", testEpubPath, "mimetype"], { cwd: staging });
+        expect(zipRes.status).toBe(0);
+        const zipRes2 = spawnSync("zip", ["-q", "-r", testEpubPath, "META-INF", "OEBPS"], { cwd: staging });
+        expect(zipRes2.status).toBe(0);
+
+        // Create mock calibredb script that records invocations and adds book 999 to db on add
+        const mockLogFile = path.join(tempDir, "calibredb.log");
+        const mockDbPath = path.join(libDir, "metadata.db");
+        const mockCalibreScript = path.join(tempDir, "mock_calibredb.sh");
+        fs.writeFileSync(
+          mockCalibreScript,
+          `#!/bin/sh
+echo "$*" >> "${mockLogFile}"
+if [ "$1" = "add" ]; then
+  sqlite3 "${mockDbPath}" "INSERT INTO books (id, title, path, has_cover, pubdate, series_index) VALUES (999, 'The Faraway Paladin, Vol. 1', 'Paladin', 0, '', 1);"
+  sqlite3 "${mockDbPath}" "INSERT INTO data (id, book, format, name) VALUES (1, 999, 'EPUB', 'test');"
+  echo "Added book ids: 999"
+  exit 0
+fi
+exit 0
+`,
+        );
+        fs.chmodSync(mockCalibreScript, 0o755);
+
+        process.env.CALIBREDB_PATH = mockCalibreScript;
+
+        // Create minimal Calibre sqlite metadata.db with empty books table initially
+        const db = new Database(mockDbPath);
+        db.run(`CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, path TEXT, has_cover INTEGER, pubdate TEXT, series_index REAL);`);
+        db.run(`CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, name TEXT);`);
+        db.run(`CREATE TABLE comments (id INTEGER PRIMARY KEY, book INTEGER, text TEXT);`);
+        db.run(`CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);`);
+        db.run(`CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);`);
+        db.run(`CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);`);
+        db.run(`CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);`);
+        db.run(`CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);`);
+        db.run(`CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);`);
+        db.run(`CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);`);
+        db.run(`CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);`);
+        db.close();
+        process.env.CALIBRE_DB_PATH = mockDbPath;
+
+        const res = await ingestBookFile(testEpubPath, "faraway_paladin_1.epub");
+        expect(res.success).toBe(true);
+        expect(res.duplicate).toBe(false);
+        expect(res.bookId).toBe(999);
+
+        const logContent = fs.existsSync(mockLogFile) ? fs.readFileSync(mockLogFile, "utf8") : "";
+        expect(logContent).toContain("comments:");
+        expect(logContent).toContain("Synopsis from uploaded EPUB container");
+      } finally {
+        globalThis.fetch = origFetch;
+        if (origJevKey !== undefined) process.env.JEV_API_KEY = origJevKey;
+        if (origTypesafeKey !== undefined) process.env.TYPESAFE_API_KEY = origTypesafeKey;
+        process.env.CALIBREDB_PATH = origCalibredbPath;
+        process.env.CALIBRE_DB_PATH = origCalibreDbPath;
+        process.env.CALIBRE_LIBRARY_DIR = origLibraryDir;
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
       }
     });
   });
