@@ -55,6 +55,7 @@ import {
   containsBurmese,
 } from "./jev-shelf";
 import { isLnoriUrl, ingestLnoriSeries } from "./lnori";
+import { isJoplinRoute, handleJoplinRequest } from "./joplin";
 
 export interface ServerDependencies {
   ingestLnoriSeries?: (url: string) => Promise<any>;
@@ -2131,6 +2132,11 @@ export async function handleRequest(
     remoteAddress: socketIp,
     isWan,
   };
+  // Joplin Clipper HTTP Compatibility (KOReader Highlights & Notes Exporter)
+  if (isJoplinRoute(url.pathname)) {
+    return await handleJoplinRequest(req, url, { corsOrigin });
+  }
+
   if (isMutating && isWan) {
     const auth = authenticateRequest(req, authOpts);
     if (!auth.authenticated) {
