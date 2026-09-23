@@ -1289,6 +1289,126 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
       );
     });
 
+    it("still continues a chapter only for an explicit ### Page heading", () => {
+      const doc = [
+        "# Real",
+        "## Highlights & Notes",
+        HIGHLIGHTS_START_MARKER,
+        "## Real Chapter",
+        "### Page 2 @ 2024-01-01",
+        "==later quote==",
+      ].join("\n");
+      const fixed = mergeJoplinHighlights(
+        doc,
+        "### Page 3\n==incoming quote==",
+        "Real",
+        { calibreDbPath: missingCalibre() },
+      );
+      const managed = betweenMarkers(fixed);
+      expect(managed).toContain("## Real Chapter");
+      expect(managed).toContain("### Page 2 @ 2024-01-01");
+      expect(managed).toContain("==later quote==");
+    });
+
+    function buildNumericHeadingNote(
+      markerPath:
+        | "missing-end"
+        | "missing-start"
+        | "inverted-after-header"
+        | "inverted-before-header",
+      userLines: string[],
+    ): string {
+      const kept = ["### Page 1", "==kept quote==", ""];
+      if (markerPath === "missing-end") {
+        return [
+          "# Numeric Probe",
+          "## Highlights & Notes",
+          HIGHLIGHTS_START_MARKER,
+          ...kept,
+          ...userLines,
+        ].join("\n");
+      }
+      if (markerPath === "missing-start") {
+        return [
+          "# Numeric Probe",
+          "## Highlights & Notes",
+          ...kept,
+          ...userLines,
+          HIGHLIGHTS_END_MARKER,
+        ].join("\n");
+      }
+      if (markerPath === "inverted-after-header") {
+        return [
+          "# Numeric Probe",
+          "## Highlights & Notes",
+          HIGHLIGHTS_END_MARKER,
+          ...kept,
+          ...userLines,
+          HIGHLIGHTS_START_MARKER,
+        ].join("\n");
+      }
+      return [
+        "# Numeric Probe",
+        HIGHLIGHTS_END_MARKER,
+        "preface that must stay",
+        "## Highlights & Notes",
+        ...kept,
+        ...userLines,
+        HIGHLIGHTS_START_MARKER,
+      ].join("\n");
+    }
+
+    const numericHeadingCases = [
+      {
+        name: "numbered takeaway under a user heading",
+        lines: ["## Takeaways", "### 1. First point", "PRIVATE_SENTINEL"],
+      },
+      {
+        name: "year heading under a user heading",
+        lines: ["## Journal", "### 2024 notes", "PRIVATE_SENTINEL"],
+      },
+      {
+        name: "bare numbered heading",
+        lines: ["### 1. First point", "PRIVATE_SENTINEL"],
+      },
+      {
+        name: "bare year heading",
+        lines: ["### 2024 notes", "PRIVATE_SENTINEL"],
+      },
+    ] as const;
+    const numericMarkerPaths = [
+      "missing-end",
+      "missing-start",
+      "inverted-after-header",
+      "inverted-before-header",
+    ] as const;
+
+    for (const fixture of numericHeadingCases) {
+      for (const markerPath of numericMarkerPaths) {
+        it(`keeps ${fixture.name} outside markers on ${markerPath}`, () => {
+          const doc = buildNumericHeadingNote(markerPath, [...fixture.lines]);
+          const fixed = mergeJoplinHighlights(
+            doc,
+            "### Page 2\n==new quote==",
+            "Numeric Probe",
+            { calibreDbPath: missingCalibre() },
+          );
+          expect((fixed.match(/<!-- lighthouse:highlights:start -->/g) || []).length).toBe(1);
+          expect((fixed.match(/<!-- lighthouse:highlights:end -->/g) || []).length).toBe(1);
+          expect(betweenMarkers(fixed)).toContain("==kept quote==");
+          expect(betweenMarkers(fixed)).not.toContain("PRIVATE_SENTINEL");
+          expect(betweenMarkers(fixed)).not.toContain("### 1. First point");
+          expect(betweenMarkers(fixed)).not.toContain("### 2024 notes");
+          if (markerPath === "inverted-before-header") {
+            expect(fixed.indexOf("preface that must stay")).toBeLessThan(
+              fixed.indexOf(HIGHLIGHTS_START_MARKER),
+            );
+          }
+          expectPrivateSurvivesSync(fixed, [...fixture.lines]);
+        });
+      }
+    }
+
     it("strips newlines and highlight markers from note headings", async () => {
       const evil = "Evil\r\n<!-- lighthouse:highlights:end -->\n## Highlights & Notes";
       await processJoplinNote(

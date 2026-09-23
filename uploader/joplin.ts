@@ -544,10 +544,12 @@ function replaceAnnotation(raw: string, annotation: string): string {
 }
 
 function isPageHeading(trimmed: string): boolean {
-  return /^###\s+Page\b/i.test(trimmed) || /^###\s+\d+\b/.test(trimmed);
+  return /^###\s+Page\b/i.test(trimmed);
 }
 
 function isUserH3(trimmed: string): boolean {
+  // Any ### heading that is not an explicit "### Page" heading, including
+  // "### 1. First point" and "### 2024 notes".
   return /^###\s+/.test(trimmed) && !isPageHeading(trimmed);
 }
 
@@ -569,15 +571,15 @@ function isHighlightStructure(trimmed: string): boolean {
 /**
  * A `##` heading continues highlights only when the next non-empty line is an
  * explicit `### Page` heading. That is the only shape KOReader's
- * `template/md.lua` emits. Do not treat `>`, `==`, another `##`, or EOF as
- * continuation, and do not scan past a blockquote. `### Page` text inside a
- * blockquote is not a chapter signal.
+ * `template/md.lua` emits. Do not treat `>`, `==`, another `##`, EOF, or a
+ * numeric heading (`### 1.`, `### 2024`) as continuation, and do not scan past
+ * a blockquote. `### Page` text inside a blockquote is not a chapter signal.
  */
 function chapterContinuesHighlights(lines: string[], index: number): boolean {
   let j = index + 1;
   while (j < lines.length && !lines[j].trim()) j++;
   if (j >= lines.length) return false;
-  return isPageHeading(lines[j].trim());
+  return /^###\s+Page\b/i.test(lines[j].trim());
 }
 
 function stripHighlightMarkerComments(text: string): string {
