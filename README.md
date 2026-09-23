@@ -327,6 +327,29 @@ LightHouse integrates [TypeSafe Jev System-1](https://api.typesafe.ai/v1/systemo
 
 ---
 
+## 📚 Lnori Light Novel & Series Ingestion Pipeline
+
+LightHouse features end-to-end automated light novel series and volume ingestion from [Lnori](https://lnori.com) across both the **Web UI** and the **Telegram Bot**:
+
+1. **Dual Ingestion Surfaces:**
+   - **LightHouse Web UI:** Click **Upload Books** &rarr; **Add from Lnori** (or paste an `lnori.com` link into the web article ingestion modal to auto-switch). The dedicated Apple fluid modal accepts series URLs (`https://lnori.com/series/...`) or individual volume URLs (`https://lnori.com/book/...`).
+   - **Telegram Ingestion Bot:** Paste any `lnori.com/series/...` or `lnori.com/book/...` URL directly into chat with `@saroat_ospeto_bot`.
+   - **REST API (`POST /api/lnori/ingest`):** Accepts `{ url: string }`, validates target with SSRF and origin guards, and returns series metadata, imported volume counts, and tags.
+2. **Robust Manifest & Volume Orchestration:**
+   - Automatically parses LD+JSON metadata and HTML schemas to extract series title, author, genres, and all associated volume endpoints (`/book/<id>/...`).
+   - Limits volume batches safely (`MAX_VOLUMES_PER_REQUEST = 50`).
+3. **Pre-Download Duplicate Prevention:**
+   - Before downloading multi-megabyte EPUB binaries, queries Calibre's database via series name and volume index or book title. Existing volumes are skipped, preventing wasted bandwidth and duplicate library entries.
+4. **Resilient Downloader & In-Process ZIP Auto-Healing:**
+   - Downloads EPUB files with exponential retry backoff and proxy routing (`http://127.0.0.1:7890`).
+   - If an EPUB is missing its Central Directory or End-of-Central-Directory (EOCD) signature, `repairTruncatedEpub` automatically repairs the container in-process.
+5. **High-Resolution Cover Conversion:**
+   - Downloads original high-resolution WebP covers from `cdn.lnori.com` and converts them to standard JPEGs via macOS `sips` for seamless Calibre and e-reader compatibility.
+6. **Automatic Calibre & Catalog Refresh:**
+   - Ingests into Calibre with standardized series indexing (`<Series>: Volume <N>`), applies metadata tags, and flushes cache to immediately reflect new books in KOReader OPDS and the web catalog.
+
+---
+
 ## 🎨 Apple WWDC Fluid Interface Design System
 
 The LightHouse web interface (`uploader/index.html`) is built according to Apple WWDC fluid interface design principles:

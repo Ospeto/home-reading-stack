@@ -46,6 +46,22 @@ import {
   classifyBookSourceCategoryDeterministic,
   containsBurmese,
 } from "./jev-shelf";
+import { isLnoriUrl, ingestLnoriSeries } from "./lnori";
+
+export interface ServerDependencies {
+  ingestLnoriSeries?: (url: string) => Promise<any>;
+  getCalibreBooks?: (forceFresh?: boolean) => any;
+}
+
+let serverDependencies: ServerDependencies = {};
+
+export function setServerDependenciesForTest(deps: ServerDependencies) {
+  serverDependencies = deps;
+}
+
+export function resetServerDependenciesForTest() {
+  serverDependencies = {};
+}
 
 export function getDropDir(): string {
   if (process.env.BOOKS_DROP_DIR) return process.env.BOOKS_DROP_DIR;
@@ -3077,6 +3093,101 @@ export async function handleRequest(
           success: false,
           error:
             sanitizeErrorMessage(err) || "Failed to ingest article from URL",
+        },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Lnori Light Novel Series & Volume Ingestion
+  if (url.pathname === "/api/lnori/ingest" && req.method === "POST") {
+    try {
+      let body: { url?: string };
+      try {
+        body = (await req.json()) as { url?: string };
+      } catch {
+        return jsonResponse(
+          { success: false, error: "Missing or invalid 'url' parameter" },
+          400,
+          corsOrigin,
+        );
+      }
+
+      if (!body || !body.url || typeof body.url !== "string" || !body.url.trim()) {
+        return jsonResponse(
+          { success: false, error: "Missing or invalid 'url' parameter" },
+          400,
+          corsOrigin,
+        );
+      }
+      const targetUrl = body.url.trim();
+
+      // Validate target URL with isLnoriUrl
+      if (!isLnoriUrl(targetUrl)) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Target URL must be a valid lnori.com series or book URL",
+          },
+          400,
+          corsOrigin,
+        );
+      }
+
+      // Validate URL against SSRF vulnerabilities
+      const ssrfCheck = await validateUrlForSSRF(targetUrl, {
+        allowProxyBypass: true,
+      });
+      if (!ssrfCheck.safe) {
+        return jsonResponse(
+          {
+            success: false,
+            error: `SSRF protection: ${ssrfCheck.error || "Unsafe target URL rejected by SSRF guard"}`,
+          },
+          400,
+          corsOrigin,
+        );
+      }
+
+      const runIngest = serverDependencies.ingestLnoriSeries ?? ingestLnoriSeries;
+      const result = await runIngest(targetUrl);
+      if (!result || !result.success) {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              sanitizeErrorMessage(result?.error) ||
+              "Failed to ingest light novel from Lnori",
+          },
+          500,
+          corsOrigin,
+        );
+      }
+
+      const refreshBooks = serverDependencies.getCalibreBooks ?? getCalibreBooks;
+      refreshBooks(true);
+
+      return jsonResponse(
+        {
+          success: true,
+          seriesTitle: result.seriesTitle,
+          author: result.author,
+          importedCount: result.importedCount,
+          skippedCount: result.skippedCount,
+          totalCount: result.totalCount,
+          tags: result.tags,
+        },
+        200,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            sanitizeErrorMessage(err) ||
+            "Failed to ingest light novel from Lnori",
         },
         500,
         corsOrigin,
