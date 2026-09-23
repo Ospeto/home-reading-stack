@@ -4,7 +4,7 @@ set -u
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 # Robust symlink resolution loop
-SOURCE="${BASH_SOURCE[0]}"
+SOURCE="${BASH_SOURCE[0]:-${0}}"
 while [ -L "$SOURCE" ]; do
   DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
   SOURCE="$(readlink "$SOURCE")"
@@ -27,6 +27,7 @@ DAEMON_PREFIX="${LIGHTHOUSE_DAEMON_PREFIX:-com.${CURRENT_USER}}"
 # Load environment configuration if available
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TELEGRAM_BACKUP_CHAT_ID="${TELEGRAM_BACKUP_CHAT_ID:-}"
+ENABLE_US_TUNNEL="${ENABLE_US_TUNNEL:-}"
 
 if [ -f "$ENV_FILE" ]; then
   while IFS='=' read -r key val || [ -n "$key" ]; do
@@ -42,6 +43,7 @@ if [ -f "$ENV_FILE" ]; then
       val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     fi
     case "$key" in
+      ENABLE_US_TUNNEL) ENABLE_US_TUNNEL="${ENABLE_US_TUNNEL:-$val}" ;;
       UPLOADER_PORT) LOCAL_HTTP_PORT="${LOCAL_HTTP_PORT:-$val}" ;;
       KOSYNC_PORT) LOCAL_KOSYNC_PORT="${LOCAL_KOSYNC_PORT:-$val}" ;;
       PROXY_URL) PROXY_URL="${PROXY_URL:-$val}" ;;
@@ -64,6 +66,7 @@ LOCAL_HTTP_PORT="${LOCAL_HTTP_PORT:-8086}"
 LOCAL_KOSYNC_PORT="${LOCAL_KOSYNC_PORT:-7200}"
 
 # --- US VLESS Tunnel Configurations ---
+ENABLE_US_TUNNEL="${ENABLE_US_TUNNEL:-0}"
 US_TUNNEL_LABEL="${US_TUNNEL_LABEL:-${DAEMON_PREFIX}.reading-vless-tunnel}"
 US_REMOTE_HOST="${US_REMOTE_HOST:-panel}"
 US_WAN_HQ_URL="${US_WAN_HQ_URL:-https://reading.wavypremium.xyz}"
@@ -85,6 +88,7 @@ fi
 if [ -n "${WAN_HQ_URL:-}" ]; then
   US_WAN_HQ_URL="$WAN_HQ_URL"
 fi
+US_PLIST="${US_PLIST:-${HOME}/Library/LaunchAgents/${US_TUNNEL_LABEL}.plist}"
 US_LOG_FILE="${US_LOG_FILE:-${LOG_DIR}/reading-vless-tunnel.log}"
 
 # --- Singapore Tunnel Configurations ---
@@ -232,66 +236,74 @@ fi
 # ==============================================================================
 # 3. Monitor & Auto-Heal: US VLESS Reverse Tunnel (panel)
 # ==============================================================================
-US_PROBE_CODE=$(probe_http_status "$US_WAN_HQ_URL" "$PROXY_URL" 0 8)
-
-# Check for collision marker in recent logs
-US_COLLISION=0
-if [ -f "$US_LOG_FILE" ] && tail -n 15 "$US_LOG_FILE" 2>/dev/null | grep -q "remote port forwarding failed for listen port"; then
-  US_COLLISION=1
-fi
-
-# Tunnel is healthy if remote probe returns 200.
-# Only treat port collision as actionable if the probe has ALSO failed (probe status != 200).
-if [ "$US_PROBE_CODE" = "200" ]; then
-  PREV_US_FAILURES=$(cat "$US_FAIL_COUNT_FILE" 2>/dev/null || echo 0)
-  if [ "$PREV_US_FAILURES" -gt 0 ]; then
-    log "US Tunnel recovered! Remote probe returned HTTP 200. Resetting US failure counter (was ${PREV_US_FAILURES})."
+if [ "$ENABLE_US_TUNNEL" != "1" ] || [ ! -f "$US_PLIST" ]; then
+  PLIST_EXISTS=0
+  [ -f "$US_PLIST" ] && PLIST_EXISTS=1
+  if [ -f "$US_FAIL_COUNT_FILE" ] || [ -f "$US_ALERT_TRACK_FILE" ] || [ -f /tmp/reading-tunnel-failures ]; then
+    log "US VLESS tunnel monitoring skipped (ENABLE_US_TUNNEL=${ENABLE_US_TUNNEL}, plist_exists=${PLIST_EXISTS}). Cleaning up stale failure markers."
   fi
-  echo 0 > "$US_FAIL_COUNT_FILE"
-  # Also maintain legacy failure file if specified
-  echo 0 > /tmp/reading-tunnel-failures 2>/dev/null || true
-  rm -f "$US_ALERT_TRACK_FILE" 2>/dev/null || true
+  rm -f "$US_FAIL_COUNT_FILE" "$US_ALERT_TRACK_FILE" /tmp/reading-tunnel-failures 2>/dev/null || true
 else
-  US_FAILURES=$(( $(cat "$US_FAIL_COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
-  echo "$US_FAILURES" > "$US_FAIL_COUNT_FILE"
-  echo "$US_FAILURES" > /tmp/reading-tunnel-failures 2>/dev/null || true
-  log "WARNING: US tunnel probe to ${US_WAN_HQ_URL} failed (HTTP ${US_PROBE_CODE}, collision=${US_COLLISION}). Consecutive failures: ${US_FAILURES}."
+  US_PROBE_CODE=$(probe_http_status "$US_WAN_HQ_URL" "$PROXY_URL" 0 8)
 
-  # Step A: Terminate hanging local SSH process for US tunnel using precise port-forwarding pattern
-  log "Auto-healing (US): Terminating stale local tunnel process..."
-  pkill -f "ssh.*0.0.0.0:${LOCAL_HTTP_PORT}.*${US_REMOTE_HOST}" 2>/dev/null || true
+  # Check for collision marker in recent logs
+  US_COLLISION=0
+  if [ -f "$US_LOG_FILE" ] && tail -n 15 "$US_LOG_FILE" 2>/dev/null | grep -q "remote port forwarding failed for listen port"; then
+    US_COLLISION=1
+  fi
 
-  # Step B: Clear orphaned listeners on remote VPS panel holding port 8086 or 7200
-  log "Auto-healing (US): Clearing orphaned sockets on remote host ${US_REMOTE_HOST}..."
-  ssh -o ProxyCommand="nc -X 5 -x 127.0.0.1:7890 %h %p" \
-      -o ConnectTimeout=8 \
-      -o BatchMode=yes \
-      -o ServerAliveInterval=5 \
-      -o ServerAliveCountMax=2 \
-      "$US_REMOTE_HOST" "fuser -k ${LOCAL_HTTP_PORT}/tcp ${LOCAL_KOSYNC_PORT}/tcp 2>/dev/null || true" 2>/dev/null || true
-
-  # Step C: Kickstart local LaunchAgent
-  log "Auto-healing (US): Kickstarting ${US_TUNNEL_LABEL}..."
-  restart_launchagent "$US_TUNNEL_LABEL"
-
-  # Step D: Allow connection to establish, then re-probe
-  sleep 4
-  US_REPROBE_CODE=$(probe_http_status "$US_WAN_HQ_URL" "$PROXY_URL" 0 8)
-
-  if [ "$US_REPROBE_CODE" = "200" ]; then
-    log "Auto-healing (US) SUCCESS: US tunnel restored and verified healthy (HTTP 200). Resetting failure counter."
+  # Tunnel is healthy if remote probe returns 200.
+  # Only treat port collision as actionable if the probe has ALSO failed (probe status != 200).
+  if [ "$US_PROBE_CODE" = "200" ]; then
+    PREV_US_FAILURES=$(cat "$US_FAIL_COUNT_FILE" 2>/dev/null || echo 0)
+    if [ "$PREV_US_FAILURES" -gt 0 ]; then
+      log "US Tunnel recovered! Remote probe returned HTTP 200. Resetting US failure counter (was ${PREV_US_FAILURES})."
+    fi
     echo 0 > "$US_FAIL_COUNT_FILE"
+    # Also maintain legacy failure file if specified
     echo 0 > /tmp/reading-tunnel-failures 2>/dev/null || true
     rm -f "$US_ALERT_TRACK_FILE" 2>/dev/null || true
   else
-    log "Auto-healing (US) INCOMPLETE: Post-restart probe returned HTTP ${US_REPROBE_CODE}."
-  fi
+    US_FAILURES=$(( $(cat "$US_FAIL_COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
+    echo "$US_FAILURES" > "$US_FAIL_COUNT_FILE"
+    echo "$US_FAILURES" > /tmp/reading-tunnel-failures 2>/dev/null || true
+    log "WARNING: US tunnel probe to ${US_WAN_HQ_URL} failed (HTTP ${US_PROBE_CODE}, collision=${US_COLLISION}). Consecutive failures: ${US_FAILURES}."
 
-  # Escalate to Telegram Alert if Failures >= 3
-  if [ "$US_FAILURES" -ge 3 ]; then
-    LAST_US_ALERTED=$(cat "$US_ALERT_TRACK_FILE" 2>/dev/null || echo 0)
-    if [ "$LAST_US_ALERTED" -eq 0 ] || [ $(( US_FAILURES - LAST_US_ALERTED )) -ge 10 ]; then
-      US_ALERT_TEXT=$(cat << EOF
+    # Step A: Terminate hanging local SSH process for US tunnel using precise port-forwarding pattern
+    log "Auto-healing (US): Terminating stale local tunnel process..."
+    pkill -f "ssh.*0.0.0.0:${LOCAL_HTTP_PORT}.*${US_REMOTE_HOST}" 2>/dev/null || true
+
+    # Step B: Clear orphaned listeners on remote VPS panel holding port 8086 or 7200
+    log "Auto-healing (US): Clearing orphaned sockets on remote host ${US_REMOTE_HOST}..."
+    ssh -o ProxyCommand="nc -X 5 -x 127.0.0.1:7890 %h %p" \
+        -o ConnectTimeout=8 \
+        -o BatchMode=yes \
+        -o ServerAliveInterval=5 \
+        -o ServerAliveCountMax=2 \
+        "$US_REMOTE_HOST" "fuser -k ${LOCAL_HTTP_PORT}/tcp ${LOCAL_KOSYNC_PORT}/tcp 2>/dev/null || true" 2>/dev/null || true
+
+    # Step C: Kickstart local LaunchAgent
+    log "Auto-healing (US): Kickstarting ${US_TUNNEL_LABEL}..."
+    restart_launchagent "$US_TUNNEL_LABEL"
+
+    # Step D: Allow connection to establish, then re-probe
+    sleep 4
+    US_REPROBE_CODE=$(probe_http_status "$US_WAN_HQ_URL" "$PROXY_URL" 0 8)
+
+    if [ "$US_REPROBE_CODE" = "200" ]; then
+      log "Auto-healing (US) SUCCESS: US tunnel restored and verified healthy (HTTP 200). Resetting failure counter."
+      echo 0 > "$US_FAIL_COUNT_FILE"
+      echo 0 > /tmp/reading-tunnel-failures 2>/dev/null || true
+      rm -f "$US_ALERT_TRACK_FILE" 2>/dev/null || true
+    else
+      log "Auto-healing (US) INCOMPLETE: Post-restart probe returned HTTP ${US_REPROBE_CODE}."
+    fi
+
+    # Escalate to Telegram Alert if Failures >= 3
+    if [ "$US_FAILURES" -ge 3 ]; then
+      LAST_US_ALERTED=$(cat "$US_ALERT_TRACK_FILE" 2>/dev/null || echo 0)
+      if [ "$LAST_US_ALERTED" -eq 0 ] || [ $(( US_FAILURES - LAST_US_ALERTED )) -ge 10 ]; then
+        US_ALERT_TEXT=$(cat << EOF
 🚨 *Reading Stack Tunnel Alert: US VLESS Tunnel*
 
 The reverse SSH tunnel to VPS (*${US_REMOTE_HOST}*) has failed *${US_FAILURES}* consecutive health checks.
@@ -304,8 +316,9 @@ The reverse SSH tunnel to VPS (*${US_REMOTE_HOST}*) has failed *${US_FAILURES}* 
 _Please inspect Mac Mini host logs and VPS panel connectivity._
 EOF
 )
-      if send_telegram_alert "$US_ALERT_TEXT"; then
-        echo "$US_FAILURES" > "$US_ALERT_TRACK_FILE"
+        if send_telegram_alert "$US_ALERT_TEXT"; then
+          echo "$US_FAILURES" > "$US_ALERT_TRACK_FILE"
+        fi
       fi
     fi
   fi
