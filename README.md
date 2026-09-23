@@ -79,6 +79,8 @@ Singapore WAN endpoints are the **primary recommended routes** for low-latency p
 | **Singapore WAN KOSync (TLS)** | `https://kosync-sg.wavypremium.xyz:8443` | HTTPS (8443) | Encrypted Singapore WAN KOSync progress sync |
 | **Singapore WAN OPDS Feed (Recommended)** | `http://opds.wavypremium.xyz/opds` | HTTP / Atom | High-speed wireless OPDS catalog for KOReader & mobile devices |
 | **Singapore WAN OPDS Feed (TLS)** | `https://opds.wavypremium.xyz:8443/opds` | HTTPS (8443) | Encrypted Singapore wireless OPDS catalog |
+| **KOReader Joplin Highlight Sync (LAN)** | `http://192.168.31.15:8086` / private `JOPLIN_TOKEN` from `.env` | HTTP / Joplin | Primary Joplin export target. KOReader's Joplin plugin is plain HTTP-only (`socket.http`, no TLS). Do not publish the token. |
+| **KOReader Joplin Highlight Sync (WAN, optional)** | `http://opds.wavypremium.xyz` port `80` | HTTP / Joplin | Optional only. `?token=` travels in cleartext and is logged in proxy access logs. Do not publish the token. |
 | **Singapore WAN Web & Mini App** | `https://reading-sg.wavypremium.xyz:8443` | HTTPS (8443) | Low-latency Singapore WAN Telegram Mini App & Web App |
 | **Global WAN Dashboard & Mini App** | `https://reading.wavypremium.xyz` | HTTPS | Global secure access to LightHouse via SSH reverse tunnel + Caddy TLS |
 | **LightHouse Dashboard (Local)** | `http://192.168.31.15:8086` | Web SPA | Fast catalog manager, KOSync reading telemetry, facets, and upload manager |
@@ -232,7 +234,21 @@ bin/lighthouse status
    *(Encrypted TLS: `https://opds.wavypremium.xyz:8443/opds` | Local LAN: `http://192.168.31.15:8088/opds`)*
 5. Tap **Connect** (no credentials required). Books can now be browsed, searched, and downloaded directly over Wi-Fi.
 
-### 3. Kindle Wi-Fi Proxy Gateway (GFW / DPI Bypass)
+### 3. Joplin Highlight & Note Export (Wireless Obsidian Sync)
+
+KOReader includes a native **Joplin** exporter that syncs your highlights, chapters, and notes wirelessly over Wi-Fi directly into Obsidian:
+1. Open any book in KOReader → tap top of screen for menu bar.
+2. Tap the **Tools (wrench icon)** tab → select **Export highlights**.
+3. Tap **Choose formats and services** → check **Joplin** (and ensure Markdown formatting is enabled).
+4. Tap **Set Joplin IP and port number**. KOReader's Joplin exporter is plain HTTP-only (LuaSocket `socket.http`; it cannot open TLS):
+   - **Host (IP):** `192.168.31.15` *(primary LAN target)*
+   - **Port:** `8086`
+   - Optional WAN: Host `opds.wavypremium.xyz`, Port `80` (plain HTTP). The `?token=` query travels in cleartext and is written to proxy access logs.
+5. Set `JOPLIN_TOKEN` in the uploader `.env` to a long random secret (for example `openssl rand -hex 24`). If it is unset or empty, Joplin writes are rejected. Enter that same private value in KOReader under **Set authorization token**. Do not commit or publish the token.
+6. Tap **Export now** (or choose book) → **Export to Joplin**.
+7. Highlights and notes are immediately written into your Obsidian vault at `<vault>/Books/<Title>.md` with clean YAML frontmatter, book synopsis, and idempotent markers (`<!-- lighthouse:highlights:start -->` / `<!-- lighthouse:highlights:end -->`). Re-exporting never creates duplicates.
+
+### 4. Kindle Wi-Fi Proxy Gateway (GFW / DPI Bypass)
 
 If your Kindle displays *"Check your network connection"* when connecting to overseas servers:
 1. On Kindle: Go to **Settings** → **Wi-Fi Networks** → select your Wi-Fi network → tap **Advanced**.
@@ -241,7 +257,7 @@ If your Kindle displays *"Check your network connection"* when connecting to ove
    - **Proxy Port:** `7890`
 3. Save network settings. All Kindle network requests will now route through the home host's sing-box proxy gateway.
 
-### 4. Telegram Mini App & Web App Access
+### 5. Telegram Mini App & Web App Access
 
 LightHouse provides an app-like catalog experience across mobile devices and desktop browsers:
 - **Singapore WAN Web App (Low-Latency Port 8443):**
@@ -292,7 +308,8 @@ LightHouse bridges your reading devices (KOReader on Kobo/Kindle/Android, native
      ```
    - On repeated syncs, only the block inside the markers is updated; any manual user reflections, synthesis notes, or custom frontmatter properties outside the markers are 100% preserved.
 
-3. **Three Seamless Synchronization Pathways:**
+3. **Four Seamless Synchronization Pathways:**
+   - **Native KOReader Joplin Clipper Exporter (`POST /notes`, `PUT /notes/:id`):** One-tap wireless sync built directly into KOReader. The plugin is plain HTTP-only. Point it at LAN `http://192.168.31.15:8086` (primary) and the private `JOPLIN_TOKEN` from `.env`. Optional WAN is plain HTTP port `80` on `opds.wavypremium.xyz`; `?token=` is cleartext and lands in proxy access logs. Do not publish the token. The server implements native Joplin Clipper HTTP compatibility (`/ping`, `/folders`, `/notes`), writes structured Markdown notes with block-style YAML tags to `<vault>/Books/<Title>.md`, and merges highlights idempotently. Unset tokens fail closed.
    - **Wireless Over-The-Air Ingest (`POST /api/highlights/sync`):** Configure KOReader's bundled **Export highlights** plugin to send JSON/Markdown exports directly to `http://192.168.31.15:8086/api/highlights/sync` on LAN or `https://reading-sg.wavypremium.xyz:8443/api/highlights/sync` on WAN.
    - **CLI Batch & Continuous Watch (`bin/lighthouse sync-obsidian`):** Auto-discovers connected Kindle / KOReader storage mounts (`/Volumes/*/`) and sidecar `.sdr` folders (`metadata.epub.lua`), merging with live KOSync databases. Pass `--watch` for continuous auto-syncing.
    - **One-Tap Web UI Sync:** Tap **Sync to Obsidian** in the book detail modal on Reading HQ or Telegram Mini App to immediately trigger note creation/update.

@@ -1876,10 +1876,39 @@
           Automatically synchronize your quotes, highlights, page numbers, chapters, and personal notes from KOReader and Kindle into structured Obsidian Markdown notes with YAML frontmatter, book synopsis, and live reading progress bars.
         </p>
 
-        <!-- Method 1: Wireless OTA Export from KOReader -->
+        <!-- Method 1: Native KOReader Joplin Exporter (Recommended) -->
+        <div class="p-3.5 bg-zinc-900/80 rounded-xl border border-zinc-800 space-y-2 text-xs text-zinc-300">
+          <div class="font-bold text-white flex items-center justify-between">
+            <div class="flex items-center gap-1.5">
+              <span class="w-5 h-5 rounded-full bg-purple-950 text-purple-400 border border-purple-800/60 flex items-center justify-center text-[11px] font-mono font-bold shrink-0">1</span>
+              <span>Native Joplin Clipper Exporter (Recommended — 1-Tap Wi-Fi Sync)</span>
+            </div>
+            <span class="text-[9px] px-1.5 py-0.5 rounded bg-purple-950/60 text-purple-300 font-mono border border-purple-800/50">Native KOReader</span>
+          </div>
+          <div class="text-[11px] text-zinc-400 space-y-1.5 pl-7 leading-relaxed">
+            <div>1. In KOReader, open any book &rarr; tap top menu &rarr; <strong>Tools (wrench icon)</strong> &rarr; <strong>Export highlights</strong>.</div>
+            <div>2. Tap <strong>Choose formats and services</strong> &rarr; enable <strong>Joplin</strong>.</div>
+            <div>3. Tap <strong>Set Joplin IP and port number</strong>. KOReader's Joplin exporter is plain HTTP-only (no TLS).</div>
+            <div class="space-y-1 pt-0.5">
+              <div class="text-[10px] text-zinc-500 font-medium">Primary target (LAN HTTP):</div>
+              <div class="flex items-center gap-2">
+                <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-purple-300 truncate select-all">192.168.31.15</code>
+                <button onclick="copyToClipboard('192.168.31.15')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy Host">
+                  <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+                </button>
+              </div>
+              <div class="text-[10px] text-zinc-500 font-medium">Port: <code class="text-zinc-300">8086</code></div>
+              <div class="text-[10px] text-amber-300/90 font-medium">Optional WAN: <code class="text-zinc-300">opds.wavypremium.xyz</code> plain HTTP port <code class="text-zinc-300">80</code>. <code class="text-zinc-300">?token=</code> travels in cleartext and is logged in proxy access logs. Do not publish the token.</div>
+            </div>
+            <div>4. Set <code class="text-zinc-200">JOPLIN_TOKEN</code> in the uploader <code class="text-zinc-200">.env</code> to a private random secret, then enter that same value in KOReader under <strong>Set authorization token</strong>. Do not use a shared or published token. If <code class="text-zinc-200">JOPLIN_TOKEN</code> is unset, exports are rejected.</div>
+            <div class="pt-1">5. Tap <strong>Export now</strong> &rarr; <strong>Export to Joplin</strong>. Highlights, chapters, and notes are formatted with clean YAML frontmatter and saved to <code class="text-zinc-200">Books/&lt;Title&gt;.md</code>. Re-exporting is 100% idempotent and never creates duplicate highlights!</div>
+          </div>
+        </div>
+
+        <!-- Method 2: Wireless OTA Export from KOReader -->
         <div class="p-3.5 bg-zinc-900/80 rounded-xl border border-zinc-800 space-y-2 text-xs text-zinc-300">
           <div class="font-bold text-white flex items-center gap-1.5">
-            <span class="w-5 h-5 rounded-full bg-purple-950 text-purple-400 border border-purple-800/60 flex items-center justify-center text-[11px] font-mono font-bold shrink-0">1</span>
+            <span class="w-5 h-5 rounded-full bg-purple-950 text-purple-400 border border-purple-800/60 flex items-center justify-center text-[11px] font-mono font-bold shrink-0">2</span>
             <span>Wireless Over-The-Air Export (KOReader Webhook / Export)</span>
           </div>
           <div class="text-[11px] text-zinc-400 space-y-1 pl-7 leading-relaxed">
@@ -1903,10 +1932,10 @@
           </div>
         </div>
 
-        <!-- Method 2: Automatic USB / Sidecar CLI Sync -->
+        <!-- Method 3: Automatic USB / Sidecar CLI Sync -->
         <div class="p-3.5 bg-zinc-900/80 rounded-xl border border-zinc-800 space-y-2 text-xs text-zinc-300">
           <div class="font-bold text-white flex items-center gap-1.5">
-            <span class="w-5 h-5 rounded-full bg-purple-950 text-purple-400 border border-purple-800/60 flex items-center justify-center text-[11px] font-mono font-bold shrink-0">2</span>
+            <span class="w-5 h-5 rounded-full bg-purple-950 text-purple-400 border border-purple-800/60 flex items-center justify-center text-[11px] font-mono font-bold shrink-0">3</span>
             <span>CLI Batch &amp; Continuous Watch Sync (bin/lighthouse sync-obsidian)</span>
           </div>
           <div class="text-[11px] text-zinc-400 space-y-1.5 pl-7 leading-relaxed">
@@ -1922,10 +1951,10 @@
           </div>
         </div>
 
-        <!-- Method 3: One-Tap Web UI Sync -->
+        <!-- Method 4: One-Tap Web UI Sync -->
         <div class="p-3.5 bg-zinc-900/80 rounded-xl border border-zinc-800 space-y-2 text-xs text-zinc-300">
           <div class="font-bold text-white flex items-center gap-1.5">
-            <span class="w-5 h-5 rounded-full bg-purple-950 text-purple-400 border border-purple-800/60 flex items-center justify-center text-[11px] font-mono font-bold shrink-0">3</span>
+            <span class="w-5 h-5 rounded-full bg-purple-950 text-purple-400 border border-purple-800/60 flex items-center justify-center text-[11px] font-mono font-bold shrink-0">4</span>
             <span>One-Tap Web App Sync</span>
           </div>
           <div class="text-[11px] text-zinc-400 pl-7 leading-relaxed">
@@ -2288,6 +2317,29 @@
               <button onclick="copyToClipboard('http://192.168.31.15:7200')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
+            </div>
+          </div>
+
+          <!-- KOReader Joplin Native Highlight Exporter -->
+          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-purple-400"></span>
+                <span>KOReader Joplin Exporter (Native Wi-Fi Sync)</span>
+              </span>
+              <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-purple-400 font-mono border border-zinc-700">Joplin Clipper</span>
+            </div>
+            <div class="text-[11px] text-zinc-400">HTTP-only KOReader plugin. Syncs quotes, chapters, and notes into Obsidian Books/</div>
+            <div class="space-y-1 pt-1">
+              <div class="text-[10px] text-zinc-500 font-medium">Primary Joplin target (LAN HTTP port 8086):</div>
+              <div class="flex items-center gap-2">
+                <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">192.168.31.15</code>
+                <button onclick="copyToClipboard('192.168.31.15')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy Host">
+                  <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+                </button>
+              </div>
+              <div class="text-[10px] text-zinc-500 font-medium">Port <code class="text-zinc-200">8086</code>. Optional WAN is plain HTTP port <code class="text-zinc-200">80</code> on <code class="text-zinc-200">opds.wavypremium.xyz</code>. <code class="text-zinc-200">?token=</code> is cleartext and appears in proxy access logs.</div>
+              <div class="text-[10px] text-zinc-500 font-medium">Authorization token: the private <code class="text-zinc-200">JOPLIN_TOKEN</code> from <code class="text-zinc-200">.env</code>. It is not published here.</div>
             </div>
           </div>
 
