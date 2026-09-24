@@ -12,6 +12,7 @@ import {
   syncSingleBookToKindle,
   syncAllBooksToKindle,
   ejectKindleVolume,
+  resolveDiskutilPath,
   buildKindleBookIndex,
   isBookAlreadyOnKindle,
   cancelKindleSync,
@@ -358,6 +359,140 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
         expect(res.message).toContain("escapes /Volumes/ directory");
       } finally {
         process.env.NODE_ENV = origEnv;
+      }
+    });
+
+    it("resolveDiskutilPath returns /usr/sbin/diskutil when binary exists", () => {
+      const origExists = fs.existsSync;
+      const origBin = process.env.LIGHTHOUSE_DISKUTIL_BIN;
+      try {
+        delete process.env.LIGHTHOUSE_DISKUTIL_BIN;
+        (fs as any).existsSync = (p: string) => {
+          if (p === "/usr/sbin/diskutil") return true;
+          return origExists(p);
+        };
+        expect(resolveDiskutilPath()).toBe("/usr/sbin/diskutil");
+      } finally {
+        fs.existsSync = origExists;
+        if (origBin !== undefined) process.env.LIGHTHOUSE_DISKUTIL_BIN = origBin;
+      }
+    });
+
+    it("resolveDiskutilPath falls back to diskutil when /usr/sbin/diskutil does not exist", () => {
+      const origExists = fs.existsSync;
+      const origBin = process.env.LIGHTHOUSE_DISKUTIL_BIN;
+      try {
+        delete process.env.LIGHTHOUSE_DISKUTIL_BIN;
+        (fs as any).existsSync = (p: string) => {
+          if (p === "/usr/sbin/diskutil") return false;
+          return origExists(p);
+        };
+        expect(resolveDiskutilPath()).toBe("diskutil");
+      } finally {
+        fs.existsSync = origExists;
+        if (origBin !== undefined) process.env.LIGHTHOUSE_DISKUTIL_BIN = origBin;
+      }
+    });
+
+    it("resolveDiskutilPath respects LIGHTHOUSE_DISKUTIL_BIN override when set", () => {
+      const origBin = process.env.LIGHTHOUSE_DISKUTIL_BIN;
+      try {
+        process.env.LIGHTHOUSE_DISKUTIL_BIN = "/custom/path/diskutil";
+        expect(resolveDiskutilPath()).toBe("/custom/path/diskutil");
+      } finally {
+        if (origBin !== undefined) {
+          process.env.LIGHTHOUSE_DISKUTIL_BIN = origBin;
+        } else {
+          delete process.env.LIGHTHOUSE_DISKUTIL_BIN;
+        }
+      }
+    });
+
+    it("ejectKindleVolume handles res.error gracefully when spawnSync fails", () => {
+      const testMount = path.join(tempBaseDir, "ErrorMount");
+      fs.mkdirSync(testMount, { recursive: true });
+      const origAllow = process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH;
+      const origBin = process.env.LIGHTHOUSE_DISKUTIL_BIN;
+
+      try {
+        process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH = tempBaseDir;
+        process.env.LIGHTHOUSE_DISKUTIL_BIN = path.join(tempBaseDir, "nonexistent-diskutil-bin");
+
+        const res = ejectKindleVolume(testMount);
+        expect(res.success).toBe(false);
+        expect(res.message).not.toContain("undefined");
+        expect(res.message).toMatch(/ENOENT|no such file/i);
+      } finally {
+        if (origAllow !== undefined) {
+          process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH = origAllow;
+        } else {
+          delete process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH;
+        }
+        if (origBin !== undefined) {
+          process.env.LIGHTHOUSE_DISKUTIL_BIN = origBin;
+        } else {
+          delete process.env.LIGHTHOUSE_DISKUTIL_BIN;
+        }
+      }
+    });
+
+    it("ejectKindleVolume succeeds when diskutil process exits 0", () => {
+      const testMount = path.join(tempBaseDir, "SuccessMount");
+      fs.mkdirSync(testMount, { recursive: true });
+      const mockScript = path.join(tempBaseDir, "mock_diskutil_success.sh");
+      fs.writeFileSync(mockScript, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+      const origAllow = process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH;
+      const origBin = process.env.LIGHTHOUSE_DISKUTIL_BIN;
+
+      try {
+        process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH = tempBaseDir;
+        process.env.LIGHTHOUSE_DISKUTIL_BIN = mockScript;
+
+        const res = ejectKindleVolume(testMount);
+        expect(res.success).toBe(true);
+        expect(res.message).toContain(`Successfully ejected ${testMount}`);
+      } finally {
+        if (origAllow !== undefined) {
+          process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH = origAllow;
+        } else {
+          delete process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH;
+        }
+        if (origBin !== undefined) {
+          process.env.LIGHTHOUSE_DISKUTIL_BIN = origBin;
+        } else {
+          delete process.env.LIGHTHOUSE_DISKUTIL_BIN;
+        }
+      }
+    });
+
+    it("ejectKindleVolume reports stderr when diskutil process exits with error", () => {
+      const testMount = path.join(tempBaseDir, "FailMount");
+      fs.mkdirSync(testMount, { recursive: true });
+      const mockScript = path.join(tempBaseDir, "mock_diskutil_fail.sh");
+      fs.writeFileSync(mockScript, '#!/bin/sh\necho "Volume is busy" >&2\nexit 1\n', { mode: 0o755 });
+
+      const origAllow = process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH;
+      const origBin = process.env.LIGHTHOUSE_DISKUTIL_BIN;
+
+      try {
+        process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH = tempBaseDir;
+        process.env.LIGHTHOUSE_DISKUTIL_BIN = mockScript;
+
+        const res = ejectKindleVolume(testMount);
+        expect(res.success).toBe(false);
+        expect(res.message).toBe("Volume is busy");
+      } finally {
+        if (origAllow !== undefined) {
+          process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH = origAllow;
+        } else {
+          delete process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH;
+        }
+        if (origBin !== undefined) {
+          process.env.LIGHTHOUSE_DISKUTIL_BIN = origBin;
+        } else {
+          delete process.env.LIGHTHOUSE_DISKUTIL_BIN;
+        }
       }
     });
   });
