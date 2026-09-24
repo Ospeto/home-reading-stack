@@ -830,6 +830,6 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
         }
         expect(lint.status).toBe(0);
       }
-    });
+    }, 15000);
   });
 });

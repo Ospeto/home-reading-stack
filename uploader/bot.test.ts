@@ -1815,6 +1815,11 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
     const origCalibredb = process.env.CALIBREDB_PATH;
     process.env.CALIBREDB_PATH = mockCalibre;
 
+    const origJevKey = process.env.JEV_API_KEY;
+    const origTypesafeKey = process.env.TYPESAFE_API_KEY;
+    delete process.env.JEV_API_KEY;
+    delete process.env.TYPESAFE_API_KEY;
+
     const testDropDir = path.join(os.tmpdir(), "test_books_drop_" + Date.now());
     fs.mkdirSync(testDropDir, { recursive: true });
     const origDropDir = process.env.BOOKS_DROP_DIR;
@@ -1884,6 +1889,16 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
       expect(confirmedMessage).toBeDefined();
     } finally {
       globalThis.fetch = origFetch;
+      if (origJevKey !== undefined) {
+        process.env.JEV_API_KEY = origJevKey;
+      } else {
+        delete process.env.JEV_API_KEY;
+      }
+      if (origTypesafeKey !== undefined) {
+        process.env.TYPESAFE_API_KEY = origTypesafeKey;
+      } else {
+        delete process.env.TYPESAFE_API_KEY;
+      }
       if (origCalibredb === undefined) {
         delete process.env.CALIBREDB_PATH;
       } else {

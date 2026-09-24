@@ -110,6 +110,7 @@ LightHouse includes a portable management CLI (`bin/lighthouse`) for service lif
 | `bin/lighthouse enrich-synopsis` | Populates descriptions for Calibre books prioritizing per-volume lookups (EPUB metadata, online volume queries) with AniList series fallback and duplicate series overview re-enrichment. |
 | `bin/lighthouse sync-kindle` | Two-way USB-C sync: pushes active/unread books from Calibre to Kindle (/Volumes/Kindle/books) and pulls clippings & KOReader highlights to Obsidian. |
 | `bin/lighthouse sync-obsidian` | Syncs highlights, notes, and progress from KOReader/Kindle to Obsidian with idempotent markers. |
+| `bin/lighthouse firecrawl <cmd>` | Control self-hosted Firecrawl on-demand cluster (`status`, `up`, `down`) to conserve host RAM (~2.5 GB). |
 | `bin/lighthouse install-daemons` | Dynamically generates and registers macOS LaunchAgents for the current user and repository root. |
 | `bin/lighthouse backup` | Flushes SQLite WAL frames and creates an atomic snapshot bundle with SHA-256 checksum and manifest. |
 | `bin/lighthouse restore <archive>` | Performs verified disaster recovery with cryptographic checksum verification and integrity scan. |
@@ -156,6 +157,15 @@ bin/lighthouse sync-obsidian --apply
 
 # Watch Calibre library and KOSync DB for continuous live Obsidian sync
 bin/lighthouse sync-obsidian --apply --watch
+
+# Inspect Firecrawl on-demand cluster state and auto-sleep timer
+bin/lighthouse firecrawl status
+
+# Wake Firecrawl cluster manually via docker compose
+bin/lighthouse firecrawl up
+
+# Stop Firecrawl cluster immediately to release ~2.5 GB RAM back to macOS
+bin/lighthouse firecrawl down
 
 # Inspect USB-C Kindle connection status and storage metrics
 bin/lighthouse sync-kindle --status
@@ -511,6 +521,7 @@ Background tasks and asynchronous workflows run via a durable SQLite job queue (
 
 Search your library and retrieve books anywhere via Telegram (`@saroat_ospeto_bot`):
 - **Search & Retrieval (`/find`, `/search`, `/f`):** Fast multi-term search across titles, authors, and series. Delivers results with 1-tap interactive buttons: `[📥 Send File]` (or command `/get <id>`), `[📖 Read Online]`, and `[ℹ️ Details]`. Files over 20MB trigger an informative message with direct Web Uploader links.
+- **On-Demand Firecrawl Cluster & Web Article Ingestion:** Web article extraction (`/epub <url>` or pasted links) prioritizes the local on-demand Firecrawl cluster (`http://127.0.0.1:3002`). LightHouse wakes containers on demand (~2.5s) upon scrape requests and automatically shuts them down after 15 minutes of inactivity (`docker compose stop`) to release ~2.5 GB of RAM back to macOS, with fail-open fallback to direct fetch and Jina Reader (`https://r.jina.ai`).
 - **Paywall & Cloudflare Bypass:** Web article extraction (`/epub <url>` or pasted links) transparently re-routes blocked pages through Jina Reader (`https://r.jina.ai`) via sing-box proxy with Kindle typography formatting.
 - **Formatting Resilience:** Automatic plain-text retry on Telegram HTTP 400 parsing errors prevents dropped notifications from unescaped characters.
 

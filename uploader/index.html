@@ -2217,6 +2217,24 @@
           </div>
         </div>
 
+        <!-- Feature 6: Firecrawl On-Demand Web Article Scraper -->
+        <div class="p-3.5 bg-zinc-900/80 rounded-xl border border-zinc-800 space-y-2 text-xs text-zinc-300">
+          <div class="font-bold text-white flex items-center justify-between">
+            <div class="flex items-center gap-1.5">
+              <span class="w-5 h-5 rounded-full bg-amber-950 text-amber-400 border border-amber-800/60 flex items-center justify-center text-[11px] font-mono font-bold shrink-0">6</span>
+              <span>Firecrawl On-Demand Web Article Scraper</span>
+            </div>
+            <span class="text-[9px] px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-300 font-mono border border-emerald-800/50">On-Demand</span>
+          </div>
+          <div class="text-[11px] text-zinc-400 space-y-1.5 pl-7 leading-relaxed">
+            <div>Articles submitted via Web Uploader or Telegram Bot leverage the self-hosted Firecrawl cluster with an on-demand lifecycle to conserve host RAM:</div>
+            <div>• <strong>Wake on Demand:</strong> LightHouse automatically wakes Firecrawl containers via <code class="text-zinc-200">docker compose start</code> in ~2.5s when an article ingestion request arrives.</div>
+            <div>• <strong>Auto-Sleep Idle Timer:</strong> After 15 minutes of inactivity without new scrapes, containers automatically shut down (<code class="text-zinc-200">docker compose stop</code>), immediately releasing ~2.5 GB RAM back to macOS.</div>
+            <div>• <strong>Fail-Open Fallback:</strong> If Docker or Firecrawl is offline, article ingestion seamlessly falls back to direct browser fetch and Jina Reader.</div>
+            <div>• <strong>CLI Control:</strong> Manage cluster state manually via <code class="text-zinc-200">bin/lighthouse firecrawl status|up|down</code>.</div>
+          </div>
+        </div>
+
         <!-- Idempotent Preservation Guarantee -->
         <div class="p-3.5 bg-purple-950/20 rounded-xl border border-purple-800/40 text-xs text-purple-200 space-y-1">
           <div class="font-bold flex items-center gap-1.5 text-purple-300">
@@ -2437,6 +2455,32 @@
             <div class="flex items-center gap-2">
               <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse restart</code>
               <button onclick="copyToClipboard('bin/lighthouse restart')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-zinc-200">Firecrawl On-Demand Cluster</span>
+              <span class="text-[10px] font-mono text-zinc-400">status / up / down</span>
+            </div>
+            <p class="text-[11px] text-zinc-400">Wakes on demand (~2.5s) for article scrapes; auto-sleeps after 15m idle to release ~2.5 GB RAM.</p>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse firecrawl status</code>
+              <button onclick="copyToClipboard('bin/lighthouse firecrawl status')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse firecrawl up</code>
+              <button onclick="copyToClipboard('bin/lighthouse firecrawl up')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse firecrawl down</code>
+              <button onclick="copyToClipboard('bin/lighthouse firecrawl down')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
