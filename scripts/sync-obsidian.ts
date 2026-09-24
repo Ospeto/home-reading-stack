@@ -19,6 +19,11 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { Database } from "bun:sqlite";
+import {
+  getHighlightsCacheDb,
+  batchUpsertHighlights,
+  cleanQuoteText,
+} from "../uploader/highlights";
 
 // ----------------------------------------------------------------------------
 // Interfaces & Types
@@ -1353,6 +1358,40 @@ export async function syncObsidian(
           fs.writeFileSync(notePath, newContent, "utf8");
         }
         result.notesCreated++;
+      }
+
+      // Index highlights into cache.db for LightHouse Web Highlights Viewer
+      if (!dryRun && mergedData.highlights && mergedData.highlights.length > 0) {
+        try {
+          const records = mergedData.highlights
+            .map((h) => {
+              let pageNum: number | null = null;
+              if (typeof h.page === "number") pageNum = h.page;
+              else if (h.page) {
+                const parsed = parseInt(String(h.page), 10);
+                if (!Number.isNaN(parsed)) pageNum = parsed;
+              }
+              const quote = cleanQuoteText(h.text);
+              if (!quote) return null;
+              return {
+                book_id: mergedData.bookId ?? null,
+                book_title: finalTitle.trim(),
+                chapter: h.chapter || null,
+                page: pageNum,
+                quote,
+                note: h.notes || null,
+                timestamp: h.datetime || null,
+              };
+            })
+            .filter((r): r is NonNullable<typeof r> => r !== null);
+
+          if (records.length > 0) {
+            const hDb = getHighlightsCacheDb();
+            batchUpsertHighlights(hDb, records);
+          }
+        } catch (_indexErr) {
+          // Fail-open
+        }
       }
 
       result.items.push({

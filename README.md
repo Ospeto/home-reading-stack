@@ -314,6 +314,15 @@ LightHouse bridges your reading devices (KOReader on Kobo/Kindle/Android, native
    - **CLI Batch & Continuous Watch (`bin/lighthouse sync-obsidian`):** Auto-discovers connected Kindle / KOReader storage mounts (`/Volumes/*/`) and sidecar `.sdr` folders (`metadata.epub.lua`), merging with live KOSync databases. Pass `--watch` for continuous auto-syncing.
    - **One-Tap Web UI Sync:** Tap **Sync to Obsidian** in the book detail modal on Reading HQ or Telegram Mini App to immediately trigger note creation/update.
 
+4. **LightHouse Web Highlights & Quotes Viewer:**
+   - **In-Browser Quotes & Notes Browsing:** Synced book highlights and annotations are indexed into `cache.db` (`book_highlights` table) and accessible directly on the LightHouse web reader (`uploader/index.html`).
+   - **Book Details Modal (`#bookDetailModal`):** Dedicated `✦ Highlights` tab renders elegant Apple Fluid translucent cards (`backdrop-filter: blur(20px) saturate(180%)`) with amber accent bars, chapter badges, page numbers, timestamps, notes, and a one-click copy button with tactile checkmark feedback.
+   - **Book Cards & Desktop Hover Wing Panel (`.card-popup`):** Books with highlights display a subtle indicator badge (`✦ 12`) on the cover and quote preview snippets in the desktop hover popover.
+   - **REST API Endpoints:**
+     - `GET /api/books/:id/highlights`: Returns structured JSON list of quotes, chapters, page numbers, notes, and timestamps with on-demand Obsidian/SDR backfill.
+     - `GET /api/highlights?title=...`: Query highlights by title or retrieve aggregate counts.
+     - `GET /api/books`: Book list payload includes `highlightCount` and `highlightPreview` for instant UI rendering.
+
 ---
 
 ## 🧠 Jev System-1 Ingestion Intelligence

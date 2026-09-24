@@ -28,6 +28,12 @@ import { Buffer } from "node:buffer";
 import { Database } from "bun:sqlite";
 import { truncateUtf8Bytes } from "./filename";
 import { sanitizeErrorMessage } from "./security";
+import {
+  getHighlightsCacheDb,
+  batchUpsertHighlights,
+  parseHighlightsFromMarkdown,
+  resolveBookIdFromTitle,
+} from "./highlights";
 
 // ----------------------------------------------------------------------------
 // Constants & Markers
@@ -51,6 +57,8 @@ export interface JoplinOptions {
   expectedToken?: string;
   corsOrigin?: string;
   calibreDbPath?: string;
+  cacheDb?: Database;
+  cacheDbPath?: string;
 }
 
 export interface JoplinNotePayload {
@@ -1298,6 +1306,18 @@ export async function processJoplinNote(
   });
 
   writeNoteAtomically(realDir, notePath, merged);
+
+  // Index highlights into SQLite cache database for LightHouse Web Viewer
+  try {
+    const bookId = resolveBookIdFromTitle(title, options.calibreDbPath);
+    const highlights = parseHighlightsFromMarkdown(merged, title, bookId);
+    if (highlights.length > 0) {
+      const hDb = getHighlightsCacheDb(options.cacheDb || options.cacheDbPath);
+      batchUpsertHighlights(hDb, highlights);
+    }
+  } catch (_indexErr) {
+    // Fail-open: indexing errors should never block note persistence
+  }
 
   const parsedEntries = splitHighlightEntries(
     cleanIncomingHighlightBody(rawBody, title),
