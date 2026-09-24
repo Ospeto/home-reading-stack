@@ -1566,5 +1566,80 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       );
       expect(match.exists).toBe(true);
     });
+
+    it("does not false-positive on contiguous author substring matches (e.g. Ed Green vs Fred Greenwood)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorDir = path.join(kindleMount, "books", "Fred Greenwood");
+      fs.mkdirSync(authorDir, { recursive: true });
+
+      fs.writeFileSync(path.join(authorDir, "01 - Unique Book.epub"), "content", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate author "Ed Green" must NOT match folder "Fred Greenwood"
+      const matchEd = isBookAlreadyOnKindle(
+        kindleMount,
+        "Unique Book.epub",
+        "Ed Green",
+        0,
+        index,
+        { title: "Unique Book", authors: "Ed Green" },
+      );
+      expect(matchEd.exists).toBe(false);
+
+      // Candidate author "Fred Green" must NOT match folder "Fred Greenwood"
+      const matchFred = isBookAlreadyOnKindle(
+        kindleMount,
+        "Unique Book.epub",
+        "Fred Green",
+        0,
+        index,
+        { title: "Unique Book", authors: "Fred Green" },
+      );
+      expect(matchFred.exists).toBe(false);
+
+      // Exact author "Fred Greenwood" matches cleanly
+      const matchExact = isBookAlreadyOnKindle(
+        kindleMount,
+        "Unique Book.epub",
+        "Fred Greenwood",
+        0,
+        index,
+        { title: "Unique Book", authors: "Fred Greenwood" },
+      );
+      expect(matchExact.exists).toBe(true);
+    });
+
+    it("matches multi-author lists across diverse delimiters (&, and, comma)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorDir = path.join(kindleMount, "books", "Brandon Sanderson");
+      fs.mkdirSync(authorDir, { recursive: true });
+
+      fs.writeFileSync(path.join(authorDir, "White Sand.epub"), "white sand", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate with "Brandon Sanderson & Isaac Stewart" matches on-disk "Brandon Sanderson"
+      const matchAmpersand = isBookAlreadyOnKindle(
+        kindleMount,
+        "White Sand.epub",
+        "Brandon Sanderson & Isaac Stewart",
+        0,
+        index,
+        { title: "White Sand", authors: "Brandon Sanderson & Isaac Stewart" },
+      );
+      expect(matchAmpersand.exists).toBe(true);
+
+      // Candidate with "Brandon Sanderson, Isaac Stewart" matches on-disk "Brandon Sanderson"
+      const matchComma = isBookAlreadyOnKindle(
+        kindleMount,
+        "White Sand.epub",
+        "Brandon Sanderson, Isaac Stewart",
+        0,
+        index,
+        { title: "White Sand", authors: "Brandon Sanderson, Isaac Stewart" },
+      );
+      expect(matchComma.exists).toBe(true);
+    });
   });
 });

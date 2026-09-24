@@ -806,6 +806,66 @@ export function getKindleDiskSpace(mountPath: string): { freeBytes: number; tota
 }
 
 /**
+ * Compares two author strings with token-boundary matching, word-order normalization,
+ * and multi-author list splitting (&, and, ;, commas separating distinct authors).
+ */
+export function authorMatchesString(sourceStr: string, targetAuthor: string): boolean {
+  if (!sourceStr || !targetAuthor) return false;
+  const sRaw = sourceStr.trim();
+  const tRaw = targetAuthor.trim();
+  if (!sRaw || !tRaw) return false;
+
+  const sNorm = normalizeTitleForDedup(sRaw);
+  const tNorm = normalizeTitleForDedup(tRaw);
+  if (!sNorm || !tNorm) return false;
+  if (sNorm === tNorm) return true;
+
+  const sSorted = sNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
+  const tSorted = tNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
+  if (sSorted === tSorted) return true;
+
+  const sourceAuthors = sRaw
+    .replace(/[\(\[]\s*(?:author|artist|illustrator|writer|story|art|translator|editor)\s*[\)\]]/gi, " ")
+    .split(/(?:\s*(?:&|\band\b|;|\/|\|)\s*|,\s*(?=[A-Z\u00A0-\uFFFFa-z]))/i)
+    .map((a) => normalizeTitleForDedup(a))
+    .filter(Boolean);
+
+  const targetAuthors = tRaw
+    .replace(/[\(\[]\s*(?:author|artist|illustrator|writer|story|art|translator|editor)\s*[\)\]]/gi, " ")
+    .split(/(?:\s*(?:&|\band\b|;|\/|\|)\s*|,\s*(?=[A-Z\u00A0-\uFFFFa-z]))/i)
+    .map((a) => normalizeTitleForDedup(a))
+    .filter(Boolean);
+
+  for (const sA of sourceAuthors) {
+    for (const tA of targetAuthors) {
+      if (sA === tA) return true;
+      const sASorted = sA.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
+      const tASorted = tA.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
+      if (sASorted === tASorted) return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Checks if a directory name looks like an author folder (contains comma or 2+ word name,
+ * and does not contain series/genre/system keywords).
+ */
+export function isLikelyAuthorFolderName(folderName: string): boolean {
+  if (!folderName) return false;
+  const lower = folderName.trim().toLowerCase();
+  if (/^(books|documents|downloads?|system|calibre|koreader)$/i.test(lower)) return false;
+  if (/\b(series|trilogy|chronicles?|novels?|collection|anthology|fantasy|sci-fi|science\s*fiction|manga|comics?|universe|saga|cycle|archives?|books?|season)\b/i.test(lower)) {
+    return false;
+  }
+  if (lower.includes(",")) return true;
+  const words = lower.split(/\s+/);
+  if (words.length >= 2 && words.every((w) => w.length >= 1)) return true;
+  return false;
+}
+
+/**
  * Checks whether a book is already present on the Kindle across all directories and filename variants.
  * Checks pre-scanned index when available or queries the cached/scanned index.
  * Matches by exact path, exact filename, base filename (format-insensitive), normalized title,
@@ -898,29 +958,8 @@ export function isBookAlreadyOnKindle(
   const normAuthor = normalizedRawAuthor ? normalizeTitleForDedup(normalizedRawAuthor) : "";
   const cleanAuthor = normalizedRawAuthor ? cleanQuery(normalizedRawAuthor).toLowerCase().trim() : "";
 
-  function authorMatchesString(sourceStr: string, targetAuthor: string): boolean {
-    if (!sourceStr || !targetAuthor) return false;
-    const sNorm = normalizeTitleForDedup(sourceStr);
-    const tNorm = normalizeTitleForDedup(targetAuthor);
-    if (!sNorm || !tNorm) return false;
-    if (sNorm === tNorm) return true;
-
-    const sTokens = sNorm.split(/\s+/);
-    const tTokens = tNorm.split(/\s+/);
-
-    if (tTokens.length >= 2) {
-      if (sNorm.includes(tNorm)) return true;
-      const allTokensPresent = tTokens.every((tok) => sTokens.includes(tok));
-      if (allTokensPresent) return true;
-    } else if (tTokens.length === 1) {
-      if (sTokens.includes(tTokens[0])) return true;
-    }
-    return false;
-  }
-
   function hasPositiveAuthorMatch(entry: KindleIndexedBook): boolean {
     if (!normAuthor && !cleanAuthor) return false;
-    const pLower = entry.filePath.toLowerCase();
 
     if (authorMatchesString(entry.parentDir, normalizedRawAuthor)) return true;
     if (authorMatchesString(entry.grandparentDir, normalizedRawAuthor)) return true;
@@ -934,22 +973,6 @@ export function isBookAlreadyOnKindle(
       }
     }
 
-    if (normAuthor && normAuthor.split(/\s+/).length >= 2 && pLower.includes(normAuthor)) {
-      return true;
-    }
-    return false;
-  }
-
-  function isLikelyAuthorFolderName(folderName: string): boolean {
-    if (!folderName) return false;
-    const lower = folderName.trim().toLowerCase();
-    if (/^(books|documents|downloads?|system|calibre|koreader)$/i.test(lower)) return false;
-    if (/\b(series|trilogy|chronicles?|novels?|collection|anthology|fantasy|sci-fi|science\s*fiction|manga|comics?|universe|saga|cycle|archives?|books?|season)\b/i.test(lower)) {
-      return false;
-    }
-    if (lower.includes(",")) return true;
-    const words = lower.split(/\s+/);
-    if (words.length >= 2 && words.every((w) => w.length >= 1)) return true;
     return false;
   }
 
@@ -1223,23 +1246,21 @@ export async function isBookAlreadyOnKindleAsync(
   for (const entry of idx.entries) {
     if (jevCallsMade >= MAX_JEV_CALLS_PER_BOOK) break;
     // Check author match
-    const parentDedup = normalizeTitleForDedup(entry.parentDir);
-    const grandparentDedup = normalizeTitleForDedup(entry.grandparentDir);
-    const pLower = entry.filePath.toLowerCase();
-    const parentSpaced = normalizeAuthorSpacing(entry.parentDir).toLowerCase();
-    const grandparentSpaced = normalizeAuthorSpacing(entry.grandparentDir).toLowerCase();
-    const spacedAuthorLower = normalizedRawAuthor.toLowerCase();
-
     const authorMatches =
       !normAuthor ||
-      parentDedup.includes(normAuthor) ||
-      grandparentDedup.includes(normAuthor) ||
-      parentSpaced.includes(spacedAuthorLower) ||
-      grandparentSpaced.includes(spacedAuthorLower) ||
-      pLower.includes(normAuthor) ||
-      pLower.includes(spacedAuthorLower);
+      authorMatchesString(entry.parentDir, normalizedRawAuthor) ||
+      authorMatchesString(entry.grandparentDir, normalizedRawAuthor);
 
-    if (!authorMatches) continue;
+    const authorCheckBase = entry.strippedBaseName || entry.baseName;
+    let filenameAuthorMatches = false;
+    if (authorCheckBase.includes(" - ")) {
+      const parts = authorCheckBase.split(" - ");
+      if (parts.length > 1 && parts[1].trim()) {
+        filenameAuthorMatches = authorMatchesString(parts[1].trim(), normalizedRawAuthor);
+      }
+    }
+
+    if (!authorMatches && !filenameAuthorMatches && normAuthor) continue;
 
     // Check volume compatibility: distinct volumes are never duplicates
     const entryVol = entry.volumeNumber ?? entry.leadingIndex ?? null;

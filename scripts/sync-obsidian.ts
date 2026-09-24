@@ -894,12 +894,21 @@ export function resolveVaultPath(cliVaultPath?: string): string {
   return DEFAULT_VAULT_PATH;
 }
 
+export const LIGHTHOUSE_ROOT =
+  process.env.LIGHTHOUSE_ROOT ||
+  path.resolve((import.meta as { dir?: string }).dir || process.cwd(), "..");
+
 export function getCalibreDbPath(): string {
   if (process.env.CALIBRE_DB_PATH) {
-    return path.resolve(process.env.CALIBRE_DB_PATH);
+    return path.isAbsolute(process.env.CALIBRE_DB_PATH)
+      ? process.env.CALIBRE_DB_PATH
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_DB_PATH);
   }
   if (process.env.CALIBRE_LIBRARY_DIR) {
-    return path.join(path.resolve(process.env.CALIBRE_LIBRARY_DIR), "metadata.db");
+    const libDir = path.isAbsolute(process.env.CALIBRE_LIBRARY_DIR)
+      ? process.env.CALIBRE_LIBRARY_DIR
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_LIBRARY_DIR);
+    return path.join(libDir, "metadata.db");
   }
   const home = process.env.HOME || os.homedir();
   return path.join(home, "Calibre Libraries", "Agent Library", "metadata.db");
