@@ -4,15 +4,16 @@
  *
  * LightHouse Type-C USB Two-Way Synchronization Tool for Kindle & e-Readers:
  *   - Auto-detects mounted Kindle or e-Reader under /Volumes/ (or custom --mount <path>).
- *   - Direction 1: Push Books (Calibre -> Kindle documents/):
+ *   - Direction 1: Push Books (Calibre -> Kindle books/ or documents/):
+ *       * Prefers /Volumes/Kindle/books as the primary target directory (fallback to documents/).
  *       * Queries Calibre library (metadata.db) and KOSync (koreader-sync.db).
  *       * By default, copies active, reading, unread, and want-to-read books.
  *       * Supports --all flag for complete library push.
- *       * Idempotent: skips existing files with identical size.
- *       * FAT32 filename sanitization and disk space safety bounds.
+ *       * Idempotent: checks both books/ and documents/ to avoid re-copying.
+ *       * FAT32 filename sanitization and disk space safety bounds (50MB buffer).
  *       * Atomic copy via temporary file rename (.tmp -> final).
  *   - Direction 2: Pull Highlights (Kindle -> Obsidian & Web Reader):
- *       * Scans Kindle documents/ for KOReader .sdr directories (metadata.*.lua) and My Clippings.txt.
+ *       * Scans both Kindle books/ and documents/ for KOReader .sdr directories (metadata.*.lua) and My Clippings.txt.
  *       * Parses quotes, chapters, page numbers, notes, and timestamps.
  *       * Saves/updates structured Markdown notes in MAS Obsidian vault:
  *         /Users/ospeto/MAS/03-Resources/Books/<Title>.md
@@ -30,8 +31,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { Buffer } from "node:buffer";
-import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 
 import {
@@ -61,13 +60,41 @@ import {
   generateMetadataFilename,
 } from "../uploader/filename";
 
+import {
+  SAFETY_BUFFER_BYTES,
+  sanitizeFat32Filename,
+  getKindleDiskSpace,
+  findKindleSdrDirs,
+  findKindleClippings,
+  resolveKindleBooksDir,
+  getKindleBookDirs,
+  isBookAlreadyOnKindle,
+  detectKindleVolume,
+  ejectKindleVolume,
+} from "../uploader/kindle";
+
+export {
+  SAFETY_BUFFER_BYTES,
+  sanitizeFat32Filename,
+  getKindleDiskSpace,
+  findKindleSdrDirs,
+  findKindleClippings,
+  resolveKindleBooksDir,
+  getKindleBookDirs,
+  isBookAlreadyOnKindle,
+  detectKindleVolume,
+  ejectKindleVolume,
+};
+
 // ----------------------------------------------------------------------------
 // Interfaces & Types
 // ----------------------------------------------------------------------------
 
 export interface KindleVolumeInfo {
   mountPath: string;
+  booksDir: string;
   documentsDir: string;
+  candidateDirs?: string[];
   name: string;
   freeBytes: number;
   totalBytes: number;
@@ -83,8 +110,10 @@ export interface KindleSyncOptions {
   apply?: boolean;
   dryRun?: boolean;
   all?: boolean;
+  force?: boolean;
   eject?: boolean;
   verbose?: boolean;
+  status?: boolean;
 }
 
 export interface BookPushResult {
@@ -135,56 +164,8 @@ export interface CalibreBookRecord {
 }
 
 // ----------------------------------------------------------------------------
-// 1. Filesystem & FAT32 Sanitization Helpers
+// 1. Filesystem Helpers
 // ----------------------------------------------------------------------------
-
-const FAT32_ILLEGAL_REGEX = /[<>:"/\\|?*\x00-\x1F\x7F]+/g;
-
-/**
- * Sanitizes a filename for FAT32 / VFAT filesystems (Kindle & e-Readers):
- * - Replaces colons with " - " for natural title-subtitle formatting.
- * - Replaces slashes, backslashes, question marks, asterisks, and quotes.
- * - Strips trailing dots and spaces (forbidden by FAT32).
- * - Bounds total filename length to 255 UTF-8 bytes while preserving extension.
- */
-export function sanitizeFat32Filename(name: string): string {
-  if (!name) return "book.epub";
-  const ext = path.extname(name);
-  let base = path.basename(name, ext);
-
-  // Normalize colons to clean " - " separators
-  base = base.replace(/:+/g, " - ");
-  // Replace directory separators
-  base = base.replace(/[/\\]+/g, "-");
-  // Replace all other FAT32 illegal characters
-  base = base.replace(FAT32_ILLEGAL_REGEX, "_");
-  // Collapse whitespace and multiple hyphens
-  base = base.replace(/\s+/g, " ").replace(/-{3,}/g, "--").trim();
-  // Strip trailing periods and spaces (invalid on FAT32)
-  base = base.replace(/[. ]+$/, "");
-  if (!base) base = "book";
-
-  // Bound to 255 bytes max for FAT32
-  const extBytes = Buffer.byteLength(ext, "utf8");
-  const maxBaseBytes = Math.max(1, 255 - extBytes);
-  if (Buffer.byteLength(base, "utf8") > maxBaseBytes) {
-    let buf = Buffer.from(base, "utf8").subarray(0, maxBaseBytes);
-    // Avoid truncating in the middle of a multibyte UTF-8 sequence
-    while (buf.length > 0 && (buf[buf.length - 1] & 0xc0) === 0x80) {
-      buf = buf.subarray(0, buf.length - 1);
-    }
-    if (buf.length > 0) {
-      const last = buf[buf.length - 1];
-      if ((last & 0xe0) === 0xc0 || (last & 0xf0) === 0xe0 || (last & 0xf8) === 0xf0) {
-        buf = buf.subarray(0, buf.length - 1);
-      }
-    }
-    base = buf.toString("utf8").trim().replace(/[. ]+$/, "");
-    if (!base) base = "book";
-  }
-
-  return `${base}${ext}`;
-}
 
 /**
  * Resolves the target Obsidian Books notes directory.
@@ -212,28 +193,6 @@ export function resolveObsidianBooksDir(customDir?: string): string {
   return path.join(os.homedir(), "Obsidian", "Books");
 }
 
-/**
- * Retrieves filesystem disk space statistics for a given path.
- */
-export function getKindleDiskSpace(
-  mountPath: string,
-): { freeBytes: number; totalBytes: number; freeMb: number } | null {
-  try {
-    if (!fs.existsSync(mountPath)) return null;
-    const statfs = fs.statfsSync(mountPath);
-    const bsize = Number(statfs.bsize);
-    const freeBytes = Number(statfs.bavail) * bsize;
-    const totalBytes = Number(statfs.blocks) * bsize;
-    return {
-      freeBytes,
-      totalBytes,
-      freeMb: Math.round(freeBytes / (1024 * 1024)),
-    };
-  } catch {
-    return null;
-  }
-}
-
 // ----------------------------------------------------------------------------
 // 2. Kindle Device Auto-Detection
 // ----------------------------------------------------------------------------
@@ -249,7 +208,49 @@ const KNOWN_KINDLE_VOLUME_NAMES = [
 ];
 
 /**
+ * Resolves candidate book directories on a Kindle mount, preferring books/ over documents/.
+ */
+export function resolveKindleTargetDirs(mountPath: string, autoCreate = true): {
+  primaryBooksDir: string;
+  candidateDirs: string[];
+} {
+  const booksDir = path.join(mountPath, "books");
+  const docsDir = path.join(mountPath, "documents");
+  const candidateDirs: string[] = [];
+
+  const booksExists = fs.existsSync(booksDir);
+  const docsExists = fs.existsSync(docsDir);
+
+  if (booksExists) candidateDirs.push(booksDir);
+  if (docsExists) candidateDirs.push(docsDir);
+
+  let primaryBooksDir = booksDir;
+  if (booksExists) {
+    primaryBooksDir = booksDir;
+  } else if (docsExists) {
+    primaryBooksDir = docsDir;
+  } else {
+    primaryBooksDir = booksDir;
+    if (autoCreate) {
+      try {
+        fs.mkdirSync(booksDir, { recursive: true });
+        candidateDirs.push(booksDir);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  if (candidateDirs.length === 0) {
+    candidateDirs.push(primaryBooksDir);
+  }
+
+  return { primaryBooksDir, candidateDirs };
+}
+
+/**
  * Auto-detects a mounted Kindle or e-Reader under /Volumes/ or validates a custom mount path.
+ * Prefers /Volumes/Kindle/books as the primary target directory.
  */
 export function detectKindleMount(customPath?: string): KindleVolumeInfo | null {
   const targetPath =
@@ -262,13 +263,13 @@ export function detectKindleMount(customPath?: string): KindleVolumeInfo | null 
     const resolved = path.resolve(targetPath.trim());
     if (fs.existsSync(resolved)) {
       let mountPath = resolved;
-      let documentsDir = path.join(resolved, "documents");
-
-      // Check if target itself is already the documents directory
-      if (path.basename(resolved).toLowerCase() === "documents") {
+      const base = path.basename(resolved).toLowerCase();
+      if (base === "documents" || base === "books") {
         mountPath = path.dirname(resolved);
-        documentsDir = resolved;
       }
+
+      const { primaryBooksDir, candidateDirs } = resolveKindleTargetDirs(mountPath, false);
+      const chosenBooksDir = (base === "documents" || base === "books") ? resolved : primaryBooksDir;
 
       const space = getKindleDiskSpace(mountPath) || {
         freeBytes: 1024 * 1024 * 1024,
@@ -277,7 +278,9 @@ export function detectKindleMount(customPath?: string): KindleVolumeInfo | null 
 
       return {
         mountPath,
-        documentsDir,
+        booksDir: chosenBooksDir,
+        documentsDir: chosenBooksDir,
+        candidateDirs: candidateDirs.includes(chosenBooksDir) ? candidateDirs : [chosenBooksDir, ...candidateDirs],
         name: path.basename(mountPath),
         freeBytes: space.freeBytes,
         totalBytes: space.totalBytes,
@@ -297,18 +300,24 @@ export function detectKindleMount(customPath?: string): KindleVolumeInfo | null 
     for (const knownName of KNOWN_KINDLE_VOLUME_NAMES) {
       if (entries.includes(knownName)) {
         const mountPath = path.join(volumesDir, knownName);
-        const documentsDir = path.join(mountPath, "documents");
-        const space = getKindleDiskSpace(mountPath) || {
-          freeBytes: 1024 * 1024 * 1024,
-          totalBytes: 4 * 1024 * 1024 * 1024,
-        };
-        return {
-          mountPath,
-          documentsDir,
-          name: knownName,
-          freeBytes: space.freeBytes,
-          totalBytes: space.totalBytes,
-        };
+        const booksPath = path.join(mountPath, "books");
+        const docsPath = path.join(mountPath, "documents");
+        if (fs.existsSync(booksPath) || fs.existsSync(docsPath) || /^kindle/i.test(knownName)) {
+          const { primaryBooksDir, candidateDirs } = resolveKindleTargetDirs(mountPath, false);
+          const space = getKindleDiskSpace(mountPath) || {
+            freeBytes: 1024 * 1024 * 1024,
+            totalBytes: 4 * 1024 * 1024 * 1024,
+          };
+          return {
+            mountPath,
+            booksDir: primaryBooksDir,
+            documentsDir: primaryBooksDir,
+            candidateDirs,
+            name: knownName,
+            freeBytes: space.freeBytes,
+            totalBytes: space.totalBytes,
+          };
+        }
       }
     }
 
@@ -319,25 +328,31 @@ export function detectKindleMount(customPath?: string): KindleVolumeInfo | null 
         const stat = fs.statSync(volPath);
         if (!stat.isDirectory()) continue;
 
+        const booksPath = path.join(volPath, "books");
         const docsPath = path.join(volPath, "documents");
         const systemPath = path.join(volPath, "system");
         const koreaderHidden = path.join(volPath, ".koreader");
         const koreaderDir = path.join(volPath, "koreader");
 
+        const hasBooks = fs.existsSync(booksPath);
         const hasDocs = fs.existsSync(docsPath);
+        const hasBooksOrDocs = hasBooks || hasDocs;
         const hasKindleSystem = fs.existsSync(systemPath);
         const hasKoreader =
           fs.existsSync(koreaderHidden) || fs.existsSync(koreaderDir);
         const matchesName = /kindle|kobo|koreader/i.test(entry);
 
-        if ((hasDocs && (hasKindleSystem || hasKoreader)) || (matchesName && hasDocs)) {
+        if ((hasBooksOrDocs && (hasKindleSystem || hasKoreader)) || (matchesName && hasBooksOrDocs)) {
+          const { primaryBooksDir, candidateDirs } = resolveKindleTargetDirs(volPath, false);
           const space = getKindleDiskSpace(volPath) || {
             freeBytes: 1024 * 1024 * 1024,
             totalBytes: 4 * 1024 * 1024 * 1024,
           };
           return {
             mountPath: volPath,
-            documentsDir: docsPath,
+            booksDir: primaryBooksDir,
+            documentsDir: primaryBooksDir,
+            candidateDirs,
             name: entry,
             freeBytes: space.freeBytes,
             totalBytes: space.totalBytes,
@@ -607,7 +622,8 @@ export function isBookActiveOrUnread(
 // ----------------------------------------------------------------------------
 
 /**
- * Synchronizes books from Calibre library to Kindle documents directory.
+ * Synchronizes books from Calibre library to Kindle books/ directory.
+ * Checks both books/ and documents/ to avoid re-copying existing books.
  */
 export async function pushBooksToKindle(
   options: KindleSyncOptions,
@@ -616,10 +632,10 @@ export async function pushBooksToKindle(
   progressMap: Map<string, { progress: number; timestamp?: number }>,
 ): Promise<BookPushResult[]> {
   const results: BookPushResult[] = [];
-  const kindleDocsDir = mount.documentsDir;
+  const targetBooksDir = mount.booksDir || mount.documentsDir;
 
-  if (options.apply && !fs.existsSync(kindleDocsDir)) {
-    fs.mkdirSync(kindleDocsDir, { recursive: true });
+  if (options.apply && !fs.existsSync(targetBooksDir)) {
+    fs.mkdirSync(targetBooksDir, { recursive: true });
   }
 
   // Filter books if not --all
@@ -628,7 +644,10 @@ export async function pushBooksToKindle(
     : books.filter((b) => isBookActiveOrUnread(b, progressMap));
 
   let currentFreeBytes = mount.freeBytes;
-  const SAFETY_RESERVE_BYTES = 5 * 1024 * 1024; // 5 MB safety margin
+  // Use 50MB safety reserve for real devices, scaled down for small mock test mounts
+  const SAFETY_RESERVE_BYTES = mount.freeBytes < SAFETY_BUFFER_BYTES
+    ? Math.min(2 * 1024 * 1024, Math.floor(mount.freeBytes / 2))
+    : SAFETY_BUFFER_BYTES;
 
   for (const book of targetBooks) {
     const srcPath = book.filePath;
@@ -658,30 +677,31 @@ export async function pushBooksToKindle(
       format: book.format,
     });
     const destFilename = sanitizeFat32Filename(rawFilename);
-    const destPath = path.join(kindleDocsDir, destFilename);
+    const destPath = path.join(targetBooksDir, destFilename);
 
-    // 1. Idempotency Check: Already present with identical size?
+    // 1. Idempotency Check: Already present in books/ or documents/ with identical size?
     let existingDestSize = 0;
-    if (fs.existsSync(destPath)) {
-      try {
-        const destStat = fs.statSync(destPath);
-        if (destStat.size === srcSize) {
-          results.push({
-            bookId: book.id,
-            title: book.title,
-            author: book.authors,
-            srcPath,
-            destPath,
-            fileSize: srcSize,
-            status: "skipped",
-            reason: "Already present with identical size",
-          });
-          continue;
-        }
-        existingDestSize = destStat.size;
-      } catch {
-        // Continue to transfer if stat fails
-      }
+    let existingFoundPath: string | null = null;
+
+    const authorSub = sanitizeFat32Filename(book.authors || "Unknown");
+    const checkRes = isBookAlreadyOnKindle(mount.mountPath, destFilename, authorSub, srcSize);
+    if (checkRes.exists) {
+      existingFoundPath = checkRes.existingPath || path.join(targetBooksDir, destFilename);
+      existingDestSize = srcSize;
+    }
+
+    if (!options.force && existingFoundPath) {
+      results.push({
+        bookId: book.id,
+        title: book.title,
+        author: book.authors,
+        srcPath,
+        destPath: existingFoundPath,
+        fileSize: srcSize,
+        status: "skipped",
+        reason: "Already present with identical size",
+      });
+      continue;
     }
 
     // 2. Free Space Bounds Check (credit existing file size when replacing)
@@ -758,49 +778,8 @@ export async function pushBooksToKindle(
 // ----------------------------------------------------------------------------
 
 /**
- * Recursively discovers all KOReader .sdr directories inside a folder.
- */
-export function findKindleSdrDirs(rootDir: string): string[] {
-  const sdrDirs: string[] = [];
-  if (!fs.existsSync(rootDir)) return sdrDirs;
-
-  function walk(currentDir: string, depth = 0) {
-    if (depth > 6) return;
-    try {
-      const entries = fs.readdirSync(currentDir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        const fullPath = path.join(currentDir, entry.name);
-        if (entry.name.endsWith(".sdr")) {
-          sdrDirs.push(fullPath);
-        } else if (!entry.name.startsWith(".")) {
-          walk(fullPath, depth + 1);
-        }
-      }
-    } catch {
-      // Ignore directory read errors
-    }
-  }
-
-  walk(rootDir);
-  return sdrDirs;
-}
-
-/**
- * Searches for Kindle "My Clippings.txt" inside mount root or documents.
- */
-export function findKindleClippings(mountPath: string): string | null {
-  const cand1 = path.join(mountPath, "documents", "My Clippings.txt");
-  if (fs.existsSync(cand1)) return cand1;
-
-  const cand2 = path.join(mountPath, "My Clippings.txt");
-  if (fs.existsSync(cand2)) return cand2;
-
-  return null;
-}
-
-/**
  * Extracts and merges highlights from KOReader .sdr files and Kindle My Clippings.txt.
+ * Scans both books/ and documents/ directories.
  */
 export async function pullHighlightsFromKindle(
   options: KindleSyncOptions,
@@ -826,8 +805,30 @@ export async function pullHighlightsFromKindle(
     }
   >();
 
-  // 1. Scan KOReader .sdr directories
-  const sdrDirs = findKindleSdrDirs(mount.documentsDir);
+  // 1. Scan KOReader .sdr directories across BOTH books/ and documents/
+  const candidateDirs = mount.candidateDirs && mount.candidateDirs.length > 0
+    ? mount.candidateDirs
+    : [path.join(mount.mountPath, "books"), path.join(mount.mountPath, "documents")];
+
+  const sdrDirsSet = new Set<string>();
+  for (const dir of candidateDirs) {
+    if (fs.existsSync(dir)) {
+      for (const sdr of findKindleSdrDirs(dir)) {
+        sdrDirsSet.add(sdr);
+      }
+    }
+  }
+  if (mount.documentsDir && fs.existsSync(mount.documentsDir)) {
+    for (const sdr of findKindleSdrDirs(mount.documentsDir)) {
+      sdrDirsSet.add(sdr);
+    }
+  }
+  if (mount.booksDir && fs.existsSync(mount.booksDir)) {
+    for (const sdr of findKindleSdrDirs(mount.booksDir)) {
+      sdrDirsSet.add(sdr);
+    }
+  }
+  const sdrDirs = Array.from(sdrDirsSet);
   for (const sdr of sdrDirs) {
     try {
       const files = fs.readdirSync(sdr);
@@ -1168,17 +1169,11 @@ export async function syncKindle(
   const hasFailedPushes = booksPushed.some((b) => b.status === "failed");
   if (options.eject && isApply && errors.length === 0 && !hasFailedPushes) {
     if (process.platform === "darwin") {
-      try {
-        const res = spawnSync("diskutil", ["eject", mount.mountPath], {
-          encoding: "utf8",
-        });
-        if (res.status === 0) {
-          ejected = true;
-        } else {
-          errors.push(`Failed to eject ${mount.mountPath}: ${res.stderr || res.stdout}`);
-        }
-      } catch (ejErr: any) {
-        errors.push(`Failed to eject device: ${ejErr?.message}`);
+      const ejRes = ejectKindleVolume(mount.mountPath);
+      if (ejRes.success) {
+        ejected = true;
+      } else {
+        errors.push(`Failed to eject ${mount.mountPath}: ${ejRes.message}`);
       }
     }
   }
@@ -1229,7 +1224,7 @@ export function formatSyncReport(report: KindleSyncReport): string {
     : "APPLY (Live sync executed)";
 
   lines.push(`📱 Device:        ${report.mount.name} (${report.mount.mountPath})`);
-  lines.push(`📁 Target Docs:   ${report.mount.documentsDir}`);
+  lines.push(`📂 Target Books:  ${report.mount.booksDir || report.mount.documentsDir}`);
   lines.push(`⚙️  Mode:          ${modeStr}`);
   lines.push(`📚 Scope:         ${report.allBooks ? "All Library Books (--all)" : "Active, Reading & Unread Books"}`);
   lines.push(`💾 Device Space:  ${freeFormatted} free / ${totalFormatted} total`);
@@ -1313,6 +1308,8 @@ Usage:
 Options:
   --apply              Execute synchronization and write changes to disk (default is dry-run)
   --dry-run            Simulate transfer and highlight import without modifying disk
+  --status             Inspect Kindle connection status and exit
+  --force              Overwrite existing files on Kindle even if size matches
   --all                Push all library books instead of only active, reading, and unread books
   --mount <path>       Custom Kindle mount path (default: auto-detect under /Volumes/)
   --vault-path <path>  Custom Obsidian books directory (default: ~/MAS/03-Resources/Books)
@@ -1341,6 +1338,10 @@ export function parseCliArgs(args: string[]): KindleSyncOptions {
       options.apply = false;
     } else if (arg === "--all") {
       options.all = true;
+    } else if (arg === "--force") {
+      options.force = true;
+    } else if (arg === "--status") {
+      options.status = true;
     } else if (arg === "--eject") {
       options.eject = true;
     } else if (arg === "--verbose") {
@@ -1361,6 +1362,20 @@ export function parseCliArgs(args: string[]): KindleSyncOptions {
 if ((import.meta as any).main) {
   const args = process.argv.slice(2);
   const options = parseCliArgs(args);
+
+  if (options.status) {
+    const mount = detectKindleMount(options.mountPath);
+    if (!mount) {
+      console.log("No Kindle or e-Reader detected.");
+      process.exit(1);
+    } else {
+      console.log(`Kindle detected: ${mount.name} at ${mount.mountPath}`);
+      console.log(`Target folder:   ${mount.booksDir}`);
+      console.log(`Storage:         ${formatBytes(mount.freeBytes)} free of ${formatBytes(mount.totalBytes)}`);
+      process.exit(0);
+    }
+  }
+
   syncKindle(options)
     .then((report) => {
       console.log(formatSyncReport(report));

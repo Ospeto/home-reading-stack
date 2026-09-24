@@ -66,6 +66,13 @@ import {
   deleteHighlightsForBook,
   cleanQuoteText,
 } from "./highlights";
+import {
+  getKindleStatus,
+  getKindleProgress,
+  syncAllBooksToKindle,
+  syncSingleBookToKindle,
+  ejectKindleVolume,
+} from "./kindle";
 
 declare const Bun: any;
 
@@ -3883,6 +3890,121 @@ export async function handleRequest(
           corsOrigin,
         );
       }
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Kindle USB Status & Live Progress
+  if (url.pathname === "/api/kindle/status" && req.method === "GET") {
+    try {
+      const status = getKindleStatus();
+      return jsonResponse(status, 200, corsOrigin);
+    } catch (err: any) {
+      return jsonResponse(
+        { detected: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Kindle Live Progress
+  if (url.pathname === "/api/kindle/progress" && req.method === "GET") {
+    try {
+      const progress = getKindleProgress();
+      const status = getKindleStatus();
+      return jsonResponse({ progress, status }, 200, corsOrigin);
+    } catch (err: any) {
+      return jsonResponse(
+        { progress: null, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Kindle Bulk Sync
+  if (url.pathname === "/api/kindle/sync" && req.method === "POST") {
+    try {
+      let body: Record<string, unknown> = {};
+      try {
+        body = (await req.json()) as Record<string, unknown>;
+      } catch {
+        // Fall back to empty options if JSON body was omitted
+      }
+      const results = await syncAllBooksToKindle({
+        forceAll: Boolean(body?.forceAll),
+        subfolderByAuthor: body?.subfolderByAuthor !== false,
+      });
+      const isOk = results.success || results.transferred > 0 || results.highlightsPulled > 0 || results.alreadySynced > 0;
+      return jsonResponse(
+        { success: isOk, results },
+        isOk ? 200 : 500,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Kindle Eject Device
+  if (url.pathname === "/api/kindle/eject" && req.method === "POST") {
+    try {
+      const ejectRes = ejectKindleVolume();
+      return jsonResponse(
+        ejectRes,
+        ejectRes.success ? 200 : 500,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, message: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Single Book Send to Kindle
+  if (
+    url.pathname.startsWith("/api/books/") &&
+    url.pathname.endsWith("/send-kindle") &&
+    req.method === "POST"
+  ) {
+    try {
+      const parts = url.pathname.split("/");
+      const bookId = validateIntegerId(parts[3]);
+      if (!bookId) {
+        return jsonResponse(
+          { success: false, error: "Invalid book ID" },
+          400,
+          corsOrigin,
+        );
+      }
+      let body: Record<string, unknown> = {};
+      try {
+        body = (await req.json()) as Record<string, unknown>;
+      } catch {
+        // Fall back to empty options if JSON body was omitted
+      }
+      const res = syncSingleBookToKindle(bookId, {
+        forceAll: Boolean(body?.forceAll),
+        subfolderByAuthor: body?.subfolderByAuthor !== false,
+      });
+      return jsonResponse(
+        res,
+        res.success ? 200 : 400,
+        corsOrigin,
+      );
     } catch (err: any) {
       return jsonResponse(
         { success: false, error: sanitizeErrorMessage(err) },

@@ -108,7 +108,7 @@ LightHouse includes a portable management CLI (`bin/lighthouse`) for service lif
 | `bin/lighthouse health` | Probes HTTP/TCP endpoints, checks response codes, and auto-heals stale remote listeners (`fuser -k`). |
 | `bin/lighthouse categorize` | Classifies book languages (`mya`, `eng`, `other`), assigns standardized category tags, and prunes promotional tags. |
 | `bin/lighthouse enrich-synopsis` | Populates descriptions for Calibre books prioritizing per-volume lookups (EPUB metadata, online volume queries) with AniList series fallback and duplicate series overview re-enrichment. |
-| `bin/lighthouse sync-kindle` | Two-way USB-C sync: pushes active/unread books from Calibre to Kindle and pulls clippings & KOReader highlights to Obsidian. |
+| `bin/lighthouse sync-kindle` | Two-way USB-C sync: pushes active/unread books from Calibre to Kindle (/Volumes/Kindle/books) and pulls clippings & KOReader highlights to Obsidian. |
 | `bin/lighthouse sync-obsidian` | Syncs highlights, notes, and progress from KOReader/Kindle to Obsidian with idempotent markers. |
 | `bin/lighthouse install-daemons` | Dynamically generates and registers macOS LaunchAgents for the current user and repository root. |
 | `bin/lighthouse backup` | Flushes SQLite WAL frames and creates an atomic snapshot bundle with SHA-256 checksum and manifest. |
@@ -156,6 +156,12 @@ bin/lighthouse sync-obsidian --apply
 
 # Watch Calibre library and KOSync DB for continuous live Obsidian sync
 bin/lighthouse sync-obsidian --apply --watch
+
+# Inspect USB-C Kindle connection status and storage metrics
+bin/lighthouse sync-kindle --status
+
+# Force re-transfer of books to Kindle even if file size matches
+bin/lighthouse sync-kindle --apply --force
 
 # Dynamically generate and register macOS LaunchAgents for the current user
 bin/lighthouse install-daemons
@@ -322,10 +328,23 @@ LightHouse bridges your reading devices (KOReader on Kobo/Kindle/Android, native
 3. **Four Seamless Synchronization Pathways:**
    - **Native KOReader Joplin Clipper Exporter (`POST /notes`, `PUT /notes/:id`):** One-tap wireless sync built directly into KOReader. The plugin is plain HTTP-only. Point it at LAN `http://192.168.31.15:8086` (primary) and the private `JOPLIN_TOKEN` from `.env`. Optional WAN is plain HTTP port `80` on `opds.wavypremium.xyz`; `?token=` is cleartext and lands in proxy access logs. Do not publish the token. The server implements native Joplin Clipper HTTP compatibility (`/ping`, `/folders`, `/notes`), writes structured Markdown notes with block-style YAML tags to `<vault>/Books/<Title>.md`, and merges highlights idempotently. Unset tokens fail closed.
    - **Wireless Over-The-Air Ingest (`POST /api/highlights/sync`):** Configure KOReader's bundled **Export highlights** plugin to send JSON/Markdown exports directly to `http://192.168.31.15:8086/api/highlights/sync` on LAN or `https://reading-sg.wavypremium.xyz:8443/api/highlights/sync` on WAN.
-   - **Type-C Kindle USB Two-Way Sync (`bin/lighthouse sync-kindle`):** Two-way USB-C sync between Calibre, Kindle, and Obsidian. Auto-detects Kindle or e-Reader under `/Volumes/`, pushes active/reading/unread books from Calibre into `documents/` with FAT32 filename sanitization and free space bounds, and pulls clippings & KOReader `.sdr` highlights into the MAS Obsidian vault (`/Users/ospeto/MAS/03-Resources/Books/<Title>.md`) and indexes them into `cache.db` (`book_highlights`). Supports `--apply`, `--dry-run`, `--all`, and `--eject`.
+   - **Type-C Kindle USB Two-Way Sync (`bin/lighthouse sync-kindle`):** Two-way USB-C sync between Calibre, Kindle, and Obsidian. Auto-detects Kindle or e-Reader under `/Volumes/`, pushes active/reading/unread books from Calibre into `books/` (fallback to `documents/`) with FAT32 filename sanitization and 50MB free-space safety bounds, checking existing files across both directories to avoid re-copying, and pulls clippings & KOReader `.sdr` highlights into the MAS Obsidian vault (`/Users/ospeto/MAS/03-Resources/Books/<Title>.md`) and indexes them into `cache.db` (`book_highlights`). Supports `--apply`, `--dry-run`, `--all`, and `--eject`.
    - **CLI Batch & Continuous Watch (`bin/lighthouse sync-obsidian`):** Auto-discovers connected Kindle / KOReader storage mounts (`/Volumes/*/`) and sidecar `.sdr` folders (`metadata.epub.lua`), merging with live KOSync databases. Pass `--watch` for continuous auto-syncing.
 
-4. **LightHouse Web Highlights & Quotes Viewer:**
+4. **USB-C Kindle Bulk Sync Workflow:**
+   - **Automatic Local Mount Detection:** Automatically discovers connected Kindle e-readers mounted at `/Volumes/Kindle`, `/Volumes/KINDLE`, or any `/Volumes/*` volume containing a `books` or `documents` folder (preferring `books/`).
+   - **Incremental File Synchronization:** Compares all Calibre library books against existing files across both `books/` and `documents/` (or `<Author>/`). Files matching by byte size are skipped, transferring only new or updated books.
+   - **FAT32 Filename Sanitization:** Enforces strictly valid FAT32 filenames, stripping illegal characters (`: * ? " < > | \ /`), trimming whitespace, and bounding lengths safely without filename collisions.
+   - **Capacity Safety Buffer:** Verifies free disk space with a mandatory 50MB safety buffer before copying.
+   - **Web UI & REST Endpoints:**
+     - Auto-prompt pop-up banner when Kindle is detected over USB (`GET /api/kindle/status`).
+     - Header status pill (`#kindleStatusBtn`) indicates connection status and free space.
+     - Apple Fluid modal (`#kindleModal`) provides one-click "Sync to Kindle" with live real-time progress bar, status text (count and bytes), and safe ejection.
+     - Individual book modal includes contextual "Send to Kindle" for fast single-title transfers.
+     - `GET /api/kindle/status`, `POST /api/kindle/sync`, `POST /api/kindle/eject`, and `POST /api/books/:id/send-kindle`.
+   - **Unified CLI Command (`bin/lighthouse sync-kindle`):** Two-way synchronization: push books, pull highlights to Obsidian & cache.db, check status, or safely eject (`--eject`) directly from terminal.
+
+5. **LightHouse Web Highlights & Quotes Viewer:**
    - **In-Browser Quotes & Notes Browsing:** Synced book highlights and annotations are indexed into `cache.db` (`book_highlights` table) and accessible directly on the LightHouse web reader (`uploader/index.html`).
    - **Book Details Modal (`#bookDetailModal`):** Dedicated `✦ Highlights` tab renders elegant Apple Fluid translucent cards (`backdrop-filter: blur(20px) saturate(180%)`) with amber accent bars, chapter badges, page numbers, timestamps, notes, and a one-click copy button with tactile checkmark feedback.
    - **Book Cards & Desktop Hover Wing Panel (`.card-popup`):** Books with highlights display a subtle indicator badge (`✦ 12`) on the cover and quote preview snippets in the desktop hover popover.

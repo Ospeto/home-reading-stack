@@ -101,7 +101,6 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(res.stdout).toContain("--vault-path");
       expect(res.stdout).toContain("--eject");
     });
-
     it("bin/lighthouse version outputs current version", () => {
       const res = spawnSync(LIGHTHOUSE_BIN, ["version"], {
         encoding: "utf8",

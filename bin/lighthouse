@@ -1485,7 +1485,6 @@ cmd_sync_kindle() {
   fi
   exec bun run "$script_path" "$@"
 }
-
 # ------------------------------------------------------------------------------
 # 10. Command: help
 # ------------------------------------------------------------------------------
@@ -1535,12 +1534,13 @@ Sync-Obsidian Options:
 Sync-Kindle Options:
   --apply                  Execute transfer and highlight import (default is dry-run)
   --dry-run                Preview synchronization without modifying Kindle or Obsidian
+  --status                 Inspect Kindle connection status and exit
   --all                    Push all library books instead of only active/unread books
+  --force                  Overwrite existing books on Kindle
   --mount <path>           Custom Kindle mount path (default: auto-detect under /Volumes/)
   --vault-path <path>      Custom Obsidian books directory (default: ~/MAS/03-Resources/Books)
   --eject                  Safely unmount/eject Kindle upon successful sync
   --verbose                Enable detailed progress logging
-
 Backup Options:
   --output, -o <path>      Explicit archive file path
   --output-dir <dir>       Directory to store backup bundle (default: ${BACKUP_DIR})
