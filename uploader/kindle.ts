@@ -824,28 +824,39 @@ export function authorMatchesString(sourceStr: string, targetAuthor: string): bo
   const tSorted = tNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
   if (sSorted === tSorted) return true;
 
+  // Split on multi-author delimiters (&, and, ;, /, |) while preserving "Last, First" single-author comma structure
+  const splitRegex = /(?:\s*(?:&|\band\b|;|\/|\|)\s*)/i;
   const sourceAuthors = sRaw
     .replace(/[\(\[]\s*(?:author|artist|illustrator|writer|story|art|translator|editor)\s*[\)\]]/gi, " ")
-    .split(/(?:\s*(?:&|\band\b|;|\/|\|)\s*|,\s*(?=[A-Z\u00A0-\uFFFFa-z]))/i)
+    .split(splitRegex)
     .map((a) => normalizeTitleForDedup(a))
     .filter(Boolean);
 
   const targetAuthors = tRaw
     .replace(/[\(\[]\s*(?:author|artist|illustrator|writer|story|art|translator|editor)\s*[\)\]]/gi, " ")
-    .split(/(?:\s*(?:&|\band\b|;|\/|\|)\s*|,\s*(?=[A-Z\u00A0-\uFFFFa-z]))/i)
+    .split(splitRegex)
     .map((a) => normalizeTitleForDedup(a))
     .filter(Boolean);
 
   for (const sA of sourceAuthors) {
+    const sANorm = normalizeTitleForDedup(sA);
+    const sASorted = sANorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
     for (const tA of targetAuthors) {
-      if (sA === tA) return true;
-      const sASorted = sA.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
-      const tASorted = tA.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
-      if (sASorted === tASorted) return true;
+      const tANorm = normalizeTitleForDedup(tA);
+      const tASorted = tANorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
+      if (sANorm === tANorm || sASorted === tASorted) return true;
     }
   }
 
   return false;
+}
+
+/**
+ * Checks if a title is a generic chapter or section title that requires strict author verification.
+ */
+export function isGenericSectionTitle(title: string): boolean {
+  const norm = normalizeTitleForDedup(title);
+  return /^(introduction|prologue|preface|epilogue|interlude|afterword|foreword|index|appendix|chapter\s*\d+|part\s*\d+|love|home)$/i.test(norm);
 }
 
 /**
@@ -916,12 +927,15 @@ export function isBookAlreadyOnKindle(
 
     const flatPath = path.join(baseDir, targetFilename);
     if (fs.existsSync(flatPath)) {
-      try {
-        const st = fs.statSync(flatPath);
-        if (fileSize <= 0 || st.size === fileSize || Math.abs(st.size - fileSize) <= 4096) {
-          return { exists: true, existingPath: flatPath, matchedBy: "direct_flat_path" };
-        }
-      } catch {}
+      const isGeneric = isGenericSectionTitle(bookDetails?.title || targetBase);
+      if (!isGeneric || !authorDir) {
+        try {
+          const st = fs.statSync(flatPath);
+          if (fileSize <= 0 || st.size === fileSize || Math.abs(st.size - fileSize) <= 4096) {
+            return { exists: true, existingPath: flatPath, matchedBy: "direct_flat_path" };
+          }
+        } catch {}
+      }
     }
   }
 
@@ -1032,9 +1046,10 @@ export function isBookAlreadyOnKindle(
   const byName = idx.byFilename.get(targetNameLower);
   if (byName && byName.length > 0) {
     for (const entry of byName) {
-      if (volumesCompatible(entry)) {
-        return { exists: true, existingPath: entry.filePath, matchedBy: "exact_filename" };
-      }
+      if (!volumesCompatible(entry)) continue;
+      const isGeneric = isGenericSectionTitle(rawTitle);
+      if (isGeneric && !authorMatchesEntry(entry, { strict: true })) continue;
+      return { exists: true, existingPath: entry.filePath, matchedBy: "exact_filename" };
     }
   }
 
@@ -1044,7 +1059,8 @@ export function isBookAlreadyOnKindle(
     if (byBase && byBase.length > 0) {
       for (const entry of byBase) {
         const isStrippedMatch = entry.strippedBaseName === targetBase && entry.baseName !== targetBase;
-        const requireStrict = isStrippedMatch;
+        const isGeneric = isGenericSectionTitle(rawTitle);
+        const requireStrict = isStrippedMatch || isGeneric;
         if (requireStrict && !authorMatchesEntry(entry, { strict: true })) {
           continue;
         }
@@ -1070,7 +1086,8 @@ export function isBookAlreadyOnKindle(
     if (byNorm && byNorm.length > 0) {
       for (const entry of byNorm) {
         const isStripped = entry.strippedNormalizedTitle === t && entry.normalizedTitle !== t;
-        const requireStrict = isStripped;
+        const isGeneric = isGenericSectionTitle(rawTitle);
+        const requireStrict = isStripped || isGeneric;
         const matchesAuthor = requireStrict
           ? authorMatchesEntry(entry, { strict: true })
           : authorMatchesEntry(entry);
@@ -1100,7 +1117,8 @@ export function isBookAlreadyOnKindle(
     if (byClean && byClean.length > 0) {
       for (const entry of byClean) {
         const isStripped = entry.strippedCleanQueryTitle === cq && entry.cleanQueryTitle !== cq;
-        const requireStrict = isStripped;
+        const isGeneric = isGenericSectionTitle(rawTitle);
+        const requireStrict = isStripped || isGeneric;
         const matchesAuthor = requireStrict
           ? authorMatchesEntry(entry, { strict: true })
           : authorMatchesEntry(entry);
@@ -1158,17 +1176,16 @@ export function isBookAlreadyOnKindle(
   if (fileSize > 0) {
     const bySizeEntries = idx.bySize.get(fileSize);
     if (bySizeEntries && bySizeEntries.length > 0) {
-      const checkWords = (normTitle + " " + normAuthor)
-        .split(/\s+/)
-        .filter((w) => w.length >= 4 && !/^(book|read|epub|mobi|file|part|vol|volume)$/.test(w));
-      // Must have at least one strong word to match on file size
-      if (checkWords.length > 0) {
-        for (const entry of bySizeEntries) {
-          if (!volumesCompatible(entry)) continue;
-          const pathLower = entry.filePath.toLowerCase();
-          if (checkWords.some((w) => pathLower.includes(w))) {
-            return { exists: true, existingPath: entry.filePath, matchedBy: "filesize_and_token" };
-          }
+      for (const entry of bySizeEntries) {
+        if (!volumesCompatible(entry)) continue;
+        if (!authorMatchesEntry(entry)) continue;
+        const baseForTokens = entry.strippedBaseName || entry.baseName;
+        const titlePortion = baseForTokens.includes(" - ") ? baseForTokens.split(" - ")[0] : baseForTokens;
+        const checkWords = normTitle
+          .split(/\s+/)
+          .filter((w) => w.length >= 4 && !/^(book|read|epub|mobi|file|part|vol|volume)$/.test(w));
+        if (checkWords.length > 0 && checkWords.some((w) => titlePortion.includes(w))) {
+          return { exists: true, existingPath: entry.filePath, matchedBy: "filesize_and_token" };
         }
       }
     }

@@ -1640,6 +1640,84 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
         { title: "White Sand", authors: "Brandon Sanderson, Isaac Stewart" },
       );
       expect(matchComma.exists).toBe(true);
+
+      // Calibre Last, First multi-author order: "Sanderson, Brandon & Stewart, Isaac"
+      const matchLastFirst = isBookAlreadyOnKindle(
+        kindleMount,
+        "White Sand.epub",
+        "Sanderson, Brandon & Stewart, Isaac",
+        0,
+        index,
+        { title: "White Sand", authors: "Sanderson, Brandon & Stewart, Isaac" },
+      );
+      expect(matchLastFirst.exists).toBe(true);
+    });
+
+    it("Strategy G filesize_and_token enforces strict author verification with non-zero fileSize", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorDir = path.join(kindleMount, "books", "Fred Greenwood");
+      fs.mkdirSync(authorDir, { recursive: true });
+
+      const targetPath = path.join(authorDir, "01 - Unique Novel.epub");
+      fs.writeFileSync(targetPath, "A".repeat(54321), "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate with identical fileSize but wrong author "Ed Green" must NOT match via Strategy G
+      const matchWrongAuthor = isBookAlreadyOnKindle(
+        kindleMount,
+        "Unique Novel Edition.epub",
+        "Ed Green",
+        54321,
+        index,
+        { title: "Unique Novel Edition", authors: "Ed Green" },
+      );
+      expect(matchWrongAuthor.exists).toBe(false);
+
+      // Candidate with identical fileSize and correct author "Fred Greenwood" matches cleanly via Strategy G
+      const matchCorrect = isBookAlreadyOnKindle(
+        kindleMount,
+        "Unique Novel Edition.epub",
+        "Fred Greenwood",
+        54321,
+        index,
+        { title: "Unique Novel Edition", authors: "Fred Greenwood" },
+      );
+      expect(matchCorrect.exists).toBe(true);
+      expect(matchCorrect.matchedBy).toBe("filesize_and_token");
+    });
+
+    it("protects flat unindexed generic section titles (e.g. books/Introduction.azw3) from cross-author collisions", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      fs.mkdirSync(booksDir, { recursive: true });
+
+      // Unindexed flat format variant: "Introduction.azw3"
+      fs.writeFileSync(path.join(booksDir, "Introduction.azw3"), "intro azw3", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate with Author B must NOT match flat generic section title
+      const crossMatch = isBookAlreadyOnKindle(
+        kindleMount,
+        "Introduction.epub",
+        "Author B",
+        0,
+        index,
+        { title: "Introduction", authors: "Author B" },
+      );
+      expect(crossMatch.exists).toBe(false);
+
+      // Candidate with no author specified matches cleanly
+      const matchNoAuthor = isBookAlreadyOnKindle(
+        kindleMount,
+        "Introduction.epub",
+        "",
+        0,
+        index,
+        { title: "Introduction" },
+      );
+      expect(matchNoAuthor.exists).toBe(true);
     });
   });
 });

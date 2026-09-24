@@ -385,9 +385,15 @@ export function detectKindleMount(customPath?: string): KindleVolumeInfo | null 
 // 3. Calibre Library Query & Book Filtering
 // ----------------------------------------------------------------------------
 
+export const LIGHTHOUSE_ROOT =
+  process.env.LIGHTHOUSE_ROOT ||
+  path.resolve((import.meta as { dir?: string }).dir || process.cwd(), "..");
+
 export function getCalibreLibraryDir(): string {
   if (process.env.CALIBRE_LIBRARY_DIR) {
-    return path.resolve(process.env.CALIBRE_LIBRARY_DIR);
+    return path.isAbsolute(process.env.CALIBRE_LIBRARY_DIR)
+      ? process.env.CALIBRE_LIBRARY_DIR
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_LIBRARY_DIR);
   }
   const home = process.env.HOME || os.homedir();
   return path.join(home, "Calibre Libraries", "Agent Library");
