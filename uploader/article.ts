@@ -8,6 +8,10 @@ import { Buffer } from "node:buffer";
 import { cleanString, isAllowedCoverUrl } from "./scraper";
 import { validateUrlForSSRF, safeFetchWithSsrf } from "./security";
 import {
+  scrapeArticleWithFirecrawl,
+  type ExtractedFirecrawlArticle,
+} from "./firecrawl";
+import {
   evaluateJunkGate,
   moveToQuarantine,
   resolveBookLanguageAndTags,
@@ -575,14 +579,20 @@ export function validateArticleUrl(rawUrl: string): URL {
     throw new Error(`Unsupported URL protocol: ${parsed.protocol}`);
   }
 
-  const host = parsed.hostname.toLowerCase();
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   // Prevent local/internal address SSRF
   if (
     host === "localhost" ||
+    host.endsWith(".localhost") ||
     host === "127.0.0.1" ||
     host === "0.0.0.0" ||
     host === "::1" ||
+    host === "169.254.169.254" ||
+    host === "host.docker.internal" ||
     host.endsWith(".local") ||
+    host.endsWith(".internal") ||
+    host.endsWith(".lan") ||
+    host.endsWith(".home.arpa") ||
     /^10\./.test(host) ||
     /^192\.168\./.test(host) ||
     /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(host)
@@ -1410,6 +1420,125 @@ function extractFromJsonLd(html: string): {
 }
 
 /**
+ * Builds an ExtractedArticle from a Firecrawl scrape result.
+ * Validates against paywall and garbage detection and formats styled document and cover.
+ */
+export async function buildArticleFromFirecrawl(
+  fcArticle: ExtractedFirecrawlArticle,
+  validatedHref: string,
+  hostname: string,
+): Promise<ExtractedArticle | null> {
+  const cleanedBodyMarkdown = cleanMarkdownNoise(fcArticle.markdown);
+  const paywallCheck = isPaywallOrGarbage(cleanedBodyMarkdown);
+  if (paywallCheck.isPaywall) {
+    console.log(
+      `[Article] Firecrawl content failed paywall check (${paywallCheck.reason || "detected paywall"}), falling back...`,
+    );
+    return null;
+  }
+
+  let title = cleanString(fcArticle.title || "");
+  if (!title || title.length < 2) {
+    title = `Article from ${fcArticle.siteName || hostname}`;
+  }
+
+  let author = cleanString(fcArticle.author || "");
+  if (!author || author.toLowerCase() === "unknown" || author.length < 2) {
+    author = fcArticle.siteName || hostname;
+  }
+
+  const siteName = cleanString(fcArticle.siteName || "") || hostname;
+
+  let publishedDate = "";
+  if (fcArticle.publishedDate) {
+    try {
+      const p = new Date(fcArticle.publishedDate);
+      if (isNaN(p.getTime())) {
+        publishedDate = fcArticle.publishedDate.split("T")[0];
+      } else {
+        publishedDate = p.toLocaleDateString("en-US", {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+        });
+      }
+    } catch (_err) {
+      void _err;
+      publishedDate = fcArticle.publishedDate.split("T")[0];
+    }
+  }
+
+  const cleanedHtml = markdownToHtml(cleanedBodyMarkdown);
+  const textOnly = decodeHtmlEntities(
+    cleanedHtml
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim(),
+  );
+  const wordCount = Math.max(1, textOnly.split(/\s+/).filter(Boolean).length);
+  const readTimeMinutes = Math.max(1, Math.ceil(wordCount / 200));
+
+  const styledDocument = buildStyledHtmlDocument({
+    title,
+    author,
+    siteName,
+    url: validatedHref,
+    publishedDate,
+    readTimeMinutes,
+    wordCount,
+    contentHtml: cleanedHtml,
+  });
+
+  const coverImageUrl = fcArticle.leadImageUrl;
+  let coverImagePath: string | undefined;
+
+  if (coverImageUrl) {
+    try {
+      const downloadedPath = await downloadCoverImage(
+        coverImageUrl,
+        validatedHref,
+      );
+      if (downloadedPath) {
+        coverImagePath = downloadedPath;
+      }
+    } catch (err: any) {
+      console.warn(
+        `[Article] Firecrawl lead image download failed: ${err.message}`,
+      );
+    }
+  }
+
+  if (!coverImagePath) {
+    try {
+      coverImagePath = generateTypographicCover(
+        title,
+        author,
+        siteName,
+        readTimeMinutes,
+      );
+    } catch (err: any) {
+      console.warn(
+        `[Article] Typographic cover generation failed: ${err.message}`,
+      );
+    }
+  }
+
+  return {
+    url: validatedHref,
+    title,
+    author,
+    siteName,
+    publishedDate: publishedDate || undefined,
+    wordCount,
+    readTimeMinutes,
+    cleanedHtml,
+    styledDocument,
+    coverImagePath,
+    coverImageUrl,
+  };
+}
+
+/**
  * Fetch and extract article metadata and clean readable content from a URL.
  */
 export async function extractArticle(
@@ -1419,7 +1548,39 @@ export async function extractArticle(
   const validatedHref = validated.href;
   const hostname = validated.hostname.replace(/^www\./i, "");
 
-  // 1. Fetch the page with standard browser headers and local proxy
+  // Pre-flight full SSRF validation (DNS resolution & IP bounds) before any network egress
+  const ssrfCheck = await validateUrlForSSRF(validatedHref, {
+    allowProxyBypass: false,
+  });
+  if (!ssrfCheck.safe) {
+    throw new Error(
+      `SSRF guard blocked article URL: ${ssrfCheck.error || "Restricted address"}`,
+    );
+  }
+
+  // Tier 1: On-Demand Self-Hosted Firecrawl Cluster
+  try {
+    const fcArticle = await scrapeArticleWithFirecrawl(validatedHref);
+    if (fcArticle) {
+      const article = await buildArticleFromFirecrawl(
+        fcArticle,
+        validatedHref,
+        hostname,
+      );
+      if (article) {
+        console.log(
+          `[Article] Successfully extracted article via Firecrawl: "${article.title}"`,
+        );
+        return article;
+      }
+    }
+  } catch (fcErr: any) {
+    console.log(
+      `[Article] Firecrawl scrape failed (${fcErr.message}), falling back to direct fetch / Jina...`,
+    );
+  }
+
+  // Tier 2: Direct fetch with standard browser headers and local proxy, falling back to Jina Reader
   let res: Response;
   try {
     res = await fetchArticlePage(validatedHref);

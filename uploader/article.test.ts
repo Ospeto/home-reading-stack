@@ -18,8 +18,10 @@ import {
   convertHtmlToEpub,
   ingestArticleFromUrl,
 } from "./article";
+import { setFirecrawlEnabled } from "./firecrawl";
 
-const originalFetch = globalThis.fetch;
+let originalFetch = globalThis.fetch;
+let mockArticleFetch: any = null;
 let mockConvertScript: string | null = null;
 let origEbookConvertPath: string | undefined;
 let lastJinaRequest: { url: string; headers: any } | null = null;
@@ -37,8 +39,11 @@ function getHeaderValue(headers: any, name: string): string | null {
 }
 
 beforeAll(() => {
+  // Disable Firecrawl by default for standard hermetic article tests
+  setFirecrawlEnabled(false);
+
   // 1. Isolate external article and Jina network access
-  globalThis.fetch = (async (input: any, init?: any) => {
+  mockArticleFetch = (async (input: any, init?: any) => {
     const urlStr = typeof input === "string" ? input : input?.url || "";
     const hostHeader =
       init?.headers instanceof Headers
@@ -114,7 +119,8 @@ ${dummyEssay}`;
     }
 
     return originalFetch(input, init);
-  }) as typeof fetch;
+  });
+  globalThis.fetch = mockArticleFetch;
 
   // 2. Isolate machine-specific ebook-convert via hermetic mock script
   mockConvertScript = path.join("/tmp", `mock_ebook_convert_${Date.now()}.sh`);
@@ -448,6 +454,7 @@ describe("Jina Reader API Key Authentication (JINA_API_KEY & JEV_API_KEY)", () =
   const origJevKey = process.env.JEV_API_KEY;
 
   afterEach(() => {
+    setFirecrawlEnabled(false);
     if (origJinaKey !== undefined) {
       process.env.JINA_API_KEY = origJinaKey;
     } else {
@@ -577,7 +584,7 @@ describe("Jina Reader API Key Authentication (JINA_API_KEY & JEV_API_KEY)", () =
       expect(quarantineFiles.length).toBe(1);
       expect(quarantineFiles[0]).toContain("truncated_12345678_abcd");
     } finally {
-      globalThis.fetch = originalFetch;
+      globalThis.fetch = mockArticleFetch;
       if (prevDropEnv !== undefined) process.env.BOOKS_DROP_DIR = prevDropEnv;
       else delete process.env.BOOKS_DROP_DIR;
       if (prevQuarantineEnv !== undefined) process.env.BOOKS_QUARANTINE_DIR = prevQuarantineEnv;
@@ -590,4 +597,129 @@ describe("Jina Reader API Key Authentication (JINA_API_KEY & JEV_API_KEY)", () =
     }
   });
 });
+
+describe("Article Extraction: Firecrawl Tier 1 & Fail-Open Fallback", () => {
+  const origEnv = { ...process.env };
+
+  afterEach(() => {
+    setFirecrawlEnabled(false);
+    for (const k of Object.keys(process.env)) {
+      if (!(k in origEnv)) delete process.env[k];
+    }
+    Object.assign(process.env, origEnv);
+  });
+
+  test("uses Firecrawl Tier 1 when available and content is valid", async () => {
+    const mockServer = Bun.serve({
+      port: 49992,
+      fetch(req) {
+        if (req.method === "GET" && new URL(req.url).pathname === "/") {
+          return new Response("OK", { status: 200 });
+        }
+        if (req.method === "POST" && new URL(req.url).pathname === "/v1/scrape") {
+          return new Response(
+            JSON.stringify({
+              success: true,
+              data: {
+                markdown: "# Distributed Systems at Scale\n\n".concat(
+                  "High-availability clusters and state synchronization protocols ensure zero data loss. ".repeat(25),
+                ),
+                metadata: {
+                  title: "Distributed Systems at Scale",
+                  author: "Dr. Network",
+                  "og:site_name": "Cluster Engineering",
+                },
+              },
+            }),
+            { headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    process.env.FIRECRAWL_URL = "http://127.0.0.1:49992";
+    setFirecrawlEnabled(true);
+
+    try {
+      const article = await extractArticle("https://techjournal.org/distributed-systems");
+      expect(article.title).toBe("Distributed Systems at Scale");
+      expect(article.author).toBe("Dr. Network");
+      expect(article.siteName).toBe("Cluster Engineering");
+      expect(article.wordCount).toBeGreaterThan(150);
+    } finally {
+      mockServer.stop(true);
+    }
+  });
+
+  test("fails open to Tier 2 when Firecrawl is offline, disabled, or fails", async () => {
+    // Point Firecrawl to an unreachable port with nonexistent compose dir to prevent real wake
+    process.env.FIRECRAWL_URL = "http://127.0.0.1:49991";
+    process.env.FIRECRAWL_COMPOSE_DIR = "/nonexistent/fc/dir";
+    setFirecrawlEnabled(true);
+
+    // Paul Graham mock is in place for Tier 2 fallback
+    const article = await extractArticle("https://paulgraham.com/foundermode.html");
+    expect(article.title).toBe("Founder Mode");
+    expect(article.wordCount).toBeGreaterThan(150);
+  });
+
+  test("falls open to Tier 2 when Firecrawl content fails paywall check", async () => {
+    const mockServer = Bun.serve({
+      port: 49990,
+      fetch(req) {
+        if (req.method === "GET" && new URL(req.url).pathname === "/") {
+          return new Response("OK", { status: 200 });
+        }
+        if (req.method === "POST" && new URL(req.url).pathname === "/v1/scrape") {
+          return new Response(
+            JSON.stringify({
+              success: true,
+              data: {
+                markdown: "Subscribe now to read this exclusive content.",
+                metadata: { title: "Paywalled Story" },
+              },
+            }),
+            { headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    process.env.FIRECRAWL_URL = "http://127.0.0.1:49990";
+    setFirecrawlEnabled(true);
+
+    try {
+      // Should fall through Firecrawl paywall failure to Tier 2 Paul Graham mock
+      const article = await extractArticle("https://paulgraham.com/foundermode.html");
+      expect(article.title).toBe("Founder Mode");
+    } finally {
+      mockServer.stop(true);
+    }
+  });
+
+  test("blocks SSRF targets upfront before any network egress", async () => {
+    const ssrfTargets = [
+      "http://169.254.169.254/latest/meta-data/",
+      "http://localhost:8088/calibre",
+      "http://127.0.0.1:8086/api/books",
+      "http://host.docker.internal:8086/",
+      "http://metadata.google.internal/",
+      "http://[::1]/secret",
+    ];
+
+    for (const target of ssrfTargets) {
+      let err: Error | null = null;
+      try {
+        await extractArticle(target);
+      } catch (e: any) {
+        err = e;
+      }
+      expect(err).not.toBeNull();
+      expect(err?.message).toMatch(/Internal or local network URLs|SSRF guard blocked/);
+    }
+  });
+});
+
 

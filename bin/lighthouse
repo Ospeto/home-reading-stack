@@ -109,6 +109,14 @@ PRESET_JOBS_DB_PATH="${JOBS_DB_PATH+set}"
 PRESET_MANGA_DB_PATH="${MANGA_DB_PATH+set}"
 PRESET_BACKUP_DIR="${BACKUP_DIR+set}"
 PRESET_LOG_DIR="${LOG_DIR+set}"
+PRESET_FIRECRAWL_PORT="${FIRECRAWL_PORT+set}"
+PRESET_FIRECRAWL_URL="${FIRECRAWL_URL+set}"
+PRESET_FIRECRAWL_COMPOSE_DIR="${FIRECRAWL_COMPOSE_DIR+set}"
+PRESET_FIRECRAWL_IDLE_TIMEOUT_MS="${FIRECRAWL_IDLE_TIMEOUT_MS+set}"
+PRESET_FIRECRAWL_ENABLED="${FIRECRAWL_ENABLED+set}"
+
+HAS_EXPLICIT_FIRECRAWL_PORT="${PRESET_FIRECRAWL_PORT:+1}"
+HAS_EXPLICIT_FIRECRAWL_URL="${PRESET_FIRECRAWL_URL:+1}"
 
 # Initialize defaults if not already set
 UPLOADER_PORT="${UPLOADER_PORT:-8086}"
@@ -132,6 +140,11 @@ JOBS_DB_PATH="${JOBS_DB_PATH:-}"
 MANGA_DB_PATH="${MANGA_DB_PATH:-}"
 BACKUP_DIR="${BACKUP_DIR:-}"
 LOG_DIR="${LOG_DIR:-${HOME}/Library/Logs}"
+FIRECRAWL_PORT="${FIRECRAWL_PORT:-3002}"
+FIRECRAWL_URL="${FIRECRAWL_URL:-http://127.0.0.1:${FIRECRAWL_PORT}}"
+FIRECRAWL_COMPOSE_DIR="${FIRECRAWL_COMPOSE_DIR:-/Users/ospeto/Documents/Firecrawl/firecrawl}"
+FIRECRAWL_IDLE_TIMEOUT_MS="${FIRECRAWL_IDLE_TIMEOUT_MS:-900000}"
+FIRECRAWL_ENABLED="${FIRECRAWL_ENABLED:-true}"
 
 if [ -f "$ENV_FILE" ]; then
   while IFS='=' read -r key val || [ -n "$key" ]; do
@@ -170,9 +183,40 @@ if [ -f "$ENV_FILE" ]; then
       MANGA_DB_PATH) [ -z "$PRESET_MANGA_DB_PATH" ] && MANGA_DB_PATH="$(anchor_path "$val")" ;;
       BACKUP_DIR) [ -z "$PRESET_BACKUP_DIR" ] && BACKUP_DIR="$(anchor_path "$val")" ;;
       LOG_DIR) [ -z "$PRESET_LOG_DIR" ] && LOG_DIR="$(anchor_path "$val")" ;;
+      FIRECRAWL_PORT)
+        if [ -z "$PRESET_FIRECRAWL_PORT" ]; then
+          FIRECRAWL_PORT="$val"
+          HAS_EXPLICIT_FIRECRAWL_PORT="1"
+        fi
+        ;;
+      FIRECRAWL_URL)
+        if [ -z "$PRESET_FIRECRAWL_URL" ]; then
+          FIRECRAWL_URL="$val"
+          HAS_EXPLICIT_FIRECRAWL_URL="1"
+        fi
+        ;;
+      FIRECRAWL_COMPOSE_DIR) [ -z "$PRESET_FIRECRAWL_COMPOSE_DIR" ] && FIRECRAWL_COMPOSE_DIR="$val" ;;
+      FIRECRAWL_IDLE_TIMEOUT_MS) [ -z "$PRESET_FIRECRAWL_IDLE_TIMEOUT_MS" ] && FIRECRAWL_IDLE_TIMEOUT_MS="$val" ;;
+      FIRECRAWL_ENABLED) [ -z "$PRESET_FIRECRAWL_ENABLED" ] && FIRECRAWL_ENABLED="$val" ;;
     esac
   done < "$ENV_FILE"
 fi
+
+# Keep FIRECRAWL_PORT and FIRECRAWL_URL strictly in sync
+if [ -n "$HAS_EXPLICIT_FIRECRAWL_PORT" ] && [ -z "$HAS_EXPLICIT_FIRECRAWL_URL" ]; then
+  FIRECRAWL_URL="http://127.0.0.1:${FIRECRAWL_PORT}"
+elif [[ "$FIRECRAWL_URL" =~ :([0-9]+) ]]; then
+  FIRECRAWL_PORT="${BASH_REMATCH[1]}"
+fi
+
+# Fallback compose directory detection
+if [ -z "$PRESET_FIRECRAWL_COMPOSE_DIR" ]; then
+  if [ -d "${HOME}/Documents/Firecrawl/firecrawl" ]; then
+    FIRECRAWL_COMPOSE_DIR="${HOME}/Documents/Firecrawl/firecrawl"
+  fi
+fi
+
+export FIRECRAWL_URL FIRECRAWL_PORT FIRECRAWL_COMPOSE_DIR FIRECRAWL_IDLE_TIMEOUT_MS FIRECRAWL_ENABLED
 
 # Fallback path resolutions
 if [ -z "$CALIBRE_LIBRARY_DIR" ]; then
@@ -365,6 +409,15 @@ cmd_status() {
     echo -e "  Port ${PROXY_PORT}  $(badge_active)   Sing-box SOCKS5 Proxy       PID: ${pid}"
   else
     echo -e "  Port ${PROXY_PORT}  $(badge_inactive) Sing-box SOCKS5 Proxy       PID: -"
+  fi
+
+  # Firecrawl Scraper (3002, On-Demand)
+  if is_port_listening "$FIRECRAWL_PORT"; then
+    local pid
+    pid=$(get_port_pid "$FIRECRAWL_PORT")
+    echo -e "  Port ${FIRECRAWL_PORT}  $(badge_active)   Firecrawl Scraper (On-Demand) PID: ${pid}"
+  else
+    echo -e "  Port ${FIRECRAWL_PORT}  $(badge_stopped)  Firecrawl Scraper (On-Demand) Sleeping"
   fi
   echo ""
 
@@ -1485,6 +1538,16 @@ cmd_sync_kindle() {
   fi
   exec bun run "$script_path" "$@"
 }
+
+cmd_firecrawl() {
+  local script_path="${LIGHTHOUSE_ROOT}/scripts/firecrawl-cli.ts"
+  if [ ! -f "$script_path" ]; then
+    echo "Error: ${script_path} not found" >&2
+    exit 1
+  fi
+  export FIRECRAWL_URL FIRECRAWL_PORT FIRECRAWL_COMPOSE_DIR FIRECRAWL_IDLE_TIMEOUT_MS FIRECRAWL_ENABLED
+  exec bun run "$script_path" "$@"
+}
 # ------------------------------------------------------------------------------
 # 10. Command: help
 # ------------------------------------------------------------------------------
@@ -1506,6 +1569,7 @@ Commands:
   enrich-synopsis [options] Batch enrich missing book synopses from local EPUBs and online APIs
   sync-obsidian [options]  Sync highlights and reading notes from KOReader/Kindle to Obsidian
   sync-kindle [options]    Two-way sync: push books & pull highlights from USB-C Kindle/e-Reader
+  firecrawl <cmd> [options] Control self-hosted Firecrawl on-demand cluster (status|up|down)
   install-daemons          Dynamically generate and register macOS LaunchAgents for current user
   backup [options]         Create hot SQLite backup with WAL checkpoint, checksum, and manifest
   restore <file> [options] Verified restoration of complete stack with integrity checks
@@ -1541,6 +1605,11 @@ Sync-Kindle Options:
   --vault-path <path>      Custom Obsidian books directory (default: ~/MAS/03-Resources/Books)
   --eject                  Safely unmount/eject Kindle upon successful sync
   --verbose                Enable detailed progress logging
+
+Firecrawl Commands:
+  status                   Inspect cluster running state, endpoint URL, and auto-sleep timer (default)
+  up                       Wake and start containers via docker compose
+  down                     Stop containers immediately to release ~2.5 GB RAM back to macOS
 Backup Options:
   --output, -o <path>      Explicit archive file path
   --output-dir <dir>       Directory to store backup bundle (default: ${BACKUP_DIR})
@@ -1578,6 +1647,7 @@ case "$ACTION" in
   enrich-synopsis) cmd_enrich_synopsis "$@" ;;
   sync-obsidian) cmd_sync_obsidian "$@" ;;
   sync-kindle) cmd_sync_kindle "$@" ;;
+  firecrawl) cmd_firecrawl "$@" ;;
   install-daemons) cmd_install_daemons "$@" ;;
   backup) cmd_backup "$@" ;;
   restore) cmd_restore "$@" ;;

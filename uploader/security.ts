@@ -271,6 +271,7 @@ export type DnsLookup = (hostname: string) => Promise<ResolvedAddress[]>;
 export interface ValidateUrlOptions {
   allowProxyBypass?: boolean;
   allowCalibreServer?: boolean;
+  allowFirecrawlServer?: boolean;
   allowInternalServices?: boolean;
   bindIp?: boolean;
   allowedProxyUrls?: string[];
@@ -352,6 +353,90 @@ export async function validateUrlForSSRF(
         safe: false,
         error: `Internal service ${host}:${port} did not resolve exclusively to loopback addresses`,
       };
+    }
+
+    if (options.allowFirecrawlServer) {
+      let fcUrlStr = (process.env.FIRECRAWL_URL || "").trim();
+      if (!fcUrlStr && process.env.FIRECRAWL_PORT) {
+        const portNum = parseInt(process.env.FIRECRAWL_PORT, 10);
+        if (!isNaN(portNum) && portNum > 0) {
+          fcUrlStr = `http://127.0.0.1:${portNum}`;
+        }
+      }
+      if (!fcUrlStr) {
+        fcUrlStr = "http://127.0.0.1:3002";
+      }
+
+      let fcUrl: URL;
+      try {
+        fcUrl = new URL(fcUrlStr);
+      } catch {
+        return {
+          safe: false,
+          error: "Invalid FIRECRAWL_URL configured",
+        };
+      }
+
+      const fcHost = fcUrl.hostname.toLowerCase();
+      const fcNormHost = normalizeIpString(fcHost);
+      const isFcIp = net.isIP(fcNormHost) !== 0;
+
+      let fcAddresses: ResolvedAddress[] = [];
+      if (isFcIp) {
+        if (!isLoopbackIp(fcNormHost)) {
+          return {
+            safe: false,
+            error: `Configured Firecrawl server IP ${fcNormHost} is not a loopback address`,
+          };
+        }
+        fcAddresses = [{ address: fcNormHost, family: net.isIP(fcNormHost) }];
+      } else {
+        if (fcHost !== "localhost" && !fcHost.endsWith(".localhost")) {
+          try {
+            fcAddresses = await resolveAll(fcHost, options);
+          } catch {
+            return {
+              safe: false,
+              error: `DNS resolution failed for configured Firecrawl server host: ${fcHost}`,
+            };
+          }
+        } else {
+          fcAddresses = [{ address: "127.0.0.1", family: 4 }];
+        }
+
+        if (
+          fcAddresses.length === 0 ||
+          !fcAddresses.every((addr) => isLoopbackIp(addr.address))
+        ) {
+          return {
+            safe: false,
+            error: `Configured Firecrawl server host ${fcHost} did not resolve exclusively to loopback addresses`,
+          };
+        }
+      }
+
+      const fcPort = fcUrl.port || (fcUrl.protocol === "https:" ? "443" : "80");
+      const isLoopbackTarget =
+        host === "localhost" ||
+        host.endsWith(".localhost") ||
+        isLoopbackIp(normalizedHost);
+
+      if (isLoopbackTarget && port === fcPort) {
+        const targetAddresses = isIpLiteral
+          ? [{ address: normalizedHost, family: net.isIP(normalizedHost) }]
+          : await resolveAll(host, options);
+
+        if (
+          targetAddresses.length > 0 &&
+          targetAddresses.every((addr) => isLoopbackIp(addr.address))
+        ) {
+          return {
+            safe: true,
+            resolvedIp: targetAddresses[0].address,
+            resolvedAddresses: targetAddresses,
+          };
+        }
+      }
     }
 
     if (options.allowCalibreServer) {
