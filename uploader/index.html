@@ -428,6 +428,27 @@
     .border-white\/5 { border-color: rgba(255, 255, 255, 0.05); }
     .border-white\/10 { border-color: rgba(255, 255, 255, 0.1); }
     .border-white\/15 { border-color: rgba(255, 255, 255, 0.15); }
+    .border-white\/20 { border-color: rgba(255, 255, 255, 0.2); }
+    .focus\:ring-white\/20:focus { --tw-ring-color: rgba(255, 255, 255, 0.2); --tw-ring-opacity: 1; }
+    .focus\:border-white\/20:focus { border-color: rgba(255, 255, 255, 0.2); }
+    .backdrop-blur-xl { -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px); }
+
+    /* Amber & Warm Gold Pastel Tokens */
+    .bg-amber-400\/10 { background-color: rgba(251, 191, 36, 0.10); }
+    .bg-amber-400\/20 { background-color: rgba(251, 191, 36, 0.20); }
+    .hover\:bg-amber-400\/20:hover { background-color: rgba(251, 191, 36, 0.20); }
+    .border-amber-400\/25 { border-color: rgba(251, 191, 36, 0.25); }
+    .border-amber-400\/30 { border-color: rgba(251, 191, 36, 0.30); }
+    .text-amber-300 { color: #fcd34d; }
+    .text-amber-200 { color: #fde68a; }
+    .hover\:text-amber-200:hover { color: #fde68a; }
+    .hover\:text-amber-200\/90:hover { color: rgba(253, 230, 138, 0.9); }
+
+    /* Sky Filter Badge Tokens */
+    .bg-sky-400\/25 { background-color: rgba(56, 189, 248, 0.25); }
+    .bg-sky-400\/30 { background-color: rgba(56, 189, 248, 0.30); }
+    .text-sky-200 { color: #bae6fd; }
+    .border-sky-400\/40 { border-color: rgba(56, 189, 248, 0.40); }
     .text-neutral-200 { color: #e5e5e5; }
     .text-neutral-300 { color: #d4d4d4; }
     .text-neutral-400 { color: #a3a3a3; }
@@ -586,6 +607,7 @@
       .sm\:pb-4 { padding-bottom: 1rem; }
       .sm\:pb-6 { padding-bottom: 1.5rem; }
       .sm\:pr-12 { padding-right: 3rem; }
+      .sm\:pr-14 { padding-right: 3.5rem; }
       .sm\:rounded-xl { border-radius: 0.75rem; }
       .sm\:border { border-width: 1px; }
       .sm\:inline-block { display: inline-block; }
@@ -740,10 +762,17 @@
     .clickable-pill:active,
     .active-press:active,
     .active\:scale-\[0\.98\]:active,
+    .active\:scale-\[0\.96\]:active,
     .active\:scale-95:active,
     .active\:scale-97:active {
       transform: scale(0.97) !important;
       transition: transform 120ms cubic-bezier(0.2, 0, 0, 1) !important;
+    }
+    .active\:scale-\[0\.96\]:active,
+    .visionos-tab:active {
+      transform: scale(0.96) !important;
+      transition: transform 80ms cubic-bezier(0.2, 0, 0, 1) !important;
+      will-change: transform;
     }
 
     /* Accessibility: Reduced Motion */
@@ -780,6 +809,7 @@
       [role="button"]:active,
       .book-card:active,
       .active\:scale-\[0\.98\]:active,
+      .active\:scale-\[0\.96\]:active,
       .active\:scale-95:active,
       .active\:scale-97:active,
       .clickable-pill:active,
@@ -914,20 +944,8 @@
       border-color: rgba(255, 255, 255, 0.2);
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.18);
     }
-    .visionos-tab-reading {
-      color: #34d399;
-    }
-    .visionos-tab-reading:hover {
-      color: #6ee7b7;
-      background-color: rgba(16, 185, 129, 0.1);
-    }
-    .visionos-tab-reading.visionos-tab-active,
-    .visionos-tab-reading.active {
-      color: #ffffff;
-      background: rgba(16, 185, 129, 0.22);
-      border-color: rgba(52, 211, 153, 0.35);
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(52, 211, 153, 0.25);
-    }
+
+    /* Base VisionOS Badges */
     .visionos-badge {
       font-size: 10px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -944,12 +962,104 @@
       color: #ffffff;
     }
     .visionos-badge-reading {
-      background: rgba(16, 185, 129, 0.18);
+      background: rgba(16, 185, 129, 0.15);
       color: #6ee7b7;
     }
+
+    /* Muted Pastel Accent Palettes (Proposal 1) */
+    /* Tab: All Volumes (Muted Warm Amber / Gold) */
+    .visionos-tab-all:hover {
+      color: #fef3c7;
+      background-color: rgba(245, 158, 11, 0.08);
+    }
+    .visionos-tab-all.visionos-tab-active,
+    .visionos-tab-all.active {
+      color: #fef3c7;
+      background: rgba(245, 158, 11, 0.15);
+      border-color: rgba(251, 191, 36, 0.30);
+      box-shadow: 0 2px 8px rgba(245, 158, 11, 0.18), inset 0 1px 0 rgba(251, 191, 36, 0.25);
+    }
+    .visionos-tab.visionos-tab-all.visionos-tab-active .visionos-badge {
+      background: rgba(245, 158, 11, 0.25);
+      color: #fef3c7;
+    }
+
+    /* Tab: Series (Muted Sky / Ice Blue) */
+    .visionos-tab-series:hover {
+      color: #e0f2fe;
+      background-color: rgba(14, 165, 233, 0.08);
+    }
+    .visionos-tab-series.visionos-tab-active,
+    .visionos-tab-series.active {
+      color: #e0f2fe;
+      background: rgba(14, 165, 233, 0.15);
+      border-color: rgba(56, 189, 248, 0.30);
+      box-shadow: 0 2px 8px rgba(14, 165, 233, 0.18), inset 0 1px 0 rgba(56, 189, 248, 0.25);
+    }
+
+    /* Tab: Reading (Muted Pastel Mint / Sage) */
+    .visionos-tab-reading {
+      color: #6ee7b7;
+    }
+    .visionos-tab-reading:hover {
+      color: #a7f3d0;
+      background-color: rgba(16, 185, 129, 0.08);
+    }
+    .visionos-tab-reading.visionos-tab-active,
+    .visionos-tab-reading.active {
+      color: #ecfdf5;
+      background: rgba(16, 185, 129, 0.15);
+      border-color: rgba(52, 211, 153, 0.30);
+      box-shadow: 0 2px 8px rgba(16, 185, 129, 0.20), inset 0 1px 0 rgba(52, 211, 153, 0.25);
+    }
     .visionos-tab-reading.visionos-tab-active .visionos-badge-reading {
-      background: rgba(16, 185, 129, 0.35);
+      background: rgba(16, 185, 129, 0.28);
       color: #ffffff;
+    }
+
+    /* Tab: Light Novels (Muted Pastel Lavender / Periwinkle) */
+    .visionos-tab-ln:hover {
+      color: #e0e7ff;
+      background-color: rgba(99, 102, 241, 0.08);
+    }
+    .visionos-tab-ln.visionos-tab-active,
+    .visionos-tab-ln.active {
+      color: #e0e7ff;
+      background: rgba(99, 102, 241, 0.15);
+      border-color: rgba(129, 140, 248, 0.30);
+      box-shadow: 0 2px 8px rgba(99, 102, 241, 0.20), inset 0 1px 0 rgba(129, 140, 248, 0.25);
+    }
+
+    /* Tab: Burmese Literature (Muted Pastel Rose / Coral) */
+    .visionos-tab-burmese:hover {
+      color: #ffe4e6;
+      background-color: rgba(244, 63, 94, 0.08);
+    }
+    .visionos-tab-burmese.visionos-tab-active,
+    .visionos-tab-burmese.active {
+      color: #ffe4e6;
+      background: rgba(244, 63, 94, 0.15);
+      border-color: rgba(251, 113, 133, 0.30);
+      box-shadow: 0 2px 8px rgba(244, 63, 94, 0.20), inset 0 1px 0 rgba(251, 113, 133, 0.25);
+    }
+
+    /* Tab: Filters Trigger Button */
+    .visionos-tab-filter:hover {
+      color: #ffffff;
+      background-color: rgba(255, 255, 255, 0.08);
+    }
+    .visionos-tab-filter:hover svg {
+      color: #ffffff;
+    }
+    .visionos-tab-filter.visionos-tab-active,
+    .visionos-tab-filter.active {
+      color: #e0f2fe;
+      background: rgba(56, 189, 248, 0.15);
+      border-color: rgba(56, 189, 248, 0.30);
+      box-shadow: 0 2px 8px rgba(56, 189, 248, 0.18), inset 0 1px 0 rgba(56, 189, 248, 0.25);
+    }
+    .visionos-tab-filter.visionos-tab-active svg {
+      color: #7dd3fc;
     }
 
     /* Accessibility: Reduced Transparency */
@@ -963,6 +1073,7 @@
       .backdrop-blur-md,
       .backdrop-blur-sm,
       .backdrop-blur-xs,
+      .backdrop-blur-xl,
       .backdrop-blur-2xl,
       .visionos-capsule,
       .highlight-quote-card,
@@ -1238,59 +1349,41 @@
   </svg>
 
   <!-- DEDICATED MULTI-TIER MOBILE HEADER (TMA & DESKTOP) -->
-  <header class="sticky top-0 z-40 apple-material-header border-b border-[#23232a] px-3 sm:px-6 transition-all shrink-0" style="padding-top: max(0.6rem, env(safe-area-inset-top, 0px)); padding-bottom: 0.6rem;">
+  <header class="sticky top-0 z-40 apple-material-header border-b border-white/10 px-3 sm:px-6 transition-all shrink-0" style="padding-top: max(0.6rem, env(safe-area-inset-top, 0px)); padding-bottom: 0.6rem;">
     <div class="max-w-[1700px] mx-auto flex flex-col gap-2.5">
       
       <!-- Top Row (Brand & Actions) -->
       <div class="flex items-center justify-between gap-3">
-        <!-- Left: Clean, minimal brand typography -->
+        <!-- Left: Clean, minimal brand typography with muted warm gold pastel accent -->
         <div class="flex items-center gap-2.5 sm:gap-3 shrink-0">
-          <div class="w-8 h-8 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-200 flex items-center justify-center font-bold text-sm shadow-sm shrink-0">
+          <div class="w-8 h-8 rounded-full bg-amber-400/10 border border-amber-400/25 text-amber-300 flex items-center justify-center font-bold text-sm shadow-sm shrink-0">
             <svg class="w-5 h-5"><use href="#icon-lighthouse"/></svg>
           </div>
           <div class="flex flex-col">
             <span class="text-sm font-bold tracking-tight text-zinc-100">LightHouse</span>
             <div class="hidden sm:flex items-center gap-1 text-[11px] text-zinc-500">
-              <button onclick="setFilter('all', null)" class="hover:text-white transition-colors cursor-pointer">Library</button>
+              <button onclick="setFilter('all', null)" class="hover:text-amber-200/90 transition-colors cursor-pointer">Library</button>
               <span>/</span>
               <span id="breadcrumbCategory" class="text-zinc-400 truncate max-w-[140px]">All Books</span>
             </div>
           </div>
         </div>
 
-        <!-- Right: Uniformly styled touch buttons (height 36px, rounded-xl) -->
+        <!-- Right: Uniformly styled touch buttons (height 36px, rounded-full) -->
         <div class="flex items-center gap-2 shrink-0">
           <!-- Kindle USB Status Badge Pill (Shown when connected) -->
-          <button id="kindleStatusBtn" onclick="openKindleModal()" class="hidden h-9 px-3 rounded-xl text-amber-300 hover:text-amber-200 bg-amber-950/40 hover:bg-amber-900/60 border border-amber-800/60 transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-[0.98] shadow-sm animate-pulse" title="Kindle Connected over USB">
-            <svg class="w-4 h-4 text-amber-400"><use href="#icon-tablet"/></svg>
+          <button id="kindleStatusBtn" onclick="openKindleModal()" class="hidden h-9 px-3 rounded-full text-amber-300 hover:text-amber-200 bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/25 transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-[0.96] shadow-sm backdrop-blur-md animate-pulse" title="Kindle Connected over USB">
+            <svg class="w-4 h-4 text-amber-300"><use href="#icon-tablet"/></svg>
             <span id="kindleStatusLabel" class="text-xs font-semibold">Kindle</span>
           </button>
-          <!-- Guide Button: Neutral zinc icon -->
-          <button onclick="openGuideModal()" class="h-9 w-9 sm:w-auto sm:px-3 rounded-xl text-zinc-300 hover:text-white bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-[0.98]" title="KOReader & Manual">
+          <!-- Guide Button: Neutral frosted glass pill -->
+          <button onclick="openGuideModal()" class="h-9 w-9 sm:w-auto sm:px-3.5 rounded-full text-zinc-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-[0.96] backdrop-blur-md shadow-sm" title="KOReader & Manual">
             <svg class="w-4 h-4 text-zinc-300"><use href="#icon-book-open"/></svg>
             <span class="hidden md:inline text-xs font-medium">Guide</span>
           </button>
 
-          <!-- Filter Button: Sleek sliders/filter icon with active count badge -->
-          <button id="filterBtn" onclick="openFilterDrawer()" class="h-9 w-9 sm:w-auto sm:px-3 rounded-xl text-zinc-300 hover:text-white bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 transition-all flex items-center justify-center gap-1.5 cursor-pointer relative active:scale-[0.97]" title="Filter Library">
-            <svg class="w-4 h-4 text-zinc-300" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24">
-              <line x1="4" y1="21" x2="4" y2="14"></line>
-              <line x1="4" y1="10" x2="4" y2="3"></line>
-              <line x1="12" y1="21" x2="12" y2="12"></line>
-              <line x1="12" y1="8" x2="12" y2="3"></line>
-              <line x1="20" y1="21" x2="20" y2="16"></line>
-              <line x1="20" y1="12" x2="20" y2="3"></line>
-              <line x1="1" y1="14" x2="7" y2="14"></line>
-              <line x1="9" y1="8" x2="15" y2="8"></line>
-              <line x1="17" y1="16" x2="23" y2="16"></line>
-            </svg>
-            <span class="hidden md:inline text-xs font-medium">Filters</span>
-            <span id="filterActiveBadge" class="hidden absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold bg-sky-400 text-zinc-950 flex items-center justify-center font-mono leading-none shadow-sm">0</span>
-            <span id="mobileFilterBadgeCount" class="hidden"></span>
-          </button>
-
-          <!-- Add Button: High-contrast white pill button -->
-          <button onclick="openUploadModal()" class="h-9 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-zinc-200 text-zinc-950 transition-all duration-150 flex items-center gap-1.5 cursor-pointer border border-white/10 active:scale-[0.98] shadow-sm">
+          <!-- Add Button: Apple frosted glass pill -->
+          <button onclick="openUploadModal()" class="h-9 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white/15 hover:bg-white/20 border border-white/20 text-white transition-all duration-150 flex items-center gap-1.5 cursor-pointer active:scale-[0.96] shadow-sm backdrop-blur-md">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
             <span>Add</span>
           </button>
@@ -1300,15 +1393,15 @@
       <!-- Second Row (Desktop-Bounded Search Bar) -->
       <div class="w-full md:max-w-2xl lg:max-w-3xl">
         <div class="relative flex items-center">
-          <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-500">
+          <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-400">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" x2="16.65" y1="21" y2="16.65"></line></svg>
           </div>
-          <input id="searchInputDesktop" name="searchInput" class="w-full h-[42px] pl-10 pr-10 sm:pr-12 bg-zinc-900/90 text-sm rounded-xl border border-zinc-800/90 text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 transition-all font-sans" placeholder="Search titles, authors, series..." type="text" oninput="syncSearch(this.value)"/>
+          <input id="searchInputDesktop" name="searchInput" class="w-full h-[40px] pl-10 pr-10 sm:pr-14 bg-zinc-900/80 text-xs sm:text-sm rounded-full border border-white/10 backdrop-blur-xl shadow-inner text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-white/20 focus:border-white/20 transition-all font-sans" placeholder="Search titles, authors, series..." type="text" oninput="syncSearch(this.value)"/>
           <div class="absolute inset-y-0 right-0 pr-1.5 flex items-center gap-1">
-            <button onclick="clearSearch()" class="clear-search-btn hidden text-zinc-400 hover:text-white w-8 h-8 flex items-center justify-center cursor-pointer active:scale-[0.98] transition-transform duration-150 rounded-lg hover:bg-zinc-800" title="Clear search">
+            <button onclick="clearSearch()" class="clear-search-btn hidden text-zinc-400 hover:text-white w-7 h-7 flex items-center justify-center cursor-pointer active:scale-[0.96] transition-transform duration-150 rounded-full hover:bg-white/10" title="Clear search">
               <svg class="w-3.5 h-3.5"><use href="#icon-xmark"/></svg>
             </button>
-            <kbd class="hidden sm:inline-block text-[10px] text-zinc-500 font-mono pointer-events-none border border-zinc-800 rounded px-1.5 py-0.5 bg-zinc-900 mr-2">⌘K</kbd>
+            <kbd class="hidden sm:inline-block text-[10px] text-zinc-400 font-mono pointer-events-none border border-white/10 rounded-full px-2 py-0.5 bg-white/5 mr-2 shadow-xs">⌘K</kbd>
           </div>
         </div>
       </div>
@@ -1318,13 +1411,13 @@
         <div class="visionos-capsule inline-flex items-center bg-zinc-900/80 backdrop-blur-2xl border border-white/10 shadow-2xl rounded-full p-1.5 gap-1 shrink-0">
           <div class="inline-flex items-center gap-1" role="tablist" aria-label="Library Filter Tabs">
             <!-- All Volumes Tab -->
-            <button onclick="setFilter('all', null)" id="chip-all" role="tab" aria-selected="true" class="visionos-tab visionos-tab-active" title="All Volumes">
+            <button onclick="setFilter('all', null)" id="chip-all" role="tab" aria-selected="true" class="visionos-tab visionos-tab-all visionos-tab-active" title="All Volumes">
               <span>All Volumes</span>
               <span id="quickTotalBooks" class="visionos-badge">0</span>
             </button>
 
             <!-- Series Tab -->
-            <button onclick="setFilter('category', 'series')" id="chip-series" role="tab" aria-selected="false" class="visionos-tab" title="Series Collections">
+            <button onclick="setFilter('category', 'series')" id="chip-series" role="tab" aria-selected="false" class="visionos-tab visionos-tab-series" title="Series Collections">
               <span>Series</span>
             </button>
 
@@ -1339,18 +1432,18 @@
             <div class="h-4 w-px bg-white/10 shrink-0 mx-0.5" aria-hidden="true"></div>
 
             <!-- Light Novels Tab -->
-            <button onclick="setFilter('category', 'light_novels')" id="chip-ln" role="tab" aria-selected="false" class="visionos-tab" title="Light Novels">
+            <button onclick="setFilter('category', 'light_novels')" id="chip-ln" role="tab" aria-selected="false" class="visionos-tab visionos-tab-ln" title="Light Novels">
               <span>Light Novels</span>
             </button>
 
             <!-- Burmese Literature Tab -->
-            <button onclick="setFilter('category', 'burmese')" id="chip-burmese" role="tab" aria-selected="false" class="visionos-tab" title="Burmese Literature">
+            <button onclick="setFilter('category', 'burmese')" id="chip-burmese" role="tab" aria-selected="false" class="visionos-tab visionos-tab-burmese" title="Burmese Literature">
               <span>Burmese</span>
             </button>
           </div>
 
           <!-- Filter Sheet Trigger Button -->
-          <button onclick="openFilterDrawer()" id="capsuleFilterBtn" role="button" aria-haspopup="dialog" aria-label="Filter library" class="visionos-tab" title="Open Filter Sheet">
+          <button onclick="openFilterDrawer()" id="capsuleFilterBtn" role="button" aria-haspopup="dialog" aria-label="Filter library" class="visionos-tab visionos-tab-filter" title="Open Filter Sheet">
             <svg class="w-3.5 h-3.5 text-zinc-300" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24">
               <line x1="4" y1="21" x2="4" y2="14"></line>
               <line x1="4" y1="10" x2="4" y2="3"></line>
@@ -1363,7 +1456,7 @@
               <line x1="17" y1="16" x2="23" y2="16"></line>
             </svg>
             <span class="hidden sm:inline">Filters</span>
-            <span id="capsuleFilterActiveBadge" class="hidden min-w-[16px] h-4 px-1 rounded-full text-[9px] font-bold bg-sky-400 text-zinc-950 flex items-center justify-center font-mono leading-none shadow-sm">0</span>
+            <span id="capsuleFilterActiveBadge" class="hidden min-w-[16px] h-4 px-1 rounded-full text-[9px] font-bold bg-sky-400/30 text-sky-200 border border-sky-400/40 flex items-center justify-center font-mono leading-none shadow-sm">0</span>
           </button>
         </div>
 
@@ -1371,6 +1464,7 @@
         <div id="quickFilterCompat" class="hidden" aria-hidden="true">
           <button onclick="setFilter('category', 'recently_added')" id="chip-recent">Recently Added</button>
           <button onclick="setFilter('format', 'EPUB')" id="chip-epub">EPUB</button>
+          <button onclick="openFilterDrawer()" id="filterBtn"><span id="filterActiveBadge" class="hidden">0</span></button>
           <div id="quickSeriesChips"></div>
           <div id="quickFormatChips"></div>
         </div>
@@ -2334,7 +2428,7 @@
               <span>visionOS Floating Island Capsule (WWDC Fluid Interface)</span>
             </div>
             <p class="text-[11px] text-zinc-400 leading-relaxed">
-              Suspended centered glass capsule replacing flat rails with iOS 18 fluid interface materials. Features structured tabs (<code class="text-zinc-200">All Volumes</code> with formatted total count badge, <code class="text-zinc-200">Series</code>, <code class="text-zinc-200">Reading</code> with pulsing emerald indicator and active read count, subtle divider, <code class="text-zinc-200">Light Novels</code>, and <code class="text-zinc-200">Burmese</code> literature), integrated 1-tap <code class="text-zinc-200">Filters</code> button with active badge indicator, and tactile active press feedback (<code class="text-zinc-200">scale(0.96)</code>).
+              Suspended centered glass capsule replacing flat rails with iOS 18 fluid interface materials and Proposal 1 muted pastel accent palettes (warm amber for All Volumes, mint/sage for Reading, lavender for Light Novels, rose/coral for Burmese, and ice blue for Series). Features structured tabs (<code class="text-zinc-200">All Volumes</code> with formatted total count badge, <code class="text-zinc-200">Series</code>, <code class="text-zinc-200">Reading</code> with pulsing emerald indicator and active read count, subtle divider, <code class="text-zinc-200">Light Novels</code>, and <code class="text-zinc-200">Burmese</code> literature), harmonized frosted glass pills (<code class="text-zinc-200">+ Add</code>, <code class="text-zinc-200">Kindle</code>, <code class="text-zinc-200">Guide</code>), organic rounded search pill, integrated 1-tap <code class="text-zinc-200">Filters</code> button with active badge indicator, and tactile active press feedback (<code class="text-zinc-200">scale(0.96)</code>).
             </p>
           </div>
           <div class="space-y-1 pt-1 border-t border-zinc-800/80">
