@@ -56,6 +56,18 @@ import {
 } from "./jev-shelf";
 import { isLnoriUrl, ingestLnoriSeries } from "./lnori";
 import { isJoplinRoute, handleJoplinRequest } from "./joplin";
+import {
+  initHighlightsTable,
+  getHighlightsForBook,
+  getHighlightsByTitle,
+  getHighlightCounts,
+  ensureBookHighlightsIndexed,
+  batchUpsertHighlights,
+  deleteHighlightsForBook,
+  cleanQuoteText,
+} from "./highlights";
+
+declare const Bun: any;
 
 export interface ServerDependencies {
   ingestLnoriSeries?: (url: string) => Promise<any>;
@@ -282,10 +294,13 @@ export function getCacheDbPath(): string {
 }
 
 let _serverCacheDbInstance: Database | null = null;
+let _cachedDbPath: string | null = null;
+
 export function getCacheDb(): Database {
-  if (!_serverCacheDbInstance) {
-    const dbPath = getCacheDbPath();
+  const dbPath = getCacheDbPath();
+  if (!_serverCacheDbInstance || _cachedDbPath !== dbPath) {
     _serverCacheDbInstance = new Database(dbPath);
+    _cachedDbPath = dbPath;
     _serverCacheDbInstance.run("PRAGMA busy_timeout = 5000;");
     _serverCacheDbInstance.run(`
       CREATE TABLE IF NOT EXISTS file_hashes (
@@ -301,6 +316,7 @@ export function getCacheDb(): Database {
     _serverCacheDbInstance.run(
       "CREATE INDEX IF NOT EXISTS idx_file_hashes_hash ON file_hashes(hash);",
     );
+    initHighlightsTable(_serverCacheDbInstance);
   }
   return _serverCacheDbInstance;
 }
@@ -765,7 +781,7 @@ export function getSipsPath(): string {
   return "sips";
 }
 
-let calibreBooksCache: { books: any[]; timestamp: number; etag?: string } = {
+let calibreBooksCache: { books: any[]; timestamp: number; etag?: string; dbPath?: string } = {
   books: [],
   timestamp: 0,
 };
@@ -791,10 +807,12 @@ function runCalibredb(args: string[]) {
 export function getCalibreBooks(forceFresh = false) {
   const now = Date.now();
   const currentEtag = getCalibreDbETag();
+  const dbPath = getCalibreDbPath();
   if (
     !forceFresh &&
     calibreBooksCache.books.length > 0 &&
     calibreBooksCache.etag === currentEtag &&
+    calibreBooksCache.dbPath === dbPath &&
     now - calibreBooksCache.timestamp < 10000
   ) {
     return calibreBooksCache.books;
@@ -899,6 +917,7 @@ export function getCalibreBooks(forceFresh = false) {
           books: epubBooks,
           timestamp: now,
           etag: currentEtag,
+          dbPath,
         };
         return epubBooks;
       } finally {
@@ -947,6 +966,7 @@ export function getCalibreBooks(forceFresh = false) {
         books: epubBooks,
         timestamp: now,
         etag: currentEtag,
+        dbPath,
       };
       return epubBooks;
     }
@@ -2137,7 +2157,7 @@ export async function handleRequest(
   // private JOPLIN_TOKEN. handleJoplinRequest fails closed (503/401) before any
   // note write, including on WAN. /ping stays unauthenticated for reachability.
   if (isJoplinRoute(url.pathname)) {
-    return await handleJoplinRequest(req, url, { corsOrigin });
+    return await handleJoplinRequest(req, url, { corsOrigin, cacheDb: getCacheDb() });
   }
 
   if (isMutating && isWan) {
@@ -2200,7 +2220,30 @@ export async function handleRequest(
     }
 
     const books = getCalibreBooks();
-    return new Response(JSON.stringify(books), {
+    let responseBooks = books;
+    try {
+      const counts = getHighlightCounts(getCacheDb());
+      responseBooks = books.map((b: any) => {
+        const normT = b.title ? b.title.trim().toLowerCase() : "";
+        const count =
+          counts.byBookId[b.id] ||
+          (normT ? counts.byTitle[normT] : 0) ||
+          0;
+        const preview =
+          counts.previewsByBookId[b.id] ||
+          (normT ? counts.previewsByTitle[normT] : "") ||
+          null;
+        return {
+          ...b,
+          highlightCount: count,
+          highlightPreview: preview,
+        };
+      });
+    } catch {
+      // Keep original books array if count lookup fails
+    }
+
+    return new Response(JSON.stringify(responseBooks), {
       status: 200,
       headers: {
         "Content-Type": "application/json; charset=utf-8",
@@ -2672,6 +2715,167 @@ export async function handleRequest(
           count: candidates.length,
           jobId: job.id,
           message: `Enqueued cover backfill job for ${candidates.length} web articles.`,
+        },
+        200,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Get highlights for a specific book
+  if (
+    url.pathname.startsWith("/api/books/") &&
+    url.pathname.endsWith("/highlights") &&
+    req.method === "GET"
+  ) {
+    const parts = url.pathname.split("/");
+    const bookId = validateIntegerId(parts[3]);
+    if (!bookId) {
+      return jsonResponse(
+        { success: false, error: "Invalid book ID" },
+        400,
+        corsOrigin,
+      );
+    }
+
+    try {
+      const books = getCalibreBooks();
+      const book = books.find((b: any) => b.id === bookId);
+      const title = book?.title || `Book #${bookId}`;
+      const forceFresh =
+        url.searchParams.has("refresh") || url.searchParams.has("fresh");
+
+      const db = getCacheDb();
+      let highlights = ensureBookHighlightsIndexed(db, bookId, title, {
+        forceFresh,
+      });
+
+      // If fresh requested or highlights empty, also recheck SDR highlights
+      if (forceFresh || highlights.length === 0) {
+        const sdrHighlights = extractHighlightsFromSdr(bookId);
+        if (sdrHighlights.length > 0) {
+          const records = sdrHighlights
+            .map((h) => ({
+              book_id: bookId,
+              book_title: title,
+              chapter: h.chapter || null,
+              page: h.page || null,
+              quote: cleanQuoteText(h.text),
+              note: h.notes || null,
+              timestamp: h.datetime || null,
+            }))
+            .filter((r) => r.quote && r.quote.trim().length > 0);
+          if (records.length > 0) {
+            batchUpsertHighlights(db, records);
+            highlights = getHighlightsForBook(db, bookId, title, 1000);
+          }
+        }
+      }
+
+      // Bound results to 1000 highlights max
+      const safeHighlights = highlights.slice(0, 1000).map((h) => ({
+        id: h.id,
+        chapter: h.chapter || null,
+        page: h.page || null,
+        quote: h.quote,
+        note: h.note || null,
+        timestamp: h.timestamp || null,
+      }));
+
+      return jsonResponse(
+        {
+          success: true,
+          count: safeHighlights.length,
+          book_id: bookId,
+          title,
+          highlights: safeHighlights,
+        },
+        200,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Highlights lookup and library-wide counts
+  if (url.pathname === "/api/highlights" && req.method === "GET") {
+    try {
+      const db = getCacheDb();
+      const titleParam = url.searchParams.get("title");
+      const bookIdParam = url.searchParams.get("book_id") || url.searchParams.get("id");
+
+      if (bookIdParam) {
+        const bookId = validateIntegerId(bookIdParam);
+        if (!bookId) {
+          return jsonResponse(
+            { success: false, error: "Invalid book ID" },
+            400,
+            corsOrigin,
+          );
+        }
+        const books = getCalibreBooks();
+        const book = books.find((b: any) => b.id === bookId);
+        const title = book?.title || `Book #${bookId}`;
+        const highlights = ensureBookHighlightsIndexed(db, bookId, title);
+        return jsonResponse(
+          {
+            success: true,
+            count: highlights.length,
+            book_id: bookId,
+            title,
+            highlights: highlights.slice(0, 1000).map((h) => ({
+              id: h.id,
+              chapter: h.chapter || null,
+              page: h.page || null,
+              quote: h.quote,
+              note: h.note || null,
+              timestamp: h.timestamp || null,
+            })),
+          },
+          200,
+          corsOrigin,
+        );
+      }
+
+      if (titleParam) {
+        const title = titleParam.trim();
+        const highlights = getHighlightsByTitle(db, title);
+        return jsonResponse(
+          {
+            success: true,
+            count: highlights.length,
+            title,
+            highlights: highlights.slice(0, 1000).map((h) => ({
+              id: h.id,
+              chapter: h.chapter || null,
+              page: h.page || null,
+              quote: h.quote,
+              note: h.note || null,
+              timestamp: h.timestamp || null,
+            })),
+          },
+          200,
+          corsOrigin,
+        );
+      }
+
+      // Aggregate counts across library
+      const counts = getHighlightCounts(db);
+      return jsonResponse(
+        {
+          success: true,
+          counts,
         },
         200,
         corsOrigin,
@@ -3442,6 +3646,10 @@ export async function handleRequest(
       );
     }
 
+    const books = getCalibreBooks();
+    const book = books.find((b: any) => b.id === bookId);
+    const bookTitle = book?.title;
+
     const delRes = runCalibredb([
       "remove",
       String(bookId),
@@ -3451,6 +3659,7 @@ export async function handleRequest(
 
     getCalibreBooks(true);
     if (delRes.status === 0) {
+      deleteHighlightsForBook(getCacheDb(), bookId, bookTitle);
       return jsonResponse(
         { success: true, message: `Removed book ${bookId}` },
         200,
@@ -3497,6 +3706,12 @@ export async function handleRequest(
         validIds.push(id);
       }
 
+      const books = getCalibreBooks();
+      const titleMap = new Map<number, string>();
+      for (const b of books) {
+        if (b.id) titleMap.set(b.id, b.title);
+      }
+
       const idsStr = validIds.map(String).join(",");
       const delRes = runCalibredb([
         "remove",
@@ -3507,6 +3722,9 @@ export async function handleRequest(
 
       getCalibreBooks(true);
       if (delRes.status === 0) {
+        for (const id of validIds) {
+          deleteHighlightsForBook(getCacheDb(), id, titleMap.get(id));
+        }
         return jsonResponse(
           { success: true, message: `Removed ${validIds.length} books` },
           200,

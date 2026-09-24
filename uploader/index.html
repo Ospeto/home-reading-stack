@@ -793,10 +793,43 @@
       }
       .book-cover-container,
       .book-card:hover .book-cover-container,
-      .book-card:focus-within .book-cover-container {
+      .book-card:focus-within .book-cover-container,
+      .highlight-quote-card,
+      .highlight-quote-card:hover,
+      .highlight-quote-card:active {
         transform: none !important;
         transition: none !important;
       }
+    }
+
+    /* Apple Fluid Translucent Quote Cards for Highlights */
+    .highlight-quote-card {
+      background: rgba(255, 255, 255, 0.03);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
+      backdrop-filter: blur(20px) saturate(180%);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-top: 1px solid rgba(255, 255, 255, 0.16);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+      position: relative;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .highlight-quote-card:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(245, 158, 11, 0.3);
+      transform: translateY(-1px);
+    }
+    .highlight-quote-card:active {
+      transform: scale(0.99);
+    }
+    .quote-accent-bar {
+      width: 3px;
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      border-top-left-radius: 0.75rem;
+      border-bottom-left-radius: 0.75rem;
+      background: linear-gradient(180deg, #f59e0b 0%, #d97706 100%);
     }
 
     /* Accessibility: Reduced Transparency */
@@ -810,6 +843,7 @@
       .backdrop-blur-md,
       .backdrop-blur-sm,
       .backdrop-blur-xs,
+      .highlight-quote-card,
       header,
       aside,
       #filterDrawer,
@@ -1428,33 +1462,67 @@
         </div>
       </div>
 
-      <!-- Synopsis / Comments -->
-      <div id="detailCommentsBox" class="hidden p-3 bg-[#18181f] rounded-xl border border-[#23232a] text-xs text-[#a1a1aa] max-h-28 overflow-y-auto leading-relaxed"></div>
-
-      <!-- Direct Downloads: Primary Action Button for EPUB & Formats -->
-      <div class="space-y-2">
-        <div class="text-[10px] font-bold text-[#71717a] uppercase tracking-wider">Download to Device</div>
-        <div id="detailDownloadButtons" class="space-y-2"></div>
+      <!-- Tab Switcher: Overview vs Highlights -->
+      <div class="flex p-1 bg-[#121216] rounded-xl border border-[#23232a]">
+        <button type="button" id="tabBtnDetails" onclick="switchDetailTab('overview')" class="flex-1 min-h-[36px] py-1.5 px-3 rounded-lg text-xs font-semibold transition-all duration-150 cursor-pointer bg-white/10 text-white shadow-sm flex items-center justify-center gap-1.5 active:scale-[0.98]">
+          <svg class="w-3.5 h-3.5"><use href="#icon-book-open"/></svg>
+          <span>Overview</span>
+        </button>
+        <button type="button" id="tabBtnHighlights" onclick="switchDetailTab('highlights')" class="flex-1 min-h-[36px] py-1.5 px-3 rounded-lg text-xs font-semibold transition-all duration-150 cursor-pointer text-zinc-400 hover:text-zinc-200 flex items-center justify-center gap-1.5 active:scale-[0.98]">
+          <span class="text-amber-400 text-xs">✦</span>
+          <span>Highlights</span>
+          <span id="detailHighlightsBadge" class="hidden px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">0</span>
+        </button>
       </div>
 
-      <!-- Quick Wireless Sync & OPDS URLs -->
-      <div class="space-y-2 pt-1">
-        <div class="text-[10px] font-bold text-[#71717a] uppercase tracking-wider">Wireless Reader Sync &amp; OPDS</div>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <button type="button" onclick="copyToClipboard('http://kosync-sg.wavypremium.xyz')" class="min-h-[44px] h-11 px-3 py-2 bg-[#18181f] hover:bg-zinc-800 text-zinc-200 text-xs font-semibold rounded-xl border border-[#23232a] flex items-center justify-between gap-2 active:scale-[0.98] transition-all duration-150 cursor-pointer">
-            <span class="flex items-center gap-2 truncate">
-              <svg class="w-4 h-4 text-sky-400 shrink-0"><use href="#icon-arrows-rotate"/></svg>
-              <span class="truncate">KOSync Server</span>
-            </span>
-            <span class="text-[10px] font-mono text-[#71717a] px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 shrink-0">Copy</span>
-          </button>
-          <button type="button" onclick="copyToClipboard('http://opds.wavypremium.xyz/opds')" class="min-h-[44px] h-11 px-3 py-2 bg-[#18181f] hover:bg-zinc-800 text-zinc-200 text-xs font-semibold rounded-xl border border-[#23232a] flex items-center justify-between gap-2 active:scale-[0.98] transition-all duration-150 cursor-pointer">
-            <span class="flex items-center gap-2 truncate">
-              <svg class="w-4 h-4 text-emerald-400 shrink-0"><use href="#icon-rss"/></svg>
-              <span class="truncate">OPDS Catalog</span>
-            </span>
-            <span class="text-[10px] font-mono text-[#71717a] px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 shrink-0">Copy</span>
-          </button>
+      <!-- TAB 1: OVERVIEW PANE -->
+      <div id="detailOverviewPane" class="space-y-4">
+        <!-- Synopsis / Comments -->
+        <div id="detailCommentsBox" class="hidden p-3 bg-[#18181f] rounded-xl border border-[#23232a] text-xs text-[#a1a1aa] max-h-28 overflow-y-auto leading-relaxed"></div>
+
+        <!-- Direct Downloads: Primary Action Button for EPUB & Formats -->
+        <div class="space-y-2">
+          <div class="text-[10px] font-bold text-[#71717a] uppercase tracking-wider">Download to Device</div>
+          <div id="detailDownloadButtons" class="space-y-2"></div>
+        </div>
+
+        <!-- Quick Wireless Sync & OPDS URLs -->
+        <div class="space-y-2 pt-1">
+          <div class="text-[10px] font-bold text-[#71717a] uppercase tracking-wider">Wireless Reader Sync &amp; OPDS</div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <button type="button" onclick="copyToClipboard('http://kosync-sg.wavypremium.xyz')" class="min-h-[44px] h-11 px-3 py-2 bg-[#18181f] hover:bg-zinc-800 text-zinc-200 text-xs font-semibold rounded-xl border border-[#23232a] flex items-center justify-between gap-2 active:scale-[0.98] transition-all duration-150 cursor-pointer">
+              <span class="flex items-center gap-2 truncate">
+                <svg class="w-4 h-4 text-sky-400 shrink-0"><use href="#icon-arrows-rotate"/></svg>
+                <span class="truncate">KOSync Server</span>
+              </span>
+              <span class="text-[10px] font-mono text-[#71717a] px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 shrink-0">Copy</span>
+            </button>
+            <button type="button" onclick="copyToClipboard('http://opds.wavypremium.xyz/opds')" class="min-h-[44px] h-11 px-3 py-2 bg-[#18181f] hover:bg-zinc-800 text-zinc-200 text-xs font-semibold rounded-xl border border-[#23232a] flex items-center justify-between gap-2 active:scale-[0.98] transition-all duration-150 cursor-pointer">
+              <span class="flex items-center gap-2 truncate">
+                <svg class="w-4 h-4 text-emerald-400 shrink-0"><use href="#icon-rss"/></svg>
+                <span class="truncate">OPDS Catalog</span>
+              </span>
+              <span class="text-[10px] font-mono text-[#71717a] px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 shrink-0">Copy</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 2: HIGHLIGHTS & QUOTES PANE -->
+      <div id="detailHighlightsPane" class="hidden space-y-3">
+        <div class="flex items-center justify-between pb-1 border-b border-[#23232a]">
+          <span class="text-[10px] font-bold text-[#71717a] uppercase tracking-wider flex items-center gap-1.5">
+            <span class="text-amber-400">✦</span> Synced Highlights &amp; Notes
+          </span>
+          <div class="flex items-center gap-2">
+            <span id="detailHighlightsSubCount" class="text-[11px] font-mono text-zinc-400"></span>
+            <button type="button" onclick="loadBookHighlights(currentDetailBookId, true)" class="w-6 h-6 rounded-lg bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer" title="Refresh highlights from disk">
+              <svg class="w-3 h-3"><use href="#icon-arrows-rotate"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="detailHighlightsList" class="space-y-3 max-h-[50vh] overflow-y-auto pr-0.5">
+          <!-- Rendered dynamically -->
         </div>
       </div>
 
@@ -1962,6 +2030,20 @@
           </div>
         </div>
 
+        <!-- Method 5: Web Highlights & Quotes Viewer -->
+        <div class="p-3.5 bg-zinc-900/80 rounded-xl border border-zinc-800 space-y-2 text-xs text-zinc-300">
+          <div class="font-bold text-white flex items-center gap-1.5">
+            <span class="w-5 h-5 rounded-full bg-amber-950 text-amber-400 border border-amber-800/60 flex items-center justify-center text-[11px] font-mono font-bold shrink-0">5</span>
+            <span>Web Highlights &amp; Quotes Viewer</span>
+          </div>
+          <div class="text-[11px] text-zinc-400 space-y-1.5 pl-7 leading-relaxed">
+            <div>Browse and copy all synced quotes, chapter markers, page numbers, and personal notes directly on the web app:</div>
+            <div>• <strong>Book Details Modal:</strong> Click any book card and tap the <code class="text-zinc-200">✦ Highlights</code> tab to view all synced quotes in translucent Apple Fluid cards with one-click copy buttons.</div>
+            <div>• <strong>Book Cards &amp; Hover Expansion:</strong> Synced books display a subtle highlight indicator pill (<code class="text-amber-300">✦ 12</code>) on the cover and quote previews in the desktop hover wing panel.</div>
+            <div>• <strong>Developer API:</strong> <code class="text-zinc-200">GET /api/books/:id/highlights</code> returns structured JSON quotes and notes.</div>
+          </div>
+        </div>
+
         <!-- Idempotent Preservation Guarantee -->
         <div class="p-3.5 bg-purple-950/20 rounded-xl border border-purple-800/40 text-xs text-purple-200 space-y-1">
           <div class="font-bold flex items-center gap-1.5 text-purple-300">
@@ -2098,6 +2180,15 @@
             </div>
             <p class="text-[11px] text-zinc-400 leading-relaxed">
               Download and ingest light novel series or individual volumes directly from <code class="text-zinc-200">lnori.com</code> via the Web UI (Upload Modal &rarr; <code class="text-zinc-200">Add from Lnori</code>) or Telegram Bot. Accepts series URLs (<code class="text-zinc-200">https://lnori.com/series/...</code>) and book URLs (<code class="text-zinc-200">https://lnori.com/book/...</code>). Automatically fetches manifests, skips existing volumes via series index deduplication, downloads EPUBs, converts high-res WebP covers to JPEG via <code class="text-zinc-200">sips</code>, auto-heals truncated ZIPs, and updates Calibre without duplicate imports.
+            </p>
+          </div>
+          <div class="space-y-1 pt-1 border-t border-zinc-800/80">
+            <div class="font-bold text-white flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-amber-400"></span>
+              <span>Web Highlights &amp; Quotes Viewer</span>
+            </div>
+            <p class="text-[11px] text-zinc-400 leading-relaxed">
+              Read and copy synced quotes, chapters, page numbers, and annotations directly on the web interface. Features translucent quote cards (<code class="text-zinc-200">blur(20px) saturate(180%)</code>), amber accent markers, one-click quote copying with tactile checkmark feedback, highlight counter badges on book covers, and instant desktop hover quote previews.
             </p>
           </div>
         </div>
@@ -3411,6 +3502,27 @@
         </a>
       `;
 
+      // Highlight Counter Badge & Popup Preview
+      const hlCount = Number(book.highlightCount) || 0;
+      const highlightCoverBadge = hlCount > 0 ? `
+        <div class="absolute bottom-2 left-2 z-20 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-black/75 text-amber-300 border border-amber-500/30 backdrop-blur-md flex items-center gap-1 shadow-sm pointer-events-none">
+          <span class="text-amber-400">✦</span>
+          <span>${hlCount}</span>
+        </div>
+      ` : '';
+
+      const popupHighlightBadge = hlCount > 0 ? `
+        <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 backdrop-blur-sm inline-flex items-center gap-1">
+          ✦ ${hlCount} ${hlCount === 1 ? 'highlight' : 'highlights'}
+        </span>
+      ` : '';
+
+      const popupHighlightPreview = (hlCount > 0 && book.highlightPreview) ? `
+        <div class="mt-2 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-200/90 leading-relaxed line-clamp-2">
+          <span class="text-amber-400 mr-1 font-serif text-sm">“</span>${escapeHtml(book.highlightPreview)}<span class="text-amber-400 ml-1 font-serif text-sm">”</span>
+        </div>
+      ` : '';
+
       // Safe CSS variable for cover glow: only point to authenticated cover image route; never pass raw data URIs
       const popupBgStyle = book.cover ? `--popup-bg-image: url('/api/books/${book.id}/cover?w=360');` : '';
 
@@ -3428,10 +3540,12 @@
                   <div class="card-popup-subtitle text-xs text-neutral-400 font-medium truncate mt-1">
                     ${popupSubtitle}
                   </div>
+                  ${popupHighlightBadge ? `<div class="mt-1.5 flex items-center gap-2">${popupHighlightBadge}</div>` : ''}
                 </div>
                 <p class="card-popup-synopsis text-[0.85rem] text-neutral-300 leading-[1.6] line-clamp-6">
                   ${cleanSynopsis || 'No synopsis available for this volume.'}
                 </p>
+                ${popupHighlightPreview}
               </div>
 
               <!-- Bottom Footer: Tags & Quick Actions -->
@@ -3460,6 +3574,7 @@
           <!-- Book Cover Container -->
           <div class="book-cover-container relative aspect-[1/1.48] rounded-xl overflow-hidden shadow-book group-hover:shadow-book-hover transition-all duration-300 bg-[#121216] border ${isSelected ? 'border-sky-400 ring-1 ring-sky-400' : 'border-[#23232a] hover:border-white/20'} skeleton-shimmer z-10">
             ${seriesIndexBadge}
+            ${highlightCoverBadge}
 
             <!-- Selection Checkbox -->
             <button onclick="event.stopPropagation(); toggleSelect(${book.id})" class="absolute top-2 right-2 z-20 min-w-[36px] min-h-[36px] w-9 h-9 rounded-lg bg-black/60 text-white flex items-center justify-center border border-white/20 backdrop-blur-sm ${isSelected ? 'bg-sky-500 text-white border-sky-400' : 'sm:opacity-0 sm:group-hover:opacity-100'} transition-all cursor-pointer active:scale-[0.98]" title="Select Book">
@@ -3698,6 +3813,20 @@
       document.getElementById('detailEditBtn').onclick = () => { closeBookDetailModal(); openEditModal(book.id); };
       document.getElementById('detailDeleteBtn').onclick = () => { closeBookDetailModal(); deleteBook(book.id); };
 
+      // Switch to Overview tab by default and load highlights in background
+      switchDetailTab('overview');
+      const badge = document.getElementById('detailHighlightsBadge');
+      const hlCount = Number(book.highlightCount) || 0;
+      if (badge) {
+        if (hlCount > 0) {
+          badge.textContent = hlCount;
+          badge.classList.remove('hidden');
+        } else {
+          badge.classList.add('hidden');
+        }
+      }
+      loadBookHighlights(book.id);
+
       openModalAnimated('bookDetailModal', false);
     }
 
@@ -3723,6 +3852,8 @@
         if (res.ok && data.success) {
           tgHaptic.notification('success');
           showToast(`✅ Synced to Obsidian (${data.count || 0} highlights)!`);
+          // Refresh highlights tab
+          loadBookHighlights(currentDetailBookId, true);
         } else {
           tgHaptic.notification('error');
           showToast('Obsidian sync failed: ' + (data.error || 'Server error'), 'error');
@@ -3741,6 +3872,207 @@
 
     function closeBookDetailModal() {
       closeModalAnimated('bookDetailModal', false);
+      currentHighlightsMap.clear();
+    }
+
+    // HIGHLIGHTS & QUOTES TAB AND VIEWER
+    const bookHighlightsCache = new Map();
+    const currentHighlightsMap = new Map();
+
+    function switchDetailTab(tab) {
+      try { tgHaptic.light(); } catch {}
+      const btnOverview = document.getElementById('tabBtnDetails');
+      const btnHighlights = document.getElementById('tabBtnHighlights');
+      const paneOverview = document.getElementById('detailOverviewPane');
+      const paneHighlights = document.getElementById('detailHighlightsPane');
+
+      if (tab === 'highlights') {
+        if (btnHighlights) {
+          btnHighlights.className = 'flex-1 min-h-[36px] py-1.5 px-3 rounded-lg text-xs font-semibold transition-all duration-150 cursor-pointer bg-white/10 text-white shadow-sm flex items-center justify-center gap-1.5 active:scale-[0.98]';
+        }
+        if (btnOverview) {
+          btnOverview.className = 'flex-1 min-h-[36px] py-1.5 px-3 rounded-lg text-xs font-semibold transition-all duration-150 cursor-pointer text-zinc-400 hover:text-zinc-200 flex items-center justify-center gap-1.5 active:scale-[0.98]';
+        }
+        paneOverview?.classList.add('hidden');
+        paneHighlights?.classList.remove('hidden');
+
+        if (currentDetailBookId) {
+          loadBookHighlights(currentDetailBookId);
+        }
+      } else {
+        if (btnOverview) {
+          btnOverview.className = 'flex-1 min-h-[36px] py-1.5 px-3 rounded-lg text-xs font-semibold transition-all duration-150 cursor-pointer bg-white/10 text-white shadow-sm flex items-center justify-center gap-1.5 active:scale-[0.98]';
+        }
+        if (btnHighlights) {
+          btnHighlights.className = 'flex-1 min-h-[36px] py-1.5 px-3 rounded-lg text-xs font-semibold transition-all duration-150 cursor-pointer text-zinc-400 hover:text-zinc-200 flex items-center justify-center gap-1.5 active:scale-[0.98]';
+        }
+        paneHighlights?.classList.add('hidden');
+        paneOverview?.classList.remove('hidden');
+      }
+    }
+
+    async function loadBookHighlights(bookId, forceFresh = false) {
+      const listEl = document.getElementById('detailHighlightsList');
+      const countLabel = document.getElementById('detailHighlightsSubCount');
+      const badge = document.getElementById('detailHighlightsBadge');
+
+      if (!forceFresh && bookHighlightsCache.has(bookId)) {
+        const cached = bookHighlightsCache.get(bookId);
+        renderHighlightsView(cached);
+        return;
+      }
+
+      if (listEl && (!listEl.children.length || forceFresh)) {
+        setHtml(listEl, `
+          <div class="p-8 text-center text-zinc-500 text-xs flex items-center justify-center gap-2">
+            <svg class="w-4 h-4 text-amber-400 animate-spin"><use href="#icon-arrows-rotate"/></svg>
+            <span>Loading highlights &amp; quotes...</span>
+          </div>
+        `);
+      }
+
+      try {
+        const fetchUrl = forceFresh ? `/api/books/${bookId}/highlights?refresh=1` : `/api/books/${bookId}/highlights`;
+        const res = await fetch(fetchUrl);
+        const data = await res.json();
+        // Guard against race condition if user navigated to another book
+        if (bookId !== currentDetailBookId) return;
+
+        if (res.ok && data.success) {
+          bookHighlightsCache.set(bookId, data);
+          renderHighlightsView(data);
+        } else {
+          if (listEl) {
+            setHtml(listEl, `
+              <div class="p-6 text-center text-xs text-rose-400 bg-rose-950/20 border border-rose-900/30 rounded-xl">
+                Failed to load highlights: ${escapeHtml(data.error || 'Server error')}
+              </div>
+            `);
+          }
+        }
+      } catch (err) {
+        if (bookId !== currentDetailBookId) return;
+        if (listEl) {
+          setHtml(listEl, `
+            <div class="p-6 text-center text-xs text-rose-400 bg-rose-950/20 border border-rose-900/30 rounded-xl">
+              Network error loading highlights.
+            </div>
+          `);
+        }
+      }
+    }
+
+    function renderHighlightsView(data) {
+      const listEl = document.getElementById('detailHighlightsList');
+      const countLabel = document.getElementById('detailHighlightsSubCount');
+      const badge = document.getElementById('detailHighlightsBadge');
+
+      const count = Number(data.count) || 0;
+      if (badge) {
+        if (count > 0) {
+          badge.textContent = count;
+          badge.classList.remove('hidden');
+        } else {
+          badge.classList.add('hidden');
+        }
+      }
+      if (countLabel) {
+        countLabel.textContent = `${count} ${count === 1 ? 'quote' : 'quotes'}`;
+      }
+
+      if (!listEl) return;
+
+      currentHighlightsMap.clear();
+
+      if (count === 0) {
+        setHtml(listEl, `
+          <div class="p-6 text-center space-y-2 border border-dashed border-white/10 rounded-xl bg-white/[0.02]">
+            <div class="w-10 h-10 mx-auto rounded-full bg-amber-500/10 text-amber-400 flex items-center justify-center mb-1">
+              <svg class="w-5 h-5"><use href="#icon-file-pen"/></svg>
+            </div>
+            <p class="text-xs font-semibold text-zinc-300">No highlights synced yet</p>
+            <p class="text-[11px] text-zinc-500 leading-relaxed max-w-xs mx-auto">
+              Export highlights from KOReader using Joplin Clipper or run sync-obsidian to see your quotes and notes here.
+            </p>
+          </div>
+        `);
+        return;
+      }
+
+      const itemsHtml = (data.highlights || []).map((h, idx) => {
+        const highlightKey = String(h.id != null ? h.id : idx);
+        currentHighlightsMap.set(highlightKey, h.quote);
+
+        const metaParts = [];
+        if (h.page) metaParts.push(`Page ${h.page}`);
+        if (h.timestamp) metaParts.push(escapeHtml(h.timestamp));
+        const metaText = metaParts.join(' • ');
+
+        let noteHtml = '';
+        if (h.note) {
+          noteHtml = `
+            <div class="mt-2.5 pt-2 border-t border-white/5 flex items-start gap-2 text-xs text-amber-200/90 bg-amber-950/30 p-2.5 rounded-xl border border-amber-500/20">
+              <svg class="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5"><use href="#icon-file-pen"/></svg>
+              <div class="flex-1 leading-relaxed">${escapeHtml(h.note)}</div>
+            </div>
+          `;
+        }
+
+        const chapterHtml = h.chapter ? `
+          <span class="px-2 py-0.5 rounded text-[10px] font-semibold bg-white/10 text-neutral-300 border border-white/10 truncate max-w-[180px]">
+            ${escapeHtml(h.chapter)}
+          </span>
+        ` : '';
+
+        const metaSpan = metaText ? `
+          <span class="text-[10px] text-neutral-400 font-mono tabular-nums">${metaText}</span>
+        ` : '';
+
+        return `
+          <div class="highlight-quote-card p-3.5 pl-4 rounded-xl relative overflow-hidden group">
+            <div class="quote-accent-bar"></div>
+            <div class="flex items-center justify-between gap-2 mb-1.5">
+              <div class="flex items-center gap-2 flex-wrap min-w-0">
+                ${chapterHtml}
+                ${metaSpan}
+              </div>
+              <button type="button" onclick="copyQuoteById(this, '${highlightKey}')" class="h-7 px-2.5 rounded-lg bg-white/5 hover:bg-amber-500/20 text-neutral-400 hover:text-amber-200 border border-white/10 hover:border-amber-500/30 flex items-center justify-center gap-1.5 text-[11px] font-medium transition-all duration-150 cursor-pointer active:scale-[0.96] shrink-0" title="Copy quote to clipboard">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+                <span>Copy</span>
+              </button>
+            </div>
+            <blockquote class="text-xs sm:text-[13px] text-neutral-100 font-normal leading-relaxed italic pl-1 text-balance">
+              “${escapeHtml(h.quote)}”
+            </blockquote>
+            ${noteHtml}
+          </div>
+        `;
+      }).join('');
+
+      setHtml(listEl, itemsHtml);
+    }
+
+    function copyQuoteById(btn, id) {
+      const quote = currentHighlightsMap.get(String(id));
+      if (typeof quote === 'string') {
+        copyQuoteText(btn, quote);
+      }
+    }
+
+    async function copyQuoteText(btn, quote) {
+      try {
+        tgHaptic.light();
+        await copyToClipboard(quote);
+        const originalHtml = btn.innerHTML;
+        setHtml(btn, `<svg class="w-3.5 h-3.5 text-emerald-400"><use href="#icon-check"/></svg><span class="text-[10px] text-emerald-300 font-semibold">Copied!</span>`);
+        btn.classList.add('bg-emerald-950/40', 'border-emerald-500/30');
+        setTimeout(() => {
+          setHtml(btn, originalHtml);
+          btn.classList.remove('bg-emerald-950/40', 'border-emerald-500/30');
+        }, 1800);
+      } catch (err) {
+        showToast('Failed to copy quote', 'error');
+      }
     }
 
     // MOBILE FILTER DRAWER
@@ -4352,6 +4684,7 @@
         const json = await res.json();
         if (json.success) {
           tgHaptic.success();
+          bookHighlightsCache.delete(bookId);
           invalidateCatalogCache();
           showToast('Book removed from library.');
           await init();
