@@ -54,7 +54,7 @@ import {
   classifyBookSourceCategoryDeterministic,
   containsBurmese,
 } from "./jev-shelf";
-import { isLnoriUrl, ingestLnoriSeries } from "./lnori";
+import { isLnoriUrl, ingestLnoriSeries, type LnoriProgressEvent } from "./lnori";
 import { isJoplinRoute, handleJoplinRequest } from "./joplin";
 import {
   initHighlightsTable,
@@ -79,7 +79,11 @@ import {
 declare const Bun: any;
 
 export interface ServerDependencies {
-  ingestLnoriSeries?: (url: string) => Promise<any>;
+  ingestLnoriSeries?: (
+    url: string,
+    onProgress?: (event: LnoriProgressEvent) => Promise<void> | void,
+    dependencies?: any,
+  ) => Promise<any>;
   getCalibreBooks?: (forceFresh?: boolean) => any;
 }
 
@@ -3390,9 +3394,13 @@ export async function handleRequest(
   // API: Lnori Light Novel Series & Volume Ingestion
   if (url.pathname === "/api/lnori/ingest" && req.method === "POST") {
     try {
-      let body: { url?: string };
+      let body: {
+        url?: string;
+        stream?: boolean | string;
+        format?: string;
+      };
       try {
-        body = (await req.json()) as { url?: string };
+        body = (await req.json()) as any;
       } catch {
         return jsonResponse(
           { success: false, error: "Missing or invalid 'url' parameter" },
@@ -3437,7 +3445,171 @@ export async function handleRequest(
         );
       }
 
+      const acceptHeader = req.headers.get("accept") || "";
+      const isNDJSON =
+        acceptHeader.includes("application/x-ndjson") ||
+        body.stream === "ndjson" ||
+        body.format === "ndjson";
+      const isSSE =
+        acceptHeader.includes("text/event-stream") ||
+        body.stream === "sse" ||
+        (Boolean(body.stream) && !isNDJSON);
+      const isStream = Boolean(body.stream || isSSE || isNDJSON);
+
       const runIngest = serverDependencies.ingestLnoriSeries ?? ingestLnoriSeries;
+      const refreshBooks = serverDependencies.getCalibreBooks ?? getCalibreBooks;
+
+      if (isStream) {
+        const contentType =
+          isNDJSON && !isSSE
+            ? "application/x-ndjson; charset=utf-8"
+            : "text/event-stream; charset=utf-8";
+
+        const streamHeaders: Record<string, string> = {
+          "Content-Type": contentType,
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+          "X-Accel-Buffering": "no",
+        };
+        if (corsOrigin) {
+          streamHeaders["Access-Control-Allow-Origin"] = corsOrigin;
+          streamHeaders["Access-Control-Allow-Credentials"] = "true";
+          streamHeaders["Vary"] = "Origin";
+        }
+
+        const abortController = new AbortController();
+        if (req.signal) {
+          if (req.signal.aborted) {
+            abortController.abort();
+          } else {
+            req.signal.addEventListener("abort", () => {
+              abortController.abort();
+            });
+          }
+        }
+
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+          async start(controller) {
+            const isSSEFormat = contentType.startsWith("text/event-stream");
+            let hasErrored = false;
+
+            const sendEvent = (event: LnoriProgressEvent) => {
+              try {
+                if (event.phase === "error") {
+                  hasErrored = true;
+                }
+                const outboundEvent: LnoriProgressEvent = {
+                  ...event,
+                  status:
+                    event.phase === "error" && event.status
+                      ? sanitizeErrorMessage(event.status)
+                      : event.status,
+                  volumeTitle: event.volumeTitle,
+                };
+                if (outboundEvent.data) {
+                  outboundEvent.data = { ...outboundEvent.data };
+                  if (typeof outboundEvent.data.error === "string") {
+                    outboundEvent.data.error = sanitizeErrorMessage(
+                      outboundEvent.data.error,
+                    );
+                  }
+                }
+                const json = JSON.stringify(outboundEvent);
+                const chunk = isSSEFormat ? `data: ${json}\n\n` : `${json}\n`;
+                controller.enqueue(encoder.encode(chunk));
+              } catch (enqueueErr) {
+                // Client disconnected or controller closed: abort background work
+                abortController.abort();
+                console.debug(
+                  "[Lnori] Stream controller enqueue failed (client disconnected):",
+                  enqueueErr,
+                );
+              }
+            };
+
+            try {
+              let hasCompleted = false;
+              const result = await runIngest(
+                targetUrl,
+                async (event: LnoriProgressEvent) => {
+                  if (event.phase === "complete") {
+                    hasCompleted = true;
+                  }
+                  sendEvent(event);
+                },
+                { signal: abortController.signal },
+              );
+
+              if (!result || !result.success) {
+                if (!hasErrored) {
+                  sendEvent({
+                    phase: "error",
+                    status:
+                      sanitizeErrorMessage(result?.error) ||
+                      "Failed to ingest light novel from Lnori",
+                    data: {
+                      error:
+                        sanitizeErrorMessage(result?.error) ||
+                        "Failed to ingest light novel from Lnori",
+                    },
+                  });
+                }
+              } else {
+                refreshBooks(true);
+                if (!hasCompleted) {
+                  sendEvent({
+                    phase: "complete",
+                    index: result.totalCount,
+                    total: result.totalCount,
+                    volumeTitle: result.seriesTitle,
+                    status: `Completed: ${result.importedCount} imported, ${result.skippedCount} skipped of ${result.totalCount} volumes`,
+                    data: {
+                      success: true,
+                      seriesTitle: result.seriesTitle,
+                      author: result.author,
+                      importedCount: result.importedCount,
+                      skippedCount: result.skippedCount,
+                      totalCount: result.totalCount,
+                      tags: result.tags,
+                      calibreBookIds: result.calibreBookIds,
+                    },
+                  });
+                }
+              }
+            } catch (err: any) {
+              if (!hasErrored) {
+                sendEvent({
+                  phase: "error",
+                  status:
+                    sanitizeErrorMessage(err) ||
+                    "Failed to ingest light novel from Lnori",
+                  data: {
+                    error:
+                      sanitizeErrorMessage(err) ||
+                      "Failed to ingest light novel from Lnori",
+                  },
+                });
+              }
+            } finally {
+              try {
+                controller.close();
+              } catch (closeErr) {
+                console.debug("[Lnori] Stream controller close failed:", closeErr);
+              }
+            }
+          },
+          cancel() {
+            abortController.abort();
+          },
+        });
+
+        return new Response(stream, {
+          status: 200,
+          headers: streamHeaders,
+        });
+      }
+
       const result = await runIngest(targetUrl);
       if (!result || !result.success) {
         return jsonResponse(
@@ -3452,7 +3624,6 @@ export async function handleRequest(
         );
       }
 
-      const refreshBooks = serverDependencies.getCalibreBooks ?? getCalibreBooks;
       refreshBooks(true);
 
       return jsonResponse(

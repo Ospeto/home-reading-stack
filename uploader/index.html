@@ -1783,7 +1783,7 @@
         <div id="lnoriIngestStatus" class="hidden text-xs p-3 rounded-xl border"></div>
 
         <div class="flex items-center justify-end gap-2 pt-2">
-          <button type="button" onclick="closeLnoriModal()" class="min-h-[44px] px-4 py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-300 text-xs font-semibold rounded-xl border border-[#23232a] cursor-pointer active:scale-[0.98] transition-all duration-150">Cancel</button>
+          <button type="button" id="lnoriCancelBtn" onclick="handleLnoriCancel()" class="min-h-[44px] px-4 py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-300 text-xs font-semibold rounded-xl border border-[#23232a] cursor-pointer active:scale-[0.98] transition-all duration-150">Cancel</button>
           <button type="submit" id="lnoriIngestBtn" class="min-h-[44px] px-4 py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl shadow-sm transition-all duration-150 flex items-center gap-2 cursor-pointer active:scale-[0.98] disabled:opacity-50">
             <svg class="w-4 h-4 text-zinc-950"><use href="#icon-download"/></svg>
             <span>Download &amp; Ingest</span>
@@ -2889,7 +2889,7 @@
               </span>
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-indigo-400 font-mono border border-zinc-700">API</span>
             </div>
-            <div class="text-[11px] text-zinc-400">Downloads and imports series or book from lnori.com</div>
+            <div class="text-[11px] text-zinc-400">Downloads and imports series or book from lnori.com with live SSE progress streaming (<code>stream: true</code>)</div>
             <div class="flex items-center gap-2 pt-1">
               <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://reading-sg.wavypremium.xyz:8443/api/lnori/ingest</code>
               <button onclick="copyToClipboard('https://reading-sg.wavypremium.xyz:8443/api/lnori/ingest')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
@@ -4709,19 +4709,39 @@
       }
     }
 
+    let isLnoriIngesting = false;
+    let activeLnoriAbortController = null;
+
     // LNORI LIGHT NOVEL INGESTION MODAL
     function openLnoriModal(initialUrl) {
+      if (isLnoriIngesting) return;
       tgHaptic.light();
       openModalAnimated('lnoriModal', false);
       const input = document.getElementById('lnoriUrlInput');
       const status = document.getElementById('lnoriIngestStatus');
+      const cancelBtn = document.getElementById('lnoriCancelBtn');
       input.value = initialUrl || '';
       status.className = 'hidden text-xs p-3 rounded-xl border';
       status.innerHTML = '';
+      if (cancelBtn) {
+        cancelBtn.disabled = false;
+        cancelBtn.textContent = 'Cancel';
+      }
       setTimeout(() => input.focus(), 60);
     }
 
+    function handleLnoriCancel() {
+      if (isLnoriIngesting && activeLnoriAbortController) {
+        activeLnoriAbortController.abort();
+      } else {
+        closeLnoriModal();
+      }
+    }
+
     function closeLnoriModal() {
+      if (isLnoriIngesting && activeLnoriAbortController) {
+        activeLnoriAbortController.abort();
+      }
       closeModalAnimated('lnoriModal', false);
     }
 
@@ -4729,42 +4749,306 @@
       e.preventDefault();
       const input = document.getElementById('lnoriUrlInput');
       const btn = document.getElementById('lnoriIngestBtn');
+      const cancelBtn = document.getElementById('lnoriCancelBtn');
       const status = document.getElementById('lnoriIngestStatus');
       const targetUrl = input.value.trim();
-      if (!targetUrl) return;
+      if (!targetUrl || isLnoriIngesting) return;
 
+      isLnoriIngesting = true;
+      const runController = new AbortController();
+      activeLnoriAbortController = runController;
       btn.disabled = true;
+      if (cancelBtn) {
+        cancelBtn.disabled = false;
+        cancelBtn.textContent = 'Stop Ingest';
+      }
       setHtml(btn, `${svgIcon('spinner', 'w-3.5 h-3.5 animate-spin')} <span>Ingesting...</span>`);
-      status.className = 'text-xs p-3 rounded-xl border bg-zinc-900 border-zinc-700 text-zinc-300';
-      setHtml(status, `<div class="flex items-center gap-2">${svgIcon('spinner', 'w-4 h-4 animate-spin text-indigo-400')} <span>Fetching Lnori manifest, downloading EPUBs &amp; converting covers...</span></div>`);
+      status.className = 'text-xs p-3.5 rounded-xl border bg-zinc-900/90 border-zinc-800 text-zinc-300';
+      setHtml(status, `
+        <div class="space-y-3">
+          <div class="flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="w-2 h-2 rounded-full bg-indigo-400 animate-pulse shrink-0"></span>
+              <span id="lnoriSeriesTitleDisplay" class="font-semibold text-zinc-200 truncate text-xs">Inspecting Lnori manifest...</span>
+            </div>
+            <span id="lnoriProgressCounter" class="text-[11px] font-mono font-medium text-zinc-400 shrink-0">0%</span>
+          </div>
+          <div class="w-full h-2 rounded-full overflow-hidden p-0.5 border border-white/10" style="background: rgba(39, 39, 42, 0.8);">
+            <div id="lnoriProgressBar" class="h-full rounded-full transition-all duration-300 ease-out" style="width: 0%; background: linear-gradient(90deg, #6366f1, #818cf8, #38bdf8);"></div>
+          </div>
+          <div class="flex items-center gap-2 text-[11px] text-zinc-300 bg-zinc-950/60 p-2.5 rounded-lg border border-zinc-800/80">
+            <svg id="lnoriStatusSpinner" class="w-3.5 h-3.5 animate-spin text-indigo-400 shrink-0"><use href="#icon-spinner"/></svg>
+            <span id="lnoriActiveStatusText" class="truncate">Fetching volume manifest for Lnori series...</span>
+          </div>
+          <div id="lnoriVolumeChips" class="hidden flex-wrap gap-1.5 max-h-36 overflow-y-auto p-1 scrollbar-thin"></div>
+        </div>
+      `);
       status.classList.remove('hidden');
+
+      let totalVolumes = 0;
+      const volumeStatuses = {};
+      let completedData = null;
+
+      function updateChipsUI() {
+        const chipsContainer = document.getElementById('lnoriVolumeChips');
+        if (!chipsContainer || totalVolumes <= 0) return;
+        chipsContainer.classList.remove('hidden');
+        chipsContainer.classList.add('flex');
+
+        let html = '';
+        for (let i = 1; i <= totalVolumes; i++) {
+          const v = volumeStatuses[i] || { state: 'pending' };
+          let style = 'background: rgba(39, 39, 42, 0.5); border: 1px solid rgba(63, 63, 70, 0.6); color: #71717a;';
+          let icon = '';
+          if (v.state === 'imported') {
+            style = 'background: rgba(6, 78, 59, 0.5); border: 1px solid rgba(16, 185, 129, 0.4); color: #6ee7b7; font-weight: 600;';
+            icon = '✓ ';
+          } else if (v.state === 'skipped') {
+            style = 'background: rgba(120, 53, 15, 0.4); border: 1px solid rgba(245, 158, 11, 0.4); color: #fcd34d; font-weight: 600;';
+            icon = '⏭️ ';
+          } else if (v.state === 'active') {
+            style = 'background: rgba(49, 46, 129, 0.6); border: 1px solid rgba(99, 102, 241, 0.6); color: #c7d2fe; font-weight: 600;';
+            icon = '⬇️ ';
+          } else if (v.state === 'error') {
+            style = 'background: rgba(136, 19, 55, 0.5); border: 1px solid rgba(244, 63, 94, 0.5); color: #fda4af; font-weight: 600;';
+            icon = '❌ ';
+          }
+          const pulseClass = v.state === 'active' ? ' animate-pulse' : '';
+          html += `<span class="px-2 py-0.5 rounded-md text-[10px] select-none transition-colors${pulseClass}" style="${style}">${icon}Vol ${i}</span>`;
+        }
+        setHtml(chipsContainer, html);
+      }
+
+      function handleProgressEvent(ev) {
+        if (!ev) return;
+        const titleEl = document.getElementById('lnoriSeriesTitleDisplay');
+        const counterEl = document.getElementById('lnoriProgressCounter');
+        const barEl = document.getElementById('lnoriProgressBar');
+        const activeTextEl = document.getElementById('lnoriActiveStatusText');
+
+        if (ev.phase === 'manifest') {
+          if (ev.volumeTitle && titleEl) {
+            titleEl.textContent = ev.volumeTitle;
+          }
+          if (ev.total && ev.total > 0) {
+            totalVolumes = ev.total;
+            if (titleEl) {
+              titleEl.textContent = `${ev.volumeTitle || 'Series'} (${totalVolumes} volume${totalVolumes === 1 ? '' : 's'})`;
+            }
+            updateChipsUI();
+          }
+          if (ev.status && activeTextEl) {
+            activeTextEl.textContent = ev.status.replace(/\\([_*`[\]\\])/g, '$1').replace(/[*_`]/g, '');
+          }
+        } else if (ev.phase === 'volume') {
+          const idx = ev.index || 1;
+          const total = ev.total || totalVolumes || 1;
+          totalVolumes = total;
+
+          const action = ev.data?.action;
+          if (action === 'skipped') {
+            volumeStatuses[idx] = { state: 'skipped' };
+            const skippedPct = Math.min(100, Math.round((idx / total) * 100));
+            if (barEl) barEl.style.width = `${skippedPct}%`;
+            if (counterEl) counterEl.textContent = `Volume ${idx} of ${total} (${skippedPct}%)`;
+          } else if (action === 'imported') {
+            volumeStatuses[idx] = { state: 'imported' };
+            const importedPct = Math.min(100, Math.round((idx / total) * 100));
+            if (barEl) barEl.style.width = `${importedPct}%`;
+            if (counterEl) counterEl.textContent = `Volume ${idx} of ${total} (${importedPct}%)`;
+          } else if (
+            action === 'downloading' ||
+            action === 'converting_cover' ||
+            action === 'adding_calibre' ||
+            action === 'inspecting'
+          ) {
+            volumeStatuses[idx] = { state: 'active' };
+            const activePct = Math.min(100, Math.round(((idx - 1) / total) * 100));
+            if (barEl) barEl.style.width = `${activePct}%`;
+            if (counterEl) counterEl.textContent = `Volume ${idx} of ${total} (${activePct}%)`;
+          }
+
+          if (titleEl && ev.volumeTitle) {
+            titleEl.textContent = ev.volumeTitle;
+          }
+
+          if (ev.status && activeTextEl) {
+            activeTextEl.textContent = ev.status.replace(/\\([_*`[\]\\])/g, '$1').replace(/[*_`]/g, '');
+          }
+          updateChipsUI();
+        } else if (ev.phase === 'complete') {
+          completedData = ev.data;
+          if (barEl) barEl.style.width = '100%';
+          if (counterEl) counterEl.textContent = '100%';
+          if (activeTextEl) activeTextEl.textContent = 'All volumes finished!';
+        } else if (ev.phase === 'error') {
+          throw new Error(ev.status || ev.data?.error || 'Ingestion encountered an error');
+        }
+      }
 
       try {
         const res = await fetch('/api/lnori/ingest', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: targetUrl })
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream',
+          },
+          body: JSON.stringify({ url: targetUrl, stream: true }),
+          signal: activeLnoriAbortController.signal,
         });
-        const data = await res.json();
-        if (res.ok && data.success) {
+
+        if (!res.ok && !res.body) {
+          const errJson = await res.json().catch(() => ({}));
+          throw new Error(errJson.error || `HTTP ${res.status}`);
+        }
+
+        const contentType = res.headers.get('content-type') || '';
+        if (
+          contentType.includes('text/event-stream') ||
+          contentType.includes('application/x-ndjson')
+        ) {
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed) continue;
+              let parsed = null;
+              if (trimmed.startsWith('data:')) {
+                try {
+                  parsed = JSON.parse(trimmed.slice(5).trim());
+                } catch {}
+              } else {
+                try {
+                  parsed = JSON.parse(trimmed);
+                } catch {}
+              }
+              if (parsed) {
+                handleProgressEvent(parsed);
+              }
+            }
+          }
+          if (buffer && buffer.trim()) {
+            const trimmed = buffer.trim();
+            let parsed = null;
+            if (trimmed.startsWith('data:')) {
+              try {
+                parsed = JSON.parse(trimmed.slice(5).trim());
+              } catch {}
+            } else {
+              try {
+                parsed = JSON.parse(trimmed);
+              } catch {}
+            }
+            if (parsed) handleProgressEvent(parsed);
+          }
+        } else {
+          // Non-streaming fallback response
+          const data = await res.json();
+          if (!res.ok || !data.success) {
+            throw new Error(data.error || 'Failed to ingest light novel from Lnori');
+          }
+          completedData = data;
+        }
+
+        if (completedData) {
           tgHaptic.success();
           invalidateCatalogCache();
-          status.className = 'text-xs p-3 rounded-xl border bg-emerald-950/40 border-emerald-800 text-emerald-300';
-          const stats = `Imported: ${data.importedCount || 0}, Skipped/Existing: ${data.skippedCount || 0}, Total: ${data.totalCount || 0}`;
-          const authorText = data.author ? ` by <em>${escapeHtml(data.author)}</em>` : '';
-          setHtml(status, `<div><strong>✅ Light Novel Ingested Successfully!</strong><div class="mt-1 text-[11px] text-zinc-300">"${escapeHtml(data.seriesTitle || 'Series')}"${authorText} (${stats}).</div></div>`);
-          showToast(`Ingested "${data.seriesTitle || 'Light Novel'}"!`);
+          status.className =
+            'text-xs p-3.5 rounded-xl border bg-emerald-950/40 border-emerald-800 text-emerald-300';
+
+          let chipsHtml = '';
+          const finalTotal = completedData.totalCount || totalVolumes;
+          if (finalTotal > 0) {
+            let renderedChips = '';
+            for (let i = 1; i <= finalTotal; i++) {
+              const v = volumeStatuses[i];
+              if (!v) continue;
+              if (v.state === 'imported') {
+                renderedChips += `<span class="px-2 py-0.5 rounded-md text-[10px]" style="background: rgba(6, 78, 59, 0.5); border: 1px solid rgba(16, 185, 129, 0.4); color: #6ee7b7; font-weight: 600;">✓ Vol ${i}</span>`;
+              } else if (v.state === 'skipped') {
+                renderedChips += `<span class="px-2 py-0.5 rounded-md text-[10px]" style="background: rgba(120, 53, 15, 0.4); border: 1px solid rgba(245, 158, 11, 0.4); color: #fcd34d; font-weight: 600;">⏭️ Vol ${i}</span>`;
+              } else if (v.state === 'error') {
+                renderedChips += `<span class="px-2 py-0.5 rounded-md text-[10px]" style="background: rgba(136, 19, 55, 0.5); border: 1px solid rgba(244, 63, 94, 0.5); color: #fda4af; font-weight: 600;">❌ Vol ${i}</span>`;
+              }
+            }
+            if (renderedChips) {
+              chipsHtml = `<div class="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto p-1 mt-1 scrollbar-thin">${renderedChips}</div>`;
+            }
+          }
+
+          setHtml(
+            status,
+            `
+            <div class="space-y-3">
+              <div class="flex items-center gap-2 text-white font-bold text-xs">
+                <div class="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
+                  ${svgIcon('check', 'w-3.5 h-3.5')}
+                </div>
+                <span>Light Novel Series Ingested Successfully!</span>
+              </div>
+              <div class="text-[11px] text-zinc-300 space-y-0.5 pl-7">
+                <div class="font-medium text-white">"${escapeHtml(completedData.seriesTitle || 'Series')}"</div>
+                ${completedData.author ? `<div class="text-zinc-400">Author: ${escapeHtml(completedData.author)}</div>` : ''}
+              </div>
+              <div class="grid grid-cols-3 gap-2 text-center text-xs">
+                <div class="p-2 rounded-xl bg-zinc-900/80 border border-zinc-800">
+                  <div class="text-[10px] text-zinc-400">Imported</div>
+                  <div class="text-sm font-bold text-emerald-400 mt-0.5">${completedData.importedCount || 0}</div>
+                </div>
+                <div class="p-2 rounded-xl bg-zinc-900/80 border border-zinc-800">
+                  <div class="text-[10px] text-zinc-400">Skipped</div>
+                  <div class="text-sm font-bold text-amber-400 mt-0.5">${completedData.skippedCount || 0}</div>
+                </div>
+                <div class="p-2 rounded-xl bg-zinc-900/80 border border-zinc-800">
+                  <div class="text-[10px] text-zinc-400">Total</div>
+                  <div class="text-sm font-bold text-zinc-200 mt-0.5">${completedData.totalCount || 0}</div>
+                </div>
+              </div>
+              ${chipsHtml}
+            </div>
+          `,
+          );
+          showToast(`Ingested "${completedData.seriesTitle || 'Light Novel'}"!`);
           input.value = '';
           await init();
         } else {
-          throw new Error(data.error || 'Failed to ingest light novel from Lnori');
+          throw new Error('Ingestion stream ended before completion');
         }
       } catch (err) {
-        tgHaptic.error();
-        status.className = 'text-xs p-3 rounded-xl border bg-rose-950/40 border-rose-800 text-rose-300';
-        setHtml(status, `<div><strong>❌ Ingestion Failed:</strong><div class="mt-1 text-[11px] text-rose-200">${escapeHtml(err.message)}</div></div>`);
+        if (err.name === 'AbortError') {
+          status.className =
+            'text-xs p-3 rounded-xl border bg-zinc-900 border-zinc-700 text-zinc-400';
+          setHtml(
+            status,
+            `<div><strong>⚠️ Ingestion Stopped:</strong><div class="mt-1 text-[11px] text-zinc-400">Light novel download was stopped.</div></div>`,
+          );
+        } else {
+          tgHaptic.error();
+          status.className =
+            'text-xs p-3 rounded-xl border bg-rose-950/40 border-rose-800 text-rose-300';
+          setHtml(
+            status,
+            `<div><strong>❌ Ingestion Failed:</strong><div class="mt-1 text-[11px] text-rose-200">${escapeHtml(err.message)}</div></div>`,
+          );
+        }
       } finally {
+        if (activeLnoriAbortController === runController) {
+          activeLnoriAbortController = null;
+          isLnoriIngesting = false;
+        }
         btn.disabled = false;
+        if (cancelBtn) {
+          cancelBtn.disabled = false;
+          cancelBtn.textContent = completedData ? 'Done' : 'Cancel';
+        }
         setHtml(btn, `${svgIcon('download', 'w-3.5 h-3.5')} <span>Download &amp; Ingest</span>`);
       }
     }
