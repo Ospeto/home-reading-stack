@@ -1468,5 +1468,92 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       );
       expect(sameAuthorMatch.exists).toBe(true);
     });
+
+    it("does not cross-match flat stripped titles when candidate author differs", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      fs.mkdirSync(booksDir, { recursive: true });
+
+      // Flat on Kindle: "01 - Introduction.epub" with no author on disk
+      fs.writeFileSync(path.join(booksDir, "01 - Introduction.epub"), "intro", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate specifying Author B must NOT match flat stripped title
+      const crossMatch = isBookAlreadyOnKindle(
+        kindleMount,
+        "Introduction.epub",
+        "Author B",
+        0,
+        index,
+        { title: "Introduction", authors: "Author B" },
+      );
+      expect(crossMatch.exists).toBe(false);
+
+      // Candidate with no author specified matches cleanly
+      const noAuthorMatch = isBookAlreadyOnKindle(
+        kindleMount,
+        "Introduction.epub",
+        "",
+        0,
+        index,
+        { title: "Introduction" },
+      );
+      expect(noAuthorMatch.exists).toBe(true);
+    });
+
+    it("matches format-insensitive titles in series folders without author rejection", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const seriesFolder = path.join(kindleMount, "books", "Cool Series");
+      fs.mkdirSync(seriesFolder, { recursive: true });
+
+      // Format-insensitive match inside series folder
+      fs.writeFileSync(path.join(seriesFolder, "The Final Empire.azw3"), "empire azw3", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      const match = isBookAlreadyOnKindle(
+        kindleMount,
+        "The Final Empire.epub",
+        "Brandon Sanderson",
+        0,
+        index,
+        { title: "The Final Empire", authors: "Brandon Sanderson" },
+      );
+      expect(match.exists).toBe(true);
+      expect(match.existingPath).toContain("The Final Empire.azw3");
+    });
+
+    it("does not false-positive on short-author substring matches (e.g. Ann vs Anne Rice)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorDir = path.join(kindleMount, "books", "Anne Rice");
+      fs.mkdirSync(authorDir, { recursive: true });
+
+      fs.writeFileSync(path.join(authorDir, "01 - Blood Canticle.epub"), "vampire", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate author "Ann" must NOT match folder "Anne Rice"
+      const crossMatch = isBookAlreadyOnKindle(
+        kindleMount,
+        "Blood Canticle.epub",
+        "Ann",
+        0,
+        index,
+        { title: "Blood Canticle", authors: "Ann" },
+      );
+      expect(crossMatch.exists).toBe(false);
+
+      // Candidate author "Anne Rice" matches cleanly
+      const match = isBookAlreadyOnKindle(
+        kindleMount,
+        "Blood Canticle.epub",
+        "Anne Rice",
+        0,
+        index,
+        { title: "Blood Canticle", authors: "Anne Rice" },
+      );
+      expect(match.exists).toBe(true);
+    });
   });
 });
