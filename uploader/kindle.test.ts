@@ -15,6 +15,11 @@ import {
   resolveDiskutilPath,
   buildKindleBookIndex,
   isBookAlreadyOnKindle,
+  isBookAlreadyOnKindleAsync,
+  normalizeAuthorSpacing,
+  resolveKindleDestinationDir,
+  runDotClean,
+  cleanDotFilesFallback,
   cancelKindleSync,
   previewKindleSync,
   isBookActiveOrUnread,
@@ -249,7 +254,7 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
   });
 
   describe("3. Bulk & Single Book Synchronization", () => {
-    it("syncs single book to Kindle with author subfolder", () => {
+    it("syncs single book to Kindle with author subfolder", async () => {
       setupFakeCalibreDatabase([
         { id: 1, title: "Way of Kings", author: "Brandon Sanderson", format: "EPUB", fileContent: "stormlight 1" },
       ]);
@@ -257,7 +262,7 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       const kindleMount = path.join(fakeVolumesDir, "Kindle");
       fs.mkdirSync(path.join(kindleMount, "documents"), { recursive: true });
 
-      const res = syncSingleBookToKindle(1, { mountPath: kindleMount });
+      const res = await syncSingleBookToKindle(1, { mountPath: kindleMount });
       expect(res.success).toBe(true);
       expect(res.bookId).toBe(1);
       expect(res.alreadySynced).toBe(false);
@@ -265,7 +270,7 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       expect(fs.existsSync(res.destinationPath!)).toBe(true);
 
       // Re-syncing same book skips transfer (alreadySynced)
-      const res2 = syncSingleBookToKindle(1, { mountPath: kindleMount });
+      const res2 = await syncSingleBookToKindle(1, { mountPath: kindleMount });
       expect(res2.success).toBe(true);
       expect(res2.alreadySynced).toBe(true);
       expect(res2.bytesTransferred).toBe(0);
@@ -1006,6 +1011,429 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       expect(resUnread.status).toBe(200);
       const dataUnread = (await resUnread.json()) as any;
       expect(dataUnread.preview.scope).toBe("unread");
+    });
+  });
+
+  describe("10. Leading Index Stripping, Author Normalization & Jev Ambiguity Arbitration", () => {
+    it("matches '01 - Title.epub' on Kindle against Calibre candidate 'Title'", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      fs.mkdirSync(booksDir, { recursive: true });
+
+      // File on Kindle with leading index prefix
+      fs.writeFileSync(path.join(booksDir, "01 - The Eminence in Shadow.epub"), "content 1", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Calibre candidate title without leading index
+      const match = isBookAlreadyOnKindle(
+        kindleMount,
+        "The Eminence in Shadow.epub",
+        "",
+        0,
+        index,
+        { title: "The Eminence in Shadow" },
+      );
+      expect(match.exists).toBe(true);
+      expect(match.existingPath).toContain("01 - The Eminence in Shadow.epub");
+    });
+
+    it("matches 'Vol. 1 - Overlord.epub' on Kindle against candidate 'Overlord, Vol. 1'", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      fs.mkdirSync(booksDir, { recursive: true });
+
+      fs.writeFileSync(path.join(booksDir, "Vol. 1 - Overlord.epub"), "overlord 1", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      const match = isBookAlreadyOnKindle(
+        kindleMount,
+        "Overlord, Vol. 1 - Kugane Maruyama.epub",
+        "Kugane Maruyama",
+        0,
+        index,
+        { title: "Overlord, Vol. 1", authors: "Kugane Maruyama" },
+      );
+      expect(match.exists).toBe(true);
+      expect(match.existingPath).toContain("Vol. 1 - Overlord.epub");
+    });
+
+    it("preserves volume isolation: '01 - The Eminence in Shadow.epub' does not match candidate with seriesIndex: 2", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      fs.mkdirSync(booksDir, { recursive: true });
+
+      fs.writeFileSync(path.join(booksDir, "01 - The Eminence in Shadow.epub"), "content 1", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate Volume 2 must not match Volume 1 on device
+      const matchVol2 = isBookAlreadyOnKindle(
+        kindleMount,
+        "The Eminence in Shadow - Daisuke Aizawa.epub",
+        "Daisuke Aizawa",
+        0,
+        index,
+        { title: "The Eminence in Shadow", authors: "Daisuke Aizawa", series: "The Eminence in Shadow", seriesIndex: 2 },
+      );
+      expect(matchVol2.exists).toBe(false);
+    });
+
+    it("matches 'Author, Artist' folder on Kindle against Calibre author 'Author,Artist'", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorFolder = path.join(kindleMount, "books", "Fuse, Mitz Vah");
+      fs.mkdirSync(authorFolder, { recursive: true });
+
+      fs.writeFileSync(path.join(authorFolder, "Slime Vol 1.epub"), "slime content", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate has comma without space in authors: "Fuse,Mitz Vah"
+      const match = isBookAlreadyOnKindle(
+        kindleMount,
+        "Slime Vol 1.epub",
+        "Fuse,Mitz Vah",
+        0,
+        index,
+        { title: "Slime Vol 1", authors: "Fuse,Mitz Vah" },
+      );
+      expect(match.exists).toBe(true);
+      expect(match.existingPath).toBe(path.join(authorFolder, "Slime Vol 1.epub"));
+    });
+
+    it("resolveKindleDestinationDir reuses existing 'Author, Artist' directory over creating comma-variant folder", () => {
+      expect(normalizeAuthorSpacing("Author,Artist")).toBe("Author, Artist");
+      expect(normalizeAuthorSpacing("Author , Artist")).toBe("Author, Artist");
+
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      const existingDir = path.join(booksDir, "Fuse, Mitz Vah");
+      fs.mkdirSync(existingDir, { recursive: true });
+
+      // Request destination with comma-missing author
+      const res = resolveKindleDestinationDir(booksDir, "Fuse,Mitz Vah");
+      expect(res.authorDir).toBe("Fuse, Mitz Vah");
+      expect(res.targetDir).toBe(existingDir);
+      expect(res.reusedExistingFolder).toBe(true);
+
+      // When folder doesn't exist, formats with clean comma spacing
+      const resNew = resolveKindleDestinationDir(booksDir, "NewAuthor,NewArtist");
+      expect(resNew.authorDir).toBe("NewAuthor, NewArtist");
+      expect(resNew.reusedExistingFolder).toBe(false);
+    });
+
+    it("resolveKindleDestinationDir places book inside existing series subfolder inside author directory", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      const authorDir = path.join(booksDir, "Kugane Maruyama");
+      const seriesDir = path.join(authorDir, "Overlord");
+      fs.mkdirSync(seriesDir, { recursive: true });
+
+      const res = resolveKindleDestinationDir(booksDir, "Kugane Maruyama", "Overlord");
+      expect(res.authorDir).toBe("Kugane Maruyama");
+      expect(res.seriesDir).toBe("Overlord");
+      expect(res.targetDir).toBe(seriesDir);
+      expect(res.relativeDir).toBe(path.join("Kugane Maruyama", "Overlord"));
+      expect(res.reusedExistingFolder).toBe(true);
+    });
+
+    it("isBookAlreadyOnKindleAsync arbitrates ambiguous duplicate using Jev System-1 when similarity is in [0.65, 0.88)", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorDir = path.join(kindleMount, "books", "Tappei Nagatsuki");
+      fs.mkdirSync(authorDir, { recursive: true });
+
+      fs.writeFileSync(
+        path.join(authorDir, "Re Zero Starting Life in Another World Prologue Chapter.epub"),
+        "rezero 1",
+        "utf8",
+      );
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Mock Jev System-1 API response
+      const origFetch = globalThis.fetch;
+      let jevCalled = false;
+      (globalThis as any).fetch = async (url: string, init?: any) => {
+        if (typeof url === "string" && url.includes("typesafe.ai")) {
+          jevCalled = true;
+          return new Response(
+            JSON.stringify({
+              model: "jev-latest",
+              answers: {
+                is_duplicate: {
+                  choice: "duplicate",
+                  confidence: 0.95,
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return origFetch(url as any, init);
+      };
+
+      try {
+        const result = await isBookAlreadyOnKindleAsync(
+          kindleMount,
+          "Re Zero Life in Another World - Prologue Arc Edition.epub",
+          "Tappei Nagatsuki",
+          0,
+          index,
+          {
+            title: "Re Zero Life in Another World - Prologue Arc Edition",
+            authors: "Tappei Nagatsuki",
+          },
+          { jevApiKey: "test-key" },
+        );
+
+        expect(jevCalled).toBe(true);
+        expect(result.exists).toBe(true);
+        expect(result.matchedBy).toBe("jev_system_one");
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("isBookAlreadyOnKindleAsync treats non-duplicate when Jev returns isDuplicate: false", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorDir = path.join(kindleMount, "books", "Author A");
+      fs.mkdirSync(authorDir, { recursive: true });
+
+      fs.writeFileSync(
+        path.join(authorDir, "Similar Title Alpha One.epub"),
+        "content a",
+        "utf8",
+      );
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      const origFetch = globalThis.fetch;
+      (globalThis as any).fetch = async (url: string, init?: any) => {
+        if (typeof url === "string" && url.includes("typesafe.ai")) {
+          return new Response(
+            JSON.stringify({
+              model: "jev-latest",
+              answers: {
+                is_duplicate: {
+                  choice: "distinct",
+                  confidence: 0.95,
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return origFetch(url as any, init);
+      };
+
+      try {
+        const result = await isBookAlreadyOnKindleAsync(
+          kindleMount,
+          "Similar Title Beta One.epub",
+          "Author A",
+          0,
+          index,
+          {
+            title: "Similar Title Beta One",
+            authors: "Author A",
+          },
+          { jevApiKey: "test-key" },
+        );
+
+        expect(result.exists).toBe(false);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("isBookAlreadyOnKindleAsync fails open gracefully when Jev API errors or times out", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorDir = path.join(kindleMount, "books", "Author A");
+      fs.mkdirSync(authorDir, { recursive: true });
+
+      fs.writeFileSync(
+        path.join(authorDir, "Similar Title Alpha One.epub"),
+        "content a",
+        "utf8",
+      );
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      const origFetch = globalThis.fetch;
+      (globalThis as any).fetch = async (url: string, init?: any) => {
+        if (typeof url === "string" && url.includes("typesafe.ai")) {
+          throw new Error("Network timeout or connection refused");
+        }
+        return origFetch(url as any, init);
+      };
+
+      try {
+        const result = await isBookAlreadyOnKindleAsync(
+          kindleMount,
+          "Similar Title Beta One.epub",
+          "Author A",
+          0,
+          index,
+          {
+            title: "Similar Title Beta One",
+            authors: "Author A",
+          },
+          { jevApiKey: "test-key" },
+        );
+
+        // Fails open gracefully without throwing
+        expect(result.exists).toBe(false);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("runDotClean purges ._* resource fork ghost files from Kindle books directory", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      const authorDir = path.join(booksDir, "Author");
+      fs.mkdirSync(authorDir, { recursive: true });
+
+      const realBook = path.join(authorDir, "Book.epub");
+      const ghostBook = path.join(authorDir, "._Book.epub");
+      const rootGhost = path.join(booksDir, "._Ghost.epub");
+
+      fs.writeFileSync(realBook, "valid content");
+      fs.writeFileSync(ghostBook, "resource fork bytes");
+      fs.writeFileSync(rootGhost, "root resource fork bytes");
+
+      expect(fs.existsSync(ghostBook)).toBe(true);
+      expect(fs.existsSync(rootGhost)).toBe(true);
+
+      const res = runDotClean(booksDir);
+      expect(res.success).toBe(true);
+
+      // Ghost files must be removed
+      expect(fs.existsSync(ghostBook)).toBe(false);
+      expect(fs.existsSync(rootGhost)).toBe(false);
+      // Real book must remain intact
+      expect(fs.existsSync(realBook)).toBe(true);
+
+      // Verify cleanDotFilesFallback returns 0 when no ghost files remain
+      expect(cleanDotFilesFallback(booksDir)).toBe(0);
+    });
+
+    it("syncSingleBookToKindle executes post-sync dot_clean", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      fs.mkdirSync(booksDir, { recursive: true });
+
+      setupFakeCalibreDatabase([
+        {
+          id: 1,
+          title: "Clean Book",
+          author: "Clean Author",
+          format: "EPUB",
+          fileContent: "epub content",
+        },
+      ]);
+
+      // Plant a ghost file in the books directory
+      const ghost = path.join(booksDir, "._dirty_fork");
+      fs.writeFileSync(ghost, "garbage");
+      expect(fs.existsSync(ghost)).toBe(true);
+
+      const res = await syncSingleBookToKindle(1, { mountPath: kindleMount });
+      expect(res.success).toBe(true);
+
+      // Post-sync dot_clean must have wiped the ghost file
+      expect(fs.existsSync(ghost)).toBe(false);
+    });
+
+    it("does not strip year-titled books like '1984 - George Orwell' into author name", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      fs.mkdirSync(booksDir, { recursive: true });
+
+      fs.writeFileSync(path.join(booksDir, "1984 - George Orwell.epub"), "orwell 1984", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate titled "George Orwell" must NOT match "1984 - George Orwell"
+      const falseMatch = isBookAlreadyOnKindle(
+        kindleMount,
+        "George Orwell.epub",
+        "",
+        0,
+        index,
+        { title: "George Orwell" },
+      );
+      expect(falseMatch.exists).toBe(false);
+
+      // Candidate titled "1984" MUST match
+      const trueMatch = isBookAlreadyOnKindle(
+        kindleMount,
+        "1984 - George Orwell.epub",
+        "George Orwell",
+        0,
+        index,
+        { title: "1984", authors: "George Orwell" },
+      );
+      expect(trueMatch.exists).toBe(true);
+    });
+
+    it("previewKindleSync resolves destinations against booksRoot and reuses existing author folders", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      const existingAuthor = path.join(booksDir, "Fuse, Mitz Vah");
+      fs.mkdirSync(existingAuthor, { recursive: true });
+
+      setupFakeCalibreDatabase([
+        {
+          id: 1,
+          title: "Slime 1",
+          author: "Fuse,Mitz Vah",
+          format: "EPUB",
+          fileContent: "content",
+        },
+      ]);
+
+      // Existing book is inside the reused folder
+      fs.writeFileSync(path.join(existingAuthor, "Slime 1 - Fuse, Mitz Vah.epub"), "content", "utf8");
+
+      const preview = previewKindleSync(kindleMount, { scope: "all" });
+      expect(preview.detected).toBe(true);
+      expect(preview.alreadySyncedCount).toBe(1);
+      expect(preview.pendingCount).toBe(0);
+    });
+
+    it("Strategy B base_filename does not cross-match stripped titles across different authors", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorA = path.join(kindleMount, "books", "Author A");
+      fs.mkdirSync(authorA, { recursive: true });
+
+      // Kindle has "01 - Introduction - Author A.epub"
+      fs.writeFileSync(path.join(authorA, "01 - Introduction - Author A.epub"), "intro a", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate has stripped base name "Introduction - Author B.epub" but belongs to Author B
+      const crossMatch = isBookAlreadyOnKindle(
+        kindleMount,
+        "Introduction - Author B.epub",
+        "Author B",
+        0,
+        index,
+        { title: "Introduction", authors: "Author B" },
+      );
+      expect(crossMatch.exists).toBe(false);
+
+      // Candidate with Author A matches cleanly
+      const sameAuthorMatch = isBookAlreadyOnKindle(
+        kindleMount,
+        "Introduction - Author A.epub",
+        "Author A",
+        0,
+        index,
+        { title: "Introduction", authors: "Author A" },
+      );
+      expect(sameAuthorMatch.exists).toBe(true);
     });
   });
 });

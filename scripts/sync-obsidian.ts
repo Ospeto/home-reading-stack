@@ -899,7 +899,7 @@ export function getCalibreDbPath(): string {
     return path.resolve(process.env.CALIBRE_DB_PATH);
   }
   const home = process.env.HOME || os.homedir();
-  return path.join(home, "Calibre Library", "metadata.db");
+  return path.join(home, "Calibre Libraries", "Agent Library", "metadata.db");
 }
 
 export function getKosyncDbPath(): string {

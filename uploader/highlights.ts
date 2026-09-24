@@ -149,7 +149,7 @@ export function resolveBookIdFromTitle(
     const dbPath =
       calibreDbPath ||
       process.env.CALIBRE_DB_PATH ||
-      path.join(os.homedir(), "Calibre Library", "metadata.db");
+      path.join(process.env.HOME || os.homedir(), "Calibre Libraries", "Agent Library", "metadata.db");
     if (!fs.existsSync(dbPath)) return null;
 
     const db = new Database(dbPath, { readonly: true });

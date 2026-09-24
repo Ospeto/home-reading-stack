@@ -63,12 +63,18 @@ import {
 import {
   SAFETY_BUFFER_BYTES,
   sanitizeFat32Filename,
+  normalizeAuthorSpacing,
+  resolveKindleDestinationDir,
+  runDotClean,
+  cleanDotFilesFallback,
+  resolveDotCleanPath,
   getKindleDiskSpace,
   findKindleSdrDirs,
   findKindleClippings,
   resolveKindleBooksDir,
   getKindleBookDirs,
   isBookAlreadyOnKindle,
+  isBookAlreadyOnKindleAsync,
   detectKindleVolume,
   ejectKindleVolume,
 } from "../uploader/kindle";
@@ -76,12 +82,18 @@ import {
 export {
   SAFETY_BUFFER_BYTES,
   sanitizeFat32Filename,
+  normalizeAuthorSpacing,
+  resolveKindleDestinationDir,
+  runDotClean,
+  cleanDotFilesFallback,
+  resolveDotCleanPath,
   getKindleDiskSpace,
   findKindleSdrDirs,
   findKindleClippings,
   resolveKindleBooksDir,
   getKindleBookDirs,
   isBookAlreadyOnKindle,
+  isBookAlreadyOnKindleAsync,
   detectKindleVolume,
   ejectKindleVolume,
 };
@@ -377,7 +389,8 @@ export function getCalibreLibraryDir(): string {
   if (process.env.CALIBRE_LIBRARY_DIR) {
     return path.resolve(process.env.CALIBRE_LIBRARY_DIR);
   }
-  return path.join(os.homedir(), "Calibre Library");
+  const home = process.env.HOME || os.homedir();
+  return path.join(home, "Calibre Libraries", "Agent Library");
 }
 
 /**
@@ -677,32 +690,56 @@ export async function pushBooksToKindle(
       format: book.format,
     });
     const destFilename = sanitizeFat32Filename(rawFilename);
-    const destPath = path.join(targetBooksDir, destFilename);
+    const flatDestPath = path.join(targetBooksDir, destFilename);
+    const destination = resolveKindleDestinationDir(
+      targetBooksDir,
+      book.authors || "Unknown",
+      book.series,
+      true,
+    );
 
-    // 1. Idempotency Check: Already present in books/ or documents/ with identical size?
+    // 1. Idempotency Check: Already present in books/ or documents/?
     let existingDestSize = 0;
     let existingFoundPath: string | null = null;
 
-    if (fs.existsSync(destPath)) {
+    if (fs.existsSync(flatDestPath)) {
       try {
-        const destStat = fs.statSync(destPath);
+        const destStat = fs.statSync(flatDestPath);
         existingDestSize = destStat.size;
-        if (destStat.size === srcSize) {
-          existingFoundPath = destPath;
-        }
+        existingFoundPath = flatDestPath;
+      } catch {}
+    } else if (fs.existsSync(path.join(destination.targetDir, destFilename))) {
+      try {
+        const p = path.join(destination.targetDir, destFilename);
+        const destStat = fs.statSync(p);
+        existingDestSize = destStat.size;
+        existingFoundPath = p;
       } catch {}
     }
 
-    if (!existingFoundPath && existingDestSize === 0) {
-      const authorSub = sanitizeFat32Filename(book.authors || "Unknown");
-      const checkRes = isBookAlreadyOnKindle(mount.mountPath, destFilename, authorSub, srcSize);
-      if (checkRes.exists) {
-        existingFoundPath = checkRes.existingPath || path.join(targetBooksDir, destFilename);
-        existingDestSize = srcSize;
+    if (!existingFoundPath) {
+      const checkRes = await isBookAlreadyOnKindleAsync(
+        mount.mountPath,
+        destFilename,
+        destination.authorDir,
+        srcSize,
+        null,
+        {
+          title: book.title,
+          authors: book.authors,
+          series: book.series,
+          seriesIndex: book.seriesIndex,
+        },
+      );
+      if (checkRes.exists && checkRes.existingPath && fs.existsSync(checkRes.existingPath)) {
+        existingFoundPath = checkRes.existingPath;
+        try {
+          existingDestSize = fs.statSync(checkRes.existingPath).size;
+        } catch {}
       }
     }
 
-    if (!options.force && existingFoundPath) {
+    if (!options.force && existingFoundPath && existingDestSize === srcSize) {
       results.push({
         bookId: book.id,
         title: book.title,
@@ -714,6 +751,16 @@ export async function pushBooksToKindle(
         reason: "Already present with identical size",
       });
       continue;
+    }
+
+    // Determine target destination path:
+    // If existing file is being updated/overwritten, overwrite the existing file location.
+    // If new file and existing author/series folder was matched, use that folder. Otherwise use flatDestPath.
+    const destPath = existingFoundPath || (destination.reusedExistingFolder ? path.join(destination.targetDir, destFilename) : flatDestPath);
+    const targetDir = path.dirname(destPath);
+
+    if (options.apply && !fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
     }
 
     // 2. Free Space Bounds Check (credit existing file size when replacing)
@@ -780,6 +827,10 @@ export async function pushBooksToKindle(
         reason: "Would copy (dry-run)",
       });
     }
+  }
+
+  if (options.apply) {
+    runDotClean(targetBooksDir);
   }
 
   return results;
