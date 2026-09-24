@@ -496,6 +496,90 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain("Burmese Literature");
   });
 
+  it("harmonizes header and navigation with visionOS glass tokens and Proposal 1 muted pastel accent tones", () => {
+    const htmlPath = path.join((import.meta as any).dir, "index.html");
+    const html = fs.readFileSync(htmlPath, "utf8");
+
+    // 1. Row 1 (Brand & Actions): Sleek brand with muted warm gold pastel accent
+    expect(html).toContain("bg-amber-400/10 border border-amber-400/25 text-amber-300");
+
+    // Re-skinned + Add button: Apple frosted glass pill (not harsh opaque white)
+    expect(html).toContain("rounded-full text-xs font-semibold bg-white/15 hover:bg-white/20 border border-white/20 text-white");
+
+    // Re-skinned Kindle status pill: rounded-full with muted pastel amber
+    expect(html).toContain('id="kindleStatusBtn"');
+    expect(html).toContain("rounded-full text-amber-300 hover:text-amber-200 bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/25");
+
+    // Re-skinned Guide button: rounded-full with frosted glass tokens
+    expect(html).toContain("rounded-full text-zinc-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10");
+
+    // Single visible Filter button in capsule; Row 1 has duplicate removed while keeping compat in #quickFilterCompat
+    const row1Html = html.split('<!-- Top Row (Brand & Actions) -->')[1]?.split('<!-- Second Row')[0] || '';
+    expect(row1Html).not.toContain('id="filterBtn"');
+    const compatHtml = html.split('id="quickFilterCompat"')[1]?.split('</nav>')[0] || '';
+    expect(compatHtml).toContain('id="filterBtn"');
+
+    // 2. Row 2 (Search Bar): Organic rounded pill matching visionOS glass tokens
+    expect(html).toContain('id="searchInputDesktop"');
+    expect(html).toContain("rounded-full border border-white/10 backdrop-blur-xl shadow-inner text-zinc-100");
+
+    // 3. Row 3 (visionOS Floating Island Capsule with Muted Pastel Accent Palettes):
+    // All Volumes: Muted warm amber / gold
+    expect(html).toContain("visionos-tab-all");
+    expect(html).toContain(".visionos-tab-all.visionos-tab-active");
+    expect(html).toContain("rgba(245, 158, 11, 0.15)");
+    expect(html).toContain("rgba(251, 191, 36, 0.30)");
+    expect(html).toContain(".visionos-tab.visionos-tab-all.visionos-tab-active .visionos-badge");
+
+    // Series: Muted sky / ice blue
+    expect(html).toContain("visionos-tab-series");
+    expect(html).toContain(".visionos-tab-series.visionos-tab-active");
+    expect(html).toContain("rgba(14, 165, 233, 0.15)");
+
+    // Reading: Muted pastel mint / sage
+    expect(html).toContain(".visionos-tab-reading.visionos-tab-active");
+    expect(html).toContain("rgba(16, 185, 129, 0.15)");
+    expect(html).toContain("rgba(52, 211, 153, 0.30)");
+
+    // Light Novels: Muted pastel lavender / periwinkle
+    expect(html).toContain("visionos-tab-ln");
+    expect(html).toContain(".visionos-tab-ln.visionos-tab-active");
+    expect(html).toContain("rgba(99, 102, 241, 0.15)");
+    expect(html).toContain("rgba(129, 140, 248, 0.30)");
+
+    // Burmese Literature: Muted pastel rose / coral
+    expect(html).toContain("visionos-tab-burmese");
+    expect(html).toContain(".visionos-tab-burmese.visionos-tab-active");
+    expect(html).toContain("rgba(244, 63, 94, 0.15)");
+    expect(html).toContain("rgba(251, 113, 133, 0.30)");
+
+    // Single visible Filter button in capsule
+    expect(html).toContain('id="capsuleFilterBtn"');
+    expect(html).toContain("visionos-tab-filter");
+    expect(html).toContain(".visionos-tab-filter.visionos-tab-active svg");
+
+    // Tactile Apple Press response scale(0.96)
+    expect(html).toContain(".active\\:scale-\\[0\\.96\\]:active");
+    expect(html).toContain("transform: scale(0.96) !important;");
+
+    // 4. Verification that static CSS utility classes actually exist in <style>
+    expect(html).toContain(".bg-amber-400\\/10 { background-color: rgba(251, 191, 36, 0.10); }");
+    expect(html).toContain(".bg-amber-400\\/20 { background-color: rgba(251, 191, 36, 0.20); }");
+    expect(html).toContain(".hover\\:bg-amber-400\\/20:hover { background-color: rgba(251, 191, 36, 0.20); }");
+    expect(html).toContain(".border-amber-400\\/25 { border-color: rgba(251, 191, 36, 0.25); }");
+    expect(html).toContain(".text-amber-300 { color: #fcd34d; }");
+    expect(html).toContain(".text-amber-200 { color: #fde68a; }");
+    expect(html).toContain(".hover\\:text-amber-200:hover { color: #fde68a; }");
+    expect(html).toContain(".backdrop-blur-xl { -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px); }");
+    expect(html).toContain(".border-white\\/20 { border-color: rgba(255, 255, 255, 0.2); }");
+    expect(html).toContain(".focus\\:ring-white\\/20:focus");
+    expect(html).toContain(".focus\\:border-white\\/20:focus");
+    expect(html).toContain(".sm\\:pr-14 { padding-right: 3.5rem; }");
+    expect(html).toContain(".bg-sky-400\\/30 { background-color: rgba(56, 189, 248, 0.30); }");
+    expect(html).toContain(".text-sky-200 { color: #bae6fd; }");
+    expect(html).toContain(".border-sky-400\\/40 { border-color: rgba(56, 189, 248, 0.40); }");
+  });
+
   it("visionOS Floating Island Capsule state machine and filtering invariants execute correctly", () => {
     // Helper simulating the single-active invariant and drawer facet logic from index.html
     function evaluateCapsuleState(type: string, value: any) {
@@ -1826,6 +1910,13 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
 
     globalThis.fetch = (async (input: any, init: any) => {
       const url = typeof input === "string" ? input : input?.url || "";
+
+      if (url.includes("api.typesafe.ai")) {
+        return new Response(
+          JSON.stringify({ ok: true, data: { choice: "valid_book", confidence: 0.99 } }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
 
       if (url.includes(`getFile?file_id=${fileId}`)) {
         return new Response(
