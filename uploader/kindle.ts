@@ -806,45 +806,72 @@ export function getKindleDiskSpace(mountPath: string): { freeBytes: number; tota
 }
 
 /**
+ * Parse an author string into a list of individual author names:
+ * - Handles &, and, ;, /, | delimiters
+ * - Handles Calibre multi-author comma lists e.g. "Brandon Sanderson, Isaac Stewart"
+ * - Preserves single-author "Last, First" comma order e.g. "Sanderson, Brandon" -> "Brandon Sanderson"
+ * - Handles paired Last, First lists e.g. "Sanderson, Brandon, Stewart, Isaac"
+ */
+export function parseAuthorList(raw: string): string[] {
+  if (!raw) return [];
+  const s = raw
+    .replace(/[\(\[]\s*(?:author|artist|illustrator|writer|story|art|translator|editor)\s*[\)\]]/gi, " ")
+    .trim();
+  if (!s) return [];
+
+  // If contains explicit multi-author delimiters: &, and, ;, /, |
+  if (/(?:&|\band\b|;|\/|\|)/i.test(s)) {
+    const segments = s.split(/(?:\s*(?:&|\band\b|;|\/|\|)\s*)/i).map((x) => x.trim()).filter(Boolean);
+    const out: string[] = [];
+    for (const seg of segments) {
+      out.push(...parseAuthorList(seg));
+    }
+    return out;
+  }
+
+  // If contains comma
+  if (s.includes(",")) {
+    const commaParts = s.split(",").map((p) => p.trim()).filter(Boolean);
+    // Case A: Exactly 2 parts e.g. "Sanderson, Brandon" -> single author in Last, First order
+    if (commaParts.length === 2 && commaParts[0].split(/\s+/).length === 1 && commaParts[1].split(/\s+/).length <= 2) {
+      return [`${commaParts[1]} ${commaParts[0]}`];
+    }
+    // Case B: Multi-authors e.g. "Brandon Sanderson, Isaac Stewart" or "Author A, Author B, Author C"
+    const allMultiWord = commaParts.every((p) => p.split(/\s+/).length >= 2);
+    if (allMultiWord) {
+      return commaParts;
+    }
+    // Case C: Pairs of Last, First e.g. "Sanderson, Brandon, Stewart, Isaac"
+    if (commaParts.length % 2 === 0) {
+      const pairs: string[] = [];
+      for (let i = 0; i < commaParts.length; i += 2) {
+        pairs.push(`${commaParts[i + 1]} ${commaParts[i]}`);
+      }
+      return pairs;
+    }
+    return commaParts;
+  }
+
+  return [s];
+}
+
+/**
  * Compares two author strings with token-boundary matching, word-order normalization,
- * and multi-author list splitting (&, and, ;, commas separating distinct authors).
+ * and multi-author list splitting.
  */
 export function authorMatchesString(sourceStr: string, targetAuthor: string): boolean {
   if (!sourceStr || !targetAuthor) return false;
-  const sRaw = sourceStr.trim();
-  const tRaw = targetAuthor.trim();
-  if (!sRaw || !tRaw) return false;
+  const sList = parseAuthorList(sourceStr);
+  const tList = parseAuthorList(targetAuthor);
+  if (sList.length === 0 || tList.length === 0) return false;
 
-  const sNorm = normalizeTitleForDedup(sRaw);
-  const tNorm = normalizeTitleForDedup(tRaw);
-  if (!sNorm || !tNorm) return false;
-  if (sNorm === tNorm) return true;
-
-  const sSorted = sNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
-  const tSorted = tNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
-  if (sSorted === tSorted) return true;
-
-  // Split on multi-author delimiters (&, and, ;, /, |) while preserving "Last, First" single-author comma structure
-  const splitRegex = /(?:\s*(?:&|\band\b|;|\/|\|)\s*)/i;
-  const sourceAuthors = sRaw
-    .replace(/[\(\[]\s*(?:author|artist|illustrator|writer|story|art|translator|editor)\s*[\)\]]/gi, " ")
-    .split(splitRegex)
-    .map((a) => normalizeTitleForDedup(a))
-    .filter(Boolean);
-
-  const targetAuthors = tRaw
-    .replace(/[\(\[]\s*(?:author|artist|illustrator|writer|story|art|translator|editor)\s*[\)\]]/gi, " ")
-    .split(splitRegex)
-    .map((a) => normalizeTitleForDedup(a))
-    .filter(Boolean);
-
-  for (const sA of sourceAuthors) {
-    const sANorm = normalizeTitleForDedup(sA);
-    const sASorted = sANorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
-    for (const tA of targetAuthors) {
-      const tANorm = normalizeTitleForDedup(tA);
-      const tASorted = tANorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
-      if (sANorm === tANorm || sASorted === tASorted) return true;
+  for (const sA of sList) {
+    const sNorm = normalizeTitleForDedup(sA);
+    const sSorted = sNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
+    for (const tA of tList) {
+      const tNorm = normalizeTitleForDedup(tA);
+      const tSorted = tNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
+      if (sNorm === tNorm || sSorted === tSorted) return true;
     }
   }
 
@@ -855,22 +882,41 @@ export function authorMatchesString(sourceStr: string, targetAuthor: string): bo
  * Checks if a title is a generic chapter or section title that requires strict author verification.
  */
 export function isGenericSectionTitle(title: string): boolean {
+  if (!title) return false;
+  const raw = title.toLowerCase().trim();
+  const rawMatch = /^(introduction|prologue|preface|epilogue|interlude|afterword|foreword|index|appendix|chapter\s*\d+|part\s*\d+|book\s*\d+|love|home)$/i.test(raw);
+  if (rawMatch) return true;
   const norm = normalizeTitleForDedup(title);
-  return /^(introduction|prologue|preface|epilogue|interlude|afterword|foreword|index|appendix|chapter\s*\d+|part\s*\d+|love|home)$/i.test(norm);
+  return /^(introduction|prologue|preface|epilogue|interlude|afterword|foreword|index|appendix|chapter\s*\d+|part\s*\d+|book\s*\d+|vol\s*\d+|love|home)$/i.test(norm);
 }
 
 /**
- * Checks if a directory name looks like an author folder (contains comma or 2+ word name,
- * and does not contain series/genre/system keywords).
+ * Checks if a directory name looks like an author folder (contains comma or starts with "author ").
  */
-export function isLikelyAuthorFolderName(folderName: string): boolean {
+export function isLikelyAuthorFolderName(
+  folderName: string,
+  candSeries?: string | null,
+  candTitle?: string | null,
+): boolean {
   if (!folderName) return false;
   const lower = folderName.trim().toLowerCase();
   if (/^(books|documents|downloads?|system|calibre|koreader)$/i.test(lower)) return false;
-  if (/\b(series|trilogy|chronicles?|novels?|collection|anthology|fantasy|sci-fi|science\s*fiction|manga|comics?|universe|saga|cycle|archives?|books?|season)\b/i.test(lower)) {
+  if (/^the\s+/i.test(lower)) return false;
+  if (
+    /\b(series|trilogy|chronicles?|novels?|collection|anthology|fantasy|sci-fi|science\s*fiction|manga|comics?|universe|saga|cycle|archives?|books?|season|empire|realm|kingdom|tales?)\b/i.test(
+      lower,
+    )
+  ) {
+    return false;
+  }
+  if (candSeries && (lower === candSeries.toLowerCase() || lower.includes(candSeries.toLowerCase()))) {
+    return false;
+  }
+  if (candTitle && (lower === candTitle.toLowerCase() || lower.includes(candTitle.toLowerCase()))) {
     return false;
   }
   if (lower.includes(",")) return true;
+  if (lower.startsWith("author ")) return true;
   const words = lower.split(/\s+/);
   if (words.length >= 2 && words.every((w) => w.length >= 1)) return true;
   return false;
@@ -996,8 +1042,7 @@ export function isBookAlreadyOnKindle(
 
     // For stripped-index/base matches of generic section titles (e.g. "01 - Introduction", "01 - Prologue"),
     // require positive author match when candidate author is given to avoid cross-author false positives
-    const isGenericSectionTitle = /^(introduction|prologue|preface|epilogue|interlude|afterword|foreword|index|appendix|chapter\s*\d+|part\s*\d+|love|home)$/i.test(normTitle);
-    if (options.strict && isGenericSectionTitle) {
+    if (options.strict && isGenericSectionTitle(normTitle)) {
       return false;
     }
 
@@ -1012,7 +1057,7 @@ export function isBookAlreadyOnKindle(
     }
 
     // If entry is in an author folder, verify it matches candidate author or series
-    if (isLikelyAuthorFolderName(entry.parentDir)) {
+    if (isLikelyAuthorFolderName(entry.parentDir, bookDetails?.series, rawTitle)) {
       const candidateSeries = bookDetails?.series ? normalizeTitleForDedup(bookDetails.series) : "";
       const isSeries = candidateSeries && (normalizeTitleForDedup(entry.parentDir) === candidateSeries || normalizeTitleForDedup(entry.parentDir).includes(candidateSeries));
       if (!isSeries && !authorMatchesString(entry.parentDir, normalizedRawAuthor) && !authorMatchesString(entry.grandparentDir, normalizedRawAuthor)) {

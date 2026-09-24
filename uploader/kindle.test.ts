@@ -1685,15 +1685,28 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       );
       expect(matchCorrect.exists).toBe(true);
       expect(matchCorrect.matchedBy).toBe("filesize_and_token");
+
+      // Same author and same fileSize but different title ("Dark Matter" vs "Dark Tower") must NOT match via Strategy G
+      const matchDifferentTitle = isBookAlreadyOnKindle(
+        kindleMount,
+        "Dark Matter.epub",
+        "Fred Greenwood",
+        54321,
+        index,
+        { title: "Dark Matter", authors: "Fred Greenwood" },
+      );
+      expect(matchDifferentTitle.exists).toBe(false);
     });
 
-    it("protects flat unindexed generic section titles (e.g. books/Introduction.azw3) from cross-author collisions", () => {
+    it("protects flat unindexed generic section titles (e.g. books/Introduction.azw3, Part 2.azw3) from cross-author collisions", () => {
       const kindleMount = path.join(fakeVolumesDir, "Kindle");
       const booksDir = path.join(kindleMount, "books");
       fs.mkdirSync(booksDir, { recursive: true });
 
       // Unindexed flat format variant: "Introduction.azw3"
       fs.writeFileSync(path.join(booksDir, "Introduction.azw3"), "intro azw3", "utf8");
+      // Generic part title: "Part 2.azw3"
+      fs.writeFileSync(path.join(booksDir, "Part 2.azw3"), "part 2 azw3", "utf8");
 
       const index = buildKindleBookIndex(kindleMount);
 
@@ -1708,6 +1721,17 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       );
       expect(crossMatch.exists).toBe(false);
 
+      // Candidate with Author B must NOT match flat "Part 2"
+      const crossMatchPart = isBookAlreadyOnKindle(
+        kindleMount,
+        "Part 2.epub",
+        "Author B",
+        0,
+        index,
+        { title: "Part 2", authors: "Author B" },
+      );
+      expect(crossMatchPart.exists).toBe(false);
+
       // Candidate with no author specified matches cleanly
       const matchNoAuthor = isBookAlreadyOnKindle(
         kindleMount,
@@ -1718,6 +1742,65 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
         { title: "Introduction" },
       );
       expect(matchNoAuthor.exists).toBe(true);
+    });
+
+    it("matches format-insensitive books in series folders without requiring series metadata", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const witcherDir = path.join(kindleMount, "books", "The Witcher");
+      const brokenEmpireDir = path.join(kindleMount, "books", "Broken Empire");
+      fs.mkdirSync(witcherDir, { recursive: true });
+      fs.mkdirSync(brokenEmpireDir, { recursive: true });
+
+      fs.writeFileSync(path.join(witcherDir, "Blood of Elves.azw3"), "witcher azw3", "utf8");
+      fs.writeFileSync(path.join(brokenEmpireDir, "Prince of Thorns.azw3"), "thorns azw3", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate with NO series metadata set matches format variant in series folder
+      const matchWitcher = isBookAlreadyOnKindle(
+        kindleMount,
+        "Blood of Elves.epub",
+        "Andrzej Sapkowski",
+        0,
+        index,
+        { title: "Blood of Elves", authors: "Andrzej Sapkowski" },
+      );
+      expect(matchWitcher.exists).toBe(true);
+      expect(matchWitcher.existingPath).toContain("Blood of Elves.azw3");
+
+      const matchThorns = isBookAlreadyOnKindle(
+        kindleMount,
+        "Prince of Thorns.epub",
+        "Mark Lawrence",
+        0,
+        index,
+        { title: "Prince of Thorns", authors: "Mark Lawrence" },
+      );
+      expect(matchThorns.exists).toBe(true);
+      expect(matchThorns.existingPath).toContain("Prince of Thorns.azw3");
+    });
+
+    it("matches format-insensitive multi-author books with comma-separated Calibre authors", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorDir = path.join(kindleMount, "books", "Brandon Sanderson");
+      fs.mkdirSync(authorDir, { recursive: true });
+
+      // Device has .azw3
+      fs.writeFileSync(path.join(authorDir, "White Sand.azw3"), "white sand azw3", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate is .epub with comma-separated Calibre authors "Brandon Sanderson, Isaac Stewart"
+      const matchFormatInsensitive = isBookAlreadyOnKindle(
+        kindleMount,
+        "White Sand.epub",
+        "Brandon Sanderson, Isaac Stewart",
+        0,
+        index,
+        { title: "White Sand", authors: "Brandon Sanderson, Isaac Stewart" },
+      );
+      expect(matchFormatInsensitive.exists).toBe(true);
+      expect(matchFormatInsensitive.matchedBy).toBe("base_filename");
     });
   });
 });
