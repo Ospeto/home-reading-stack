@@ -683,11 +683,23 @@ export async function pushBooksToKindle(
     let existingDestSize = 0;
     let existingFoundPath: string | null = null;
 
-    const authorSub = sanitizeFat32Filename(book.authors || "Unknown");
-    const checkRes = isBookAlreadyOnKindle(mount.mountPath, destFilename, authorSub, srcSize);
-    if (checkRes.exists) {
-      existingFoundPath = checkRes.existingPath || path.join(targetBooksDir, destFilename);
-      existingDestSize = srcSize;
+    if (fs.existsSync(destPath)) {
+      try {
+        const destStat = fs.statSync(destPath);
+        existingDestSize = destStat.size;
+        if (destStat.size === srcSize) {
+          existingFoundPath = destPath;
+        }
+      } catch {}
+    }
+
+    if (!existingFoundPath && existingDestSize === 0) {
+      const authorSub = sanitizeFat32Filename(book.authors || "Unknown");
+      const checkRes = isBookAlreadyOnKindle(mount.mountPath, destFilename, authorSub, srcSize);
+      if (checkRes.exists) {
+        existingFoundPath = checkRes.existingPath || path.join(targetBooksDir, destFilename);
+        existingDestSize = srcSize;
+      }
     }
 
     if (!options.force && existingFoundPath) {

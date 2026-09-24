@@ -2212,7 +2212,7 @@
               <span>USB-C Kindle Bulk Transfer &amp; Safe Eject</span>
             </div>
             <p class="text-[11px] text-zinc-400 leading-relaxed">
-              Plug your Kindle e-reader into the Mac Mini via USB cable. LightHouse automatically detects the device (<code class="text-zinc-200">/Volumes/Kindle</code> or <code class="text-zinc-200">/Volumes/KINDLE</code>) and displays a live connection pill in the header. Tap the pill to open the Apple Fluid transfer modal, review available storage, and execute one-click incremental synchronization of all Calibre books directly into Kindle's <code class="text-zinc-200">books/</code> folder (or <code class="text-zinc-200">documents/</code>, skipping files already matching in either directory, sanitizing FAT32 names, and checking 50MB free space). You can also send individual titles from the book details modal or safely unmount the device before unplugging.
+              Plug your Kindle e-reader into the Mac Mini via USB cable. LightHouse automatically detects the device (<code class="text-zinc-200">/Volumes/Kindle</code> or <code class="text-zinc-200">/Volumes/KINDLE</code>) and displays a live connection pill in the header. Tap the pill to open the Apple Fluid transfer modal, review available storage, select sync scope (Active &amp; Unread vs All Books), preview pending transfer size, and execute one-click incremental synchronization of Calibre books directly into Kindle's <code class="text-zinc-200">books/</code> folder (or <code class="text-zinc-200">documents/</code>, deeply scanning all subdirectories and filename variants, enforcing pre-flight storage verification, sanitizing FAT32 names, and supporting instant cancellation via Stop Sync). You can also send individual titles from the book details modal or safely unmount the device before unplugging.
             </p>
           </div>
         </div>
@@ -2714,7 +2714,7 @@
               </span>
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-amber-400 font-mono border border-zinc-700">API</span>
             </div>
-            <div class="text-[11px] text-zinc-400">Bulk syncs library to USB Kindle with FAT32 naming & safe eject (/api/kindle/eject)</div>
+            <div class="text-[11px] text-zinc-400">Bulk syncs library to USB Kindle with recursive dedup, pre-flight storage checks, cancel (/api/kindle/cancel) &amp; safe eject (/api/kindle/eject)</div>
             <div class="flex items-center gap-2 pt-1">
               <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">http://192.168.31.15:8086/api/kindle/sync</code>
               <button onclick="copyToClipboard('http://192.168.31.15:8086/api/kindle/sync')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
@@ -2809,10 +2809,35 @@
         </div>
       </div>
 
+      <!-- Scope Selection & Transfer Preview Card -->
+      <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2.5">
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-zinc-400 font-medium">Sync Scope</span>
+          <span id="kindlePreviewStats" class="font-mono text-[11px] text-amber-300 truncate max-w-[220px]">Checking...</span>
+        </div>
+        <!-- Scope Segmented Toggle -->
+        <div class="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-zinc-950/80 border border-zinc-800/80">
+          <button type="button" id="kindleScopeUnreadBtn" onclick="setKindleSyncScope('unread')" class="py-1.5 px-2 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 bg-amber-400 text-zinc-950 shadow-sm cursor-pointer">
+            <span>Active &amp; Unread</span>
+          </button>
+          <button type="button" id="kindleScopeAllBtn" onclick="setKindleSyncScope('all')" class="py-1.5 px-2 rounded-lg text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-all flex items-center justify-center gap-1.5 cursor-pointer">
+            <span>All Books</span>
+          </button>
+        </div>
+        <!-- Storage Warning Callout (shown when insufficient) -->
+        <div id="kindleStorageWarning" class="hidden p-2.5 rounded-lg bg-rose-950/40 border border-rose-800/60 text-[11px] text-rose-300 space-y-1">
+          <div class="flex items-center gap-1.5 font-bold">
+            <svg class="w-3.5 h-3.5 shrink-0"><use href="#icon-triangle-exclamation"/></svg>
+            <span>Insufficient Kindle Storage</span>
+          </div>
+          <p id="kindleStorageWarningText" class="text-rose-200/90 leading-tight">Requires more space than available.</p>
+        </div>
+      </div>
+
       <!-- Sync Status & Live Progress -->
       <div id="kindleSyncStatusArea" class="hidden p-3.5 rounded-xl border border-amber-800/60 bg-amber-950/30 text-xs space-y-2.5">
         <div class="flex items-center justify-between text-xs">
-          <span id="kindleLiveTitle" class="font-medium text-zinc-100 truncate max-w-[260px]">Scanning Calibre library &amp; Kindle storage...</span>
+          <span id="kindleLiveTitle" class="font-medium text-zinc-100 truncate max-w-[240px]">Scanning Calibre library &amp; Kindle storage...</span>
           <span id="kindleSyncPercent" class="font-mono font-bold text-amber-300 shrink-0">0%</span>
         </div>
         <!-- Real-time Progress Bar (0% -> 100%) -->
@@ -2823,6 +2848,9 @@
           <span id="kindleLiveCount" class="font-mono text-zinc-300">Preparing transfer...</span>
           <span id="kindleLiveBytes" class="text-zinc-400">0 MB transferred</span>
         </div>
+        <button type="button" id="kindleStopSyncBtn" onclick="stopKindleSyncAction()" class="w-full h-9 mt-1 bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-md flex items-center justify-center gap-1.5 transition-all cursor-pointer">
+          <span>⏹️ Stop Sync</span>
+        </button>
       </div>
 
       <!-- Clean Summary Card (Rendered on Completion) -->
@@ -5070,9 +5098,11 @@
       progress: null,
     };
     let isKindleSyncing = false;
+    let isKindleCancelRequested = false;
     let kindlePromptDismissed = false;
     let lastPromptedMount = null;
     let syncProgressPollInterval = null;
+    let kindleSyncScope = 'unread';
 
     function formatBytes(bytes) {
       if (!bytes || bytes <= 0) return '0 MB';
@@ -5083,15 +5113,103 @@
       return Math.round(mb) + ' MB';
     }
 
+    function setKindleSyncScope(scope) {
+      kindleSyncScope = scope === 'all' ? 'all' : 'unread';
+      tgHaptic.selection();
+
+      const unreadBtn = document.getElementById('kindleScopeUnreadBtn');
+      const allBtn = document.getElementById('kindleScopeAllBtn');
+      if (unreadBtn && allBtn) {
+        if (kindleSyncScope === 'unread') {
+          unreadBtn.className = 'py-1.5 px-2 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 bg-amber-400 text-zinc-950 shadow-sm cursor-pointer';
+          allBtn.className = 'py-1.5 px-2 rounded-lg text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-all flex items-center justify-center gap-1.5 cursor-pointer';
+        } else {
+          allBtn.className = 'py-1.5 px-2 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 bg-amber-400 text-zinc-950 shadow-sm cursor-pointer';
+          unreadBtn.className = 'py-1.5 px-2 rounded-lg text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-all flex items-center justify-center gap-1.5 cursor-pointer';
+        }
+      }
+
+      fetchKindleSyncPreview();
+    }
+
+    async function fetchKindleSyncPreview() {
+      const statsEl = document.getElementById('kindlePreviewStats');
+      if (statsEl) statsEl.textContent = 'Calculating...';
+
+      try {
+        const res = await fetch(`/api/kindle/preview?scope=${kindleSyncScope}`);
+        if (res.ok) {
+          const preview = await res.json();
+          renderKindlePreview(preview);
+        }
+      } catch (err) {
+        if (statsEl) statsEl.textContent = 'Ready';
+      }
+    }
+
+    function renderKindlePreview(preview) {
+      if (!preview || !preview.detected) return;
+
+      const statsEl = document.getElementById('kindlePreviewStats');
+      const warningEl = document.getElementById('kindleStorageWarning');
+      const warningTextEl = document.getElementById('kindleStorageWarningText');
+      const syncBtn = document.getElementById('kindleSyncAllBtn');
+
+      if (statsEl) {
+        statsEl.textContent = `Pending: ${preview.pendingCount} books (${formatBytes(preview.pendingBytes)}) • Free: ${formatBytes(preview.freeBytes)}`;
+      }
+
+      if (!preview.sufficientSpace && preview.pendingCount > 0) {
+        if (warningEl) warningEl.classList.remove('hidden');
+        if (warningTextEl) {
+          warningTextEl.textContent = `Requires ${formatBytes(preview.requiredBytes)} (including 50MB reserve), but only ${formatBytes(preview.freeBytes)} available.`;
+        }
+        if (syncBtn && !isKindleSyncing) {
+          syncBtn.disabled = true;
+          syncBtn.classList.add('opacity-50', 'cursor-not-allowed');
+        }
+      } else {
+        if (warningEl) warningEl.classList.add('hidden');
+        if (syncBtn && !isKindleSyncing) {
+          syncBtn.disabled = false;
+          syncBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+        }
+      }
+    }
+
+    async function stopKindleSyncAction() {
+      tgHaptic.medium();
+      isKindleCancelRequested = true;
+      const stopBtn = document.getElementById('kindleStopSyncBtn');
+      const liveTitle = document.getElementById('kindleLiveTitle');
+      if (liveTitle) liveTitle.textContent = '⏹️ Stopping sync...';
+      if (stopBtn) {
+        stopBtn.disabled = true;
+        setHtml(stopBtn, `${svgIcon('spinner', 'w-3.5 h-3.5 animate-spin text-white')} <span>Stopping...</span>`);
+      }
+      try {
+        const res = await fetch('/api/kindle/cancel', { method: 'POST' });
+        const data = await res.json();
+        showToast('Kindle sync cancellation requested...');
+      } catch (err) {
+        showToast('Error requesting sync cancellation', 'error');
+      }
+    }
+
     function showKindleAutoPrompt() {
       const promptEl = document.getElementById('kindleAutoPrompt');
       const detailsEl = document.getElementById('kindleAutoPromptDetails');
       if (!promptEl || isKindleSyncing) return;
 
       const targetFolder = kindleState.booksDir || (kindleState.mountPath ? `${kindleState.mountPath}/books` : '/Volumes/Kindle/books');
-      const freeGb = (kindleState.freeBytes / (1024 * 1024 * 1024)).toFixed(1);
+      const prev = kindleState.preview;
       if (detailsEl) {
-        detailsEl.textContent = `${targetFolder} • ${freeGb} GB Free`;
+        if (prev && prev.detected) {
+          detailsEl.textContent = `${targetFolder} • Pending: ${prev.pendingCount} books (${formatBytes(prev.pendingBytes)}) • Free: ${formatBytes(prev.freeBytes)}`;
+        } else {
+          const freeGb = (kindleState.freeBytes / (1024 * 1024 * 1024)).toFixed(1);
+          detailsEl.textContent = `${targetFolder} • ${freeGb} GB Free`;
+        }
       }
       promptEl.classList.remove('hidden');
     }
@@ -5117,7 +5235,7 @@
 
     async function pollKindleStatus(showToastFeedback = false) {
       try {
-        const res = await fetch('/api/kindle/status');
+        const res = await fetch(`/api/kindle/status?scope=${kindleSyncScope}`);
         if (res.ok) {
           const data = await res.json();
           const wasDetected = kindleState.detected;
@@ -5194,6 +5312,10 @@
       const libBooks = document.getElementById('kindleLibraryBooksCount');
       if (libBooks) libBooks.textContent = kindleState.libraryBooks || (allBooks.length || 0);
 
+      if (kindleState.preview && (!kindleState.preview.scope || kindleState.preview.scope === kindleSyncScope)) {
+        renderKindlePreview(kindleState.preview);
+      }
+
       updateBookModalKindleBtn();
     }
 
@@ -5208,11 +5330,12 @@
       }
     }
 
-    function openKindleModal() {
+    async function openKindleModal() {
       tgHaptic.light();
       dismissKindlePrompt();
-      pollKindleStatus();
       openModalAnimated('kindleModal');
+      await pollKindleStatus();
+      await fetchKindleSyncPreview();
     }
 
     function closeKindleModal() {
@@ -5236,11 +5359,16 @@
       const progressPercent = document.getElementById('kindleSyncPercent');
       const summaryCard = document.getElementById('kindleSummaryCard');
       const summaryText = document.getElementById('kindleSummaryText');
+      const stopBtn = document.getElementById('kindleStopSyncBtn');
 
       if (summaryCard) summaryCard.classList.add('hidden');
       if (btn) {
         btn.disabled = true;
         btn.classList.add('opacity-70');
+      }
+      if (stopBtn) {
+        stopBtn.disabled = false;
+        setHtml(stopBtn, '<span>⏹️ Stop Sync</span>');
       }
       if (btnText) btnText.textContent = 'Syncing to Kindle...';
       if (statusArea) {
@@ -5267,16 +5395,19 @@
               if (progressPercent) progressPercent.textContent = `${pct}%`;
 
               if (p.phase === 'scanning') {
-                if (liveTitle) liveTitle.textContent = 'Scanning Calibre library & Kindle storage...';
+                if (liveTitle) liveTitle.textContent = isKindleCancelRequested ? '⏹️ Stopping sync...' : 'Scanning Calibre library & Kindle storage...';
                 if (liveCount) liveCount.textContent = 'Analyzing candidate books...';
               } else if (p.phase === 'transferring') {
-                if (liveTitle) liveTitle.textContent = p.currentBookTitle || 'Transferring book...';
+                if (liveTitle) liveTitle.textContent = isKindleCancelRequested ? '⏹️ Stopping sync...' : (p.currentBookTitle || 'Transferring book...');
                 if (liveCount) liveCount.textContent = `Transferring ${p.currentIndex || 0} of ${p.totalCandidates || 0}...`;
                 if (liveBytes) liveBytes.textContent = `${formatBytes(p.bytesTransferred)} transferred`;
               } else if (p.phase === 'highlights') {
-                if (liveTitle) liveTitle.textContent = 'Syncing highlights to Obsidian MAS vault & cache.db...';
+                if (liveTitle) liveTitle.textContent = isKindleCancelRequested ? '⏹️ Stopping sync...' : 'Syncing highlights to Obsidian MAS vault & cache.db...';
                 if (liveCount) liveCount.textContent = 'Scanning KOReader .sdr and My Clippings.txt...';
                 if (liveBytes) liveBytes.textContent = `${formatBytes(p.bytesTransferred)} transferred`;
+              } else if (p.phase === 'cancelled') {
+                if (liveTitle) liveTitle.textContent = '⏹️ Sync stopped by user';
+                if (liveCount) liveCount.textContent = `Stopped: Transferred ${p.transferredCount || 0} books, skipped ${p.alreadySyncedCount || 0} existing.`;
               }
             }
           }
@@ -5287,13 +5418,32 @@
         const res = await fetch('/api/kindle/sync', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ subfolderByAuthor: true })
+          body: JSON.stringify({ subfolderByAuthor: true, scope: kindleSyncScope })
         });
         const data = await res.json();
         const r = data.results || {};
+        const hasStorageError = Boolean(
+          r.errors && r.errors.some(e => /insufficient.*storage/i.test(e.error))
+        );
         const hasProcessed = r.transferred > 0 || r.highlightsPulled > 0 || r.alreadySynced > 0;
 
-        if (res.ok || hasProcessed) {
+        if (hasStorageError || (!res.ok && !r.cancelled)) {
+          tgHaptic.error();
+          let errMsg = data.error || (r.errors && r.errors[0]?.error) || 'Sync failed';
+          if (liveTitle) liveTitle.textContent = `❌ Error: ${errMsg}`;
+          showToast(`Kindle sync error: ${errMsg}`, 'error');
+        } else if (r.cancelled) {
+          tgHaptic.warning();
+          if (summaryCard) {
+            summaryCard.classList.remove('hidden');
+            if (summaryText) {
+              summaryText.textContent = `Sync stopped by user. Transferred ${r.transferred || 0} books, skipped ${r.alreadySynced || 0} existing (${formatBytes(r.bytesTransferred)} total).`;
+            }
+          }
+          if (statusArea) statusArea.classList.add('hidden');
+          showToast(`Sync stopped by user. Transferred ${r.transferred || 0} books, skipped ${r.alreadySynced || 0} existing.`);
+          pollKindleStatus();
+        } else if (res.ok || hasProcessed) {
           tgHaptic.success();
           if (progressBar) progressBar.style.width = '100%';
           if (progressPercent) progressPercent.textContent = '100%';
@@ -5323,6 +5473,7 @@
         showToast('Network error syncing to Kindle', 'error');
       } finally {
         isKindleSyncing = false;
+        isKindleCancelRequested = false;
         if (syncProgressPollInterval) {
           clearInterval(syncProgressPollInterval);
           syncProgressPollInterval = null;

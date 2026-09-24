@@ -12,6 +12,13 @@ import {
   syncSingleBookToKindle,
   syncAllBooksToKindle,
   ejectKindleVolume,
+  buildKindleBookIndex,
+  isBookAlreadyOnKindle,
+  cancelKindleSync,
+  previewKindleSync,
+  isBookActiveOrUnread,
+  getAllKindleCandidates,
+  invalidateKindleBookIndex,
 } from "./kindle";
 import { handleRequest, resetServerDependenciesForTest } from "./server";
 
@@ -36,9 +43,13 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
     origCalibreLib = process.env.CALIBRE_LIBRARY_DIR;
     process.env.CALIBRE_DB_PATH = fakeCalibreDbPath;
     process.env.CALIBRE_LIBRARY_DIR = fakeLibraryDir;
+    process.env.LIGHTHOUSE_VOLUMES_DIR = fakeVolumesDir;
+    invalidateKindleBookIndex();
   });
 
   afterEach(() => {
+    delete process.env.LIGHTHOUSE_VOLUMES_DIR;
+    invalidateKindleBookIndex();
     resetServerDependenciesForTest();
     if (origCalibreDb !== undefined) process.env.CALIBRE_DB_PATH = origCalibreDb;
     else delete process.env.CALIBRE_DB_PATH;
@@ -58,6 +69,7 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
     author: string;
     series?: string;
     seriesIndex?: number;
+    tags?: string[];
     format: string;
     fileContent: string;
   }>) {
@@ -82,6 +94,8 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
       CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
       CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+      CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+      CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
     `);
 
     for (const b of books) {
@@ -116,6 +130,15 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       if (b.series) {
         db.run("INSERT INTO series (id, name) VALUES (?, ?)", [b.id, b.series]);
         db.run("INSERT INTO books_series_link (book, series) VALUES (?, ?)", [b.id, b.id]);
+      }
+
+      if (b.tags) {
+        for (let tIdx = 0; tIdx < b.tags.length; tIdx++) {
+          const tagName = b.tags[tIdx];
+          const tagId = b.id * 100 + tIdx + 1;
+          db.run("INSERT INTO tags (id, name) VALUES (?, ?)", [tagId, tagName]);
+          db.run("INSERT INTO books_tags_link (id, book, tag) VALUES (?, ?, ?)", [tagId, b.id, tagId]);
+        }
       }
     }
     db.close();
@@ -396,6 +419,37 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       expect(data).toHaveProperty("message");
     });
 
+    it("POST /api/kindle/cancel responds with JSON cancellation confirmation", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/kindle/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(true);
+      expect(data.message).toBe("Sync cancellation requested");
+    });
+
+    it("GET /api/kindle/preview returns sync preview metrics", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      const req = new Request("http://127.0.0.1:8086/api/kindle/preview?scope=unread", {
+        method: "GET",
+      });
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+
+      const data = (await res.json()) as any;
+      expect(data.detected).toBe(true);
+      expect(data).toHaveProperty("pendingCount");
+      expect(data).toHaveProperty("pendingBytes");
+      expect(data).toHaveProperty("sufficientSpace");
+      expect(data).toHaveProperty("requiredBytes");
+    });
+
     it("POST /api/books/:id/send-kindle validates ID and handles transfer", async () => {
       const reqBad = new Request("http://127.0.0.1:8086/api/books/invalid/send-kindle", {
         method: "POST",
@@ -421,6 +475,19 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       expect(html).toContain('id="kindleSyncAllBtn"');
       expect(html).toContain('id="kindleEjectBtn"');
       expect(html).toContain('id="detailSendKindleBtn"');
+
+      // Scope Selection & Preview UI
+      expect(html).toContain('id="kindleScopeUnreadBtn"');
+      expect(html).toContain('id="kindleScopeAllBtn"');
+      expect(html).toContain('id="kindlePreviewStats"');
+      expect(html).toContain('id="kindleStorageWarning"');
+      expect(html).toContain('id="kindleStorageWarningText"');
+      expect(html).toContain("Active &amp; Unread");
+      expect(html).toContain("All Books");
+
+      // Stop Sync Button
+      expect(html).toContain('id="kindleStopSyncBtn"');
+      expect(html).toContain("Stop Sync");
 
       // Auto-Prompt Pop-up Banner elements
       expect(html).toContain('id="kindleAutoPrompt"');
@@ -463,6 +530,347 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
           }).not.toThrow();
         }
       }
+    });
+  });
+
+  describe("6. Deep Recursive Duplicate Detection & Indexing", () => {
+    it("buildKindleBookIndex recursively catalogs books in nested subdirectories", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const nestedDir = path.join(kindleMount, "books", "Brandon Sanderson", "Mistborn");
+      const docsNestedDir = path.join(kindleMount, "documents", "Sci-Fi", "Frank Herbert");
+      fs.mkdirSync(nestedDir, { recursive: true });
+      fs.mkdirSync(docsNestedDir, { recursive: true });
+
+      fs.writeFileSync(path.join(nestedDir, "The Final Empire.epub"), "sample content", "utf8");
+      fs.writeFileSync(path.join(docsNestedDir, "Dune.mobi"), "dune mobi", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+      expect(index.entries.length).toBe(2);
+      expect(index.byFilename.has("the final empire.epub")).toBe(true);
+      expect(index.byBaseName.has("dune")).toBe(true);
+      expect(index.byNormalizedTitle.has("the final empire")).toBe(true);
+    });
+
+    it("isBookAlreadyOnKindle detects books across nested subfolders and format variants", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const nestedDir = path.join(kindleMount, "books", "Brandon Sanderson", "The Stormlight Archive");
+      const docsDir = path.join(kindleMount, "documents", "Light Novels");
+      fs.mkdirSync(nestedDir, { recursive: true });
+      fs.mkdirSync(docsDir, { recursive: true });
+
+      // 1. Deeply nested book
+      fs.writeFileSync(path.join(nestedDir, "The Way of Kings.epub"), "kings content", "utf8");
+      // 2. Format variant (.azw3 instead of .epub)
+      fs.writeFileSync(path.join(docsDir, "Overlord Vol 1.azw3"), "overlord content", "utf8");
+      // 3. Inverted author - title
+      fs.writeFileSync(path.join(kindleMount, "books", "Frank Herbert - Dune.epub"), "dune content", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Match deeply nested book with author
+      const match1 = isBookAlreadyOnKindle(
+        kindleMount,
+        "The Way of Kings - Brandon Sanderson.epub",
+        "Brandon Sanderson",
+        0,
+        index,
+        { title: "The Way of Kings", authors: "Brandon Sanderson" },
+      );
+      expect(match1.exists).toBe(true);
+      expect(match1.existingPath).toContain("The Way of Kings.epub");
+
+      // Match format variant and volume normalization
+      const match2 = isBookAlreadyOnKindle(
+        kindleMount,
+        "Overlord, Vol. 1 - Kugane Maruyama.epub",
+        "Kugane Maruyama",
+        0,
+        index,
+        { title: "Overlord, Vol. 1", authors: "Kugane Maruyama" },
+      );
+      expect(match2.exists).toBe(true);
+      expect(match2.existingPath).toContain("Overlord Vol 1.azw3");
+
+      // Match inverted author - title
+      const match3 = isBookAlreadyOnKindle(
+        kindleMount,
+        "Dune - Frank Herbert.epub",
+        "Frank Herbert",
+        0,
+        index,
+        { title: "Dune", authors: "Frank Herbert" },
+      );
+      expect(match3.exists).toBe(true);
+      expect(match3.existingPath).toContain("Frank Herbert - Dune.epub");
+    });
+
+    it("NEVER matches different volumes in a series as duplicates (Volume Isolation Regression)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const docsDir = path.join(kindleMount, "documents", "Light Novels");
+      fs.mkdirSync(docsDir, { recursive: true });
+
+      // Kindle has Vol 1 of Overlord and Vol 1 of Sword Art Online
+      fs.writeFileSync(path.join(docsDir, "Overlord Vol 1.epub"), "overlord 1", "utf8");
+      fs.writeFileSync(path.join(docsDir, "Sword Art Online 01 - Aincrad.epub"), "sao 1", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Overlord Vol 2 candidate MUST NOT match Overlord Vol 1
+      const matchVol2 = isBookAlreadyOnKindle(
+        kindleMount,
+        "Overlord, Vol. 2 - Kugane Maruyama.epub",
+        "Kugane Maruyama",
+        0,
+        index,
+        { title: "Overlord, Vol. 2", authors: "Kugane Maruyama" },
+      );
+      expect(matchVol2.exists).toBe(false);
+
+      // Overlord Vol 3 candidate MUST NOT match Overlord Vol 1
+      const matchVol3 = isBookAlreadyOnKindle(
+        kindleMount,
+        "Overlord Vol 3 - Kugane Maruyama.epub",
+        "Kugane Maruyama",
+        0,
+        index,
+        { title: "Overlord Vol 3", authors: "Kugane Maruyama" },
+      );
+      expect(matchVol3.exists).toBe(false);
+
+      // Sword Art Online Vol 2 candidate MUST NOT match SAO Vol 1
+      const matchSaoVol2 = isBookAlreadyOnKindle(
+        kindleMount,
+        "Sword Art Online 02 - Aincrad - Reki Kawahara.epub",
+        "Reki Kawahara",
+        0,
+        index,
+        { title: "Sword Art Online, Vol. 2 - Aincrad", authors: "Reki Kawahara" },
+      );
+      expect(matchSaoVol2.exists).toBe(false);
+
+      // Unnumbered series title MUST NOT match a numbered volume
+      const matchUnnumbered = isBookAlreadyOnKindle(
+        kindleMount,
+        "Overlord - Kugane Maruyama.epub",
+        "Kugane Maruyama",
+        0,
+        index,
+        { title: "Overlord", authors: "Kugane Maruyama" },
+      );
+      expect(matchUnnumbered.exists).toBe(false);
+    });
+
+    it("filesize_and_token does not falsely match on weak or empty tokens", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      // Unrelated file with 12345 bytes
+      const targetFile = path.join(kindleMount, "books", "Unrelated Novel.epub");
+      fs.writeFileSync(targetFile, "X".repeat(12345), "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate with short/weak title/author (length < 4) and same byte size
+      const matchWeak = isBookAlreadyOnKindle(
+        kindleMount,
+        "AB - XY.epub",
+        "XY",
+        12345,
+        index,
+        { title: "AB", authors: "XY" },
+      );
+      expect(matchWeak.exists).toBe(false);
+    });
+
+    it("syncAllBooksToKindle skips existing books in nested subdirectories without re-transferring", async () => {
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Mistborn", author: "Brandon Sanderson", format: "EPUB", fileContent: "calibre mistborn" },
+        { id: 2, title: "New Book", author: "New Author", format: "EPUB", fileContent: "new content" },
+      ]);
+
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const nestedDir = path.join(kindleMount, "books", "Brandon Sanderson", "Mistborn");
+      fs.mkdirSync(nestedDir, { recursive: true });
+      fs.writeFileSync(path.join(nestedDir, "Mistborn.epub"), "existing kindle content", "utf8");
+
+      const res = await syncAllBooksToKindle({ mountPath: kindleMount });
+      expect(res.success).toBe(true);
+      expect(res.totalBooks).toBe(2);
+      expect(res.alreadySynced).toBe(1); // Mistborn was detected and skipped!
+      expect(res.transferred).toBe(1); // Only New Book was transferred!
+    });
+  });
+
+  describe("7. Stop Sync & Cancellation Engine", () => {
+    it("cancelKindleSync aborts active bulk transfer between books and marks cancelled", async () => {
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Book One", author: "Author One", format: "EPUB", fileContent: "one" },
+        { id: 2, title: "Book Two", author: "Author Two", format: "EPUB", fileContent: "two" },
+        { id: 3, title: "Book Three", author: "Author Three", format: "EPUB", fileContent: "three" },
+      ]);
+
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      // Trigger cancellation on progress callback during transfer of first candidate
+      let cancelCalled = false;
+      const res = await syncAllBooksToKindle({
+        mountPath: kindleMount,
+        onProgress: (p) => {
+          if (p.transferredCount >= 1 && !cancelCalled) {
+            cancelCalled = true;
+            const cancelled = cancelKindleSync();
+            expect(cancelled).toBe(true);
+          }
+        },
+      });
+
+      expect(res.cancelled).toBe(true);
+      expect(res.success).toBe(false);
+      expect(res.transferred).toBeLessThan(3);
+    });
+
+    it("cancelKindleSync returns false when no sync is actively running", () => {
+      const res = cancelKindleSync();
+      expect(res).toBe(false);
+    });
+  });
+
+  describe("8. Pre-Flight Storage Verification & Preview", () => {
+    it("previewKindleSync computes pending books, pending bytes, and required reserve", () => {
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Book One", author: "Author A", format: "EPUB", fileContent: "sample content 1" },
+        { id: 2, title: "Book Two", author: "Author B", format: "EPUB", fileContent: "sample content 2" },
+      ]);
+
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      // Pre-add Book One on Kindle
+      fs.writeFileSync(path.join(kindleMount, "books", "Book One - Author A.epub"), "existing", "utf8");
+
+      const preview = previewKindleSync(kindleMount, { scope: "all" });
+      expect(preview.detected).toBe(true);
+      expect(preview.totalCandidates).toBe(2);
+      expect(preview.alreadySyncedCount).toBe(1);
+      expect(preview.pendingCount).toBe(1);
+      expect(preview.pendingBytes).toBeGreaterThan(0);
+      expect(preview.sufficientSpace).toBe(true);
+    });
+
+    it("syncAllBooksToKindle halts upfront when storage is insufficient for pending candidates", async () => {
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Huge Book", author: "Author", format: "EPUB", fileContent: "sample content" },
+      ]);
+
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      // Set free bytes to a tiny amount (100 bytes) so pending candidate + 50MB reserve exceeds it
+      process.env.TEST_KINDLE_FREE_BYTES = "100";
+      try {
+        const preview = previewKindleSync(kindleMount, { scope: "all" });
+        expect(preview.sufficientSpace).toBe(false);
+        expect(preview.pendingCount).toBe(1);
+        expect(preview.shortfallBytes).toBeGreaterThan(0);
+
+        const res = await syncAllBooksToKindle({ mountPath: kindleMount });
+        expect(res.success).toBe(false);
+        expect(res.transferred).toBe(0);
+        expect(res.errors.length).toBeGreaterThan(0);
+        expect(res.errors[0].error).toContain("Insufficient Kindle storage");
+      } finally {
+        delete process.env.TEST_KINDLE_FREE_BYTES;
+      }
+    });
+
+    it("storage failure with alreadySynced > 0 returns HTTP 507 and is flagged as error", async () => {
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Book One", author: "Author One", format: "EPUB", fileContent: "book 1" },
+        { id: 2, title: "Book Two", author: "Author Two", format: "EPUB", fileContent: "book 2" },
+      ]);
+
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      // Pre-add Book One on Kindle so alreadySynced = 1
+      fs.writeFileSync(path.join(kindleMount, "books", "Book One - Author One.epub"), "existing", "utf8");
+
+      process.env.TEST_KINDLE_FREE_BYTES = "50";
+      try {
+        const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+        const req = new Request("http://127.0.0.1:8086/api/kindle/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scope: "all" }),
+        });
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(507);
+
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(false);
+        expect(data.error).toContain("Insufficient Kindle storage");
+        expect(data.results.alreadySynced).toBe(1);
+        expect(data.results.transferred).toBe(0);
+      } finally {
+        delete process.env.TEST_KINDLE_FREE_BYTES;
+      }
+    });
+  });
+
+  describe("9. Scope Selection (Active & Unread vs All)", () => {
+    it("isBookActiveOrUnread accurately qualifies active and unread books and filters finished", () => {
+      // 1. Reading tag
+      expect(isBookActiveOrUnread({ title: "Book", tags: ["currently-reading"] })).toBe(true);
+      // 2. Finished tag
+      expect(isBookActiveOrUnread({ title: "Book", tags: ["finished"] })).toBe(false);
+      // 3. KOSync active reading progress (45%)
+      const kosyncMap = new Map([
+        ["reading book", { progress: 45 }],
+        ["finished book", { progress: 100 }],
+        ["unread book", { progress: 0 }],
+      ]);
+      expect(isBookActiveOrUnread({ title: "Reading Book" }, kosyncMap)).toBe(true);
+      expect(isBookActiveOrUnread({ title: "Finished Book" }, kosyncMap)).toBe(false);
+      expect(isBookActiveOrUnread({ title: "Unread Book" }, kosyncMap)).toBe(true);
+      // 4. Untagged book with no KOSync entry defaults to unread (true)
+      expect(isBookActiveOrUnread({ title: "Brand New Book" }, kosyncMap)).toBe(true);
+    });
+
+    it("getAllKindleCandidates defaults to unread scope and excludes finished books", () => {
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Active Book", author: "Author A", tags: ["currently-reading"], format: "EPUB", fileContent: "active" },
+        { id: 2, title: "Finished Book", author: "Author B", tags: ["finished"], format: "EPUB", fileContent: "done" },
+        { id: 3, title: "Untagged New Book", author: "Author C", format: "EPUB", fileContent: "new" },
+      ]);
+
+      // Scope omitted -> defaults to unread: Finished Book is excluded!
+      const defaultCandidates = getAllKindleCandidates();
+      expect(defaultCandidates.length).toBe(2);
+      expect(defaultCandidates.map((c) => c.title).sort()).toEqual(["Active Book", "Untagged New Book"]);
+
+      // Scope "all" -> includes all books including Finished Book
+      const allCandidates = getAllKindleCandidates({ scope: "all" });
+      expect(allCandidates.length).toBe(3);
+      expect(allCandidates.map((c) => c.title).sort()).toEqual(["Active Book", "Finished Book", "Untagged New Book"]);
+    });
+
+    it("GET /api/kindle/status preserves requested scope preview without clobbering", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+      const reqAll = new Request("http://127.0.0.1:8086/api/kindle/status?scope=all", { method: "GET" });
+      const resAll = await handleRequest(reqAll, localServer);
+      expect(resAll.status).toBe(200);
+      const dataAll = (await resAll.json()) as any;
+      expect(dataAll.preview.scope).toBe("all");
+
+      const reqUnread = new Request("http://127.0.0.1:8086/api/kindle/status?scope=unread", { method: "GET" });
+      const resUnread = await handleRequest(reqUnread, localServer);
+      expect(resUnread.status).toBe(200);
+      const dataUnread = (await resUnread.json()) as any;
+      expect(dataUnread.preview.scope).toBe("unread");
     });
   });
 });
