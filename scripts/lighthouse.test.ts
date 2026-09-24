@@ -229,6 +229,14 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(uploaderContent).toContain("server.ts");
       expect(uploaderContent).toContain("--env-file=");
 
+      // Verify all generated plists include /usr/sbin:/sbin on PATH
+      for (const f of files) {
+        const content = fs.readFileSync(path.join(outputDir, f), "utf8");
+        expect(content).toContain(
+          "<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>",
+        );
+      }
+
       // Validate each plist using plutil if on macOS
       if (os.platform() === "darwin") {
         for (const f of files) {

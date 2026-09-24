@@ -1749,6 +1749,20 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
 }
 
 /**
+ * Resolves the path to the macOS diskutil binary.
+ * Checks if /usr/sbin/diskutil exists first, otherwise falls back to "diskutil".
+ */
+export function resolveDiskutilPath(): string {
+  if (process.env.LIGHTHOUSE_DISKUTIL_BIN) {
+    return process.env.LIGHTHOUSE_DISKUTIL_BIN;
+  }
+  if (fs.existsSync("/usr/sbin/diskutil")) {
+    return "/usr/sbin/diskutil";
+  }
+  return "diskutil";
+}
+
+/**
  * Safely unmount/eject the Kindle volume via macOS diskutil.
  * Refuses ejection while an active transfer lock is held or if path escapes /Volumes.
  */
@@ -1783,16 +1797,29 @@ export function ejectKindleVolume(mountPath?: string): { success: boolean; messa
   }
 
   try {
-    const res = spawnSync("diskutil", ["eject", resolvedTarget], {
+    const diskutilBin = resolveDiskutilPath();
+    const res = spawnSync(diskutilBin, ["eject", resolvedTarget], {
       encoding: "utf8",
       timeout: 10000,
     });
+    if (res.error) {
+      return {
+        success: false,
+        message: res.error.message,
+      };
+    }
     if (res.status === 0) {
       return { success: true, message: `Successfully ejected ${resolvedTarget}` };
     }
+    let statusDesc = "unknown error";
+    if (res.status !== undefined && res.status !== null) {
+      statusDesc = `status ${res.status}`;
+    } else if (res.signal) {
+      statusDesc = `signal ${res.signal}`;
+    }
     return {
       success: false,
-      message: res.stderr ? res.stderr.trim() : `diskutil exited with status ${res.status}`,
+      message: res.stderr ? res.stderr.trim() : `diskutil exited with ${statusDesc}`,
     };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
