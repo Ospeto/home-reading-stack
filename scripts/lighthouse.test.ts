@@ -43,7 +43,8 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(stdout).toContain("health");
       expect(stdout).toContain("categorize");
       expect(stdout).toContain("enrich-synopsis");
-expect(stdout).toContain("sync-obsidian");
+      expect(stdout).toContain("sync-obsidian");
+      expect(stdout).toContain("sync-kindle");
       expect(stdout).toContain("install-daemons");
       expect(stdout).toContain("backup");
       expect(stdout).toContain("restore");
@@ -73,7 +74,7 @@ expect(stdout).toContain("sync-obsidian");
       expect(res.stdout).toContain("--limit");
       expect(res.stdout).toContain("--source");
     });
-it("bin/lighthouse sync-obsidian --help outputs sync-obsidian options", () => {
+    it("bin/lighthouse sync-obsidian --help outputs sync-obsidian options", () => {
       const res = spawnSync(LIGHTHOUSE_BIN, ["sync-obsidian", "--help"], {
         encoding: "utf8",
         cwd: tempTestDir,
@@ -84,6 +85,21 @@ it("bin/lighthouse sync-obsidian --help outputs sync-obsidian options", () => {
       expect(res.stdout).toContain("--dry-run");
       expect(res.stdout).toContain("--apply");
       expect(res.stdout).toContain("--watch");
+    });
+
+    it("bin/lighthouse sync-kindle --help outputs sync-kindle options", () => {
+      const res = spawnSync(LIGHTHOUSE_BIN, ["sync-kindle", "--help"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain("LightHouse Type-C Kindle Two-Way Synchronization CLI");
+      expect(res.stdout).toContain("--apply");
+      expect(res.stdout).toContain("--dry-run");
+      expect(res.stdout).toContain("--all");
+      expect(res.stdout).toContain("--mount");
+      expect(res.stdout).toContain("--vault-path");
+      expect(res.stdout).toContain("--eject");
     });
 
     it("bin/lighthouse version outputs current version", () => {

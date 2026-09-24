@@ -1477,6 +1477,15 @@ cmd_sync_obsidian() {
   exec bun run "$script_path" "$@"
 }
 
+cmd_sync_kindle() {
+  local script_path="${LIGHTHOUSE_ROOT}/scripts/sync-kindle.ts"
+  if [ ! -f "$script_path" ]; then
+    echo "Error: ${script_path} not found" >&2
+    exit 1
+  fi
+  exec bun run "$script_path" "$@"
+}
+
 # ------------------------------------------------------------------------------
 # 10. Command: help
 # ------------------------------------------------------------------------------
@@ -1496,7 +1505,8 @@ Commands:
   health                   Run automated probes and auto-heal stale listeners/workers
   categorize [options]     Categorize, tag, and correct book languages in Calibre library
   enrich-synopsis [options] Batch enrich missing book synopses from local EPUBs and online APIs
-sync-obsidian [options]  Sync highlights and reading notes from KOReader/Kindle to Obsidian
+  sync-obsidian [options]  Sync highlights and reading notes from KOReader/Kindle to Obsidian
+  sync-kindle [options]    Two-way sync: push books & pull highlights from USB-C Kindle/e-Reader
   install-daemons          Dynamically generate and register macOS LaunchAgents for current user
   backup [options]         Create hot SQLite backup with WAL checkpoint, checksum, and manifest
   restore <file> [options] Verified restoration of complete stack with integrity checks
@@ -1515,11 +1525,21 @@ Enrich-Synopsis Options:
   --source <type>          Source strategy: all (default), epub, or online
   --re-enrich-duplicates   Re-enrich volumes holding duplicate series summaries
   --verbose                Enable verbose logging of search and extraction steps
+
 Sync-Obsidian Options:
   --vault-path <path>      Obsidian vault path (default: \$OBSIDIAN_VAULT_PATH or ~/Obsidian)
   --dry-run                Preview changes without writing to disk (default)
   --apply                  Write/update markdown notes in <vault>/Books/
   --watch                  Watch library and KOSync DB for changes and auto-sync
+
+Sync-Kindle Options:
+  --apply                  Execute transfer and highlight import (default is dry-run)
+  --dry-run                Preview synchronization without modifying Kindle or Obsidian
+  --all                    Push all library books instead of only active/unread books
+  --mount <path>           Custom Kindle mount path (default: auto-detect under /Volumes/)
+  --vault-path <path>      Custom Obsidian books directory (default: ~/MAS/03-Resources/Books)
+  --eject                  Safely unmount/eject Kindle upon successful sync
+  --verbose                Enable detailed progress logging
 
 Backup Options:
   --output, -o <path>      Explicit archive file path
@@ -1556,7 +1576,8 @@ case "$ACTION" in
   health) cmd_health "$@" ;;
   categorize) cmd_categorize "$@" ;;
   enrich-synopsis) cmd_enrich_synopsis "$@" ;;
-sync-obsidian) cmd_sync_obsidian "$@" ;;
+  sync-obsidian) cmd_sync_obsidian "$@" ;;
+  sync-kindle) cmd_sync_kindle "$@" ;;
   install-daemons) cmd_install_daemons "$@" ;;
   backup) cmd_backup "$@" ;;
   restore) cmd_restore "$@" ;;
