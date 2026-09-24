@@ -1435,5 +1435,38 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       );
       expect(sameAuthorMatch.exists).toBe(true);
     });
+
+    it("does not cross-match stripped titles across different authors when filename has no author suffix", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorA = path.join(kindleMount, "books", "Author A");
+      fs.mkdirSync(authorA, { recursive: true });
+
+      // Kindle has "01 - Introduction.epub" inside Author A folder (no author in filename)
+      fs.writeFileSync(path.join(authorA, "01 - Introduction.epub"), "intro a", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate belongs to Author B
+      const crossMatch = isBookAlreadyOnKindle(
+        kindleMount,
+        "Introduction.epub",
+        "Author B",
+        0,
+        index,
+        { title: "Introduction", authors: "Author B" },
+      );
+      expect(crossMatch.exists).toBe(false);
+
+      // Candidate with Author A matches cleanly
+      const sameAuthorMatch = isBookAlreadyOnKindle(
+        kindleMount,
+        "Introduction.epub",
+        "Author A",
+        0,
+        index,
+        { title: "Introduction", authors: "Author A" },
+      );
+      expect(sameAuthorMatch.exists).toBe(true);
+    });
   });
 });

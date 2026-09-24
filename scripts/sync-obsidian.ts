@@ -898,6 +898,9 @@ export function getCalibreDbPath(): string {
   if (process.env.CALIBRE_DB_PATH) {
     return path.resolve(process.env.CALIBRE_DB_PATH);
   }
+  if (process.env.CALIBRE_LIBRARY_DIR) {
+    return path.join(path.resolve(process.env.CALIBRE_LIBRARY_DIR), "metadata.db");
+  }
   const home = process.env.HOME || os.homedir();
   return path.join(home, "Calibre Libraries", "Agent Library", "metadata.db");
 }
@@ -1390,6 +1393,7 @@ export async function syncObsidian(
             batchUpsertHighlights(hDb, records);
           }
         } catch (_indexErr) {
+          void _indexErr;
           // Fail-open
         }
       }
