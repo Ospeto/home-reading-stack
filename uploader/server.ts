@@ -69,8 +69,10 @@ import {
 import {
   getKindleStatus,
   getKindleProgress,
+  previewKindleSync,
   syncAllBooksToKindle,
   syncSingleBookToKindle,
+  cancelKindleSync,
   ejectKindleVolume,
 } from "./kindle";
 
@@ -3902,8 +3904,27 @@ export async function handleRequest(
   // API: Kindle USB Status & Live Progress
   if (url.pathname === "/api/kindle/status" && req.method === "GET") {
     try {
-      const status = getKindleStatus();
+      const scopeParam = url.searchParams.get("scope");
+      const scope: "unread" | "all" = scopeParam === "all" ? "all" : "unread";
+      const status = getKindleStatus(undefined, scope);
       return jsonResponse(status, 200, corsOrigin);
+    } catch (err: any) {
+      return jsonResponse(
+        { detected: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Kindle Sync Preview
+  if (url.pathname === "/api/kindle/preview" && req.method === "GET") {
+    try {
+      const scopeParam = url.searchParams.get("scope");
+      const scope = scopeParam === "all" ? "all" : "unread";
+      const forceAll = url.searchParams.get("forceAll") === "true";
+      const preview = previewKindleSync(undefined, { scope, forceAll });
+      return jsonResponse(preview, 200, corsOrigin);
     } catch (err: any) {
       return jsonResponse(
         { detected: false, error: sanitizeErrorMessage(err) },
@@ -3937,14 +3958,49 @@ export async function handleRequest(
       } catch {
         // Fall back to empty options if JSON body was omitted
       }
+      let scope: "unread" | "all" = "unread";
+      if (body?.scope === "all" || body?.forceAll) {
+        scope = "all";
+      }
       const results = await syncAllBooksToKindle({
         forceAll: Boolean(body?.forceAll),
         subfolderByAuthor: body?.subfolderByAuthor !== false,
+        scope,
       });
-      const isOk = results.success || results.transferred > 0 || results.highlightsPulled > 0 || results.alreadySynced > 0;
+      const hasStorageError = Boolean(
+        results.errors && results.errors.some((e) => /insufficient.*storage/i.test(e.error)),
+      );
+      const isOk = !hasStorageError && (results.cancelled || results.success || results.transferred > 0);
+      const statusCode = hasStorageError ? 507 : isOk ? 200 : 500;
       return jsonResponse(
-        { success: isOk, results },
-        isOk ? 200 : 500,
+        {
+          success: isOk,
+          results,
+          error: hasStorageError ? results.errors?.[0]?.error : undefined,
+        },
+        statusCode,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Kindle Cancel Sync
+  if (url.pathname === "/api/kindle/cancel" && req.method === "POST") {
+    try {
+      const cancelled = cancelKindleSync();
+      return jsonResponse(
+        {
+          success: true,
+          cancelled,
+          message: "Sync cancellation requested",
+        },
+        200,
         corsOrigin,
       );
     } catch (err: any) {

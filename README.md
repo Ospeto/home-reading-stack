@@ -333,15 +333,18 @@ LightHouse bridges your reading devices (KOReader on Kobo/Kindle/Android, native
 
 4. **USB-C Kindle Bulk Sync Workflow:**
    - **Automatic Local Mount Detection:** Automatically discovers connected Kindle e-readers mounted at `/Volumes/Kindle`, `/Volumes/KINDLE`, or any `/Volumes/*` volume containing a `books` or `documents` folder (preferring `books/`).
-   - **Incremental File Synchronization:** Compares all Calibre library books against existing files across both `books/` and `documents/` (or `<Author>/`). Files matching by byte size are skipped, transferring only new or updated books.
+   - **Recursive Deep Duplicate Detection:** Builds an in-memory recursive index of all book files across both `books/` and `documents/` (including all nested subdirectories like `<author>/<title>`, `<series>/...`). Matches candidates across exact filenames, base filenames (format-insensitive: `.epub`, `.azw3`, `.kfx`, `.mobi`, `.pdf`), normalized titles, clean queries, compound and inverted author-title strings, and token sets. Already-present books are safely skipped without redundant re-transfers.
+   - **Pre-Flight Total Storage Verification:** Calculates the sum of file sizes for all pending (non-skipped) book candidates before beginning transfers. Halts upfront with an explicit error if required space exceeds available Kindle storage (including a 50MB safety reserve), preventing partial transfers that leave the Kindle full.
+   - **Per-Book Space Pre-Check:** Re-verifies available storage before copying each individual book, halting gracefully with clear stats if space is exhausted mid-sync.
+   - **Instant Sync Cancellation ("Stop Sync"):** Provides an immediate Stop Sync / Cancel capability (`POST /api/kindle/cancel`) in the web UI and sync engine, halting active transfers between books without corrupting files or requiring cable disconnection.
+   - **Scope Selection (Active & Unread vs All Books):** Choice between syncing active and unread books (default: currently reading in KOSync or tagged reading/to-read) versus complete library synchronization.
    - **FAT32 Filename Sanitization:** Enforces strictly valid FAT32 filenames, stripping illegal characters (`: * ? " < > | \ /`), trimming whitespace, and bounding lengths safely without filename collisions.
-   - **Capacity Safety Buffer:** Verifies free disk space with a mandatory 50MB safety buffer before copying.
    - **Web UI & REST Endpoints:**
-     - Auto-prompt pop-up banner when Kindle is detected over USB (`GET /api/kindle/status`).
+     - Auto-prompt pop-up banner when Kindle is detected over USB (`GET /api/kindle/status`) with pending transfer count and size preview.
      - Header status pill (`#kindleStatusBtn`) indicates connection status and free space.
-     - Apple Fluid modal (`#kindleModal`) provides one-click "Sync to Kindle" with live real-time progress bar, status text (count and bytes), and safe ejection.
+     - Apple Fluid modal (`#kindleModal`) provides scope selection, storage preview, live real-time progress bar, high-contrast **"⏹️ Stop Sync"** button, and safe ejection.
      - Individual book modal includes contextual "Send to Kindle" for fast single-title transfers.
-     - `GET /api/kindle/status`, `POST /api/kindle/sync`, `POST /api/kindle/eject`, and `POST /api/books/:id/send-kindle`.
+     - `GET /api/kindle/status`, `GET /api/kindle/preview`, `POST /api/kindle/sync`, `POST /api/kindle/cancel`, `POST /api/kindle/eject`, and `POST /api/books/:id/send-kindle`.
    - **Unified CLI Command (`bin/lighthouse sync-kindle`):** Two-way synchronization: push books, pull highlights to Obsidian & cache.db, check status, or safely eject (`--eject`) directly from terminal.
 
 5. **LightHouse Web Highlights & Quotes Viewer:**

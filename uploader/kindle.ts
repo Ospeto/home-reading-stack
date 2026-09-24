@@ -7,6 +7,7 @@ import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 import { generateMetadataFilename, truncateUtf8Bytes } from "./filename";
+import { normalizeTitleForDedup, cleanQuery, extractVolumeNumber } from "./scraper";
 
 export function getCalibreDbPath(): string {
   if (process.env.CALIBRE_DB_PATH) {
@@ -24,7 +25,7 @@ export function getCalibreLibraryDir(): string {
 }
 
 export interface KindleLiveProgress {
-  phase: "idle" | "scanning" | "transferring" | "highlights" | "completed" | "error";
+  phase: "idle" | "scanning" | "transferring" | "highlights" | "completed" | "cancelled" | "error";
   currentBookTitle?: string;
   currentIndex: number;
   totalCandidates: number;
@@ -39,6 +40,21 @@ export interface KindleLiveProgress {
   error?: string;
 }
 
+export interface KindleSyncPreview {
+  detected: boolean;
+  mountPath: string | null;
+  freeBytes: number;
+  totalBytes: number;
+  totalCandidates: number;
+  alreadySyncedCount: number;
+  pendingCount: number;
+  pendingBytes: number;
+  sufficientSpace: boolean;
+  requiredBytes: number;
+  shortfallBytes: number;
+  scope: "unread" | "all";
+}
+
 export interface KindleStatus {
   detected: boolean;
   mountPath: string | null;
@@ -50,18 +66,21 @@ export interface KindleStatus {
   libraryBooks: number;
   syncInProgress: boolean;
   progress?: KindleLiveProgress | null;
+  preview?: KindleSyncPreview | null;
 }
 
 export interface KindleSyncOptions {
   mountPath?: string;
   forceAll?: boolean; // If true, overwrite existing files
   subfolderByAuthor?: boolean; // Default true: books/<Author>/<Filename>
+  scope?: "unread" | "all"; // Scope: "unread" (active & unread) or "all" (entire library)
   vaultPath?: string;
   onProgress?: (progress: KindleLiveProgress) => void;
 }
 
 export interface KindleSyncResult {
   success: boolean;
+  cancelled?: boolean;
   mountPath: string | null;
   booksDir?: string | null;
   totalBooks: number;
@@ -103,9 +122,22 @@ export const SAFETY_BUFFER_BYTES = 50 * 1024 * 1024;
 // Standard Kindle book extensions in priority order
 export const KINDLE_FORMAT_PREFERENCE = ["EPUB", "AZW3", "KFX", "MOBI", "PDF"];
 
-// In-process lock and live progress state
+// Valid book file extensions found on Kindle devices
+export const KINDLE_BOOK_EXTENSIONS = new Set([
+  ".epub",
+  ".azw3",
+  ".kfx",
+  ".mobi",
+  ".pdf",
+  ".txt",
+  ".azw",
+  ".prc",
+]);
+
+// In-process lock, live progress, and cancellation state
 let activeKindleLock: "sync" | null = null;
 let activeKindleProgress: KindleLiveProgress | null = null;
+let cancelRequested = false;
 
 export function isKindleLocked(): boolean {
   return activeKindleLock !== null;
@@ -113,6 +145,187 @@ export function isKindleLocked(): boolean {
 
 export function getKindleProgress(): KindleLiveProgress | null {
   return activeKindleProgress;
+}
+
+export function cancelKindleSync(): boolean {
+  if (activeKindleLock === null) {
+    return false;
+  }
+  cancelRequested = true;
+  return true;
+}
+
+export function isKindleSyncCancelled(): boolean {
+  return cancelRequested;
+}
+
+export interface KindleIndexedBook {
+  filePath: string;
+  filename: string;
+  ext: string;
+  baseName: string;
+  size: number;
+  normalizedTitle: string;
+  cleanQueryTitle: string;
+  volumeNumber: number | null;
+  parentDir: string;
+  grandparentDir: string;
+}
+
+export interface KindleBookIndex {
+  mountPath: string;
+  entries: KindleIndexedBook[];
+  byFilename: Map<string, KindleIndexedBook[]>;
+  byBaseName: Map<string, KindleIndexedBook[]>;
+  byNormalizedTitle: Map<string, KindleIndexedBook[]>;
+  byCleanQuery: Map<string, KindleIndexedBook[]>;
+  bySize: Map<number, KindleIndexedBook[]>;
+}
+
+export interface BookMatchOptions {
+  title?: string;
+  authors?: string;
+  series?: string | null;
+  seriesIndex?: number | string | null;
+}
+
+function appendToMultiMap<K, V>(map: Map<K, V[]>, key: K, val: V) {
+  let list = map.get(key);
+  if (!list) {
+    list = [];
+    map.set(key, list);
+  }
+  list.push(val);
+}
+
+export function createKindleBookEntry(filePath: string, size?: number): KindleIndexedBook {
+  const ext = path.extname(filePath).toLowerCase();
+  const filename = path.basename(filePath);
+  const baseName = path.basename(filePath, ext).toLowerCase().trim();
+  const normalizedTitle = normalizeTitleForDedup(baseName);
+  const cleanQueryTitle = cleanQuery(baseName).toLowerCase().trim();
+  const volumeNumber = extractVolumeNumber(filename) ?? extractVolumeNumber(baseName);
+  const parentDir = path.basename(path.dirname(filePath)).toLowerCase().trim();
+  const grandparentDir = path.basename(path.dirname(path.dirname(filePath))).toLowerCase().trim();
+
+  let statSize = size ?? 0;
+  if (statSize <= 0) {
+    try {
+      statSize = fs.statSync(filePath).size;
+    } catch {
+      statSize = 0;
+    }
+  }
+
+  return {
+    filePath,
+    filename,
+    ext,
+    baseName,
+    size: statSize,
+    normalizedTitle,
+    cleanQueryTitle,
+    volumeNumber,
+    parentDir,
+    grandparentDir,
+  };
+}
+
+export function addFileToKindleIndex(index: KindleBookIndex, filePath: string, size?: number): void {
+  const item = createKindleBookEntry(filePath, size);
+  index.entries.push(item);
+  appendToMultiMap(index.byFilename, item.filename.toLowerCase(), item);
+  if (item.baseName) appendToMultiMap(index.byBaseName, item.baseName, item);
+  if (item.normalizedTitle) appendToMultiMap(index.byNormalizedTitle, item.normalizedTitle, item);
+  // Only add cleanQueryTitle to index when there is no volume number to prevent cross-volume collisions
+  if (
+    item.cleanQueryTitle &&
+    item.cleanQueryTitle !== item.normalizedTitle &&
+    item.volumeNumber === null
+  ) {
+    appendToMultiMap(index.byCleanQuery, item.cleanQueryTitle, item);
+  }
+  if (item.size > 0) appendToMultiMap(index.bySize, item.size, item);
+}
+
+/**
+ * Builds a comprehensive recursive index of all books present on the Kindle
+ * across both books/ and documents/ (and all nested subfolders).
+ */
+export function buildKindleBookIndex(mountPath: string): KindleBookIndex {
+  const index: KindleBookIndex = {
+    mountPath,
+    entries: [],
+    byFilename: new Map(),
+    byBaseName: new Map(),
+    byNormalizedTitle: new Map(),
+    byCleanQuery: new Map(),
+    bySize: new Map(),
+  };
+
+  const searchDirs = getKindleBookDirs(mountPath);
+  const seenPaths = new Set<string>();
+
+  function walk(currentDir: string, depth = 0) {
+    if (depth > 8 || !fs.existsSync(currentDir)) return;
+    try {
+      const dirEntries = fs.readdirSync(currentDir, { withFileTypes: true });
+      for (const ent of dirEntries) {
+        if (ent.name.startsWith(".")) continue;
+        const full = path.join(currentDir, ent.name);
+        if (ent.isDirectory()) {
+          // Skip .sdr sidecar folders and system directories
+          if (!ent.name.endsWith(".sdr") && ent.name !== "system") {
+            walk(full, depth + 1);
+          }
+        } else if (ent.isFile()) {
+          const ext = path.extname(ent.name).toLowerCase();
+          if (KINDLE_BOOK_EXTENSIONS.has(ext)) {
+            if (seenPaths.has(full)) continue;
+            seenPaths.add(full);
+            addFileToKindleIndex(index, full);
+          }
+        }
+      }
+    } catch {
+      // Ignore unreadable dirs
+    }
+  }
+
+  for (const d of searchDirs) {
+    walk(d);
+  }
+
+  return index;
+}
+
+// In-memory cache for KindleBookIndex with 30s TTL
+let cachedIndexMount: string | null = null;
+let cachedIndexTime = 0;
+let cachedIndex: KindleBookIndex | null = null;
+
+export function getOrCreateKindleBookIndex(mountPath: string, forceRefresh = false): KindleBookIndex {
+  const now = Date.now();
+  if (
+    !forceRefresh &&
+    cachedIndex &&
+    cachedIndexMount === mountPath &&
+    now - cachedIndexTime < 30000
+  ) {
+    return cachedIndex;
+  }
+
+  const idx = buildKindleBookIndex(mountPath);
+  cachedIndex = idx;
+  cachedIndexMount = mountPath;
+  cachedIndexTime = now;
+  return idx;
+}
+
+export function invalidateKindleBookIndex(): void {
+  cachedIndex = null;
+  cachedIndexMount = null;
+  cachedIndexTime = 0;
 }
 
 const FAT32_ILLEGAL_REGEX = /[<>:"/\\|?*\x00-\x1F\x7F]+/g;
@@ -205,17 +418,18 @@ export function getKindleBookDirs(mountPath: string): string[] {
  * 1. Volumes named Kindle or KINDLE (or starting with Kindle / Kobo / KOReader) having books/ or documents/
  * 2. Any volume under /Volumes/* containing books/ or documents/ AND Kindle markers (system/ directory or name match)
  */
-export function detectKindleVolume(customVolumesDir = "/Volumes"): string | null {
+export function detectKindleVolume(customVolumesDir?: string): string | null {
+  const targetDir = customVolumesDir || process.env.LIGHTHOUSE_VOLUMES_DIR || "/Volumes";
   try {
-    if (!fs.existsSync(customVolumesDir)) return null;
+    if (!fs.existsSync(targetDir)) return null;
 
-    const entries = fs.readdirSync(customVolumesDir, { withFileTypes: true });
+    const entries = fs.readdirSync(targetDir, { withFileTypes: true });
 
     // First pass: volume name matches Kindle/KINDLE or known names
     for (const ent of entries) {
       if ((ent.isDirectory() || ent.isSymbolicLink()) && !ent.name.startsWith(".")) {
         if (/^kindle/i.test(ent.name) || /kobo|koreader/i.test(ent.name)) {
-          const candidate = path.join(customVolumesDir, ent.name);
+          const candidate = path.join(targetDir, ent.name);
           const booksPath = path.join(candidate, "books");
           const docsPath = path.join(candidate, "documents");
           if (fs.existsSync(booksPath) || fs.existsSync(docsPath)) {
@@ -228,7 +442,7 @@ export function detectKindleVolume(customVolumesDir = "/Volumes"): string | null
     // Second pass: any other volume containing books or documents directory and Kindle system markers
     for (const ent of entries) {
       if ((ent.isDirectory() || ent.isSymbolicLink()) && !ent.name.startsWith(".")) {
-        const candidate = path.join(customVolumesDir, ent.name);
+        const candidate = path.join(targetDir, ent.name);
         try {
           const booksPath = path.join(candidate, "books");
           const docsPath = path.join(candidate, "documents");
@@ -253,6 +467,11 @@ export function detectKindleVolume(customVolumesDir = "/Volumes"): string | null
  * Query filesystem storage statistics (free and total bytes) via statfs / df -k
  */
 export function getKindleDiskSpace(mountPath: string): { freeBytes: number; totalBytes: number; freeMb: number } {
+  if (process.env.TEST_KINDLE_FREE_BYTES !== undefined) {
+    const free = Number(process.env.TEST_KINDLE_FREE_BYTES);
+    return { freeBytes: free, totalBytes: Math.max(free * 2, 1024 * 1024), freeMb: Math.round(free / (1024 * 1024)) };
+  }
+
   try {
     if (!fs.existsSync(mountPath)) {
       return { freeBytes: 0, totalBytes: 0, freeMb: 0 };
@@ -306,42 +525,229 @@ export function getKindleDiskSpace(mountPath: string): { freeBytes: number; tota
 }
 
 /**
- * Checks whether a book is already present on the Kindle in either books/ or documents/.
- * Checks both author subfolder (`<dir>/<author>/<filename>`) and flat (`<dir>/<filename>`).
+ * Checks whether a book is already present on the Kindle across all directories and filename variants.
+ * Checks pre-scanned index when available or queries the cached/scanned index.
+ * Matches by exact path, exact filename, base filename (format-insensitive), normalized title,
+ * clean query, compound/inverted title-author, token sets, and file sizes.
  */
 export function isBookAlreadyOnKindle(
   mountPath: string,
   targetFilename: string,
   authorDir = "",
   fileSize = 0,
-): { exists: boolean; existingPath?: string } {
-  const searchDirs = [path.join(mountPath, "books"), path.join(mountPath, "documents")];
+  index?: KindleBookIndex | null,
+  bookDetails?: BookMatchOptions,
+): { exists: boolean; existingPath?: string; matchedBy?: string } {
+  const targetExt = path.extname(targetFilename).toLowerCase();
+  const targetBase = path.basename(targetFilename, targetExt).toLowerCase().trim();
+  const targetNameLower = targetFilename.toLowerCase().trim();
 
+  // 1. Direct path check for exact destination (author subfolder or flat)
+  const searchDirs = [path.join(mountPath, "books"), path.join(mountPath, "documents")];
   for (const baseDir of searchDirs) {
     if (!fs.existsSync(baseDir)) continue;
 
-    // Check author subfolder if provided
     if (authorDir) {
       const subPath = path.join(baseDir, authorDir, targetFilename);
       if (fs.existsSync(subPath)) {
         try {
           const st = fs.statSync(subPath);
-          if (fileSize <= 0 || st.size === fileSize) {
-            return { exists: true, existingPath: subPath };
+          if (fileSize <= 0 || st.size === fileSize || Math.abs(st.size - fileSize) <= 4096) {
+            return { exists: true, existingPath: subPath, matchedBy: "direct_author_path" };
           }
         } catch {}
       }
     }
 
-    // Check flat in baseDir
     const flatPath = path.join(baseDir, targetFilename);
     if (fs.existsSync(flatPath)) {
       try {
         const st = fs.statSync(flatPath);
-        if (fileSize <= 0 || st.size === fileSize) {
-          return { exists: true, existingPath: flatPath };
+        if (fileSize <= 0 || st.size === fileSize || Math.abs(st.size - fileSize) <= 4096) {
+          return { exists: true, existingPath: flatPath, matchedBy: "direct_flat_path" };
         }
       } catch {}
+    }
+  }
+
+  // 2. Query recursive index across all Kindle subdirectories
+  const idx = index || getOrCreateKindleBookIndex(mountPath);
+
+  let rawTitle = bookDetails?.title || "";
+  let rawAuthor = bookDetails?.authors || authorDir || "";
+
+  if (!rawTitle && targetBase.includes(" - ")) {
+    const parts = targetBase.split(" - ");
+    rawTitle = parts[0].trim();
+    if (!rawAuthor && parts.length > 1) {
+      rawAuthor = parts[1].trim();
+    }
+  } else if (!rawTitle) {
+    rawTitle = targetBase;
+  }
+
+  const candVol =
+    extractVolumeNumber(rawTitle) ??
+    (bookDetails?.series && bookDetails?.seriesIndex !== null && bookDetails?.seriesIndex !== undefined
+      ? Number(bookDetails.seriesIndex)
+      : null) ??
+    extractVolumeNumber(targetBase);
+
+  function volumesCompatible(entry: KindleIndexedBook): boolean {
+    if (candVol !== null && entry.volumeNumber !== null) {
+      return candVol === entry.volumeNumber;
+    }
+    if (candVol !== null && entry.volumeNumber === null) {
+      // Candidate is an explicit volume; entry has no volume notation -> not compatible
+      return false;
+    }
+    if (candVol === null && entry.volumeNumber !== null) {
+      // Candidate has no volume; entry is a specific volume -> not compatible
+      return false;
+    }
+    return true;
+  }
+
+  // Strategy A: Exact filename match anywhere on device
+  const byName = idx.byFilename.get(targetNameLower);
+  if (byName && byName.length > 0) {
+    for (const entry of byName) {
+      if (volumesCompatible(entry)) {
+        return { exists: true, existingPath: entry.filePath, matchedBy: "exact_filename" };
+      }
+    }
+  }
+
+  // Strategy B: Exact base filename match (format-insensitive: .epub vs .azw3 vs .mobi)
+  if (targetBase) {
+    const byBase = idx.byBaseName.get(targetBase);
+    if (byBase && byBase.length > 0) {
+      for (const entry of byBase) {
+        if (volumesCompatible(entry)) {
+          return { exists: true, existingPath: entry.filePath, matchedBy: "base_filename" };
+        }
+      }
+    }
+  }
+
+  // Strategy C: Normalized title & clean query matching across nested subdirectories
+  const normTitle = normalizeTitleForDedup(rawTitle);
+  const cleanTitle = cleanQuery(rawTitle).toLowerCase().trim();
+  const normAuthor = rawAuthor ? normalizeTitleForDedup(rawAuthor) : "";
+  const cleanAuthor = rawAuthor ? cleanQuery(rawAuthor).toLowerCase().trim() : "";
+
+  function authorMatchesEntry(entry: KindleIndexedBook): boolean {
+    if (!normAuthor && !cleanAuthor) return true;
+    const pLower = entry.filePath.toLowerCase();
+    if (
+      cleanAuthor &&
+      (pLower.includes(cleanAuthor) ||
+        entry.parentDir.includes(cleanAuthor) ||
+        entry.grandparentDir.includes(cleanAuthor))
+    ) {
+      return true;
+    }
+    if (
+      normAuthor &&
+      (pLower.includes(normAuthor) ||
+        entry.parentDir.includes(normAuthor) ||
+        entry.grandparentDir.includes(normAuthor))
+    ) {
+      return true;
+    }
+    // If entry has a hyphenated author in its filename that differs from candidate author
+    if (entry.filename.includes(" - ")) {
+      const parts = entry.baseName.split(" - ");
+      if (parts.length > 1) {
+        const entryAuthor = parts[1].trim();
+        if (entryAuthor && !entryAuthor.includes(normAuthor) && !normAuthor.includes(entryAuthor)) {
+          return false;
+        }
+      }
+    }
+    // Allow match if title is distinct and volume is verified compatible
+    return normTitle.length >= 5;
+  }
+
+  if (normTitle) {
+    const byNorm = idx.byNormalizedTitle.get(normTitle);
+    if (byNorm && byNorm.length > 0) {
+      for (const entry of byNorm) {
+        if (authorMatchesEntry(entry) && volumesCompatible(entry)) {
+          return { exists: true, existingPath: entry.filePath, matchedBy: "normalized_title" };
+        }
+      }
+    }
+  }
+
+  // Only check cleanTitle if the candidate has no volume notation
+  if (candVol === null && cleanTitle && cleanTitle !== normTitle) {
+    const byClean = idx.byCleanQuery.get(cleanTitle);
+    if (byClean && byClean.length > 0) {
+      for (const entry of byClean) {
+        if (authorMatchesEntry(entry) && volumesCompatible(entry)) {
+          return { exists: true, existingPath: entry.filePath, matchedBy: "clean_title" };
+        }
+      }
+    }
+  }
+
+  // Strategy D: Compound Title + Author normalized
+  if (normTitle && normAuthor) {
+    const compound = normalizeTitleForDedup(`${rawTitle} ${rawAuthor}`);
+    const byCompound = idx.byNormalizedTitle.get(compound);
+    if (byCompound && byCompound.length > 0) {
+      for (const entry of byCompound) {
+        if (volumesCompatible(entry)) {
+          return { exists: true, existingPath: entry.filePath, matchedBy: "compound_title_author" };
+        }
+      }
+    }
+
+    // Strategy E: Inverted Author + Title (e.g. "Brandon Sanderson - The Final Empire")
+    const inverted = normalizeTitleForDedup(`${rawAuthor} ${rawTitle}`);
+    const byInverted = idx.byNormalizedTitle.get(inverted);
+    if (byInverted && byInverted.length > 0) {
+      for (const entry of byInverted) {
+        if (volumesCompatible(entry)) {
+          return { exists: true, existingPath: entry.filePath, matchedBy: "inverted_author_title" };
+        }
+      }
+    }
+  }
+
+  // Strategy F: Token set matching for multi-word titles
+  const titleTokens = normTitle
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !/^(vol|volume|book|part)$/.test(w));
+  if (titleTokens.length >= 2) {
+    for (const entry of idx.entries) {
+      if (!volumesCompatible(entry)) continue;
+      const entryBase = entry.baseName;
+      const allTokensMatch = titleTokens.every((tok) => entryBase.includes(tok));
+      if (allTokensMatch && authorMatchesEntry(entry)) {
+        return { exists: true, existingPath: entry.filePath, matchedBy: "token_set" };
+      }
+    }
+  }
+
+  // Strategy G: Exact size match + strong token verification
+  if (fileSize > 0) {
+    const bySizeEntries = idx.bySize.get(fileSize);
+    if (bySizeEntries && bySizeEntries.length > 0) {
+      const checkWords = (normTitle + " " + normAuthor)
+        .split(/\s+/)
+        .filter((w) => w.length >= 4 && !/^(book|read|epub|mobi|file|part|vol|volume)$/.test(w));
+      // Must have at least one strong word to match on file size
+      if (checkWords.length > 0) {
+        for (const entry of bySizeEntries) {
+          if (!volumesCompatible(entry)) continue;
+          const pathLower = entry.filePath.toLowerCase();
+          if (checkWords.some((w) => pathLower.includes(w))) {
+            return { exists: true, existingPath: entry.filePath, matchedBy: "filesize_and_token" };
+          }
+        }
+      }
     }
   }
 
@@ -352,36 +758,8 @@ export function isBookAlreadyOnKindle(
  * Recursively count book files present across Kindle books/ and documents/ directories.
  */
 export function countKindleBooks(mountPath: string): number {
-  const validExts = new Set([".epub", ".azw3", ".kfx", ".mobi", ".pdf", ".txt", ".azw", ".prc"]);
-  const foundBookKeys = new Set<string>();
-
-  function walk(dir: string, depth = 0) {
-    if (depth > 6 || !fs.existsSync(dir)) return;
-    try {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const ent of entries) {
-        if (ent.name.startsWith(".")) continue;
-        const full = path.join(dir, ent.name);
-        if (ent.isDirectory()) {
-          // Skip system directories like .sdr
-          if (!ent.name.endsWith(".sdr")) {
-            walk(full, depth + 1);
-          }
-        } else if (ent.isFile()) {
-          const ext = path.extname(ent.name).toLowerCase();
-          if (validExts.has(ext)) {
-            foundBookKeys.add(ent.name.toLowerCase());
-          }
-        }
-      }
-    } catch {
-      // Ignore unreadable dirs
-    }
-  }
-
-  walk(path.join(mountPath, "books"));
-  walk(path.join(mountPath, "documents"));
-  return foundBookKeys.size;
+  const index = getOrCreateKindleBookIndex(mountPath);
+  return index.entries.length;
 }
 
 /**
@@ -439,8 +817,12 @@ export function findKindleClippings(mountPath: string): string | null {
 /**
  * Return current status of USB Kindle device.
  */
-export function getKindleStatus(customVolumesDir = "/Volumes"): KindleStatus {
-  const mountPath = detectKindleVolume(customVolumesDir);
+export function getKindleStatus(
+  customVolumesDir?: string,
+  scope: "unread" | "all" = "unread",
+): KindleStatus {
+  const volumesDir = customVolumesDir || process.env.LIGHTHOUSE_VOLUMES_DIR || "/Volumes";
+  const mountPath = detectKindleVolume(volumesDir);
   let freeBytes = 0;
   let totalBytes = 0;
   let booksOnDevice = 0;
@@ -479,6 +861,15 @@ export function getKindleStatus(customVolumesDir = "/Volumes"): KindleStatus {
     libraryBooks = 0;
   }
 
+  let preview: KindleSyncPreview | null = null;
+  if (mountPath) {
+    try {
+      preview = previewKindleSync(mountPath, { scope });
+    } catch {
+      preview = null;
+    }
+  }
+
   return {
     detected: Boolean(mountPath),
     mountPath,
@@ -490,7 +881,111 @@ export function getKindleStatus(customVolumesDir = "/Volumes"): KindleStatus {
     libraryBooks,
     syncInProgress: activeKindleLock !== null,
     progress: activeKindleProgress,
+    preview,
   };
+}
+
+export function getKosyncDbPath(): string {
+  if (process.env.KOSYNC_DB_PATH) {
+    return path.resolve(process.env.KOSYNC_DB_PATH);
+  }
+  const home = process.env.HOME || os.homedir();
+  return path.join(home, "kosync-server", "data", "koreader-sync.db");
+}
+
+export function getKosyncProgressMap(
+  kosyncDbPath: string,
+): Map<string, { progress: number; timestamp?: number }> {
+  const map = new Map<string, { progress: number; timestamp?: number }>();
+  if (!fs.existsSync(kosyncDbPath)) return map;
+
+  try {
+    const db = new Database(kosyncDbPath, { readonly: true });
+    try {
+      db.run("PRAGMA busy_timeout = 3000;");
+      const rows = db
+        .query(
+          "SELECT title, filename, percentage, timestamp FROM progress ORDER BY timestamp DESC;",
+        )
+        .all() as Array<{
+          title?: string;
+          filename?: string;
+          percentage?: number;
+          timestamp?: number;
+        }>;
+
+      for (const r of rows) {
+        let pct = Number(r.percentage || 0);
+        if (pct > 0 && pct <= 1) pct = Math.round(pct * 100);
+        else pct = Math.round(pct);
+
+        if (r.title) {
+          const normTitle = r.title.toLowerCase().trim();
+          if (!map.has(normTitle)) {
+            map.set(normTitle, { progress: pct, timestamp: r.timestamp });
+          }
+        }
+        if (r.filename) {
+          const normFile = r.filename
+            .replace(/\.epub$/i, "")
+            .toLowerCase()
+            .trim();
+          if (!map.has(normFile)) {
+            map.set(normFile, { progress: pct, timestamp: r.timestamp });
+          }
+        }
+      }
+    } finally {
+      db.close();
+    }
+  } catch {
+    // Fail-open returning empty map
+  }
+  return map;
+}
+
+export function isBookActiveOrUnread(
+  book: { id?: number; title?: string | null; tags?: string[] | string | null; path?: string | null },
+  progressMap?: Map<string, { progress: number; timestamp?: number }>,
+): boolean {
+  const normTitle = (book.title || "").toLowerCase().trim();
+  const tagsList: string[] = Array.isArray(book.tags)
+    ? book.tags.map((t) => String(t).toLowerCase().trim())
+    : typeof book.tags === "string"
+      ? book.tags.split(",").map((t) => t.toLowerCase().trim())
+      : [];
+
+  // 1. Explicit active / reading / want-to-read tags always qualify
+  const hasReadingTag = tagsList.some(
+    (t) =>
+      /^(reading|currently[- ]reading|want[- ]to[- ]read|to[- ]read|unread)$/i.test(t) ||
+      t.includes("reading") ||
+      t.includes("to-read") ||
+      t.includes("want-to-read"),
+  );
+  if (hasReadingTag) return true;
+
+  // 2. Explicit finished tags
+  const hasFinishedTag = tagsList.some((t) =>
+    /^(finished|read|completed|done)$/i.test(t),
+  );
+
+  // 3. KOSync reading progress check
+  if (progressMap && normTitle) {
+    const progressInfo = progressMap.get(normTitle);
+    if (progressInfo !== undefined) {
+      const pct = progressInfo.progress;
+      if (pct > 0 && pct < 99) return true;
+      if (pct >= 99) return false;
+      if (pct === 0) return true;
+    }
+  }
+
+  // If marked finished via tag and no reading tag, exclude
+  if (hasFinishedTag) return false;
+
+  // Default for books with no progress record and no finished tag is unread (true)
+  return true;
 }
 
 /**
@@ -628,18 +1123,57 @@ export function resolveCalibreBookFile(bookId: number, dbInstance?: Database): K
 /**
  * Retrieve all candidates for Kindle bulk sync from Calibre metadata.db.
  * Reuses a single open database connection to eliminate N+1 reopen churn.
+ * Supports filtering by scope: 'unread' (default: active/unread) or 'all' (entire library).
  */
-export function getAllKindleCandidates(): KindleFileCandidate[] {
+export function getAllKindleCandidates(options: { scope?: "unread" | "all" } = {}): KindleFileCandidate[] {
   const dbPath = getCalibreDbPath();
   if (!fs.existsSync(dbPath)) return [];
 
+  const scope = options.scope === "all" ? "all" : "unread";
   const candidates: KindleFileCandidate[] = [];
   try {
     const db = new Database(dbPath, { readonly: true });
     try {
       db.run("PRAGMA busy_timeout = 3000;");
-      const rows = db.query("SELECT DISTINCT id FROM books ORDER BY id DESC").all() as Array<{ id: number }>;
+
+      const kosyncMap =
+        scope === "unread"
+          ? getKosyncProgressMap(getKosyncDbPath())
+          : new Map<string, { progress: number; timestamp?: number }>();
+
+      const hasTagsTable = Boolean(
+        db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='books_tags_link';").get(),
+      );
+
+      const rows = hasTagsTable
+        ? (db
+            .query(`
+              SELECT b.id, b.title,
+                     GROUP_CONCAT(DISTINCT t.name) as tags
+              FROM books b
+              LEFT JOIN books_tags_link btl ON b.id = btl.book
+              LEFT JOIN tags t ON btl.tag = t.id
+              GROUP BY b.id
+              ORDER BY b.id DESC
+            `)
+            .all() as Array<{ id: number; title: string | null; tags: string | null }>)
+        : (db
+            .query(`
+              SELECT b.id, b.title, NULL as tags
+              FROM books b
+              ORDER BY b.id DESC
+            `)
+            .all() as Array<{ id: number; title: string | null; tags: string | null }>);
+
       for (const r of rows) {
+        if (scope === "unread") {
+          const isActiveOrUnread = isBookActiveOrUnread(
+            { id: r.id, title: r.title, tags: r.tags },
+            kosyncMap,
+          );
+          if (!isActiveOrUnread) continue;
+        }
+
         const candidate = resolveCalibreBookFile(r.id, db);
         if (candidate) {
           candidates.push(candidate);
@@ -652,6 +1186,78 @@ export function getAllKindleCandidates(): KindleFileCandidate[] {
     console.error("[Kindle] Error retrieving candidates:", err);
   }
   return candidates;
+}
+
+/**
+ * Previews Kindle synchronization without transferring any files:
+ * - Detects Kindle volume and disk space
+ * - Builds/retrieves recursive index of existing books on Kindle
+ * - Compares candidate books against Kindle index to determine pending transfers
+ * - Computes total required bytes and verifies against free space (including 50MB reserve)
+ */
+export function previewKindleSync(
+  mountPath?: string,
+  options: { scope?: "unread" | "all"; forceAll?: boolean } = {},
+): KindleSyncPreview {
+  const mount = mountPath || detectKindleVolume();
+  const scope = options.scope === "all" ? "all" : "unread";
+
+  if (!mount || !fs.existsSync(mount)) {
+    return {
+      detected: false,
+      mountPath: null,
+      freeBytes: 0,
+      totalBytes: 0,
+      totalCandidates: 0,
+      alreadySyncedCount: 0,
+      pendingCount: 0,
+      pendingBytes: 0,
+      sufficientSpace: false,
+      requiredBytes: 0,
+      shortfallBytes: 0,
+      scope,
+    };
+  }
+
+  const space = getKindleDiskSpace(mount);
+  const index = getOrCreateKindleBookIndex(mount);
+  const candidates = getAllKindleCandidates({ scope });
+
+  let alreadySyncedCount = 0;
+  let pendingCount = 0;
+  let pendingBytes = 0;
+
+  for (const c of candidates) {
+    if (!options.forceAll) {
+      const authorDir = sanitizeFat32Filename(c.authors || "Unknown");
+      const check = isBookAlreadyOnKindle(mount, c.targetFilename, authorDir, c.fileSize, index, c);
+      if (check.exists) {
+        alreadySyncedCount++;
+        continue;
+      }
+    }
+    pendingCount++;
+    pendingBytes += c.fileSize;
+  }
+
+  const requiredBytes = pendingCount > 0 ? pendingBytes + SAFETY_BUFFER_BYTES : 0;
+  const sufficientSpace = pendingCount === 0 || space.freeBytes >= requiredBytes;
+  const shortfallBytes = Math.max(0, requiredBytes - space.freeBytes);
+
+  return {
+    detected: true,
+    mountPath: mount,
+    freeBytes: space.freeBytes,
+    totalBytes: space.totalBytes,
+    totalCandidates: candidates.length,
+    alreadySyncedCount,
+    pendingCount,
+    pendingBytes,
+    sufficientSpace,
+    requiredBytes,
+    shortfallBytes,
+    scope,
+  };
 }
 
 /**
@@ -735,7 +1341,14 @@ export function syncSingleBookToKindle(
 
   // Check if already synced across books/ or documents/
   if (!options.forceAll) {
-    const existing = isBookAlreadyOnKindle(resolvedMount, candidate.targetFilename, authorDir, candidate.fileSize);
+    const existing = isBookAlreadyOnKindle(
+      resolvedMount,
+      candidate.targetFilename,
+      authorDir,
+      candidate.fileSize,
+      null,
+      candidate,
+    );
     if (existing.exists) {
       return {
         success: true,
@@ -762,6 +1375,7 @@ export function syncSingleBookToKindle(
   activeKindleLock = "sync";
   try {
     safeCopyFileToKindle(candidate.sourceFilePath, destPath);
+    invalidateKindleBookIndex();
     return {
       success: true,
       bookId,
@@ -805,8 +1419,12 @@ async function getPullHighlightsFn() {
 }
 
 /**
- * Bulk synchronize all Calibre library books to the connected Kindle.
- * Supports live progress tracking and highlight syncing to Obsidian MAS vault & cache.db.
+ * Bulk synchronize Calibre library books to the connected Kindle.
+ * - Deeply checks existing books on device across all subdirectories and filename variants
+ * - Enforces pre-flight total storage check before starting transfers
+ * - Pre-checks individual book space before copying
+ * - Supports graceful cancellation between transfers via cancelKindleSync()
+ * - Supports live progress tracking and highlight syncing to Obsidian MAS vault & cache.db.
  */
 export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Promise<KindleSyncResult> {
   if (activeKindleLock) {
@@ -846,6 +1464,7 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
   const targetBooksRoot = resolveKindleBooksDir(resolvedMount, true);
 
   activeKindleLock = "sync";
+  cancelRequested = false;
   activeKindleProgress = {
     phase: "scanning",
     currentIndex: 0,
@@ -862,24 +1481,119 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
   options.onProgress?.(activeKindleProgress);
 
   try {
-    const candidates = getAllKindleCandidates();
+    // 1. Build recursive index of Kindle existing books
+    const index = buildKindleBookIndex(resolvedMount);
+
+    // 2. Resolve candidates respecting scope ('unread' default vs 'all')
+    const scope = options.scope === "all" ? "all" : "unread";
+    const candidates = getAllKindleCandidates({ scope });
     const subfolder = options.subfolderByAuthor !== false;
 
     let alreadySynced = 0;
+    const pendingCandidates: KindleFileCandidate[] = [];
+    let totalRequiredBytes = 0;
+
+    for (const candidate of candidates) {
+      const authorDir = subfolder ? sanitizeFat32Filename(candidate.authors || "Unknown") : "";
+      let existsAndMatches = false;
+      if (!options.forceAll) {
+        const existing = isBookAlreadyOnKindle(
+          resolvedMount,
+          candidate.targetFilename,
+          authorDir,
+          candidate.fileSize,
+          index,
+          candidate,
+        );
+        if (existing.exists) {
+          existsAndMatches = true;
+        }
+      }
+
+      if (existsAndMatches) {
+        alreadySynced++;
+      } else {
+        pendingCandidates.push(candidate);
+        totalRequiredBytes += candidate.fileSize;
+      }
+    }
+
+    // 3. Pre-Flight Total Storage Check
+    const space = getKindleDiskSpace(resolvedMount);
+    const requiredBufferBytes = pendingCandidates.length > 0 ? SAFETY_BUFFER_BYTES : 0;
+    const totalNeededWithBuffer = totalRequiredBytes + requiredBufferBytes;
+
+    if (pendingCandidates.length > 0 && space.freeBytes < totalNeededWithBuffer) {
+      const reqMb = (totalNeededWithBuffer / (1024 * 1024)).toFixed(1);
+      const freeMb = (space.freeBytes / (1024 * 1024)).toFixed(1);
+      const errMsg = `Insufficient Kindle storage: requires ${reqMb} MB (including 50MB reserve), but only ${freeMb} MB available`;
+
+      activeKindleProgress = {
+        phase: "error",
+        currentIndex: 0,
+        totalCandidates: candidates.length,
+        transferredCount: 0,
+        alreadySyncedCount: alreadySynced,
+        failedCount: pendingCandidates.length,
+        skippedCount: 0,
+        bytesTransferred: 0,
+        percent: 0,
+        highlightsPulledCount: 0,
+        booksDir: targetBooksRoot,
+        error: errMsg,
+      };
+      options.onProgress?.(activeKindleProgress);
+
+      return {
+        success: false,
+        mountPath: resolvedMount,
+        booksDir: targetBooksRoot,
+        totalBooks: candidates.length,
+        alreadySynced,
+        transferred: 0,
+        failed: pendingCandidates.length,
+        skipped: 0,
+        bytesTransferred: 0,
+        highlightsPulled: 0,
+        errors: [{ bookId: 0, title: "Storage", error: errMsg }],
+      };
+    }
+
+    // 4. Transfer Candidates
     let transferred = 0;
     let failed = 0;
     let skipped = 0;
     let bytesTransferred = 0;
+    let currentFreeBytes = space.freeBytes;
     const errors: Array<{ bookId: number; title: string; error: string }> = [];
     const transferredBooks: Array<{ bookId: number; title: string; filename: string; bytes: number }> = [];
 
-    const space = getKindleDiskSpace(resolvedMount);
-
     activeKindleProgress.totalCandidates = candidates.length;
+    activeKindleProgress.alreadySyncedCount = alreadySynced;
     activeKindleProgress.phase = "transferring";
 
-    for (let i = 0; i < candidates.length; i++) {
-      const candidate = candidates[i];
+    for (let i = 0; i < pendingCandidates.length; i++) {
+      if (cancelRequested) {
+        console.log(`[Kindle] Sync cancelled by user at book ${i + 1}/${pendingCandidates.length}`);
+        activeKindleProgress = {
+          phase: "cancelled",
+          currentBookTitle: "Sync cancelled by user",
+          currentIndex: i,
+          totalCandidates: candidates.length,
+          transferredCount: transferred,
+          alreadySyncedCount: alreadySynced,
+          failedCount: failed,
+          skippedCount: skipped,
+          bytesTransferred,
+          percent: Math.round(((alreadySynced + transferred) / Math.max(1, candidates.length)) * 100),
+          highlightsPulledCount: 0,
+          booksDir: targetBooksRoot,
+        };
+        options.onProgress?.(activeKindleProgress);
+        break;
+      }
+
+      const candidate = pendingCandidates[i];
       const authorDir = subfolder ? sanitizeFat32Filename(candidate.authors || "Unknown") : "";
       const targetDir = authorDir ? path.resolve(targetBooksRoot, authorDir) : targetBooksRoot;
       const destPath = path.resolve(targetDir, candidate.targetFilename);
@@ -895,12 +1609,29 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
         continue;
       }
 
-      // Update live progress
-      const currentPercent = candidates.length > 0 ? Math.min(85, Math.round(((i + 1) / candidates.length) * 85)) : 85;
+      // Per-book storage pre-check: verify device has space for file + 50MB buffer
+      if (currentFreeBytes < candidate.fileSize + SAFETY_BUFFER_BYTES) {
+        const freeMb = (currentFreeBytes / (1024 * 1024)).toFixed(1);
+        const needMb = (candidate.fileSize / (1024 * 1024)).toFixed(1);
+        const reason = `Insufficient space on Kindle for "${candidate.title}" (Free: ${freeMb}MB, Needed: ${needMb}MB + 50MB buffer)`;
+        errors.push({
+          bookId: candidate.bookId,
+          title: candidate.title,
+          error: reason,
+        });
+        skipped++;
+        console.warn(`[Kindle] Space exhausted mid-sync. Halting transfer loop gracefully.`);
+        break;
+      }
+
+      const currentPercent = candidates.length > 0
+        ? Math.min(85, Math.round(((alreadySynced + transferred + 1) / candidates.length) * 85))
+        : 85;
+
       activeKindleProgress = {
         phase: "transferring",
         currentBookTitle: candidate.title,
-        currentIndex: i + 1,
+        currentIndex: alreadySynced + transferred + 1,
         totalCandidates: candidates.length,
         transferredCount: transferred,
         alreadySyncedCount: alreadySynced,
@@ -913,38 +1644,13 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
       };
       options.onProgress?.(activeKindleProgress);
 
-      // Check if already present on Kindle in books/ or documents/
-      let existsAndMatches = false;
-      if (!options.forceAll) {
-        const existing = isBookAlreadyOnKindle(resolvedMount, candidate.targetFilename, authorDir, candidate.fileSize);
-        if (existing.exists) {
-          existsAndMatches = true;
-        }
-      }
-
-      if (existsAndMatches) {
-        alreadySynced++;
-        activeKindleProgress.alreadySyncedCount = alreadySynced;
-        continue;
-      }
-
-      // Check space
-      if (space.freeBytes < candidate.fileSize + SAFETY_BUFFER_BYTES) {
-        skipped++;
-        activeKindleProgress.skippedCount = skipped;
-        errors.push({
-          bookId: candidate.bookId,
-          title: candidate.title,
-          error: "Skipped due to low disk space on Kindle",
-        });
-        continue;
-      }
-
       try {
         safeCopyFileToKindle(candidate.sourceFilePath, destPath);
         transferred++;
         bytesTransferred += candidate.fileSize;
-        space.freeBytes -= candidate.fileSize;
+        currentFreeBytes -= candidate.fileSize;
+
+        addFileToKindleIndex(index, destPath, candidate.fileSize);
 
         activeKindleProgress.transferredCount = transferred;
         activeKindleProgress.bytesTransferred = bytesTransferred;
@@ -970,41 +1676,43 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
       }
     }
 
-    // Direction 2: Pull Highlights from both books/ and documents/
+    // Direction 2: Pull Highlights from both books/ and documents/ (only if not cancelled)
     let highlightsPulled = 0;
-    try {
-      activeKindleProgress = {
-        ...activeKindleProgress,
-        phase: "highlights",
-        currentBookTitle: "Syncing highlights to Obsidian MAS vault...",
-        percent: 90,
-      };
-      options.onProgress?.(activeKindleProgress);
+    if (!cancelRequested) {
+      try {
+        activeKindleProgress = {
+          ...activeKindleProgress,
+          phase: "highlights",
+          currentBookTitle: "Syncing highlights to Obsidian MAS vault...",
+          percent: 90,
+        };
+        options.onProgress?.(activeKindleProgress);
 
-      const pullFn = await getPullHighlightsFn();
-      if (pullFn) {
-        const hlRes = await pullFn(
-          { apply: true, vaultPath: options.vaultPath },
-          {
-            mountPath: resolvedMount,
-            booksDir: targetBooksRoot,
-            documentsDir: targetBooksRoot,
-            candidateDirs: [path.join(resolvedMount, "books"), path.join(resolvedMount, "documents")],
-            name: path.basename(resolvedMount),
-            freeBytes: space.freeBytes,
-            totalBytes: space.totalBytes,
-          },
-          getCalibreDbPath(),
-          new Map(),
-        );
-        highlightsPulled = hlRes?.totalImported ?? 0;
+        const pullFn = await getPullHighlightsFn();
+        if (pullFn) {
+          const hlRes = await pullFn(
+            { apply: true, vaultPath: options.vaultPath },
+            {
+              mountPath: resolvedMount,
+              booksDir: targetBooksRoot,
+              documentsDir: targetBooksRoot,
+              candidateDirs: [path.join(resolvedMount, "books"), path.join(resolvedMount, "documents")],
+              name: path.basename(resolvedMount),
+              freeBytes: currentFreeBytes,
+              totalBytes: space.totalBytes,
+            },
+            getCalibreDbPath(),
+            new Map(),
+          );
+          highlightsPulled = hlRes?.totalImported ?? 0;
+        }
+      } catch (hlErr) {
+        console.warn("[Kindle] Notice: Highlight pull step completed with notice:", hlErr);
       }
-    } catch (hlErr) {
-      console.warn("[Kindle] Notice: Highlight pull step completed with notice:", hlErr);
     }
 
     activeKindleProgress = {
-      phase: "completed",
+      phase: cancelRequested ? "cancelled" : "completed",
       currentIndex: candidates.length,
       totalCandidates: candidates.length,
       transferredCount: transferred,
@@ -1012,14 +1720,15 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
       failedCount: failed,
       skippedCount: skipped,
       bytesTransferred,
-      percent: 100,
+      percent: cancelRequested ? activeKindleProgress.percent : 100,
       highlightsPulledCount: highlightsPulled,
       booksDir: targetBooksRoot,
     };
     options.onProgress?.(activeKindleProgress);
 
     return {
-      success: failed === 0,
+      success: !cancelRequested && failed === 0,
+      cancelled: cancelRequested,
       mountPath: resolvedMount,
       booksDir: targetBooksRoot,
       totalBooks: candidates.length,
@@ -1034,6 +1743,8 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
     };
   } finally {
     activeKindleLock = null;
+    cancelRequested = false;
+    invalidateKindleBookIndex();
   }
 }
 
