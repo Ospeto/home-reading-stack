@@ -782,9 +782,13 @@
       .active\:scale-\[0\.98\]:active,
       .active\:scale-95:active,
       .active\:scale-97:active,
-      .clickable-pill:active {
+      .clickable-pill:active,
+      .visionos-tab:active {
         transform: none !important;
         transition: none !important;
+      }
+      .visionos-tab .animate-pulse {
+        animation: none !important;
       }
       .card-popup {
         animation: none !important;
@@ -832,6 +836,122 @@
       background: linear-gradient(180deg, #f59e0b 0%, #d97706 100%);
     }
 
+    /* Apple visionOS Floating Island Capsule & Fluid Tabs */
+    .backdrop-blur-2xl {
+      -webkit-backdrop-filter: blur(40px) saturate(180%);
+      backdrop-filter: blur(40px) saturate(180%);
+    }
+    .p-1\.5 {
+      padding: 0.375rem;
+    }
+    .visionos-nav-container {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      overflow-x: auto;
+      padding-top: 0.25rem;
+      padding-bottom: 0.25rem;
+      -webkit-overflow-scrolling: touch;
+      scroll-behavior: smooth;
+      justify-content: flex-start;
+      scroll-padding-left: 0.5rem;
+    }
+    @media (min-width: 640px) {
+      .visionos-nav-container {
+        justify-content: center;
+      }
+    }
+    .visionos-capsule {
+      background: rgba(24, 24, 27, 0.8);
+      -webkit-backdrop-filter: blur(40px) saturate(180%);
+      backdrop-filter: blur(40px) saturate(180%);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.8), 0 0 1px 1px rgba(255, 255, 255, 0.06);
+      border-radius: 9999px;
+      padding: 0.375rem;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .visionos-tab {
+      height: 2rem;
+      padding: 0 0.875rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      line-height: 1rem;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      white-space: nowrap;
+      flex-shrink: 0;
+      cursor: pointer;
+      color: #a1a1aa;
+      background: transparent;
+      border: 1px solid transparent;
+      transition: transform 120ms cubic-bezier(0.2, 0, 0, 1), background-color 150ms cubic-bezier(0.16, 1, 0.3, 1), color 150ms cubic-bezier(0.16, 1, 0.3, 1), border-color 150ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 150ms cubic-bezier(0.16, 1, 0.3, 1);
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .visionos-tab:hover {
+      color: #f4f4f5;
+      background-color: rgba(255, 255, 255, 0.06);
+    }
+    .visionos-tab:focus-visible {
+      outline: 2px solid #38bdf8;
+      outline-offset: 2px;
+    }
+    .visionos-tab:active {
+      transform: scale(0.96) !important;
+      transition: transform 80ms cubic-bezier(0.2, 0, 0, 1) !important;
+      will-change: transform;
+    }
+    .visionos-tab.visionos-tab-active,
+    .visionos-tab.active {
+      color: #ffffff;
+      background: rgba(255, 255, 255, 0.15);
+      border-color: rgba(255, 255, 255, 0.2);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+    }
+    .visionos-tab-reading {
+      color: #34d399;
+    }
+    .visionos-tab-reading:hover {
+      color: #6ee7b7;
+      background-color: rgba(16, 185, 129, 0.1);
+    }
+    .visionos-tab-reading.visionos-tab-active,
+    .visionos-tab-reading.active {
+      color: #ffffff;
+      background: rgba(16, 185, 129, 0.22);
+      border-color: rgba(52, 211, 153, 0.35);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(52, 211, 153, 0.25);
+    }
+    .visionos-badge {
+      font-size: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      padding: 0.125rem 0.4rem;
+      border-radius: 9999px;
+      background: rgba(255, 255, 255, 0.1);
+      color: #d4d4d8;
+      line-height: 1;
+      font-weight: 500;
+      transition: all 150ms ease;
+    }
+    .visionos-tab.visionos-tab-active .visionos-badge {
+      background: rgba(255, 255, 255, 0.2);
+      color: #ffffff;
+    }
+    .visionos-badge-reading {
+      background: rgba(16, 185, 129, 0.18);
+      color: #6ee7b7;
+    }
+    .visionos-tab-reading.visionos-tab-active .visionos-badge-reading {
+      background: rgba(16, 185, 129, 0.35);
+      color: #ffffff;
+    }
+
     /* Accessibility: Reduced Transparency */
     @media (prefers-reduced-transparency: reduce) {
       .apple-material-header,
@@ -843,6 +963,8 @@
       .backdrop-blur-md,
       .backdrop-blur-sm,
       .backdrop-blur-xs,
+      .backdrop-blur-2xl,
+      .visionos-capsule,
       .highlight-quote-card,
       header,
       aside,
@@ -1191,32 +1313,68 @@
         </div>
       </div>
 
-      <!-- Third Row (Category Rail) -->
-      <div class="overflow-x-auto no-scrollbar flex items-center gap-2 py-1 text-xs">
-        <button onclick="setFilter('all', null)" id="chip-all" class="h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5 shadow-sm">
-          <span>All Books</span>
-          <span id="quickTotalBooks" class="text-[10px] font-mono text-zinc-600">0</span>
-        </button>
-        <button onclick="setFilter('category', 'series')" id="chip-series" class="h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
-          <span>Series</span>
-        </button>
-        <button onclick="setFilter('category', 'light_novels')" id="chip-ln" class="h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
-          <span>Light Novels</span>
-        </button>
-        <button onclick="setFilter('category', 'recently_added')" id="chip-recent" class="h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
-          <span>Recently Added</span>
-        </button>
-        <button onclick="setFilter('status', 'reading')" id="chip-reading" class="h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 text-emerald-400 hover:text-white border border-zinc-800/80 shrink-0 transition-all duration-150 ease-out flex items-center gap-1.5 cursor-pointer active:scale-[0.98]">
-          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-          <span>Reading</span>
-          <span id="quickReadingCount" class="text-[10px] text-zinc-500 font-mono">0</span>
-        </button>
-        <button onclick="setFilter('format', 'EPUB')" id="chip-epub" class="h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5">
-          <span>EPUB</span>
-        </button>
-        <div id="quickSeriesChips" class="flex items-center gap-2 shrink-0"></div>
-        <div id="quickFormatChips" class="flex items-center gap-2 shrink-0"></div>
-      </div>
+      <!-- Third Row (visionOS Floating Island Capsule) -->
+      <nav class="visionos-nav-container w-full flex items-center justify-start sm:justify-center overflow-x-auto no-scrollbar py-1" aria-label="Library Navigation Capsule">
+        <div class="visionos-capsule inline-flex items-center bg-zinc-900/80 backdrop-blur-2xl border border-white/10 shadow-2xl rounded-full p-1.5 gap-1 shrink-0">
+          <div class="inline-flex items-center gap-1" role="tablist" aria-label="Library Filter Tabs">
+            <!-- All Volumes Tab -->
+            <button onclick="setFilter('all', null)" id="chip-all" role="tab" aria-selected="true" class="visionos-tab visionos-tab-active" title="All Volumes">
+              <span>All Volumes</span>
+              <span id="quickTotalBooks" class="visionos-badge">0</span>
+            </button>
+
+            <!-- Series Tab -->
+            <button onclick="setFilter('category', 'series')" id="chip-series" role="tab" aria-selected="false" class="visionos-tab" title="Series Collections">
+              <span>Series</span>
+            </button>
+
+            <!-- Reading Tab -->
+            <button onclick="setFilter('status', 'reading')" id="chip-reading" role="tab" aria-selected="false" class="visionos-tab visionos-tab-reading" title="Currently Reading">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
+              <span>Reading</span>
+              <span id="quickReadingCount" class="visionos-badge visionos-badge-reading">0</span>
+            </button>
+
+            <!-- Subtle Vertical Divider -->
+            <div class="h-4 w-px bg-white/10 shrink-0 mx-0.5" aria-hidden="true"></div>
+
+            <!-- Light Novels Tab -->
+            <button onclick="setFilter('category', 'light_novels')" id="chip-ln" role="tab" aria-selected="false" class="visionos-tab" title="Light Novels">
+              <span>Light Novels</span>
+            </button>
+
+            <!-- Burmese Literature Tab -->
+            <button onclick="setFilter('category', 'burmese')" id="chip-burmese" role="tab" aria-selected="false" class="visionos-tab" title="Burmese Literature">
+              <span>Burmese</span>
+            </button>
+          </div>
+
+          <!-- Filter Sheet Trigger Button -->
+          <button onclick="openFilterDrawer()" id="capsuleFilterBtn" role="button" aria-haspopup="dialog" aria-label="Filter library" class="visionos-tab" title="Open Filter Sheet">
+            <svg class="w-3.5 h-3.5 text-zinc-300" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24">
+              <line x1="4" y1="21" x2="4" y2="14"></line>
+              <line x1="4" y1="10" x2="4" y2="3"></line>
+              <line x1="12" y1="21" x2="12" y2="12"></line>
+              <line x1="12" y1="8" x2="12" y2="3"></line>
+              <line x1="20" y1="21" x2="20" y2="16"></line>
+              <line x1="20" y1="12" x2="20" y2="3"></line>
+              <line x1="1" y1="14" x2="7" y2="14"></line>
+              <line x1="9" y1="8" x2="15" y2="8"></line>
+              <line x1="17" y1="16" x2="23" y2="16"></line>
+            </svg>
+            <span class="hidden sm:inline">Filters</span>
+            <span id="capsuleFilterActiveBadge" class="hidden min-w-[16px] h-4 px-1 rounded-full text-[9px] font-bold bg-sky-400 text-zinc-950 flex items-center justify-center font-mono leading-none shadow-sm">0</span>
+          </button>
+        </div>
+
+        <!-- Hidden Compatibility Elements for Facets & Secondary Chips -->
+        <div id="quickFilterCompat" class="hidden" aria-hidden="true">
+          <button onclick="setFilter('category', 'recently_added')" id="chip-recent">Recently Added</button>
+          <button onclick="setFilter('format', 'EPUB')" id="chip-epub">EPUB</button>
+          <div id="quickSeriesChips"></div>
+          <div id="quickFormatChips"></div>
+        </div>
+      </nav>
 
     </div>
   </header>
@@ -2155,6 +2313,15 @@
           <div class="space-y-1">
             <div class="font-bold text-white flex items-center gap-1.5">
               <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+              <span>visionOS Floating Island Capsule (WWDC Fluid Interface)</span>
+            </div>
+            <p class="text-[11px] text-zinc-400 leading-relaxed">
+              Suspended centered glass capsule replacing flat rails with iOS 18 fluid interface materials. Features structured tabs (<code class="text-zinc-200">All Volumes</code> with formatted total count badge, <code class="text-zinc-200">Series</code>, <code class="text-zinc-200">Reading</code> with pulsing emerald indicator and active read count, subtle divider, <code class="text-zinc-200">Light Novels</code>, and <code class="text-zinc-200">Burmese</code> literature), integrated 1-tap <code class="text-zinc-200">Filters</code> button with active badge indicator, and tactile active press feedback (<code class="text-zinc-200">scale(0.96)</code>).
+            </p>
+          </div>
+          <div class="space-y-1 pt-1 border-t border-zinc-800/80">
+            <div class="font-bold text-white flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
               <span>Dynamic Language Shelves (All / Burmese / English / Other)</span>
             </div>
             <p class="text-[11px] text-zinc-400 leading-relaxed">
@@ -2922,7 +3089,7 @@
       if (finishEl) finishEl.textContent = finishedCount;
 
       const quickReading = document.getElementById('quickReadingCount');
-      if (quickReading) quickReading.textContent = readingCount;
+      if (quickReading) quickReading.textContent = (readingCount || 0).toLocaleString();
     }
 
     function toggleFullscreen() {
@@ -3185,8 +3352,8 @@
           if (Array.isArray(parsed.data) && parsed.data.length > 0) {
             allBooks = parsed.data;
             document.getElementById('totalBooksStat').textContent = allBooks.length;
-            document.getElementById('facetTotalBooks').textContent = allBooks.length;
-            document.getElementById('quickTotalBooks').textContent = allBooks.length;
+            document.getElementById('facetTotalBooks').textContent = (allBooks.length || 0).toLocaleString();
+            document.getElementById('quickTotalBooks').textContent = (allBooks.length || 0).toLocaleString();
             applyFilters();
           }
         }
@@ -3252,8 +3419,7 @@
             }
           }
         }
-        document.getElementById('quickReadingCount').textContent = readingCount;
-        updateLibraryCounters();
+        document.getElementById('quickReadingCount').textContent = (readingCount || 0).toLocaleString();
         updateLibraryCounters();
       } catch (e) {
         console.error('Failed to load KOSync active progress:', e);
@@ -3282,7 +3448,7 @@
         saveCachedData(CACHE_KEY_BOOKS, freshBooks, booksEtag);
         document.getElementById('totalBooksStat').textContent = allBooks.length;
         document.getElementById('facetTotalBooks').textContent = allBooks.length.toLocaleString();
-        document.getElementById('quickTotalBooks').textContent = allBooks.length;
+        document.getElementById('quickTotalBooks').textContent = (allBooks.length || 0).toLocaleString();
         updateLibraryCounters();
         if (hasChanged) {
           applyFilters();
@@ -3316,6 +3482,11 @@
     function renderQuickFilterChips() {
       const seriesContainer = document.getElementById('quickSeriesChips');
       const formatContainer = document.getElementById('quickFormatChips');
+      if (!seriesContainer || !formatContainer) return;
+      // Skip DOM manipulation when compat container is hidden
+      if (seriesContainer.offsetParent === null && formatContainer.offsetParent === null) {
+        return;
+      }
 
       // Top 3 Series
       setHtml(seriesContainer, (facets.series || []).slice(0, 3).map(s => {
@@ -3417,6 +3588,9 @@
       const chipSeries = document.getElementById('chip-series');
       const chipRecent = document.getElementById('chip-recent');
       const chipReading = document.getElementById('chip-reading');
+      const chipBurmese = document.getElementById('chip-burmese');
+      const capsuleFilterBtn = document.getElementById('capsuleFilterBtn');
+      const capsuleFilterActiveBadge = document.getElementById('capsuleFilterActiveBadge');
 
       const navInactive = 'flex items-center justify-between px-3 py-2 rounded-xl text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left active:scale-[0.97]';
       const navActive = 'flex items-center justify-between px-3 py-2 rounded-xl bg-white/10 text-white font-medium transition-colors cursor-pointer text-left active:scale-[0.97]';
@@ -3426,19 +3600,39 @@
       if (navWant) navWant.className = (type === 'status' && value === 'want_to_read') ? navActive : navInactive;
       if (navFinished) navFinished.className = (type === 'status' && value === 'finished') ? navActive : navInactive;
 
-      const chipActiveCls = 'h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5 shadow-sm';
-      const chipInactiveCls = 'h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 border border-zinc-800/80 text-zinc-400 hover:text-zinc-200 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5';
+      const isAll = (type === 'all');
+      const isSeries = (type === 'category' && value === 'series');
+      const isLn = (type === 'category' && value === 'light_novels');
+      const isBurmese = (type === 'category' && value === 'burmese');
+      const isReading = (type === 'status' && value === 'reading');
+      const isRecent = (type === 'category' && value === 'recently_added');
+      const isEpub = (type === 'format' && value === 'EPUB');
 
-      if (chipAll) chipAll.className = (type === 'all') ? chipActiveCls : chipInactiveCls;
-      if (chipLn) chipLn.className = (type === 'category' && value === 'light_novels') ? chipActiveCls : chipInactiveCls;
-      if (chipEpub) chipEpub.className = (type === 'format' && value === 'EPUB') ? chipActiveCls : chipInactiveCls;
-      if (chipSeries) chipSeries.className = (type === 'category' && value === 'series') ? chipActiveCls : chipInactiveCls;
-      if (chipRecent) chipRecent.className = (type === 'category' && value === 'recently_added') ? chipActiveCls : chipInactiveCls;
-
+      if (chipAll) {
+        chipAll.classList.toggle('visionos-tab-active', isAll);
+        chipAll.setAttribute('aria-selected', isAll ? 'true' : 'false');
+      }
+      if (chipSeries) {
+        chipSeries.classList.toggle('visionos-tab-active', isSeries);
+        chipSeries.setAttribute('aria-selected', isSeries ? 'true' : 'false');
+      }
+      if (chipLn) {
+        chipLn.classList.toggle('visionos-tab-active', isLn);
+        chipLn.setAttribute('aria-selected', isLn ? 'true' : 'false');
+      }
+      if (chipBurmese) {
+        chipBurmese.classList.toggle('visionos-tab-active', isBurmese);
+        chipBurmese.setAttribute('aria-selected', isBurmese ? 'true' : 'false');
+      }
       if (chipReading) {
-        chipReading.className = (type === 'status' && value === 'reading')
-          ? 'h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white text-zinc-950 shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5 shadow-sm'
-          : 'h-8 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-zinc-900/80 border border-zinc-800/80 text-emerald-400 hover:text-white shrink-0 transition-all duration-150 ease-out active:scale-[0.98] cursor-pointer flex items-center gap-1.5';
+        chipReading.classList.toggle('visionos-tab-active', isReading);
+        chipReading.setAttribute('aria-selected', isReading ? 'true' : 'false');
+      }
+      if (chipRecent) {
+        chipRecent.classList.toggle('visionos-tab-active', isRecent);
+      }
+      if (chipEpub) {
+        chipEpub.classList.toggle('visionos-tab-active', isEpub);
       }
 
       const breadcrumb = document.getElementById('breadcrumbCategory');
@@ -3455,8 +3649,13 @@
         if (headerTitle) headerTitle.textContent = 'All Books';
         if (mobileBadge) mobileBadge.classList.add('hidden');
         if (filterActiveBadge) filterActiveBadge.classList.add('hidden');
+        if (capsuleFilterActiveBadge) capsuleFilterActiveBadge.classList.add('hidden');
         if (filterBtn) {
           filterBtn.classList.remove('border-sky-500/50', 'text-white');
+        }
+        if (capsuleFilterBtn) {
+          capsuleFilterBtn.classList.remove('visionos-tab-active');
+          capsuleFilterBtn.setAttribute('aria-pressed', 'false');
         }
       } else {
         if (box) box.classList.remove('hidden');
@@ -3470,6 +3669,9 @@
           if (value === 'light_novels') label = 'Light Novels';
           else if (value === 'series') label = 'Series Collections';
           else if (value === 'recently_added') label = 'Recently Added';
+          else if (value === 'burmese') {
+            label = 'Burmese Literature';
+          }
         } else if (type === 'format') {
           label = `${value} Books`;
         }
@@ -3485,6 +3687,21 @@
         }
         if (filterBtn) {
           filterBtn.classList.add('border-sky-500/50', 'text-white');
+        }
+
+        const isCapsulePrimary = (isAll || isSeries || isLn || isBurmese || isReading);
+        const isDrawerFacet = !isCapsulePrimary && type !== 'all' && value !== null;
+        if (capsuleFilterActiveBadge) {
+          if (isDrawerFacet && activeCount > 0) {
+            capsuleFilterActiveBadge.classList.remove('hidden');
+            capsuleFilterActiveBadge.textContent = String(activeCount);
+          } else {
+            capsuleFilterActiveBadge.classList.add('hidden');
+          }
+        }
+        if (capsuleFilterBtn) {
+          capsuleFilterBtn.classList.toggle('visionos-tab-active', isDrawerFacet);
+          capsuleFilterBtn.setAttribute('aria-pressed', isDrawerFacet ? 'true' : 'false');
         }
       }
 
@@ -3546,6 +3763,18 @@
       syncSearch('');
     }
 
+    // Navigation and Filtering Aliases
+    window.setCategory = function(cat) { setFilter('category', cat); };
+    window.filterBooks = function() { applyFilters(); };
+
+    function isBurmeseBook(b) {
+      const rawLangs = (b.languages || []).map(l => String(l).toLowerCase().trim());
+      const titleText = b.title || '';
+      const hasMyanmarChars = /[\u1000-\u109F\uA9E0-\uA9FF\uAA60-\uAA7F]/.test(titleText);
+      const hasBurmeseTag = (b.tags || []).some(t => /burmese|myanmar/i.test(t));
+      return rawLangs.includes('my') || rawLangs.includes('mya') || rawLangs.includes('burmese') || (rawLangs.length === 0 && hasMyanmarChars) || hasBurmeseTag;
+    }
+
     function applyFilters() {
       const qDesktop = document.getElementById('searchInputDesktop')?.value || '';
       const qMobile = document.getElementById('searchInputMobile')?.value || '';
@@ -3566,9 +3795,8 @@
         if (activeLanguageShelf !== 'all') {
           const rawLangs = (b.languages || []).map(l => String(l).toLowerCase().trim());
           const titleText = b.title || '';
-          const hasMyanmarChars = /[\u1000-\u109F\uA9E0-\uA9FF\uAA60-\uAA7F]/.test(titleText);
-          const isBurmese = rawLangs.includes('my') || rawLangs.includes('mya') || rawLangs.includes('burmese') || (rawLangs.length === 0 && hasMyanmarChars);
-          const isEnglish = rawLangs.includes('en') || rawLangs.includes('eng') || rawLangs.includes('english') || (rawLangs.length === 0 && !hasMyanmarChars && /[a-zA-Z]/.test(titleText));
+          const isBurmese = isBurmeseBook(b);
+          const isEnglish = rawLangs.includes('en') || rawLangs.includes('eng') || rawLangs.includes('english') || (!isBurmese && /[a-zA-Z]/.test(titleText));
 
           if (activeLanguageShelf === 'my') {
             if (!isBurmese) return false;
@@ -3594,6 +3822,9 @@
           }
           if (activeFilter.value === 'recently_added') {
             return true;
+          }
+          if (activeFilter.value === 'burmese') {
+            return isBurmeseBook(b);
           }
         }
         if (activeFilter.type === 'status') {

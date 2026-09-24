@@ -440,6 +440,10 @@ The LightHouse web interface (`uploader/index.html`) is built according to Apple
    - Permanent left sidebar filtering panel is completely removed in favor of an expansive, edge-to-edge full-width book card grid that smoothly adapts from mobile (2 columns), tablet (3-4 columns), desktop (5-6 columns), to ultra-wide viewports (7 columns).
    - Comprehensive library facet filtering (full Collections/Series, Authors, Tags, Reading Status, Formats, and Sort Order) is centralized into an Apple Fluid translucent slide-over sheet (`backdrop-filter: blur(20px) saturate(180%)`), while top category chips and content header sort select remain available for instant shortcuts.
    - Accessible via the top header `Filters` button featuring an active filter pill badge with live filter count, subtle top-edge light highlights (`border-top: 1px solid rgba(255, 255, 255, 0.15)`), and quick dismissal via dismiss button, outside backdrop click, or the Escape key.
+8. **visionOS Floating Island Capsule Navigation:**
+   - Replaced flat category rail with a centered, suspended Apple visionOS / iOS 18 translucent glass capsule (`bg-zinc-900/80 backdrop-blur-2xl border border-white/10 shadow-2xl rounded-full p-1.5`).
+   - Structured tabs & badges: `All Volumes` (with formatted locale count badge, e.g. `1,297`), `Series`, `Reading` (with live pulsing emerald indicator and active reading count), subtle vertical divider (`h-4 w-px bg-white/10`), primary categories (`Light Novels`, `Burmese`), and an integrated 1-tap `Filters` trigger button with live active badge (supplementing the top header action button).
+   - Tactile Apple Fluid press response (`:active { transform: scale(0.96); }`), smooth cubic-bezier transitions, immediate pointer active feedback, full keyboard focus rings (`:focus-visible`), ARIA tabs/accessibility markup, and responsive mobile & Telegram Mini App centering with smooth horizontal swipe adaptation without scrollbars. Secondary facets (Recently Added, EPUB, individual series, and formats) are cleanly managed inside the translucent Filter sheet.
 
 ---
 

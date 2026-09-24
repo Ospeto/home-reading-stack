@@ -418,6 +418,180 @@ describe("Telegram Mini App (TMA) Integration", () => {
     // Safe CSS variable for cover glow: never wraps unescaped SVG data URIs
     expect(html).not.toContain("style=\"--popup-bg-image: url('data:image");
   });
+
+  it("index.html implements Apple visionOS Floating Island Capsule navigation (WWDC fluid design, translucent glass, structured tabs, tactile feedback)", () => {
+    const htmlPath = path.join((import.meta as any).dir, "index.html");
+    const html = fs.readFileSync(htmlPath, "utf8");
+
+    // 1. Centered suspended glass capsule & translucent materials
+    expect(html).toContain("visionos-capsule");
+    expect(html).toContain("visionos-nav-container");
+    expect(html).toContain("bg-zinc-900/80");
+    expect(html).toContain("backdrop-blur-2xl");
+    expect(html).toContain("border-white/10");
+    expect(html).toContain("shadow-2xl");
+    expect(html).toContain("rounded-full");
+    expect(html).toContain("p-1.5");
+    expect(html).toContain('role="tablist"');
+
+    // 2. Structured tabs and badges
+    // Tab 1: All Volumes with formatted count badge
+    expect(html).toContain('id="chip-all"');
+    expect(html).toContain('role="tab"');
+    expect(html).toContain('aria-selected="true"');
+    expect(html).toContain("All Volumes");
+    expect(html).toContain('id="quickTotalBooks"');
+    expect(html).toContain("visionos-badge");
+
+    // Tab 2: Series
+    expect(html).toContain('id="chip-series"');
+    expect(html).toContain("Series");
+
+    // Tab 3: Reading with live emerald pulse indicator and active count badge
+    expect(html).toContain('id="chip-reading"');
+    expect(html).toContain("Reading");
+    expect(html).toContain("animate-pulse");
+    expect(html).toContain('id="quickReadingCount"');
+    expect(html).toContain("visionos-badge-reading");
+
+    // Subtle vertical divider
+    expect(html).toContain("h-4 w-px bg-white/10");
+
+    // Primary categories: Light Novels and Burmese
+    expect(html).toContain('id="chip-ln"');
+    expect(html).toContain("Light Novels");
+    expect(html).toContain('id="chip-burmese"');
+    expect(html).toContain("Burmese");
+
+    // Filter button inside capsule
+    expect(html).toContain('id="capsuleFilterBtn"');
+    expect(html).toContain('aria-label="Filter library"');
+    expect(html).toContain('id="capsuleFilterActiveBadge"');
+
+    // 3. Tactile Apple Fluid press response: scale(0.96) and focus ring
+    expect(html).toContain(".visionos-tab:active");
+    expect(html).toContain("transform: scale(0.96) !important;");
+    expect(html).toContain(".visionos-tab:focus-visible");
+    expect(html).toContain("outline: 2px solid #38bdf8");
+
+    // 4. Accessibility & Mobile scrolling invariants
+    expect(html).toContain(".visionos-tab .animate-pulse");
+    expect(html).toContain(".visionos-capsule");
+    expect(html).toContain("scroll-padding-left: 0.5rem");
+    expect(html).toContain("justify-content: flex-start");
+
+    // 5. Compatibility elements for facets & legacy queries
+    expect(html).toContain('id="quickFilterCompat"');
+    expect(html).toContain('id="quickSeriesChips"');
+    expect(html).toContain('id="quickFormatChips"');
+    expect(html).toContain('id="chip-recent"');
+    expect(html).toContain('id="chip-epub"');
+
+    // 6. Navigation and filtering aliases in JavaScript
+    expect(html).toContain("window.setCategory");
+    expect(html).toContain("window.filterBooks");
+
+    // 7. Burmese category filter handling in JavaScript
+    expect(html).toContain("activeFilter.value === 'burmese'");
+    expect(html).toContain("Burmese Literature");
+  });
+
+  it("visionOS Floating Island Capsule state machine and filtering invariants execute correctly", () => {
+    // Helper simulating the single-active invariant and drawer facet logic from index.html
+    function evaluateCapsuleState(type: string, value: any) {
+      const isAll = type === "all";
+      const isSeries = type === "category" && value === "series";
+      const isLn = type === "category" && value === "light_novels";
+      const isBurmese = type === "category" && value === "burmese";
+      const isReading = type === "status" && value === "reading";
+
+      const activeTabs = [
+        isAll && "all",
+        isSeries && "series",
+        isLn && "light_novels",
+        isBurmese && "burmese",
+        isReading && "reading",
+      ].filter(Boolean);
+
+      const isCapsulePrimary = isAll || isSeries || isLn || isBurmese || isReading;
+      const isDrawerFacet = !isCapsulePrimary && type !== "all" && value !== null;
+
+      return {
+        activeTabs,
+        singlePrimaryActive: activeTabs.length === 1,
+        noPrimaryActive: activeTabs.length === 0,
+        isDrawerFacet,
+      };
+    }
+
+    // 1. All Volumes
+    const allState = evaluateCapsuleState("all", null);
+    expect(allState.singlePrimaryActive).toBe(true);
+    expect(allState.activeTabs).toEqual(["all"]);
+    expect(allState.isDrawerFacet).toBe(false);
+
+    // 2. Primary Capsule Tabs
+    const seriesState = evaluateCapsuleState("category", "series");
+    expect(seriesState.singlePrimaryActive).toBe(true);
+    expect(seriesState.activeTabs).toEqual(["series"]);
+    expect(seriesState.isDrawerFacet).toBe(false);
+
+    const lnState = evaluateCapsuleState("category", "light_novels");
+    expect(lnState.singlePrimaryActive).toBe(true);
+    expect(lnState.activeTabs).toEqual(["light_novels"]);
+    expect(lnState.isDrawerFacet).toBe(false);
+
+    const burmeseState = evaluateCapsuleState("category", "burmese");
+    expect(burmeseState.singlePrimaryActive).toBe(true);
+    expect(burmeseState.activeTabs).toEqual(["burmese"]);
+    expect(burmeseState.isDrawerFacet).toBe(false);
+
+    const readingState = evaluateCapsuleState("status", "reading");
+    expect(readingState.singlePrimaryActive).toBe(true);
+    expect(readingState.activeTabs).toEqual(["reading"]);
+    expect(readingState.isDrawerFacet).toBe(false);
+
+    // 3. Drawer Facets (Specific Series, Author, Format, Tag)
+    const specificSeriesState = evaluateCapsuleState("series", "Monogatari Series");
+    expect(specificSeriesState.noPrimaryActive).toBe(true);
+    expect(specificSeriesState.isDrawerFacet).toBe(true);
+
+    const authorState = evaluateCapsuleState("author", "NISIOISIN");
+    expect(authorState.noPrimaryActive).toBe(true);
+    expect(authorState.isDrawerFacet).toBe(true);
+
+    const formatState = evaluateCapsuleState("format", "EPUB");
+    expect(formatState.noPrimaryActive).toBe(true);
+    expect(formatState.isDrawerFacet).toBe(true);
+
+    const tagState = evaluateCapsuleState("tag", "Action");
+    expect(tagState.noPrimaryActive).toBe(true);
+    expect(tagState.isDrawerFacet).toBe(true);
+
+    // 4. Burmese filtering predicate parity test
+    function isBurmeseBook(book: { title?: string; languages?: string[]; tags?: string[] }) {
+      const rawLangs = (book.languages || []).map((l: string) => String(l).toLowerCase().trim());
+      const titleText = book.title || "";
+      const hasMyanmarChars = /[\u1000-\u109F\uA9E0-\uA9FF\uAA60-\uAA7F]/.test(titleText);
+      const hasBurmeseTag = (book.tags || []).some((t: string) => /burmese|myanmar/i.test(t));
+      return (
+        rawLangs.includes("my") ||
+        rawLangs.includes("mya") ||
+        rawLangs.includes("burmese") ||
+        (rawLangs.length === 0 && hasMyanmarChars) ||
+        hasBurmeseTag
+      );
+    }
+
+    // Title with Myanmar characters
+    expect(isBurmeseBook({ title: "မြန်မာဝတ္ထု" })).toBe(true);
+    // Language tag 'my'
+    expect(isBurmeseBook({ title: "Translated Novel", languages: ["my"] })).toBe(true);
+    // Tag-only Burmese book
+    expect(isBurmeseBook({ title: "English Title", tags: ["Burmese Literature"] })).toBe(true);
+    // Non-Burmese book
+    expect(isBurmeseBook({ title: "Sword Art Online", languages: ["en"], tags: ["Light Novel"] })).toBe(false);
+  });
 });
 
 describe("Reverse SSH Tunnel Auto-Healing Watchdog", () => {
