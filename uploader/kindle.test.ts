@@ -1490,6 +1490,17 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       );
       expect(crossMatch.exists).toBe(false);
 
+      // Candidate specifying Author B with seriesIndex=1 must ALSO NOT match flat stripped title
+      const crossMatchSeries = isBookAlreadyOnKindle(
+        kindleMount,
+        "Introduction.epub",
+        "Author B",
+        0,
+        index,
+        { title: "Introduction", authors: "Author B", series: "Some Series", seriesIndex: 1 },
+      );
+      expect(crossMatchSeries.exists).toBe(false);
+
       // Candidate with no author specified matches cleanly
       const noAuthorMatch = isBookAlreadyOnKindle(
         kindleMount,

@@ -957,8 +957,10 @@ export function isBookAlreadyOnKindle(
     if (!normAuthor && !cleanAuthor) return true;
     if (hasPositiveAuthorMatch(entry)) return true;
 
-    // For stripped-index/base matches, require positive author match when candidate author is specified
-    if (options.strict) {
+    // For stripped-index/base matches of generic section titles (e.g. "01 - Introduction", "01 - Prologue"),
+    // require positive author match when candidate author is given to avoid cross-author false positives
+    const isGenericSectionTitle = /^(introduction|prologue|preface|epilogue|interlude|afterword|foreword|index|appendix|chapter\s*\d+|part\s*\d+|love|home)$/i.test(normTitle);
+    if (options.strict && isGenericSectionTitle) {
       return false;
     }
 
@@ -1019,9 +1021,7 @@ export function isBookAlreadyOnKindle(
     if (byBase && byBase.length > 0) {
       for (const entry of byBase) {
         const isStrippedMatch = entry.strippedBaseName === targetBase && entry.baseName !== targetBase;
-        const entryVol = entry.volumeNumber ?? entry.leadingIndex ?? null;
-        const hasMatchingVolume = candVol !== null && entryVol !== null && candVol === entryVol;
-        const requireStrict = isStrippedMatch && !hasMatchingVolume;
+        const requireStrict = isStrippedMatch;
         if (requireStrict && !authorMatchesEntry(entry, { strict: true })) {
           continue;
         }
@@ -1047,9 +1047,7 @@ export function isBookAlreadyOnKindle(
     if (byNorm && byNorm.length > 0) {
       for (const entry of byNorm) {
         const isStripped = entry.strippedNormalizedTitle === t && entry.normalizedTitle !== t;
-        const entryVol = entry.volumeNumber ?? entry.leadingIndex ?? null;
-        const hasMatchingVolume = candVol !== null && entryVol !== null && candVol === entryVol;
-        const requireStrict = isStripped && !hasMatchingVolume;
+        const requireStrict = isStripped;
         const matchesAuthor = requireStrict
           ? authorMatchesEntry(entry, { strict: true })
           : authorMatchesEntry(entry);
@@ -1079,9 +1077,7 @@ export function isBookAlreadyOnKindle(
     if (byClean && byClean.length > 0) {
       for (const entry of byClean) {
         const isStripped = entry.strippedCleanQueryTitle === cq && entry.cleanQueryTitle !== cq;
-        const entryVol = entry.volumeNumber ?? entry.leadingIndex ?? null;
-        const hasMatchingVolume = candVol !== null && entryVol !== null && candVol === entryVol;
-        const requireStrict = isStripped && !hasMatchingVolume;
+        const requireStrict = isStripped;
         const matchesAuthor = requireStrict
           ? authorMatchesEntry(entry, { strict: true })
           : authorMatchesEntry(entry);
