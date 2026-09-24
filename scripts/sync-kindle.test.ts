@@ -823,5 +823,117 @@ War is peace. Freedom is slavery. Ignorance is strength.
       expect(res.stdout).toContain("LightHouse Type-C Kindle Two-Way Synchronization");
       expect(res.stdout).toContain("DRY RUN");
     });
+
+    it("verifies bin/lighthouse kindle-sync does not exist as duplicate command", () => {
+      const res = spawnSync(LIGHTHOUSE_BIN, ["kindle-sync"], {
+        encoding: "utf8",
+        cwd: tempDir,
+      });
+      expect(res.status).not.toBe(0);
+      expect(res.stdout + res.stderr).toContain("Unknown command");
+    });
+
+    it("detects /Volumes/Kindle/books as primary target when both books and documents exist", () => {
+      const dualMount = path.join(tempDir, "DualKindle");
+      fs.mkdirSync(path.join(dualMount, "books"), { recursive: true });
+      fs.mkdirSync(path.join(dualMount, "documents"), { recursive: true });
+
+      const info = detectKindleMount(dualMount);
+      expect(info).not.toBeNull();
+      expect(info?.booksDir).toBe(path.join(dualMount, "books"));
+      expect(info?.candidateDirs).toContain(path.join(dualMount, "books"));
+      expect(info?.candidateDirs).toContain(path.join(dualMount, "documents"));
+    });
+
+    it("deduplicates books present in documents/ when syncing to books/", async () => {
+      const booksDir = path.join(mockKindleMount, "books");
+      const docsDir = path.join(mockKindleMount, "documents");
+      fs.mkdirSync(booksDir, { recursive: true });
+      fs.mkdirSync(docsDir, { recursive: true });
+
+      const mountInfo = detectKindleMount(mockKindleMount)!;
+      expect(mountInfo.booksDir).toBe(booksDir);
+
+      // Create a book in Calibre
+      const bookRel = "Authors/BookX";
+      const fullDir = path.join(mockCalibreDir, bookRel);
+      fs.mkdirSync(fullDir, { recursive: true });
+      const bookContent = "Dummy epub content for deduplication test";
+      fs.writeFileSync(path.join(fullDir, "BookX - AuthorX.epub"), bookContent);
+
+      const cDb = new Database(mockCalibreDbPath);
+      cDb.run("INSERT INTO books (id, title, path) VALUES (101, 'BookX', ?);", [bookRel]);
+      cDb.run("INSERT INTO authors (id, name) VALUES (101, 'AuthorX');");
+      cDb.run("INSERT INTO books_authors_link (book, author) VALUES (101, 101);");
+      cDb.run("INSERT INTO data (book, format, name, uncompressed_size) VALUES (101, 'EPUB', 'BookX - AuthorX', ?);", [bookContent.length]);
+      cDb.close();
+
+      const books = queryCalibreBooksWithFiles(mockCalibreDbPath, mockCalibreDir);
+      const targetBook = books.find((b) => b.id === 101)!;
+
+      // Place book in documents/ (legacy location)
+      fs.writeFileSync(path.join(docsDir, "BookX - AuthorX.epub"), bookContent);
+
+      // Run push to booksDir
+      const pushRes = await pushBooksToKindle(
+        { apply: true, all: true },
+        mountInfo,
+        [targetBook],
+        new Map(),
+      );
+
+      expect(pushRes.length).toBe(1);
+      expect(pushRes[0].status).toBe("skipped");
+      expect(pushRes[0].reason).toContain("Already present with identical size");
+
+      // Verify it was NOT re-copied to books/
+      expect(fs.existsSync(path.join(booksDir, "BookX - AuthorX.epub"))).toBe(false);
+    });
+
+    it("scans and pulls highlights from both books/ and documents/ .sdr folders", async () => {
+      const booksDir = path.join(mockKindleMount, "books");
+      const docsDir = path.join(mockKindleMount, "documents");
+      fs.mkdirSync(booksDir, { recursive: true });
+      fs.mkdirSync(docsDir, { recursive: true });
+
+      // Create .sdr in books/
+      const sdrInBooks = path.join(booksDir, "NovelA.sdr");
+      fs.mkdirSync(sdrInBooks, { recursive: true });
+      fs.writeFileSync(
+        path.join(sdrInBooks, "metadata.epub.lua"),
+        `return {
+          ["bookmarks"] = {
+            { ["text"] = "Quote from books directory", ["datetime"] = "2026-09-24 10:00:00", ["page"] = 10 }
+          },
+          ["stats"] = { ["title"] = "Novel A", ["authors"] = "Author A", ["performance_in_pages"] = {} }
+        }`,
+      );
+
+      // Create .sdr in documents/
+      const sdrInDocs = path.join(docsDir, "NovelB.sdr");
+      fs.mkdirSync(sdrInDocs, { recursive: true });
+      fs.writeFileSync(
+        path.join(sdrInDocs, "metadata.epub.lua"),
+        `return {
+          ["bookmarks"] = {
+            { ["text"] = "Quote from documents directory", ["datetime"] = "2026-09-24 11:00:00", ["page"] = 20 }
+          },
+          ["stats"] = { ["title"] = "Novel B", ["authors"] = "Author B", ["performance_in_pages"] = {} }
+        }`,
+      );
+
+      const mountInfo = detectKindleMount(mockKindleMount)!;
+      const pullRes = await pullHighlightsFromKindle(
+        { apply: true, vaultPath: mockObsidianBooks },
+        mountInfo,
+        mockCalibreDbPath,
+        new Map(),
+      );
+
+      expect(pullRes.totalImported).toBe(2);
+      expect(pullRes.results.map((r) => r.bookTitle).sort()).toEqual(["Novel A", "Novel B"].sort());
+      expect(fs.existsSync(path.join(mockObsidianBooks, "Novel A.md"))).toBe(true);
+      expect(fs.existsSync(path.join(mockObsidianBooks, "Novel B.md"))).toBe(true);
+    });
   });
 });
