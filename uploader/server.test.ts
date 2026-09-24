@@ -898,6 +898,492 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
         resetServerDependenciesForTest();
       }
     });
+
+    it("supports Server-Sent Events (SSE) streaming progress when stream: true in body", async () => {
+      let cacheRefreshed = false;
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async (_url: string, onProgress?: any) => {
+          if (onProgress) {
+            await onProgress({
+              phase: "manifest",
+              total: 2,
+              volumeTitle: "Stream Series",
+              status: "Found 2 volumes",
+              data: { action: "manifest_ready" },
+            });
+            await onProgress({
+              phase: "volume",
+              index: 1,
+              total: 2,
+              volumeTitle: "Stream Series: Volume 1",
+              status: "Imported Volume 1",
+              data: { action: "imported", calibreId: 101 },
+            });
+            await onProgress({
+              phase: "complete",
+              index: 2,
+              total: 2,
+              volumeTitle: "Stream Series",
+              status: "Completed",
+              data: {
+                success: true,
+                seriesTitle: "Stream Series",
+                author: "Stream Author",
+                importedCount: 2,
+                skippedCount: 0,
+                totalCount: 2,
+                tags: "Light Novel",
+                calibreBookIds: [101, 102],
+              },
+            });
+          }
+          return {
+            success: true,
+            seriesTitle: "Stream Series",
+            author: "Stream Author",
+            importedCount: 2,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 2,
+            tags: "Light Novel",
+            calibreBookIds: [101, 102],
+          };
+        },
+        getCalibreBooks: (forceFresh?: boolean) => {
+          if (forceFresh) cacheRefreshed = true;
+          return [];
+        },
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/streaming-test",
+            stream: true,
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+        const text = await res.text();
+        const rawBlocks = text.split("\n\n").filter((b) => b.trim().startsWith("data:"));
+        const events = rawBlocks.map((b) => JSON.parse(b.replace(/^data:\s*/, "").trim()));
+
+        expect(events.length).toBeGreaterThanOrEqual(3);
+        expect(events[0].phase).toBe("manifest");
+        expect(events[0].total).toBe(2);
+        expect(events[1].phase).toBe("volume");
+        expect(events[1].index).toBe(1);
+        expect(events[2].phase).toBe("complete");
+        expect(events[2].data.seriesTitle).toBe("Stream Series");
+        expect(events[2].data.importedCount).toBe(2);
+        expect(cacheRefreshed).toBe(true);
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("supports Server-Sent Events (SSE) streaming progress when Accept: text/event-stream", async () => {
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async (_url: string, onProgress?: any) => {
+          if (onProgress) {
+            await onProgress({
+              phase: "manifest",
+              total: 1,
+              volumeTitle: "Accept Header Series",
+              status: "Found 1 volume",
+            });
+          }
+          return {
+            success: true,
+            seriesTitle: "Accept Header Series",
+            author: "Author",
+            importedCount: 1,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 1,
+            tags: "Light Novel",
+            calibreBookIds: [201],
+          };
+        },
+        getCalibreBooks: () => [],
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+          },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/accept-test",
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+        const text = await res.text();
+        const events = text
+          .split("\n\n")
+          .filter((b) => b.trim().startsWith("data:"))
+          .map((b) => JSON.parse(b.replace(/^data:\s*/, "").trim()));
+
+        expect(events.length).toBeGreaterThanOrEqual(1);
+        expect(events[0].phase).toBe("manifest");
+        const completeEvent = events.find((e) => e.phase === "complete");
+        expect(completeEvent).toBeDefined();
+        expect(completeEvent.data.seriesTitle).toBe("Accept Header Series");
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("supports NDJSON streaming progress when Accept: application/x-ndjson", async () => {
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async (_url: string, onProgress?: any) => {
+          if (onProgress) {
+            await onProgress({
+              phase: "manifest",
+              total: 3,
+              volumeTitle: "NDJSON Series",
+              status: "Manifest ready",
+            });
+          }
+          return {
+            success: true,
+            seriesTitle: "NDJSON Series",
+            author: "Author",
+            importedCount: 3,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 3,
+            tags: "Light Novel",
+            calibreBookIds: [301, 302, 303],
+          };
+        },
+        getCalibreBooks: () => [],
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/x-ndjson",
+          },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/ndjson-test",
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toContain("application/x-ndjson");
+
+        const text = await res.text();
+        const lines = text.trim().split("\n").filter(Boolean);
+        const events = lines.map((l) => JSON.parse(l));
+
+        expect(events.length).toBeGreaterThanOrEqual(1);
+        expect(events[0].phase).toBe("manifest");
+        const completeEvent = events.find((e) => e.phase === "complete");
+        expect(completeEvent).toBeDefined();
+        expect(completeEvent.data.seriesTitle).toBe("NDJSON Series");
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("streams error events when ingestLnoriSeries fails during streaming", async () => {
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async () => {
+          throw new Error("Simulated stream failure (/secret/path)");
+        },
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/error-stream-test",
+            stream: true,
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+        const text = await res.text();
+        const events = text
+          .split("\n\n")
+          .filter((b) => b.trim().startsWith("data:"))
+          .map((b) => JSON.parse(b.replace(/^data:\s*/, "").trim()));
+
+        expect(events.length).toBe(1);
+        expect(events[0].phase).toBe("error");
+        expect(events[0].status).toContain("Simulated stream failure");
+        expect(events[0].status).not.toContain("/secret/path");
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("preserves slashes and URLs in title and status during streaming without mangling", async () => {
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async (_url: string, onProgress?: any) => {
+          if (onProgress) {
+            await onProgress({
+              phase: "manifest",
+              total: 2,
+              volumeTitle: "Fate/stay night: Unlimited Blade Works",
+              status: "Inspecting volume https://lnori.com/book/801/vol-1",
+            });
+            await onProgress({
+              phase: "complete",
+              index: 2,
+              total: 2,
+              volumeTitle: "Fate/stay night: Unlimited Blade Works",
+              status: "Completed",
+              data: {
+                success: true,
+                seriesTitle: "Fate/stay night: Unlimited Blade Works",
+                author: "TYPE-MOON / Kinoko Nasu",
+                importedCount: 2,
+                skippedCount: 0,
+                totalCount: 2,
+                tags: "Light Novel",
+                calibreBookIds: [1, 2],
+              },
+            });
+          }
+          return {
+            success: true,
+            seriesTitle: "Fate/stay night: Unlimited Blade Works",
+            author: "TYPE-MOON / Kinoko Nasu",
+            importedCount: 2,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 2,
+            tags: "Light Novel",
+            calibreBookIds: [1, 2],
+          };
+        },
+        getCalibreBooks: () => [],
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/slash-title-test",
+            stream: true,
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+
+        const text = await res.text();
+        const events = text
+          .split("\n\n")
+          .filter((b) => b.trim().startsWith("data:"))
+          .map((b) => JSON.parse(b.replace(/^data:\s*/, "").trim()));
+
+        expect(events[0].volumeTitle).toBe("Fate/stay night: Unlimited Blade Works");
+        expect(events[0].status).toBe("Inspecting volume https://lnori.com/book/801/vol-1");
+        expect(events[1].data.seriesTitle).toBe("Fate/stay night: Unlimited Blade Works");
+        // Verify slashes and URLs were NOT replaced by "[path]"
+        expect(events[0].volumeTitle).not.toContain("[path]");
+        expect(events[0].status).not.toContain("[path]");
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("streams error event when ingestLnoriSeries returns success: false on stream", async () => {
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async () => ({
+          success: false,
+          error: "Failed to download volume from /Users/ospeto/internal/storage",
+          seriesTitle: "",
+          author: "",
+          tags: "",
+          importedCount: 0,
+          skippedCount: 0,
+          duplicateCount: 0,
+          totalCount: 1,
+          calibreBookIds: [],
+        }),
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/fail-stream-test",
+            stream: true,
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+        const text = await res.text();
+        const events = text
+          .split("\n\n")
+          .filter((b) => b.trim().startsWith("data:"))
+          .map((b) => JSON.parse(b.replace(/^data:\s*/, "").trim()));
+
+        expect(events.length).toBe(1);
+        expect(events[0].phase).toBe("error");
+        expect(events[0].status).toContain("Failed to download volume");
+        expect(events[0].status).not.toContain("/Users/ospeto/internal/storage");
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("aborts ingest when client aborts request signal", async () => {
+      const clientAbort = new AbortController();
+      let abortedObserved = false;
+
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async (_url: string, onProgress?: any, deps?: any) => {
+          if (onProgress) {
+            await onProgress({
+              phase: "manifest",
+              total: 5,
+              volumeTitle: "Abort Test Series",
+              status: "Found 5 volumes",
+            });
+          }
+          // Simulate client aborting during volume processing
+          clientAbort.abort();
+          if (deps?.signal?.aborted) {
+            abortedObserved = true;
+            throw new Error("Lnori ingestion aborted by client");
+          }
+          return {
+            success: true,
+            seriesTitle: "Abort Test Series",
+            author: "Author",
+            importedCount: 0,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 5,
+            tags: "Light Novel",
+            calibreBookIds: [],
+          };
+        },
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/abort-test",
+            stream: true,
+          }),
+          signal: clientAbort.signal,
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toContain("text/event-stream");
+        const text = await res.text();
+        expect(abortedObserved).toBe(true);
+        expect(text).toContain("aborted by client");
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("defaults to non-streaming JSON response when Accept: application/json", async () => {
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async () => ({
+          success: true,
+          seriesTitle: "JSON Series",
+          author: "Author",
+          importedCount: 1,
+          skippedCount: 0,
+          duplicateCount: 0,
+          totalCount: 1,
+          tags: "Light Novel",
+          calibreBookIds: [501],
+        }),
+        getCalibreBooks: () => [],
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/json-default-test",
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toContain("application/json");
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(true);
+        expect(data.seriesTitle).toBe("JSON Series");
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("emits only one single error event when manifest is empty during stream", async () => {
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async () => {
+          throw new Error("No volumes found in Lnori series manifest for: https://lnori.com/series/8046/empty");
+        },
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/empty-stream-test",
+            stream: true,
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+        const text = await res.text();
+        const events = text
+          .split("\n\n")
+          .filter((b) => b.trim().startsWith("data:"))
+          .map((b) => JSON.parse(b.replace(/^data:\s*/, "").trim()));
+
+        expect(events.length).toBe(1);
+        expect(events[0].phase).toBe("error");
+        expect(events[0].status).toContain("No volumes found");
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
   });
 
   describe("Auto-Populate Synopses on Ingest", () => {

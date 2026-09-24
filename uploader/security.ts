@@ -1729,7 +1729,7 @@ export function repairTruncatedEpub(filePath: string): boolean {
           let p = dataOffset;
           let foundDescriptor = false;
           while (p + 4 <= scanLimit) {
-            const nextPk = buf.indexOf(PK_MAGIC, p);
+            const nextPk = buf.subarray(0, scanLimit).indexOf(PK_MAGIC, p);
             if (nextPk === -1 || nextPk + 4 > scanLimit) break;
             if (++probes > MAX_DESCRIPTOR_PROBES) break;
             const descSig = buf.readUInt32LE(nextPk);

@@ -23,6 +23,21 @@ export interface LnoriDependencies {
   calibreDbPath?: string;
   isVolumeInLibrary?: (seriesTitle: string, volumeIndex: number, title: string) => boolean;
   sleep?: (ms: number) => Promise<void>;
+  signal?: AbortSignal;
+}
+
+export function composeSignal(timeoutMs: number, userSignal?: AbortSignal): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  if (!userSignal) return timeoutSignal;
+  if (userSignal.aborted) return userSignal;
+  if (typeof (AbortSignal as any).any === "function") {
+    return (AbortSignal as any).any([timeoutSignal, userSignal]);
+  }
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(userSignal.reason || timeoutSignal.reason);
+  userSignal.addEventListener("abort", onAbort, { once: true });
+  timeoutSignal.addEventListener("abort", onAbort, { once: true });
+  return controller.signal;
 }
 
 export function escapeTelegramMarkdown(text: string): string {
@@ -690,16 +705,19 @@ export async function fetchLnoriHtml(
         Referer: "https://lnori.com/",
       },
       proxy: PROXY_URL,
-      signal: AbortSignal.timeout(30000),
+      signal: composeSignal(30000, dependencies?.signal),
     } as any);
   } catch {
+    if (dependencies?.signal?.aborted) {
+      throw new Error("Lnori ingestion aborted by client");
+    }
     // If proxy failed or threw, retry without proxy
     res = await fetcher(targetUrl, {
       headers: {
         "User-Agent": USER_AGENT,
         Referer: "https://lnori.com/",
       },
-      signal: AbortSignal.timeout(30000),
+      signal: composeSignal(30000, dependencies?.signal),
     } as any);
   }
 
@@ -717,12 +735,15 @@ export async function fetchLnoriHtml(
           sRes = await fetcher(sitemapPath, {
             headers: { "User-Agent": USER_AGENT },
             proxy: PROXY_URL,
-            signal: AbortSignal.timeout(20000),
+            signal: composeSignal(20000, dependencies?.signal),
           } as any);
         } catch {
+          if (dependencies?.signal?.aborted) {
+            throw new Error("Lnori ingestion aborted by client");
+          }
           sRes = await fetcher(sitemapPath, {
             headers: { "User-Agent": USER_AGENT },
-            signal: AbortSignal.timeout(20000),
+            signal: composeSignal(20000, dependencies?.signal),
           } as any);
         }
         if (sRes.ok) {
@@ -736,7 +757,14 @@ export async function fetchLnoriHtml(
             return await fetchLnoriHtml(smMatch[1], dependencies);
           }
         }
-      } catch {
+      } catch (smErr: any) {
+        if (
+          dependencies?.signal?.aborted ||
+          smErr?.name === "AbortError" ||
+          smErr?.message?.includes("aborted")
+        ) {
+          throw smErr;
+        }
         // ignore sitemap fallback failure
       }
     }
@@ -769,9 +797,17 @@ export async function downloadLnoriEpub(
   let lastError: any = null;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (dependencies?.signal?.aborted) {
+      throw new Error("Lnori ingestion aborted by client");
+    }
+
     if (attempt > 0) {
       const backoffMs = Math.min(10000, 1000 * 2 ** (attempt - 1));
       await sleep(backoffMs);
+    }
+
+    if (dependencies?.signal?.aborted) {
+      throw new Error("Lnori ingestion aborted by client");
     }
 
     try {
@@ -781,7 +817,7 @@ export async function downloadLnoriEpub(
           "User-Agent": USER_AGENT,
         },
         proxy: PROXY_URL,
-        signal: AbortSignal.timeout(60000),
+        signal: composeSignal(60000, dependencies?.signal),
       } as any);
 
       if (!res.ok) {
@@ -809,6 +845,14 @@ export async function downloadLnoriEpub(
         await fs.promises.rm(destPath, { force: true });
       } catch {
         // ignore cleanup error if file was already removed
+      }
+
+      if (
+        dependencies?.signal?.aborted ||
+        err?.name === "AbortError" ||
+        err?.message?.includes("aborted")
+      ) {
+        throw err;
       }
 
       if (
@@ -862,15 +906,18 @@ export async function fetchAndConvertCover(
             "User-Agent": USER_AGENT,
           },
           proxy: PROXY_URL,
-          signal: AbortSignal.timeout(20000),
+          signal: composeSignal(20000, dependencies?.signal),
         } as any);
       } catch {
+        if (dependencies?.signal?.aborted) {
+          throw new Error("Lnori ingestion aborted by client");
+        }
         res = await fetcher(cUrl, {
           headers: {
             Referer: "https://lnori.com/",
             "User-Agent": USER_AGENT,
           },
-          signal: AbortSignal.timeout(20000),
+          signal: composeSignal(20000, dependencies?.signal),
         } as any);
       }
 
@@ -879,7 +926,14 @@ export async function fetchAndConvertCover(
         downloaded = true;
         break;
       }
-    } catch {
+    } catch (err: any) {
+      if (
+        dependencies?.signal?.aborted ||
+        err?.name === "AbortError" ||
+        err?.message?.includes("aborted")
+      ) {
+        throw new Error("Lnori ingestion aborted by client");
+      }
       // try next
     }
   }
@@ -913,6 +967,47 @@ export async function fetchAndConvertCover(
   }
 }
 
+export interface LnoriProgressEvent {
+  phase: "manifest" | "volume" | "complete" | "error";
+  index?: number;
+  total?: number;
+  volumeTitle?: string;
+  status?: string;
+  data?: any;
+}
+
+export type LnoriProgressCallback = (
+  event: LnoriProgressEvent,
+) => Promise<void> | void;
+
+export function formatLnoriProgress(event: LnoriProgressEvent): string {
+  if (event.status) return event.status;
+  if (event.phase === "manifest") {
+    return event.volumeTitle
+      ? `Found ${event.total || 0} volumes in series "${event.volumeTitle}"`
+      : "Inspecting Lnori manifest...";
+  }
+  if (event.phase === "volume") {
+    return `[Volume ${event.index || 1}/${event.total || 1}] ${event.volumeTitle || ""}`;
+  }
+  if (event.phase === "complete") {
+    return `Completed: ${event.data?.importedCount || 0} imported, ${event.data?.skippedCount || 0} skipped`;
+  }
+  return `[Lnori ${event.phase}]`;
+}
+
+async function reportProgress(
+  onProgress: LnoriProgressCallback | ((event: any) => any) | undefined,
+  event: LnoriProgressEvent,
+): Promise<void> {
+  if (!onProgress) return;
+  try {
+    await onProgress(event);
+  } catch (err) {
+    console.warn("[Lnori] onProgress callback threw error:", err);
+  }
+}
+
 export interface IngestLnoriResult {
   success: boolean;
   seriesTitle: string;
@@ -928,7 +1023,7 @@ export interface IngestLnoriResult {
 
 export async function ingestLnoriSeries(
   url: string,
-  onProgress?: (text: string) => Promise<void>,
+  onProgress?: LnoriProgressCallback | ((text: string) => Promise<void>),
   dependencies?: LnoriDependencies,
 ): Promise<IngestLnoriResult> {
   const parsed = parseLnoriUrl(url);
@@ -936,9 +1031,11 @@ export async function ingestLnoriSeries(
     throw new Error(`Invalid Lnori URL: ${url}`);
   }
 
-  if (onProgress) {
-    await onProgress(`⏳ _Fetching volume manifest for Lnori ${parsed.type}..._`);
-  }
+  await reportProgress(onProgress, {
+    phase: "manifest",
+    status: `⏳ _Fetching volume manifest for Lnori ${parsed.type}..._`,
+    data: { action: "fetching_manifest", type: parsed.type, url },
+  });
 
   const html = await fetchLnoriHtml(url, dependencies);
   const manifest = extractManifestFromHtml(html, url, parsed);
@@ -952,171 +1049,281 @@ export async function ingestLnoriSeries(
     );
   }
 
+  if (dependencies?.signal?.aborted) {
+    throw new Error("Lnori ingestion aborted by client");
+  }
+
   const totalCount = manifest.volumePaths.length;
   let importedCount = 0;
   let skippedCount = 0;
   const calibreBookIds: number[] = [];
 
+  await reportProgress(onProgress, {
+    phase: "manifest",
+    total: totalCount,
+    volumeTitle: manifest.seriesTitle,
+    status: `Found ${totalCount} volume${totalCount === 1 ? "" : "s"} in series "${manifest.seriesTitle}"`,
+    data: {
+      action: "manifest_ready",
+      seriesTitle: manifest.seriesTitle,
+      author: manifest.author,
+      totalCount,
+      tags: manifest.tags,
+    },
+  });
+
   const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-"));
 
   try {
     for (let idx = 0; idx < totalCount; idx++) {
-    const volPath = manifest.volumePaths[idx];
-    const fullVolUrl = volPath.startsWith("http")
-      ? volPath
-      : `https://lnori.com${volPath.startsWith("/") ? "" : "/"}${volPath}`;
-    const volNum = idx + 1;
-
-    if (onProgress) {
-      await onProgress(
-        `⏳ _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Inspecting volume metadata..._\n\`${escapeTelegramMarkdown(fullVolUrl)}\``,
-      );
-    }
-
-    let volMeta: LnoriVolumeMetadata | null = null;
-    try {
-      const volHtml = await fetchLnoriHtml(fullVolUrl, dependencies);
-      const volParsedUrl = parseLnoriUrl(fullVolUrl);
-      volMeta = parseVolumeAppData(volHtml, volParsedUrl?.id);
-    } catch (err: any) {
-      console.error(`[Lnori] Failed to inspect volume ${volPath}:`, err?.message || err);
-    }
-
-    if (!volMeta || !volMeta.epubFilename) {
-      console.warn(`[Lnori] Skipping volume without epub_filename: ${volPath}`);
-      continue;
-    }
-
-    const bookId = validateLnoriBookId(volMeta.bookId);
-    const assignedIndex = volMeta.volumeNumber === undefined ? volNum : volMeta.volumeNumber;
-    const title = `${manifest.seriesTitle}: Volume ${assignedIndex}`;
-
-    // Pre-download duplicate detection: check if volume already exists in Calibre
-    if (isVolumeAlreadyInCalibre(manifest.seriesTitle, assignedIndex, title, dependencies)) {
-      console.log(
-        `[Lnori] Volume ${assignedIndex} of "${manifest.seriesTitle}" already in library, skipping`,
-      );
-      if (onProgress) {
-        await onProgress(
-          `⏭️ _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Volume ${escapeTelegramMarkdown(String(assignedIndex))} already in library, skipping..._`,
-        );
-      }
-      skippedCount++;
-      continue;
-    }
-
-    if (onProgress) {
-      await onProgress(
-        `⬇️ _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Downloading EPUB..._\n*${escapeTelegramMarkdown(volMeta.epubFilename)}*`,
-      );
-    }
-
-    const tempEpubPath = path.join(workDir, `volume-${volNum}.epub`);
-
-    try {
-      await downloadLnoriEpub(volMeta.epubFilename, tempEpubPath, undefined, dependencies);
-
-      if (onProgress) {
-        await onProgress(
-          `📦 _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Ingesting into Calibre library..._\n*Volume ${escapeTelegramMarkdown(String(assignedIndex))}*`,
-        );
+      if (dependencies?.signal?.aborted) {
+        throw new Error("Lnori ingestion aborted by client");
       }
 
-      // Add to Calibre
-      const addRes = runCalibredb([
-        "add",
-        "--with-library",
-        SERVER_URL,
-        tempEpubPath,
-      ], dependencies);
+      const volPath = manifest.volumePaths[idx];
+      const fullVolUrl = volPath.startsWith("http")
+        ? volPath
+        : `https://lnori.com${volPath.startsWith("/") ? "" : "/"}${volPath}`;
+      const volNum = idx + 1;
 
-      let calibreId: number | null = null;
-      if (addRes.status === 0 && addRes.stdout) {
-        const idMatch = addRes.stdout.match(/Added book ids?:?\s*([0-9]+)/i);
-        if (idMatch) {
-          calibreId = parseInt(idMatch[1], 10);
-        }
-      }
+      await reportProgress(onProgress, {
+        phase: "volume",
+        index: volNum,
+        total: totalCount,
+        volumeTitle: `${manifest.seriesTitle} (Vol ${volNum})`,
+        status: `⏳ _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Inspecting volume metadata..._\n\`${escapeTelegramMarkdown(fullVolUrl)}\``,
+        data: {
+          action: "inspecting",
+          volumeIndex: volNum,
+          volumeUrl: fullVolUrl,
+        },
+      });
 
-      if (!calibreId) {
-        throw new Error(
-          `Failed to add volume ${volNum} to Calibre: ${addRes.stderr || addRes.stdout}`,
-        );
-      }
-
-      calibreBookIds.push(calibreId);
-
-      // Metadata enrichment
-      const title = `${manifest.seriesTitle}: Volume ${assignedIndex}`;
-      const author = manifest.author || (volMeta.authors ? volMeta.authors.join(", ") : "Unknown");
-      const tagList = ["Light Novel", ...manifest.tags];
-      const tagsStr = Array.from(new Set(tagList)).join(",");
-
-      const setArgs = [
-        "set_metadata",
-        "--with-library",
-        SERVER_URL,
-        String(calibreId),
-        "--field",
-        `title:${title}`,
-        "--field",
-        `authors:${author}`,
-        "--field",
-        `series:${manifest.seriesTitle}`,
-        "--field",
-        `series_index:${assignedIndex}`,
-        "--field",
-        `tags:${tagsStr}`,
-      ];
-
-      // Extract synopsis from volMeta.description, or fallback to EPUB content.opf <dc:description>
-      let synopsis: string | null = null;
-      if (volMeta.description && !isCommentsEmpty(volMeta.description)) {
-        synopsis = volMeta.description;
-      }
-      if (!synopsis && fs.existsSync(tempEpubPath)) {
-        synopsis = extractEpubDescription(tempEpubPath);
-      }
-      if (!synopsis && manifest.description && !isCommentsEmpty(manifest.description)) {
-        synopsis = manifest.description;
-      }
-
-      if (synopsis && !isCommentsEmpty(synopsis)) {
-        setArgs.push("--field", `comments:${synopsis}`);
-      }
-
-      // Download and convert master cover art
-      let coverPath: string | null = null;
+      let volMeta: LnoriVolumeMetadata | null = null;
       try {
-        coverPath = await fetchAndConvertCover(bookId, volMeta.coverImageUrl, workDir, dependencies);
-        if (coverPath && fs.existsSync(coverPath)) {
-          setArgs.push("--field", `cover:${coverPath}`);
+        const volHtml = await fetchLnoriHtml(fullVolUrl, dependencies);
+        const volParsedUrl = parseLnoriUrl(fullVolUrl);
+        volMeta = parseVolumeAppData(volHtml, volParsedUrl?.id);
+      } catch (err: any) {
+        if (
+          dependencies?.signal?.aborted ||
+          err?.name === "AbortError" ||
+          err?.message?.includes("aborted")
+        ) {
+          throw err;
         }
-      } catch (covErr: any) {
-        console.warn(`[Lnori] Cover download failed for book ${volMeta.bookId}:`, covErr?.message || covErr);
+        console.error(`[Lnori] Failed to inspect volume ${volPath}:`, err?.message || err);
       }
 
-      const setRes = runCalibredb(setArgs, dependencies);
-      if (setRes.status !== 0) {
-        console.warn(
-          `[Lnori] Warning: set_metadata failed for Calibre #${calibreId}: ${setRes.stderr}`,
+      if (!volMeta || !volMeta.epubFilename) {
+        console.warn(`[Lnori] Skipping volume without epub_filename: ${volPath}`);
+        await reportProgress(onProgress, {
+          phase: "volume",
+          index: volNum,
+          total: totalCount,
+          volumeTitle: `${manifest.seriesTitle} (Vol ${volNum})`,
+          status: `⚠️ [Volume ${volNum}/${totalCount}] Skipping volume without EPUB filename`,
+          data: {
+            action: "skipped",
+            reason: "missing_epub",
+            volumeIndex: volNum,
+          },
+        });
+        skippedCount++;
+        continue;
+      }
+
+      const bookId = validateLnoriBookId(volMeta.bookId);
+      const assignedIndex = volMeta.volumeNumber === undefined ? volNum : volMeta.volumeNumber;
+      const title = `${manifest.seriesTitle}: Volume ${assignedIndex}`;
+
+      // Pre-download duplicate detection: check if volume already exists in Calibre
+      if (isVolumeAlreadyInCalibre(manifest.seriesTitle, assignedIndex, title, dependencies)) {
+        console.log(
+          `[Lnori] Volume ${assignedIndex} of "${manifest.seriesTitle}" already in library, skipping`,
         );
+        await reportProgress(onProgress, {
+          phase: "volume",
+          index: volNum,
+          total: totalCount,
+          volumeTitle: title,
+          status: `⏭️ _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Volume ${escapeTelegramMarkdown(String(assignedIndex))} already in library, skipping..._`,
+          data: {
+            action: "skipped",
+            reason: "already_exists",
+            volumeIndex: assignedIndex,
+            title,
+          },
+        });
+        skippedCount++;
+        continue;
       }
 
-      if (coverPath && fs.existsSync(coverPath)) {
-        try {
-          fs.unlinkSync(coverPath);
-        } catch {}
-      }
+      await reportProgress(onProgress, {
+        phase: "volume",
+        index: volNum,
+        total: totalCount,
+        volumeTitle: title,
+        status: `⬇️ _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Downloading EPUB..._\n*${escapeTelegramMarkdown(volMeta.epubFilename)}*`,
+        data: {
+          action: "downloading",
+          volumeIndex: assignedIndex,
+          title,
+          epubFilename: volMeta.epubFilename,
+        },
+      });
 
-      importedCount++;
-    } finally {
-      if (fs.existsSync(tempEpubPath)) {
+      const tempEpubPath = path.join(workDir, `volume-${volNum}.epub`);
+
+      try {
+        await downloadLnoriEpub(volMeta.epubFilename, tempEpubPath, undefined, dependencies);
+
+        await reportProgress(onProgress, {
+          phase: "volume",
+          index: volNum,
+          total: totalCount,
+          volumeTitle: title,
+          status: `📚 _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Ingesting into Calibre library..._\n*Volume ${escapeTelegramMarkdown(String(assignedIndex))}*`,
+          data: {
+            action: "adding_calibre",
+            volumeIndex: assignedIndex,
+            title,
+          },
+        });
+
+        // Add to Calibre
+        const addRes = runCalibredb([
+          "add",
+          "--with-library",
+          SERVER_URL,
+          tempEpubPath,
+        ], dependencies);
+
+        let calibreId: number | null = null;
+        if (addRes.status === 0 && addRes.stdout) {
+          const idMatch = addRes.stdout.match(/Added book ids?:?\s*([0-9]+)/i);
+          if (idMatch) {
+            calibreId = parseInt(idMatch[1], 10);
+          }
+        }
+
+        if (!calibreId) {
+          throw new Error(
+            `Failed to add volume ${volNum} to Calibre: ${addRes.stderr || addRes.stdout}`,
+          );
+        }
+
+        calibreBookIds.push(calibreId);
+
+        // Metadata enrichment
+        const author = manifest.author || (volMeta.authors ? volMeta.authors.join(", ") : "Unknown");
+        const tagList = ["Light Novel", ...manifest.tags];
+        const tagsStr = Array.from(new Set(tagList)).join(",");
+
+        const setArgs = [
+          "set_metadata",
+          "--with-library",
+          SERVER_URL,
+          String(calibreId),
+          "--field",
+          `title:${title}`,
+          "--field",
+          `authors:${author}`,
+          "--field",
+          `series:${manifest.seriesTitle}`,
+          "--field",
+          `series_index:${assignedIndex}`,
+          "--field",
+          `tags:${tagsStr}`,
+        ];
+
+        // Extract synopsis from volMeta.description, or fallback to EPUB content.opf <dc:description>
+        let synopsis: string | null = null;
+        if (volMeta.description && !isCommentsEmpty(volMeta.description)) {
+          synopsis = volMeta.description;
+        }
+        if (!synopsis && fs.existsSync(tempEpubPath)) {
+          synopsis = extractEpubDescription(tempEpubPath);
+        }
+        if (!synopsis && manifest.description && !isCommentsEmpty(manifest.description)) {
+          synopsis = manifest.description;
+        }
+
+        if (synopsis && !isCommentsEmpty(synopsis)) {
+          setArgs.push("--field", `comments:${synopsis}`);
+        }
+
+        // Download and convert master cover art
+        let coverPath: string | null = null;
         try {
-          fs.unlinkSync(tempEpubPath);
-        } catch {}
+          if (volMeta.coverImageUrl) {
+            await reportProgress(onProgress, {
+              phase: "volume",
+              index: volNum,
+              total: totalCount,
+              volumeTitle: title,
+              status: `🎨 Converting WebP cover for Volume ${assignedIndex}...`,
+              data: {
+                action: "converting_cover",
+                volumeIndex: assignedIndex,
+                title,
+              },
+            });
+          }
+          coverPath = await fetchAndConvertCover(bookId, volMeta.coverImageUrl, workDir, dependencies);
+          if (coverPath && fs.existsSync(coverPath)) {
+            setArgs.push("--field", `cover:${coverPath}`);
+          }
+        } catch (covErr: any) {
+          if (
+            dependencies?.signal?.aborted ||
+            covErr?.name === "AbortError" ||
+            covErr?.message?.includes("aborted")
+          ) {
+            throw covErr;
+          }
+          console.warn(`[Lnori] Cover download failed for book ${volMeta.bookId}:`, covErr?.message || covErr);
+        }
+
+        if (dependencies?.signal?.aborted) {
+          throw new Error("Lnori ingestion aborted by client");
+        }
+
+        const setRes = runCalibredb(setArgs, dependencies);
+        if (setRes.status !== 0) {
+          console.warn(
+            `[Lnori] Warning: set_metadata failed for Calibre #${calibreId}: ${setRes.stderr}`,
+          );
+        }
+
+        if (coverPath && fs.existsSync(coverPath)) {
+          try {
+            fs.unlinkSync(coverPath);
+          } catch {}
+        }
+
+        importedCount++;
+
+        await reportProgress(onProgress, {
+          phase: "volume",
+          index: volNum,
+          total: totalCount,
+          volumeTitle: title,
+          status: `✓ Volume ${assignedIndex} imported successfully`,
+          data: {
+            action: "imported",
+            volumeIndex: assignedIndex,
+            title,
+            calibreId,
+          },
+        });
+      } finally {
+        if (fs.existsSync(tempEpubPath)) {
+          try {
+            fs.unlinkSync(tempEpubPath);
+          } catch {}
+        }
       }
-    }
     }
   } finally {
     await fs.promises.rm(workDir, { recursive: true, force: true });
@@ -1124,7 +1331,7 @@ export async function ingestLnoriSeries(
 
   const tagsFormatted = ["Light Novel", ...manifest.tags].join(", ");
 
-  return {
+  const result: IngestLnoriResult = {
     success: importedCount > 0 || (skippedCount > 0 && totalCount > 0),
     seriesTitle: manifest.seriesTitle,
     author: manifest.author,
@@ -1135,4 +1342,15 @@ export async function ingestLnoriSeries(
     totalCount,
     calibreBookIds,
   };
+
+  await reportProgress(onProgress, {
+    phase: "complete",
+    index: totalCount,
+    total: totalCount,
+    volumeTitle: manifest.seriesTitle,
+    status: `Completed: ${importedCount} imported, ${skippedCount} skipped of ${totalCount} volumes`,
+    data: result,
+  });
+
+  return result;
 }

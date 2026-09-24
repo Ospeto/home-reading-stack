@@ -21,7 +21,12 @@ import {
 } from "./scraper";
 import { isArchiveFile, unpackArchive, isCanonicalEpub } from "./archive";
 import { extractUrlFromText, ingestArticleFromUrl, generateTypographicCover } from "./article";
-import { isLnoriUrl, ingestLnoriSeries } from "./lnori";
+import {
+  isLnoriUrl,
+  ingestLnoriSeries,
+  type LnoriProgressEvent,
+  formatLnoriProgress,
+} from "./lnori";
 import { generateMetadataFilename } from "./filename";
 import { getJobQueue } from "./jobs";
 import {
@@ -4136,13 +4141,19 @@ export async function handleTextMessage(
                 try {
                   const result = await ingestLnoriSeries(
                     articleUrl,
-                    async (progressText: string) => {
-                      await editOrSendMessage(
-                        chatId,
-                        statusMsgId,
-                        progressText,
-                        "Markdown",
-                      );
+                    async (progress: LnoriProgressEvent | string) => {
+                      const text =
+                        typeof progress === "string"
+                          ? progress
+                          : formatLnoriProgress(progress);
+                      if (text) {
+                        await editOrSendMessage(
+                          chatId,
+                          statusMsgId,
+                          text,
+                          "Markdown",
+                        );
+                      }
                     },
                   );
 

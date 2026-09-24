@@ -23,6 +23,8 @@ import {
   validateLnoriBookId,
   isVolumeAlreadyInCalibre,
   type ParsedLnoriUrl,
+  type LnoriProgressEvent,
+  formatLnoriProgress,
 } from "./lnori";
 
 describe("Lnori Light Novel Ingestion Module", () => {
@@ -950,6 +952,558 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
       const commentsArg = capturedSetMetadataArgs.find((a) => a.startsWith("comments:"));
       expect(commentsArg).toBeDefined();
       expect(commentsArg).toContain("Momonga is trapped in Yggdrasil");
+    });
+
+    it("emits structured LnoriProgressEvent objects for manifest, volume, and complete phases", async () => {
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+      const syntheticEpub = Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+
+      const manifestHtml = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "Progress Test Series",
+          "author": { "@type": "Person", "name": "Author Name" },
+          "hasPart": [
+            { "@type": "Book", "url": "https://lnori.com/book/701/vol-1" },
+            { "@type": "Book", "url": "https://lnori.com/book/702/vol-2" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      const vol1Html = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "Progress Test Vol 1",
+          "id": "701",
+          "additionalProperty": [
+            { "name": "epub_filename", "value": "vol1.epub" },
+            { "name": "book_id", "value": "701" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      const vol2Html = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "Progress Test Vol 2",
+          "id": "702",
+          "additionalProperty": [
+            { "name": "epub_filename", "value": "vol2.epub" },
+            { "name": "book_id", "value": "702" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      const events: LnoriProgressEvent[] = [];
+      const result = await ingestLnoriSeries(
+        "https://lnori.com/series/700/progress-test",
+        async (event: LnoriProgressEvent) => {
+          events.push(event);
+        },
+        {
+          fetch: async (url: string) => {
+            if (url.includes("/series/700")) return new Response(manifestHtml);
+            if (url.includes("/book/701")) return new Response(vol1Html);
+            if (url.includes("/book/702")) return new Response(vol2Html);
+            if (url.includes("files.lnori.com")) {
+              return new Response(syntheticEpub, { status: 200 });
+            }
+            return new Response("Not found", { status: 404 });
+          },
+          // Volume 1 is skipped (duplicate), Volume 2 is imported
+          isVolumeInLibrary: (_series: string, index: number) => index === 1,
+          spawnSync: (_cmd: string, args: string[]) => {
+            if (args[0] === "add") return { status: 0, stdout: "Added book ids: 702", stderr: "" };
+            return { status: 0, stdout: "", stderr: "" };
+          },
+        },
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.importedCount).toBe(1);
+      expect(result.skippedCount).toBe(1);
+      expect(result.totalCount).toBe(2);
+
+      // Verify progress events were emitted
+      expect(events.length).toBeGreaterThan(0);
+
+      // Check manifest phases
+      const manifestEvents = events.filter((e) => e.phase === "manifest");
+      expect(manifestEvents.length).toBeGreaterThanOrEqual(2);
+      expect(manifestEvents[0].data?.action).toBe("fetching_manifest");
+      expect(manifestEvents[1].data?.action).toBe("manifest_ready");
+      expect(manifestEvents[1].total).toBe(2);
+      expect(manifestEvents[1].volumeTitle).toBe("Progress Test Series");
+
+      // Check volume phases
+      const volumeEvents = events.filter((e) => e.phase === "volume");
+      expect(volumeEvents.length).toBeGreaterThan(0);
+
+      // Check skipped volume 1
+      const skippedEvent = volumeEvents.find((e) => e.index === 1 && e.data?.action === "skipped");
+      expect(skippedEvent).toBeDefined();
+      expect(skippedEvent?.data?.reason).toBe("already_exists");
+
+      // Check imported volume 2
+      const downloadingEvent = volumeEvents.find((e) => e.index === 2 && e.data?.action === "downloading");
+      expect(downloadingEvent).toBeDefined();
+
+      const addingEvent = volumeEvents.find((e) => e.index === 2 && e.data?.action === "adding_calibre");
+      expect(addingEvent).toBeDefined();
+
+      const importedEvent = volumeEvents.find((e) => e.index === 2 && e.data?.action === "imported");
+      expect(importedEvent).toBeDefined();
+      expect(importedEvent?.data?.calibreId).toBe(702);
+
+      // Check complete phase
+      const completeEvents = events.filter((e) => e.phase === "complete");
+      expect(completeEvents.length).toBe(1);
+      expect(completeEvents[0].data.importedCount).toBe(1);
+      expect(completeEvents[0].data.skippedCount).toBe(1);
+      expect(completeEvents[0].data.totalCount).toBe(2);
+    });
+
+    it("formats progress events cleanly for string consumers via formatLnoriProgress", async () => {
+      const manifestHtml = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "String Callback Test",
+          "hasPart": [
+            { "@type": "Book", "url": "https://lnori.com/book/801/vol-1" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      const vol1Html = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "String Callback Vol 1",
+          "id": "801",
+          "additionalProperty": [
+            { "name": "epub_filename", "value": "vol1.epub" },
+            { "name": "book_id", "value": "801" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      const receivedStrings: string[] = [];
+      const stringCallback = (event: LnoriProgressEvent | string) => {
+        const text = typeof event === "string" ? event : formatLnoriProgress(event);
+        receivedStrings.push(text);
+        return Promise.resolve();
+      };
+
+      await ingestLnoriSeries(
+        "https://lnori.com/series/800/string-test",
+        stringCallback,
+        {
+          fetch: async (url: string) => {
+            if (url.includes("/series/800")) return new Response(manifestHtml);
+            if (url.includes("/book/801")) return new Response(vol1Html);
+            return new Response("Not found", { status: 404 });
+          },
+          isVolumeInLibrary: () => true, // skip volume
+        },
+      );
+
+      expect(receivedStrings.length).toBeGreaterThan(0);
+      for (const s of receivedStrings) {
+        expect(typeof s).toBe("string");
+        expect(s).not.toBe("[object Object]");
+        expect(s.length).toBeGreaterThan(0);
+      }
+    });
+
+    it("aborts when dependencies.signal is aborted before or during volume loop", async () => {
+      const manifestHtml = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "Abort Lnori Series",
+          "hasPart": [
+            { "@type": "Book", "url": "https://lnori.com/book/901/vol-1" },
+            { "@type": "Book", "url": "https://lnori.com/book/902/vol-2" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      const abortController = new AbortController();
+      // Abort immediately
+      abortController.abort();
+
+      let threw = false;
+      try {
+        await ingestLnoriSeries(
+          "https://lnori.com/series/900/abort-series",
+          undefined,
+          {
+            fetch: async () => new Response(manifestHtml),
+            signal: abortController.signal,
+          },
+        );
+      } catch (err: any) {
+        threw = true;
+        expect(err.message).toContain("aborted by client");
+      }
+      expect(threw).toBe(true);
+    });
+
+    it("counts volumes with missing epub_filename in skippedCount", async () => {
+      const manifestHtml = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "Missing EPUB Series",
+          "hasPart": [
+            { "@type": "Book", "url": "https://lnori.com/book/951/vol-1" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      // Volume without epub_filename
+      const volHtml = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "Missing EPUB Vol 1",
+          "id": "951",
+          "additionalProperty": [
+            { "name": "book_id", "value": "951" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      const result = await ingestLnoriSeries(
+        "https://lnori.com/series/950/missing-epub-series",
+        undefined,
+        {
+          fetch: async (url: string) => {
+            if (url.includes("/series/950")) return new Response(manifestHtml);
+            if (url.includes("/book/951")) return new Response(volHtml);
+            return new Response("Not found", { status: 404 });
+          },
+        },
+      );
+
+      expect(result.totalCount).toBe(1);
+      expect(result.skippedCount).toBe(1);
+      expect(result.importedCount).toBe(0);
+      expect(result.success).toBe(true);
+    });
+
+    it("aborts in-flight download when dependencies.signal is aborted", async () => {
+      const abortController = new AbortController();
+      let abortedSignalSeen = false;
+
+      let threw = false;
+      try {
+        await downloadLnoriEpub(
+          "test.epub",
+          "/tmp/test_abort.epub",
+          undefined,
+          {
+            fetch: async (_url: string, init?: any) => {
+              abortController.abort();
+              if (init?.signal?.aborted) {
+                abortedSignalSeen = true;
+                const err = new Error("The operation was aborted");
+                err.name = "AbortError";
+                throw err;
+              }
+              return new Response("not aborted");
+            },
+            signal: abortController.signal,
+          },
+        );
+      } catch (err: any) {
+        threw = true;
+        expect(err.name === "AbortError" || err.message.includes("aborted")).toBe(true);
+      }
+      expect(threw).toBe(true);
+      expect(abortedSignalSeen).toBe(true);
+    });
+
+    it("aborts when dependencies.signal is aborted during cover conversion and does not import volume", async () => {
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+      const syntheticEpub = Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+
+      const manifestHtml = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "Cover Abort Series",
+          "hasPart": [
+            { "@type": "Book", "url": "https://lnori.com/book/991/vol-1" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      const vol1Html = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "Cover Abort Vol 1",
+          "id": "991",
+          "image": "https://cdn.lnori.com/cover/991.webp",
+          "additionalProperty": [
+            { "name": "epub_filename", "value": "vol1.epub" },
+            { "name": "book_id", "value": "991" },
+            { "name": "cover_image_url", "value": "https://cdn.lnori.com/cover/991.webp" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      const abortController = new AbortController();
+      let calibreAddCalled = false;
+      let setMetadataCalled = false;
+
+      let threw = false;
+      try {
+        await ingestLnoriSeries(
+          "https://lnori.com/series/990/cover-abort",
+          undefined,
+          {
+            fetch: async (url: string) => {
+              if (url.includes("/series/990")) return new Response(manifestHtml);
+              if (url.includes("/book/991")) return new Response(vol1Html);
+              if (url.includes("files.lnori.com")) return new Response(syntheticEpub, { status: 200 });
+              if (url.includes("cdn.lnori.com")) {
+                // Abort during cover fetch!
+                abortController.abort();
+                const err = new Error("The operation was aborted");
+                err.name = "AbortError";
+                throw err;
+              }
+              return new Response("Not found", { status: 404 });
+            },
+            isVolumeInLibrary: () => false,
+            spawnSync: (_cmd: string, args: string[]) => {
+              if (args[0] === "add") {
+                calibreAddCalled = true;
+                return { status: 0, stdout: "Added book ids: 991", stderr: "" };
+              }
+              if (args[0] === "set_metadata") {
+                setMetadataCalled = true;
+                return { status: 0, stdout: "", stderr: "" };
+              }
+              return { status: 0, stdout: "", stderr: "" };
+            },
+            signal: abortController.signal,
+          },
+        );
+      } catch (err: any) {
+        threw = true;
+        expect(err.name === "AbortError" || err.message.includes("aborted")).toBe(true);
+      }
+
+      expect(threw).toBe(true);
+      expect(calibreAddCalled).toBe(true);
+      // Volume must not finish metadata enrichment / import cycle after abort
+      expect(setMetadataCalled).toBe(false);
+    });
+
+    it("aborts during volume HTML inspect on multi-volume series without continuing subsequent volumes", async () => {
+      const manifestHtml = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "Volume Inspect Abort Series",
+          "hasPart": [
+            { "@type": "Book", "url": "https://lnori.com/book/1001/vol-1" },
+            { "@type": "Book", "url": "https://lnori.com/book/1002/vol-2" },
+            { "@type": "Book", "url": "https://lnori.com/book/1003/vol-3" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      const vol1Html = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "Inspect Vol 1",
+          "id": "1001",
+          "additionalProperty": [
+            { "name": "epub_filename", "value": "vol1.epub" },
+            { "name": "book_id", "value": "1001" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      const abortController = new AbortController();
+      let vol2InspectCalled = false;
+      let vol3InspectCalled = false;
+
+      let threw = false;
+      try {
+        await ingestLnoriSeries(
+          "https://lnori.com/series/1000/inspect-abort",
+          undefined,
+          {
+            fetch: async (url: string) => {
+              if (url.includes("/series/1000")) return new Response(manifestHtml);
+              if (url.includes("/book/1001")) {
+                // Vol 1: skipped (duplicate in library)
+                return new Response(vol1Html);
+              }
+              if (url.includes("/book/1002")) {
+                // Vol 2: abort during inspect!
+                vol2InspectCalled = true;
+                abortController.abort();
+                const err = new Error("The operation was aborted");
+                err.name = "AbortError";
+                throw err;
+              }
+              if (url.includes("/book/1003")) {
+                vol3InspectCalled = true;
+                return new Response(vol1Html);
+              }
+              return new Response("Not found", { status: 404 });
+            },
+            isVolumeInLibrary: () => true, // vol 1 skipped
+            signal: abortController.signal,
+          },
+        );
+      } catch (err: any) {
+        threw = true;
+        expect(err.name === "AbortError" || err.message.includes("aborted")).toBe(true);
+      }
+
+      expect(threw).toBe(true);
+      expect(vol2InspectCalled).toBe(true);
+      // Volume 3 must NEVER have been inspected or downloaded
+      expect(vol3InspectCalled).toBe(false);
+    });
+
+    it("formatLnoriProgress formats all phases cleanly", () => {
+      expect(
+        formatLnoriProgress({
+          phase: "manifest",
+          volumeTitle: "My Series",
+          total: 10,
+        }),
+      ).toContain("Found 10 volumes in series \"My Series\"");
+
+      expect(
+        formatLnoriProgress({
+          phase: "volume",
+          index: 3,
+          total: 10,
+          volumeTitle: "My Series: Volume 3",
+        }),
+      ).toBe("[Volume 3/10] My Series: Volume 3");
+
+      expect(
+        formatLnoriProgress({
+          phase: "complete",
+          data: { importedCount: 8, skippedCount: 2 },
+        }),
+      ).toContain("Completed: 8 imported, 2 skipped");
+
+      expect(
+        formatLnoriProgress({
+          phase: "volume",
+          status: "Custom explicit status",
+        }),
+      ).toBe("Custom explicit status");
     });
   });
 
