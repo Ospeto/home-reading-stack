@@ -1088,7 +1088,10 @@ export function isBookAlreadyOnKindle(
     if (!isRootOrGenre && normAuthor) {
       const candidateSeries = bookDetails?.series ? normalizeTitleForDedup(bookDetails.series) : "";
       const isSeries = candidateSeries && (normalizeTitleForDedup(pDir) === candidateSeries || normalizeTitleForDedup(pDir).includes(candidateSeries));
-      const isSeriesName = /^the\s+/i.test(pDir) || /\b(series|trilogy|chronicles?|novels?|collection|anthology|fantasy|sci-fi|manga|comics?|universe|saga|cycle|archives?|books?|season|empire|realm|kingdom|tales?)\b/i.test(pDir);
+      const isSeriesName =
+        /^the\s+/i.test(pDir) ||
+        /\b(series|trilogy|chronicles?|novels?|collection|anthology|fantasy|sci-fi|manga|comics?|universe|saga|cycle|archives?|books?|season|empire|realm|kingdom|tales?|rising|law|wars?|order|age|era|world|dawn|shadows?|legends?)\b/i.test(pDir) ||
+        /\b(first|second|third|fourth|fifth)\b/i.test(pDir);
       if (!isSeries && !isSeriesName) {
         const matchesAuthor =
           authorMatchesString(entry.parentDir, normalizedRawAuthor) ||
