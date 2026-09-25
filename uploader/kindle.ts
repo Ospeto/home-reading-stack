@@ -473,6 +473,76 @@ export function normalizeAuthorSpacing(author: string): string {
   return author.replace(/\s*,\s*/g, ", ").trim();
 }
 
+/**
+ * Parse an author string into a list of individual author names:
+ * - Handles &, and, ;, /, | delimiters
+ * - Handles Calibre multi-author comma lists e.g. "Brandon Sanderson, Isaac Stewart"
+ * - Preserves single-author "Last, First" comma order e.g. "Sanderson, Brandon" -> "Brandon Sanderson"
+ * - Handles paired Last, First lists e.g. "Sanderson, Brandon, Stewart, Isaac"
+ */
+export function parseAuthorList(raw: string): string[] {
+  if (!raw) return [];
+  const s = raw
+    .replace(/[\(\[]\s*(?:author|artist|illustrator|writer|story|art|translator|editor)\s*[\)\]]/gi, " ")
+    .trim();
+  if (!s) return [];
+
+  // If contains explicit multi-author delimiters: &, and, ;, /, |
+  if (/(?:&|\band\b|;|\/|\|)/i.test(s)) {
+    const segments = s.split(/(?:\s*(?:&|\band\b|;|\/|\|)\s*)/i).map((x) => x.trim()).filter(Boolean);
+    const out: string[] = [];
+    for (const seg of segments) {
+      out.push(...parseAuthorList(seg));
+    }
+    return out;
+  }
+
+  // If contains comma
+  if (s.includes(",")) {
+    const commaParts = s.split(",").map((p) => p.trim()).filter(Boolean);
+    // Case A: Exactly 2 parts e.g. "Le Guin, Ursula K." or "Sanderson, Brandon"
+    // Provide both flipped "First Last" and individual parts to handle both single author Last, First and pairs
+    if (commaParts.length === 2) {
+      const flipped = `${commaParts[1]} ${commaParts[0]}`;
+      return [flipped, ...commaParts];
+    }
+    // Case B: Pairs of Last, First e.g. "Sanderson, Brandon, Stewart, Isaac"
+    if (commaParts.length % 2 === 0) {
+      const pairs: string[] = [];
+      for (let i = 0; i < commaParts.length; i += 2) {
+        pairs.push(`${commaParts[i + 1]} ${commaParts[i]}`);
+      }
+      return pairs;
+    }
+    return commaParts;
+  }
+
+  return [s];
+}
+
+/**
+ * Compares two author strings with token-boundary matching, word-order normalization,
+ * and multi-author list splitting.
+ */
+export function authorMatchesString(sourceStr: string, targetAuthor: string): boolean {
+  if (!sourceStr || !targetAuthor) return false;
+  const sList = parseAuthorList(sourceStr);
+  const tList = parseAuthorList(targetAuthor);
+  if (sList.length === 0 || tList.length === 0) return false;
+
+  for (const sA of sList) {
+    const sNorm = normalizeTitleForDedup(sA);
+    const sSorted = sNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
+    for (const tA of tList) {
+      const tNorm = normalizeTitleForDedup(tA);
+      const tSorted = tNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
+      if (sNorm === tNorm || sSorted === tSorted) return true;
+    }
+  }
+
+  return false;
+}
+
 export interface KindleDestinationResolution {
   authorDir: string;
   seriesDir?: string;
@@ -529,6 +599,13 @@ export function resolveKindleDestinationDir(
         const dedupExisting = normalizeTitleForDedup(existingDirName);
         const dedupTarget = normalizeTitleForDedup(normAuthor);
         if (dedupExisting && dedupTarget && dedupExisting === dedupTarget) {
+          matchedAuthorDir = existingDirName;
+          reusedAuthorFolder = true;
+          break;
+        }
+
+        // Full author matching including Last, First and multi-author list parsing
+        if (authorMatchesString(existingDirName, normAuthor)) {
           matchedAuthorDir = existingDirName;
           reusedAuthorFolder = true;
           break;
@@ -806,88 +883,16 @@ export function getKindleDiskSpace(mountPath: string): { freeBytes: number; tota
 }
 
 /**
- * Parse an author string into a list of individual author names:
- * - Handles &, and, ;, /, | delimiters
- * - Handles Calibre multi-author comma lists e.g. "Brandon Sanderson, Isaac Stewart"
- * - Preserves single-author "Last, First" comma order e.g. "Sanderson, Brandon" -> "Brandon Sanderson"
- * - Handles paired Last, First lists e.g. "Sanderson, Brandon, Stewart, Isaac"
- */
-export function parseAuthorList(raw: string): string[] {
-  if (!raw) return [];
-  const s = raw
-    .replace(/[\(\[]\s*(?:author|artist|illustrator|writer|story|art|translator|editor)\s*[\)\]]/gi, " ")
-    .trim();
-  if (!s) return [];
-
-  // If contains explicit multi-author delimiters: &, and, ;, /, |
-  if (/(?:&|\band\b|;|\/|\|)/i.test(s)) {
-    const segments = s.split(/(?:\s*(?:&|\band\b|;|\/|\|)\s*)/i).map((x) => x.trim()).filter(Boolean);
-    const out: string[] = [];
-    for (const seg of segments) {
-      out.push(...parseAuthorList(seg));
-    }
-    return out;
-  }
-
-  // If contains comma
-  if (s.includes(",")) {
-    const commaParts = s.split(",").map((p) => p.trim()).filter(Boolean);
-    // Case A: Exactly 2 parts e.g. "Sanderson, Brandon" -> single author in Last, First order
-    if (commaParts.length === 2 && commaParts[0].split(/\s+/).length === 1 && commaParts[1].split(/\s+/).length <= 2) {
-      return [`${commaParts[1]} ${commaParts[0]}`];
-    }
-    // Case B: Multi-authors e.g. "Brandon Sanderson, Isaac Stewart" or "Author A, Author B, Author C"
-    const allMultiWord = commaParts.every((p) => p.split(/\s+/).length >= 2);
-    if (allMultiWord) {
-      return commaParts;
-    }
-    // Case C: Pairs of Last, First e.g. "Sanderson, Brandon, Stewart, Isaac"
-    if (commaParts.length % 2 === 0) {
-      const pairs: string[] = [];
-      for (let i = 0; i < commaParts.length; i += 2) {
-        pairs.push(`${commaParts[i + 1]} ${commaParts[i]}`);
-      }
-      return pairs;
-    }
-    return commaParts;
-  }
-
-  return [s];
-}
-
-/**
- * Compares two author strings with token-boundary matching, word-order normalization,
- * and multi-author list splitting.
- */
-export function authorMatchesString(sourceStr: string, targetAuthor: string): boolean {
-  if (!sourceStr || !targetAuthor) return false;
-  const sList = parseAuthorList(sourceStr);
-  const tList = parseAuthorList(targetAuthor);
-  if (sList.length === 0 || tList.length === 0) return false;
-
-  for (const sA of sList) {
-    const sNorm = normalizeTitleForDedup(sA);
-    const sSorted = sNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
-    for (const tA of tList) {
-      const tNorm = normalizeTitleForDedup(tA);
-      const tSorted = tNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
-      if (sNorm === tNorm || sSorted === tSorted) return true;
-    }
-  }
-
-  return false;
-}
-
-/**
  * Checks if a title is a generic chapter or section title that requires strict author verification.
  */
 export function isGenericSectionTitle(title: string): boolean {
   if (!title) return false;
   const raw = title.toLowerCase().trim();
-  const rawMatch = /^(introduction|prologue|preface|epilogue|interlude|afterword|foreword|index|appendix|chapter\s*\d+|part\s*\d+|book\s*\d+|love|home)$/i.test(raw);
-  if (rawMatch) return true;
+  const pattern =
+    /^(introduction|prologue|preface|epilogue|interlude|afterword|foreword|index|appendix|(?:chapter|part|book|vol(?:ume)?)\s*(?:\d+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten)|love|home)$/i;
+  if (pattern.test(raw)) return true;
   const norm = normalizeTitleForDedup(title);
-  return /^(introduction|prologue|preface|epilogue|interlude|afterword|foreword|index|appendix|chapter\s*\d+|part\s*\d+|book\s*\d+|vol\s*\d+|love|home)$/i.test(norm);
+  return pattern.test(norm);
 }
 
 /**

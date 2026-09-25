@@ -18,6 +18,8 @@ import {
   isBookAlreadyOnKindleAsync,
   normalizeAuthorSpacing,
   resolveKindleDestinationDir,
+  authorMatchesString,
+  isGenericSectionTitle,
   runDotClean,
   cleanDotFilesFallback,
   cancelKindleSync,
@@ -1121,6 +1123,14 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       const resNew = resolveKindleDestinationDir(booksDir, "NewAuthor,NewArtist");
       expect(resNew.authorDir).toBe("NewAuthor, NewArtist");
       expect(resNew.reusedExistingFolder).toBe(false);
+
+      // Reuses existing "First Last" folder when candidate is "Last, First"
+      const leGuinFolder = path.join(booksDir, "Ursula K. Le Guin");
+      fs.mkdirSync(leGuinFolder, { recursive: true });
+      const resLeGuin = resolveKindleDestinationDir(booksDir, "Le Guin, Ursula K.");
+      expect(resLeGuin.authorDir).toBe("Ursula K. Le Guin");
+      expect(resLeGuin.targetDir).toBe(leGuinFolder);
+      expect(resLeGuin.reusedExistingFolder).toBe(true);
     });
 
     it("resolveKindleDestinationDir places book inside existing series subfolder inside author directory", () => {
@@ -1653,9 +1663,13 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       expect(matchLastFirst.exists).toBe(true);
 
       // Multi-word surname: "Le Guin, Ursula K." vs on-disk "Ursula K. Le Guin"
+      expect(authorMatchesString("Ursula K. Le Guin", "Le Guin, Ursula K.")).toBe(true);
+      expect(authorMatchesString("Gabriel Garcia Marquez", "Garcia Marquez, Gabriel")).toBe(true);
+
       const leGuinDir = path.join(kindleMount, "books", "Ursula K. Le Guin");
       fs.mkdirSync(leGuinDir, { recursive: true });
-      fs.writeFileSync(path.join(leGuinDir, "A Wizard of Earthsea.epub"), "earthsea", "utf8");
+      // Write .azw3 on disk so Strategy A (exact filename) does NOT match and forces Strategy B (base_filename)
+      fs.writeFileSync(path.join(leGuinDir, "A Wizard of Earthsea.azw3"), "earthsea", "utf8");
       const idxLeGuin = buildKindleBookIndex(kindleMount);
 
       const matchLeGuin = isBookAlreadyOnKindle(
@@ -1667,6 +1681,14 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
         { title: "A Wizard of Earthsea", authors: "Le Guin, Ursula K." },
       );
       expect(matchLeGuin.exists).toBe(true);
+      expect(matchLeGuin.matchedBy).toBe("base_filename");
+    });
+
+    it("isGenericSectionTitle recognizes word numbers like Book Two and Chapter One", () => {
+      expect(isGenericSectionTitle("Book Two")).toBe(true);
+      expect(isGenericSectionTitle("Chapter One")).toBe(true);
+      expect(isGenericSectionTitle("Part Two")).toBe(true);
+      expect(isGenericSectionTitle("The Final Empire")).toBe(false);
     });
 
     it("Strategy G filesize_and_token enforces strict author verification with non-zero fileSize", () => {
