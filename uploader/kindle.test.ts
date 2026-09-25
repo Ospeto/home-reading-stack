@@ -35,13 +35,17 @@ import {
   getKindleProgress,
   resetKindleProgressForTesting,
   scanKindleDeviceDuplicates,
+  scanKindleDeviceDuplicatesAsync,
   cleanKindleDeviceDuplicates,
+  cleanKindleDeviceDuplicatesAsync,
+  classifyKindleDeviceDuplicateWithJev,
+  hasZawgyiMarkers,
   getKindleSyncStatus,
   isCrossScriptAuthorMatch,
   invalidateKindleSyncPreviewCache,
   setActiveKindleProgress,
 } from "./kindle";
-import { handleRequest, resetServerDependenciesForTest } from "./server";
+import { handleRequest, setServerDependenciesForTest, resetServerDependenciesForTest } from "./server";
 
 describe("Kindle USB Detection & Bulk Sync Engine", () => {
   let tempBaseDir: string;
@@ -3778,6 +3782,500 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       expect(afterPreview.totalCandidates).toBe(2);
       expect(afterPreview.alreadySyncedCount).toBe(2);
       expect(afterPreview.pendingCount).toBe(0);
+    });
+  });
+
+  describe("14. TypeSafe Jev System-1 Device Duplicate Arbitration", () => {
+    it("hasZawgyiMarkers accurately detects legacy Zawgyi vowel ordering vs standard Myanmar Unicode", () => {
+      // Standard Unicode: Consonant first, then vowel \u1031 (ေ)
+      expect(hasZawgyiMarkers("သော်တာဆွေ")).toBe(false);
+      expect(hasZawgyiMarkers("မင်းသိင်္ခ")).toBe(false);
+      expect(hasZawgyiMarkers("သိပ္ပံမောင်ဝ")).toBe(false);
+      expect(hasZawgyiMarkers("ချစ်ဦးညို")).toBe(false);
+
+      // Legacy Zawgyi: Vowel \u1031 (ေ) placed BEFORE consonant
+      expect(hasZawgyiMarkers("ေသာ်တာေဆွ")).toBe(true);
+      expect(hasZawgyiMarkers("မင္းသိင္ခ")).toBe(true);
+      expect(hasZawgyiMarkers("ေမမွန်း")).toBe(true);
+    });
+
+    it("classifyKindleDeviceDuplicateWithJev queries Jev System-1 endpoint and parses Choice responses", async () => {
+      const origFetch = globalThis.fetch;
+      let jevCalled = false;
+      let requestBody: any = null;
+
+      (globalThis as any).fetch = async (url: string, init?: any) => {
+        if (typeof url === "string" && url.includes("typesafe.ai")) {
+          jevCalled = true;
+          requestBody = JSON.parse(init.body);
+          return new Response(
+            JSON.stringify({
+              model: "jev-latest",
+              answers: {
+                is_duplicate: {
+                  choice: "duplicate",
+                  confidence: 0.96,
+                },
+                canonical_copy: {
+                  choice: "book_a",
+                  confidence: 0.94,
+                },
+                duplicate_reason: {
+                  choice: "zawgyi_unicode",
+                  confidence: 0.92,
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return origFetch(url as any, init);
+      };
+
+      try {
+        const entryA = {
+          filePath: "/Volumes/Kindle/books/သော်တာဆွေ/သော်တာဆွေ - သော်တာဆွေ.epub",
+          filename: "သော်တာဆွေ - သော်တာဆွေ.epub",
+          ext: ".epub",
+          baseName: "သော်တာဆွေ - သော်တာဆွေ",
+          size: 150000,
+          normalizedTitle: "သော်တာဆွေ",
+          cleanQueryTitle: "သော်တာဆွေ",
+          volumeNumber: null,
+          parentDir: "သော်တာဆွေ",
+          grandparentDir: "books",
+        };
+        const entryB = {
+          filePath: "/Volumes/Kindle/books/ေသာ်တာေဆွ/ေသာ်တာေဆွ.epub",
+          filename: "ေသာ်တာေဆွ.epub",
+          ext: ".epub",
+          baseName: "ေသာ်တာေဆွ",
+          size: 151000,
+          normalizedTitle: "ေသာ်တာေဆွ",
+          cleanQueryTitle: "ေသာ်တာေဆွ",
+          volumeNumber: null,
+          parentDir: "ေသာ်တာေဆွ",
+          grandparentDir: "books",
+        };
+
+        const res = await classifyKindleDeviceDuplicateWithJev(entryA as any, entryB as any, {
+          apiKey: "test-jev-key",
+        });
+
+        expect(jevCalled).toBe(true);
+        expect(requestBody.model).toBe("jev-latest");
+        expect(requestBody.questions.is_duplicate).toBeDefined();
+        expect(requestBody.questions.canonical_copy).toBeDefined();
+        expect(requestBody.questions.duplicate_reason).toBeDefined();
+        expect(res).not.toBeNull();
+        expect(res!.isDuplicate).toBe(true);
+        expect(res!.confidence).toBe(0.96);
+        expect(res!.canonicalChoice).toBe("book_a");
+        expect(res!.reason).toBe("jev_zawgyi_unicode");
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("scanKindleDeviceDuplicatesAsync clusters Zawgyi vs Myanmar Unicode duplicate with Jev mock and prefers Unicode as canonical", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const unicodeDir = path.join(kindleMount, "books", "သော်တာဆွေ");
+      const zawgyiDir = path.join(kindleMount, "books", "ေသာ်တာေဆွ");
+      fs.mkdirSync(unicodeDir, { recursive: true });
+      fs.mkdirSync(zawgyiDir, { recursive: true });
+
+      const unicodeFile = path.join(unicodeDir, "သော်တာဆွေ - သော်တာဆွေ.epub");
+      const zawgyiFile = path.join(zawgyiDir, "ေသာ်တာေဆွ - ေသာ်တာေဆွ.epub");
+
+      // Same text content / similar size
+      fs.writeFileSync(unicodeFile, "dummy unicode book content for thawtarswe", "utf8");
+      fs.writeFileSync(zawgyiFile, "dummy unicode book content for thawtarswe zawgyi", "utf8");
+
+      const origFetch = globalThis.fetch;
+      let jevCalls = 0;
+      (globalThis as any).fetch = async (url: string, init?: any) => {
+        if (typeof url === "string" && url.includes("typesafe.ai")) {
+          jevCalls++;
+          const body = JSON.parse(init.body);
+          const isBookAUnicode = body.state.includes("Book A:\n- Filename: သော်တာဆွေ");
+          const canonChoice = isBookAUnicode ? "book_a" : "book_b";
+          return new Response(
+            JSON.stringify({
+              model: "jev-latest",
+              answers: {
+                is_duplicate: {
+                  choice: "duplicate",
+                  confidence: 0.95,
+                },
+                canonical_copy: {
+                  choice: canonChoice, // prefer Unicode copy as canonical
+                  confidence: 0.92,
+                },
+                duplicate_reason: {
+                  choice: "zawgyi_unicode",
+                  confidence: 0.94,
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return origFetch(url as any, init);
+      };
+
+      try {
+        invalidateKindleBookIndex();
+        const dupGroups = await scanKindleDeviceDuplicatesAsync(kindleMount, {
+          useJev: true,
+          forceRefresh: true,
+          jevApiKey: "test-api-key",
+        });
+
+        expect(jevCalls).toBeGreaterThanOrEqual(1);
+        expect(dupGroups.length).toBe(1);
+        const group = dupGroups[0];
+        expect(group.canonicalPath).toBe(unicodeFile);
+        expect(group.duplicatePaths).toContain(zawgyiFile);
+        expect(group.matchedBy).toBe("jev_zawgyi_unicode");
+        expect(group.reason).toBe("jev_zawgyi_unicode");
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("scanKindleDeviceDuplicatesAsync clusters English transliteration vs Myanmar script author duplicates with Jev mock", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const latinDir = path.join(kindleMount, "books", "Theikpan Mg Wa");
+      const burmeseDir = path.join(kindleMount, "books", "သိပ္ပံမောင်ဝ");
+      fs.mkdirSync(latinDir, { recursive: true });
+      fs.mkdirSync(burmeseDir, { recursive: true });
+
+      const latinFile = path.join(latinDir, "Selected Short Stories.epub");
+      const burmeseFile = path.join(burmeseDir, "Selected Short Stories - သိပ္ပံမောင်ဝ.epub");
+
+      fs.writeFileSync(latinFile, "content for theikpan mg wa stories latin", "utf8");
+      fs.writeFileSync(burmeseFile, "content for theikpan mg wa stories burmese", "utf8");
+
+      const origFetch = globalThis.fetch;
+      let jevCalled = false;
+      (globalThis as any).fetch = async (url: string, init?: any) => {
+        if (typeof url === "string" && url.includes("typesafe.ai")) {
+          jevCalled = true;
+          return new Response(
+            JSON.stringify({
+              model: "jev-latest",
+              answers: {
+                is_duplicate: {
+                  choice: "duplicate",
+                  confidence: 0.93,
+                },
+                canonical_copy: {
+                  choice: "book_b", // Burmesefile has clean Calibre Title - Author structure
+                  confidence: 0.90,
+                },
+                duplicate_reason: {
+                  choice: "cross_script_author",
+                  confidence: 0.91,
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return origFetch(url as any, init);
+      };
+
+      try {
+        invalidateKindleBookIndex();
+        const dupGroups = await scanKindleDeviceDuplicatesAsync(kindleMount, {
+          useJev: true,
+          forceRefresh: true,
+          jevApiKey: "test-api-key",
+        });
+
+        expect(jevCalled).toBe(true);
+        expect(dupGroups.length).toBe(1);
+        const group = dupGroups[0];
+        expect(group.canonicalPath).toBe(burmeseFile);
+        expect(group.duplicatePaths).toContain(latinFile);
+        expect(group.matchedBy).toBe("jev_cross_script");
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("scanKindleDeviceDuplicatesAsync clusters Light Novel subtitle and title variations with Jev mock", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorDir = path.join(kindleMount, "books", "Ryo Shirakome");
+      fs.mkdirSync(authorDir, { recursive: true });
+
+      const fullSubtitleFile = path.join(
+        authorDir,
+        "Arifureta From Commonplace to Worlds Strongest Vol 1.epub",
+      );
+      const shortTitleFile = path.join(authorDir, "Arifureta Vol 1.epub");
+
+      fs.writeFileSync(fullSubtitleFile, "arifureta volume 1 complete light novel edition", "utf8");
+      fs.writeFileSync(shortTitleFile, "arifureta volume 1 short title light novel edition", "utf8");
+
+      const origFetch = globalThis.fetch;
+      let jevCalled = false;
+      (globalThis as any).fetch = async (url: string, init?: any) => {
+        if (typeof url === "string" && url.includes("typesafe.ai")) {
+          jevCalled = true;
+          const body = JSON.parse(init.body);
+          const isBookAFull = body.state.includes("Book A:\n- Filename: Arifureta From Commonplace");
+          const canonChoice = isBookAFull ? "book_a" : "book_b";
+          return new Response(
+            JSON.stringify({
+              model: "jev-latest",
+              answers: {
+                is_duplicate: {
+                  choice: "duplicate",
+                  confidence: 0.95,
+                },
+                canonical_copy: {
+                  choice: canonChoice, // keep the one with full subtitle
+                  confidence: 0.88,
+                },
+                duplicate_reason: {
+                  choice: "subtitle_variant",
+                  confidence: 0.92,
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return origFetch(url as any, init);
+      };
+
+      try {
+        invalidateKindleBookIndex();
+        const dupGroups = await scanKindleDeviceDuplicatesAsync(kindleMount, {
+          useJev: true,
+          forceRefresh: true,
+          jevApiKey: "test-api-key",
+        });
+
+        expect(jevCalled).toBe(true);
+        expect(dupGroups.length).toBe(1);
+        const group = dupGroups[0];
+        expect(group.canonicalPath).toBe(fullSubtitleFile);
+        expect(group.duplicatePaths).toContain(shortTitleFile);
+        expect(group.matchedBy).toBe("jev_subtitle_variant");
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("scanKindleDeviceDuplicatesAsync fails open gracefully to Tier 1 deterministic clustering when Jev API errors or times out", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorDir = path.join(kindleMount, "books", "Arthur Conan Doyle");
+      fs.mkdirSync(authorDir, { recursive: true });
+
+      const file1 = path.join(authorDir, "A Study in Scarlet - Arthur Conan Doyle.epub");
+      const file2 = path.join(authorDir, "A Study in Scarlet.epub");
+      fs.writeFileSync(file1, "elementary my dear watson - identical bytes", "utf8");
+      fs.writeFileSync(file2, "elementary my dear watson - identical bytes", "utf8");
+
+      const origFetch = globalThis.fetch;
+      (globalThis as any).fetch = async (url: string, init?: any) => {
+        if (typeof url === "string" && url.includes("typesafe.ai")) {
+          throw new Error("ETIMEDOUT: Connection to typesafe.ai timed out");
+        }
+        return origFetch(url as any, init);
+      };
+
+      try {
+        invalidateKindleBookIndex();
+        // Should not throw, but fail open gracefully
+        const dupGroups = await scanKindleDeviceDuplicatesAsync(kindleMount, {
+          useJev: true,
+          forceRefresh: true,
+          jevApiKey: "test-api-key",
+        });
+
+        // Tier 1 deterministic clustering still catches the identical-content duplicate
+        expect(dupGroups.length).toBe(1);
+        expect(dupGroups[0].canonicalPath).toBe(file1);
+        expect(dupGroups[0].duplicatePaths).toContain(file2);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("cleanKindleDeviceDuplicatesAsync prunes duplicate files while retaining Jev-designated canonical copy", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const unicodeDir = path.join(kindleMount, "books", "သော်တာဆွေ");
+      const zawgyiDir = path.join(kindleMount, "books", "ေသာ်တာေဆွ");
+      fs.mkdirSync(unicodeDir, { recursive: true });
+      fs.mkdirSync(zawgyiDir, { recursive: true });
+
+      const unicodeFile = path.join(unicodeDir, "သော်တာဆွေ - သော်တာဆွေ.epub");
+      const zawgyiFile = path.join(zawgyiDir, "ေသာ်တာေဆွ - ေသာ်တာေဆွ.epub");
+
+      fs.writeFileSync(unicodeFile, "dummy unicode book content for thawtarswe", "utf8");
+      fs.writeFileSync(zawgyiFile, "dummy unicode book content for thawtarswe zawgyi", "utf8");
+
+      const origFetch = globalThis.fetch;
+      (globalThis as any).fetch = async (url: string, init?: any) => {
+        if (typeof url === "string" && url.includes("typesafe.ai")) {
+          const body = JSON.parse(init.body);
+          const isBookAUnicode = body.state.includes("Book A:\n- Filename: သော်တာဆွေ");
+          const canonChoice = isBookAUnicode ? "book_a" : "book_b";
+          return new Response(
+            JSON.stringify({
+              model: "jev-latest",
+              answers: {
+                is_duplicate: { choice: "duplicate", confidence: 0.95 },
+                canonical_copy: { choice: canonChoice, confidence: 0.92 },
+                duplicate_reason: { choice: "zawgyi_unicode", confidence: 0.94 },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return origFetch(url as any, init);
+      };
+
+      try {
+        invalidateKindleBookIndex();
+        const res = await cleanKindleDeviceDuplicatesAsync(kindleMount, {
+          useJev: true,
+          forceRefresh: true,
+          jevApiKey: "test-api-key",
+        });
+
+        expect(res.cleanedCount).toBe(1);
+        expect(res.bytesFreed).toBeGreaterThan(0);
+        expect(fs.existsSync(unicodeFile)).toBe(true);
+        expect(fs.existsSync(zawgyiFile)).toBe(false);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("POST /api/kindle/clean-device-duplicates accepts { useJev: true } and triggers async Jev duplicate cleaning", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      resetServerDependenciesForTest();
+      let passedOptions: any = null;
+      setServerDependenciesForTest({
+        detectKindleVolume: () => kindleMount,
+        cleanKindleDeviceDuplicatesAsync: async (_mount: string, opts?: any) => {
+          passedOptions = opts;
+          return { cleanedCount: 2, bytesFreed: 500000, duplicates: [] };
+        },
+      });
+
+      const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+      const req = new Request("http://127.0.0.1:8086/api/kindle/clean-device-duplicates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ useJev: true }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.success).toBe(true);
+      expect(json.cleanedCount).toBe(2);
+      expect(passedOptions).toEqual({ useJev: true });
+
+      resetServerDependenciesForTest();
+    });
+
+    it("POST /api/kindle/clean-device-duplicates defaults to useJev: false when body is omitted or useJev is not explicitly true", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      resetServerDependenciesForTest();
+      let passedOptions: any = null;
+      setServerDependenciesForTest({
+        detectKindleVolume: () => kindleMount,
+        cleanKindleDeviceDuplicatesAsync: async (_mount: string, opts?: any) => {
+          passedOptions = opts;
+          return { cleanedCount: 0, bytesFreed: 0, duplicates: [] };
+        },
+      });
+
+      const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+      const req = new Request("http://127.0.0.1:8086/api/kindle/clean-device-duplicates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+      expect(passedOptions).toEqual({ useJev: false });
+
+      resetServerDependenciesForTest();
+    });
+
+    it("scanKindleDeviceDuplicatesAsync with useJev omitted or false defaults to safe Tier-1 and never calls Jev API", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorDir = path.join(kindleMount, "books", "Author");
+      fs.mkdirSync(authorDir, { recursive: true });
+      fs.writeFileSync(path.join(authorDir, "Book A.epub"), "sample content", "utf8");
+      fs.writeFileSync(path.join(authorDir, "Book B.epub"), "different content", "utf8");
+
+      let fetchCalled = false;
+      const origFetch = globalThis.fetch;
+      (globalThis as any).fetch = async (url: string, init?: any) => {
+        if (typeof url === "string" && url.includes("typesafe.ai")) {
+          fetchCalled = true;
+        }
+        return origFetch(url as any, init);
+      };
+
+      try {
+        invalidateKindleBookIndex();
+        // Omitted useJev must default to false
+        const groups = await scanKindleDeviceDuplicatesAsync(kindleMount, {
+          jevApiKey: "test-api-key",
+        });
+        expect(fetchCalled).toBe(false);
+        expect(groups.length).toBe(0);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("scanKindleDeviceDuplicatesAsync does not enqueue candidates when sizes differ significantly or no Zawgyi marker is present", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const dir1 = path.join(kindleMount, "books", "မင်းသိင်္ခ");
+      const dir2 = path.join(kindleMount, "books", "သော်တာဆွေ");
+      fs.mkdirSync(dir1, { recursive: true });
+      fs.mkdirSync(dir2, { recursive: true });
+
+      // Two different standard Unicode Burmese books with completely different sizes
+      fs.writeFileSync(path.join(dir1, "မနောမယ.epub"), "small book content", "utf8");
+      fs.writeFileSync(path.join(dir2, "ရယ်စရာဝတ္ထုများ.epub"), "x".repeat(300000), "utf8");
+
+      let fetchCalled = false;
+      const origFetch = globalThis.fetch;
+      (globalThis as any).fetch = async (url: string, init?: any) => {
+        if (typeof url === "string" && url.includes("typesafe.ai")) {
+          fetchCalled = true;
+        }
+        return origFetch(url as any, init);
+      };
+
+      try {
+        invalidateKindleBookIndex();
+        const groups = await scanKindleDeviceDuplicatesAsync(kindleMount, {
+          useJev: true,
+          forceRefresh: true,
+          jevApiKey: "test-api-key",
+        });
+        // Non-candidate pair must not trigger any Jev API call
+        expect(fetchCalled).toBe(false);
+        expect(groups.length).toBe(0);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
     });
   });
 });
