@@ -4267,7 +4267,7 @@ export async function handleRequest(
             alreadySynced: preview.alreadySyncedCount,
           },
         },
-        200,
+        202,
         corsOrigin,
       );
     } catch (err: any) {

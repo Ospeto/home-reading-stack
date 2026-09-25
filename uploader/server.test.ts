@@ -1714,7 +1714,7 @@ exit 0
         const res = await handleRequest(req, localServer);
         const duration = Date.now() - start;
 
-        expect(res.status).toBe(200);
+        expect(res.status).toBe(202);
         expect(duration).toBeLessThan(500);
 
         const data = (await res.json()) as any;

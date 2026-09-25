@@ -2141,7 +2141,7 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       const res = await handleRequest(req, localServer);
       const elapsed = Date.now() - startTime;
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(202);
       expect(elapsed).toBeLessThan(100); // Non-blocking: returns in under 100ms
 
       const data = (await res.json()) as any;
@@ -2192,8 +2192,7 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
         handleRequest(req2, localServer),
       ]);
 
-      expect(res1.status).toBe(200);
-      expect(res2.status).toBe(200);
+      expect([res1.status, res2.status].sort()).toEqual([200, 202]);
 
       const [data1, data2] = await Promise.all([res1.json() as Promise<any>, res2.json() as Promise<any>]);
 
