@@ -69,6 +69,9 @@ import {
 import {
   getKindleStatus,
   getKindleProgress,
+  tryAcquireKindleSyncLock,
+  releaseKindleSyncLock,
+  isKindleSyncCancelled,
   previewKindleSync,
   syncAllBooksToKindle,
   syncSingleBookToKindle,
@@ -4131,6 +4134,20 @@ export async function handleRequest(
   // API: Kindle Bulk Sync
   if (url.pathname === "/api/kindle/sync" && req.method === "POST") {
     try {
+      // 1. Synchronous Atomic Admit Gate
+      if (!tryAcquireKindleSyncLock()) {
+        return jsonResponse(
+          {
+            success: true,
+            alreadyRunning: true,
+            message: "Sync already in progress",
+            results: { inProgress: true },
+          },
+          200,
+          corsOrigin,
+        );
+      }
+
       let body: Record<string, unknown> = {};
       try {
         body = (await req.json()) as Record<string, unknown>;
@@ -4141,26 +4158,120 @@ export async function handleRequest(
       if (body?.scope === "all" || body?.forceAll) {
         scope = "all";
       }
-      const results = await syncAllBooksToKindle({
-        forceAll: Boolean(body?.forceAll),
-        subfolderByAuthor: body?.subfolderByAuthor !== false,
+
+      const forceAll = Boolean(body?.forceAll);
+      const subfolderByAuthor = body?.subfolderByAuthor !== false;
+
+      // 2. Upfront pre-flight check via previewKindleSync
+      const preview = previewKindleSync(undefined, { scope, forceAll });
+      if (!preview.detected) {
+        releaseKindleSyncLock("error", "No Kindle device detected under /Volumes");
+        return jsonResponse(
+          {
+            success: false,
+            error: "No Kindle device detected under /Volumes",
+            results: {
+              success: false,
+              mountPath: null,
+              totalBooks: 0,
+              alreadySynced: 0,
+              transferred: 0,
+              failed: 0,
+              skipped: 0,
+              bytesTransferred: 0,
+              highlightsPulled: 0,
+              errors: [{ bookId: 0, title: "None", error: "No Kindle device detected under /Volumes" }],
+            },
+          },
+          500,
+          corsOrigin,
+        );
+      }
+
+      if (!preview.sufficientSpace && preview.pendingCount > 0) {
+        const reqMb = (preview.requiredBytes / (1024 * 1024)).toFixed(1);
+        const freeMb = (preview.freeBytes / (1024 * 1024)).toFixed(1);
+        const errMsg = `Insufficient Kindle storage: requires ${reqMb} MB (including 50MB reserve), but only ${freeMb} MB available`;
+        releaseKindleSyncLock("error", errMsg);
+        return jsonResponse(
+          {
+            success: false,
+            error: errMsg,
+            results: {
+              success: false,
+              mountPath: preview.mountPath,
+              totalBooks: preview.totalCandidates,
+              alreadySynced: preview.alreadySyncedCount,
+              transferred: 0,
+              failed: preview.pendingCount,
+              skipped: 0,
+              bytesTransferred: 0,
+              highlightsPulled: 0,
+              errors: [{ bookId: 0, title: "Storage", error: errMsg }],
+            },
+          },
+          507,
+          corsOrigin,
+        );
+      }
+
+      // Check if user requested cancellation during pre-flight
+      if (isKindleSyncCancelled()) {
+        releaseKindleSyncLock("cancelled");
+        const cancelledResult = {
+          success: false,
+          cancelled: true,
+          mountPath: preview.mountPath,
+          booksDir: null,
+          totalBooks: preview.totalCandidates,
+          alreadySynced: preview.alreadySyncedCount,
+          transferred: 0,
+          failed: 0,
+          skipped: 0,
+          bytesTransferred: 0,
+          highlightsPulled: 0,
+          errors: [],
+        };
+        return jsonResponse(
+          {
+            success: true,
+            cancelled: true,
+            started: false,
+            message: "Sync cancelled by user",
+            results: cancelledResult,
+          },
+          200,
+          corsOrigin,
+        );
+      }
+
+      // 3. Kick off background transfer with lock already held
+      syncAllBooksToKindle({
+        forceAll,
+        subfolderByAuthor,
         scope,
+        lockAlreadyAcquired: true,
+      }).catch((syncErr) => {
+        console.error("[Kindle] Background sync exception:", syncErr);
       });
-      const hasStorageError = Boolean(
-        results.errors && results.errors.some((e) => /insufficient.*storage/i.test(e.error)),
-      );
-      const isOk = !hasStorageError && (results.cancelled || results.success || results.transferred > 0);
-      const statusCode = hasStorageError ? 507 : isOk ? 200 : 500;
+
       return jsonResponse(
         {
-          success: isOk,
-          results,
-          error: hasStorageError ? results.errors?.[0]?.error : undefined,
+          success: true,
+          started: true,
+          message: "Kindle sync started in background",
+          results: {
+            inProgress: true,
+            started: true,
+            totalBooks: preview.totalCandidates,
+            alreadySynced: preview.alreadySyncedCount,
+          },
         },
-        statusCode,
+        202,
         corsOrigin,
       );
     } catch (err: any) {
+      releaseKindleSyncLock();
       return jsonResponse(
         { success: false, error: sanitizeErrorMessage(err) },
         500,
