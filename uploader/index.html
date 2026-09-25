@@ -1106,6 +1106,9 @@
         border-color: #27272a !important;
       }
     }
+    #kindleCleanDuplicatesBtn:hover:not(:disabled) {
+      background-color: #f59e0b !important;
+    }
   </style>
 </head>
 <body class="bg-[#09090b] text-[#f4f4f5] antialiased min-h-screen flex flex-col font-sans selection:bg-zinc-800 selection:text-white pb-12 sm:pb-6" style="padding-bottom: max(1.5rem, calc(1.5rem + env(safe-area-inset-bottom, 0px)));">
@@ -1284,6 +1287,9 @@
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
       </symbol>
       <symbol id="icon-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+      </symbol>
+      <symbol id="icon-trash-can" viewBox="0 0 24 24" fill="none" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
       </symbol>
       <symbol id="icon-pen" viewBox="0 0 24 24" fill="none" stroke="currentColor">
@@ -3168,8 +3174,9 @@
           <span class="text-base shrink-0">⚠️</span>
           <span id="kindleDuplicatesText" class="truncate font-medium">Found 0 duplicate files on device</span>
         </div>
-        <button type="button" id="kindleCleanDuplicatesBtn" onclick="cleanKindleDuplicatesAction()" class="shrink-0 px-2.5 py-1.5 bg-amber-400 hover:bg-amber-300 active:scale-[0.96] text-zinc-950 font-bold text-[11px] rounded-lg shadow-sm transition-all cursor-pointer flex items-center gap-1">
-          <span>Clean Duplicates</span>
+        <button type="button" id="kindleCleanDuplicatesBtn" onclick="cleanKindleDuplicatesAction()" style="background-color: #fbbf24 !important; color: #09090b !important; border: 1px solid rgba(245, 158, 11, 0.6) !important;" class="shrink-0 px-3 py-1.5 active:scale-[0.96] text-zinc-950 font-bold text-[11px] rounded-full shadow-md hover:shadow-amber-500/20 disabled:opacity-60 disabled:cursor-wait disabled:pointer-events-none transition-all cursor-pointer flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5 shrink-0" aria-hidden="true"><use href="#icon-trash-can"/></svg>
+          <span>Remove Duplicates</span>
         </button>
       </div>
 
@@ -6466,7 +6473,7 @@
     async function cleanKindleDuplicatesAction() {
       const dupCount = kindleState.deviceDuplicatesCount || 0;
       const countMsg = dupCount > 0 ? `${dupCount} ` : '';
-      if (!confirm(`Are you sure you want to clean ${countMsg}redundant duplicate book file(s) on your Kindle? The canonical copies will be preserved.`)) {
+      if (!confirm(`Are you sure you want to remove ${countMsg}redundant duplicate book file(s) on your Kindle? The canonical copies will be preserved.`)) {
         return;
       }
       tgHaptic.medium();
@@ -6476,7 +6483,11 @@
         setHtml(btn, `${svgIcon('spinner', 'w-3.5 h-3.5 animate-spin text-zinc-950')} <span>Cleaning...</span>`);
       }
       try {
-        const res = await fetch('/api/kindle/clean-device-duplicates', { method: 'POST' });
+        const res = await fetch('/api/kindle/clean-device-duplicates', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ useJev: true }),
+        });
         const data = await res.json();
         if (res.ok && data.success) {
           tgHaptic.success();
@@ -6493,7 +6504,7 @@
       } finally {
         if (btn) {
           btn.disabled = false;
-          setHtml(btn, `<span>Clean Duplicates</span>`);
+          setHtml(btn, `<svg class="w-3.5 h-3.5 shrink-0" aria-hidden="true"><use href="#icon-trash-can"/></svg> <span>Remove Duplicates</span>`);
         }
       }
     }
