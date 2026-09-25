@@ -80,6 +80,7 @@ import {
   ejectKindleVolume,
   detectKindleVolume,
   cleanKindleDeviceDuplicates,
+  cleanKindleDeviceDuplicatesAsync,
   setActiveKindleProgress,
   resolveKindleBooksDir,
 } from "./kindle";
@@ -102,7 +103,16 @@ export interface ServerDependencies {
   ) => Promise<any>;
   getCalibreBooks?: (forceFresh?: boolean) => any;
   detectKindleVolume?: (volumesDir?: string) => string | null;
-  cleanKindleDeviceDuplicates?: (mountPath: string) => { cleanedCount: number; bytesFreed: number; duplicates?: any[] };
+  cleanKindleDeviceDuplicates?: (
+    mountPath: string,
+    options?: { useJev?: boolean; groups?: any[] },
+  ) =>
+    | { cleanedCount: number; bytesFreed: number; duplicates?: any[] }
+    | Promise<{ cleanedCount: number; bytesFreed: number; duplicates?: any[] }>;
+  cleanKindleDeviceDuplicatesAsync?: (
+    mountPath: string,
+    options?: { useJev?: boolean; groups?: any[] },
+  ) => Promise<{ cleanedCount: number; bytesFreed: number; duplicates?: any[] }>;
 }
 
 let serverDependencies: ServerDependencies = {};
@@ -4351,6 +4361,13 @@ export async function handleRequest(
   // API: Kindle Clean Device Duplicates
   if (url.pathname === "/api/kindle/clean-device-duplicates" && req.method === "POST") {
     try {
+      let body: Record<string, unknown> = {};
+      try {
+        body = (await req.json()) as Record<string, unknown>;
+      } catch {
+        // Fall back to empty options if JSON body was omitted
+      }
+
       const volumesDir = process.env.LIGHTHOUSE_VOLUMES_DIR || "/Volumes";
       const detectFn = serverDependencies.detectKindleVolume || detectKindleVolume;
       const mountPath = detectFn(volumesDir);
@@ -4371,8 +4388,12 @@ export async function handleRequest(
       }
 
       try {
-        const cleanFn = serverDependencies.cleanKindleDeviceDuplicates || cleanKindleDeviceDuplicates;
-        const res = cleanFn(mountPath);
+        const useJev = body.useJev === true;
+        const cleanFn =
+          serverDependencies.cleanKindleDeviceDuplicatesAsync ||
+          serverDependencies.cleanKindleDeviceDuplicates ||
+          cleanKindleDeviceDuplicatesAsync;
+        const res = await cleanFn(mountPath, { useJev });
         return jsonResponse(
           {
             success: true,

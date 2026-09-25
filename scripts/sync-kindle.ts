@@ -78,7 +78,9 @@ import {
   detectKindleVolume,
   ejectKindleVolume,
   scanKindleDeviceDuplicates,
+  scanKindleDeviceDuplicatesAsync,
   cleanKindleDeviceDuplicates,
+  cleanKindleDeviceDuplicatesAsync,
   tryAcquireKindleSyncLock,
   releaseKindleSyncLock,
 } from "../uploader/kindle";
@@ -101,7 +103,9 @@ export {
   detectKindleVolume,
   ejectKindleVolume,
   scanKindleDeviceDuplicates,
+  scanKindleDeviceDuplicatesAsync,
   cleanKindleDeviceDuplicates,
+  cleanKindleDeviceDuplicatesAsync,
   tryAcquireKindleSyncLock,
   releaseKindleSyncLock,
 };
@@ -135,6 +139,7 @@ export interface KindleSyncOptions {
   verbose?: boolean;
   status?: boolean;
   cleanDuplicates?: boolean;
+  jev?: boolean;
 }
 
 export interface BookPushResult {
@@ -1416,6 +1421,7 @@ Options:
   --dry-run            Simulate transfer and highlight import without modifying disk
   --status             Inspect Kindle connection status and exit
   --clean-duplicates   Scan and prune redundant duplicate book files (preview by default; pass --apply to prune)
+  --jev                Enable TypeSafe Jev System-1 arbitration for ambiguous cross-script & transliteration duplicates
   --force              Overwrite existing files on Kindle even if size matches
   --all                Push all library books instead of only active, reading, and unread books
   --mount <path>       Custom Kindle mount path (default: auto-detect under /Volumes/)
@@ -1451,6 +1457,8 @@ export function parseCliArgs(args: string[]): KindleSyncOptions {
       options.status = true;
     } else if (arg === "--clean-duplicates") {
       options.cleanDuplicates = true;
+    } else if (arg === "--jev") {
+      options.jev = true;
     } else if (arg === "--eject") {
       options.eject = true;
     } else if (arg === "--verbose") {
@@ -1491,8 +1499,13 @@ if ((import.meta as any).main) {
       console.log("No Kindle or e-Reader detected.");
       process.exit(1);
     } else {
-      console.log(`Scanning device duplicates on ${mount.name} (${mount.mountPath})...`);
-      const dupGroups = scanKindleDeviceDuplicates(mount.mountPath);
+      const useJev = Boolean(options.jev);
+      console.log(
+        `Scanning device duplicates on ${mount.name} (${mount.mountPath})${useJev ? " with TypeSafe Jev System-1 arbitration" : ""}...`,
+      );
+      const dupGroups = useJev
+        ? await scanKindleDeviceDuplicatesAsync(mount.mountPath, { useJev: true })
+        : scanKindleDeviceDuplicates(mount.mountPath);
       const dupCount = dupGroups.reduce((acc, g) => acc + g.duplicatePaths.length, 0);
       const wastedBytes = dupGroups.reduce((acc, g) => acc + g.wastedBytes, 0);
 
@@ -1522,7 +1535,9 @@ if ((import.meta as any).main) {
 
       try {
         console.log(`\nPruning duplicate files from Kindle...`);
-        const res = cleanKindleDeviceDuplicates(mount.mountPath);
+        const res = useJev
+          ? await cleanKindleDeviceDuplicatesAsync(mount.mountPath, { useJev: true, groups: dupGroups })
+          : cleanKindleDeviceDuplicates(mount.mountPath, { groups: dupGroups });
         console.log(`✓ Cleaned ${res.cleanedCount} duplicate file(s) on Kindle (${formatBytes(res.bytesFreed)} freed).`);
         process.exit(0);
       } finally {

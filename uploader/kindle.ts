@@ -15,6 +15,7 @@ import {
   stringSimilarity,
   classifyDuplicateWithJev,
 } from "./scraper";
+import { safeFetchWithSsrf } from "./security";
 
 export const LIGHTHOUSE_ROOT =
   process.env.LIGHTHOUSE_ROOT ||
@@ -502,6 +503,7 @@ let cachedIndex: KindleBookIndex | null = null;
 let cachedDuplicateGroups: KindleDeviceDuplicateGroup[] | null = null;
 let cachedDuplicatesTime = 0;
 let cachedDuplicatesMount: string | null = null;
+let cachedDuplicatesWithJev = false;
 
 export function getOrCreateKindleBookIndex(mountPath: string, forceRefresh = false): KindleBookIndex {
   const now = Date.now();
@@ -528,6 +530,7 @@ export function invalidateKindleBookIndex(): void {
   cachedDuplicateGroups = null;
   cachedDuplicatesMount = null;
   cachedDuplicatesTime = 0;
+  cachedDuplicatesWithJev = false;
   invalidateKindleSyncPreviewCache();
 }
 
@@ -1870,6 +1873,24 @@ export interface KindleDeviceDuplicateGroup {
   files: KindleDeviceDuplicateFile[];
   wastedBytes: number;
   matchedBy: string;
+  reason?: string;
+}
+
+/**
+ * Detects presence of legacy Zawgyi encoding patterns vs Myanmar Unicode.
+ * Standard Myanmar Unicode places combining vowel 'ေ' (\u1031) strictly AFTER the base consonant (\u1000-\u1021).
+ * In Zawgyi, visual typing places 'ေ' (\u1031) BEFORE the consonant.
+ * Zawgyi also uses specific non-standard codepoints in the \u1060-\u1097 range.
+ */
+export function hasZawgyiMarkers(text: string): boolean {
+  if (!text) return false;
+  // 1. Visual vowel 'ေ' (\u1031) preceding consonant (\u1000-\u1021) or at word/string start
+  if (/(?:^|[^\u1000-\u1021])\u1031[\u1000-\u1021]/.test(text)) return true;
+  // 2. Virama (\u1039) followed by non-consonant (e.g. visarga \u1038 or space/end), which is impossible in Unicode
+  if (/\u1039[^\u1000-\u1021]|\u1039$/.test(text)) return true;
+  // 3. Specific Zawgyi-only codepoint usage (e.g. \u107E, \u1088, \u1064, etc.)
+  if (/[\u1060-\u1069\u1070-\u1074\u107e\u107f\u1085-\u108f]/.test(text)) return true;
+  return false;
 }
 
 export function getAllKindleSidecarDirs(bookFilePath: string): string[] {
@@ -1894,8 +1915,12 @@ export function findKindleSidecarDir(bookFilePath: string): string | null {
  * Score a Kindle file to determine canonical preference when duplicates exist.
  * Higher score = more canonical.
  */
-function scoreKindleFileForCanonical(entry: KindleIndexedBook, mountPath: string): number {
-  let score = 0;
+function scoreKindleFileForCanonical(
+  entry: KindleIndexedBook,
+  mountPath: string,
+  jevCanonicalBoost = 0,
+): number {
+  let score = jevCanonicalBoost;
   const rel = path.relative(mountPath, entry.filePath).replace(/\\/g, "/");
   const parts = rel.split("/");
 
@@ -1912,10 +1937,18 @@ function scoreKindleFileForCanonical(entry: KindleIndexedBook, mountPath: string
     score += 60;
   }
 
-  // 3. For Burmese books, prefer author folder with Myanmar Unicode
-  if (/[\u1000-\u109F]/.test(entry.baseName) || /[\u1000-\u109F]/.test(entry.filePath)) {
+  // 3. For Burmese books, prefer author folder with Myanmar Unicode and penalize Zawgyi
+  const hasMyanmarScript =
+    /[\u1000-\u109F]/.test(entry.baseName) || /[\u1000-\u109F]/.test(entry.filePath);
+  if (hasMyanmarScript) {
     if (/[\u1000-\u109F]/.test(entry.parentDir)) {
       score += 40;
+    }
+    // Strongly prefer standard Myanmar Unicode over legacy Zawgyi
+    if (hasZawgyiMarkers(entry.filename) || hasZawgyiMarkers(entry.baseName)) {
+      score -= 50;
+    } else {
+      score += 30;
     }
   }
 
@@ -1938,6 +1971,181 @@ function scoreKindleFileForCanonical(entry: KindleIndexedBook, mountPath: string
   score += Math.min(10, entry.size / 1000000);
 
   return score;
+}
+
+export interface KindleDeviceDuplicateJevResult {
+  isDuplicate: boolean;
+  confidence: number;
+  canonicalChoice?: "book_a" | "book_b" | "either";
+  reason?: "jev_cross_script" | "jev_zawgyi_unicode" | "jev_subtitle_variant" | "jev_system_one";
+}
+
+/**
+ * Arbitrate ambiguous duplicate candidates on Kindle device storage using Jev System-1.
+ * Resolves Zawgyi vs Unicode codepoint mismatch, English transliteration vs Myanmar script authors,
+ * and light novel subtitle/naming variations, and designates canonical copy to keep.
+ */
+export async function classifyKindleDeviceDuplicateWithJev(
+  entryA: KindleIndexedBook,
+  entryB: KindleIndexedBook,
+  options: { apiKey?: string; timeoutMs?: number } = {},
+): Promise<KindleDeviceDuplicateJevResult | null> {
+  const apiKey = (
+    options.apiKey ||
+    process.env.JEV_API_KEY ||
+    process.env.TYPESAFE_API_KEY ||
+    ""
+  ).trim();
+
+  if (!apiKey) return null;
+
+  const authorA = getExplicitBookAuthor(entryA) || entryA.parentDir || "Unknown";
+  const authorB = getExplicitBookAuthor(entryB) || entryB.parentDir || "Unknown";
+  const titleA = (entryA.strippedBaseName || entryA.baseName).split(" - ")[0].trim();
+  const titleB = (entryB.strippedBaseName || entryB.baseName).split(" - ")[0].trim();
+
+  const stateText = `Compare these two book files located on an e-reader device:
+
+Book A:
+- Filename: ${entryA.filename}
+- Title: ${titleA}
+- Author: ${authorA}
+- File Size: ${entryA.size} bytes
+- Folder: ${entryA.parentDir}
+${entryA.volumeNumber !== null ? `- Volume: ${entryA.volumeNumber}` : ""}
+
+Book B:
+- Filename: ${entryB.filename}
+- Title: ${titleB}
+- Author: ${authorB}
+- File Size: ${entryB.size} bytes
+- Folder: ${entryB.parentDir}
+${entryB.volumeNumber !== null ? `- Volume: ${entryB.volumeNumber}` : ""}
+
+Task: Are these two books on an e-reader duplicate copies of the same work, and which one is the canonical copy to keep?
+Consider:
+1. Zawgyi vs Myanmar Unicode codepoint mismatch: titles/authors written in Zawgyi (e.g. ေသာ်တာေဆွ) vs Unicode (သော်တာဆွေ) represent the exact same entity.
+2. English transliteration vs Myanmar script: e.g. "Theikpan Mg Wa" vs "သိပ္ပံမောင်ဝ", "Ashin Sandardika" vs "အရှင်ဆန္ဒာဓိက", "Min Theim Kha" vs "မင်းသိင်္ခ".
+3. Subtitle variations or series naming differences (e.g. "Arifureta: From Commonplace to World's Strongest Vol. 1" vs "Arifureta Vol. 1").
+4. Different volumes in a series (e.g. Vol. 1 vs Vol. 2) are NEVER duplicates.
+5. Canonical copy should prefer standard Myanmar Unicode over legacy Zawgyi, clean Calibre metadata structure ('Title - Author.epub'), and standard naming.`;
+
+  const timeout = options.timeoutMs || 3000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const res = await safeFetchWithSsrf("https://api.typesafe.ai/v1/systemone", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      redirect: "error",
+      body: JSON.stringify({
+        model: "jev-latest",
+        state: stateText,
+        questions: {
+          is_duplicate: {
+            type: "choice",
+            instructions: "Are these two books on an e-reader duplicate copies of the same work?",
+            criteria: {
+              duplicate:
+                "The two files are duplicate copies or different editions/encodings/transliterations of the exact same work and volume.",
+              distinct:
+                "Different books, different volumes in a series (e.g. Vol 1 vs Vol 2), or distinct works.",
+            },
+          },
+          canonical_copy: {
+            type: "choice",
+            instructions: "Which book should be kept as the canonical copy on the device?",
+            criteria: {
+              book_a: "Book A is the preferred canonical copy (standard Unicode, clean Calibre 'Title - Author' structure, or better metadata).",
+              book_b: "Book B is the preferred canonical copy (standard Unicode, clean Calibre 'Title - Author' structure, or better metadata).",
+              either: "Either copy is equally suitable as canonical.",
+            },
+          },
+          duplicate_reason: {
+            type: "choice",
+            instructions: "What is the primary reason or category of the duplicate mismatch?",
+            criteria: {
+              zawgyi_unicode: "Zawgyi vs Myanmar Unicode encoding mismatch.",
+              cross_script_author: "English transliteration vs Myanmar script author name.",
+              subtitle_variant: "Light novel or general book subtitle / naming variation.",
+              identical_content: "Near-identical title, tokens, or content.",
+            },
+          },
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      clearTimeout(timer);
+      return null;
+    }
+
+    const json = (await res.json()) as any;
+    clearTimeout(timer);
+
+    const isDupAns = json?.answers?.is_duplicate;
+    if (!isDupAns) return null;
+
+    const isDuplicate = isDupAns.choice === "duplicate";
+    const confidence =
+      typeof isDupAns.confidence === "number" && !Number.isNaN(isDupAns.confidence)
+        ? isDupAns.confidence
+        : 0.85;
+
+    let canonicalChoice: "book_a" | "book_b" | "either" | undefined;
+    const canonAns = json?.answers?.canonical_copy;
+    if (canonAns?.choice === "book_a" || canonAns?.choice === "book_b" || canonAns?.choice === "either") {
+      canonicalChoice = canonAns.choice;
+    }
+
+    let reason: "jev_cross_script" | "jev_zawgyi_unicode" | "jev_subtitle_variant" | "jev_system_one" | undefined;
+    const reasonAns = json?.answers?.duplicate_reason;
+    if (reasonAns?.choice === "zawgyi_unicode") {
+      reason = "jev_zawgyi_unicode";
+    } else if (reasonAns?.choice === "cross_script_author") {
+      reason = "jev_cross_script";
+    } else if (reasonAns?.choice === "subtitle_variant") {
+      reason = "jev_subtitle_variant";
+    } else if (reasonAns?.choice === "identical_content") {
+      reason = "jev_system_one";
+    }
+
+    if (!reason && isDuplicate) {
+      const aHasZawgyi = hasZawgyiMarkers(entryA.filename) || hasZawgyiMarkers(titleA);
+      const bHasZawgyi = hasZawgyiMarkers(entryB.filename) || hasZawgyiMarkers(titleB);
+      const aHasMy = /[\u1000-\u109F]/.test(titleA) || /[\u1000-\u109F]/.test(authorA);
+      const bHasMy = /[\u1000-\u109F]/.test(titleB) || /[\u1000-\u109F]/.test(authorB);
+
+      if (aHasZawgyi || bHasZawgyi) {
+        reason = "jev_zawgyi_unicode";
+      } else if ((aHasMy && !bHasMy) || (!aHasMy && bHasMy)) {
+        reason = "jev_cross_script";
+      } else {
+        const normA = normalizeTitleForDedup(titleA);
+        const normB = normalizeTitleForDedup(titleB);
+        if (normA && normB && (normA.includes(normB) || normB.includes(normA))) {
+          reason = "jev_subtitle_variant";
+        } else {
+          reason = "jev_system_one";
+        }
+      }
+    }
+
+    return {
+      isDuplicate,
+      confidence,
+      canonicalChoice,
+      reason,
+    };
+  } catch {
+    clearTimeout(timer);
+    return null;
+  }
 }
 
 /**
@@ -2082,6 +2290,7 @@ export function scanKindleDeviceDuplicates(
     !options?.forceRefresh &&
     cachedDuplicateGroups &&
     cachedDuplicatesMount === mountPath &&
+    !cachedDuplicatesWithJev &&
     now - cachedDuplicatesTime < 30000
   ) {
     return cachedDuplicateGroups;
@@ -2233,6 +2442,7 @@ export function scanKindleDeviceDuplicates(
       files,
       wastedBytes,
       matchedBy: matchReasons.get(root) || "duplicate_detected",
+      reason: matchReasons.get(root) || "duplicate_detected",
     });
   }
 
@@ -2241,6 +2451,380 @@ export function scanKindleDeviceDuplicates(
   cachedDuplicateGroups = duplicateGroups;
   cachedDuplicatesMount = mountPath;
   cachedDuplicatesTime = now;
+  cachedDuplicatesWithJev = false;
+
+  return duplicateGroups;
+}
+
+interface JevDuplicateCandidate {
+  i: number;
+  j: number;
+  score: number;
+  candidateType: "zawgyi_unicode" | "cross_script" | "subtitle_variant" | "ambiguous_similarity";
+}
+
+function getCandidateSuspiciousPairsForJev(
+  entries: KindleIndexedBook[],
+  find: (idx: number) => number,
+): JevDuplicateCandidate[] {
+  const n = entries.length;
+  const candidates: JevDuplicateCandidate[] = [];
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (find(i) === find(j)) continue;
+
+      const a = entries[i];
+      const b = entries[j];
+      if (a.ext !== b.ext) continue;
+
+      const aVol = a.volumeNumber ?? a.leadingIndex ?? null;
+      const bVol = b.volumeNumber ?? b.leadingIndex ?? null;
+      if (aVol !== null && bVol !== null && aVol !== bVol) continue;
+      if ((aVol !== null && bVol === null) || (aVol === null && bVol !== null)) {
+        if (a.volumeNumber !== null || b.volumeNumber !== null) continue;
+      }
+
+      const aBase = a.strippedBaseName || a.baseName;
+      const bBase = b.strippedBaseName || b.baseName;
+      const aTitle = aBase.includes(" - ") ? aBase.split(" - ")[0].trim() : aBase;
+      const bTitle = bBase.includes(" - ") ? bBase.split(" - ")[0].trim() : bBase;
+      const aAuthor = getExplicitBookAuthor(a) || "";
+      const bAuthor = getExplicitBookAuthor(b) || "";
+
+      const aHasMyanmar = /[\u1000-\u109F]/.test(aTitle) || /[\u1000-\u109F]/.test(aAuthor);
+      const bHasMyanmar = /[\u1000-\u109F]/.test(bTitle) || /[\u1000-\u109F]/.test(bAuthor);
+
+      const sizeDiff = Math.abs(a.size - b.size);
+      const maxSizeBytes = Math.max(a.size, b.size);
+      const sizeRatio = maxSizeBytes > 0 ? sizeDiff / maxSizeBytes : 0;
+      // Close file size: within 64KB or 15%
+      const isSizeClose = sizeDiff <= 65536 || sizeRatio <= 0.15;
+
+      if (!isSizeClose) continue; // Conjunction: size must always be reasonably close
+
+      const aParentNotRoot = !isRootOrGenreFolder(a.parentDir);
+      const bParentNotRoot = !isRootOrGenreFolder(b.parentDir);
+
+      // Signal 1: Zawgyi vs Myanmar Unicode codepoint mismatch
+      // Strictly requires Zawgyi markers to prevent pairing unrelated Burmese books
+      if (aHasMyanmar && bHasMyanmar) {
+        const hasZawgyi =
+          hasZawgyiMarkers(a.filename) ||
+          hasZawgyiMarkers(b.filename) ||
+          hasZawgyiMarkers(aTitle) ||
+          hasZawgyiMarkers(bTitle);
+        if (hasZawgyi) {
+          candidates.push({ i, j, score: 95, candidateType: "zawgyi_unicode" });
+          continue;
+        }
+      }
+
+      // Signal 2: Cross-Script Author / English transliteration vs Myanmar script
+      if ((aHasMyanmar && !bHasMyanmar) || (!aHasMyanmar && bHasMyanmar)) {
+        const cleanA = cleanQuery(aTitle);
+        const cleanB = cleanQuery(bTitle);
+        const hasTokenOverlap =
+          cleanA.length > 0 &&
+          cleanB.length > 0 &&
+          cleanA.split(/\s+/).some((t) => t.length >= 3 && cleanB.includes(t));
+        const sim = stringSimilarity(cleanA, cleanB);
+        const sameExplicitAuthorDir =
+          aParentNotRoot && bParentNotRoot && a.parentDir.toLowerCase() === b.parentDir.toLowerCase();
+
+        if (hasTokenOverlap || sim >= 0.35 || sameExplicitAuthorDir) {
+          candidates.push({ i, j, score: 85, candidateType: "cross_script" });
+          continue;
+        }
+      }
+
+      // Signal 3: Light novel / book subtitle variations
+      const authorsCompatible =
+        !aAuthor ||
+        !bAuthor ||
+        authorMatchesString(aAuthor, bAuthor) ||
+        authorMatchesString(bAuthor, aAuthor) ||
+        stringSimilarity(aAuthor.toLowerCase(), bAuthor.toLowerCase()) >= 0.7 ||
+        (aParentNotRoot && bParentNotRoot && a.parentDir.toLowerCase() === b.parentDir.toLowerCase());
+
+      if (authorsCompatible) {
+        const cleanA = cleanQuery(aTitle);
+        const cleanB = cleanQuery(bTitle);
+        const isSubstring =
+          (cleanA.length >= 4 && cleanB.includes(cleanA)) ||
+          (cleanB.length >= 4 && cleanA.includes(cleanB));
+        const sim = stringSimilarity(cleanA, cleanB);
+
+        if (isSubstring || (sim >= 0.55 && sim < 0.88)) {
+          candidates.push({ i, j, score: 75, candidateType: "subtitle_variant" });
+          continue;
+        }
+
+        // Signal 4: Ambiguous normalized title similarity
+        const normSim = stringSimilarity(a.normalizedTitle || cleanA, b.normalizedTitle || cleanB);
+        if (normSim >= 0.65 && normSim < 0.88) {
+          candidates.push({ i, j, score: 65, candidateType: "ambiguous_similarity" });
+          continue;
+        }
+      }
+    }
+  }
+
+  candidates.sort((c1, c2) => c2.score - c1.score);
+  return candidates.slice(0, 15);
+}
+
+/**
+ * Scans Kindle USB device for redundant duplicate copies with TypeSafe Jev System-1 arbitration.
+ * Uses fast local Tier 1 clustering (<50ms) to isolate candidates, queries Jev System-1 for
+ * ambiguous cross-script, Zawgyi vs Unicode, and subtitle variations, and designates canonical copy.
+ * Fails open gracefully to Tier 1 clustering if Jev is unreachable or unconfigured.
+ */
+export async function scanKindleDeviceDuplicatesAsync(
+  mountPath: string,
+  options?: {
+    useJev?: boolean;
+    forceRefresh?: boolean;
+    jevApiKey?: string;
+    timeoutMs?: number;
+  },
+): Promise<KindleDeviceDuplicateGroup[]> {
+  if (!mountPath || !fs.existsSync(mountPath)) return [];
+
+  const useJev = options?.useJev === true;
+  const now = Date.now();
+  if (
+    !options?.forceRefresh &&
+    cachedDuplicateGroups &&
+    cachedDuplicatesMount === mountPath &&
+    (useJev ? cachedDuplicatesWithJev : !cachedDuplicatesWithJev) &&
+    now - cachedDuplicatesTime < 30000
+  ) {
+    return cachedDuplicateGroups;
+  }
+
+  const idx = getOrCreateKindleBookIndex(mountPath, options?.forceRefresh);
+  const entries = idx.entries.filter((e) => fs.existsSync(e.filePath));
+  if (entries.length < 2) return [];
+
+  const n = entries.length;
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const matchReasons = new Map<number, string>();
+  const jevCanonicalBoost = new Map<string, number>();
+  const jevArbitratedFiles = new Set<string>();
+
+  // Track explicit author identities per cluster to forbid transitive cross-author merges
+  const clusterAuthors = new Map<number, Set<string>>();
+  for (let i = 0; i < n; i++) {
+    const auth = getExplicitBookAuthor(entries[i]);
+    const set = new Set<string>();
+    if (auth) set.add(auth.toLowerCase());
+    clusterAuthors.set(i, set);
+  }
+
+  function find(i: number): number {
+    let root = i;
+    while (root !== parent[root]) {
+      root = parent[root];
+    }
+    let curr = i;
+    while (curr !== root) {
+      const next = parent[curr];
+      parent[curr] = root;
+      curr = next;
+    }
+    return root;
+  }
+
+  function canUnionAuthors(rootI: number, rootJ: number, isBurmese: boolean): boolean {
+    const authorsI = clusterAuthors.get(rootI);
+    const authorsJ = clusterAuthors.get(rootJ);
+    if (!authorsI || !authorsJ || authorsI.size === 0 || authorsJ.size === 0) return true;
+
+    for (const a of authorsI) {
+      for (const b of authorsJ) {
+        if (a && b) {
+          const matches = isBurmese
+            ? isCrossScriptAuthorMatch(a, b)
+            : (authorMatchesString(a, b) || authorMatchesString(b, a));
+          if (!matches) {
+            return false;
+          }
+        }
+      }
+    }
+    return true;
+  }
+
+  function union(i: number, j: number, reason: string): void {
+    const rootI = find(i);
+    const rootJ = find(j);
+    if (rootI !== rootJ) {
+      parent[rootI] = rootJ;
+      if (!matchReasons.has(rootJ)) {
+        matchReasons.set(rootJ, reason);
+      }
+      const setI = clusterAuthors.get(rootI);
+      const setJ = clusterAuthors.get(rootJ);
+      if (setI && setJ) {
+        for (const auth of setI) setJ.add(auth);
+      }
+    }
+  }
+
+  // Tier 1: Fast deterministic clustering (<50ms)
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const rootI = find(i);
+      const rootJ = find(j);
+      if (rootI === rootJ) continue;
+
+      const res = areKindleEntriesDuplicates(entries[i], entries[j]);
+      if (res.isDuplicate) {
+        const isBurmese = res.matchedBy === "burmese_cross_script";
+        if (canUnionAuthors(rootI, rootJ, isBurmese)) {
+          union(i, j, res.matchedBy);
+        }
+      }
+    }
+  }
+
+  // Tier 2: Jev System-1 Ambiguity Arbitration (opt-in via useJev: true)
+  if (useJev) {
+    const apiKey = (
+      options?.jevApiKey ||
+      process.env.JEV_API_KEY ||
+      process.env.TYPESAFE_API_KEY ||
+      ""
+    ).trim();
+
+    if (apiKey) {
+      const candidates = getCandidateSuspiciousPairsForJev(entries, find);
+      const MAX_JEV_CALLS = 15;
+      let jevCallsMade = 0;
+
+      for (const candidate of candidates) {
+        if (jevCallsMade >= MAX_JEV_CALLS) break;
+        const rootI = find(candidate.i);
+        const rootJ = find(candidate.j);
+        if (rootI === rootJ) continue;
+
+        jevCallsMade++;
+        try {
+          const verdict = await classifyKindleDeviceDuplicateWithJev(
+            entries[candidate.i],
+            entries[candidate.j],
+            {
+              apiKey,
+              timeoutMs: options?.timeoutMs,
+            },
+          );
+
+          if (verdict && verdict.isDuplicate && verdict.confidence >= 0.7) {
+            const reason =
+              verdict.reason ||
+              (candidate.candidateType === "zawgyi_unicode"
+                ? "jev_zawgyi_unicode"
+                : candidate.candidateType === "cross_script"
+                  ? "jev_cross_script"
+                  : candidate.candidateType === "subtitle_variant"
+                    ? "jev_subtitle_variant"
+                    : "jev_system_one");
+
+            union(candidate.i, candidate.j, reason);
+            const newRoot = find(candidate.j);
+            matchReasons.set(newRoot, reason);
+            jevArbitratedFiles.add(entries[candidate.i].filePath);
+            jevArbitratedFiles.add(entries[candidate.j].filePath);
+
+            if (verdict.canonicalChoice === "book_a") {
+              jevCanonicalBoost.set(entries[candidate.i].filePath, 500);
+            } else if (verdict.canonicalChoice === "book_b") {
+              jevCanonicalBoost.set(entries[candidate.j].filePath, 500);
+            }
+          }
+        } catch (jevErr) {
+          console.warn("[Kindle] Jev device duplicate arbitration notice:", jevErr);
+        }
+      }
+    }
+  }
+
+  const clusters = new Map<number, KindleIndexedBook[]>();
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    let list = clusters.get(root);
+    if (!list) {
+      list = [];
+      clusters.set(root, list);
+    }
+    list.push(entries[i]);
+  }
+
+  const duplicateGroups: KindleDeviceDuplicateGroup[] = [];
+
+  for (const [root, groupEntries] of clusters.entries()) {
+    if (groupEntries.length < 2) continue;
+
+    groupEntries.sort((a, b) => {
+      const scoreA = scoreKindleFileForCanonical(a, mountPath, jevCanonicalBoost.get(a.filePath) || 0);
+      const scoreB = scoreKindleFileForCanonical(b, mountPath, jevCanonicalBoost.get(b.filePath) || 0);
+      if (scoreA !== scoreB) return scoreB - scoreA;
+      return a.filePath.localeCompare(b.filePath);
+    });
+
+    const canonicalEntry = groupEntries[0];
+    const canonicalAuthor = getExplicitBookAuthor(canonicalEntry);
+    const clusterReason = matchReasons.get(root) || "duplicate_detected";
+
+    // Defense-in-depth: duplicates must not conflict with canonical author, exempting specifically Jev-arbitrated pairs
+    const duplicateEntries = groupEntries.slice(1).filter((e) => {
+      if (jevArbitratedFiles.has(e.filePath)) return true;
+      const titlePart = (e.strippedBaseName || e.baseName).split(" - ")[0].trim();
+      const isBurmese = /[\u1000-\u109F]/.test(titlePart);
+      const dupAuthor = getExplicitBookAuthor(e);
+      if (!dupAuthor || !canonicalAuthor) return true;
+      return isBurmese
+        ? isCrossScriptAuthorMatch(dupAuthor, canonicalAuthor)
+        : (authorMatchesString(dupAuthor, canonicalAuthor) || authorMatchesString(canonicalAuthor, dupAuthor));
+    });
+
+    if (duplicateEntries.length === 0) continue;
+
+    const keptEntries = [canonicalEntry, ...duplicateEntries];
+    const files: KindleDeviceDuplicateFile[] = keptEntries.map((e, idx) => ({
+      filePath: e.filePath,
+      filename: e.filename,
+      size: e.size,
+      parentDir: e.parentDir,
+      isCanonical: idx === 0,
+    }));
+
+    const wastedBytes = duplicateEntries.reduce((sum, e) => sum + e.size, 0);
+    const ext = path.extname(canonicalEntry.filename);
+    const baseWithCase = path.basename(canonicalEntry.filename, ext);
+    const title = baseWithCase.includes(" - ")
+      ? baseWithCase.split(" - ")[0].trim()
+      : baseWithCase;
+
+    duplicateGroups.push({
+      key: canonicalEntry.filePath,
+      title: title || canonicalEntry.filename,
+      canonicalPath: canonicalEntry.filePath,
+      duplicatePaths: duplicateEntries.map((e) => e.filePath),
+      files,
+      wastedBytes,
+      matchedBy: clusterReason,
+      reason: clusterReason,
+    });
+  }
+
+  duplicateGroups.sort((a, b) => b.wastedBytes - a.wastedBytes);
+
+  cachedDuplicateGroups = duplicateGroups;
+  cachedDuplicatesMount = mountPath;
+  cachedDuplicatesTime = now;
+  cachedDuplicatesWithJev = useJev;
 
   return duplicateGroups;
 }
@@ -2262,13 +2846,14 @@ export function hasActiveReadingProgress(sdrDir: string): boolean {
  */
 export function cleanKindleDeviceDuplicates(
   mountPath: string,
+  options?: { groups?: KindleDeviceDuplicateGroup[] },
 ): { cleanedCount: number; bytesFreed: number; duplicates: KindleDeviceDuplicateGroup[] } {
   if (!mountPath || !fs.existsSync(mountPath)) {
     return { cleanedCount: 0, bytesFreed: 0, duplicates: [] };
   }
 
   const realMount = fs.realpathSync(mountPath);
-  const groups = scanKindleDeviceDuplicates(mountPath);
+  const groups = options?.groups || scanKindleDeviceDuplicates(mountPath);
   let cleanedCount = 0;
   let bytesFreed = 0;
 
@@ -2387,6 +2972,27 @@ export function cleanKindleDeviceDuplicates(
   invalidateKindleBookIndex();
 
   return { cleanedCount, bytesFreed, duplicates: groups };
+}
+
+/**
+ * Asynchronously cleans Kindle device duplicates by removing redundant files, leaving the canonical version intact.
+ * Automatically scans duplicates with Jev System-1 arbitration when enabled.
+ */
+export async function cleanKindleDeviceDuplicatesAsync(
+  mountPath: string,
+  options?: {
+    useJev?: boolean;
+    forceRefresh?: boolean;
+    jevApiKey?: string;
+    timeoutMs?: number;
+    groups?: KindleDeviceDuplicateGroup[];
+  },
+): Promise<{ cleanedCount: number; bytesFreed: number; duplicates: KindleDeviceDuplicateGroup[] }> {
+  if (!mountPath || !fs.existsSync(mountPath)) {
+    return { cleanedCount: 0, bytesFreed: 0, duplicates: [] };
+  }
+  const groups = options?.groups || (await scanKindleDeviceDuplicatesAsync(mountPath, options));
+  return cleanKindleDeviceDuplicates(mountPath, { groups });
 }
 
 /**
