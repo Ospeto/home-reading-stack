@@ -1929,6 +1929,19 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       );
       expect(matchFirstLawWrong.exists).toBe(false);
 
+      // Adversarial check: partial or substring series keywords ("Law", "First", "A", "The") with wrong author MUST NOT bypass author check
+      for (const bogusSeries of ["Law", "First", "A", "The"]) {
+        const matchBogus = isBookAlreadyOnKindle(
+          kindleMount,
+          "The Blade Itself.epub",
+          "Not Abercrombie",
+          0,
+          idxSeries,
+          { title: "The Blade Itself", authors: "Not Abercrombie", series: bogusSeries },
+        );
+        expect(matchBogus.exists).toBe(false);
+      }
+
       const matchRedRising = isBookAlreadyOnKindle(
         kindleMount,
         "Golden Son.epub",
@@ -1949,6 +1962,19 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
         { title: "Golden Son", authors: "Wrong Author" },
       );
       expect(matchRedRisingWrong.exists).toBe(false);
+
+      // Adversarial check: substring series keywords ("Red", "Rising") with wrong author MUST NOT bypass author check
+      for (const bogusSeries of ["Red", "Rising"]) {
+        const matchBogus = isBookAlreadyOnKindle(
+          kindleMount,
+          "Golden Son.epub",
+          "Wrong Author",
+          0,
+          idxSeries,
+          { title: "Golden Son", authors: "Wrong Author", series: bogusSeries },
+        );
+        expect(matchBogus.exists).toBe(false);
+      }
     });
 
     it("parses Calibre compact initials in Last, First order (e.g. Martin, George R.R.)", () => {
@@ -1962,6 +1988,30 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
 
       const parsedRR = parseAuthorList("Martin, George RR");
       expect(parsedRR).toEqual(["George RR Martin"]);
+      // Compact RR must match dotted R.R.
+      expect(authorMatchesString("George R.R. Martin", "Martin, George RR")).toBe(true);
+      expect(authorMatchesString("J.R.R. Tolkien", "Tolkien, JRR")).toBe(true);
+      expect(authorMatchesString("H.P. Lovecraft", "Lovecraft, HP")).toBe(true);
+
+      // Multi-word given names in Last, First order
+      const parsedDoyle = parseAuthorList("Doyle, Arthur Conan");
+      expect(parsedDoyle).toEqual(["Arthur Conan Doyle"]);
+      expect(authorMatchesString("Arthur Conan Doyle", "Doyle, Arthur Conan")).toBe(true);
+
+      const parsedOates = parseAuthorList("Oates, Joyce Carol");
+      expect(parsedOates).toEqual(["Joyce Carol Oates"]);
+    });
+
+    it("resolveKindleDestinationDir reuses existing folder across initials variants", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      const grrmDir = path.join(booksDir, "George R.R. Martin");
+      fs.mkdirSync(grrmDir, { recursive: true });
+
+      const res = resolveKindleDestinationDir(booksDir, "Martin, George RR");
+      expect(res.authorDir).toBe("George R.R. Martin");
+      expect(res.targetDir).toBe(grrmDir);
+      expect(res.reusedExistingFolder).toBe(true);
     });
 
     it("strips decimal leading index and volume prefixes cleanly", () => {

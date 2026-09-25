@@ -473,12 +473,52 @@ export function normalizeAuthorSpacing(author: string): string {
   return author.replace(/\s*,\s*/g, ", ").trim();
 }
 
+const SURNAME_PREFIXES = /^(?:le|de|van|von|mc|mac|di|da|del|della|la|du|st\.?|saint)\s+/i;
+
+function isSingleAuthorLastFirst(parts: string[]): boolean {
+  if (parts.length !== 2) return false;
+  const [last, first] = parts;
+  const lastWords = last.trim().split(/\s+/);
+  const firstWords = first.trim().split(/\s+/);
+
+  const isSurname = lastWords.length === 1 || (lastWords.length === 2 && SURNAME_PREFIXES.test(last));
+  if (!isSurname) return false;
+
+  return firstWords.length >= 1 && firstWords.length <= 4;
+}
+
 function isGivenNamePattern(str: string): boolean {
   const words = str.trim().split(/\s+/);
   if (words.length === 1) return true;
   const isInitial = (w: string) => /^[A-Z](?:\.[A-Z])*\.?$/i.test(w) || /^[A-Z]{1,3}$/i.test(w);
   if (words.length >= 2 && words.slice(1).every(isInitial)) return true;
   return false;
+}
+
+/**
+ * Canonicalizes author names by merging consecutive single-letter initials
+ * (e.g. "George R.R. Martin", "George R. R. Martin", "George RR Martin" all become "george rr martin").
+ */
+export function canonicalizeAuthorName(name: string): string {
+  if (!name) return "";
+  const cleaned = name.toLowerCase().replace(/[\.\,\-_]/g, " ").replace(/\s+/g, " ").trim();
+  const words = cleaned.split(" ");
+  const result: string[] = [];
+
+  let lastWasInitial = false;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (w.length === 1 && result.length > 0 && lastWasInitial) {
+      result[result.length - 1] = (result.at(-1) ?? "") + w;
+    } else if (w.length === 1 && i + 1 < words.length && words[i + 1].length === 1) {
+      result.push(w);
+      lastWasInitial = true;
+    } else {
+      result.push(w);
+      lastWasInitial = false;
+    }
+  }
+  return result.join(" ");
 }
 
 /**
@@ -508,9 +548,9 @@ export function parseAuthorList(raw: string): string[] {
   // If contains comma
   if (s.includes(",")) {
     const commaParts = s.split(",").map((p) => p.trim()).filter(Boolean);
-    // Case A: Exactly 2 parts e.g. "Le Guin, Ursula K." or "Sanderson, Brandon" -> single author in Last, First order
+    // Case A: Exactly 2 parts e.g. "Le Guin, Ursula K.", "Sanderson, Brandon", or "Doyle, Arthur Conan" -> single author in Last, First order
     if (commaParts.length === 2) {
-      if (isGivenNamePattern(commaParts[1])) {
+      if (isSingleAuthorLastFirst(commaParts) || isGivenNamePattern(commaParts[1])) {
         return [`${commaParts[1]} ${commaParts[0]}`];
       }
       return commaParts;
@@ -545,11 +585,22 @@ export function authorMatchesString(sourceStr: string, targetAuthor: string): bo
 
   for (const sA of sList) {
     const sNorm = normalizeTitleForDedup(sA);
+    const sCanon = canonicalizeAuthorName(sA);
     const sSorted = sNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
+    const sCanonSorted = sCanon.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
     for (const tA of tList) {
       const tNorm = normalizeTitleForDedup(tA);
+      const tCanon = canonicalizeAuthorName(tA);
       const tSorted = tNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
-      if (sNorm === tNorm || sSorted === tSorted) return true;
+      const tCanonSorted = tCanon.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
+      if (
+        sNorm === tNorm ||
+        sSorted === tSorted ||
+        sCanon === tCanon ||
+        sCanonSorted === tCanonSorted
+      ) {
+        return true;
+      }
     }
   }
 
@@ -615,6 +666,15 @@ export function resolveKindleDestinationDir(
         const dedupExisting = normalizeTitleForDedup(existingDirName);
         const dedupTarget = normalizeTitleForDedup(normAuthor);
         if (dedupExisting && dedupTarget && dedupExisting === dedupTarget) {
+          matchedAuthorDir = existingDirName;
+          reusedAuthorFolder = true;
+          break;
+        }
+
+        // Initials-canonicalized comparison (e.g. "George R.R. Martin" vs "Martin, George RR")
+        const canonExisting = canonicalizeAuthorName(existingDirName);
+        const canonTarget = canonicalizeAuthorName(normAuthor);
+        if (canonExisting && canonTarget && canonExisting === canonTarget) {
           matchedAuthorDir = existingDirName;
           reusedAuthorFolder = true;
           break;
@@ -1103,12 +1163,17 @@ export function isBookAlreadyOnKindle(
         pDir,
       );
     if (!isRootOrGenre && normAuthor) {
-      const candidateSeries = bookDetails?.series ? normalizeTitleForDedup(bookDetails.series) : "";
+      const stripThe = (s: string) => s.replace(/^the\s+/i, "").trim();
+      const candSeriesNorm = bookDetails?.series ? normalizeTitleForDedup(bookDetails.series) : "";
+      const candSeriesBare = stripThe(candSeriesNorm);
+      const pDirNorm = normalizeTitleForDedup(pDir);
+      const pDirBare = stripThe(pDirNorm);
+
       const isSeries =
-        candidateSeries &&
-        (normalizeTitleForDedup(pDir) === candidateSeries ||
-          normalizeTitleForDedup(pDir).includes(candidateSeries) ||
-          candidateSeries.includes(normalizeTitleForDedup(pDir)));
+        Boolean(candSeriesBare) &&
+        Boolean(pDirBare) &&
+        (pDirNorm === candSeriesNorm || pDirBare === candSeriesBare);
+
       if (!isSeries) {
         const matchesAuthor =
           authorMatchesString(entry.parentDir, normalizedRawAuthor) ||
