@@ -3686,18 +3686,16 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
 
     it("syncAllBooksToKindle handles failed book transfers gracefully, transitions to phase error, records error message, and invalidates cache", async () => {
       const kindleMount = path.join(fakeVolumesDir, "Kindle");
-      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+      const booksDir = path.join(kindleMount, "books");
+      fs.mkdirSync(booksDir, { recursive: true });
 
       setupFakeCalibreDatabase([
-        { id: 1, title: "Missing Source Book", author: "Author", format: "EPUB", fileContent: "1" },
+        { id: 1, title: "Blocked Book", author: "BlockedAuthor", format: "EPUB", fileContent: "valid content" },
       ]);
       resetKindleProgressForTesting();
 
-      // Remove the physical file from Calibre library so transfer fails
-      const booksInLib = fs.readdirSync(path.join(fakeLibraryDir, "Author_1", "Book_1"));
-      for (const f of booksInLib) {
-        fs.unlinkSync(path.join(fakeLibraryDir, "Author_1", "Book_1", f));
-      }
+      // Create a regular file where the author directory would be, forcing copy to fail with ENOTDIR
+      fs.writeFileSync(path.join(booksDir, "BlockedAuthor"), "file conflict preventing folder creation");
 
       const result = await syncAllBooksToKindle({ mountPath: kindleMount });
       expect(result.success).toBe(false);
