@@ -4231,7 +4231,7 @@ export async function handleRequest(
       } catch {
         // Fall back to empty options if JSON body was omitted
       }
-      const res = syncSingleBookToKindle(bookId, {
+      const res = await syncSingleBookToKindle(bookId, {
         forceAll: Boolean(body?.forceAll),
         subfolderByAuthor: body?.subfolderByAuthor !== false,
       });

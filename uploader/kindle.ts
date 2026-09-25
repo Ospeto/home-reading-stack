@@ -7,21 +7,49 @@ import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 import { generateMetadataFilename, truncateUtf8Bytes } from "./filename";
-import { normalizeTitleForDedup, cleanQuery, extractVolumeNumber } from "./scraper";
+import {
+  normalizeTitleForDedup,
+  cleanQuery,
+  extractVolumeNumber,
+  cleanSeriesTitle,
+  stringSimilarity,
+  classifyDuplicateWithJev,
+} from "./scraper";
+
+export const LIGHTHOUSE_ROOT =
+  process.env.LIGHTHOUSE_ROOT ||
+  path.resolve((import.meta as { dir?: string }).dir || process.cwd(), "..");
 
 export function getCalibreDbPath(): string {
   if (process.env.CALIBRE_DB_PATH) {
-    return path.resolve(process.env.CALIBRE_DB_PATH);
+    return path.isAbsolute(process.env.CALIBRE_DB_PATH)
+      ? process.env.CALIBRE_DB_PATH
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_DB_PATH);
   }
-  return path.join(os.homedir(), "Calibre Library", "metadata.db");
+  if (process.env.CALIBRE_LIBRARY_DIR) {
+    const libDir = path.isAbsolute(process.env.CALIBRE_LIBRARY_DIR)
+      ? process.env.CALIBRE_LIBRARY_DIR
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_LIBRARY_DIR);
+    return path.join(libDir, "metadata.db");
+  }
+  const home = process.env.HOME || os.homedir();
+  return path.join(
+    home,
+    "Calibre Libraries",
+    "Agent Library",
+    "metadata.db",
+  );
 }
 
 export function getCalibreLibraryDir(): string {
   if (process.env.CALIBRE_LIBRARY_DIR) {
-    return path.resolve(process.env.CALIBRE_LIBRARY_DIR);
+    return path.isAbsolute(process.env.CALIBRE_LIBRARY_DIR)
+      ? process.env.CALIBRE_LIBRARY_DIR
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_LIBRARY_DIR);
   }
   if (process.env.CALIBRE_DB_PATH) return path.dirname(getCalibreDbPath());
-  return path.join(os.homedir(), "Calibre Library");
+  const home = process.env.HOME || os.homedir();
+  return path.join(home, "Calibre Libraries", "Agent Library");
 }
 
 export interface KindleLiveProgress {
@@ -164,10 +192,14 @@ export interface KindleIndexedBook {
   filename: string;
   ext: string;
   baseName: string;
+  strippedBaseName?: string;
   size: number;
   normalizedTitle: string;
+  strippedNormalizedTitle?: string;
   cleanQueryTitle: string;
+  strippedCleanQueryTitle?: string;
   volumeNumber: number | null;
+  leadingIndex?: number | null;
   parentDir: string;
   grandparentDir: string;
 }
@@ -198,13 +230,55 @@ function appendToMultiMap<K, V>(map: Map<K, V[]>, key: K, val: V) {
   list.push(val);
 }
 
+/**
+ * Strips leading index and volume prefixes from a filename base:
+ * - "01 - The Eminence in Shadow" -> "The Eminence in Shadow"
+ * - "Vol. 1 - Overlord" -> "Overlord"
+ * - Keeps year-like titles intact (e.g. "1984 - George Orwell")
+ */
+export function stripLeadingIndexPrefix(baseName: string): string {
+  if (!baseName) return "";
+  const volStripped =
+    baseName.replace(/^vol(ume)?\.?\s*\d+(?:\.\d+)?\s*[-–—._]\s*/i, "").trim() || baseName;
+
+  const m = baseName.match(/^(\d+(?:\.\d+)?)\s*[-–—._]\s*/);
+  if (!m) return volStripped;
+
+  const num = Number.parseFloat(m[1]);
+  // Keep year-like titles intact (e.g. "1984 - George Orwell")
+  if (!Number.isNaN(num) && num >= 1900 && num <= 2100) {
+    return volStripped === baseName ? baseName : volStripped;
+  }
+
+  const digitStripped = baseName.replace(/^(\d+(?:\.\d+)?)\s*[-–—._]\s*/, "").trim();
+  return (
+    digitStripped
+      .replace(/^vol(ume)?\.?\s*\d+(?:\.\d+)?\s*[-–—._]\s*/i, "")
+      .replace(/^(\d+(?:\.\d+)?)\s*[-–—._]\s*/, "")
+      .trim() || baseName
+  );
+}
+
 export function createKindleBookEntry(filePath: string, size?: number): KindleIndexedBook {
   const ext = path.extname(filePath).toLowerCase();
   const filename = path.basename(filePath);
   const baseName = path.basename(filePath, ext).toLowerCase().trim();
+  const strippedBaseName = stripLeadingIndexPrefix(baseName);
   const normalizedTitle = normalizeTitleForDedup(baseName);
+  const strippedNormalizedTitle = normalizeTitleForDedup(strippedBaseName);
   const cleanQueryTitle = cleanQuery(baseName).toLowerCase().trim();
+  const strippedCleanQueryTitle = cleanQuery(strippedBaseName).toLowerCase().trim();
   const volumeNumber = extractVolumeNumber(filename) ?? extractVolumeNumber(baseName);
+
+  const leadingIndexMatch = baseName.match(/^(?:vol(?:ume)?\.?\s*)?0*(\d+(?:\.\d+)?)\s*[-–—._]\s*/i);
+  let leadingIndex: number | null = null;
+  if (leadingIndexMatch) {
+    const num = parseFloat(leadingIndexMatch[1]);
+    if (!isNaN(num) && (num < 1900 || num > 2100)) {
+      leadingIndex = num;
+    }
+  }
+
   const parentDir = path.basename(path.dirname(filePath)).toLowerCase().trim();
   const grandparentDir = path.basename(path.dirname(path.dirname(filePath))).toLowerCase().trim();
 
@@ -222,10 +296,14 @@ export function createKindleBookEntry(filePath: string, size?: number): KindleIn
     filename,
     ext,
     baseName,
+    strippedBaseName,
     size: statSize,
     normalizedTitle,
+    strippedNormalizedTitle,
     cleanQueryTitle,
+    strippedCleanQueryTitle,
     volumeNumber,
+    leadingIndex,
     parentDir,
     grandparentDir,
   };
@@ -236,7 +314,16 @@ export function addFileToKindleIndex(index: KindleBookIndex, filePath: string, s
   index.entries.push(item);
   appendToMultiMap(index.byFilename, item.filename.toLowerCase(), item);
   if (item.baseName) appendToMultiMap(index.byBaseName, item.baseName, item);
+  if (item.strippedBaseName && item.strippedBaseName !== item.baseName) {
+    appendToMultiMap(index.byBaseName, item.strippedBaseName, item);
+  }
   if (item.normalizedTitle) appendToMultiMap(index.byNormalizedTitle, item.normalizedTitle, item);
+  if (
+    item.strippedNormalizedTitle &&
+    item.strippedNormalizedTitle !== item.normalizedTitle
+  ) {
+    appendToMultiMap(index.byNormalizedTitle, item.strippedNormalizedTitle, item);
+  }
   // Only add cleanQueryTitle to index when there is no volume number to prevent cross-volume collisions
   if (
     item.cleanQueryTitle &&
@@ -244,6 +331,14 @@ export function addFileToKindleIndex(index: KindleBookIndex, filePath: string, s
     item.volumeNumber === null
   ) {
     appendToMultiMap(index.byCleanQuery, item.cleanQueryTitle, item);
+  }
+  if (
+    item.strippedCleanQueryTitle &&
+    item.strippedCleanQueryTitle !== item.cleanQueryTitle &&
+    item.strippedCleanQueryTitle !== item.strippedNormalizedTitle &&
+    item.volumeNumber === null
+  ) {
+    appendToMultiMap(index.byCleanQuery, item.strippedCleanQueryTitle, item);
   }
   if (item.size > 0) appendToMultiMap(index.bySize, item.size, item);
 }
@@ -366,6 +461,355 @@ export function sanitizeFat32Filename(name: string): string {
   const finalBase = boundedBase.replace(/[\s.]+$/, "").trim() || "document";
 
   return `${finalBase}${ext}`;
+}
+
+/**
+ * Normalizes author strings by ensuring consistent comma spacing:
+ * "Author,Artist" -> "Author, Artist"
+ * "Author , Artist" -> "Author, Artist"
+ */
+export function normalizeAuthorSpacing(author: string): string {
+  if (!author) return "";
+  return author.replace(/\s*,\s*/g, ", ").trim();
+}
+
+const SURNAME_PREFIXES = /^(?:le|de|van|von|mc|mac|di|da|del|della|la|du|st\.?|saint)\s+/i;
+
+function isSingleAuthorLastFirst(parts: string[]): boolean {
+  if (parts.length !== 2) return false;
+  const [last, first] = parts;
+  const lastWords = last.trim().split(/\s+/);
+  const firstWords = first.trim().split(/\s+/);
+
+  const isSurname = lastWords.length === 1 || (lastWords.length === 2 && SURNAME_PREFIXES.test(last));
+  if (!isSurname) return false;
+
+  return firstWords.length >= 1 && firstWords.length <= 4;
+}
+
+function isGivenNamePattern(str: string): boolean {
+  const words = str.trim().split(/\s+/);
+  if (words.length === 1) return true;
+  const isInitial = (w: string) => /^[A-Z](?:\.[A-Z])*\.?$/i.test(w) || /^[A-Z]{1,3}$/i.test(w);
+  if (words.length >= 2 && words.slice(1).every(isInitial)) return true;
+  return false;
+}
+
+/**
+ * Canonicalizes author names by merging consecutive single-letter initials
+ * (e.g. "George R.R. Martin", "George R. R. Martin", "George RR Martin" all become "george rr martin").
+ */
+export function canonicalizeAuthorName(name: string): string {
+  if (!name) return "";
+  const cleaned = name.toLowerCase().replace(/[\.\,\-_]/g, " ").replace(/\s+/g, " ").trim();
+  const words = cleaned.split(" ");
+  const result: string[] = [];
+
+  let lastWasInitial = false;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (w.length === 1 && result.length > 0 && lastWasInitial) {
+      result[result.length - 1] = (result.at(-1) ?? "") + w;
+    } else if (w.length === 1 && i + 1 < words.length && words[i + 1].length === 1) {
+      result.push(w);
+      lastWasInitial = true;
+    } else {
+      result.push(w);
+      lastWasInitial = false;
+    }
+  }
+  return result.join(" ");
+}
+
+/**
+ * Parse an author string into a list of individual author names:
+ * - Handles &, and, ;, /, | delimiters
+ * - Handles Calibre multi-author comma lists e.g. "Brandon Sanderson, Isaac Stewart"
+ * - Preserves single-author "Last, First" comma order e.g. "Sanderson, Brandon" -> "Brandon Sanderson"
+ * - Handles paired Last, First lists e.g. "Sanderson, Brandon, Stewart, Isaac"
+ */
+export function parseAuthorList(raw: string): string[] {
+  if (!raw) return [];
+  const s = raw
+    .replace(/[\(\[]\s*(?:author|artist|illustrator|writer|story|art|translator|editor)\s*[\)\]]/gi, " ")
+    .trim();
+  if (!s) return [];
+
+  // If contains explicit multi-author delimiters: &, and, ;, /, |
+  if (/(?:&|\band\b|;|\/|\|)/i.test(s)) {
+    const segments = s.split(/(?:\s*(?:&|\band\b|;|\/|\|)\s*)/i).map((x) => x.trim()).filter(Boolean);
+    const out: string[] = [];
+    for (const seg of segments) {
+      out.push(...parseAuthorList(seg));
+    }
+    return out;
+  }
+
+  // If contains comma
+  if (s.includes(",")) {
+    const commaParts = s.split(",").map((p) => p.trim()).filter(Boolean);
+    // Case A: Exactly 2 parts e.g. "Le Guin, Ursula K.", "Sanderson, Brandon", or "Doyle, Arthur Conan" -> single author in Last, First order
+    if (commaParts.length === 2) {
+      if (isSingleAuthorLastFirst(commaParts) || isGivenNamePattern(commaParts[1])) {
+        return [`${commaParts[1]} ${commaParts[0]}`];
+      }
+      return commaParts;
+    }
+    // Case B: Pairs of Last, First e.g. "Sanderson, Brandon, Stewart, Isaac"
+    if (commaParts.length % 2 === 0) {
+      const pairs: string[] = [];
+      for (let i = 0; i < commaParts.length; i += 2) {
+        if (isGivenNamePattern(commaParts[i + 1])) {
+          pairs.push(`${commaParts[i + 1]} ${commaParts[i]}`);
+        } else {
+          pairs.push(commaParts[i], commaParts[i + 1]);
+        }
+      }
+      return pairs;
+    }
+    return commaParts;
+  }
+
+  return [s];
+}
+
+/**
+ * Compares two author strings with token-boundary matching, word-order normalization,
+ * and multi-author list splitting.
+ */
+export function authorMatchesString(sourceStr: string, targetAuthor: string): boolean {
+  if (!sourceStr || !targetAuthor) return false;
+  const sList = parseAuthorList(sourceStr);
+  const tList = parseAuthorList(targetAuthor);
+  if (sList.length === 0 || tList.length === 0) return false;
+
+  for (const sA of sList) {
+    const sNorm = normalizeTitleForDedup(sA);
+    const sCanon = canonicalizeAuthorName(sA);
+    const sSorted = sNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
+    const sCanonSorted = sCanon.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
+    for (const tA of tList) {
+      const tNorm = normalizeTitleForDedup(tA);
+      const tCanon = canonicalizeAuthorName(tA);
+      const tSorted = tNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
+      const tCanonSorted = tCanon.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
+      if (
+        sNorm === tNorm ||
+        sSorted === tSorted ||
+        sCanon === tCanon ||
+        sCanonSorted === tCanonSorted
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+export interface KindleDestinationResolution {
+  authorDir: string;
+  seriesDir?: string;
+  targetDir: string;
+  relativeDir: string;
+  reusedExistingFolder: boolean;
+}
+
+/**
+ * Resolves the destination directory for a book on Kindle:
+ * 1. If subfolderByAuthor is true, normalizes author comma spacing.
+ * 2. Scans targetBooksRoot for existing directories. If an existing directory matches
+ *    the normalized author (e.g. 'Fuse, Mitz Vah' vs 'Fuse,Mitz Vah'), reuses that folder.
+ * 3. If book belongs to a series and a series subfolder exists inside the author folder,
+ *    places the book inside that existing series folder.
+ */
+export function resolveKindleDestinationDir(
+  targetBooksRoot: string,
+  rawAuthor: string,
+  series?: string | null,
+  subfolderByAuthor = true,
+): KindleDestinationResolution {
+  if (!subfolderByAuthor) {
+    return {
+      authorDir: "",
+      targetDir: targetBooksRoot,
+      relativeDir: "",
+      reusedExistingFolder: false,
+    };
+  }
+
+  const normAuthor = normalizeAuthorSpacing(rawAuthor || "Unknown");
+  const sanitizedDefaultAuthor = sanitizeFat32Filename(normAuthor);
+  let matchedAuthorDir = sanitizedDefaultAuthor;
+  let reusedAuthorFolder = false;
+
+  if (fs.existsSync(targetBooksRoot)) {
+    try {
+      const entries = fs.readdirSync(targetBooksRoot, { withFileTypes: true });
+      const parsedCandAuthors = parseAuthorList(normAuthor);
+      const primaryAuthor = parsedCandAuthors[0] || normAuthor;
+
+      for (const ent of entries) {
+        if (!ent.isDirectory() || ent.name.startsWith(".")) continue;
+        const existingDirName = ent.name;
+
+        // Comma-spacing normalized comparison
+        const normExisting = normalizeAuthorSpacing(existingDirName).toLowerCase();
+        const normTarget = normAuthor.toLowerCase();
+        if (normExisting === normTarget) {
+          matchedAuthorDir = existingDirName;
+          reusedAuthorFolder = true;
+          break;
+        }
+
+        // Punctuation-stripped dedup comparison
+        const dedupExisting = normalizeTitleForDedup(existingDirName);
+        const dedupTarget = normalizeTitleForDedup(normAuthor);
+        if (dedupExisting && dedupTarget && dedupExisting === dedupTarget) {
+          matchedAuthorDir = existingDirName;
+          reusedAuthorFolder = true;
+          break;
+        }
+
+        // Initials-canonicalized comparison (e.g. "George R.R. Martin" vs "Martin, George RR")
+        const canonExisting = canonicalizeAuthorName(existingDirName);
+        const canonTarget = canonicalizeAuthorName(normAuthor);
+        if (canonExisting && canonTarget && canonExisting === canonTarget) {
+          matchedAuthorDir = existingDirName;
+          reusedAuthorFolder = true;
+          break;
+        }
+
+        // Joint multi-author match (folder represents joint authors)
+        if (parsedCandAuthors.length > 1 && authorMatchesString(existingDirName, normAuthor)) {
+          const folderAuthors = parseAuthorList(existingDirName);
+          if (folderAuthors.length > 1) {
+            matchedAuthorDir = existingDirName;
+            reusedAuthorFolder = true;
+            break;
+          }
+        }
+
+        // Primary author matching (never match a secondary co-author to a single-author folder)
+        if (authorMatchesString(existingDirName, primaryAuthor)) {
+          matchedAuthorDir = existingDirName;
+          reusedAuthorFolder = true;
+          break;
+        }
+      }
+    } catch {
+      // Ignore directory scan errors
+    }
+  }
+
+  const authorFullPath = path.resolve(targetBooksRoot, matchedAuthorDir);
+
+  // Check if series subfolder exists inside the author folder
+  if (series && fs.existsSync(authorFullPath)) {
+    const cleanSeries = cleanSeriesTitle(series) || series.trim();
+    const normSeries = normalizeTitleForDedup(cleanSeries);
+    try {
+      const authorEntries = fs.readdirSync(authorFullPath, { withFileTypes: true });
+      for (const ent of authorEntries) {
+        if (!ent.isDirectory() || ent.name.startsWith(".")) continue;
+        const subDirName = ent.name;
+        const normSub = normalizeTitleForDedup(cleanSeriesTitle(subDirName) || subDirName);
+        if (normSub && normSeries && normSub === normSeries) {
+          return {
+            authorDir: matchedAuthorDir,
+            seriesDir: subDirName,
+            targetDir: path.resolve(authorFullPath, subDirName),
+            relativeDir: path.join(matchedAuthorDir, subDirName),
+            reusedExistingFolder: true,
+          };
+        }
+      }
+    } catch {
+      // Ignore subfolder scan errors
+    }
+  }
+
+  return {
+    authorDir: matchedAuthorDir,
+    targetDir: authorFullPath,
+    relativeDir: matchedAuthorDir,
+    reusedExistingFolder: reusedAuthorFolder,
+  };
+}
+
+/**
+ * Recursively cleans any macOS resource fork '._*' ghost files from directory.
+ */
+export function cleanDotFilesFallback(targetDir: string): number {
+  let cleanedCount = 0;
+  if (!fs.existsSync(targetDir)) return cleanedCount;
+
+  function walk(currentDir: string, depth = 0) {
+    if (depth > 10) return;
+    try {
+      const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+      for (const ent of entries) {
+        const full = path.join(currentDir, ent.name);
+        if (ent.isDirectory()) {
+          walk(full, depth + 1);
+        } else if (ent.isFile() && ent.name.startsWith("._")) {
+          try {
+            fs.unlinkSync(full);
+            cleanedCount++;
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+
+  walk(targetDir);
+  return cleanedCount;
+}
+
+/**
+ * Resolves the path to the macOS dot_clean binary.
+ * Checks /usr/sbin/dot_clean, /usr/bin/dot_clean, then falls back to "dot_clean".
+ */
+export function resolveDotCleanPath(): string {
+  if (process.env.LIGHTHOUSE_DOT_CLEAN_BIN) {
+    return process.env.LIGHTHOUSE_DOT_CLEAN_BIN;
+  }
+  if (fs.existsSync("/usr/sbin/dot_clean")) {
+    return "/usr/sbin/dot_clean";
+  }
+  if (fs.existsSync("/usr/bin/dot_clean")) {
+    return "/usr/bin/dot_clean";
+  }
+  return "dot_clean";
+}
+
+/**
+ * Executes macOS dot_clean -m on the target books directory to merge/delete
+ * ._* resource fork ghost files, preventing clutter on FAT32 Kindle storage.
+ */
+export function runDotClean(targetDir: string): { success: boolean; error?: string } {
+  if (!targetDir || !fs.existsSync(targetDir)) {
+    return { success: false, error: "Target directory does not exist" };
+  }
+
+  // Always run fallback unlinker first to guarantee zero ghost files
+  cleanDotFilesFallback(targetDir);
+
+  if (process.platform === "darwin") {
+    try {
+      const bin = resolveDotCleanPath();
+      spawnSync(bin, ["-m", targetDir], {
+        encoding: "utf8",
+        timeout: 15000,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      return { success: true };
+    } catch {
+      return { success: true };
+    }
+  }
+
+  return { success: true };
 }
 
 /**
@@ -525,6 +969,66 @@ export function getKindleDiskSpace(mountPath: string): { freeBytes: number; tota
 }
 
 /**
+ * Checks if a title is a generic chapter or section title that requires strict author verification.
+ */
+const ROMAN_NUMERALS =
+  /^(?:i|ii|iii|iv|v|vi|vii|viii|ix|x|xi|xii|xiii|xiv|xv|xvi|xvii|xviii|xix|xx|xxi|xxii|xxiii|xxiv|xxv|xxx|xl|l)$/i;
+const WORD_NUMBERS =
+  /^(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)$/i;
+
+export function isGenericSectionTitle(title: string): boolean {
+  if (!title) return false;
+  const s = title.trim();
+  if (/^(introduction|prologue|preface|epilogue|interlude|afterword|foreword|index|appendix|love|home)$/i.test(s)) {
+    return true;
+  }
+  const norm = normalizeTitleForDedup(s);
+  if (/^(introduction|prologue|preface|epilogue|interlude|afterword|foreword|index|appendix|love|home)$/i.test(norm)) {
+    return true;
+  }
+
+  const mRaw = s.match(/^(?:chapter|part|book|vol(?:ume)?)\s+(.+)$/i);
+  if (mRaw) {
+    const numPart = mRaw[1].trim();
+    if (/^\d+$/.test(numPart)) return true;
+    if (ROMAN_NUMERALS.test(numPart)) return true;
+    if (WORD_NUMBERS.test(numPart)) return true;
+  }
+
+  const mNorm = norm.match(/^(?:chapter|part|book|vol(?:ume)?)\s+(.+)$/i);
+  if (mNorm) {
+    const numPart = mNorm[1].trim();
+    if (/^\d+$/.test(numPart)) return true;
+    if (ROMAN_NUMERALS.test(numPart)) return true;
+    if (WORD_NUMBERS.test(numPart)) return true;
+  }
+  return false;
+}
+
+/**
+ * Checks if a directory name looks like an author folder (contains comma or starts with "author ").
+ */
+export function isLikelyAuthorFolderName(
+  folderName: string,
+  candSeries?: string | null,
+  candTitle?: string | null,
+): boolean {
+  if (!folderName) return false;
+  const lower = folderName.trim().toLowerCase();
+  if (/^(books|documents|downloads?|system|calibre|koreader)$/i.test(lower)) return false;
+  if (/^the\s+/i.test(lower)) return false;
+  if (candSeries && (lower === candSeries.toLowerCase() || lower.includes(candSeries.toLowerCase()))) {
+    return false;
+  }
+  if (candTitle && (lower === candTitle.toLowerCase() || lower.includes(candTitle.toLowerCase()))) {
+    return false;
+  }
+  if (lower.includes(",")) return true;
+  if (lower.startsWith("author ")) return true;
+  return false;
+}
+
+/**
  * Checks whether a book is already present on the Kindle across all directories and filename variants.
  * Checks pre-scanned index when available or queries the cached/scanned index.
  * Matches by exact path, exact filename, base filename (format-insensitive), normalized title,
@@ -557,16 +1061,33 @@ export function isBookAlreadyOnKindle(
           }
         } catch {}
       }
+
+      // Check resolved destination directory (scanning existing author/series folders)
+      const resolved = resolveKindleDestinationDir(baseDir, authorDir, bookDetails?.series);
+      if (resolved.targetDir !== path.join(baseDir, authorDir)) {
+        const resSubPath = path.join(resolved.targetDir, targetFilename);
+        if (fs.existsSync(resSubPath)) {
+          try {
+            const st = fs.statSync(resSubPath);
+            if (fileSize <= 0 || st.size === fileSize || Math.abs(st.size - fileSize) <= 4096) {
+              return { exists: true, existingPath: resSubPath, matchedBy: "direct_author_path" };
+            }
+          } catch {}
+        }
+      }
     }
 
     const flatPath = path.join(baseDir, targetFilename);
     if (fs.existsSync(flatPath)) {
-      try {
-        const st = fs.statSync(flatPath);
-        if (fileSize <= 0 || st.size === fileSize || Math.abs(st.size - fileSize) <= 4096) {
-          return { exists: true, existingPath: flatPath, matchedBy: "direct_flat_path" };
-        }
-      } catch {}
+      const isGeneric = isGenericSectionTitle(bookDetails?.title || targetBase);
+      if (!isGeneric || !authorDir) {
+        try {
+          const st = fs.statSync(flatPath);
+          if (fileSize <= 0 || st.size === fileSize || Math.abs(st.size - fileSize) <= 4096) {
+            return { exists: true, existingPath: flatPath, matchedBy: "direct_flat_path" };
+          }
+        } catch {}
+      }
     }
   }
 
@@ -593,17 +1114,99 @@ export function isBookAlreadyOnKindle(
       : null) ??
     extractVolumeNumber(targetBase);
 
+  const normTitle = normalizeTitleForDedup(rawTitle);
+  const cleanTitle = cleanQuery(rawTitle).toLowerCase().trim();
+  const strippedCandidateTitle = cleanSeriesTitle(rawTitle);
+  const normStrippedCandidate = strippedCandidateTitle ? normalizeTitleForDedup(strippedCandidateTitle) : "";
+  const cleanStrippedCandidate = strippedCandidateTitle ? cleanQuery(strippedCandidateTitle).toLowerCase().trim() : "";
+
+  const normalizedRawAuthor = normalizeAuthorSpacing(rawAuthor);
+  const normAuthor = normalizedRawAuthor ? normalizeTitleForDedup(normalizedRawAuthor) : "";
+  const cleanAuthor = normalizedRawAuthor ? cleanQuery(normalizedRawAuthor).toLowerCase().trim() : "";
+
+  function hasPositiveAuthorMatch(entry: KindleIndexedBook): boolean {
+    if (!normAuthor && !cleanAuthor) return false;
+
+    if (authorMatchesString(entry.parentDir, normalizedRawAuthor)) return true;
+    if (authorMatchesString(entry.grandparentDir, normalizedRawAuthor)) return true;
+
+    const authorCheckBase = entry.strippedBaseName || entry.baseName;
+    if (authorCheckBase.includes(" - ")) {
+      const parts = authorCheckBase.split(" - ");
+      if (parts.length > 1 && parts[1].trim()) {
+        const entryAuthor = parts[1].trim();
+        if (authorMatchesString(entryAuthor, normalizedRawAuthor)) return true;
+      }
+    }
+
+    return false;
+  }
+
+  function authorMatchesEntry(entry: KindleIndexedBook, options: { strict?: boolean } = {}): boolean {
+    if (!normAuthor && !cleanAuthor) return true;
+    if (hasPositiveAuthorMatch(entry)) return true;
+
+    // Check if entry has a hyphenated author in its filename that differs from candidate author
+    const authorCheckBase = entry.strippedBaseName || entry.baseName;
+    const parts = authorCheckBase.split(" - ");
+    if (parts.length > 1 && parts[1].trim()) {
+      const entryAuthor = parts[1].trim();
+      if (!authorMatchesString(entryAuthor, normalizedRawAuthor)) {
+        return false;
+      }
+    }
+
+    // Check if parent directory is a specific folder other than root books/documents or common genre shelves
+    const pDir = entry.parentDir.toLowerCase().trim();
+    const isRootOrGenre =
+      /^(books|documents|downloads?|system|calibre|koreader|ebooks?|light\s*novels?|novels?|manga|comics?|fiction|non-fiction|sci-fi|science\s*fiction|fantasy|classics?|audiobooks?|web\s*novels?|fanfiction|short\s*stories)$/i.test(
+        pDir,
+      );
+    if (!isRootOrGenre && normAuthor) {
+      const stripThe = (s: string) => s.replace(/^the\s+/i, "").trim();
+      const candSeriesNorm = bookDetails?.series ? normalizeTitleForDedup(bookDetails.series) : "";
+      const candSeriesBare = stripThe(candSeriesNorm);
+      const pDirNorm = normalizeTitleForDedup(pDir);
+      const pDirBare = stripThe(pDirNorm);
+
+      const isSeries =
+        Boolean(candSeriesBare) &&
+        Boolean(pDirBare) &&
+        (pDirNorm === candSeriesNorm || pDirBare === candSeriesBare);
+
+      if (!isSeries) {
+        const matchesAuthor =
+          authorMatchesString(entry.parentDir, normalizedRawAuthor) ||
+          authorMatchesString(entry.grandparentDir, normalizedRawAuthor);
+        if (!matchesAuthor) {
+          return false;
+        }
+      }
+    }
+
+    // For generic section titles or strict mode, require positive author match
+    if (isGenericSectionTitle(rawTitle) || (options.strict && isGenericSectionTitle(normTitle))) {
+      return false;
+    }
+
+    // Allow match if title is distinct and volume is verified compatible
+    return normTitle.length >= 5;
+  }
+
   function volumesCompatible(entry: KindleIndexedBook): boolean {
-    if (candVol !== null && entry.volumeNumber !== null) {
-      return candVol === entry.volumeNumber;
+    const entryVol = entry.volumeNumber ?? entry.leadingIndex ?? null;
+    if (candVol !== null && entryVol !== null) {
+      return candVol === entryVol;
     }
-    if (candVol !== null && entry.volumeNumber === null) {
-      // Candidate is an explicit volume; entry has no volume notation -> not compatible
+    if (candVol !== null && entryVol === null) {
+      // Candidate is an explicit volume; entry has no volume notation or leading index -> not compatible
       return false;
     }
-    if (candVol === null && entry.volumeNumber !== null) {
-      // Candidate has no volume; entry is a specific volume -> not compatible
-      return false;
+    if (candVol === null && entryVol !== null) {
+      // If entry has explicit volumeNumber (e.g. "Overlord Vol 1"), unnumbered candidate does not match
+      if (entry.volumeNumber !== null) return false;
+      // If entry only had a leading file index (e.g. "01 - Title.epub"), allow match for unnumbered candidate
+      return true;
     }
     return true;
   }
@@ -612,9 +1215,9 @@ export function isBookAlreadyOnKindle(
   const byName = idx.byFilename.get(targetNameLower);
   if (byName && byName.length > 0) {
     for (const entry of byName) {
-      if (volumesCompatible(entry)) {
-        return { exists: true, existingPath: entry.filePath, matchedBy: "exact_filename" };
-      }
+      if (!volumesCompatible(entry)) continue;
+      if (!authorMatchesEntry(entry)) continue;
+      return { exists: true, existingPath: entry.filePath, matchedBy: "exact_filename" };
     }
   }
 
@@ -623,6 +1226,15 @@ export function isBookAlreadyOnKindle(
     const byBase = idx.byBaseName.get(targetBase);
     if (byBase && byBase.length > 0) {
       for (const entry of byBase) {
+        const isStrippedMatch = entry.strippedBaseName === targetBase && entry.baseName !== targetBase;
+        const isGeneric = isGenericSectionTitle(rawTitle);
+        const requireStrict = isStrippedMatch || isGeneric;
+        if (requireStrict && !authorMatchesEntry(entry, { strict: true })) {
+          continue;
+        }
+        if (!requireStrict && !authorMatchesEntry(entry)) {
+          continue;
+        }
         if (volumesCompatible(entry)) {
           return { exists: true, existingPath: entry.filePath, matchedBy: "base_filename" };
         }
@@ -631,49 +1243,23 @@ export function isBookAlreadyOnKindle(
   }
 
   // Strategy C: Normalized title & clean query matching across nested subdirectories
-  const normTitle = normalizeTitleForDedup(rawTitle);
-  const cleanTitle = cleanQuery(rawTitle).toLowerCase().trim();
-  const normAuthor = rawAuthor ? normalizeTitleForDedup(rawAuthor) : "";
-  const cleanAuthor = rawAuthor ? cleanQuery(rawAuthor).toLowerCase().trim() : "";
-
-  function authorMatchesEntry(entry: KindleIndexedBook): boolean {
-    if (!normAuthor && !cleanAuthor) return true;
-    const pLower = entry.filePath.toLowerCase();
-    if (
-      cleanAuthor &&
-      (pLower.includes(cleanAuthor) ||
-        entry.parentDir.includes(cleanAuthor) ||
-        entry.grandparentDir.includes(cleanAuthor))
-    ) {
-      return true;
-    }
-    if (
-      normAuthor &&
-      (pLower.includes(normAuthor) ||
-        entry.parentDir.includes(normAuthor) ||
-        entry.grandparentDir.includes(normAuthor))
-    ) {
-      return true;
-    }
-    // If entry has a hyphenated author in its filename that differs from candidate author
-    if (entry.filename.includes(" - ")) {
-      const parts = entry.baseName.split(" - ");
-      if (parts.length > 1) {
-        const entryAuthor = parts[1].trim();
-        if (entryAuthor && !entryAuthor.includes(normAuthor) && !normAuthor.includes(entryAuthor)) {
-          return false;
-        }
-      }
-    }
-    // Allow match if title is distinct and volume is verified compatible
-    return normTitle.length >= 5;
+  const normTitlesToCheck = [normTitle];
+  if (normStrippedCandidate && normStrippedCandidate !== normTitle) {
+    normTitlesToCheck.push(normStrippedCandidate);
   }
 
-  if (normTitle) {
-    const byNorm = idx.byNormalizedTitle.get(normTitle);
+  for (const t of normTitlesToCheck) {
+    if (!t) continue;
+    const byNorm = idx.byNormalizedTitle.get(t);
     if (byNorm && byNorm.length > 0) {
       for (const entry of byNorm) {
-        if (authorMatchesEntry(entry) && volumesCompatible(entry)) {
+        const isStripped = entry.strippedNormalizedTitle === t && entry.normalizedTitle !== t;
+        const isGeneric = isGenericSectionTitle(rawTitle);
+        const requireStrict = isStripped || isGeneric;
+        const matchesAuthor = requireStrict
+          ? authorMatchesEntry(entry, { strict: true })
+          : authorMatchesEntry(entry);
+        if (matchesAuthor && volumesCompatible(entry)) {
           return { exists: true, existingPath: entry.filePath, matchedBy: "normalized_title" };
         }
       }
@@ -681,11 +1267,30 @@ export function isBookAlreadyOnKindle(
   }
 
   // Only check cleanTitle if the candidate has no volume notation
+  const cleanQueriesToCheck: string[] = [];
   if (candVol === null && cleanTitle && cleanTitle !== normTitle) {
-    const byClean = idx.byCleanQuery.get(cleanTitle);
+    cleanQueriesToCheck.push(cleanTitle);
+  }
+  if (
+    candVol === null &&
+    cleanStrippedCandidate &&
+    cleanStrippedCandidate !== normTitle &&
+    !cleanQueriesToCheck.includes(cleanStrippedCandidate)
+  ) {
+    cleanQueriesToCheck.push(cleanStrippedCandidate);
+  }
+
+  for (const cq of cleanQueriesToCheck) {
+    const byClean = idx.byCleanQuery.get(cq);
     if (byClean && byClean.length > 0) {
       for (const entry of byClean) {
-        if (authorMatchesEntry(entry) && volumesCompatible(entry)) {
+        const isStripped = entry.strippedCleanQueryTitle === cq && entry.cleanQueryTitle !== cq;
+        const isGeneric = isGenericSectionTitle(rawTitle);
+        const requireStrict = isStripped || isGeneric;
+        const matchesAuthor = requireStrict
+          ? authorMatchesEntry(entry, { strict: true })
+          : authorMatchesEntry(entry);
+        if (matchesAuthor && volumesCompatible(entry)) {
           return { exists: true, existingPath: entry.filePath, matchedBy: "clean_title" };
         }
       }
@@ -694,7 +1299,7 @@ export function isBookAlreadyOnKindle(
 
   // Strategy D: Compound Title + Author normalized
   if (normTitle && normAuthor) {
-    const compound = normalizeTitleForDedup(`${rawTitle} ${rawAuthor}`);
+    const compound = normalizeTitleForDedup(`${rawTitle} ${normalizedRawAuthor}`);
     const byCompound = idx.byNormalizedTitle.get(compound);
     if (byCompound && byCompound.length > 0) {
       for (const entry of byCompound) {
@@ -705,7 +1310,7 @@ export function isBookAlreadyOnKindle(
     }
 
     // Strategy E: Inverted Author + Title (e.g. "Brandon Sanderson - The Final Empire")
-    const inverted = normalizeTitleForDedup(`${rawAuthor} ${rawTitle}`);
+    const inverted = normalizeTitleForDedup(`${normalizedRawAuthor} ${rawTitle}`);
     const byInverted = idx.byNormalizedTitle.get(inverted);
     if (byInverted && byInverted.length > 0) {
       for (const entry of byInverted) {
@@ -723,9 +1328,16 @@ export function isBookAlreadyOnKindle(
   if (titleTokens.length >= 2) {
     for (const entry of idx.entries) {
       if (!volumesCompatible(entry)) continue;
-      const entryBase = entry.baseName;
-      const allTokensMatch = titleTokens.every((tok) => entryBase.includes(tok));
-      if (allTokensMatch && authorMatchesEntry(entry)) {
+      const baseForTokens = entry.strippedBaseName || entry.baseName;
+      // If filename has "Title - Author", only match title tokens against the title portion
+      const titlePortion = baseForTokens.includes(" - ")
+        ? baseForTokens.split(" - ")[0]
+        : baseForTokens;
+      const allTokensMatch = titleTokens.every((tok) => titlePortion.includes(tok));
+      const isStripped = entry.strippedNormalizedTitle === normTitle && entry.normalizedTitle !== normTitle;
+      const isGeneric = isGenericSectionTitle(rawTitle);
+      const requireStrict = isStripped || isGeneric;
+      if (allTokensMatch && authorMatchesEntry(entry, { strict: requireStrict })) {
         return { exists: true, existingPath: entry.filePath, matchedBy: "token_set" };
       }
     }
@@ -735,18 +1347,167 @@ export function isBookAlreadyOnKindle(
   if (fileSize > 0) {
     const bySizeEntries = idx.bySize.get(fileSize);
     if (bySizeEntries && bySizeEntries.length > 0) {
-      const checkWords = (normTitle + " " + normAuthor)
-        .split(/\s+/)
-        .filter((w) => w.length >= 4 && !/^(book|read|epub|mobi|file|part|vol|volume)$/.test(w));
-      // Must have at least one strong word to match on file size
-      if (checkWords.length > 0) {
-        for (const entry of bySizeEntries) {
-          if (!volumesCompatible(entry)) continue;
-          const pathLower = entry.filePath.toLowerCase();
-          if (checkWords.some((w) => pathLower.includes(w))) {
-            return { exists: true, existingPath: entry.filePath, matchedBy: "filesize_and_token" };
-          }
+      for (const entry of bySizeEntries) {
+        if (!volumesCompatible(entry)) continue;
+        if (!authorMatchesEntry(entry, { strict: true })) continue;
+        const baseForTokens = entry.strippedBaseName || entry.baseName;
+        const titlePortion = baseForTokens.includes(" - ") ? baseForTokens.split(" - ")[0] : baseForTokens;
+        const entryTokens = titlePortion
+          .split(/\s+/)
+          .map((w) => w.trim())
+          .filter((w) => w.length >= 3 && !/^(the|a|an|and|of|in|to|vol|volume|book|part)$/.test(w));
+        const checkWords = normTitle
+          .split(/\s+/)
+          .filter((w) => w.length >= 3 && !/^(the|a|an|and|of|in|to|vol|volume|book|part)$/.test(w));
+
+        const nonEditionCand = checkWords.filter((w) => !/^(edition|special|deluxe|anniversary|retail|official|epub)$/.test(w));
+        const nonEditionEntry = entryTokens.filter((w) => !/^(edition|special|deluxe|anniversary|retail|official|epub)$/.test(w));
+
+        // Require matching significant title token set (preventing subset overmatch like Dune vs Dune Messiah)
+        if (
+          nonEditionCand.length > 0 &&
+          nonEditionCand.length === nonEditionEntry.length &&
+          nonEditionCand.every((w) => nonEditionEntry.includes(w))
+        ) {
+          return { exists: true, existingPath: entry.filePath, matchedBy: "filesize_and_token" };
         }
+      }
+    }
+  }
+
+  return { exists: false };
+}
+
+/**
+ * Two-tier Kindle duplicate detection:
+ * - Tier 1: Fast Deterministic (<5ms, handles 99% of books)
+ * - Tier 2: Jev System-1 Ambiguity Arbitration:
+ *     When a book does not match in Tier 1, but has a partial title similarity
+ *     (between 0.65 and 0.88) with an existing book in the same author folder:
+ *     Calls classifyDuplicateWithJev using TYPESAFE_API_KEY / JEV_API_KEY.
+ *     If Jev returns duplicate with high confidence (>= 0.7), treats it as already on device.
+ *     Fails open gracefully if Jev is unreachable or offline.
+ */
+export async function isBookAlreadyOnKindleAsync(
+  mountPath: string,
+  targetFilename: string,
+  authorDir = "",
+  fileSize = 0,
+  index?: KindleBookIndex | null,
+  bookDetails?: BookMatchOptions,
+  options?: { jevApiKey?: string; timeoutMs?: number },
+): Promise<{ exists: boolean; existingPath?: string; matchedBy?: string }> {
+  // Tier 1: Fast Deterministic (<5ms)
+  const tier1 = isBookAlreadyOnKindle(
+    mountPath,
+    targetFilename,
+    authorDir,
+    fileSize,
+    index,
+    bookDetails,
+  );
+  if (tier1.exists) {
+    return tier1;
+  }
+
+  // Tier 2: Jev System-1 Ambiguity Arbitration
+  const idx = index || getOrCreateKindleBookIndex(mountPath);
+  let rawTitle = bookDetails?.title || "";
+  let rawAuthor = bookDetails?.authors || authorDir || "";
+
+  if (!rawTitle) {
+    const targetExt = path.extname(targetFilename).toLowerCase();
+    const targetBase = path.basename(targetFilename, targetExt).toLowerCase().trim();
+    if (targetBase.includes(" - ")) {
+      const parts = targetBase.split(" - ");
+      rawTitle = parts[0].trim();
+      if (!rawAuthor && parts.length > 1) {
+        rawAuthor = parts[1].trim();
+      }
+    } else {
+      rawTitle = targetBase;
+    }
+  }
+
+  const normalizedRawAuthor = normalizeAuthorSpacing(rawAuthor);
+  const normAuthor = normalizedRawAuthor ? normalizeTitleForDedup(normalizedRawAuthor) : "";
+  const normCandTitle = normalizeTitleForDedup(rawTitle);
+
+  if (!normCandTitle) return { exists: false };
+
+  const candVol =
+    extractVolumeNumber(rawTitle) ??
+    (bookDetails?.series && bookDetails?.seriesIndex !== null && bookDetails?.seriesIndex !== undefined
+      ? Number(bookDetails.seriesIndex)
+      : null);
+
+  let jevCallsMade = 0;
+  const MAX_JEV_CALLS_PER_BOOK = 3;
+
+  for (const entry of idx.entries) {
+    if (jevCallsMade >= MAX_JEV_CALLS_PER_BOOK) break;
+    // Check author match
+    const authorMatches =
+      !normAuthor ||
+      authorMatchesString(entry.parentDir, normalizedRawAuthor) ||
+      authorMatchesString(entry.grandparentDir, normalizedRawAuthor);
+
+    const authorCheckBase = entry.strippedBaseName || entry.baseName;
+    let filenameAuthorMatches = false;
+    if (authorCheckBase.includes(" - ")) {
+      const parts = authorCheckBase.split(" - ");
+      if (parts.length > 1 && parts[1].trim()) {
+        filenameAuthorMatches = authorMatchesString(parts[1].trim(), normalizedRawAuthor);
+      }
+    }
+
+    if (!authorMatches && !filenameAuthorMatches && normAuthor) continue;
+
+    // Check volume compatibility: distinct volumes are never duplicates
+    const entryVol = entry.volumeNumber ?? entry.leadingIndex ?? null;
+    if (candVol !== null && entryVol !== null && candVol !== entryVol) {
+      continue;
+    }
+
+    const normEntryTitle = entry.normalizedTitle || normalizeTitleForDedup(entry.baseName);
+    const normEntryStripped = entry.strippedNormalizedTitle || "";
+
+    const sim1 = stringSimilarity(normCandTitle, normEntryTitle);
+    const sim2 = normEntryStripped ? stringSimilarity(normCandTitle, normEntryStripped) : 0;
+    const maxSim = Math.max(sim1, sim2);
+
+    if (maxSim >= 0.65 && maxSim < 0.88) {
+      jevCallsMade++;
+      try {
+        const jevVerdict = await classifyDuplicateWithJev(
+          {
+            title: rawTitle,
+            authors: normalizedRawAuthor,
+            series: bookDetails?.series || undefined,
+            series_index: candVol !== null ? candVol : undefined,
+          },
+          {
+            title: entry.strippedBaseName || entry.baseName,
+            authors: normalizedRawAuthor,
+            series: (bookDetails?.series || undefined) as any,
+            series_index: (entryVol !== null ? entryVol : undefined) as any,
+          },
+          {
+            apiKey: options?.jevApiKey,
+            timeoutMs: options?.timeoutMs,
+          },
+        );
+
+        if (jevVerdict && jevVerdict.isDuplicate && jevVerdict.confidence >= 0.7) {
+          return {
+            exists: true,
+            existingPath: entry.filePath,
+            matchedBy: "jev_system_one",
+          };
+        }
+      } catch (jevErr) {
+        // Fail open gracefully on Jev network/timeout error
+        console.warn("[Kindle] Jev duplicate classification notice:", jevErr);
       }
     }
   }
@@ -1222,6 +1983,7 @@ export function previewKindleSync(
   const space = getKindleDiskSpace(mount);
   const index = getOrCreateKindleBookIndex(mount);
   const candidates = getAllKindleCandidates({ scope });
+  const booksRoot = resolveKindleBooksDir(mount, false);
 
   let alreadySyncedCount = 0;
   let pendingCount = 0;
@@ -1229,8 +1991,13 @@ export function previewKindleSync(
 
   for (const c of candidates) {
     if (!options.forceAll) {
-      const authorDir = sanitizeFat32Filename(c.authors || "Unknown");
-      const check = isBookAlreadyOnKindle(mount, c.targetFilename, authorDir, c.fileSize, index, c);
+      const destination = resolveKindleDestinationDir(
+        booksRoot,
+        c.authors || "Unknown",
+        c.series,
+        true,
+      );
+      const check = isBookAlreadyOnKindle(mount, c.targetFilename, destination.authorDir, c.fileSize, index, c);
       if (check.exists) {
         alreadySyncedCount++;
         continue;
@@ -1289,10 +2056,10 @@ export function safeCopyFileToKindle(srcPath: string, destPath: string): void {
 /**
  * Synchronize a single book to the connected Kindle.
  */
-export function syncSingleBookToKindle(
+export async function syncSingleBookToKindle(
   bookId: number,
   options: KindleSyncOptions = {},
-): SingleBookSyncResult {
+): Promise<SingleBookSyncResult> {
   if (activeKindleLock) {
     return {
       success: false,
@@ -1326,8 +2093,14 @@ export function syncSingleBookToKindle(
   }
 
   const subfolder = options.subfolderByAuthor !== false;
-  const authorDir = subfolder ? sanitizeFat32Filename(candidate.authors || "Unknown") : "";
-  const destPath = path.resolve(targetBooksRoot, authorDir, candidate.targetFilename);
+  const destination = resolveKindleDestinationDir(
+    targetBooksRoot,
+    candidate.authors || "Unknown",
+    candidate.series,
+    subfolder,
+  );
+  const destPath = path.resolve(destination.targetDir, candidate.targetFilename);
+  const authorDir = destination.authorDir;
 
   // Assert destination path containment
   if (!destPath.startsWith(targetBooksRoot + path.sep) && destPath !== targetBooksRoot) {
@@ -1341,7 +2114,7 @@ export function syncSingleBookToKindle(
 
   // Check if already synced across books/ or documents/
   if (!options.forceAll) {
-    const existing = isBookAlreadyOnKindle(
+    const existing = await isBookAlreadyOnKindleAsync(
       resolvedMount,
       candidate.targetFilename,
       authorDir,
@@ -1394,6 +2167,7 @@ export function syncSingleBookToKindle(
     };
   } finally {
     activeKindleLock = null;
+    runDotClean(targetBooksRoot);
   }
 }
 
@@ -1494,13 +2268,18 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
     let totalRequiredBytes = 0;
 
     for (const candidate of candidates) {
-      const authorDir = subfolder ? sanitizeFat32Filename(candidate.authors || "Unknown") : "";
+      const destination = resolveKindleDestinationDir(
+        targetBooksRoot,
+        candidate.authors || "Unknown",
+        candidate.series,
+        subfolder,
+      );
       let existsAndMatches = false;
       if (!options.forceAll) {
-        const existing = isBookAlreadyOnKindle(
+        const existing = await isBookAlreadyOnKindleAsync(
           resolvedMount,
           candidate.targetFilename,
-          authorDir,
+          destination.authorDir,
           candidate.fileSize,
           index,
           candidate,
@@ -1594,9 +2373,13 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
       }
 
       const candidate = pendingCandidates[i];
-      const authorDir = subfolder ? sanitizeFat32Filename(candidate.authors || "Unknown") : "";
-      const targetDir = authorDir ? path.resolve(targetBooksRoot, authorDir) : targetBooksRoot;
-      const destPath = path.resolve(targetDir, candidate.targetFilename);
+      const destination = resolveKindleDestinationDir(
+        targetBooksRoot,
+        candidate.authors || "Unknown",
+        candidate.series,
+        subfolder,
+      );
+      const destPath = path.resolve(destination.targetDir, candidate.targetFilename);
 
       // Assert path containment
       if (!destPath.startsWith(targetBooksRoot + path.sep) && destPath !== targetBooksRoot) {
@@ -1744,6 +2527,7 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
   } finally {
     activeKindleLock = null;
     cancelRequested = false;
+    runDotClean(targetBooksRoot);
     invalidateKindleBookIndex();
   }
 }
