@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import fs from "node:fs";
 import os from "node:os";
@@ -18,6 +18,8 @@ import {
   getKindleProgress,
   resetKindleProgressForTesting,
   invalidateKindleBookIndex,
+  tryAcquireKindleSyncLock,
+  releaseKindleSyncLock,
 } from "./kindle";
 
 describe("Calibre OPDS & Asset Reverse Proxy", () => {
@@ -1798,6 +1800,111 @@ exit 0
         invalidateKindleBookIndex();
         await fs.promises.rm(tempBaseDir, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe("Kindle Device Duplicate Hygiene Endpoint (POST /api/kindle/clean-device-duplicates)", () => {
+    let tempBaseDir: string;
+    let fakeVolumesDir: string;
+    let origVolumesDir: string | undefined;
+
+    beforeEach(() => {
+      tempBaseDir = fs.mkdtempSync(path.join(os.tmpdir(), "server-kindle-dedup-"));
+      fakeVolumesDir = path.join(tempBaseDir, "Volumes");
+      fs.mkdirSync(fakeVolumesDir, { recursive: true });
+      origVolumesDir = process.env.LIGHTHOUSE_VOLUMES_DIR;
+      process.env.LIGHTHOUSE_VOLUMES_DIR = fakeVolumesDir;
+      resetKindleProgressForTesting();
+      invalidateKindleBookIndex();
+      resetServerDependenciesForTest();
+    });
+
+    afterEach(async () => {
+      if (origVolumesDir !== undefined) process.env.LIGHTHOUSE_VOLUMES_DIR = origVolumesDir;
+      else delete process.env.LIGHTHOUSE_VOLUMES_DIR;
+      resetKindleProgressForTesting();
+      invalidateKindleBookIndex();
+      resetServerDependenciesForTest();
+      await fs.promises.rm(tempBaseDir, { recursive: true, force: true });
+    });
+
+    it("returns 404 when no Kindle device is mounted under /Volumes", async () => {
+      const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+      const req = new Request("http://127.0.0.1:8086/api/kindle/clean-device-duplicates", {
+        method: "POST",
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(404);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("No Kindle device detected");
+    });
+
+    it("returns 409 when Kindle sync is currently active", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      // Acquire sync lock to simulate active sync
+      expect(tryAcquireKindleSyncLock()).toBe(true);
+
+      try {
+        const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+        const req = new Request("http://127.0.0.1:8086/api/kindle/clean-device-duplicates", {
+          method: "POST",
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(409);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(false);
+        expect(data.error).toContain("Cannot clean duplicates while sync is active");
+      } finally {
+        releaseKindleSyncLock();
+      }
+    });
+
+    it("cleans duplicate files on Kindle and returns 200 with summary stats", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const burmeseDir = path.join(kindleMount, "books", "မြသန်းတင့်");
+      const oldDir = path.join(kindleMount, "books", "Mya Than Tint");
+      fs.mkdirSync(burmeseDir, { recursive: true });
+      fs.mkdirSync(oldDir, { recursive: true });
+
+      const canonicalPath = path.join(burmeseDir, "ပါရီကျဆုံးခန်း - မြသန်းတင့်.epub");
+      const duplicatePath = path.join(oldDir, "ပါရီကျဆုံးခန်း.epub");
+      fs.writeFileSync(canonicalPath, Buffer.alloc(100000, "c"));
+      fs.writeFileSync(duplicatePath, Buffer.alloc(100000, "d"));
+
+      const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+      const req = new Request("http://127.0.0.1:8086/api/kindle/clean-device-duplicates", {
+        method: "POST",
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(true);
+      expect(data.cleanedCount).toBe(1);
+      expect(data.bytesFreed).toBe(100000);
+      expect(data.message).toContain("Cleaned 1 duplicate file(s)");
+
+      // Verify filesystem state
+      expect(fs.existsSync(canonicalPath)).toBe(true);
+      expect(fs.existsSync(duplicatePath)).toBe(false);
+    });
+
+    it("Web UI in uploader/index.html defines duplicate warning banner, button, and handler", () => {
+      const indexPath = path.resolve(__dirname, "index.html");
+      const html = fs.readFileSync(indexPath, "utf8");
+
+      expect(html).toContain('id="kindleDuplicatesBanner"');
+      expect(html).toContain('id="kindleDuplicatesText"');
+      expect(html).toContain('id="kindleCleanDuplicatesBtn"');
+      expect(html).toContain("cleanKindleDuplicatesAction()");
+      expect(html).toContain("/api/kindle/clean-device-duplicates");
+      expect(html).toContain("deviceDuplicatesCount");
     });
   });
 });

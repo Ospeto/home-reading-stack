@@ -77,6 +77,10 @@ import {
   isBookAlreadyOnKindleAsync,
   detectKindleVolume,
   ejectKindleVolume,
+  scanKindleDeviceDuplicates,
+  cleanKindleDeviceDuplicates,
+  tryAcquireKindleSyncLock,
+  releaseKindleSyncLock,
 } from "../uploader/kindle";
 
 export {
@@ -96,6 +100,10 @@ export {
   isBookAlreadyOnKindleAsync,
   detectKindleVolume,
   ejectKindleVolume,
+  scanKindleDeviceDuplicates,
+  cleanKindleDeviceDuplicates,
+  tryAcquireKindleSyncLock,
+  releaseKindleSyncLock,
 };
 
 // ----------------------------------------------------------------------------
@@ -126,6 +134,7 @@ export interface KindleSyncOptions {
   eject?: boolean;
   verbose?: boolean;
   status?: boolean;
+  cleanDuplicates?: boolean;
 }
 
 export interface BookPushResult {
@@ -1406,6 +1415,7 @@ Options:
   --apply              Execute synchronization and write changes to disk (default is dry-run)
   --dry-run            Simulate transfer and highlight import without modifying disk
   --status             Inspect Kindle connection status and exit
+  --clean-duplicates   Scan and prune redundant duplicate book files (preview by default; pass --apply to prune)
   --force              Overwrite existing files on Kindle even if size matches
   --all                Push all library books instead of only active, reading, and unread books
   --mount <path>       Custom Kindle mount path (default: auto-detect under /Volumes/)
@@ -1439,6 +1449,8 @@ export function parseCliArgs(args: string[]): KindleSyncOptions {
       options.force = true;
     } else if (arg === "--status") {
       options.status = true;
+    } else if (arg === "--clean-duplicates") {
+      options.cleanDuplicates = true;
     } else if (arg === "--eject") {
       options.eject = true;
     } else if (arg === "--verbose") {
@@ -1470,6 +1482,52 @@ if ((import.meta as any).main) {
       console.log(`Target folder:   ${mount.booksDir}`);
       console.log(`Storage:         ${formatBytes(mount.freeBytes)} free of ${formatBytes(mount.totalBytes)}`);
       process.exit(0);
+    }
+  }
+
+  if (options.cleanDuplicates) {
+    const mount = detectKindleMount(options.mountPath);
+    if (!mount) {
+      console.log("No Kindle or e-Reader detected.");
+      process.exit(1);
+    } else {
+      console.log(`Scanning device duplicates on ${mount.name} (${mount.mountPath})...`);
+      const dupGroups = scanKindleDeviceDuplicates(mount.mountPath);
+      const dupCount = dupGroups.reduce((acc, g) => acc + g.duplicatePaths.length, 0);
+      const wastedBytes = dupGroups.reduce((acc, g) => acc + g.wastedBytes, 0);
+
+      if (dupCount === 0) {
+        console.log("✓ No duplicate books found on device. Storage is clean!");
+        process.exit(0);
+      }
+
+      console.log(`Found ${dupCount} duplicate file(s) across ${dupGroups.length} title(s) (${formatBytes(wastedBytes)} wasted).`);
+      for (const g of dupGroups) {
+        console.log(`\n  • ${g.title}:`);
+        console.log(`    Keep canonical: ${g.canonicalPath}`);
+        for (const d of g.duplicatePaths) {
+          console.log(`    Remove dup:     ${d}`);
+        }
+      }
+
+      if (!options.apply) {
+        console.log(`\nDRY RUN (Preview only): 0 files removed. Pass --apply to prune duplicates.`);
+        process.exit(0);
+      }
+
+      if (!tryAcquireKindleSyncLock()) {
+        console.error("Error: Cannot clean duplicates while another Kindle sync operation is active.");
+        process.exit(1);
+      }
+
+      try {
+        console.log(`\nPruning duplicate files from Kindle...`);
+        const res = cleanKindleDeviceDuplicates(mount.mountPath);
+        console.log(`✓ Cleaned ${res.cleanedCount} duplicate file(s) on Kindle (${formatBytes(res.bytesFreed)} freed).`);
+        process.exit(0);
+      } finally {
+        releaseKindleSyncLock();
+      }
     }
   }
 

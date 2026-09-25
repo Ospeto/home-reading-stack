@@ -34,6 +34,10 @@ import {
   releaseKindleSyncLock,
   getKindleProgress,
   resetKindleProgressForTesting,
+  scanKindleDeviceDuplicates,
+  cleanKindleDeviceDuplicates,
+  getKindleSyncStatus,
+  isCrossScriptAuthorMatch,
 } from "./kindle";
 import { handleRequest, resetServerDependenciesForTest } from "./server";
 
@@ -2320,6 +2324,1072 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       expect(status.progress?.phase).toBe("scanning");
 
       releaseKindleSyncLock();
+    });
+  });
+
+  describe("12. Cross-Script Burmese Dedup, File Size Signatures & Device Duplicate Hygiene", () => {
+    it("matches Burmese book title on Kindle even if author folder is in English transliteration (Cross-Script Exemption)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const myaThanTintDir = path.join(kindleMount, "books", "Mya Than Tint");
+      const minLuDir = path.join(kindleMount, "books", "Min Lu");
+      fs.mkdirSync(myaThanTintDir, { recursive: true });
+      fs.mkdirSync(minLuDir, { recursive: true });
+
+      // Older hand-copied books in Latin transliteration author folders
+      fs.writeFileSync(path.join(myaThanTintDir, "ပါရီကျဆုံးခန်း.epub"), "paris content", "utf8");
+      fs.writeFileSync(path.join(minLuDir, "ရိုးမပေါ်ကျတဲ့မျက်ရည်.epub"), "yoma content", "utf8");
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate 1: Calibre author is proper Myanmar Unicode 'မြသန်းတင့်'
+      const match1 = isBookAlreadyOnKindle(
+        kindleMount,
+        "ပါရီကျဆုံးခန်း - မြသန်းတင့်.epub",
+        "မြသန်းတင့်",
+        0,
+        index,
+        { title: "ပါရီကျဆုံးခန်း", authors: "မြသန်းတင့်" },
+      );
+      expect(match1.exists).toBe(true);
+      expect(match1.existingPath).toBe(path.join(myaThanTintDir, "ပါရီကျဆုံးခန်း.epub"));
+
+      // Candidate 2: Calibre author is proper Myanmar Unicode 'မင်းလူ'
+      const match2 = isBookAlreadyOnKindle(
+        kindleMount,
+        "ရိုးမပေါ်ကျတဲ့မျက်ရည် - မင်းလူ.epub",
+        "မင်းလူ",
+        0,
+        index,
+        { title: "ရိုးမပေါ်ကျတဲ့မျက်ရည်", authors: "မင်းလူ" },
+      );
+      expect(match2.exists).toBe(true);
+      expect(match2.existingPath).toBe(path.join(minLuDir, "ရိုးမပေါ်ကျတဲ့မျက်ရည်.epub"));
+    });
+
+    it("matches candidates against Kindle files with identical byte sizes (or within ±4KB) regardless of folder name", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const miscDir = path.join(kindleMount, "documents", "Misc");
+      fs.mkdirSync(miscDir, { recursive: true });
+
+      const sampleSize = 120500;
+      const fileBytes = Buffer.alloc(sampleSize, "x");
+      fs.writeFileSync(path.join(miscDir, "The Hobbit (Special Edition) - J.R.R. Tolkien.epub"), fileBytes);
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Match 1: Identical byte size in a completely different folder with edition variance
+      const match1 = isBookAlreadyOnKindle(
+        kindleMount,
+        "The Hobbit (Deluxe Edition) - J.R.R. Tolkien.epub",
+        "J.R.R. Tolkien",
+        sampleSize,
+        index,
+        { title: "The Hobbit (Deluxe Edition)", authors: "J.R.R. Tolkien" },
+      );
+      expect(match1.exists).toBe(true);
+      expect(match1.matchedBy).toBe("filesize_and_token");
+
+      // Match 2: Byte size within ±4KB (e.g. 1024 bytes difference due to zip timestamp)
+      const match2 = isBookAlreadyOnKindle(
+        kindleMount,
+        "The Hobbit (Deluxe Edition) - J.R.R. Tolkien.epub",
+        "J.R.R. Tolkien",
+        sampleSize + 1024,
+        index,
+        { title: "The Hobbit (Deluxe Edition)", authors: "J.R.R. Tolkien" },
+      );
+      expect(match2.exists).toBe(true);
+      expect(match2.matchedBy).toBe("filesize_and_token");
+
+      // Rejection: Volume mismatch must never match even if sizes are close
+      const matchVol2 = isBookAlreadyOnKindle(
+        kindleMount,
+        "The Hobbit Vol 2.epub",
+        "J.R.R. Tolkien",
+        sampleSize,
+        index,
+        { title: "The Hobbit Vol 2", authors: "J.R.R. Tolkien" },
+      );
+      expect(matchVol2.exists).toBe(false);
+    });
+
+    it("scanKindleDeviceDuplicates detects duplicate copies and picks the canonical version", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const burmeseDir = path.join(kindleMount, "books", "မြသန်းတင့်");
+      const latinDir = path.join(kindleMount, "books", "Mya Than Tint");
+      const docsDir = path.join(kindleMount, "documents");
+      fs.mkdirSync(burmeseDir, { recursive: true });
+      fs.mkdirSync(latinDir, { recursive: true });
+      fs.mkdirSync(docsDir, { recursive: true });
+
+      // Duplicate pair 1: Burmese book in proper Unicode folder vs older Latin folder
+      const canonicalBurmese = path.join(burmeseDir, "ပါရီကျဆုံးခန်း - မြသန်းတင့်.epub");
+      const duplicateBurmese = path.join(latinDir, "ပါရီကျဆုံးခန်း.epub");
+      fs.writeFileSync(canonicalBurmese, Buffer.alloc(100000, "b"));
+      fs.writeFileSync(duplicateBurmese, Buffer.alloc(100000, "b"));
+
+      // Duplicate pair 2: Flat document vs structured book
+      const canonicalHobbit = path.join(kindleMount, "books", "J.R.R. Tolkien", "The Hobbit - J.R.R. Tolkien.epub");
+      fs.mkdirSync(path.dirname(canonicalHobbit), { recursive: true });
+      const duplicateHobbit = path.join(docsDir, "The Hobbit.epub");
+      fs.writeFileSync(canonicalHobbit, Buffer.alloc(50000, "h"));
+      fs.writeFileSync(duplicateHobbit, Buffer.alloc(50000, "h"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      expect(dupGroups.length).toBe(2);
+
+      // Check Burmese group
+      const burmeseGroup = dupGroups.find((g) => g.title.includes("ပါရီကျဆုံးခန်း"));
+      expect(burmeseGroup).toBeDefined();
+      expect(burmeseGroup?.canonicalPath).toBe(canonicalBurmese);
+      expect(burmeseGroup?.duplicatePaths).toContain(duplicateBurmese);
+      expect(burmeseGroup?.wastedBytes).toBe(100000);
+
+      // Check Hobbit group
+      const hobbitGroup = dupGroups.find((g) => g.title.includes("The Hobbit"));
+      expect(hobbitGroup).toBeDefined();
+      expect(hobbitGroup?.canonicalPath).toBe(canonicalHobbit);
+      expect(hobbitGroup?.duplicatePaths).toContain(duplicateHobbit);
+      expect(hobbitGroup?.wastedBytes).toBe(50000);
+    });
+
+    it("cleanKindleDeviceDuplicates prunes duplicate files and cleans sidecars without touching canonical", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const burmeseDir = path.join(kindleMount, "books", "မြသန်းတင့်");
+      const oldDir = path.join(kindleMount, "books", "Old Mya Than Tint");
+      fs.mkdirSync(burmeseDir, { recursive: true });
+      fs.mkdirSync(oldDir, { recursive: true });
+
+      const canonicalPath = path.join(burmeseDir, "ပါရီကျဆုံးခန်း - မြသန်းတင့်.epub");
+      const dupPath = path.join(oldDir, "ပါရီကျဆုံးခန်း.epub");
+      const dupSdr = path.join(oldDir, "ပါရီကျဆုံးခန်း.sdr");
+
+      fs.writeFileSync(canonicalPath, Buffer.alloc(80000, "c"));
+      fs.writeFileSync(dupPath, Buffer.alloc(80000, "d"));
+      fs.mkdirSync(dupSdr, { recursive: true });
+      fs.writeFileSync(path.join(dupSdr, "metadata.lua"), "test lua", "utf8");
+
+      invalidateKindleBookIndex();
+      const res = cleanKindleDeviceDuplicates(kindleMount);
+
+      expect(res.cleanedCount).toBe(1);
+      expect(res.bytesFreed).toBe(80000);
+
+      // Canonical file must survive untouched
+      expect(fs.existsSync(canonicalPath)).toBe(true);
+      // Duplicate file must be removed
+      expect(fs.existsSync(dupPath)).toBe(false);
+      // Duplicate .sdr folder must be removed
+      expect(fs.existsSync(dupSdr)).toBe(false);
+      // Empty parent dir must be cleaned up
+      expect(fs.existsSync(oldDir)).toBe(false);
+    });
+
+    it("getKindleStatus and getKindleSyncStatus report deviceDuplicatesCount", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const dir1 = path.join(kindleMount, "books", "Author1");
+      const dir2 = path.join(kindleMount, "documents");
+      fs.mkdirSync(dir1, { recursive: true });
+      fs.mkdirSync(dir2, { recursive: true });
+
+      // Create duplicate files
+      fs.writeFileSync(path.join(dir1, "Duplicate Book.epub"), Buffer.alloc(20000, "1"));
+      fs.writeFileSync(path.join(dir2, "Duplicate Book.epub"), Buffer.alloc(20000, "1"));
+
+      invalidateKindleBookIndex();
+      const status = getKindleStatus(fakeVolumesDir);
+      expect(status.detected).toBe(true);
+      expect(status.deviceDuplicatesCount).toBe(1);
+
+      const syncStatus = getKindleSyncStatus(fakeVolumesDir);
+      expect(syncStatus.deviceDuplicatesCount).toBe(1);
+    });
+
+    it("NEVER clusters distinct books by different authors sharing a filename (e.g. Selected Poems by Sylvia Plath vs T.S. Eliot)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const plathDir = path.join(kindleMount, "books", "Sylvia Plath");
+      const eliotDir = path.join(kindleMount, "books", "T.S. Eliot");
+      fs.mkdirSync(plathDir, { recursive: true });
+      fs.mkdirSync(eliotDir, { recursive: true });
+
+      const plathBook = path.join(plathDir, "Selected Poems.epub");
+      const eliotBook = path.join(eliotDir, "Selected Poems.epub");
+
+      // Plath is 150KB, Eliot is 350KB (clearly distinct books)
+      fs.writeFileSync(plathBook, Buffer.alloc(150000, "p"));
+      fs.writeFileSync(eliotBook, Buffer.alloc(350000, "e"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Must NOT cluster these as duplicates!
+      expect(dupGroups.length).toBe(0);
+
+      // Verify cleanKindleDeviceDuplicates does not touch either file
+      const cleanRes = cleanKindleDeviceDuplicates(kindleMount);
+      expect(cleanRes.cleanedCount).toBe(0);
+      expect(fs.existsSync(plathBook)).toBe(true);
+      expect(fs.existsSync(eliotBook)).toBe(true);
+    });
+
+    it("prioritizes file with active .sdr reading progress folder when structure is comparable", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksAuthorDir = path.join(kindleMount, "books", "J.R.R. Tolkien");
+      const docsAuthorDir = path.join(kindleMount, "documents", "J.R.R. Tolkien");
+      fs.mkdirSync(booksAuthorDir, { recursive: true });
+      fs.mkdirSync(docsAuthorDir, { recursive: true });
+
+      const unreadPath = path.join(booksAuthorDir, "The Hobbit.epub");
+      const activePath = path.join(docsAuthorDir, "The Hobbit.epub");
+      const activeSdr = path.join(docsAuthorDir, "The Hobbit.sdr");
+
+      // Give activePath a slightly richer content size or .sdr
+      fs.writeFileSync(unreadPath, Buffer.alloc(60000, "u"));
+      fs.writeFileSync(activePath, Buffer.alloc(60000, "a"));
+      fs.mkdirSync(activeSdr, { recursive: true });
+      fs.writeFileSync(path.join(activeSdr, "metadata.epub.lua"), "reading progress 75%", "utf8");
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      expect(dupGroups.length).toBe(1);
+      // Both are in author folders; if one has .sdr sidecar, its highlights are preserved
+      expect(dupGroups[0].files.length).toBe(2);
+      expect(fs.existsSync(activeSdr)).toBe(true);
+    });
+
+    it("migrates .sdr progress to canonical file when cleaning a duplicate that has .sdr", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorDir = path.join(kindleMount, "books", "မြသန်းတင့်");
+      const oldDir = path.join(kindleMount, "books", "Mya Than Tint");
+      fs.mkdirSync(authorDir, { recursive: true });
+      fs.mkdirSync(oldDir, { recursive: true });
+
+      const canonicalPath = path.join(authorDir, "ပါရီကျဆုံးခန်း - မြသန်းတင့်.epub");
+      const dupPath = path.join(oldDir, "ပါရီကျဆုံးခန်း.epub");
+      const dupSdr = path.join(oldDir, "ပါရီကျဆုံးခန်း.sdr");
+      const canonicalSdr = path.join(authorDir, "ပါရီကျဆုံးခန်း - မြသန်းတင့်.sdr");
+
+      // Canonical has higher score (+100 books +60 subfolder +40 Unicode author +20 dash +15 epub = 235),
+      // but dup has .sdr sidecar with active highlights
+      fs.writeFileSync(canonicalPath, Buffer.alloc(80000, "c"));
+      fs.writeFileSync(dupPath, Buffer.alloc(80000, "d"));
+      fs.mkdirSync(dupSdr, { recursive: true });
+      fs.writeFileSync(path.join(dupSdr, "metadata.epub.lua"), "saved quotes", "utf8");
+
+      invalidateKindleBookIndex();
+      const cleanRes = cleanKindleDeviceDuplicates(kindleMount);
+
+      expect(cleanRes.cleanedCount).toBe(1);
+      expect(fs.existsSync(dupPath)).toBe(false);
+      expect(fs.existsSync(canonicalPath)).toBe(true);
+
+      // Canonical file must have the migrated .sdr sidecar
+      const hasProgressPreserved = fs.existsSync(`${canonicalPath}.sdr`) || fs.existsSync(canonicalSdr);
+      expect(hasProgressPreserved).toBe(true);
+      expect(fs.existsSync(dupSdr)).toBe(false);
+    });
+
+    it("migrates real KOReader *.epub.sdr sidecar to canonical *.epub.sdr upon cleaning duplicate", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const burmeseDir = path.join(kindleMount, "books", "မြသန်းတင့်");
+      const oldDir = path.join(kindleMount, "books", "Mya Than Tint");
+      fs.mkdirSync(burmeseDir, { recursive: true });
+      fs.mkdirSync(oldDir, { recursive: true });
+
+      const canonicalPath = path.join(burmeseDir, "ပါရီကျဆုံးခန်း - မြသန်းတင့်.epub");
+      const dupPath = path.join(oldDir, "ပါရီကျဆုံးခန်း.epub");
+      // Real KOReader sidecar format is <filename>.sdr
+      const dupEpubSdr = `${dupPath}.sdr`;
+      const canonicalEpubSdr = `${canonicalPath}.sdr`;
+
+      fs.writeFileSync(canonicalPath, Buffer.alloc(80000, "c"));
+      fs.writeFileSync(dupPath, Buffer.alloc(80000, "d"));
+      fs.mkdirSync(dupEpubSdr, { recursive: true });
+      fs.writeFileSync(path.join(dupEpubSdr, "metadata.epub.lua"), "koreader bookmarks", "utf8");
+
+      invalidateKindleBookIndex();
+      const cleanRes = cleanKindleDeviceDuplicates(kindleMount);
+
+      expect(cleanRes.cleanedCount).toBe(1);
+      expect(fs.existsSync(dupPath)).toBe(false);
+      expect(fs.existsSync(canonicalPath)).toBe(true);
+      // Canonical file must now have the migrated KOReader .sdr sidecar
+      expect(fs.existsSync(canonicalEpubSdr)).toBe(true);
+      expect(fs.readFileSync(path.join(canonicalEpubSdr, "metadata.epub.lua"), "utf8")).toBe("koreader bookmarks");
+      expect(fs.existsSync(dupEpubSdr)).toBe(false);
+    });
+
+    it("drains and cleans dual-format sidecars (both *.epub.sdr and *.sdr) without leaving orphan directories", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const burmeseDir = path.join(kindleMount, "books", "မြသန်းတင့်");
+      const oldDir = path.join(kindleMount, "books", "Mya Than Tint");
+      fs.mkdirSync(burmeseDir, { recursive: true });
+      fs.mkdirSync(oldDir, { recursive: true });
+
+      const canonicalPath = path.join(burmeseDir, "ပါရီကျဆုံးခန်း - မြသန်းတင့်.epub");
+      const dupPath = path.join(oldDir, "ပါရီကျဆုံးခန်း.epub");
+
+      // Duplicate has BOTH KOReader format (*.epub.sdr) and legacy format (*.sdr)
+      const dupEpubSdr = `${dupPath}.sdr`;
+      const dupBaseSdr = path.join(oldDir, "ပါရီကျဆုံးခန်း.sdr");
+
+      fs.writeFileSync(canonicalPath, Buffer.alloc(80000, "c"));
+      fs.writeFileSync(dupPath, Buffer.alloc(80000, "d"));
+      fs.mkdirSync(dupEpubSdr, { recursive: true });
+      fs.writeFileSync(path.join(dupEpubSdr, "metadata.epub.lua"), "koreader active progress", "utf8");
+      fs.mkdirSync(dupBaseSdr, { recursive: true });
+      fs.writeFileSync(path.join(dupBaseSdr, "legacy.lua"), "legacy notes", "utf8");
+
+      invalidateKindleBookIndex();
+      const cleanRes = cleanKindleDeviceDuplicates(kindleMount);
+
+      expect(cleanRes.cleanedCount).toBe(1);
+      expect(fs.existsSync(canonicalPath)).toBe(true);
+      expect(fs.existsSync(dupPath)).toBe(false);
+
+      // Preferred sidecar is migrated to canonical
+      expect(fs.existsSync(`${canonicalPath}.sdr`)).toBe(true);
+      expect(fs.readFileSync(path.join(`${canonicalPath}.sdr`, "metadata.epub.lua"), "utf8")).toBe("koreader active progress");
+
+      // BOTH duplicate sidecars must be completely cleaned up: NO orphans!
+      expect(fs.existsSync(dupEpubSdr)).toBe(false);
+      expect(fs.existsSync(dupBaseSdr)).toBe(false);
+
+      // Empty parent dir must be completely removed
+      expect(fs.existsSync(oldDir)).toBe(false);
+    });
+
+    it("NEVER matches distinct sequels / supersets like 'Dark Tower' against 'Dark Tower Gunslinger' in Strategy F or G", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const kingDir = path.join(kindleMount, "books", "Stephen King");
+      fs.mkdirSync(kingDir, { recursive: true });
+
+      const existingPath = path.join(kingDir, "The Dark Tower Gunslinger - Stephen King.epub");
+      fs.writeFileSync(existingPath, Buffer.alloc(200000, "g"));
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate is "The Dark Tower" (Vol 7 or standalone series title), candidate size within ±4KB
+      const match = isBookAlreadyOnKindle(
+        kindleMount,
+        "The Dark Tower - Stephen King.epub",
+        "Stephen King",
+        200500,
+        index,
+        { title: "The Dark Tower", authors: "Stephen King" },
+      );
+
+      // Must NOT match "The Dark Tower Gunslinger"!
+      expect(match.exists).toBe(false);
+    });
+
+    it("NEVER matches 3+ token subset variants (e.g. Complete Guide to Rust Programming vs Complete Guide to Rust Programming Advanced)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const rustDir = path.join(kindleMount, "books", "Tech Author");
+      fs.mkdirSync(rustDir, { recursive: true });
+
+      const existingPath = path.join(rustDir, "Complete Guide to Rust Programming - Tech Author.epub");
+      fs.writeFileSync(existingPath, Buffer.alloc(200000, "r"));
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate has an extra distinct title word ("Advanced"), size within ±4KB
+      const match1 = isBookAlreadyOnKindle(
+        kindleMount,
+        "Complete Guide to Rust Programming Advanced - Tech Author.epub",
+        "Tech Author",
+        200500,
+        index,
+        { title: "Complete Guide to Rust Programming Advanced", authors: "Tech Author" },
+      );
+      expect(match1.exists).toBe(false);
+
+      // Reverse case: candidate is a subset ("Complete Guide to Rust")
+      const match2 = isBookAlreadyOnKindle(
+        kindleMount,
+        "Complete Guide to Rust - Tech Author.epub",
+        "Tech Author",
+        200500,
+        index,
+        { title: "Complete Guide to Rust", authors: "Tech Author" },
+      );
+      expect(match2.exists).toBe(false);
+    });
+
+    it("clusters duplicate files even if one is in a staging or junk folder (e.g. books/Old vs books/Author)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorDir = path.join(kindleMount, "books", "J.R.R. Tolkien");
+      const oldDir = path.join(kindleMount, "books", "Old");
+      fs.mkdirSync(authorDir, { recursive: true });
+      fs.mkdirSync(oldDir, { recursive: true });
+
+      const canonicalPath = path.join(authorDir, "The Hobbit.epub");
+      const oldDupPath = path.join(oldDir, "The Hobbit.epub");
+
+      fs.writeFileSync(canonicalPath, Buffer.alloc(60000, "c"));
+      fs.writeFileSync(oldDupPath, Buffer.alloc(60000, "o"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      expect(dupGroups.length).toBe(1);
+      expect(dupGroups[0].canonicalPath).toBe(canonicalPath);
+      expect(dupGroups[0].duplicatePaths).toContain(oldDupPath);
+    });
+
+    it("does not false-positive on short Burmese substring titles in Strategy G", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorDir = path.join(kindleMount, "books", "Burmese Author");
+      fs.mkdirSync(authorDir, { recursive: true });
+
+      // Existing book is a longer Burmese title: "ရွှေမင်းသမီးလေး" (The Golden Princess)
+      const existingPath = path.join(authorDir, "ရွှေမင်းသမီးလေး.epub");
+      fs.writeFileSync(existingPath, Buffer.alloc(100000, "b"));
+
+      const index = buildKindleBookIndex(kindleMount);
+
+      // Candidate is a short single-word Burmese title: "ရွှေ" (Gold), length < 6
+      const match = isBookAlreadyOnKindle(
+        kindleMount,
+        "ရွှေ - Burmese Author.epub",
+        "Burmese Author",
+        100500,
+        index,
+        { title: "ရွှေ", authors: "Burmese Author" },
+      );
+
+      // Must NOT match the longer different book "ရွှေမင်းသမီးလေး"!
+      expect(match.exists).toBe(false);
+    });
+
+    it("replaces stale canonical sidecar when duplicate contains active KOReader reading progress", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books", "Author");
+      const oldDir = path.join(kindleMount, "books", "Old");
+      fs.mkdirSync(booksDir, { recursive: true });
+      fs.mkdirSync(oldDir, { recursive: true });
+
+      const canonicalPath = path.join(booksDir, "Book.epub");
+      const dupPath = path.join(oldDir, "Book.epub");
+
+      // Canonical has only a stale empty sidecar with no lua progress
+      const canonicalStaleSdr = path.join(booksDir, "Book.sdr");
+      fs.mkdirSync(canonicalStaleSdr, { recursive: true });
+      fs.writeFileSync(path.join(canonicalStaleSdr, "stale.txt"), "old notes", "utf8");
+
+      // Duplicate has authoritative KOReader .epub.sdr with active bookmarks
+      const dupRichSdr = `${dupPath}.sdr`;
+      fs.mkdirSync(dupRichSdr, { recursive: true });
+      fs.writeFileSync(path.join(dupRichSdr, "metadata.epub.lua"), "page=220 reading progress", "utf8");
+
+      fs.writeFileSync(canonicalPath, Buffer.alloc(50000, "c"));
+      fs.writeFileSync(dupPath, Buffer.alloc(50000, "d"));
+
+      invalidateKindleBookIndex();
+      const cleanRes = cleanKindleDeviceDuplicates(kindleMount);
+
+      expect(cleanRes.cleanedCount).toBe(1);
+      expect(fs.existsSync(dupPath)).toBe(false);
+      expect(fs.existsSync(canonicalPath)).toBe(true);
+
+      // Canonical file must now have the authoritative KOReader .sdr sidecar with page=220
+      const canonicalFullSdr = `${canonicalPath}.sdr`;
+      expect(fs.existsSync(canonicalFullSdr)).toBe(true);
+      expect(fs.readFileSync(path.join(canonicalFullSdr, "metadata.epub.lua"), "utf8")).toBe("page=220 reading progress");
+    });
+
+    it("migrates active legacy *.sdr progress to canonical even when duplicate also has an empty *.epub.sdr", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books", "Author");
+      const oldDir = path.join(kindleMount, "books", "Old");
+      fs.mkdirSync(booksDir, { recursive: true });
+      fs.mkdirSync(oldDir, { recursive: true });
+
+      const canonicalPath = path.join(booksDir, "The Final Empire - Author.epub");
+      const dupPath = path.join(oldDir, "The Final Empire.epub");
+
+      // Duplicate has an EMPTY *.epub.sdr and a RICH legacy *.sdr with metadata.lua
+      const dupEpubSdr = `${dupPath}.sdr`;
+      const dupBaseSdr = path.join(oldDir, "The Final Empire.sdr");
+      fs.mkdirSync(dupEpubSdr, { recursive: true });
+      fs.mkdirSync(dupBaseSdr, { recursive: true });
+      fs.writeFileSync(path.join(dupBaseSdr, "metadata.epub.lua"), "legacy active reading progress", "utf8");
+
+      fs.writeFileSync(canonicalPath, Buffer.alloc(50000, "c"));
+      fs.writeFileSync(dupPath, Buffer.alloc(50000, "d"));
+
+      invalidateKindleBookIndex();
+      const cleanRes = cleanKindleDeviceDuplicates(kindleMount);
+
+      expect(cleanRes.cleanedCount).toBe(1);
+      expect(fs.existsSync(dupPath)).toBe(false);
+      expect(fs.existsSync(canonicalPath)).toBe(true);
+
+      // Canonical file must have received the active reading progress sidecar
+      const canonicalFullSdr = `${canonicalPath}.sdr`;
+      expect(fs.existsSync(canonicalFullSdr)).toBe(true);
+      expect(fs.readFileSync(path.join(canonicalFullSdr, "metadata.epub.lua"), "utf8")).toBe("legacy active reading progress");
+
+      // No orphans left behind
+      expect(fs.existsSync(dupEpubSdr)).toBe(false);
+      expect(fs.existsSync(dupBaseSdr)).toBe(false);
+      expect(fs.existsSync(oldDir)).toBe(false);
+    });
+
+    it("NEVER clusters same-filename books in staging folders if file sizes differ significantly", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const oldDir = path.join(kindleMount, "books", "old");
+      const stagingDir = path.join(kindleMount, "books", "staging");
+      fs.mkdirSync(oldDir, { recursive: true });
+      fs.mkdirSync(stagingDir, { recursive: true });
+
+      // Two different editions/works sharing the title "The Odyssey" in staging folders (100KB vs 500KB)
+      const book1 = path.join(oldDir, "The Odyssey.epub");
+      const book2 = path.join(stagingDir, "The Odyssey.epub");
+
+      fs.writeFileSync(book1, Buffer.alloc(100000, "1"));
+      fs.writeFileSync(book2, Buffer.alloc(500000, "2"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Must NOT treat these as duplicates!
+      expect(dupGroups.length).toBe(0);
+    });
+
+    it("NEVER clusters generic section titles like Introduction across staging folders via filesize_and_token", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const oldDir = path.join(kindleMount, "books", "old");
+      const stagingDir = path.join(kindleMount, "books", "staging");
+      fs.mkdirSync(oldDir, { recursive: true });
+      fs.mkdirSync(stagingDir, { recursive: true });
+
+      const intro1 = path.join(oldDir, "Introduction.epub");
+      const intro2 = path.join(stagingDir, "Introduction.epub");
+
+      fs.writeFileSync(intro1, Buffer.alloc(4000, "i"));
+      fs.writeFileSync(intro2, Buffer.alloc(4000, "i"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Generic section titles without author corroboration must never cluster!
+      expect(dupGroups.length).toBe(0);
+    });
+
+    it("NEVER treats different format variants (.epub vs .mobi vs .azw3) as device duplicates to delete", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorDir = path.join(kindleMount, "books", "Author");
+      fs.mkdirSync(authorDir, { recursive: true });
+
+      // User has both EPUB (for KOReader) and MOBI (for native Kindle reader) of the same book
+      const epubPath = path.join(authorDir, "Dune.epub");
+      const mobiPath = path.join(authorDir, "Dune.mobi");
+
+      fs.writeFileSync(epubPath, Buffer.alloc(100000, "e"));
+      fs.writeFileSync(mobiPath, Buffer.alloc(100000, "m"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Format variants must NOT be grouped as duplicates or deleted!
+      expect(dupGroups.length).toBe(0);
+
+      const cleanRes = cleanKindleDeviceDuplicates(kindleMount);
+      expect(cleanRes.cleanedCount).toBe(0);
+      expect(fs.existsSync(epubPath)).toBe(true);
+      expect(fs.existsSync(mobiPath)).toBe(true);
+    });
+
+    it("NEVER clusters same-filename books under same author if file sizes differ significantly", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksTolkien = path.join(kindleMount, "books", "Tolkien");
+      const docsTolkien = path.join(kindleMount, "documents", "Tolkien");
+      fs.mkdirSync(booksTolkien, { recursive: true });
+      fs.mkdirSync(docsTolkien, { recursive: true });
+
+      // Same author folder, same filename, but 100KB sample vs 900KB full book
+      const sample = path.join(booksTolkien, "The Hobbit.epub");
+      const full = path.join(docsTolkien, "The Hobbit.epub");
+
+      fs.writeFileSync(sample, Buffer.alloc(100000, "s"));
+      fs.writeFileSync(full, Buffer.alloc(900000, "f"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Large size delta must prevent false-positive duplicate clustering
+      expect(dupGroups.length).toBe(0);
+    });
+
+    it("NEVER clusters same Burmese title when file sizes differ significantly (e.g. 100KB sample vs 900KB full book)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const burmeseDir = path.join(kindleMount, "books", "မြသန်းတင့်");
+      const latinDir = path.join(kindleMount, "books", "Mya Than Tint");
+      fs.mkdirSync(burmeseDir, { recursive: true });
+      fs.mkdirSync(latinDir, { recursive: true });
+
+      // Same Burmese title across different author folders, but 100KB sample vs 900KB full book
+      const sample = path.join(burmeseDir, "ပါရီကျဆုံးခန်း.epub");
+      const full = path.join(latinDir, "ပါရီကျဆုံးခန်း.epub");
+
+      fs.writeFileSync(sample, Buffer.alloc(100000, "s"));
+      fs.writeFileSync(full, Buffer.alloc(900000, "f"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Large size delta must prevent clustering different sample/full works!
+      expect(dupGroups.length).toBe(0);
+    });
+
+    it("NEVER clusters distinct Latin books when author segment has Burmese characters (e.g. Dune - Mya Than Tint vs Dune - Frank Herbert)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const burmeseAuthorDir = path.join(kindleMount, "books", "မြသန်းတင့်");
+      const herbertDir = path.join(kindleMount, "books", "Frank Herbert");
+      fs.mkdirSync(burmeseAuthorDir, { recursive: true });
+      fs.mkdirSync(herbertDir, { recursive: true });
+
+      // Latin title "Dune", but one file has Burmese translator in author segment of filename
+      const translatorBook = path.join(burmeseAuthorDir, "Dune - မြသန်းတင့်.epub");
+      const herbertBook = path.join(herbertDir, "Dune.epub");
+
+      fs.writeFileSync(translatorBook, Buffer.alloc(120000, "t"));
+      fs.writeFileSync(herbertBook, Buffer.alloc(120000, "h"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Must NOT cluster because title "Dune" is Latin and authors conflict!
+      expect(dupGroups.length).toBe(0);
+
+      // Verify upload candidate Frank Herbert / Dune does NOT match Dune - မြသန်းတင့်.epub
+      const index = buildKindleBookIndex(kindleMount);
+      const matchUpload = isBookAlreadyOnKindle(
+        kindleMount,
+        "Dune - Frank Herbert.epub",
+        "Frank Herbert",
+        120000,
+        index,
+        { title: "Dune", authors: "Frank Herbert" },
+      );
+      expect(matchUpload.existingPath).toBe(herbertBook);
+
+      // And candidate Dune - မြသန်းတင့် does NOT match Frank Herbert's book
+      const matchBurmese = isBookAlreadyOnKindle(
+        kindleMount,
+        "Dune - မြသန်းတင့်.epub",
+        "မြသန်းတင့်",
+        120000,
+        index,
+        { title: "Dune", authors: "မြသန်းတင့်" },
+      );
+      expect(matchBurmese.existingPath).toBe(translatorBook);
+    });
+
+    it("NEVER clusters same Burmese title when authors are different Latin names (e.g. books/AuthorA/ပါရီကျဆုံးခန်း.epub vs books/AuthorB/ပါရီကျဆုံးခန်း.epub)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const authorADir = path.join(kindleMount, "books", "AuthorA");
+      const authorBDir = path.join(kindleMount, "books", "AuthorB");
+      fs.mkdirSync(authorADir, { recursive: true });
+      fs.mkdirSync(authorBDir, { recursive: true });
+
+      const bookA = path.join(authorADir, "ပါရီကျဆုံးခန်း.epub");
+      const bookB = path.join(authorBDir, "ပါရီကျဆုံးခန်း.epub");
+
+      // Same Burmese title, same size, but different Latin authors
+      fs.writeFileSync(bookA, Buffer.alloc(100000, "a"));
+      fs.writeFileSync(bookB, Buffer.alloc(100000, "b"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Conflicting authors in same script must NEVER cluster as duplicates!
+      expect(dupGroups.length).toBe(0);
+
+      // Verify upload candidate for AuthorA does NOT match AuthorB's book
+      const index = buildKindleBookIndex(kindleMount);
+      const matchCandidate = isBookAlreadyOnKindle(
+        kindleMount,
+        "ပါရီကျဆုံးခန်း.epub",
+        "DifferentAuthor",
+        100000,
+        index,
+        { title: "ပါရီကျဆုံးခန်း", authors: "DifferentAuthor" },
+      );
+      expect(matchCandidate.exists).toBe(false);
+    });
+
+    it("clusters same Burmese title when one author is Myanmar and the other is Latin transliteration (e.g. မြသန်းတင့် vs Mya Than Tint)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const myanmarDir = path.join(kindleMount, "books", "မြသန်းတင့်");
+      const latinDir = path.join(kindleMount, "books", "Mya Than Tint");
+      fs.mkdirSync(myanmarDir, { recursive: true });
+      fs.mkdirSync(latinDir, { recursive: true });
+
+      const bookMyanmar = path.join(myanmarDir, "ပါရီကျဆုံးခန်း.epub");
+      const bookLatin = path.join(latinDir, "ပါရီကျဆုံးခန်း.epub");
+
+      fs.writeFileSync(bookMyanmar, Buffer.alloc(100000, "m"));
+      fs.writeFileSync(bookLatin, Buffer.alloc(100000, "l"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Cross-script author match allows clustering the same Burmese book!
+      expect(dupGroups.length).toBe(1);
+    });
+
+    it("NEVER clusters same Burmese title when authors are different persons even across scripts (e.g. မြသန်းတင့် vs Min Lu or Maung Win)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const myaThanTintDir = path.join(kindleMount, "books", "မြသန်းတင့်");
+      const minLuDir = path.join(kindleMount, "books", "Min Lu");
+      const maungWinDir = path.join(kindleMount, "books", "Maung Win");
+      fs.mkdirSync(myaThanTintDir, { recursive: true });
+      fs.mkdirSync(minLuDir, { recursive: true });
+      fs.mkdirSync(maungWinDir, { recursive: true });
+
+      const bookMya = path.join(myaThanTintDir, "ပါရီကျဆုံးခန်း.epub");
+      const bookMin = path.join(minLuDir, "ပါရီကျဆုံးခန်း.epub");
+      const bookMaung = path.join(maungWinDir, "ပါရီကျဆုံးခန်း.epub");
+
+      // Same Burmese title and identical file size, but distinct real authors!
+      fs.writeFileSync(bookMya, Buffer.alloc(100000, "m"));
+      fs.writeFileSync(bookMin, Buffer.alloc(100000, "l"));
+      fs.writeFileSync(bookMaung, Buffer.alloc(100000, "w"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Must NOT cluster any of these together!
+      expect(dupGroups.length).toBe(0);
+
+      // Clean must leave all three files completely intact!
+      cleanKindleDeviceDuplicates(kindleMount);
+      expect(fs.existsSync(bookMya)).toBe(true);
+      expect(fs.existsSync(bookMin)).toBe(true);
+      expect(fs.existsSync(bookMaung)).toBe(true);
+
+      // Upload candidate with author မြသန်းတင့် must NOT match Min Lu or Maung Win on device
+      const index = buildKindleBookIndex(kindleMount);
+      const matchWrong = isBookAlreadyOnKindle(
+        kindleMount,
+        "ပါရီကျဆုံးခန်း.epub",
+        "မင်းလူ",
+        100000,
+        index,
+        { title: "ပါရီကျဆုံးခန်း", authors: "မင်းလူ" },
+      );
+      // It must strictly match Min Lu on device, NEVER မြသန်းတင့် or Maung Win
+      expect(matchWrong.existingPath).toBe(bookMin);
+
+      // Upload candidate with an unrelated author must NOT match any of them
+      const matchUnrelated = isBookAlreadyOnKindle(
+        kindleMount,
+        "ပါရီကျဆုံးခန်း.epub",
+        "ချစ်ဦးညို",
+        100000,
+        index,
+        { title: "ပါရီကျဆုံးခန်း", authors: "ချစ်ဦးညို" },
+      );
+      expect(matchUnrelated.exists).toBe(false);
+    });
+
+    it("NEVER clusters near-substring Latin authors against Myanmar authors (e.g. Min Luang or Min Lua vs မင်းလူ, Mya Than Tinting vs မြသန်းတင့်)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const minLuDir = path.join(kindleMount, "books", "မင်းလူ");
+      const minLuangDir = path.join(kindleMount, "books", "Min Luang");
+      fs.mkdirSync(minLuDir, { recursive: true });
+      fs.mkdirSync(minLuangDir, { recursive: true });
+
+      const bookMinLu = path.join(minLuDir, "ဝတ္ထု.epub");
+      const bookMinLuang = path.join(minLuangDir, "ဝတ္ထု.epub");
+
+      fs.writeFileSync(bookMinLu, Buffer.alloc(100000, "1"));
+      fs.writeFileSync(bookMinLuang, Buffer.alloc(100000, "2"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Substring names like Min Luang must NEVER match မင်းလူ!
+      expect(dupGroups.length).toBe(0);
+
+      // Upload candidate Min Luang must NOT match မင်းလူ on device
+      const index = buildKindleBookIndex(kindleMount);
+      const matchUpload = isBookAlreadyOnKindle(
+        kindleMount,
+        "ဝတ္ထု.epub",
+        "Min Luang",
+        100000,
+        index,
+        { title: "ဝတ္ထု", authors: "Min Luang" },
+      );
+      expect(matchUpload.existingPath).toBe(bookMinLuang);
+
+      // Near-substrings like Min Lua and Mya Than Tinting must NOT match
+      const matchMinLua = isBookAlreadyOnKindle(
+        kindleMount,
+        "ဝတ္ထု.epub",
+        "Min Lua",
+        100000,
+        index,
+        { title: "ဝတ္ထု", authors: "Min Lua" },
+      );
+      expect(matchMinLua.exists).toBe(false);
+
+      const matchMyaTinting = isBookAlreadyOnKindle(
+        kindleMount,
+        "ဝတ္ထု.epub",
+        "Mya Than Tinting",
+        100000,
+        index,
+        { title: "ဝတ္ထု", authors: "Mya Than Tinting" },
+      );
+      expect(matchMyaTinting.exists).toBe(false);
+
+      // Fragment author "လူ" must NOT match မင်းလူ
+      const matchFragment = isBookAlreadyOnKindle(
+        kindleMount,
+        "ဝတ္ထု.epub",
+        "လူ",
+        100000,
+        index,
+        { title: "ဝတ္ထု", authors: "လူ" },
+      );
+      expect(matchFragment.exists).toBe(false);
+    });
+
+    it("clusters Latin-to-Latin transliteration variants of the same Burmese author (e.g. Mya Than Tint vs Myathan Tint, Min Lu vs minlu)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const dirSpaced = path.join(kindleMount, "books", "Mya Than Tint");
+      const dirCompact = path.join(kindleMount, "books", "Myathan Tint");
+      fs.mkdirSync(dirSpaced, { recursive: true });
+      fs.mkdirSync(dirCompact, { recursive: true });
+
+      const book1 = path.join(dirSpaced, "ပါရီကျဆုံးခန်း.epub");
+      const book2 = path.join(dirCompact, "ပါရီကျဆုံးခန်း.epub");
+
+      fs.writeFileSync(book1, Buffer.alloc(100000, "1"));
+      fs.writeFileSync(book2, Buffer.alloc(100000, "2"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Both Latin variants resolve to canonical Burmese key မြသန်းတင့် and cluster as duplicates!
+      expect(dupGroups.length).toBe(1);
+
+      // Upload candidate with compact Latin spelling matches on device
+      const index = buildKindleBookIndex(kindleMount);
+      const matchUpload = isBookAlreadyOnKindle(
+        kindleMount,
+        "ပါရီကျဆုံးခန်း.epub",
+        "Myathan Tint",
+        100000,
+        index,
+        { title: "ပါရီကျဆုံးခန်း", authors: "Myathan Tint" },
+      );
+      expect(matchUpload.exists).toBe(true);
+    });
+
+    it("unifies dual Myanmar Unicode spellings under one canonical identity (e.g. ချစ်ဦးညို U+1026 vs ချစ်ဦးညို U+1025+U+102E ↔ Chit Oo Nyo)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      // Two folders with different Myanmar Unicode codepoints for the same name across books/ and documents/
+      const spellingADir = path.join(kindleMount, "books", "ချစ်ဦးညို"); // U+1026
+      const spellingBDir = path.join(kindleMount, "documents", "ချစ်ဦးညို"); // U+1025 + U+102E
+      fs.mkdirSync(spellingADir, { recursive: true });
+      fs.mkdirSync(spellingBDir, { recursive: true });
+
+      const bookA = path.join(spellingADir, "လင်္ကာဒီပချစ်သူ.epub");
+      const bookB = path.join(spellingBDir, "လင်္ကာဒီပချစ်သူ.epub");
+
+      fs.writeFileSync(bookA, Buffer.alloc(100000, "a"));
+      fs.writeFileSync(bookB, Buffer.alloc(100000, "b"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Both dual-spelling Myanmar folders must unify and cluster as duplicates!
+      expect(dupGroups.length).toBe(1);
+
+      // Upload candidate with Latin transliteration Chit Oo Nyo matches either spelling on device
+      const index = buildKindleBookIndex(kindleMount);
+      const matchUpload = isBookAlreadyOnKindle(
+        kindleMount,
+        "လင်္ကာဒီပချစ်သူ.epub",
+        "Chit Oo Nyo",
+        100000,
+        index,
+        { title: "လင်္ကာဒီပချစ်သူ", authors: "Chit Oo Nyo" },
+      );
+      expect(matchUpload.exists).toBe(true);
+    });
+
+    it("NEVER clusters over-broad short aliases against distinct people (e.g. Phone Naing vs Tekatho Phone Naing)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const tekathoDir = path.join(kindleMount, "books", "တက္ကသိုလ်ဘုန်းနိုင်");
+      const phoneNaingDir = path.join(kindleMount, "books", "Phone Naing");
+      fs.mkdirSync(tekathoDir, { recursive: true });
+      fs.mkdirSync(phoneNaingDir, { recursive: true });
+
+      const book1 = path.join(tekathoDir, "ဝတ္ထု.epub");
+      const book2 = path.join(phoneNaingDir, "ဝတ္ထု.epub");
+
+      fs.writeFileSync(book1, Buffer.alloc(100000, "1"));
+      fs.writeFileSync(book2, Buffer.alloc(100000, "2"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Bare short alias Phone Naing must NOT cluster with full author တက္ကသိုလ်ဘုန်းနိုင်!
+      expect(dupGroups.length).toBe(0);
+
+      // Only full unambiguous name Tekatho Phone Naing matches
+      const index = buildKindleBookIndex(kindleMount);
+      const matchFull = isBookAlreadyOnKindle(
+        kindleMount,
+        "ဝတ္ထု.epub",
+        "Tekatho Phone Naing",
+        100000,
+        index,
+        { title: "ဝတ္ထု", authors: "Tekatho Phone Naing" },
+      );
+      expect(matchFull.existingPath).toBe(book1);
+    });
+
+    it("NEVER clusters distinct authors flat under books/ (e.g. books/Dune - Frank Herbert.epub vs books/Dune - Mya Than Tint.epub)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      fs.mkdirSync(booksDir, { recursive: true });
+
+      const file1 = path.join(booksDir, "Dune - Frank Herbert.epub");
+      const file2 = path.join(booksDir, "Dune - မြသန်းတင့်.epub");
+
+      fs.writeFileSync(file1, Buffer.alloc(120000, "1"));
+      fs.writeFileSync(file2, Buffer.alloc(120000, "2"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Filename author conflict guard must prevent clustering flat books!
+      expect(dupGroups.length).toBe(0);
+    });
+
+    it("NEVER transitively merges conflicting authors via loose documents/ copy (e.g. Plath vs Eliot via documents/Selected Poems.epub)", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const plathDir = path.join(kindleMount, "books", "Sylvia Plath");
+      const eliotDir = path.join(kindleMount, "books", "T.S. Eliot");
+      const docsDir = path.join(kindleMount, "documents");
+      fs.mkdirSync(plathDir, { recursive: true });
+      fs.mkdirSync(eliotDir, { recursive: true });
+      fs.mkdirSync(docsDir, { recursive: true });
+
+      const plathBook = path.join(plathDir, "Selected Poems.epub");
+      const eliotBook = path.join(eliotDir, "Selected Poems.epub");
+      const looseBook = path.join(docsDir, "Selected Poems.epub");
+
+      // All three files are identical in byte size (150KB)
+      fs.writeFileSync(plathBook, Buffer.alloc(150000, "p"));
+      fs.writeFileSync(eliotBook, Buffer.alloc(150000, "e"));
+      fs.writeFileSync(looseBook, Buffer.alloc(150000, "l"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+
+      // Plath and Eliot must NEVER be in the same duplicate group!
+      for (const g of dupGroups) {
+        const containsPlath = g.files.some((f) => f.filePath === plathBook);
+        const containsEliot = g.files.some((f) => f.filePath === eliotBook);
+        expect(containsPlath && containsEliot).toBe(false);
+      }
+
+      // Execute cleanKindleDeviceDuplicates
+      cleanKindleDeviceDuplicates(kindleMount);
+
+      // BOTH author copies must survive: Eliot's book must NEVER be deleted!
+      expect(fs.existsSync(plathBook)).toBe(true);
+      expect(fs.existsSync(eliotBook)).toBe(true);
+    });
+
+    it("unifies unmapped dual-spelling Myanmar authors (e.g. ဦးသုခ vs ဦးသုခ) and ZWSP formatting (မောင်\\u200Bထွန်း vs မောင်ထွန်း)", () => {
+      // 1. Unmapped dual-spelling author
+      expect(isCrossScriptAuthorMatch("ဦးသုခ", "ဦးသုခ")).toBe(true);
+      expect(authorMatchesString("ဦးသုခ", "ဦးသုခ")).toBe(true);
+
+      // 2. Unmapped ZWSP-formatted author
+      const zwspAuthor = "မောင်\u200Bထွန်း";
+      const cleanAuthor = "မောင်ထွန်း";
+      expect(isCrossScriptAuthorMatch(zwspAuthor, cleanAuthor)).toBe(true);
+      expect(authorMatchesString(zwspAuthor, cleanAuthor)).toBe(true);
+    });
+
+    it("resolves Last, First transliterated Burmese author (e.g. Tint, Mya Than ↔ မြသန်းတင့်)", () => {
+      expect(isCrossScriptAuthorMatch("Tint, Mya Than", "မြသန်းတင့်")).toBe(true);
+      expect(isCrossScriptAuthorMatch("Tint, Mya Than", "Mya Than Tint")).toBe(true);
+      expect(authorMatchesString("Tint, Mya Than", "မြသန်းတင့်")).toBe(true);
+    });
+
+    it("reuses existing author folder for incoming cross-script author in resolveKindleDestinationDir", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksRoot = path.join(kindleMount, "books");
+      const existingMyanmarDir = path.join(booksRoot, "မြသန်းတင့်");
+      fs.mkdirSync(existingMyanmarDir, { recursive: true });
+
+      // Incoming book has Latin author "Mya Than Tint"
+      const res = resolveKindleDestinationDir(booksRoot, "Mya Than Tint");
+      expect(res.reusedExistingFolder).toBe(true);
+      expect(res.authorDir).toBe("မြသန်းတင့်");
+      expect(res.targetDir).toBe(existingMyanmarDir);
+    });
+
+    it("NEVER collapses spaces in Latin author names (e.g. John Smith vs Johnsmith) while preserving word-order matching", () => {
+      // 1. Spaced Latin author vs concatenated must NEVER match
+      expect(authorMatchesString("John Smith", "Johnsmith")).toBe(false);
+      expect(isCrossScriptAuthorMatch("John Smith", "Johnsmith")).toBe(false);
+
+      // 2. resolveKindleDestinationDir must NOT reuse John Smith for Johnsmith
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksRoot = path.join(kindleMount, "books");
+      const smithDir = path.join(booksRoot, "John Smith");
+      fs.mkdirSync(smithDir, { recursive: true });
+
+      const destRes = resolveKindleDestinationDir(booksRoot, "Johnsmith");
+      expect(destRes.reusedExistingFolder).toBe(false);
+      expect(destRes.authorDir).toBe("Johnsmith");
+
+      // 3. Duplicate scanner must NOT cluster books by John Smith and Johnsmith
+      const johnsmithDir = path.join(booksRoot, "Johnsmith");
+      fs.mkdirSync(johnsmithDir, { recursive: true });
+      fs.writeFileSync(path.join(smithDir, "Some Title.epub"), Buffer.alloc(100000, "1"));
+      fs.writeFileSync(path.join(johnsmithDir, "Some Title.epub"), Buffer.alloc(100000, "2"));
+
+      invalidateKindleBookIndex();
+      const dupGroups = scanKindleDeviceDuplicates(kindleMount, { forceRefresh: true });
+      expect(dupGroups.length).toBe(0);
+
+      // 4. Word-order matching for spaced tokens is fully preserved
+      expect(authorMatchesString("Sanderson Brandon", "Brandon Sanderson")).toBe(true);
+    });
+
+    it("strictly confines file deletions to mount directory and never deletes outside", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      fs.mkdirSync(booksDir, { recursive: true });
+
+      // Create an outside file in tmp
+      const outsideDir = path.join(fakeVolumesDir, "..", "OutsideDir");
+      fs.mkdirSync(outsideDir, { recursive: true });
+      const outsideFile = path.join(outsideDir, "Sensitive.epub");
+      fs.writeFileSync(outsideFile, "do not delete", "utf8");
+
+      // Attempt to clean
+      cleanKindleDeviceDuplicates(kindleMount);
+      expect(fs.existsSync(outsideFile)).toBe(true);
+
+      // Clean up outside dir
+      fs.rmSync(outsideDir, { recursive: true, force: true });
     });
   });
 });

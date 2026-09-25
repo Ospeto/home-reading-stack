@@ -2309,7 +2309,8 @@
             <div>Dry-run preview: <code class="text-zinc-200">bin/lighthouse sync-kindle</code> (or <code class="text-zinc-200">--dry-run</code>)</div>
             <div>Push full library: <code class="text-zinc-200">bin/lighthouse sync-kindle --apply --all</code></div>
             <div>Auto-eject upon completion: <code class="text-zinc-200">bin/lighthouse sync-kindle --apply --eject</code></div>
-            <div>• <strong>Smart Ingestion &amp; Duplicate Shield:</strong> Normalizes leading index prefixes (<code class="text-zinc-200">01 - </code>, <code class="text-zinc-200">Vol. 1 - </code>), reuses existing author/series folders, arbitrates ambiguous duplicates with Jev System-1, and runs <code class="text-zinc-200">dot_clean</code> to prevent macOS <code class="text-zinc-200">._*</code> ghost files.</div>
+            <div>Prune device duplicates: <code class="text-zinc-200">bin/lighthouse sync-kindle --clean-duplicates</code></div>
+            <div>• <strong>Smart Ingestion &amp; Duplicate Shield:</strong> Cross-script Burmese Unicode matching (<code class="text-zinc-200">[\u1000-\u109F]</code>), byte size (±4KB) &amp; title token signatures, normalizes leading index prefixes (<code class="text-zinc-200">01 - </code>, <code class="text-zinc-200">Vol. 1 - </code>), reuses existing author/series folders, arbitrates ambiguous duplicates with Jev System-1, on-device duplicate cleaner (<code class="text-zinc-200">--clean-duplicates</code> or Web UI), and runs <code class="text-zinc-200">dot_clean</code> to prevent macOS <code class="text-zinc-200">._*</code> ghost files.</div>
           </div>
         </div>
 
@@ -3159,6 +3160,17 @@
             <span id="kindleLibraryBooksCount" class="font-mono font-semibold text-zinc-200">0</span>
           </div>
         </div>
+      </div>
+
+      <!-- Device Duplicate Notice Banner (shown when deviceDuplicatesCount > 0) -->
+      <div id="kindleDuplicatesBanner" class="hidden p-3 rounded-xl bg-amber-950/40 border border-amber-500/40 text-xs flex items-center justify-between gap-2.5 backdrop-blur-md transition-all">
+        <div class="flex items-center gap-2 text-amber-200 min-w-0">
+          <span class="text-base shrink-0">⚠️</span>
+          <span id="kindleDuplicatesText" class="truncate font-medium">Found 0 duplicate files on device</span>
+        </div>
+        <button type="button" id="kindleCleanDuplicatesBtn" onclick="cleanKindleDuplicatesAction()" class="shrink-0 px-2.5 py-1.5 bg-amber-400 hover:bg-amber-300 active:scale-[0.96] text-zinc-950 font-bold text-[11px] rounded-lg shadow-sm transition-all cursor-pointer flex items-center gap-1">
+          <span>Clean Duplicates</span>
+        </button>
       </div>
 
       <!-- Scope Selection & Transfer Preview Card -->
@@ -6130,6 +6142,18 @@
       const libBooks = document.getElementById('kindleLibraryBooksCount');
       if (libBooks) libBooks.textContent = kindleState.libraryBooks || (allBooks.length || 0);
 
+      const dupBanner = document.getElementById('kindleDuplicatesBanner');
+      const dupText = document.getElementById('kindleDuplicatesText');
+      const dupCount = kindleState.deviceDuplicatesCount || 0;
+      if (dupBanner && dupText) {
+        if (dupCount > 0 && kindleState.detected && !isKindleSyncing) {
+          dupText.textContent = `Found ${dupCount} duplicate file${dupCount === 1 ? '' : 's'} on device`;
+          dupBanner.classList.remove('hidden');
+        } else {
+          dupBanner.classList.add('hidden');
+        }
+      }
+
       if (kindleState.preview && (!kindleState.preview.scope || kindleState.preview.scope === kindleSyncScope)) {
         renderKindlePreview(kindleState.preview);
       }
@@ -6406,6 +6430,41 @@
         tgHaptic.error();
         if (liveTitle) liveTitle.textContent = `❌ Network error: ${err.message || String(err)}`;
         showToast('Network error starting Kindle sync', 'error');
+      }
+    }
+
+    async function cleanKindleDuplicatesAction() {
+      const dupCount = kindleState.deviceDuplicatesCount || 0;
+      const countMsg = dupCount > 0 ? `${dupCount} ` : '';
+      if (!confirm(`Are you sure you want to clean ${countMsg}redundant duplicate book file(s) on your Kindle? The canonical copies will be preserved.`)) {
+        return;
+      }
+      tgHaptic.medium();
+      const btn = document.getElementById('kindleCleanDuplicatesBtn');
+      if (btn) {
+        btn.disabled = true;
+        setHtml(btn, `${svgIcon('spinner', 'w-3.5 h-3.5 animate-spin text-zinc-950')} <span>Cleaning...</span>`);
+      }
+      try {
+        const res = await fetch('/api/kindle/clean-device-duplicates', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          tgHaptic.success();
+          showToast(data.message || `Cleaned ${data.cleanedCount} duplicates!`);
+          await pollKindleStatus(true);
+          await fetchKindleSyncPreview();
+        } else {
+          tgHaptic.error();
+          showToast(data.error || 'Failed to clean duplicates', 'error');
+        }
+      } catch (err) {
+        tgHaptic.error();
+        showToast('Network error while cleaning duplicates', 'error');
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          setHtml(btn, `<span>Clean Duplicates</span>`);
+        }
       }
     }
 

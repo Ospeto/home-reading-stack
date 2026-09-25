@@ -1758,6 +1758,7 @@ Sync-Kindle Options:
   --apply                  Execute transfer and highlight import (default is dry-run)
   --dry-run                Preview synchronization without modifying Kindle or Obsidian
   --status                 Inspect Kindle connection status and exit
+  --clean-duplicates       Scan and prune redundant duplicate book files from Kindle
   --all                    Push all library books instead of only active/unread books
   --force                  Overwrite existing books on Kindle
   --mount <path>           Custom Kindle mount path (default: auto-detect under /Volumes/)
