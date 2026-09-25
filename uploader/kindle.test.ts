@@ -1131,6 +1131,21 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       expect(resLeGuin.authorDir).toBe("Ursula K. Le Guin");
       expect(resLeGuin.targetDir).toBe(leGuinFolder);
       expect(resLeGuin.reusedExistingFolder).toBe(true);
+
+      // Verify Sanderson, Brandon does NOT reuse a bare folder named "Brandon" or "Sanderson"
+      const brandonFolder = path.join(booksDir, "Brandon");
+      fs.mkdirSync(brandonFolder, { recursive: true });
+      const resBrandon = resolveKindleDestinationDir(booksDir, "Sanderson, Brandon");
+      expect(resBrandon.targetDir).not.toBe(brandonFolder);
+
+      // Verify that when Le Guin/, Ursula K./, and Ursula K. Le Guin/ all exist, it reuses the full author folder
+      const bareLeGuin = path.join(booksDir, "Le Guin");
+      const bareUrsula = path.join(booksDir, "Ursula K.");
+      fs.mkdirSync(bareLeGuin, { recursive: true });
+      fs.mkdirSync(bareUrsula, { recursive: true });
+      const resFullLeGuin = resolveKindleDestinationDir(booksDir, "Le Guin, Ursula K.");
+      expect(resFullLeGuin.authorDir).toBe("Ursula K. Le Guin");
+      expect(resFullLeGuin.targetDir).toBe(leGuinFolder);
     });
 
     it("resolveKindleDestinationDir places book inside existing series subfolder inside author directory", () => {
@@ -1687,7 +1702,13 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
     it("isGenericSectionTitle recognizes word numbers like Book Two and Chapter One", () => {
       expect(isGenericSectionTitle("Book Two")).toBe(true);
       expect(isGenericSectionTitle("Chapter One")).toBe(true);
+      expect(isGenericSectionTitle("Book Eleven")).toBe(true);
       expect(isGenericSectionTitle("Part Two")).toBe(true);
+      expect(isGenericSectionTitle("Part II")).toBe(true);
+      expect(isGenericSectionTitle("Chapter mid")).toBe(false);
+      expect(isGenericSectionTitle("Book civil")).toBe(false);
+      expect(isGenericSectionTitle("Part did")).toBe(false);
+      expect(isGenericSectionTitle("Chapter mix")).toBe(false);
       expect(isGenericSectionTitle("The Final Empire")).toBe(false);
     });
 
@@ -1740,6 +1761,23 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
         { title: "Dark Matter", authors: "Fred Greenwood" },
       );
       expect(matchDifferentTitle.exists).toBe(false);
+
+      // Plant a real "Dune.epub" (33333 bytes) by Frank Herbert
+      const herbertDir = path.join(kindleMount, "books", "Frank Herbert");
+      fs.mkdirSync(herbertDir, { recursive: true });
+      fs.writeFileSync(path.join(herbertDir, "Dune.epub"), "C".repeat(33333), "utf8");
+      const idxDune = buildKindleBookIndex(kindleMount);
+
+      // Candidate "Dune Messiah" with same author and same size must NOT match Dune via Strategy G
+      const matchDuneMessiah = isBookAlreadyOnKindle(
+        kindleMount,
+        "Dune Messiah.epub",
+        "Frank Herbert",
+        33333,
+        idxDune,
+        { title: "Dune Messiah", authors: "Frank Herbert" },
+      );
+      expect(matchDuneMessiah.exists).toBe(false);
     });
 
     it("protects flat unindexed generic section titles (e.g. books/Introduction.azw3, Part 2.azw3) from cross-author collisions", () => {
@@ -1822,6 +1860,40 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       );
       expect(matchThorns.exists).toBe(true);
       expect(matchThorns.existingPath).toContain("Prince of Thorns.azw3");
+
+      // Series folders without franchise keywords e.g. "First Law" and "Red Rising"
+      const firstLawDir = path.join(kindleMount, "books", "First Law");
+      const redRisingDir = path.join(kindleMount, "books", "Red Rising");
+      fs.mkdirSync(firstLawDir, { recursive: true });
+      fs.mkdirSync(redRisingDir, { recursive: true });
+
+      fs.writeFileSync(path.join(firstLawDir, "The Blade Itself.azw3"), "blade azw3", "utf8");
+      fs.writeFileSync(path.join(redRisingDir, "Golden Son.azw3"), "golden azw3", "utf8");
+
+      const idxSeries = buildKindleBookIndex(kindleMount);
+
+      // Candidate with NO series metadata set matches format variant in series folder
+      const matchFirstLaw = isBookAlreadyOnKindle(
+        kindleMount,
+        "The Blade Itself.epub",
+        "Joe Abercrombie",
+        0,
+        idxSeries,
+        { title: "The Blade Itself", authors: "Joe Abercrombie" },
+      );
+      expect(matchFirstLaw.exists).toBe(true);
+      expect(matchFirstLaw.existingPath).toContain("The Blade Itself.azw3");
+
+      const matchRedRising = isBookAlreadyOnKindle(
+        kindleMount,
+        "Golden Son.epub",
+        "Pierce Brown",
+        0,
+        idxSeries,
+        { title: "Golden Son", authors: "Pierce Brown" },
+      );
+      expect(matchRedRising.exists).toBe(true);
+      expect(matchRedRising.existingPath).toContain("Golden Son.azw3");
     });
 
     it("matches format-insensitive multi-author books with comma-separated Calibre authors", () => {

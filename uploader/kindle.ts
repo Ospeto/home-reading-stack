@@ -473,6 +473,13 @@ export function normalizeAuthorSpacing(author: string): string {
   return author.replace(/\s*,\s*/g, ", ").trim();
 }
 
+function isGivenNamePattern(str: string): boolean {
+  const words = str.trim().split(/\s+/);
+  if (words.length === 1) return true;
+  if (words.length >= 2 && words.slice(1).every((w) => /^[A-Z]\.?$/i.test(w))) return true;
+  return false;
+}
+
 /**
  * Parse an author string into a list of individual author names:
  * - Handles &, and, ;, /, | delimiters
@@ -500,17 +507,22 @@ export function parseAuthorList(raw: string): string[] {
   // If contains comma
   if (s.includes(",")) {
     const commaParts = s.split(",").map((p) => p.trim()).filter(Boolean);
-    // Case A: Exactly 2 parts e.g. "Le Guin, Ursula K." or "Sanderson, Brandon"
-    // Provide both flipped "First Last" and individual parts to handle both single author Last, First and pairs
+    // Case A: Exactly 2 parts e.g. "Le Guin, Ursula K." or "Sanderson, Brandon" -> single author in Last, First order
     if (commaParts.length === 2) {
-      const flipped = `${commaParts[1]} ${commaParts[0]}`;
-      return [flipped, ...commaParts];
+      if (isGivenNamePattern(commaParts[1])) {
+        return [`${commaParts[1]} ${commaParts[0]}`];
+      }
+      return commaParts;
     }
     // Case B: Pairs of Last, First e.g. "Sanderson, Brandon, Stewart, Isaac"
     if (commaParts.length % 2 === 0) {
       const pairs: string[] = [];
       for (let i = 0; i < commaParts.length; i += 2) {
-        pairs.push(`${commaParts[i + 1]} ${commaParts[i]}`);
+        if (isGivenNamePattern(commaParts[i + 1])) {
+          pairs.push(`${commaParts[i + 1]} ${commaParts[i]}`);
+        } else {
+          pairs.push(commaParts[i], commaParts[i + 1]);
+        }
       }
       return pairs;
     }
@@ -885,14 +897,38 @@ export function getKindleDiskSpace(mountPath: string): { freeBytes: number; tota
 /**
  * Checks if a title is a generic chapter or section title that requires strict author verification.
  */
+const ROMAN_NUMERALS =
+  /^(?:i|ii|iii|iv|v|vi|vii|viii|ix|x|xi|xii|xiii|xiv|xv|xvi|xvii|xviii|xix|xx|xxi|xxii|xxiii|xxiv|xxv|xxx|xl|l)$/i;
+const WORD_NUMBERS =
+  /^(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)$/i;
+
 export function isGenericSectionTitle(title: string): boolean {
   if (!title) return false;
-  const raw = title.toLowerCase().trim();
-  const pattern =
-    /^(introduction|prologue|preface|epilogue|interlude|afterword|foreword|index|appendix|(?:chapter|part|book|vol(?:ume)?)\s*(?:\d+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten)|love|home)$/i;
-  if (pattern.test(raw)) return true;
-  const norm = normalizeTitleForDedup(title);
-  return pattern.test(norm);
+  const s = title.trim();
+  if (/^(introduction|prologue|preface|epilogue|interlude|afterword|foreword|index|appendix|love|home)$/i.test(s)) {
+    return true;
+  }
+  const norm = normalizeTitleForDedup(s);
+  if (/^(introduction|prologue|preface|epilogue|interlude|afterword|foreword|index|appendix|love|home)$/i.test(norm)) {
+    return true;
+  }
+
+  const mRaw = s.match(/^(?:chapter|part|book|vol(?:ume)?)\s+(.+)$/i);
+  if (mRaw) {
+    const numPart = mRaw[1].trim();
+    if (/^\d+$/.test(numPart)) return true;
+    if (ROMAN_NUMERALS.test(numPart)) return true;
+    if (WORD_NUMBERS.test(numPart)) return true;
+  }
+
+  const mNorm = norm.match(/^(?:chapter|part|book|vol(?:ume)?)\s+(.+)$/i);
+  if (mNorm) {
+    const numPart = mNorm[1].trim();
+    if (/^\d+$/.test(numPart)) return true;
+    if (ROMAN_NUMERALS.test(numPart)) return true;
+    if (WORD_NUMBERS.test(numPart)) return true;
+  }
+  return false;
 }
 
 /**
@@ -907,13 +943,6 @@ export function isLikelyAuthorFolderName(
   const lower = folderName.trim().toLowerCase();
   if (/^(books|documents|downloads?|system|calibre|koreader)$/i.test(lower)) return false;
   if (/^the\s+/i.test(lower)) return false;
-  if (
-    /\b(series|trilogy|chronicles?|novels?|collection|anthology|fantasy|sci-fi|science\s*fiction|manga|comics?|universe|saga|cycle|archives?|books?|season|empire|realm|kingdom|tales?)\b/i.test(
-      lower,
-    )
-  ) {
-    return false;
-  }
   if (candSeries && (lower === candSeries.toLowerCase() || lower.includes(candSeries.toLowerCase()))) {
     return false;
   }
@@ -922,8 +951,6 @@ export function isLikelyAuthorFolderName(
   }
   if (lower.includes(",")) return true;
   if (lower.startsWith("author ")) return true;
-  const words = lower.split(/\s+/);
-  if (words.length >= 2 && words.every((w) => w.length >= 1)) return true;
   return false;
 }
 
@@ -1045,12 +1072,6 @@ export function isBookAlreadyOnKindle(
     if (!normAuthor && !cleanAuthor) return true;
     if (hasPositiveAuthorMatch(entry)) return true;
 
-    // For stripped-index/base matches of generic section titles (e.g. "01 - Introduction", "01 - Prologue"),
-    // require positive author match when candidate author is given to avoid cross-author false positives
-    if (options.strict && isGenericSectionTitle(normTitle)) {
-      return false;
-    }
-
     // Check if entry has a hyphenated author in its filename that differs from candidate author
     const authorCheckBase = entry.strippedBaseName || entry.baseName;
     const parts = authorCheckBase.split(" - ");
@@ -1061,13 +1082,26 @@ export function isBookAlreadyOnKindle(
       }
     }
 
-    // If entry is in an author folder, verify it matches candidate author or series
-    if (isLikelyAuthorFolderName(entry.parentDir, bookDetails?.series, rawTitle)) {
+    // Check if parent directory is a specific folder other than root books/documents
+    const pDir = entry.parentDir.toLowerCase().trim();
+    const isRootOrGenre = /^(books|documents|downloads?|system|calibre|koreader)$/i.test(pDir);
+    if (!isRootOrGenre && normAuthor) {
       const candidateSeries = bookDetails?.series ? normalizeTitleForDedup(bookDetails.series) : "";
-      const isSeries = candidateSeries && (normalizeTitleForDedup(entry.parentDir) === candidateSeries || normalizeTitleForDedup(entry.parentDir).includes(candidateSeries));
-      if (!isSeries && !authorMatchesString(entry.parentDir, normalizedRawAuthor) && !authorMatchesString(entry.grandparentDir, normalizedRawAuthor)) {
-        return false;
+      const isSeries = candidateSeries && (normalizeTitleForDedup(pDir) === candidateSeries || normalizeTitleForDedup(pDir).includes(candidateSeries));
+      const isSeriesName = /^the\s+/i.test(pDir) || /\b(series|trilogy|chronicles?|novels?|collection|anthology|fantasy|sci-fi|manga|comics?|universe|saga|cycle|archives?|books?|season|empire|realm|kingdom|tales?)\b/i.test(pDir);
+      if (!isSeries && !isSeriesName) {
+        const matchesAuthor =
+          authorMatchesString(entry.parentDir, normalizedRawAuthor) ||
+          authorMatchesString(entry.grandparentDir, normalizedRawAuthor);
+        if (!matchesAuthor) {
+          return false;
+        }
       }
+    }
+
+    // For generic section titles or strict mode, require positive author match
+    if (isGenericSectionTitle(rawTitle) || (options.strict && isGenericSectionTitle(normTitle))) {
+      return false;
     }
 
     // Allow match if title is distinct and volume is verified compatible
@@ -1216,7 +1250,10 @@ export function isBookAlreadyOnKindle(
         ? baseForTokens.split(" - ")[0]
         : baseForTokens;
       const allTokensMatch = titleTokens.every((tok) => titlePortion.includes(tok));
-      if (allTokensMatch && authorMatchesEntry(entry)) {
+      const isStripped = entry.strippedNormalizedTitle === normTitle && entry.normalizedTitle !== normTitle;
+      const isGeneric = isGenericSectionTitle(rawTitle);
+      const requireStrict = isStripped || isGeneric;
+      if (allTokensMatch && authorMatchesEntry(entry, { strict: requireStrict })) {
         return { exists: true, existingPath: entry.filePath, matchedBy: "token_set" };
       }
     }
@@ -1228,16 +1265,26 @@ export function isBookAlreadyOnKindle(
     if (bySizeEntries && bySizeEntries.length > 0) {
       for (const entry of bySizeEntries) {
         if (!volumesCompatible(entry)) continue;
-        if (!authorMatchesEntry(entry)) continue;
+        if (!authorMatchesEntry(entry, { strict: true })) continue;
         const baseForTokens = entry.strippedBaseName || entry.baseName;
         const titlePortion = baseForTokens.includes(" - ") ? baseForTokens.split(" - ")[0] : baseForTokens;
-        const entryTokens = titlePortion.split(/\s+/).map((w) => w.trim()).filter(Boolean);
+        const entryTokens = titlePortion
+          .split(/\s+/)
+          .map((w) => w.trim())
+          .filter((w) => w.length >= 3 && !/^(the|a|an|and|of|in|to|vol|volume|book|part)$/.test(w));
         const checkWords = normTitle
           .split(/\s+/)
           .filter((w) => w.length >= 3 && !/^(the|a|an|and|of|in|to|vol|volume|book|part)$/.test(w));
-        const allCandidateTokensPresent = checkWords.length > 0 && checkWords.every((w) => entryTokens.includes(w));
-        const allEntryTokensPresent = entryTokens.length > 0 && entryTokens.every((w) => checkWords.includes(w));
-        if (allCandidateTokensPresent || allEntryTokensPresent) {
+
+        const nonEditionCand = checkWords.filter((w) => !/^(edition|special|deluxe|anniversary|retail|official|epub)$/.test(w));
+        const nonEditionEntry = entryTokens.filter((w) => !/^(edition|special|deluxe|anniversary|retail|official|epub)$/.test(w));
+
+        // Require matching significant title token set (preventing subset overmatch like Dune vs Dune Messiah)
+        if (
+          nonEditionCand.length > 0 &&
+          nonEditionCand.length === nonEditionEntry.length &&
+          nonEditionCand.every((w) => nonEditionEntry.includes(w))
+        ) {
           return { exists: true, existingPath: entry.filePath, matchedBy: "filesize_and_token" };
         }
       }
