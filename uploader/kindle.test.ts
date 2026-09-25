@@ -19,6 +19,8 @@ import {
   normalizeAuthorSpacing,
   resolveKindleDestinationDir,
   authorMatchesString,
+  parseAuthorList,
+  stripLeadingIndexPrefix,
   isGenericSectionTitle,
   runDotClean,
   cleanDotFilesFallback,
@@ -1554,10 +1556,21 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
         "Brandon Sanderson",
         0,
         index,
-        { title: "The Final Empire", authors: "Brandon Sanderson" },
+        { title: "The Final Empire", authors: "Brandon Sanderson", series: "Cool Series" },
       );
       expect(match.exists).toBe(true);
       expect(match.existingPath).toContain("The Final Empire.azw3");
+
+      // Verify that a different author with no matching series is rejected
+      const matchWrong = isBookAlreadyOnKindle(
+        kindleMount,
+        "The Final Empire.epub",
+        "Wrong Author",
+        0,
+        index,
+        { title: "The Final Empire", authors: "Wrong Author" },
+      );
+      expect(matchWrong.exists).toBe(false);
     });
 
     it("does not false-positive on short-author substring matches (e.g. Ann vs Anne Rice)", () => {
@@ -1826,7 +1839,7 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       expect(matchNoAuthor.exists).toBe(true);
     });
 
-    it("matches format-insensitive books in series folders without requiring series metadata", () => {
+    it("matches format-insensitive books in series folders with series metadata and rejects cross-author false matches", () => {
       const kindleMount = path.join(fakeVolumesDir, "Kindle");
       const witcherDir = path.join(kindleMount, "books", "The Witcher");
       const brokenEmpireDir = path.join(kindleMount, "books", "Broken Empire");
@@ -1838,17 +1851,28 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
 
       const index = buildKindleBookIndex(kindleMount);
 
-      // Candidate with NO series metadata set matches format variant in series folder
+      // Candidate with series metadata matches format variant in series folder
       const matchWitcher = isBookAlreadyOnKindle(
         kindleMount,
         "Blood of Elves.epub",
         "Andrzej Sapkowski",
         0,
         index,
-        { title: "Blood of Elves", authors: "Andrzej Sapkowski" },
+        { title: "Blood of Elves", authors: "Andrzej Sapkowski", series: "The Witcher" },
       );
       expect(matchWitcher.exists).toBe(true);
       expect(matchWitcher.existingPath).toContain("Blood of Elves.azw3");
+
+      // Candidate with wrong author must NOT match series folder
+      const matchWitcherWrong = isBookAlreadyOnKindle(
+        kindleMount,
+        "Blood of Elves.epub",
+        "Wrong Author",
+        0,
+        index,
+        { title: "Blood of Elves", authors: "Wrong Author" },
+      );
+      expect(matchWitcherWrong.exists).toBe(false);
 
       const matchThorns = isBookAlreadyOnKindle(
         kindleMount,
@@ -1856,10 +1880,20 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
         "Mark Lawrence",
         0,
         index,
-        { title: "Prince of Thorns", authors: "Mark Lawrence" },
+        { title: "Prince of Thorns", authors: "Mark Lawrence", series: "Broken Empire" },
       );
       expect(matchThorns.exists).toBe(true);
       expect(matchThorns.existingPath).toContain("Prince of Thorns.azw3");
+
+      const matchThornsWrong = isBookAlreadyOnKindle(
+        kindleMount,
+        "Prince of Thorns.epub",
+        "Wrong Author",
+        0,
+        index,
+        { title: "Prince of Thorns", authors: "Wrong Author" },
+      );
+      expect(matchThornsWrong.exists).toBe(false);
 
       // Series folders without franchise keywords e.g. "First Law" and "Red Rising"
       const firstLawDir = path.join(kindleMount, "books", "First Law");
@@ -1872,17 +1906,28 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
 
       const idxSeries = buildKindleBookIndex(kindleMount);
 
-      // Candidate with NO series metadata set matches format variant in series folder
+      // Candidate with matching series matches cleanly
       const matchFirstLaw = isBookAlreadyOnKindle(
         kindleMount,
         "The Blade Itself.epub",
         "Joe Abercrombie",
         0,
         idxSeries,
-        { title: "The Blade Itself", authors: "Joe Abercrombie" },
+        { title: "The Blade Itself", authors: "Joe Abercrombie", series: "First Law" },
       );
       expect(matchFirstLaw.exists).toBe(true);
       expect(matchFirstLaw.existingPath).toContain("The Blade Itself.azw3");
+
+      // Candidate with wrong author or missing series does NOT match
+      const matchFirstLawWrong = isBookAlreadyOnKindle(
+        kindleMount,
+        "The Blade Itself.epub",
+        "Not Abercrombie",
+        0,
+        idxSeries,
+        { title: "The Blade Itself", authors: "Not Abercrombie" },
+      );
+      expect(matchFirstLawWrong.exists).toBe(false);
 
       const matchRedRising = isBookAlreadyOnKindle(
         kindleMount,
@@ -1890,10 +1935,62 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
         "Pierce Brown",
         0,
         idxSeries,
-        { title: "Golden Son", authors: "Pierce Brown" },
+        { title: "Golden Son", authors: "Pierce Brown", series: "Red Rising" },
       );
       expect(matchRedRising.exists).toBe(true);
       expect(matchRedRising.existingPath).toContain("Golden Son.azw3");
+
+      const matchRedRisingWrong = isBookAlreadyOnKindle(
+        kindleMount,
+        "Golden Son.epub",
+        "Wrong Author",
+        0,
+        idxSeries,
+        { title: "Golden Son", authors: "Wrong Author" },
+      );
+      expect(matchRedRisingWrong.exists).toBe(false);
+    });
+
+    it("parses Calibre compact initials in Last, First order (e.g. Martin, George R.R.)", () => {
+      const parsedGRRM = parseAuthorList("Martin, George R.R.");
+      expect(parsedGRRM).toEqual(["George R.R. Martin"]);
+      expect(authorMatchesString("George R.R. Martin", parsedGRRM[0])).toBe(true);
+
+      const parsedJRRT = parseAuthorList("Tolkien, J.R.R.");
+      expect(parsedJRRT).toEqual(["J.R.R. Tolkien"]);
+      expect(authorMatchesString("J.R.R. Tolkien", parsedJRRT[0])).toBe(true);
+
+      const parsedRR = parseAuthorList("Martin, George RR");
+      expect(parsedRR).toEqual(["George RR Martin"]);
+    });
+
+    it("strips decimal leading index and volume prefixes cleanly", () => {
+      expect(stripLeadingIndexPrefix("1.5 - Half")).toBe("Half");
+      expect(stripLeadingIndexPrefix("Vol. 2.5 - Index")).toBe("Index");
+      expect(stripLeadingIndexPrefix("03.5 - Interlude")).toBe("Interlude");
+    });
+
+    it("resolveKindleDestinationDir prioritizes primary author and joint folder over secondary co-author", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      const isaacDir = path.join(booksDir, "Isaac Stewart");
+      const brandonDir = path.join(booksDir, "Brandon Sanderson");
+      fs.mkdirSync(isaacDir, { recursive: true });
+      fs.mkdirSync(brandonDir, { recursive: true });
+
+      // When Isaac Stewart is listed before Brandon Sanderson, it must still pick Brandon Sanderson
+      const res = resolveKindleDestinationDir(booksDir, "Brandon Sanderson, Isaac Stewart");
+      expect(res.authorDir).toBe("Brandon Sanderson");
+      expect(res.targetDir).toBe(brandonDir);
+      expect(res.reusedExistingFolder).toBe(true);
+
+      // When only Isaac Stewart exists, it must NOT reuse Isaac Stewart for a Sanderson-led book
+      const tmpSolo = path.join(fakeVolumesDir, "SoloTest");
+      const soloBooks = path.join(tmpSolo, "books");
+      fs.mkdirSync(path.join(soloBooks, "Isaac Stewart"), { recursive: true });
+      const resSolo = resolveKindleDestinationDir(soloBooks, "Brandon Sanderson, Isaac Stewart");
+      expect(resSolo.authorDir).toBe("Brandon Sanderson, Isaac Stewart");
+      expect(resSolo.reusedExistingFolder).toBe(false);
     });
 
     it("matches format-insensitive multi-author books with comma-separated Calibre authors", () => {

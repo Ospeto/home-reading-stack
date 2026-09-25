@@ -239,7 +239,7 @@ function appendToMultiMap<K, V>(map: Map<K, V[]>, key: K, val: V) {
 export function stripLeadingIndexPrefix(baseName: string): string {
   if (!baseName) return "";
   const volStripped =
-    baseName.replace(/^vol(ume)?\.?\s*\d+\s*[-–—._]\s*/i, "").trim() || baseName;
+    baseName.replace(/^vol(ume)?\.?\s*\d+(?:\.\d+)?\s*[-–—._]\s*/i, "").trim() || baseName;
 
   const m = baseName.match(/^(\d+(?:\.\d+)?)\s*[-–—._]\s*/);
   if (!m) return volStripped;
@@ -250,11 +250,11 @@ export function stripLeadingIndexPrefix(baseName: string): string {
     return volStripped === baseName ? baseName : volStripped;
   }
 
-  const digitStripped = baseName.replace(/^\d+\s*[-–—._]\s*/, "").trim();
+  const digitStripped = baseName.replace(/^(\d+(?:\.\d+)?)\s*[-–—._]\s*/, "").trim();
   return (
     digitStripped
-      .replace(/^vol(ume)?\.?\s*\d+\s*[-–—._]\s*/i, "")
-      .replace(/^\d+\s*[-–—._]\s*/, "")
+      .replace(/^vol(ume)?\.?\s*\d+(?:\.\d+)?\s*[-–—._]\s*/i, "")
+      .replace(/^(\d+(?:\.\d+)?)\s*[-–—._]\s*/, "")
       .trim() || baseName
   );
 }
@@ -476,7 +476,8 @@ export function normalizeAuthorSpacing(author: string): string {
 function isGivenNamePattern(str: string): boolean {
   const words = str.trim().split(/\s+/);
   if (words.length === 1) return true;
-  if (words.length >= 2 && words.slice(1).every((w) => /^[A-Z]\.?$/i.test(w))) return true;
+  const isInitial = (w: string) => /^[A-Z](?:\.[A-Z])*\.?$/i.test(w) || /^[A-Z]{1,3}$/i.test(w);
+  if (words.length >= 2 && words.slice(1).every(isInitial)) return true;
   return false;
 }
 
@@ -594,6 +595,9 @@ export function resolveKindleDestinationDir(
   if (fs.existsSync(targetBooksRoot)) {
     try {
       const entries = fs.readdirSync(targetBooksRoot, { withFileTypes: true });
+      const parsedCandAuthors = parseAuthorList(normAuthor);
+      const primaryAuthor = parsedCandAuthors[0] || normAuthor;
+
       for (const ent of entries) {
         if (!ent.isDirectory() || ent.name.startsWith(".")) continue;
         const existingDirName = ent.name;
@@ -616,8 +620,18 @@ export function resolveKindleDestinationDir(
           break;
         }
 
-        // Full author matching including Last, First and multi-author list parsing
-        if (authorMatchesString(existingDirName, normAuthor)) {
+        // Joint multi-author match (folder represents joint authors)
+        if (parsedCandAuthors.length > 1 && authorMatchesString(existingDirName, normAuthor)) {
+          const folderAuthors = parseAuthorList(existingDirName);
+          if (folderAuthors.length > 1) {
+            matchedAuthorDir = existingDirName;
+            reusedAuthorFolder = true;
+            break;
+          }
+        }
+
+        // Primary author matching (never match a secondary co-author to a single-author folder)
+        if (authorMatchesString(existingDirName, primaryAuthor)) {
           matchedAuthorDir = existingDirName;
           reusedAuthorFolder = true;
           break;
@@ -1082,17 +1096,20 @@ export function isBookAlreadyOnKindle(
       }
     }
 
-    // Check if parent directory is a specific folder other than root books/documents
+    // Check if parent directory is a specific folder other than root books/documents or common genre shelves
     const pDir = entry.parentDir.toLowerCase().trim();
-    const isRootOrGenre = /^(books|documents|downloads?|system|calibre|koreader)$/i.test(pDir);
+    const isRootOrGenre =
+      /^(books|documents|downloads?|system|calibre|koreader|ebooks?|light\s*novels?|novels?|manga|comics?|fiction|non-fiction|sci-fi|science\s*fiction|fantasy|classics?|audiobooks?|web\s*novels?|fanfiction|short\s*stories)$/i.test(
+        pDir,
+      );
     if (!isRootOrGenre && normAuthor) {
       const candidateSeries = bookDetails?.series ? normalizeTitleForDedup(bookDetails.series) : "";
-      const isSeries = candidateSeries && (normalizeTitleForDedup(pDir) === candidateSeries || normalizeTitleForDedup(pDir).includes(candidateSeries));
-      const isSeriesName =
-        /^the\s+/i.test(pDir) ||
-        /\b(series|trilogy|chronicles?|novels?|collection|anthology|fantasy|sci-fi|manga|comics?|universe|saga|cycle|archives?|books?|season|empire|realm|kingdom|tales?|rising|law|wars?|order|age|era|world|dawn|shadows?|legends?)\b/i.test(pDir) ||
-        /\b(first|second|third|fourth|fifth)\b/i.test(pDir);
-      if (!isSeries && !isSeriesName) {
+      const isSeries =
+        candidateSeries &&
+        (normalizeTitleForDedup(pDir) === candidateSeries ||
+          normalizeTitleForDedup(pDir).includes(candidateSeries) ||
+          candidateSeries.includes(normalizeTitleForDedup(pDir)));
+      if (!isSeries) {
         const matchesAuthor =
           authorMatchesString(entry.parentDir, normalizedRawAuthor) ||
           authorMatchesString(entry.grandparentDir, normalizedRawAuthor);
@@ -1134,8 +1151,7 @@ export function isBookAlreadyOnKindle(
   if (byName && byName.length > 0) {
     for (const entry of byName) {
       if (!volumesCompatible(entry)) continue;
-      const isGeneric = isGenericSectionTitle(rawTitle);
-      if (isGeneric && !authorMatchesEntry(entry, { strict: true })) continue;
+      if (!authorMatchesEntry(entry)) continue;
       return { exists: true, existingPath: entry.filePath, matchedBy: "exact_filename" };
     }
   }

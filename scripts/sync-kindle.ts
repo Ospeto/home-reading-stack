@@ -707,6 +707,7 @@ export async function pushBooksToKindle(
     // 1. Idempotency Check: Already present in books/ or documents/?
     let existingDestSize = 0;
     let existingFoundPath: string | null = null;
+    let isFuzzyOrVariantMatch = false;
 
     if (fs.existsSync(flatDestPath)) {
       try {
@@ -739,12 +740,16 @@ export async function pushBooksToKindle(
       );
       if (checkRes.exists && checkRes.existingPath && fs.existsSync(checkRes.existingPath)) {
         existingFoundPath = checkRes.existingPath;
+        isFuzzyOrVariantMatch =
+          checkRes.matchedBy !== "exact_path" &&
+          checkRes.matchedBy !== "exact_filename";
         try {
           existingDestSize = fs.statSync(checkRes.existingPath).size;
         } catch {}
       }
     }
 
+    // If identical size, always skip
     if (!options.force && existingFoundPath && existingDestSize === srcSize) {
       results.push({
         bookId: book.id,
@@ -759,10 +764,33 @@ export async function pushBooksToKindle(
       continue;
     }
 
+    // If size differs, but it was a fuzzy or format variant match (not exact filename/path),
+    // NEVER overwrite the existing file unless forced. Skip to protect on-device books.
+    if (!options.force && existingFoundPath && isFuzzyOrVariantMatch) {
+      results.push({
+        bookId: book.id,
+        title: book.title,
+        author: book.authors,
+        srcPath,
+        destPath: existingFoundPath,
+        fileSize: srcSize,
+        status: "skipped",
+        reason: "Already present on Kindle (format variant or title match)",
+      });
+      continue;
+    }
+
     // Determine target destination path:
-    // If existing file is being updated/overwritten, overwrite the existing file location.
-    // If new file and existing author/series folder was matched, use that folder. Otherwise use flatDestPath.
-    const destPath = existingFoundPath || (destination.reusedExistingFolder ? path.join(destination.targetDir, destFilename) : flatDestPath);
+    // If existing file is being updated/overwritten, only overwrite if exact path/filename matches.
+    // Never overwrite a format variant or fuzzy match (e.g. .azw3 or Jev duplicate).
+    let destPath: string;
+    if (existingFoundPath && !isFuzzyOrVariantMatch) {
+      destPath = existingFoundPath;
+    } else if (destination.reusedExistingFolder) {
+      destPath = path.join(destination.targetDir, destFilename);
+    } else {
+      destPath = flatDestPath;
+    }
     const targetDir = path.dirname(destPath);
 
     if (options.apply && !fs.existsSync(targetDir)) {

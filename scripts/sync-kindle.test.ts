@@ -430,6 +430,27 @@ describe("LightHouse Type-C Kindle Two-Way Synchronization", () => {
       expect(fs.readFileSync(destPath, "utf8")).toBe("New Larger Content 1234567890");
     });
 
+    it("does not overwrite format variants (.azw3) when candidate is .epub with different size", async () => {
+      const book = setupMockBook(12, "Variant Book", "Author", "New EPUB Content");
+      const mount: KindleVolumeInfo = {
+        mountPath: mockKindleMount,
+        documentsDir: mockKindleDocs,
+        name: "Kindle",
+        freeBytes: 1024 * 1024 * 10,
+        totalBytes: 1024 * 1024 * 100,
+      };
+
+      // Create an existing .azw3 variant with different size
+      const variantPath = path.join(mockKindleDocs, "Variant Book - Author.azw3");
+      fs.writeFileSync(variantPath, "Existing AZW3 Content with different bytes 12345");
+
+      const results = await pushBooksToKindle({ apply: true }, mount, [book], new Map());
+      expect(results[0].status).toBe("skipped");
+      expect(results[0].reason).toContain("format variant");
+      // Existing AZW3 file content must be intact
+      expect(fs.readFileSync(variantPath, "utf8")).toBe("Existing AZW3 Content with different bytes 12345");
+    });
+
     it("respects --all flag pushing finished books as well", async () => {
       const book1 = setupMockBook(5, "Active Book", "Author A", "c1", ["reading"]);
       const book2 = setupMockBook(6, "Finished Book", "Author B", "c2", ["finished"]);
