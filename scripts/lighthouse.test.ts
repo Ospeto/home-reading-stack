@@ -204,7 +204,7 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(fs.existsSync(outputDir)).toBe(true);
 
       const files = fs.readdirSync(outputDir);
-      expect(files.length).toBe(6);
+      expect(files.length).toBe(7);
 
       const uploaderPlist = files.find((f: string) => f.includes("book-uploader"));
       const botPlist = files.find((f: string) => f.includes("reading-telegram-bot"));
@@ -212,6 +212,7 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       const vlessPlist = files.find((f: string) => f.includes("reading-vless-tunnel"));
       const sgPlist = files.find((f: string) => f.includes("reading-sg-tunnel"));
       const backupPlist = files.find((f: string) => f.includes("reading-stack-backup"));
+      const ssdBackupPlist = files.find((f: string) => f.includes("reading-ssd-backup"));
 
       expect(uploaderPlist).toBeDefined();
       expect(botPlist).toBeDefined();
@@ -219,6 +220,7 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(vlessPlist).toBeDefined();
       expect(sgPlist).toBeDefined();
       expect(backupPlist).toBeDefined();
+      expect(ssdBackupPlist).toBeDefined();
 
       // Check contents of book-uploader plist
       const uploaderContent = fs.readFileSync(
@@ -803,6 +805,7 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
     const scriptsToLint = [
       LIGHTHOUSE_BIN,
       path.join(REPO_ROOT, "scripts", "backup-daily.sh"),
+      path.join(REPO_ROOT, "scripts", "backup-ssd.sh"),
       path.join(REPO_ROOT, "scripts", "clean-duplicates.sh"),
       path.join(REPO_ROOT, "scripts", "migration-preflight.sh"),
       path.join(REPO_ROOT, "scripts", "sync-series-metadata.sh"),
@@ -830,6 +833,6 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
         }
         expect(lint.status).toBe(0);
       }
-    }, 15000);
+    }, 30000);
   });
 });

@@ -112,6 +112,7 @@ LightHouse includes a portable management CLI (`bin/lighthouse`) for service lif
 | `bin/lighthouse sync-obsidian` | Syncs highlights, notes, and progress from KOReader/Kindle to Obsidian with idempotent markers. |
 | `bin/lighthouse firecrawl <cmd>` | Control self-hosted Firecrawl on-demand cluster (`status`, `up`, `down`) to conserve host RAM (~2.5 GB). |
 | `bin/lighthouse install-daemons` | Dynamically generates and registers macOS LaunchAgents for the current user and repository root. |
+| `bin/lighthouse backup-ssd` | Incremental whole-library backup to external SSD (`rsync -av --delete` + hot SQLite snapshots). |
 | `bin/lighthouse backup` | Flushes SQLite WAL frames and creates an atomic snapshot bundle with SHA-256 checksum and manifest. |
 | `bin/lighthouse restore <archive>` | Performs verified disaster recovery with cryptographic checksum verification and integrity scan. |
 
@@ -176,6 +177,18 @@ bin/lighthouse sync-kindle --apply --force
 # Dynamically generate and register macOS LaunchAgents for the current user
 bin/lighthouse install-daemons
 
+# Run immediate incremental whole-library backup to external SSD
+bin/lighthouse backup-ssd
+
+# Inspect external SSD backup status and drive detection
+bin/lighthouse backup-ssd status
+
+# Update daily scheduled backup time (managed via LaunchAgent)
+bin/lighthouse backup-ssd set-time 03:00
+
+# Preview whole-library SSD backup without modifying external drive
+bin/lighthouse backup-ssd --dry-run
+
 # Create a hot SQLite backup bundle with checksum and manifest
 bin/lighthouse backup
 
@@ -207,6 +220,14 @@ The reading stack supports three complementary backup workflows:
   - Automatically delivers backup archives to Telegram when `TELEGRAM_BACKUP_CHAT_ID` is set.
 - **In-Chat Telegram On-Demand Backups (`/backup`):**
   - Instant online backup created by the Telegram bot producing `reading-stack-backup-YYYY-MM-DD_HHMMSS.tar.gz` and delivered directly to the chat as a `.tar.gz` document.
+- **External SSD Incremental Whole-Library Mirror (`bin/lighthouse backup-ssd`):**
+  - Incremental whole-library backup to external storage (e.g. `/Volumes/Ospeto_SSD`).
+  - Mirrors entire Calibre library (EPUBs, covers, author directories, `metadata.db`) via `rsync -av --delete` to `<SSD>/Calibre_Library/` so subsequent backups take only seconds.
+  - Takes hot atomic SQLite snapshots of all four databases (`metadata.db`, `cache.db`, `koreader-sync.db`, `manga.db`) into `<SSD>/Databases/` with SHA-256 integrity checksums.
+  - Writes `<SSD>/backup_manifest.json` recording timestamp, book count, total size, database hashes, and duration.
+  - **Dynamic LaunchAgent Scheduling:** Managed via `com.ospeto.reading-ssd-backup.plist` with `StartCalendarInterval` matching configured schedule time (e.g. daily at `03:00`).
+  - **Safe Mount Detection:** If the SSD is unmounted at scheduled run time, logs a clean notice and exits with code 0 without erroring or crashing.
+  - **Web UI & REST APIs:** Configurable via Web UI Settings & Storage modal (`openStorageModal`), with endpoints `GET /api/backup/ssd/status`, `POST /api/backup/ssd/config`, and `POST /api/backup/ssd/run`.
 
 ### 2. Verified Restore Engine (`bin/lighthouse restore`)
 

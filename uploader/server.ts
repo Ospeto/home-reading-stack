@@ -75,6 +75,14 @@ import {
   cancelKindleSync,
   ejectKindleVolume,
 } from "./kindle";
+import {
+  getSsdBackupStatus,
+  saveSsdBackupConfig,
+  updateLaunchAgentSchedule,
+  performSsdBackup,
+  validateScheduleTime,
+  validateTargetDirectory,
+} from "./ssd-backup";
 
 declare const Bun: any;
 
@@ -4230,6 +4238,127 @@ export async function handleRequest(
       return jsonResponse(
         res,
         res.success ? 200 : 400,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: External SSD Backup Status
+  if (url.pathname === "/api/backup/ssd/status" && req.method === "GET") {
+    try {
+      const status = getSsdBackupStatus();
+      return jsonResponse(status, 200, corsOrigin);
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: External SSD Backup Configuration & LaunchAgent Update
+  if (url.pathname === "/api/backup/ssd/config" && req.method === "POST") {
+    try {
+      let body: Record<string, unknown> = {};
+      try {
+        body = (await req.json()) as Record<string, unknown>;
+      } catch {
+        return jsonResponse(
+          { success: false, error: "Malformed JSON payload" },
+          400,
+          corsOrigin,
+        );
+      }
+
+      const patch: Record<string, unknown> = {};
+      if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
+      if (typeof body.scheduleTime === "string") {
+        try {
+          validateScheduleTime(body.scheduleTime);
+          patch.scheduleTime = body.scheduleTime.trim();
+        } catch (err: any) {
+          return jsonResponse(
+            { success: false, error: err?.message || "Invalid scheduleTime" },
+            400,
+            corsOrigin,
+          );
+        }
+      }
+      if (typeof body.targetMount === "string" && body.targetMount.trim().length > 0) {
+        const valRes = validateTargetDirectory(body.targetMount);
+        if (!valRes.valid) {
+          return jsonResponse(
+            { success: false, error: valRes.error },
+            400,
+            corsOrigin,
+          );
+        }
+        patch.targetMount = valRes.resolvedPath;
+      }
+
+      const updatedConfig = saveSsdBackupConfig(patch);
+      const launchAgentRes = updateLaunchAgentSchedule({
+        scheduleTime: updatedConfig.scheduleTime,
+        enabled: updatedConfig.enabled,
+      });
+
+      return jsonResponse(
+        {
+          success: true,
+          config: updatedConfig,
+          launchAgent: launchAgentRes,
+        },
+        200,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Trigger External SSD Whole-Library Backup Immediately
+  if (url.pathname === "/api/backup/ssd/run" && req.method === "POST") {
+    try {
+      let body: Record<string, unknown> = {};
+      try {
+        body = (await req.json()) as Record<string, unknown>;
+      } catch {
+        // Body is optional
+      }
+
+      let target: string | undefined = undefined;
+      if (typeof body.target === "string" && body.target.trim().length > 0) {
+        const valRes = validateTargetDirectory(body.target);
+        if (!valRes.valid) {
+          return jsonResponse(
+            { success: false, error: valRes.error },
+            400,
+            corsOrigin,
+          );
+        }
+        target = valRes.resolvedPath;
+      }
+      const dryRun = Boolean(body.dryRun);
+
+      const result = await performSsdBackup({
+        target,
+        dryRun,
+      });
+
+      return jsonResponse(
+        result,
+        result.success ? 200 : result.skipped ? 200 : 500,
         corsOrigin,
       );
     } catch (err: any) {
