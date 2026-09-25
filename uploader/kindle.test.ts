@@ -1651,6 +1651,22 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
         { title: "White Sand", authors: "Sanderson, Brandon & Stewart, Isaac" },
       );
       expect(matchLastFirst.exists).toBe(true);
+
+      // Multi-word surname: "Le Guin, Ursula K." vs on-disk "Ursula K. Le Guin"
+      const leGuinDir = path.join(kindleMount, "books", "Ursula K. Le Guin");
+      fs.mkdirSync(leGuinDir, { recursive: true });
+      fs.writeFileSync(path.join(leGuinDir, "A Wizard of Earthsea.epub"), "earthsea", "utf8");
+      const idxLeGuin = buildKindleBookIndex(kindleMount);
+
+      const matchLeGuin = isBookAlreadyOnKindle(
+        kindleMount,
+        "A Wizard of Earthsea.epub",
+        "Le Guin, Ursula K.",
+        0,
+        idxLeGuin,
+        { title: "A Wizard of Earthsea", authors: "Le Guin, Ursula K." },
+      );
+      expect(matchLeGuin.exists).toBe(true);
     });
 
     it("Strategy G filesize_and_token enforces strict author verification with non-zero fileSize", () => {
@@ -1686,13 +1702,19 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       expect(matchCorrect.exists).toBe(true);
       expect(matchCorrect.matchedBy).toBe("filesize_and_token");
 
+      // Plant a real "Dark Tower.epub" with identical fileSize to test token overlap resistance
+      const darkTowerPath = path.join(authorDir, "Dark Tower.epub");
+      fs.writeFileSync(darkTowerPath, "B".repeat(65432), "utf8");
+
+      const idxUpdated = buildKindleBookIndex(kindleMount);
+
       // Same author and same fileSize but different title ("Dark Matter" vs "Dark Tower") must NOT match via Strategy G
       const matchDifferentTitle = isBookAlreadyOnKindle(
         kindleMount,
         "Dark Matter.epub",
         "Fred Greenwood",
-        54321,
-        index,
+        65432,
+        idxUpdated,
         { title: "Dark Matter", authors: "Fred Greenwood" },
       );
       expect(matchDifferentTitle.exists).toBe(false);

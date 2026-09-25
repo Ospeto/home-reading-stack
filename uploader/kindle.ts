@@ -1226,10 +1226,13 @@ export function isBookAlreadyOnKindle(
         if (!authorMatchesEntry(entry)) continue;
         const baseForTokens = entry.strippedBaseName || entry.baseName;
         const titlePortion = baseForTokens.includes(" - ") ? baseForTokens.split(" - ")[0] : baseForTokens;
+        const entryTokens = titlePortion.split(/\s+/).map((w) => w.trim()).filter(Boolean);
         const checkWords = normTitle
           .split(/\s+/)
-          .filter((w) => w.length >= 4 && !/^(book|read|epub|mobi|file|part|vol|volume)$/.test(w));
-        if (checkWords.length > 0 && checkWords.some((w) => titlePortion.includes(w))) {
+          .filter((w) => w.length >= 3 && !/^(the|a|an|and|of|in|to|vol|volume|book|part)$/.test(w));
+        const allCandidateTokensPresent = checkWords.length > 0 && checkWords.every((w) => entryTokens.includes(w));
+        const allEntryTokensPresent = entryTokens.length > 0 && entryTokens.every((w) => checkWords.includes(w));
+        if (allCandidateTokensPresent || allEntryTokensPresent) {
           return { exists: true, existingPath: entry.filePath, matchedBy: "filesize_and_token" };
         }
       }
