@@ -1950,6 +1950,13 @@ describe("Retry Import Actions & Telegram Bot Handling", () => {
         );
       }
 
+      if (url.includes("systemone")) {
+        return new Response(
+          JSON.stringify({ verdict: "clean", confidence: 0.95, reasoning: "synthetic test clean" }),
+          { status: 200 },
+        );
+      }
+
       return origFetch(input, init);
     }) as typeof fetch;
 

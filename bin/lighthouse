@@ -1025,8 +1025,67 @@ EOF
 </plist>
 EOF
 
+  # 7. External SSD Backup Plist (configured time & enabled state)
+  local ssd_hour=3
+  local ssd_minute=0
+  local ssd_enabled=0
+  local ssd_cfg_file="${LIGHTHOUSE_ROOT}/data/ssd-backup-config.json"
+  if [ -f "$ssd_cfg_file" ]; then
+    local parsed_time
+    parsed_time=$(grep -o '"scheduleTime"[[:space:]]*:[[:space:]]*"[^"]*"' "$ssd_cfg_file" | sed -e 's/.*"scheduleTime"[[:space:]]*:[[:space:]]*"//' -e 's/"//' 2>/dev/null || echo "03:00")
+    if [[ "$parsed_time" =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+      local candidate_h=$(( 10#${BASH_REMATCH[1]} ))
+      local candidate_m=$(( 10#${BASH_REMATCH[2]} ))
+      if [ "$candidate_h" -ge 0 ] && [ "$candidate_h" -le 23 ] && [ "$candidate_m" -ge 0 ] && [ "$candidate_m" -le 59 ]; then
+        ssd_hour="$candidate_h"
+        ssd_minute="$candidate_m"
+      fi
+    fi
+    if grep -q '"enabled"[[:space:]]*:[[:space:]]*true' "$ssd_cfg_file" 2>/dev/null; then
+      ssd_enabled=1
+    fi
+  fi
+
+  local ssd_backup_plist="${target_dir}/${DAEMON_PREFIX}.reading-ssd-backup.plist"
+  cat << EOF > "$ssd_backup_plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${P_PREFIX}.reading-ssd-backup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${P_BASH}</string>
+        <string>${P_ROOT}/scripts/backup-ssd.sh</string>
+        <string>--scheduled</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LIGHTHOUSE_ROOT</key>
+        <string>${P_ROOT}</string>
+        <key>HOME</key>
+        <string>${P_HOME}</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>${ssd_hour}</integer>
+        <key>Minute</key>
+        <integer>${ssd_minute}</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>${P_LOG_DIR}/reading-ssd-backup.log</string>
+    <key>StandardErrorPath</key>
+    <string>${P_LOG_DIR}/reading-ssd-backup.log</string>
+</dict>
+</plist>
+EOF
+
   # Validate all generated plists with plutil if available
-  local all_plists=("$uploader_plist" "$bot_plist" "$watchdog_plist" "$vless_plist" "$sg_plist" "$backup_plist")
+  local all_plists=("$uploader_plist" "$bot_plist" "$watchdog_plist" "$vless_plist" "$sg_plist" "$backup_plist" "$ssd_backup_plist")
   for p in "${all_plists[@]}"; do
     if command -v plutil >/dev/null 2>&1; then
       plutil -lint "$p" >/dev/null
@@ -1043,6 +1102,10 @@ EOF
     echo "Registering LaunchAgents with launchctl..."
     for p in "${all_plists[@]}"; do
       launchctl unload "$p" 2>/dev/null || true
+      if [ "$p" = "$ssd_backup_plist" ] && [ "$ssd_enabled" -eq 0 ]; then
+        echo -e "  Notice: SSD Auto-Backup is disabled in configuration. Plist generated but left unloaded."
+        continue
+      fi
       launchctl load -w "$p" 2>/dev/null || true
     done
     echo -e "${COLOR_GREEN}LaunchAgents registered and active.${COLOR_RESET}"
@@ -1538,7 +1601,6 @@ cmd_sync_kindle() {
   fi
   exec bun run "$script_path" "$@"
 }
-
 cmd_firecrawl() {
   local script_path="${LIGHTHOUSE_ROOT}/scripts/firecrawl-cli.ts"
   if [ ! -f "$script_path" ]; then
@@ -1547,6 +1609,102 @@ cmd_firecrawl() {
   fi
   export FIRECRAWL_URL FIRECRAWL_PORT FIRECRAWL_COMPOSE_DIR FIRECRAWL_IDLE_TIMEOUT_MS FIRECRAWL_ENABLED
   exec bun run "$script_path" "$@"
+}
+
+cmd_backup_ssd() {
+  local script_path="${LIGHTHOUSE_ROOT}/scripts/backup-ssd.sh"
+  if [ ! -f "$script_path" ]; then
+    echo "Error: ${script_path} not found" >&2
+    exit 1
+  fi
+
+  local target_opt=""
+  local time_opt=""
+  local schedule_flag=0
+  local dry_run_flag=0
+  local subcmd=""
+  local pass_args=()
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      status)
+        subcmd="status"
+        shift
+        ;;
+      set-time)
+        subcmd="set-time"
+        shift
+        if [ $# -gt 0 ]; then
+          time_opt="$1"
+          shift
+        fi
+        ;;
+      enable|disable)
+        subcmd="$1"
+        shift
+        ;;
+      --time)
+        if [ $# -lt 2 ]; then
+          echo "Error: --time requires a time argument in format HH:MM (e.g. 03:00)" >&2
+          exit 1
+        fi
+        time_opt="$2"
+        shift 2
+        ;;
+      --target)
+        if [ $# -lt 2 ]; then
+          echo "Error: --target requires a destination path argument" >&2
+          exit 1
+        fi
+        target_opt="$2"
+        shift 2
+        ;;
+      --schedule)
+        schedule_flag=1
+        shift
+        ;;
+      --scheduled)
+        pass_args+=(--scheduled)
+        shift
+        ;;
+      --dry-run)
+        dry_run_flag=1
+        shift
+        ;;
+      *)
+        pass_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [ "$schedule_flag" -eq 1 ]; then
+    if [ -n "$time_opt" ]; then
+      "$script_path" set-time "$time_opt"
+    fi
+    exec "$script_path" enable
+  fi
+
+  if [ -n "$time_opt" ]; then
+    exec "$script_path" set-time "$time_opt"
+  fi
+
+  if [ "$subcmd" = "status" ]; then
+    exec "$script_path" status
+  elif [ "$subcmd" = "set-time" ]; then
+    exec "$script_path" set-time "${time_opt:-}"
+  elif [ "$subcmd" = "enable" ] || [ "$subcmd" = "disable" ]; then
+    exec "$script_path" "$subcmd"
+  fi
+
+  local run_args=()
+  [ -n "$target_opt" ] && run_args+=(--target "$target_opt")
+  [ "$dry_run_flag" -eq 1 ] && run_args+=(--dry-run)
+  if [ ${#pass_args[@]} -gt 0 ]; then
+    run_args+=("${pass_args[@]}")
+  fi
+
+  exec "$script_path" "${run_args[@]}"
 }
 # ------------------------------------------------------------------------------
 # 10. Command: help
@@ -1570,6 +1728,7 @@ Commands:
   sync-obsidian [options]  Sync highlights and reading notes from KOReader/Kindle to Obsidian
   sync-kindle [options]    Two-way sync: push books & pull highlights from USB-C Kindle/e-Reader
   firecrawl <cmd> [options] Control self-hosted Firecrawl on-demand cluster (status|up|down)
+  backup-ssd [options]     Incremental whole-library backup to external SSD (rsync + hot SQLite DBs)
   install-daemons          Dynamically generate and register macOS LaunchAgents for current user
   backup [options]         Create hot SQLite backup with WAL checkpoint, checksum, and manifest
   restore <file> [options] Verified restoration of complete stack with integrity checks
@@ -1605,11 +1764,18 @@ Sync-Kindle Options:
   --vault-path <path>      Custom Obsidian books directory (default: ~/MAS/03-Resources/Books)
   --eject                  Safely unmount/eject Kindle upon successful sync
   --verbose                Enable detailed progress logging
-
 Firecrawl Commands:
   status                   Inspect cluster running state, endpoint URL, and auto-sleep timer (default)
   up                       Wake and start containers via docker compose
   down                     Stop containers immediately to release ~2.5 GB RAM back to macOS
+
+Backup-SSD Options:
+  status                   Show SSD backup configuration, drive detection, and last backup stats
+  set-time <HH:MM>         Update daily scheduled backup time and reload LaunchAgent
+  --target <path>          Custom destination path (default: detected or configured SSD)
+  --time <HH:MM>           Set schedule time (e.g. --time 03:00)
+  --schedule               Enable and register LaunchAgent schedule
+  --dry-run                Verify library paths and database connectivity without writing
 Backup Options:
   --output, -o <path>      Explicit archive file path
   --output-dir <dir>       Directory to store backup bundle (default: ${BACKUP_DIR})
@@ -1648,6 +1814,7 @@ case "$ACTION" in
   sync-obsidian) cmd_sync_obsidian "$@" ;;
   sync-kindle) cmd_sync_kindle "$@" ;;
   firecrawl) cmd_firecrawl "$@" ;;
+  backup-ssd) cmd_backup_ssd "$@" ;;
   install-daemons) cmd_install_daemons "$@" ;;
   backup) cmd_backup "$@" ;;
   restore) cmd_restore "$@" ;;
