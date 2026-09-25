@@ -72,6 +72,7 @@ import {
   tryAcquireKindleSyncLock,
   releaseKindleSyncLock,
   isKindleSyncCancelled,
+  isKindleLocked,
   previewKindleSync,
   syncAllBooksToKindle,
   syncSingleBookToKindle,
@@ -4274,10 +4275,12 @@ export async function handleRequest(
         lockAlreadyAcquired: true,
       }).catch((syncErr) => {
         console.error("[Kindle] Background sync exception:", syncErr);
-        releaseKindleSyncLock(
-          "error",
-          syncErr instanceof Error ? syncErr.message : String(syncErr),
-        );
+        if (isKindleLocked()) {
+          releaseKindleSyncLock(
+            "error",
+            syncErr instanceof Error ? syncErr.message : String(syncErr),
+          );
+        }
       });
 
       return jsonResponse(

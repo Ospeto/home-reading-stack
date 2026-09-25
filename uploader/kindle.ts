@@ -242,6 +242,7 @@ export function resetKindleProgressForTesting(): void {
   activeKindleLock = null;
   activeKindleProgress = null;
   cancelRequested = false;
+  invalidateKindleSyncPreviewCache();
 }
 
 export function getKindleProgress(): KindleLiveProgress | null {
