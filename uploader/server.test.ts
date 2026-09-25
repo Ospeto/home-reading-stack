@@ -1902,8 +1902,17 @@ exit 0
       expect(html).toContain('id="kindleDuplicatesBanner"');
       expect(html).toContain('id="kindleDuplicatesText"');
       expect(html).toContain('id="kindleCleanDuplicatesBtn"');
+      expect(html).toContain("Remove Duplicates");
+      expect(html).toContain("icon-trash-can");
+      expect(html).toContain("background-color: #fbbf24");
+      expect(html).toContain("color: #09090b");
+      expect(html).toContain("rounded-full");
+      expect(html).toContain("disabled:opacity-60");
       expect(html).toContain("cleanKindleDuplicatesAction()");
       expect(html).toContain("/api/kindle/clean-device-duplicates");
+      expect(html).toContain("'Content-Type': 'application/json'");
+      expect(html).toContain("useJev: true");
+      expect(html).toContain("Cleaning...");
       expect(html).toContain("deviceDuplicatesCount");
     });
   });
