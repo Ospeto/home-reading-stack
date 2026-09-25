@@ -6172,6 +6172,29 @@
       }
     }
 
+    let kindleModalPollInterval = null;
+
+    function startKindleModalIdlePolling() {
+      if (kindleModalPollInterval) clearInterval(kindleModalPollInterval);
+      kindleModalPollInterval = setInterval(async () => {
+        const modal = document.getElementById('kindleModal');
+        if (!modal || modal.classList.contains('hidden')) {
+          stopKindleModalIdlePolling();
+          return;
+        }
+        if (!isKindleSyncing) {
+          await pollKindleStatus();
+        }
+      }, 3000);
+    }
+
+    function stopKindleModalIdlePolling() {
+      if (kindleModalPollInterval) {
+        clearInterval(kindleModalPollInterval);
+        kindleModalPollInterval = null;
+      }
+    }
+
     async function openKindleModal() {
       tgHaptic.light();
       dismissKindlePrompt();
@@ -6182,10 +6205,12 @@
         startKindleSyncPolling();
       } else {
         await fetchKindleSyncPreview();
+        startKindleModalIdlePolling();
       }
     }
 
     function closeKindleModal() {
+      stopKindleModalIdlePolling();
       closeModalAnimated('kindleModal');
     }
 
@@ -6203,9 +6228,14 @@
         btn.classList.remove('opacity-70');
       }
       if (btnText) btnText.textContent = 'Sync to Kindle';
+      const modal = document.getElementById('kindleModal');
+      if (modal && !modal.classList.contains('hidden')) {
+        startKindleModalIdlePolling();
+      }
     }
 
     function startKindleSyncPolling() {
+      stopKindleModalIdlePolling();
       if (syncProgressPollInterval) clearInterval(syncProgressPollInterval);
 
       let pollInFlight = false;
@@ -6269,8 +6299,8 @@
           const data = await res.json();
           const p = data.progress;
           if (!p) {
-            // If device disconnected or no progress record during sync, clean up safely
-            if (!data.detected || !data.syncInProgress) {
+            // If device disconnected or no progress record during sync, clean up safely (after 3s grace period)
+            if (Date.now() - pollStartTime > 3000 && (!data.detected || !data.syncInProgress)) {
               terminalHandled = true;
               finishKindleSyncUI();
               tgHaptic.error();
@@ -6365,7 +6395,7 @@
       };
 
       pollProgressTick();
-      syncProgressPollInterval = setInterval(pollProgressTick, 350);
+      syncProgressPollInterval = setInterval(pollProgressTick, 1000);
     }
 
     async function syncAllBooksToKindleAction() {

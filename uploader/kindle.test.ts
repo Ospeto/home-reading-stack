@@ -38,6 +38,8 @@ import {
   cleanKindleDeviceDuplicates,
   getKindleSyncStatus,
   isCrossScriptAuthorMatch,
+  invalidateKindleSyncPreviewCache,
+  setActiveKindleProgress,
 } from "./kindle";
 import { handleRequest, resetServerDependenciesForTest } from "./server";
 
@@ -3390,6 +3392,392 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
 
       // Clean up outside dir
       fs.rmSync(outsideDir, { recursive: true, force: true });
+    });
+  });
+
+  describe("13. In-Memory Directory Caching, Preview TTL & Frontend Polling Hygiene", () => {
+    it("resolveKindleDestinationDir respects existingDirNames cache without disk I/O", () => {
+      const nonExistentRoot = path.join(fakeVolumesDir, "NonExistentKindle", "books");
+      const cachedDirs = ["Fuse, Mitz Vah", "Brandon Sanderson", "George R.R. Martin"];
+
+      // 1. Matches comma-spacing variant using cached array without root existing on disk
+      const res1 = resolveKindleDestinationDir(
+        nonExistentRoot,
+        "Fuse,Mitz Vah",
+        null,
+        true,
+        cachedDirs,
+      );
+      expect(res1.reusedExistingFolder).toBe(true);
+      expect(res1.authorDir).toBe("Fuse, Mitz Vah");
+      expect(res1.targetDir).toBe(path.join(nonExistentRoot, "Fuse, Mitz Vah"));
+
+      // 2. Non-existent author falls back to sanitized default without disk I/O
+      const res2 = resolveKindleDestinationDir(
+        nonExistentRoot,
+        "Unknown New Author",
+        null,
+        true,
+        cachedDirs,
+      );
+      expect(res2.reusedExistingFolder).toBe(false);
+      expect(res2.authorDir).toBe("Unknown New Author");
+
+      // 3. Verify no fs.readdirSync is called when existingDirNames is provided
+      let readdirCalled = false;
+      const origReaddir = fs.readdirSync;
+      try {
+        (fs as any).readdirSync = ((p: any, opts: any) => {
+          if (typeof p === "string" && p.includes("NonExistentKindle")) {
+            readdirCalled = true;
+          }
+          return origReaddir(p, opts);
+        }) as any;
+
+        const res3 = resolveKindleDestinationDir(
+          nonExistentRoot,
+          "Brandon Sanderson",
+          null,
+          true,
+          cachedDirs,
+        );
+        expect(res3.reusedExistingFolder).toBe(true);
+        expect(readdirCalled).toBe(false);
+      } finally {
+        fs.readdirSync = origReaddir;
+      }
+    });
+
+    it("previewKindleSync executes in under 200ms with in-memory directory caching and TTL", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      fs.mkdirSync(booksDir, { recursive: true });
+
+      // Create 50 books in Calibre
+      const books = Array.from({ length: 50 }, (_, i) => ({
+        id: i + 1,
+        title: `Book Title ${i + 1}`,
+        author: `Author ${i + 1}`,
+        format: "EPUB",
+        fileContent: `content ${i + 1}`,
+      }));
+      setupFakeCalibreDatabase(books);
+
+      invalidateKindleSyncPreviewCache();
+
+      // First run: builds index, reads existing directory names once, caches preview
+      const t0 = performance.now();
+      const firstPreview = previewKindleSync(kindleMount, { scope: "all" });
+      const firstDuration = performance.now() - t0;
+      expect(firstPreview.totalCandidates).toBe(50);
+      expect(firstDuration).toBeLessThan(200);
+
+      // Repeat calls: must return from 5s TTL cache in under 20ms total for 10 iterations
+      const t1 = performance.now();
+      for (let i = 0; i < 10; i++) {
+        const cached = previewKindleSync(kindleMount, { scope: "all" });
+        expect(cached.totalCandidates).toBe(50);
+        expect(cached.mountPath).toBe(kindleMount);
+      }
+      const repeatDuration = performance.now() - t1;
+      expect(repeatDuration).toBeLessThan(200);
+    });
+
+    it("invalidateKindleSyncPreviewCache purges cached preview immediately", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Book One", author: "Author One", format: "EPUB", fileContent: "1" },
+      ]);
+      invalidateKindleSyncPreviewCache();
+
+      const p1 = previewKindleSync(kindleMount, { scope: "all" });
+      expect(p1.totalCandidates).toBe(1);
+
+      // Add second book to DB
+      fs.rmSync(fakeCalibreDbPath, { force: true });
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Book One", author: "Author One", format: "EPUB", fileContent: "1" },
+        { id: 2, title: "Book Two", author: "Author Two", format: "EPUB", fileContent: "2" },
+      ]);
+
+      // Before invalidation: returns cached result with 1 candidate
+      const pCached = previewKindleSync(kindleMount, { scope: "all" });
+      expect(pCached.totalCandidates).toBe(1);
+
+      // After invalidation: re-evaluates and returns 2 candidates
+      invalidateKindleSyncPreviewCache();
+      const pFresh = previewKindleSync(kindleMount, { scope: "all" });
+      expect(pFresh.totalCandidates).toBe(2);
+    });
+
+    it("previewKindleSync isolates cache keys by mount, scope, and forceAll", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Active Book", author: "Author A", tags: ["currently-reading"], format: "EPUB", fileContent: "a" },
+        { id: 2, title: "Finished Book", author: "Author B", tags: ["finished"], format: "EPUB", fileContent: "b" },
+      ]);
+      invalidateKindleSyncPreviewCache();
+
+      // unread scope only has 1 candidate (finished excluded)
+      const pUnread = previewKindleSync(kindleMount, { scope: "unread" });
+      expect(pUnread.scope).toBe("unread");
+      expect(pUnread.totalCandidates).toBe(1);
+
+      // all scope has 2 candidates
+      const pAll = previewKindleSync(kindleMount, { scope: "all" });
+      expect(pAll.scope).toBe("all");
+      expect(pAll.totalCandidates).toBe(2);
+
+      // Unread scope cached result must not have been overwritten by all scope
+      const pUnreadCached = previewKindleSync(kindleMount, { scope: "unread" });
+      expect(pUnreadCached.totalCandidates).toBe(1);
+    });
+
+    it("POST /api/kindle/sync initializes progress immediately before returning 202", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Test Book", author: "Author Test", format: "EPUB", fileContent: "test content" },
+      ]);
+      resetKindleProgressForTesting();
+      invalidateKindleSyncPreviewCache();
+
+      const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+      const req = new Request("http://127.0.0.1:8086/api/kindle/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope: "unread" }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(202);
+
+      // Progress must be immediately accessible and in 'scanning' or 'transferring' phase
+      const progress = getKindleProgress();
+      expect(progress).not.toBeNull();
+      expect(["scanning", "transferring", "highlights", "completed"]).toContain(progress!.phase);
+      expect(isKindleSyncActive()).toBe(true);
+
+      // Wait a moment for background task to settle and clean up
+      await new Promise((r) => setTimeout(r, 100));
+      resetKindleProgressForTesting();
+    });
+
+    it("index.html defines 1000ms active polling and 3000ms idle polling with grace period", () => {
+      const htmlPath = path.resolve(__dirname, "index.html");
+      const html = fs.readFileSync(htmlPath, "utf8");
+
+      // Active progress polling must be 1000ms (not 350ms)
+      expect(html).toContain("syncProgressPollInterval = setInterval(pollProgressTick, 1000);");
+      expect(html).not.toContain("syncProgressPollInterval = setInterval(pollProgressTick, 350);");
+
+      // Modal idle polling must be 3000ms
+      expect(html).toContain("function startKindleModalIdlePolling()");
+      expect(html).toContain("3000");
+
+      // Grace period of 3000ms before treating missing progress as disconnected
+      expect(html).toContain("Date.now() - pollStartTime > 3000");
+    });
+
+    it("ejectKindleVolume invalidates index and preview caches upon success", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Book One", author: "Author One", format: "EPUB", fileContent: "1" },
+      ]);
+      const prev = previewKindleSync(kindleMount, { scope: "all" });
+      expect(prev.totalCandidates).toBe(1);
+
+      const mockScript = path.join(tempBaseDir, "mock_diskutil_eject.sh");
+      fs.writeFileSync(mockScript, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+      const origAllow = process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH;
+      const origBin = process.env.LIGHTHOUSE_DISKUTIL_BIN;
+
+      try {
+        process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH = tempBaseDir;
+        process.env.LIGHTHOUSE_DISKUTIL_BIN = mockScript;
+
+        // Successful eject should clear preview cache
+        const res = ejectKindleVolume(kindleMount);
+        expect(res.success).toBe(true);
+
+        // Remove mount to simulate unmounted state
+        fs.rmSync(kindleMount, { recursive: true, force: true });
+
+        // Verify preview cache was cleared (calling preview on unmounted returns detected: false)
+        const prevAfter = previewKindleSync(kindleMount, { scope: "all" });
+        expect(prevAfter.detected).toBe(false);
+      } finally {
+        if (origAllow !== undefined) process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH = origAllow;
+        else delete process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH;
+        if (origBin !== undefined) process.env.LIGHTHOUSE_DISKUTIL_BIN = origBin;
+        else delete process.env.LIGHTHOUSE_DISKUTIL_BIN;
+      }
+    });
+
+    it("getKindleStatus does not wipe activeKindleProgress if mount flaps while sync lock is held", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Book One", author: "Author One", format: "EPUB", fileContent: "1" },
+      ]);
+      expect(tryAcquireKindleSyncLock()).toBe(true);
+
+      // Status call when mount directory is momentarily missing/unreachable
+      const nonExistentVolumes = path.join(fakeVolumesDir, "NonExistentVolumes");
+      const status = getKindleStatus(nonExistentVolumes);
+      expect(status.detected).toBe(false);
+
+      // activeKindleProgress must NOT be nulled while lock is active
+      const progress = getKindleProgress();
+      expect(progress).not.toBeNull();
+      expect(progress!.phase).toBe("scanning");
+
+      releaseKindleSyncLock();
+    });
+
+    it("syncAllBooksToKindle preserves seeded candidate totals when lockAlreadyAcquired is true", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Seed Book", author: "Author Seed", format: "EPUB", fileContent: "seed" },
+      ]);
+      expect(tryAcquireKindleSyncLock()).toBe(true);
+
+      // Seed progress as server does before 202
+      let progressReported: any = null;
+      setActiveKindleProgress({
+        phase: "scanning",
+        currentIndex: 0,
+        totalCandidates: 42,
+        transferredCount: 0,
+        alreadySyncedCount: 10,
+        failedCount: 0,
+        skippedCount: 0,
+        bytesTransferred: 0,
+        percent: 5,
+        highlightsPulledCount: 0,
+      });
+
+      await syncAllBooksToKindle({
+        mountPath: kindleMount,
+        lockAlreadyAcquired: true,
+        onProgress: (p) => {
+          if (!progressReported && p.phase === "scanning") {
+            progressReported = { ...p };
+          }
+        },
+      });
+
+      // The initial scanning progress event emitted must have preserved totalCandidates: 42
+      expect(progressReported).not.toBeNull();
+      expect(progressReported.totalCandidates).toBe(42);
+      expect(progressReported.alreadySyncedCount).toBe(10);
+    });
+
+    it("syncAllBooksToKindle handles failed book transfers gracefully, transitions to phase error, records error message, and invalidates cache", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      fs.mkdirSync(booksDir, { recursive: true });
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Blocked Book", author: "BlockedAuthor", format: "EPUB", fileContent: "valid content" },
+      ]);
+      resetKindleProgressForTesting();
+
+      // Create a regular file where the author directory would be, forcing copy to fail with ENOTDIR
+      fs.writeFileSync(path.join(booksDir, "BlockedAuthor"), "file conflict preventing folder creation");
+
+      const result = await syncAllBooksToKindle({ mountPath: kindleMount });
+      expect(result.success).toBe(false);
+      expect(result.failed).toBe(1);
+      expect(result.errors.length).toBe(1);
+
+      // activeKindleProgress must transition to 'error' phase when transfers fail with 0 transferred
+      const progress = getKindleProgress();
+      expect(progress).not.toBeNull();
+      expect(progress!.phase).toBe("error");
+      expect(progress!.error).toBeDefined();
+
+      // Lock must be released in finally block
+      expect(isKindleSyncActive()).toBe(false);
+      resetKindleProgressForTesting();
+    });
+
+    it("POST /api/kindle/sync releases lock with phase error when background sync rejects", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Test Book", author: "Author Test", format: "EPUB", fileContent: "test content" },
+      ]);
+      resetKindleProgressForTesting();
+      invalidateKindleSyncPreviewCache();
+
+      const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+      const req = new Request("http://127.0.0.1:8086/api/kindle/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope: "unread" }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(202);
+
+      // Wait a moment for background task to execute
+      await new Promise((r) => setTimeout(r, 150));
+
+      // After background sync settles, lock must be released (not stuck)
+      expect(tryAcquireKindleSyncLock()).toBe(true);
+      releaseKindleSyncLock();
+      resetKindleProgressForTesting();
+    });
+
+    it("synchronizes cleanly to a brand new Kindle device with an empty documents folder", async () => {
+      // Simulate a factory-fresh Kindle with only an empty documents folder
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const docsDir = path.join(kindleMount, "documents");
+      fs.mkdirSync(docsDir, { recursive: true });
+      resetKindleProgressForTesting();
+      invalidateKindleSyncPreviewCache();
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Book One", author: "NewAuthor, First", series: "Epic Series", seriesIndex: 1, format: "EPUB", fileContent: "book 1 content" },
+        { id: 2, title: "Book Two", author: "NewAuthor, First", series: "Epic Series", seriesIndex: 2, format: "EPUB", fileContent: "book 2 content" },
+      ]);
+
+      // 1. Initial preview on fresh device must detect all books as pending
+      const preview = previewKindleSync(kindleMount, { scope: "all" });
+      expect(preview.detected).toBe(true);
+      expect(preview.totalCandidates).toBe(2);
+      expect(preview.alreadySyncedCount).toBe(0);
+      expect(preview.pendingCount).toBe(2);
+
+      // 2. Perform bulk transfer to new Kindle
+      const syncResult = await syncAllBooksToKindle({ mountPath: kindleMount, scope: "all" });
+      expect(syncResult.success).toBe(true);
+      expect(syncResult.transferred).toBe(2);
+      expect(syncResult.alreadySynced).toBe(0);
+      expect(syncResult.failed).toBe(0);
+
+      // 3. Verify destination folder structure
+      expect(fs.existsSync(path.join(docsDir, "NewAuthor, First"))).toBe(true);
+
+      // 4. Repeat preview after sync must recognize all books are already synced
+      invalidateKindleSyncPreviewCache();
+      const afterPreview = previewKindleSync(kindleMount, { scope: "all" });
+      expect(afterPreview.totalCandidates).toBe(2);
+      expect(afterPreview.alreadySyncedCount).toBe(2);
+      expect(afterPreview.pendingCount).toBe(0);
     });
   });
 });

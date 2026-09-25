@@ -72,6 +72,7 @@ import {
   tryAcquireKindleSyncLock,
   releaseKindleSyncLock,
   isKindleSyncCancelled,
+  isKindleLocked,
   previewKindleSync,
   syncAllBooksToKindle,
   syncSingleBookToKindle,
@@ -79,6 +80,8 @@ import {
   ejectKindleVolume,
   detectKindleVolume,
   cleanKindleDeviceDuplicates,
+  setActiveKindleProgress,
+  resolveKindleBooksDir,
 } from "./kindle";
 import {
   getSsdBackupStatus,
@@ -4249,6 +4252,21 @@ export async function handleRequest(
         );
       }
 
+      // Ensure activeKindleProgress is populated with live scanning progress before returning 202
+      setActiveKindleProgress({
+        phase: "scanning",
+        currentIndex: 0,
+        totalCandidates: preview.totalCandidates,
+        transferredCount: 0,
+        alreadySyncedCount: preview.alreadySyncedCount,
+        failedCount: 0,
+        skippedCount: 0,
+        bytesTransferred: 0,
+        percent: 5,
+        highlightsPulledCount: 0,
+        booksDir: preview.mountPath ? resolveKindleBooksDir(preview.mountPath, false) : undefined,
+      });
+
       // 3. Kick off background transfer with lock already held
       syncAllBooksToKindle({
         forceAll,
@@ -4257,6 +4275,12 @@ export async function handleRequest(
         lockAlreadyAcquired: true,
       }).catch((syncErr) => {
         console.error("[Kindle] Background sync exception:", syncErr);
+        if (isKindleLocked()) {
+          releaseKindleSyncLock(
+            "error",
+            syncErr instanceof Error ? syncErr.message : String(syncErr),
+          );
+        }
       });
 
       return jsonResponse(

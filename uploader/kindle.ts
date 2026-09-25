@@ -242,10 +242,15 @@ export function resetKindleProgressForTesting(): void {
   activeKindleLock = null;
   activeKindleProgress = null;
   cancelRequested = false;
+  invalidateKindleSyncPreviewCache();
 }
 
 export function getKindleProgress(): KindleLiveProgress | null {
   return activeKindleProgress;
+}
+
+export function setActiveKindleProgress(progress: KindleLiveProgress | null): void {
+  activeKindleProgress = progress;
 }
 
 export function cancelKindleSync(): boolean {
@@ -253,6 +258,7 @@ export function cancelKindleSync(): boolean {
     return false;
   }
   cancelRequested = true;
+  invalidateKindleSyncPreviewCache();
   return true;
 }
 
@@ -285,6 +291,7 @@ export interface KindleBookIndex {
   byNormalizedTitle: Map<string, KindleIndexedBook[]>;
   byCleanQuery: Map<string, KindleIndexedBook[]>;
   bySize: Map<number, KindleIndexedBook[]>;
+  dirNamesByRoot?: Map<string, string[]>;
 }
 
 export interface BookMatchOptions {
@@ -440,6 +447,7 @@ export function buildKindleBookIndex(mountPath: string): KindleBookIndex {
     byNormalizedTitle: new Map(),
     byCleanQuery: new Map(),
     bySize: new Map(),
+    dirNamesByRoot: new Map(),
   };
 
   const searchDirs = getKindleBookDirs(mountPath);
@@ -448,7 +456,15 @@ export function buildKindleBookIndex(mountPath: string): KindleBookIndex {
   function walk(currentDir: string, depth = 0) {
     if (depth > 8 || !fs.existsSync(currentDir)) return;
     try {
-      const dirEntries = fs.readdirSync(currentDir, { withFileTypes: true });
+      const dirEntries = fs.readdirSync(currentDir, { withFileTypes: true }) as fs.Dirent[];
+      if (depth === 0 && index.dirNamesByRoot) {
+        index.dirNamesByRoot.set(
+          currentDir,
+          dirEntries
+            .filter((ent) => ent.isDirectory() && !ent.name.startsWith(".") && !ent.name.endsWith(".sdr") && ent.name !== "system")
+            .map((ent) => ent.name),
+        );
+      }
       for (const ent of dirEntries) {
         if (ent.name.startsWith(".")) continue;
         const full = path.join(currentDir, ent.name);
@@ -493,7 +509,7 @@ export function getOrCreateKindleBookIndex(mountPath: string, forceRefresh = fal
     !forceRefresh &&
     cachedIndex &&
     cachedIndexMount === mountPath &&
-    now - cachedIndexTime < 30000
+    (now - cachedIndexTime < 30000 || activeKindleLock !== null)
   ) {
     return cachedIndex;
   }
@@ -512,6 +528,7 @@ export function invalidateKindleBookIndex(): void {
   cachedDuplicateGroups = null;
   cachedDuplicatesMount = null;
   cachedDuplicatesTime = 0;
+  invalidateKindleSyncPreviewCache();
 }
 
 const FAT32_ILLEGAL_REGEX = /[<>:"/\\|?*\x00-\x1F\x7F]+/g;
@@ -849,8 +866,9 @@ export interface KindleDestinationResolution {
 /**
  * Resolves the destination directory for a book on Kindle:
  * 1. If subfolderByAuthor is true, normalizes author comma spacing.
- * 2. Scans targetBooksRoot for existing directories. If an existing directory matches
- *    the normalized author (e.g. 'Fuse, Mitz Vah' vs 'Fuse,Mitz Vah'), reuses that folder.
+ * 2. Scans targetBooksRoot for existing directories (or uses provided existingDirNames cache).
+ *    If an existing directory matches the normalized author (e.g. 'Fuse, Mitz Vah' vs 'Fuse,Mitz Vah'),
+ *    reuses that folder.
  * 3. If book belongs to a series and a series subfolder exists inside the author folder,
  *    places the book inside that existing series folder.
  */
@@ -859,6 +877,7 @@ export function resolveKindleDestinationDir(
   rawAuthor: string,
   series?: string | null,
   subfolderByAuthor = true,
+  existingDirNames?: string[],
 ): KindleDestinationResolution {
   if (!subfolderByAuthor) {
     return {
@@ -874,69 +893,80 @@ export function resolveKindleDestinationDir(
   let matchedAuthorDir = sanitizedDefaultAuthor;
   let reusedAuthorFolder = false;
 
-  if (fs.existsSync(targetBooksRoot)) {
+  let dirNames: string[] = [];
+  if (existingDirNames !== undefined) {
+    dirNames = existingDirNames;
+  } else if (fs.existsSync(targetBooksRoot)) {
     try {
-      const entries = fs.readdirSync(targetBooksRoot, { withFileTypes: true });
-      const parsedCandAuthors = parseAuthorList(normAuthor);
-      const primaryAuthor = parsedCandAuthors[0] || normAuthor;
+      const entries = fs.readdirSync(targetBooksRoot, { withFileTypes: true }) as fs.Dirent[];
+      dirNames = entries
+        .filter((ent) => ent.isDirectory() && !ent.name.startsWith("."))
+        .map((ent) => ent.name);
+    } catch {
+      dirNames = [];
+    }
+  }
 
-      for (const ent of entries) {
-        if (!ent.isDirectory() || ent.name.startsWith(".")) continue;
-        const existingDirName = ent.name;
+  if (dirNames.length > 0) {
+    const parsedCandAuthors = parseAuthorList(normAuthor);
+    const primaryAuthor = parsedCandAuthors[0] || normAuthor;
 
-        // Comma-spacing normalized comparison
-        const normExisting = normalizeAuthorSpacing(existingDirName).toLowerCase();
-        const normTarget = normAuthor.toLowerCase();
-        if (normExisting === normTarget) {
-          matchedAuthorDir = existingDirName;
-          reusedAuthorFolder = true;
-          break;
-        }
+    for (const existingDirName of dirNames) {
+      if (!existingDirName || existingDirName.startsWith(".")) continue;
 
-        // Punctuation-stripped dedup comparison
-        const dedupExisting = normalizeTitleForDedup(existingDirName);
-        const dedupTarget = normalizeTitleForDedup(normAuthor);
-        if (dedupExisting && dedupTarget && dedupExisting === dedupTarget) {
-          matchedAuthorDir = existingDirName;
-          reusedAuthorFolder = true;
-          break;
-        }
+      // Comma-spacing normalized comparison
+      const normExisting = normalizeAuthorSpacing(existingDirName).toLowerCase();
+      const normTarget = normAuthor.toLowerCase();
+      if (normExisting === normTarget) {
+        matchedAuthorDir = existingDirName;
+        reusedAuthorFolder = true;
+        break;
+      }
 
-        // Initials-canonicalized comparison (e.g. "George R.R. Martin" vs "Martin, George RR")
-        const canonExisting = canonicalizeAuthorName(existingDirName);
-        const canonTarget = canonicalizeAuthorName(normAuthor);
-        if (canonExisting && canonTarget && canonExisting === canonTarget) {
-          matchedAuthorDir = existingDirName;
-          reusedAuthorFolder = true;
-          break;
-        }
+      // Punctuation-stripped dedup comparison
+      const dedupExisting = normalizeTitleForDedup(existingDirName);
+      const dedupTarget = normalizeTitleForDedup(normAuthor);
+      if (dedupExisting && dedupTarget && dedupExisting === dedupTarget) {
+        matchedAuthorDir = existingDirName;
+        reusedAuthorFolder = true;
+        break;
+      }
 
-        // Joint multi-author match (folder represents joint authors)
-        if (parsedCandAuthors.length > 1 && authorMatchesString(existingDirName, normAuthor)) {
-          const folderAuthors = parseAuthorList(existingDirName);
-          if (folderAuthors.length > 1) {
-            matchedAuthorDir = existingDirName;
-            reusedAuthorFolder = true;
-            break;
-          }
-        }
+      // Initials-canonicalized comparison (e.g. "George R.R. Martin" vs "Martin, George RR")
+      const canonExisting = canonicalizeAuthorName(existingDirName);
+      const canonTarget = canonicalizeAuthorName(normAuthor);
+      if (canonExisting && canonTarget && canonExisting === canonTarget) {
+        matchedAuthorDir = existingDirName;
+        reusedAuthorFolder = true;
+        break;
+      }
 
-        // Primary author matching (never match a secondary co-author to a single-author folder)
-        if (authorMatchesString(existingDirName, primaryAuthor)) {
+      // Joint multi-author match (folder represents joint authors)
+      if (parsedCandAuthors.length > 1 && authorMatchesString(existingDirName, normAuthor)) {
+        const folderAuthors = parseAuthorList(existingDirName);
+        if (folderAuthors.length > 1) {
           matchedAuthorDir = existingDirName;
           reusedAuthorFolder = true;
           break;
         }
       }
-    } catch {
-      // Ignore directory scan errors
+
+      // Primary author matching (never match a secondary co-author to a single-author folder)
+      if (authorMatchesString(existingDirName, primaryAuthor)) {
+        matchedAuthorDir = existingDirName;
+        reusedAuthorFolder = true;
+        break;
+      }
     }
   }
 
   const authorFullPath = path.resolve(targetBooksRoot, matchedAuthorDir);
 
-  // Check if series subfolder exists inside the author folder
-  if (series && fs.existsSync(authorFullPath)) {
+  // Check if series subfolder exists inside the author folder.
+  // Avoid disk I/O if existingDirNames was provided and author folder does not exist.
+  const authorFolderExists =
+    reusedAuthorFolder || (existingDirNames === undefined && fs.existsSync(authorFullPath));
+  if (series && authorFolderExists) {
     const cleanSeries = cleanSeriesTitle(series) || series.trim();
     const normSeries = normalizeTitleForDedup(cleanSeries);
     try {
@@ -1294,7 +1324,14 @@ export function isBookAlreadyOnKindle(
       }
 
       // Check resolved destination directory (scanning existing author/series folders)
-      const resolved = resolveKindleDestinationDir(baseDir, authorDir, bookDetails?.series);
+      const existingDirsForBase = index?.dirNamesByRoot?.get(baseDir);
+      const resolved = resolveKindleDestinationDir(
+        baseDir,
+        authorDir,
+        bookDetails?.series,
+        true,
+        existingDirsForBase,
+      );
       if (resolved.targetDir !== path.join(baseDir, authorDir)) {
         const resSubPath = path.join(resolved.targetDir, targetFilename);
         if (fs.existsSync(resSubPath)) {
@@ -2427,8 +2464,11 @@ export function getKindleStatus(
     booksDir = resolveKindleBooksDir(mountPath, false);
     booksOnDevice = countKindleBooks(mountPath);
   } else {
-    // If device is no longer mounted, clear active live progress
-    activeKindleProgress = null;
+    // If device is no longer mounted and no transfer lock is held, clear active live progress and cached preview
+    if (!activeKindleLock) {
+      activeKindleProgress = null;
+      invalidateKindleSyncPreviewCache();
+    }
   }
 
   let libraryBooks = 0;
@@ -2788,21 +2828,34 @@ export function getAllKindleCandidates(options: { scope?: "unread" | "all" } = {
   return candidates;
 }
 
+// Module-level preview cache with 5s TTL
+let cachedKindleSyncPreview: {
+  key: string;
+  timestamp: number;
+  preview: KindleSyncPreview;
+} | null = null;
+
+export function invalidateKindleSyncPreviewCache(): void {
+  cachedKindleSyncPreview = null;
+}
+
 /**
  * Previews Kindle synchronization without transferring any files:
  * - Detects Kindle volume and disk space
  * - Builds/retrieves recursive index of existing books on Kindle
  * - Compares candidate books against Kindle index to determine pending transfers
  * - Computes total required bytes and verifies against free space (including 50MB reserve)
+ * - Caches preview result for 5000ms per mount and scope to prevent USB re-scan thrashing
  */
 export function previewKindleSync(
   mountPath?: string,
-  options: { scope?: "unread" | "all"; forceAll?: boolean } = {},
+  options: { scope?: "unread" | "all"; forceAll?: boolean; forceRefresh?: boolean } = {},
 ): KindleSyncPreview {
   const mount = mountPath || detectKindleVolume();
   const scope = options.scope === "all" ? "all" : "unread";
 
   if (!mount || !fs.existsSync(mount)) {
+    invalidateKindleSyncPreviewCache();
     return {
       detected: false,
       mountPath: null,
@@ -2819,10 +2872,41 @@ export function previewKindleSync(
     };
   }
 
+  const cacheKey = `${mount}::${scope}::${Boolean(options.forceAll)}`;
+  const now = Date.now();
+  if (
+    !options.forceRefresh &&
+    cachedKindleSyncPreview &&
+    cachedKindleSyncPreview.key === cacheKey &&
+    now - cachedKindleSyncPreview.timestamp < 5000
+  ) {
+    return { ...cachedKindleSyncPreview.preview };
+  }
+
   const space = getKindleDiskSpace(mount);
   const index = getOrCreateKindleBookIndex(mount);
   const candidates = getAllKindleCandidates({ scope });
   const booksRoot = resolveKindleBooksDir(mount, false);
+
+  let existingDirNames: string[] = [];
+  try {
+    existingDirNames = fs.existsSync(booksRoot)
+      ? (fs.readdirSync(booksRoot, { withFileTypes: true }) as fs.Dirent[])
+          .filter((ent) => ent.isDirectory() && !ent.name.startsWith("."))
+          .map((ent) => ent.name)
+      : [];
+  } catch {
+    existingDirNames = [];
+  }
+
+  if (index) {
+    if (!index.dirNamesByRoot) {
+      index.dirNamesByRoot = new Map();
+    }
+    if (!index.dirNamesByRoot.has(booksRoot)) {
+      index.dirNamesByRoot.set(booksRoot, existingDirNames);
+    }
+  }
 
   let alreadySyncedCount = 0;
   let pendingCount = 0;
@@ -2835,6 +2919,7 @@ export function previewKindleSync(
         c.authors || "Unknown",
         c.series,
         true,
+        existingDirNames,
       );
       const check = isBookAlreadyOnKindle(mount, c.targetFilename, destination.authorDir, c.fileSize, index, c);
       if (check.exists) {
@@ -2850,7 +2935,7 @@ export function previewKindleSync(
   const sufficientSpace = pendingCount === 0 || space.freeBytes >= requiredBytes;
   const shortfallBytes = Math.max(0, requiredBytes - space.freeBytes);
 
-  return {
+  const result: KindleSyncPreview = {
     detected: true,
     mountPath: mount,
     freeBytes: space.freeBytes,
@@ -2864,6 +2949,14 @@ export function previewKindleSync(
     shortfallBytes,
     scope,
   };
+
+  cachedKindleSyncPreview = {
+    key: cacheKey,
+    timestamp: Date.now(),
+    preview: result,
+  };
+
+  return { ...result };
 }
 
 /**
@@ -3101,9 +3194,15 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
   activeKindleProgress = {
     phase: "scanning",
     currentIndex: 0,
-    totalCandidates: 0,
+    totalCandidates:
+      options.lockAlreadyAcquired && activeKindleProgress?.totalCandidates
+        ? activeKindleProgress.totalCandidates
+        : 0,
     transferredCount: 0,
-    alreadySyncedCount: 0,
+    alreadySyncedCount:
+      options.lockAlreadyAcquired && activeKindleProgress?.alreadySyncedCount
+        ? activeKindleProgress.alreadySyncedCount
+        : 0,
     failedCount: 0,
     skippedCount: 0,
     bytesTransferred: 0,
@@ -3122,6 +3221,28 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
     const candidates = getAllKindleCandidates({ scope });
     const subfolder = options.subfolderByAuthor !== false;
 
+    // Cache existing directories once at the start of sync/transfer loop
+    let existingDirNames: string[] = [];
+    try {
+      existingDirNames = fs.existsSync(targetBooksRoot)
+        ? (fs.readdirSync(targetBooksRoot, { withFileTypes: true }) as fs.Dirent[])
+            .filter((ent) => ent.isDirectory() && !ent.name.startsWith("."))
+            .map((ent) => ent.name)
+        : [];
+    } catch {
+      existingDirNames = [];
+    }
+    const cachedDirsSet = new Set(existingDirNames);
+
+    if (index) {
+      if (!index.dirNamesByRoot) {
+        index.dirNamesByRoot = new Map();
+      }
+      if (!index.dirNamesByRoot.has(targetBooksRoot)) {
+        index.dirNamesByRoot.set(targetBooksRoot, existingDirNames);
+      }
+    }
+
     let alreadySynced = 0;
     const pendingCandidates: KindleFileCandidate[] = [];
     let totalRequiredBytes = 0;
@@ -3132,6 +3253,7 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
         candidate.authors || "Unknown",
         candidate.series,
         subfolder,
+        existingDirNames,
       );
       let existsAndMatches = false;
       if (!options.forceAll) {
@@ -3240,6 +3362,7 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
         candidate.authors || "Unknown",
         candidate.series,
         subfolder,
+        existingDirNames,
       );
       const destPath = path.resolve(destination.targetDir, candidate.targetFilename);
 
@@ -3296,6 +3419,11 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
         currentFreeBytes -= candidate.fileSize;
 
         addFileToKindleIndex(index, destPath, candidate.fileSize);
+
+        if (destination.authorDir && !cachedDirsSet.has(destination.authorDir)) {
+          cachedDirsSet.add(destination.authorDir);
+          existingDirNames.push(destination.authorDir);
+        }
 
         activeKindleProgress.transferredCount = transferred;
         activeKindleProgress.bytesTransferred = bytesTransferred;
@@ -3427,6 +3555,7 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
     cancelRequested = false;
     runDotClean(targetBooksRoot);
     invalidateKindleBookIndex();
+    invalidateKindleSyncPreviewCache();
   }
 }
 
@@ -3491,6 +3620,8 @@ export function ejectKindleVolume(mountPath?: string): { success: boolean; messa
       };
     }
     if (res.status === 0) {
+      invalidateKindleSyncPreviewCache();
+      invalidateKindleBookIndex();
       return { success: true, message: `Successfully ejected ${resolvedTarget}` };
     }
     let statusDesc = "unknown error";
