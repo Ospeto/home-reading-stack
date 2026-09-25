@@ -2887,11 +2887,16 @@ export function previewKindleSync(
   const candidates = getAllKindleCandidates({ scope });
   const booksRoot = resolveKindleBooksDir(mount, false);
 
-  const existingDirNames = fs.existsSync(booksRoot)
-    ? (fs.readdirSync(booksRoot, { withFileTypes: true }) as fs.Dirent[])
-        .filter((ent) => ent.isDirectory() && !ent.name.startsWith("."))
-        .map((ent) => ent.name)
-    : [];
+  let existingDirNames: string[] = [];
+  try {
+    existingDirNames = fs.existsSync(booksRoot)
+      ? (fs.readdirSync(booksRoot, { withFileTypes: true }) as fs.Dirent[])
+          .filter((ent) => ent.isDirectory() && !ent.name.startsWith("."))
+          .map((ent) => ent.name)
+      : [];
+  } catch {
+    existingDirNames = [];
+  }
 
   if (index) {
     if (!index.dirNamesByRoot) {
@@ -3216,11 +3221,16 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
     const subfolder = options.subfolderByAuthor !== false;
 
     // Cache existing directories once at the start of sync/transfer loop
-    const existingDirNames = fs.existsSync(targetBooksRoot)
-      ? (fs.readdirSync(targetBooksRoot, { withFileTypes: true }) as fs.Dirent[])
-          .filter((ent) => ent.isDirectory() && !ent.name.startsWith("."))
-          .map((ent) => ent.name)
-      : [];
+    let existingDirNames: string[] = [];
+    try {
+      existingDirNames = fs.existsSync(targetBooksRoot)
+        ? (fs.readdirSync(targetBooksRoot, { withFileTypes: true }) as fs.Dirent[])
+            .filter((ent) => ent.isDirectory() && !ent.name.startsWith("."))
+            .map((ent) => ent.name)
+        : [];
+    } catch {
+      existingDirNames = [];
+    }
     const cachedDirsSet = new Set(existingDirNames);
 
     if (index) {

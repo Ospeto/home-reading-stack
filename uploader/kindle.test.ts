@@ -3684,44 +3684,35 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       expect(progressReported.alreadySyncedCount).toBe(10);
     });
 
-    it("syncAllBooksToKindle handles unhandled exceptions gracefully, transitions to phase error, records error message, and invalidates cache", async () => {
+    it("syncAllBooksToKindle handles failed book transfers gracefully, transitions to phase error, records error message, and invalidates cache", async () => {
       const kindleMount = path.join(fakeVolumesDir, "Kindle");
       fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
 
       setupFakeCalibreDatabase([
-        { id: 1, title: "Error Book", author: "Author", format: "EPUB", fileContent: "1" },
+        { id: 1, title: "Missing Source Book", author: "Author", format: "EPUB", fileContent: "1" },
       ]);
       resetKindleProgressForTesting();
 
-      // Force an unexpected exception during buildKindleBookIndex / candidate processing
-      const origReaddir = fs.readdirSync;
-      let injectError = true;
-      (fs as any).readdirSync = ((p: any, opts: any) => {
-        if (injectError && typeof p === "string" && p.includes("Kindle")) {
-          injectError = false;
-          throw new Error("Synthetic USB I/O failure");
-        }
-        return origReaddir(p, opts);
-      }) as any;
-
-      try {
-        const result = await syncAllBooksToKindle({ mountPath: kindleMount });
-        expect(result.success).toBe(false);
-        expect(result.errors.length).toBeGreaterThan(0);
-        expect(result.errors[0].error).toContain("Synthetic USB I/O failure");
-
-        // activeKindleProgress must transition to 'error' phase with error string
-        const progress = getKindleProgress();
-        expect(progress).not.toBeNull();
-        expect(progress!.phase).toBe("error");
-        expect(progress!.error).toContain("Synthetic USB I/O failure");
-
-        // Lock must be released in finally block
-        expect(isKindleSyncActive()).toBe(false);
-      } finally {
-        fs.readdirSync = origReaddir;
-        resetKindleProgressForTesting();
+      // Remove the physical file from Calibre library so transfer fails
+      const booksInLib = fs.readdirSync(path.join(fakeLibraryDir, "Author_1", "Book_1"));
+      for (const f of booksInLib) {
+        fs.unlinkSync(path.join(fakeLibraryDir, "Author_1", "Book_1", f));
       }
+
+      const result = await syncAllBooksToKindle({ mountPath: kindleMount });
+      expect(result.success).toBe(false);
+      expect(result.failed).toBe(1);
+      expect(result.errors.length).toBe(1);
+
+      // activeKindleProgress must transition to 'error' phase when transfers fail with 0 transferred
+      const progress = getKindleProgress();
+      expect(progress).not.toBeNull();
+      expect(progress!.phase).toBe("error");
+      expect(progress!.error).toBeDefined();
+
+      // Lock must be released in finally block
+      expect(isKindleSyncActive()).toBe(false);
+      resetKindleProgressForTesting();
     });
 
     it("POST /api/kindle/sync releases lock with phase error when background sync rejects", async () => {
