@@ -77,6 +77,8 @@ import {
   syncSingleBookToKindle,
   cancelKindleSync,
   ejectKindleVolume,
+  detectKindleVolume,
+  cleanKindleDeviceDuplicates,
 } from "./kindle";
 import {
   getSsdBackupStatus,
@@ -96,6 +98,8 @@ export interface ServerDependencies {
     dependencies?: any,
   ) => Promise<any>;
   getCalibreBooks?: (forceFresh?: boolean) => any;
+  detectKindleVolume?: (volumesDir?: string) => string | null;
+  cleanKindleDeviceDuplicates?: (mountPath: string) => { cleanedCount: number; bytesFreed: number; duplicates?: any[] };
 }
 
 let serverDependencies: ServerDependencies = {};
@@ -4314,6 +4318,53 @@ export async function handleRequest(
     } catch (err: any) {
       return jsonResponse(
         { success: false, message: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Kindle Clean Device Duplicates
+  if (url.pathname === "/api/kindle/clean-device-duplicates" && req.method === "POST") {
+    try {
+      const volumesDir = process.env.LIGHTHOUSE_VOLUMES_DIR || "/Volumes";
+      const detectFn = serverDependencies.detectKindleVolume || detectKindleVolume;
+      const mountPath = detectFn(volumesDir);
+      if (!mountPath) {
+        return jsonResponse(
+          { success: false, error: "No Kindle device detected under /Volumes" },
+          404,
+          corsOrigin,
+        );
+      }
+
+      if (!tryAcquireKindleSyncLock()) {
+        return jsonResponse(
+          { success: false, error: "Cannot clean duplicates while sync is active" },
+          409,
+          corsOrigin,
+        );
+      }
+
+      try {
+        const cleanFn = serverDependencies.cleanKindleDeviceDuplicates || cleanKindleDeviceDuplicates;
+        const res = cleanFn(mountPath);
+        return jsonResponse(
+          {
+            success: true,
+            cleanedCount: res.cleanedCount,
+            bytesFreed: res.bytesFreed,
+            message: `Cleaned ${res.cleanedCount} duplicate file(s) (${(res.bytesFreed / (1024 * 1024)).toFixed(1)} MB freed)`,
+          },
+          200,
+          corsOrigin,
+        );
+      } finally {
+        releaseKindleSyncLock();
+      }
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
         500,
         corsOrigin,
       );

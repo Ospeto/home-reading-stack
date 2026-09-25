@@ -93,6 +93,7 @@ export interface KindleStatus {
   totalBytes: number;
   booksOnDevice: number;
   libraryBooks: number;
+  deviceDuplicatesCount?: number;
   syncInProgress: boolean;
   progress?: KindleLiveProgress | null;
   preview?: KindleSyncPreview | null;
@@ -389,6 +390,17 @@ export function addFileToKindleIndex(index: KindleBookIndex, filePath: string, s
   if (item.strippedBaseName && item.strippedBaseName !== item.baseName) {
     appendToMultiMap(index.byBaseName, item.strippedBaseName, item);
   }
+  // Index title portion before " - " into byBaseName and byNormalizedTitle
+  if (item.baseName.includes(" - ")) {
+    const titlePart = item.baseName.split(" - ")[0].trim();
+    if (titlePart && titlePart !== item.baseName) {
+      appendToMultiMap(index.byBaseName, titlePart, item);
+      const normTitlePart = normalizeTitleForDedup(titlePart);
+      if (normTitlePart && normTitlePart !== item.normalizedTitle) {
+        appendToMultiMap(index.byNormalizedTitle, normTitlePart, item);
+      }
+    }
+  }
   if (item.normalizedTitle) appendToMultiMap(index.byNormalizedTitle, item.normalizedTitle, item);
   if (
     item.strippedNormalizedTitle &&
@@ -471,6 +483,10 @@ let cachedIndexMount: string | null = null;
 let cachedIndexTime = 0;
 let cachedIndex: KindleBookIndex | null = null;
 
+let cachedDuplicateGroups: KindleDeviceDuplicateGroup[] | null = null;
+let cachedDuplicatesTime = 0;
+let cachedDuplicatesMount: string | null = null;
+
 export function getOrCreateKindleBookIndex(mountPath: string, forceRefresh = false): KindleBookIndex {
   const now = Date.now();
   if (
@@ -493,6 +509,9 @@ export function invalidateKindleBookIndex(): void {
   cachedIndex = null;
   cachedIndexMount = null;
   cachedIndexTime = 0;
+  cachedDuplicateGroups = null;
+  cachedDuplicatesMount = null;
+  cachedDuplicatesTime = 0;
 }
 
 const FAT32_ILLEGAL_REGEX = /[<>:"/\\|?*\x00-\x1F\x7F]+/g;
@@ -645,6 +664,136 @@ export function parseAuthorList(raw: string): string[] {
   return [s];
 }
 
+export function isRootOrGenreFolder(folderName: string): boolean {
+  if (!folderName) return true;
+  return /^(books|documents|downloads?|system|calibre|koreader|ebooks?|light\s*novels?|novels?|manga|comics?|fiction|non-fiction|sci-fi|science\s*fiction|fantasy|classics?|audiobooks?|web\s*novels?|fanfiction|short\s*stories|misc|favorites|other|old|backup|backups?|to\s*sort|unsorted|staging|temp|tmp)$/i.test(
+    folderName.trim(),
+  );
+}
+
+export function getExplicitBookAuthor(entry: KindleIndexedBook): string {
+  const base = entry.strippedBaseName || entry.baseName;
+  if (base.includes(" - ")) {
+    const parts = base.split(" - ");
+    if (parts.length > 1 && parts[1].trim()) {
+      return parts[1].trim();
+    }
+  }
+  if (!isRootOrGenreFolder(entry.parentDir)) {
+    if (!isRootOrGenreFolder(entry.grandparentDir)) {
+      return entry.grandparentDir;
+    }
+    return entry.parentDir;
+  }
+  return "";
+}
+
+export function normalizeMyanmarAuthorSpelling(name: string): string {
+  return name
+    .normalize("NFC")
+    // Strip zero-width spaces / format characters
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    // Normalize dual-spelling for ဦ (U+1026) vs ဥ (U+1025) + ီ (U+102E)
+    .replace(/\u1025\u102E/g, "\u1026")
+    .replace(/\s+/g, "")
+    .trim();
+}
+
+const BURMESE_AUTHOR_TRANSLITERATION_MAP: Record<string, readonly string[]> = {
+  "မြသန်းတင့်": ["mya than tint", "mya than tin", "myathan tint"],
+  "မင်းလူ": ["min lu", "minlu"],
+  "ချစ်ဦးညို": ["chit oo nyo", "chit u nyo", "chitoonyo"],
+  "ရွှေဥဒေါင်း": ["shwe u daung", "shwe oo daung", "shweudaung"],
+  "သော်တာဆွေ": ["thaw da swe", "thawda swe", "thaw dar swe"],
+  "ဂျာနယ်ကျော်မမလေး": ["journal kyaw ma ma lay"],
+  "ဒဂုန်တာရာ": ["dagon taryar", "dagon taya", "dagun taya"],
+  "ဆရာစံ": ["saya san"],
+  "ပီမိုးနင်း": ["pi moe nin", "pi mo nin"],
+  "တက္ကသိုလ်ဘုန်းနိုင်": ["tekatho phone naing", "thet katho phone naing"],
+  "နတ်နွယ်": ["nat nwe", "nat nway"],
+  "ခင်ခင်ထူး": ["khin khin htoo", "khin khin htu"],
+  "မစန္ဒာ": ["ma sanda"],
+  "နုနုရည်": ["nu nu yi", "nu nu yee"],
+  "မောင်ထွန်းသူ": ["maung tun thu", "mg tun thu"],
+  "မောင်စိန်ဝင်း": ["maung sein win", "mg sein win"],
+  "မောင်သာနိုး": ["maung tha no", "mg tha noe"],
+  "မောင်ပေါ်ထွန်း": ["maung paw tun", "mg paw tun"],
+  "သိန်းဖေမြင့်": ["thein pe myint", "thein pay myint"],
+  "ဗန်းမော်တင်အောင်": ["bhamo tin aung", "bamaw tin aung"],
+  "လင်းယုန်မောင်မောင်": ["lin yone maung maung", "lin yone mg mg"],
+  "ဇော်ဂျီ": ["zawgyi", "zaw gyi"],
+  "မင်းသုဝဏ်": ["min thu wun", "minthuwun"],
+  "သခင်ကိုယ်တော်မှိုင်း": ["thakin kodaw hmaing", "thakin ko daw hmaing"],
+};
+
+export function findCanonicalBurmeseAuthorKey(name: string): string | null {
+  if (!name) return null;
+  const trimmed = name.trim();
+  const hasMyanmar = /[\u1000-\u109F]/.test(trimmed);
+
+  if (hasMyanmar) {
+    const normName = normalizeMyanmarAuthorSpelling(trimmed);
+    for (const key of Object.keys(BURMESE_AUTHOR_TRANSLITERATION_MAP)) {
+      const normKey = normalizeMyanmarAuthorSpelling(key);
+      if (normName === normKey) {
+        return normKey;
+      }
+    }
+  } else {
+    // Check if name is in "Last, First" format (e.g. "Tint, Mya Than")
+    if (trimmed.includes(",")) {
+      const parsedList = parseAuthorList(trimmed);
+      if (parsedList.length > 0 && parsedList[0].toLowerCase() !== trimmed.toLowerCase()) {
+        const keyFromParsed = findCanonicalBurmeseAuthorKey(parsedList[0]);
+        if (keyFromParsed) return keyFromParsed;
+      }
+    }
+
+    const rawLatin = trimmed.toLowerCase();
+    const latinAuthor = rawLatin.replace(/^(old|classic|legacy|archive|author|writer)\s+/i, "").trim();
+    const latinClean = latinAuthor.replace(/[^a-z]/g, " ").replace(/\s+/g, " ").trim();
+    const latinCompact = latinClean.replace(/\s+/g, "");
+
+    for (const [key, variants] of Object.entries(BURMESE_AUTHOR_TRANSLITERATION_MAP)) {
+      const normKey = normalizeMyanmarAuthorSpelling(key);
+      for (const v of variants) {
+        const vClean = v.toLowerCase().replace(/[^a-z]/g, " ").replace(/\s+/g, " ").trim();
+        const vCompact = vClean.replace(/\s+/g, "");
+        if (latinClean === vClean || latinCompact === vCompact) {
+          return normKey;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+export function isCrossScriptAuthorMatch(authorA: string, authorB: string): boolean {
+  if (!authorA || !authorB) return false;
+  const aClean = authorA.trim().toLowerCase();
+  const bClean = authorB.trim().toLowerCase();
+  if (aClean === bClean) return true;
+
+  // General Myanmar spelling normalization (dual spelling and ZWSP) only when both have Myanmar characters
+  const aHasMyanmar = /[\u1000-\u109F]/.test(authorA);
+  const bHasMyanmar = /[\u1000-\u109F]/.test(authorB);
+  if (aHasMyanmar && bHasMyanmar) {
+    const aNormMy = normalizeMyanmarAuthorSpelling(authorA);
+    const bNormMy = normalizeMyanmarAuthorSpelling(authorB);
+    if (aNormMy === bNormMy) return true;
+  }
+
+  const keyA = findCanonicalBurmeseAuthorKey(authorA);
+  const keyB = findCanonicalBurmeseAuthorKey(authorB);
+
+  // If both authors resolve to the same canonical Burmese author in the transliteration map
+  if (keyA && keyB && keyA === keyB) {
+    return true;
+  }
+
+  return false;
+}
+
 /**
  * Compares two author strings with token-boundary matching, word-order normalization,
  * and multi-author list splitting.
@@ -656,13 +805,23 @@ export function authorMatchesString(sourceStr: string, targetAuthor: string): bo
   if (sList.length === 0 || tList.length === 0) return false;
 
   for (const sA of sList) {
-    const sNorm = normalizeTitleForDedup(sA);
-    const sCanon = canonicalizeAuthorName(sA);
+    for (const tA of tList) {
+      if (isCrossScriptAuthorMatch(sA, tA)) {
+        return true;
+      }
+    }
+  }
+
+  for (const sA of sList) {
+    const sHasMy = /[\u1000-\u109F]/.test(sA);
+    const sNorm = sHasMy ? normalizeMyanmarAuthorSpelling(sA) : normalizeTitleForDedup(sA);
+    const sCanon = sHasMy ? normalizeMyanmarAuthorSpelling(sA) : canonicalizeAuthorName(sA);
     const sSorted = sNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
     const sCanonSorted = sCanon.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
     for (const tA of tList) {
-      const tNorm = normalizeTitleForDedup(tA);
-      const tCanon = canonicalizeAuthorName(tA);
+      const tHasMy = /[\u1000-\u109F]/.test(tA);
+      const tNorm = tHasMy ? normalizeMyanmarAuthorSpelling(tA) : normalizeTitleForDedup(tA);
+      const tCanon = tHasMy ? normalizeMyanmarAuthorSpelling(tA) : canonicalizeAuthorName(tA);
       const tSorted = tNorm.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
       const tCanonSorted = tCanon.split(/\s+/).sort((a, b) => a.localeCompare(b)).join(" ");
       if (
@@ -1176,8 +1335,12 @@ export function isBookAlreadyOnKindle(
       rawAuthor = parts[1].trim();
     }
   } else if (!rawTitle) {
-    rawTitle = targetBase;
+    rawTitle = targetBase.includes(" - ") ? targetBase.split(" - ")[0].trim() : targetBase;
   }
+
+  const isBurmeseTitle =
+    /[\u1000-\u109F]/.test(rawTitle) ||
+    Boolean(bookDetails?.title && /[\u1000-\u109F]/.test(bookDetails.title));
 
   const candVol =
     extractVolumeNumber(rawTitle) ??
@@ -1218,6 +1381,30 @@ export function isBookAlreadyOnKindle(
     if (!normAuthor && !cleanAuthor) return true;
     if (hasPositiveAuthorMatch(entry)) return true;
 
+    // Cross-script exemption for Burmese literature:
+    // If book title contains Myanmar Unicode characters ([\u1000-\u109F]), the title is distinct and unique.
+    // Allow title matches even when the author folder on disk is in Latin/English transliteration
+    // (e.g. "Mya Than Tint" on disk vs "မြသန်းတင့်" in Calibre).
+    const entryBaseForTitle = entry.strippedBaseName || entry.baseName;
+    const entryTitlePortion = entryBaseForTitle.includes(" - ")
+      ? entryBaseForTitle.split(" - ")[0].trim()
+      : entryBaseForTitle;
+
+    const isBurmese =
+      isBurmeseTitle ||
+      /[\u1000-\u109F]/.test(entryTitlePortion);
+
+    if (isBurmese) {
+      if (isGenericSectionTitle(rawTitle) || (options.strict && isGenericSectionTitle(normTitle))) {
+        return false;
+      }
+      const entryAuthor = getExplicitBookAuthor(entry);
+      if (entryAuthor && normalizedRawAuthor) {
+        return isCrossScriptAuthorMatch(normalizedRawAuthor, entryAuthor);
+      }
+      return true;
+    }
+
     // Check if entry has a hyphenated author in its filename that differs from candidate author
     const authorCheckBase = entry.strippedBaseName || entry.baseName;
     const parts = authorCheckBase.split(" - ");
@@ -1231,7 +1418,7 @@ export function isBookAlreadyOnKindle(
     // Check if parent directory is a specific folder other than root books/documents or common genre shelves
     const pDir = entry.parentDir.toLowerCase().trim();
     const isRootOrGenre =
-      /^(books|documents|downloads?|system|calibre|koreader|ebooks?|light\s*novels?|novels?|manga|comics?|fiction|non-fiction|sci-fi|science\s*fiction|fantasy|classics?|audiobooks?|web\s*novels?|fanfiction|short\s*stories)$/i.test(
+      /^(books|documents|downloads?|system|calibre|koreader|ebooks?|light\s*novels?|novels?|manga|comics?|fiction|non-fiction|sci-fi|science\s*fiction|fantasy|classics?|audiobooks?|web\s*novels?|fanfiction|short\s*stories|misc|favorites|other)$/i.test(
         pDir,
       );
     if (!isRootOrGenre && normAuthor) {
@@ -1393,7 +1580,7 @@ export function isBookAlreadyOnKindle(
     }
   }
 
-  // Strategy F: Token set matching for multi-word titles
+  // Strategy F: Token set matching for multi-word titles (exact token set only)
   const titleTokens = normTitle
     .split(/\s+/)
     .filter((w) => w.length >= 3 && !/^(vol|volume|book|part)$/.test(w));
@@ -1403,44 +1590,79 @@ export function isBookAlreadyOnKindle(
       const baseForTokens = entry.strippedBaseName || entry.baseName;
       // If filename has "Title - Author", only match title tokens against the title portion
       const titlePortion = baseForTokens.includes(" - ")
-        ? baseForTokens.split(" - ")[0]
+        ? baseForTokens.split(" - ")[0].trim()
         : baseForTokens;
-      const allTokensMatch = titleTokens.every((tok) => titlePortion.includes(tok));
-      const isStripped = entry.strippedNormalizedTitle === normTitle && entry.normalizedTitle !== normTitle;
-      const isGeneric = isGenericSectionTitle(rawTitle);
-      const requireStrict = isStripped || isGeneric;
-      if (allTokensMatch && authorMatchesEntry(entry, { strict: requireStrict })) {
-        return { exists: true, existingPath: entry.filePath, matchedBy: "token_set" };
+
+      const entryTokens = titlePortion
+        .split(/\s+/)
+        .map((w) => w.trim().toLowerCase())
+        .filter((w) => w.length >= 3 && !/^(vol|volume|book|part)$/.test(w));
+
+      // Exact token set match: candidate and entry must share the exact same significant tokens
+      const exactTokensMatch =
+        titleTokens.length === entryTokens.length &&
+        titleTokens.every((tok) => entryTokens.includes(tok));
+
+      if (exactTokensMatch) {
+        const isStripped = entry.strippedNormalizedTitle === normTitle && entry.normalizedTitle !== normTitle;
+        const isGeneric = isGenericSectionTitle(rawTitle);
+        const requireStrict = isStripped || isGeneric;
+        if (authorMatchesEntry(entry, { strict: requireStrict })) {
+          return { exists: true, existingPath: entry.filePath, matchedBy: "token_set" };
+        }
       }
     }
   }
 
-  // Strategy G: Exact size match + strong token verification
+  // Strategy G: File size match (identical or within ±4KB) + volume and title token verification
+  // Acts as a fallback match tier regardless of whether the folder on disk is named differently
   if (fileSize > 0) {
-    const bySizeEntries = idx.bySize.get(fileSize);
-    if (bySizeEntries && bySizeEntries.length > 0) {
-      for (const entry of bySizeEntries) {
-        if (!volumesCompatible(entry)) continue;
-        if (!authorMatchesEntry(entry, { strict: true })) continue;
-        const baseForTokens = entry.strippedBaseName || entry.baseName;
-        const titlePortion = baseForTokens.includes(" - ") ? baseForTokens.split(" - ")[0] : baseForTokens;
-        const entryTokens = titlePortion
-          .split(/\s+/)
-          .map((w) => w.trim())
-          .filter((w) => w.length >= 3 && !/^(the|a|an|and|of|in|to|vol|volume|book|part)$/.test(w));
-        const checkWords = normTitle
-          .split(/\s+/)
-          .filter((w) => w.length >= 3 && !/^(the|a|an|and|of|in|to|vol|volume|book|part)$/.test(w));
+    for (const entry of idx.entries) {
+      if (entry.size <= 0) continue;
+      const sizeDiff = Math.abs(entry.size - fileSize);
+      if (sizeDiff > 4096) continue;
+      if (!volumesCompatible(entry)) continue;
 
-        const nonEditionCand = checkWords.filter((w) => !/^(edition|special|deluxe|anniversary|retail|official|epub)$/.test(w));
-        const nonEditionEntry = entryTokens.filter((w) => !/^(edition|special|deluxe|anniversary|retail|official|epub)$/.test(w));
+      // Author conflict guard:
+      // Allow match if folder is genre/root or author matches (including Burmese cross-script), but reject conflicting authors
+      if (!authorMatchesEntry(entry)) continue;
 
-        // Require matching significant title token set (preventing subset overmatch like Dune vs Dune Messiah)
-        if (
-          nonEditionCand.length > 0 &&
+      const baseForTokens = entry.strippedBaseName || entry.baseName;
+      const titlePortion = baseForTokens.includes(" - ") ? baseForTokens.split(" - ")[0].trim() : baseForTokens;
+
+      // Burmese title matching within ±4KB (requires exact normalized title match)
+      if (isBurmeseTitle || /[\u1000-\u109F]/.test(titlePortion)) {
+        const normEntryTitle = normalizeTitleForDedup(titlePortion);
+        if (normEntryTitle === normTitle) {
+          return { exists: true, existingPath: entry.filePath, matchedBy: "filesize_and_token" };
+        }
+      }
+
+      // Latin / general title token matching within ±4KB
+      const entryTokens = titlePortion
+        .split(/\s+/)
+        .map((w) => w.trim().toLowerCase().replace(/[^\w\u00A0-\uFFFF]/g, ""))
+        .filter((w) => w.length >= 3 && !/^(the|a|an|and|of|in|to|vol|volume|book|part)$/.test(w));
+      const checkWords = normTitle
+        .split(/\s+/)
+        .map((w) => w.trim().toLowerCase().replace(/[^\w\u00A0-\uFFFF]/g, ""))
+        .filter((w) => w.length >= 3 && !/^(the|a|an|and|of|in|to|vol|volume|book|part)$/.test(w));
+
+      const nonEditionCand = checkWords.filter((w) => !/^(edition|special|deluxe|anniversary|retail|official|epub)$/.test(w));
+      const nonEditionEntry = entryTokens.filter((w) => !/^(edition|special|deluxe|anniversary|retail|official|epub)$/.test(w));
+
+      // Require exact matching significant title token set (preventing subset overmatch like Dune vs Dune Messiah)
+      if (nonEditionCand.length > 0 && nonEditionEntry.length > 0) {
+        const exactMatch =
           nonEditionCand.length === nonEditionEntry.length &&
-          nonEditionCand.every((w) => nonEditionEntry.includes(w))
-        ) {
+          nonEditionCand.every((w) => nonEditionEntry.includes(w));
+
+        if (exactMatch) {
+          return { exists: true, existingPath: entry.filePath, matchedBy: "filesize_and_token" };
+        }
+      } else if (normTitle && titlePortion) {
+        const normEntry = normalizeTitleForDedup(titlePortion);
+        if (normEntry === normTitle) {
           return { exists: true, existingPath: entry.filePath, matchedBy: "filesize_and_token" };
         }
       }
@@ -1595,6 +1817,541 @@ export function countKindleBooks(mountPath: string): number {
   return index.entries.length;
 }
 
+export interface KindleDeviceDuplicateFile {
+  filePath: string;
+  filename: string;
+  size: number;
+  parentDir: string;
+  isCanonical: boolean;
+}
+
+export interface KindleDeviceDuplicateGroup {
+  key: string;
+  title: string;
+  canonicalPath: string;
+  duplicatePaths: string[];
+  files: KindleDeviceDuplicateFile[];
+  wastedBytes: number;
+  matchedBy: string;
+}
+
+export function getAllKindleSidecarDirs(bookFilePath: string): string[] {
+  const ext = path.extname(bookFilePath);
+  const base = path.basename(bookFilePath, ext);
+  const candidate1 = `${bookFilePath}.sdr`; // Canonical KOReader format: e.g. Book.epub.sdr
+  const candidate2 = path.join(path.dirname(bookFilePath), `${base}.sdr`); // Legacy / Calibre format: e.g. Book.sdr
+  const found: string[] = [];
+  if (fs.existsSync(candidate1)) found.push(candidate1);
+  if (fs.existsSync(candidate2) && candidate2 !== candidate1 && !found.includes(candidate2)) {
+    found.push(candidate2);
+  }
+  return found;
+}
+
+export function findKindleSidecarDir(bookFilePath: string): string | null {
+  const all = getAllKindleSidecarDirs(bookFilePath);
+  return all.length > 0 ? all[0] : null;
+}
+
+/**
+ * Score a Kindle file to determine canonical preference when duplicates exist.
+ * Higher score = more canonical.
+ */
+function scoreKindleFileForCanonical(entry: KindleIndexedBook, mountPath: string): number {
+  let score = 0;
+  const rel = path.relative(mountPath, entry.filePath).replace(/\\/g, "/");
+  const parts = rel.split("/");
+
+  // 1. Prefer books/ directory over documents/ or downloads/
+  if (parts[0].toLowerCase() === "books") {
+    score += 100;
+  } else if (parts[0].toLowerCase() === "documents") {
+    score += 50;
+  }
+
+  // 2. Prefer being inside an author/series subfolder (e.g. books/Author/Title.epub)
+  // over sitting flat in books/ or documents/
+  if (parts.length >= 3) {
+    score += 60;
+  }
+
+  // 3. For Burmese books, prefer author folder with Myanmar Unicode
+  if (/[\u1000-\u109F]/.test(entry.baseName) || /[\u1000-\u109F]/.test(entry.filePath)) {
+    if (/[\u1000-\u109F]/.test(entry.parentDir)) {
+      score += 40;
+    }
+  }
+
+  // 4. Prefer filename containing " - " (Title - Author format)
+  if (entry.filename.includes(" - ")) {
+    score += 20;
+  }
+
+  // 5. Prefer .epub over other formats
+  if (entry.ext === ".epub") {
+    score += 15;
+  }
+
+  // 6. Presence of KOReader .sdr reading progress sidecar (+10 points)
+  if (findKindleSidecarDir(entry.filePath)) {
+    score += 10;
+  }
+
+  // 7. Tie-breaker: file size (larger usually has cover/metadata embedded)
+  score += Math.min(10, entry.size / 1000000);
+
+  return score;
+}
+
+/**
+ * Checks whether two indexed Kindle entries represent duplicate copies of the same book.
+ */
+function areKindleEntriesDuplicates(
+  a: KindleIndexedBook,
+  b: KindleIndexedBook,
+): { isDuplicate: boolean; matchedBy: string } {
+  if (a.filePath === b.filePath) return { isDuplicate: false, matchedBy: "" };
+
+  // 0. Format isolation: Never treat different file formats (.epub vs .mobi vs .azw3) as device duplicates
+  if (a.ext !== b.ext) {
+    return { isDuplicate: false, matchedBy: "" };
+  }
+
+  // Volume numbers must match; distinct volumes are never duplicates
+  const aVol = a.volumeNumber ?? a.leadingIndex ?? null;
+  const bVol = b.volumeNumber ?? b.leadingIndex ?? null;
+  if (aVol !== null && bVol !== null && aVol !== bVol) {
+    return { isDuplicate: false, matchedBy: "" };
+  }
+  if ((aVol !== null && bVol === null) || (aVol === null && bVol !== null)) {
+    if (a.volumeNumber !== null || b.volumeNumber !== null) {
+      return { isDuplicate: false, matchedBy: "" };
+    }
+  }
+
+  const aBase = a.strippedBaseName || a.baseName;
+  const bBase = b.strippedBaseName || b.baseName;
+  const aTitle = aBase.includes(" - ") ? aBase.split(" - ")[0].trim() : aBase;
+  const bTitle = bBase.includes(" - ") ? bBase.split(" - ")[0].trim() : bBase;
+
+  // Burmese title check: must be in the title text only, never author segment or path
+  const isBurmeseTitle =
+    /[\u1000-\u109F]/.test(aTitle) ||
+    /[\u1000-\u109F]/.test(bTitle);
+
+  // Author conflict guard:
+  // If both entries have explicit authors (from filename "Title - Author" or non-root author folder) that conflict, they are NEVER duplicates
+  const aAuthor = getExplicitBookAuthor(a);
+  const bAuthor = getExplicitBookAuthor(b);
+
+  const authorsConflict =
+    Boolean(aAuthor) &&
+    Boolean(bAuthor) &&
+    (isBurmeseTitle
+      ? !isCrossScriptAuthorMatch(aAuthor, bAuthor)
+      : (!authorMatchesString(aAuthor, bAuthor) && !authorMatchesString(bAuthor, aAuthor)));
+
+  if (authorsConflict) {
+    return { isDuplicate: false, matchedBy: "" };
+  }
+
+  // 1. Burmese title matching (cross-script exemption for Burmese literature)
+  // Requires exact normalized title match + size within ±4KB to prevent substring collisions
+  if (isBurmeseTitle) {
+    const aNormBurmese = normalizeTitleForDedup(aTitle);
+    const bNormBurmese = normalizeTitleForDedup(bTitle);
+    const isSizeClose = a.size > 0 && b.size > 0 && Math.abs(a.size - b.size) <= 4096;
+
+    if (aNormBurmese && bNormBurmese && isSizeClose && aNormBurmese === bNormBurmese) {
+      return { isDuplicate: true, matchedBy: "burmese_cross_script" };
+    }
+  }
+
+  // 2. Exact filename or base filename match across different directories
+  const sameFilename = a.filename.toLowerCase() === b.filename.toLowerCase();
+  const sameBase = a.baseName && a.baseName === b.baseName;
+
+  if (sameFilename || sameBase) {
+    if (!isGenericSectionTitle(a.baseName)) {
+      const explicitSameAuthor =
+        Boolean(aAuthor) &&
+        Boolean(bAuthor) &&
+        (authorMatchesString(aAuthor, bAuthor) || authorMatchesString(bAuthor, aAuthor));
+      const isSizeClose = a.size > 0 && b.size > 0 && Math.abs(a.size - b.size) <= 4096;
+
+      if (isSizeClose && (isBurmeseTitle || explicitSameAuthor || isRootOrGenreFolder(a.parentDir) || isRootOrGenreFolder(b.parentDir))) {
+        return { isDuplicate: true, matchedBy: sameFilename ? "exact_filename" : "base_filename" };
+      }
+    }
+  }
+
+  // 3. Normalized title match
+  if (a.normalizedTitle && b.normalizedTitle && a.normalizedTitle === b.normalizedTitle) {
+    if (!isGenericSectionTitle(aTitle)) {
+      const sameAuthor =
+        Boolean(aAuthor) &&
+        Boolean(bAuthor) &&
+        (authorMatchesString(aAuthor, bAuthor) || authorMatchesString(bAuthor, aAuthor));
+      const isSizeClose = a.size > 0 && b.size > 0 && Math.abs(a.size - b.size) <= 4096;
+      const isOneRoot = isRootOrGenreFolder(a.parentDir) || isRootOrGenreFolder(b.parentDir);
+
+      if (isSizeClose && (isBurmeseTitle || sameAuthor || isOneRoot)) {
+        return { isDuplicate: true, matchedBy: "normalized_title" };
+      }
+    }
+  }
+
+  // 4. File size within ±4KB + significant title token match
+  if (a.size > 0 && b.size > 0 && Math.abs(a.size - b.size) <= 4096) {
+    if (isGenericSectionTitle(aTitle) || isGenericSectionTitle(bTitle)) {
+      return { isDuplicate: false, matchedBy: "" };
+    }
+    const aTokens = aTitle
+      .split(/\s+/)
+      .map((w) => w.trim().toLowerCase())
+      .filter((w) => w.length >= 3 && !/^(the|a|an|and|of|in|to|vol|volume|book|part|edition|special|deluxe|anniversary|retail|official|epub)$/.test(w));
+    const bTokens = bTitle
+      .split(/\s+/)
+      .map((w) => w.trim().toLowerCase())
+      .filter((w) => w.length >= 3 && !/^(the|a|an|and|of|in|to|vol|volume|book|part|edition|special|deluxe|anniversary|retail|official|epub)$/.test(w));
+
+    if (aTokens.length > 0 && bTokens.length > 0) {
+      const exactMatch =
+        aTokens.length === bTokens.length && aTokens.every((t) => bTokens.includes(t));
+
+      if (exactMatch) {
+        return { isDuplicate: true, matchedBy: "filesize_and_token" };
+      }
+    } else if (a.normalizedTitle && b.normalizedTitle && a.normalizedTitle === b.normalizedTitle) {
+      return { isDuplicate: true, matchedBy: "filesize_and_token" };
+    }
+  }
+
+  return { isDuplicate: false, matchedBy: "" };
+}
+
+/**
+ * Scans Kindle USB device for redundant duplicate copies across books/ and documents/ subfolders.
+ * Returns grouped duplicates with the canonical copy identified and redundant copies isolated.
+ */
+export function scanKindleDeviceDuplicates(
+  mountPath: string,
+  options?: { forceRefresh?: boolean },
+): KindleDeviceDuplicateGroup[] {
+  if (!mountPath || !fs.existsSync(mountPath)) return [];
+
+  const now = Date.now();
+  if (
+    !options?.forceRefresh &&
+    cachedDuplicateGroups &&
+    cachedDuplicatesMount === mountPath &&
+    now - cachedDuplicatesTime < 30000
+  ) {
+    return cachedDuplicateGroups;
+  }
+
+  const idx = getOrCreateKindleBookIndex(mountPath, options?.forceRefresh);
+  const entries = idx.entries.filter((e) => fs.existsSync(e.filePath));
+  if (entries.length < 2) return [];
+
+  const n = entries.length;
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const matchReasons = new Map<number, string>();
+
+  // Track explicit author identities per cluster to forbid transitive cross-author merges
+  const clusterAuthors = new Map<number, Set<string>>();
+  for (let i = 0; i < n; i++) {
+    const auth = getExplicitBookAuthor(entries[i]);
+    const set = new Set<string>();
+    if (auth) set.add(auth.toLowerCase());
+    clusterAuthors.set(i, set);
+  }
+
+  function find(i: number): number {
+    let root = i;
+    while (root !== parent[root]) {
+      root = parent[root];
+    }
+    let curr = i;
+    while (curr !== root) {
+      const next = parent[curr];
+      parent[curr] = root;
+      curr = next;
+    }
+    return root;
+  }
+
+  function canUnionAuthors(rootI: number, rootJ: number, isBurmese: boolean): boolean {
+    const authorsI = clusterAuthors.get(rootI);
+    const authorsJ = clusterAuthors.get(rootJ);
+    if (!authorsI || !authorsJ || authorsI.size === 0 || authorsJ.size === 0) return true;
+
+    for (const a of authorsI) {
+      for (const b of authorsJ) {
+        if (a && b) {
+          const matches = isBurmese
+            ? isCrossScriptAuthorMatch(a, b)
+            : (authorMatchesString(a, b) || authorMatchesString(b, a));
+          if (!matches) {
+            return false; // Conflicting authors! Transitive merge forbidden!
+          }
+        }
+      }
+    }
+    return true;
+  }
+
+  function union(i: number, j: number, reason: string): void {
+    const rootI = find(i);
+    const rootJ = find(j);
+    if (rootI !== rootJ) {
+      parent[rootI] = rootJ;
+      if (!matchReasons.has(rootJ)) {
+        matchReasons.set(rootJ, reason);
+      }
+      const setI = clusterAuthors.get(rootI);
+      const setJ = clusterAuthors.get(rootJ);
+      if (setI && setJ) {
+        for (const auth of setI) setJ.add(auth);
+      }
+    }
+  }
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const rootI = find(i);
+      const rootJ = find(j);
+      if (rootI === rootJ) continue;
+
+      const res = areKindleEntriesDuplicates(entries[i], entries[j]);
+      if (res.isDuplicate) {
+        const isBurmese = res.matchedBy === "burmese_cross_script";
+        if (canUnionAuthors(rootI, rootJ, isBurmese)) {
+          union(i, j, res.matchedBy);
+        }
+      }
+    }
+  }
+
+  const clusters = new Map<number, KindleIndexedBook[]>();
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    let list = clusters.get(root);
+    if (!list) {
+      list = [];
+      clusters.set(root, list);
+    }
+    list.push(entries[i]);
+  }
+
+  const duplicateGroups: KindleDeviceDuplicateGroup[] = [];
+
+  for (const [root, groupEntries] of clusters.entries()) {
+    if (groupEntries.length < 2) continue;
+
+    groupEntries.sort((a, b) => {
+      const scoreA = scoreKindleFileForCanonical(a, mountPath);
+      const scoreB = scoreKindleFileForCanonical(b, mountPath);
+      if (scoreA !== scoreB) return scoreB - scoreA;
+      return a.filePath.localeCompare(b.filePath);
+    });
+
+    const canonicalEntry = groupEntries[0];
+    const canonicalAuthor = getExplicitBookAuthor(canonicalEntry);
+
+    // Defense-in-depth: duplicates must not conflict with canonical author
+    const duplicateEntries = groupEntries.slice(1).filter((e) => {
+      const titlePart = (e.strippedBaseName || e.baseName).split(" - ")[0].trim();
+      const isBurmese = /[\u1000-\u109F]/.test(titlePart);
+      const dupAuthor = getExplicitBookAuthor(e);
+      if (!dupAuthor || !canonicalAuthor) return true;
+      return isBurmese
+        ? isCrossScriptAuthorMatch(dupAuthor, canonicalAuthor)
+        : (authorMatchesString(dupAuthor, canonicalAuthor) || authorMatchesString(canonicalAuthor, dupAuthor));
+    });
+
+    if (duplicateEntries.length === 0) continue;
+
+    const keptEntries = [canonicalEntry, ...duplicateEntries];
+    const files: KindleDeviceDuplicateFile[] = keptEntries.map((e, idx) => ({
+      filePath: e.filePath,
+      filename: e.filename,
+      size: e.size,
+      parentDir: e.parentDir,
+      isCanonical: idx === 0,
+    }));
+
+    const wastedBytes = duplicateEntries.reduce((sum, e) => sum + e.size, 0);
+    const ext = path.extname(canonicalEntry.filename);
+    const baseWithCase = path.basename(canonicalEntry.filename, ext);
+    const title = baseWithCase.includes(" - ")
+      ? baseWithCase.split(" - ")[0].trim()
+      : baseWithCase;
+
+    duplicateGroups.push({
+      key: canonicalEntry.filePath,
+      title: title || canonicalEntry.filename,
+      canonicalPath: canonicalEntry.filePath,
+      duplicatePaths: duplicateEntries.map((e) => e.filePath),
+      files,
+      wastedBytes,
+      matchedBy: matchReasons.get(root) || "duplicate_detected",
+    });
+  }
+
+  duplicateGroups.sort((a, b) => b.wastedBytes - a.wastedBytes);
+
+  cachedDuplicateGroups = duplicateGroups;
+  cachedDuplicatesMount = mountPath;
+  cachedDuplicatesTime = now;
+
+  return duplicateGroups;
+}
+
+export function hasActiveReadingProgress(sdrDir: string): boolean {
+  if (!fs.existsSync(sdrDir)) return false;
+  try {
+    const files = fs.readdirSync(sdrDir);
+    return files.some((f: string) => f.endsWith(".lua") || f.endsWith(".json"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Cleans Kindle device duplicates by removing redundant files, leaving the canonical version intact.
+ * Automatically cleans associated .sdr folders (migrating reading progress to canonical if needed),
+ * enforces realpath mount confinement, and cleans empty parent directories.
+ */
+export function cleanKindleDeviceDuplicates(
+  mountPath: string,
+): { cleanedCount: number; bytesFreed: number; duplicates: KindleDeviceDuplicateGroup[] } {
+  if (!mountPath || !fs.existsSync(mountPath)) {
+    return { cleanedCount: 0, bytesFreed: 0, duplicates: [] };
+  }
+
+  const realMount = fs.realpathSync(mountPath);
+  const groups = scanKindleDeviceDuplicates(mountPath);
+  let cleanedCount = 0;
+  let bytesFreed = 0;
+
+  for (const group of groups) {
+    // Determine existing sidecars and active reading progress for canonical copy
+    const canonicalSidecars = getAllKindleSidecarDirs(group.canonicalPath);
+    const canonicalFullSdr = `${group.canonicalPath}.sdr`; // Canonical KOReader format
+    let canonicalHasActiveProgress = canonicalSidecars.some((s) => hasActiveReadingProgress(s));
+    let canonicalHasAnySidecar = canonicalSidecars.length > 0;
+
+    for (const dupPath of group.duplicatePaths) {
+      if (dupPath === group.canonicalPath) continue;
+      try {
+        if (!fs.existsSync(dupPath)) continue;
+
+        // Path containment check: verify dupPath is strictly inside realMount
+        const realDup = fs.realpathSync(dupPath);
+        if (!realDup.startsWith(realMount + path.sep)) {
+          try {
+            throw new Error(`Refusing to remove file outside mount path: ${realDup}`);
+          } catch (confinementErr) {
+            console.error("[Kindle] Security boundary:", confinementErr);
+          }
+          continue;
+        }
+
+        const st = fs.statSync(realDup);
+        const size = st.size;
+        fs.unlinkSync(realDup);
+        cleanedCount++;
+        bytesFreed += size;
+
+        // Drain ALL sidecar folders on duplicate, prioritizing ones with active reading progress:
+        const dupSdrDirs = getAllKindleSidecarDirs(dupPath);
+        dupSdrDirs.sort((a, b) => (hasActiveReadingProgress(b) ? 1 : 0) - (hasActiveReadingProgress(a) ? 1 : 0));
+        for (const dupSdr of dupSdrDirs) {
+          try {
+            if (!fs.existsSync(dupSdr)) continue;
+            const realDupSdr = fs.realpathSync(dupSdr);
+            if (realDupSdr.startsWith(realMount + path.sep)) {
+              const dupHasActiveProgress = hasActiveReadingProgress(realDupSdr);
+
+              // If canonical has NO sidecar at all, OR canonical only has a stale/empty sidecar while duplicate has real active progress:
+              if (!canonicalHasAnySidecar || (!canonicalHasActiveProgress && dupHasActiveProgress)) {
+                // Remove stale empty sidecars from canonical before migrating rich progress
+                if (canonicalHasAnySidecar && fs.existsSync(canonicalFullSdr)) {
+                  try {
+                    fs.rmSync(canonicalFullSdr, { recursive: true, force: true });
+                  } catch (rmErr) {
+                    console.error("[Kindle] Notice clearing stale canonical sidecar:", rmErr);
+                  }
+                }
+                for (const oldSdr of canonicalSidecars) {
+                  if (fs.existsSync(oldSdr) && oldSdr !== canonicalFullSdr) {
+                    try {
+                      fs.rmSync(oldSdr, { recursive: true, force: true });
+                    } catch (rmErr) {
+                      console.error("[Kindle] Notice clearing legacy canonical sidecar:", rmErr);
+                    }
+                  }
+                }
+                // Migrate duplicate's active progress to canonical KOReader format (*.epub.sdr)
+                fs.renameSync(realDupSdr, canonicalFullSdr);
+                canonicalHasAnySidecar = true;
+                canonicalHasActiveProgress = hasActiveReadingProgress(canonicalFullSdr);
+              } else {
+                // Otherwise clean up duplicate sidecar so no orphans remain
+                fs.rmSync(realDupSdr, { recursive: true, force: true });
+              }
+            }
+          } catch (sdrErr) {
+            console.error(`[Kindle] Notice handling .sdr sidecar for ${dupPath}:`, sdrErr);
+          }
+        }
+
+        // Clean up empty parent directory if safe and not a root/system folder
+        const parentDir = path.dirname(dupPath);
+        if (fs.existsSync(parentDir)) {
+          try {
+            const realParent = fs.realpathSync(parentDir);
+            const parentName = path.basename(realParent).toLowerCase();
+            const protectedDirs = new Set(["books", "documents", "downloads", "system", path.basename(realMount).toLowerCase()]);
+
+            if (realParent !== realMount && realParent.startsWith(realMount + path.sep) && !protectedDirs.has(parentName)) {
+              const remaining = fs.readdirSync(realParent);
+              if (remaining.length === 0 || remaining.every((f: string) => f.startsWith("."))) {
+                for (const f of remaining) {
+                  try {
+                    fs.unlinkSync(path.join(realParent, f));
+                  } catch {}
+                }
+                fs.rmdirSync(realParent);
+              }
+            }
+          } catch (rmDirErr) {
+            console.error(`[Kindle] Notice cleaning empty parent dir ${parentDir}:`, rmDirErr);
+          }
+        }
+      } catch (err) {
+        console.error(`[Kindle] Failed to remove duplicate ${dupPath}:`, err);
+      }
+    }
+  }
+
+  // Run dot_clean to eliminate ._* ghost files left on FAT32
+  try {
+    const booksDir = resolveKindleBooksDir(mountPath, false);
+    if (booksDir) {
+      runDotClean(booksDir);
+    }
+  } catch (dotCleanErr) {
+    console.error("[Kindle] Notice running dot_clean after duplicate pruning:", dotCleanErr);
+  }
+
+  // Invalidate cached Kindle index so subsequent queries reflect new state
+  invalidateKindleBookIndex();
+
+  return { cleanedCount, bytesFreed, duplicates: groups };
+}
+
 /**
  * Backward compatibility alias for countKindleBooks.
  */
@@ -1695,11 +2452,18 @@ export function getKindleStatus(
   }
 
   let preview: KindleSyncPreview | null = null;
+  let deviceDuplicatesCount = 0;
   if (mountPath && !isKindleSyncActive()) {
     try {
       preview = previewKindleSync(mountPath, { scope });
     } catch {
       preview = null;
+    }
+    try {
+      const dupGroups = scanKindleDeviceDuplicates(mountPath);
+      deviceDuplicatesCount = dupGroups.reduce((acc, g) => acc + g.duplicatePaths.length, 0);
+    } catch {
+      deviceDuplicatesCount = 0;
     }
   }
 
@@ -1712,11 +2476,14 @@ export function getKindleStatus(
     totalBytes,
     booksOnDevice,
     libraryBooks,
+    deviceDuplicatesCount,
     syncInProgress: isKindleSyncActive(),
     progress: activeKindleProgress,
     preview,
   };
 }
+
+export const getKindleSyncStatus = getKindleStatus;
 
 export function getKosyncDbPath(): string {
   if (process.env.KOSYNC_DB_PATH) {

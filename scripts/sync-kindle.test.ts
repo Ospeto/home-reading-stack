@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 
@@ -19,6 +20,7 @@ import {
   syncKindle,
   formatBytes,
   formatSyncReport,
+  parseCliArgs,
   type KindleVolumeInfo,
   type KindleSyncOptions,
   type CalibreBookRecord,
@@ -955,6 +957,49 @@ War is peace. Freedom is slavery. Ignorance is strength.
       expect(pullRes.results.map((r) => r.bookTitle).sort()).toEqual(["Novel A", "Novel B"].sort());
       expect(fs.existsSync(path.join(mockObsidianBooks, "Novel A.md"))).toBe(true);
       expect(fs.existsSync(path.join(mockObsidianBooks, "Novel B.md"))).toBe(true);
+    });
+
+    it("parseCliArgs parses --clean-duplicates flag", () => {
+      const parsed = parseCliArgs(["--clean-duplicates", "--mount", "/Volumes/Kindle"]);
+      expect(parsed.cleanDuplicates).toBe(true);
+      expect(parsed.mountPath).toBe("/Volumes/Kindle");
+    });
+
+    it("sync-kindle --clean-duplicates CLI option defaults to preview and prunes with --apply", () => {
+      const kindleMount = path.join(tempDir, "KindleCliTest");
+      const booksDir = path.join(kindleMount, "books");
+      const docsDir = path.join(kindleMount, "documents");
+      fs.mkdirSync(booksDir, { recursive: true });
+      fs.mkdirSync(docsDir, { recursive: true });
+
+      // Create duplicate book in books and documents
+      fs.writeFileSync(path.join(booksDir, "Sample Book.epub"), Buffer.alloc(30000, "1"));
+      fs.writeFileSync(path.join(docsDir, "Sample Book.epub"), Buffer.alloc(30000, "1"));
+
+      // 1. Without --apply: dry run preview mode, no deletion
+      const scriptPath = path.resolve((import.meta as any).dir || process.cwd(), "sync-kindle.ts");
+      const previewRes = spawnSync(
+        "bun",
+        ["run", scriptPath, "--clean-duplicates", "--mount", kindleMount],
+        { encoding: "utf8" },
+      );
+
+      expect(previewRes.status).toBe(0);
+      expect(previewRes.stdout).toContain("Scanning device duplicates");
+      expect(previewRes.stdout).toContain("DRY RUN (Preview only)");
+      expect(fs.existsSync(path.join(docsDir, "Sample Book.epub"))).toBe(true);
+
+      // 2. With --apply: live pruning executed
+      const applyRes = spawnSync(
+        "bun",
+        ["run", scriptPath, "--clean-duplicates", "--apply", "--mount", kindleMount],
+        { encoding: "utf8" },
+      );
+
+      expect(applyRes.status).toBe(0);
+      expect(applyRes.stdout).toContain("Cleaned 1 duplicate file(s)");
+      expect(fs.existsSync(path.join(booksDir, "Sample Book.epub"))).toBe(true);
+      expect(fs.existsSync(path.join(docsDir, "Sample Book.epub"))).toBe(false);
     });
   });
 });
