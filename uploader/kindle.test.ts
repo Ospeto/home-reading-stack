@@ -3741,5 +3741,43 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       releaseKindleSyncLock();
       resetKindleProgressForTesting();
     });
+
+    it("synchronizes cleanly to a brand new Kindle device with an empty documents folder", async () => {
+      // Simulate a factory-fresh Kindle with only an empty documents folder
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const docsDir = path.join(kindleMount, "documents");
+      fs.mkdirSync(docsDir, { recursive: true });
+      resetKindleProgressForTesting();
+      invalidateKindleSyncPreviewCache();
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Book One", author: "NewAuthor, First", series: "Epic Series", seriesIndex: 1, format: "EPUB", fileContent: "book 1 content" },
+        { id: 2, title: "Book Two", author: "NewAuthor, First", series: "Epic Series", seriesIndex: 2, format: "EPUB", fileContent: "book 2 content" },
+      ]);
+
+      // 1. Initial preview on fresh device must detect all books as pending
+      const preview = previewKindleSync(kindleMount, { scope: "all" });
+      expect(preview.detected).toBe(true);
+      expect(preview.totalCandidates).toBe(2);
+      expect(preview.alreadySyncedCount).toBe(0);
+      expect(preview.pendingCount).toBe(2);
+
+      // 2. Perform bulk transfer to new Kindle
+      const syncResult = await syncAllBooksToKindle({ mountPath: kindleMount, scope: "all" });
+      expect(syncResult.success).toBe(true);
+      expect(syncResult.transferred).toBe(2);
+      expect(syncResult.alreadySynced).toBe(0);
+      expect(syncResult.failed).toBe(0);
+
+      // 3. Verify destination folder structure
+      expect(fs.existsSync(path.join(docsDir, "NewAuthor, First"))).toBe(true);
+
+      // 4. Repeat preview after sync must recognize all books are already synced
+      invalidateKindleSyncPreviewCache();
+      const afterPreview = previewKindleSync(kindleMount, { scope: "all" });
+      expect(afterPreview.totalCandidates).toBe(2);
+      expect(afterPreview.alreadySyncedCount).toBe(2);
+      expect(afterPreview.pendingCount).toBe(0);
+    });
   });
 });
