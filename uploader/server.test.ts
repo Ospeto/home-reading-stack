@@ -13,6 +13,12 @@ import {
 } from "./server";
 import { validateUrlForSSRF, getBsdtarPath } from "./security";
 import { autoEnrichBookSynopsis } from "./scraper";
+import {
+  isKindleSyncActive,
+  getKindleProgress,
+  resetKindleProgressForTesting,
+  invalidateKindleBookIndex,
+} from "./kindle";
 
 describe("Calibre OPDS & Asset Reverse Proxy", () => {
   it("proxies /opds GET to Calibre server and preserves XML streaming body", async () => {
@@ -1616,6 +1622,181 @@ exit 0
         process.env.CALIBRE_DB_PATH = origCalibreDbPath;
         process.env.CALIBRE_LIBRARY_DIR = origLibraryDir;
         await fs.promises.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("Kindle Asynchronous Bulk Sync Endpoint (POST /api/kindle/sync)", () => {
+    let tempBaseDir: string;
+    let fakeVolumesDir: string;
+    let fakeLibraryDir: string;
+    let fakeCalibreDbPath: string;
+    let origCalibreDb: string | undefined;
+    let origCalibreLib: string | undefined;
+    let origVolumesDir: string | undefined;
+
+    const setupFakeCalibreDatabase = (
+      books: Array<{ id: number; title: string; author: string; format: string; fileContent: string }>,
+    ) => {
+      const db = new Database(fakeCalibreDbPath);
+      db.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, path TEXT, has_cover INTEGER, pubdate TEXT, series_index REAL);");
+      db.run("CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);");
+      db.run("CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);");
+      db.run("CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);");
+      db.run("CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);");
+      db.run("CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);");
+      db.run("CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);");
+      db.run("CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);");
+
+      for (const b of books) {
+        const bookRelDir = `${b.author}/${b.title} (${b.id})`;
+        const fullBookDir = path.join(fakeLibraryDir, bookRelDir);
+        fs.mkdirSync(fullBookDir, { recursive: true });
+        const filename = `${b.title} - ${b.author}.${b.format.toLowerCase()}`;
+        const filePath = path.join(fullBookDir, filename);
+        fs.writeFileSync(filePath, b.fileContent, "utf8");
+
+        db.run("INSERT INTO books (id, title, path, has_cover, pubdate, series_index) VALUES (?, ?, ?, 0, '', 1);", [
+          b.id,
+          b.title,
+          bookRelDir,
+        ]);
+        const stat = fs.statSync(filePath);
+        db.run("INSERT INTO data (id, book, format, uncompressed_size, name) VALUES (?, ?, ?, ?, ?);", [
+          b.id,
+          b.id,
+          b.format.toUpperCase(),
+          stat.size,
+          `${b.title} - ${b.author}`,
+        ]);
+        db.run("INSERT OR IGNORE INTO authors (id, name) VALUES (?, ?);", [b.id, b.author]);
+        db.run("INSERT INTO books_authors_link (id, book, author) VALUES (?, ?, ?);", [b.id, b.id, b.id]);
+      }
+      db.close();
+    };
+
+    it("returns non-blocking response in <500ms and executes sync in background", async () => {
+      tempBaseDir = fs.mkdtempSync(path.join(os.tmpdir(), "server-kindle-test-"));
+      fakeVolumesDir = path.join(tempBaseDir, "Volumes");
+      fakeLibraryDir = path.join(tempBaseDir, "Calibre_Library");
+      fakeCalibreDbPath = path.join(fakeLibraryDir, "metadata.db");
+
+      fs.mkdirSync(fakeVolumesDir, { recursive: true });
+      fs.mkdirSync(fakeLibraryDir, { recursive: true });
+
+      origCalibreDb = process.env.CALIBRE_DB_PATH;
+      origCalibreLib = process.env.CALIBRE_LIBRARY_DIR;
+      origVolumesDir = process.env.LIGHTHOUSE_VOLUMES_DIR;
+
+      process.env.CALIBRE_DB_PATH = fakeCalibreDbPath;
+      process.env.CALIBRE_LIBRARY_DIR = fakeLibraryDir;
+      process.env.LIGHTHOUSE_VOLUMES_DIR = fakeVolumesDir;
+
+      resetKindleProgressForTesting();
+      invalidateKindleBookIndex();
+
+      try {
+        setupFakeCalibreDatabase([
+          { id: 1, title: "Server Book 1", author: "Author", format: "EPUB", fileContent: "book 1" },
+        ]);
+
+        const kindleMount = path.join(fakeVolumesDir, "Kindle");
+        fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+        const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+        const req = new Request("http://127.0.0.1:8086/api/kindle/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scope: "all" }),
+        });
+
+        const start = Date.now();
+        const res = await handleRequest(req, localServer);
+        const duration = Date.now() - start;
+
+        expect(res.status).toBe(200);
+        expect(duration).toBeLessThan(500);
+
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(true);
+        expect(data.started).toBe(true);
+
+        // Wait for background sync to complete
+        let attempts = 0;
+        while (isKindleSyncActive() && attempts < 50) {
+          await new Promise((r) => setTimeout(r, 20));
+          attempts++;
+        }
+
+        const progress = getKindleProgress();
+        expect(progress?.phase).toBe("completed");
+        expect(progress?.lastResult?.success).toBe(true);
+      } finally {
+        if (origCalibreDb !== undefined) process.env.CALIBRE_DB_PATH = origCalibreDb;
+        else delete process.env.CALIBRE_DB_PATH;
+        if (origCalibreLib !== undefined) process.env.CALIBRE_LIBRARY_DIR = origCalibreLib;
+        else delete process.env.CALIBRE_LIBRARY_DIR;
+        if (origVolumesDir !== undefined) process.env.LIGHTHOUSE_VOLUMES_DIR = origVolumesDir;
+        else delete process.env.LIGHTHOUSE_VOLUMES_DIR;
+        resetKindleProgressForTesting();
+        invalidateKindleBookIndex();
+        await fs.promises.rm(tempBaseDir, { recursive: true, force: true });
+      }
+    });
+
+    it("returns 507 immediately when storage is insufficient", async () => {
+      tempBaseDir = fs.mkdtempSync(path.join(os.tmpdir(), "server-kindle-507-"));
+      fakeVolumesDir = path.join(tempBaseDir, "Volumes");
+      fakeLibraryDir = path.join(tempBaseDir, "Calibre_Library");
+      fakeCalibreDbPath = path.join(fakeLibraryDir, "metadata.db");
+
+      fs.mkdirSync(fakeVolumesDir, { recursive: true });
+      fs.mkdirSync(fakeLibraryDir, { recursive: true });
+
+      origCalibreDb = process.env.CALIBRE_DB_PATH;
+      origCalibreLib = process.env.CALIBRE_LIBRARY_DIR;
+      origVolumesDir = process.env.LIGHTHOUSE_VOLUMES_DIR;
+
+      process.env.CALIBRE_DB_PATH = fakeCalibreDbPath;
+      process.env.CALIBRE_LIBRARY_DIR = fakeLibraryDir;
+      process.env.LIGHTHOUSE_VOLUMES_DIR = fakeVolumesDir;
+
+      resetKindleProgressForTesting();
+      invalidateKindleBookIndex();
+
+      process.env.TEST_KINDLE_FREE_BYTES = "50";
+      try {
+        setupFakeCalibreDatabase([
+          { id: 1, title: "Huge Book", author: "Author", format: "EPUB", fileContent: "content" },
+        ]);
+
+        const kindleMount = path.join(fakeVolumesDir, "Kindle");
+        fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+        const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+        const req = new Request("http://127.0.0.1:8086/api/kindle/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scope: "all" }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(507);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(false);
+        expect(data.error).toContain("Insufficient Kindle storage");
+        expect(isKindleSyncActive()).toBe(false);
+      } finally {
+        delete process.env.TEST_KINDLE_FREE_BYTES;
+        if (origCalibreDb !== undefined) process.env.CALIBRE_DB_PATH = origCalibreDb;
+        else delete process.env.CALIBRE_DB_PATH;
+        if (origCalibreLib !== undefined) process.env.CALIBRE_LIBRARY_DIR = origCalibreLib;
+        else delete process.env.CALIBRE_LIBRARY_DIR;
+        if (origVolumesDir !== undefined) process.env.LIGHTHOUSE_VOLUMES_DIR = origVolumesDir;
+        else delete process.env.LIGHTHOUSE_VOLUMES_DIR;
+        resetKindleProgressForTesting();
+        invalidateKindleBookIndex();
+        await fs.promises.rm(tempBaseDir, { recursive: true, force: true });
       }
     });
   });

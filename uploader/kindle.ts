@@ -66,6 +66,7 @@ export interface KindleLiveProgress {
   highlightsPulledCount: number;
   booksDir?: string;
   error?: string;
+  lastResult?: KindleSyncResult;
 }
 
 export interface KindleSyncPreview {
@@ -103,6 +104,7 @@ export interface KindleSyncOptions {
   subfolderByAuthor?: boolean; // Default true: books/<Author>/<Filename>
   scope?: "unread" | "all"; // Scope: "unread" (active & unread) or "all" (entire library)
   vaultPath?: string;
+  lockAlreadyAcquired?: boolean;
   onProgress?: (progress: KindleLiveProgress) => void;
 }
 
@@ -169,6 +171,76 @@ let cancelRequested = false;
 
 export function isKindleLocked(): boolean {
   return activeKindleLock !== null;
+}
+
+export function tryAcquireKindleSyncLock(): boolean {
+  if (activeKindleLock !== null) return false;
+  activeKindleLock = "sync";
+  cancelRequested = false;
+  activeKindleProgress = {
+    phase: "scanning",
+    currentIndex: 0,
+    totalCandidates: 0,
+    transferredCount: 0,
+    alreadySyncedCount: 0,
+    failedCount: 0,
+    skippedCount: 0,
+    bytesTransferred: 0,
+    percent: 0,
+    highlightsPulledCount: 0,
+  };
+  return true;
+}
+
+export function releaseKindleSyncLock(terminalPhase?: "cancelled" | "error" | "idle", errorMsg?: string): void {
+  activeKindleLock = null;
+  if (terminalPhase && terminalPhase !== "idle") {
+    activeKindleProgress = {
+      phase: terminalPhase,
+      currentIndex: activeKindleProgress?.currentIndex || 0,
+      totalCandidates: activeKindleProgress?.totalCandidates || 0,
+      transferredCount: activeKindleProgress?.transferredCount || 0,
+      alreadySyncedCount: activeKindleProgress?.alreadySyncedCount || 0,
+      failedCount: activeKindleProgress?.failedCount || 0,
+      skippedCount: activeKindleProgress?.skippedCount || 0,
+      bytesTransferred: activeKindleProgress?.bytesTransferred || 0,
+      percent: activeKindleProgress?.percent || 0,
+      highlightsPulledCount: 0,
+      error: errorMsg,
+      lastResult: {
+        success: false,
+        cancelled: terminalPhase === "cancelled",
+        mountPath: null,
+        booksDir: null,
+        totalBooks: activeKindleProgress?.totalCandidates || 0,
+        alreadySynced: activeKindleProgress?.alreadySyncedCount || 0,
+        transferred: 0,
+        failed: terminalPhase === "error" ? 1 : 0,
+        skipped: 0,
+        bytesTransferred: 0,
+        highlightsPulled: 0,
+        errors: errorMsg ? [{ bookId: 0, title: "LockRelease", error: errorMsg }] : [],
+      },
+    };
+  } else {
+    activeKindleProgress = null;
+  }
+}
+
+export function isKindleSyncActive(): boolean {
+  if (activeKindleLock !== null) return true;
+  if (!activeKindleProgress) return false;
+  return (
+    activeKindleProgress.phase === "scanning" ||
+    activeKindleProgress.phase === "transferring" ||
+    activeKindleProgress.phase === "highlights"
+  );
+}
+
+export function resetKindleProgressForTesting(): void {
+  activeKindleLock = null;
+  activeKindleProgress = null;
+  cancelRequested = false;
 }
 
 export function getKindleProgress(): KindleLiveProgress | null {
@@ -1623,7 +1695,7 @@ export function getKindleStatus(
   }
 
   let preview: KindleSyncPreview | null = null;
-  if (mountPath) {
+  if (mountPath && !isKindleSyncActive()) {
     try {
       preview = previewKindleSync(mountPath, { scope });
     } catch {
@@ -1640,7 +1712,7 @@ export function getKindleStatus(
     totalBytes,
     booksOnDevice,
     libraryBooks,
-    syncInProgress: activeKindleLock !== null,
+    syncInProgress: isKindleSyncActive(),
     progress: activeKindleProgress,
     preview,
   };
@@ -2201,7 +2273,7 @@ async function getPullHighlightsFn() {
  * - Supports live progress tracking and highlight syncing to Obsidian MAS vault & cache.db.
  */
 export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Promise<KindleSyncResult> {
-  if (activeKindleLock) {
+  if (activeKindleLock && !options.lockAlreadyAcquired) {
     return {
       success: false,
       mountPath: null,
@@ -2217,9 +2289,15 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
     };
   }
 
+  activeKindleLock = "sync";
+  if (!options.lockAlreadyAcquired) {
+    cancelRequested = false;
+  }
+
   const mountPath = options.mountPath || detectKindleVolume();
   if (!mountPath || !fs.existsSync(mountPath)) {
-    return {
+    activeKindleLock = null;
+    const noMountResult: KindleSyncResult = {
       success: false,
       mountPath: mountPath || null,
       booksDir: null,
@@ -2232,13 +2310,27 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
       highlightsPulled: 0,
       errors: [{ bookId: 0, title: "None", error: "No Kindle device detected under /Volumes" }],
     };
+    activeKindleProgress = {
+      phase: "error",
+      currentIndex: 0,
+      totalCandidates: 0,
+      transferredCount: 0,
+      alreadySyncedCount: 0,
+      failedCount: 0,
+      skippedCount: 0,
+      bytesTransferred: 0,
+      percent: 0,
+      highlightsPulledCount: 0,
+      error: "No Kindle device detected under /Volumes",
+      lastResult: noMountResult,
+    };
+    options.onProgress?.(activeKindleProgress);
+    return noMountResult;
   }
 
   const resolvedMount = path.resolve(mountPath);
   const targetBooksRoot = resolveKindleBooksDir(resolvedMount, true);
 
-  activeKindleLock = "sync";
-  cancelRequested = false;
   activeKindleProgress = {
     phase: "scanning",
     currentIndex: 0,
@@ -2307,6 +2399,20 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
       const freeMb = (space.freeBytes / (1024 * 1024)).toFixed(1);
       const errMsg = `Insufficient Kindle storage: requires ${reqMb} MB (including 50MB reserve), but only ${freeMb} MB available`;
 
+      const storageResult: KindleSyncResult = {
+        success: false,
+        mountPath: resolvedMount,
+        booksDir: targetBooksRoot,
+        totalBooks: candidates.length,
+        alreadySynced,
+        transferred: 0,
+        failed: pendingCandidates.length,
+        skipped: 0,
+        bytesTransferred: 0,
+        highlightsPulled: 0,
+        errors: [{ bookId: 0, title: "Storage", error: errMsg }],
+      };
+
       activeKindleProgress = {
         phase: "error",
         currentIndex: 0,
@@ -2320,22 +2426,11 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
         highlightsPulledCount: 0,
         booksDir: targetBooksRoot,
         error: errMsg,
+        lastResult: storageResult,
       };
       options.onProgress?.(activeKindleProgress);
 
-      return {
-        success: false,
-        mountPath: resolvedMount,
-        booksDir: targetBooksRoot,
-        totalBooks: candidates.length,
-        alreadySynced,
-        transferred: 0,
-        failed: pendingCandidates.length,
-        skipped: 0,
-        bytesTransferred: 0,
-        highlightsPulled: 0,
-        errors: [{ bookId: 0, title: "Storage", error: errMsg }],
-      };
+      return storageResult;
     }
 
     // 4. Transfer Candidates
@@ -2494,22 +2589,7 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
       }
     }
 
-    activeKindleProgress = {
-      phase: cancelRequested ? "cancelled" : "completed",
-      currentIndex: candidates.length,
-      totalCandidates: candidates.length,
-      transferredCount: transferred,
-      alreadySyncedCount: alreadySynced,
-      failedCount: failed,
-      skippedCount: skipped,
-      bytesTransferred,
-      percent: cancelRequested ? activeKindleProgress.percent : 100,
-      highlightsPulledCount: highlightsPulled,
-      booksDir: targetBooksRoot,
-    };
-    options.onProgress?.(activeKindleProgress);
-
-    return {
+    const finalResult: KindleSyncResult = {
       success: !cancelRequested && failed === 0,
       cancelled: cancelRequested,
       mountPath: resolvedMount,
@@ -2524,6 +2604,57 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
       errors,
       transferredBooks,
     };
+
+    activeKindleProgress = {
+      phase: cancelRequested ? "cancelled" : (failed > 0 && transferred === 0 && alreadySynced === 0 ? "error" : "completed"),
+      currentIndex: candidates.length,
+      totalCandidates: candidates.length,
+      transferredCount: transferred,
+      alreadySyncedCount: alreadySynced,
+      failedCount: failed,
+      skippedCount: skipped,
+      bytesTransferred,
+      percent: cancelRequested ? (activeKindleProgress?.percent ?? 0) : 100,
+      highlightsPulledCount: highlightsPulled,
+      booksDir: targetBooksRoot,
+      lastResult: finalResult,
+      ...(finalResult.errors && finalResult.errors.length > 0 ? { error: finalResult.errors[0].error } : {}),
+    };
+    options.onProgress?.(activeKindleProgress);
+
+    return finalResult;
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    const errorResult: KindleSyncResult = {
+      success: false,
+      mountPath: resolvedMount,
+      booksDir: targetBooksRoot,
+      totalBooks: activeKindleProgress?.totalCandidates || 0,
+      alreadySynced: activeKindleProgress?.alreadySyncedCount || 0,
+      transferred: activeKindleProgress?.transferredCount || 0,
+      failed: 1,
+      skipped: 0,
+      bytesTransferred: activeKindleProgress?.bytesTransferred || 0,
+      highlightsPulled: 0,
+      errors: [{ bookId: 0, title: "Exception", error: errorMsg }],
+    };
+    activeKindleProgress = {
+      phase: "error",
+      currentIndex: activeKindleProgress?.currentIndex || 0,
+      totalCandidates: activeKindleProgress?.totalCandidates || 0,
+      transferredCount: activeKindleProgress?.transferredCount || 0,
+      alreadySyncedCount: activeKindleProgress?.alreadySyncedCount || 0,
+      failedCount: (activeKindleProgress?.failedCount || 0) + 1,
+      skippedCount: activeKindleProgress?.skippedCount || 0,
+      bytesTransferred: activeKindleProgress?.bytesTransferred || 0,
+      percent: activeKindleProgress?.percent || 0,
+      highlightsPulledCount: 0,
+      booksDir: targetBooksRoot,
+      error: errorMsg,
+      lastResult: errorResult,
+    };
+    options.onProgress?.(activeKindleProgress);
+    return errorResult;
   } finally {
     activeKindleLock = null;
     cancelRequested = false;
