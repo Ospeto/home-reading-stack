@@ -4274,6 +4274,10 @@ export async function handleRequest(
         lockAlreadyAcquired: true,
       }).catch((syncErr) => {
         console.error("[Kindle] Background sync exception:", syncErr);
+        releaseKindleSyncLock(
+          "error",
+          syncErr instanceof Error ? syncErr.message : String(syncErr),
+        );
       });
 
       return jsonResponse(

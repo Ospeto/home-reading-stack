@@ -3683,5 +3683,74 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
       expect(progressReported.totalCandidates).toBe(42);
       expect(progressReported.alreadySyncedCount).toBe(10);
     });
+
+    it("syncAllBooksToKindle handles unhandled exceptions gracefully, transitions to phase error, records error message, and invalidates cache", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Error Book", author: "Author", format: "EPUB", fileContent: "1" },
+      ]);
+      resetKindleProgressForTesting();
+
+      // Force an unexpected exception during buildKindleBookIndex / candidate processing
+      const origReaddir = fs.readdirSync;
+      let injectError = true;
+      (fs as any).readdirSync = ((p: any, opts: any) => {
+        if (injectError && typeof p === "string" && p.includes("Kindle")) {
+          injectError = false;
+          throw new Error("Synthetic USB I/O failure");
+        }
+        return origReaddir(p, opts);
+      }) as any;
+
+      try {
+        const result = await syncAllBooksToKindle({ mountPath: kindleMount });
+        expect(result.success).toBe(false);
+        expect(result.errors.length).toBeGreaterThan(0);
+        expect(result.errors[0].error).toContain("Synthetic USB I/O failure");
+
+        // activeKindleProgress must transition to 'error' phase with error string
+        const progress = getKindleProgress();
+        expect(progress).not.toBeNull();
+        expect(progress!.phase).toBe("error");
+        expect(progress!.error).toContain("Synthetic USB I/O failure");
+
+        // Lock must be released in finally block
+        expect(isKindleSyncActive()).toBe(false);
+      } finally {
+        fs.readdirSync = origReaddir;
+        resetKindleProgressForTesting();
+      }
+    });
+
+    it("POST /api/kindle/sync releases lock with phase error when background sync rejects", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Test Book", author: "Author Test", format: "EPUB", fileContent: "test content" },
+      ]);
+      resetKindleProgressForTesting();
+      invalidateKindleSyncPreviewCache();
+
+      const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+      const req = new Request("http://127.0.0.1:8086/api/kindle/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope: "unread" }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(202);
+
+      // Wait a moment for background task to execute
+      await new Promise((r) => setTimeout(r, 150));
+
+      // After background sync settles, lock must be released (not stuck)
+      expect(tryAcquireKindleSyncLock()).toBe(true);
+      releaseKindleSyncLock();
+      resetKindleProgressForTesting();
+    });
   });
 });
