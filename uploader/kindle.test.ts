@@ -39,6 +39,7 @@ import {
   getKindleSyncStatus,
   isCrossScriptAuthorMatch,
   invalidateKindleSyncPreviewCache,
+  setActiveKindleProgress,
 } from "./kindle";
 import { handleRequest, resetServerDependenciesForTest } from "./server";
 
@@ -3581,6 +3582,106 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
 
       // Grace period of 3000ms before treating missing progress as disconnected
       expect(html).toContain("Date.now() - pollStartTime > 3000");
+    });
+
+    it("ejectKindleVolume invalidates index and preview caches upon success", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Book One", author: "Author One", format: "EPUB", fileContent: "1" },
+      ]);
+      const prev = previewKindleSync(kindleMount, { scope: "all" });
+      expect(prev.totalCandidates).toBe(1);
+
+      const mockScript = path.join(tempBaseDir, "mock_diskutil_eject.sh");
+      fs.writeFileSync(mockScript, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+      const origAllow = process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH;
+      const origBin = process.env.LIGHTHOUSE_DISKUTIL_BIN;
+
+      try {
+        process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH = tempBaseDir;
+        process.env.LIGHTHOUSE_DISKUTIL_BIN = mockScript;
+
+        // Successful eject should clear preview cache
+        const res = ejectKindleVolume(kindleMount);
+        expect(res.success).toBe(true);
+
+        // Remove mount to simulate unmounted state
+        fs.rmSync(kindleMount, { recursive: true, force: true });
+
+        // Verify preview cache was cleared (calling preview on unmounted returns detected: false)
+        const prevAfter = previewKindleSync(kindleMount, { scope: "all" });
+        expect(prevAfter.detected).toBe(false);
+      } finally {
+        if (origAllow !== undefined) process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH = origAllow;
+        else delete process.env.LIGHTHOUSE_TEST_ALLOW_EJECT_PATH;
+        if (origBin !== undefined) process.env.LIGHTHOUSE_DISKUTIL_BIN = origBin;
+        else delete process.env.LIGHTHOUSE_DISKUTIL_BIN;
+      }
+    });
+
+    it("getKindleStatus does not wipe activeKindleProgress if mount flaps while sync lock is held", () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Book One", author: "Author One", format: "EPUB", fileContent: "1" },
+      ]);
+      expect(tryAcquireKindleSyncLock()).toBe(true);
+
+      // Status call when mount directory is momentarily missing/unreachable
+      const nonExistentVolumes = path.join(fakeVolumesDir, "NonExistentVolumes");
+      const status = getKindleStatus(nonExistentVolumes);
+      expect(status.detected).toBe(false);
+
+      // activeKindleProgress must NOT be nulled while lock is active
+      const progress = getKindleProgress();
+      expect(progress).not.toBeNull();
+      expect(progress!.phase).toBe("scanning");
+
+      releaseKindleSyncLock();
+    });
+
+    it("syncAllBooksToKindle preserves seeded candidate totals when lockAlreadyAcquired is true", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Seed Book", author: "Author Seed", format: "EPUB", fileContent: "seed" },
+      ]);
+      expect(tryAcquireKindleSyncLock()).toBe(true);
+
+      // Seed progress as server does before 202
+      let progressReported: any = null;
+      setActiveKindleProgress({
+        phase: "scanning",
+        currentIndex: 0,
+        totalCandidates: 42,
+        transferredCount: 0,
+        alreadySyncedCount: 10,
+        failedCount: 0,
+        skippedCount: 0,
+        bytesTransferred: 0,
+        percent: 5,
+        highlightsPulledCount: 0,
+      });
+
+      await syncAllBooksToKindle({
+        mountPath: kindleMount,
+        lockAlreadyAcquired: true,
+        onProgress: (p) => {
+          if (!progressReported && p.phase === "scanning") {
+            progressReported = { ...p };
+          }
+        },
+      });
+
+      // The initial scanning progress event emitted must have preserved totalCandidates: 42
+      expect(progressReported).not.toBeNull();
+      expect(progressReported.totalCandidates).toBe(42);
+      expect(progressReported.alreadySyncedCount).toBe(10);
     });
   });
 });

@@ -6205,8 +6205,8 @@
         startKindleSyncPolling();
       } else {
         await fetchKindleSyncPreview();
+        startKindleModalIdlePolling();
       }
-      startKindleModalIdlePolling();
     }
 
     function closeKindleModal() {
@@ -6228,7 +6228,10 @@
         btn.classList.remove('opacity-70');
       }
       if (btnText) btnText.textContent = 'Sync to Kindle';
-      startKindleModalIdlePolling();
+      const modal = document.getElementById('kindleModal');
+      if (modal && !modal.classList.contains('hidden')) {
+        startKindleModalIdlePolling();
+      }
     }
 
     function startKindleSyncPolling() {

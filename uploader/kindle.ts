@@ -455,7 +455,7 @@ export function buildKindleBookIndex(mountPath: string): KindleBookIndex {
   function walk(currentDir: string, depth = 0) {
     if (depth > 8 || !fs.existsSync(currentDir)) return;
     try {
-      const dirEntries = fs.readdirSync(currentDir, { withFileTypes: true });
+      const dirEntries = fs.readdirSync(currentDir, { withFileTypes: true }) as fs.Dirent[];
       if (depth === 0 && index.dirNamesByRoot) {
         index.dirNamesByRoot.set(
           currentDir,
@@ -508,7 +508,7 @@ export function getOrCreateKindleBookIndex(mountPath: string, forceRefresh = fal
     !forceRefresh &&
     cachedIndex &&
     cachedIndexMount === mountPath &&
-    now - cachedIndexTime < 30000
+    (now - cachedIndexTime < 30000 || activeKindleLock !== null)
   ) {
     return cachedIndex;
   }
@@ -897,7 +897,7 @@ export function resolveKindleDestinationDir(
     dirNames = existingDirNames;
   } else if (fs.existsSync(targetBooksRoot)) {
     try {
-      const entries = fs.readdirSync(targetBooksRoot, { withFileTypes: true });
+      const entries = fs.readdirSync(targetBooksRoot, { withFileTypes: true }) as fs.Dirent[];
       dirNames = entries
         .filter((ent) => ent.isDirectory() && !ent.name.startsWith("."))
         .map((ent) => ent.name);
@@ -965,7 +965,7 @@ export function resolveKindleDestinationDir(
   // Avoid disk I/O if existingDirNames was provided and author folder does not exist.
   const authorFolderExists =
     reusedAuthorFolder || (existingDirNames === undefined && fs.existsSync(authorFullPath));
-  if (series && authorFolderExists && fs.existsSync(authorFullPath)) {
+  if (series && authorFolderExists) {
     const cleanSeries = cleanSeriesTitle(series) || series.trim();
     const normSeries = normalizeTitleForDedup(cleanSeries);
     try {
@@ -1323,23 +1323,7 @@ export function isBookAlreadyOnKindle(
       }
 
       // Check resolved destination directory (scanning existing author/series folders)
-      let existingDirsForBase = index?.dirNamesByRoot?.get(baseDir);
-      if (!existingDirsForBase && index?.entries && index.entries.length > 0) {
-        const baseNorm = path.resolve(baseDir);
-        const derived = new Set<string>();
-        for (const entry of index.entries) {
-          if (entry.filePath.startsWith(baseNorm + path.sep)) {
-            if (entry.parentDir) derived.add(entry.parentDir);
-            if (entry.grandparentDir && entry.grandparentDir !== path.basename(baseDir)) {
-              derived.add(entry.grandparentDir);
-            }
-          }
-        }
-        if (derived.size > 0) {
-          existingDirsForBase = Array.from(derived);
-        }
-      }
-
+      const existingDirsForBase = index?.dirNamesByRoot?.get(baseDir);
       const resolved = resolveKindleDestinationDir(
         baseDir,
         authorDir,
@@ -2479,9 +2463,11 @@ export function getKindleStatus(
     booksDir = resolveKindleBooksDir(mountPath, false);
     booksOnDevice = countKindleBooks(mountPath);
   } else {
-    // If device is no longer mounted, clear active live progress and cached preview
-    activeKindleProgress = null;
-    invalidateKindleSyncPreviewCache();
+    // If device is no longer mounted and no transfer lock is held, clear active live progress and cached preview
+    if (!activeKindleLock) {
+      activeKindleProgress = null;
+      invalidateKindleSyncPreviewCache();
+    }
   }
 
   let libraryBooks = 0;
@@ -2902,7 +2888,7 @@ export function previewKindleSync(
   const booksRoot = resolveKindleBooksDir(mount, false);
 
   const existingDirNames = fs.existsSync(booksRoot)
-    ? fs.readdirSync(booksRoot, { withFileTypes: true })
+    ? (fs.readdirSync(booksRoot, { withFileTypes: true }) as fs.Dirent[])
         .filter((ent) => ent.isDirectory() && !ent.name.startsWith("."))
         .map((ent) => ent.name)
     : [];
@@ -3202,9 +3188,15 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
   activeKindleProgress = {
     phase: "scanning",
     currentIndex: 0,
-    totalCandidates: 0,
+    totalCandidates:
+      options.lockAlreadyAcquired && activeKindleProgress?.totalCandidates
+        ? activeKindleProgress.totalCandidates
+        : 0,
     transferredCount: 0,
-    alreadySyncedCount: 0,
+    alreadySyncedCount:
+      options.lockAlreadyAcquired && activeKindleProgress?.alreadySyncedCount
+        ? activeKindleProgress.alreadySyncedCount
+        : 0,
     failedCount: 0,
     skippedCount: 0,
     bytesTransferred: 0,
@@ -3225,7 +3217,7 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
 
     // Cache existing directories once at the start of sync/transfer loop
     const existingDirNames = fs.existsSync(targetBooksRoot)
-      ? fs.readdirSync(targetBooksRoot, { withFileTypes: true })
+      ? (fs.readdirSync(targetBooksRoot, { withFileTypes: true }) as fs.Dirent[])
           .filter((ent) => ent.isDirectory() && !ent.name.startsWith("."))
           .map((ent) => ent.name)
       : [];
@@ -3617,6 +3609,8 @@ export function ejectKindleVolume(mountPath?: string): { success: boolean; messa
       };
     }
     if (res.status === 0) {
+      invalidateKindleSyncPreviewCache();
+      invalidateKindleBookIndex();
       return { success: true, message: `Successfully ejected ${resolvedTarget}` };
     }
     let statusDesc = "unknown error";
