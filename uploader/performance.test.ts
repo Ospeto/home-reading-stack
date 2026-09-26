@@ -654,6 +654,11 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
       expect(webpThumbRes.headers.get("Vary")).toBe("Accept");
       const webpThumbEtag = webpThumbRes.headers.get("ETag");
       expect(webpThumbEtag).not.toBeNull();
+      // Verify valid WebP RIFF header bytes
+      const webpBytes = new Uint8Array(await webpThumbRes.arrayBuffer());
+      expect(webpBytes.length).toBeGreaterThan(12);
+      expect(String.fromCharCode(...webpBytes.slice(0, 4))).toBe("RIFF");
+      expect(String.fromCharCode(...webpBytes.slice(8, 12))).toBe("WEBP");
 
       // Subsequent conditional request to WebP thumbnail returns 304 Not Modified
       const condWebpThumbReq = new Request("http://127.0.0.1:8086/api/books/1/cover?w=128", {
@@ -679,6 +684,10 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
       expect(webpMasterRes.headers.get("Content-Type")).toBe("image/webp");
       expect(webpMasterRes.headers.get("Cache-Control")).toBe("public, max-age=86400");
       expect(webpMasterRes.headers.get("Vary")).toBe("Accept");
+      const masterWebpBytes = new Uint8Array(await webpMasterRes.arrayBuffer());
+      expect(masterWebpBytes.length).toBeGreaterThan(12);
+      expect(String.fromCharCode(...masterWebpBytes.slice(0, 4))).toBe("RIFF");
+      expect(String.fromCharCode(...masterWebpBytes.slice(8, 12))).toBe("WEBP");
 
       // Non-WebP request falls back to image/jpeg
       const nonWebpReq = new Request("http://127.0.0.1:8086/api/books/1/cover?w=128", {
@@ -689,6 +698,29 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
       expect(nonWebpRes.status).toBe(200);
       expect(nonWebpRes.headers.get("Content-Type")).toBe("image/jpeg");
       expect(nonWebpRes.headers.get("Vary")).toBe("Accept");
+      const jpegBytes = new Uint8Array(await nonWebpRes.arrayBuffer());
+      expect(jpegBytes[0]).toBe(0xff);
+      expect(jpegBytes[1]).toBe(0xd8);
+    });
+
+    it("Cover downscaling falls back safely to JPEG without cache poisoning if WebP fails", async () => {
+      // Simulate environment where WebP conversion tool is missing or fails
+      const origCwebp = process.env.CWEBP_PATH;
+      process.env.CWEBP_PATH = "/nonexistent/cwebp";
+
+      try {
+        const testFailWebp = path.join(tempLibDir, "fail_test.webp");
+        // downscaleImageAsync must return false and NOT create a JPEG file at the .webp path
+        const result = await downscaleImageAsync(coverPath, testFailWebp, 64, "webp");
+        expect(result).toBe(false);
+        expect(fs.existsSync(testFailWebp)).toBe(false);
+      } finally {
+        if (origCwebp !== undefined) {
+          process.env.CWEBP_PATH = origCwebp;
+        } else {
+          delete process.env.CWEBP_PATH;
+        }
+      }
     });
 
     it("Highlight count memoization caches results and auto-invalidates on mutations", () => {

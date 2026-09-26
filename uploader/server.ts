@@ -1159,19 +1159,21 @@ export async function downscaleImageAsync(
             "--out",
             outputPath,
           ],
-          { stdout: "ignore", stderr: "pipe" },
+          { stdout: "ignore", stderr: "ignore" },
         );
-        const timeout = new Promise<number>((_, reject) =>
-          setTimeout(() => {
+        let timer: any = null;
+        const timeout = new Promise<number>((_, reject) => {
+          timer = setTimeout(() => {
             try {
               proc.kill();
             } catch (_killErr) {
               void _killErr;
             }
             reject(new Error("sips timeout"));
-          }, 15000),
-        );
+          }, 15000);
+        });
         const exitCode = await Promise.race([proc.exited, timeout]);
+        if (timer) clearTimeout(timer);
         if (exitCode === 0 && fs.existsSync(outputPath)) {
           return true;
         }
@@ -1186,35 +1188,39 @@ export async function downscaleImageAsync(
         try {
           const downProc = Bun.spawn(
             [sipsBin, "-s", "format", "jpeg", "-Z", String(targetWidth), inputPath, "--out", tempJpg],
-            { stdout: "ignore", stderr: "pipe" },
+            { stdout: "ignore", stderr: "ignore" },
           );
-          const downTimeout = new Promise<number>((_, reject) =>
-            setTimeout(() => {
+          let downTimer: any = null;
+          const downTimeout = new Promise<number>((_, reject) => {
+            downTimer = setTimeout(() => {
               try {
                 downProc.kill();
               } catch (_killErr) {
                 void _killErr;
               }
               reject(new Error("sips timeout"));
-            }, 15000),
-          );
+            }, 15000);
+          });
           const downExitCode = await Promise.race([downProc.exited, downTimeout]);
+          if (downTimer) clearTimeout(downTimer);
           if (downExitCode === 0 && fs.existsSync(tempJpg)) {
             const cwebpProc = Bun.spawn(
               [cwebpBin, "-q", "80", tempJpg, "-o", outputPath],
-              { stdout: "ignore", stderr: "pipe" },
+              { stdout: "ignore", stderr: "ignore" },
             );
-            const cwebpTimeout = new Promise<number>((_, reject) =>
-              setTimeout(() => {
+            let cwebpTimer: any = null;
+            const cwebpTimeout = new Promise<number>((_, reject) => {
+              cwebpTimer = setTimeout(() => {
                 try {
                   cwebpProc.kill();
                 } catch (_killErr) {
                   void _killErr;
                 }
                 reject(new Error("cwebp timeout"));
-              }, 15000),
-            );
+              }, 15000);
+            });
             const cwebpExit = await Promise.race([cwebpProc.exited, cwebpTimeout]);
+            if (cwebpTimer) clearTimeout(cwebpTimer);
             if (cwebpExit === 0 && fs.existsSync(outputPath)) {
               return true;
             }
@@ -1232,47 +1238,36 @@ export async function downscaleImageAsync(
         }
       }
 
-      // 3. Fallback: downscale as standard jpeg to target outputPath if webp failed
-      try {
-        const proc = Bun.spawn(
-          [sipsBin, "-s", "format", "jpeg", "-Z", String(targetWidth), inputPath, "--out", outputPath],
-          { stdout: "ignore", stderr: "pipe" },
-        );
-        const timeout = new Promise<number>((_, reject) =>
-          setTimeout(() => {
-            try {
-              proc.kill();
-            } catch (_killErr) {
-              void _killErr;
-            }
-            reject(new Error("sips timeout"));
-          }, 15000),
-        );
-        const exitCode = await Promise.race([proc.exited, timeout]);
-        return exitCode === 0 && fs.existsSync(outputPath);
-      } catch (err) {
-        console.warn("Async sips downscaling failed:", err);
-        return false;
+      // WebP conversion failed: do NOT write JPEG into .webp path. Fail cleanly so caller can fall back.
+      if (fs.existsSync(outputPath)) {
+        try {
+          fs.unlinkSync(outputPath);
+        } catch (_un) {
+          void _un;
+        }
       }
+      return false;
     }
 
     // Default: JPEG downscaling
     try {
       const proc = Bun.spawn(
         [sipsBin, "-Z", String(targetWidth), inputPath, "--out", outputPath],
-        { stdout: "ignore", stderr: "pipe" },
+        { stdout: "ignore", stderr: "ignore" },
       );
-      const timeout = new Promise<number>((_, reject) =>
-        setTimeout(() => {
+      let timer: any = null;
+      const timeout = new Promise<number>((_, reject) => {
+        timer = setTimeout(() => {
           try {
             proc.kill();
           } catch (_killErr) {
             void _killErr;
           }
           reject(new Error("sips timeout"));
-        }, 15000),
-      );
+        }, 15000);
+      });
       const exitCode = await Promise.race([proc.exited, timeout]);
+      if (timer) clearTimeout(timer);
       return exitCode === 0 && fs.existsSync(outputPath);
     } catch (err) {
       console.warn("Async sips downscaling failed:", err);
@@ -2900,14 +2895,32 @@ async function handleRequestCore(
       }
 
       try {
+        const atomicTempPath = cacheFilePath + `.tmp_${Date.now()}_${Math.random().toString(16).slice(2)}`;
         const success = await downscaleImageAsync(
           masterInputPath,
-          cacheFilePath,
+          atomicTempPath,
           targetWidth,
           requestedFormat,
         );
 
-        if (success && fs.existsSync(cacheFilePath)) {
+        if (success && fs.existsSync(atomicTempPath)) {
+          try {
+            fs.renameSync(atomicTempPath, cacheFilePath);
+          } catch (_renErr) {
+            // In case of parallel write, if cacheFilePath exists, proceed
+            if (!fs.existsSync(cacheFilePath)) {
+              throw _renErr;
+            }
+          }
+        } else if (fs.existsSync(atomicTempPath)) {
+          try {
+            fs.unlinkSync(atomicTempPath);
+          } catch (_un) {
+            void _un;
+          }
+        }
+
+        if (fs.existsSync(cacheFilePath)) {
           const etag = getFileETag(cacheFilePath) || `"${Date.now().toString(16)}"`;
 
           if (req.headers.get("if-none-match") === etag) {
@@ -3030,14 +3043,29 @@ async function handleRequestCore(
       // Convert master cover to WebP if master disk file exists
       const diskCoverPath = getMasterCoverPath(bookId);
       if (diskCoverPath && fs.existsSync(diskCoverPath)) {
+        const atomicMasterTemp = masterWebpCache + `.tmp_${Date.now()}_${Math.random().toString(16).slice(2)}`;
         // Downscale with large target width (e.g. 2400) to preserve full master resolution
         const converted = await downscaleImageAsync(
           diskCoverPath,
-          masterWebpCache,
+          atomicMasterTemp,
           2400,
           "webp",
         );
-        if (converted && fs.existsSync(masterWebpCache)) {
+        if (converted && fs.existsSync(atomicMasterTemp)) {
+          try {
+            fs.renameSync(atomicMasterTemp, masterWebpCache);
+          } catch (_ren) {
+            if (!fs.existsSync(masterWebpCache)) throw _ren;
+          }
+        } else if (fs.existsSync(atomicMasterTemp)) {
+          try {
+            fs.unlinkSync(atomicMasterTemp);
+          } catch (_un) {
+            void _un;
+          }
+        }
+
+        if (fs.existsSync(masterWebpCache)) {
           const etag = getFileETag(masterWebpCache) || `"${Date.now().toString(16)}"`;
           if (req.headers.get("if-none-match") === etag) {
             return new Response(null, {
