@@ -6,6 +6,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+// @ts-ignore
+import zlib from "node:zlib";
 import {
   searchUniversalMetadata,
   applyMetadataToCalibre,
@@ -65,7 +67,10 @@ import {
   batchUpsertHighlights,
   deleteHighlightsForBook,
   cleanQuoteText,
+  invalidateHighlightCountsCache,
 } from "./highlights";
+
+export { invalidateHighlightCountsCache };
 import {
   getKindleStatus,
   getKindleProgress,
@@ -79,7 +84,6 @@ import {
   cancelKindleSync,
   ejectKindleVolume,
   detectKindleVolume,
-  cleanKindleDeviceDuplicates,
   cleanKindleDeviceDuplicatesAsync,
   setActiveKindleProgress,
   resolveKindleBooksDir,
@@ -307,6 +311,35 @@ function resolveHtmlPath(): string {
 }
 
 const HTML_PATH = resolveHtmlPath();
+
+export function getIndexHtmlETag(): string {
+  try {
+    if (fs.existsSync(HTML_PATH)) {
+      const stat = fs.statSync(HTML_PATH);
+      return `"${Math.floor(stat.mtimeMs).toString(16)}-${stat.size.toString(16)}"`;
+    }
+  } catch (_e) {
+    void _e;
+  }
+  return `"${Date.now().toString(16)}"`;
+}
+
+let _cachedHtml: string | null = null;
+let _cachedHtmlMtime = 0;
+let _cachedHtmlSize = 0;
+let _cachedHtmlEtag = "";
+
+export function getFileETag(filePath: string): string | null {
+  try {
+    if (fs.existsSync(filePath)) {
+      const stat = fs.statSync(filePath);
+      return `"${Math.floor(stat.mtimeMs).toString(16)}-${stat.size.toString(16)}"`;
+    }
+  } catch (_e) {
+    void _e;
+  }
+  return null;
+}
 
 export function getCacheDbPath(): string {
   if (process.env.CACHE_DB_PATH || process.env.JOBS_DB_PATH) {
@@ -1883,11 +1916,156 @@ export function validateAndCanonicalizeProxyPath(
   return { valid: false, error: "Not an OPDS or Calibre asset route" };
 }
 
+export function isCompressibleContentType(contentType: string | null): boolean {
+  if (!contentType) return false;
+  const lower = contentType.toLowerCase();
+  // Strictly exclude streaming and binary types
+  if (
+    lower.includes("text/event-stream") ||
+    lower.includes("application/x-ndjson") ||
+    lower.includes("application/octet-stream") ||
+    lower.includes("application/epub+zip") ||
+    (lower.includes("image/") && !lower.includes("image/svg+xml")) ||
+    lower.includes("video/") ||
+    lower.includes("audio/") ||
+    lower.includes("font/")
+  ) {
+    return false;
+  }
+  return (
+    lower.includes("application/json") ||
+    lower.includes("text/html") ||
+    lower.includes("text/plain") ||
+    lower.includes("text/css") ||
+    lower.includes("text/javascript") ||
+    lower.includes("application/javascript") ||
+    lower.includes("application/xml") ||
+    lower.includes("text/xml") ||
+    lower.includes("application/atom+xml") ||
+    lower.includes("image/svg+xml")
+  );
+}
+
+export function appendVary(headers: Headers, headerName: string): void {
+  const existing = headers.get("Vary");
+  if (!existing) {
+    headers.set("Vary", headerName);
+  } else {
+    const parts = existing.split(",").map((s) => s.trim().toLowerCase());
+    if (!parts.includes(headerName.toLowerCase())) {
+      headers.set("Vary", `${existing}, ${headerName}`);
+    }
+  }
+}
+
+export function getPreferredEncoding(
+  acceptEncoding: string | null,
+): "gzip" | "deflate" | null {
+  if (!acceptEncoding) return null;
+  const lower = acceptEncoding.toLowerCase();
+  if (lower.includes("gzip") || lower.includes("*")) {
+    return "gzip";
+  }
+  if (lower.includes("deflate")) {
+    return "deflate";
+  }
+  return null;
+}
+
+export async function compressResponseIfNeeded(
+  res: Response,
+  req: Request,
+): Promise<Response> {
+  if (
+    res.status === 204 ||
+    res.status === 304 ||
+    res.status < 200 ||
+    !res.body ||
+    req.method.toUpperCase() === "HEAD"
+  ) {
+    return res;
+  }
+
+  if (res.headers.has("Content-Encoding")) {
+    return res;
+  }
+
+  const contentType = res.headers.get("Content-Type");
+  if (!isCompressibleContentType(contentType)) {
+    return res;
+  }
+
+  const acceptEncoding = req.headers.get("accept-encoding");
+  const encoding = getPreferredEncoding(acceptEncoding);
+
+  if (!encoding) {
+    const newHeaders = new Headers(res.headers);
+    appendVary(newHeaders, "Accept-Encoding");
+    return new Response(res.body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: newHeaders,
+    });
+  }
+
+  let bodyBuffer: Buffer;
+  try {
+    const arrayBuf = await res.arrayBuffer();
+    bodyBuffer = Buffer.from(arrayBuf);
+  } catch (_e) {
+    void _e;
+    return res;
+  }
+
+  if (bodyBuffer.length <= 1024) {
+    const newHeaders = new Headers(res.headers);
+    appendVary(newHeaders, "Accept-Encoding");
+    return new Response(bodyBuffer, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: newHeaders,
+    });
+  }
+
+  let compressed: Uint8Array | Buffer;
+  try {
+    if (encoding === "gzip") {
+      compressed =
+        typeof (globalThis as any).Bun?.gzipSync === "function"
+          ? (globalThis as any).Bun.gzipSync(bodyBuffer)
+          : zlib.gzipSync(bodyBuffer);
+    } else {
+      compressed =
+        typeof (globalThis as any).Bun?.deflateSync === "function"
+          ? (globalThis as any).Bun.deflateSync(bodyBuffer)
+          : zlib.deflateSync(bodyBuffer);
+    }
+  } catch (err) {
+    console.error(`[Server] Compression failed (${encoding}):`, err);
+    return new Response(bodyBuffer, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+    });
+  }
+
+  const newHeaders = new Headers(res.headers);
+  newHeaders.set("Content-Encoding", encoding);
+  newHeaders.set("Content-Length", String(compressed.byteLength));
+  appendVary(newHeaders, "Accept-Encoding");
+
+  return new Response(compressed as any, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: newHeaders,
+  });
+}
+
 /**
  * Primary HTTP Request Handler with Hardened WAN Security, CORS, CSRF,
  * and Durable Job Queue Lifecycle.
  */
-export async function handleRequest(
+async function handleRequestCore(
   req: Request,
   server?: any,
 ): Promise<Response> {
@@ -2459,14 +2637,17 @@ export async function handleRequest(
       );
 
       if (fs.existsSync(cacheFilePath)) {
-        const cachedBuffer = fs.readFileSync(cacheFilePath);
-        const etag = `"${crypto.createHash("sha256").update(cachedBuffer).digest("hex").slice(0, 16)}"`;
+        const etag = getFileETag(cacheFilePath) || `"${Date.now().toString(16)}"`;
 
         if (req.headers.get("if-none-match") === etag) {
           return new Response(null, { status: 304 });
         }
 
-        return new Response(cachedBuffer, {
+        const file = (globalThis as any).Bun?.file
+          ? (globalThis as any).Bun.file(cacheFilePath)
+          : fs.readFileSync(cacheFilePath);
+
+        return new Response(file, {
           headers: {
             "Content-Type": "image/jpeg",
             "Cache-Control": "public, max-age=604800, immutable",
@@ -2509,14 +2690,17 @@ export async function handleRequest(
         );
 
         if (success && fs.existsSync(cacheFilePath)) {
-          const thumbBuffer = fs.readFileSync(cacheFilePath);
-          const etag = `"${crypto.createHash("sha256").update(thumbBuffer).digest("hex").slice(0, 16)}"`;
+          const etag = getFileETag(cacheFilePath) || `"${Date.now().toString(16)}"`;
 
           if (req.headers.get("if-none-match") === etag) {
             return new Response(null, { status: 304 });
           }
 
-          return new Response(thumbBuffer, {
+          const file = (globalThis as any).Bun?.file
+            ? (globalThis as any).Bun.file(cacheFilePath)
+            : fs.readFileSync(cacheFilePath);
+
+          return new Response(file, {
             headers: {
               "Content-Type": "image/jpeg",
               "Cache-Control": "public, max-age=604800, immutable",
@@ -2536,11 +2720,24 @@ export async function handleRequest(
 
       // Fallback to original master if downscaling fails
       if (!masterBuffer && diskCoverPath && fs.existsSync(diskCoverPath)) {
-        masterBuffer = fs.readFileSync(diskCoverPath);
+        const etag = getFileETag(diskCoverPath) || `"${Date.now().toString(16)}"`;
+        if (req.headers.get("if-none-match") === etag) {
+          return new Response(null, { status: 304 });
+        }
+        const file = (globalThis as any).Bun?.file
+          ? (globalThis as any).Bun.file(diskCoverPath)
+          : fs.readFileSync(diskCoverPath);
+        return new Response(file, {
+          headers: {
+            "Content-Type": "image/jpeg",
+            "Cache-Control": "public, max-age=604800, immutable",
+            ETag: etag,
+          },
+        });
       }
 
       if (masterBuffer) {
-        const etag = `"${crypto.createHash("sha256").update(masterBuffer).digest("hex").slice(0, 16)}"`;
+        const etag = `"${masterBuffer.length.toString(16)}-${crypto.createHash("sha256").update(masterBuffer).digest("hex").slice(0, 16)}"`;
         if (req.headers.get("if-none-match") === etag) {
           return new Response(null, { status: 304 });
         }
@@ -2558,15 +2755,18 @@ export async function handleRequest(
 
     // Master cover request (full resolution)
     const diskCoverPath = getMasterCoverPath(bookId);
-    if (diskCoverPath) {
-      const coverBuf = fs.readFileSync(diskCoverPath);
-      const etag = `"${crypto.createHash("sha256").update(coverBuf).digest("hex").slice(0, 16)}"`;
+    if (diskCoverPath && fs.existsSync(diskCoverPath)) {
+      const etag = getFileETag(diskCoverPath) || `"${Date.now().toString(16)}"`;
 
       if (req.headers.get("if-none-match") === etag) {
         return new Response(null, { status: 304 });
       }
 
-      return new Response(coverBuf, {
+      const file = (globalThis as any).Bun?.file
+        ? (globalThis as any).Bun.file(diskCoverPath)
+        : fs.readFileSync(diskCoverPath);
+
+      return new Response(file, {
         headers: {
           "Content-Type": "image/jpeg",
           "Cache-Control": "public, max-age=86400",
@@ -2584,7 +2784,7 @@ export async function handleRequest(
     );
     if (coverRes.ok) {
       const coverBuf = Buffer.from(await coverRes.arrayBuffer());
-      const etag = `"${crypto.createHash("sha256").update(coverBuf).digest("hex").slice(0, 16)}"`;
+      const etag = `"${coverBuf.length.toString(16)}-${crypto.createHash("sha256").update(coverBuf).digest("hex").slice(0, 16)}"`;
 
       if (req.headers.get("if-none-match") === etag) {
         return new Response(null, { status: 304 });
@@ -3208,6 +3408,7 @@ export async function handleRequest(
       });
 
       const syncedItem = syncResult.items[0];
+      invalidateHighlightCountsCache(getCacheDb());
       const relPath = syncedItem?.filename ? path.join("Books", syncedItem.filename) : "";
       return jsonResponse(
         {
@@ -4579,20 +4780,76 @@ export async function handleRequest(
 
   // Serve SPA HTML
   try {
-    const html = fs.readFileSync(HTML_PATH, "utf8");
-    return new Response(html, {
-      headers: {
+    if (fs.existsSync(HTML_PATH)) {
+      const stat = fs.statSync(HTML_PATH);
+      const mtime = Math.floor(stat.mtimeMs);
+      const size = stat.size;
+      let etag = _cachedHtmlEtag;
+      if (!_cachedHtml || _cachedHtmlMtime !== mtime || _cachedHtmlSize !== size) {
+        _cachedHtml = fs.readFileSync(HTML_PATH, "utf8");
+        _cachedHtmlMtime = mtime;
+        _cachedHtmlSize = size;
+        _cachedHtmlEtag = `"${mtime.toString(16)}-${size.toString(16)}"`;
+        etag = _cachedHtmlEtag;
+      }
+
+      const ifNoneMatch = req.headers.get("if-none-match");
+      const htmlHeaders: Record<string, string> = {
         "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-cache",
+        "Cache-Control": "public, max-age=60, must-revalidate",
+        ETag: etag,
         "X-Content-Type-Options": "nosniff",
-      },
-    });
+      };
+      if (corsOrigin && isAllowedOrigin(corsOrigin)) {
+        htmlHeaders["Access-Control-Allow-Origin"] = corsOrigin;
+        htmlHeaders["Access-Control-Allow-Credentials"] = "true";
+        htmlHeaders["Vary"] = "Origin";
+      }
+
+      if (
+        ifNoneMatch &&
+        (ifNoneMatch === etag ||
+          ifNoneMatch.includes(etag) ||
+          ifNoneMatch.replace(/^W\//, "") === etag ||
+          ifNoneMatch === etag.replace(/"/g, ""))
+      ) {
+        return new Response(null, {
+          status: 304,
+          headers: htmlHeaders,
+        });
+      }
+
+      if (req.method.toUpperCase() === "HEAD") {
+        return new Response(null, {
+          status: 200,
+          headers: htmlHeaders,
+        });
+      }
+
+      return new Response(_cachedHtml, {
+        status: 200,
+        headers: htmlHeaders,
+      });
+    }
   } catch (_e) {
     void _e;
-    return new Response("Reading HQ Web App", {
-      headers: { "Content-Type": "text/plain" },
-    });
   }
+
+  return new Response("Reading HQ Web App", {
+    headers: { "Content-Type": "text/plain" },
+  });
+}
+
+/**
+ * Primary HTTP Request Handler with Hardened WAN Security, CORS, CSRF,
+ * Transparent Gzip/Deflate Compression, and Durable Job Queue Lifecycle.
+ */
+export async function handleRequest(
+  req: Request,
+  server?: any,
+): Promise<Response> {
+  const res = await handleRequestCore(req, server);
+  return compressResponseIfNeeded(res, req);
 }
 
 // Start Server & Background Job Queue Worker when run directly
