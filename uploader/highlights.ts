@@ -688,7 +688,13 @@ export function getHighlightCounts(
     _cachedHighlightCounts.db === db &&
     now - _cachedHighlightCounts.timestamp < HIGHLIGHT_COUNTS_CACHE_TTL_MS
   ) {
-    return _cachedHighlightCounts.result;
+    const res = _cachedHighlightCounts.result;
+    return {
+      byBookId: { ...res.byBookId },
+      byTitle: { ...res.byTitle },
+      previewsByBookId: { ...res.previewsByBookId },
+      previewsByTitle: { ...res.previewsByTitle },
+    };
   }
 
   initHighlightsTable(db);
@@ -973,6 +979,7 @@ export function ensureBookHighlightsIndexed(
                 "DELETE FROM book_highlights WHERE book_id = ? OR lower(trim(book_title)) = lower(trim(?));",
                 [bookId, title.trim()],
               );
+              invalidateHighlightCountsCache(db);
             }
             if (parsed.length > 0) {
               batchUpsertHighlights(db, parsed);

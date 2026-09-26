@@ -1962,13 +1962,56 @@ export function getPreferredEncoding(
   acceptEncoding: string | null,
 ): "gzip" | "deflate" | null {
   if (!acceptEncoding) return null;
-  const lower = acceptEncoding.toLowerCase();
-  if (lower.includes("gzip") || lower.includes("*")) {
-    return "gzip";
+
+  // Parse comma-separated encodings with quality values (RFC 7231 / RFC 9110)
+  // e.g. "gzip;q=1.0, deflate;q=0.5, *;q=0"
+  const entries: Array<{ encoding: string; q: number }> = [];
+  const parts = acceptEncoding.split(",");
+
+  for (const part of parts) {
+    const [rawEncoding, ...params] = part.trim().split(";");
+    const enc = rawEncoding.trim().toLowerCase();
+    if (!enc) continue;
+
+    let q = 1.0;
+    for (const p of params) {
+      const trimmed = p.trim().toLowerCase();
+      if (trimmed.startsWith("q=")) {
+        const parsedQ = parseFloat(trimmed.slice(2));
+        if (!isNaN(parsedQ)) {
+          q = Math.max(0, Math.min(1, parsedQ));
+        }
+      }
+    }
+    entries.push({ encoding: enc, q });
   }
-  if (lower.includes("deflate")) {
-    return "deflate";
+
+  // Find explicit q-value for gzip, deflate, and wildcard *
+  let gzipQ = -1;
+  let deflateQ = -1;
+  let wildcardQ = -1;
+
+  for (const { encoding, q } of entries) {
+    if (encoding === "gzip") gzipQ = q;
+    else if (encoding === "deflate") deflateQ = q;
+    else if (encoding === "*") wildcardQ = q;
   }
+
+  // Fallback to wildcard if not explicitly defined
+  if (gzipQ === -1 && wildcardQ !== -1) gzipQ = wildcardQ;
+  if (deflateQ === -1 && wildcardQ !== -1) deflateQ = wildcardQ;
+
+  // Must have q > 0 to be acceptable
+  const gzipAcceptable = gzipQ > 0;
+  const deflateAcceptable = deflateQ > 0;
+
+  if (gzipAcceptable && deflateAcceptable) {
+    // Prefer higher q-value; default to gzip if equal
+    return gzipQ >= deflateQ ? "gzip" : "deflate";
+  }
+  if (gzipAcceptable) return "gzip";
+  if (deflateAcceptable) return "deflate";
+
   return null;
 }
 
@@ -1976,9 +2019,11 @@ export async function compressResponseIfNeeded(
   res: Response,
   req: Request,
 ): Promise<Response> {
+  // Never compress non-200 / 204 / 304 / 206 Partial Content
   if (
     res.status === 204 ||
     res.status === 304 ||
+    res.status === 206 ||
     res.status < 200 ||
     !res.body ||
     req.method.toUpperCase() === "HEAD"
@@ -1986,7 +2031,28 @@ export async function compressResponseIfNeeded(
     return res;
   }
 
-  if (res.headers.has("Content-Encoding")) {
+  // Never compress if partial content range or explicitly forbidden from transforming
+  if (
+    res.headers.has("Content-Range") ||
+    res.headers.get("Cache-Control")?.includes("no-transform") ||
+    res.headers.has("Content-Encoding")
+  ) {
+    return res;
+  }
+
+  if (res.headers.get("X-Skip-Compression") === "1") {
+    const cleanHeaders = new Headers(res.headers);
+    cleanHeaders.delete("X-Skip-Compression");
+    return new Response(res.body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: cleanHeaders,
+    });
+  }
+
+  // Cap sync buffering to 10MB to avoid event loop stalls
+  const declaredLen = parseInt(res.headers.get("Content-Length") || "0", 10);
+  if (declaredLen > 10 * 1024 * 1024) {
     return res;
   }
 
@@ -2042,10 +2108,12 @@ export async function compressResponseIfNeeded(
     }
   } catch (err) {
     console.error(`[Server] Compression failed (${encoding}):`, err);
+    const fallbackHeaders = new Headers(res.headers);
+    appendVary(fallbackHeaders, "Accept-Encoding");
     return new Response(bodyBuffer, {
       status: res.status,
       statusText: res.statusText,
-      headers: res.headers,
+      headers: fallbackHeaders,
     });
   }
 
@@ -2315,6 +2383,10 @@ async function handleRequestCore(
           statusText: upstreamRes.statusText,
           headers: proxyHeaders,
         });
+      }
+
+      if (pathCheck.canonicalPath?.startsWith("/get/")) {
+        proxyHeaders.set("X-Skip-Compression", "1");
       }
 
       // Stream body responses for large file downloads (ReadableStream from fetch)
@@ -2640,7 +2712,13 @@ async function handleRequestCore(
         const etag = getFileETag(cacheFilePath) || `"${Date.now().toString(16)}"`;
 
         if (req.headers.get("if-none-match") === etag) {
-          return new Response(null, { status: 304 });
+          return new Response(null, {
+            status: 304,
+            headers: {
+              ETag: etag,
+              "Cache-Control": "public, max-age=604800, immutable",
+            },
+          });
         }
 
         const file = (globalThis as any).Bun?.file
@@ -2693,7 +2771,13 @@ async function handleRequestCore(
           const etag = getFileETag(cacheFilePath) || `"${Date.now().toString(16)}"`;
 
           if (req.headers.get("if-none-match") === etag) {
-            return new Response(null, { status: 304 });
+            return new Response(null, {
+              status: 304,
+              headers: {
+                ETag: etag,
+                "Cache-Control": "public, max-age=604800, immutable",
+              },
+            });
           }
 
           const file = (globalThis as any).Bun?.file
@@ -2722,7 +2806,13 @@ async function handleRequestCore(
       if (!masterBuffer && diskCoverPath && fs.existsSync(diskCoverPath)) {
         const etag = getFileETag(diskCoverPath) || `"${Date.now().toString(16)}"`;
         if (req.headers.get("if-none-match") === etag) {
-          return new Response(null, { status: 304 });
+          return new Response(null, {
+            status: 304,
+            headers: {
+              ETag: etag,
+              "Cache-Control": "public, max-age=604800, immutable",
+            },
+          });
         }
         const file = (globalThis as any).Bun?.file
           ? (globalThis as any).Bun.file(diskCoverPath)
@@ -2739,7 +2829,13 @@ async function handleRequestCore(
       if (masterBuffer) {
         const etag = `"${masterBuffer.length.toString(16)}-${crypto.createHash("sha256").update(masterBuffer).digest("hex").slice(0, 16)}"`;
         if (req.headers.get("if-none-match") === etag) {
-          return new Response(null, { status: 304 });
+          return new Response(null, {
+            status: 304,
+            headers: {
+              ETag: etag,
+              "Cache-Control": "public, max-age=604800, immutable",
+            },
+          });
         }
         return new Response(masterBuffer, {
           headers: {
@@ -2759,7 +2855,13 @@ async function handleRequestCore(
       const etag = getFileETag(diskCoverPath) || `"${Date.now().toString(16)}"`;
 
       if (req.headers.get("if-none-match") === etag) {
-        return new Response(null, { status: 304 });
+        return new Response(null, {
+          status: 304,
+          headers: {
+            ETag: etag,
+            "Cache-Control": "public, max-age=86400",
+          },
+        });
       }
 
       const file = (globalThis as any).Bun?.file
@@ -2787,7 +2889,13 @@ async function handleRequestCore(
       const etag = `"${coverBuf.length.toString(16)}-${crypto.createHash("sha256").update(coverBuf).digest("hex").slice(0, 16)}"`;
 
       if (req.headers.get("if-none-match") === etag) {
-        return new Response(null, { status: 304 });
+        return new Response(null, {
+          status: 304,
+          headers: {
+            ETag: etag,
+            "Cache-Control": "public, max-age=86400",
+          },
+        });
       }
 
       return new Response(coverBuf, {

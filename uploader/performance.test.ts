@@ -26,6 +26,7 @@ import {
   getHighlightCounts,
   batchUpsertHighlights,
   deleteHighlightsForBook,
+  ensureBookHighlightsIndexed,
   invalidateHighlightCountsCache,
   getCachedHighlightCountsForTesting,
 } from "./highlights";
@@ -300,13 +301,64 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
       expect(isCompressibleContentType(null)).toBe(false);
     });
 
-    it("getPreferredEncoding prioritizes gzip over deflate and handles wildcard", () => {
+    it("getPreferredEncoding prioritizes gzip over deflate and handles quality values (q-values)", () => {
       expect(getPreferredEncoding("gzip, deflate, br")).toBe("gzip");
       expect(getPreferredEncoding("deflate, gzip")).toBe("gzip");
       expect(getPreferredEncoding("deflate")).toBe("deflate");
       expect(getPreferredEncoding("*")).toBe("gzip");
       expect(getPreferredEncoding("identity")).toBe(null);
       expect(getPreferredEncoding(null)).toBe(null);
+
+      // Quality value negotiation tests (Bug B remediation)
+      expect(getPreferredEncoding("gzip;q=0, deflate")).toBe("deflate");
+      expect(getPreferredEncoding("gzip;q=0, deflate;q=0.8")).toBe("deflate");
+      expect(getPreferredEncoding("deflate;q=0.9, gzip;q=0.5")).toBe("deflate");
+      expect(getPreferredEncoding("gzip;q=0.8, deflate;q=0.5")).toBe("gzip");
+      expect(getPreferredEncoding("gzip;q=0, *;q=0")).toBe(null);
+      expect(getPreferredEncoding("gzip;q=0, deflate;q=0")).toBe(null);
+      expect(getPreferredEncoding("*;q=0")).toBe(null);
+    });
+
+    it("compressResponseIfNeeded strictly preserves 206 Partial Content, Content-Range, and no-transform", async () => {
+      const { compressResponseIfNeeded } = await import("./server");
+
+      // 206 Partial Content
+      const res206 = new Response("bytes 0-100/500", {
+        status: 206,
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Range": "bytes 0-100/500",
+        },
+      });
+      const reqGzip = new Request("http://127.0.0.1:8086/api/test", {
+        headers: { "Accept-Encoding": "gzip" },
+      });
+      const out206 = await compressResponseIfNeeded(res206, reqGzip);
+      expect(out206.status).toBe(206);
+      expect(out206.headers.get("Content-Encoding")).toBeNull();
+
+      // Cache-Control: no-transform
+      const resNoTransform = new Response("x".repeat(2000), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-transform",
+        },
+      });
+      const outNoTransform = await compressResponseIfNeeded(resNoTransform, reqGzip);
+      expect(outNoTransform.headers.get("Content-Encoding")).toBeNull();
+
+      // X-Skip-Compression (e.g. proxied book downloads)
+      const resSkip = new Response("x".repeat(2000), {
+        status: 200,
+        headers: {
+          "Content-Type": "text/plain",
+          "X-Skip-Compression": "1",
+        },
+      });
+      const outSkip = await compressResponseIfNeeded(resSkip, reqGzip);
+      expect(outSkip.headers.get("Content-Encoding")).toBeNull();
+      expect(outSkip.headers.get("X-Skip-Compression")).toBeNull(); // Header cleanly stripped
     });
 
     it("GET / serves index.html with mtime+size ETag and Cache-Control: public, max-age=60, must-revalidate", async () => {
@@ -459,13 +511,15 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
       expect(masterRes.headers.get("ETag")).toBe(fileEtag);
       expect(masterRes.headers.get("Cache-Control")).toBe("public, max-age=86400");
 
-      // 304 on master cover
+      // 304 on master cover must include ETag and Cache-Control
       const condMasterReq = new Request("http://127.0.0.1:8086/api/books/1/cover", {
         method: "GET",
         headers: { "If-None-Match": fileEtag! },
       });
       const condMasterRes = await handleRequest(condMasterReq);
       expect(condMasterRes.status).toBe(304);
+      expect(condMasterRes.headers.get("ETag")).toBe(fileEtag);
+      expect(condMasterRes.headers.get("Cache-Control")).toBe("public, max-age=86400");
 
       // GET Downscaled thumbnail (w=128)
       const thumbReq = new Request("http://127.0.0.1:8086/api/books/1/cover?w=128", { method: "GET" });
@@ -477,13 +531,15 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
       const thumbEtag = thumbRes.headers.get("ETag");
       expect(thumbEtag).not.toBeNull();
 
-      // Subsequent request to cached thumbnail returns 304 Not Modified
+      // Subsequent request to cached thumbnail returns 304 Not Modified with ETag and Cache-Control
       const condThumbReq = new Request("http://127.0.0.1:8086/api/books/1/cover?w=128", {
         method: "GET",
         headers: { "If-None-Match": thumbEtag! },
       });
       const condThumbRes = await handleRequest(condThumbReq);
       expect(condThumbRes.status).toBe(304);
+      expect(condThumbRes.headers.get("ETag")).toBe(thumbEtag);
+      expect(condThumbRes.headers.get("Cache-Control")).toBe("public, max-age=604800, immutable");
     });
 
     it("Highlight count memoization caches results and auto-invalidates on mutations", () => {
@@ -500,7 +556,8 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
 
       // Calling getHighlightCounts again returns memoized result
       const counts2 = getHighlightCounts(hDb);
-      expect(counts2).toBe(counts1); // Exact reference equality indicates memory cache hit
+      expect(counts2).toEqual(counts1); // Returns identical memoized counts
+      expect(getCachedHighlightCountsForTesting()?.timestamp).toBe(cachedRef1?.timestamp);
 
       // Insert highlights using batchUpsertHighlights
       batchUpsertHighlights(hDb, [
@@ -529,6 +586,37 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
 
       const counts4 = getHighlightCounts(hDb);
       expect(counts4.byBookId[10]).toBeUndefined();
+
+      // ensureBookHighlightsIndexed with forceFresh deletes and invalidates even if 0 parsed highlights (Bug C remediation)
+      batchUpsertHighlights(hDb, [
+        {
+          book_id: 20,
+          book_title: "Nonexistent Note Book",
+          chapter: null,
+          page: null,
+          quote: "Test Quote",
+          note: null,
+          timestamp: "2026-09-26",
+        },
+      ]);
+      expect(getHighlightCounts(hDb).byBookId[20]).toBe(1);
+      expect(getCachedHighlightCountsForTesting()).not.toBeNull();
+
+      // Calling ensureBookHighlightsIndexed with forceFresh when note file exists but has 0 highlights (Bug C remediation)
+      const tempVault = path.join(os.tmpdir(), `test_vault_${Date.now()}`);
+      fs.mkdirSync(tempVault, { recursive: true });
+      fs.writeFileSync(
+        path.join(tempVault, "Nonexistent Note Book.md"),
+        "# Note Without Highlights\nJust general notes, no markers.",
+      );
+
+      ensureBookHighlightsIndexed(hDb, 20, "Nonexistent Note Book", {
+        forceFresh: true,
+        booksDir: tempVault,
+      });
+      // Cache must be invalidated!
+      expect(getCachedHighlightCountsForTesting()).toBeNull();
+      fs.rmSync(tempVault, { recursive: true, force: true });
 
       // Explicit invalidateHighlightCountsCache
       invalidateHighlightCountsCache(hDb);
