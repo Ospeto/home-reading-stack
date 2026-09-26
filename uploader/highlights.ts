@@ -74,7 +74,12 @@ CREATE INDEX IF NOT EXISTS idx_book_highlights_book_id ON book_highlights(book_i
 CREATE INDEX IF NOT EXISTS idx_book_highlights_title ON book_highlights(book_title);
 `;
 
-export function initHighlightsTable(db: Database): void {
+const _initializedDbs = new WeakSet<Database>();
+
+export function initHighlightsTable(db: Database, force = false): void {
+  if (!force && _initializedDbs.has(db)) {
+    return;
+  }
   db.run("PRAGMA busy_timeout = 5000;");
   db.run(`
     CREATE TABLE IF NOT EXISTS book_highlights (
@@ -96,6 +101,7 @@ export function initHighlightsTable(db: Database): void {
   db.run(
     "CREATE INDEX IF NOT EXISTS idx_book_highlights_title ON book_highlights(book_title);",
   );
+  _initializedDbs.add(db);
 }
 
 export function getHighlightsCacheDbPath(customPath?: string): string {
@@ -529,6 +535,7 @@ export function insertOrUpdateHighlight(
     highlight.timestamp ?? null,
   );
 
+  invalidateHighlightCountsCache(db);
   return 1;
 }
 
@@ -568,6 +575,9 @@ export function batchUpsertHighlights(
     }
   })();
 
+  if (insertedCount > 0) {
+    invalidateHighlightCountsCache(db);
+  }
   return insertedCount;
 }
 
@@ -588,10 +598,13 @@ export function getHighlightsForBook(
   if (title && title.trim()) {
     const cleanTitle = title.trim();
     // Auto-link unlinked highlights with matching title
-    db.run(
+    const updateRes = db.run(
       "UPDATE book_highlights SET book_id = ? WHERE book_id IS NULL AND lower(trim(book_title)) = lower(trim(?));",
       [bookId, cleanTitle],
     );
+    if (updateRes && (updateRes as any).changes > 0) {
+      invalidateHighlightCountsCache(db);
+    }
 
     rows = db
       .query(
@@ -639,11 +652,51 @@ export function getHighlightsByTitle(
     .all(title.trim(), limit) as HighlightRecord[];
 }
 
+export const HIGHLIGHT_COUNTS_CACHE_TTL_MS = 30_000; // 30 seconds
+
+interface CachedHighlightCounts {
+  result: HighlightCountsResult;
+  timestamp: number;
+  db: Database;
+}
+
+let _cachedHighlightCounts: CachedHighlightCounts | null = null;
+
+export function invalidateHighlightCountsCache(db?: Database): void {
+  if (!db || _cachedHighlightCounts?.db === db) {
+    _cachedHighlightCounts = null;
+  }
+}
+
+export function getCachedHighlightCountsForTesting(): { timestamp: number } | null {
+  return _cachedHighlightCounts ? { timestamp: _cachedHighlightCounts.timestamp } : null;
+}
+
 /**
  * Fast aggregate counts across the entire library with latest quote previews.
  * Returns mapped counts and latest quote previews by book_id and lowercase title.
+ * Memoized in-memory with a 30-second TTL fallback and auto-invalidated on mutations.
  */
-export function getHighlightCounts(db: Database): HighlightCountsResult {
+export function getHighlightCounts(
+  db: Database,
+  options?: { forceFresh?: boolean },
+): HighlightCountsResult {
+  const now = Date.now();
+  if (
+    !options?.forceFresh &&
+    _cachedHighlightCounts &&
+    _cachedHighlightCounts.db === db &&
+    now - _cachedHighlightCounts.timestamp < HIGHLIGHT_COUNTS_CACHE_TTL_MS
+  ) {
+    const res = _cachedHighlightCounts.result;
+    return {
+      byBookId: { ...res.byBookId },
+      byTitle: { ...res.byTitle },
+      previewsByBookId: { ...res.previewsByBookId },
+      previewsByTitle: { ...res.previewsByTitle },
+    };
+  }
+
   initHighlightsTable(db);
 
   const byBookId: Record<number, number> = {};
@@ -702,7 +755,25 @@ export function getHighlightCounts(db: Database): HighlightCountsResult {
     // Fail-open
   }
 
-  return { byBookId, byTitle, previewsByBookId, previewsByTitle };
+  const result: HighlightCountsResult = {
+    byBookId,
+    byTitle,
+    previewsByBookId,
+    previewsByTitle,
+  };
+
+  _cachedHighlightCounts = {
+    result,
+    timestamp: now,
+    db,
+  };
+
+  return {
+    byBookId: { ...byBookId },
+    byTitle: { ...byTitle },
+    previewsByBookId: { ...previewsByBookId },
+    previewsByTitle: { ...previewsByTitle },
+  };
 }
 
 /**
@@ -841,6 +912,7 @@ export function deleteHighlightsForBook(
   } else {
     db.run("DELETE FROM book_highlights WHERE book_id = ?;", [bookId]);
   }
+  invalidateHighlightCountsCache(db);
 }
 
 /**
@@ -912,6 +984,7 @@ export function ensureBookHighlightsIndexed(
                 "DELETE FROM book_highlights WHERE book_id = ? OR lower(trim(book_title)) = lower(trim(?));",
                 [bookId, title.trim()],
               );
+              invalidateHighlightCountsCache(db);
             }
             if (parsed.length > 0) {
               batchUpsertHighlights(db, parsed);
