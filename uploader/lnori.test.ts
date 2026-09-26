@@ -529,7 +529,7 @@ describe("Lnori Light Novel Ingestion Module", () => {
       expect(calls).toBe(2);
     });
 
-    it("retries EPUB download over proxy with backoff and fails after exhausting retries", async () => {
+    it("retries EPUB download directly after proxy error and with backoff after failures", async () => {
       const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
       let calls = 0;
       const proxyUsed: (string | undefined)[] = [];
@@ -544,8 +544,239 @@ describe("Lnori Light Novel Ingestion Module", () => {
             },
           }),
         ).rejects.toThrow("Failed to download EPUB from Lnori storage (503)");
-        expect(calls).toBe(4); // 1 initial attempt + 3 retries
-        expect(proxyUsed.every((p) => p === "http://127.0.0.1:7890")).toBe(true);
+        // Call 1: attempt 0 with proxy (throws proxy unavailable)
+        // Call 2: attempt 0 direct fallback (returns 503)
+        // Call 3: attempt 1 direct (returns 503)
+        // Call 4: attempt 2 direct (returns 503)
+        // Call 5: attempt 3 direct (returns 503)
+        expect(calls).toBe(5);
+        expect(proxyUsed[0]).toBe("http://127.0.0.1:7890");
+        expect(proxyUsed.slice(1).every((p) => p === undefined)).toBe(true);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("succeeds via direct fallback when proxy throws or times out on initial attempt", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "direct-success.epub");
+      let calls = 0;
+      const proxyUsed: (string | undefined)[] = [];
+
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+      const validEpubContent = Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+
+      try {
+        await downloadLnoriEpub("direct-success.epub", destPath, undefined, {
+          fetch: async (_url: string, init: any) => {
+            calls++;
+            proxyUsed.push(init?.proxy);
+            if (calls === 1) {
+              const err: any = new Error("The operation timed out.");
+              err.name = "TimeoutError";
+              throw err;
+            }
+            return new Response(validEpubContent, { status: 200 });
+          },
+        });
+
+        expect(calls).toBe(2);
+        expect(proxyUsed[0]).toBe("http://127.0.0.1:7890");
+        expect(proxyUsed[1]).toBeUndefined();
+        expect(fs.existsSync(destPath)).toBe(true);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("succeeds for large book downloads when stream is continuously active across multiple chunks", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "slow-active.epub");
+
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+      const fullBuffer = Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+
+      // Split into 4 chunks with short pauses between them
+      const chunkSize = Math.ceil(fullBuffer.length / 4);
+      const chunks: Uint8Array[] = [];
+      for (let i = 0; i < fullBuffer.length; i += chunkSize) {
+        chunks.push(new Uint8Array(fullBuffer.subarray(i, i + chunkSize)));
+      }
+
+      const activeSlowStream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          for (const c of chunks) {
+            controller.enqueue(c);
+            await new Promise((r) => setTimeout(r, 20));
+          }
+          controller.close();
+        },
+      });
+
+      try {
+        await streamResponseToFile(
+          new Response(activeSlowStream, { status: 200 }),
+          destPath,
+          MAX_EPUB_BYTES,
+          "Slow active EPUB",
+          undefined,
+          { activityTimeoutMs: 100 },
+        );
+        expect(fs.existsSync(destPath)).toBe(true);
+        expect(fs.statSync(destPath).size).toBe(fullBuffer.length);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("downloadLnoriEpub succeeds for active streams longer than TTFB timeout without being aborted", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "long-stream.epub");
+
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+      const fullBuffer = Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+
+      // Create stream with multiple chunks simulating a transfer that continues after fetch headers return
+      const chunks = [
+        new Uint8Array(fullBuffer.subarray(0, Math.floor(fullBuffer.length / 2))),
+        new Uint8Array(fullBuffer.subarray(Math.floor(fullBuffer.length / 2))),
+      ];
+
+      const streamingBody = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          for (const c of chunks) {
+            controller.enqueue(c);
+            await new Promise((r) => setTimeout(r, 25));
+          }
+          controller.close();
+        },
+      });
+
+      try {
+        await downloadLnoriEpub("long-stream.epub", destPath, undefined, {
+          fetch: async () => new Response(streamingBody, { status: 200 }),
+        });
+        expect(fs.existsSync(destPath)).toBe(true);
+        expect(fs.statSync(destPath).size).toBeGreaterThan(0);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("aborts and cleans up when download stream stalls exceeding activity timeout", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "stalled.epub");
+
+      try {
+        const stalledResponse = new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array([1, 2, 3]));
+              // Stalls indefinitely without closing or enqueueing further
+            },
+          }),
+          { status: 200 },
+        );
+
+        await expect(
+          streamResponseToFile(
+            stalledResponse,
+            destPath,
+            MAX_EPUB_BYTES,
+            "Stalled EPUB",
+            undefined,
+            { activityTimeoutMs: 50 },
+          ),
+        ).rejects.toThrow("stream stalled (no data received for 50ms)");
+
+        expect(fs.existsSync(destPath)).toBe(false);
       } finally {
         await fs.promises.rm(workDir, { recursive: true, force: true });
       }

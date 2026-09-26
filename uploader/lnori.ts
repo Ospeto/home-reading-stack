@@ -68,6 +68,7 @@ export async function streamResponseToFile(
   maxBytes: number,
   label: string,
   onProgress?: (progressPercent: number) => void,
+  options?: { activityTimeoutMs?: number; signal?: AbortSignal },
 ): Promise<void> {
   const contentLength = response.headers.get("content-length");
   const declaredLength = contentLength ? Number.parseInt(contentLength, 10) : NaN;
@@ -84,13 +85,98 @@ export async function streamResponseToFile(
 
   let receivedBytes = 0;
   let file: fs.promises.FileHandle | undefined;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  const activityTimeoutMs = options?.activityTimeoutMs;
+  let activityTimer: ReturnType<typeof setTimeout> | undefined;
+
   try {
     file = await fs.promises.open(destPath, "w");
-    for await (const chunk of response.body as AsyncIterable<Uint8Array>) {
+    reader = response.body.getReader();
+
+    const activeReader = reader;
+    const resetActivityTimer = (reject: (reason?: Error) => void) => {
+      if (activityTimer) clearTimeout(activityTimer);
+      if (activityTimeoutMs && activityTimeoutMs > 0) {
+        activityTimer = setTimeout(() => {
+          reject(new Error(`${label} stream stalled (no data received for ${activityTimeoutMs}ms)`));
+        }, activityTimeoutMs);
+      }
+    };
+
+    while (true) {
+      if (options?.signal?.aborted) {
+        throw new Error("Lnori ingestion aborted by client");
+      }
+
+      let readResult: ReadableStreamReadResult<Uint8Array>;
+      if (activityTimeoutMs && activityTimeoutMs > 0) {
+        readResult = await new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+          let settled = false;
+          let abortListener: (() => void) | undefined;
+
+          if (options?.signal) {
+            abortListener = () => {
+              if (!settled) {
+                settled = true;
+                if (activityTimer) clearTimeout(activityTimer);
+                activeReader.cancel().catch(() => {});
+                reject(new Error("Lnori ingestion aborted by client"));
+              }
+            };
+            options.signal.addEventListener("abort", abortListener, { once: true });
+          }
+
+          resetActivityTimer((stallErr) => {
+            if (!settled) {
+              settled = true;
+              if (options?.signal && abortListener) {
+                options.signal.removeEventListener("abort", abortListener);
+              }
+              activeReader.cancel().catch(() => {});
+              reject(stallErr);
+            }
+          });
+
+          activeReader.read().then(
+            (val) => {
+              if (!settled) {
+                settled = true;
+                if (activityTimer) clearTimeout(activityTimer);
+                if (options?.signal && abortListener) {
+                  options.signal.removeEventListener("abort", abortListener);
+                }
+                resolve(val);
+              }
+            },
+            (err) => {
+              if (!settled) {
+                settled = true;
+                if (activityTimer) clearTimeout(activityTimer);
+                if (options?.signal && abortListener) {
+                  options.signal.removeEventListener("abort", abortListener);
+                }
+                activeReader.cancel().catch(() => {});
+                reject(err);
+              }
+            },
+          );
+        });
+      } else {
+        readResult = await activeReader.read();
+      }
+
+      const { done, value: chunk } = readResult;
+      if (done) break;
+      if (!chunk) continue;
+
       const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
       receivedBytes += bytes.byteLength;
       if (receivedBytes > maxBytes) {
-        await cancelResponseBody(response);
+        try {
+          await reader.cancel();
+        } catch {
+          // ignore
+        }
         throw new Error(`${label} exceeds maximum size of ${maxBytes} bytes`);
       }
       await file.write(bytes);
@@ -99,9 +185,20 @@ export async function streamResponseToFile(
       }
     }
   } catch (err) {
+    try {
+      await reader?.cancel();
+    } catch {
+      // ignore
+    }
     await fs.promises.rm(destPath, { force: true });
     throw err;
   } finally {
+    if (activityTimer) clearTimeout(activityTimer);
+    try {
+      await reader?.cancel();
+    } catch {
+      // stream might already be closed/cancelled
+    }
     await file?.close();
   }
 }
@@ -810,15 +907,83 @@ export async function downloadLnoriEpub(
       throw new Error("Lnori ingestion aborted by client");
     }
 
+    // Try through proxy first; on proxy failure/timeout or subsequent retries, fall back to direct fetch.
+    const tryProxyAndDirect = async (
+      runFetch: (useProxy: boolean) => Promise<Response>,
+    ): Promise<Response> => {
+      if (attempt === 0) {
+        try {
+          return await runFetch(true);
+        } catch (proxyErr: any) {
+          if (dependencies?.signal?.aborted) {
+            throw proxyErr;
+          }
+          // Proxy threw, timed out, or connection failed: fall back immediately to direct fetch
+          return runFetch(false);
+        }
+      }
+      // On retries (attempt > 0), fall back directly without proxy to avoid proxy stalls
+      return runFetch(false);
+    };
+
     try {
-      const res = await fetcher(downloadUrl, {
-        headers: {
+      const res = await tryProxyAndDirect(async (useProxy) => {
+        // Disarmable TTFB controller: only bounds the time until response headers arrive.
+        // Once fetcher resolves, ttfbTimer is cleared so active body streaming is not aborted.
+        const ttfbController = new AbortController();
+        const ttfbTimeoutMs = useProxy ? 30000 : 60000;
+        let ttfbTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+          const timeoutErr = new Error(`Connection timed out waiting for headers (${ttfbTimeoutMs}ms)`);
+          timeoutErr.name = "TimeoutError";
+          ttfbController.abort(timeoutErr);
+        }, ttfbTimeoutMs);
+
+        let abortListener: (() => void) | undefined;
+        if (dependencies?.signal) {
+          if (dependencies.signal.aborted) {
+            clearTimeout(ttfbTimer);
+            ttfbController.abort(dependencies.signal.reason);
+          } else {
+            abortListener = () => {
+              if (ttfbTimer) clearTimeout(ttfbTimer);
+              ttfbController.abort(dependencies?.signal?.reason);
+            };
+            dependencies.signal.addEventListener("abort", abortListener, { once: true });
+          }
+        }
+
+        const headers = {
           Referer: "https://lnori.com/",
           "User-Agent": USER_AGENT,
-        },
-        proxy: PROXY_URL,
-        signal: composeSignal(60000, dependencies?.signal),
-      } as any);
+        };
+        const fetchOptions: RequestInit & { proxy?: string } = {
+          headers,
+          signal: ttfbController.signal,
+        };
+        if (useProxy) {
+          fetchOptions.proxy = PROXY_URL;
+        }
+
+        try {
+          const response = await fetcher(downloadUrl, fetchOptions);
+          // Headers received: clear the TTFB timer immediately so body reads are not killed
+          if (ttfbTimer) {
+            clearTimeout(ttfbTimer);
+            ttfbTimer = undefined;
+          }
+          return response;
+        } catch (fetchErr) {
+          if (ttfbTimer) {
+            clearTimeout(ttfbTimer);
+            ttfbTimer = undefined;
+          }
+          throw fetchErr;
+        } finally {
+          if (dependencies?.signal && abortListener) {
+            dependencies.signal.removeEventListener("abort", abortListener);
+          }
+        }
+      });
 
       if (!res.ok) {
         lastError = new Error(
@@ -836,6 +1001,10 @@ export async function downloadLnoriEpub(
         MAX_EPUB_BYTES,
         "Downloaded EPUB",
         onProgress,
+        {
+          activityTimeoutMs: 60000,
+          signal: dependencies?.signal,
+        },
       );
       lastError = null;
       break;
@@ -847,11 +1016,7 @@ export async function downloadLnoriEpub(
         // ignore cleanup error if file was already removed
       }
 
-      if (
-        dependencies?.signal?.aborted ||
-        err?.name === "AbortError" ||
-        err?.message?.includes("aborted")
-      ) {
+      if (dependencies?.signal?.aborted) {
         throw err;
       }
 
