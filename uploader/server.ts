@@ -375,6 +375,7 @@ export function getCacheDb(): Database {
   if (!_serverCacheDbInstance || _cachedDbPath !== dbPath) {
     _serverCacheDbInstance = new Database(dbPath);
     _cachedDbPath = dbPath;
+    _serverCacheDbInstance.run("PRAGMA journal_mode = WAL;");
     _serverCacheDbInstance.run("PRAGMA busy_timeout = 5000;");
     _serverCacheDbInstance.run(`
       CREATE TABLE IF NOT EXISTS file_hashes (
@@ -855,6 +856,21 @@ export function getSipsPath(): string {
   return "sips";
 }
 
+export function getCwebpPath(): string | null {
+  if (process.env.CWEBP_PATH) return process.env.CWEBP_PATH;
+  const candidates = [
+    "/opt/homebrew/bin/cwebp",
+    "/usr/local/bin/cwebp",
+    "/usr/bin/cwebp",
+  ];
+  for (const cand of candidates) {
+    if (fs.existsSync(cand)) return cand;
+  }
+  const probe = spawnSync("which", ["cwebp"], { encoding: "utf8" });
+  if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
+  return null;
+}
+
 let calibreBooksCache: { books: any[]; timestamp: number; etag?: string; dbPath?: string } = {
   books: [],
   timestamp: 0,
@@ -1120,6 +1136,7 @@ export async function downscaleImageAsync(
   inputPath: string,
   outputPath: string,
   targetWidth: number,
+  format: "jpeg" | "webp" = "jpeg",
 ): Promise<boolean> {
   const sipsBin = getSipsPath();
   if (!fs.existsSync(sipsBin) && sipsBin !== "sips") {
@@ -1127,6 +1144,119 @@ export async function downscaleImageAsync(
   }
 
   return sipsLimiter.run(async () => {
+    if (format === "webp") {
+      // 1. First attempt native sips WebP conversion
+      try {
+        const proc = Bun.spawn(
+          [
+            sipsBin,
+            "-s",
+            "format",
+            "webp",
+            "-Z",
+            String(targetWidth),
+            inputPath,
+            "--out",
+            outputPath,
+          ],
+          { stdout: "ignore", stderr: "pipe" },
+        );
+        const timeout = new Promise<number>((_, reject) =>
+          setTimeout(() => {
+            try {
+              proc.kill();
+            } catch (_killErr) {
+              void _killErr;
+            }
+            reject(new Error("sips timeout"));
+          }, 15000),
+        );
+        const exitCode = await Promise.race([proc.exited, timeout]);
+        if (exitCode === 0 && fs.existsSync(outputPath)) {
+          return true;
+        }
+      } catch (_sipsErr) {
+        void _sipsErr;
+      }
+
+      // 2. If native sips webp format fails or is unsupported by OS, downscale via sips to jpeg then convert via cwebp
+      const cwebpBin = getCwebpPath();
+      if (cwebpBin) {
+        const tempJpg = outputPath + `.tmp_${Date.now()}_${Math.random().toString(16).slice(2)}.jpg`;
+        try {
+          const downProc = Bun.spawn(
+            [sipsBin, "-s", "format", "jpeg", "-Z", String(targetWidth), inputPath, "--out", tempJpg],
+            { stdout: "ignore", stderr: "pipe" },
+          );
+          const downTimeout = new Promise<number>((_, reject) =>
+            setTimeout(() => {
+              try {
+                downProc.kill();
+              } catch (_killErr) {
+                void _killErr;
+              }
+              reject(new Error("sips timeout"));
+            }, 15000),
+          );
+          const downExitCode = await Promise.race([downProc.exited, downTimeout]);
+          if (downExitCode === 0 && fs.existsSync(tempJpg)) {
+            const cwebpProc = Bun.spawn(
+              [cwebpBin, "-q", "80", tempJpg, "-o", outputPath],
+              { stdout: "ignore", stderr: "pipe" },
+            );
+            const cwebpTimeout = new Promise<number>((_, reject) =>
+              setTimeout(() => {
+                try {
+                  cwebpProc.kill();
+                } catch (_killErr) {
+                  void _killErr;
+                }
+                reject(new Error("cwebp timeout"));
+              }, 15000),
+            );
+            const cwebpExit = await Promise.race([cwebpProc.exited, cwebpTimeout]);
+            if (cwebpExit === 0 && fs.existsSync(outputPath)) {
+              return true;
+            }
+          }
+        } catch (_cwebpErr) {
+          void _cwebpErr;
+        } finally {
+          if (fs.existsSync(tempJpg)) {
+            try {
+              fs.unlinkSync(tempJpg);
+            } catch (_unErr) {
+              void _unErr;
+            }
+          }
+        }
+      }
+
+      // 3. Fallback: downscale as standard jpeg to target outputPath if webp failed
+      try {
+        const proc = Bun.spawn(
+          [sipsBin, "-s", "format", "jpeg", "-Z", String(targetWidth), inputPath, "--out", outputPath],
+          { stdout: "ignore", stderr: "pipe" },
+        );
+        const timeout = new Promise<number>((_, reject) =>
+          setTimeout(() => {
+            try {
+              proc.kill();
+            } catch (_killErr) {
+              void _killErr;
+            }
+            reject(new Error("sips timeout"));
+          }, 15000),
+        );
+        const exitCode = await Promise.race([proc.exited, timeout]);
+        return exitCode === 0 && fs.existsSync(outputPath);
+      } catch (err) {
+        console.warn("Async sips downscaling failed:", err);
+        return false;
+      }
+    }
+
+    // Default: JPEG downscaling
     try {
       const proc = Bun.spawn(
         [sipsBin, "-Z", String(targetWidth), inputPath, "--out", outputPath],
@@ -2697,6 +2827,12 @@ async function handleRequestCore(
     const bookId = validateIntegerId(parts[3]);
     if (!bookId) return new Response("Invalid book ID", { status: 400 });
 
+    const acceptHeader = req.headers.get("accept") || "";
+    const clientAcceptsWebp = acceptHeader.toLowerCase().includes("image/webp");
+    const requestedFormat: "webp" | "jpeg" = clientAcceptsWebp ? "webp" : "jpeg";
+    const extension = clientAcceptsWebp ? "webp" : "jpg";
+    const contentType = clientAcceptsWebp ? "image/webp" : "image/jpeg";
+
     const widthParam = url.searchParams.get("w");
 
     if (widthParam) {
@@ -2706,7 +2842,7 @@ async function handleRequestCore(
       );
       const cacheFilePath = path.join(
         getCoverCacheDir(),
-        `${bookId}_${targetWidth}.jpg`,
+        `${bookId}_${targetWidth}.${extension}`,
       );
 
       if (fs.existsSync(cacheFilePath)) {
@@ -2718,6 +2854,7 @@ async function handleRequestCore(
             headers: {
               ETag: etag,
               "Cache-Control": "public, max-age=604800, immutable",
+              Vary: "Accept",
             },
           });
         }
@@ -2728,9 +2865,10 @@ async function handleRequestCore(
 
         return new Response(file, {
           headers: {
-            "Content-Type": "image/jpeg",
+            "Content-Type": contentType,
             "Cache-Control": "public, max-age=604800, immutable",
             ETag: etag,
+            Vary: "Accept",
           },
         });
       }
@@ -2766,6 +2904,7 @@ async function handleRequestCore(
           masterInputPath,
           cacheFilePath,
           targetWidth,
+          requestedFormat,
         );
 
         if (success && fs.existsSync(cacheFilePath)) {
@@ -2777,6 +2916,7 @@ async function handleRequestCore(
               headers: {
                 ETag: etag,
                 "Cache-Control": "public, max-age=604800, immutable",
+                Vary: "Accept",
               },
             });
           }
@@ -2787,9 +2927,10 @@ async function handleRequestCore(
 
           return new Response(file, {
             headers: {
-              "Content-Type": "image/jpeg",
+              "Content-Type": contentType,
               "Cache-Control": "public, max-age=604800, immutable",
               ETag: etag,
+              Vary: "Accept",
             },
           });
         }
@@ -2812,6 +2953,7 @@ async function handleRequestCore(
             headers: {
               ETag: etag,
               "Cache-Control": "public, max-age=604800, immutable",
+              Vary: "Accept",
             },
           });
         }
@@ -2823,6 +2965,7 @@ async function handleRequestCore(
             "Content-Type": "image/jpeg",
             "Cache-Control": "public, max-age=604800, immutable",
             ETag: etag,
+            Vary: "Accept",
           },
         });
       }
@@ -2835,6 +2978,7 @@ async function handleRequestCore(
             headers: {
               ETag: etag,
               "Cache-Control": "public, max-age=604800, immutable",
+              Vary: "Accept",
             },
           });
         }
@@ -2843,6 +2987,7 @@ async function handleRequestCore(
             "Content-Type": "image/jpeg",
             "Cache-Control": "public, max-age=604800, immutable",
             ETag: etag,
+            Vary: "Accept",
           },
         });
       }
@@ -2851,6 +2996,74 @@ async function handleRequestCore(
     }
 
     // Master cover request (full resolution)
+    // If WebP is requested, check if on-demand converted master WebP cover exists in cache
+    if (clientAcceptsWebp) {
+      const masterWebpCache = path.join(
+        getCoverCacheDir(),
+        `master_${bookId}.webp`,
+      );
+      if (fs.existsSync(masterWebpCache)) {
+        const etag = getFileETag(masterWebpCache) || `"${Date.now().toString(16)}"`;
+        if (req.headers.get("if-none-match") === etag) {
+          return new Response(null, {
+            status: 304,
+            headers: {
+              ETag: etag,
+              "Cache-Control": "public, max-age=86400",
+              Vary: "Accept",
+            },
+          });
+        }
+        const file = (globalThis as any).Bun?.file
+          ? (globalThis as any).Bun.file(masterWebpCache)
+          : fs.readFileSync(masterWebpCache);
+        return new Response(file, {
+          headers: {
+            "Content-Type": "image/webp",
+            "Cache-Control": "public, max-age=86400",
+            ETag: etag,
+            Vary: "Accept",
+          },
+        });
+      }
+
+      // Convert master cover to WebP if master disk file exists
+      const diskCoverPath = getMasterCoverPath(bookId);
+      if (diskCoverPath && fs.existsSync(diskCoverPath)) {
+        // Downscale with large target width (e.g. 2400) to preserve full master resolution
+        const converted = await downscaleImageAsync(
+          diskCoverPath,
+          masterWebpCache,
+          2400,
+          "webp",
+        );
+        if (converted && fs.existsSync(masterWebpCache)) {
+          const etag = getFileETag(masterWebpCache) || `"${Date.now().toString(16)}"`;
+          if (req.headers.get("if-none-match") === etag) {
+            return new Response(null, {
+              status: 304,
+              headers: {
+                ETag: etag,
+                "Cache-Control": "public, max-age=86400",
+                Vary: "Accept",
+              },
+            });
+          }
+          const file = (globalThis as any).Bun?.file
+            ? (globalThis as any).Bun.file(masterWebpCache)
+            : fs.readFileSync(masterWebpCache);
+          return new Response(file, {
+            headers: {
+              "Content-Type": "image/webp",
+              "Cache-Control": "public, max-age=86400",
+              ETag: etag,
+              Vary: "Accept",
+            },
+          });
+        }
+      }
+    }
+
     const diskCoverPath = getMasterCoverPath(bookId);
     if (diskCoverPath && fs.existsSync(diskCoverPath)) {
       const etag = getFileETag(diskCoverPath) || `"${Date.now().toString(16)}"`;
@@ -2861,6 +3074,7 @@ async function handleRequestCore(
           headers: {
             ETag: etag,
             "Cache-Control": "public, max-age=86400",
+            Vary: "Accept",
           },
         });
       }
@@ -2874,6 +3088,7 @@ async function handleRequestCore(
           "Content-Type": "image/jpeg",
           "Cache-Control": "public, max-age=86400",
           ETag: etag,
+          Vary: "Accept",
         },
       });
     }
@@ -2895,6 +3110,7 @@ async function handleRequestCore(
           headers: {
             ETag: etag,
             "Cache-Control": "public, max-age=86400",
+            Vary: "Accept",
           },
         });
       }
@@ -2904,6 +3120,7 @@ async function handleRequestCore(
           "Content-Type": coverRes.headers.get("Content-Type") || "image/jpeg",
           "Cache-Control": "public, max-age=86400",
           ETag: etag,
+          Vary: "Accept",
         },
       });
     }

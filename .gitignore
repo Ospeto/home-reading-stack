@@ -10,6 +10,8 @@
 *.db-journal
 data/
 cache.db*
+cache/
+uploader/cache/
 
 # Logs
 *.log
