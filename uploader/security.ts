@@ -11,6 +11,7 @@ import { Agent, buildConnector } from "undici";
 
 // Default production WAN domain and ports
 export const DEFAULT_WAN_DOMAIN = "reading.wavypremium.xyz";
+export const READING_SG_WAN_DOMAIN = "reading-sg.wavypremium.xyz";
 export const KOSYNC_WAN_DOMAIN = "kosync.wavypremium.xyz";
 export const KOSYNC_SG_WAN_DOMAIN = "kosync-sg.wavypremium.xyz";
 export const OPDS_SG_WAN_DOMAIN = "opds.wavypremium.xyz";
@@ -639,6 +640,7 @@ export function isWanRequest(
   // Standard recognized WAN domains
   const defaultWanDomains = new Set([
     wanDomain,
+    READING_SG_WAN_DOMAIN,
     kosyncWanDomain,
     KOSYNC_WAN_DOMAIN,
     KOSYNC_SG_WAN_DOMAIN,
@@ -908,8 +910,12 @@ export function isAllowedOrigin(
   // Allow standard production WAN domains
   if (
     lower === "https://reading.wavypremium.xyz" ||
+    lower === "http://reading.wavypremium.xyz" ||
+    lower === "http://reading.wavypremium.xyz:80" ||
     lower === "https://reading-sg.wavypremium.xyz:8443" ||
     lower === "https://reading-sg.wavypremium.xyz" ||
+    lower === "http://reading-sg.wavypremium.xyz" ||
+    lower === "http://reading-sg.wavypremium.xyz:80" ||
     lower === "https://kosync.wavypremium.xyz" ||
     lower === "http://kosync-sg.wavypremium.xyz" ||
     lower === "https://kosync-sg.wavypremium.xyz:8443" ||

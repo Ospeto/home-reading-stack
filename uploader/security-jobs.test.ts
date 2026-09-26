@@ -397,6 +397,23 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
     expect(isWanRequest(wanReq3, { remoteAddress: "127.0.0.1" })).toBe(true);
 
     // WAN requests via Singapore default WAN domains
+    const wanReqSgReading = new Request("http://127.0.0.1:8086/api/books", {
+      headers: { host: "reading-sg.wavypremium.xyz" },
+    });
+    expect(isWanRequest(wanReqSgReading, { remoteAddress: "127.0.0.1" })).toBe(
+      true,
+    );
+
+    const wanReqSgReadingForwarded = new Request("http://127.0.0.1:8086/api/books", {
+      headers: {
+        host: "127.0.0.1:8086",
+        "x-forwarded-host": "reading-sg.wavypremium.xyz:8443",
+      },
+    });
+    expect(
+      isWanRequest(wanReqSgReadingForwarded, { remoteAddress: "127.0.0.1" }),
+    ).toBe(true);
+
     const wanReqSgKosync = new Request("http://127.0.0.1:8086/api/books", {
       headers: { host: "kosync-sg.wavypremium.xyz" },
     });
@@ -552,7 +569,12 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
 describe("Public WAN & API Surface Hardening — CORS & CSRF Guards", () => {
   it("allows configured production WAN and local LAN origins", () => {
     expect(isAllowedOrigin("https://reading.wavypremium.xyz")).toBe(true);
+    expect(isAllowedOrigin("http://reading.wavypremium.xyz")).toBe(true);
+    expect(isAllowedOrigin("http://reading.wavypremium.xyz:80")).toBe(true);
     expect(isAllowedOrigin("https://reading-sg.wavypremium.xyz:8443")).toBe(true);
+    expect(isAllowedOrigin("https://reading-sg.wavypremium.xyz")).toBe(true);
+    expect(isAllowedOrigin("http://reading-sg.wavypremium.xyz")).toBe(true);
+    expect(isAllowedOrigin("http://reading-sg.wavypremium.xyz:80")).toBe(true);
     expect(isAllowedOrigin("https://kosync.wavypremium.xyz")).toBe(true);
     expect(isAllowedOrigin("http://kosync-sg.wavypremium.xyz")).toBe(true);
     expect(isAllowedOrigin("https://kosync-sg.wavypremium.xyz:8443")).toBe(true);
@@ -596,6 +618,23 @@ describe("Public WAN & API Surface Hardening — CORS & CSRF Guards", () => {
     });
     const check = validateOriginAndCsrf(validPost);
     expect(check.valid).toBe(true);
+
+    const validSgHttp = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+      method: "POST",
+      headers: {
+        origin: "http://reading-sg.wavypremium.xyz",
+      },
+    });
+    const checkSgHttp = validateOriginAndCsrf(validSgHttp);
+    expect(checkSgHttp.valid).toBe(true);
+
+    const validSgHttpPort80 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+      method: "POST",
+      headers: {
+        origin: "http://reading-sg.wavypremium.xyz:80",
+      },
+    });
+    expect(validateOriginAndCsrf(validSgHttpPort80).valid).toBe(true);
   });
 });
 
