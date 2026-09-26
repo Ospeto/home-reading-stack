@@ -193,6 +193,7 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
     expect(res.status).toBe(304);
     expect(res.headers.get("ETag")).toBe(etag);
     expect(res.headers.get("Cache-Control")).toBe("public, max-age=5, must-revalidate");
+    expect(res.headers.get("Vary")).toContain("Accept-Encoding");
     expect(duration).toBeLessThan(10); // Typically < 2ms, comfortably bounded
     const body = await res.text();
     expect(body).toBe("");

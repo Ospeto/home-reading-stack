@@ -2491,11 +2491,12 @@ async function handleRequestCore(
     const cacheHeaders: Record<string, string> = {
       ETag: etag,
       "Cache-Control": "public, max-age=5, must-revalidate",
+      Vary: "Accept-Encoding",
     };
     if (corsOrigin && isAllowedOrigin(corsOrigin)) {
       cacheHeaders["Access-Control-Allow-Origin"] = corsOrigin;
       cacheHeaders["Access-Control-Allow-Credentials"] = "true";
-      cacheHeaders["Vary"] = "Origin";
+      cacheHeaders["Vary"] = "Origin, Accept-Encoding";
     }
 
     if (
