@@ -2083,7 +2083,7 @@ export async function compressResponseIfNeeded(
     return res;
   }
 
-  if (bodyBuffer.length <= 1024) {
+  if (bodyBuffer.length <= 1024 || bodyBuffer.length > 10 * 1024 * 1024) {
     const newHeaders = new Headers(res.headers);
     appendVary(newHeaders, "Accept-Encoding");
     return new Response(bodyBuffer, {
@@ -4907,11 +4907,12 @@ async function handleRequestCore(
         "Cache-Control": "public, max-age=60, must-revalidate",
         ETag: etag,
         "X-Content-Type-Options": "nosniff",
+        Vary: "Accept-Encoding",
       };
       if (corsOrigin && isAllowedOrigin(corsOrigin)) {
         htmlHeaders["Access-Control-Allow-Origin"] = corsOrigin;
         htmlHeaders["Access-Control-Allow-Credentials"] = "true";
-        htmlHeaders["Vary"] = "Origin";
+        htmlHeaders["Vary"] = "Origin, Accept-Encoding";
       }
 
       if (

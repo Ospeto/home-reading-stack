@@ -768,7 +768,12 @@ export function getHighlightCounts(
     db,
   };
 
-  return result;
+  return {
+    byBookId: { ...byBookId },
+    byTitle: { ...byTitle },
+    previewsByBookId: { ...previewsByBookId },
+    previewsByTitle: { ...previewsByTitle },
+  };
 }
 
 /**

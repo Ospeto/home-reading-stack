@@ -359,6 +359,14 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
       const outSkip = await compressResponseIfNeeded(resSkip, reqGzip);
       expect(outSkip.headers.get("Content-Encoding")).toBeNull();
       expect(outSkip.headers.get("X-Skip-Compression")).toBeNull(); // Header cleanly stripped
+
+      // Oversized body (>10MB) without declared Content-Length skips sync compression (Bug 1 remediation)
+      const resHuge = new Response("a".repeat(10 * 1024 * 1024 + 100), {
+        headers: { "Content-Type": "application/json" },
+      });
+      const outHuge = await compressResponseIfNeeded(resHuge, reqGzip);
+      expect(outHuge.headers.get("Content-Encoding")).toBeNull();
+      expect(outHuge.headers.get("Vary")).toContain("Accept-Encoding");
     });
 
     it("GET / serves index.html with mtime+size ETag and Cache-Control: public, max-age=60, must-revalidate", async () => {
@@ -390,6 +398,7 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
       expect(condRes.status).toBe(304);
       expect(condRes.headers.get("ETag")).toBe(etag);
       expect(condRes.headers.get("Cache-Control")).toBe("public, max-age=60, must-revalidate");
+      expect(condRes.headers.get("Vary")).toContain("Accept-Encoding");
       const condBody = await condRes.text();
       expect(condBody).toBe("");
     });
@@ -617,6 +626,15 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
       // Cache must be invalidated!
       expect(getCachedHighlightCountsForTesting()).toBeNull();
       fs.rmSync(tempVault, { recursive: true, force: true });
+
+      // Defensive copies test on both miss and hit (Bug 2 remediation)
+      const missCounts = getHighlightCounts(hDb);
+      missCounts.byBookId[99] = 999; // Attempt mutation on miss return
+      const hitCounts = getHighlightCounts(hDb);
+      expect(hitCounts.byBookId[99]).toBeUndefined(); // Internal cache was NOT poisoned
+      hitCounts.byBookId[99] = 888; // Attempt mutation on hit return
+      const hitCounts2 = getHighlightCounts(hDb);
+      expect(hitCounts2.byBookId[99]).toBeUndefined(); // Still not poisoned
 
       // Explicit invalidateHighlightCountsCache
       invalidateHighlightCountsCache(hDb);
