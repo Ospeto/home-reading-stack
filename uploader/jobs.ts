@@ -58,6 +58,7 @@ export class DurableJobQueue {
   }
 
   private initSchema() {
+    this.db.run("PRAGMA journal_mode = WAL;");
     this.db.run("PRAGMA busy_timeout = 5000;");
     this.db.run(`
       CREATE TABLE IF NOT EXISTS jobs (

@@ -125,6 +125,7 @@ export function getCacheDb(): Database {
   if (!_cacheDbInstance) {
     const dbPath = getCacheDbPath();
     _cacheDbInstance = new Database(dbPath);
+    _cacheDbInstance.run("PRAGMA journal_mode = WAL;");
     _cacheDbInstance.run("PRAGMA busy_timeout = 5000;");
     _cacheDbInstance.run(`
       CREATE TABLE IF NOT EXISTS file_hashes (

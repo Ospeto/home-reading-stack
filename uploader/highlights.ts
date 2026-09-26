@@ -125,11 +125,23 @@ let _cachedHighlightsDbPath: string | null = null;
 
 export function getHighlightsCacheDb(dbOrPath?: Database | string): Database {
   if (dbOrPath instanceof Database) {
+    try {
+      dbOrPath.run("PRAGMA journal_mode = WAL;");
+      dbOrPath.run("PRAGMA busy_timeout = 5000;");
+    } catch (_e) {
+      void _e;
+    }
     initHighlightsTable(dbOrPath);
     return dbOrPath;
   }
   if (typeof dbOrPath === "string") {
     const db = new Database(dbOrPath);
+    try {
+      db.run("PRAGMA journal_mode = WAL;");
+      db.run("PRAGMA busy_timeout = 5000;");
+    } catch (_e) {
+      void _e;
+    }
     initHighlightsTable(db);
     return db;
   }
@@ -137,6 +149,12 @@ export function getHighlightsCacheDb(dbOrPath?: Database | string): Database {
   if (!_cachedHighlightsDb || _cachedHighlightsDbPath !== dbPath) {
     _cachedHighlightsDb = new Database(dbPath);
     _cachedHighlightsDbPath = dbPath;
+    try {
+      _cachedHighlightsDb.run("PRAGMA journal_mode = WAL;");
+      _cachedHighlightsDb.run("PRAGMA busy_timeout = 5000;");
+    } catch (_e) {
+      void _e;
+    }
     initHighlightsTable(_cachedHighlightsDb);
   }
   return _cachedHighlightsDb;
