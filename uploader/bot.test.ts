@@ -177,6 +177,7 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain('id="filterBtn"');
     expect(html).toContain("breadcrumbCategory");
     expect(html).toContain("⌘K");
+    expect(html).not.toContain("md:max-w-2xl lg:max-w-3xl");
 
     // Quick Category / Series swipeable chips for TMA & Mobile
     expect(html).toContain('id="chip-all"');
