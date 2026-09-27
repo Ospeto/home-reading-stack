@@ -591,6 +591,29 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
     const originWithKeyRes = authenticateRequest(originWithKeyReq, { apiKey: "my-secret-key" });
     expect(originWithKeyRes.authenticated).toBe(false);
     expect(originWithKeyRes.error).toContain("Authentication required");
+
+    // 6. Localhost/LAN origin spoof on WAN request with empty apiKey -> rejected with 401
+    const spoofLocalhostReq = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+      method: "POST",
+      headers: {
+        host: "reading.wavypremium.xyz",
+        origin: "http://127.0.0.1:8086",
+      },
+    });
+    const spoofLocalhostRes = authenticateRequest(spoofLocalhostReq, { apiKey: "" });
+    expect(spoofLocalhostRes.authenticated).toBe(false);
+    expect(spoofLocalhostRes.error).toContain("Authentication required");
+
+    const spoofLanReq = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+      method: "POST",
+      headers: {
+        host: "reading.wavypremium.xyz",
+        origin: "http://192.168.31.15:8086",
+      },
+    });
+    const spoofLanRes = authenticateRequest(spoofLanReq, { apiKey: "" });
+    expect(spoofLanRes.authenticated).toBe(false);
+    expect(spoofLanRes.error).toContain("Authentication required");
   });
 
   it("validateTelegramWebAppData correctly verifies valid HMAC-SHA256 signatures and rejects tampered data", () => {

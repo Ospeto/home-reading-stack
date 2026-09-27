@@ -4071,6 +4071,7 @@ async function handleRequestCore(
           }
         }
 
+        let canceled = false;
         let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
         const cleanupKeepalive = () => {
           if (keepaliveTimer !== null) {
@@ -4085,7 +4086,14 @@ async function handleRequestCore(
             const isSSEFormat = contentType.startsWith("text/event-stream");
             let hasErrored = false;
 
-            if (isSSEFormat) {
+            if (isSSEFormat && !canceled && !abortController.signal.aborted) {
+              // Send immediate keepalive comment to prevent immediate proxy idle timeout
+              try {
+                controller.enqueue(encoder.encode(": keepalive\n\n"));
+              } catch {
+                // Controller already closed
+              }
+
               keepaliveTimer = setInterval(() => {
                 try {
                   controller.enqueue(encoder.encode(": keepalive\n\n"));
@@ -4202,6 +4210,7 @@ async function handleRequestCore(
             }
           },
           cancel() {
+            canceled = true;
             cleanupKeepalive();
             abortController.abort();
           },

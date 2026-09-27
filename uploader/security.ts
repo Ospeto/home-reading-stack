@@ -812,6 +812,7 @@ export interface AuthenticateRequestOptions {
  * - X-API-Key matching READING_API_KEY
  * - Valid Telegram WebApp initData (via X-Telegram-Init-Data or Authorization: Bearer tma_...)
  * - Valid session cookie
+ * - Or when READING_API_KEY is unset, a verified production WAN origin (Origin or Referer)
  */
 export function authenticateRequest(
   req: Request,
@@ -876,12 +877,13 @@ export function authenticateRequest(
     }
   }
 
-  // 5. Allow verified production origins when READING_API_KEY is unset.
+  // 5. Allow verified production WAN origins when READING_API_KEY is unset.
   // When no API key is configured, public WAN access from the trusted web UI
-  // is authenticated via origin verification (Origin or Referer).
+  // is authenticated via production origin verification (Origin or Referer).
+  // Local LAN / loopback origins are explicitly excluded from WAN authentication.
   if (!apiKey) {
     const origin = req.headers.get("origin");
-    if (origin && isAllowedOrigin(origin)) {
+    if (origin && isAllowedProductionWanOrigin(origin)) {
       return { authenticated: true, method: "origin" };
     }
     const referer = req.headers.get("referer");
@@ -889,7 +891,7 @@ export function authenticateRequest(
       try {
         const refUrl = new URL(referer);
         const refOrigin = `${refUrl.protocol}//${refUrl.host}`;
-        if (isAllowedOrigin(refOrigin)) {
+        if (isAllowedProductionWanOrigin(refOrigin)) {
           return { authenticated: true, method: "origin" };
         }
       } catch {
@@ -922,7 +924,11 @@ function parseCookies(header: string): Record<string, string> {
 // 5. CORS & CSRF Origin Validation
 // ---------------------------------------------------------------------------
 
-export function isAllowedOrigin(
+/**
+ * Checks if an origin matches verified production WAN origins (excluding local LAN/loopback).
+ * Used strictly for authenticating WAN requests when READING_API_KEY is unset.
+ */
+export function isAllowedProductionWanOrigin(
   origin: string,
   extraAllowedOrigins: string[] = [],
 ): boolean {
@@ -954,6 +960,49 @@ export function isAllowedOrigin(
   }
   const kosyncWan = process.env.KOSYNC_WAN_URL;
   if (kosyncWan && lower === kosyncWan.toLowerCase().replace(/\/+$/, "")) {
+    return true;
+  }
+
+  // Check extra allowed origins from options or env (ensuring they are not local LAN)
+  const envOrigins = (process.env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((o: string) => o.trim().toLowerCase())
+    .filter(Boolean);
+  const allAllowed = [
+    ...extraAllowedOrigins.map((o: string) => o.toLowerCase()),
+    ...envOrigins,
+  ];
+  if (allAllowed.includes(lower)) {
+    // Ensure configured extra origins are not loopback/RFC1918
+    try {
+      const u = new URL(lower);
+      const h = u.hostname;
+      if (
+        h !== "localhost" &&
+        h !== "127.0.0.1" &&
+        !h.startsWith("192.168.") &&
+        !h.startsWith("10.") &&
+        !/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h)
+      ) {
+        return true;
+      }
+    } catch {
+      // Malformed URL
+    }
+  }
+
+  return false;
+}
+
+export function isAllowedOrigin(
+  origin: string,
+  extraAllowedOrigins: string[] = [],
+): boolean {
+  if (!origin) return false;
+  const lower = origin.toLowerCase().trim();
+
+  // Allow standard production WAN domains
+  if (isAllowedProductionWanOrigin(origin, extraAllowedOrigins)) {
     return true;
   }
 

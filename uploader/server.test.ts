@@ -773,6 +773,64 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
         if (origKey !== undefined) process.env.READING_API_KEY = origKey;
         else delete process.env.READING_API_KEY;
       }
+
+      // 4. When READING_API_KEY is unset, WAN request from spoofed localhost origin is rejected with 401
+      const reqSpoofedLocal = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+        method: "POST",
+        headers: {
+          host: "reading.wavypremium.xyz",
+          origin: "http://127.0.0.1:8086",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ url: "https://lnori.com/series/8046" }),
+      });
+      const resSpoofedLocal = await handleRequest(reqSpoofedLocal);
+      expect(resSpoofedLocal.status).toBe(401);
+      const dataSpoofedLocal = (await resSpoofedLocal.json()) as any;
+      expect(dataSpoofedLocal.success).toBe(false);
+      expect(dataSpoofedLocal.error).toContain("Authentication required");
+    });
+
+    it("authenticates WAN ingest request from production origin when READING_API_KEY is unset", async () => {
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async () => ({
+          success: true,
+          seriesTitle: "Production Origin Novel",
+          author: "Author",
+          importedCount: 1,
+          skippedCount: 0,
+          duplicateCount: 0,
+          totalCount: 1,
+          tags: "Light Novel",
+          calibreBookIds: [999],
+        }),
+        getCalibreBooks: () => [],
+      });
+
+      try {
+        const origKey = process.env.READING_API_KEY;
+        delete process.env.READING_API_KEY;
+
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: {
+            host: "reading.wavypremium.xyz",
+            origin: "https://reading.wavypremium.xyz",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ url: "https://lnori.com/series/8046/prod-test" }),
+        });
+
+        const res = await handleRequest(req);
+        expect(res.status).toBe(200);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(true);
+        expect(data.seriesTitle).toBe("Production Origin Novel");
+
+        if (origKey !== undefined) process.env.READING_API_KEY = origKey;
+      } finally {
+        resetServerDependenciesForTest();
+      }
     });
 
     it("returns 200 and refreshes Calibre cache on successful ingest", async () => {
@@ -1015,6 +1073,7 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
         expect(res.headers.get("content-type")).toContain("text/event-stream");
 
         const text = await res.text();
+        expect(text).toContain(": keepalive\n\n");
         const rawBlocks = text.split("\n\n").filter((b) => b.trim().startsWith("data:"));
         const events = rawBlocks.map((b) => JSON.parse(b.replace(/^data:\s*/, "").trim()));
 
