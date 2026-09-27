@@ -2085,6 +2085,96 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
         resetActiveLnoriStateForTest();
       }
     });
+
+    it("supports POST /api/elscione/ingest and /api/novel/ingest with progress and cancel", async () => {
+      resetActiveLnoriStateForTest();
+      let elscioneIngestCalled = false;
+      setServerDependenciesForTest({
+        ingestElscioneSeries: async (_url: string) => {
+          elscioneIngestCalled = true;
+          return {
+            success: true,
+            seriesTitle: "Grimgar",
+            author: "Jyumonji",
+            importedCount: 2,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 2,
+            tags: ["Light Novel", "Elscione"],
+            calibreBookIds: [301, 302],
+          };
+        },
+        getCalibreBooks: () => [],
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/elscione/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar/",
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(true);
+        expect(data.seriesTitle).toBe("Grimgar");
+        expect(elscioneIngestCalled).toBe(true);
+
+        // Progress check on /api/elscione/progress
+        const progReq = new Request("http://127.0.0.1:8086/api/elscione/progress");
+        const progRes = await handleRequest(progReq, localServer);
+        expect(progRes.status).toBe(200);
+
+        // Cancel endpoint on /api/elscione/cancel
+        const cancelReq = new Request("http://127.0.0.1:8086/api/elscione/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        });
+        const cancelRes = await handleRequest(cancelReq, localServer);
+        expect(cancelRes.status).toBe(200);
+
+        // Unified endpoint: POST /api/novel/ingest with Lnori URL
+        let novelLnoriCalled = false;
+        setServerDependenciesForTest({
+          ingestLnoriSeries: async () => {
+            novelLnoriCalled = true;
+            return {
+              success: true,
+              seriesTitle: "Novel Ingest",
+              author: "Author",
+              importedCount: 1,
+              skippedCount: 0,
+              duplicateCount: 0,
+              totalCount: 1,
+              tags: "Light Novel",
+              calibreBookIds: [401],
+            };
+          },
+          getCalibreBooks: () => [],
+        });
+
+        const reqNovel = new Request("http://127.0.0.1:8086/api/novel/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/unified-test",
+          }),
+        });
+        const resNovel = await handleRequest(reqNovel, localServer);
+        expect(resNovel.status).toBe(200);
+        expect(novelLnoriCalled).toBe(true);
+
+        const progReqNovel = new Request("http://127.0.0.1:8086/api/novel/progress");
+        const progResNovel = await handleRequest(progReqNovel, localServer);
+        expect(progResNovel.status).toBe(200);
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
   });
 
   describe("Auto-Populate Synopses on Ingest", () => {
