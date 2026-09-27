@@ -23,5 +23,8 @@ jobs:
       - name: Install Shellcheck
         run: brew install shellcheck || true
 
+      - name: Install Python Dependencies
+        run: pip3 install --break-system-packages curl_cffi || pip3 install curl_cffi || true
+
       - name: Run tests
         run: bun test

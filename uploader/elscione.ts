@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import crypto from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import readline from "node:readline";
 import {
   safeFetchWithSsrf,
   getBsdtarPath,
@@ -36,6 +37,7 @@ export const MAX_VOLUMES_PER_REQUEST = 50;
 export interface ElscioneDependencies {
   fetch?: (url: string, init?: RequestInit) => Promise<Response>;
   spawnSync?: (...args: any[]) => any;
+  spawn?: (...args: any[]) => any;
   sipsPath?: string;
   bsdtarPath?: string;
   unzipPath?: string;
@@ -43,6 +45,9 @@ export interface ElscioneDependencies {
   isVolumeInLibrary?: (seriesTitle: string, volumeIndex: number, title: string) => boolean;
   sleep?: (ms: number) => Promise<void>;
   signal?: AbortSignal;
+  helperPath?: string;
+  pythonPath?: string;
+  useHelper?: boolean;
 }
 
 export interface AnubisChallenge {
@@ -60,6 +65,7 @@ export interface AnubisSolution {
 
 export interface ElscioneVolumeMeta {
   volumeNumber: number;
+  partNumber?: number;
   filename: string;
   downloadUrl: string;
   title: string;
@@ -70,6 +76,7 @@ export interface ElscioneManifest {
   seriesTitle: string;
   url: string;
   isSingleVolume: boolean;
+  totalCount?: number;
   volumes: ElscioneVolumeMeta[];
 }
 
@@ -167,7 +174,12 @@ export function resetElscioneSessionForTest(): void {
 export function isElscioneUrl(url: string): boolean {
   if (!url || typeof url !== "string") return false;
   try {
-    const parsed = new URL(url.trim());
+    let clean = url.trim();
+    if (clean.startsWith("//")) clean = "https:" + clean;
+    else if (!clean.startsWith("http://") && !clean.startsWith("https://")) {
+      clean = "https://" + clean.replace(/^\/+/, "");
+    }
+    const parsed = new URL(clean);
     return (
       parsed.hostname === "server.elscione.com" ||
       parsed.hostname.endsWith(".elscione.com")
@@ -190,7 +202,12 @@ export function parseElscioneUrl(url: string): {
 } | null {
   if (!isElscioneUrl(url)) return null;
   try {
-    const parsed = new URL(url.trim());
+    let clean = url.trim();
+    if (clean.startsWith("//")) clean = "https:" + clean;
+    else if (!clean.startsWith("http://") && !clean.startsWith("https://")) {
+      clean = "https://" + clean.replace(/^\/+/, "");
+    }
+    const parsed = new URL(clean);
     const pathname = parsed.pathname;
     const isEpub = /\.epub$/i.test(pathname);
 
@@ -198,8 +215,8 @@ export function parseElscioneUrl(url: string): {
       const filename = path.basename(decodeURIComponent(pathname));
       const dirPath = path.dirname(pathname);
       const folderPath = dirPath.endsWith("/") ? dirPath : `${dirPath}/`;
-      const segments = folderPath.split("/").filter(Boolean);
-      const seriesTitle = segments.length > 0 ? decodeURIComponent(segments[segments.length - 1]) : undefined;
+      const segments = decodeURIComponent(folderPath).split("/").filter(Boolean);
+      const seriesTitle = segments.length > 0 ? segments[segments.length - 1] : undefined;
       return {
         hostname: parsed.hostname,
         pathname,
@@ -211,8 +228,8 @@ export function parseElscioneUrl(url: string): {
     }
 
     const folderPath = pathname.endsWith("/") ? pathname : `${pathname}/`;
-    const segments = folderPath.split("/").filter(Boolean);
-    const seriesTitle = segments.length > 0 ? decodeURIComponent(segments[segments.length - 1]) : undefined;
+    const segments = decodeURIComponent(folderPath).split("/").filter(Boolean);
+    const seriesTitle = segments.length > 0 ? segments[segments.length - 1] : undefined;
     return {
       hostname: parsed.hostname,
       pathname,
@@ -229,11 +246,21 @@ export function parseElscioneUrl(url: string): {
  * Extracts volume index from filename using standard light novel naming conventions
  */
 export function extractVolumeNumberFromFilename(filename: string): number | undefined {
-  const name = filename.replace(/\.epub$/i, "");
+  const name = filename.replace(/\.epub$/i, "").trim();
+
+  // Part X ... Volume Y or Part X ... vY (e.g. "Part 1 Volume 2" or "Part 1 Daughter of a Soldier v02")
+  const partMatch = name.match(/Part\s*(\d+).*?(?:Volume|Vol\.?|v)\s*(\d+(?:\.\d+)?)/i);
+  if (partMatch) {
+    return parseFloat(partMatch[2]);
+  }
 
   // Vol / Volume / Book patterns (e.g. "Volume 01", "Vol. 4.5", "Book 3")
   const volMatch = name.match(/(?:vol(?:ume)?|book)\.?\s*([0-9]+(?:\.[0-9]+)?)/i);
   if (volMatch) return parseFloat(volMatch[1]);
+
+  // v(\d+) (e.g. "Series v01.epub" or "Series - v02.epub")
+  const vMatch = name.match(/(?:^|[\s_\-\[\(])v([0-9]+(?:\.[0-9]+)?)(?:$|[\s_\-\]\)])/i);
+  if (vMatch) return parseFloat(vMatch[1]);
 
   // #01 pattern
   const hashMatch = name.match(/#\s*([0-9]+(?:\.[0-9]+)?)/);
@@ -515,6 +542,214 @@ export async function fetchWithAnubis(
   return res;
 }
 
+export function safeDecodeURIComponent(str: string): string {
+  if (!str) return "";
+  try {
+    return decodeURIComponent(str);
+  } catch {
+    return str;
+  }
+}
+
+export function getElscioneHelperPath(dependencies?: ElscioneDependencies): string {
+  if (dependencies?.helperPath) return dependencies.helperPath;
+  let currentDir = "";
+  try {
+    currentDir = (import.meta as any).dir || path.dirname(new URL(import.meta.url).pathname);
+  } catch {
+    currentDir = path.join(process.cwd(), "uploader");
+  }
+  const possiblePaths = [
+    path.join(currentDir, "scripts", "elscione_helper.py"),
+    path.join(process.cwd(), "uploader", "scripts", "elscione_helper.py"),
+    path.join(process.cwd(), "scripts", "elscione_helper.py"),
+  ];
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) return p;
+  }
+  return possiblePaths[0];
+}
+
+export function getPythonPath(dependencies?: ElscioneDependencies): string {
+  if (dependencies?.pythonPath) return dependencies.pythonPath;
+  if (process.env.PYTHON_PATH) return process.env.PYTHON_PATH;
+  return "python3";
+}
+
+/**
+ * Invokes uploader/scripts/elscione_helper.py to extract series manifest
+ */
+export async function runElscioneHelperManifest(
+  url: string,
+  dependencies?: ElscioneDependencies,
+): Promise<ElscioneManifest> {
+  const helperPath = getElscioneHelperPath(dependencies);
+  if (!fs.existsSync(helperPath)) {
+    throw new Error(`Elscione helper script not found at ${helperPath}`);
+  }
+  const pythonBin = getPythonPath(dependencies);
+  const runSpawnSync = dependencies?.spawnSync ?? spawnSync;
+
+  const res = runSpawnSync(pythonBin, [helperPath, "manifest", url], {
+    encoding: "utf8",
+    timeout: SUBPROCESS_TIMEOUT_MS,
+    maxBuffer: SUBPROCESS_MAX_BUFFER,
+  });
+
+  if (res.status !== 0) {
+    throw new Error(
+      `Elscione helper manifest exited with status ${res.status}: ${res.stderr || res.stdout}`,
+    );
+  }
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(res.stdout);
+  } catch (err: any) {
+    throw new Error(`Failed to parse Elscione helper JSON: ${err?.message || err}`);
+  }
+
+  if (!parsed.success || !Array.isArray(parsed.volumes)) {
+    throw new Error(parsed.error || "Elscione helper returned unsuccessful manifest");
+  }
+
+  return {
+    seriesTitle: parsed.seriesTitle || "Light Novel",
+    url: parsed.url || url,
+    isSingleVolume: Boolean(parsed.isSingleVolume),
+    totalCount: typeof parsed.totalCount === "number" ? parsed.totalCount : parsed.volumes.length,
+    volumes: parsed.volumes
+      .filter((v: any) => v && typeof v.downloadUrl === "string" && isElscioneUrl(v.downloadUrl))
+      .map((v: any) => ({
+        volumeNumber: v.volumeNumber,
+        partNumber: typeof v.partNumber === "number" ? v.partNumber : undefined,
+        filename: v.filename,
+        downloadUrl: v.downloadUrl,
+        title: v.title,
+        size: typeof v.size === "number" ? v.size : undefined,
+      })),
+  };
+}
+
+const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+const MAX_STDERR_BYTES = 1024 * 1024;
+
+/**
+ * Invokes uploader/scripts/elscione_helper.py to stream EPUB download with progress reporting
+ */
+export async function runElscioneHelperDownload(
+  downloadUrl: string,
+  destPath: string,
+  onProgress?: (progressPercent: number) => void,
+  dependencies?: ElscioneDependencies,
+): Promise<void> {
+  const helperPath = getElscioneHelperPath(dependencies);
+  if (!fs.existsSync(helperPath)) {
+    throw new Error(`Elscione helper script not found at ${helperPath}`);
+  }
+  const pythonBin = getPythonPath(dependencies);
+  const runSpawn = dependencies?.spawn ?? spawn;
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timer: any = null;
+
+    const cleanup = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (abortHandler && dependencies?.signal) {
+        dependencies.signal.removeEventListener("abort", abortHandler);
+      }
+    };
+
+    const safeResolve = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+
+    const safeReject = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
+
+    const proc = runSpawn(pythonBin, [helperPath, "download", downloadUrl, destPath], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const killProcessWithEscalation = () => {
+      if (typeof proc.kill === "function") {
+        proc.kill("SIGTERM");
+        setTimeout(() => {
+          try {
+            if (typeof proc.kill === "function") proc.kill("SIGKILL");
+          } catch (killErr) {
+            console.debug("[Elscione] SIGKILL ignored:", killErr);
+          }
+        }, 3000);
+      }
+    };
+
+    let abortHandler: (() => void) | null = null;
+    if (dependencies?.signal) {
+      if (dependencies.signal.aborted) {
+        killProcessWithEscalation();
+        return safeReject(new Error("Elscione ingestion aborted by client"));
+      }
+      abortHandler = () => {
+        killProcessWithEscalation();
+        safeReject(new Error("Elscione ingestion aborted by client"));
+      };
+      dependencies.signal.addEventListener("abort", abortHandler, { once: true });
+    }
+
+    timer = setTimeout(() => {
+      killProcessWithEscalation();
+      safeReject(new Error(`Elscione helper download timed out after ${DOWNLOAD_TIMEOUT_MS}ms`));
+    }, DOWNLOAD_TIMEOUT_MS);
+
+    let stderr = "";
+    if (proc.stderr) {
+      proc.stderr.on("data", (chunk: any) => {
+        if (stderr.length < MAX_STDERR_BYTES) {
+          stderr += chunk.toString().slice(0, MAX_STDERR_BYTES - stderr.length);
+        }
+      });
+    }
+
+    if (proc.stdout) {
+      const rl = readline.createInterface({ input: proc.stdout });
+      rl.on("line", (line: string) => {
+        if (line.startsWith("PROGRESS:") && onProgress) {
+          const match = line.match(/PROGRESS:\s*([0-9]+(?:\.[0-9]+)?)%/);
+          if (match) {
+            onProgress(parseFloat(match[1]));
+          }
+        }
+      });
+    }
+
+    proc.on("error", (err: any) => {
+      safeReject(err);
+    });
+
+    proc.on("close", (code: number) => {
+      if (code === 0) {
+        safeResolve();
+      } else {
+        safeReject(new Error(`Elscione helper download failed (exit ${code}): ${stderr}`));
+      }
+    });
+  });
+
+  validateDownloadedEpub(destPath);
+}
+
 /**
  * Extracts folder & manifest from server.elscione.com:
  * Handles both series folders (via _h5ai directory API) and direct .epub file URLs.
@@ -536,22 +771,50 @@ export async function extractElscioneManifest(
       parsed.filename.replace(/\s*-\s*vol(?:ume)?.*$/i, "").replace(/\.epub$/i, "").trim() ||
       "Light Novel";
 
+    const partMatch = parsed.filename.match(/Part\s*(\d+)/i);
+    const partNum = partMatch ? parseInt(partMatch[1], 10) : undefined;
+    const title = partMatch
+      ? `${seriesTitle}: Part ${partMatch[1]} Volume ${volNum}`
+      : `${seriesTitle}: Volume ${volNum}`;
+
     return {
       seriesTitle,
       url,
       isSingleVolume: true,
+      totalCount: 1,
       volumes: [
         {
           volumeNumber: volNum,
+          partNumber: partNum,
           filename: parsed.filename,
           downloadUrl: url,
-          title: `${seriesTitle}: Volume ${volNum}`,
+          title,
         },
       ],
     };
   }
 
-  // 2. Series folder URL: POST to folder path with _h5ai JSON action
+  // Check if helper can be used (disabled if mock fetch dependency is provided for unit tests)
+  const hasMockFetch = Boolean(dependencies?.fetch);
+  const allowHelper = dependencies?.useHelper !== false && !hasMockFetch;
+
+  if (allowHelper) {
+    try {
+      const helperManifest = await runElscioneHelperManifest(url, dependencies);
+      if (helperManifest && helperManifest.volumes.length > 0) {
+        return helperManifest;
+      }
+    } catch (err: any) {
+      if (dependencies?.signal?.aborted) {
+        throw err;
+      }
+      console.warn(
+        `[Elscione] Helper manifest failed, falling back to in-process fetch: ${err?.message || err}`,
+      );
+    }
+  }
+
+  // 2. Pure JS fallback for series folder URL: POST to folder path with _h5ai JSON action
   const folderPath = parsed.folderPath;
   const seriesTitle = parsed.seriesTitle || "Light Novel";
 
@@ -607,6 +870,7 @@ export async function extractElscioneManifest(
 
   interface RawItemInfo {
     volNum: number | undefined;
+    partNum: number | undefined;
     filename: string;
     downloadUrl: string;
     size?: number;
@@ -614,19 +878,33 @@ export async function extractElscioneManifest(
   const numberedItems: RawItemInfo[] = [];
   const unnumberedItems: RawItemInfo[] = [];
 
+  const unquotedTarget = safeDecodeURIComponent(folderPath);
+  const normTarget = path.posix.normalize(unquotedTarget).replace(/\/+$/, "") + "/";
+
   for (const item of rawItems) {
     const href = item.href || item.name;
     if (!href || typeof href !== "string") continue;
     if (!/\.epub$/i.test(href)) continue;
 
-    const filename = path.basename(decodeURIComponent(href));
+    const unquotedRaw = safeDecodeURIComponent(href);
+    const absUnquoted = unquotedRaw.startsWith("/")
+      ? path.posix.normalize(unquotedRaw)
+      : path.posix.normalize(path.posix.join(normTarget, unquotedRaw));
+
+    // Strict folder scoping check
+    if (!absUnquoted.startsWith(normTarget)) continue;
+
+    const filename = path.posix.basename(absUnquoted);
     const volNum = extractVolumeNumberFromFilename(filename);
+    const partMatch = filename.match(/Part\s*(\d+)/i);
+    const partNum = partMatch ? parseInt(partMatch[1], 10) : undefined;
     const downloadUrlObj = safeCreateUrl(href, targetFolderUrl);
     const downloadUrl = downloadUrlObj ? downloadUrlObj.toString() : "";
     if (!downloadUrl) continue;
 
     const rawInfo: RawItemInfo = {
       volNum,
+      partNum,
       filename,
       downloadUrl,
       size: typeof item.size === "number" ? item.size : undefined,
@@ -644,8 +922,11 @@ export async function extractElscioneManifest(
     throw new Error(`No EPUB volumes found in Elscione folder: ${targetFolderUrl}`);
   }
 
-  // Sort numbered items numerically by volume index (preserves Volume 0 correctly)
+  // Sort numbered items numerically by (part, volume index, filename)
   numberedItems.sort((a, b) => {
+    if ((a.partNum ?? 0) !== (b.partNum ?? 0)) {
+      return (a.partNum ?? 0) - (b.partNum ?? 0);
+    }
     if (a.volNum !== b.volNum) {
       return (a.volNum ?? 0) - (b.volNum ?? 0);
     }
@@ -661,11 +942,16 @@ export async function extractElscioneManifest(
 
   // Add numbered volumes
   for (const item of numberedItems) {
+    const title = item.partNum !== undefined
+      ? `${seriesTitle}: Part ${item.partNum} Volume ${item.volNum}`
+      : `${seriesTitle}: Volume ${item.volNum}`;
+
     epubItems.push({
       volumeNumber: item.volNum!,
+      partNumber: item.partNum,
       filename: item.filename,
       downloadUrl: item.downloadUrl,
-      title: `${seriesTitle}: Volume ${item.volNum}`,
+      title,
       size: item.size,
     });
   }
@@ -700,6 +986,7 @@ export async function extractElscioneManifest(
     seriesTitle,
     url,
     isSingleVolume: false,
+    totalCount: epubItems.length,
     volumes: epubItems,
   };
 }
@@ -912,6 +1199,28 @@ export async function downloadElscioneEpub(
     dependencies?.sleep ??
     ((ms: number) => new Promise((resolve) => setTimeout(resolve, isTestEnv ? 0 : ms)));
 
+  // If mock fetch dependency was injected, use pure-JS logic directly so test mocks work as expected
+  const hasMockFetch = Boolean(dependencies?.fetch);
+  const allowHelper = dependencies?.useHelper !== false && !hasMockFetch;
+
+  if (allowHelper) {
+    try {
+      await runElscioneHelperDownload(downloadUrl, destPath, onProgress, dependencies);
+      return;
+    } catch (err: any) {
+      if (
+        dependencies?.signal?.aborted ||
+        err?.name === "AbortError" ||
+        err?.message?.includes("aborted")
+      ) {
+        throw new Error("Elscione ingestion aborted by client");
+      }
+      console.warn(
+        `[Elscione] Helper download failed, falling back to in-process fetch: ${err?.message || err}`,
+      );
+    }
+  }
+
   const MAX_RETRIES = 3;
   let lastError: any = null;
 
@@ -930,11 +1239,15 @@ export async function downloadElscioneEpub(
     }
 
     try {
+      const parsed = safeCreateUrl(downloadUrl);
+      const folderPath = parsed ? path.posix.dirname(parsed.pathname) + "/" : "/";
+      const referer = parsed ? `${parsed.origin}${folderPath}` : "https://server.elscione.com/";
+
       const res = await fetchWithAnubis(
         downloadUrl,
         {
           headers: {
-            Referer: "https://server.elscione.com/",
+            Referer: referer,
           },
         },
         dependencies,
@@ -1028,10 +1341,13 @@ export async function ingestElscioneSeries(
 
       const vol = manifest.volumes[i];
       const volNum = vol.volumeNumber;
-      const title = `${manifest.seriesTitle}: Volume ${volNum}`;
+      const title = vol.title || `${manifest.seriesTitle}: Volume ${volNum}`;
+      const seriesIndex = vol.partNumber !== undefined && vol.partNumber > 1
+        ? vol.partNumber * 100 + volNum
+        : volNum;
 
       // Pre-download duplicate check
-      if (isVolumeAlreadyInCalibre(manifest.seriesTitle, volNum, title, dependencies)) {
+      if (isVolumeAlreadyInCalibre(manifest.seriesTitle, seriesIndex, title, dependencies)) {
         console.log(
           `[Elscione] Volume ${volNum} of "${manifest.seriesTitle}" already in library, skipping`,
         );
@@ -1141,7 +1457,7 @@ export async function ingestElscioneSeries(
           "--field",
           `series:${manifest.seriesTitle}`,
           "--field",
-          `series_index:${volNum}`,
+          `series_index:${seriesIndex}`,
           "--field",
           `tags:${tagsStr}`,
         ];
