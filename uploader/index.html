@@ -5020,6 +5020,7 @@
 
     function closeLnoriModal() {
       if (isLnoriIngesting && activeLnoriAbortController) {
+        // Detach client stream/polling; background task continues running on server
         activeLnoriAbortController.abort();
       }
       closeModalAnimated('lnoriModal', false);
@@ -5176,18 +5177,29 @@
         }
       }
 
-      // If resuming from existing server state, initialize UI from snapshot
+      // If resuming from existing server state, initialize UI from snapshot safely
       if (existingState) {
-        handleProgressEvent(existingState);
+        try {
+          handleProgressEvent(existingState);
+        } catch (initSnapErr) {
+          console.debug('[Lnori] Error initializing from existing state:', initSnapErr);
+        }
       }
 
       // Resilient Polling Fallback Helper
-      async function pollProgressUntilDone() {
+      async function pollProgressUntilDone(expectedRunId = null, expectedTargetUrl = targetUrl) {
         const activeTextEl = document.getElementById('lnoriActiveStatusText');
         if (activeTextEl) {
           activeTextEl.textContent = 'Connection stream interrupted. Continuing in background...';
         }
+        const pollStartTime = Date.now();
+        const maxPollDurationMs = 15 * 60 * 1000; // 15 minute safety timeout
+
         while (isLnoriIngesting && !runController.signal.aborted) {
+          if (Date.now() - pollStartTime > maxPollDurationMs) {
+            throw new Error('Background ingestion polling timed out after 15 minutes.');
+          }
+
           await new Promise((r) => setTimeout(r, 1500));
           if (runController.signal.aborted) break;
 
@@ -5198,6 +5210,16 @@
             if (!pollData || !pollData.state) continue;
 
             const st = pollData.state;
+            // Validate job identity against expected runId or targetUrl
+            if (expectedRunId && st.runId && st.runId !== expectedRunId) {
+              console.warn('[Lnori] Polled job runId mismatch:', st.runId, 'expected:', expectedRunId);
+              continue;
+            }
+            if (!expectedRunId && expectedTargetUrl && st.targetUrl && st.targetUrl !== expectedTargetUrl) {
+              console.warn('[Lnori] Polled job targetUrl mismatch:', st.targetUrl, 'expected:', expectedTargetUrl);
+              continue;
+            }
+
             handleProgressEvent({
               phase: st.phase,
               index: st.index,
@@ -5221,7 +5243,12 @@
             if (pollErr.name === 'AbortError' || runController.signal.aborted) {
               throw pollErr;
             }
-            if (pollErr.message && !pollErr.message.includes('fetch') && !pollErr.message.includes('network')) {
+            if (
+              pollErr.message &&
+              !pollErr.message.includes('fetch') &&
+              !pollErr.message.includes('network') &&
+              !pollErr.message.includes('Failed to fetch')
+            ) {
               throw pollErr;
             }
           }
@@ -5234,8 +5261,11 @@
         return completedData;
       }
 
+      let currentRunId = existingState?.runId || null;
+
       try {
         if (!isResuming) {
+          let responseStarted = false;
           try {
             const res = await fetch('/api/lnori/ingest', {
               method: 'POST',
@@ -5251,6 +5281,8 @@
               const errJson = await res.json().catch(() => ({}));
               throw new Error(errJson.error || `HTTP ${res.status}`);
             }
+
+            responseStarted = true;
 
             const contentType = res.headers.get('content-type') || '';
             if (
@@ -5281,6 +5313,13 @@
                     } catch {}
                   }
                   if (parsed) {
+                    if (parsed.runId) currentRunId = parsed.runId;
+                    if (parsed.phase === 'error') {
+                      const errMsg = parsed.status || parsed.data?.error || 'Ingestion encountered an error';
+                      const fatalErr = new Error(errMsg);
+                      (fatalErr as any).isStructuredFatal = true;
+                      throw fatalErr;
+                    }
                     handleProgressEvent(parsed);
                   }
                 }
@@ -5297,7 +5336,16 @@
                     parsed = JSON.parse(trimmed);
                   } catch {}
                 }
-                if (parsed) handleProgressEvent(parsed);
+                if (parsed) {
+                  if (parsed.runId) currentRunId = parsed.runId;
+                  if (parsed.phase === 'error') {
+                    const errMsg = parsed.status || parsed.data?.error || 'Ingestion encountered an error';
+                    const fatalErr = new Error(errMsg);
+                    (fatalErr as any).isStructuredFatal = true;
+                    throw fatalErr;
+                  }
+                  handleProgressEvent(parsed);
+                }
               }
             } else {
               // Non-streaming fallback response
@@ -5308,21 +5356,24 @@
               completedData = data;
             }
           } catch (streamErr) {
-            // If the stream dropped, timed out, or threw a network error,
-            // fall back to polling the server's background progress endpoint
+            // Only fall back to background polling if response had successfully started
+            // and the error is a transport/stream disconnect (NOT a 4xx/5xx pre-flight failure,
+            // NOT a structured server error, and NOT a user abort).
             if (
+              responseStarted &&
+              !(streamErr as any)?.isStructuredFatal &&
               streamErr.name !== 'AbortError' &&
               !runController.signal.aborted
             ) {
               console.warn('[Lnori] Streaming connection dropped or failed, falling back to background polling:', streamErr);
-              completedData = await pollProgressUntilDone();
+              completedData = await pollProgressUntilDone(currentRunId, targetUrl);
             } else {
               throw streamErr;
             }
           }
         } else {
           // Resumed directly from active state: poll until complete
-          completedData = await pollProgressUntilDone();
+          completedData = await pollProgressUntilDone(currentRunId, targetUrl);
         }
 
         if (completedData) {

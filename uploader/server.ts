@@ -130,6 +130,7 @@ export function resetServerDependenciesForTest() {
 }
 
 export interface ActiveLnoriState {
+  runId: string;
   active: boolean;
   targetUrl: string | null;
   phase: "idle" | "manifest" | "volume" | "complete" | "error";
@@ -145,6 +146,7 @@ export interface ActiveLnoriState {
 }
 
 let activeLnoriState: ActiveLnoriState = {
+  runId: "",
   active: false,
   targetUrl: null,
   phase: "idle",
@@ -163,7 +165,11 @@ let activeLnoriAbortController: AbortController | null = null;
 const activeLnoriListeners: Array<(event: LnoriProgressEvent) => void> = [];
 
 export function getActiveLnoriState(): ActiveLnoriState {
-  return { ...activeLnoriState };
+  return {
+    ...activeLnoriState,
+    data: activeLnoriState.data ? { ...activeLnoriState.data } : null,
+    completedData: activeLnoriState.completedData ? { ...activeLnoriState.completedData } : null,
+  };
 }
 
 export function resetActiveLnoriStateForTest(): void {
@@ -173,6 +179,7 @@ export function resetActiveLnoriStateForTest(): void {
   }
   activeLnoriListeners.length = 0;
   activeLnoriState = {
+    runId: "",
     active: false,
     targetUrl: null,
     phase: "idle",
@@ -193,7 +200,10 @@ export function cancelActiveLnoriIngest(): boolean {
     return false;
   }
   activeLnoriAbortController.abort();
-  activeLnoriState.status = "Ingestion cancelled by user";
+  activeLnoriState.active = false;
+  activeLnoriState.phase = "error";
+  activeLnoriState.status = "Lnori ingestion cancelled by user";
+  activeLnoriState.error = "Lnori ingestion cancelled by user";
   activeLnoriState.updatedAt = new Date().toISOString();
   return true;
 }
@@ -4111,10 +4121,27 @@ async function handleRequestCore(
       const runIngest = serverDependencies.ingestLnoriSeries ?? ingestLnoriSeries;
       const refreshBooks = serverDependencies.getCalibreBooks ?? getCalibreBooks;
 
+      // Single-flight concurrency protection:
+      // If an ingestion is currently active, reject concurrent requests with 409 Conflict.
+      if (activeLnoriState.active) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Another Lnori ingestion is currently active",
+            active: true,
+            state: getActiveLnoriState(),
+          },
+          409,
+          corsOrigin,
+        );
+      }
+
       const backgroundAbortController = new AbortController();
       activeLnoriAbortController = backgroundAbortController;
       const nowIso = new Date().toISOString();
+      const runId = `lnori-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       activeLnoriState = {
+        runId,
         active: true,
         targetUrl,
         phase: "manifest",
@@ -4363,12 +4390,15 @@ async function handleRequestCore(
                 controller.enqueue(encoder.encode(": keepalive\n\n"));
               } catch (keepaliveInitErr) {
                 console.debug("[Lnori] Initial keepalive enqueue failed:", keepaliveInitErr);
+                removeListener();
+                cleanupKeepalive();
               }
 
               keepaliveTimer = setInterval(() => {
                 try {
                   controller.enqueue(encoder.encode(": keepalive\n\n"));
                 } catch {
+                  removeListener();
                   cleanupKeepalive();
                 }
               }, 15000);
@@ -4379,6 +4409,7 @@ async function handleRequestCore(
           },
           cancel() {
             // Stream cancelled by client: clean up listener and keepalive, but DO NOT abort background task
+            removeListener();
             cleanupKeepalive();
           },
         });

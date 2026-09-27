@@ -1634,6 +1634,65 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
       expect(cancelData.cancelled).toBe(false);
       expect(cancelData.message).toContain("No active Lnori ingestion");
     });
+
+    it("POST /api/lnori/ingest returns 409 Conflict when another ingestion is currently active", async () => {
+      resetActiveLnoriStateForTest();
+      let completeTrigger: (() => void) | undefined;
+      const completionPromise = new Promise<void>((resolve) => {
+        completeTrigger = resolve;
+      });
+
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async () => {
+          await completionPromise;
+          return {
+            success: true,
+            seriesTitle: "Lock Test Series",
+            author: "Author",
+            importedCount: 1,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 1,
+            tags: "Light Novel",
+            calibreBookIds: [99],
+          };
+        },
+      });
+
+      try {
+        const req1 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/lock-test-1",
+            stream: true,
+          }),
+        });
+        const res1 = await handleRequest(req1, localServer);
+        expect(res1.status).toBe(200);
+
+        // Second concurrent request must receive 409
+        const req2 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/lock-test-2",
+            stream: true,
+          }),
+        });
+        const res2 = await handleRequest(req2, localServer);
+        expect(res2.status).toBe(409);
+        const errData = (await res2.json()) as any;
+        expect(errData.success).toBe(false);
+        expect(errData.error).toContain("Another Lnori ingestion is currently active");
+        expect(errData.active).toBe(true);
+
+        completeTrigger?.();
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
   });
 
   describe("Auto-Populate Synopses on Ingest", () => {
