@@ -56,7 +56,12 @@ import {
   classifyBookSourceCategoryDeterministic,
   containsBurmese,
 } from "./jev-shelf";
-import { isLnoriUrl, ingestLnoriSeries, type LnoriProgressEvent } from "./lnori";
+import {
+  isLnoriUrl,
+  parseLnoriUrl,
+  ingestLnoriSeries,
+  type LnoriProgressEvent,
+} from "./lnori";
 import { isJoplinRoute, handleJoplinRequest } from "./joplin";
 import {
   initHighlightsTable,
@@ -129,6 +134,13 @@ export function resetServerDependenciesForTest() {
   serverDependencies = {};
 }
 
+export interface LnoriQueueItem {
+  id: string; // runId
+  targetUrl: string;
+  seriesId?: string;
+  createdAt: string;
+}
+
 export interface ActiveLnoriState {
   runId: string;
   active: boolean;
@@ -143,6 +155,10 @@ export interface ActiveLnoriState {
   error: string | null;
   startedAt: string | null;
   updatedAt: string | null;
+  queued?: boolean;
+  queuePosition?: number;
+  queueLength?: number;
+  queuedItems?: Array<{ id: string; targetUrl: string; createdAt: string }>;
 }
 
 let activeLnoriState: ActiveLnoriState = {
@@ -162,22 +178,53 @@ let activeLnoriState: ActiveLnoriState = {
 };
 
 let activeLnoriAbortController: AbortController | null = null;
-const activeLnoriListeners: Array<(event: LnoriProgressEvent) => void> = [];
+const activeLnoriListeners: Array<(event: LnoriProgressEvent & { runId?: string }) => void> = [];
+const lnoriQueue: LnoriQueueItem[] = [];
+
+// Ring buffer of recent completed/errored jobs to preserve terminal state for polling clients
+const completedLnoriJobs = new Map<string, ActiveLnoriState>();
+const MAX_COMPLETED_JOBS_HISTORY = 50;
+
+function recordCompletedLnoriJob(state: ActiveLnoriState): void {
+  if (!state.runId) return;
+  completedLnoriJobs.set(state.runId, {
+    ...state,
+    active: false,
+    data: state.data ? JSON.parse(JSON.stringify(state.data)) : null,
+    completedData: state.completedData ? JSON.parse(JSON.stringify(state.completedData)) : null,
+  });
+  if (completedLnoriJobs.size > MAX_COMPLETED_JOBS_HISTORY) {
+    const oldestKey = completedLnoriJobs.keys().next().value;
+    if (oldestKey) completedLnoriJobs.delete(oldestKey);
+  }
+}
+
+export function getLnoriQueue(): LnoriQueueItem[] {
+  return lnoriQueue.map((item) => ({ ...item }));
+}
 
 export function getActiveLnoriState(): ActiveLnoriState {
   return {
     ...activeLnoriState,
     data: activeLnoriState.data ? JSON.parse(JSON.stringify(activeLnoriState.data)) : null,
     completedData: activeLnoriState.completedData ? JSON.parse(JSON.stringify(activeLnoriState.completedData)) : null,
+    queueLength: lnoriQueue.length,
+    queuedItems: lnoriQueue.map((q) => ({ id: q.id, targetUrl: q.targetUrl, createdAt: q.createdAt })),
   };
 }
 
 export function resetActiveLnoriStateForTest(): void {
+  if (lnoriDrainTimer !== null) {
+    clearTimeout(lnoriDrainTimer);
+    lnoriDrainTimer = null;
+  }
   if (activeLnoriAbortController) {
     activeLnoriAbortController.abort();
     activeLnoriAbortController = null;
   }
   activeLnoriListeners.length = 0;
+  lnoriQueue.length = 0;
+  completedLnoriJobs.clear();
   activeLnoriState = {
     runId: "",
     active: false,
@@ -195,17 +242,298 @@ export function resetActiveLnoriStateForTest(): void {
   };
 }
 
-export function cancelActiveLnoriIngest(): boolean {
+export function cancelActiveLnoriIngest(targetRunId?: string): boolean {
+  // If a specific targetRunId is provided, check if it matches a queued item first
+  if (targetRunId) {
+    const queueIdx = lnoriQueue.findIndex((item) => item.id === targetRunId);
+    if (queueIdx !== -1) {
+      lnoriQueue.splice(queueIdx, 1);
+      return true;
+    }
+    // If not in queue, check if it matches the active job
+    if (activeLnoriState.active && activeLnoriState.runId === targetRunId && activeLnoriAbortController) {
+      activeLnoriAbortController.abort();
+      activeLnoriState.active = false;
+      activeLnoriState.phase = "error";
+      activeLnoriState.status = "Lnori ingestion cancelled by user";
+      activeLnoriState.error = "Lnori ingestion cancelled by user";
+      activeLnoriState.updatedAt = new Date().toISOString();
+
+      // Broadcast immediate cancellation to active SSE/NDJSON stream listeners
+      const cancelEvent: LnoriProgressEvent & { runId?: string } = {
+        phase: "error",
+        status: "Lnori ingestion cancelled by user",
+        runId: targetRunId,
+        data: { error: "Lnori ingestion cancelled by user", aborted: true },
+      };
+      for (let i = activeLnoriListeners.length - 1; i >= 0; i--) {
+        try {
+          activeLnoriListeners[i](cancelEvent);
+        } catch {
+          activeLnoriListeners.splice(i, 1);
+        }
+      }
+
+      scheduleLnoriDrain();
+      recordCompletedLnoriJob(activeLnoriState);
+      return true;
+    }
+    return false;
+  }
+
+  // If no targetRunId is provided, cancel the active ingestion
   if (!activeLnoriState.active || !activeLnoriAbortController) {
     return false;
   }
+  const cancelledRunId = activeLnoriState.runId;
   activeLnoriAbortController.abort();
   activeLnoriState.active = false;
   activeLnoriState.phase = "error";
   activeLnoriState.status = "Lnori ingestion cancelled by user";
   activeLnoriState.error = "Lnori ingestion cancelled by user";
   activeLnoriState.updatedAt = new Date().toISOString();
+
+  // Broadcast immediate cancellation to active SSE/NDJSON stream listeners
+  const cancelEvent: LnoriProgressEvent & { runId?: string } = {
+    phase: "error",
+    status: "Lnori ingestion cancelled by user",
+    runId: cancelledRunId,
+    data: { error: "Lnori ingestion cancelled by user", aborted: true },
+  };
+  for (let i = activeLnoriListeners.length - 1; i >= 0; i--) {
+    try {
+      activeLnoriListeners[i](cancelEvent);
+    } catch {
+      activeLnoriListeners.splice(i, 1);
+    }
+  }
+
+  scheduleLnoriDrain();
+  recordCompletedLnoriJob(activeLnoriState);
   return true;
+}
+
+export function areMatchingLnoriUrls(url1: string, url2: string): boolean {
+  if (url1 === url2) return true;
+  const p1 = parseLnoriUrl(url1);
+  const p2 = parseLnoriUrl(url2);
+  if (!p1 || !p2) return false;
+  // If both have parsed series/book identifiers
+  if (p1.type === p2.type && p1.id === p2.id) {
+    return true;
+  }
+  return false;
+}
+
+let lnoriDrainTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function scheduleLnoriDrain(delayMs = 20): void {
+  if (lnoriDrainTimer !== null) {
+    clearTimeout(lnoriDrainTimer);
+  }
+  lnoriDrainTimer = setTimeout(() => {
+    lnoriDrainTimer = null;
+    processNextLnoriQueueItem();
+  }, delayMs);
+}
+
+export function processNextLnoriQueueItem(): void {
+  if (activeLnoriState.active) {
+    return;
+  }
+  const nextItem = lnoriQueue.shift();
+  if (!nextItem) {
+    return;
+  }
+  executeLnoriIngestTask(nextItem.id, nextItem.targetUrl);
+}
+
+export function executeLnoriIngestTask(
+  runId: string,
+  targetUrl: string,
+): Promise<any> {
+  const runIngest = serverDependencies.ingestLnoriSeries ?? ingestLnoriSeries;
+  const refreshBooks = serverDependencies.getCalibreBooks ?? getCalibreBooks;
+
+  const backgroundAbortController = new AbortController();
+  activeLnoriAbortController = backgroundAbortController;
+  const nowIso = new Date().toISOString();
+
+  activeLnoriState = {
+    runId,
+    active: true,
+    targetUrl,
+    phase: "manifest",
+    status: "Initializing Lnori background ingestion...",
+    index: 0,
+    total: 0,
+    volumeTitle: null,
+    data: null,
+    completedData: null,
+    error: null,
+    startedAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  const updateStateFromEvent = (event: LnoriProgressEvent) => {
+    if (activeLnoriState.runId !== runId) return;
+    activeLnoriState.updatedAt = new Date().toISOString();
+    if (event.phase) {
+      activeLnoriState.phase = event.phase;
+    }
+    if (typeof event.index === "number") {
+      activeLnoriState.index = event.index;
+    }
+    if (typeof event.total === "number") {
+      activeLnoriState.total = event.total;
+    }
+    if (event.volumeTitle) {
+      activeLnoriState.volumeTitle = event.volumeTitle;
+    }
+    if (event.status) {
+      activeLnoriState.status =
+        event.phase === "error"
+          ? sanitizeErrorMessage(event.status)
+          : event.status;
+    }
+    if (event.data) {
+      activeLnoriState.data = event.data;
+    }
+  };
+
+  const broadcastEvent = (event: LnoriProgressEvent) => {
+    if (activeLnoriState.runId !== runId) return;
+    updateStateFromEvent(event);
+    const eventWithRunId: LnoriProgressEvent & { runId?: string } = {
+      ...event,
+      runId,
+    };
+    for (let i = activeLnoriListeners.length - 1; i >= 0; i--) {
+      try {
+        activeLnoriListeners[i](eventWithRunId);
+      } catch {
+        activeLnoriListeners.splice(i, 1);
+      }
+    }
+  };
+
+  const taskPromise = (async () => {
+    let hasCompleted = false;
+    let hasErrored = false;
+    try {
+      const result = await runIngest(
+        targetUrl,
+        async (event: LnoriProgressEvent) => {
+          if (activeLnoriState.runId !== runId) return;
+          if (event.phase === "complete") {
+            hasCompleted = true;
+          }
+          if (event.phase === "error") {
+            hasErrored = true;
+          }
+          broadcastEvent(event);
+        },
+        { signal: backgroundAbortController.signal },
+      );
+
+      if (activeLnoriState.runId !== runId) {
+        return { success: false, error: "Task generation superseded" };
+      }
+
+      if (!result || !result.success) {
+        const errMsg =
+          sanitizeErrorMessage(result?.error) ||
+          "Failed to ingest light novel from Lnori";
+        activeLnoriState.active = false;
+        activeLnoriState.phase = "error";
+        activeLnoriState.error = errMsg;
+        activeLnoriState.status = errMsg;
+        activeLnoriState.updatedAt = new Date().toISOString();
+        if (!hasErrored) {
+          broadcastEvent({
+            phase: "error",
+            status: errMsg,
+            data: { error: errMsg },
+          });
+        }
+        recordCompletedLnoriJob(activeLnoriState);
+        return { success: false, error: errMsg };
+      } else {
+        try {
+          refreshBooks(true);
+        } catch (rfErr) {
+          console.debug("[Lnori] refreshBooks failed:", rfErr);
+        }
+
+        const finalCompletedData = {
+          success: true,
+          seriesTitle: result.seriesTitle,
+          author: result.author,
+          importedCount: result.importedCount,
+          skippedCount: result.skippedCount,
+          totalCount: result.totalCount,
+          tags: result.tags,
+          calibreBookIds: result.calibreBookIds,
+        };
+
+        activeLnoriState.active = false;
+        activeLnoriState.phase = "complete";
+        activeLnoriState.completedData = finalCompletedData;
+        activeLnoriState.index = result.totalCount;
+        activeLnoriState.total = result.totalCount;
+        activeLnoriState.volumeTitle = result.seriesTitle;
+        activeLnoriState.status = `Completed: ${result.importedCount} imported, ${result.skippedCount} skipped of ${result.totalCount} volumes`;
+        activeLnoriState.updatedAt = new Date().toISOString();
+
+        if (!hasCompleted) {
+          broadcastEvent({
+            phase: "complete",
+            index: result.totalCount,
+            total: result.totalCount,
+            volumeTitle: result.seriesTitle,
+            status: activeLnoriState.status,
+            data: finalCompletedData,
+          });
+        }
+        recordCompletedLnoriJob(activeLnoriState);
+        return finalCompletedData;
+      }
+    } catch (err: any) {
+      if (activeLnoriState.runId !== runId) {
+        return { success: false, error: "Task generation superseded" };
+      }
+      const isAborted =
+        backgroundAbortController.signal.aborted ||
+        err?.name === "AbortError" ||
+        String(err?.message || "").includes("aborted");
+      const errMsg = isAborted
+        ? "Lnori ingestion cancelled by user"
+        : sanitizeErrorMessage(err) || "Failed to ingest light novel from Lnori";
+
+      activeLnoriState.active = false;
+      activeLnoriState.phase = "error";
+      activeLnoriState.error = errMsg;
+      activeLnoriState.status = errMsg;
+      activeLnoriState.updatedAt = new Date().toISOString();
+
+      if (!hasErrored) {
+        broadcastEvent({
+          phase: "error",
+          status: errMsg,
+          data: { error: errMsg, aborted: isAborted },
+        });
+      }
+      recordCompletedLnoriJob(activeLnoriState);
+      return { success: false, error: errMsg };
+    } finally {
+      if (activeLnoriAbortController === backgroundAbortController) {
+        activeLnoriAbortController = null;
+      }
+      // Process next queued ingestion item sequentially via coalesced drain
+      scheduleLnoriDrain(20);
+    }
+  })();
+  return taskPromise;
 }
 
 export function getDropDir(): string {
@@ -4118,28 +4446,208 @@ async function handleRequestCore(
         (Boolean(body.stream) && !isNDJSON);
       const isStream = Boolean(body.stream || isSSE || isNDJSON);
 
-      const runIngest = serverDependencies.ingestLnoriSeries ?? ingestLnoriSeries;
-      const refreshBooks = serverDependencies.getCalibreBooks ?? getCalibreBooks;
+      // Check if an ingestion is already active with the same or matching URL/series
+      if (activeLnoriState.active && activeLnoriState.targetUrl && areMatchingLnoriUrls(activeLnoriState.targetUrl, targetUrl)) {
+        if (isStream) {
+          // Reconnect client stream to existing active ingestion
+          const contentType =
+            isNDJSON && !isSSE
+              ? "application/x-ndjson; charset=utf-8"
+              : "text/event-stream; charset=utf-8";
 
-      // Single-flight concurrency protection:
-      // If an ingestion is currently active, reject concurrent requests with 409 Conflict.
-      if (activeLnoriState.active) {
+          const streamHeaders: Record<string, string> = {
+            "Content-Type": contentType,
+            "Cache-Control": "no-cache, no-transform",
+            Connection: "keep-alive",
+            "X-Accel-Buffering": "no",
+          };
+          if (corsOrigin) {
+            streamHeaders["Access-Control-Allow-Origin"] = corsOrigin;
+            streamHeaders["Access-Control-Allow-Credentials"] = "true";
+            streamHeaders["Vary"] = "Origin";
+          }
+
+          let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+          const cleanupKeepalive = () => {
+            if (keepaliveTimer !== null) {
+              clearInterval(keepaliveTimer);
+              keepaliveTimer = null;
+            }
+          };
+
+          let removeListener = () => {};
+          const encoder = new TextEncoder();
+          const runId = activeLnoriState.runId;
+
+          const stream = new ReadableStream({
+            start(controller) {
+              const isSSEFormat = contentType.startsWith("text/event-stream");
+
+              const sendEvent = (event: LnoriProgressEvent & { runId?: string }) => {
+                try {
+                  const outboundEvent: LnoriProgressEvent & { runId?: string } = {
+                    ...event,
+                    runId: event.runId || runId,
+                    status:
+                      event.phase === "error" && event.status
+                        ? sanitizeErrorMessage(event.status)
+                        : event.status,
+                    volumeTitle: event.volumeTitle,
+                  };
+                  if (outboundEvent.data) {
+                    outboundEvent.data = { ...outboundEvent.data };
+                    if (typeof outboundEvent.data.error === "string") {
+                      outboundEvent.data.error = sanitizeErrorMessage(
+                        outboundEvent.data.error,
+                      );
+                    }
+                  }
+                  const json = JSON.stringify(outboundEvent);
+                  const chunk = isSSEFormat ? `data: ${json}\n\n` : `${json}\n`;
+                  controller.enqueue(encoder.encode(chunk));
+                } catch (enqueueErr) {
+                  console.debug("[Lnori] Reconnected stream enqueue failed:", enqueueErr);
+                  removeListener();
+                  cleanupKeepalive();
+                }
+              };
+
+              const listener = (event: LnoriProgressEvent & { runId?: string }) => {
+                sendEvent(event);
+                if (event.phase === "complete" || event.phase === "error") {
+                  removeListener();
+                  cleanupKeepalive();
+                  try {
+                    controller.close();
+                  } catch (closeErr) {
+                    console.debug("[Lnori] Reconnected stream controller close failed:", closeErr);
+                  }
+                }
+              };
+
+              removeListener = () => {
+                const idx = activeLnoriListeners.indexOf(listener);
+                if (idx !== -1) {
+                  activeLnoriListeners.splice(idx, 1);
+                }
+              };
+
+              activeLnoriListeners.push(listener);
+
+              if (isSSEFormat) {
+                try {
+                  controller.enqueue(encoder.encode(": keepalive\n\n"));
+                } catch {
+                  removeListener();
+                  cleanupKeepalive();
+                }
+
+                keepaliveTimer = setInterval(() => {
+                  try {
+                    controller.enqueue(encoder.encode(": keepalive\n\n"));
+                  } catch {
+                    removeListener();
+                    cleanupKeepalive();
+                  }
+                }, 15000);
+              }
+
+              // Send immediate snapshot of current active state
+              sendEvent({
+                phase: activeLnoriState.phase,
+                index: activeLnoriState.index,
+                total: activeLnoriState.total,
+                volumeTitle: activeLnoriState.volumeTitle || undefined,
+                status: activeLnoriState.status || undefined,
+                data: activeLnoriState.data || undefined,
+              });
+            },
+            cancel() {
+              removeListener();
+              cleanupKeepalive();
+            },
+          });
+
+          return new Response(stream, {
+            status: 200,
+            headers: streamHeaders,
+          });
+        }
+
+        // Non-streaming duplicate active request: return existing active runId/state
         return jsonResponse(
           {
-            success: false,
-            error: "Another Lnori ingestion is currently active",
+            success: true,
             active: true,
+            runId: activeLnoriState.runId,
             state: getActiveLnoriState(),
           },
-          409,
+          200,
           corsOrigin,
         );
       }
 
-      const backgroundAbortController = new AbortController();
-      activeLnoriAbortController = backgroundAbortController;
-      const nowIso = new Date().toISOString();
+      // Check if this URL is already in queue
+      const existingQueueIndex = lnoriQueue.findIndex((item) =>
+        areMatchingLnoriUrls(item.targetUrl, targetUrl),
+      );
+      if (existingQueueIndex !== -1) {
+        const queuedItem = lnoriQueue[existingQueueIndex];
+        return jsonResponse(
+          {
+            success: true,
+            queued: true,
+            queuePosition: existingQueueIndex + 1,
+            queueLength: lnoriQueue.length,
+            runId: queuedItem.id,
+          },
+          200,
+          corsOrigin,
+        );
+      }
+
+      const MAX_LNORI_QUEUE = 25;
+
+      // If an ingestion is currently active with a different URL, enqueue it
+      if (activeLnoriState.active) {
+        if (lnoriQueue.length >= MAX_LNORI_QUEUE) {
+          return jsonResponse(
+            {
+              success: false,
+              error: `Lnori ingestion queue is full (${MAX_LNORI_QUEUE} items). Please wait for active downloads to finish.`,
+            },
+            429,
+            corsOrigin,
+          );
+        }
+
+        const parsedTarget = parseLnoriUrl(targetUrl);
+        const queueRunId = `lnori-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const queueItem: LnoriQueueItem = {
+          id: queueRunId,
+          targetUrl,
+          seriesId: parsedTarget?.id,
+          createdAt: new Date().toISOString(),
+        };
+        lnoriQueue.push(queueItem);
+        const queuePosition = lnoriQueue.length;
+
+        return jsonResponse(
+          {
+            success: true,
+            queued: true,
+            queuePosition,
+            queueLength: lnoriQueue.length,
+            runId: queueRunId,
+          },
+          200,
+          corsOrigin,
+        );
+      }
+
+      // Idle: reserve slot synchronously to prevent concurrent post-validation TOCTOU races
       const runId = `lnori-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const nowIso = new Date().toISOString();
       activeLnoriState = {
         runId,
         active: true,
@@ -4154,163 +4662,6 @@ async function handleRequestCore(
         error: null,
         startedAt: nowIso,
         updatedAt: nowIso,
-      };
-
-      const updateStateFromEvent = (event: LnoriProgressEvent) => {
-        if (activeLnoriState.runId !== runId) return;
-        activeLnoriState.updatedAt = new Date().toISOString();
-        if (event.phase) {
-          activeLnoriState.phase = event.phase;
-        }
-        if (typeof event.index === "number") {
-          activeLnoriState.index = event.index;
-        }
-        if (typeof event.total === "number") {
-          activeLnoriState.total = event.total;
-        }
-        if (event.volumeTitle) {
-          activeLnoriState.volumeTitle = event.volumeTitle;
-        }
-        if (event.status) {
-          activeLnoriState.status =
-            event.phase === "error"
-              ? sanitizeErrorMessage(event.status)
-              : event.status;
-        }
-        if (event.data) {
-          activeLnoriState.data = event.data;
-        }
-      };
-
-      const broadcastEvent = (event: LnoriProgressEvent) => {
-        if (activeLnoriState.runId !== runId) return;
-        updateStateFromEvent(event);
-        const eventWithRunId: LnoriProgressEvent & { runId?: string } = {
-          ...event,
-          runId,
-        };
-        for (let i = activeLnoriListeners.length - 1; i >= 0; i--) {
-          try {
-            activeLnoriListeners[i](eventWithRunId);
-          } catch {
-            activeLnoriListeners.splice(i, 1);
-          }
-        }
-      };
-
-      const startIngestTask = () => {
-        const taskPromise = (async () => {
-          let hasCompleted = false;
-          let hasErrored = false;
-          try {
-            const result = await runIngest(
-              targetUrl,
-              async (event: LnoriProgressEvent) => {
-                if (activeLnoriState.runId !== runId) return;
-                if (event.phase === "complete") {
-                  hasCompleted = true;
-                }
-                if (event.phase === "error") {
-                  hasErrored = true;
-                }
-                broadcastEvent(event);
-              },
-              { signal: backgroundAbortController.signal },
-            );
-
-            if (activeLnoriState.runId !== runId) {
-              return { success: false, error: "Task generation superseded" };
-            }
-
-            if (!result || !result.success) {
-              const errMsg =
-                sanitizeErrorMessage(result?.error) ||
-                "Failed to ingest light novel from Lnori";
-              activeLnoriState.active = false;
-              activeLnoriState.phase = "error";
-              activeLnoriState.error = errMsg;
-              activeLnoriState.status = errMsg;
-              activeLnoriState.updatedAt = new Date().toISOString();
-              if (!hasErrored) {
-                broadcastEvent({
-                  phase: "error",
-                  status: errMsg,
-                  data: { error: errMsg },
-                });
-              }
-              return { success: false, error: errMsg };
-            } else {
-              try {
-                refreshBooks(true);
-              } catch (rfErr) {
-                console.debug("[Lnori] refreshBooks failed:", rfErr);
-              }
-
-              const finalCompletedData = {
-                success: true,
-                seriesTitle: result.seriesTitle,
-                author: result.author,
-                importedCount: result.importedCount,
-                skippedCount: result.skippedCount,
-                totalCount: result.totalCount,
-                tags: result.tags,
-                calibreBookIds: result.calibreBookIds,
-              };
-
-              activeLnoriState.active = false;
-              activeLnoriState.phase = "complete";
-              activeLnoriState.completedData = finalCompletedData;
-              activeLnoriState.index = result.totalCount;
-              activeLnoriState.total = result.totalCount;
-              activeLnoriState.volumeTitle = result.seriesTitle;
-              activeLnoriState.status = `Completed: ${result.importedCount} imported, ${result.skippedCount} skipped of ${result.totalCount} volumes`;
-              activeLnoriState.updatedAt = new Date().toISOString();
-
-              if (!hasCompleted) {
-                broadcastEvent({
-                  phase: "complete",
-                  index: result.totalCount,
-                  total: result.totalCount,
-                  volumeTitle: result.seriesTitle,
-                  status: activeLnoriState.status,
-                  data: finalCompletedData,
-                });
-              }
-              return finalCompletedData;
-            }
-          } catch (err: any) {
-            if (activeLnoriState.runId !== runId) {
-              return { success: false, error: "Task generation superseded" };
-            }
-            const isAborted =
-              backgroundAbortController.signal.aborted ||
-              err?.name === "AbortError" ||
-              String(err?.message || "").includes("aborted");
-            const errMsg = isAborted
-              ? "Lnori ingestion cancelled by user"
-              : sanitizeErrorMessage(err) || "Failed to ingest light novel from Lnori";
-
-            activeLnoriState.active = false;
-            activeLnoriState.phase = "error";
-            activeLnoriState.error = errMsg;
-            activeLnoriState.status = errMsg;
-            activeLnoriState.updatedAt = new Date().toISOString();
-
-            if (!hasErrored) {
-              broadcastEvent({
-                phase: "error",
-                status: errMsg,
-                data: { error: errMsg, aborted: isAborted },
-              });
-            }
-            return { success: false, error: errMsg };
-          } finally {
-            if (activeLnoriAbortController === backgroundAbortController) {
-              activeLnoriAbortController = null;
-            }
-          }
-        })();
-        return taskPromise;
       };
 
       if (isStream) {
@@ -4380,7 +4731,7 @@ async function handleRequestCore(
               }
             };
 
-            const listener = (event: LnoriProgressEvent) => {
+            const listener = (event: LnoriProgressEvent & { runId?: string }) => {
               sendEvent(event);
               if (event.phase === "complete" || event.phase === "error") {
                 removeListener();
@@ -4422,7 +4773,7 @@ async function handleRequestCore(
             }
 
             // Start the background ingestion task now that the listener is attached
-            startIngestTask();
+            executeLnoriIngestTask(runId, targetUrl);
           },
           cancel() {
             // Stream cancelled by client: clean up listener and keepalive, but DO NOT abort background task
@@ -4437,8 +4788,8 @@ async function handleRequestCore(
         });
       }
 
-      // Non-streaming request: start task and await the background promise
-      const result = await startIngestTask();
+      // Non-streaming request: await the background promise so synchronous non-streaming callers receive full result
+      const result = await executeLnoriIngestTask(runId, targetUrl);
       if (!result || !result.success) {
         return jsonResponse(
           {
@@ -4484,11 +4835,34 @@ async function handleRequestCore(
   if (url.pathname === "/api/lnori/progress" && req.method === "GET") {
     try {
       const state = getActiveLnoriState();
+      const targetRunId = url.searchParams.get("runId");
+      let currentQueuePosition: number | null = null;
+      let reportedState = state;
+
+      if (targetRunId) {
+        if (state.runId === targetRunId) {
+          reportedState = state;
+        } else if (completedLnoriJobs.has(targetRunId)) {
+          // If live active state has already moved on, report the recorded terminal state
+          reportedState = completedLnoriJobs.get(targetRunId)!;
+        } else {
+          const qIdx = (state.queuedItems || []).findIndex(
+            (item) => item.id === targetRunId,
+          );
+          if (qIdx !== -1) {
+            currentQueuePosition = qIdx + 1;
+          }
+        }
+      }
+
       return jsonResponse(
         {
           success: true,
-          active: state.active,
-          state,
+          active: reportedState.runId === state.runId ? state.active : false,
+          state: reportedState,
+          queueLength: state.queueLength || 0,
+          queuedItems: state.queuedItems || [],
+          currentQueuePosition,
         },
         200,
         corsOrigin,
@@ -4499,6 +4873,9 @@ async function handleRequestCore(
           success: false,
           active: false,
           state: null,
+          queueLength: 0,
+          queuedItems: [],
+          currentQueuePosition: null,
           error: sanitizeErrorMessage(err),
         },
         500,
@@ -4510,14 +4887,28 @@ async function handleRequestCore(
   // API: Lnori Cancel Ingestion
   if (url.pathname === "/api/lnori/cancel" && req.method === "POST") {
     try {
-      const cancelled = cancelActiveLnoriIngest();
+      let runIdToCancel: string | undefined;
+      try {
+        const body = (await req.json()) as any;
+        if (body && typeof body.runId === "string" && body.runId.trim()) {
+          runIdToCancel = body.runId.trim();
+        }
+      } catch {
+        // Request may have no body or non-JSON body, which is fine (defaults to active)
+      }
+
+      const cancelled = cancelActiveLnoriIngest(runIdToCancel);
       return jsonResponse(
         {
           success: true,
           cancelled,
           message: cancelled
-            ? "Lnori ingestion cancellation requested"
-            : "No active Lnori ingestion to cancel",
+            ? (runIdToCancel
+                ? `Lnori ingestion ${runIdToCancel} cancelled`
+                : "Lnori ingestion cancellation requested")
+            : (runIdToCancel
+                ? `No active or queued Lnori ingestion found matching ${runIdToCancel}`
+                : "No active Lnori ingestion to cancel"),
         },
         200,
         corsOrigin,
