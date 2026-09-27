@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import zlib from "node:zlib";
+import { PassThrough } from "node:stream";
 import {
   isElscioneUrl,
   parseElscioneUrl,
@@ -20,6 +21,10 @@ import {
   setElscioneSessionCookies,
   resetElscioneSessionForTest,
   formatElscioneProgress,
+  runElscioneHelperManifest,
+  runElscioneHelperDownload,
+  getElscioneHelperPath,
+  getPythonPath,
   type AnubisChallenge,
   type ElscioneProgressEvent,
 } from "./elscione";
@@ -152,6 +157,60 @@ describe("Elscione Light Novel Ingestion Module", () => {
       expect(
         extractVolumeNumberFromFilename("Standalone Novel.epub"),
       ).toBeUndefined();
+    });
+
+    it("parseElscioneUrl handles URL variations with quotes, encoded characters, spaces, and subseries", () => {
+      // Encoded %27 and raw quote
+      const p1 = parseElscioneUrl(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister%27s%20All%20You%20Need/",
+      );
+      expect(p1).not.toBeNull();
+      expect(p1!.seriesTitle).toBe("A Sister's All You Need");
+
+      const p2 = parseElscioneUrl(
+        "https://server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/",
+      );
+      expect(p2).not.toBeNull();
+      expect(p2!.seriesTitle).toBe("A Sister's All You Need");
+
+      // Missing trailing slash
+      const p3 = parseElscioneUrl(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister%27s%20All%20You%20Need",
+      );
+      expect(p3).not.toBeNull();
+      expect(p3!.folderPath).toBe(
+        "/Officially%20Translated%20Light%20Novels/A%20Sister%27s%20All%20You%20Need/",
+      );
+
+      // Subseries like "NT"
+      const p4 = parseElscioneUrl(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Certain%20Magical%20Index%20NT/",
+      );
+      expect(p4).not.toBeNull();
+      expect(p4!.seriesTitle).toBe("A Certain Magical Index NT");
+      expect(p4!.folderPath).toBe(
+        "/Officially%20Translated%20Light%20Novels/A%20Certain%20Magical%20Index%20NT/",
+      );
+    });
+
+    it("extractVolumeNumberFromFilename handles generalized volume conventions (Volume 01, v01, Part X Volume Y)", () => {
+      expect(
+        extractVolumeNumberFromFilename(
+          "Ascendance of a Bookworm - Part 1 Volume 2.epub",
+        ),
+      ).toBe(2);
+      expect(
+        extractVolumeNumberFromFilename(
+          "Ascendance of a Bookworm - Part 1 Daughter of a Soldier v02.epub",
+        ),
+      ).toBe(2);
+      expect(extractVolumeNumberFromFilename("Toradora! v01.epub")).toBe(1);
+      expect(extractVolumeNumberFromFilename("Series - v03.epub")).toBe(3);
+      expect(
+        extractVolumeNumberFromFilename(
+          "Classroom of the Elite: Year 2 Vol. 4.5.epub",
+        ),
+      ).toBe(4.5);
     });
   });
 
@@ -422,6 +481,19 @@ describe("Elscione Light Novel Ingestion Module", () => {
       expect(manifest.volumes[0].downloadUrl).toContain("Overlord%20-%20Volume%2001.epub");
     });
 
+    it("extractElscioneManifest preserves partNumber on direct .epub file URL", async () => {
+      const manifest = await extractElscioneManifest(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Ascendance%20of%20a%20Bookworm/Ascendance%20of%20a%20Bookworm%20-%20Part%202%20Volume%201.epub",
+      );
+
+      expect(manifest.isSingleVolume).toBe(true);
+      expect(manifest.seriesTitle).toBe("Ascendance of a Bookworm");
+      expect(manifest.volumes.length).toBe(1);
+      expect(manifest.volumes[0].volumeNumber).toBe(1);
+      expect(manifest.volumes[0].partNumber).toBe(2);
+      expect(manifest.volumes[0].title).toBe("Ascendance of a Bookworm: Part 2 Volume 1");
+    });
+
     it("extractElscioneManifest extracts and numerically sorts volumes from _h5ai directory API", async () => {
       const mockItems = [
         {
@@ -569,6 +641,51 @@ describe("Elscione Light Novel Ingestion Module", () => {
           fetch: mockFetch as any,
         }),
       ).rejects.toThrow(/no epub volumes found/i);
+    });
+
+    it("extractElscioneManifest strictly scopes items to target folder and rejects sibling/parent folders", async () => {
+      const mockH5aiResponse = {
+        items: [
+          // Sibling subseries folder items (must be excluded)
+          {
+            href: "/Officially%20Translated%20Light%20Novels/A%20Certain%20Magical%20Index%20NT/Index%20NT%20Vol%201.epub",
+            size: 1000,
+          },
+          // Target series folder items
+          {
+            href: "/Officially%20Translated%20Light%20Novels/A%20Certain%20Magical%20Index/Index%20Vol%201.epub",
+            size: 1000,
+          },
+          {
+            href: "/Officially%20Translated%20Light%20Novels/A%20Certain%20Magical%20Index/Index%20Vol%202.epub",
+            size: 2000,
+          },
+          // Parent folder non-epub
+          { href: "/Officially%20Translated%20Light%20Novels/", size: 0 },
+        ],
+      };
+
+      const mockFetch = async (_url: string, init?: any) => {
+        if (init?.method === "POST") {
+          return new Response(JSON.stringify(mockH5aiResponse), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("OK", { status: 200 });
+      };
+
+      const manifest = await extractElscioneManifest(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Certain%20Magical%20Index/",
+        { fetch: mockFetch as any },
+      );
+
+      expect(manifest.volumes.length).toBe(2);
+      expect(manifest.volumes[0].filename).toBe("Index Vol 1.epub");
+      expect(manifest.volumes[1].filename).toBe("Index Vol 2.epub");
+      expect(
+        manifest.volumes.some((v) => v.filename.includes("Index NT")),
+      ).toBe(false);
     });
   });
 
@@ -821,6 +938,128 @@ describe("Elscione Light Novel Ingestion Module", () => {
       );
 
       expect(fs.existsSync(destPath)).toBe(true);
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+  });
+
+  describe("Elscione Python Helper CLI Integration", () => {
+    it("getElscioneHelperPath resolves existing helper script", () => {
+      const helperPath = getElscioneHelperPath();
+      expect(fs.existsSync(helperPath)).toBe(true);
+      expect(getPythonPath()).toBeDefined();
+    });
+
+    it("runElscioneHelperManifest executes helper for direct epub URL", async () => {
+      const manifest = await runElscioneHelperManifest(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Overlord/Overlord%20-%20Volume%2004.epub",
+      );
+      expect(manifest.isSingleVolume).toBe(true);
+      expect(manifest.totalCount).toBe(1);
+      expect(manifest.volumes[0].volumeNumber).toBe(4);
+      expect(manifest.volumes[0].filename).toBe("Overlord - Volume 04.epub");
+    });
+
+    it("runElscioneHelperManifest parses mocked spawnSync output", async () => {
+      const mockSpawnSync = () => ({
+        status: 0,
+        stdout: JSON.stringify({
+          success: true,
+          seriesTitle: "Test Series",
+          url: "https://server.elscione.com/Test%20Series/",
+          isSingleVolume: false,
+          totalCount: 1,
+          volumes: [
+            {
+              volumeNumber: 1,
+              filename: "Test - Volume 01.epub",
+              downloadUrl:
+                "https://server.elscione.com/Test%20Series/Test%20-%20Volume%2001.epub",
+              title: "Test Series: Volume 1",
+            },
+          ],
+        }),
+        stderr: "",
+      });
+
+      const manifest = await runElscioneHelperManifest(
+        "https://server.elscione.com/Test%20Series/",
+        { spawnSync: mockSpawnSync as any },
+      );
+      expect(manifest.seriesTitle).toBe("Test Series");
+      expect(manifest.volumes.length).toBe(1);
+      expect(manifest.volumes[0].volumeNumber).toBe(1);
+    });
+
+    it("runElscioneHelperManifest throws on non-zero exit or invalid JSON", async () => {
+      const mockFail = () => ({
+        status: 1,
+        stdout: "",
+        stderr: "Failed to connect",
+      });
+      expect(
+        runElscioneHelperManifest("https://server.elscione.com/test", {
+          spawnSync: mockFail as any,
+        }),
+      ).rejects.toThrow("Elscione helper manifest exited with status 1");
+
+      const mockBadJson = () => ({
+        status: 0,
+        stdout: "not-json",
+        stderr: "",
+      });
+      expect(
+        runElscioneHelperManifest("https://server.elscione.com/test", {
+          spawnSync: mockBadJson as any,
+        }),
+      ).rejects.toThrow("Failed to parse Elscione helper JSON");
+    });
+
+    it("runElscioneHelperDownload reports progress and creates validated file", async () => {
+      const tempDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "elscione-dl-helper-"),
+      );
+      const destPath = path.join(tempDir, "test.epub");
+      const syntheticEpub = createSyntheticEpub();
+
+      const mockSpawn = (_bin: string, args: string[]) => {
+        const dest = args[args.length - 1];
+        fs.writeFileSync(dest, syntheticEpub);
+
+        const stdout = new PassThrough();
+        const stderr = new PassThrough();
+
+        const listeners: Record<string, Function[]> = {};
+        const proc: any = {
+          stdout,
+          stderr,
+          on: (event: string, cb: Function) => {
+            if (!listeners[event]) listeners[event] = [];
+            listeners[event].push(cb);
+            if (event === "close") {
+              setTimeout(() => {
+                stdout.write(
+                  "PROGRESS: 50.0% (500/1000)\nPROGRESS: 100.0% (1000/1000)\n",
+                );
+                stdout.end();
+                setTimeout(() => cb(0), 10);
+              }, 10);
+            }
+          },
+        };
+        return proc;
+      };
+
+      const progressEvents: number[] = [];
+      await runElscioneHelperDownload(
+        "https://server.elscione.com/book.epub",
+        destPath,
+        (pct) => progressEvents.push(pct),
+        { spawn: mockSpawn as any },
+      );
+
+      expect(fs.existsSync(destPath)).toBe(true);
+      expect(progressEvents.length).toBeGreaterThan(0);
+      expect(progressEvents).toContain(100);
       fs.rmSync(tempDir, { recursive: true, force: true });
     });
   });
