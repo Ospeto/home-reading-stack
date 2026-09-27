@@ -507,6 +507,11 @@
     .h-5 { height: 1.25rem; }
     .h-10 { height: 2.5rem; }
     .h-13 { height: 3.25rem; }
+    .h-\[40px\] { height: 40px; }
+    .h-\[46px\] { height: 46px; }
+    .h-\[48px\] { height: 48px; }
+    .w-4\.5 { width: 1.125rem; }
+    .h-4\.5 { height: 1.125rem; }
     .min-h-\[36px\] { min-height: 36px; }
     .min-h-\[44px\] { min-height: 44px; }
     .min-w-\[36px\] { min-width: 36px; }
@@ -536,11 +541,25 @@
     .pb-6 { padding-bottom: 1.5rem; }
     .pt-4 { padding-top: 1rem; }
     .pl-3\.5 { padding-left: 0.875rem; }
+    .pl-4 { padding-left: 1rem; }
     .pl-9 { padding-left: 2.25rem; }
     .pl-10 { padding-left: 2.5rem; }
+    .pl-11 { padding-left: 2.75rem; }
+    .pl-12 { padding-left: 3rem; }
     .pr-1\.5 { padding-right: 0.375rem; }
+    .pr-2 { padding-right: 0.5rem; }
+    .pr-2\.5 { padding-right: 0.625rem; }
     .pr-10 { padding-right: 2.5rem; }
+    .pr-11 { padding-right: 2.75rem; }
     .pr-12 { padding-right: 3rem; }
+    .pr-14 { padding-right: 3.5rem; }
+    .pr-16 { padding-right: 4rem; }
+    .focus\:ring-1:focus { --tw-ring-offset-shadow: var(--tw-ring-inset) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color); --tw-ring-shadow: var(--tw-ring-inset) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color); box-shadow: var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow, 0 0 #0000); }
+    .focus\:ring-2:focus { --tw-ring-offset-shadow: var(--tw-ring-inset) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color); --tw-ring-shadow: var(--tw-ring-inset) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color); box-shadow: var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow, 0 0 #0000); }
+    .focus\:ring-white\/15:focus { --tw-ring-color: rgba(255, 255, 255, 0.15); }
+    .focus\:ring-white\/20:focus { --tw-ring-color: rgba(255, 255, 255, 0.2); }
+    .focus\:border-white\/20:focus { border-color: rgba(255, 255, 255, 0.2); }
+    .focus\:border-white\/25:focus { border-color: rgba(255, 255, 255, 0.25); }
     .px-5 { padding-left: 1.25rem; padding-right: 1.25rem; }
     .px-6 { padding-left: 1.5rem; padding-right: 1.5rem; }
     .space-y-5 > :not([hidden]) ~ :not([hidden]) { --tw-space-y-reverse: 0; margin-top: calc(1.25rem * (1 - var(--tw-space-y-reverse))); margin-bottom: calc(1.25rem * var(--tw-space-y-reverse)); }
@@ -606,8 +625,20 @@
       .sm\:p-6 { padding: 1.5rem; }
       .sm\:pb-4 { padding-bottom: 1rem; }
       .sm\:pb-6 { padding-bottom: 1.5rem; }
+      .sm\:h-\[48px\] { height: 48px; }
+      .sm\:w-4 { width: 1rem; }
+      .sm\:h-4 { height: 1rem; }
+      .sm\:w-5 { width: 1.25rem; }
+      .sm\:h-5 { height: 1.25rem; }
+      .sm\:w-8 { width: 2rem; }
+      .sm\:h-8 { height: 2rem; }
+      .sm\:pl-4 { padding-left: 1rem; }
+      .sm\:pl-12 { padding-left: 3rem; }
+      .sm\:pr-2\.5 { padding-right: 0.625rem; }
       .sm\:pr-12 { padding-right: 3rem; }
       .sm\:pr-14 { padding-right: 3.5rem; }
+      .sm\:pr-16 { padding-right: 4rem; }
+      .sm\:pr-24 { padding-right: 6rem; }
       .sm\:rounded-xl { border-radius: 0.75rem; }
       .sm\:border { border-width: 1px; }
       .sm\:inline-block { display: inline-block; }
@@ -891,6 +922,16 @@
         justify-content: center;
       }
     }
+
+    /* Apple Fluid Search Bar */
+    #searchInputDesktop {
+      height: 48px;
+    }
+    #searchInputDesktop:focus {
+      border-color: rgba(255, 255, 255, 0.25);
+      box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.12), inset 0 2px 4px 0 rgba(0, 0, 0, 0.2);
+    }
+
     .visionos-capsule {
       background: rgba(24, 24, 27, 0.8);
       -webkit-backdrop-filter: blur(40px) saturate(180%);
@@ -1411,15 +1452,15 @@
       <!-- Second Row (Full-Width Search Bar) -->
       <div class="w-full">
         <div class="relative flex items-center">
-          <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-400">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" x2="16.65" y1="21" y2="16.65"></line></svg>
+          <div class="absolute inset-y-0 left-0 pl-3.5 sm:pl-4 flex items-center pointer-events-none text-zinc-400">
+            <svg class="w-4.5 h-4.5 sm:w-5 sm:h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" x2="16.65" y1="21" y2="16.65"></line></svg>
           </div>
-          <input id="searchInputDesktop" name="searchInput" class="w-full h-[40px] pl-10 pr-10 sm:pr-14 bg-zinc-900/80 text-xs sm:text-sm rounded-full border border-white/10 backdrop-blur-xl shadow-inner text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-white/20 focus:border-white/20 transition-all font-sans" placeholder="Search titles, authors, series..." type="text" oninput="syncSearch(this.value)"/>
-          <div class="absolute inset-y-0 right-0 pr-1.5 flex items-center gap-1">
-            <button onclick="clearSearch()" class="clear-search-btn hidden text-zinc-400 hover:text-white w-7 h-7 flex items-center justify-center cursor-pointer active:scale-[0.96] transition-transform duration-150 rounded-full hover:bg-white/10" title="Clear search">
-              <svg class="w-3.5 h-3.5"><use href="#icon-xmark"/></svg>
+          <input id="searchInputDesktop" name="searchInput" aria-label="Search titles, authors, series" class="w-full h-[48px] pl-11 sm:pl-12 pr-12 sm:pr-24 bg-zinc-900/80 text-sm sm:text-base rounded-full border border-white/10 backdrop-blur-xl shadow-inner text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-white/15 focus:border-white/20 transition-all font-sans" placeholder="Search titles, authors, series..." type="text" oninput="syncSearch(this.value)"/>
+          <div class="absolute inset-y-0 right-0 pr-2 sm:pr-2.5 flex items-center gap-1.5">
+            <button onclick="clearSearch()" class="clear-search-btn hidden text-zinc-400 hover:text-white w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center cursor-pointer active:scale-[0.96] transition-transform duration-150 rounded-full hover:bg-white/10" title="Clear search" aria-label="Clear search">
+              <svg class="w-3.5 h-3.5 sm:w-4 sm:h-4"><use href="#icon-xmark"/></svg>
             </button>
-            <kbd class="hidden sm:inline-block text-[10px] text-zinc-400 font-mono pointer-events-none border border-white/10 rounded-full px-2 py-0.5 bg-white/5 mr-2 shadow-xs">⌘K</kbd>
+            <kbd class="hidden sm:inline-block text-[10px] text-zinc-400 font-mono pointer-events-none border border-white/10 rounded-full px-2.5 py-0.5 bg-white/5 mr-1 shadow-xs">⌘K</kbd>
           </div>
         </div>
       </div>
