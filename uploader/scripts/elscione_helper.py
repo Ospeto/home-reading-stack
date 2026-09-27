@@ -23,13 +23,11 @@ import posixpath
 import re
 import sys
 import time
+from typing import TYPE_CHECKING
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
-try:
+if TYPE_CHECKING:
     from curl_cffi import requests
-except ImportError:
-    sys.stderr.write("Error: curl_cffi is required but not installed. Install with 'pip install curl_cffi'.\n")
-    sys.exit(1)
 
 MAX_EPUB_BYTES = 500 * 1024 * 1024  # 500 MB
 MAX_VOLUMES_PER_REQUEST = 50
@@ -327,10 +325,19 @@ def ensure_authenticated_session(session: requests.Session, target_url: str, max
     return session.get(target_url, allow_redirects=False, timeout=SUBPROCESS_TIMEOUT)
 
 
-def create_session() -> requests.Session:
+def create_session():
     """
     Creates an impersonated Chrome 131 session with fallback proxy support.
     """
+    try:
+        from curl_cffi import requests
+    except ImportError:
+        sys.stderr.write(
+            "Error: curl_cffi is required for Elscione network operations. "
+            "Install with 'pip3 install curl_cffi'.\n"
+        )
+        sys.exit(1)
+
     session = requests.Session(impersonate="chrome131")
     proxy_url = os.environ.get("PROXY_URL") or os.environ.get("HTTP_PROXY")
     if proxy_url:
