@@ -2586,7 +2586,8 @@ describe("Documentation, Manual Sync & Standing Invariant Verification", () => {
     expect(readme).toContain("MangaDex API");
     expect(readme).toContain("Google Books");
 
-    // 5. Apple WWDC Fluid Interface Design System
+    // 6. Lnori Centralized Queue & Ingestion
+    expect(readme).toContain("Telegram Ingestion Bot:** Paste any `lnori.com/series/...` or `lnori.com/book/...` URL directly into chat with `@saroat_ospeto_bot`. Links automatically submit to the centralized Uploader server queue (`POST /api/lnori/ingest`), reporting real-time queue position");
     expect(readme).toContain("Apple WWDC Fluid Interface Design System");
     expect(readme).toContain("Materials & Translucency");
     expect(readme).toContain("Optical Typography");
@@ -2629,6 +2630,9 @@ describe("Documentation, Manual Sync & Standing Invariant Verification", () => {
     expect(html).toContain("user-select: none;");
     expect(html).toContain("cleanSynopsis");
     expect(html).toContain("synopsisPreviewHtml");
+
+    // Lnori centralized queue integration in guide
+    expect(html).toContain("Links sent to the Telegram bot are enqueued to the centralized Uploader server queue (<code class=\"text-zinc-200\">POST /api/lnori/ingest</code>)");
 
     // CSS rules for Apple WWDC glass materials and optical tracking
     expect(html).toContain(".apple-material-glass-light {");
@@ -3073,9 +3077,7 @@ describe("Lnori Queue & Telegram Bot Integration", () => {
       resolveFirstJob();
       await p1;
 
-      // Allow queue drain timer to execute
-      await new Promise((r) => setTimeout(r, 50));
-
+      // Verify execution order under sequential queue drain
       expect(executionOrder).toEqual([
         "https://lnori.com/series/1/series-alpha",
         "https://lnori.com/series/2/series-beta",

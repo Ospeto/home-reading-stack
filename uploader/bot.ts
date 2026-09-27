@@ -4077,7 +4077,6 @@ export async function pollLnoriProgress(
   let lastReportedLen = initialQueueLen;
   let lastProgressText = "";
   let lastEditTime = 0;
-  let isJobActive = false;
   let consecutiveErrors = 0;
   let pollAttempts = 0;
 
@@ -4181,10 +4180,6 @@ export async function pollLnoriProgress(
         "Job was removed or could not be found in ingestion queue",
       );
       return;
-    }
-
-    if (!isJobActive) {
-      isJobActive = true;
     }
 
     // 3. Check terminal states
