@@ -435,7 +435,7 @@ LightHouse features end-to-end automated light novel series and volume ingestion
 1. **Dual Ingestion Surfaces:**
    - **LightHouse Web UI:** Click **Upload Books** &rarr; **Add from Lnori** (or paste an `lnori.com` link into the web article ingestion modal to auto-switch). The dedicated Apple fluid modal accepts series URLs (`https://lnori.com/series/...`) or individual volume URLs (`https://lnori.com/book/...`).
    - **Telegram Ingestion Bot:** Paste any `lnori.com/series/...` or `lnori.com/book/...` URL directly into chat with `@saroat_ospeto_bot`.
-   - **REST API (`POST /api/lnori/ingest`):** Accepts `{ url: string, stream?: boolean }`, validates target with SSRF and origin guards, supports live Server-Sent Events (`text/event-stream`) and NDJSON streaming progress updates, and returns series metadata, imported volume counts, and tags.
+   - **REST API (`POST /api/lnori/ingest`):** Accepts `{ url: string, stream?: boolean }`, validates target with SSRF and origin guards, runs an autonomous decoupled server background task resilient against client disconnections, supports live Server-Sent Events (`text/event-stream`) and NDJSON streaming progress updates, exposes live status via `GET /api/lnori/progress`, and supports explicit cancellation via `POST /api/lnori/cancel`.
 2. **Robust Manifest & Volume Orchestration:**
    - Automatically parses LD+JSON metadata and HTML schemas to extract series title, author, genres, and all associated volume endpoints (`/book/<id>/...`).
    - Limits volume batches safely (`MAX_VOLUMES_PER_REQUEST = 50`).

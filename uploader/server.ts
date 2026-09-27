@@ -129,6 +129,75 @@ export function resetServerDependenciesForTest() {
   serverDependencies = {};
 }
 
+export interface ActiveLnoriState {
+  active: boolean;
+  targetUrl: string | null;
+  phase: "idle" | "manifest" | "volume" | "complete" | "error";
+  status: string | null;
+  index: number;
+  total: number;
+  volumeTitle: string | null;
+  data: any;
+  completedData: any;
+  error: string | null;
+  startedAt: string | null;
+  updatedAt: string | null;
+}
+
+let activeLnoriState: ActiveLnoriState = {
+  active: false,
+  targetUrl: null,
+  phase: "idle",
+  status: null,
+  index: 0,
+  total: 0,
+  volumeTitle: null,
+  data: null,
+  completedData: null,
+  error: null,
+  startedAt: null,
+  updatedAt: null,
+};
+
+let activeLnoriAbortController: AbortController | null = null;
+const activeLnoriListeners: Array<(event: LnoriProgressEvent) => void> = [];
+
+export function getActiveLnoriState(): ActiveLnoriState {
+  return { ...activeLnoriState };
+}
+
+export function resetActiveLnoriStateForTest(): void {
+  if (activeLnoriAbortController) {
+    activeLnoriAbortController.abort();
+    activeLnoriAbortController = null;
+  }
+  activeLnoriListeners.length = 0;
+  activeLnoriState = {
+    active: false,
+    targetUrl: null,
+    phase: "idle",
+    status: null,
+    index: 0,
+    total: 0,
+    volumeTitle: null,
+    data: null,
+    completedData: null,
+    error: null,
+    startedAt: null,
+    updatedAt: null,
+  };
+}
+
+export function cancelActiveLnoriIngest(): boolean {
+  if (!activeLnoriState.active || !activeLnoriAbortController) {
+    return false;
+  }
+  activeLnoriAbortController.abort();
+  activeLnoriState.status = "Ingestion cancelled by user";
+  activeLnoriState.updatedAt = new Date().toISOString();
+  return true;
+}
+
 export function getDropDir(): string {
   if (process.env.BOOKS_DROP_DIR) return process.env.BOOKS_DROP_DIR;
   const home = process.env.HOME || os.homedir();
@@ -4042,6 +4111,167 @@ async function handleRequestCore(
       const runIngest = serverDependencies.ingestLnoriSeries ?? ingestLnoriSeries;
       const refreshBooks = serverDependencies.getCalibreBooks ?? getCalibreBooks;
 
+      const backgroundAbortController = new AbortController();
+      activeLnoriAbortController = backgroundAbortController;
+      const nowIso = new Date().toISOString();
+      activeLnoriState = {
+        active: true,
+        targetUrl,
+        phase: "manifest",
+        status: "Initializing Lnori background ingestion...",
+        index: 0,
+        total: 0,
+        volumeTitle: null,
+        data: null,
+        completedData: null,
+        error: null,
+        startedAt: nowIso,
+        updatedAt: nowIso,
+      };
+
+      const updateStateFromEvent = (event: LnoriProgressEvent) => {
+        activeLnoriState.updatedAt = new Date().toISOString();
+        if (event.phase) {
+          activeLnoriState.phase = event.phase;
+        }
+        if (typeof event.index === "number") {
+          activeLnoriState.index = event.index;
+        }
+        if (typeof event.total === "number") {
+          activeLnoriState.total = event.total;
+        }
+        if (event.volumeTitle) {
+          activeLnoriState.volumeTitle = event.volumeTitle;
+        }
+        if (event.status) {
+          activeLnoriState.status =
+            event.phase === "error"
+              ? sanitizeErrorMessage(event.status)
+              : event.status;
+        }
+        if (event.data) {
+          activeLnoriState.data = event.data;
+        }
+      };
+
+      const broadcastEvent = (event: LnoriProgressEvent) => {
+        updateStateFromEvent(event);
+        for (let i = activeLnoriListeners.length - 1; i >= 0; i--) {
+          try {
+            activeLnoriListeners[i](event);
+          } catch {
+            activeLnoriListeners.splice(i, 1);
+          }
+        }
+      };
+
+      const startIngestTask = () => {
+        const taskPromise = (async () => {
+          let hasCompleted = false;
+          let hasErrored = false;
+          try {
+            const result = await runIngest(
+              targetUrl,
+              async (event: LnoriProgressEvent) => {
+                if (event.phase === "complete") {
+                  hasCompleted = true;
+                }
+                if (event.phase === "error") {
+                  hasErrored = true;
+                }
+                broadcastEvent(event);
+              },
+              { signal: backgroundAbortController.signal },
+            );
+
+            if (!result || !result.success) {
+              const errMsg =
+                sanitizeErrorMessage(result?.error) ||
+                "Failed to ingest light novel from Lnori";
+              activeLnoriState.active = false;
+              activeLnoriState.phase = "error";
+              activeLnoriState.error = errMsg;
+              activeLnoriState.status = errMsg;
+              activeLnoriState.updatedAt = new Date().toISOString();
+              if (!hasErrored) {
+                broadcastEvent({
+                  phase: "error",
+                  status: errMsg,
+                  data: { error: errMsg },
+                });
+              }
+              return { success: false, error: errMsg };
+            } else {
+              try {
+                refreshBooks(true);
+              } catch (rfErr) {
+                console.debug("[Lnori] refreshBooks failed:", rfErr);
+              }
+
+              const finalCompletedData = {
+                success: true,
+                seriesTitle: result.seriesTitle,
+                author: result.author,
+                importedCount: result.importedCount,
+                skippedCount: result.skippedCount,
+                totalCount: result.totalCount,
+                tags: result.tags,
+                calibreBookIds: result.calibreBookIds,
+              };
+
+              activeLnoriState.active = false;
+              activeLnoriState.phase = "complete";
+              activeLnoriState.completedData = finalCompletedData;
+              activeLnoriState.index = result.totalCount;
+              activeLnoriState.total = result.totalCount;
+              activeLnoriState.volumeTitle = result.seriesTitle;
+              activeLnoriState.status = `Completed: ${result.importedCount} imported, ${result.skippedCount} skipped of ${result.totalCount} volumes`;
+              activeLnoriState.updatedAt = new Date().toISOString();
+
+              if (!hasCompleted) {
+                broadcastEvent({
+                  phase: "complete",
+                  index: result.totalCount,
+                  total: result.totalCount,
+                  volumeTitle: result.seriesTitle,
+                  status: activeLnoriState.status,
+                  data: finalCompletedData,
+                });
+              }
+              return finalCompletedData;
+            }
+          } catch (err: any) {
+            const isAborted =
+              backgroundAbortController.signal.aborted ||
+              err?.name === "AbortError" ||
+              String(err?.message || "").includes("aborted");
+            const errMsg = isAborted
+              ? "Lnori ingestion cancelled by user"
+              : sanitizeErrorMessage(err) || "Failed to ingest light novel from Lnori";
+
+            activeLnoriState.active = false;
+            activeLnoriState.phase = "error";
+            activeLnoriState.error = errMsg;
+            activeLnoriState.status = errMsg;
+            activeLnoriState.updatedAt = new Date().toISOString();
+
+            if (!hasErrored) {
+              broadcastEvent({
+                phase: "error",
+                status: errMsg,
+                data: { error: errMsg, aborted: isAborted },
+              });
+            }
+            return { success: false, error: errMsg };
+          } finally {
+            if (activeLnoriAbortController === backgroundAbortController) {
+              activeLnoriAbortController = null;
+            }
+          }
+        })();
+        return taskPromise;
+      };
+
       if (isStream) {
         const contentType =
           isNDJSON && !isSSE
@@ -4060,18 +4290,6 @@ async function handleRequestCore(
           streamHeaders["Vary"] = "Origin";
         }
 
-        const abortController = new AbortController();
-        if (req.signal) {
-          if (req.signal.aborted) {
-            abortController.abort();
-          } else {
-            req.signal.addEventListener("abort", () => {
-              abortController.abort();
-            });
-          }
-        }
-
-        let canceled = false;
         let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
         const cleanupKeepalive = () => {
           if (keepaliveTimer !== null) {
@@ -4082,32 +4300,11 @@ async function handleRequestCore(
 
         const encoder = new TextEncoder();
         const stream = new ReadableStream({
-          async start(controller) {
+          start(controller) {
             const isSSEFormat = contentType.startsWith("text/event-stream");
-            let hasErrored = false;
-
-            if (isSSEFormat && !canceled && !abortController.signal.aborted) {
-              // Send immediate keepalive comment to prevent immediate proxy idle timeout
-              try {
-                controller.enqueue(encoder.encode(": keepalive\n\n"));
-              } catch {
-                // Controller already closed
-              }
-
-              keepaliveTimer = setInterval(() => {
-                try {
-                  controller.enqueue(encoder.encode(": keepalive\n\n"));
-                } catch {
-                  cleanupKeepalive();
-                }
-              }, 15000);
-            }
 
             const sendEvent = (event: LnoriProgressEvent) => {
               try {
-                if (event.phase === "error") {
-                  hasErrored = true;
-                }
                 const outboundEvent: LnoriProgressEvent = {
                   ...event,
                   status:
@@ -4128,91 +4325,61 @@ async function handleRequestCore(
                 const chunk = isSSEFormat ? `data: ${json}\n\n` : `${json}\n`;
                 controller.enqueue(encoder.encode(chunk));
               } catch (enqueueErr) {
-                // Client disconnected or controller closed: abort background work
-                abortController.abort();
+                // Client disconnected or controller closed:
+                // IMPORTANT: Do NOT abort background ingestion! Web downloads continue in background.
                 console.debug(
-                  "[Lnori] Stream controller enqueue failed (client disconnected):",
+                  "[Lnori] Stream controller enqueue failed (client disconnected, background task continues):",
                   enqueueErr,
                 );
+                removeListener();
+                cleanupKeepalive();
               }
             };
 
-            try {
-              let hasCompleted = false;
-              const result = await runIngest(
-                targetUrl,
-                async (event: LnoriProgressEvent) => {
-                  if (event.phase === "complete") {
-                    hasCompleted = true;
-                  }
-                  sendEvent(event);
-                },
-                { signal: abortController.signal },
-              );
+            const listener = (event: LnoriProgressEvent) => {
+              sendEvent(event);
+              if (event.phase === "complete" || event.phase === "error") {
+                removeListener();
+                cleanupKeepalive();
+                try {
+                  controller.close();
+                } catch (closeErr) {
+                  console.debug("[Lnori] Stream controller close failed in listener:", closeErr);
+                }
+              }
+            };
 
-              if (!result || !result.success) {
-                if (!hasErrored) {
-                  sendEvent({
-                    phase: "error",
-                    status:
-                      sanitizeErrorMessage(result?.error) ||
-                      "Failed to ingest light novel from Lnori",
-                    data: {
-                      error:
-                        sanitizeErrorMessage(result?.error) ||
-                        "Failed to ingest light novel from Lnori",
-                    },
-                  });
-                }
-              } else {
-                refreshBooks(true);
-                if (!hasCompleted) {
-                  sendEvent({
-                    phase: "complete",
-                    index: result.totalCount,
-                    total: result.totalCount,
-                    volumeTitle: result.seriesTitle,
-                    status: `Completed: ${result.importedCount} imported, ${result.skippedCount} skipped of ${result.totalCount} volumes`,
-                    data: {
-                      success: true,
-                      seriesTitle: result.seriesTitle,
-                      author: result.author,
-                      importedCount: result.importedCount,
-                      skippedCount: result.skippedCount,
-                      totalCount: result.totalCount,
-                      tags: result.tags,
-                      calibreBookIds: result.calibreBookIds,
-                    },
-                  });
-                }
+            const removeListener = () => {
+              const idx = activeLnoriListeners.indexOf(listener);
+              if (idx !== -1) {
+                activeLnoriListeners.splice(idx, 1);
               }
-            } catch (err: any) {
-              if (!hasErrored) {
-                sendEvent({
-                  phase: "error",
-                  status:
-                    sanitizeErrorMessage(err) ||
-                    "Failed to ingest light novel from Lnori",
-                  data: {
-                    error:
-                      sanitizeErrorMessage(err) ||
-                      "Failed to ingest light novel from Lnori",
-                  },
-                });
-              }
-            } finally {
-              cleanupKeepalive();
+            };
+
+            activeLnoriListeners.push(listener);
+
+            if (isSSEFormat) {
               try {
-                controller.close();
-              } catch (closeErr) {
-                console.debug("[Lnori] Stream controller close failed:", closeErr);
+                controller.enqueue(encoder.encode(": keepalive\n\n"));
+              } catch (keepaliveInitErr) {
+                console.debug("[Lnori] Initial keepalive enqueue failed:", keepaliveInitErr);
               }
+
+              keepaliveTimer = setInterval(() => {
+                try {
+                  controller.enqueue(encoder.encode(": keepalive\n\n"));
+                } catch {
+                  cleanupKeepalive();
+                }
+              }, 15000);
             }
+
+            // Start the background ingestion task now that the listener is attached
+            startIngestTask();
           },
           cancel() {
-            canceled = true;
+            // Stream cancelled by client: clean up listener and keepalive, but DO NOT abort background task
             cleanupKeepalive();
-            abortController.abort();
           },
         });
 
@@ -4222,21 +4389,21 @@ async function handleRequestCore(
         });
       }
 
-      const result = await runIngest(targetUrl);
+      // Non-streaming request: start task and await the background promise
+      const result = await startIngestTask();
       if (!result || !result.success) {
         return jsonResponse(
           {
             success: false,
             error:
               sanitizeErrorMessage(result?.error) ||
+              activeLnoriState.error ||
               "Failed to ingest light novel from Lnori",
           },
           500,
           corsOrigin,
         );
       }
-
-      refreshBooks(true);
 
       return jsonResponse(
         {
@@ -4259,6 +4426,57 @@ async function handleRequestCore(
             sanitizeErrorMessage(err) ||
             "Failed to ingest light novel from Lnori",
         },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Lnori Live Progress
+  if (url.pathname === "/api/lnori/progress" && req.method === "GET") {
+    try {
+      const state = getActiveLnoriState();
+      return jsonResponse(
+        {
+          success: true,
+          active: state.active,
+          state,
+        },
+        200,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        {
+          success: false,
+          active: false,
+          state: null,
+          error: sanitizeErrorMessage(err),
+        },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Lnori Cancel Ingestion
+  if (url.pathname === "/api/lnori/cancel" && req.method === "POST") {
+    try {
+      const cancelled = cancelActiveLnoriIngest();
+      return jsonResponse(
+        {
+          success: true,
+          cancelled,
+          message: cancelled
+            ? "Lnori ingestion cancellation requested"
+            : "No active Lnori ingestion to cancel",
+        },
+        200,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
         500,
         corsOrigin,
       );
