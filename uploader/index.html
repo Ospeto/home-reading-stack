@@ -5317,7 +5317,7 @@
                     if (parsed.phase === 'error') {
                       const errMsg = parsed.status || parsed.data?.error || 'Ingestion encountered an error';
                       const fatalErr = new Error(errMsg);
-                      (fatalErr as any).isStructuredFatal = true;
+                      fatalErr.isStructuredFatal = true;
                       throw fatalErr;
                     }
                     handleProgressEvent(parsed);
@@ -5341,7 +5341,7 @@
                   if (parsed.phase === 'error') {
                     const errMsg = parsed.status || parsed.data?.error || 'Ingestion encountered an error';
                     const fatalErr = new Error(errMsg);
-                    (fatalErr as any).isStructuredFatal = true;
+                    fatalErr.isStructuredFatal = true;
                     throw fatalErr;
                   }
                   handleProgressEvent(parsed);
@@ -5361,7 +5361,7 @@
             // NOT a structured server error, and NOT a user abort).
             if (
               responseStarted &&
-              !(streamErr as any)?.isStructuredFatal &&
+              !streamErr?.isStructuredFatal &&
               streamErr.name !== 'AbortError' &&
               !runController.signal.aborted
             ) {
@@ -5446,7 +5446,7 @@
             'text-xs p-3 rounded-xl border bg-zinc-900 border-zinc-700 text-zinc-400';
           setHtml(
             status,
-            `<div><strong>⚠️ Ingestion Stopped:</strong><div class="mt-1 text-[11px] text-zinc-400">Light novel download was stopped.</div></div>`,
+            `<div><strong>ℹ️ Ingestion Running in Background:</strong><div class="mt-1 text-[11px] text-zinc-400">Modal was closed or client detached. Light novel download continues in background on the server. Re-open to resume monitoring.</div></div>`,
           );
         } else {
           tgHaptic.error();

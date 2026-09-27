@@ -167,8 +167,8 @@ const activeLnoriListeners: Array<(event: LnoriProgressEvent) => void> = [];
 export function getActiveLnoriState(): ActiveLnoriState {
   return {
     ...activeLnoriState,
-    data: activeLnoriState.data ? { ...activeLnoriState.data } : null,
-    completedData: activeLnoriState.completedData ? { ...activeLnoriState.completedData } : null,
+    data: activeLnoriState.data ? JSON.parse(JSON.stringify(activeLnoriState.data)) : null,
+    completedData: activeLnoriState.completedData ? JSON.parse(JSON.stringify(activeLnoriState.completedData)) : null,
   };
 }
 
@@ -4157,6 +4157,7 @@ async function handleRequestCore(
       };
 
       const updateStateFromEvent = (event: LnoriProgressEvent) => {
+        if (activeLnoriState.runId !== runId) return;
         activeLnoriState.updatedAt = new Date().toISOString();
         if (event.phase) {
           activeLnoriState.phase = event.phase;
@@ -4182,10 +4183,15 @@ async function handleRequestCore(
       };
 
       const broadcastEvent = (event: LnoriProgressEvent) => {
+        if (activeLnoriState.runId !== runId) return;
         updateStateFromEvent(event);
+        const eventWithRunId: LnoriProgressEvent & { runId?: string } = {
+          ...event,
+          runId,
+        };
         for (let i = activeLnoriListeners.length - 1; i >= 0; i--) {
           try {
-            activeLnoriListeners[i](event);
+            activeLnoriListeners[i](eventWithRunId);
           } catch {
             activeLnoriListeners.splice(i, 1);
           }
@@ -4200,6 +4206,7 @@ async function handleRequestCore(
             const result = await runIngest(
               targetUrl,
               async (event: LnoriProgressEvent) => {
+                if (activeLnoriState.runId !== runId) return;
                 if (event.phase === "complete") {
                   hasCompleted = true;
                 }
@@ -4210,6 +4217,10 @@ async function handleRequestCore(
               },
               { signal: backgroundAbortController.signal },
             );
+
+            if (activeLnoriState.runId !== runId) {
+              return { success: false, error: "Task generation superseded" };
+            }
 
             if (!result || !result.success) {
               const errMsg =
@@ -4268,6 +4279,9 @@ async function handleRequestCore(
               return finalCompletedData;
             }
           } catch (err: any) {
+            if (activeLnoriState.runId !== runId) {
+              return { success: false, error: "Task generation superseded" };
+            }
             const isAborted =
               backgroundAbortController.signal.aborted ||
               err?.name === "AbortError" ||
@@ -4325,15 +4339,18 @@ async function handleRequestCore(
           }
         };
 
+        let removeListener = () => {};
+
         const encoder = new TextEncoder();
         const stream = new ReadableStream({
           start(controller) {
             const isSSEFormat = contentType.startsWith("text/event-stream");
 
-            const sendEvent = (event: LnoriProgressEvent) => {
+            const sendEvent = (event: LnoriProgressEvent & { runId?: string }) => {
               try {
-                const outboundEvent: LnoriProgressEvent = {
+                const outboundEvent: LnoriProgressEvent & { runId?: string } = {
                   ...event,
+                  runId: event.runId || runId,
                   status:
                     event.phase === "error" && event.status
                       ? sanitizeErrorMessage(event.status)
@@ -4376,7 +4393,7 @@ async function handleRequestCore(
               }
             };
 
-            const removeListener = () => {
+            removeListener = () => {
               const idx = activeLnoriListeners.indexOf(listener);
               if (idx !== -1) {
                 activeLnoriListeners.splice(idx, 1);

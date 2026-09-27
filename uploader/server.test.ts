@@ -1410,7 +1410,6 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
       });
 
       try {
-        const clientAbort = new AbortController();
         const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1418,22 +1417,24 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
             url: "https://lnori.com/series/8046/bg-disconnect-test",
             stream: true,
           }),
-          signal: clientAbort.signal,
         });
 
         const res = await handleRequest(req, localServer);
         expect(res.status).toBe(200);
 
-        // Abort the client's HTTP request / stream
-        clientAbort.abort();
+        // Cancel the response body stream (simulating client network drop / tab close)
+        if (res.body) {
+          await res.body.cancel();
+        }
 
-        // Check progress endpoint while background ingest is running
+        // Check progress endpoint while background ingest continues running
         const progressReq1 = new Request("http://127.0.0.1:8086/api/lnori/progress");
         const progressRes1 = await handleRequest(progressReq1, localServer);
         expect(progressRes1.status).toBe(200);
         const progressData1 = (await progressRes1.json()) as any;
         expect(progressData1.success).toBe(true);
         expect(progressData1.state).toBeDefined();
+        expect(progressData1.state.runId).toBeDefined();
 
         // Send explicit cancel request
         const cancelReq = new Request("http://127.0.0.1:8086/api/lnori/cancel", {
