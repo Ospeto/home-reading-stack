@@ -332,10 +332,19 @@ export async function validateUrlForSSRF(
 
     // Explicit internal-service access is a narrow, opt-in allowlist. It is
     // intentionally checked only after deriving host and only for loopback hosts.
+    const configuredUploaderPort =
+      process.env.UPLOADER_PORT || process.env.PORT || "8086";
+    const allowedInternalPorts = [
+      "8086",
+      "8088",
+      "7200",
+      configuredUploaderPort,
+    ];
+
     if (
       options.allowInternalServices &&
       (host === "localhost" || isLoopbackIp(normalizedHost)) &&
-      ["8086", "8088", "7200"].includes(port)
+      allowedInternalPorts.includes(port)
     ) {
       const addresses = isIpLiteral
         ? [{ address: normalizedHost, family: net.isIP(normalizedHost) }]
