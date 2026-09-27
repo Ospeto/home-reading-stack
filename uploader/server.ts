@@ -62,6 +62,12 @@ import {
   ingestLnoriSeries,
   type LnoriProgressEvent,
 } from "./lnori";
+import {
+  isElscioneUrl,
+  parseElscioneUrl,
+  ingestElscioneSeries,
+  type ElscioneProgressEvent,
+} from "./elscione";
 import { isJoplinRoute, handleJoplinRequest } from "./joplin";
 import {
   initHighlightsTable,
@@ -108,6 +114,11 @@ export interface ServerDependencies {
   ingestLnoriSeries?: (
     url: string,
     onProgress?: (event: LnoriProgressEvent) => Promise<void> | void,
+    dependencies?: any,
+  ) => Promise<any>;
+  ingestElscioneSeries?: (
+    url: string,
+    onProgress?: (event: any) => Promise<void> | void,
     dependencies?: any,
   ) => Promise<any>;
   getCalibreBooks?: (forceFresh?: boolean) => any;
@@ -243,6 +254,7 @@ export function resetActiveLnoriStateForTest(): void {
 }
 
 export function cancelActiveLnoriIngest(targetRunId?: string): boolean {
+  const activeSource = isElscioneUrl(activeLnoriState.targetUrl || "") ? "Elscione" : "Lnori";
   // If a specific targetRunId is provided, check if it matches a queued item first
   if (targetRunId) {
     const queueIdx = lnoriQueue.findIndex((item) => item.id === targetRunId);
@@ -255,16 +267,16 @@ export function cancelActiveLnoriIngest(targetRunId?: string): boolean {
       activeLnoriAbortController.abort();
       activeLnoriState.active = false;
       activeLnoriState.phase = "error";
-      activeLnoriState.status = "Lnori ingestion cancelled by user";
-      activeLnoriState.error = "Lnori ingestion cancelled by user";
+      activeLnoriState.status = `${activeSource} ingestion cancelled by user`;
+      activeLnoriState.error = `${activeSource} ingestion cancelled by user`;
       activeLnoriState.updatedAt = new Date().toISOString();
 
       // Broadcast immediate cancellation to active SSE/NDJSON stream listeners
       const cancelEvent: LnoriProgressEvent & { runId?: string } = {
         phase: "error",
-        status: "Lnori ingestion cancelled by user",
+        status: `${activeSource} ingestion cancelled by user`,
         runId: targetRunId,
-        data: { error: "Lnori ingestion cancelled by user", aborted: true },
+        data: { error: `${activeSource} ingestion cancelled by user`, aborted: true },
       };
       for (let i = activeLnoriListeners.length - 1; i >= 0; i--) {
         try {
@@ -289,16 +301,16 @@ export function cancelActiveLnoriIngest(targetRunId?: string): boolean {
   activeLnoriAbortController.abort();
   activeLnoriState.active = false;
   activeLnoriState.phase = "error";
-  activeLnoriState.status = "Lnori ingestion cancelled by user";
-  activeLnoriState.error = "Lnori ingestion cancelled by user";
+  activeLnoriState.status = `${activeSource} ingestion cancelled by user`;
+  activeLnoriState.error = `${activeSource} ingestion cancelled by user`;
   activeLnoriState.updatedAt = new Date().toISOString();
 
   // Broadcast immediate cancellation to active SSE/NDJSON stream listeners
   const cancelEvent: LnoriProgressEvent & { runId?: string } = {
     phase: "error",
-    status: "Lnori ingestion cancelled by user",
+    status: `${activeSource} ingestion cancelled by user`,
     runId: cancelledRunId,
-    data: { error: "Lnori ingestion cancelled by user", aborted: true },
+    data: { error: `${activeSource} ingestion cancelled by user`, aborted: true },
   };
   for (let i = activeLnoriListeners.length - 1; i >= 0; i--) {
     try {
@@ -313,8 +325,37 @@ export function cancelActiveLnoriIngest(targetRunId?: string): boolean {
   return true;
 }
 
+export function areMatchingElscioneUrls(url1: string, url2: string): boolean {
+  if (url1 === url2) return true;
+  const p1 = parseElscioneUrl(url1);
+  const p2 = parseElscioneUrl(url2);
+  if (!p1 || !p2) return false;
+  // If one is EPUB and the other is a series folder, they are distinct targets!
+  if (p1.isEpub !== p2.isEpub) {
+    return false;
+  }
+  if (p1.isEpub && p2.isEpub) {
+    return p1.pathname === p2.pathname;
+  }
+  return p1.folderPath === p2.folderPath;
+}
+
+export function areMatchingNovelUrls(url1: string, url2: string): boolean {
+  if (url1 === url2) return true;
+  if (isElscioneUrl(url1) && isElscioneUrl(url2)) {
+    return areMatchingElscioneUrls(url1, url2);
+  }
+  if (isLnoriUrl(url1) && isLnoriUrl(url2)) {
+    return areMatchingLnoriUrls(url1, url2);
+  }
+  return false;
+}
+
 export function areMatchingLnoriUrls(url1: string, url2: string): boolean {
   if (url1 === url2) return true;
+  if (isElscioneUrl(url1) && isElscioneUrl(url2)) {
+    return areMatchingElscioneUrls(url1, url2);
+  }
   const p1 = parseLnoriUrl(url1);
   const p2 = parseLnoriUrl(url2);
   if (!p1 || !p2) return false;
@@ -352,7 +393,11 @@ export function executeLnoriIngestTask(
   runId: string,
   targetUrl: string,
 ): Promise<any> {
-  const runIngest = serverDependencies.ingestLnoriSeries ?? ingestLnoriSeries;
+  const isElscione = isElscioneUrl(targetUrl);
+  const sourceName = isElscione ? "Elscione" : "Lnori";
+  const runIngest = isElscione
+    ? (serverDependencies.ingestElscioneSeries ?? ingestElscioneSeries)
+    : (serverDependencies.ingestLnoriSeries ?? ingestLnoriSeries);
   const refreshBooks = serverDependencies.getCalibreBooks ?? getCalibreBooks;
 
   const backgroundAbortController = new AbortController();
@@ -364,7 +409,7 @@ export function executeLnoriIngestTask(
     active: true,
     targetUrl,
     phase: "manifest",
-    status: "Initializing Lnori background ingestion...",
+    status: `Initializing ${sourceName} background ingestion...`,
     index: 0,
     total: 0,
     volumeTitle: null,
@@ -443,7 +488,7 @@ export function executeLnoriIngestTask(
       if (!result || !result.success) {
         const errMsg =
           sanitizeErrorMessage(result?.error) ||
-          "Failed to ingest light novel from Lnori";
+          `Failed to ingest light novel from ${sourceName}`;
         activeLnoriState.active = false;
         activeLnoriState.phase = "error";
         activeLnoriState.error = errMsg;
@@ -507,8 +552,8 @@ export function executeLnoriIngestTask(
         err?.name === "AbortError" ||
         String(err?.message || "").includes("aborted");
       const errMsg = isAborted
-        ? "Lnori ingestion cancelled by user"
-        : sanitizeErrorMessage(err) || "Failed to ingest light novel from Lnori";
+        ? `${sourceName} ingestion cancelled by user`
+        : sanitizeErrorMessage(err) || `Failed to ingest light novel from ${sourceName}`;
 
       activeLnoriState.active = false;
       activeLnoriState.phase = "error";
@@ -4381,8 +4426,13 @@ async function handleRequestCore(
     }
   }
 
-  // API: Lnori Light Novel Series & Volume Ingestion
-  if (url.pathname === "/api/lnori/ingest" && req.method === "POST") {
+  // API: Light Novel Series & Volume Ingestion (Lnori & Elscione)
+  if (
+    (url.pathname === "/api/lnori/ingest" ||
+      url.pathname === "/api/elscione/ingest" ||
+      url.pathname === "/api/novel/ingest") &&
+    req.method === "POST"
+  ) {
     try {
       let body: {
         url?: string;
@@ -4408,12 +4458,37 @@ async function handleRequestCore(
       }
       const targetUrl = body.url.trim();
 
-      // Validate target URL with isLnoriUrl
-      if (!isLnoriUrl(targetUrl)) {
+      // Validate target URL with isLnoriUrl or isElscioneUrl
+      const isElscione = isElscioneUrl(targetUrl);
+      const isLnori = isLnoriUrl(targetUrl);
+
+      if (url.pathname === "/api/elscione/ingest" && !isElscione) {
         return jsonResponse(
           {
             success: false,
-            error: "Target URL must be a valid lnori.com series or book URL",
+            error: "Target URL must be a valid server.elscione.com series or book URL",
+          },
+          400,
+          corsOrigin,
+        );
+      }
+
+      if (url.pathname === "/api/lnori/ingest" && !isLnori && !isElscione) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Target URL must be a valid lnori.com series or book URL (or server.elscione.com)",
+          },
+          400,
+          corsOrigin,
+        );
+      }
+
+      if (!isLnori && !isElscione) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Target URL must be a valid lnori.com or server.elscione.com series or book URL",
           },
           400,
           corsOrigin,
@@ -4447,7 +4522,7 @@ async function handleRequestCore(
       const isStream = Boolean(body.stream || isSSE || isNDJSON);
 
       // Check if an ingestion is already active with the same or matching URL/series
-      if (activeLnoriState.active && activeLnoriState.targetUrl && areMatchingLnoriUrls(activeLnoriState.targetUrl, targetUrl)) {
+      if (activeLnoriState.active && activeLnoriState.targetUrl && areMatchingNovelUrls(activeLnoriState.targetUrl, targetUrl)) {
         if (isStream) {
           // Reconnect client stream to existing active ingestion
           const contentType =
@@ -4592,7 +4667,7 @@ async function handleRequestCore(
 
       // Check if this URL is already in queue
       const existingQueueIndex = lnoriQueue.findIndex((item) =>
-        areMatchingLnoriUrls(item.targetUrl, targetUrl),
+        areMatchingNovelUrls(item.targetUrl, targetUrl),
       );
       if (existingQueueIndex !== -1) {
         const queuedItem = lnoriQueue[existingQueueIndex];
@@ -4617,15 +4692,16 @@ async function handleRequestCore(
           return jsonResponse(
             {
               success: false,
-              error: `Lnori ingestion queue is full (${MAX_LNORI_QUEUE} items). Please wait for active downloads to finish.`,
+              error: `Light novel ingestion queue is full (${MAX_LNORI_QUEUE} items). Please wait for active downloads to finish.`,
             },
             429,
             corsOrigin,
           );
         }
 
-        const parsedTarget = parseLnoriUrl(targetUrl);
-        const queueRunId = `lnori-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const idPrefix = isElscione ? "elscione" : "lnori";
+        const parsedTarget = isLnori ? parseLnoriUrl(targetUrl) : null;
+        const queueRunId = `${idPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const queueItem: LnoriQueueItem = {
           id: queueRunId,
           targetUrl,
@@ -4649,14 +4725,16 @@ async function handleRequestCore(
       }
 
       // Idle: reserve slot synchronously to prevent concurrent post-validation TOCTOU races
-      const runId = `lnori-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const idPrefix = isElscione ? "elscione" : "lnori";
+      const sourceName = isElscione ? "Elscione" : "Lnori";
+      const runId = `${idPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const nowIso = new Date().toISOString();
       activeLnoriState = {
         runId,
         active: true,
         targetUrl,
         phase: "manifest",
-        status: "Initializing Lnori background ingestion...",
+        status: `Initializing ${sourceName} background ingestion...`,
         index: 0,
         total: 0,
         volumeTitle: null,
@@ -4800,7 +4878,7 @@ async function handleRequestCore(
             error:
               sanitizeErrorMessage(result?.error) ||
               activeLnoriState.error ||
-              "Failed to ingest light novel from Lnori",
+              `Failed to ingest light novel from ${sourceName}`,
           },
           500,
           corsOrigin,
@@ -4826,7 +4904,7 @@ async function handleRequestCore(
           success: false,
           error:
             sanitizeErrorMessage(err) ||
-            "Failed to ingest light novel from Lnori",
+            "Failed to ingest light novel",
         },
         500,
         corsOrigin,
@@ -4834,8 +4912,13 @@ async function handleRequestCore(
     }
   }
 
-  // API: Lnori Live Progress
-  if (url.pathname === "/api/lnori/progress" && req.method === "GET") {
+  // API: Light Novel Live Progress (Lnori & Elscione)
+  if (
+    (url.pathname === "/api/lnori/progress" ||
+      url.pathname === "/api/elscione/progress" ||
+      url.pathname === "/api/novel/progress") &&
+    req.method === "GET"
+  ) {
     try {
       const state = getActiveLnoriState();
       const targetRunId = url.searchParams.get("runId");
@@ -4887,8 +4970,13 @@ async function handleRequestCore(
     }
   }
 
-  // API: Lnori Cancel Ingestion
-  if (url.pathname === "/api/lnori/cancel" && req.method === "POST") {
+  // API: Light Novel Cancel Ingestion (Lnori & Elscione)
+  if (
+    (url.pathname === "/api/lnori/cancel" ||
+      url.pathname === "/api/elscione/cancel" ||
+      url.pathname === "/api/novel/cancel") &&
+    req.method === "POST"
+  ) {
     try {
       let runIdToCancel: string | undefined;
       try {
@@ -4900,6 +4988,14 @@ async function handleRequestCore(
         // Request may have no body or non-JSON body, which is fine (defaults to active)
       }
 
+      const isElscioneCancel = url.pathname === "/api/elscione/cancel";
+      const isNovelCancel = url.pathname === "/api/novel/cancel";
+      const sourceBrand = isElscioneCancel
+        ? "Elscione"
+        : isNovelCancel
+          ? "light novel"
+          : "Lnori";
+
       const cancelled = cancelActiveLnoriIngest(runIdToCancel);
       return jsonResponse(
         {
@@ -4907,11 +5003,11 @@ async function handleRequestCore(
           cancelled,
           message: cancelled
             ? (runIdToCancel
-                ? `Lnori ingestion ${runIdToCancel} cancelled`
-                : "Lnori ingestion cancellation requested")
+                ? `${sourceBrand} ingestion ${runIdToCancel} cancelled`
+                : `${sourceBrand} ingestion cancellation requested`)
             : (runIdToCancel
-                ? `No active or queued Lnori ingestion found matching ${runIdToCancel}`
-                : "No active Lnori ingestion to cancel"),
+                ? `No active or queued ${sourceBrand} ingestion found matching ${runIdToCancel}`
+                : `No active ${sourceBrand} ingestion to cancel`),
         },
         200,
         corsOrigin,

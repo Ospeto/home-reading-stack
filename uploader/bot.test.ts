@@ -40,7 +40,7 @@ import {
   setLnoriPollIntervalForTest,
   resetLocalLnoriQueueForTest,
   getLocalLnoriQueue,
-  sendLnoriCompletionCard,
+  setIngestElscioneSeriesRunnerForTest,
   sendLnoriErrorCard,
   sendLnoriIncompleteCard,
   runDirectLnoriFallback,
@@ -3287,6 +3287,136 @@ describe("Lnori Queue & Telegram Bot Integration", () => {
     } finally {
       if (origEnv !== undefined) process.env.LOCAL_UPLOADER_URL = origEnv;
       else delete process.env.LOCAL_UPLOADER_URL;
+    }
+  });
+
+  it("handleTextMessage detects Elscione light novel URL and routes through queue", async () => {
+    resetLocalLnoriQueueForTest();
+    const sentTelegramBodies: any[] = [];
+    const origFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentTelegramBodies.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 1010 } }), {
+          status: 200,
+        });
+      }
+      if (url.includes("/api/lnori/ingest")) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            queued: true,
+            queuePosition: 1,
+            queueLength: 1,
+            runId: "elscione-run-123",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.includes("/api/lnori/progress")) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            active: false,
+            state: {
+              runId: "elscione-run-123",
+              phase: "complete",
+              total: 2,
+              data: {
+                success: true,
+                seriesTitle: "Grimgar",
+                author: "Jyumonji",
+                importedCount: 2,
+                skippedCount: 0,
+                totalCount: 2,
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      await handleTextMessage(
+        12345,
+        "Here is the book: https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar%20of%20Fantasy%20and%20Ash/",
+        "reader",
+      );
+
+      expect(sentTelegramBodies.length).toBeGreaterThan(0);
+      const firstMsg = sentTelegramBodies[0];
+      expect(firstMsg.text).toContain("Detected Elscione Light Novel Series");
+
+      const lastMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(lastMsg.text).toContain("Light Novel Series Imported Successfully!");
+      expect(lastMsg.text).toContain("Grimgar");
+    } finally {
+      globalThis.fetch = origFetch;
+      resetLocalLnoriQueueForTest();
+    }
+  });
+
+  it("runDirectLnoriFallback supports Elscione URLs using _ingestElscioneSeriesRunner", async () => {
+    resetLocalLnoriQueueForTest();
+    const sentTelegramBodies: any[] = [];
+    const origFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentTelegramBodies.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 1011 } }), {
+          status: 200,
+        });
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    let elscioneRunnerCalledWith = "";
+    setIngestElscioneSeriesRunnerForTest(async (url: string, onProgress?: any) => {
+      elscioneRunnerCalledWith = url;
+      if (onProgress) {
+        await onProgress({
+          phase: "volume",
+          index: 1,
+          total: 1,
+          volumeTitle: "Overlord Vol 1",
+          status: "Importing Overlord...",
+        });
+      }
+      return {
+        success: true,
+        seriesTitle: "Overlord",
+        author: "Kugane Maruyama",
+        importedCount: 1,
+        skippedCount: 0,
+        totalCount: 1,
+        tags: ["Light Novel", "Elscione"],
+        calibreBookIds: [99],
+        duplicateCount: 0,
+      };
+    });
+
+    try {
+      await runDirectLnoriFallback(
+        555,
+        1011,
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Overlord/Vol1.epub",
+      );
+
+      expect(elscioneRunnerCalledWith).toContain("Overlord/Vol1.epub");
+      const completionMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(completionMsg.text).toContain("Light Novel Series Imported Successfully!");
+      expect(completionMsg.text).toContain("Overlord");
+    } finally {
+      globalThis.fetch = origFetch;
+      resetLocalLnoriQueueForTest();
     }
   });
 });

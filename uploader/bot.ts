@@ -27,6 +27,11 @@ import {
   type LnoriProgressEvent,
   formatLnoriProgress,
 } from "./lnori";
+import {
+  isElscioneUrl,
+  ingestElscioneSeries,
+  formatElscioneProgress,
+} from "./elscione";
 import { generateMetadataFilename } from "./filename";
 import { getJobQueue } from "./jobs";
 import {
@@ -3837,6 +3842,13 @@ export function setIngestLnoriSeriesRunnerForTest(
   _ingestLnoriSeriesRunner = runner || ingestLnoriSeries;
 }
 
+let _ingestElscioneSeriesRunner: typeof ingestElscioneSeries = ingestElscioneSeries;
+export function setIngestElscioneSeriesRunnerForTest(
+  runner: typeof ingestElscioneSeries | null,
+): void {
+  _ingestElscioneSeriesRunner = runner || ingestElscioneSeries;
+}
+
 let _lnoriPollIntervalMs = 1500;
 export function setLnoriPollIntervalForTest(ms: number): void {
   _lnoriPollIntervalMs = ms;
@@ -3860,6 +3872,7 @@ export function resetLocalLnoriQueueForTest(): void {
   isLocalLnoriActive = false;
   _localUploaderUrl = null;
   _ingestLnoriSeriesRunner = ingestLnoriSeries;
+  _ingestElscioneSeriesRunner = ingestElscioneSeries;
   _lnoriPollIntervalMs = 1500;
 }
 
@@ -3873,7 +3886,7 @@ export async function sendLnoriCompletionCard(
     importedCount?: number;
     skippedCount?: number;
     totalCount?: number;
-    tags?: string;
+    tags?: string | string[];
   },
 ): Promise<number | null> {
   const seriesTitle = result.seriesTitle || "Light Novel Series";
@@ -3881,7 +3894,10 @@ export async function sendLnoriCompletionCard(
   const importedCount = result.importedCount ?? 0;
   const skippedCount = result.skippedCount ?? 0;
   const totalCount = result.totalCount ?? importedCount;
-  const tags = result.tags || "Light Novel";
+  const rawTags = result.tags;
+  const tags = Array.isArray(rawTags)
+    ? rawTags.join(", ")
+    : rawTags || "Light Novel";
 
   const skipText =
     skippedCount > 0 ? ` (${skippedCount} already in library)` : "";
@@ -3918,10 +3934,11 @@ export async function sendLnoriErrorCard(
   articleUrl: string,
   errorMsg: string,
 ): Promise<number | null> {
+  const sourceName = isElscioneUrl(articleUrl) ? "Elscione" : "Lnori";
   const card =
-    `⚠️ *Lnori Ingestion Failed*\n\n` +
+    `⚠️ *${sourceName} Ingestion Failed*\n\n` +
     `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
-    `❌ *Error:* ${escapeTelegramMarkdown(errorMsg || "Failed to import Lnori series")}\n\n` +
+    `❌ *Error:* ${escapeTelegramMarkdown(errorMsg || `Failed to import ${sourceName} series`)}\n\n` +
     `_Please verify the link is accessible and try again._`;
 
   return await editOrSendMessage(chatId, statusMsgId, card, "Markdown");
@@ -3932,10 +3949,11 @@ export async function sendLnoriIncompleteCard(
   statusMsgId: number | null,
   articleUrl: string,
 ): Promise<number | null> {
+  const sourceName = isElscioneUrl(articleUrl) ? "Elscione" : "Lnori";
   const card =
-    `⚠️ *Lnori Ingestion Incomplete*\n\n` +
+    `⚠️ *${sourceName} Ingestion Incomplete*\n\n` +
     `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
-    `❌ *Error:* No volumes could be imported from Lnori.\n\n` +
+    `❌ *Error:* No volumes could be imported from ${sourceName}.\n\n` +
     `_Please verify the link and try again._`;
 
   return await editOrSendMessage(chatId, statusMsgId, card, "Markdown");
@@ -3946,12 +3964,14 @@ export async function runDirectLnoriFallback(
   statusMsgId: number | null,
   articleUrl: string,
 ): Promise<void> {
+  const isElscione = isElscioneUrl(articleUrl);
+  const sourceName = isElscione ? "Elscione" : "Lnori";
   if (isLocalLnoriActive) {
     if (localLnoriQueue.length >= MAX_LOCAL_LNORI_QUEUE) {
       await editOrSendMessage(
         chatId,
         statusMsgId,
-        `⚠️ *Lnori Ingestion Queue Full*\n\n` +
+        `⚠️ *${sourceName} Ingestion Queue Full*\n\n` +
           `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
           `⏳ *Status:* Local ingestion queue is full (${MAX_LOCAL_LNORI_QUEUE} items). Please wait for active downloads to finish.\n\n` +
           `_Please try again in a few moments._`,
@@ -3963,7 +3983,7 @@ export async function runDirectLnoriFallback(
     const queuePosition = localLnoriQueue.length;
     const queueLength = localLnoriQueue.length;
     const queuedText =
-      `⏳ *Queued Lnori Light Novel Series (Position #${queuePosition} of ${queueLength})*\n` +
+      `⏳ *Queued ${sourceName} Light Novel Series (Position #${queuePosition} of ${queueLength})*\n` +
       `\`${escapeTelegramMarkdown(articleUrl)}\`\n\n` +
       `_Waiting for previous ingestion to finish..._`;
     const msgId = await editOrSendMessage(
@@ -3988,17 +4008,25 @@ export async function runDirectLnoriFallback(
       const activeUrl = currentJob.url;
       const activeChatId = currentJob.chatId;
       let activeMsgId = currentJob.statusMsgId;
+      const currentIsElscione = isElscioneUrl(activeUrl);
+      const activeSourceName = currentIsElscione ? "Elscione" : "Lnori";
+      const runner = currentIsElscione
+        ? _ingestElscioneSeriesRunner
+        : _ingestLnoriSeriesRunner;
+      const progressFormatter = currentIsElscione
+        ? formatElscioneProgress
+        : formatLnoriProgress;
 
       try {
         let lastProgressText = "";
         let lastEditTime = 0;
-        const result = await _ingestLnoriSeriesRunner(
+        const result = await runner(
           activeUrl,
-          async (progress: LnoriProgressEvent | string) => {
+          async (progress: any) => {
             const text =
               typeof progress === "string"
                 ? progress
-                : formatLnoriProgress(progress);
+                : progressFormatter(progress);
             const now = Date.now();
             if (
               text &&
@@ -4034,20 +4062,21 @@ export async function runDirectLnoriFallback(
         }
       } catch (err: any) {
         logError(
-          `Direct fallback Lnori ingestion error for ${activeUrl}: ${err?.message || err}`,
+          `Direct fallback ${activeSourceName} ingestion error for ${activeUrl}: ${err?.message || err}`,
         );
         await sendLnoriErrorCard(
           activeChatId,
           activeMsgId,
           activeUrl,
-          err?.message || "Failed to import Lnori series",
+          err?.message || `Failed to import ${activeSourceName} series`,
         );
       }
 
       currentJob = localLnoriQueue.shift() || null;
       if (currentJob) {
+        const nextSourceName = isElscioneUrl(currentJob.url) ? "Elscione" : "Lnori";
         const activatingText =
-          `📖 *Detected Lnori Light Novel Series*\n\`${escapeTelegramMarkdown(currentJob.url)}\`\n\n` +
+          `📖 *Detected ${nextSourceName} Light Novel Series*\n\`${escapeTelegramMarkdown(currentJob.url)}\`\n\n` +
           `⏳ _Fetching volume manifest..._`;
         const msgId = await editOrSendMessage(
           currentJob.chatId,
@@ -4148,13 +4177,15 @@ export async function pollLnoriProgress(
     const queueLength = progData.queueLength || 0;
     const state = progData.state || {};
 
+    const sourceName = isElscioneUrl(articleUrl) ? "Elscione" : "Lnori";
+
     // 1. Still in queue
     if (currentPos !== null && currentPos !== undefined) {
       if (currentPos !== lastReportedPos || queueLength !== lastReportedLen) {
         lastReportedPos = currentPos;
         lastReportedLen = queueLength;
         const queuedText =
-          `⏳ *Queued Lnori Light Novel Series (Position #${currentPos} of ${queueLength})*\n` +
+          `⏳ *Queued ${sourceName} Light Novel Series (Position #${currentPos} of ${queueLength})*\n` +
           `\`${escapeTelegramMarkdown(articleUrl)}\`\n\n` +
           `_Waiting for previous ingestion to finish..._`;
         const msgId = await editOrSendMessage(
@@ -4171,7 +4202,7 @@ export async function pollLnoriProgress(
     // 2. Not in queue: verify state.runId matches target runId!
     if (state.runId !== runId) {
       logError(
-        `Lnori progress state runId (${state.runId}) does not match target runId (${runId}) and item is not in queue`,
+        `${sourceName} progress state runId (${state.runId}) does not match target runId (${runId}) and item is not in queue`,
       );
       await sendLnoriErrorCard(
         chatId,
@@ -4198,13 +4229,15 @@ export async function pollLnoriProgress(
 
     if (state.phase === "error") {
       const errMsg =
-        state.error || state.status || "Failed to import Lnori series";
+        state.error || state.status || `Failed to import ${sourceName} series`;
       await sendLnoriErrorCard(chatId, statusMsgId, articleUrl, errMsg);
       return;
     }
 
     // 4. Active progress event
-    const text = formatLnoriProgress(state);
+    const text = isElscioneUrl(articleUrl)
+      ? formatElscioneProgress(state)
+      : formatLnoriProgress(state);
     const now = Date.now();
     if (text && (text !== lastProgressText || now - lastEditTime >= 1000)) {
       lastProgressText = text;
@@ -4298,12 +4331,13 @@ export async function consumeLnoriSseStream(
               return;
             }
 
+            const sourceName = isElscioneUrl(articleUrl) ? "Elscione" : "Lnori";
             if (event.phase === "error") {
               completed = true;
               const errMsg =
                 event.data?.error ||
                 event.status ||
-                "Failed to import Lnori series";
+                `Failed to import ${sourceName} series`;
               await sendLnoriErrorCard(
                 chatId,
                 statusMsgId,
@@ -4313,7 +4347,9 @@ export async function consumeLnoriSseStream(
               return;
             }
 
-            const text = formatLnoriProgress(event);
+            const text = isElscioneUrl(articleUrl)
+              ? formatElscioneProgress(event)
+              : formatLnoriProgress(event);
             const now = Date.now();
             if (
               text &&
@@ -4375,11 +4411,13 @@ export async function handleLnoriUrlMessage(
   articleUrl: string,
   sender: string = "user",
 ): Promise<void> {
+  const isElscione = isElscioneUrl(articleUrl);
+  const sourceName = isElscione ? "Elscione" : "Lnori";
   log(
-    `Detected Lnori light novel URL in message: "${articleUrl}" from ${sender}`,
+    `Detected ${sourceName} light novel URL in message: "${articleUrl}" from ${sender}`,
   );
   const initialStatus =
-    `📖 *Detected Lnori Light Novel Series*\n\`${escapeTelegramMarkdown(articleUrl)}\`\n\n` +
+    `📖 *Detected ${sourceName} Light Novel Series*\n\`${escapeTelegramMarkdown(articleUrl)}\`\n\n` +
     `⏳ _Fetching volume manifest..._`;
   let statusMsgId = await sendMessage(
     chatId,
@@ -4419,9 +4457,9 @@ export async function handleLnoriUrlMessage(
     await editOrSendMessage(
       chatId,
       statusMsgId,
-      `⚠️ *Invalid Lnori URL*\n\n` +
+      `⚠️ *Invalid ${sourceName} URL*\n\n` +
         `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
-        `❌ *Error:* ${escapeTelegramMarkdown(data.error || "Target URL must be a valid lnori.com series or book URL")}\n\n` +
+        `❌ *Error:* ${escapeTelegramMarkdown(data.error || `Target URL must be a valid ${sourceName} series or book URL`)}\n\n` +
         `_Please verify the link and try again._`,
       "Markdown",
     );
@@ -4433,7 +4471,7 @@ export async function handleLnoriUrlMessage(
     await editOrSendMessage(
       chatId,
       statusMsgId,
-      `⚠️ *Lnori Ingestion Queue Full*\n\n` +
+      `⚠️ *${sourceName} Ingestion Queue Full*\n\n` +
         `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
         `⏳ *Status:* ${escapeTelegramMarkdown(data.error || "Queue is currently full. Please wait for active downloads to finish.")}\n\n` +
         `_Please try again in a few moments._`,
@@ -4446,7 +4484,7 @@ export async function handleLnoriUrlMessage(
     const data = await serverResponse.json().catch(() => ({}));
     const errMsg =
       data.error || `Server responded with status ${serverResponse.status}`;
-    logError(`Lnori ingest API error (${serverResponse.status}): ${errMsg}`);
+    logError(`${sourceName} ingest API error (${serverResponse.status}): ${errMsg}`);
     await sendLnoriErrorCard(chatId, statusMsgId, articleUrl, errMsg);
     return;
   }
@@ -4461,7 +4499,7 @@ export async function handleLnoriUrlMessage(
       const queueRunId = data.runId;
 
       const queuedText =
-        `⏳ *Queued Lnori Light Novel Series (Position #${queuePosition} of ${queueLength})*\n` +
+        `⏳ *Queued ${sourceName} Light Novel Series (Position #${queuePosition} of ${queueLength})*\n` +
         `\`${escapeTelegramMarkdown(articleUrl)}\`\n\n` +
         `_Waiting for previous ingestion to finish..._`;
       const msgId = await editOrSendMessage(
@@ -4517,7 +4555,7 @@ export async function handleLnoriUrlMessage(
       chatId,
       statusMsgId,
       articleUrl,
-      data.error || "Failed to import Lnori series",
+      data.error || `Failed to import ${sourceName} series`,
     );
     return;
   }
@@ -4854,7 +4892,7 @@ export async function handleTextMessage(
             const articleUrl = extractUrlFromText(text);
 
             if (articleUrl) {
-              if (isLnoriUrl(articleUrl)) {
+              if (isLnoriUrl(articleUrl) || isElscioneUrl(articleUrl)) {
                 await handleLnoriUrlMessage(chatId, articleUrl, sender);
                 return;
               }

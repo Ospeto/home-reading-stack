@@ -428,25 +428,32 @@ LightHouse integrates [TypeSafe Jev System-1](https://api.typesafe.ai/v1/systemo
 
 ---
 
-## 📚 Lnori Light Novel & Series Ingestion Pipeline
+## 📚 Lnori & Elscione Light Novel Ingestion Pipeline
 
-LightHouse features end-to-end automated light novel series and volume ingestion from [Lnori](https://lnori.com) across both the **Web UI** and the **Telegram Bot**:
+LightHouse features end-to-end automated light novel series and volume ingestion from [Lnori](https://lnori.com) and [Elscione](https://server.elscione.com) across both the **Web UI** and the **Telegram Bot**:
 
 1. **Dual Ingestion Surfaces:**
-   - **LightHouse Web UI:** Click **Upload Books** &rarr; **Add from Lnori** (or paste an `lnori.com` link into the web article ingestion modal to auto-switch). The dedicated Apple fluid modal accepts series URLs (`https://lnori.com/series/...`) or individual volume URLs (`https://lnori.com/book/...`).
-   - **Telegram Ingestion Bot:** Paste any `lnori.com/series/...` or `lnori.com/book/...` URL directly into chat with `@saroat_ospeto_bot`. Links automatically submit to the centralized Uploader server queue (`POST /api/lnori/ingest`), reporting real-time queue position (`⏳ Queued Lnori Light Novel Series (Position #N of M)`), streaming volume progress upon activation via SSE/polling, delivering formatted completion cards with 1-tap "Open Reading HQ" Web App links, and falling back gracefully to an in-process queue/mutex if the local uploader server is offline.
-   - **REST API (`POST /api/lnori/ingest`):** Accepts `{ url: string, stream?: boolean }`, validates target with SSRF and origin guards, runs an asynchronous FIFO queue supporting sequential processing across concurrent requests without 409 rejections, runs an autonomous decoupled server background task resilient against client disconnections, supports live Server-Sent Events (`text/event-stream`) and NDJSON streaming progress updates, exposes live status and queue state (`queueLength`, `queuedItems`, `currentQueuePosition`) via `GET /api/lnori/progress`, and supports explicit cancellation via `POST /api/lnori/cancel` (by `runId` or active job).
-2. **Robust Manifest & Volume Orchestration:**
-   - Automatically parses LD+JSON metadata and HTML schemas to extract series title, author, genres, and all associated volume endpoints (`/book/<id>/...`).
-   - Limits volume batches safely (`MAX_VOLUMES_PER_REQUEST = 50`).
-3. **Pre-Download Duplicate Prevention:**
+   - **LightHouse Web UI:** Click **Upload Books** &rarr; **Add Light Novel** (or paste an `lnori.com` or `server.elscione.com` link into the web article ingestion modal to auto-switch). The dedicated Apple fluid modal accepts series folder URLs (e.g. `https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar%20of%20Fantasy%20and%20Ash/` or `https://lnori.com/series/...`) and individual volume URLs (`https://server.elscione.com/.../Volume%2001.epub` or `https://lnori.com/book/...`).
+   - **Telegram Ingestion Bot:** Paste any `lnori.com/series/...` or `lnori.com/book/...` URL directly into chat with `@saroat_ospeto_bot`. Links automatically submit to the centralized Uploader server queue (`POST /api/lnori/ingest`), reporting real-time queue position (`⏳ Queued Light Novel Series (Position #N of M)`), streaming volume progress upon activation via SSE/polling, delivering formatted completion cards with 1-tap "Open Reading HQ" Web App links, and falling back gracefully to an in-process queue/mutex if the local uploader server is offline. URLs from `server.elscione.com` (`/Officially%20Translated%20Light%20Novels/...`) are also fully supported with Anubis PoW challenge solving.
+   - **REST API (`POST /api/elscione/ingest`, `POST /api/lnori/ingest`, `POST /api/novel/ingest`):** Accepts `{ url: string, stream?: boolean }`, validates target with SSRF and origin guards, runs an asynchronous FIFO queue supporting sequential processing across concurrent requests without 409 rejections, runs an autonomous decoupled server background task resilient against client disconnections, supports live Server-Sent Events (`text/event-stream`) and NDJSON streaming progress updates, exposes live status and queue state (`queueLength`, `queuedItems`, `currentQueuePosition`) via `GET /api/lnori/progress` / `GET /api/elscione/progress`, and supports explicit cancellation via `POST /api/lnori/cancel` / `POST /api/elscione/cancel` (by `runId` or active job).
+2. **Anubis Proof-of-Work Challenge Solver (Elscione):**
+   - Automatically intercepts Anubis challenge HTML pages (`<script id="anubis_challenge" type="application/json">`) on `server.elscione.com`.
+   - Computes SHA-256 hash `h = sha256(randomData + nonce)` until the target `difficulty` leading zero half-bytes are satisfied.
+   - Submits the solution to `/.within.website/x/cmd/anubis/api/pass-challenge` and caches authorized session cookies (`PHPSESSID`, `anubis-auth`, `download_token`) to transparently authenticate subsequent folder requests and volume downloads.
+3. **_h5ai Directory API & Manifest Extraction:**
+   - For series folder URLs on `server.elscione.com`, sends authenticated POST requests with `{"action": "get", "items": {"href": folderPath, "what": 1}}`.
+   - Filters `.epub` volumes and sorts them numerically by extracted volume index (Volume 1, Volume 2, Volume 10) instead of lexicographical ordering.
+   - For direct `.epub` file links, treats the URL as an immediate 1-volume manifest.
+   - For `lnori.com`, parses LD+JSON metadata and HTML schemas to extract series title, author, genres, and volume endpoints.
+4. **Pre-Download Duplicate Prevention:**
    - Before downloading multi-megabyte EPUB binaries, queries Calibre's database via series name and volume index or book title. Existing volumes are skipped, preventing wasted bandwidth and duplicate library entries.
-4. **Resilient Downloader & In-Process ZIP Auto-Healing:**
+5. **Resilient Downloader & In-Process ZIP Auto-Healing:**
    - Downloads EPUB files with exponential retry backoff and proxy routing (`http://127.0.0.1:7890`).
    - If an EPUB is missing its Central Directory or End-of-Central-Directory (EOCD) signature, `repairTruncatedEpub` automatically repairs the container in-process.
-5. **High-Resolution Cover Conversion:**
-   - Downloads original high-resolution WebP covers from `cdn.lnori.com` and converts them to standard JPEGs via macOS `sips` for seamless Calibre and e-reader compatibility.
-6. **Automatic Calibre & Catalog Refresh:**
+6. **High-Resolution Cover Extraction & Conversion:**
+   - Extracts embedded cover art from internal EPUB container metadata or downloads master covers from `cdn.lnori.com`.
+   - Converts covers to standard formats using macOS `sips` for seamless Calibre and e-reader compatibility.
+7. **Automatic Calibre & Catalog Refresh:**
    - Ingests into Calibre with standardized series indexing (`<Series>: Volume <N>`), applies metadata tags, and flushes cache to immediately reflect new books in KOReader OPDS and the web catalog.
 
 ---
