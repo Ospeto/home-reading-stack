@@ -516,20 +516,24 @@ describe("Lnori Light Novel Ingestion Module", () => {
       }
     });
 
-    it("retries Lnori HTML fetch directly after a proxy network error", async () => {
+    it("falls back to proxy for Lnori HTML fetch after direct network error", async () => {
       let calls = 0;
+      const proxyUsed: (string | undefined)[] = [];
       const html = await fetchLnoriHtml("https://lnori.com/series/8046/test-series", {
-        fetch: async () => {
+        fetch: async (_url: string, init: any) => {
           calls++;
-          if (calls === 1) throw new Error("proxy unavailable");
-          return new Response("<html>direct response</html>");
+          proxyUsed.push(init?.proxy);
+          if (calls === 1) throw new Error("direct connection failed");
+          return new Response("<html>proxy response</html>");
         },
       });
-      expect(html).toBe("<html>direct response</html>");
+      expect(html).toBe("<html>proxy response</html>");
       expect(calls).toBe(2);
+      expect(proxyUsed[0]).toBeUndefined();
+      expect(proxyUsed[1]).toBe("http://127.0.0.1:7890");
     });
 
-    it("retries EPUB download directly after proxy error and with backoff after failures", async () => {
+    it("retries EPUB download with direct-first priority and proxy fallback on every attempt", async () => {
       const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
       let calls = 0;
       const proxyUsed: (string | undefined)[] = [];
@@ -539,25 +543,174 @@ describe("Lnori Light Novel Ingestion Module", () => {
             fetch: async (_url: string, init: any) => {
               calls++;
               proxyUsed.push(init?.proxy);
-              if (calls === 1) throw new Error("proxy unavailable");
+              if (calls === 1) throw new Error("direct connection failed");
               return new Response("unavailable", { status: 503 });
             },
           }),
         ).rejects.toThrow("Failed to download EPUB from Lnori storage (503)");
-        // Call 1: attempt 0 with proxy (throws proxy unavailable)
-        // Call 2: attempt 0 direct fallback (returns 503)
-        // Call 3: attempt 1 direct (returns 503)
-        // Call 4: attempt 2 direct (returns 503)
-        // Call 5: attempt 3 direct (returns 503)
+        // Attempt 0: direct (calls=1, throws) -> fallback to proxy (calls=2, returns 503)
+        // Attempt 1: direct (calls=3, returns 503)
+        // Attempt 2: direct (calls=4, returns 503)
+        // Attempt 3: direct (calls=5, returns 503)
         expect(calls).toBe(5);
-        expect(proxyUsed[0]).toBe("http://127.0.0.1:7890");
-        expect(proxyUsed.slice(1).every((p) => p === undefined)).toBe(true);
+        expect(proxyUsed[0]).toBeUndefined();
+        expect(proxyUsed[1]).toBe("http://127.0.0.1:7890");
+        expect(proxyUsed.slice(2).every((p) => p === undefined)).toBe(true);
       } finally {
         await fs.promises.rm(workDir, { recursive: true, force: true });
       }
     });
 
-    it("succeeds via direct fallback when proxy throws or times out on initial attempt", async () => {
+    it("succeeds when transient direct failure on attempt 0 clears on retry even if proxy fails", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "retry-direct-success.epub");
+      let calls = 0;
+      const proxyUsed: (string | undefined)[] = [];
+
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+      const validEpubContent = Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+
+      try {
+        await downloadLnoriEpub("retry-direct-success.epub", destPath, undefined, {
+          fetch: async (_url: string, init: any) => {
+            calls++;
+            proxyUsed.push(init?.proxy);
+            if (calls === 1) {
+              // Attempt 0: direct throws
+              throw new Error("transient direct network error");
+            }
+            if (calls === 2) {
+              // Attempt 0 fallback: proxy also throws/fails (500)
+              return new Response("proxy internal error", { status: 500 });
+            }
+            // Attempt 1: direct succeeds at full speed
+            return new Response(validEpubContent, { status: 200 });
+          },
+        });
+
+        expect(calls).toBe(3);
+        expect(proxyUsed[0]).toBeUndefined();
+        expect(proxyUsed[1]).toBe("http://127.0.0.1:7890");
+        expect(proxyUsed[2]).toBeUndefined();
+        expect(fs.existsSync(destPath)).toBe(true);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("pure direct success never uses proxy across download", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "pure-direct.epub");
+      let calls = 0;
+      const proxyUsed: (string | undefined)[] = [];
+
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+      const validEpubContent = Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+
+      try {
+        await downloadLnoriEpub("pure-direct.epub", destPath, undefined, {
+          fetch: async (_url: string, init: any) => {
+            calls++;
+            proxyUsed.push(init?.proxy);
+            return new Response(validEpubContent, { status: 200 });
+          },
+        });
+
+        expect(calls).toBe(1);
+        expect(proxyUsed[0]).toBeUndefined();
+        expect(fs.existsSync(destPath)).toBe(true);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("client abort during direct attempt does not trigger proxy fallback", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "aborted.epub");
+      let calls = 0;
+      const proxyUsed: (string | undefined)[] = [];
+      const controller = new AbortController();
+
+      try {
+        await expect(
+          downloadLnoriEpub("aborted.epub", destPath, undefined, {
+            fetch: async (_url: string, init: any) => {
+              calls++;
+              proxyUsed.push(init?.proxy);
+              controller.abort(new Error("user aborted"));
+              throw controller.signal.reason;
+            },
+            signal: controller.signal,
+          }),
+        ).rejects.toThrow();
+
+        expect(calls).toBe(1);
+        expect(proxyUsed[0]).toBeUndefined();
+        expect(fs.existsSync(destPath)).toBe(false);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("succeeds via proxy fallback when direct connection throws or times out on initial attempt", async () => {
       const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
       const destPath = path.join(workDir, "direct-success.epub");
       let calls = 0;
@@ -610,8 +763,8 @@ describe("Lnori Light Novel Ingestion Module", () => {
         });
 
         expect(calls).toBe(2);
-        expect(proxyUsed[0]).toBe("http://127.0.0.1:7890");
-        expect(proxyUsed[1]).toBeUndefined();
+        expect(proxyUsed[0]).toBeUndefined();
+        expect(proxyUsed[1]).toBe("http://127.0.0.1:7890");
         expect(fs.existsSync(destPath)).toBe(true);
       } finally {
         await fs.promises.rm(workDir, { recursive: true, force: true });
@@ -782,15 +935,17 @@ describe("Lnori Light Novel Ingestion Module", () => {
       }
     });
 
-    it("retries cover fetch directly after a proxy network error", async () => {
+    it("falls back to proxy for cover fetch after direct network error", async () => {
       const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
       let calls = 0;
+      const proxyUsed: (string | undefined)[] = [];
       const jpegPath = path.join(workDir, "cover.jpg");
       try {
         const converted = await fetchAndConvertCover("23021", undefined, workDir, {
-          fetch: async () => {
+          fetch: async (_url: string, init: any) => {
             calls++;
-            if (calls === 1) throw new Error("proxy unavailable");
+            proxyUsed.push(init?.proxy);
+            if (calls === 1) throw new Error("direct connection failed");
             return new Response(new Uint8Array([1, 2, 3]));
           },
           sipsPath: "fake-sips",
@@ -801,6 +956,8 @@ describe("Lnori Light Novel Ingestion Module", () => {
         });
         expect(converted).toBe(jpegPath);
         expect(calls).toBe(2);
+        expect(proxyUsed[0]).toBeUndefined();
+        expect(proxyUsed[1]).toBe("http://127.0.0.1:7890");
       } finally {
         await fs.promises.rm(workDir, { recursive: true, force: true });
       }

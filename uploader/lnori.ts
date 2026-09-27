@@ -796,24 +796,25 @@ export async function fetchLnoriHtml(
   const fetcher = dependencies?.fetch ?? safeFetchWithSsrf;
   let res: Response;
   try {
+    // Attempt direct connection first for maximum speed
     res = await fetcher(targetUrl, {
       headers: {
         "User-Agent": USER_AGENT,
         Referer: "https://lnori.com/",
       },
-      proxy: PROXY_URL,
       signal: composeSignal(30000, dependencies?.signal),
     } as any);
   } catch {
     if (dependencies?.signal?.aborted) {
       throw new Error("Lnori ingestion aborted by client");
     }
-    // If proxy failed or threw, retry without proxy
+    // If direct connection failed or threw, fall back to proxy
     res = await fetcher(targetUrl, {
       headers: {
         "User-Agent": USER_AGENT,
         Referer: "https://lnori.com/",
       },
+      proxy: PROXY_URL,
       signal: composeSignal(30000, dependencies?.signal),
     } as any);
   }
@@ -829,17 +830,19 @@ export async function fetchLnoriHtml(
       try {
         let sRes: Response;
         try {
+          // Direct first for sitemap
           sRes = await fetcher(sitemapPath, {
             headers: { "User-Agent": USER_AGENT },
-            proxy: PROXY_URL,
             signal: composeSignal(20000, dependencies?.signal),
           } as any);
         } catch {
           if (dependencies?.signal?.aborted) {
             throw new Error("Lnori ingestion aborted by client");
           }
+          // Fallback to proxy
           sRes = await fetcher(sitemapPath, {
             headers: { "User-Agent": USER_AGENT },
+            proxy: PROXY_URL,
             signal: composeSignal(20000, dependencies?.signal),
           } as any);
         }
@@ -907,27 +910,23 @@ export async function downloadLnoriEpub(
       throw new Error("Lnori ingestion aborted by client");
     }
 
-    // Try through proxy first; on proxy failure/timeout or subsequent retries, fall back to direct fetch.
-    const tryProxyAndDirect = async (
+    // Try direct connection first on every attempt for maximum speed; on failure/timeout, fall back to proxy.
+    const tryDirectAndProxy = async (
       runFetch: (useProxy: boolean) => Promise<Response>,
     ): Promise<Response> => {
-      if (attempt === 0) {
-        try {
-          return await runFetch(true);
-        } catch (proxyErr: any) {
-          if (dependencies?.signal?.aborted) {
-            throw proxyErr;
-          }
-          // Proxy threw, timed out, or connection failed: fall back immediately to direct fetch
-          return runFetch(false);
+      try {
+        return await runFetch(false);
+      } catch (directErr: any) {
+        if (dependencies?.signal?.aborted) {
+          throw directErr;
         }
+        // Direct fetch threw, timed out, or connection failed: fall back to proxy
+        return runFetch(true);
       }
-      // On retries (attempt > 0), fall back directly without proxy to avoid proxy stalls
-      return runFetch(false);
     };
 
     try {
-      const res = await tryProxyAndDirect(async (useProxy) => {
+      const res = await tryDirectAndProxy(async (useProxy) => {
         // Disarmable TTFB controller: only bounds the time until response headers arrive.
         // Once fetcher resolves, ttfbTimer is cleared so active body streaming is not aborted.
         const ttfbController = new AbortController();
@@ -1065,23 +1064,25 @@ export async function fetchAndConvertCover(
     try {
       let res: Response;
       try {
+        // Direct first for cover download
         res = await fetcher(cUrl, {
           headers: {
             Referer: "https://lnori.com/",
             "User-Agent": USER_AGENT,
           },
-          proxy: PROXY_URL,
           signal: composeSignal(20000, dependencies?.signal),
         } as any);
       } catch {
         if (dependencies?.signal?.aborted) {
           throw new Error("Lnori ingestion aborted by client");
         }
+        // Fall back to proxy
         res = await fetcher(cUrl, {
           headers: {
             Referer: "https://lnori.com/",
             "User-Agent": USER_AGENT,
           },
+          proxy: PROXY_URL,
           signal: composeSignal(20000, dependencies?.signal),
         } as any);
       }
