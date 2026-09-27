@@ -3037,7 +3037,7 @@
               </span>
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-indigo-400 font-mono border border-zinc-700">API</span>
             </div>
-            <div class="text-[11px] text-zinc-400">Downloads and imports series or book from lnori.com with live SSE progress streaming (<code>stream: true</code>)</div>
+            <div class="text-[11px] text-zinc-400">Downloads and imports series or book from lnori.com with autonomous background decoupling, live SSE progress streaming (<code>stream: true</code>), progress polling (<code>GET /api/lnori/progress</code>), and cancel support (<code>POST /api/lnori/cancel</code>)</div>
             <div class="flex items-center gap-2 pt-1">
               <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://reading-sg.wavypremium.xyz:8443/api/lnori/ingest</code>
               <button onclick="copyToClipboard('https://reading-sg.wavypremium.xyz:8443/api/lnori/ingest')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
@@ -4973,7 +4973,7 @@
     let activeLnoriAbortController = null;
 
     // LNORI LIGHT NOVEL INGESTION MODAL
-    function openLnoriModal(initialUrl) {
+    async function openLnoriModal(initialUrl) {
       if (isLnoriIngesting) return;
       tgHaptic.light();
       openModalAnimated('lnoriModal', false);
@@ -4988,11 +4988,31 @@
         cancelBtn.textContent = 'Cancel';
       }
       setTimeout(() => input.focus(), 60);
+
+      // Check if an ingestion is already active on the server
+      try {
+        const res = await fetch('/api/lnori/progress');
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.active && data.state) {
+            resumeActiveLnoriIngest(data.state);
+          }
+        }
+      } catch (err) {
+        console.debug('[Lnori] Failed to check initial progress:', err);
+      }
     }
 
-    function handleLnoriCancel() {
-      if (isLnoriIngesting && activeLnoriAbortController) {
-        activeLnoriAbortController.abort();
+    async function handleLnoriCancel() {
+      if (isLnoriIngesting) {
+        try {
+          await fetch('/api/lnori/cancel', { method: 'POST' });
+        } catch (err) {
+          console.debug('[Lnori] Failed to call cancel endpoint:', err);
+        }
+        if (activeLnoriAbortController) {
+          activeLnoriAbortController.abort();
+        }
       } else {
         closeLnoriModal();
       }
@@ -5000,18 +5020,29 @@
 
     function closeLnoriModal() {
       if (isLnoriIngesting && activeLnoriAbortController) {
+        // Detach client stream/polling; background task continues running on server
         activeLnoriAbortController.abort();
       }
       closeModalAnimated('lnoriModal', false);
     }
 
-    async function handleLnoriIngest(e) {
-      e.preventDefault();
+    function resumeActiveLnoriIngest(initialState) {
+      if (isLnoriIngesting) return;
+      const input = document.getElementById('lnoriUrlInput');
+      if (initialState?.targetUrl) {
+        input.value = initialState.targetUrl;
+      }
+      const fakeEvent = { preventDefault: () => {} };
+      handleLnoriIngest(fakeEvent, true, initialState);
+    }
+
+    async function handleLnoriIngest(e, isResuming = false, existingState = null) {
+      if (e && e.preventDefault) e.preventDefault();
       const input = document.getElementById('lnoriUrlInput');
       const btn = document.getElementById('lnoriIngestBtn');
       const cancelBtn = document.getElementById('lnoriCancelBtn');
       const status = document.getElementById('lnoriIngestStatus');
-      const targetUrl = input.value.trim();
+      const targetUrl = (existingState?.targetUrl || input.value || '').trim();
       if (!targetUrl || isLnoriIngesting) return;
 
       isLnoriIngesting = true;
@@ -5045,7 +5076,7 @@
       `);
       status.classList.remove('hidden');
 
-      let totalVolumes = 0;
+      let totalVolumes = existingState?.total || 0;
       const volumeStatuses = {};
       let completedData = null;
 
@@ -5146,76 +5177,203 @@
         }
       }
 
-      try {
-        const res = await fetch('/api/lnori/ingest', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'text/event-stream',
-          },
-          body: JSON.stringify({ url: targetUrl, stream: true }),
-          signal: activeLnoriAbortController.signal,
-        });
-
-        if (!res.ok) {
-          const errJson = await res.json().catch(() => ({}));
-          throw new Error(errJson.error || `HTTP ${res.status}`);
+      // If resuming from existing server state, initialize UI from snapshot safely
+      if (existingState) {
+        try {
+          handleProgressEvent(existingState);
+        } catch (initSnapErr) {
+          console.debug('[Lnori] Error initializing from existing state:', initSnapErr);
         }
+      }
 
-        const contentType = res.headers.get('content-type') || '';
-        if (
-          contentType.includes('text/event-stream') ||
-          contentType.includes('application/x-ndjson')
-        ) {
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
+      // Resilient Polling Fallback Helper
+      async function pollProgressUntilDone(expectedRunId = null, expectedTargetUrl = targetUrl) {
+        const activeTextEl = document.getElementById('lnoriActiveStatusText');
+        if (activeTextEl) {
+          activeTextEl.textContent = 'Connection stream interrupted. Continuing in background...';
+        }
+        const pollStartTime = Date.now();
+        const maxPollDurationMs = 15 * 60 * 1000; // 15 minute safety timeout
 
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop();
-            for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed) continue;
-              let parsed = null;
-              if (trimmed.startsWith('data:')) {
-                try {
-                  parsed = JSON.parse(trimmed.slice(5).trim());
-                } catch {}
+        while (isLnoriIngesting && !runController.signal.aborted) {
+          if (Date.now() - pollStartTime > maxPollDurationMs) {
+            throw new Error('Background ingestion polling timed out after 15 minutes.');
+          }
+
+          await new Promise((r) => setTimeout(r, 1500));
+          if (runController.signal.aborted) break;
+
+          try {
+            const pollRes = await fetch('/api/lnori/progress');
+            if (!pollRes.ok) continue;
+            const pollData = await pollRes.json();
+            if (!pollData || !pollData.state) continue;
+
+            const st = pollData.state;
+            // Validate job identity against expected runId or targetUrl
+            if (expectedRunId && st.runId && st.runId !== expectedRunId) {
+              console.warn('[Lnori] Polled job runId mismatch:', st.runId, 'expected:', expectedRunId);
+              continue;
+            }
+            if (!expectedRunId && expectedTargetUrl && st.targetUrl && st.targetUrl !== expectedTargetUrl) {
+              console.warn('[Lnori] Polled job targetUrl mismatch:', st.targetUrl, 'expected:', expectedTargetUrl);
+              continue;
+            }
+
+            handleProgressEvent({
+              phase: st.phase,
+              index: st.index,
+              total: st.total,
+              volumeTitle: st.volumeTitle,
+              status: st.status,
+              data: st.data,
+            });
+
+            if (!pollData.active) {
+              if (st.completedData) {
+                completedData = st.completedData;
+                return completedData;
+              } else if (st.error) {
+                throw new Error(st.error);
               } else {
-                try {
-                  parsed = JSON.parse(trimmed);
-                } catch {}
+                throw new Error('Background ingestion completed with unknown status');
               }
-              if (parsed) {
-                handleProgressEvent(parsed);
-              }
+            }
+          } catch (pollErr) {
+            if (pollErr.name === 'AbortError' || runController.signal.aborted) {
+              throw pollErr;
+            }
+            if (
+              pollErr.message &&
+              !pollErr.message.includes('fetch') &&
+              !pollErr.message.includes('network') &&
+              !pollErr.message.includes('Failed to fetch')
+            ) {
+              throw pollErr;
             }
           }
-          if (buffer && buffer.trim()) {
-            const trimmed = buffer.trim();
-            let parsed = null;
-            if (trimmed.startsWith('data:')) {
-              try {
-                parsed = JSON.parse(trimmed.slice(5).trim());
-              } catch {}
-            } else {
-              try {
-                parsed = JSON.parse(trimmed);
-              } catch {}
+        }
+        if (runController.signal.aborted) {
+          const abortErr = new Error('Lnori ingestion cancelled by user');
+          abortErr.name = 'AbortError';
+          throw abortErr;
+        }
+        return completedData;
+      }
+
+      let currentRunId = existingState?.runId || null;
+
+      try {
+        if (!isResuming) {
+          let responseStarted = false;
+          try {
+            const res = await fetch('/api/lnori/ingest', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'text/event-stream',
+              },
+              body: JSON.stringify({ url: targetUrl, stream: true }),
+              signal: activeLnoriAbortController.signal,
+            });
+
+            if (!res.ok) {
+              const errJson = await res.json().catch(() => ({}));
+              throw new Error(errJson.error || `HTTP ${res.status}`);
             }
-            if (parsed) handleProgressEvent(parsed);
+
+            responseStarted = true;
+
+            const contentType = res.headers.get('content-type') || '';
+            if (
+              contentType.includes('text/event-stream') ||
+              contentType.includes('application/x-ndjson')
+            ) {
+              const reader = res.body.getReader();
+              const decoder = new TextDecoder();
+              let buffer = '';
+
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+                for (const line of lines) {
+                  const trimmed = line.trim();
+                  if (!trimmed) continue;
+                  let parsed = null;
+                  if (trimmed.startsWith('data:')) {
+                    try {
+                      parsed = JSON.parse(trimmed.slice(5).trim());
+                    } catch {}
+                  } else {
+                    try {
+                      parsed = JSON.parse(trimmed);
+                    } catch {}
+                  }
+                  if (parsed) {
+                    if (parsed.runId) currentRunId = parsed.runId;
+                    if (parsed.phase === 'error') {
+                      const errMsg = parsed.status || parsed.data?.error || 'Ingestion encountered an error';
+                      const fatalErr = new Error(errMsg);
+                      fatalErr.isStructuredFatal = true;
+                      throw fatalErr;
+                    }
+                    handleProgressEvent(parsed);
+                  }
+                }
+              }
+              if (buffer && buffer.trim()) {
+                const trimmed = buffer.trim();
+                let parsed = null;
+                if (trimmed.startsWith('data:')) {
+                  try {
+                    parsed = JSON.parse(trimmed.slice(5).trim());
+                  } catch {}
+                } else {
+                  try {
+                    parsed = JSON.parse(trimmed);
+                  } catch {}
+                }
+                if (parsed) {
+                  if (parsed.runId) currentRunId = parsed.runId;
+                  if (parsed.phase === 'error') {
+                    const errMsg = parsed.status || parsed.data?.error || 'Ingestion encountered an error';
+                    const fatalErr = new Error(errMsg);
+                    fatalErr.isStructuredFatal = true;
+                    throw fatalErr;
+                  }
+                  handleProgressEvent(parsed);
+                }
+              }
+            } else {
+              // Non-streaming fallback response
+              const data = await res.json();
+              if (!res.ok || !data.success) {
+                throw new Error(data.error || 'Failed to ingest light novel from Lnori');
+              }
+              completedData = data;
+            }
+          } catch (streamErr) {
+            // Only fall back to background polling if response had successfully started
+            // and the error is a transport/stream disconnect (NOT a 4xx/5xx pre-flight failure,
+            // NOT a structured server error, and NOT a user abort).
+            if (
+              responseStarted &&
+              !streamErr?.isStructuredFatal &&
+              streamErr.name !== 'AbortError' &&
+              !runController.signal.aborted
+            ) {
+              console.warn('[Lnori] Streaming connection dropped or failed, falling back to background polling:', streamErr);
+              completedData = await pollProgressUntilDone(currentRunId, targetUrl);
+            } else {
+              throw streamErr;
+            }
           }
         } else {
-          // Non-streaming fallback response
-          const data = await res.json();
-          if (!res.ok || !data.success) {
-            throw new Error(data.error || 'Failed to ingest light novel from Lnori');
-          }
-          completedData = data;
+          // Resumed directly from active state: poll until complete
+          completedData = await pollProgressUntilDone(currentRunId, targetUrl);
         }
 
         if (completedData) {
@@ -5288,7 +5446,7 @@
             'text-xs p-3 rounded-xl border bg-zinc-900 border-zinc-700 text-zinc-400';
           setHtml(
             status,
-            `<div><strong>⚠️ Ingestion Stopped:</strong><div class="mt-1 text-[11px] text-zinc-400">Light novel download was stopped.</div></div>`,
+            `<div><strong>ℹ️ Ingestion Running in Background:</strong><div class="mt-1 text-[11px] text-zinc-400">Modal was closed or client detached. Light novel download continues in background on the server. Re-open to resume monitoring.</div></div>`,
           );
         } else {
           tgHaptic.error();

@@ -9,6 +9,7 @@ import {
   validateAndCanonicalizeProxyPath,
   setServerDependenciesForTest,
   resetServerDependenciesForTest,
+  resetActiveLnoriStateForTest,
   ingestBookFile,
 } from "./server";
 import { validateUrlForSSRF, getBsdtarPath } from "./security";
@@ -1359,9 +1360,9 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
       }
     });
 
-    it("aborts ingest when client aborts request signal", async () => {
-      const clientAbort = new AbortController();
-      let abortedObserved = false;
+    it("continues background ingest even after client stream disconnects, but aborts on POST /api/lnori/cancel", async () => {
+      let runFinished = false;
+      let abortSignalObserved = false;
 
       setServerDependenciesForTest({
         ingestLnoriSeries: async (_url: string, onProgress?: any, deps?: any) => {
@@ -1369,26 +1370,41 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
             await onProgress({
               phase: "manifest",
               total: 5,
-              volumeTitle: "Abort Test Series",
+              volumeTitle: "Background Ingest Test Series",
               status: "Found 5 volumes",
             });
           }
-          // Simulate client aborting during volume processing
-          clientAbort.abort();
-          if (deps?.signal?.aborted) {
-            abortedObserved = true;
-            throw new Error("Lnori ingestion aborted by client");
+
+          // Check if signal gets aborted during background execution
+          for (let step = 1; step <= 5; step++) {
+            if (deps?.signal?.aborted) {
+              abortSignalObserved = true;
+              throw new Error("Lnori ingestion cancelled by user");
+            }
+            if (onProgress) {
+              await onProgress({
+                phase: "volume",
+                index: step,
+                total: 5,
+                volumeTitle: `Vol ${step}`,
+                status: `Imported vol ${step}`,
+                data: { action: "imported" },
+              });
+            }
+            await new Promise((r) => setTimeout(r, 20));
           }
+
+          runFinished = true;
           return {
             success: true,
-            seriesTitle: "Abort Test Series",
+            seriesTitle: "Background Ingest Test Series",
             author: "Author",
-            importedCount: 0,
+            importedCount: 5,
             skippedCount: 0,
             duplicateCount: 0,
             totalCount: 5,
             tags: "Light Novel",
-            calibreBookIds: [],
+            calibreBookIds: [1, 2, 3, 4, 5],
           };
         },
       });
@@ -1398,20 +1414,53 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            url: "https://lnori.com/series/8046/abort-test",
+            url: "https://lnori.com/series/8046/bg-disconnect-test",
             stream: true,
           }),
-          signal: clientAbort.signal,
         });
 
         const res = await handleRequest(req, localServer);
         expect(res.status).toBe(200);
-        expect(res.headers.get("content-type")).toContain("text/event-stream");
-        const text = await res.text();
-        expect(abortedObserved).toBe(true);
-        expect(text).toContain("aborted by client");
+
+        // Cancel the response body stream (simulating client network drop / tab close)
+        if (res.body) {
+          await res.body.cancel();
+        }
+
+        // Check progress endpoint while background ingest continues running
+        const progressReq1 = new Request("http://127.0.0.1:8086/api/lnori/progress");
+        const progressRes1 = await handleRequest(progressReq1, localServer);
+        expect(progressRes1.status).toBe(200);
+        const progressData1 = (await progressRes1.json()) as any;
+        expect(progressData1.success).toBe(true);
+        expect(progressData1.state).toBeDefined();
+        expect(progressData1.state.runId).toBeDefined();
+
+        // Send explicit cancel request
+        const cancelReq = new Request("http://127.0.0.1:8086/api/lnori/cancel", {
+          method: "POST",
+        });
+        const cancelRes = await handleRequest(cancelReq, localServer);
+        expect(cancelRes.status).toBe(200);
+        const cancelData = (await cancelRes.json()) as any;
+        expect(cancelData.success).toBe(true);
+        expect(cancelData.cancelled).toBe(true);
+
+        // Wait a brief moment for the abort to be handled in the background task loop
+        await new Promise((r) => setTimeout(r, 50));
+        expect(abortSignalObserved).toBe(true);
+        expect(runFinished).toBe(false);
+
+        // Progress endpoint should now reflect cancelled / error state
+        const progressReq2 = new Request("http://127.0.0.1:8086/api/lnori/progress");
+        const progressRes2 = await handleRequest(progressReq2, localServer);
+        const progressData2 = (await progressRes2.json()) as any;
+        expect(progressData2.active).toBe(false);
+        expect(progressData2.state.phase).toBe("error");
+        expect(progressData2.state.error).toContain("cancelled by user");
       } finally {
         resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
       }
     });
 
@@ -1486,6 +1535,163 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
         expect(events[0].status).toContain("No volumes found");
       } finally {
         resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
+
+    it("GET /api/lnori/progress returns active status when ingestion is in progress and completedData when done", async () => {
+      let completeTrigger: (() => void) | undefined;
+      const completionPromise = new Promise<void>((resolve) => {
+        completeTrigger = resolve;
+      });
+
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async (_url: string, onProgress?: any) => {
+          if (onProgress) {
+            await onProgress({
+              phase: "manifest",
+              total: 3,
+              volumeTitle: "Polling Test Series",
+              status: "Found 3 volumes",
+            });
+            await onProgress({
+              phase: "volume",
+              index: 1,
+              total: 3,
+              volumeTitle: "Vol 1",
+              status: "Imported Vol 1",
+              data: { action: "imported" },
+            });
+          }
+          await completionPromise;
+          return {
+            success: true,
+            seriesTitle: "Polling Test Series",
+            author: "Author",
+            importedCount: 3,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 3,
+            tags: "Light Novel",
+            calibreBookIds: [10, 11, 12],
+          };
+        },
+      });
+
+      try {
+        // Start streaming ingestion
+        const ingestReq = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/polling-test",
+            stream: true,
+          }),
+        });
+        const ingestRes = await handleRequest(ingestReq, localServer);
+        expect(ingestRes.status).toBe(200);
+
+        // Check progress while running
+        const progReq1 = new Request("http://127.0.0.1:8086/api/lnori/progress");
+        const progRes1 = await handleRequest(progReq1, localServer);
+        expect(progRes1.status).toBe(200);
+        const progData1 = (await progRes1.json()) as any;
+        expect(progData1.success).toBe(true);
+        expect(progData1.active).toBe(true);
+        expect(progData1.state.volumeTitle).toBe("Vol 1");
+        expect(progData1.state.index).toBe(1);
+        expect(progData1.state.total).toBe(3);
+
+        // Let background ingestion finish
+        completeTrigger?.();
+        await new Promise((r) => setTimeout(r, 50));
+
+        // Check progress after completion
+        const progReq2 = new Request("http://127.0.0.1:8086/api/lnori/progress");
+        const progRes2 = await handleRequest(progReq2, localServer);
+        expect(progRes2.status).toBe(200);
+        const progData2 = (await progRes2.json()) as any;
+        expect(progData2.success).toBe(true);
+        expect(progData2.active).toBe(false);
+        expect(progData2.state.phase).toBe("complete");
+        expect(progData2.state.completedData).toBeDefined();
+        expect(progData2.state.completedData.importedCount).toBe(3);
+        expect(progData2.state.completedData.seriesTitle).toBe("Polling Test Series");
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
+
+    it("POST /api/lnori/cancel returns 200 with cancelled: false when no ingest is active", async () => {
+      resetActiveLnoriStateForTest();
+      const cancelReq = new Request("http://127.0.0.1:8086/api/lnori/cancel", {
+        method: "POST",
+      });
+      const cancelRes = await handleRequest(cancelReq, localServer);
+      expect(cancelRes.status).toBe(200);
+      const cancelData = (await cancelRes.json()) as any;
+      expect(cancelData.success).toBe(true);
+      expect(cancelData.cancelled).toBe(false);
+      expect(cancelData.message).toContain("No active Lnori ingestion");
+    });
+
+    it("POST /api/lnori/ingest returns 409 Conflict when another ingestion is currently active", async () => {
+      resetActiveLnoriStateForTest();
+      let completeTrigger: (() => void) | undefined;
+      const completionPromise = new Promise<void>((resolve) => {
+        completeTrigger = resolve;
+      });
+
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async () => {
+          await completionPromise;
+          return {
+            success: true,
+            seriesTitle: "Lock Test Series",
+            author: "Author",
+            importedCount: 1,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 1,
+            tags: "Light Novel",
+            calibreBookIds: [99],
+          };
+        },
+      });
+
+      try {
+        const req1 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/lock-test-1",
+            stream: true,
+          }),
+        });
+        const res1 = await handleRequest(req1, localServer);
+        expect(res1.status).toBe(200);
+
+        // Second concurrent request must receive 409
+        const req2 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/lock-test-2",
+            stream: true,
+          }),
+        });
+        const res2 = await handleRequest(req2, localServer);
+        expect(res2.status).toBe(409);
+        const errData = (await res2.json()) as any;
+        expect(errData.success).toBe(false);
+        expect(errData.error).toContain("Another Lnori ingestion is currently active");
+        expect(errData.active).toBe(true);
+
+        completeTrigger?.();
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
       }
     });
   });
