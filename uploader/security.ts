@@ -953,13 +953,34 @@ export function isAllowedProductionWanOrigin(
     return true;
   }
 
-  // Allow configured WAN URLs
+  // Allow configured WAN URLs (ensuring they are not local/private IPs)
+  const isSafeWanUrl = (urlStr: string) => {
+    try {
+      const u = new URL(urlStr);
+      const h = u.hostname.replace(/^\[|\]$/g, "");
+      if (h === "localhost" || h.endsWith(".localhost") || isPrivateOrInternalIp(h)) {
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const readingWan = process.env.READING_WEBAPP_URL;
-  if (readingWan && lower === readingWan.toLowerCase().replace(/\/+$/, "")) {
+  if (
+    readingWan &&
+    isSafeWanUrl(readingWan) &&
+    lower === readingWan.toLowerCase().replace(/\/+$/, "")
+  ) {
     return true;
   }
   const kosyncWan = process.env.KOSYNC_WAN_URL;
-  if (kosyncWan && lower === kosyncWan.toLowerCase().replace(/\/+$/, "")) {
+  if (
+    kosyncWan &&
+    isSafeWanUrl(kosyncWan) &&
+    lower === kosyncWan.toLowerCase().replace(/\/+$/, "")
+  ) {
     return true;
   }
 
@@ -972,23 +993,8 @@ export function isAllowedProductionWanOrigin(
     ...extraAllowedOrigins.map((o: string) => o.toLowerCase()),
     ...envOrigins,
   ];
-  if (allAllowed.includes(lower)) {
-    // Ensure configured extra origins are not loopback/RFC1918
-    try {
-      const u = new URL(lower);
-      const h = u.hostname;
-      if (
-        h !== "localhost" &&
-        h !== "127.0.0.1" &&
-        !h.startsWith("192.168.") &&
-        !h.startsWith("10.") &&
-        !/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h)
-      ) {
-        return true;
-      }
-    } catch {
-      // Malformed URL
-    }
+  if (allAllowed.includes(lower) && isSafeWanUrl(lower)) {
+    return true;
   }
 
   return false;
