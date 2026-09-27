@@ -520,6 +520,79 @@ describe("Public WAN & API Surface Hardening — WAN vs LAN & Authentication", (
     ).toBe(true);
   });
 
+  it("authenticateRequest authenticates allowed origins when apiKey is empty, and rejects untrusted origins", () => {
+    // 1. Allowed Origin header with empty apiKey -> method: 'origin', authenticated: true
+    const originReq = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+      method: "POST",
+      headers: {
+        host: "reading.wavypremium.xyz",
+        origin: "https://reading.wavypremium.xyz",
+      },
+    });
+    const originRes = authenticateRequest(originReq, { apiKey: "" });
+    expect(originRes.authenticated).toBe(true);
+    expect(originRes.method).toBe("origin");
+
+    // Singapore WAN origin
+    const originSgReq = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+      method: "POST",
+      headers: {
+        host: "reading-sg.wavypremium.xyz:8443",
+        origin: "https://reading-sg.wavypremium.xyz:8443",
+      },
+    });
+    const originSgRes = authenticateRequest(originSgReq, { apiKey: "" });
+    expect(originSgRes.authenticated).toBe(true);
+    expect(originSgRes.method).toBe("origin");
+
+    // 2. Allowed Referer header with empty apiKey -> method: 'origin', authenticated: true
+    const refererReq = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+      method: "POST",
+      headers: {
+        host: "reading.wavypremium.xyz",
+        referer: "https://reading.wavypremium.xyz/app",
+      },
+    });
+    const refererRes = authenticateRequest(refererReq, { apiKey: "" });
+    expect(refererRes.authenticated).toBe(true);
+    expect(refererRes.method).toBe("origin");
+
+    // 3. Untrusted origin with empty apiKey -> rejected with 401
+    const untrustedReq = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+      method: "POST",
+      headers: {
+        host: "reading.wavypremium.xyz",
+        origin: "https://attacker.site",
+      },
+    });
+    const untrustedRes = authenticateRequest(untrustedReq, { apiKey: "" });
+    expect(untrustedRes.authenticated).toBe(false);
+    expect(untrustedRes.error).toContain("Authentication required");
+
+    // 4. Missing origin and referer with empty apiKey -> rejected with 401
+    const noOriginReq = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+      method: "POST",
+      headers: {
+        host: "reading.wavypremium.xyz",
+      },
+    });
+    const noOriginRes = authenticateRequest(noOriginReq, { apiKey: "" });
+    expect(noOriginRes.authenticated).toBe(false);
+    expect(noOriginRes.error).toContain("Authentication required");
+
+    // 5. Allowed origin when apiKey IS configured still requires matching credentials
+    const originWithKeyReq = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+      method: "POST",
+      headers: {
+        host: "reading.wavypremium.xyz",
+        origin: "https://reading.wavypremium.xyz",
+      },
+    });
+    const originWithKeyRes = authenticateRequest(originWithKeyReq, { apiKey: "my-secret-key" });
+    expect(originWithKeyRes.authenticated).toBe(false);
+    expect(originWithKeyRes.error).toContain("Authentication required");
+  });
+
   it("validateTelegramWebAppData correctly verifies valid HMAC-SHA256 signatures and rejects tampered data", () => {
     const botToken = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11";
     const authDate = Math.floor(Date.now() / 1000);
@@ -1605,19 +1678,41 @@ describe("Server Integration Endpoints & Hardened API Surface", () => {
   });
 
   it("blocks unauthenticated WAN mutating requests with 401", async () => {
-    const wanDelete = new Request("http://127.0.0.1:8086/api/books/999", {
+    // 1. WAN request with no origin header or credentials rejected with 401
+    const wanDeleteNoOrigin = new Request("http://127.0.0.1:8086/api/books/999", {
       method: "DELETE",
       headers: {
         host: "reading.wavypremium.xyz",
-        origin: "https://reading.wavypremium.xyz",
       },
     });
 
-    const res = await handleRequest(wanDelete);
-    expect(res.status).toBe(401);
-    const data = (await res.json()) as any;
-    expect(data.success).toBe(false);
-    expect(data.error).toContain("Authentication required");
+    const resNoOrigin = await handleRequest(wanDeleteNoOrigin);
+    expect(resNoOrigin.status).toBe(401);
+    const dataNoOrigin = (await resNoOrigin.json()) as any;
+    expect(dataNoOrigin.success).toBe(false);
+    expect(dataNoOrigin.error).toContain("Authentication required");
+
+    // 2. When READING_API_KEY is configured, WAN mutating request from allowed origin still requires valid credentials
+    const origKey = process.env.READING_API_KEY;
+    try {
+      process.env.READING_API_KEY = "test-secret-key-123";
+      const wanDelete = new Request("http://127.0.0.1:8086/api/books/999", {
+        method: "DELETE",
+        headers: {
+          host: "reading.wavypremium.xyz",
+          origin: "https://reading.wavypremium.xyz",
+        },
+      });
+
+      const res = await handleRequest(wanDelete);
+      expect(res.status).toBe(401);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("Authentication required");
+    } finally {
+      if (origKey !== undefined) process.env.READING_API_KEY = origKey;
+      else delete process.env.READING_API_KEY;
+    }
   });
 
   it("preserves Calibre internal paths and constructs metadata-derived download names", () => {

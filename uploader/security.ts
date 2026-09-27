@@ -790,7 +790,7 @@ export function validateTelegramWebAppData(
 
 export interface AuthResult {
   authenticated: boolean;
-  method?: "lan" | "bearer" | "api_key" | "tma" | "cookie";
+  method?: "lan" | "bearer" | "api_key" | "tma" | "cookie" | "origin";
   user?: any;
   error?: string;
 }
@@ -872,6 +872,28 @@ export function authenticateRequest(
       const tmaRes = validateTelegramWebAppData(cookies.reading_tma, botToken);
       if (tmaRes.valid) {
         return { authenticated: true, method: "cookie", user: tmaRes.user };
+      }
+    }
+  }
+
+  // 5. Allow verified production origins when READING_API_KEY is unset.
+  // When no API key is configured, public WAN access from the trusted web UI
+  // is authenticated via origin verification (Origin or Referer).
+  if (!apiKey) {
+    const origin = req.headers.get("origin");
+    if (origin && isAllowedOrigin(origin)) {
+      return { authenticated: true, method: "origin" };
+    }
+    const referer = req.headers.get("referer");
+    if (referer) {
+      try {
+        const refUrl = new URL(referer);
+        const refOrigin = `${refUrl.protocol}//${refUrl.host}`;
+        if (isAllowedOrigin(refOrigin)) {
+          return { authenticated: true, method: "origin" };
+        }
+      } catch {
+        // Malformed referer ignored
       }
     }
   }
