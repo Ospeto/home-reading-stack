@@ -334,11 +334,21 @@ export async function validateUrlForSSRF(
     // intentionally checked only after deriving host and only for loopback hosts.
     const configuredUploaderPort =
       process.env.UPLOADER_PORT || process.env.PORT || "8086";
+    let localUploaderPort = configuredUploaderPort;
+    if (process.env.LOCAL_UPLOADER_URL) {
+      try {
+        const u = new URL(process.env.LOCAL_UPLOADER_URL);
+        if (u.port) localUploaderPort = u.port;
+      } catch (_parseErr) {
+        void _parseErr;
+      }
+    }
     const allowedInternalPorts = [
       "8086",
       "8088",
       "7200",
       configuredUploaderPort,
+      localUploaderPort,
     ];
 
     if (

@@ -2706,6 +2706,7 @@ describe("Lnori Queue & Telegram Bot Integration", () => {
             currentQueuePosition: null,
             queueLength: 0,
             state: {
+              runId: "run-queued-1",
               phase: "complete",
               completedData: {
                 seriesTitle: "The Genius Prince's Guide",
@@ -2798,6 +2799,7 @@ describe("Lnori Queue & Telegram Bot Integration", () => {
               currentQueuePosition: null,
               queueLength: 1,
               state: {
+                runId: "run-poll-test",
                 phase: "volume",
                 index: 1,
                 total: 2,
@@ -2816,6 +2818,7 @@ describe("Lnori Queue & Telegram Bot Integration", () => {
             currentQueuePosition: null,
             queueLength: 0,
             state: {
+              runId: "run-poll-test",
               phase: "complete",
               completedData: {
                 seriesTitle: "Sword Art Online",
@@ -2854,7 +2857,7 @@ describe("Lnori Queue & Telegram Bot Integration", () => {
 
       // Active volume progress
       const activeProgressMsg = sentTelegramBodies.find((m) =>
-        m.text.includes("[Volume 1/2] Downloading \"Volume 1\"..."),
+        m.text.includes("Volume 1/2") && m.text.includes("Downloading"),
       );
       expect(activeProgressMsg).toBeDefined();
 
@@ -3135,9 +3138,153 @@ describe("Lnori Queue & Telegram Bot Integration", () => {
       await sendLnoriErrorCard(123, 7001, "https://lnori.com/series/8046/failed", "Network timeout after 60s");
       expect(sentTelegramBodies[0].text).toContain("Lnori Ingestion Failed");
       expect(sentTelegramBodies[0].text).toContain("Network timeout after 60s");
+
+      // 5. Unexpected Content-Type
+      responseStatus = 200;
+      responseBody = "Unknown format";
+      sentTelegramBodies.length = 0;
+      globalThis.fetch = (async (input: any, init: any) => {
+        const url = typeof input === "string" ? input : input?.url || "";
+        if (url.includes("sendMessage") || url.includes("editMessageText")) {
+          const body = JSON.parse(init?.body || "{}");
+          sentTelegramBodies.push(body);
+          return new Response(JSON.stringify({ ok: true, result: { message_id: 7002 } }), {
+            status: 200,
+          });
+        }
+        if (url.includes("/api/lnori/ingest")) {
+          return new Response("Unknown raw text", {
+            status: 200,
+            headers: { "Content-Type": "text/plain" },
+          });
+        }
+        return origFetch(input, init);
+      }) as typeof fetch;
+
+      await handleLnoriUrlMessage(123, "https://lnori.com/series/8046/unknown-ct", "tester");
+      const unexpMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(unexpMsg.text).toContain("Lnori Ingestion Failed");
+      expect(unexpMsg.text).toContain("Unexpected response from uploader server");
     } finally {
       globalThis.fetch = origFetch;
       resetLocalLnoriQueueForTest();
+    }
+  });
+
+  it("pollLnoriProgress terminates with error card when polled runId mismatches or is evicted", async () => {
+    resetLocalLnoriQueueForTest();
+    setLnoriPollIntervalForTest(10);
+    const sentTelegramBodies: any[] = [];
+    const origFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentTelegramBodies.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 8001 } }), {
+          status: 200,
+        });
+      }
+      if (url.includes("/api/lnori/progress")) {
+        // Return global active state for a completely different runId
+        return new Response(
+          JSON.stringify({
+            success: true,
+            active: true,
+            currentQueuePosition: null,
+            queueLength: 0,
+            state: {
+              runId: "different-unrelated-runId",
+              phase: "volume",
+              status: "Downloading unrelated series",
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      await pollLnoriProgress(
+        123,
+        8001,
+        "https://lnori.com/series/8046/test",
+        "expected-my-runId",
+        "http://127.0.0.1:8086",
+      );
+
+      const errorMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(errorMsg.text).toContain("Lnori Ingestion Failed");
+      expect(errorMsg.text).toContain("Job was removed or could not be found in ingestion queue");
+    } finally {
+      globalThis.fetch = origFetch;
+      resetLocalLnoriQueueForTest();
+    }
+  });
+
+  it("consumeLnoriSseStream sends error card when stream disconnects without receiving runId", async () => {
+    resetLocalLnoriQueueForTest();
+    const sentTelegramBodies: any[] = [];
+    const origFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentTelegramBodies.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 9001 } }), {
+          status: 200,
+        });
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    // Stream that only sends keepalive and then closes without any event or runId
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(": keepalive\n\n"));
+        controller.close();
+      },
+    });
+
+    const sseResponse = new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+
+    try {
+      await consumeLnoriSseStream(
+        123,
+        9001,
+        "https://lnori.com/series/8046/drop",
+        sseResponse,
+        "http://127.0.0.1:8086",
+      );
+
+      const errorMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(errorMsg.text).toContain("Lnori Ingestion Failed");
+      expect(errorMsg.text).toContain("Stream connection lost before ingestion initialized");
+    } finally {
+      globalThis.fetch = origFetch;
+      resetLocalLnoriQueueForTest();
+    }
+  });
+
+  it("LOCAL_UPLOADER_URL custom port is allowlisted in SSRF validation", async () => {
+    const { validateUrlForSSRF } = await import("./security");
+    const origEnv = process.env.LOCAL_UPLOADER_URL;
+    try {
+      process.env.LOCAL_UPLOADER_URL = "http://127.0.0.1:9876";
+      const check = await validateUrlForSSRF("http://127.0.0.1:9876/api/lnori/ingest", {
+        allowInternalServices: true,
+      });
+      expect(check.safe).toBe(true);
+      expect(check.resolvedIp).toBe("127.0.0.1");
+    } finally {
+      if (origEnv !== undefined) process.env.LOCAL_UPLOADER_URL = origEnv;
+      else delete process.env.LOCAL_UPLOADER_URL;
     }
   });
 });

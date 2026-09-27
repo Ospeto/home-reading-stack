@@ -3826,14 +3826,6 @@ export function getLocalUploaderUrl(): string {
   if (process.env.LOCAL_UPLOADER_URL) {
     return process.env.LOCAL_UPLOADER_URL.replace(/\/+$/, "");
   }
-  if (process.env.WEB_UPLOADER_URL && !process.env.UPLOADER_PORT) {
-    try {
-      const u = new URL(process.env.WEB_UPLOADER_URL);
-      return `${u.protocol}//127.0.0.1:${u.port || "8086"}`;
-    } catch (_urlErr) {
-      void _urlErr;
-    }
-  }
   const port = process.env.UPLOADER_PORT || process.env.PORT || "8086";
   return `http://127.0.0.1:${port}`;
 }
@@ -3857,6 +3849,7 @@ export interface LocalLnoriQueueItem {
 }
 const localLnoriQueue: LocalLnoriQueueItem[] = [];
 let isLocalLnoriActive = false;
+const MAX_LOCAL_LNORI_QUEUE = 25;
 
 export function getLocalLnoriQueue(): LocalLnoriQueueItem[] {
   return localLnoriQueue.map((item) => ({ ...item }));
@@ -3954,6 +3947,18 @@ export async function runDirectLnoriFallback(
   articleUrl: string,
 ): Promise<void> {
   if (isLocalLnoriActive) {
+    if (localLnoriQueue.length >= MAX_LOCAL_LNORI_QUEUE) {
+      await editOrSendMessage(
+        chatId,
+        statusMsgId,
+        `⚠️ *Lnori Ingestion Queue Full*\n\n` +
+          `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
+          `⏳ *Status:* Local ingestion queue is full (${MAX_LOCAL_LNORI_QUEUE} items). Please wait for active downloads to finish.\n\n` +
+          `_Please try again in a few moments._`,
+        "Markdown",
+      );
+      return;
+    }
     localLnoriQueue.push({ url: articleUrl, chatId, statusMsgId });
     const queuePosition = localLnoriQueue.length;
     const queueLength = localLnoriQueue.length;
@@ -3972,64 +3977,89 @@ export async function runDirectLnoriFallback(
   }
 
   isLocalLnoriActive = true;
-  try {
-    let lastProgressText = "";
-    let lastEditTime = 0;
-    const result = await _ingestLnoriSeriesRunner(
-      articleUrl,
-      async (progress: LnoriProgressEvent | string) => {
-        const text =
-          typeof progress === "string"
-            ? progress
-            : formatLnoriProgress(progress);
-        const now = Date.now();
-        if (text && (text !== lastProgressText || now - lastEditTime >= 1000)) {
-          lastProgressText = text;
-          lastEditTime = now;
-          const msgId = await editOrSendMessage(
-            chatId,
-            statusMsgId,
-            text,
-            "Markdown",
-          );
-          if (msgId && !statusMsgId) statusMsgId = msgId;
-        }
-      },
-    );
+  let currentJob: LocalLnoriQueueItem | null = {
+    url: articleUrl,
+    chatId,
+    statusMsgId,
+  };
 
-    if (result && result.success) {
-      if (result.importedCount === 0 && result.skippedCount === 0) {
-        await sendLnoriIncompleteCard(chatId, statusMsgId, articleUrl);
-      } else {
-        await sendLnoriCompletionCard(chatId, statusMsgId, articleUrl, result);
-      }
-    } else {
-      await sendLnoriIncompleteCard(chatId, statusMsgId, articleUrl);
-    }
-  } catch (err: any) {
-    logError(
-      `Direct fallback Lnori ingestion error for ${articleUrl}: ${err?.message || err}`,
-    );
-    await sendLnoriErrorCard(
-      chatId,
-      statusMsgId,
-      articleUrl,
-      err?.message || "Failed to import Lnori series",
-    );
-  } finally {
-    isLocalLnoriActive = false;
-    if (localLnoriQueue.length > 0) {
-      const next = localLnoriQueue.shift()!;
-      setTimeout(() => {
-        runDirectLnoriFallback(next.chatId, next.statusMsgId, next.url).catch(
-          (e) => {
-            logError(
-              `Error processing next queued local Lnori job: ${e?.message || e}`,
-            );
+  try {
+    while (currentJob) {
+      const activeUrl = currentJob.url;
+      const activeChatId = currentJob.chatId;
+      let activeMsgId = currentJob.statusMsgId;
+
+      try {
+        let lastProgressText = "";
+        let lastEditTime = 0;
+        const result = await _ingestLnoriSeriesRunner(
+          activeUrl,
+          async (progress: LnoriProgressEvent | string) => {
+            const text =
+              typeof progress === "string"
+                ? progress
+                : formatLnoriProgress(progress);
+            const now = Date.now();
+            if (
+              text &&
+              (text !== lastProgressText || now - lastEditTime >= 1000)
+            ) {
+              lastProgressText = text;
+              lastEditTime = now;
+              const cleanText = escapeTelegramMarkdown(text);
+              const msgId = await editOrSendMessage(
+                activeChatId,
+                activeMsgId,
+                cleanText,
+                "Markdown",
+              );
+              if (msgId && !activeMsgId) activeMsgId = msgId;
+            }
           },
         );
-      }, 10);
+
+        if (result && result.success) {
+          if (result.importedCount === 0 && result.skippedCount === 0) {
+            await sendLnoriIncompleteCard(activeChatId, activeMsgId, activeUrl);
+          } else {
+            await sendLnoriCompletionCard(
+              activeChatId,
+              activeMsgId,
+              activeUrl,
+              result,
+            );
+          }
+        } else {
+          await sendLnoriIncompleteCard(activeChatId, activeMsgId, activeUrl);
+        }
+      } catch (err: any) {
+        logError(
+          `Direct fallback Lnori ingestion error for ${activeUrl}: ${err?.message || err}`,
+        );
+        await sendLnoriErrorCard(
+          activeChatId,
+          activeMsgId,
+          activeUrl,
+          err?.message || "Failed to import Lnori series",
+        );
+      }
+
+      currentJob = localLnoriQueue.shift() || null;
+      if (currentJob) {
+        const activatingText =
+          `📖 *Detected Lnori Light Novel Series*\n\`${escapeTelegramMarkdown(currentJob.url)}\`\n\n` +
+          `⏳ _Fetching volume manifest..._`;
+        const msgId = await editOrSendMessage(
+          currentJob.chatId,
+          currentJob.statusMsgId,
+          activatingText,
+          "Markdown",
+        );
+        if (msgId && !currentJob.statusMsgId) currentJob.statusMsgId = msgId;
+      }
     }
+  } finally {
+    isLocalLnoriActive = false;
   }
 }
 
@@ -4041,6 +4071,7 @@ export async function pollLnoriProgress(
   uploaderUrl: string,
   initialQueuePos: number | null = null,
   initialQueueLen: number | null = null,
+  maxPollAttempts: number = 1200,
 ): Promise<void> {
   let lastReportedPos = initialQueuePos;
   let lastReportedLen = initialQueueLen;
@@ -4048,8 +4079,10 @@ export async function pollLnoriProgress(
   let lastEditTime = 0;
   let isJobActive = false;
   let consecutiveErrors = 0;
+  let pollAttempts = 0;
 
-  while (true) {
+  while (pollAttempts < maxPollAttempts) {
+    pollAttempts++;
     await new Promise((r) => setTimeout(r, _lnoriPollIntervalMs));
 
     let progData: any;
@@ -4096,6 +4129,19 @@ export async function pollLnoriProgress(
     }
 
     if (!progData || !progData.success) {
+      consecutiveErrors++;
+      if (consecutiveErrors >= 5) {
+        logError(
+          `Progress polling returned success: false 5 consecutive times`,
+        );
+        await sendLnoriErrorCard(
+          chatId,
+          statusMsgId,
+          articleUrl,
+          "Failed to retrieve ingestion progress from server",
+        );
+        return;
+      }
       continue;
     }
 
@@ -4123,7 +4169,20 @@ export async function pollLnoriProgress(
       continue;
     }
 
-    // 2. Transitioned from queued to active
+    // 2. Not in queue: verify state.runId matches target runId!
+    if (state.runId !== runId) {
+      logError(
+        `Lnori progress state runId (${state.runId}) does not match target runId (${runId}) and item is not in queue`,
+      );
+      await sendLnoriErrorCard(
+        chatId,
+        statusMsgId,
+        articleUrl,
+        "Job was removed or could not be found in ingestion queue",
+      );
+      return;
+    }
+
     if (!isJobActive) {
       isJobActive = true;
     }
@@ -4155,36 +4214,26 @@ export async function pollLnoriProgress(
     if (text && (text !== lastProgressText || now - lastEditTime >= 1000)) {
       lastProgressText = text;
       lastEditTime = now;
+      const cleanText = escapeTelegramMarkdown(text);
       const msgId = await editOrSendMessage(
         chatId,
         statusMsgId,
-        text,
+        cleanText,
         "Markdown",
       );
       if (msgId && !statusMsgId) statusMsgId = msgId;
     }
-
-    // 5. Edge case: state is not active, not complete, not error, and not in queue
-    if (!progData.active && !state.phase && currentPos === null) {
-      log(`Lnori job ${runId} concluded without active state`);
-      if (state.completedData) {
-        await sendLnoriCompletionCard(
-          chatId,
-          statusMsgId,
-          articleUrl,
-          state.completedData,
-        );
-        return;
-      }
-      await sendLnoriErrorCard(
-        chatId,
-        statusMsgId,
-        articleUrl,
-        "Job was removed from ingestion queue",
-      );
-      return;
-    }
   }
+
+  logError(
+    `Progress polling for ${runId} exceeded maximum attempts (${maxPollAttempts})`,
+  );
+  await sendLnoriErrorCard(
+    chatId,
+    statusMsgId,
+    articleUrl,
+    "Ingestion monitoring timed out after 30 minutes",
+  );
 }
 
 export async function consumeLnoriSseStream(
@@ -4197,6 +4246,12 @@ export async function consumeLnoriSseStream(
   const reader = response.body?.getReader();
   if (!reader) {
     logError("No response body reader for SSE stream");
+    await sendLnoriErrorCard(
+      chatId,
+      statusMsgId,
+      articleUrl,
+      "Unable to read streaming progress from server",
+    );
     return;
   }
 
@@ -4271,10 +4326,11 @@ export async function consumeLnoriSseStream(
             ) {
               lastProgressText = text;
               lastEditTime = now;
+              const cleanText = escapeTelegramMarkdown(text);
               const msgId = await editOrSendMessage(
                 chatId,
                 statusMsgId,
-                text,
+                cleanText,
                 "Markdown",
               );
               if (msgId && !statusMsgId) statusMsgId = msgId;
@@ -4287,19 +4343,35 @@ export async function consumeLnoriSseStream(
     }
   } catch (streamErr: any) {
     logError(`SSE stream error: ${streamErr?.message || streamErr}`);
+  } finally {
+    try {
+      await reader.cancel();
+    } catch (_cancelErr) {
+      void _cancelErr;
+    }
   }
 
-  if (!completed && runId) {
-    log(
-      `SSE stream disconnected for runId ${runId}, falling back to progress polling...`,
-    );
-    await pollLnoriProgress(
-      chatId,
-      statusMsgId,
-      articleUrl,
-      runId,
-      uploaderUrl,
-    );
+  if (!completed) {
+    if (runId) {
+      log(
+        `SSE stream disconnected for runId ${runId}, falling back to progress polling...`,
+      );
+      await pollLnoriProgress(
+        chatId,
+        statusMsgId,
+        articleUrl,
+        runId,
+        uploaderUrl,
+      );
+    } else {
+      logError("SSE stream disconnected before runId was received");
+      await sendLnoriErrorCard(
+        chatId,
+        statusMsgId,
+        articleUrl,
+        "Stream connection lost before ingestion initialized",
+      );
+    }
   }
 }
 
@@ -4415,6 +4487,13 @@ export async function handleLnoriUrlMessage(
           queuePosition,
           queueLength,
         );
+      } else {
+        await sendLnoriErrorCard(
+          chatId,
+          statusMsgId,
+          articleUrl,
+          "Server queued request but did not return a run ID",
+        );
       }
       return;
     }
@@ -4459,7 +4538,13 @@ export async function handleLnoriUrlMessage(
     return;
   }
 
-  log(`Unexpected Content-Type from /api/lnori/ingest: ${contentType}`);
+  logError(`Unexpected Content-Type from /api/lnori/ingest: ${contentType}`);
+  await sendLnoriErrorCard(
+    chatId,
+    statusMsgId,
+    articleUrl,
+    `Unexpected response from uploader server (${contentType || "unknown"})`,
+  );
 }
 
 export async function handleTextMessage(
