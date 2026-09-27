@@ -151,6 +151,20 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
       allowInternalServices: true,
     });
     expect(wrongPort.safe).toBe(false);
+
+    // Dynamic configured port via LOCAL_UPLOADER_URL or UPLOADER_PORT
+    const origLocalUrl = process.env.LOCAL_UPLOADER_URL;
+    try {
+      process.env.LOCAL_UPLOADER_URL = "http://127.0.0.1:8089";
+      const dynamicPortAllowed = await validateUrlForSSRF("http://127.0.0.1:8089/status", {
+        allowInternalServices: true,
+      });
+      expect(dynamicPortAllowed.safe).toBe(true);
+      expect(dynamicPortAllowed.resolvedIp).toBe("127.0.0.1");
+    } finally {
+      if (origLocalUrl !== undefined) process.env.LOCAL_UPLOADER_URL = origLocalUrl;
+      else delete process.env.LOCAL_UPLOADER_URL;
+    }
   });
 
   it("validateUrlForSSRF blocks direct private IP literals and metadata endpoints", async () => {

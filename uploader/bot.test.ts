@@ -33,6 +33,19 @@ import {
   formatDuplicateCleanerCard,
   handleTextMessage,
   setDuplicateCleanerRunnerForTest,
+  handleLnoriUrlMessage,
+  getLocalUploaderUrl,
+  setLocalUploaderUrlForTest,
+  setIngestLnoriSeriesRunnerForTest,
+  setLnoriPollIntervalForTest,
+  resetLocalLnoriQueueForTest,
+  getLocalLnoriQueue,
+  sendLnoriCompletionCard,
+  sendLnoriErrorCard,
+  sendLnoriIncompleteCard,
+  runDirectLnoriFallback,
+  pollLnoriProgress,
+  consumeLnoriSseStream,
 } from "./bot";
 import { type CleanDuplicatesReport } from "../scripts/clean-duplicates";
 
@@ -2573,7 +2586,8 @@ describe("Documentation, Manual Sync & Standing Invariant Verification", () => {
     expect(readme).toContain("MangaDex API");
     expect(readme).toContain("Google Books");
 
-    // 5. Apple WWDC Fluid Interface Design System
+    // 6. Lnori Centralized Queue & Ingestion
+    expect(readme).toContain("Telegram Ingestion Bot:** Paste any `lnori.com/series/...` or `lnori.com/book/...` URL directly into chat with `@saroat_ospeto_bot`. Links automatically submit to the centralized Uploader server queue (`POST /api/lnori/ingest`), reporting real-time queue position");
     expect(readme).toContain("Apple WWDC Fluid Interface Design System");
     expect(readme).toContain("Materials & Translucency");
     expect(readme).toContain("Optical Typography");
@@ -2617,6 +2631,9 @@ describe("Documentation, Manual Sync & Standing Invariant Verification", () => {
     expect(html).toContain("cleanSynopsis");
     expect(html).toContain("synopsisPreviewHtml");
 
+    // Lnori centralized queue integration in guide
+    expect(html).toContain("Links sent to the Telegram bot are enqueued to the centralized Uploader server queue (<code class=\"text-zinc-200\">POST /api/lnori/ingest</code>)");
+
     // CSS rules for Apple WWDC glass materials and optical tracking
     expect(html).toContain(".apple-material-glass-light {");
     expect(html).toContain("backdrop-filter: blur(12px) saturate(150%);");
@@ -2626,4 +2643,652 @@ describe("Documentation, Manual Sync & Standing Invariant Verification", () => {
     expect(html).toContain("transform: scale(0.97) !important;");
   });
 });
+
+describe("Lnori Queue & Telegram Bot Integration", () => {
+  it("getLocalUploaderUrl resolves port, env overrides, and test setter", () => {
+    resetLocalLnoriQueueForTest();
+    expect(getLocalUploaderUrl()).toBe("http://127.0.0.1:8086");
+
+    setLocalUploaderUrlForTest("http://127.0.0.1:9090");
+    expect(getLocalUploaderUrl()).toBe("http://127.0.0.1:9090");
+    setLocalUploaderUrlForTest(null);
+
+    const origPort = process.env.UPLOADER_PORT;
+    const origLocalUrl = process.env.LOCAL_UPLOADER_URL;
+    try {
+      process.env.LOCAL_UPLOADER_URL = "http://127.0.0.1:7777/";
+      expect(getLocalUploaderUrl()).toBe("http://127.0.0.1:7777");
+      delete process.env.LOCAL_UPLOADER_URL;
+
+      process.env.UPLOADER_PORT = "8888";
+      expect(getLocalUploaderUrl()).toBe("http://127.0.0.1:8888");
+    } finally {
+      if (origPort !== undefined) process.env.UPLOADER_PORT = origPort;
+      else delete process.env.UPLOADER_PORT;
+      if (origLocalUrl !== undefined) process.env.LOCAL_UPLOADER_URL = origLocalUrl;
+      else delete process.env.LOCAL_UPLOADER_URL;
+      resetLocalLnoriQueueForTest();
+    }
+  });
+
+  it("handleTextMessage detects Lnori URL and edits status to queued when server reports queued", async () => {
+    resetLocalLnoriQueueForTest();
+    setLnoriPollIntervalForTest(10);
+    const sentTelegramBodies: any[] = [];
+    const origFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentTelegramBodies.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 2001 } }), {
+          status: 200,
+        });
+      }
+      if (url.includes("/api/lnori/ingest")) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            queued: true,
+            queuePosition: 2,
+            queueLength: 3,
+            runId: "run-queued-1",
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+      if (url.includes("/api/lnori/progress")) {
+        // Complete immediately on first poll to conclude the test
+        return new Response(
+          JSON.stringify({
+            success: true,
+            active: false,
+            currentQueuePosition: null,
+            queueLength: 0,
+            state: {
+              runId: "run-queued-1",
+              phase: "complete",
+              completedData: {
+                seriesTitle: "The Genius Prince's Guide",
+                author: "Toru Toba",
+                importedCount: 5,
+                skippedCount: 1,
+                totalCount: 6,
+                tags: "Light Novel, Fantasy",
+              },
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      await handleTextMessage(
+        998877,
+        "Here is the novel: https://lnori.com/series/8046/the-genius-princes-guide",
+        "tester",
+      );
+
+      expect(sentTelegramBodies.length).toBeGreaterThanOrEqual(3);
+
+      // Initial message
+      const initialMsg = sentTelegramBodies[0];
+      expect(initialMsg.chat_id).toBe(998877);
+      expect(initialMsg.text).toContain("Detected Lnori Light Novel Series");
+
+      // Queued message
+      const queuedMsg = sentTelegramBodies[1];
+      expect(queuedMsg.text).toContain("Queued Lnori Light Novel Series (Position #2 of 3)");
+      expect(queuedMsg.text).toContain("https://lnori.com/series/8046/the-genius-princes-guide");
+      expect(queuedMsg.text).toContain("Waiting for previous ingestion to finish...");
+
+      // Final confirmation card
+      const finalMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(finalMsg.text).toContain("Light Novel Series Imported Successfully!");
+      expect(finalMsg.text).toContain("The Genius Prince's Guide");
+      expect(finalMsg.text).toContain("Toru Toba");
+      expect(finalMsg.text).toContain("5/6 (1 already in library)");
+      expect(finalMsg.text).toContain("Light Novel, Fantasy");
+      expect(finalMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.text).toContain("Open Reading HQ");
+      expect(finalMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.web_app?.url).toBe(READING_WEBAPP_URL);
+    } finally {
+      globalThis.fetch = origFetch;
+      resetLocalLnoriQueueForTest();
+    }
+  });
+
+  it("pollLnoriProgress updates queue advancement, transitions to active progress, and sends completion card", async () => {
+    resetLocalLnoriQueueForTest();
+    setLnoriPollIntervalForTest(10);
+    const sentTelegramBodies: any[] = [];
+    const origFetch = globalThis.fetch;
+
+    let pollCount = 0;
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentTelegramBodies.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 3001 } }), {
+          status: 200,
+        });
+      }
+      if (url.includes("/api/lnori/progress")) {
+        pollCount++;
+        if (pollCount === 1) {
+          // Advanced in queue to position 1
+          return new Response(
+            JSON.stringify({
+              success: true,
+              active: false,
+              currentQueuePosition: 1,
+              queueLength: 2,
+              state: {},
+            }),
+            { status: 200 },
+          );
+        }
+        if (pollCount === 2) {
+          // Transitioned to active volume download
+          return new Response(
+            JSON.stringify({
+              success: true,
+              active: true,
+              currentQueuePosition: null,
+              queueLength: 1,
+              state: {
+                runId: "run-poll-test",
+                phase: "volume",
+                index: 1,
+                total: 2,
+                volumeTitle: "Volume 1",
+                status: "[Volume 1/2] Downloading \"Volume 1\"...",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        // Completed
+        return new Response(
+          JSON.stringify({
+            success: true,
+            active: false,
+            currentQueuePosition: null,
+            queueLength: 0,
+            state: {
+              runId: "run-poll-test",
+              phase: "complete",
+              completedData: {
+                seriesTitle: "Sword Art Online",
+                author: "Reki Kawahara",
+                importedCount: 2,
+                skippedCount: 0,
+                totalCount: 2,
+                tags: "Light Novel, Action",
+              },
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      await pollLnoriProgress(
+        112233,
+        3001,
+        "https://lnori.com/series/1234/sao",
+        "run-poll-test",
+        "http://127.0.0.1:8086",
+        2,
+        3,
+      );
+
+      expect(sentTelegramBodies.length).toBeGreaterThanOrEqual(3);
+
+      // Advanced queue position
+      const queueAdvanceMsg = sentTelegramBodies.find((m) =>
+        m.text.includes("Position #1 of 2"),
+      );
+      expect(queueAdvanceMsg).toBeDefined();
+
+      // Active volume progress
+      const activeProgressMsg = sentTelegramBodies.find((m) =>
+        m.text.includes("Volume 1/2") && m.text.includes("Downloading"),
+      );
+      expect(activeProgressMsg).toBeDefined();
+
+      // Completion confirmation card
+      const completionMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(completionMsg.text).toContain("Light Novel Series Imported Successfully!");
+      expect(completionMsg.text).toContain("Sword Art Online");
+      expect(completionMsg.text).toContain("Reki Kawahara");
+      expect(completionMsg.text).toContain("2/2");
+      expect(completionMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.text).toContain("Open Reading HQ");
+    } finally {
+      globalThis.fetch = origFetch;
+      resetLocalLnoriQueueForTest();
+    }
+  });
+
+  it("consumeLnoriSseStream streams live events and posts completion card", async () => {
+    resetLocalLnoriQueueForTest();
+    const sentTelegramBodies: any[] = [];
+    const origFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentTelegramBodies.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 4001 } }), {
+          status: 200,
+        });
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    const sseChunks = [
+      'data: {"phase":"manifest","status":"Found 2 volumes in series \\"Overlord\\"","runId":"run-sse-1"}\n\n',
+      'data: {"phase":"volume","index":1,"total":2,"volumeTitle":"The Undead King","status":"[Volume 1/2] Downloading \\"The Undead King\\"...","runId":"run-sse-1"}\n\n',
+      'data: {"phase":"complete","runId":"run-sse-1","data":{"seriesTitle":"Overlord","author":"Kugane Maruyama","importedCount":2,"skippedCount":0,"totalCount":2,"tags":"Light Novel, Dark Fantasy"}}\n\n',
+    ];
+
+    const stream = new ReadableStream({
+      start(controller) {
+        for (const chunk of sseChunks) {
+          controller.enqueue(new TextEncoder().encode(chunk));
+        }
+        controller.close();
+      },
+    });
+
+    const sseResponse = new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+
+    try {
+      await consumeLnoriSseStream(
+        445566,
+        4001,
+        "https://lnori.com/series/5555/overlord",
+        sseResponse,
+        "http://127.0.0.1:8086",
+      );
+
+      expect(sentTelegramBodies.length).toBeGreaterThanOrEqual(2);
+
+      // Final completion card
+      const finalMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(finalMsg.text).toContain("Light Novel Series Imported Successfully!");
+      expect(finalMsg.text).toContain("Overlord");
+      expect(finalMsg.text).toContain("Kugane Maruyama");
+      expect(finalMsg.text).toContain("2/2");
+      expect(finalMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.text).toContain("Open Reading HQ");
+    } finally {
+      globalThis.fetch = origFetch;
+      resetLocalLnoriQueueForTest();
+    }
+  });
+
+  it("falls back to direct ingestLnoriSeries when local uploader server is unreachable", async () => {
+    resetLocalLnoriQueueForTest();
+    const sentTelegramBodies: any[] = [];
+    const origFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentTelegramBodies.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 5001 } }), {
+          status: 200,
+        });
+      }
+      if (url.includes("/api/lnori/ingest")) {
+        throw new Error("connect ECONNREFUSED 127.0.0.1:8086");
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    let runnerCalledWith = "";
+    setIngestLnoriSeriesRunnerForTest(async (url, onProgress) => {
+      runnerCalledWith = url;
+      if (onProgress) {
+        await onProgress({
+          phase: "volume",
+          index: 1,
+          total: 1,
+          volumeTitle: "Direct Vol 1",
+          status: "[Volume 1/1] Downloading \"Direct Vol 1\"...",
+        });
+      }
+      return {
+        success: true,
+        seriesTitle: "Standalone Novel",
+        author: "Independent Author",
+        tags: "Light Novel",
+        importedCount: 1,
+        skippedCount: 0,
+        duplicateCount: 0,
+        totalCount: 1,
+        calibreBookIds: [999],
+      };
+    });
+
+    try {
+      await handleLnoriUrlMessage(777888, "https://lnori.com/series/777/standalone", "tester");
+
+      expect(runnerCalledWith).toBe("https://lnori.com/series/777/standalone");
+      expect(sentTelegramBodies.length).toBeGreaterThanOrEqual(2);
+
+      const finalMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(finalMsg.text).toContain("Light Novel Series Imported Successfully!");
+      expect(finalMsg.text).toContain("Standalone Novel");
+      expect(finalMsg.text).toContain("Independent Author");
+      expect(finalMsg.text).toContain("1/1");
+      expect(finalMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.text).toContain("Open Reading HQ");
+    } finally {
+      globalThis.fetch = origFetch;
+      resetLocalLnoriQueueForTest();
+    }
+  });
+
+  it("handles concurrent direct fallback requests with in-process local queue", async () => {
+    resetLocalLnoriQueueForTest();
+    const sentTelegramBodies: any[] = [];
+    const origFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentTelegramBodies.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 6001 } }), {
+          status: 200,
+        });
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    let resolveFirstJob: any;
+    const firstJobPromise = new Promise((resolve) => {
+      resolveFirstJob = resolve;
+    });
+
+    const executionOrder: string[] = [];
+    setIngestLnoriSeriesRunnerForTest(async (url) => {
+      executionOrder.push(url);
+      if (url.includes("series-alpha")) {
+        await firstJobPromise;
+        return {
+          success: true,
+          seriesTitle: "Series Alpha",
+          author: "Alpha Author",
+          tags: "Light Novel",
+          importedCount: 1,
+          skippedCount: 0,
+          duplicateCount: 0,
+          totalCount: 1,
+          calibreBookIds: [101],
+        };
+      }
+      return {
+        success: true,
+        seriesTitle: "Series Beta",
+        author: "Beta Author",
+        tags: "Light Novel",
+        importedCount: 2,
+        skippedCount: 0,
+        duplicateCount: 0,
+        totalCount: 2,
+        calibreBookIds: [102, 103],
+      };
+    });
+
+    try {
+      // Start first job (blocks on resolveFirstJob)
+      const p1 = runDirectLnoriFallback(111, 6001, "https://lnori.com/series/1/series-alpha");
+
+      // While first is active, enqueue second job
+      const p2 = runDirectLnoriFallback(222, 6002, "https://lnori.com/series/2/series-beta");
+      await p2;
+
+      // Verify second was enqueued
+      const queue = getLocalLnoriQueue();
+      expect(queue.length).toBe(1);
+      expect(queue[0].url).toBe("https://lnori.com/series/2/series-beta");
+
+      // Verify second job received queued message
+      const queuedMsg = sentTelegramBodies.find((m) =>
+        m.text.includes("Queued Lnori Light Novel Series (Position #1 of 1)"),
+      );
+      expect(queuedMsg).toBeDefined();
+
+      // Resolve first job
+      resolveFirstJob();
+      await p1;
+
+      // Verify execution order under sequential queue drain
+      expect(executionOrder).toEqual([
+        "https://lnori.com/series/1/series-alpha",
+        "https://lnori.com/series/2/series-beta",
+      ]);
+    } finally {
+      globalThis.fetch = origFetch;
+      resetLocalLnoriQueueForTest();
+    }
+  });
+
+  it("handles server 400, 429, and error states gracefully in Telegram", async () => {
+    resetLocalLnoriQueueForTest();
+    const sentTelegramBodies: any[] = [];
+    const origFetch = globalThis.fetch;
+
+    let responseStatus = 400;
+    let responseBody: any = { success: false, error: "Target URL must be a valid lnori.com series or book URL" };
+
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentTelegramBodies.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 7001 } }), {
+          status: 200,
+        });
+      }
+      if (url.includes("/api/lnori/ingest")) {
+        return new Response(JSON.stringify(responseBody), {
+          status: responseStatus,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      // 1. 400 Invalid URL
+      responseStatus = 400;
+      responseBody = { success: false, error: "Target URL must be a valid lnori.com series or book URL" };
+      await handleLnoriUrlMessage(123, "https://lnori.com/genre/fantasy", "tester");
+      const invalidMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(invalidMsg.text).toContain("Invalid Lnori URL");
+
+      // 2. 429 Queue Full
+      responseStatus = 429;
+      responseBody = { success: false, error: "Lnori ingestion queue is full (25 items)." };
+      await handleLnoriUrlMessage(123, "https://lnori.com/series/8046/full", "tester");
+      const fullMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(fullMsg.text).toContain("Lnori Ingestion Queue Full");
+
+      // 3. Incomplete Ingestion (0 volumes imported)
+      sentTelegramBodies.length = 0;
+      await sendLnoriIncompleteCard(123, 7001, "https://lnori.com/series/8046/empty");
+      expect(sentTelegramBodies[0].text).toContain("Lnori Ingestion Incomplete");
+      expect(sentTelegramBodies[0].text).toContain("No volumes could be imported");
+
+      // 4. Ingestion Failed Error Card
+      sentTelegramBodies.length = 0;
+      await sendLnoriErrorCard(123, 7001, "https://lnori.com/series/8046/failed", "Network timeout after 60s");
+      expect(sentTelegramBodies[0].text).toContain("Lnori Ingestion Failed");
+      expect(sentTelegramBodies[0].text).toContain("Network timeout after 60s");
+
+      // 5. Unexpected Content-Type
+      responseStatus = 200;
+      responseBody = "Unknown format";
+      sentTelegramBodies.length = 0;
+      globalThis.fetch = (async (input: any, init: any) => {
+        const url = typeof input === "string" ? input : input?.url || "";
+        if (url.includes("sendMessage") || url.includes("editMessageText")) {
+          const body = JSON.parse(init?.body || "{}");
+          sentTelegramBodies.push(body);
+          return new Response(JSON.stringify({ ok: true, result: { message_id: 7002 } }), {
+            status: 200,
+          });
+        }
+        if (url.includes("/api/lnori/ingest")) {
+          return new Response("Unknown raw text", {
+            status: 200,
+            headers: { "Content-Type": "text/plain" },
+          });
+        }
+        return origFetch(input, init);
+      }) as typeof fetch;
+
+      await handleLnoriUrlMessage(123, "https://lnori.com/series/8046/unknown-ct", "tester");
+      const unexpMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(unexpMsg.text).toContain("Lnori Ingestion Failed");
+      expect(unexpMsg.text).toContain("Unexpected response from uploader server");
+    } finally {
+      globalThis.fetch = origFetch;
+      resetLocalLnoriQueueForTest();
+    }
+  });
+
+  it("pollLnoriProgress terminates with error card when polled runId mismatches or is evicted", async () => {
+    resetLocalLnoriQueueForTest();
+    setLnoriPollIntervalForTest(10);
+    const sentTelegramBodies: any[] = [];
+    const origFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentTelegramBodies.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 8001 } }), {
+          status: 200,
+        });
+      }
+      if (url.includes("/api/lnori/progress")) {
+        // Return global active state for a completely different runId
+        return new Response(
+          JSON.stringify({
+            success: true,
+            active: true,
+            currentQueuePosition: null,
+            queueLength: 0,
+            state: {
+              runId: "different-unrelated-runId",
+              phase: "volume",
+              status: "Downloading unrelated series",
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      await pollLnoriProgress(
+        123,
+        8001,
+        "https://lnori.com/series/8046/test",
+        "expected-my-runId",
+        "http://127.0.0.1:8086",
+      );
+
+      const errorMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(errorMsg.text).toContain("Lnori Ingestion Failed");
+      expect(errorMsg.text).toContain("Job was removed or could not be found in ingestion queue");
+    } finally {
+      globalThis.fetch = origFetch;
+      resetLocalLnoriQueueForTest();
+    }
+  });
+
+  it("consumeLnoriSseStream sends error card when stream disconnects without receiving runId", async () => {
+    resetLocalLnoriQueueForTest();
+    const sentTelegramBodies: any[] = [];
+    const origFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentTelegramBodies.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 9001 } }), {
+          status: 200,
+        });
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    // Stream that only sends keepalive and then closes without any event or runId
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(": keepalive\n\n"));
+        controller.close();
+      },
+    });
+
+    const sseResponse = new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+
+    try {
+      await consumeLnoriSseStream(
+        123,
+        9001,
+        "https://lnori.com/series/8046/drop",
+        sseResponse,
+        "http://127.0.0.1:8086",
+      );
+
+      const errorMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(errorMsg.text).toContain("Lnori Ingestion Failed");
+      expect(errorMsg.text).toContain("Stream connection lost before ingestion initialized");
+    } finally {
+      globalThis.fetch = origFetch;
+      resetLocalLnoriQueueForTest();
+    }
+  });
+
+  it("LOCAL_UPLOADER_URL custom port is allowlisted in SSRF validation", async () => {
+    const { validateUrlForSSRF } = await import("./security");
+    const origEnv = process.env.LOCAL_UPLOADER_URL;
+    try {
+      process.env.LOCAL_UPLOADER_URL = "http://127.0.0.1:9876";
+      const check = await validateUrlForSSRF("http://127.0.0.1:9876/api/lnori/ingest", {
+        allowInternalServices: true,
+      });
+      expect(check.safe).toBe(true);
+      expect(check.resolvedIp).toBe("127.0.0.1");
+    } finally {
+      if (origEnv !== undefined) process.env.LOCAL_UPLOADER_URL = origEnv;
+      else delete process.env.LOCAL_UPLOADER_URL;
+    }
+  });
+});
+
 

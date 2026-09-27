@@ -4554,7 +4554,10 @@ async function handleRequestCore(
 
               // Send immediate snapshot of current active state
               sendEvent({
-                phase: activeLnoriState.phase,
+                phase:
+                  activeLnoriState.phase === "idle"
+                    ? "manifest"
+                    : activeLnoriState.phase,
                 index: activeLnoriState.index,
                 total: activeLnoriState.total,
                 volumeTitle: activeLnoriState.volumeTitle || undefined,

@@ -2537,7 +2537,7 @@
               <span>Lnori Light Novel &amp; Series Ingestion</span>
             </div>
             <p class="text-[11px] text-zinc-400 leading-relaxed">
-              Download and ingest light novel series or individual volumes directly from <code class="text-zinc-200">lnori.com</code> via the Web UI (Upload Modal &rarr; <code class="text-zinc-200">Add from Lnori</code>) or Telegram Bot. Accepts series URLs (<code class="text-zinc-200">https://lnori.com/series/...</code>) and book URLs (<code class="text-zinc-200">https://lnori.com/book/...</code>). Automatically fetches manifests, skips existing volumes via series index deduplication, downloads EPUBs, converts high-res WebP covers to JPEG via <code class="text-zinc-200">sips</code>, auto-heals truncated ZIPs, and updates Calibre without duplicate imports.
+              Download and ingest light novel series or individual volumes directly from <code class="text-zinc-200">lnori.com</code> via the Web UI (Upload Modal &rarr; <code class="text-zinc-200">Add from Lnori</code>) or Telegram Bot. Links sent to the Telegram bot are enqueued to the centralized Uploader server queue (<code class="text-zinc-200">POST /api/lnori/ingest</code>), reporting live queue positions, streaming active volume progress, and delivering completion cards with 1-tap Reading HQ buttons (with seamless in-process queue fallback). Automatically fetches manifests, skips existing volumes via series index deduplication, downloads EPUBs, converts high-res WebP covers to JPEG via <code class="text-zinc-200">sips</code>, auto-heals truncated ZIPs, and updates Calibre without duplicate imports.
             </p>
           </div>
           <div class="space-y-1 pt-1 border-t border-zinc-800/80">

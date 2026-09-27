@@ -3814,6 +3814,734 @@ export function startJobWorker(intervalMs = 1000) {
   return q;
 }
 
+let _localUploaderUrl: string | null = null;
+export function setLocalUploaderUrlForTest(url: string | null): void {
+  _localUploaderUrl = url;
+}
+
+export function getLocalUploaderUrl(): string {
+  if (_localUploaderUrl) {
+    return _localUploaderUrl.replace(/\/+$/, "");
+  }
+  if (process.env.LOCAL_UPLOADER_URL) {
+    return process.env.LOCAL_UPLOADER_URL.replace(/\/+$/, "");
+  }
+  const port = process.env.UPLOADER_PORT || process.env.PORT || "8086";
+  return `http://127.0.0.1:${port}`;
+}
+
+let _ingestLnoriSeriesRunner: typeof ingestLnoriSeries = ingestLnoriSeries;
+export function setIngestLnoriSeriesRunnerForTest(
+  runner: typeof ingestLnoriSeries | null,
+): void {
+  _ingestLnoriSeriesRunner = runner || ingestLnoriSeries;
+}
+
+let _lnoriPollIntervalMs = 1500;
+export function setLnoriPollIntervalForTest(ms: number): void {
+  _lnoriPollIntervalMs = ms;
+}
+
+export interface LocalLnoriQueueItem {
+  url: string;
+  chatId: number;
+  statusMsgId: number | null;
+}
+const localLnoriQueue: LocalLnoriQueueItem[] = [];
+let isLocalLnoriActive = false;
+const MAX_LOCAL_LNORI_QUEUE = 25;
+
+export function getLocalLnoriQueue(): LocalLnoriQueueItem[] {
+  return localLnoriQueue.map((item) => ({ ...item }));
+}
+
+export function resetLocalLnoriQueueForTest(): void {
+  localLnoriQueue.length = 0;
+  isLocalLnoriActive = false;
+  _localUploaderUrl = null;
+  _ingestLnoriSeriesRunner = ingestLnoriSeries;
+  _lnoriPollIntervalMs = 1500;
+}
+
+export async function sendLnoriCompletionCard(
+  chatId: number,
+  statusMsgId: number | null,
+  _articleUrl: string,
+  result: {
+    seriesTitle?: string;
+    author?: string;
+    importedCount?: number;
+    skippedCount?: number;
+    totalCount?: number;
+    tags?: string;
+  },
+): Promise<number | null> {
+  const seriesTitle = result.seriesTitle || "Light Novel Series";
+  const author = result.author || "Unknown";
+  const importedCount = result.importedCount ?? 0;
+  const skippedCount = result.skippedCount ?? 0;
+  const totalCount = result.totalCount ?? importedCount;
+  const tags = result.tags || "Light Novel";
+
+  const skipText =
+    skippedCount > 0 ? ` (${skippedCount} already in library)` : "";
+
+  const confirmation =
+    `✅ *Light Novel Series Imported Successfully!*\n\n` +
+    `📖 *Series:* ${escapeTelegramMarkdown(seriesTitle)}\n` +
+    `✍️ *Author:* ${escapeTelegramMarkdown(author)}\n` +
+    `📚 *Volumes Imported:* ${escapeTelegramMarkdown(String(importedCount))}/${escapeTelegramMarkdown(String(totalCount))}${escapeTelegramMarkdown(skipText)}\n` +
+    `🏷️ *Tags:* ${escapeTelegramMarkdown(tags)}\n\n` +
+    `_Ready in your library and syncable to KOReader._`;
+
+  return await editOrSendMessage(
+    chatId,
+    statusMsgId,
+    confirmation,
+    "Markdown",
+    {
+      inline_keyboard: [
+        [
+          {
+            text: "📖 Open Reading HQ",
+            web_app: { url: READING_WEBAPP_URL },
+          },
+        ],
+      ],
+    },
+  );
+}
+
+export async function sendLnoriErrorCard(
+  chatId: number,
+  statusMsgId: number | null,
+  articleUrl: string,
+  errorMsg: string,
+): Promise<number | null> {
+  const card =
+    `⚠️ *Lnori Ingestion Failed*\n\n` +
+    `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
+    `❌ *Error:* ${escapeTelegramMarkdown(errorMsg || "Failed to import Lnori series")}\n\n` +
+    `_Please verify the link is accessible and try again._`;
+
+  return await editOrSendMessage(chatId, statusMsgId, card, "Markdown");
+}
+
+export async function sendLnoriIncompleteCard(
+  chatId: number,
+  statusMsgId: number | null,
+  articleUrl: string,
+): Promise<number | null> {
+  const card =
+    `⚠️ *Lnori Ingestion Incomplete*\n\n` +
+    `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
+    `❌ *Error:* No volumes could be imported from Lnori.\n\n` +
+    `_Please verify the link and try again._`;
+
+  return await editOrSendMessage(chatId, statusMsgId, card, "Markdown");
+}
+
+export async function runDirectLnoriFallback(
+  chatId: number,
+  statusMsgId: number | null,
+  articleUrl: string,
+): Promise<void> {
+  if (isLocalLnoriActive) {
+    if (localLnoriQueue.length >= MAX_LOCAL_LNORI_QUEUE) {
+      await editOrSendMessage(
+        chatId,
+        statusMsgId,
+        `⚠️ *Lnori Ingestion Queue Full*\n\n` +
+          `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
+          `⏳ *Status:* Local ingestion queue is full (${MAX_LOCAL_LNORI_QUEUE} items). Please wait for active downloads to finish.\n\n` +
+          `_Please try again in a few moments._`,
+        "Markdown",
+      );
+      return;
+    }
+    localLnoriQueue.push({ url: articleUrl, chatId, statusMsgId });
+    const queuePosition = localLnoriQueue.length;
+    const queueLength = localLnoriQueue.length;
+    const queuedText =
+      `⏳ *Queued Lnori Light Novel Series (Position #${queuePosition} of ${queueLength})*\n` +
+      `\`${escapeTelegramMarkdown(articleUrl)}\`\n\n` +
+      `_Waiting for previous ingestion to finish..._`;
+    const msgId = await editOrSendMessage(
+      chatId,
+      statusMsgId,
+      queuedText,
+      "Markdown",
+    );
+    if (msgId && !statusMsgId) statusMsgId = msgId;
+    return;
+  }
+
+  isLocalLnoriActive = true;
+  let currentJob: LocalLnoriQueueItem | null = {
+    url: articleUrl,
+    chatId,
+    statusMsgId,
+  };
+
+  try {
+    while (currentJob) {
+      const activeUrl = currentJob.url;
+      const activeChatId = currentJob.chatId;
+      let activeMsgId = currentJob.statusMsgId;
+
+      try {
+        let lastProgressText = "";
+        let lastEditTime = 0;
+        const result = await _ingestLnoriSeriesRunner(
+          activeUrl,
+          async (progress: LnoriProgressEvent | string) => {
+            const text =
+              typeof progress === "string"
+                ? progress
+                : formatLnoriProgress(progress);
+            const now = Date.now();
+            if (
+              text &&
+              (text !== lastProgressText || now - lastEditTime >= 1000)
+            ) {
+              lastProgressText = text;
+              lastEditTime = now;
+              const cleanText = escapeTelegramMarkdown(text);
+              const msgId = await editOrSendMessage(
+                activeChatId,
+                activeMsgId,
+                cleanText,
+                "Markdown",
+              );
+              if (msgId && !activeMsgId) activeMsgId = msgId;
+            }
+          },
+        );
+
+        if (result && result.success) {
+          if (result.importedCount === 0 && result.skippedCount === 0) {
+            await sendLnoriIncompleteCard(activeChatId, activeMsgId, activeUrl);
+          } else {
+            await sendLnoriCompletionCard(
+              activeChatId,
+              activeMsgId,
+              activeUrl,
+              result,
+            );
+          }
+        } else {
+          await sendLnoriIncompleteCard(activeChatId, activeMsgId, activeUrl);
+        }
+      } catch (err: any) {
+        logError(
+          `Direct fallback Lnori ingestion error for ${activeUrl}: ${err?.message || err}`,
+        );
+        await sendLnoriErrorCard(
+          activeChatId,
+          activeMsgId,
+          activeUrl,
+          err?.message || "Failed to import Lnori series",
+        );
+      }
+
+      currentJob = localLnoriQueue.shift() || null;
+      if (currentJob) {
+        const activatingText =
+          `📖 *Detected Lnori Light Novel Series*\n\`${escapeTelegramMarkdown(currentJob.url)}\`\n\n` +
+          `⏳ _Fetching volume manifest..._`;
+        const msgId = await editOrSendMessage(
+          currentJob.chatId,
+          currentJob.statusMsgId,
+          activatingText,
+          "Markdown",
+        );
+        if (msgId && !currentJob.statusMsgId) currentJob.statusMsgId = msgId;
+      }
+    }
+  } finally {
+    isLocalLnoriActive = false;
+  }
+}
+
+export async function pollLnoriProgress(
+  chatId: number,
+  statusMsgId: number | null,
+  articleUrl: string,
+  runId: string,
+  uploaderUrl: string,
+  initialQueuePos: number | null = null,
+  initialQueueLen: number | null = null,
+  maxPollAttempts: number = 1200,
+): Promise<void> {
+  let lastReportedPos = initialQueuePos;
+  let lastReportedLen = initialQueueLen;
+  let lastProgressText = "";
+  let lastEditTime = 0;
+  let consecutiveErrors = 0;
+  let pollAttempts = 0;
+
+  while (pollAttempts < maxPollAttempts) {
+    pollAttempts++;
+    await new Promise((r) => setTimeout(r, _lnoriPollIntervalMs));
+
+    let progData: any;
+    try {
+      const res = await safeFetchWithSsrf(
+        `${uploaderUrl}/api/lnori/progress?runId=${encodeURIComponent(runId)}`,
+        { timeoutMs: 15000 } as any,
+        5,
+        { allowInternalServices: true, bindIp: false },
+      );
+      if (!res.ok) {
+        consecutiveErrors++;
+        if (consecutiveErrors >= 5) {
+          logError(
+            `Progress polling failed with status ${res.status} after 5 attempts`,
+          );
+          await sendLnoriErrorCard(
+            chatId,
+            statusMsgId,
+            articleUrl,
+            `Polling error (${res.status})`,
+          );
+          return;
+        }
+        continue;
+      }
+      progData = await res.json();
+      consecutiveErrors = 0;
+    } catch (pollErr: any) {
+      consecutiveErrors++;
+      if (consecutiveErrors >= 5) {
+        logError(
+          `Progress polling network error after 5 attempts: ${pollErr?.message || pollErr}`,
+        );
+        await sendLnoriErrorCard(
+          chatId,
+          statusMsgId,
+          articleUrl,
+          "Connection lost while polling progress",
+        );
+        return;
+      }
+      continue;
+    }
+
+    if (!progData || !progData.success) {
+      consecutiveErrors++;
+      if (consecutiveErrors >= 5) {
+        logError(
+          `Progress polling returned success: false 5 consecutive times`,
+        );
+        await sendLnoriErrorCard(
+          chatId,
+          statusMsgId,
+          articleUrl,
+          "Failed to retrieve ingestion progress from server",
+        );
+        return;
+      }
+      continue;
+    }
+
+    const currentPos = progData.currentQueuePosition;
+    const queueLength = progData.queueLength || 0;
+    const state = progData.state || {};
+
+    // 1. Still in queue
+    if (currentPos !== null && currentPos !== undefined) {
+      if (currentPos !== lastReportedPos || queueLength !== lastReportedLen) {
+        lastReportedPos = currentPos;
+        lastReportedLen = queueLength;
+        const queuedText =
+          `⏳ *Queued Lnori Light Novel Series (Position #${currentPos} of ${queueLength})*\n` +
+          `\`${escapeTelegramMarkdown(articleUrl)}\`\n\n` +
+          `_Waiting for previous ingestion to finish..._`;
+        const msgId = await editOrSendMessage(
+          chatId,
+          statusMsgId,
+          queuedText,
+          "Markdown",
+        );
+        if (msgId && !statusMsgId) statusMsgId = msgId;
+      }
+      continue;
+    }
+
+    // 2. Not in queue: verify state.runId matches target runId!
+    if (state.runId !== runId) {
+      logError(
+        `Lnori progress state runId (${state.runId}) does not match target runId (${runId}) and item is not in queue`,
+      );
+      await sendLnoriErrorCard(
+        chatId,
+        statusMsgId,
+        articleUrl,
+        "Job was removed or could not be found in ingestion queue",
+      );
+      return;
+    }
+
+    // 3. Check terminal states
+    if (state.phase === "complete") {
+      const result = state.completedData || state.data || {};
+      if (
+        (result.importedCount ?? 0) === 0 &&
+        (result.skippedCount ?? 0) === 0
+      ) {
+        await sendLnoriIncompleteCard(chatId, statusMsgId, articleUrl);
+      } else {
+        await sendLnoriCompletionCard(chatId, statusMsgId, articleUrl, result);
+      }
+      return;
+    }
+
+    if (state.phase === "error") {
+      const errMsg =
+        state.error || state.status || "Failed to import Lnori series";
+      await sendLnoriErrorCard(chatId, statusMsgId, articleUrl, errMsg);
+      return;
+    }
+
+    // 4. Active progress event
+    const text = formatLnoriProgress(state);
+    const now = Date.now();
+    if (text && (text !== lastProgressText || now - lastEditTime >= 1000)) {
+      lastProgressText = text;
+      lastEditTime = now;
+      const cleanText = escapeTelegramMarkdown(text);
+      const msgId = await editOrSendMessage(
+        chatId,
+        statusMsgId,
+        cleanText,
+        "Markdown",
+      );
+      if (msgId && !statusMsgId) statusMsgId = msgId;
+    }
+  }
+
+  logError(
+    `Progress polling for ${runId} exceeded maximum attempts (${maxPollAttempts})`,
+  );
+  await sendLnoriErrorCard(
+    chatId,
+    statusMsgId,
+    articleUrl,
+    "Ingestion monitoring timed out after 30 minutes",
+  );
+}
+
+export async function consumeLnoriSseStream(
+  chatId: number,
+  statusMsgId: number | null,
+  articleUrl: string,
+  response: Response,
+  uploaderUrl: string,
+): Promise<void> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    logError("No response body reader for SSE stream");
+    await sendLnoriErrorCard(
+      chatId,
+      statusMsgId,
+      articleUrl,
+      "Unable to read streaming progress from server",
+    );
+    return;
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let lastProgressText = "";
+  let lastEditTime = 0;
+  let runId: string | null = null;
+  let completed = false;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(":")) continue;
+
+        if (trimmed.startsWith("data:")) {
+          const jsonStr = trimmed.slice(5).trim();
+          try {
+            const event: LnoriProgressEvent & { runId?: string } =
+              JSON.parse(jsonStr);
+            if (event.runId && !runId) {
+              runId = event.runId;
+            }
+
+            if (event.phase === "complete") {
+              completed = true;
+              const result = event.data || {};
+              if (
+                (result.importedCount ?? 0) === 0 &&
+                (result.skippedCount ?? 0) === 0
+              ) {
+                await sendLnoriIncompleteCard(chatId, statusMsgId, articleUrl);
+              } else {
+                await sendLnoriCompletionCard(
+                  chatId,
+                  statusMsgId,
+                  articleUrl,
+                  result,
+                );
+              }
+              return;
+            }
+
+            if (event.phase === "error") {
+              completed = true;
+              const errMsg =
+                event.data?.error ||
+                event.status ||
+                "Failed to import Lnori series";
+              await sendLnoriErrorCard(
+                chatId,
+                statusMsgId,
+                articleUrl,
+                errMsg,
+              );
+              return;
+            }
+
+            const text = formatLnoriProgress(event);
+            const now = Date.now();
+            if (
+              text &&
+              (text !== lastProgressText || now - lastEditTime >= 1000)
+            ) {
+              lastProgressText = text;
+              lastEditTime = now;
+              const cleanText = escapeTelegramMarkdown(text);
+              const msgId = await editOrSendMessage(
+                chatId,
+                statusMsgId,
+                cleanText,
+                "Markdown",
+              );
+              if (msgId && !statusMsgId) statusMsgId = msgId;
+            }
+          } catch (jsonErr) {
+            console.debug("[Lnori SSE] JSON parse error:", jsonErr);
+          }
+        }
+      }
+    }
+  } catch (streamErr: any) {
+    logError(`SSE stream error: ${streamErr?.message || streamErr}`);
+  } finally {
+    try {
+      await reader.cancel();
+    } catch (_cancelErr) {
+      void _cancelErr;
+    }
+  }
+
+  if (!completed) {
+    if (runId) {
+      log(
+        `SSE stream disconnected for runId ${runId}, falling back to progress polling...`,
+      );
+      await pollLnoriProgress(
+        chatId,
+        statusMsgId,
+        articleUrl,
+        runId,
+        uploaderUrl,
+      );
+    } else {
+      logError("SSE stream disconnected before runId was received");
+      await sendLnoriErrorCard(
+        chatId,
+        statusMsgId,
+        articleUrl,
+        "Stream connection lost before ingestion initialized",
+      );
+    }
+  }
+}
+
+export async function handleLnoriUrlMessage(
+  chatId: number,
+  articleUrl: string,
+  sender: string = "user",
+): Promise<void> {
+  log(
+    `Detected Lnori light novel URL in message: "${articleUrl}" from ${sender}`,
+  );
+  const initialStatus =
+    `📖 *Detected Lnori Light Novel Series*\n\`${escapeTelegramMarkdown(articleUrl)}\`\n\n` +
+    `⏳ _Fetching volume manifest..._`;
+  let statusMsgId = await sendMessage(
+    chatId,
+    initialStatus,
+    "Markdown",
+  );
+
+  const uploaderUrl = getLocalUploaderUrl();
+  const ingestEndpoint = `${uploaderUrl}/api/lnori/ingest`;
+
+  let serverResponse: Response | null = null;
+  try {
+    serverResponse = await safeFetchWithSsrf(
+      ingestEndpoint,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream, application/json",
+        },
+        body: JSON.stringify({ url: articleUrl, stream: true }),
+        timeoutMs: 30000,
+      } as any,
+      5,
+      { allowInternalServices: true, bindIp: false },
+    );
+  } catch (err: any) {
+    log(
+      `Local uploader server unreachable at ${ingestEndpoint} (${err?.message || err}), falling back to direct in-process queue`,
+    );
+    await runDirectLnoriFallback(chatId, statusMsgId, articleUrl);
+    return;
+  }
+
+  if (serverResponse.status === 400) {
+    const data = await serverResponse.json().catch(() => ({}));
+    await editOrSendMessage(
+      chatId,
+      statusMsgId,
+      `⚠️ *Invalid Lnori URL*\n\n` +
+        `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
+        `❌ *Error:* ${escapeTelegramMarkdown(data.error || "Target URL must be a valid lnori.com series or book URL")}\n\n` +
+        `_Please verify the link and try again._`,
+      "Markdown",
+    );
+    return;
+  }
+
+  if (serverResponse.status === 429) {
+    const data = await serverResponse.json().catch(() => ({}));
+    await editOrSendMessage(
+      chatId,
+      statusMsgId,
+      `⚠️ *Lnori Ingestion Queue Full*\n\n` +
+        `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
+        `⏳ *Status:* ${escapeTelegramMarkdown(data.error || "Queue is currently full. Please wait for active downloads to finish.")}\n\n` +
+        `_Please try again in a few moments._`,
+      "Markdown",
+    );
+    return;
+  }
+
+  if (!serverResponse.ok) {
+    const data = await serverResponse.json().catch(() => ({}));
+    const errMsg =
+      data.error || `Server responded with status ${serverResponse.status}`;
+    logError(`Lnori ingest API error (${serverResponse.status}): ${errMsg}`);
+    await sendLnoriErrorCard(chatId, statusMsgId, articleUrl, errMsg);
+    return;
+  }
+
+  const contentType = serverResponse.headers.get("content-type") || "";
+
+  if (contentType.includes("application/json")) {
+    const data = (await serverResponse.json()) as any;
+    if (data.queued) {
+      const queuePosition = data.queuePosition || 1;
+      const queueLength = data.queueLength || 1;
+      const queueRunId = data.runId;
+
+      const queuedText =
+        `⏳ *Queued Lnori Light Novel Series (Position #${queuePosition} of ${queueLength})*\n` +
+        `\`${escapeTelegramMarkdown(articleUrl)}\`\n\n` +
+        `_Waiting for previous ingestion to finish..._`;
+      const msgId = await editOrSendMessage(
+        chatId,
+        statusMsgId,
+        queuedText,
+        "Markdown",
+      );
+      if (msgId && !statusMsgId) statusMsgId = msgId;
+
+      if (queueRunId) {
+        await pollLnoriProgress(
+          chatId,
+          statusMsgId,
+          articleUrl,
+          queueRunId,
+          uploaderUrl,
+          queuePosition,
+          queueLength,
+        );
+      } else {
+        await sendLnoriErrorCard(
+          chatId,
+          statusMsgId,
+          articleUrl,
+          "Server queued request but did not return a run ID",
+        );
+      }
+      return;
+    }
+
+    if (data.active && data.runId) {
+      await pollLnoriProgress(
+        chatId,
+        statusMsgId,
+        articleUrl,
+        data.runId,
+        uploaderUrl,
+      );
+      return;
+    }
+
+    if (data.success) {
+      if (data.importedCount === 0 && data.skippedCount === 0) {
+        await sendLnoriIncompleteCard(chatId, statusMsgId, articleUrl);
+      } else {
+        await sendLnoriCompletionCard(chatId, statusMsgId, articleUrl, data);
+      }
+      return;
+    }
+
+    await sendLnoriErrorCard(
+      chatId,
+      statusMsgId,
+      articleUrl,
+      data.error || "Failed to import Lnori series",
+    );
+    return;
+  }
+
+  if (contentType.includes("text/event-stream")) {
+    await consumeLnoriSseStream(
+      chatId,
+      statusMsgId,
+      articleUrl,
+      serverResponse,
+      uploaderUrl,
+    );
+    return;
+  }
+
+  logError(`Unexpected Content-Type from /api/lnori/ingest: ${contentType}`);
+  await sendLnoriErrorCard(
+    chatId,
+    statusMsgId,
+    articleUrl,
+    `Unexpected response from uploader server (${contentType || "unknown"})`,
+  );
+}
+
 export async function handleTextMessage(
   chatId: number,
   text: string,
@@ -4127,90 +4855,7 @@ export async function handleTextMessage(
 
             if (articleUrl) {
               if (isLnoriUrl(articleUrl)) {
-                log(
-                  `Detected Lnori light novel URL in message: "${articleUrl}" from ${sender}`,
-                );
-                const initialStatus =
-                  `📖 *Detected Lnori Light Novel Series*\n\`${escapeTelegramMarkdown(articleUrl)}\`\n\n` +
-                  `⏳ _Fetching volume manifest..._`;
-                const statusMsgId = await sendMessage(
-                  chatId,
-                  initialStatus,
-                  "Markdown",
-                );
-
-                try {
-                  const result = await ingestLnoriSeries(
-                    articleUrl,
-                    async (progress: LnoriProgressEvent | string) => {
-                      const text =
-                        typeof progress === "string"
-                          ? progress
-                          : formatLnoriProgress(progress);
-                      if (text) {
-                        await editOrSendMessage(
-                          chatId,
-                          statusMsgId,
-                          text,
-                          "Markdown",
-                        );
-                      }
-                    },
-                  );
-
-                  if (result.success) {
-                    const skipText =
-                      result.skippedCount > 0
-                        ? ` (${result.skippedCount} already in library)`
-                        : "";
-                    const confirmation =
-                      `✅ *Light Novel Series Imported Successfully!*\n\n` +
-                      `📖 *Series:* ${escapeTelegramMarkdown(result.seriesTitle)}\n` +
-                      `✍️ *Author:* ${escapeTelegramMarkdown(result.author)}\n` +
-                      `📚 *Volumes Imported:* ${escapeTelegramMarkdown(String(result.importedCount))}/${escapeTelegramMarkdown(String(result.totalCount))}${escapeTelegramMarkdown(skipText)}\n` +
-                      `🏷️ *Tags:* ${escapeTelegramMarkdown(result.tags)}\n\n` +
-                      `_Ready in your library and syncable to KOReader._`;
-                    await editOrSendMessage(
-                      chatId,
-                      statusMsgId,
-                      confirmation,
-                      "Markdown",
-                      {
-                        inline_keyboard: [
-                          [
-                            {
-                              text: "📖 Open Reading HQ",
-                              web_app: { url: READING_WEBAPP_URL },
-                            },
-                          ],
-                        ],
-                      },
-                    );
-                  } else {
-                    await editOrSendMessage(
-                      chatId,
-                      statusMsgId,
-                      `⚠️ *Lnori Ingestion Incomplete*\n\n` +
-                        `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
-                        `❌ *Error:* No volumes could be imported from Lnori.\n\n` +
-                        `_Please verify the link and try again._`,
-                      "Markdown",
-                    );
-                  }
-                } catch (err: any) {
-                  logError(
-                    `Lnori ingestion exception for ${articleUrl}: ${err.message}`,
-                  );
-                  await editOrSendMessage(
-                    chatId,
-                    statusMsgId,
-                    `⚠️ *Lnori Ingestion Failed*\n\n` +
-                      `🔗 *URL:* \`${escapeTelegramMarkdown(articleUrl)}\`\n` +
-                      `❌ *Error:* ${escapeTelegramMarkdown(err.message || "Failed to import Lnori series")}\n\n` +
-                      `_Please verify the link is accessible and try again._`,
-                    "Markdown",
-                  );
-                }
+                await handleLnoriUrlMessage(chatId, articleUrl, sender);
                 return;
               }
 
