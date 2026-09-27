@@ -5157,7 +5157,7 @@
           signal: activeLnoriAbortController.signal,
         });
 
-        if (!res.ok && !res.body) {
+        if (!res.ok) {
           const errJson = await res.json().catch(() => ({}));
           throw new Error(errJson.error || `HTTP ${res.status}`);
         }

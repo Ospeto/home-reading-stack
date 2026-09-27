@@ -790,7 +790,7 @@ export function validateTelegramWebAppData(
 
 export interface AuthResult {
   authenticated: boolean;
-  method?: "lan" | "bearer" | "api_key" | "tma" | "cookie";
+  method?: "lan" | "bearer" | "api_key" | "tma" | "cookie" | "origin";
   user?: any;
   error?: string;
 }
@@ -812,6 +812,7 @@ export interface AuthenticateRequestOptions {
  * - X-API-Key matching READING_API_KEY
  * - Valid Telegram WebApp initData (via X-Telegram-Init-Data or Authorization: Bearer tma_...)
  * - Valid session cookie
+ * - Or when READING_API_KEY is unset, a verified production WAN origin (Origin or Referer)
  */
 export function authenticateRequest(
   req: Request,
@@ -876,6 +877,29 @@ export function authenticateRequest(
     }
   }
 
+  // 5. Allow verified production WAN origins when READING_API_KEY is unset.
+  // When no API key is configured, public WAN access from the trusted web UI
+  // is authenticated via production origin verification (Origin or Referer).
+  // Local LAN / loopback origins are explicitly excluded from WAN authentication.
+  if (!apiKey) {
+    const origin = req.headers.get("origin");
+    if (origin && isAllowedProductionWanOrigin(origin)) {
+      return { authenticated: true, method: "origin" };
+    }
+    const referer = req.headers.get("referer");
+    if (referer) {
+      try {
+        const refUrl = new URL(referer);
+        const refOrigin = `${refUrl.protocol}//${refUrl.host}`;
+        if (isAllowedProductionWanOrigin(refOrigin)) {
+          return { authenticated: true, method: "origin" };
+        }
+      } catch {
+        // Malformed referer ignored
+      }
+    }
+  }
+
   // Credentials in query strings are intentionally not accepted. URLs leak via
   // browser history, proxy logs, Referer headers, and analytics; use a header or
   // the intended secure cookie channel instead.
@@ -900,7 +924,11 @@ function parseCookies(header: string): Record<string, string> {
 // 5. CORS & CSRF Origin Validation
 // ---------------------------------------------------------------------------
 
-export function isAllowedOrigin(
+/**
+ * Checks if an origin matches verified production WAN origins (excluding local LAN/loopback).
+ * Used strictly for authenticating WAN requests when READING_API_KEY is unset.
+ */
+export function isAllowedProductionWanOrigin(
   origin: string,
   extraAllowedOrigins: string[] = [],
 ): boolean {
@@ -925,13 +953,62 @@ export function isAllowedOrigin(
     return true;
   }
 
-  // Allow configured WAN URLs
+  // Allow configured WAN URLs (ensuring they are not local/private IPs)
+  const isSafeWanUrl = (urlStr: string) => {
+    try {
+      const u = new URL(urlStr);
+      const h = u.hostname.replace(/^\[|\]$/g, "");
+      if (h === "localhost" || h.endsWith(".localhost") || isPrivateOrInternalIp(h)) {
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const readingWan = process.env.READING_WEBAPP_URL;
-  if (readingWan && lower === readingWan.toLowerCase().replace(/\/+$/, "")) {
+  if (
+    readingWan &&
+    isSafeWanUrl(readingWan) &&
+    lower === readingWan.toLowerCase().replace(/\/+$/, "")
+  ) {
     return true;
   }
   const kosyncWan = process.env.KOSYNC_WAN_URL;
-  if (kosyncWan && lower === kosyncWan.toLowerCase().replace(/\/+$/, "")) {
+  if (
+    kosyncWan &&
+    isSafeWanUrl(kosyncWan) &&
+    lower === kosyncWan.toLowerCase().replace(/\/+$/, "")
+  ) {
+    return true;
+  }
+
+  // Check extra allowed origins from options or env (ensuring they are not local LAN)
+  const envOrigins = (process.env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((o: string) => o.trim().toLowerCase())
+    .filter(Boolean);
+  const allAllowed = [
+    ...extraAllowedOrigins.map((o: string) => o.toLowerCase()),
+    ...envOrigins,
+  ];
+  if (allAllowed.includes(lower) && isSafeWanUrl(lower)) {
+    return true;
+  }
+
+  return false;
+}
+
+export function isAllowedOrigin(
+  origin: string,
+  extraAllowedOrigins: string[] = [],
+): boolean {
+  if (!origin) return false;
+  const lower = origin.toLowerCase().trim();
+
+  // Allow standard production WAN domains
+  if (isAllowedProductionWanOrigin(origin, extraAllowedOrigins)) {
     return true;
   }
 

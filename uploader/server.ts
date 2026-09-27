@@ -4071,11 +4071,37 @@ async function handleRequestCore(
           }
         }
 
+        let canceled = false;
+        let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+        const cleanupKeepalive = () => {
+          if (keepaliveTimer !== null) {
+            clearInterval(keepaliveTimer);
+            keepaliveTimer = null;
+          }
+        };
+
         const encoder = new TextEncoder();
         const stream = new ReadableStream({
           async start(controller) {
             const isSSEFormat = contentType.startsWith("text/event-stream");
             let hasErrored = false;
+
+            if (isSSEFormat && !canceled && !abortController.signal.aborted) {
+              // Send immediate keepalive comment to prevent immediate proxy idle timeout
+              try {
+                controller.enqueue(encoder.encode(": keepalive\n\n"));
+              } catch {
+                // Controller already closed
+              }
+
+              keepaliveTimer = setInterval(() => {
+                try {
+                  controller.enqueue(encoder.encode(": keepalive\n\n"));
+                } catch {
+                  cleanupKeepalive();
+                }
+              }, 15000);
+            }
 
             const sendEvent = (event: LnoriProgressEvent) => {
               try {
@@ -4175,6 +4201,7 @@ async function handleRequestCore(
                 });
               }
             } finally {
+              cleanupKeepalive();
               try {
                 controller.close();
               } catch (closeErr) {
@@ -4183,6 +4210,8 @@ async function handleRequestCore(
             }
           },
           cancel() {
+            canceled = true;
+            cleanupKeepalive();
             abortController.abort();
           },
         });

@@ -721,21 +721,116 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
       expect(data2.error).toContain("Target URL must be a valid lnori.com series or book URL");
     });
 
-    it("blocks unauthenticated WAN requests with 401", async () => {
-      const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+    it("blocks unauthenticated WAN requests with 401 when apiKey is configured or origin is untrusted", async () => {
+      // 1. Untrusted origin WAN request without credentials rejected with 401
+      const reqUntrusted = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
         method: "POST",
         headers: {
           host: "reading.wavypremium.xyz",
-          origin: "https://reading.wavypremium.xyz",
+          origin: "https://untrusted-attacker.com",
           "content-type": "application/json",
         },
         body: JSON.stringify({ url: "https://lnori.com/series/8046" }),
       });
-      const res = await handleRequest(req);
-      expect(res.status).toBe(401);
-      const data = (await res.json()) as any;
-      expect(data.success).toBe(false);
-      expect(data.error).toContain("Authentication required");
+      // Note: Origin check returns 403 when origin header is present but untrusted
+      const resUntrusted = await handleRequest(reqUntrusted);
+      expect(resUntrusted.status).toBe(403);
+
+      // 2. WAN request with no origin header or credentials rejected with 401
+      const reqNoOrigin = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+        method: "POST",
+        headers: {
+          host: "reading.wavypremium.xyz",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ url: "https://lnori.com/series/8046" }),
+      });
+      const resNoOrigin = await handleRequest(reqNoOrigin);
+      expect(resNoOrigin.status).toBe(401);
+      const dataNoOrigin = (await resNoOrigin.json()) as any;
+      expect(dataNoOrigin.success).toBe(false);
+      expect(dataNoOrigin.error).toContain("Authentication required");
+
+      // 3. When READING_API_KEY is configured, WAN request with allowed origin still requires valid credentials
+      const origKey = process.env.READING_API_KEY;
+      try {
+        process.env.READING_API_KEY = "test-secret-key-123";
+        const reqWithKeyConfigured = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: {
+            host: "reading.wavypremium.xyz",
+            origin: "https://reading.wavypremium.xyz",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ url: "https://lnori.com/series/8046" }),
+        });
+        const resWithKey = await handleRequest(reqWithKeyConfigured);
+        expect(resWithKey.status).toBe(401);
+        const dataWithKey = (await resWithKey.json()) as any;
+        expect(dataWithKey.success).toBe(false);
+        expect(dataWithKey.error).toContain("Authentication required");
+      } finally {
+        if (origKey !== undefined) process.env.READING_API_KEY = origKey;
+        else delete process.env.READING_API_KEY;
+      }
+
+      // 4. When READING_API_KEY is unset, WAN request from spoofed localhost origin is rejected with 401
+      const reqSpoofedLocal = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+        method: "POST",
+        headers: {
+          host: "reading.wavypremium.xyz",
+          origin: "http://127.0.0.1:8086",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ url: "https://lnori.com/series/8046" }),
+      });
+      const resSpoofedLocal = await handleRequest(reqSpoofedLocal);
+      expect(resSpoofedLocal.status).toBe(401);
+      const dataSpoofedLocal = (await resSpoofedLocal.json()) as any;
+      expect(dataSpoofedLocal.success).toBe(false);
+      expect(dataSpoofedLocal.error).toContain("Authentication required");
+    });
+
+    it("authenticates WAN ingest request from production origin when READING_API_KEY is unset", async () => {
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async () => ({
+          success: true,
+          seriesTitle: "Production Origin Novel",
+          author: "Author",
+          importedCount: 1,
+          skippedCount: 0,
+          duplicateCount: 0,
+          totalCount: 1,
+          tags: "Light Novel",
+          calibreBookIds: [999],
+        }),
+        getCalibreBooks: () => [],
+      });
+
+      try {
+        const origKey = process.env.READING_API_KEY;
+        delete process.env.READING_API_KEY;
+
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: {
+            host: "reading.wavypremium.xyz",
+            origin: "https://reading.wavypremium.xyz",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ url: "https://lnori.com/series/8046/prod-test" }),
+        });
+
+        const res = await handleRequest(req);
+        expect(res.status).toBe(200);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(true);
+        expect(data.seriesTitle).toBe("Production Origin Novel");
+
+        if (origKey !== undefined) process.env.READING_API_KEY = origKey;
+      } finally {
+        resetServerDependenciesForTest();
+      }
     });
 
     it("returns 200 and refreshes Calibre cache on successful ingest", async () => {
@@ -978,6 +1073,7 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
         expect(res.headers.get("content-type")).toContain("text/event-stream");
 
         const text = await res.text();
+        expect(text).toContain(": keepalive\n\n");
         const rawBlocks = text.split("\n\n").filter((b) => b.trim().startsWith("data:"));
         const events = rawBlocks.map((b) => JSON.parse(b.replace(/^data:\s*/, "").trim()));
 
