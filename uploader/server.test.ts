@@ -1636,19 +1636,31 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
       expect(cancelData.message).toContain("No active Lnori ingestion");
     });
 
-    it("POST /api/lnori/ingest returns 409 Conflict when another ingestion is currently active", async () => {
+    it("POST /api/lnori/ingest queues concurrent requests and returns queue position instead of 409", async () => {
       resetActiveLnoriStateForTest();
-      let completeTrigger: (() => void) | undefined;
-      const completionPromise = new Promise<void>((resolve) => {
-        completeTrigger = resolve;
+      let completeTrigger1: (() => void) | undefined;
+      const completionPromise1 = new Promise<void>((resolve) => {
+        completeTrigger1 = resolve;
       });
 
+      let completeTrigger2: (() => void) | undefined;
+      const completionPromise2 = new Promise<void>((resolve) => {
+        completeTrigger2 = resolve;
+      });
+
+      const executedUrls: string[] = [];
+
       setServerDependenciesForTest({
-        ingestLnoriSeries: async () => {
-          await completionPromise;
+        ingestLnoriSeries: async (url: string) => {
+          executedUrls.push(url);
+          if (url.includes("queue-test-1")) {
+            await completionPromise1;
+          } else if (url.includes("queue-test-2")) {
+            await completionPromise2;
+          }
           return {
             success: true,
-            seriesTitle: "Lock Test Series",
+            seriesTitle: url.includes("queue-test-1") ? "Series 1" : "Series 2",
             author: "Author",
             importedCount: 1,
             skippedCount: 0,
@@ -1661,34 +1673,413 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
       });
 
       try {
+        // Request 1: starts immediately
         const req1 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            url: "https://lnori.com/series/8046/lock-test-1",
+            url: "https://lnori.com/series/8046/queue-test-1",
             stream: true,
           }),
         });
         const res1 = await handleRequest(req1, localServer);
         expect(res1.status).toBe(200);
 
-        // Second concurrent request must receive 409
+        // Verify active state
+        const progReqActive = new Request("http://127.0.0.1:8086/api/lnori/progress");
+        const progResActive = await handleRequest(progReqActive, localServer);
+        const progDataActive = (await progResActive.json()) as any;
+        expect(progDataActive.active).toBe(true);
+        expect(progDataActive.state.targetUrl).toBe("https://lnori.com/series/8046/queue-test-1");
+
+        // Duplicate active request (same URL): returns active runId/state
+        const reqDup = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/queue-test-1",
+          }),
+        });
+        const resDup = await handleRequest(reqDup, localServer);
+        expect(resDup.status).toBe(200);
+        const dupData = (await resDup.json()) as any;
+        expect(dupData.success).toBe(true);
+        expect(dupData.active).toBe(true);
+        expect(dupData.runId).toBe(progDataActive.state.runId);
+
+        // Request 2 (different URL): enqueued sequentially
         const req2 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            url: "https://lnori.com/series/8046/lock-test-2",
-            stream: true,
+            url: "https://lnori.com/series/9999/queue-test-2",
           }),
         });
         const res2 = await handleRequest(req2, localServer);
-        expect(res2.status).toBe(409);
-        const errData = (await res2.json()) as any;
-        expect(errData.success).toBe(false);
-        expect(errData.error).toContain("Another Lnori ingestion is currently active");
-        expect(errData.active).toBe(true);
+        expect(res2.status).toBe(200);
+        const queueData = (await res2.json()) as any;
+        expect(queueData.success).toBe(true);
+        expect(queueData.queued).toBe(true);
+        expect(queueData.queuePosition).toBe(1);
+        expect(queueData.queueLength).toBe(1);
+        expect(typeof queueData.runId).toBe("string");
+
+        // Request 3 (duplicate of queued URL): returns existing queue position
+        const req3 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/9999/queue-test-2",
+          }),
+        });
+        const res3 = await handleRequest(req3, localServer);
+        expect(res3.status).toBe(200);
+        const queueData3 = (await res3.json()) as any;
+        expect(queueData3.success).toBe(true);
+        expect(queueData3.queued).toBe(true);
+        expect(queueData3.queuePosition).toBe(1);
+        expect(queueData3.runId).toBe(queueData.runId);
+
+        // Progress check: shows queue length and currentQueuePosition
+        const progReqWithRunId = new Request(
+          `http://127.0.0.1:8086/api/lnori/progress?runId=${encodeURIComponent(queueData.runId)}`,
+        );
+        const progResWithRunId = await handleRequest(progReqWithRunId, localServer);
+        const progDataWithRunId = (await progResWithRunId.json()) as any;
+        expect(progDataWithRunId.queueLength).toBe(1);
+        expect(progDataWithRunId.currentQueuePosition).toBe(1);
+        expect(progDataWithRunId.queuedItems.length).toBe(1);
+
+        // Complete job 1
+        completeTrigger1?.();
+        // Give background queue processor a moment to dequeue job 2
+        await new Promise((r) => setTimeout(r, 60));
+
+        // Now job 2 should have started
+        expect(executedUrls).toContain("https://lnori.com/series/9999/queue-test-2");
+
+        // Complete job 2
+        completeTrigger2?.();
+        await new Promise((r) => setTimeout(r, 60));
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
+
+    it("POST /api/lnori/cancel cancels queued items by runId", async () => {
+      resetActiveLnoriStateForTest();
+      let completeTrigger: (() => void) | undefined;
+      const completionPromise = new Promise<void>((resolve) => {
+        completeTrigger = resolve;
+      });
+
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async () => {
+          await completionPromise;
+          return {
+            success: true,
+            seriesTitle: "Active Series",
+            author: "Author",
+            importedCount: 1,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 1,
+            tags: "Light Novel",
+            calibreBookIds: [100],
+          };
+        },
+      });
+
+      try {
+        // Start active job
+        const req1 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/active-job",
+            stream: true,
+          }),
+        });
+        await handleRequest(req1, localServer);
+
+        // Enqueue job 2
+        const req2 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/9999/queued-to-cancel",
+          }),
+        });
+        const res2 = await handleRequest(req2, localServer);
+        const data2 = (await res2.json()) as any;
+        expect(data2.queued).toBe(true);
+
+        // Cancel the queued job by runId
+        const cancelReq = new Request("http://127.0.0.1:8086/api/lnori/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ runId: data2.runId }),
+        });
+        const cancelRes = await handleRequest(cancelReq, localServer);
+        const cancelData = (await cancelRes.json()) as any;
+        expect(cancelData.success).toBe(true);
+        expect(cancelData.cancelled).toBe(true);
+        expect(cancelData.message).toContain("cancelled");
+
+        // Progress check: queue should now be empty
+        const progReq = new Request("http://127.0.0.1:8086/api/lnori/progress");
+        const progRes = await handleRequest(progReq, localServer);
+        const progData = (await progRes.json()) as any;
+        expect(progData.queueLength).toBe(0);
 
         completeTrigger?.();
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
+
+    it("prevents TOCTOU races between concurrent post-validation idle claims", async () => {
+      resetActiveLnoriStateForTest();
+      let completeTrigger: (() => void) | undefined;
+      const completionPromise = new Promise<void>((resolve) => {
+        completeTrigger = resolve;
+      });
+
+      const startedUrls: string[] = [];
+
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async (url: string) => {
+          startedUrls.push(url);
+          await completionPromise;
+          return {
+            success: true,
+            seriesTitle: "TOCTOU Series",
+            author: "Author",
+            importedCount: 1,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 1,
+            tags: "Light Novel",
+            calibreBookIds: [101],
+          };
+        },
+      });
+
+      try {
+        const reqA = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: "https://lnori.com/series/1111/alpha", stream: true }),
+        });
+        const reqB = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: "https://lnori.com/series/2222/beta" }),
+        });
+
+        // Fire both requests simultaneously
+        const [resA, resB] = await Promise.all([
+          handleRequest(reqA, localServer),
+          handleRequest(reqB, localServer),
+        ]);
+
+        expect(resA.status).toBe(200);
+        expect(resB.status).toBe(200);
+
+        const dataB = (await resB.json()) as any;
+
+        // B must be queued while A started as active stream
+        expect(dataB.queued).toBe(true);
+        expect(dataB.queuePosition).toBe(1);
+
+        // At this moment, only 1 task should be executing
+        expect(startedUrls.length).toBe(1);
+
+        completeTrigger?.();
+        await new Promise((r) => setTimeout(r, 60));
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
+
+    it("cancels active ingestion by runId and immediately starts next queued item", async () => {
+      resetActiveLnoriStateForTest();
+      let resolveJob2: (() => void) | undefined;
+      const job2Promise = new Promise<void>((r) => {
+        resolveJob2 = r;
+      });
+
+      const startedUrls: string[] = [];
+
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async (url: string, _onProgress: any, deps: any) => {
+          startedUrls.push(url);
+          if (url.includes("job-1")) {
+            // Keep hanging until aborted
+            await new Promise<void>((_, reject) => {
+              if (deps?.signal) {
+                deps.signal.addEventListener("abort", () => {
+                  const err = new Error("Lnori ingestion cancelled by user");
+                  err.name = "AbortError";
+                  reject(err);
+                });
+              }
+            });
+          } else if (url.includes("job-2")) {
+            await job2Promise;
+          }
+          return {
+            success: true,
+            seriesTitle: "Job 2 Series",
+            author: "Author",
+            importedCount: 1,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 1,
+            tags: "Light Novel",
+            calibreBookIds: [102],
+          };
+        },
+      });
+
+      try {
+        // Start job 1
+        const req1 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: "https://lnori.com/series/8046/job-1", stream: true }),
+        });
+        await handleRequest(req1, localServer);
+
+        // Queue job 2 (use a different series ID so it's not a duplicate)
+        const req2 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: "https://lnori.com/series/9999/job-2" }),
+        });
+        const res2 = await handleRequest(req2, localServer);
+        const data2 = (await res2.json()) as any;
+        expect(data2.queued).toBe(true);
+
+        const progRes1 = await handleRequest(
+          new Request("http://127.0.0.1:8086/api/lnori/progress"),
+          localServer,
+        );
+        const progData1 = (await progRes1.json()) as any;
+        const activeRunId = progData1.state.runId;
+
+        // Cancel with wrong runId -> false
+        const cancelWrong = await handleRequest(
+          new Request("http://127.0.0.1:8086/api/lnori/cancel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ runId: "nonexistent-run-id" }),
+          }),
+          localServer,
+        );
+        const cancelWrongData = (await cancelWrong.json()) as any;
+        expect(cancelWrongData.cancelled).toBe(false);
+
+        // Cancel with correct active runId -> true
+        const cancelReq = new Request("http://127.0.0.1:8086/api/lnori/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ runId: activeRunId }),
+        });
+        const cancelRes = await handleRequest(cancelReq, localServer);
+        const cancelData = (await cancelRes.json()) as any;
+        expect(cancelData.cancelled).toBe(true);
+
+        // Wait for drain to process job 2
+        await new Promise((r) => setTimeout(r, 60));
+        expect(startedUrls).toContain("https://lnori.com/series/9999/job-2");
+
+        resolveJob2?.();
+        await new Promise((r) => setTimeout(r, 60));
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
+
+    it("GET /api/lnori/progress?runId= returns terminal completed state even after live active has drained", async () => {
+      resetActiveLnoriStateForTest();
+      let completeTrigger1: (() => void) | undefined;
+      const completionPromise1 = new Promise<void>((r) => {
+        completeTrigger1 = r;
+      });
+
+      let completeTrigger2: (() => void) | undefined;
+      const completionPromise2 = new Promise<void>((r) => {
+        completeTrigger2 = r;
+      });
+
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async (url: string) => {
+          if (url.includes("terminal-test-1")) {
+            await completionPromise1;
+          } else if (url.includes("terminal-test-2")) {
+            await completionPromise2;
+          }
+          return {
+            success: true,
+            seriesTitle: url.includes("terminal-test-1") ? "Finished Series 1" : "Series 2",
+            author: "Author",
+            importedCount: 5,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 5,
+            tags: "Light Novel",
+            calibreBookIds: [103],
+          };
+        },
+      });
+
+      try {
+        // Start job 1
+        const req1 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: "https://lnori.com/series/8046/terminal-test-1", stream: true }),
+        });
+        await handleRequest(req1, localServer);
+
+        const progReq1 = new Request("http://127.0.0.1:8086/api/lnori/progress");
+        const progRes1 = await handleRequest(progReq1, localServer);
+        const progData1 = (await progRes1.json()) as any;
+        const job1RunId = progData1.state.runId;
+
+        // Queue job 2
+        const req2 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: "https://lnori.com/series/9999/terminal-test-2" }),
+        });
+        await handleRequest(req2, localServer);
+
+        // Complete job 1; drain will start job 2 and overwrite live activeLnoriState
+        completeTrigger1?.();
+        await new Promise((r) => setTimeout(r, 60));
+
+        // Now query progress with job 1's runId
+        const progJob1Req = new Request(
+          `http://127.0.0.1:8086/api/lnori/progress?runId=${encodeURIComponent(job1RunId)}`,
+        );
+        const progJob1Res = await handleRequest(progJob1Req, localServer);
+        const progJob1Data = (await progJob1Res.json()) as any;
+
+        // Must still report job 1's completed terminal state with its completedData
+        expect(progJob1Data.success).toBe(true);
+        expect(progJob1Data.state.runId).toBe(job1RunId);
+        expect(progJob1Data.state.phase).toBe("complete");
+        expect(progJob1Data.state.completedData).toBeTruthy();
+        expect(progJob1Data.state.completedData.seriesTitle).toBe("Finished Series 1");
+
+        completeTrigger2?.();
+        await new Promise((r) => setTimeout(r, 60));
       } finally {
         resetServerDependenciesForTest();
         resetActiveLnoriStateForTest();

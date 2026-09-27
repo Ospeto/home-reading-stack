@@ -3037,7 +3037,7 @@
               </span>
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-indigo-400 font-mono border border-zinc-700">API</span>
             </div>
-            <div class="text-[11px] text-zinc-400">Downloads and imports series or book from lnori.com with autonomous background decoupling, live SSE progress streaming (<code>stream: true</code>), progress polling (<code>GET /api/lnori/progress</code>), and cancel support (<code>POST /api/lnori/cancel</code>)</div>
+            <div class="text-[11px] text-zinc-400">Downloads and imports series or book from lnori.com with asynchronous FIFO sequential queueing, autonomous background decoupling, live SSE progress streaming (<code>stream: true</code>), progress polling with queue position (<code>GET /api/lnori/progress</code>), and cancel support (<code>POST /api/lnori/cancel</code>)</div>
             <div class="flex items-center gap-2 pt-1">
               <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://reading-sg.wavypremium.xyz:8443/api/lnori/ingest</code>
               <button onclick="copyToClipboard('https://reading-sg.wavypremium.xyz:8443/api/lnori/ingest')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
@@ -4989,13 +4989,22 @@
       }
       setTimeout(() => input.focus(), 60);
 
-      // Check if an ingestion is already active on the server
+      // Check if an ingestion is already active or queued on the server
       try {
         const res = await fetch('/api/lnori/progress');
         if (res.ok) {
           const data = await res.json();
           if (data && data.active && data.state) {
             resumeActiveLnoriIngest(data.state);
+          } else if (data && data.queuedItems && data.queuedItems.length > 0) {
+            // Display first queued item if not active
+            const firstQueued = data.queuedItems[0];
+            renderQueuedState({
+              targetUrl: firstQueued.targetUrl,
+              queuePosition: 1,
+              queueLength: data.queuedItems.length,
+              runId: firstQueued.id,
+            });
           }
         }
       } catch (err) {
@@ -5006,7 +5015,11 @@
     async function handleLnoriCancel() {
       if (isLnoriIngesting) {
         try {
-          await fetch('/api/lnori/cancel', { method: 'POST' });
+          await fetch('/api/lnori/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ runId: currentLnoriRunId || undefined }),
+          });
         } catch (err) {
           console.debug('[Lnori] Failed to call cancel endpoint:', err);
         }
@@ -5026,8 +5039,122 @@
       closeModalAnimated('lnoriModal', false);
     }
 
+    let currentLnoriRunId = null;
+
+    function renderQueuedState(queueInfo) {
+      isLnoriIngesting = true;
+      currentLnoriRunId = queueInfo.runId;
+      const input = document.getElementById('lnoriUrlInput');
+      const btn = document.getElementById('lnoriIngestBtn');
+      const cancelBtn = document.getElementById('lnoriCancelBtn');
+      const status = document.getElementById('lnoriIngestStatus');
+      if (queueInfo.targetUrl && input) {
+        input.value = queueInfo.targetUrl;
+      }
+      if (btn) btn.disabled = true;
+      if (cancelBtn) {
+        cancelBtn.disabled = false;
+        cancelBtn.textContent = 'Cancel Queued Job';
+      }
+      setHtml(btn, `${svgIcon('spinner', 'w-3.5 h-3.5 animate-spin')} <span>Queued...</span>`);
+
+      status.className = 'text-xs p-3.5 rounded-xl border bg-amber-950/30 border-amber-800/60 text-amber-200';
+      setHtml(status, `
+        <div class="space-y-2">
+          <div class="flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="w-2 h-2 rounded-full bg-amber-400 animate-ping shrink-0"></span>
+              <span class="font-bold text-amber-300 text-xs">Queued — Position #${queueInfo.queuePosition} of ${queueInfo.queueLength}</span>
+            </div>
+            <span class="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-900/60 text-amber-300 border border-amber-700/50">WAITING</span>
+          </div>
+          <div class="flex items-center gap-2 text-[11px] text-zinc-300 bg-zinc-950/70 p-2.5 rounded-lg border border-zinc-800/80">
+            <svg class="w-3.5 h-3.5 animate-spin text-amber-400 shrink-0"><use href="#icon-spinner"/></svg>
+            <span id="lnoriQueueStatusText" class="truncate">Another light novel is downloading. This download will begin automatically...</span>
+          </div>
+        </div>
+      `);
+      status.classList.remove('hidden');
+
+      const runController = new AbortController();
+      activeLnoriAbortController = runController;
+
+      // Poll until this queued job transitions to active or completes
+      (async () => {
+        try {
+          while (isLnoriIngesting && !runController.signal.aborted) {
+            await new Promise((r) => setTimeout(r, 2000));
+            if (runController.signal.aborted) break;
+
+            const res = await fetch(`/api/lnori/progress?runId=${encodeURIComponent(queueInfo.runId)}`);
+            if (!res.ok) continue;
+            const data = await res.json();
+            if (!data) continue;
+
+            // Check if our job is now the active running job
+            if (data.active && data.state && data.state.runId === queueInfo.runId) {
+              // Seamlessly transition into active progress monitoring
+              isLnoriIngesting = false;
+              if (activeLnoriAbortController === runController) {
+                activeLnoriAbortController = null;
+              }
+              resumeActiveLnoriIngest(data.state);
+              return;
+            }
+
+            // Check if our job already completed or errored
+            if (!data.active && data.state?.runId === queueInfo.runId) {
+              isLnoriIngesting = false;
+              if (activeLnoriAbortController === runController) {
+                activeLnoriAbortController = null;
+              }
+              resumeActiveLnoriIngest(data.state);
+              return;
+            }
+
+            // Check if our job is still in the pending queue
+            const stillQueued = (data.queuedItems || []).some(
+              (item) => item.id === queueInfo.runId,
+            );
+
+            if (stillQueued) {
+              if (typeof data.currentQueuePosition === 'number') {
+                const posText = document.querySelector('#lnoriIngestStatus span.text-amber-300');
+                if (posText) {
+                  posText.textContent = `Queued — Position #${data.currentQueuePosition} of ${data.queueLength}`;
+                }
+              }
+            } else {
+              // Job was removed or cancelled remotely
+              status.className =
+                'text-xs p-3 rounded-xl border bg-zinc-900 border-zinc-700 text-zinc-400';
+              setHtml(
+                status,
+                `<div><strong>ℹ️ Queued Job Cancelled:</strong><div class="mt-1 text-[11px] text-zinc-400">This queued download was cancelled or removed.</div></div>`,
+              );
+              break;
+            }
+          }
+        } catch (pollErr) {
+          console.debug('[Lnori] Queue polling error:', pollErr);
+        } finally {
+          if (activeLnoriAbortController === runController) {
+            activeLnoriAbortController = null;
+            isLnoriIngesting = false;
+            btn.disabled = false;
+            if (cancelBtn) {
+              cancelBtn.disabled = false;
+              cancelBtn.textContent = 'Cancel';
+            }
+            setHtml(btn, `${svgIcon('download', 'w-3.5 h-3.5')} <span>Download &amp; Ingest</span>`);
+          }
+        }
+      })();
+    }
+
     function resumeActiveLnoriIngest(initialState) {
       if (isLnoriIngesting) return;
+      currentLnoriRunId = initialState?.runId || null;
       const input = document.getElementById('lnoriUrlInput');
       if (initialState?.targetUrl) {
         input.value = initialState.targetUrl;
@@ -5204,7 +5331,10 @@
           if (runController.signal.aborted) break;
 
           try {
-            const pollRes = await fetch('/api/lnori/progress');
+            const pollUrl = expectedRunId
+              ? `/api/lnori/progress?runId=${encodeURIComponent(expectedRunId)}`
+              : '/api/lnori/progress';
+            const pollRes = await fetch(pollUrl);
             if (!pollRes.ok) continue;
             const pollData = await pollRes.json();
             if (!pollData || !pollData.state) continue;
@@ -5263,6 +5393,8 @@
 
       let currentRunId = existingState?.runId || null;
 
+      let handedOffToQueue = false;
+
       try {
         if (!isResuming) {
           let responseStarted = false;
@@ -5313,7 +5445,10 @@
                     } catch {}
                   }
                   if (parsed) {
-                    if (parsed.runId) currentRunId = parsed.runId;
+                    if (parsed.runId) {
+                      currentRunId = parsed.runId;
+                      currentLnoriRunId = parsed.runId;
+                    }
                     if (parsed.phase === 'error') {
                       const errMsg = parsed.status || parsed.data?.error || 'Ingestion encountered an error';
                       const fatalErr = new Error(errMsg);
@@ -5337,7 +5472,10 @@
                   } catch {}
                 }
                 if (parsed) {
-                  if (parsed.runId) currentRunId = parsed.runId;
+                  if (parsed.runId) {
+                    currentRunId = parsed.runId;
+                    currentLnoriRunId = parsed.runId;
+                  }
                   if (parsed.phase === 'error') {
                     const errMsg = parsed.status || parsed.data?.error || 'Ingestion encountered an error';
                     const fatalErr = new Error(errMsg);
@@ -5348,10 +5486,20 @@
                 }
               }
             } else {
-              // Non-streaming fallback response
+              // Non-streaming response or queued response
               const data = await res.json();
               if (!res.ok || !data.success) {
                 throw new Error(data.error || 'Failed to ingest light novel from Lnori');
+              }
+              if (data.queued) {
+                handedOffToQueue = true;
+                renderQueuedState({
+                  targetUrl,
+                  queuePosition: data.queuePosition,
+                  queueLength: data.queueLength,
+                  runId: data.runId,
+                });
+                return;
               }
               completedData = data;
             }
@@ -5458,16 +5606,18 @@
           );
         }
       } finally {
-        if (activeLnoriAbortController === runController) {
-          activeLnoriAbortController = null;
-          isLnoriIngesting = false;
+        if (!handedOffToQueue) {
+          if (activeLnoriAbortController === runController) {
+            activeLnoriAbortController = null;
+            isLnoriIngesting = false;
+          }
+          btn.disabled = false;
+          if (cancelBtn) {
+            cancelBtn.disabled = false;
+            cancelBtn.textContent = completedData ? 'Done' : 'Cancel';
+          }
+          setHtml(btn, `${svgIcon('download', 'w-3.5 h-3.5')} <span>Download &amp; Ingest</span>`);
         }
-        btn.disabled = false;
-        if (cancelBtn) {
-          cancelBtn.disabled = false;
-          cancelBtn.textContent = completedData ? 'Done' : 'Cancel';
-        }
-        setHtml(btn, `${svgIcon('download', 'w-3.5 h-3.5')} <span>Download &amp; Ingest</span>`);
       }
     }
 
