@@ -518,8 +518,10 @@ export function executeLnoriIngestTask(
         recordCompletedLnoriJob(activeLnoriState);
         return { success: false, error: errMsg };
       } else {
+        let bookList: any[] = [];
         try {
-          refreshBooks(true);
+          const freshBooks = refreshBooks(true);
+          bookList = Array.isArray(freshBooks) ? freshBooks : [];
         } catch (rfErr) {
           console.debug("[Lnori] refreshBooks failed:", rfErr);
         }
@@ -534,6 +536,43 @@ export function executeLnoriIngestTask(
           tags: result.tags,
           calibreBookIds: result.calibreBookIds,
         };
+
+        // Enqueue durable metadata_enrich jobs for newly imported books (best-effort, never fails ingestion)
+        if (Array.isArray(result.calibreBookIds) && result.calibreBookIds.length > 0) {
+          try {
+            const defaultTags: string[] = Array.isArray(result.tags)
+              ? result.tags
+              : typeof result.tags === "string"
+                ? result.tags.split(",").map((t: string) => t.trim()).filter(Boolean)
+                : ["Light Novel"];
+
+            for (const newId of result.calibreBookIds) {
+              const found = bookList.find((b: any) => b.id === newId);
+              const bookTitle = found?.title || result.seriesTitle;
+              const bookAuthor = found?.authors || result.author;
+              const bookTags: string[] = Array.isArray(found?.tags)
+                ? found.tags
+                : typeof found?.tags === "string"
+                  ? found.tags.split(",").map((t: string) => t.trim()).filter(Boolean)
+                  : defaultTags;
+              const isManga = bookTags.some((t: string) => /manga|comic/i.test(t));
+
+              try {
+                jobQueue.enqueue("metadata_enrich", {
+                  bookId: newId,
+                  title: bookTitle,
+                  author: bookAuthor,
+                  tags: bookTags,
+                  isManga,
+                });
+              } catch (qErr) {
+                console.warn(`[Lnori] Failed to enqueue metadata_enrich job for #${newId}:`, qErr);
+              }
+            }
+          } catch (enrichErr) {
+            console.warn("[Lnori] Failed to process metadata_enrich queueing:", enrichErr);
+          }
+        }
 
         activeLnoriState.active = false;
         activeLnoriState.phase = "complete";
@@ -4918,6 +4957,7 @@ async function handleRequestCore(
           skippedCount: result.skippedCount,
           totalCount: result.totalCount,
           tags: result.tags,
+          calibreBookIds: result.calibreBookIds,
         },
         200,
         corsOrigin,

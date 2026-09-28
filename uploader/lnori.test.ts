@@ -1764,6 +1764,121 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
       expect(commentsArg).toContain("Momonga is trapped in Yggdrasil");
     });
 
+    it("falls back to fetchOnlineSynopsis when volMeta, EPUB, and manifest lack synopsis", async () => {
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+      // EPUB has no description
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+      const syntheticEpub = Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+
+      // Manifest has no description
+      const manifestHtml = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "No Description Series",
+          "author": { "@type": "Person", "name": "Kugane Maruyama" },
+          "hasPart": [
+            { "@type": "Book", "url": "https://lnori.com/book/601/vol-1" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      // Volume metadata has no description
+      const volHtml = `
+        <html>
+        <script id="app-data" type="application/ld+json">
+        {
+          "@type": "Book",
+          "name": "No Description Vol 1",
+          "id": "601",
+          "additionalProperty": [
+            { "name": "epub_filename", "value": "vol1.epub" },
+            { "name": "book_id", "value": "601" }
+          ]
+        }
+        </script>
+        </html>
+      `;
+
+      const capturedCalibreArgs: string[][] = [];
+      const onlineCalls: any[] = [];
+      const mockFetchOnlineSynopsis = async (book: any, options?: any) => {
+        onlineCalls.push({ book, options });
+        return {
+          description: "Online synopsis for No Description Series Volume 1",
+          source: "RanobeDB",
+        };
+      };
+
+      const result = await ingestLnoriSeries(
+        "https://lnori.com/series/600/no-desc",
+        undefined,
+        {
+          fetch: async (url: string) => {
+            if (url.includes("/series/600")) return new Response(manifestHtml);
+            if (url.includes("/book/601")) return new Response(volHtml);
+            if (url.includes("files.lnori.com")) {
+              return new Response(syntheticEpub, { status: 200 });
+            }
+            return new Response("Not found", { status: 404 });
+          },
+          spawnSync: (_cmd: string, args: string[]) => {
+            capturedCalibreArgs.push(args);
+            if (args[0] === "add") {
+              return { status: 0, stdout: "Added book ids: 601", stderr: "" };
+            }
+            return { status: 0, stdout: "", stderr: "" };
+          },
+          fetchOnlineSynopsis: mockFetchOnlineSynopsis as any,
+        },
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.importedCount).toBe(1);
+      expect(onlineCalls.length).toBe(1);
+      expect(onlineCalls[0].book.title).toContain("No Description Series");
+      expect(onlineCalls[0].options?.seriesCache).toBeDefined();
+
+      const commentsCommands = capturedCalibreArgs.filter(
+        (c) => c[0] === "set_metadata" && c.some((arg) => arg.startsWith("comments:")),
+      );
+      expect(commentsCommands.length).toBe(1);
+      expect(commentsCommands[0].find((arg) => arg.startsWith("comments:"))).toContain(
+        "Online synopsis for No Description Series Volume 1",
+      );
+    });
+
     it("emits structured LnoriProgressEvent objects for manifest, volume, and complete phases", async () => {
       function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
         const nameBuf = Buffer.from(name);

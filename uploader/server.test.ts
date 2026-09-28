@@ -11,6 +11,7 @@ import {
   resetServerDependenciesForTest,
   resetActiveLnoriStateForTest,
   ingestBookFile,
+  jobQueue,
 } from "./server";
 import { validateUrlForSSRF, getBsdtarPath } from "./security";
 import { autoEnrichBookSynopsis } from "./scraper";
@@ -955,6 +956,61 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
         expect(res.status).toBe(200);
         expect(passed).toBe("https://www.lnori.com/book/12345/test-vol-1");
       } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("enqueues metadata_enrich jobs into jobQueue for newly imported calibreBookIds upon successful ingestion", async () => {
+      const origEnqueue = jobQueue.enqueue;
+      const enqueuedJobs: any[] = [];
+      (jobQueue as any).enqueue = (type: string, payload: any) => {
+        enqueuedJobs.push({ type, payload });
+        return { id: 1, type, payload, status: "pending" };
+      };
+
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async () => ({
+          success: true,
+          seriesTitle: "Enrich Test Series",
+          author: "Test Author",
+          importedCount: 2,
+          skippedCount: 0,
+          duplicateCount: 0,
+          totalCount: 2,
+          tags: ["Light Novel", "Fantasy"],
+          calibreBookIds: [777, 778],
+        }),
+        getCalibreBooks: () => [
+          { id: 777, title: "Enrich Test Series Vol 1", authors: "Test Author", tags: ["Light Novel"] },
+          { id: 778, title: "Enrich Test Series Vol 2", authors: "Test Author", tags: ["Light Novel"] },
+        ],
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/9999/enrich-test",
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(true);
+        expect(data.calibreBookIds).toEqual([777, 778]);
+
+        // Check enqueued jobs
+        const enrichJobs = enqueuedJobs.filter((j) => j.type === "metadata_enrich");
+        expect(enrichJobs.length).toBe(2);
+        expect(enrichJobs[0].payload.bookId).toBe(777);
+        expect(enrichJobs[0].payload.title).toBe("Enrich Test Series Vol 1");
+        expect(enrichJobs[0].payload.author).toBe("Test Author");
+        expect(enrichJobs[1].payload.bookId).toBe(778);
+        expect(enrichJobs[1].payload.title).toBe("Enrich Test Series Vol 2");
+      } finally {
+        (jobQueue as any).enqueue = origEnqueue;
         resetServerDependenciesForTest();
       }
     });

@@ -4047,6 +4047,35 @@ export async function runDirectLnoriFallback(
         );
 
         if (result && result.success) {
+          // Durable metadata enrichment via Job Queue for newly imported volumes
+          if (Array.isArray(result.calibreBookIds) && result.calibreBookIds.length > 0) {
+            try {
+              const defaultTags: string[] = Array.isArray(result.tags)
+                ? result.tags
+                : typeof result.tags === "string"
+                  ? result.tags.split(",").map((t: string) => t.trim()).filter(Boolean)
+                  : ["Light Novel"];
+
+              const jq = getJobQueue(getCacheDb());
+              for (const newId of result.calibreBookIds) {
+                try {
+                  jq.enqueue("metadata_enrich", {
+                    bookId: newId,
+                    title: result.seriesTitle,
+                    author: result.author,
+                    tags: defaultTags,
+                    isManga: defaultTags.some((t: string) => /manga|comic/i.test(t)),
+                    chatId: activeChatId,
+                  });
+                } catch (qErr) {
+                  logError(`Failed to enqueue metadata_enrich for book #${newId}: ${qErr}`);
+                }
+              }
+            } catch (enrichErr) {
+              logError(`Failed to process metadata_enrich queueing: ${enrichErr}`);
+            }
+          }
+
           if (result.importedCount === 0 && result.skippedCount === 0) {
             await sendLnoriIncompleteCard(activeChatId, activeMsgId, activeUrl);
           } else {

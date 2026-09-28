@@ -14,6 +14,7 @@ import {
 import {
   isCommentsEmpty,
   extractEpubDescription,
+  fetchOnlineSynopsis,
 } from "./scraper";
 import {
   streamResponseToFile,
@@ -48,6 +49,7 @@ export interface ElscioneDependencies {
   helperPath?: string;
   pythonPath?: string;
   useHelper?: boolean;
+  fetchOnlineSynopsis?: typeof fetchOnlineSynopsis;
 }
 
 export interface AnubisChallenge {
@@ -1521,6 +1523,7 @@ export async function ingestElscioneSeries(
   let skippedErrors = 0;
   const calibreBookIds: number[] = [];
   let seriesAuthor = "Unknown";
+  const seriesCache = new Map<string, { description: string; coverUrl?: string; source?: string }>();
 
   try {
     for (let i = 0; i < manifest.volumes.length; i++) {
@@ -1704,6 +1707,61 @@ export async function ingestElscioneSeries(
           console.warn(
             `[Elscione] Warning: set_metadata failed for Calibre #${calibreId}: ${setRes.stderr}`,
           );
+        }
+
+        // Online synopsis fallback: if synopsis is missing or empty, fetch online
+        if (!synopsis || isCommentsEmpty(synopsis)) {
+          if (dependencies?.signal?.aborted) {
+            throw new Error("Elscione ingestion aborted by client");
+          }
+          try {
+            const fetchOnline = dependencies?.fetchOnlineSynopsis ?? fetchOnlineSynopsis;
+            const onlineRes = await fetchOnline(
+              {
+                id: calibreId,
+                title,
+                author: authorToSet,
+                series: manifest.seriesTitle,
+                series_index: seriesIndex,
+                tags: tagsStr,
+              },
+              { seriesCache },
+            );
+            if (dependencies?.signal?.aborted) {
+              throw new Error("Elscione ingestion aborted by client");
+            }
+            if (onlineRes?.description && !isCommentsEmpty(onlineRes.description)) {
+              synopsis = onlineRes.description;
+              const onlineSetRes = runCalibredb(
+                [
+                  "set_metadata",
+                  String(calibreId),
+                  "--with-library",
+                  SERVER_URL,
+                  "--field",
+                  `comments:${synopsis}`,
+                ],
+                dependencies,
+              );
+              if (onlineSetRes.status !== 0) {
+                console.warn(
+                  `[Elscione] Warning: set_metadata (online synopsis) failed for Calibre #${calibreId}: ${onlineSetRes.stderr}`,
+                );
+              }
+            }
+          } catch (onlineErr: any) {
+            if (
+              dependencies?.signal?.aborted ||
+              onlineErr?.name === "AbortError" ||
+              String(onlineErr?.message || "").includes("aborted")
+            ) {
+              throw onlineErr;
+            }
+            console.debug(
+              `[Elscione] Online synopsis lookup failed for volume ${volNum} ("${title}"):`,
+              onlineErr?.message || onlineErr,
+            );
+          }
         }
 
         if (coverPath && fs.existsSync(coverPath)) {
