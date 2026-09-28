@@ -288,6 +288,32 @@ describe("Calibre Library Duplicate Scanner & Pruning Tool", () => {
 
         expect(checkDuplicatePair(a, b).isDuplicate).toBe(false);
       });
+
+      it("rejects series with distinct work markers (Classroom of the Elite vs Year 2, Re:Zero vs Ex)", () => {
+        const cote1: CalibreBook = {
+          id: 13,
+          title: "Classroom of the Elite Vol. 1",
+          authors: "Shogo Kinugasa",
+        };
+        const coteY2V1: CalibreBook = {
+          id: 14,
+          title: "Classroom of the Elite Year 2 Vol. 1",
+          authors: "Shogo Kinugasa",
+        };
+        expect(checkDuplicatePair(cote1, coteY2V1).isDuplicate).toBe(false);
+
+        const rezero1: CalibreBook = {
+          id: 15,
+          title: "Re:Zero Vol. 1",
+          authors: "Tappei Nagatsuki",
+        };
+        const rezeroEx1: CalibreBook = {
+          id: 16,
+          title: "Re:Zero Ex Vol. 1",
+          authors: "Tappei Nagatsuki",
+        };
+        expect(checkDuplicatePair(rezero1, rezeroEx1).isDuplicate).toBe(false);
+      });
     });
   });
 
@@ -357,6 +383,61 @@ describe("Calibre Library Duplicate Scanner & Pruning Tool", () => {
       expect(groups[0].keeperId).toBe(1);
       expect(groups[0].duplicateIds.sort()).toEqual([2, 3]);
       expect(groups[0].books.length).toBe(3);
+    });
+
+    it("refuses to cluster Classroom of the Elite Vol. 1 with Year 2 Vol. 1", () => {
+      const books: CalibreBook[] = [
+        {
+          id: 1,
+          title: "Classroom of the Elite Vol. 1",
+          authors: "Shogo Kinugasa",
+          formats: ["EPUB"],
+        },
+        {
+          id: 2,
+          title: "Classroom of the Elite Year 2 Vol. 1",
+          authors: "Shogo Kinugasa",
+          formats: ["EPUB"],
+        },
+      ];
+
+      const groups = clusterDuplicateGroups(books);
+      expect(groups.length).toBe(0);
+    });
+
+    it("refuses to bridge two different non-null canonical volumes through a volumeless title (Overlord case)", () => {
+      const books: CalibreBook[] = [
+        {
+          id: 101,
+          title: "Overlord",
+          authors: "Kugane Maruyama",
+          series: "Overlord",
+          series_index: 1,
+          formats: ["EPUB"],
+          has_cover: true,
+        },
+        {
+          id: 102,
+          title: "Overlord",
+          authors: "Kugane Maruyama",
+          formats: ["EPUB"],
+        },
+        {
+          id: 103,
+          title: "Overlord",
+          authors: "Kugane Maruyama",
+          series: "Overlord",
+          series_index: 2,
+          formats: ["EPUB"],
+        },
+      ];
+
+      const groups = clusterDuplicateGroups(books);
+      const allDuplicateIds = groups.flatMap((g) => g.duplicateIds);
+      // Volume 2 (103) must NEVER be in duplicateIds
+      expect(allDuplicateIds).not.toContain(103);
+      // Direct check of volume 1 against volume 2 must stay not-duplicate
+      expect(checkDuplicatePair(books[0], books[2]).isDuplicate).toBe(false);
     });
 
     it("maintains strict volume isolation in multi-book collections", () => {

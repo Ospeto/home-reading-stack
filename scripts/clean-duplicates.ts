@@ -35,6 +35,7 @@ const {
   stringSimilarity,
   cleanString,
   isJunkAuthor,
+  isCompatibleSeriesName,
 } = scraperMod;
 
 export interface CalibreBook {
@@ -317,18 +318,24 @@ export function checkDuplicatePair(
   if (sA && sB) {
     const normSA = normalizeTitleForDedup(sA.series);
     const normSB = normalizeTitleForDedup(sB.series);
-    if (sA.volume === sB.volume) {
-      if (
-        normSA === normSB ||
-        ((normSA.startsWith(normSB) || normSB.startsWith(normSA)) &&
-          (!hasKnownAuthors || authorSim >= 0.6))
-      ) {
+    const seriesCompatible =
+      normSA === normSB ||
+      (isCompatibleSeriesName(normSA, normSB) &&
+        (!hasKnownAuthors || authorSim >= 0.6));
+
+    if (seriesCompatible) {
+      if (sA.volume === sB.volume) {
         return {
           isDuplicate: true,
           matchType: "series_volume",
           reason: `Series "${sA.series}" Volume ${sA.volume}`,
         };
+      } else {
+        return { isDuplicate: false }; // Different volumes in compatible series
       }
+    } else {
+      // Both books have distinct series/branches (e.g. Year 2, Ex)
+      return { isDuplicate: false };
     }
   }
 
@@ -367,35 +374,79 @@ export function checkDuplicatePair(
  */
 export function clusterDuplicateGroups(books: CalibreBook[]): DuplicateGroup[] {
   const n = books.length;
-  const parent = Array.from({ length: n }, (_, i) => i);
-  const find = (i: number): number => {
-    if (parent[i] === i) return i;
-    parent[i] = find(parent[i]);
-    return parent[i];
-  };
-  const union = (i: number, j: number) => {
-    const rootI = find(i);
-    const rootJ = find(j);
-    if (rootI !== rootJ) parent[rootI] = rootJ;
-  };
-
+  const duplicatePairs: [number, number][] = [];
   const pairReasons = new Map<
     string,
     { matchType: DuplicateGroup["matchType"]; reason: string }
   >();
+  const pairedVolumes = new Map<number, Set<number>>();
+  for (let i = 0; i < n; i++) pairedVolumes.set(i, new Set());
 
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
       const res = checkDuplicatePair(books[i], books[j]);
       if (res.isDuplicate && res.matchType && res.reason) {
-        union(i, j);
+        duplicatePairs.push([i, j]);
         const pairKey = `${Math.min(books[i].id, books[j].id)}_${Math.max(books[i].id, books[j].id)}`;
         pairReasons.set(pairKey, {
           matchType: res.matchType,
           reason: res.reason,
         });
+
+        const vI = getCanonicalVolume(books[i]);
+        const vJ = getCanonicalVolume(books[j]);
+        if (vJ !== null) pairedVolumes.get(i)!.add(vJ);
+        if (vI !== null) pairedVolumes.get(j)!.add(vI);
       }
     }
+  }
+
+  // Detect ambiguous volumeless books: books with null canonical volume that match
+  // 2 or more distinct non-null canonical volumes (e.g. bare "Overlord" matching both Vol 1 and Vol 2).
+  // Such books must NOT bridge distinct volumes into a single prune cluster.
+  const ambiguousVolumeless = new Set<number>();
+  for (let i = 0; i < n; i++) {
+    if (getCanonicalVolume(books[i]) === null && pairedVolumes.get(i)!.size > 1) {
+      ambiguousVolumeless.add(i);
+    }
+  }
+
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const clusterVols = new Map<number, Set<number>>();
+  for (let i = 0; i < n; i++) {
+    const v = getCanonicalVolume(books[i]);
+    const s = new Set<number>();
+    if (v !== null) s.add(v);
+    clusterVols.set(i, s);
+  }
+
+  const find = (i: number): number => {
+    if (parent[i] === i) return i;
+    parent[i] = find(parent[i]);
+    return parent[i];
+  };
+  const union = (i: number, j: number): boolean => {
+    if (ambiguousVolumeless.has(i) || ambiguousVolumeless.has(j)) {
+      return false; // Refuse ambiguous volumeless bridge
+    }
+    const rootI = find(i);
+    const rootJ = find(j);
+    if (rootI === rootJ) return true;
+
+    const volsI = clusterVols.get(rootI) || new Set();
+    const volsJ = clusterVols.get(rootJ) || new Set();
+    const combined = new Set<number>([...volsI, ...volsJ]);
+    if (combined.size > 1) {
+      return false; // Refuse cluster that would contain two different non-null canonical volumes
+    }
+
+    parent[rootI] = rootJ;
+    clusterVols.set(rootJ, combined);
+    return true;
+  };
+
+  for (const [i, j] of duplicatePairs) {
+    union(i, j);
   }
 
   const clusters = new Map<number, CalibreBook[]>();

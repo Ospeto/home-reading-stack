@@ -76,6 +76,27 @@ export const MENTION_REGEX = /@\w+/gi;
 export const WWW_REGEX = /www\.[^\s)\]]+/gi;
 export const FORMAT_EXT_REGEX = /\b(epub|pdf|mobi|azw3?|cbz|cbr|azw|djvu)\b/gi;
 
+// Markers that identify a distinct work or branch rather than the same series
+export const DISTINCT_WORK_MARKER_REGEX =
+  /\b(?:year\s*\d+|ex\b|manga\b|comic\b|side[\s-]*stor(?:y|ies)|spin[\s-]*off|anthology|gaiden|special|short[\s-]*stor(?:y|ies)|after[\s-]*story)\b/i;
+
+export function hasDistinctWorkMarker(text: string): boolean {
+  return DISTINCT_WORK_MARKER_REGEX.test(text);
+}
+
+export function isCompatibleSeriesName(normA: string, normB: string): boolean {
+  if (normA === normB) return true;
+  const shorter = normA.length <= normB.length ? normA : normB;
+  const longer = normA.length <= normB.length ? normB : normA;
+  if (!longer.startsWith(shorter)) return false;
+
+  const remainder = longer.slice(shorter.length).trim();
+  if (hasDistinctWorkMarker(remainder)) {
+    return false;
+  }
+  return true;
+}
+
 /**
  * Clean strings (titles, authors, filenames) by scrubbing watermarks, digital library
  * tags, channel promos, t.me links, @mentions, bracket garbage, and file format extensions.
@@ -587,7 +608,7 @@ export function isSameBook(
     const normIS = normalizeTitleForDedup(incomingSeries.series);
     const sameSeries =
       normES === normIS ||
-      ((normES.startsWith(normIS) || normIS.startsWith(normES)) &&
+      (isCompatibleSeriesName(normES, normIS) &&
         (!hasKnownAuthors || authorSim >= 0.6));
     if (sameSeries) {
       return existingSeries.volume === incomingSeries.volume;
@@ -640,8 +661,19 @@ export function isSameBook(
     (normExistingTitle.startsWith(normIncomingTitle) ||
       normIncomingTitle.startsWith(normExistingTitle))
   ) {
-    if (!hasKnownAuthors || authorSim >= 0.6) {
-      if (titleSim >= 0.8) return true;
+    const shorter =
+      normExistingTitle.length <= normIncomingTitle.length
+        ? normExistingTitle
+        : normIncomingTitle;
+    const longer =
+      normExistingTitle.length <= normIncomingTitle.length
+        ? normIncomingTitle
+        : normExistingTitle;
+    const remainder = longer.slice(shorter.length).trim();
+    if (!hasDistinctWorkMarker(remainder)) {
+      if (!hasKnownAuthors || authorSim >= 0.6) {
+        if (titleSim >= 0.8) return true;
+      }
     }
   }
 
