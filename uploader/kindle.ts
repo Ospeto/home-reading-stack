@@ -3713,6 +3713,10 @@ export async function syncSingleBookToKindle(
  * Dynamic loader for highlight pulling from scripts/sync-kindle
  */
 let pullHighlightsFromKindleFn: any = null;
+export function setPullHighlightsFnForTesting(fn: any) {
+  pullHighlightsFromKindleFn = fn;
+}
+
 async function getPullHighlightsFn() {
   if (pullHighlightsFromKindleFn) return pullHighlightsFromKindleFn;
   try {
@@ -4081,7 +4085,7 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
               totalBytes: space.totalBytes,
             },
             getCalibreDbPath(),
-            new Map(),
+            getKosyncProgressMap(getKosyncDbPath()),
           );
           highlightsPulled = hlRes?.totalImported ?? 0;
         }

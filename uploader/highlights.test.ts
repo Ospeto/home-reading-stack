@@ -14,12 +14,11 @@ import {
   parseHighlightsFromMarkdown,
   cleanQuoteText,
   parseRawHighlightEntry,
-  splitNoteIntoHighlightBlocks,
   backfillHighlightsFromObsidian,
   ensureBookHighlightsIndexed,
   resolveBookIdFromTitle,
-  getHighlightsCacheDb,
   deleteHighlightsForBook,
+  authorsMatch,
 } from "./highlights";
 import { handleRequest } from "./server";
 import { processJoplinNote } from "./joplin";
@@ -714,6 +713,343 @@ title: "Dune"
 
       hl = getHighlightsForBook(testDb, 1, "Dune");
       expect(hl.find((h) => h.quote === "Unique Quote")?.note).toBeNull();
+    });
+  });
+
+  describe("Regression: Defect 1 & 2 (Shared Title Isolation & Punctuation Resolution Past 1000 IDs)", () => {
+    it("opening Homer's book does not show Fry's quotes and deleting Homer's book deletes by book_id", () => {
+      insertOrUpdateHighlight(testDb, {
+        book_id: 10,
+        book_title: "The Odyssey",
+        quote: "Homer quote: Sing in me, Muse",
+      });
+      insertOrUpdateHighlight(testDb, {
+        book_id: 20,
+        book_title: "The Odyssey",
+        quote: "Stephen Fry quote: Troy was taken",
+      });
+
+      // Opening Homer's book (id 10) must NOT show Fry's quotes
+      const homerQuotes = getHighlightsForBook(testDb, 10, "The Odyssey");
+      expect(homerQuotes.map((q) => q.quote)).toEqual(["Homer quote: Sing in me, Muse"]);
+
+      // Opening Fry's book (id 20) must NOT show Homer's quotes
+      const fryQuotes = getHighlightsForBook(testDb, 20, "The Odyssey");
+      expect(fryQuotes.map((q) => q.quote)).toEqual(["Stephen Fry quote: Troy was taken"]);
+
+      // Deleting Homer's book highlights must delete ONLY Homer's highlights
+      deleteHighlightsForBook(testDb, 10, "The Odyssey");
+      const homerAfter = getHighlightsForBook(testDb, 10, "The Odyssey");
+      const fryAfter = getHighlightsForBook(testDb, 20, "The Odyssey");
+      expect(homerAfter.length).toBe(0);
+      expect(fryAfter.map((q) => q.quote)).toEqual(["Stephen Fry quote: Troy was taken"]);
+    });
+
+    it("resolveBookIdFromTitle resolves book past id 1000 differing only by punctuation and fullwidth characters", () => {
+      const tmpDbPath = `/tmp/calibre-punct-1001-${Date.now()}.db`;
+      const cDb = new Database(tmpDbPath);
+      cDb.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT);");
+      const insert = cDb.prepare("INSERT INTO books (id, title) VALUES (?, ?);");
+      cDb.transaction(() => {
+        for (let i = 1; i <= 1000; i++) {
+          insert.run(i, `Book ${i}`);
+        }
+        insert.run(1001, "Punctuated：Title！");
+        insert.run(1002, "Title（Subtitle）");
+      })();
+      cDb.close();
+
+      try {
+        const resolved1 = resolveBookIdFromTitle("Punctuated Title", tmpDbPath);
+        expect(resolved1).toBe(1001);
+        const resolved2 = resolveBookIdFromTitle("Title Subtitle", tmpDbPath);
+        expect(resolved2).toBe(1002);
+      } finally {
+        if (fs.existsSync(tmpDbPath)) fs.unlinkSync(tmpDbPath);
+      }
+    });
+
+    it("resolveBookIdFromTitle preserves unique title resolution even when author is missing or unmatched", () => {
+      const tmpDbPath = `/tmp/calibre-unique-author-${Date.now()}.db`;
+      const cDb = new Database(tmpDbPath);
+      cDb.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT);");
+      cDb.run("CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);");
+      cDb.run("CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);");
+
+      // Unique title book with no author linked
+      cDb.run("INSERT INTO books (id, title) VALUES (42, 'Unique Title Book');");
+      cDb.close();
+
+      try {
+        // Author provided but not matching/unlinked: unique title must still resolve to 42!
+        expect(resolveBookIdFromTitle("Unique Title Book", tmpDbPath, "Some Random Author")).toBe(42);
+        // No author passed: unique title must resolve to 42
+        expect(resolveBookIdFromTitle("Unique Title Book", tmpDbPath)).toBe(42);
+      } finally {
+        if (fs.existsSync(tmpDbPath)) fs.unlinkSync(tmpDbPath);
+      }
+    });
+
+    it("resolveBookIdFromTitle handles Last, First author order and returns null on unmatched author for shared title", () => {
+      const tmpDbPath = `/tmp/calibre-authors-match-${Date.now()}.db`;
+      const cDb = new Database(tmpDbPath);
+      cDb.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT);");
+      cDb.run("CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);");
+      cDb.run("CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);");
+
+      cDb.run("INSERT INTO books (id, title) VALUES (1, 'The Odyssey');");
+      cDb.run("INSERT INTO authors (id, name) VALUES (1, 'Homer');");
+      cDb.run("INSERT INTO books_authors_link (id, book, author) VALUES (1, 1, 1);");
+
+      cDb.run("INSERT INTO books (id, title) VALUES (2, 'The Odyssey');");
+      cDb.run("INSERT INTO authors (id, name) VALUES (2, 'Stephen Fry');");
+      cDb.run("INSERT INTO books_authors_link (id, book, author) VALUES (2, 2, 2);");
+      cDb.close();
+
+      try {
+        // "Fry, Stephen" matches "Stephen Fry" (id 2)
+        expect(resolveBookIdFromTitle("The Odyssey", tmpDbPath, "Fry, Stephen")).toBe(2);
+        // "Homer" matches Homer (id 1)
+        expect(resolveBookIdFromTitle("The Odyssey", tmpDbPath, "Homer")).toBe(1);
+        // Unmatched author on shared title returns null (does not falsely fall back to Homer!)
+        expect(resolveBookIdFromTitle("The Odyssey", tmpDbPath, "Completely Wrong Author")).toBeNull();
+        // Missing or Unknown author on shared title returns null (does not pick the lowest id!)
+        expect(resolveBookIdFromTitle("The Odyssey", tmpDbPath)).toBeNull();
+        expect(resolveBookIdFromTitle("The Odyssey", tmpDbPath, "Unknown")).toBeNull();
+      } finally {
+        if (fs.existsSync(tmpDbPath)) fs.unlinkSync(tmpDbPath);
+      }
+    });
+
+    it("authorsMatch prevents false positive substring matches while matching valid variants", () => {
+      // Valid variants match
+      expect(authorsMatch("Stephen Fry", "Fry, Stephen")).toBe(true);
+      expect(authorsMatch("Homer", "Homer, Translator")).toBe(true);
+      expect(authorsMatch("Neil Gaiman & Terry Pratchett", "Terry Pratchett")).toBe(true);
+
+      // Substrings must NOT match
+      expect(authorsMatch("Ann", "Joanne")).toBe(false);
+      expect(authorsMatch("Homer", "Homeric")).toBe(false);
+      expect(authorsMatch("Bob", "Bobby")).toBe(false);
+      expect(authorsMatch("Stephen King", "Stephen Fry")).toBe(false);
+    });
+
+    it("allows two books sharing a title to hold the exact same quote without conflict", () => {
+      // Homer's book (id 1) quotes "Sing in me, Muse"
+      insertOrUpdateHighlight(testDb, {
+        book_id: 1,
+        book_title: "The Odyssey - Homer",
+        quote: "Sing in me, Muse",
+        page: 1,
+      });
+
+      // Fry's book (id 2) quotes the exact same text "Sing in me, Muse"
+      insertOrUpdateHighlight(testDb, {
+        book_id: 2,
+        book_title: "The Odyssey - Stephen Fry",
+        quote: "Sing in me, Muse",
+        page: 5,
+      });
+
+      const homerQuotes = getHighlightsForBook(testDb, 1, "The Odyssey");
+      const fryQuotes = getHighlightsForBook(testDb, 2, "The Odyssey");
+
+      expect(homerQuotes.length).toBe(1);
+      expect(homerQuotes[0].quote).toBe("Sing in me, Muse");
+      expect(homerQuotes[0].page).toBe(1);
+
+      expect(fryQuotes.length).toBe(1);
+      expect(fryQuotes[0].quote).toBe("Sing in me, Muse");
+      expect(fryQuotes[0].page).toBe(5);
+    });
+
+    it("ensureBookHighlightsIndexed discovers author-suffixed notes and forceFresh deletes only target book", () => {
+      const booksDir = path.join(os.tmpdir(), `books-author-suffix-${Date.now()}`);
+      fs.mkdirSync(booksDir, { recursive: true });
+
+      const homerNote = path.join(booksDir, "The Odyssey - Homer.md");
+      fs.writeFileSync(
+        homerNote,
+        `---
+title: "The Odyssey"
+author: "Homer"
+---
+## Highlights & Notes
+<!-- lighthouse:highlights:start -->
+> Sing in me, Muse
+— Page 1
+<!-- lighthouse:highlights:end -->
+`,
+        "utf8",
+      );
+
+      // Seed Fry's highlights in DB
+      insertOrUpdateHighlight(testDb, {
+        book_id: 2,
+        book_title: "The Odyssey - Stephen Fry",
+        quote: "Fry quote: Troy had fallen",
+      });
+
+      try {
+        // Opening Homer's book (id 1) should discover The Odyssey - Homer.md
+        const homerHl = ensureBookHighlightsIndexed(testDb, 1, "The Odyssey", {
+          booksDir,
+          author: "Homer",
+        });
+
+        expect(homerHl.length).toBe(1);
+        expect(homerHl[0].quote).toBe("Sing in me, Muse");
+
+        // Fry's highlights must remain completely intact
+        const fryHl = getHighlightsForBook(testDb, 2, "The Odyssey");
+        expect(fryHl.length).toBe(1);
+        expect(fryHl[0].quote).toBe("Fry quote: Troy had fallen");
+
+        // forceFresh refresh on Homer's book must NOT delete Fry's highlights
+        ensureBookHighlightsIndexed(testDb, 1, "The Odyssey", {
+          booksDir,
+          author: "Homer",
+          forceFresh: true,
+        });
+
+        const fryAfter = getHighlightsForBook(testDb, 2, "The Odyssey");
+        expect(fryAfter.length).toBe(1);
+        expect(fryAfter[0].quote).toBe("Fry quote: Troy had fallen");
+      } finally {
+        fs.rmSync(booksDir, { recursive: true, force: true });
+      }
+    });
+
+    it("ensureBookHighlightsIndexed never falls back to plain Title.md for shared-title book with different author", () => {
+      const booksDir = path.join(os.tmpdir(), `books-no-leak-${Date.now()}`);
+      fs.mkdirSync(booksDir, { recursive: true });
+
+      // Plain The Odyssey.md belongs to Homer
+      fs.writeFileSync(
+        path.join(booksDir, "The Odyssey.md"),
+        `---
+title: "The Odyssey"
+author: "Homer"
+---
+## Highlights & Notes
+<!-- lighthouse:highlights:start -->
+> Homer quote: Sing in me, Muse
+— Page 1
+<!-- lighthouse:highlights:end -->
+`,
+        "utf8",
+      );
+
+      // Suffixed note belongs to Stephen Fry
+      fs.writeFileSync(
+        path.join(booksDir, "The Odyssey - Stephen Fry.md"),
+        `---
+title: "The Odyssey"
+author: "Stephen Fry"
+---
+## Highlights & Notes
+<!-- lighthouse:highlights:start -->
+> Fry quote: Troy was taken
+— Page 5
+<!-- lighthouse:highlights:end -->
+`,
+        "utf8",
+      );
+
+      // Setup Calibre DB where book 1 is Homer and book 2 is Fry, Stephen
+      const customCalibreDb = path.join(os.tmpdir(), `calibre-shared-authors-${Date.now()}.db`);
+      const cDb = new Database(customCalibreDb);
+      cDb.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT);");
+      cDb.run("CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);");
+      cDb.run("CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);");
+      cDb.run("INSERT INTO books VALUES (1, 'The Odyssey'), (2, 'The Odyssey');");
+      cDb.run("INSERT INTO authors VALUES (1, 'Homer'), (2, 'Fry, Stephen');");
+      cDb.run("INSERT INTO books_authors_link VALUES (1, 1, 1), (2, 2, 2);");
+      cDb.close();
+
+      try {
+        // Open Fry's book (id 2, Calibre author "Fry, Stephen")
+        const fryHl = ensureBookHighlightsIndexed(testDb, 2, "The Odyssey", {
+          booksDir,
+          calibreDbPath: customCalibreDb,
+        });
+
+        // Must load Fry's quote and NEVER Homer's quote from plain The Odyssey.md!
+        expect(fryHl.length).toBe(1);
+        expect(fryHl[0].quote).toBe("Fry quote: Troy was taken");
+        expect(fryHl[0].quote).not.toContain("Homer");
+      } finally {
+        fs.rmSync(booksDir, { recursive: true, force: true });
+        if (fs.existsSync(customCalibreDb)) fs.unlinkSync(customCalibreDb);
+      }
+    });
+
+    it("backfillHighlightsFromObsidian preserves identical quotes across two books sharing a title", async () => {
+      const booksDir = path.join(os.tmpdir(), `books-backfill-shared-${Date.now()}`);
+      fs.mkdirSync(booksDir, { recursive: true });
+
+      fs.writeFileSync(
+        path.join(booksDir, "The Odyssey - Homer.md"),
+        `---
+title: "The Odyssey"
+author: "Homer"
+---
+## Highlights & Notes
+<!-- lighthouse:highlights:start -->
+> Shared quote: Sing in me, Muse
+— Page 1
+<!-- lighthouse:highlights:end -->
+`,
+        "utf8",
+      );
+
+      fs.writeFileSync(
+        path.join(booksDir, "The Odyssey - Stephen Fry.md"),
+        `---
+title: "The Odyssey"
+author: "Stephen Fry"
+---
+## Highlights & Notes
+<!-- lighthouse:highlights:start -->
+> Shared quote: Sing in me, Muse
+— Page 5
+<!-- lighthouse:highlights:end -->
+`,
+        "utf8",
+      );
+
+      const customCalibreDb = path.join(os.tmpdir(), `calibre-backfill-shared-${Date.now()}.db`);
+      const cDb = new Database(customCalibreDb);
+      cDb.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT);");
+      cDb.run("CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);");
+      cDb.run("CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);");
+      cDb.run("INSERT INTO books VALUES (1, 'The Odyssey'), (2, 'The Odyssey');");
+      cDb.run("INSERT INTO authors VALUES (1, 'Homer'), (2, 'Stephen Fry');");
+      cDb.run("INSERT INTO books_authors_link VALUES (1, 1, 1), (2, 2, 2);");
+      cDb.close();
+
+      const backfillDb = new Database(":memory:");
+      initHighlightsTable(backfillDb);
+
+      try {
+        await backfillHighlightsFromObsidian({
+          booksDir,
+          calibreDbPath: customCalibreDb,
+          db: backfillDb,
+        });
+
+        const homerQuotes = getHighlightsForBook(backfillDb, 1, "The Odyssey");
+        const fryQuotes = getHighlightsForBook(backfillDb, 2, "The Odyssey");
+
+        expect(homerQuotes.length).toBe(1);
+        expect(homerQuotes[0].quote).toBe("Shared quote: Sing in me, Muse");
+
+        expect(fryQuotes.length).toBe(1);
+        expect(fryQuotes[0].quote).toBe("Shared quote: Sing in me, Muse");
+      } finally {
+        fs.rmSync(booksDir, { recursive: true, force: true });
+        if (fs.existsSync(customCalibreDb)) fs.unlinkSync(customCalibreDb);
+      }
     });
   });
 });

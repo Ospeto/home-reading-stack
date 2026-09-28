@@ -44,6 +44,7 @@ import {
   isCrossScriptAuthorMatch,
   invalidateKindleSyncPreviewCache,
   setActiveKindleProgress,
+  setPullHighlightsFnForTesting,
 } from "./kindle";
 import { handleRequest, setServerDependenciesForTest, resetServerDependenciesForTest } from "./server";
 
@@ -4275,6 +4276,53 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
         expect(groups.length).toBe(0);
       } finally {
         globalThis.fetch = origFetch;
+      }
+    });
+  });
+
+  describe("15. Defect 4 Regression: Real Progress Map Passed to Highlight Pulling", () => {
+    it("syncAllBooksToKindle passes real KOSync progress map instead of empty Map during highlight pull", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      fs.mkdirSync(booksDir, { recursive: true });
+
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Test Book", author: "Author", format: "EPUB", fileContent: "valid content" },
+      ]);
+
+      const mockKosyncDbPath = path.join(tempBaseDir, "mock-kosync.db");
+      const kDb = new Database(mockKosyncDbPath);
+      kDb.run("CREATE TABLE progress (title TEXT, filename TEXT, percentage REAL, timestamp INTEGER);");
+      kDb.run("INSERT INTO progress VALUES ('Test Book', 'test.epub', 0.8, 1700000000);");
+      kDb.close();
+
+      const origKosyncEnv = process.env.KOSYNC_DB_PATH;
+      process.env.KOSYNC_DB_PATH = mockKosyncDbPath;
+
+      let passedMap: Map<string, any> | null = null;
+      setPullHighlightsFnForTesting(
+        async (_opts: any, _mount: any, _calibreDb: any, progressMap: Map<string, any>) => {
+          passedMap = progressMap;
+          return { results: [], totalImported: 0 };
+        },
+      );
+
+      try {
+        resetKindleProgressForTesting();
+        await syncAllBooksToKindle({ mountPath: kindleMount });
+
+        expect(passedMap).not.toBeNull();
+        expect(passedMap!.size).toBeGreaterThan(0);
+        const info = passedMap!.get("test book");
+        expect(info).toBeDefined();
+        expect(info.progress).toBe(80);
+      } finally {
+        setPullHighlightsFnForTesting(null);
+        if (origKosyncEnv !== undefined) {
+          process.env.KOSYNC_DB_PATH = origKosyncEnv;
+        } else {
+          delete process.env.KOSYNC_DB_PATH;
+        }
       }
     });
   });

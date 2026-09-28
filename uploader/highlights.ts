@@ -164,9 +164,41 @@ export function getHighlightsCacheDb(dbOrPath?: Database | string): Database {
 // Calibre Book Lookup Helper
 // ----------------------------------------------------------------------------
 
+/**
+ * Compares two author strings with token-sort and normalized whole-word matching.
+ * Handles "Stephen Fry" ↔ "Fry, Stephen" and multi-author containment without
+ * false positives on substring matches (e.g. Ann vs Joanne, Homer vs Homeric).
+ */
+export function authorsMatch(a?: string, b?: string): boolean {
+  if (!a || !b) return false;
+  const tokenize = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[\p{P}\p{S}]+/gu, " ")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+
+  const tokensA = tokenize(a);
+  const tokensB = tokenize(b);
+  if (tokensA.length === 0 || tokensB.length === 0) return false;
+
+  const sortedA = [...tokensA].sort().join(" ");
+  const sortedB = [...tokensB].sort().join(" ");
+  if (sortedA === sortedB) return true;
+
+  // Whole-word token containment (e.g. "Homer" in "Homer, Translator")
+  const setA = new Set(tokensA);
+  const setB = new Set(tokensB);
+  const aInB = tokensA.every((t) => setB.has(t));
+  const bInA = tokensB.every((t) => setA.has(t));
+  return aInB || bInA;
+}
+
 export function resolveBookIdFromTitle(
   title: string,
   calibreDbPath?: string,
+  author?: string,
 ): number | null {
   if (!title || !title.trim()) return null;
   try {
@@ -181,32 +213,105 @@ export function resolveBookIdFromTitle(
       db.run("PRAGMA busy_timeout = 2000;");
       const normalizedTitle = title.trim();
 
-      // 1. Exact match COLLATE NOCASE
-      let bookRow = db
-        .query("SELECT id FROM books WHERE title = ? COLLATE NOCASE ORDER BY id ASC LIMIT 1;")
-        .get(normalizedTitle) as any;
+      const hasAuthorsTable = Boolean(
+        db
+          .query(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='authors' LIMIT 1;",
+          )
+          .get(),
+      );
 
-      if (bookRow?.id) return Number(bookRow.id);
+      const findAuthorMatch = (rows: Array<{ id: number; authors?: string }>): number | null => {
+        if (rows.length === 0) return null;
+        if (rows.length === 1) {
+          return Number(rows[0].id);
+        }
+        // Shared title (rows.length > 1): require a positive author match
+        if (author && author.trim() && author !== "Unknown") {
+          for (const r of rows) {
+            if (authorsMatch(r.authors, author)) {
+              return Number(r.id);
+            }
+          }
+        }
+        // If title is shared and author is missing, Unknown, or unmatched: return null
+        return null;
+      };
+
+      // 1. Exact match COLLATE NOCASE
+      const exactQuery = hasAuthorsTable
+        ? `SELECT b.id, GROUP_CONCAT(DISTINCT a.name) as authors
+           FROM books b
+           LEFT JOIN books_authors_link bal ON b.id = bal.book
+           LEFT JOIN authors a ON bal.author = a.id
+           WHERE b.title = ? COLLATE NOCASE
+           GROUP BY b.id
+           ORDER BY b.id ASC;`
+        : `SELECT b.id, NULL as authors FROM books b WHERE b.title = ? COLLATE NOCASE ORDER BY b.id ASC;`;
+
+      const exactRows = db.query(exactQuery).all(normalizedTitle) as any[];
+      if (exactRows.length > 0) {
+        return findAuthorMatch(exactRows);
+      }
 
       // 2. Lowercase trimmed match
-      bookRow = db
-        .query("SELECT id FROM books WHERE lower(trim(title)) = ? ORDER BY id ASC LIMIT 1;")
-        .get(normalizedTitle.toLowerCase()) as any;
+      const lowerQuery = hasAuthorsTable
+        ? `SELECT b.id, GROUP_CONCAT(DISTINCT a.name) as authors
+           FROM books b
+           LEFT JOIN books_authors_link bal ON b.id = bal.book
+           LEFT JOIN authors a ON bal.author = a.id
+           WHERE lower(trim(b.title)) = ?
+           GROUP BY b.id
+           ORDER BY b.id ASC;`
+        : `SELECT b.id, NULL as authors FROM books b WHERE lower(trim(b.title)) = ? ORDER BY b.id ASC;`;
 
-      if (bookRow?.id) return Number(bookRow.id);
+      const lowerRows = db.query(lowerQuery).all(normalizedTitle.toLowerCase()) as any[];
+      if (lowerRows.length > 0) {
+        return findAuthorMatch(lowerRows);
+      }
 
-      // 3. Strict alphanumeric normalized exact match
+      // 3. Strict alphanumeric normalized exact match in SQL (no 1000-row cap)
       const cleanNorm = (s: string) =>
         (s || "").toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, "");
       const searchNorm = cleanNorm(normalizedTitle);
 
       if (searchNorm.length >= 3) {
-        const rows = db.query("SELECT id, title FROM books ORDER BY id ASC LIMIT 1000;").all() as any[];
-        for (const r of rows) {
-          const rNorm = cleanNorm(r.title);
-          if (rNorm === searchNorm) {
-            return Number(r.id);
+        const punctChars = [
+          ":", "!", "?", ".", ",", ";", "-", "—", "–", "'", "\"", "`", " ", "_",
+          "(", ")", "[", "]", "{", "}", "/", "\\", "@", "#", "$", "%", "^", "&",
+          "*", "+", "=", "~", "<", ">", "\t", "\n", "\r", "’", "‘", "“", "”", "·", "…",
+          "\u00A0", "\u3000", "\u200B", "\u2011", "\u2012", "\u2013", "\u2014", "\u2015",
+          "（", "）", "【", "】", "『", "』", "「", "」", "〔", "〕", "〈", "〉", "《", "》", "〖", "〗",
+          "：", "！", "？", "，", "；", "、", "。", "・", "～", "‹", "›", "«", "»"
+        ];
+        const sqlQuote = (ch: string) => "'" + ch.replace(/'/g, "''") + "'";
+        const batches: string[][] = [];
+        for (let i = 0; i < punctChars.length; i += 12) {
+          batches.push(punctChars.slice(i, i + 12));
+        }
+
+        const baseSelect = hasAuthorsTable
+          ? `SELECT b.id, lower(b.title) AS t, GROUP_CONCAT(DISTINCT a.name) AS authors
+             FROM books b
+             LEFT JOIN books_authors_link bal ON b.id = bal.book
+             LEFT JOIN authors a ON bal.author = a.id
+             GROUP BY b.id`
+          : `SELECT b.id, lower(b.title) AS t, NULL AS authors FROM books b`;
+
+        let cte = `WITH step0 AS (${baseSelect})`;
+        batches.forEach((batch, idx) => {
+          let expr = "t";
+          for (const ch of batch) {
+            expr = `replace(${expr}, ${sqlQuote(ch)}, "")`;
           }
+          cte += `, step${idx + 1} AS (SELECT id, authors, ${expr} AS t FROM step${idx})`;
+        });
+
+        const sql = `${cte} SELECT id, authors FROM step${batches.length} WHERE t = ? ORDER BY id ASC;`;
+        const candidateRows = db.query(sql).all(searchNorm) as any[];
+
+        if (candidateRows.length > 0) {
+          return findAuthorMatch(candidateRows);
         }
       }
     } finally {
@@ -600,14 +705,55 @@ export function batchUpsertHighlights(
 }
 
 /**
- * Retrieves all highlights for a book by book_id, falling back to title match.
- * If title match finds unlinked highlights (book_id IS NULL), auto-links them to book_id.
+ * Checks whether a title is unique to the given book across both book_highlights and Calibre metadata.
+ */
+function isTitleUniqueForBook(
+  db: Database,
+  bookId: number,
+  cleanTitle: string,
+  calibreDbPath?: string,
+): boolean {
+  // Check if any other book in book_highlights has this title
+  const otherBook = db
+    .query(
+      "SELECT 1 FROM book_highlights WHERE lower(trim(book_title)) = lower(trim(?)) AND book_id IS NOT NULL AND book_id != ? LIMIT 1;",
+    )
+    .get(cleanTitle, bookId);
+  if (otherBook) return false;
+
+  // Check if Calibre DB has multiple books with this title
+  try {
+    const dbPath =
+      calibreDbPath ||
+      process.env.CALIBRE_DB_PATH ||
+      path.join(process.env.HOME || os.homedir(), "Calibre Libraries", "Agent Library", "metadata.db");
+    if (fs.existsSync(dbPath)) {
+      const cDb = new Database(dbPath, { readonly: true });
+      const countRow = cDb
+        .query("SELECT COUNT(*) as count FROM books WHERE lower(trim(title)) = lower(trim(?));")
+        .get(cleanTitle) as any;
+      cDb.close();
+      if (countRow && countRow.count > 1) {
+        return false;
+      }
+    }
+  } catch {
+    // Ignore
+  }
+
+  return true;
+}
+
+/**
+ * Retrieves all highlights for a book by book_id, falling back to title match only if title is unique.
+ * If title match finds unlinked highlights (book_id IS NULL) and title is unique, auto-links them to book_id.
  */
 export function getHighlightsForBook(
   db: Database,
   bookId: number,
   title?: string,
   limit = 1000,
+  calibreDbPath?: string,
 ): HighlightRecord[] {
   initHighlightsTable(db);
 
@@ -615,24 +761,39 @@ export function getHighlightsForBook(
 
   if (title && title.trim()) {
     const cleanTitle = title.trim();
-    // Auto-link unlinked highlights with matching title
-    const updateRes = db.run(
-      "UPDATE book_highlights SET book_id = ? WHERE book_id IS NULL AND lower(trim(book_title)) = lower(trim(?));",
-      [bookId, cleanTitle],
-    );
-    if (updateRes && (updateRes as any).changes > 0) {
-      invalidateHighlightCountsCache(db);
-    }
+    const isUnique = isTitleUniqueForBook(db, bookId, cleanTitle, calibreDbPath);
 
-    rows = db
-      .query(
-        `SELECT id, book_id, book_title, chapter, page, quote, note, timestamp, created_at
-         FROM book_highlights
-         WHERE book_id = ? OR lower(trim(book_title)) = lower(trim(?))
-         ORDER BY CASE WHEN page IS NULL THEN 999999 ELSE page END ASC, id ASC
-         LIMIT ?;`,
-      )
-      .all(bookId, cleanTitle, limit) as HighlightRecord[];
+    if (isUnique) {
+      // Auto-link unlinked highlights with matching title only if unique
+      const updateRes = db.run(
+        "UPDATE book_highlights SET book_id = ? WHERE book_id IS NULL AND lower(trim(book_title)) = lower(trim(?));",
+        [bookId, cleanTitle],
+      );
+      if (updateRes && (updateRes as any).changes > 0) {
+        invalidateHighlightCountsCache(db);
+      }
+
+      rows = db
+        .query(
+          `SELECT id, book_id, book_title, chapter, page, quote, note, timestamp, created_at
+           FROM book_highlights
+           WHERE book_id = ? OR (book_id IS NULL AND lower(trim(book_title)) = lower(trim(?)))
+           ORDER BY CASE WHEN page IS NULL THEN 999999 ELSE page END ASC, id ASC
+           LIMIT ?;`,
+        )
+        .all(bookId, cleanTitle, limit) as HighlightRecord[];
+    } else {
+      // Shared title: strictly query by book_id to never leak other books' quotes
+      rows = db
+        .query(
+          `SELECT id, book_id, book_title, chapter, page, quote, note, timestamp, created_at
+           FROM book_highlights
+           WHERE book_id = ?
+           ORDER BY CASE WHEN page IS NULL THEN 999999 ELSE page END ASC, id ASC
+           LIMIT ?;`,
+        )
+        .all(bookId, limit) as HighlightRecord[];
+    }
   } else {
     rows = db
       .query(
@@ -806,15 +967,29 @@ export function getLatestQuotePreview(
 
   let row: any = null;
   if (title && title.trim()) {
-    row = db
-      .query(
-        `SELECT quote, note
-         FROM book_highlights
-         WHERE book_id = ? OR lower(trim(book_title)) = lower(trim(?))
-         ORDER BY id DESC
-         LIMIT 1;`,
-      )
-      .get(bookId, title.trim());
+    const cleanTitle = title.trim();
+    const isUnique = isTitleUniqueForBook(db, bookId, cleanTitle);
+    if (isUnique) {
+      row = db
+        .query(
+          `SELECT quote, note
+           FROM book_highlights
+           WHERE book_id = ? OR (book_id IS NULL AND lower(trim(book_title)) = lower(trim(?)))
+           ORDER BY id DESC
+           LIMIT 1;`,
+        )
+        .get(bookId, cleanTitle);
+    } else {
+      row = db
+        .query(
+          `SELECT quote, note
+           FROM book_highlights
+           WHERE book_id = ?
+           ORDER BY id DESC
+           LIMIT 1;`,
+        )
+        .get(bookId);
+    }
   } else {
     row = db
       .query(
@@ -896,10 +1071,23 @@ export async function backfillHighlightsFromObsidian(
           title = (fmTitleMatch[1] || fmTitleMatch[2] || fmTitleMatch[3] || title).trim();
         }
 
-        const bookId = resolveBookIdFromTitle(title, options.calibreDbPath);
+        let author: string | undefined;
+        const fmAuthorMatch = content.match(/^author:\s*(?:"([^"]+)"|'([^']+)'|([^\n]+))/m);
+        if (fmAuthorMatch) {
+          author = (fmAuthorMatch[1] || fmAuthorMatch[2] || fmAuthorMatch[3] || "").trim() || undefined;
+        }
+
+        const bookId = resolveBookIdFromTitle(title, options.calibreDbPath, author);
         const highlights = parseHighlightsFromMarkdown(content, title, bookId);
 
         if (highlights.length > 0) {
+          const isShared = bookId ? !isTitleUniqueForBook(db, bookId, title, options.calibreDbPath) : false;
+          if (isShared && author && author !== "Unknown") {
+            const disambiguatedTitle = `${title.trim()} - ${author.trim()}`;
+            for (const h of highlights) {
+              h.book_title = disambiguatedTitle;
+            }
+          }
           const inserted = batchUpsertHighlights(db, highlights);
           result.totalHighlights += inserted;
           result.booksProcessed.push(title);
@@ -914,19 +1102,26 @@ export async function backfillHighlightsFromObsidian(
 }
 
 /**
- * Deletes all highlights for a book by book_id and optionally book title.
+ * Deletes all highlights for a book by book_id, and also by title only if title is unique.
  */
 export function deleteHighlightsForBook(
   db: Database,
   bookId: number,
   title?: string,
+  calibreDbPath?: string,
 ): void {
   initHighlightsTable(db);
   if (title && title.trim()) {
-    db.run(
-      "DELETE FROM book_highlights WHERE book_id = ? OR lower(trim(book_title)) = lower(trim(?));",
-      [bookId, title.trim()],
-    );
+    const cleanTitle = title.trim();
+    const isUnique = isTitleUniqueForBook(db, bookId, cleanTitle, calibreDbPath);
+    if (isUnique) {
+      db.run(
+        "DELETE FROM book_highlights WHERE book_id = ? OR (book_id IS NULL AND lower(trim(book_title)) = lower(trim(?)));",
+        [bookId, cleanTitle],
+      );
+    } else {
+      db.run("DELETE FROM book_highlights WHERE book_id = ?;", [bookId]);
+    }
   } else {
     db.run("DELETE FROM book_highlights WHERE book_id = ?;", [bookId]);
   }
@@ -941,9 +1136,9 @@ export function ensureBookHighlightsIndexed(
   db: Database,
   bookId: number,
   title: string,
-  options: { booksDir?: string; calibreDbPath?: string; forceFresh?: boolean } = {},
+  options: { booksDir?: string; calibreDbPath?: string; forceFresh?: boolean; author?: string } = {},
 ): HighlightRecord[] {
-  let existing = getHighlightsForBook(db, bookId, title);
+  let existing = getHighlightsForBook(db, bookId, title, 1000, options.calibreDbPath);
 
   // On-demand check in Obsidian Books folder with strict path containment
   const booksDir = resolveBooksDir(options.booksDir);
@@ -958,34 +1153,132 @@ export function ensureBookHighlightsIndexed(
       return existing;
     }
 
-    const candidateFiles = [
-      `${safeTitleBase}.md`,
-      `${path.basename(title.replace(/[\/:]/g, " - ").trim())}.md`,
-    ];
+    // Try to resolve author and shared status from Calibre if not provided
+    let author = options.author;
+    let isSharedInCalibre = false;
+    try {
+      const dbPath =
+        options.calibreDbPath ||
+        process.env.CALIBRE_DB_PATH ||
+        path.join(process.env.HOME || os.homedir(), "Calibre Libraries", "Agent Library", "metadata.db");
+      if (fs.existsSync(dbPath)) {
+        const cDb = new Database(dbPath, { readonly: true });
+        const aRow = cDb
+          .query(
+            `SELECT GROUP_CONCAT(DISTINCT a.name) as authors
+             FROM books_authors_link bal
+             JOIN authors a ON bal.author = a.id
+             WHERE bal.book = ?;`,
+          )
+          .get(bookId) as any;
+        if (aRow?.authors && !author) {
+          author = aRow.authors;
+        }
+        const countRow = cDb
+          .query("SELECT COUNT(*) as count FROM books WHERE lower(trim(title)) = lower(trim(?));")
+          .get(title.trim()) as any;
+        if (countRow && countRow.count > 1) {
+          isSharedInCalibre = true;
+        }
+        cDb.close();
+      }
+    } catch {
+      // Ignore
+    }
 
+    const isShared = isSharedInCalibre || !isTitleUniqueForBook(db, bookId, title.trim(), options.calibreDbPath);
+
+    const candidateFiles: string[] = [];
+
+    if (author && author.trim() && author !== "Unknown") {
+      const safeAuthor = path.basename(author.replace(/[\\/:*?"<>|]/g, "_").trim());
+      const cleanAuthor = path.basename(author.replace(/[\/:]/g, " - ").trim());
+      candidateFiles.push(`${safeTitleBase} - ${safeAuthor}.md`);
+      candidateFiles.push(`${path.basename(title.replace(/[\/:]/g, " - ").trim())} - ${cleanAuthor}.md`);
+
+      // Handle Last, First ↔ First Last (e.g. "Fry, Stephen" ↔ "Stephen Fry")
+      if (author.includes(",")) {
+        const parts = author.split(",").map((p) => p.trim()).filter(Boolean);
+        if (parts.length === 2) {
+          const firstLast = path.basename(`${parts[1]} ${parts[0]}`.replace(/[\\/:*?"<>|]/g, "_").trim());
+          candidateFiles.push(`${safeTitleBase} - ${firstLast}.md`);
+          candidateFiles.push(`${path.basename(title.replace(/[\/:]/g, " - ").trim())} - ${firstLast}.md`);
+        }
+      } else {
+        const words = author.trim().split(/\s+/);
+        if (words.length >= 2) {
+          const lastFirst = path.basename(`${words[words.length - 1]}, ${words.slice(0, -1).join(" ")}`.replace(/[\\/:*?"<>|]/g, "_").trim());
+          candidateFiles.push(`${safeTitleBase} - ${lastFirst}.md`);
+        }
+      }
+    }
+
+    // ONLY check unsuffixed Title.md if the title is NOT shared!
+    // When a title is shared, unsuffixed Title.md may belong to another book.
+    if (!isShared) {
+      candidateFiles.push(`${safeTitleBase}.md`);
+      candidateFiles.push(`${path.basename(title.replace(/[\/:]/g, " - ").trim())}.md`);
+    }
+
+    // Locate matching file among candidateFiles
+    let matchedPath: string | null = null;
     for (const name of candidateFiles) {
       const notePath = path.join(booksDir, name);
-      const resolvedNotePath = path.resolve(notePath);
-
-      // Verify strict path containment inside booksDir
-      if (!resolvedNotePath.startsWith(resolvedBooksDir + path.sep)) {
-        continue;
+      const resolved = path.resolve(notePath);
+      if (resolved.startsWith(resolvedBooksDir + path.sep) && fs.existsSync(resolved)) {
+        matchedPath = resolved;
+        break;
       }
+    }
 
-      if (fs.existsSync(resolvedNotePath)) {
-        try {
-          const st = fs.lstatSync(resolvedNotePath);
-          if (st.isSymbolicLink() || !st.isFile()) continue;
+    // If not found in candidateFiles and title is shared, scan directory notes by frontmatter author
+    if (!matchedPath && isShared && author && author !== "Unknown") {
+      try {
+        const entries = fs.readdirSync(booksDir, { withFileTypes: true });
+        for (const ent of entries) {
+          if (ent.isFile() && ent.name.endsWith(".md") && !ent.name.startsWith(".")) {
+            const fullP = path.resolve(path.join(booksDir, ent.name));
+            if (fullP.startsWith(resolvedBooksDir + path.sep)) {
+              const noteContent = fs.readFileSync(fullP, "utf8");
+              const fmTitleMatch = noteContent.match(/^title:\s*(?:"([^"]+)"|'([^']+)'|([^\n]+))/m);
+              const fmAuthorMatch = noteContent.match(/^author:\s*(?:"([^"]+)"|'([^']+)'|([^\n]+))/m);
+              const nTitle = (fmTitleMatch?.[1] || fmTitleMatch?.[2] || fmTitleMatch?.[3] || "").trim();
+              const nAuthor = (fmAuthorMatch?.[1] || fmAuthorMatch?.[2] || fmAuthorMatch?.[3] || "").trim();
 
+              if (nTitle && title.trim().toLowerCase() === nTitle.toLowerCase()) {
+                if (authorsMatch(nAuthor, author)) {
+                  matchedPath = fullP;
+                  break;
+                }
+              }
+            }
+          }
+        }
+      } catch {
+        // Ignore
+      }
+    }
+
+    if (matchedPath) {
+      try {
+        const st = fs.lstatSync(matchedPath);
+        if (!st.isSymbolicLink() && st.isFile()) {
           // Check if file is newer than existing highlights or forceFresh was requested
           let shouldReindex = options.forceFresh || existing.length === 0;
           if (!shouldReindex && existing.length > 0) {
-            const latestCreated = db
-              .query(
-                `SELECT MAX(created_at) as max_c FROM book_highlights
-                 WHERE book_id = ? OR lower(trim(book_title)) = lower(trim(?));`,
-              )
-              .get(bookId, title.trim()) as any;
+            const latestCreated = isShared
+              ? (db
+                  .query(
+                    `SELECT MAX(created_at) as max_c FROM book_highlights WHERE book_id = ?;`,
+                  )
+                  .get(bookId) as any)
+              : (db
+                  .query(
+                    `SELECT MAX(created_at) as max_c FROM book_highlights
+                     WHERE book_id = ? OR (book_id IS NULL AND lower(trim(book_title)) = lower(trim(?)));`,
+                  )
+                  .get(bookId, title.trim()) as any);
+
             if (latestCreated?.max_c) {
               const latestMs = new Date(latestCreated.max_c + "Z").getTime();
               if (st.mtimeMs > latestMs) {
@@ -995,23 +1288,27 @@ export function ensureBookHighlightsIndexed(
           }
 
           if (shouldReindex) {
-            const content = fs.readFileSync(resolvedNotePath, "utf8");
+            const content = fs.readFileSync(matchedPath, "utf8");
             const parsed = parseHighlightsFromMarkdown(content, title, bookId);
+
             if (options.forceFresh) {
-              db.run(
-                "DELETE FROM book_highlights WHERE book_id = ? OR lower(trim(book_title)) = lower(trim(?));",
-                [bookId, title.trim()],
-              );
-              invalidateHighlightCountsCache(db);
+              deleteHighlightsForBook(db, bookId, title, options.calibreDbPath);
             }
+
             if (parsed.length > 0) {
+              if (isShared && author && author !== "Unknown") {
+                const disambiguatedTitle = `${title.trim()} - ${author.trim()}`;
+                for (const p of parsed) {
+                  p.book_title = disambiguatedTitle;
+                }
+              }
               batchUpsertHighlights(db, parsed);
             }
-            return getHighlightsForBook(db, bookId, title);
+            return getHighlightsForBook(db, bookId, title, 1000, options.calibreDbPath);
           }
-        } catch (_readErr) {
-          void _readErr;
         }
+      } catch (_readErr) {
+        void _readErr;
       }
     }
   }

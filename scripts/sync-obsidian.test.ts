@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
 import {
   parseLuaTable,
@@ -651,6 +652,135 @@ My personal reflection on habits.
 
       expect(res.status).toBe(0);
       expect(res.stdout).toContain("sync-obsidian");
+    });
+  });
+
+  describe("8. Regression: Defect 1 & 3 (Shared Title Author Fidelity & Highlight Union)", () => {
+    it("syncObsidian must not replace Homer's author with Stephen Fry when two books share the title", async () => {
+      const mockCalibreDb = path.join(tempDir, "calibre-metadata.db");
+      const cDb = new Database(mockCalibreDb);
+      cDb.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, series_index REAL);");
+      cDb.run("CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);");
+      cDb.run("CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);");
+      cDb.run("CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);");
+      cDb.run("CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);");
+
+      // Book 1: Homer - The Odyssey
+      cDb.run("INSERT INTO books (id, title) VALUES (1, 'The Odyssey');");
+      cDb.run("INSERT INTO authors (id, name) VALUES (1, 'Homer');");
+      cDb.run("INSERT INTO books_authors_link (id, book, author) VALUES (1, 1, 1);");
+
+      // Book 2: Stephen Fry - The Odyssey
+      cDb.run("INSERT INTO books (id, title) VALUES (2, 'The Odyssey');");
+      cDb.run("INSERT INTO authors (id, name) VALUES (2, 'Stephen Fry');");
+      cDb.run("INSERT INTO books_authors_link (id, book, author) VALUES (2, 2, 2);");
+      cDb.close();
+
+      await syncObsidian({
+        vaultPath: mockVault,
+        calibreDbPath: mockCalibreDb,
+        apply: true,
+        books: [
+          {
+            title: "The Odyssey",
+            author: "Homer",
+            highlights: [{ text: "Sing in me, Muse" }],
+          },
+        ],
+      });
+
+      // Find Homer's note
+      const files = fs.readdirSync(path.join(mockVault, "Books"));
+      const homerNoteFile = files.find((f) => f.includes("The Odyssey"));
+      expect(homerNoteFile).toBeDefined();
+
+      const noteContent = fs.readFileSync(
+        path.join(mockVault, "Books", homerNoteFile!),
+        "utf8",
+      );
+      // Author must be Homer, NOT Stephen Fry!
+      expect(noteContent).toContain('author: "Homer"');
+      expect(noteContent).not.toContain("Stephen Fry");
+    });
+
+    it("mergeNoteContent unions existing note highlights instead of dropping quotes (A+B then B+C -> A+B+C)", () => {
+      const initial = generateBookMarkdown({
+        title: "Test Book",
+        author: "Test Author",
+        highlights: [
+          { text: "Quote A", page: 10 },
+          { text: "Quote B", page: 20 },
+        ],
+      });
+
+      // Apply again with only Quote B and Quote C
+      const merged = mergeNoteContent(initial, {
+        title: "Test Book",
+        author: "Test Author",
+        highlights: [
+          { text: "Quote B", page: 20, notes: "Enriched note for B" },
+          { text: "Quote C", page: 30 },
+        ],
+      });
+
+      expect(merged).toContain("Quote A");
+      expect(merged).toContain("Quote B");
+      expect(merged).toContain("Quote C");
+      expect(merged).toContain("Enriched note for B");
+
+      // Empty incoming highlights must still preserve the block
+      const preserved = mergeNoteContent(merged, {
+        title: "Test Book",
+        author: "Test Author",
+        highlights: [],
+      });
+      expect(preserved).toContain("Quote A");
+      expect(preserved).toContain("Quote B");
+      expect(preserved).toContain("Quote C");
+      expect(preserved).not.toContain("*No highlights recorded yet.*");
+    });
+
+    it("getCalibreBooksMap matches Last, First author order (Fry, Stephen ↔ Stephen Fry) on shared title", async () => {
+      const mockCalibreDb = path.join(tempDir, "calibre-last-first.db");
+      const cDb = new Database(mockCalibreDb);
+      cDb.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, series_index REAL);");
+      cDb.run("CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);");
+      cDb.run("CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);");
+      cDb.run("CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);");
+      cDb.run("CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);");
+
+      // Book 1: Homer
+      cDb.run("INSERT INTO books (id, title) VALUES (1, 'The Odyssey');");
+      cDb.run("INSERT INTO authors (id, name) VALUES (1, 'Homer');");
+      cDb.run("INSERT INTO books_authors_link (id, book, author) VALUES (1, 1, 1);");
+
+      // Book 2: Fry, Stephen (Calibre format)
+      cDb.run("INSERT INTO books (id, title) VALUES (2, 'The Odyssey');");
+      cDb.run("INSERT INTO authors (id, name) VALUES (2, 'Fry, Stephen');");
+      cDb.run("INSERT INTO books_authors_link (id, book, author) VALUES (2, 2, 2);");
+      cDb.close();
+
+      await syncObsidian({
+        vaultPath: mockVault,
+        calibreDbPath: mockCalibreDb,
+        apply: true,
+        books: [
+          {
+            title: "The Odyssey",
+            author: "Stephen Fry", // First Last format from device/clippings
+            highlights: [{ text: "Fry quote from device" }],
+          },
+        ],
+      });
+
+      const files = fs.readdirSync(path.join(mockVault, "Books"));
+      const fryNoteFile = files.find((f) => f.includes("The Odyssey"));
+      expect(fryNoteFile).toBeDefined();
+
+      const noteContent = fs.readFileSync(path.join(mockVault, "Books", fryNoteFile!), "utf8");
+      // Must match Fry (id 2) and NOT replace with Homer!
+      expect(noteContent).toContain("Fry");
+      expect(noteContent).not.toContain("Homer");
     });
   });
 });

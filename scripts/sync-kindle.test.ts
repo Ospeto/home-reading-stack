@@ -699,6 +699,160 @@ Case had never seen anyone who looked so much like a doll.
       const matches = updatedContent.match(/tuned to a dead channel/g);
       expect(matches?.length).toBe(1);
     });
+
+    it("keys by title plus author when two books share a title so Homer and Fry land in separate notes", async () => {
+      // Setup Calibre database with two distinct books sharing the title "The Odyssey"
+      const multiCalibreDbPath = path.join(tempDir, "calibre-multi.db");
+      const cDb = new Database(multiCalibreDbPath);
+      cDb.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, series_index REAL);");
+      cDb.run("CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);");
+      cDb.run("CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);");
+      cDb.run("CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);");
+      cDb.run("CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);");
+
+      cDb.run("INSERT INTO books (id, title) VALUES (1, 'The Odyssey');");
+      cDb.run("INSERT INTO authors (id, name) VALUES (1, 'Homer');");
+      cDb.run("INSERT INTO books_authors_link (id, book, author) VALUES (1, 1, 1);");
+
+      cDb.run("INSERT INTO books (id, title) VALUES (2, 'The Odyssey');");
+      cDb.run("INSERT INTO authors (id, name) VALUES (2, 'Stephen Fry');");
+      cDb.run("INSERT INTO books_authors_link (id, book, author) VALUES (2, 2, 2);");
+      cDb.close();
+
+      // Create two separate .sdr directories on Kindle
+      const homerSdr = path.join(mockKindleDocs, "The Odyssey - Homer.sdr");
+      fs.mkdirSync(homerSdr, { recursive: true });
+      fs.writeFileSync(
+        path.join(homerSdr, "metadata.epub.lua"),
+        `return {
+          ["stats"] = { ["title"] = "The Odyssey", ["authors"] = "Homer" },
+          ["bookmarks"] = {
+            { ["text"] = "Homer quote: Sing in me, Muse", ["page"] = 1, ["datetime"] = "2026-03-01 10:00:00" },
+          }
+        }`,
+        "utf8",
+      );
+
+      const frySdr = path.join(mockKindleDocs, "The Odyssey - Stephen Fry.sdr");
+      fs.mkdirSync(frySdr, { recursive: true });
+      fs.writeFileSync(
+        path.join(frySdr, "metadata.epub.lua"),
+        `return {
+          ["stats"] = { ["title"] = "The Odyssey", ["authors"] = "Stephen Fry" },
+          ["bookmarks"] = {
+            { ["text"] = "Fry quote: Troy had fallen", ["page"] = 5, ["datetime"] = "2026-03-01 11:00:00" },
+          }
+        }`,
+        "utf8",
+      );
+
+      const mount: KindleVolumeInfo = {
+        mountPath: mockKindleMount,
+        documentsDir: mockKindleDocs,
+        name: "Kindle",
+        freeBytes: 1024 * 1024 * 100,
+        totalBytes: 1024 * 1024 * 200,
+      };
+
+      const options: KindleSyncOptions = {
+        apply: true,
+        vaultPath: mockObsidianBooks,
+        cacheDbPath: mockCacheDbPath,
+      };
+
+      const { results, totalImported } = await pullHighlightsFromKindle(
+        options,
+        mount,
+        multiCalibreDbPath,
+        new Map(),
+      );
+
+      // Must import both distinct books
+      expect(results.length).toBe(2);
+      expect(totalImported).toBe(2);
+
+      const files = fs.readdirSync(mockObsidianBooks);
+      const homerNoteName = files.find((f) => f.includes("Homer") || f === "The Odyssey.md");
+      const fryNoteName = files.find((f) => f.includes("Fry"));
+
+      expect(homerNoteName).toBeDefined();
+      expect(fryNoteName).toBeDefined();
+      expect(homerNoteName).not.toEqual(fryNoteName);
+
+      const homerContent = fs.readFileSync(path.join(mockObsidianBooks, homerNoteName!), "utf8");
+      const fryContent = fs.readFileSync(path.join(mockObsidianBooks, fryNoteName!), "utf8");
+
+      expect(homerContent).toContain("Homer quote: Sing in me, Muse");
+      expect(homerContent).not.toContain("Fry quote: Troy had fallen");
+
+      expect(fryContent).toContain("Fry quote: Troy had fallen");
+      expect(fryContent).not.toContain("Homer quote: Sing in me, Muse");
+    });
+
+    it("does not overwrite a stored note percent with 0 when device file and kosync progress are absent", async () => {
+      // Existing note with 80% progress
+      const notePath = path.join(mockObsidianBooks, "Deep Work.md");
+      fs.writeFileSync(
+        notePath,
+        `---
+title: "Deep Work"
+author: "Cal Newport"
+progress: 80
+status: reading
+tags:
+  - book-notes
+---
+
+# Deep Work
+
+**Progress:** 80% [██████░░]
+
+## Highlights & Notes
+<!-- lighthouse:highlights:start -->
+> Existing quote
+— Page 10
+<!-- lighthouse:highlights:end -->
+`,
+      );
+
+      // Create a Kindle .sdr with highlights but NO percent_finished
+      const sdrDir = path.join(mockKindleDocs, "Deep Work.sdr");
+      fs.mkdirSync(sdrDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sdrDir, "metadata.epub.lua"),
+        `return {
+          ["stats"] = { ["title"] = "Deep Work", ["authors"] = "Cal Newport" },
+          ["bookmarks"] = {
+            { ["text"] = "New deep work insight", ["page"] = 25, ["datetime"] = "2026-03-01 14:00:00" },
+          }
+        }`,
+        "utf8",
+      );
+
+      const mount: KindleVolumeInfo = {
+        mountPath: mockKindleMount,
+        documentsDir: mockKindleDocs,
+        name: "Kindle",
+        freeBytes: 1024 * 1024 * 100,
+        totalBytes: 1024 * 1024 * 200,
+      };
+
+      const options: KindleSyncOptions = {
+        apply: true,
+        vaultPath: mockObsidianBooks,
+        cacheDbPath: mockCacheDbPath,
+      };
+
+      // Call pull with empty kosyncProgressMap (both device and progress source absent)
+      await pullHighlightsFromKindle(options, mount, mockCalibreDbPath, new Map());
+
+      const updated = fs.readFileSync(notePath, "utf8");
+      // Stored 80% progress must be preserved, NOT overwritten with 0!
+      expect(updated).toContain("progress: 80");
+      expect(updated).toContain("**Progress:** 80%");
+      expect(updated).not.toContain("progress: 0");
+      expect(updated).not.toContain("**Progress:** 0%");
+    });
   });
 
   // --------------------------------------------------------------------------
