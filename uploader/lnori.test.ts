@@ -533,7 +533,7 @@ describe("Lnori Light Novel Ingestion Module", () => {
       expect(proxyUsed[1]).toBe("http://127.0.0.1:7890");
     });
 
-    it("retries EPUB download with direct-first priority and proxy fallback on every attempt", async () => {
+    it("retries EPUB download with direct-first priority and sticky proxy fallback on subsequent attempts after non-OK response", async () => {
       const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
       let calls = 0;
       const proxyUsed: (string | undefined)[] = [];
@@ -549,13 +549,158 @@ describe("Lnori Light Novel Ingestion Module", () => {
           }),
         ).rejects.toThrow("Failed to download EPUB from Lnori storage (503)");
         // Attempt 0: direct (calls=1, throws) -> fallback to proxy (calls=2, returns 503)
-        // Attempt 1: direct (calls=3, returns 503)
-        // Attempt 2: direct (calls=4, returns 503)
-        // Attempt 3: direct (calls=5, returns 503)
-        expect(calls).toBe(5);
+        // Attempt 1: direct (calls=3, returns 503) -> fallback to proxy (calls=4, returns 503, sets forceProxy)
+        // Attempt 2: proxy directly (calls=5, returns 503)
+        // Attempt 3: proxy directly (calls=6, returns 503)
+        expect(calls).toBe(6);
         expect(proxyUsed[0]).toBeUndefined();
         expect(proxyUsed[1]).toBe("http://127.0.0.1:7890");
-        expect(proxyUsed.slice(2).every((p) => p === undefined)).toBe(true);
+        expect(proxyUsed[2]).toBeUndefined();
+        expect(proxyUsed[3]).toBe("http://127.0.0.1:7890");
+        expect(proxyUsed[4]).toBe("http://127.0.0.1:7890");
+        expect(proxyUsed[5]).toBe("http://127.0.0.1:7890");
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("falls back to proxy for Lnori HTML fetch after direct HTTP 403", async () => {
+      let calls = 0;
+      const proxyUsed: (string | undefined)[] = [];
+      const html = await fetchLnoriHtml("https://lnori.com/series/8046/test-series", {
+        fetch: async (_url: string, init: any) => {
+          calls++;
+          proxyUsed.push(init?.proxy);
+          if (calls === 1) return new Response("forbidden", { status: 403 });
+          return new Response("<html>proxy response</html>", { status: 200 });
+        },
+      });
+      expect(html).toBe("<html>proxy response</html>");
+      expect(calls).toBe(2);
+      expect(proxyUsed[0]).toBeUndefined();
+      expect(proxyUsed[1]).toBe("http://127.0.0.1:7890");
+    });
+
+    it("falls back to proxy for EPUB download when direct response is HTTP 403", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "fallback-403.epub");
+      let calls = 0;
+      const proxyUsed: (string | undefined)[] = [];
+
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+      const validEpubContent = Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+
+      try {
+        await downloadLnoriEpub("fallback-403.epub", destPath, undefined, {
+          fetch: async (_url: string, init: any) => {
+            calls++;
+            proxyUsed.push(init?.proxy);
+            if (calls === 1) {
+              return new Response("Cloudflare 403 Forbidden", { status: 403 });
+            }
+            return new Response(validEpubContent, { status: 200 });
+          },
+        });
+
+        expect(calls).toBe(2);
+        expect(proxyUsed[0]).toBeUndefined();
+        expect(proxyUsed[1]).toBe("http://127.0.0.1:7890");
+        expect(fs.existsSync(destPath)).toBe(true);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not stay direct on subsequent attempts after direct response is HTTP 503", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      const destPath = path.join(workDir, "subsequent-proxy.epub");
+      let calls = 0;
+      const proxyUsed: (string | undefined)[] = [];
+
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+      const validEpubContent = Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+
+      try {
+        await downloadLnoriEpub("subsequent-proxy.epub", destPath, undefined, {
+          fetch: async (_url: string, init: any) => {
+            calls++;
+            proxyUsed.push(init?.proxy);
+            if (calls === 1) {
+              // Attempt 0: direct returns 503
+              return new Response("Service Unavailable", { status: 503 });
+            }
+            if (calls === 2) {
+              // Attempt 0 fallback: proxy also returns 503 (transient)
+              return new Response("Proxy 503", { status: 503 });
+            }
+            // Attempt 1: must use proxy directly, NOT direct!
+            return new Response(validEpubContent, { status: 200 });
+          },
+        });
+
+        expect(calls).toBe(3);
+        expect(proxyUsed[0]).toBeUndefined();
+        expect(proxyUsed[1]).toBe("http://127.0.0.1:7890");
+        expect(proxyUsed[2]).toBe("http://127.0.0.1:7890");
+        expect(fs.existsSync(destPath)).toBe(true);
       } finally {
         await fs.promises.rm(workDir, { recursive: true, force: true });
       }
@@ -963,6 +1108,48 @@ describe("Lnori Light Novel Ingestion Module", () => {
       }
     });
 
+    it("falls back to proxy for cover fetch on direct HTTP 403 before trying next candidate", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-"));
+      let calls = 0;
+      const urlsCalled: string[] = [];
+      const proxyUsed: (string | undefined)[] = [];
+      const jpegPath = path.join(workDir, "cover.jpg");
+      try {
+        const converted = await fetchAndConvertCover(
+          "23021",
+          "https://fallback.com/cover.jpg",
+          workDir,
+          {
+            fetch: async (url: string, init: any) => {
+              calls++;
+              urlsCalled.push(url);
+              proxyUsed.push(init?.proxy);
+              if (calls === 1) {
+                // Direct WebP returns 403
+                return new Response("Forbidden", { status: 403 });
+              }
+              // Proxy WebP returns 200 OK
+              return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+            },
+            sipsPath: "fake-sips",
+            spawnSync: (_command: string, args: string[]) => {
+              fs.writeFileSync(args[args.length - 1], "jpeg");
+              return { status: 0, stdout: "", stderr: "" };
+            },
+          },
+        );
+        expect(converted).toBe(jpegPath);
+        expect(calls).toBe(2);
+        // Both calls must be for the first candidate (cdn.lnori.com) before trying fallback
+        expect(urlsCalled[0]).toContain("cdn.lnori.com");
+        expect(urlsCalled[1]).toContain("cdn.lnori.com");
+        expect(proxyUsed[0]).toBeUndefined();
+        expect(proxyUsed[1]).toBe("http://127.0.0.1:7890");
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
     it("throws on subprocess timeouts", () => {
       expect(() =>
         throwOnSubprocessTimeout({ error: { code: "ETIMEDOUT" } }, "test-command"),
@@ -994,19 +1181,20 @@ describe("Lnori Light Novel Ingestion Module", () => {
           { name: "book_id", value: "23021" },
         ],
       })}</script>`;
-      await expect(
-        ingestLnoriSeries("https://lnori.com/series/8046/test-series", undefined, {
-          fetch: async (url: string) => {
-            requestCount++;
-            if (requestCount === 1) {
-              return new Response('<title>Test Series</title><a href="/book/23021/volume-1">Volume 1</a>');
-            }
-            if (requestCount === 2) return new Response(volumeHtml);
-            expect(url).toContain("files.lnori.com");
-            return new Response("unavailable", { status: 503 });
-          },
-        }),
-      ).rejects.toThrow("Failed to download EPUB from Lnori storage (503)");
+      const result = await ingestLnoriSeries("https://lnori.com/series/8046/test-series", undefined, {
+        fetch: async (url: string) => {
+          requestCount++;
+          if (requestCount === 1) {
+            return new Response('<title>Test Series</title><a href="/book/23021/volume-1">Volume 1</a>');
+          }
+          if (requestCount === 2) return new Response(volumeHtml);
+          expect(url).toContain("files.lnori.com");
+          return new Response("unavailable", { status: 503 });
+        },
+      });
+      expect(result.success).toBe(false);
+      expect(result.importedCount).toBe(0);
+      expect(result.skippedCount).toBe(1);
       const after = fs
         .readdirSync(os.tmpdir())
         .filter((entry: string) => entry.startsWith("lnori-"));
@@ -1123,6 +1311,35 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
       }
     });
 
+    it("isVolumeAlreadyInCalibre matches rounded index only and does not treat fractional 1.5 as volume 1", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "calibre-fractional-test-"));
+      const dbPath = path.join(workDir, "metadata.db");
+      const db = new Database(dbPath);
+      db.run(`
+        CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, series_index REAL);
+        CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+        INSERT INTO books VALUES (1, "Spice and Wolf: Volume 1.5", 1.5);
+        INSERT INTO series VALUES (1, "Spice and Wolf");
+        INSERT INTO books_series_link VALUES (1, 1, 1);
+      `);
+      db.close();
+
+      try {
+        // Checking for Volume 1 must be FALSE (not shadowed by 1.5)
+        expect(
+          isVolumeAlreadyInCalibre("Spice and Wolf", 1, "Spice and Wolf: Volume 1", { calibreDbPath: dbPath }),
+        ).toBe(false);
+
+        // Checking for Volume 1.5 must be TRUE
+        expect(
+          isVolumeAlreadyInCalibre("Spice and Wolf", 1.5, "Spice and Wolf: Volume 1.5", { calibreDbPath: dbPath }),
+        ).toBe(true);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
     it("isVolumeAlreadyInCalibre returns true when matching title in SQLite", async () => {
       const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "calibre-test-"));
       const dbPath = path.join(workDir, "metadata.db");
@@ -1150,6 +1367,211 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
       };
       expect(isVolumeAlreadyInCalibre("Mock Series", 1, "Mock Series: Volume 1", { isVolumeInLibrary })).toBe(true);
       expect(isVolumeAlreadyInCalibre("Mock Series", 2, "Mock Series: Volume 2", { isVolumeInLibrary })).toBe(false);
+    });
+
+    it("ingestLnoriSeries continues to volume 2 when volume 1 download throws and reports one skipped error and one import", async () => {
+      const manifestHtml = `<title>Resilience Test Series</title>
+        <a href="/book/201/vol-1">Volume 1</a>
+        <a href="/book/202/vol-2">Volume 2</a>`;
+      const vol1Html = `<script id="app-data" type="application/ld+json">${JSON.stringify({
+        name: "Volume 1",
+        additionalProperty: [
+          { name: "epub_filename", value: "vol1.epub" },
+          { name: "book_id", value: "201" },
+          { name: "series_title", value: "Resilience Test Series" },
+        ],
+      })}</script>`;
+      const vol2Html = `<script id="app-data" type="application/ld+json">${JSON.stringify({
+        name: "Volume 2",
+        additionalProperty: [
+          { name: "epub_filename", value: "vol2.epub" },
+          { name: "book_id", value: "202" },
+          { name: "series_title", value: "Resilience Test Series" },
+        ],
+      })}</script>`;
+
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+      const syntheticEpub = Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+
+      let vol1Attempted = false;
+      let vol2Downloaded = false;
+      const progressEvents: LnoriProgressEvent[] = [];
+
+      const result = await ingestLnoriSeries(
+        "https://lnori.com/series/8888/resilience-test-series",
+        (event) => {
+          progressEvents.push(event);
+        },
+        {
+          fetch: async (url: string) => {
+            if (url.includes("/series/8888")) return new Response(manifestHtml);
+            if (url.includes("/book/201")) return new Response(vol1Html);
+            if (url.includes("/book/202")) return new Response(vol2Html);
+            if (url.includes("vol1.epub")) {
+              vol1Attempted = true;
+              throw new Error("Disk read failure or network timeout on vol 1");
+            }
+            if (url.includes("vol2.epub")) {
+              vol2Downloaded = true;
+              return new Response(syntheticEpub, { status: 200 });
+            }
+            if (url.includes("cdn.lnori.com")) {
+              return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+            }
+            return new Response("Not found", { status: 404 });
+          },
+          isVolumeInLibrary: () => false,
+          spawnSync: (_cmd: string, args: string[]) => {
+            if (args[0] === "add") {
+              return { status: 0, stdout: "Added book ids: 888", stderr: "" };
+            }
+            return { status: 0, stdout: "", stderr: "" };
+          },
+        },
+      );
+
+      expect(vol1Attempted).toBe(true);
+      expect(vol2Downloaded).toBe(true);
+      expect(result.totalCount).toBe(2);
+      expect(result.importedCount).toBe(1);
+      expect(result.skippedCount).toBe(1);
+      expect(result.skippedErrors).toBe(1);
+      expect(result.duplicateCount).toBe(0);
+      expect(result.success).toBe(true);
+      expect(result.calibreBookIds).toEqual([888]);
+
+      // Verify progress emitted import_error skip for vol 1
+      const skippedEvent = progressEvents.find(
+        (e) => e.phase === "volume" && e.data?.action === "skipped" && e.data?.reason === "import_error",
+      );
+      expect(skippedEvent).toBeDefined();
+      expect(skippedEvent?.data?.volumeIndex).toBe(1);
+    });
+
+    it("ingestLnoriSeries downloads volume 1 when volume 1.5 is in SQLite library", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "calibre-vol1-test-"));
+      const dbPath = path.join(workDir, "metadata.db");
+      const db = new Database(dbPath);
+      db.run(`
+        CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, series_index REAL);
+        CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+        INSERT INTO books VALUES (1, "Fractional Series: Volume 1.5", 1.5);
+        INSERT INTO series VALUES (1, "Fractional Series");
+        INSERT INTO books_series_link VALUES (1, 1, 1);
+      `);
+      db.close();
+
+      const manifestHtml = `<title>Fractional Series</title>
+        <a href="/book/301/vol-1">Volume 1</a>`;
+      const vol1Html = `<script id="app-data" type="application/ld+json">${JSON.stringify({
+        name: "Volume 1",
+        additionalProperty: [
+          { name: "epub_filename", value: "vol1.epub" },
+          { name: "book_id", value: "301" },
+          { name: "series_title", value: "Fractional Series" },
+          { name: "volume_number", value: "1" },
+        ],
+      })}</script>`;
+
+      function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+        const nameBuf = Buffer.from(name);
+        const payload = compData || data;
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(compMethod, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(payload.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, payload]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData, 0);
+      const containerXml = Buffer.from(
+        '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      );
+      const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+      const opfXml = Buffer.from(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>',
+      );
+      const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+      const syntheticEpub = Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+
+      let vol1Downloaded = false;
+
+      try {
+        const result = await ingestLnoriSeries(
+          "https://lnori.com/series/7777/fractional-series",
+          undefined,
+          {
+            calibreDbPath: dbPath,
+            fetch: async (url: string) => {
+              if (url.includes("/series/7777")) return new Response(manifestHtml);
+              if (url.includes("/book/301")) return new Response(vol1Html);
+              if (url.includes("vol1.epub")) {
+                vol1Downloaded = true;
+                return new Response(syntheticEpub, { status: 200 });
+              }
+              if (url.includes("cdn.lnori.com")) {
+                return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+              }
+              return new Response("Not found", { status: 404 });
+            },
+            spawnSync: (_cmd: string, args: string[]) => {
+              if (args[0] === "add") {
+                return { status: 0, stdout: "Added book ids: 701", stderr: "" };
+              }
+              return { status: 0, stdout: "", stderr: "" };
+            },
+          },
+        );
+
+        // Volume 1 must have been downloaded and imported, not skipped
+        expect(vol1Downloaded).toBe(true);
+        expect(result.importedCount).toBe(1);
+        expect(result.skippedCount).toBe(0);
+        expect(result.duplicateCount).toBe(0);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
     });
 
     it("ingestLnoriSeries skips downloading existing volumes and reports counts", async () => {

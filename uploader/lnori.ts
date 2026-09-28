@@ -312,9 +312,9 @@ export function isVolumeAlreadyInCalibre(
         JOIN books_series_link bsl ON b.id = bsl.book
         JOIN series s ON bsl.series = s.id
         WHERE LOWER(TRIM(s.name)) = LOWER(TRIM(?))
-          AND (ROUND(b.series_index, 2) = ROUND(?, 2) OR CAST(b.series_index AS INTEGER) = ?)
+          AND ROUND(b.series_index, 2) = ROUND(?, 2)
         LIMIT 1
-      `).get(seriesTitle, assignedIndex, assignedIndex);
+      `).get(seriesTitle, assignedIndex);
 
       if (seriesMatch) {
         db.close();
@@ -795,6 +795,7 @@ export async function fetchLnoriHtml(
 ): Promise<string> {
   const fetcher = dependencies?.fetch ?? safeFetchWithSsrf;
   let res: Response;
+  let directUsed = true;
   try {
     // Attempt direct connection first for maximum speed
     res = await fetcher(targetUrl, {
@@ -804,11 +805,31 @@ export async function fetchLnoriHtml(
       },
       signal: composeSignal(30000, dependencies?.signal),
     } as any);
-  } catch {
-    if (dependencies?.signal?.aborted) {
+  } catch (err: any) {
+    if (
+      dependencies?.signal?.aborted ||
+      err?.name === "AbortError" ||
+      err?.message?.includes("aborted")
+    ) {
       throw new Error("Lnori ingestion aborted by client");
     }
     // If direct connection failed or threw, fall back to proxy
+    res = await fetcher(targetUrl, {
+      headers: {
+        "User-Agent": USER_AGENT,
+        Referer: "https://lnori.com/",
+      },
+      proxy: PROXY_URL,
+      signal: composeSignal(30000, dependencies?.signal),
+    } as any);
+    directUsed = false;
+  }
+
+  if (directUsed && !res.ok) {
+    await cancelResponseBody(res);
+    if (dependencies?.signal?.aborted) {
+      throw new Error("Lnori ingestion aborted by client");
+    }
     res = await fetcher(targetUrl, {
       headers: {
         "User-Agent": USER_AGENT,
@@ -829,6 +850,7 @@ export async function fetchLnoriHtml(
           : "https://lnori.com/sitemap/sitemap-book.xml";
       try {
         let sRes: Response;
+        let sDirectUsed = true;
         try {
           // Direct first for sitemap
           sRes = await fetcher(sitemapPath, {
@@ -840,6 +862,18 @@ export async function fetchLnoriHtml(
             throw new Error("Lnori ingestion aborted by client");
           }
           // Fallback to proxy
+          sRes = await fetcher(sitemapPath, {
+            headers: { "User-Agent": USER_AGENT },
+            proxy: PROXY_URL,
+            signal: composeSignal(20000, dependencies?.signal),
+          } as any);
+          sDirectUsed = false;
+        }
+        if (sDirectUsed && !sRes.ok) {
+          await cancelResponseBody(sRes);
+          if (dependencies?.signal?.aborted) {
+            throw new Error("Lnori ingestion aborted by client");
+          }
           sRes = await fetcher(sitemapPath, {
             headers: { "User-Agent": USER_AGENT },
             proxy: PROXY_URL,
@@ -895,6 +929,7 @@ export async function downloadLnoriEpub(
 
   const MAX_RETRIES = 3;
   let lastError: any = null;
+  let forceProxy = false;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (dependencies?.signal?.aborted) {
@@ -910,23 +945,8 @@ export async function downloadLnoriEpub(
       throw new Error("Lnori ingestion aborted by client");
     }
 
-    // Try direct connection first on every attempt for maximum speed; on failure/timeout, fall back to proxy.
-    const tryDirectAndProxy = async (
-      runFetch: (useProxy: boolean) => Promise<Response>,
-    ): Promise<Response> => {
-      try {
-        return await runFetch(false);
-      } catch (directErr: any) {
-        if (dependencies?.signal?.aborted) {
-          throw directErr;
-        }
-        // Direct fetch threw, timed out, or connection failed: fall back to proxy
-        return runFetch(true);
-      }
-    };
-
     try {
-      const res = await tryDirectAndProxy(async (useProxy) => {
+      const runFetch = async (useProxy: boolean): Promise<Response> => {
         // Disarmable TTFB controller: only bounds the time until response headers arrive.
         // Once fetcher resolves, ttfbTimer is cleared so active body streaming is not aborted.
         const ttfbController = new AbortController();
@@ -982,13 +1002,44 @@ export async function downloadLnoriEpub(
             dependencies.signal.removeEventListener("abort", abortListener);
           }
         }
-      });
+      };
+
+      let res: Response;
+      if (forceProxy) {
+        res = await runFetch(true);
+      } else {
+        let directUsed = true;
+        try {
+          res = await runFetch(false);
+        } catch (directErr: any) {
+          if (
+            dependencies?.signal?.aborted ||
+            directErr?.name === "AbortError" ||
+            directErr?.message?.includes("aborted")
+          ) {
+            throw directErr;
+          }
+          // Direct fetch threw, timed out, or connection failed: fall back to proxy
+          res = await runFetch(true);
+          directUsed = false;
+        }
+
+        if (directUsed && !res.ok) {
+          await cancelResponseBody(res);
+          if (dependencies?.signal?.aborted) {
+            throw new Error("Lnori ingestion aborted by client");
+          }
+          forceProxy = true;
+          res = await runFetch(true);
+        }
+      }
 
       if (!res.ok) {
         lastError = new Error(
           `Failed to download EPUB from Lnori storage (${res.status}): ${downloadUrl}`,
         );
         if ((res.status >= 500 || res.status === 429) && attempt < MAX_RETRIES) {
+          await cancelResponseBody(res);
           continue;
         }
         throw lastError;
@@ -1063,6 +1114,7 @@ export async function fetchAndConvertCover(
   for (const cUrl of urlsToTry) {
     try {
       let res: Response;
+      let directUsed = true;
       try {
         // Direct first for cover download
         res = await fetcher(cUrl, {
@@ -1072,11 +1124,32 @@ export async function fetchAndConvertCover(
           },
           signal: composeSignal(20000, dependencies?.signal),
         } as any);
-      } catch {
-        if (dependencies?.signal?.aborted) {
+      } catch (directErr: any) {
+        if (
+          dependencies?.signal?.aborted ||
+          directErr?.name === "AbortError" ||
+          directErr?.message?.includes("aborted")
+        ) {
           throw new Error("Lnori ingestion aborted by client");
         }
         // Fall back to proxy
+        res = await fetcher(cUrl, {
+          headers: {
+            Referer: "https://lnori.com/",
+            "User-Agent": USER_AGENT,
+          },
+          proxy: PROXY_URL,
+          signal: composeSignal(20000, dependencies?.signal),
+        } as any);
+        directUsed = false;
+      }
+
+      if (directUsed && !res.ok) {
+        await cancelResponseBody(res);
+        if (dependencies?.signal?.aborted) {
+          throw new Error("Lnori ingestion aborted by client");
+        }
+        // Direct returned non-OK: fall back to proxy for the same candidate before trying next
         res = await fetcher(cUrl, {
           headers: {
             Referer: "https://lnori.com/",
@@ -1091,6 +1164,8 @@ export async function fetchAndConvertCover(
         await streamResponseToFile(res, rawCoverPath, MAX_COVER_BYTES, "Lnori cover");
         downloaded = true;
         break;
+      } else {
+        await cancelResponseBody(res);
       }
     } catch (err: any) {
       if (
@@ -1182,6 +1257,7 @@ export interface IngestLnoriResult {
   importedCount: number;
   skippedCount: number;
   duplicateCount: number;
+  skippedErrors?: number;
   totalCount: number;
   calibreBookIds: number[];
   error?: string;
@@ -1221,7 +1297,9 @@ export async function ingestLnoriSeries(
 
   const totalCount = manifest.volumePaths.length;
   let importedCount = 0;
-  let skippedCount = 0;
+  let duplicateCount = 0;
+  let skippedMissing = 0;
+  let skippedErrors = 0;
   const calibreBookIds: number[] = [];
 
   await reportProgress(onProgress, {
@@ -1295,11 +1373,10 @@ export async function ingestLnoriSeries(
             volumeIndex: volNum,
           },
         });
-        skippedCount++;
+        skippedMissing++;
         continue;
       }
 
-      const bookId = validateLnoriBookId(volMeta.bookId);
       const assignedIndex = volMeta.volumeNumber === undefined ? volNum : volMeta.volumeNumber;
       const title = `${manifest.seriesTitle}: Volume ${assignedIndex}`;
 
@@ -1321,7 +1398,7 @@ export async function ingestLnoriSeries(
             title,
           },
         });
-        skippedCount++;
+        duplicateCount++;
         continue;
       }
 
@@ -1340,8 +1417,10 @@ export async function ingestLnoriSeries(
       });
 
       const tempEpubPath = path.join(workDir, `volume-${volNum}.epub`);
+      let coverPath: string | null = null;
 
       try {
+        const bookId = validateLnoriBookId(volMeta.bookId);
         await downloadLnoriEpub(volMeta.epubFilename, tempEpubPath, undefined, dependencies);
 
         await reportProgress(onProgress, {
@@ -1420,7 +1499,6 @@ export async function ingestLnoriSeries(
         }
 
         // Download and convert master cover art
-        let coverPath: string | null = null;
         try {
           if (volMeta.coverImageUrl) {
             await reportProgress(onProgress, {
@@ -1466,6 +1544,7 @@ export async function ingestLnoriSeries(
           try {
             fs.unlinkSync(coverPath);
           } catch {}
+          coverPath = null;
         }
 
         importedCount++;
@@ -1483,7 +1562,39 @@ export async function ingestLnoriSeries(
             calibreId,
           },
         });
+      } catch (volErr: any) {
+        if (
+          dependencies?.signal?.aborted ||
+          volErr?.name === "AbortError" ||
+          volErr?.message?.includes("aborted")
+        ) {
+          throw volErr;
+        }
+        console.warn(
+          `[Lnori] Volume ${assignedIndex} ("${title}") failed during ingestion:`,
+          volErr?.message || volErr,
+        );
+        await reportProgress(onProgress, {
+          phase: "volume",
+          index: volNum,
+          total: totalCount,
+          volumeTitle: title,
+          status: `⚠️ _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Skipped volume due to error, continuing with next volume..._\n*${escapeTelegramMarkdown(volMeta.epubFilename)}*`,
+          data: {
+            action: "skipped",
+            reason: "import_error",
+            volumeIndex: assignedIndex,
+            title,
+            error: volErr?.message || String(volErr),
+          },
+        });
+        skippedErrors++;
       } finally {
+        if (coverPath && fs.existsSync(coverPath)) {
+          try {
+            fs.unlinkSync(coverPath);
+          } catch {}
+        }
         if (fs.existsSync(tempEpubPath)) {
           try {
             fs.unlinkSync(tempEpubPath);
@@ -1496,15 +1607,17 @@ export async function ingestLnoriSeries(
   }
 
   const tagsFormatted = ["Light Novel", ...manifest.tags].join(", ");
+  const totalSkipped = duplicateCount + skippedMissing + skippedErrors;
 
   const result: IngestLnoriResult = {
-    success: importedCount > 0 || (skippedCount > 0 && totalCount > 0),
+    success: importedCount > 0 || (duplicateCount > 0 && skippedErrors === 0) || (skippedMissing > 0 && skippedErrors === 0),
     seriesTitle: manifest.seriesTitle,
     author: manifest.author,
     tags: tagsFormatted,
     importedCount,
-    skippedCount,
-    duplicateCount: skippedCount,
+    skippedCount: totalSkipped,
+    duplicateCount,
+    skippedErrors,
     totalCount,
     calibreBookIds,
   };
@@ -1514,7 +1627,7 @@ export async function ingestLnoriSeries(
     index: totalCount,
     total: totalCount,
     volumeTitle: manifest.seriesTitle,
-    status: `Completed: ${importedCount} imported, ${skippedCount} skipped of ${totalCount} volumes`,
+    status: `Completed: ${importedCount} imported, ${totalSkipped} skipped of ${totalCount} volumes`,
     data: result,
   });
 
