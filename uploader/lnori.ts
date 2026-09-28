@@ -6,7 +6,12 @@ import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 import { validateEpubContent, repairTruncatedEpub, safeFetchWithSsrf } from "./security";
-import { isCommentsEmpty, sanitizeSynopsis, extractEpubDescription } from "./scraper";
+import {
+  isCommentsEmpty,
+  sanitizeSynopsis,
+  extractEpubDescription,
+  fetchOnlineSynopsis,
+} from "./scraper";
 
 const PROXY_URL = "http://127.0.0.1:7890";
 export const MAX_EPUB_BYTES = 256 * 1024 * 1024;
@@ -24,6 +29,7 @@ export interface LnoriDependencies {
   isVolumeInLibrary?: (seriesTitle: string, volumeIndex: number, title: string) => boolean;
   sleep?: (ms: number) => Promise<void>;
   signal?: AbortSignal;
+  fetchOnlineSynopsis?: typeof fetchOnlineSynopsis;
 }
 
 export function composeSignal(timeoutMs: number, userSignal?: AbortSignal): AbortSignal {
@@ -1301,6 +1307,7 @@ export async function ingestLnoriSeries(
   let skippedMissing = 0;
   let skippedErrors = 0;
   const calibreBookIds: number[] = [];
+  const seriesCache = new Map<string, { description: string; coverUrl?: string; source?: string }>();
 
   await reportProgress(onProgress, {
     phase: "manifest",
@@ -1538,6 +1545,61 @@ export async function ingestLnoriSeries(
           console.warn(
             `[Lnori] Warning: set_metadata failed for Calibre #${calibreId}: ${setRes.stderr}`,
           );
+        }
+
+        // Online synopsis fallback: if synopsis is missing or empty, fetch online
+        if (!synopsis || isCommentsEmpty(synopsis)) {
+          if (dependencies?.signal?.aborted) {
+            throw new Error("Lnori ingestion aborted by client");
+          }
+          try {
+            const fetchOnline = dependencies?.fetchOnlineSynopsis ?? fetchOnlineSynopsis;
+            const onlineRes = await fetchOnline(
+              {
+                id: calibreId,
+                title,
+                author,
+                series: manifest.seriesTitle,
+                series_index: assignedIndex,
+                tags: tagsStr,
+              },
+              { seriesCache },
+            );
+            if (dependencies?.signal?.aborted) {
+              throw new Error("Lnori ingestion aborted by client");
+            }
+            if (onlineRes?.description && !isCommentsEmpty(onlineRes.description)) {
+              synopsis = onlineRes.description;
+              const onlineSetRes = runCalibredb(
+                [
+                  "set_metadata",
+                  String(calibreId),
+                  "--with-library",
+                  SERVER_URL,
+                  "--field",
+                  `comments:${synopsis}`,
+                ],
+                dependencies,
+              );
+              if (onlineSetRes.status !== 0) {
+                console.warn(
+                  `[Lnori] Warning: set_metadata (online synopsis) failed for Calibre #${calibreId}: ${onlineSetRes.stderr}`,
+                );
+              }
+            }
+          } catch (onlineErr: any) {
+            if (
+              dependencies?.signal?.aborted ||
+              onlineErr?.name === "AbortError" ||
+              String(onlineErr?.message || "").includes("aborted")
+            ) {
+              throw onlineErr;
+            }
+            console.debug(
+              `[Lnori] Online synopsis lookup failed for volume ${assignedIndex} ("${title}"):`,
+              onlineErr?.message || onlineErr,
+            );
+          }
         }
 
         if (coverPath && fs.existsSync(coverPath)) {

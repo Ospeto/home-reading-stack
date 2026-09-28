@@ -1114,6 +1114,103 @@ describe("Elscione Light Novel Ingestion Module", () => {
         }),
       ).toContain("Completed: 3 imported, 2 skipped");
     });
+
+    it("falls back to fetchOnlineSynopsis and populates seriesCache across volumes when EPUB lacks description", async () => {
+      const mockItems = [
+        {
+          href: "/Officially%20Translated%20Light%20Novels/DanMachi/DanMachi%20Volume%2001.epub",
+          size: 1000000,
+        },
+        {
+          href: "/Officially%20Translated%20Light%20Novels/DanMachi/DanMachi%20Volume%2002.epub",
+          size: 1000000,
+        },
+      ];
+
+      const syntheticEpub = createSyntheticEpub();
+
+      const mockFetch = async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          return new Response(JSON.stringify({ items: mockItems }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(syntheticEpub, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/epub+zip",
+            "Content-Length": String(syntheticEpub.length),
+          },
+        });
+      };
+
+      let bookIdCounter = 100;
+      const calibreCommands: string[][] = [];
+      const mockSpawnSync = (bin: string, args: string[]) => {
+        if (bin === "calibredb" || bin.includes("calibredb")) {
+          calibreCommands.push(args);
+          if (args[0] === "add") {
+            bookIdCounter++;
+            return { status: 0, stdout: `Added book ids: ${bookIdCounter}` };
+          }
+          if (args[0] === "set_metadata") {
+            return { status: 0, stdout: "Metadata set" };
+          }
+        }
+        return { status: 0, stdout: "" };
+      };
+
+      const onlineCalls: any[] = [];
+      const mockFetchOnlineSynopsis = async (book: any, options?: any) => {
+        onlineCalls.push({ book, options });
+        // Check seriesCache
+        const seriesKey = (book.series || "").toLowerCase();
+        if (options?.seriesCache?.has(seriesKey)) {
+          const cached = options.seriesCache.get(seriesKey);
+          return { description: cached.description, source: cached.source };
+        }
+        // First volume sets series overview in seriesCache
+        const desc = `Synopsis for ${book.series}: ${book.title}`;
+        if (options?.seriesCache) {
+          options.seriesCache.set(seriesKey, { description: desc, source: "RanobeDB" });
+        }
+        return { description: desc, source: "RanobeDB" };
+      };
+
+      const result = await ingestElscioneSeries(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/DanMachi/",
+        undefined,
+        {
+          fetch: mockFetch as any,
+          spawnSync: mockSpawnSync as any,
+          fetchOnlineSynopsis: mockFetchOnlineSynopsis as any,
+        },
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.importedCount).toBe(2);
+      expect(onlineCalls.length).toBe(2);
+
+      // Verify second volume had access to seriesCache populated by the first volume
+      const call1SeriesCache = onlineCalls[0].options?.seriesCache;
+      const call2SeriesCache = onlineCalls[1].options?.seriesCache;
+      expect(call1SeriesCache).toBeDefined();
+      expect(call2SeriesCache).toBe(call1SeriesCache);
+      expect(call2SeriesCache.has("danmachi")).toBe(true);
+
+      // Verify comments were set via set_metadata
+      const commentsCommands = calibreCommands.filter(
+        (c) => c[0] === "set_metadata" && c.some((arg) => arg.startsWith("comments:")),
+      );
+      expect(commentsCommands.length).toBe(2);
+      expect(commentsCommands[0].find((arg) => arg.startsWith("comments:"))).toContain(
+        "Synopsis for DanMachi: DanMachi: Volume 1",
+      );
+      expect(commentsCommands[1].find((arg) => arg.startsWith("comments:"))).toContain(
+        "Synopsis for DanMachi: DanMachi: Volume 1",
+      );
+    });
   });
 
   describe("Server & Queue Integration", () => {
