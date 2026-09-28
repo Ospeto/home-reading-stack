@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 MAX_EPUB_BYTES = 500 * 1024 * 1024  # 500 MB
 MAX_VOLUMES_PER_REQUEST = 50
 SUBPROCESS_TIMEOUT = 30
+DOWNLOAD_TIMEOUT = 300  # 5 minutes for streaming large EPUBs
 
 ALLOWED_HOSTS = {"server.elscione.com", "elscione.com"}
 ALLOWED_HOST_SUFFIX = ".elscione.com"
@@ -559,11 +560,6 @@ def cmd_download(file_url: str, dest_path: str):
     assert_elscione_host(parsed.netloc)
     folder_url = f"{parsed.scheme}://{parsed.netloc}{quote(norm['folder_path'], safe='/')}"
 
-    session = create_session()
-
-    # Authenticate on folder first
-    ensure_authenticated_session(session, folder_url)
-
     headers = {
         "Referer": folder_url,
         "Accept": "*/*",
@@ -574,26 +570,6 @@ def cmd_download(file_url: str, dest_path: str):
         "Upgrade-Insecure-Requests": "1",
     }
 
-    res = session.get(canonical_file_url, headers=headers, stream=True, allow_redirects=False, timeout=SUBPROCESS_TIMEOUT)
-
-    # Check for challenge or non-EPUB HTML response
-    content_type = (res.headers.get("content-type") or "").lower()
-    if res.status_code == 403 or "text/html" in content_type:
-        ensure_authenticated_session(session, folder_url)
-        res = session.get(canonical_file_url, headers=headers, stream=True, allow_redirects=False, timeout=SUBPROCESS_TIMEOUT)
-
-    if res.status_code != 200:
-        raise RuntimeError(f"Failed to download EPUB (HTTP {res.status_code}): {canonical_file_url}")
-
-    content_length = res.headers.get("content-length")
-    total_bytes = 0
-    if content_length and content_length.isdigit():
-        try:
-            total_bytes = int(content_length)
-        except (ValueError, TypeError):
-            total_bytes = 0
-
-    temp_dest = validated_dest + f".tmp.{os.getpid()}"
     dest_dir = os.path.dirname(validated_dest)
     if dest_dir:
         try:
@@ -601,66 +577,134 @@ def cmd_download(file_url: str, dest_path: str):
         except OSError as err:
             raise RuntimeError(f"Failed to create directory {dest_dir}: {err}") from err
 
-    downloaded_bytes = 0
-    last_report_time = time.time()
-    stream_iter = res.iter_content(chunk_size=65536)
+    max_attempts = 3
+    last_err = None
 
-    try:
-        # Check first chunk for EPUB ZIP magic bytes before writing full file
-        first_chunk = next(stream_iter, b"")
-        if not first_chunk:
-            raise RuntimeError("Downloaded stream was empty")
+    for attempt in range(1, max_attempts + 1):
+        temp_dest = validated_dest + f".tmp.{os.getpid()}.{attempt}"
+        session = create_session()
 
-        if not first_chunk.startswith(b"PK\x03\x04"):
-            # Check if this is an Anubis challenge HTML page in disguise
-            probe_text = first_chunk.decode("utf-8", errors="ignore")
-            challenge = parse_anubis_challenge(probe_text)
-            if challenge:
+        try:
+            if attempt > 1:
+                backoff_sec = min(5, 2 ** (attempt - 2))
+                time.sleep(backoff_sec)
+
+            # Authenticate on folder first
+            ensure_authenticated_session(session, folder_url)
+
+            res = session.get(
+                canonical_file_url,
+                headers=headers,
+                stream=True,
+                allow_redirects=True,
+                timeout=DOWNLOAD_TIMEOUT,
+            )
+
+            # Assert final landing URL stays on allowed Elscione host
+            if getattr(res, "url", None):
+                assert_elscione_host(urlsplit(res.url).netloc)
+
+            # Check for challenge or non-EPUB HTML response
+            content_type = (res.headers.get("content-type") or "").lower()
+            if res.status_code == 403 or "text/html" in content_type:
                 ensure_authenticated_session(session, folder_url)
-                res = session.get(canonical_file_url, headers=headers, stream=True, allow_redirects=False, timeout=SUBPROCESS_TIMEOUT)
-                stream_iter = res.iter_content(chunk_size=65536)
-                first_chunk = next(stream_iter, b"")
-                if not first_chunk.startswith(b"PK\x03\x04"):
-                    raise RuntimeError(f"Stream retry did not return valid EPUB ZIP magic bytes: {canonical_file_url}")
-            else:
-                raise RuntimeError(f"Stream did not start with valid EPUB ZIP magic bytes (got {first_chunk[:8]!r})")
+                res = session.get(
+                    canonical_file_url,
+                    headers=headers,
+                    stream=True,
+                    allow_redirects=True,
+                    timeout=DOWNLOAD_TIMEOUT,
+                )
+                if getattr(res, "url", None):
+                    assert_elscione_host(urlsplit(res.url).netloc)
 
-        with open(temp_dest, "wb") as f:
-            f.write(first_chunk)
-            downloaded_bytes += len(first_chunk)
+            if res.status_code != 200:
+                raise RuntimeError(f"Failed to download EPUB (HTTP {res.status_code}): {canonical_file_url}")
 
-            for chunk in stream_iter:
-                if not chunk:
-                    continue
-                downloaded_bytes += len(chunk)
-                if downloaded_bytes > MAX_EPUB_BYTES:
-                    raise RuntimeError(f"Downloaded bytes exceeded maximum allowed ({MAX_EPUB_BYTES} bytes)")
-                f.write(chunk)
+            content_length = res.headers.get("content-length")
+            total_bytes = 0
+            if content_length and content_length.isdigit():
+                try:
+                    total_bytes = int(content_length)
+                except (ValueError, TypeError):
+                    total_bytes = 0
 
-                now = time.time()
-                if now - last_report_time >= 0.5 or (total_bytes and downloaded_bytes == total_bytes):
-                    last_report_time = now
-                    if total_bytes > 0:
-                        pct = round((downloaded_bytes / total_bytes) * 100, 1)
-                        print(f"PROGRESS: {pct}% ({downloaded_bytes}/{total_bytes})", flush=True)
-                    else:
-                        print(f"PROGRESS: {downloaded_bytes} bytes", flush=True)
+            downloaded_bytes = 0
+            last_report_time = time.time()
+            stream_iter = res.iter_content(chunk_size=65536)
 
-        if not os.path.exists(temp_dest) or os.path.getsize(temp_dest) < 100:
-            raise RuntimeError("Downloaded file is empty or too small to be an EPUB")
+            # Check first chunk for EPUB ZIP magic bytes before writing full file
+            first_chunk = next(stream_iter, b"")
+            if not first_chunk:
+                raise RuntimeError("Downloaded stream was empty")
 
-        with open(temp_dest, "rb") as f:
-            magic = f.read(4)
-            if magic != b"PK\x03\x04":
-                raise RuntimeError(f"Downloaded file does not start with ZIP/EPUB magic bytes (got {magic!r})")
+            if not first_chunk.startswith(b"PK\x03\x04"):
+                # Check if this is an Anubis challenge HTML page in disguise
+                probe_text = first_chunk.decode("utf-8", errors="ignore")
+                challenge = parse_anubis_challenge(probe_text)
+                if challenge:
+                    ensure_authenticated_session(session, folder_url)
+                    res = session.get(
+                        canonical_file_url,
+                        headers=headers,
+                        stream=True,
+                        allow_redirects=True,
+                        timeout=DOWNLOAD_TIMEOUT,
+                    )
+                    if getattr(res, "url", None):
+                        assert_elscione_host(urlsplit(res.url).netloc)
+                    if res.status_code != 200:
+                        raise RuntimeError(f"Stream retry failed to download EPUB (HTTP {res.status_code}): {canonical_file_url}")
+                    stream_iter = res.iter_content(chunk_size=65536)
+                    first_chunk = next(stream_iter, b"")
+                    if not first_chunk.startswith(b"PK\x03\x04"):
+                        raise RuntimeError(f"Stream retry did not return valid EPUB ZIP magic bytes: {canonical_file_url}")
+                else:
+                    raise RuntimeError(f"Stream did not start with valid EPUB ZIP magic bytes (got {first_chunk[:8]!r})")
 
-        os.replace(temp_dest, validated_dest)
-        print(f"DOWNLOAD_COMPLETE: {validated_dest} ({downloaded_bytes} bytes)", flush=True)
-        return 0
-    finally:
-        if os.path.exists(temp_dest):
-            with contextlib.suppress(Exception):
-                os.remove(temp_dest)
+            with open(temp_dest, "wb") as f:
+                f.write(first_chunk)
+                downloaded_bytes += len(first_chunk)
+
+                for chunk in stream_iter:
+                    if not chunk:
+                        continue
+                    downloaded_bytes += len(chunk)
+                    if downloaded_bytes > MAX_EPUB_BYTES:
+                        raise RuntimeError(f"Downloaded bytes exceeded maximum allowed ({MAX_EPUB_BYTES} bytes)")
+                    f.write(chunk)
+
+                    now = time.time()
+                    if now - last_report_time >= 0.5 or (total_bytes and downloaded_bytes == total_bytes):
+                        last_report_time = now
+                        if total_bytes > 0:
+                            pct = round((downloaded_bytes / total_bytes) * 100, 1)
+                            print(f"PROGRESS: {pct}% ({downloaded_bytes}/{total_bytes})", flush=True)
+                        else:
+                            print(f"PROGRESS: {downloaded_bytes} bytes", flush=True)
+
+            if not os.path.exists(temp_dest) or os.path.getsize(temp_dest) < 100:
+                raise RuntimeError("Downloaded file is empty or too small to be an EPUB")
+
+            with open(temp_dest, "rb") as f:
+                magic = f.read(4)
+                if magic != b"PK\x03\x04":
+                    raise RuntimeError(f"Downloaded file does not start with ZIP/EPUB magic bytes (got {magic!r})")
+
+            os.replace(temp_dest, validated_dest)
+            print(f"DOWNLOAD_COMPLETE: {validated_dest} ({downloaded_bytes} bytes)", flush=True)
+            return 0
+
+        except Exception as err:
+            last_err = err
+            if os.path.exists(temp_dest):
+                with contextlib.suppress(Exception):
+                    os.remove(temp_dest)
+            if attempt < max_attempts:
+                sys.stderr.write(f"Download attempt {attempt}/{max_attempts} failed ({err}), retrying...\n")
+                sys.stderr.flush()
+                continue
+            raise RuntimeError(f"EPUB download failed after {max_attempts} attempts: {last_err}") from last_err
 
 
 def main():
