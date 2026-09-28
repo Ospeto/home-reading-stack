@@ -16,6 +16,7 @@ import {
   sanitizeSynopsis,
   extractEpubDescription,
   autoEnrichBookSynopsis,
+  isSameBookAsync,
 } from "./scraper";
 import {
   isArchiveFile,
@@ -67,7 +68,6 @@ import {
   parseElscioneUrl,
   ingestElscioneSeries,
   cleanAndNormalizeNovelUrl,
-  type ElscioneProgressEvent,
 } from "./elscione";
 import { isJoplinRoute, handleJoplinRequest } from "./joplin";
 import {
@@ -1916,34 +1916,27 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
   // 2. Check if normalized title already exists
   const incomingSeries = await extractSeriesWithJev(candidateTitle, originalFileName, extractSeries);
 
-  const existingBook = books.find((b: any) => {
-    const bTitle = cleanString(b.title).toLowerCase();
-    const sTitle = candidateTitle.toLowerCase();
-
-    const bSeries = extractSeries(b.title, "");
-    const bActualSeries = b.series
-      ? { series: cleanString(b.series), volume: b.series_index || 1 }
-      : bSeries;
-
-    if (incomingSeries && bActualSeries) {
-      if (
-        cleanString(incomingSeries.series).toLowerCase() ===
-        cleanString(bActualSeries.series).toLowerCase()
-      ) {
-        return incomingSeries.volume === bActualSeries.volume;
-      }
-    } else if (incomingSeries || bActualSeries) {
-      return false;
+  let existingBook: any = null;
+  for (const b of books) {
+    if (
+      await isSameBookAsync(
+        {
+          title: b.title,
+          authors: b.authors,
+          series: b.series,
+          series_index: b.series_index,
+        },
+        {
+          title: candidateTitle,
+          author: candidateAuthor,
+          series: incomingSeries,
+        },
+      )
+    ) {
+      existingBook = b;
+      break;
     }
-
-    return (
-      bTitle === sTitle ||
-      (sTitle.length > 5 &&
-        (bTitle === sTitle ||
-          bTitle.startsWith(sTitle) ||
-          sTitle.startsWith(bTitle)))
-    );
-  });
+  }
 
   if (existingBook) {
     return {
@@ -3260,11 +3253,28 @@ async function handleRequestCore(
         400,
         corsOrigin,
       );
-    const retried = jobQueue.retryJob(jobId);
-    if (!retried)
+    const existingJob = jobQueue.getJob(jobId);
+    if (!existingJob)
       return jsonResponse(
         { success: false, error: "Job not found" },
         404,
+        corsOrigin,
+      );
+    if (existingJob.status !== "failed")
+      return jsonResponse(
+        {
+          success: false,
+          error: `Cannot retry job in '${existingJob.status}' state; only failed jobs can be retried`,
+        },
+        400,
+        corsOrigin,
+      );
+
+    const retried = jobQueue.retryJob(jobId);
+    if (!retried)
+      return jsonResponse(
+        { success: false, error: "Failed to queue job for retry" },
+        500,
         corsOrigin,
       );
 
@@ -3652,7 +3662,7 @@ async function handleRequestCore(
         headers: {
           "Content-Type":
             fileRes.headers.get("Content-Type") || "application/octet-stream",
-          "Content-Disposition": `attachment; filename="${downloadFilename}"`,
+          "Content-Disposition": buildContentDisposition(downloadFilename),
           "X-Content-Type-Options": "nosniff",
         },
       });
@@ -5147,19 +5157,34 @@ async function handleRequestCore(
         const importedCount = results.filter(
           (r: any) => r.success && !r.duplicate,
         ).length;
+        const duplicateCount = results.filter(
+          (r: any) => r.success && r.duplicate,
+        ).length;
+        const failedCount = results.filter((r: any) => !r.success).length;
+        const archiveSuccess = importedCount > 0 || (results.length > 0 && failedCount === 0 && duplicateCount === results.length);
+
         const uploadResponsePayload = {
-          success: true,
+          success: archiveSuccess,
           isArchive: true,
           archiveName: fileName,
           total: unp.books.length,
           imported: importedCount,
+          duplicates: duplicateCount,
+          failed: failedCount,
           quarantined: unp.quarantined || [],
           quarantinedCount: (unp.quarantined || []).length,
           results,
+          error: !archiveSuccess
+            ? (results.length === 0
+                ? "Archive contained no valid EPUBs"
+                : duplicateCount > 0
+                  ? "All books in archive failed or were skipped"
+                  : "All books in archive failed to import")
+            : undefined,
         };
         return jsonResponse(
           recursivelySanitize(uploadResponsePayload),
-          200,
+          archiveSuccess ? 200 : 400,
           corsOrigin,
         );
       }

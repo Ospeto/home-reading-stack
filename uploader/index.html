@@ -5823,9 +5823,23 @@
           const json = await res.json();
           invalidateCatalogCache();
           if (json.isArchive) {
-            tgHaptic.success();
-            setHtml(item, `<span class="truncate text-emerald-400 font-medium">📦 ${escapeHtml(file.name)}</span><span class="text-emerald-400 font-bold shrink-0">Unpacked ${json.imported}/${json.total}</span>`);
-            await init();
+            const hasImported = (json.imported || 0) > 0;
+            const isAllDuplicates = Array.isArray(json.results) && json.results.length > 0 && json.results.every((r) => r.duplicate);
+            const isArchiveSuccessful = json.success && (hasImported || isAllDuplicates);
+
+            if (isArchiveSuccessful) {
+              if (hasImported) {
+                tgHaptic.success();
+                setHtml(item, `<span class="truncate text-emerald-400 font-medium">📦 ${escapeHtml(file.name)}</span><span class="text-emerald-400 font-bold shrink-0">Unpacked ${json.imported}/${json.total}</span>`);
+              } else {
+                tgHaptic.light();
+                setHtml(item, `<span class="truncate text-sky-400 font-medium">📦 ${escapeHtml(file.name)}</span><span class="text-sky-400 font-bold shrink-0">Already exists (0/${json.total})</span>`);
+              }
+              await init();
+            } else {
+              tgHaptic.error();
+              renderFailedUploadItem(item, file, json.error || "All books failed to import");
+            }
           } else if (json.duplicate) {
             tgHaptic.light();
             setHtml(item, `<span class="truncate text-sky-400 font-medium">${escapeHtml(file.name)}</span><span class="text-sky-400 font-bold shrink-0">Already exists</span>`);

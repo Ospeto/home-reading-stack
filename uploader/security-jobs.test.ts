@@ -1644,6 +1644,44 @@ describe("Durable Ingestion Job Queue Lifecycle & Crash Recovery", () => {
     const retried = queue.retryJob(failedJob.id);
     expect(retried?.status).toBe("pending");
     expect(retried?.error).toBeNull();
+
+    // Defect 4: retryJob must refuse anything but failed status
+    expect(queue.retryJob(retried!.id)).toBeNull(); // now 'pending'
+    testDb.prepare("UPDATE jobs SET status = 'completed' WHERE id = ?").run(retried!.id);
+    expect(queue.retryJob(retried!.id)).toBeNull(); // now 'completed'
+    testDb.prepare("UPDATE jobs SET status = 'processing' WHERE id = ?").run(retried!.id);
+    expect(queue.retryJob(retried!.id)).toBeNull(); // now 'processing'
+  });
+
+  it("Defect 4: processNextJob does not overwrite a status that is no longer processing upon completion or error", async () => {
+    const testDb = new Database(":memory:");
+    const queue = new DurableJobQueue(testDb);
+
+    let handlerResolve: (value: any) => void;
+    let handlerPromise = new Promise((resolve) => {
+      handlerResolve = resolve;
+    });
+
+    queue.registerHandler("slow_job", async () => {
+      await handlerPromise;
+      return { ok: true };
+    });
+
+    const job = queue.enqueue("slow_job", { foo: "bar" });
+    const processPromise = queue.processNextJob();
+
+    // Verify job transitioned to processing
+    expect(queue.getJob(job.id)?.status).toBe("processing");
+
+    // Externally update status to something else (e.g. cancelled/completed)
+    testDb.prepare("UPDATE jobs SET status = 'cancelled' WHERE id = ?").run(job.id);
+
+    // Complete the handler
+    handlerResolve!({ done: true });
+    await processPromise;
+
+    // Status should NOT have been overwritten to 'completed'
+    expect(queue.getJob(job.id)?.status).toBe("cancelled");
   });
 });
 
