@@ -573,6 +573,18 @@ export function getElscioneHelperPath(dependencies?: ElscioneDependencies): stri
 export function getPythonPath(dependencies?: ElscioneDependencies): string {
   if (dependencies?.pythonPath) return dependencies.pythonPath;
   if (process.env.PYTHON_PATH) return process.env.PYTHON_PATH;
+
+  // Prefer Homebrew python3 on macOS where curl_cffi and certificates are installed
+  const homebrewPaths = [
+    "/opt/homebrew/bin/python3", // Apple Silicon Homebrew
+    "/usr/local/bin/python3",    // Intel Homebrew
+  ];
+  for (const p of homebrewPaths) {
+    if (fs.existsSync(p)) {
+      return p;
+    }
+  }
+
   return "python3";
 }
 
@@ -1199,26 +1211,50 @@ export async function downloadElscioneEpub(
     dependencies?.sleep ??
     ((ms: number) => new Promise((resolve) => setTimeout(resolve, isTestEnv ? 0 : ms)));
 
-  // If mock fetch dependency was injected, use pure-JS logic directly so test mocks work as expected
+  // If mock fetch dependency was injected, use pure-JS logic directly so test mocks work as expected (unless explicitly forced by useHelper)
   const hasMockFetch = Boolean(dependencies?.fetch);
-  const allowHelper = dependencies?.useHelper !== false && !hasMockFetch;
+  const allowHelper = dependencies?.useHelper ?? (!hasMockFetch);
 
   if (allowHelper) {
-    try {
-      await runElscioneHelperDownload(downloadUrl, destPath, onProgress, dependencies);
-      return;
-    } catch (err: any) {
-      if (
-        dependencies?.signal?.aborted ||
-        err?.name === "AbortError" ||
-        err?.message?.includes("aborted")
-      ) {
+    const MAX_HELPER_ATTEMPTS = 2; // 2 invocations of helper (helper itself retries up to 3 times internally)
+    let lastHelperError: any = null;
+
+    for (let attempt = 0; attempt < MAX_HELPER_ATTEMPTS; attempt++) {
+      if (dependencies?.signal?.aborted) {
         throw new Error("Elscione ingestion aborted by client");
       }
-      console.warn(
-        `[Elscione] Helper download failed, falling back to in-process fetch: ${err?.message || err}`,
-      );
+
+      if (attempt > 0) {
+        const backoffMs = Math.min(5000, 1000 * 2 ** (attempt - 1));
+        await sleep(backoffMs);
+      }
+
+      if (dependencies?.signal?.aborted) {
+        throw new Error("Elscione ingestion aborted by client");
+      }
+
+      try {
+        await runElscioneHelperDownload(downloadUrl, destPath, onProgress, dependencies);
+        return;
+      } catch (err: any) {
+        lastHelperError = err;
+        if (
+          dependencies?.signal?.aborted ||
+          err?.name === "AbortError" ||
+          err?.message?.includes("aborted")
+        ) {
+          throw new Error("Elscione ingestion aborted by client");
+        }
+        console.warn(
+          `[Elscione] Helper download attempt ${attempt + 1}/${MAX_HELPER_ATTEMPTS} failed: ${err?.message || err}`,
+        );
+      }
     }
+
+    throw (
+      lastHelperError ||
+      new Error(`Failed to download EPUB via helper after ${MAX_HELPER_ATTEMPTS} attempts: ${downloadUrl}`)
+    );
   }
 
   const MAX_RETRIES = 3;
@@ -1329,7 +1365,8 @@ export async function ingestElscioneSeries(
   await fs.promises.mkdir(workDir, { recursive: true });
 
   let importedCount = 0;
-  let skippedCount = 0;
+  let skippedExisting = 0;
+  let skippedErrors = 0;
   const calibreBookIds: number[] = [];
   let seriesAuthor = "Unknown";
 
@@ -1364,7 +1401,7 @@ export async function ingestElscioneSeries(
             title,
           },
         });
-        skippedCount++;
+        skippedExisting++;
         continue;
       }
 
@@ -1383,14 +1420,45 @@ export async function ingestElscioneSeries(
       });
 
       const tempEpubPath = path.join(workDir, `volume-${volNum}.epub`);
+      let coverPath: string | null = null;
 
       try {
-        await downloadElscioneEpub(
-          vol.downloadUrl,
-          tempEpubPath,
-          undefined,
-          dependencies,
-        );
+        try {
+          await downloadElscioneEpub(
+            vol.downloadUrl,
+            tempEpubPath,
+            undefined,
+            dependencies,
+          );
+        } catch (dlErr: any) {
+          if (
+            dependencies?.signal?.aborted ||
+            dlErr?.name === "AbortError" ||
+            dlErr?.message?.includes("aborted")
+          ) {
+            throw dlErr;
+          }
+          console.warn(
+            `[Elscione] Failed to download volume ${volNum} ("${title}"):`,
+            dlErr?.message || dlErr,
+          );
+          await reportProgress(onProgress, {
+            phase: "volume",
+            index: i + 1,
+            total: totalCount,
+            volumeTitle: title,
+            status: `⚠️ _[Volume ${escapeTelegramMarkdown(String(i + 1))}/${escapeTelegramMarkdown(String(totalCount))}] Skipped volume due to download error, continuing with next volume..._\n*${escapeTelegramMarkdown(vol.filename)}*`,
+            data: {
+              action: "skipped",
+              reason: "download_error",
+              volumeIndex: volNum,
+              title,
+              error: dlErr?.message || String(dlErr),
+            },
+          });
+          skippedErrors++;
+          continue;
+        }
 
         await reportProgress(onProgress, {
           phase: "volume",
@@ -1467,7 +1535,6 @@ export async function ingestElscioneSeries(
         }
 
         // Cover extraction from EPUB
-        let coverPath: string | null = null;
         try {
           coverPath = await extractAndConvertEpubCover(tempEpubPath, workDir, dependencies);
           if (coverPath && fs.existsSync(coverPath)) {
@@ -1490,6 +1557,7 @@ export async function ingestElscioneSeries(
         if (coverPath && fs.existsSync(coverPath)) {
           try {
             fs.unlinkSync(coverPath);
+            coverPath = null;
           } catch {}
         }
 
@@ -1508,7 +1576,39 @@ export async function ingestElscioneSeries(
             calibreId,
           },
         });
+      } catch (volErr: any) {
+        if (
+          dependencies?.signal?.aborted ||
+          volErr?.name === "AbortError" ||
+          volErr?.message?.includes("aborted")
+        ) {
+          throw volErr;
+        }
+        console.warn(
+          `[Elscione] Volume ${volNum} ("${title}") failed during ingestion:`,
+          volErr?.message || volErr,
+        );
+        await reportProgress(onProgress, {
+          phase: "volume",
+          index: i + 1,
+          total: totalCount,
+          volumeTitle: title,
+          status: `⚠️ _[Volume ${escapeTelegramMarkdown(String(i + 1))}/${escapeTelegramMarkdown(String(totalCount))}] Skipped volume due to error, continuing with next volume..._\n*${escapeTelegramMarkdown(vol.filename)}*`,
+          data: {
+            action: "skipped",
+            reason: "import_error",
+            volumeIndex: volNum,
+            title,
+            error: volErr?.message || String(volErr),
+          },
+        });
+        skippedErrors++;
       } finally {
+        if (coverPath && fs.existsSync(coverPath)) {
+          try {
+            fs.unlinkSync(coverPath);
+          } catch {}
+        }
         if (fs.existsSync(tempEpubPath)) {
           try {
             fs.unlinkSync(tempEpubPath);
@@ -1520,13 +1620,15 @@ export async function ingestElscioneSeries(
     await fs.promises.rm(workDir, { recursive: true, force: true });
   }
 
+  const totalSkipped = skippedExisting + skippedErrors;
   const finalResult: ElscioneIngestResult = {
-    success: importedCount > 0 || (skippedCount > 0 && totalCount > 0),
+    // Succeeded if at least one book was imported, OR if volumes already existed and there were no unhandled download/import errors
+    success: importedCount > 0 || (skippedExisting > 0 && skippedErrors === 0),
     seriesTitle: manifest.seriesTitle,
     author: seriesAuthor,
     importedCount,
-    skippedCount,
-    duplicateCount: skippedCount,
+    skippedCount: totalSkipped,
+    duplicateCount: skippedExisting,
     totalCount,
     tags: ["Light Novel", "Elscione"],
     calibreBookIds,
@@ -1536,7 +1638,7 @@ export async function ingestElscioneSeries(
     phase: "complete",
     total: totalCount,
     volumeTitle: manifest.seriesTitle,
-    status: `Completed: ${importedCount} imported, ${skippedCount} skipped of ${totalCount} volumes`,
+    status: `Completed: ${importedCount} imported, ${totalSkipped} skipped (${skippedExisting} duplicates, ${skippedErrors} errors) of ${totalCount} volumes`,
     data: finalResult,
   });
 

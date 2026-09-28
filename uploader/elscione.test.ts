@@ -1062,5 +1062,299 @@ describe("Elscione Light Novel Ingestion Module", () => {
       expect(progressEvents).toContain(100);
       fs.rmSync(tempDir, { recursive: true, force: true });
     });
+
+    it("downloadElscioneEpub retries via helper on transient failure and succeeds", async () => {
+      const tempDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "elscione-dl-retry-"),
+      );
+      const destPath = path.join(tempDir, "retry-test.epub");
+      const syntheticEpub = createSyntheticEpub();
+
+      let attempts = 0;
+      const mockSpawn = (_bin: string, args: string[]) => {
+        attempts++;
+        const dest = args[args.length - 1];
+        const stdout = new PassThrough();
+        const stderr = new PassThrough();
+
+        const listeners: Record<string, Function[]> = {};
+        const proc: any = {
+          stdout,
+          stderr,
+          on: (event: string, cb: Function) => {
+            if (!listeners[event]) listeners[event] = [];
+            listeners[event].push(cb);
+            if (event === "close") {
+              setTimeout(() => {
+                if (attempts < 2) {
+                  stderr.write("curl: (28) Operation timed out");
+                  stdout.end();
+                  stderr.end();
+                  setTimeout(() => cb(1), 5);
+                } else {
+                  fs.writeFileSync(dest, syntheticEpub);
+                  stdout.write("PROGRESS: 100.0% (1000/1000)\n");
+                  stdout.end();
+                  stderr.end();
+                  setTimeout(() => cb(0), 5);
+                }
+              }, 5);
+            }
+          },
+        };
+        return proc;
+      };
+
+      await downloadElscioneEpub(
+        "https://server.elscione.com/retry-book.epub",
+        destPath,
+        undefined,
+        {
+          spawn: mockSpawn as any,
+          sleep: async () => {},
+        },
+      );
+
+      expect(attempts).toBe(2);
+      expect(fs.existsSync(destPath)).toBe(true);
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it("ingestElscioneSeries continues to next volume when one volume download fails", async () => {
+      const mockItems = [
+        {
+          href: "/Officially%20Translated%20Light%20Novels/Sister/Sister%20Volume%2007.epub",
+          size: 1000000,
+        },
+        {
+          href: "/Officially%20Translated%20Light%20Novels/Sister/Sister%20Volume%2008.epub",
+          size: 1000000,
+        },
+      ];
+
+      const progressEvents: ElscioneProgressEvent[] = [];
+      const syntheticEpub = createSyntheticEpub();
+
+      const mockFetch = async (_url: string, init?: RequestInit) => {
+        // Manifest request
+        if (init?.method === "POST") {
+          return new Response(JSON.stringify({ items: mockItems }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        // Vol 7 fails with 403 / timeout, Vol 8 succeeds
+        if (_url.includes("Volume%2007") || _url.includes("Volume 07")) {
+          return new Response("Forbidden", { status: 403 });
+        }
+        return new Response(syntheticEpub, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/epub+zip",
+            "Content-Length": String(syntheticEpub.length),
+          },
+        });
+      };
+
+      const calibreCommands: string[][] = [];
+      const mockSpawnSync = (bin: string, args: string[]) => {
+        if (bin === "calibredb" || bin.includes("calibredb")) {
+          calibreCommands.push(args);
+          if (args[0] === "add") {
+            return { status: 0, stdout: "Added book ids: 77" };
+          }
+          if (args[0] === "set_metadata") {
+            return { status: 0, stdout: "Metadata set" };
+          }
+        }
+        return { status: 0, stdout: "" };
+      };
+
+      const result = await ingestElscioneSeries(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Sister/",
+        (event) => {
+          progressEvents.push(event);
+        },
+        {
+          fetch: mockFetch as any,
+          spawnSync: mockSpawnSync as any,
+          isVolumeInLibrary: () => false,
+          sleep: async () => {},
+        },
+      );
+
+      // Series ingestion succeeded partially (1 imported, 1 skipped) without throwing or crashing
+      expect(result.success).toBe(true);
+      expect(result.totalCount).toBe(2);
+      expect(result.importedCount).toBe(1);
+      expect(result.skippedCount).toBe(1);
+      expect(result.calibreBookIds).toEqual([77]);
+
+      // Progress reported warning for volume 7
+      const skippedWarning = progressEvents.find(
+        (e) => e.phase === "volume" && e.data?.action === "skipped" && e.data?.reason === "download_error",
+      );
+      expect(skippedWarning).toBeDefined();
+      expect(skippedWarning?.status).toContain("Skipped volume due to download error");
+
+      // Progress reported import for volume 8
+      const importedVol = progressEvents.find(
+        (e) => e.phase === "volume" && e.data?.action === "imported" && e.data?.calibreId === 77,
+      );
+      expect(importedVol).toBeDefined();
+    });
+
+    it("downloadElscioneEpub fails when helper exhausted and never falls back to in-process fetch", async () => {
+      const tempDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "elscione-dl-no-fallback-"),
+      );
+      const destPath = path.join(tempDir, "fail.epub");
+
+      const mockSpawn = () => {
+        const stdout = new PassThrough();
+        const stderr = new PassThrough();
+
+        const listeners: Record<string, Function[]> = {};
+        const proc: any = {
+          stdout,
+          stderr,
+          on: (event: string, cb: Function) => {
+            if (!listeners[event]) listeners[event] = [];
+            listeners[event].push(cb);
+            if (event === "close") {
+              setTimeout(() => {
+                stderr.write("Cloudflare challenge / TLS block");
+                stdout.end();
+                stderr.end();
+                setTimeout(() => cb(1), 5);
+              }, 5);
+            }
+          },
+        };
+        return proc;
+      };
+
+      let fetchCalled = false;
+      const forbiddenFetch = async () => {
+        fetchCalled = true;
+        throw new Error("fetch should not be called when helper is used");
+      };
+
+      await expect(
+        downloadElscioneEpub(
+          "https://server.elscione.com/fail-book.epub",
+          destPath,
+          undefined,
+          {
+            spawn: mockSpawn as any,
+            fetch: forbiddenFetch as any, // Even if passed, useHelper=true forces helper path
+            useHelper: true,
+            sleep: async () => {},
+          },
+        ),
+      ).rejects.toThrow("Cloudflare challenge / TLS block");
+
+      expect(fetchCalled).toBe(false);
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it("ingestElscioneSeries returns success: false when all volumes fail to download", async () => {
+      const mockItems = [
+        {
+          href: "/Officially%20Translated%20Light%20Novels/Sister/Sister%20Volume%2007.epub",
+          size: 1000000,
+        },
+      ];
+
+      const mockFetch = async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          return new Response(JSON.stringify({ items: mockItems }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("Forbidden", { status: 403 });
+      };
+
+      const result = await ingestElscioneSeries(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Sister/",
+        undefined,
+        {
+          fetch: mockFetch as any,
+          isVolumeInLibrary: () => false,
+          sleep: async () => {},
+        },
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.importedCount).toBe(0);
+      expect(result.skippedCount).toBe(1);
+      expect(result.duplicateCount).toBe(0);
+    });
+
+    it("ingestElscioneSeries continues to next volume when Calibre add fails (import_error)", async () => {
+      const mockItems = [
+        {
+          href: "/Officially%20Translated%20Light%20Novels/Sister/Sister%20Volume%2001.epub",
+          size: 1000000,
+        },
+        {
+          href: "/Officially%20Translated%20Light%20Novels/Sister/Sister%20Volume%2002.epub",
+          size: 1000000,
+        },
+      ];
+
+      const syntheticEpub = createSyntheticEpub();
+      const mockFetch = async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          return new Response(JSON.stringify({ items: mockItems }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(syntheticEpub, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/epub+zip",
+            "Content-Length": String(syntheticEpub.length),
+          },
+        });
+      };
+
+      let addAttempts = 0;
+      const mockSpawnSync = (bin: string, args: string[]) => {
+        if (bin === "calibredb" || bin.includes("calibredb")) {
+          if (args[0] === "add") {
+            addAttempts++;
+            if (addAttempts === 1) {
+              return { status: 1, stdout: "", stderr: "Database locked" };
+            }
+            return { status: 0, stdout: "Added book ids: 99" };
+          }
+          if (args[0] === "set_metadata") {
+            return { status: 0, stdout: "Metadata set" };
+          }
+        }
+        return { status: 0, stdout: "" };
+      };
+
+      const result = await ingestElscioneSeries(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Sister/",
+        undefined,
+        {
+          fetch: mockFetch as any,
+          spawnSync: mockSpawnSync as any,
+          isVolumeInLibrary: () => false,
+          sleep: async () => {},
+        },
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.totalCount).toBe(2);
+      expect(result.importedCount).toBe(1);
+      expect(result.skippedCount).toBe(1);
+      expect(result.duplicateCount).toBe(0);
+      expect(result.calibreBookIds).toEqual([99]);
+    });
   });
 });
