@@ -3695,6 +3695,7 @@ export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
         db.close();
         if (targetVol === null && bookRow) {
           if (
+            bookRow.series &&
             bookRow.series_index !== undefined &&
             bookRow.series_index !== null &&
             !isNaN(Number(bookRow.series_index)) &&
@@ -3730,7 +3731,7 @@ export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
         // If target book has a volume, verify candidate does not have a conflicting volume
         const candidateVol = top.title ? extractVolumeNumber(top.title) : null;
         const isVolumeConflict =
-          hasVolume &&
+          targetVol !== null &&
           ((candidateVol !== null && candidateVol !== targetVol) ||
             (targetVol > 1 && candidateVol === null));
 

@@ -910,6 +910,7 @@ export function registerJobHandlers(q: DurableJobQueue) {
       const targetBook = Array.isArray(calibreBooks) ? calibreBooks.find((b: any) => b.id === payload.bookId) : null;
       if (targetVol === null && targetBook) {
         if (
+          targetBook.series &&
           targetBook.series_index !== undefined &&
           targetBook.series_index !== null &&
           !isNaN(Number(targetBook.series_index)) &&
@@ -939,7 +940,7 @@ export function registerJobHandlers(q: DurableJobQueue) {
         // If target book has a volume, verify candidate does not have a conflicting volume
         const candidateVol = top.title ? extractVolumeNumber(top.title) : null;
         const isVolumeConflict =
-          hasVolume &&
+          targetVol !== null &&
           ((candidateVol !== null && candidateVol !== targetVol) ||
             (targetVol > 1 && candidateVol === null));
 

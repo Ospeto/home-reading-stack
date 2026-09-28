@@ -2208,6 +2208,7 @@ export async function applyMetadataToCalibre(
     if (existing) {
       if (existing.title) existingVol = extractVolumeNumber(existing.title);
       if (
+        existing.series &&
         existing.series_index !== undefined &&
         existing.series_index !== null &&
         !isNaN(Number(existing.series_index))
@@ -2227,7 +2228,7 @@ export async function applyMetadataToCalibre(
     //    and meta.title has a different volume or no volume.
     const hasVolumeOrMultiVolSeries =
       (existingVol !== null && existingVol > 1) ||
-      (existingSeriesIndex !== null && existingSeriesIndex > 1);
+      (Boolean(existing?.series) && existingSeriesIndex !== null && existingSeriesIndex > 1);
 
     const isDifferentVolume =
       existingVol !== null &&
@@ -2255,8 +2256,7 @@ export async function applyMetadataToCalibre(
       ((candidateVol !== null && candidateVol !== existingVol) ||
         (existingVol > 1 && candidateVol === null));
 
-    const skipCover =
-      !meta.coverUrl || (existingHasCover && volumeMismatchForCover) || volumeMismatchForCover;
+    const skipCover = !meta.coverUrl || volumeMismatchForCover;
 
     if (meta.coverUrl && volumeMismatchForCover) {
       console.warn(
