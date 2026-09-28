@@ -608,9 +608,13 @@ describe("Article Extraction: Firecrawl Tier 1 & Fail-Open Fallback", () => {
       if (!(k in origEnv)) delete process.env[k];
     }
     Object.assign(process.env, origEnv);
+    if (mockConvertScript) {
+      process.env.EBOOK_CONVERT_PATH = mockConvertScript;
+    }
   });
 
   test("uses Firecrawl Tier 1 when available and content is valid", async () => {
+    process.env.EBOOK_CONVERT_PATH = mockConvertScript!;
     const mockServer = Bun.serve({
       port: 49992,
       fetch(req) {
@@ -666,6 +670,7 @@ describe("Article Extraction: Firecrawl Tier 1 & Fail-Open Fallback", () => {
   });
 
   test("falls open to Tier 2 when Firecrawl content fails paywall check", async () => {
+    process.env.EBOOK_CONVERT_PATH = mockConvertScript!;
     const mockServer = Bun.serve({
       port: 49990,
       fetch(req) {
@@ -884,6 +889,198 @@ describe("URL Extraction from Conversational Text (extractUrlFromText)", () => {
 
     const tMeLink = "Join our channel https://t.me/reading_stack";
     expect(extractUrlFromText(tMeLink)).toBeNull();
+  });
+});
+
+describe("Regression: Open Graph Metadata Attribute Ordering", () => {
+  test("extractArticle accepts content before property/name for og:title, og:site_name, author, and published_time", async () => {
+    const htmlWithContentFirst = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Generic Home Page</title>
+  <meta content="Special OG Article Title" property="og:title">
+  <meta content="The Custom Publication" property="og:site_name">
+  <meta content="Jane Doe" name="author">
+  <meta content="2026-05-15T08:00:00Z" property="article:published_time">
+  <meta content="https://example.com/cover.jpg" property="og:image">
+</head>
+<body>
+  <article>
+    <p>${"In-depth analysis of open metadata protocols and attribute parsing robustness. ".repeat(20)}</p>
+  </article>
+</body>
+</html>`;
+
+    const origFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => {
+        return new Response(htmlWithContentFirst, {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }) as any;
+
+      const article = await extractArticle("https://example.com/content-first-test");
+      expect(article.title).toBe("Special OG Article Title");
+      expect(article.siteName).toBe("The Custom Publication");
+      expect(article.author).toBe("Jane Doe");
+      expect(article.publishedDate).toContain("2026");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  test("extractArticle preserves property-first and name-first metadata attributes", async () => {
+    const htmlWithPropertyFirst = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Generic Home Page</title>
+  <meta property="og:title" content="Property First Title">
+  <meta property="og:site_name" content="Property First Site">
+  <meta property="article:author" content="John Smith">
+  <meta property="article:published_time" content="2026-09-01T12:00:00Z">
+</head>
+<body>
+  <article>
+    <p>${"Understanding standard HTML meta attribute ordering in modern syndication engines. ".repeat(20)}</p>
+  </article>
+</body>
+</html>`;
+
+    const origFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => {
+        return new Response(htmlWithPropertyFirst, {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }) as any;
+
+      const article = await extractArticle("https://example.com/property-first-test");
+      expect(article.title).toBe("Property First Title");
+      expect(article.siteName).toBe("Property First Site");
+      expect(article.author).toBe("John Smith");
+      expect(article.publishedDate).toContain("2026");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+describe("Regression: Calibre Add Failure Handling in ingestArticleFromUrl", () => {
+  test("ingestArticleFromUrl returns success: false with stderr when calibredb add exits non-zero", async () => {
+    process.env.EBOOK_CONVERT_PATH = mockConvertScript!;
+    const testTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "article-add-fail-test-"));
+    const testDropDir = path.join(testTempDir, "drop");
+    fs.mkdirSync(testDropDir, { recursive: true });
+
+    // Mock calibredb runner script that fails on add
+    const mockCalibreScript = path.join(testTempDir, "mock_calibredb.sh");
+    fs.writeFileSync(
+      mockCalibreScript,
+      `#!/bin/bash
+if [ "$1" = "add" ]; then
+  echo "calibredb: database is locked or corrupted" >&2
+  exit 1
+fi
+echo "[]"
+exit 0
+`,
+      { mode: 0o755 },
+    );
+
+    const prevDropEnv = process.env.BOOKS_DROP_DIR;
+    const prevCalibrePath = process.env.CALIBREDB_PATH;
+    process.env.BOOKS_DROP_DIR = testDropDir;
+    process.env.CALIBREDB_PATH = mockCalibreScript;
+
+    const prose = "Resilient ingestion services must abort immediately upon database write failures. ".repeat(25);
+    const origFetch = globalThis.fetch;
+
+    try {
+      globalThis.fetch = (async () => {
+        return new Response(
+          `<html><head><title>Add Failure Test Article</title></head><body><article><p>${prose}</p></article></body></html>`,
+          { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } },
+        );
+      }) as any;
+
+      const res = await ingestArticleFromUrl("https://example.com/add-fail-test");
+      expect(res.success).toBe(false);
+      expect(res.error).toContain("database is locked or corrupted");
+      expect(res.bookId).toBeUndefined();
+    } finally {
+      globalThis.fetch = origFetch;
+      if (prevDropEnv !== undefined) process.env.BOOKS_DROP_DIR = prevDropEnv;
+      else delete process.env.BOOKS_DROP_DIR;
+      if (prevCalibrePath !== undefined) process.env.CALIBREDB_PATH = prevCalibrePath;
+      else delete process.env.CALIBREDB_PATH;
+      try {
+        fs.rmSync(testTempDir, { recursive: true, force: true });
+      } catch (_err) {
+        void _err;
+      }
+    }
+  });
+
+  test("ingestArticleFromUrl retains parsed bookId from Added book ids: 99 without falling back to title search", async () => {
+    process.env.EBOOK_CONVERT_PATH = mockConvertScript!;
+    const testTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "article-add-success-test-"));
+    const testDropDir = path.join(testTempDir, "drop");
+    fs.mkdirSync(testDropDir, { recursive: true });
+
+    // Mock calibredb runner script: add succeeds with ID 99; if list was called, it would return ID 1
+    const mockCalibreScript = path.join(testTempDir, "mock_calibredb.sh");
+    fs.writeFileSync(
+      mockCalibreScript,
+      `#!/bin/bash
+if [ "$1" = "add" ]; then
+  echo "Added book ids: 99"
+  exit 0
+elif [ "$1" = "list" ]; then
+  echo '[{"id": 1, "title": "Added Book Test", "authors": "Author"}]'
+  exit 0
+elif [ "$1" = "set_metadata" ]; then
+  exit 0
+fi
+echo "[]"
+exit 0
+`,
+      { mode: 0o755 },
+    );
+
+    const prevDropEnv = process.env.BOOKS_DROP_DIR;
+    const prevCalibrePath = process.env.CALIBREDB_PATH;
+    process.env.BOOKS_DROP_DIR = testDropDir;
+    process.env.CALIBREDB_PATH = mockCalibreScript;
+
+    const prose = "Consistent book ID allocation maintains library relational integrity. ".repeat(25);
+    const origFetch = globalThis.fetch;
+
+    try {
+      globalThis.fetch = (async () => {
+        return new Response(
+          `<html><head><title>Added Book Test</title></head><body><article><p>${prose}</p></article></body></html>`,
+          { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } },
+        );
+      }) as any;
+
+      const res = await ingestArticleFromUrl("https://example.com/add-success-test");
+      expect(res.success).toBe(true);
+      expect(res.bookId).toBe(99);
+      expect(res.duplicate).toBe(false);
+    } finally {
+      globalThis.fetch = origFetch;
+      if (prevDropEnv !== undefined) process.env.BOOKS_DROP_DIR = prevDropEnv;
+      else delete process.env.BOOKS_DROP_DIR;
+      if (prevCalibrePath !== undefined) process.env.CALIBREDB_PATH = prevCalibrePath;
+      else delete process.env.CALIBREDB_PATH;
+      try {
+        fs.rmSync(testTempDir, { recursive: true, force: true });
+      } catch (_err) {
+        void _err;
+      }
+    }
   });
 });
 

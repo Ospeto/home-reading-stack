@@ -3500,6 +3500,62 @@ describe("Lnori Queue & Telegram Bot Integration", () => {
       resetLocalLnoriQueueForTest();
     }
   });
+
+  describe("/get and /get@bot Command Parsing", () => {
+    it("handles /get@bot <id> and /get <id> identically without falling into default EPUB prompt", async () => {
+      const sentTelegramBodies: any[] = [];
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: any, init: any) => {
+        const url = typeof input === "string" ? input : input?.url || "";
+        if (
+          url.includes("sendMessage") ||
+          url.includes("editMessageText") ||
+          url.includes("sendDocument")
+        ) {
+          const body = JSON.parse(init?.body || "{}");
+          sentTelegramBodies.push({ url, body });
+          return new Response(
+            JSON.stringify({ ok: true, result: { message_id: 8888 } }),
+            { status: 200 },
+          );
+        }
+        return origFetch(input, init);
+      }) as typeof fetch;
+
+      try {
+        // Send /get@saroat_ospeto_bot 6
+        await handleTextMessage(
+          999,
+          "/get@saroat_ospeto_bot 6",
+          "group_member",
+        );
+
+        expect(sentTelegramBodies.length).toBeGreaterThan(0);
+        // Should NOT send the generic prompt ("Please send EPUB files")
+        for (const item of sentTelegramBodies) {
+          expect(item.body.text || "").not.toContain("Please send EPUB files");
+        }
+        // It either sent retrieving status / book not found / book document
+        const anyRetrievalMention = sentTelegramBodies.some(
+          (item) =>
+            (item.body.text && (item.body.text.includes("Retrieving") || item.body.text.includes("Book #6 Not Found"))) ||
+            item.url.includes("sendDocument"),
+        );
+        expect(anyRetrievalMention).toBe(true);
+
+        sentTelegramBodies.length = 0;
+
+        // Send /get@bot without ID
+        await handleTextMessage(999, "/get@saroat_ospeto_bot", "group_member");
+        expect(sentTelegramBodies.length).toBe(1);
+        expect(sentTelegramBodies[0].body.text).toContain("Book Retrieval");
+        expect(sentTelegramBodies[0].body.text).toContain("Usage: `/get <id>`");
+        expect(sentTelegramBodies[0].body.text).not.toContain("Please send EPUB files");
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+  });
 });
 
 

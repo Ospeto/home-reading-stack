@@ -1726,21 +1726,33 @@ export async function extractArticle(
   const jsonLd = extractFromJsonLd(rawHtml);
 
   // Site Name
-  const ogSiteMatch = rawHtml.match(
-    /<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']+)["']/i,
-  );
+  const ogSiteMatch =
+    rawHtml.match(
+      /<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']+)["']/i,
+    ) ||
+    rawHtml.match(
+      /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:site_name["']/i,
+    );
   let siteName = cleanString(ogSiteMatch ? ogSiteMatch[1] : "");
   if (!siteName) {
     siteName = hostname;
   }
 
   // Title
-  const ogTitleMatch = rawHtml.match(
-    /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i,
-  );
-  const twitterTitleMatch = rawHtml.match(
-    /<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']+)["']/i,
-  );
+  const ogTitleMatch =
+    rawHtml.match(
+      /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i,
+    ) ||
+    rawHtml.match(
+      /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i,
+    );
+  const twitterTitleMatch =
+    rawHtml.match(
+      /<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']+)["']/i,
+    ) ||
+    rawHtml.match(
+      /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:title["']/i,
+    );
   const titleTagMatch = rawHtml.match(/<title[^>]*>([^<]+)<\/title>/i);
   const h1Match = rawHtml.match(/<h1[^>]*>([^<]+)<\/h1>/i);
 
@@ -1764,15 +1776,27 @@ export async function extractArticle(
   }
 
   // Author
-  const metaAuthor = rawHtml.match(
-    /<meta[^>]+name=["']author["'][^>]+content=["']([^"']+)["']/i,
-  );
-  const articleAuthor = rawHtml.match(
-    /<meta[^>]+property=["']article:author["'][^>]+content=["']([^"']+)["']/i,
-  );
-  const twitterCreator = rawHtml.match(
-    /<meta[^>]+name=["']twitter:creator["'][^>]+content=["']([^"']+)["']/i,
-  );
+  const metaAuthor =
+    rawHtml.match(
+      /<meta[^>]+name=["']author["'][^>]+content=["']([^"']+)["']/i,
+    ) ||
+    rawHtml.match(
+      /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']author["']/i,
+    );
+  const articleAuthor =
+    rawHtml.match(
+      /<meta[^>]+property=["']article:author["'][^>]+content=["']([^"']+)["']/i,
+    ) ||
+    rawHtml.match(
+      /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']article:author["']/i,
+    );
+  const twitterCreator =
+    rawHtml.match(
+      /<meta[^>]+name=["']twitter:creator["'][^>]+content=["']([^"']+)["']/i,
+    ) ||
+    rawHtml.match(
+      /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:creator["']/i,
+    );
   const bylineMatch = rawHtml.match(
     /<(?:span|div|p|a)[^>]+class=["'][^"']*(?:author|byline)[^"']*["'][^>]*>([^<]+)<\//i,
   );
@@ -1791,12 +1815,20 @@ export async function extractArticle(
   }
 
   // Published Date
-  const ogPubDate = rawHtml.match(
-    /<meta[^>]+property=["']article:published_time["'][^>]+content=["']([^"']+)["']/i,
-  );
-  const metaDate = rawHtml.match(
-    /<meta[^>]+name=["'](?:date|pubdate)["'][^>]+content=["']([^"']+)["']/i,
-  );
+  const ogPubDate =
+    rawHtml.match(
+      /<meta[^>]+property=["']article:published_time["'][^>]+content=["']([^"']+)["']/i,
+    ) ||
+    rawHtml.match(
+      /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']article:published_time["']/i,
+    );
+  const metaDate =
+    rawHtml.match(
+      /<meta[^>]+name=["'](?:date|pubdate)["'][^>]+content=["']([^"']+)["']/i,
+    ) ||
+    rawHtml.match(
+      /<meta[^>]+content=["']([^"']+)["'][^>]+name=["'](?:date|pubdate)["']/i,
+    );
   const timeMatch = rawHtml.match(/<time[^>]+datetime=["']([^"']+)["']/i);
 
   const rawDate =
@@ -2237,14 +2269,25 @@ export async function ingestArticleFromUrl(
 
     const addRes = runCalibredb(addArgs);
 
+    if (addRes.status !== 0) {
+      return {
+        success: false,
+        title: article.title,
+        authors: article.author,
+        siteName: article.siteName,
+        wordCount: article.wordCount,
+        readTimeMinutes: article.readTimeMinutes,
+        format: "EPUB",
+        error: addRes.stderr || "Failed to add article to Calibre",
+      };
+    }
+
     let bookId: number | null = null;
     let isDuplicate = false;
 
-    if (addRes.status === 0) {
-      const match = addRes.stdout?.match(/Added book ids?:?\s*([0-9]+)/i);
-      if (match) {
-        bookId = parseInt(match[1], 10);
-      }
+    const match = addRes.stdout?.match(/Added book ids?:?\s*([0-9]+)/i);
+    if (match) {
+      bookId = parseInt(match[1], 10);
     }
 
     // If bookId not returned directly, search by title to link book record

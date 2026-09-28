@@ -4841,15 +4841,15 @@ export async function handleTextMessage(
               return;
             }
 
-            // Book Retrieval: /get <id> or /get_<id>
-            const getMatch = text.match(/^\/get(?:_|\s+)(\d+)$/i);
+            // Book Retrieval: /get <id>, /get@bot <id>, or /get_<id>
+            const getMatch = text.match(/^\/get(?:@\w+)?(?:_|\s+)(\d+)$/i);
             if (getMatch) {
               const bookId = parseInt(getMatch[1], 10);
               log(`Handling /get command for book #${bookId} from ${sender}`);
               await retrieveAndSendBook(chatId, bookId);
               return;
             }
-            if (/^\/get(?:@\w+)?$/i.test(text)) {
+            if (/^\/get(?:@\w+)?$/i.test(text.trim())) {
               await sendMessage(
                 chatId,
                 `ℹ️ *Book Retrieval*\n\nPlease specify a book ID:\nUsage: \`/get <id>\`\nExample: \`/get 6\``,
