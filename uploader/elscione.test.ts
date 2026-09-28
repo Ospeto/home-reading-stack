@@ -8,6 +8,7 @@ import { PassThrough } from "node:stream";
 import {
   isElscioneUrl,
   parseElscioneUrl,
+  cleanAndNormalizeNovelUrl,
   extractVolumeNumberFromFilename,
   parseAnubisChallenge,
   solveAnubisChallenge,
@@ -74,6 +75,104 @@ describe("Elscione Light Novel Ingestion Module", () => {
   });
 
   describe("URL Recognition & Parsing", () => {
+    it("cleanAndNormalizeNovelUrl handles spaces, quotes, missing protocols, and preserves encoded characters", () => {
+      // Spaces in path auto-encoded as %20
+      expect(
+        cleanAndNormalizeNovelUrl(
+          "https://server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/",
+        ),
+      ).toBe(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+      );
+
+      // Missing protocol prefix prepends https://
+      expect(
+        cleanAndNormalizeNovelUrl(
+          "server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/",
+        ),
+      ).toBe(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+      );
+
+      // // prefix prepends https:
+      expect(
+        cleanAndNormalizeNovelUrl(
+          "//server.elscione.com/Officially Translated Light Novels/DanMachi/",
+        ),
+      ).toBe(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/DanMachi/",
+      );
+
+      // Preserves already-encoded %20 and %27 without double-encoding
+      expect(
+        cleanAndNormalizeNovelUrl(
+          "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister%27s%20All%20You%20Need/?tag=test%20query&page=1#heading",
+        ),
+      ).toBe(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister%27s%20All%20You%20Need/?tag=test%20query&page=1#heading",
+      );
+
+      // Mixed encoded and unencoded spaces
+      expect(
+        cleanAndNormalizeNovelUrl(
+          "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A Sister's All You Need/",
+        ),
+      ).toBe(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+      );
+
+      // Direct .epub with spaces
+      expect(
+        cleanAndNormalizeNovelUrl(
+          "server.elscione.com/Officially Translated/Overlord/Overlord Volume 01.epub",
+        ),
+      ).toBe(
+        "https://server.elscione.com/Officially%20Translated/Overlord/Overlord%20Volume%2001.epub",
+      );
+
+      // Non-breaking space (NBSP) is converted to %20
+      expect(
+        cleanAndNormalizeNovelUrl(
+          "https://server.elscione.com/Officially\u00A0Translated/DanMachi/",
+        ),
+      ).toBe(
+        "https://server.elscione.com/Officially%20Translated/DanMachi/",
+      );
+
+      // Strips wrapping quotes and brackets
+      expect(
+        cleanAndNormalizeNovelUrl(
+          "\"https://server.elscione.com/Officially Translated Light Novels/Grimgar/\"",
+        ),
+      ).toBe(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar/",
+      );
+      expect(
+        cleanAndNormalizeNovelUrl(
+          "<https://server.elscione.com/Officially Translated Light Novels/Grimgar/>",
+        ),
+      ).toBe(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar/",
+      );
+      expect(
+        cleanAndNormalizeNovelUrl(
+          "'https://server.elscione.com/Officially Translated Light Novels/Grimgar/'",
+        ),
+      ).toBe(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar/",
+      );
+
+      // Normalizes lnori URLs missing protocol
+      expect(
+        cleanAndNormalizeNovelUrl("lnori.com/series/8046/the-genius-princes-guide"),
+      ).toBe("https://lnori.com/series/8046/the-genius-princes-guide");
+
+      // Empty and invalid inputs
+      expect(cleanAndNormalizeNovelUrl("")).toBe("");
+      expect(cleanAndNormalizeNovelUrl(null as any)).toBe("");
+      expect(cleanAndNormalizeNovelUrl(undefined as any)).toBe("");
+    });
+
     it("isElscioneUrl correctly identifies server.elscione.com URLs", () => {
       expect(
         isElscioneUrl(
@@ -87,6 +186,22 @@ describe("Elscione Light Novel Ingestion Module", () => {
       ).toBe(true);
       expect(isElscioneUrl("http://server.elscione.com/test")).toBe(true);
       expect(isElscioneUrl("https://mirror.server.elscione.com/folder/")).toBe(true);
+      // Spaces, raw quotes, and missing protocol
+      expect(
+        isElscioneUrl(
+          "https://server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/",
+        ),
+      ).toBe(true);
+      expect(
+        isElscioneUrl(
+          "server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/",
+        ),
+      ).toBe(true);
+      expect(
+        isElscioneUrl(
+          "server.elscione.com/Officially Translated/Overlord Volume 01.epub",
+        ),
+      ).toBe(true);
     });
 
     it("isElscioneUrl rejects non-Elscione or invalid URLs", () => {
@@ -899,6 +1014,29 @@ describe("Elscione Light Novel Ingestion Module", () => {
       // Mixed folder vs EPUB volume must NOT match!
       expect(areMatchingElscioneUrls(url1, epub1)).toBe(false);
       expect(areMatchingElscioneUrls(epub1, url1)).toBe(false);
+
+      // Space-containing raw URL matches already-encoded URL
+      const rawSpaceUrl =
+        "https://server.elscione.com/Officially Translated Light Novels/Grimgar/";
+      expect(areMatchingElscioneUrls(rawSpaceUrl, url1)).toBe(true);
+
+      // URL with raw single quote matches URL with encoded %27
+      const rawQuoteUrl =
+        "https://server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/";
+      const encodedQuoteUrl =
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister%27s%20All%20You%20Need/";
+      expect(areMatchingElscioneUrls(rawQuoteUrl, encodedQuoteUrl)).toBe(true);
+
+      // Missing protocol prefix matches full https URL
+      const noProtoUrl =
+        "server.elscione.com/Officially Translated Light Novels/Grimgar/";
+      expect(areMatchingElscioneUrls(noProtoUrl, url1)).toBe(true);
+
+      // Malformed % sequence does not throw URIError
+      const malformedUrl1 = "https://server.elscione.com/folder%invalid/";
+      const malformedUrl2 = "https://server.elscione.com/folder%invalid/";
+      expect(areMatchingElscioneUrls(malformedUrl1, malformedUrl2)).toBe(true);
+      expect(areMatchingElscioneUrls(malformedUrl1, url1)).toBe(false);
     });
 
     it("areMatchingNovelUrls routes across Elscione and Lnori", () => {

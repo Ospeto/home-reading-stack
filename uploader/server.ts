@@ -66,6 +66,7 @@ import {
   isElscioneUrl,
   parseElscioneUrl,
   ingestElscioneSeries,
+  cleanAndNormalizeNovelUrl,
   type ElscioneProgressEvent,
 } from "./elscione";
 import { isJoplinRoute, handleJoplinRequest } from "./joplin";
@@ -334,10 +335,23 @@ export function areMatchingElscioneUrls(url1: string, url2: string): boolean {
   if (p1.isEpub !== p2.isEpub) {
     return false;
   }
+  const safeDecode = (s: string) => {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  };
   if (p1.isEpub && p2.isEpub) {
-    return p1.pathname === p2.pathname;
+    return (
+      p1.pathname === p2.pathname ||
+      safeDecode(p1.pathname) === safeDecode(p2.pathname)
+    );
   }
-  return p1.folderPath === p2.folderPath;
+  return (
+    p1.folderPath === p2.folderPath ||
+    safeDecode(p1.folderPath) === safeDecode(p2.folderPath)
+  );
 }
 
 export function areMatchingNovelUrls(url1: string, url2: string): boolean {
@@ -4456,7 +4470,7 @@ async function handleRequestCore(
           corsOrigin,
         );
       }
-      const targetUrl = body.url.trim();
+      const targetUrl = cleanAndNormalizeNovelUrl(body.url.trim());
 
       // Validate target URL with isLnoriUrl or isElscioneUrl
       const isElscione = isElscioneUrl(targetUrl);

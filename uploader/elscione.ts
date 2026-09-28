@@ -169,16 +169,79 @@ export function resetElscioneSessionForTest(): void {
 }
 
 /**
+ * Normalizes novel and folder URLs:
+ * - Prepends https:// if protocol is missing (or //)
+ * - Auto-encodes unencoded spaces in pathname as %20
+ * - Preserves already-encoded %20, %27, query parameters, and hashes
+ */
+export function cleanAndNormalizeNovelUrl(raw: string): string {
+  if (!raw || typeof raw !== "string") return "";
+  let clean = raw.trim();
+  if (!clean) return "";
+
+  // Strip wrapping quotes/angle brackets (including Unicode curly quotes) if present
+  if (
+    (clean.startsWith('"') && clean.endsWith('"')) ||
+    (clean.startsWith("'") && clean.endsWith("'")) ||
+    (clean.startsWith("<") && clean.endsWith(">")) ||
+    (clean.startsWith("\u201C") && clean.endsWith("\u201D")) ||
+    (clean.startsWith("\u2018") && clean.endsWith("\u2019"))
+  ) {
+    clean = clean.slice(1, -1).trim();
+  }
+  // Strip unmatched leading or trailing wrapping quote characters
+  clean = clean
+    .replace(/^[\u201C\u2018"'<]+/, "")
+    .replace(/[\u201D\u2019"'>]+$/, "")
+    .trim();
+  if (!clean) return "";
+
+  // 1. Missing protocol prefix
+  if (clean.startsWith("//")) {
+    clean = "https:" + clean;
+  } else if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(clean)) {
+    clean = "https://" + clean.replace(/^\/+/, "");
+  }
+
+  // 2. Separate origin/authority from pathname + search + hash
+  const match = clean.match(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#]+)(.*)$/s);
+  if (!match) return clean;
+
+  const origin = match[1];
+  const rest = match[2] || "";
+
+  if (!rest) {
+    return origin;
+  }
+
+  const restMatch = rest.match(/^([^?#]*)(?:\?([^#]*))?(?:#(.*))?$/s);
+  let pathname = restMatch ? restMatch[1] : rest;
+  const search = restMatch && restMatch[2] !== undefined ? restMatch[2] : null;
+  const hash = restMatch && restMatch[3] !== undefined ? restMatch[3] : null;
+
+  // Auto-encode unencoded spaces in path as %20
+  // Note: we replace literal spaces/tabs/NBSP, leaving existing %20, %27, etc. intact
+  pathname = pathname.replace(/[ \t\u00A0]/g, "%20");
+
+  let result = origin + pathname;
+  if (search !== null) {
+    result += "?" + search.replace(/[ \t\u00A0]/g, "%20");
+  }
+  if (hash !== null) {
+    result += "#" + hash.replace(/[ \t\u00A0]/g, "%20");
+  }
+
+  return result;
+}
+
+/**
  * URL Detection: returns true if the URL points to server.elscione.com
  */
 export function isElscioneUrl(url: string): boolean {
   if (!url || typeof url !== "string") return false;
   try {
-    let clean = url.trim();
-    if (clean.startsWith("//")) clean = "https:" + clean;
-    else if (!clean.startsWith("http://") && !clean.startsWith("https://")) {
-      clean = "https://" + clean.replace(/^\/+/, "");
-    }
+    const clean = cleanAndNormalizeNovelUrl(url);
+    if (!clean) return false;
     const parsed = new URL(clean);
     return (
       parsed.hostname === "server.elscione.com" ||
@@ -202,20 +265,24 @@ export function parseElscioneUrl(url: string): {
 } | null {
   if (!isElscioneUrl(url)) return null;
   try {
-    let clean = url.trim();
-    if (clean.startsWith("//")) clean = "https:" + clean;
-    else if (!clean.startsWith("http://") && !clean.startsWith("https://")) {
-      clean = "https://" + clean.replace(/^\/+/, "");
-    }
+    const clean = cleanAndNormalizeNovelUrl(url);
     const parsed = new URL(clean);
     const pathname = parsed.pathname;
     const isEpub = /\.epub$/i.test(pathname);
 
+    const safeDecode = (s: string) => {
+      try {
+        return decodeURIComponent(s);
+      } catch {
+        return s;
+      }
+    };
+
     if (isEpub) {
-      const filename = path.basename(decodeURIComponent(pathname));
+      const filename = path.basename(safeDecode(pathname));
       const dirPath = path.dirname(pathname);
       const folderPath = dirPath.endsWith("/") ? dirPath : `${dirPath}/`;
-      const segments = decodeURIComponent(folderPath).split("/").filter(Boolean);
+      const segments = safeDecode(folderPath).split("/").filter(Boolean);
       const seriesTitle = segments.length > 0 ? segments[segments.length - 1] : undefined;
       return {
         hostname: parsed.hostname,
@@ -228,7 +295,7 @@ export function parseElscioneUrl(url: string): {
     }
 
     const folderPath = pathname.endsWith("/") ? pathname : `${pathname}/`;
-    const segments = decodeURIComponent(folderPath).split("/").filter(Boolean);
+    const segments = safeDecode(folderPath).split("/").filter(Boolean);
     const seriesTitle = segments.length > 0 ? segments[segments.length - 1] : undefined;
     return {
       hostname: parsed.hostname,
@@ -770,7 +837,8 @@ export async function extractElscioneManifest(
   url: string,
   dependencies?: ElscioneDependencies,
 ): Promise<ElscioneManifest> {
-  const parsed = parseElscioneUrl(url);
+  const normalizedUrl = cleanAndNormalizeNovelUrl(url);
+  const parsed = parseElscioneUrl(normalizedUrl);
   if (!parsed) {
     throw new Error(`Invalid Elscione URL: ${url}. Expected server.elscione.com URL.`);
   }
@@ -791,7 +859,7 @@ export async function extractElscioneManifest(
 
     return {
       seriesTitle,
-      url,
+      url: normalizedUrl,
       isSingleVolume: true,
       totalCount: 1,
       volumes: [
@@ -799,7 +867,7 @@ export async function extractElscioneManifest(
           volumeNumber: volNum,
           partNumber: partNum,
           filename: parsed.filename,
-          downloadUrl: url,
+          downloadUrl: normalizedUrl,
           title,
         },
       ],
@@ -996,7 +1064,7 @@ export async function extractElscioneManifest(
 
   return {
     seriesTitle,
-    url,
+    url: normalizedUrl,
     isSingleVolume: false,
     totalCount: epubItems.length,
     volumes: epubItems,
@@ -1204,6 +1272,7 @@ export async function downloadElscioneEpub(
   onProgress?: (progressPercent: number) => void,
   dependencies?: ElscioneDependencies,
 ): Promise<void> {
+  const normalizedDownloadUrl = cleanAndNormalizeNovelUrl(downloadUrl);
   const isTestEnv =
     process.argv.some((a: string) => a.includes(".test.") || a.includes("test")) ||
     process.env.NODE_ENV === "test";
@@ -1234,7 +1303,7 @@ export async function downloadElscioneEpub(
       }
 
       try {
-        await runElscioneHelperDownload(downloadUrl, destPath, onProgress, dependencies);
+        await runElscioneHelperDownload(normalizedDownloadUrl, destPath, onProgress, dependencies);
         return;
       } catch (err: any) {
         lastHelperError = err;
@@ -1253,7 +1322,7 @@ export async function downloadElscioneEpub(
 
     throw (
       lastHelperError ||
-      new Error(`Failed to download EPUB via helper after ${MAX_HELPER_ATTEMPTS} attempts: ${downloadUrl}`)
+      new Error(`Failed to download EPUB via helper after ${MAX_HELPER_ATTEMPTS} attempts: ${normalizedDownloadUrl}`)
     );
   }
 
@@ -1275,12 +1344,12 @@ export async function downloadElscioneEpub(
     }
 
     try {
-      const parsed = safeCreateUrl(downloadUrl);
+      const parsed = safeCreateUrl(normalizedDownloadUrl);
       const folderPath = parsed ? path.posix.dirname(parsed.pathname) + "/" : "/";
       const referer = parsed ? `${parsed.origin}${folderPath}` : "https://server.elscione.com/";
 
       const res = await fetchWithAnubis(
-        downloadUrl,
+        normalizedDownloadUrl,
         {
           headers: {
             Referer: referer,
@@ -1290,7 +1359,7 @@ export async function downloadElscioneEpub(
       );
 
       if (!res.ok) {
-        throw new Error(`Failed to download EPUB (${res.status}): ${downloadUrl}`);
+        throw new Error(`Failed to download EPUB (${res.status}): ${normalizedDownloadUrl}`);
       }
 
       await streamResponseToFile(
@@ -1319,7 +1388,7 @@ export async function downloadElscioneEpub(
 
   throw (
     lastError ||
-    new Error(`Failed to download EPUB after ${MAX_RETRIES} retries: ${downloadUrl}`)
+    new Error(`Failed to download EPUB after ${MAX_RETRIES} retries: ${normalizedDownloadUrl}`)
   );
 }
 
@@ -1331,6 +1400,7 @@ export async function ingestElscioneSeries(
   onProgress?: ElscioneProgressCallback,
   dependencies?: ElscioneDependencies,
 ): Promise<ElscioneIngestResult> {
+  const normalizedUrl = cleanAndNormalizeNovelUrl(url);
   if (dependencies?.signal?.aborted) {
     throw new Error("Elscione ingestion aborted by client");
   }
@@ -1340,7 +1410,7 @@ export async function ingestElscioneSeries(
     status: "Inspecting Elscione light novel manifest...",
   });
 
-  const manifest = await extractElscioneManifest(url, dependencies);
+  const manifest = await extractElscioneManifest(normalizedUrl, dependencies);
   const totalCount = manifest.volumes.length;
 
   await reportProgress(onProgress, {
