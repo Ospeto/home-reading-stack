@@ -663,6 +663,39 @@ describe("RanobeDB Scraper & Light Novel Metadata Engine", () => {
         };
         expect(isSameBook(b1, b2)).toBe(false);
       });
+
+      it("rejects distinct series with distinct work markers (Classroom of the Elite vs Year 2, Re:Zero vs Ex)", () => {
+        const cote1 = {
+          title: "Classroom of the Elite Vol. 1",
+          authors: "Shogo Kinugasa",
+        };
+        const coteY2V1 = {
+          title: "Classroom of the Elite Year 2 Vol. 1",
+          authors: "Shogo Kinugasa",
+        };
+        expect(isSameBook(cote1, coteY2V1)).toBe(false);
+
+        const rezero1 = {
+          title: "Re:Zero Vol. 1",
+          authors: "Tappei Nagatsuki",
+        };
+        const rezeroEx1 = {
+          title: "Re:Zero Ex Vol. 1",
+          authors: "Tappei Nagatsuki",
+        };
+        expect(isSameBook(rezero1, rezeroEx1)).toBe(false);
+
+        // Subtitles of the same work must still match
+        const mt1 = {
+          title: "Mushoku Tensei Vol. 1",
+          authors: "Rifujin na Magonote",
+        };
+        const mtSub1 = {
+          title: "Mushoku Tensei: Jobless Reincarnation Volume 01",
+          authors: "Rifujin na Magonote",
+        };
+        expect(isSameBook(mt1, mtSub1)).toBe(true);
+      });
     });
 
     describe("Jev System-1 Triage Arbitration (classifyDuplicateWithJev & isSameBookAsync)", () => {
