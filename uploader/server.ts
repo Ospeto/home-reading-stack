@@ -634,6 +634,34 @@ export function getCoverCacheDir(): string {
   }
 }
 
+/**
+ * Purge cached downscaled and master cover files for a specific book.
+ * Cleans up ${bookId}_*.* and master_${bookId}.* from cover cache directory.
+ */
+export function purgeCoverCache(bookId: number): number {
+  if (!bookId || isNaN(bookId) || bookId <= 0) return 0;
+  const cacheDir = getCoverCacheDir();
+  if (!fs.existsSync(cacheDir)) return 0;
+
+  let purgedCount = 0;
+  try {
+    const files = fs.readdirSync(cacheDir);
+    for (const file of files) {
+      if (file.startsWith(`${bookId}_`) || file.startsWith(`master_${bookId}.`)) {
+        try {
+          fs.unlinkSync(path.join(cacheDir, file));
+          purgedCount++;
+        } catch (_unErr) {
+          void _unErr;
+        }
+      }
+    }
+  } catch (_readErr) {
+    void _readErr;
+  }
+  return purgedCount;
+}
+
 export const LIGHTHOUSE_ROOT =
   process.env.LIGHTHOUSE_ROOT ||
   path.resolve((import.meta as { dir?: string }).dir || process.cwd(), "..");
@@ -3364,7 +3392,22 @@ async function handleRequestCore(
         `${bookId}_${targetWidth}.${extension}`,
       );
 
-      if (fs.existsSync(cacheFilePath)) {
+      // Check master cover on disk to verify cache freshness
+      const diskCoverPath = getMasterCoverPath(bookId);
+      let isCacheStale = false;
+      if (fs.existsSync(cacheFilePath) && diskCoverPath && fs.existsSync(diskCoverPath)) {
+        try {
+          const cacheMtime = fs.statSync(cacheFilePath).mtimeMs;
+          const diskMtime = fs.statSync(diskCoverPath).mtimeMs;
+          if (diskMtime > cacheMtime) {
+            isCacheStale = true;
+          }
+        } catch (_statErr) {
+          void _statErr;
+        }
+      }
+
+      if (fs.existsSync(cacheFilePath) && !isCacheStale) {
         const etag = getFileETag(cacheFilePath) || `"${Date.now().toString(16)}"`;
 
         if (req.headers.get("if-none-match") === etag) {
@@ -3392,8 +3435,7 @@ async function handleRequestCore(
         });
       }
 
-      // Check if master cover exists directly on disk
-      const diskCoverPath = getMasterCoverPath(bookId);
+      // Master cover resolution for generation/refresh
       let tempMasterPath: string | null = null;
       let masterInputPath: string | null = null;
       let masterBuffer: Buffer | null = null;
@@ -3539,7 +3581,21 @@ async function handleRequestCore(
         getCoverCacheDir(),
         `master_${bookId}.webp`,
       );
-      if (fs.existsSync(masterWebpCache)) {
+      const diskCoverPath = getMasterCoverPath(bookId);
+      let isMasterWebpStale = false;
+      if (fs.existsSync(masterWebpCache) && diskCoverPath && fs.existsSync(diskCoverPath)) {
+        try {
+          const cacheMtime = fs.statSync(masterWebpCache).mtimeMs;
+          const diskMtime = fs.statSync(diskCoverPath).mtimeMs;
+          if (diskMtime > cacheMtime) {
+            isMasterWebpStale = true;
+          }
+        } catch (_statErr) {
+          void _statErr;
+        }
+      }
+
+      if (fs.existsSync(masterWebpCache) && !isMasterWebpStale) {
         const etag = getFileETag(masterWebpCache) || `"${Date.now().toString(16)}"`;
         if (req.headers.get("if-none-match") === etag) {
           return new Response(null, {
@@ -3565,7 +3621,6 @@ async function handleRequestCore(
       }
 
       // Convert master cover to WebP if master disk file exists
-      const diskCoverPath = getMasterCoverPath(bookId);
       if (diskCoverPath && fs.existsSync(diskCoverPath)) {
         const atomicMasterTemp = masterWebpCache + `.tmp_${Date.now()}_${Math.random().toString(16).slice(2)}`;
         // Downscale with large target width (e.g. 2400) to preserve full master resolution
@@ -5500,6 +5555,10 @@ async function handleRequestCore(
         } catch (_cleanErr) {
           void _cleanErr;
         }
+      }
+
+      if (body.coverUrl) {
+        purgeCoverCache(bookId);
       }
 
       getCalibreBooks(true);
