@@ -1530,5 +1530,456 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
       expect(synced).toContain("- reading");
       expect(synced).toContain("- book-notes");
     });
+
+    it("does not merge notes when sanitized titles differ only by case on case-insensitive filesystems", async () => {
+      const res1 = await processJoplinNote(
+        { title: "alpha notes", body: "### Page 1\n==quote from lower==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      const res2 = await processJoplinNote(
+        { title: "Alpha Notes", body: "### Page 2\n==quote from upper==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      expect(res1.action).toBe("created");
+      expect(res2.action).toBe("created");
+      expect(res1.path).not.toBe(res2.path);
+
+      const files = fs.readdirSync(booksDir).filter((f) => !f.startsWith("."));
+      expect(files.length).toBe(2);
+
+      const content1 = fs.readFileSync(res1.path, "utf8");
+      const content2 = fs.readFileSync(res2.path, "utf8");
+
+      expect(content1).toContain("quote from lower");
+      expect(content1).not.toContain("quote from upper");
+
+      expect(content2).toContain("quote from upper");
+      expect(content2).not.toContain("quote from lower");
+
+      // Verify re-exporting to each note updates the correct file without cross-talk
+      const res1Update = await processJoplinNote(
+        { title: "alpha notes", body: "### Page 1\n==quote from lower==\n\n### Page 3\n==second lower quote==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(res1Update.action).toBe("updated");
+      expect(res1Update.path).toBe(res1.path);
+
+      const updatedContent1 = fs.readFileSync(res1.path, "utf8");
+      expect(updatedContent1).toContain("second lower quote");
+      expect(updatedContent1).not.toContain("quote from upper");
+
+      const res2Update = await processJoplinNote(
+        { title: "Alpha Notes", body: "### Page 2\n==quote from upper==\n\n### Page 4\n==second upper quote==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(res2Update.action).toBe("updated");
+      expect(res2Update.path).toBe(res2.path);
+
+      const updatedContent2 = fs.readFileSync(res2.path, "utf8");
+      expect(updatedContent2).toContain("second upper quote");
+      expect(updatedContent2).not.toContain("second lower quote");
+    });
+
+    it("preserves specified colon-versus-dash collapse into the same note", async () => {
+      const res1 = await processJoplinNote(
+        { title: "Dune: Part One", body: "### Page 1\n==quote from colon==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      const res2 = await processJoplinNote(
+        { title: "Dune - Part One", body: "### Page 2\n==quote from dash==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      expect(res1.action).toBe("created");
+      expect(res2.action).toBe("updated");
+      expect(res1.path).toBe(res2.path);
+
+      const content = fs.readFileSync(res1.path, "utf8");
+      expect(content).toContain("quote from colon");
+      expect(content).toContain("quote from dash");
+    });
+
+    it("prevents Unicode case-fold collisions from clobbering or merging notes (e.g. weiss vs weiß)", async () => {
+      const res1 = await processJoplinNote(
+        { title: "weiss", body: "### Page 1\n==quote from weiss==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      const res2 = await processJoplinNote(
+        { title: "weiß", body: "### Page 2\n==quote from weiß==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      expect(res1.action).toBe("created");
+      expect(res2.action).toBe("created");
+      expect(res1.path).not.toBe(res2.path);
+
+      const content1 = fs.readFileSync(res1.path, "utf8");
+      const content2 = fs.readFileSync(res2.path, "utf8");
+
+      expect(content1).toContain("quote from weiss");
+      expect(content1).not.toContain("quote from weiß");
+
+      expect(content2).toContain("quote from weiß");
+      expect(content2).not.toContain("quote from weiss");
+    });
+
+    it("does not steal an existing pre-numbered note when disambiguating case collisions", async () => {
+      // Suppose a real book "Title (1)" already exists in the library
+      const resExisting = await processJoplinNote(
+        { title: "Title (1)", body: "### Page 1\n==real book one quote==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      // And a book "title" exists
+      const resLower = await processJoplinNote(
+        { title: "title", body: "### Page 1\n==lower title quote==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      // Now a new book "Title" arrives, which collides in case with "title.md".
+      // It must not overwrite or merge into "Title (1).md"!
+      const resUpper = await processJoplinNote(
+        { title: "Title", body: "### Page 1\n==upper title quote==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      expect(resUpper.path).not.toBe(resExisting.path);
+      expect(resUpper.path).not.toBe(resLower.path);
+
+      const existingContent = fs.readFileSync(resExisting.path, "utf8");
+      expect(existingContent).toContain("real book one quote");
+      expect(existingContent).not.toContain("upper title quote");
+
+      const upperContent = fs.readFileSync(resUpper.path, "utf8");
+      expect(upperContent).toContain("upper title quote");
+      expect(upperContent).not.toContain("real book one quote");
+    });
+
+    it("reclaims disambiguated note on re-export with quotes and formatting variations in title", async () => {
+      // 1. Lowercase note exists
+      await processJoplinNote(
+        { title: "something quoted", body: "### Page 1\n==lower quote==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      // 2. Title with double quotes and extra internal whitespace arrives
+      const titleWithQuotes = 'Something  "quoted"';
+      const res1 = await processJoplinNote(
+        { title: titleWithQuotes, body: "### Page 1\n==first quote==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(res1.action).toBe("created");
+      expect(res1.path).toMatch(/Something quoted \(1\)\.md$/);
+
+      // 3. Re-exporting the same title must update the existing (1) file, not create (2)
+      const res2 = await processJoplinNote(
+        { title: titleWithQuotes, body: "### Page 1\n==first quote==\n\n### Page 2\n==second quote==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(res2.action).toBe("updated");
+      expect(res2.path).toBe(res1.path);
+
+      const files = fs.readdirSync(booksDir).filter((f: string) => f.includes("Something quoted"));
+      expect(files.length).toBe(1);
+      expect(files[0]).toBe("Something quoted (1).md");
+
+      const content = fs.readFileSync(res2.path, "utf8");
+      expect(content).toContain("second quote");
+    });
+
+    it("does not treat body text matching title: as frontmatter ownership", async () => {
+      // Plant a note with no frontmatter title, but a body mentioning title: "Target"
+      const plantedPath = path.join(booksDir, "Target (1).md");
+      fs.writeFileSync(
+        plantedPath,
+        `# Notes on something\nHere is a code snippet:\ntitle: "Target"\n\n==planted quote==\n`,
+        "utf8",
+      );
+
+      // And "target" exists
+      await processJoplinNote(
+        { title: "target", body: "### Page 1\n==lower target==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      // Incoming "Target" must NOT match the planted file as its own frontmatter title!
+      const res = await processJoplinNote(
+        { title: "Target", body: "### Page 1\n==upper target==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      expect(res.path).not.toBe(plantedPath);
+      expect(res.path).toMatch(/Target \(2\)\.md$/);
+
+      const plantedContent = fs.readFileSync(plantedPath, "utf8");
+      expect(plantedContent).toContain("planted quote");
+      expect(plantedContent).not.toContain("upper target");
+    });
+
+    it("preserves canonical frontmatter title and reclaims note when updating via note id", async () => {
+      // 1. Lowercase note exists
+      await processJoplinNote(
+        { title: "gamma notes", body: "### Page 1\n==lower gamma==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      // 2. Disambiguated note created
+      const resCreated = await processJoplinNote(
+        { title: "Gamma Notes", body: "### Page 1\n==upper gamma 1==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(resCreated.id).toBe("Gamma Notes (1)");
+      expect(resCreated.path).toMatch(/Gamma Notes \(1\)\.md$/);
+
+      // 3. Client updates note using id without supplying title (PUT /notes/:id)
+      const resUpdatedById = await processJoplinNote(
+        { id: resCreated.id, body: "### Page 1\n==upper gamma 1==\n\n### Page 2\n==upper gamma 2==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(resUpdatedById.path).toBe(resCreated.path);
+
+      // Frontmatter title must remain canonical "Gamma Notes", NOT "Gamma Notes (1)"
+      const contentAfterIdUpdate = fs.readFileSync(resCreated.path, "utf8");
+      expect(contentAfterIdUpdate).toMatch(/^title:\s*"Gamma Notes"/m);
+      expect(contentAfterIdUpdate).not.toMatch(/^title:\s*"Gamma Notes \(1\)"/m);
+
+      // 4. Later export with logical title "Gamma Notes" must still reclaim "Gamma Notes (1).md"
+      const resLater = await processJoplinNote(
+        { title: "Gamma Notes", body: "### Page 1\n==upper gamma 1==\n\n### Page 3\n==upper gamma 3==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(resLater.path).toBe(resCreated.path);
+      expect(resLater.action).toBe("updated");
+
+      const files = fs.readdirSync(booksDir).filter((f: string) => f.includes("Gamma Notes"));
+      expect(files.length).toBe(1);
+      expect(files[0]).toBe("Gamma Notes (1).md");
+    });
+
+    it("reclaims disambiguated note across NFC and NFD Unicode normalization variants", async () => {
+      // 1. Lowercase note exists
+      await processJoplinNote(
+        { title: "café notes", body: "### Page 1\n==lower cafe==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      // 2. Export with NFD title creates disambiguated (1) note
+      const nfdTitle = "Cafe\u0301 Notes";
+      const resNFD = await processJoplinNote(
+        { title: nfdTitle, body: "### Page 1\n==nfd quote==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(resNFD.path).toMatch(/Café Notes \(1\)\.md$/);
+
+      // 3. Re-export with NFC title must reclaim the same (1) note
+      const nfcTitle = "Café Notes";
+      const resNFC = await processJoplinNote(
+        { title: nfcTitle, body: "### Page 1\n==nfd quote==\n\n### Page 2\n==nfc quote==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(resNFC.path).toBe(resNFD.path);
+      expect(resNFC.action).toBe("updated");
+
+      const files = fs.readdirSync(booksDir).filter((f: string) => f.toLowerCase().includes("notes ("));
+      expect(files.length).toBe(1);
+    });
+
+    it("pins write target to existing note when updating by id even if colliding base note is deleted", async () => {
+      // 1. Create base note and disambiguated note
+      await processJoplinNote(
+        { title: "delta notes", body: "### Page 1\n==lower delta==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      const resUpper = await processJoplinNote(
+        { title: "Delta Notes", body: "### Page 1\n==upper delta 1==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(resUpper.id).toBe("Delta Notes (1)");
+
+      // 2. Base note "delta notes.md" is removed from disk
+      fs.unlinkSync(path.join(booksDir, "delta notes.md"));
+
+      // 3. Client updates via id "Delta Notes (1)"
+      const resUpdateById = await processJoplinNote(
+        { id: resUpper.id, body: "### Page 1\n==upper delta 1==\n\n### Page 2\n==upper delta 2==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(resUpdateById.path).toBe(resUpper.path);
+      expect(resUpdateById.action).toBe("updated");
+
+      // Verify the content in "Delta Notes (1).md" has both quotes and wasn't orphaned into a new "Delta Notes.md"
+      const content = fs.readFileSync(resUpper.path, "utf8");
+      expect(content).toContain("upper delta 1");
+      expect(content).toContain("upper delta 2");
+      expect(fs.existsSync(path.join(booksDir, "Delta Notes.md"))).toBe(false);
+    });
+
+    it("does not steal hand-named annotated notes like Dune (annotated) when base note is free", async () => {
+      // 1. Hand-named note exists
+      const annotatedPath = path.join(booksDir, "Dune (annotated).md");
+      fs.writeFileSync(annotatedPath, `---\ntitle: "Dune"\n---\n# Dune (annotated)\n==manual note==\n`, "utf8");
+
+      // 2. Incoming export for "Dune"
+      const res = await processJoplinNote(
+        { title: "Dune", body: "### Page 1\n==koreader quote==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      // Must create "Dune.md", NOT overwrite or merge into "Dune (annotated).md"
+      expect(res.path).toBe(path.join(fs.realpathSync(booksDir), "Dune.md"));
+      expect(res.action).toBe("created");
+
+      const annotatedContent = fs.readFileSync(annotatedPath, "utf8");
+      expect(annotatedContent).not.toContain("koreader quote");
+      expect(annotatedContent).toContain("manual note");
+    });
+
+    it("reclaims disambiguated note for near-NAME_MAX titles when colliding base note is deleted", async () => {
+      const longTitle = "B".repeat(240);
+      const resLower = await processJoplinNote(
+        { title: longTitle.toLowerCase(), body: "### Page 1\n==lower long==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      const resUpper = await processJoplinNote(
+        { title: longTitle, body: "### Page 1\n==upper long 1==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(resUpper.action).toBe("created");
+      expect(resUpper.path).not.toBe(resLower.path);
+
+      // Remove colliding base note
+      fs.unlinkSync(resLower.path);
+
+      // Re-exporting upper longTitle must reclaim the existing disambiguated file rather than creating a new one
+      const resReclaim = await processJoplinNote(
+        { title: longTitle, body: "### Page 1\n==upper long 1==\n\n### Page 2\n==upper long 2==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(resReclaim.path).toBe(resUpper.path);
+      expect(resReclaim.action).toBe("updated");
+      const content = fs.readFileSync(resUpper.path, "utf8");
+      expect(content).toContain("upper long 2");
+    });
+
+    it("prevents ownership poisoning when updating by id with missing FM or title echoed as id", async () => {
+      // 1. Lowercase note
+      await processJoplinNote(
+        { title: "echo notes", body: "### Page 1\n==lower echo==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      // 2. Disambiguated note
+      const resUpper = await processJoplinNote(
+        { title: "Echo Notes", body: "### Page 1\n==upper echo 1==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(resUpper.id).toBe("Echo Notes (1)");
+
+      // Strip frontmatter from "Echo Notes (1).md" simulating manual edit or external tool
+      const strippedBody = "# Echo Notes\n\n## Highlights & Notes\n<!-- lighthouse:highlights:start -->\n==upper echo 1==\n<!-- lighthouse:highlights:end -->\n";
+      fs.writeFileSync(resUpper.path, strippedBody, "utf8");
+
+      // 3. Update by id where title is omitted (PUT /notes/:id)
+      const resEchoUpdate = await processJoplinNote(
+        { id: resUpper.id, body: "### Page 1\n==upper echo 1==\n\n### Page 2\n==upper echo 2==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(resEchoUpdate.path).toBe(resUpper.path);
+
+      // 4. Later export of "Echo Notes" must still reclaim "Echo Notes (1).md"
+      const resLater = await processJoplinNote(
+        { title: "Echo Notes", body: "### Page 1\n==upper echo 1==\n\n### Page 3\n==upper echo 3==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(resLater.path).toBe(resUpper.path);
+      expect(resLater.action).toBe("updated");
+    });
+
+    it("reclaims owned disambiguated note across gaps in slot numbering", async () => {
+      // 1. Lowercase note
+      await processJoplinNote(
+        { title: "gap title", body: "### Page 1\n==lower gap==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      // 2. Owned note sitting at slot (7) with a gap (slots 1..6 empty or deleted)
+      const ownedPath = path.join(fs.realpathSync(booksDir), "Gap Title (7).md");
+      fs.writeFileSync(
+        ownedPath,
+        `---\ntitle: "Gap Title"\n---\n# Gap Title\n==quote 1 in slot 7==\n`,
+        "utf8",
+      );
+
+      // 3. Export of "Gap Title" must reclaim "Gap Title (7).md" across the gap!
+      const res = await processJoplinNote(
+        { title: "Gap Title", body: "### Page 1\n==quote 1 in slot 7==\n\n### Page 2\n==quote 2==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(res.path).toBe(ownedPath);
+      expect(res.action).toBe("updated");
+
+      const content = fs.readFileSync(ownedPath, "utf8");
+      expect(content).toContain("quote 2");
+    });
+
+    it("does not allow a logical title 'Title (1)' to steal an existing disambiguated note", async () => {
+      // 1. Lowercase "title"
+      await processJoplinNote(
+        { title: "title", body: "### Page 1\n==quote lower==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      // 2. "Title" creates "Title (1).md" with FM title: "Title"
+      const resTitle = await processJoplinNote(
+        { title: "Title", body: "### Page 1\n==quote Title==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(resTitle.path).toMatch(/Title \(1\)\.md$/);
+
+      // 3. New separate book arrives whose logical title is literally "Title (1)"
+      const resLiteralTitle1 = await processJoplinNote(
+        { title: "Title (1)", body: "### Page 1\n==quote literal Title (1)==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      // It must NOT overwrite or merge into "Title (1).md", but disambiguate to a separate file!
+      expect(resLiteralTitle1.path).not.toBe(resTitle.path);
+
+      const titleContent = fs.readFileSync(resTitle.path, "utf8");
+      expect(titleContent).toContain("quote Title");
+      expect(titleContent).not.toContain("quote literal Title (1)");
+
+      const literalContent = fs.readFileSync(resLiteralTitle1.path, "utf8");
+      expect(literalContent).toContain("quote literal Title (1)");
+      expect(literalContent).not.toContain("quote Title");
+    });
+
+    it("prevents path traversal or absolute file reads via payload.id", async () => {
+      // Create a secret file outside booksDir
+      const tmpDir = path.dirname(booksDir);
+      const secretFile = path.join(tmpDir, "secret_note.md");
+      fs.writeFileSync(secretFile, `---\ntitle: "Leaked Secret"\n---\n# Secret\n`, "utf8");
+
+      try {
+        const realBooks = fs.realpathSync(booksDir);
+        // Attempt relative path escape via payload.id
+        const res1 = await processJoplinNote(
+          { id: `../${path.basename(tmpDir)}/secret_note`, body: "### Page 1\n==test==" },
+          { booksDir, calibreDbPath: missingCalibre() },
+        );
+        // Must not adopt the secret title or write outside booksDir
+        expect(res1.title).not.toBe("Leaked Secret");
+        expect(res1.path.startsWith(realBooks)).toBe(true);
+
+        // Attempt absolute path escape via payload.id
+        const res2 = await processJoplinNote(
+          { id: secretFile, body: "### Page 1\n==test==" },
+          { booksDir, calibreDbPath: missingCalibre() },
+        );
+        expect(res2.title).not.toBe("Leaked Secret");
+        expect(res2.path.startsWith(realBooks)).toBe(true);
+      } finally {
+        try { fs.unlinkSync(secretFile); } catch (_e) { void _e; }
+      }
+    });
   });
 });

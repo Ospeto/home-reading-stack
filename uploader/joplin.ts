@@ -244,15 +244,149 @@ export function assertNotSymlink(notePath: string): void {
  */
 export function sanitizeNoteHeading(title: string): string {
   let s = title || "";
+  s = s.normalize("NFC");
   s = s.replace(/\r\n|\r|\n|\u2028|\u2029/g, " ");
   s = s.replace(/<!--\s*lighthouse:highlights:[^>]*-->/gi, " ");
   s = s.replace(/\s+/g, " ").trim();
   return s || "Untitled";
 }
 
+/**
+ * Inspects a candidate note path for filesystem existence and case/normalization match.
+ * On case-insensitive and case-preserving filesystems (such as APFS on Darwin),
+ * `lstat` or `realpath` can succeed for a different casing of the filename.
+ * This helper verifies whether the file exists and whether its directory entry matches.
+ */
+export function checkNotePathExistence(targetPath: string): {
+  exists: boolean;
+  exactMatch: boolean;
+  realFilename: string | null;
+} {
+  try {
+    fs.lstatSync(targetPath);
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      return { exists: false, exactMatch: false, realFilename: null };
+    }
+    throw err;
+  }
+
+  const targetFilename = path.basename(targetPath).normalize("NFC");
+  const parentDir = path.dirname(targetPath);
+
+  // If readdirSync succeeded and directMatch was not found, the file does NOT
+  // match exact casing/normalization. Only proceed to realpathSync.native if
+  // readdirSync was unavailable or threw an error.
+  let checkedDir = false;
+  try {
+    const entries = fs.readdirSync(parentDir);
+    checkedDir = true;
+    const directMatch = entries.find(
+      (e: string) => e.normalize("NFC") === targetFilename,
+    );
+    if (directMatch) {
+      return { exists: true, exactMatch: true, realFilename: directMatch };
+    }
+  } catch (_e) {
+    void _e;
+  }
+
+  if (!checkedDir) {
+    try {
+      if (fs.realpathSync.native) {
+        const real = fs.realpathSync.native(targetPath);
+        const realFilename = path.basename(real).normalize("NFC");
+        return {
+          exists: true,
+          exactMatch: realFilename === targetFilename,
+          realFilename,
+        };
+      }
+    } catch (_e) {
+      void _e;
+    }
+  }
+
+  return { exists: true, exactMatch: false, realFilename: null };
+}
+
+function parseNoteMetadata(filePath: string): {
+  fmTitle?: string;
+  leadH1?: string;
+} {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    let rest = raw;
+    let fmTitle: string | undefined;
+
+    if (raw.startsWith("---")) {
+      const endFm = raw.indexOf("\n---", 3);
+      if (endFm !== -1) {
+        const fmBlock = raw.slice(3, endFm);
+        rest = raw.slice(endFm + 4);
+        for (const line of fmBlock.split("\n")) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("title:")) {
+            const parsed = yamlScalar(trimmed.slice("title:".length));
+            if (parsed) {
+              fmTitle = parsed;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // Only inspect the lead H1 immediately following frontmatter (or at start of document)
+    const trimmedRest = rest.trimStart();
+    const leadMatch = trimmedRest.match(/^#\s+([^\n]+)/);
+    const leadH1 = leadMatch && leadMatch[1].trim() ? leadMatch[1].trim() : undefined;
+
+    return { fmTitle, leadH1 };
+  } catch (_e) {
+    void _e;
+  }
+  return {};
+}
+
+function parseNoteTitle(filePath: string): string | null {
+  const { fmTitle, leadH1 } = parseNoteMetadata(filePath);
+  // An explicit frontmatter title is ALWAYS trusted as canonical
+  if (fmTitle) {
+    return fmTitle;
+  }
+
+  if (!leadH1) return null;
+
+  // If frontmatter is missing, and the note is a numbered slot file (1..100)
+  // whose lead heading merely echoes the slot filename (e.g. `# Echo Notes (1)`),
+  // de-echo to the base stem so ownership and reclaim remain consistent.
+  const stem = path.basename(filePath, ".md");
+  const slotMatch = stem.match(/^(.*?)\s+\((\d+)\)$/);
+  if (slotMatch) {
+    const num = parseInt(slotMatch[2], 10);
+    if (num >= 1 && num <= 100 && isSameNoteTitle(leadH1, stem)) {
+      return slotMatch[1].trim() || leadH1;
+    }
+  }
+
+  return leadH1;
+}
+
+export function isSameNoteTitle(docTitle: string, queryTitle: string): boolean {
+  if (!docTitle || !queryTitle) return false;
+  const nfcDoc = docTitle.normalize("NFC");
+  const nfcQuery = queryTitle.normalize("NFC");
+  if (nfcDoc === nfcQuery) return true;
+  if (sanitizeNoteHeading(nfcDoc) === sanitizeNoteHeading(nfcQuery)) return true;
+  if (sanitizeTitle(nfcDoc) === sanitizeTitle(nfcQuery)) return true;
+  return false;
+}
+
 export function getBookNotePath(
   title: string,
   booksDir?: string,
+  options?: { disambiguateCase?: boolean },
 ): { safeTitle: string; notePath: string; booksDir: string } {
   const configured = path.resolve(getObsidianBooksDir(booksDir));
   const realDir = fs.existsSync(configured)
@@ -266,16 +400,154 @@ export function getBookNotePath(
     safeTitle = "Untitled";
   }
 
-  const safeFilename = path.basename(safeTitle) + ".md";
-  const notePath = path.resolve(realDir, safeFilename);
+  const baseFilename = path.basename(safeTitle) + ".md";
+  const basePath = path.resolve(realDir, baseFilename);
 
-  if (!isInsideDir(realDir, notePath)) {
-    throw new JoplinPathError(
-      "Invalid note path: potential path traversal detected",
-    );
+  if (!options?.disambiguateCase) {
+    if (!isInsideDir(realDir, basePath)) {
+      throw new JoplinPathError(
+        "Invalid note path: potential path traversal detected",
+      );
+    }
+    return { safeTitle, notePath: basePath, booksDir: realDir };
   }
 
-  return { safeTitle, notePath, booksDir: realDir };
+  // Before choosing a new path, check if a previously disambiguated file
+  // (e.g. `${safeTitle} (1).md`) already exists for this exact title in this directory.
+  // This ensures that if the colliding base note is deleted, or gaps exist in the numbered slots,
+  // re-exporting still reclaims the existing owned note instead of creating a new orphaned note.
+  // We scan the directory for all files matching the numbered disambiguation pattern (slots 1..100)
+  // for this exact safeTitle (or safeTitle truncated for NAME_MAX suffix budget), sorted numerically,
+  // and verify ownership via isSameNoteTitle.
+  try {
+    const entries = fs.readdirSync(realDir);
+    const slots: Array<{ num: number; entry: string }> = [];
+    const normSafe = safeTitle.normalize("NFC").toLowerCase();
+
+    for (const entry of entries) {
+      const normEntry = entry.normalize("NFC");
+      const m = normEntry.match(/^(.*?)\s+\((\d+)\)\.md$/i);
+      if (!m) continue;
+      const stem = m[1].normalize("NFC").toLowerCase();
+      const num = parseInt(m[2], 10);
+      if (num < 1 || num > 100) continue;
+
+      const sfx = ` (${num})`;
+      const expectedTruncated = truncateUtf8Bytes(
+        safeTitle,
+        240 - Buffer.byteLength(sfx, "utf8"),
+      )
+        .normalize("NFC")
+        .toLowerCase();
+
+      if (stem === normSafe || stem === expectedTruncated) {
+        slots.push({ num, entry });
+      }
+    }
+
+    slots.sort((a, b) => a.num - b.num);
+
+    for (const s of slots) {
+      const candPath = path.resolve(realDir, s.entry);
+      if (isInsideDir(realDir, candPath)) {
+        const check = checkNotePathExistence(candPath);
+        if (check.exists && check.exactMatch) {
+          const docTitle = parseNoteTitle(candPath);
+          if (docTitle && isSameNoteTitle(docTitle, title)) {
+            return {
+              safeTitle: path.basename(s.entry, ".md"),
+              notePath: candPath,
+              booksDir: realDir,
+            };
+          }
+        }
+      }
+    }
+  } catch (_e) {
+    void _e;
+  }
+
+  const baseCheck = checkNotePathExistence(basePath);
+
+  // 1. If base path does not exist on disk, use it directly.
+  // If it exists with exact filename match, ensure it is NOT an occupied disambiguation slot
+  // belonging to a different book (e.g. "Title (1).md" created for "Title").
+  if (!baseCheck.exists) {
+    if (!isInsideDir(realDir, basePath)) {
+      throw new JoplinPathError(
+        "Invalid note path: potential path traversal detected",
+      );
+    }
+    return { safeTitle, notePath: basePath, booksDir: realDir };
+  }
+
+  if (baseCheck.exactMatch) {
+    const docTitle = parseNoteTitle(basePath);
+    // If no title can be extracted, only allow claiming if baseFilename does NOT match
+    // the disambiguation slot pattern `* (1..100).md`. If it DOES match that pattern and has
+    // no title, we treat it as an ambiguous/foreign slot to prevent clobbering.
+    const slotM = baseFilename.match(/^(.*?)\s+\((\d+)\)\.md$/i);
+    const isDisambiguationSlot = Boolean(
+      slotM && parseInt(slotM[2], 10) >= 1 && parseInt(slotM[2], 10) <= 100,
+    );
+    if (docTitle ? isSameNoteTitle(docTitle, title) : !isDisambiguationSlot) {
+      if (!isInsideDir(realDir, basePath)) {
+        throw new JoplinPathError(
+          "Invalid note path: potential path traversal detected",
+        );
+      }
+      return { safeTitle, notePath: basePath, booksDir: realDir };
+    }
+  }
+
+  // 2. Base path exists on disk, but collides with a different casing/normalization,
+  // or is an occupied note belonging to a different title!
+  // Find a free or previously owned disambiguated file `${safeTitle} (${counter}).md` (capped at 100).
+  let counter = 1;
+  while (counter <= 100) {
+    const suffix = ` (${counter})`;
+    const truncatedBase = truncateUtf8Bytes(
+      safeTitle,
+      240 - Buffer.byteLength(suffix, "utf8"),
+    );
+    const candidateSafeTitle = `${truncatedBase}${suffix}`;
+    const candidateFilename = path.basename(candidateSafeTitle) + ".md";
+    const candidatePath = path.resolve(realDir, candidateFilename);
+
+    if (!isInsideDir(realDir, candidatePath)) {
+      throw new JoplinPathError(
+        "Invalid note path: potential path traversal detected",
+      );
+    }
+
+    const candCheck = checkNotePathExistence(candidatePath);
+    if (!candCheck.exists) {
+      // Free non-colliding filename found
+      return {
+        safeTitle: candidateSafeTitle,
+        notePath: candidatePath,
+        booksDir: realDir,
+      };
+    }
+
+    if (candCheck.exactMatch) {
+      // Exact filename match: verify if this file was created for this exact title
+      const docTitle = parseNoteTitle(candidatePath);
+      if (docTitle && isSameNoteTitle(docTitle, title)) {
+        return {
+          safeTitle: candidateSafeTitle,
+          notePath: candidatePath,
+          booksDir: realDir,
+        };
+      }
+    }
+
+    counter++;
+  }
+
+  throw new JoplinPathError(
+    `Exceeded maximum disambiguation slots (100) for note "${safeTitle}"`,
+  );
 }
 
 function writeNoteAtomically(
@@ -301,6 +573,12 @@ function writeNoteAtomically(
   fs.writeFileSync(tmpPath, content, { encoding: "utf8", flag: "wx" });
   try {
     assertNotSymlink(notePath);
+    const preCheck = checkNotePathExistence(notePath);
+    if (preCheck.exists && !preCheck.exactMatch) {
+      throw new JoplinPathError(
+        "Refusing to write to note path with case collision",
+      );
+    }
     fs.renameSync(tmpPath, notePath);
   } catch (err) {
     try {
@@ -1258,10 +1536,14 @@ export async function processJoplinNote(
   let title = payload.title?.trim();
   const rawBody = payload.body || "";
 
-  // 1. Derive title if omitted
-  if (!title && payload.id) {
+  // 1. Derive title and optional pinned note path if updating by id
+  let requestedId: string | undefined;
+  let pinnedNotePath: string | undefined;
+  let pinnedSafeTitle: string | undefined;
+
+  if (payload.id) {
     try {
-      title = decodeURIComponent(payload.id).trim();
+      requestedId = decodeURIComponent(payload.id).trim();
     } catch (err) {
       if (err instanceof URIError) {
         throw Object.assign(new Error("Malformed note id"), { statusCode: 400 });
@@ -1269,6 +1551,63 @@ export async function processJoplinNote(
       throw err;
     }
   }
+
+  const realDir = resolveRealBooksDir(options.booksDir);
+
+  if (requestedId) {
+    // Sanitize requestedId to prevent path traversal or absolute path escape
+    let safeId = sanitizeTitle(requestedId);
+    safeId = truncateUtf8Bytes(safeId, 240);
+    const candidateFilename = path.basename(safeId) + ".md";
+    const candidatePath = path.resolve(realDir, candidateFilename);
+
+    if (isInsideDir(realDir, candidatePath)) {
+      const check = checkNotePathExistence(candidatePath);
+      if (check.exists && check.exactMatch) {
+        pinnedNotePath = candidatePath;
+        pinnedSafeTitle = path.basename(candidateFilename, ".md");
+        const { fmTitle, leadH1 } = parseNoteMetadata(candidatePath);
+
+        const slotMatch = safeId.match(/^(.*?)\s+\((\d+)\)$/);
+        const isSlotNumbered = Boolean(
+          slotMatch && parseInt(slotMatch[2], 10) >= 1 && parseInt(slotMatch[2], 10) <= 100,
+        );
+        const strippedStem = slotMatch ? slotMatch[1].trim() : safeId;
+
+        // 1. Explicit frontmatter title is ALWAYS trusted as canonical
+        if (fmTitle) {
+          title = fmTitle;
+        } else if (isSlotNumbered) {
+          // Frontmatter is missing on a numbered slot file (e.g. `Echo Notes (1).md`).
+          // If a lead H1 exists and equals `safeId` (i.e. heading echoed the filename `# Echo Notes (1)`),
+          // recover the base logical title `strippedStem` to prevent ownership poisoning.
+          if (leadH1 && isSameNoteTitle(leadH1, safeId)) {
+            title = strippedStem;
+          } else if (leadH1) {
+            title = leadH1;
+          } else if (title && isSameNoteTitle(title, strippedStem)) {
+            title = strippedStem;
+          } else {
+            title = strippedStem;
+          }
+        } else {
+          // Non-slot file without frontmatter
+          if (leadH1) {
+            title = leadH1;
+          } else if (title && isSameNoteTitle(title, safeId)) {
+            // Keep caller title
+          } else {
+            title = safeId;
+          }
+        }
+      }
+    }
+
+    if (!title) {
+      title = safeId || "Untitled";
+    }
+  }
+
   if (!title && rawBody) {
     const match = rawBody.match(/^#\s+([^\n]+)/m);
     if (match) {
@@ -1279,8 +1618,19 @@ export async function processJoplinNote(
     title = "Untitled";
   }
 
-  const realDir = resolveRealBooksDir(options.booksDir);
-  const { safeTitle, notePath } = getBookNotePath(title, realDir);
+  let safeTitle: string;
+  let notePath: string;
+
+  if (pinnedNotePath && pinnedSafeTitle) {
+    notePath = pinnedNotePath;
+    safeTitle = pinnedSafeTitle;
+  } else {
+    const resolved = getBookNotePath(title, realDir, {
+      disambiguateCase: true,
+    });
+    notePath = resolved.notePath;
+    safeTitle = resolved.safeTitle;
+  }
 
   let fileExisted = false;
   let existingContent = "";
@@ -1293,8 +1643,19 @@ export async function processJoplinNote(
       throw new JoplinPathError("Refusing to overwrite a directory");
     }
     if (st.isFile()) {
-      fileExisted = true;
-      existingContent = fs.readFileSync(notePath, "utf8");
+      // On case-insensitive filesystems (such as APFS on Darwin), verify that
+      // the existing file on disk actually matches notePath (not a collision
+      // from an existing note with different casing).
+      const check = checkNotePathExistence(notePath);
+      if (check.exists && !check.exactMatch) {
+        throw new JoplinPathError(
+          "Refusing to write to note path with case collision",
+        );
+      }
+      if (check.exactMatch) {
+        fileExisted = true;
+        existingContent = fs.readFileSync(notePath, "utf8");
+      }
     }
   } catch (err: any) {
     if (err?.code !== "ENOENT") throw err;
@@ -1316,6 +1677,7 @@ export async function processJoplinNote(
       batchUpsertHighlights(hDb, highlights);
     }
   } catch (_indexErr) {
+    void _indexErr;
     // Fail-open: indexing errors should never block note persistence
   }
 
@@ -1565,10 +1927,32 @@ export async function handleJoplinRequest(
           }
           throw err;
         }
+
+        // If the note exists on disk, return its true logical title from frontmatter / heading
+        let displayTitle = decodedId;
+        try {
+          const realDir = resolveRealBooksDir(options.booksDir);
+          let safeId = sanitizeTitle(decodedId);
+          safeId = truncateUtf8Bytes(safeId, 240);
+          const candidateFilename = path.basename(safeId) + ".md";
+          const candidatePath = path.resolve(realDir, candidateFilename);
+          if (isInsideDir(realDir, candidatePath)) {
+            const check = checkNotePathExistence(candidatePath);
+            if (check.exists && check.exactMatch) {
+              const docTitle = parseNoteTitle(candidatePath);
+              if (docTitle) {
+                displayTitle = docTitle;
+              }
+            }
+          }
+        } catch (_e) {
+          void _e;
+        }
+
         return new Response(
           JSON.stringify({
             id: noteId,
-            title: decodedId,
+            title: displayTitle,
           }),
           {
             status: 200,
