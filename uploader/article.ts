@@ -130,9 +130,35 @@ export function isInternalTelegramUrl(urlStr: string): boolean {
 /**
  * Strip trailing punctuation commonly appended to URLs in conversational text.
  * Includes ASCII punctuation plus Unicode curly quotes (” ’) and angle quotes.
+ * Does not strip a final parenthesis if it balances a parenthesis inside the URL
+ * (e.g. Wikipedia article URLs like .../C_(programming_language)), but strips
+ * unmatched trailing parentheses (e.g. (https://example.com/article)).
  */
 function cleanExtractedUrl(urlStr: string): string {
-  return urlStr.replace(/[.,;:!?)>\]"'\`\u201D\u2019\u00BB]+$/, "");
+  let cleaned = urlStr;
+  while (cleaned.length > 0) {
+    const strippedPunct = cleaned.replace(/[.,;:!?>\]"'\`\u201D\u2019\u00BB]+$/, "");
+    if (strippedPunct !== cleaned) {
+      cleaned = strippedPunct;
+      continue;
+    }
+
+    if (cleaned.endsWith(")")) {
+      let openCount = 0;
+      let closeCount = 0;
+      for (let i = 0; i < cleaned.length; i++) {
+        if (cleaned[i] === "(") openCount++;
+        else if (cleaned[i] === ")") closeCount++;
+      }
+      if (closeCount > openCount) {
+        cleaned = cleaned.slice(0, -1);
+        continue;
+      }
+    }
+
+    break;
+  }
+  return cleaned;
 }
 
 /**
@@ -251,9 +277,7 @@ export function extractUrlFromText(text: string): string | null {
   }
 
   // Find any http:// or https:// URL in message
-  const urlMatches = trimmed.match(
-    /https?:\/\/[^\s<>"'()]+(?:\([^\s<>"']+\)|[^\s<>"'.,:;!?(){}[\]])/gi,
-  );
+  const urlMatches = trimmed.match(/https?:\/\/[^\s<>"“”]+/gi);
   if (!urlMatches) return null;
 
   for (const raw of urlMatches) {
