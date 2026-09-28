@@ -12,6 +12,7 @@ import {
   resetActiveLnoriStateForTest,
   ingestBookFile,
   jobQueue,
+  registerJobHandlers,
 } from "./server";
 import { validateUrlForSSRF, getBsdtarPath } from "./security";
 import { autoEnrichBookSynopsis } from "./scraper";
@@ -960,7 +961,7 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
       }
     });
 
-    it("enqueues metadata_enrich jobs into jobQueue for newly imported calibreBookIds upon successful ingestion", async () => {
+    it("does NOT enqueue destructive metadata_enrich jobs into jobQueue for newly imported calibreBookIds upon Lnori series ingestion", async () => {
       const origEnqueue = jobQueue.enqueue;
       const enqueuedJobs: any[] = [];
       (jobQueue as any).enqueue = (type: string, payload: any) => {
@@ -1001,17 +1002,122 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
         expect(data.success).toBe(true);
         expect(data.calibreBookIds).toEqual([777, 778]);
 
-        // Check enqueued jobs
+        // Verify NO metadata_enrich jobs were enqueued to prevent volume overwrites
         const enrichJobs = enqueuedJobs.filter((j) => j.type === "metadata_enrich");
-        expect(enrichJobs.length).toBe(2);
-        expect(enrichJobs[0].payload.bookId).toBe(777);
-        expect(enrichJobs[0].payload.title).toBe("Enrich Test Series Vol 1");
-        expect(enrichJobs[0].payload.author).toBe("Test Author");
-        expect(enrichJobs[1].payload.bookId).toBe(778);
-        expect(enrichJobs[1].payload.title).toBe("Enrich Test Series Vol 2");
+        expect(enrichJobs.length).toBe(0);
       } finally {
         (jobQueue as any).enqueue = origEnqueue;
         resetServerDependenciesForTest();
+      }
+    });
+
+    it("does NOT enqueue destructive metadata_enrich jobs upon Elscione series ingestion", async () => {
+      const origEnqueue = jobQueue.enqueue;
+      const enqueuedJobs: any[] = [];
+      (jobQueue as any).enqueue = (type: string, payload: any) => {
+        enqueuedJobs.push({ type, payload });
+        return { id: 1, type, payload, status: "pending" };
+      };
+
+      setServerDependenciesForTest({
+        ingestElscioneSeries: async () => ({
+          success: true,
+          seriesTitle: "Elscione Test Series",
+          author: "Elscione Author",
+          importedCount: 2,
+          skippedCount: 0,
+          duplicateCount: 0,
+          totalCount: 2,
+          tags: ["Light Novel", "Elscione"],
+          calibreBookIds: [881, 882],
+        }),
+        getCalibreBooks: () => [
+          { id: 881, title: "Elscione Test Series Vol 1", authors: "Elscione Author", tags: ["Light Novel"] },
+          { id: 882, title: "Elscione Test Series Vol 2", authors: "Elscione Author", tags: ["Light Novel"] },
+        ],
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/elscione/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/ElscioneTest",
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(true);
+        expect(data.calibreBookIds).toEqual([881, 882]);
+
+        const enrichJobs = enqueuedJobs.filter((j) => j.type === "metadata_enrich");
+        expect(enrichJobs.length).toBe(0);
+      } finally {
+        (jobQueue as any).enqueue = origEnqueue;
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("metadata_enrich job handler refuses to overwrite volume titles and covers when volume numbers mismatch", async () => {
+      const { DurableJobQueue } = await import("./jobs");
+      const testDb = new Database(":memory:");
+      const testQueue = new DurableJobQueue(testDb);
+      registerJobHandlers(testQueue);
+
+      const handler = (testQueue as any).handlers.get("metadata_enrich");
+      expect(handler).toBeDefined();
+
+      let applyCalled = false;
+      let searchedPreserveVolume: boolean | undefined = undefined;
+
+      // Book 303 in Calibre is Volume 3
+      setServerDependenciesForTest({
+        getCalibreBooks: () => [
+          { id: 303, title: "Goblin Slayer Vol 3", series: "Goblin Slayer", series_index: 3, tags: ["Light Novel"] },
+        ],
+        searchUniversalMetadata: async (_query: string, hint?: any) => {
+          searchedPreserveVolume = hint?.preserveVolume;
+          // Returns Volume 1 match with high confidence (simulating the bug where RanobeDB returned Vol 1)
+          return [
+            {
+              title: "Goblin Slayer, Vol. 1",
+              authors: "Kumo Kagyu",
+              confidence: 0.95,
+              source: "RanobeDB",
+              coverUrl: "https://images.ranobedb.org/vol1.jpg",
+              tags: ["Light Novel"],
+            },
+          ];
+        },
+        applyMetadataToCalibre: async () => {
+          applyCalled = true;
+          return true;
+        },
+      });
+
+      try {
+        const res = await handler({
+          bookId: 303,
+          title: "Goblin Slayer Vol 3",
+          author: "Kumo Kagyu",
+          tags: ["Light Novel"],
+        });
+
+        // 1. Verify preserveVolume was passed to search
+        expect(searchedPreserveVolume).toBe(true);
+
+        // 2. Verify applyMetadataToCalibre was NOT called due to volume conflict (target Vol 3 vs match Vol 1)
+        expect(applyCalled).toBe(false);
+
+        // 3. Verify message explains volume conflict and preserves original title
+        expect(res.success).toBe(true);
+        expect(res.message).toContain("Volume conflict");
+        expect(res.message).toContain("Preserved original title and cover");
+      } finally {
+        resetServerDependenciesForTest();
+        testDb.close();
       }
     });
 

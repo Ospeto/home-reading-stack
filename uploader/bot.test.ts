@@ -46,6 +46,9 @@ import {
   runDirectLnoriFallback,
   pollLnoriProgress,
   consumeLnoriSseStream,
+  registerJobHandlers,
+  setSearchUniversalMetadataRunnerForTest,
+  setApplyMetadataToCalibreRunnerForTest,
 } from "./bot";
 import { type CleanDuplicatesReport } from "../scripts/clean-duplicates";
 
@@ -3632,6 +3635,92 @@ describe("Lnori Queue & Telegram Bot Integration", () => {
         expect(sentTelegramBodies[0].body.text).not.toContain("Please send EPUB files");
       } finally {
         globalThis.fetch = origFetch;
+      }
+    });
+  });
+
+  describe("Metadata Enrichment & Series Volume Overwrite Protection in Telegram Bot", () => {
+    it("runDirectLnoriFallback does NOT enqueue metadata_enrich jobs upon successful ingestion", async () => {
+      const { getJobQueue } = await import("./jobs");
+      const jq = getJobQueue(getCacheDb());
+      const origEnqueue = jq.enqueue;
+      const enqueuedJobs: any[] = [];
+      (jq as any).enqueue = (type: string, payload: any) => {
+        enqueuedJobs.push({ type, payload });
+        return { id: "1", type, payload, status: "pending" };
+      };
+
+      setIngestLnoriSeriesRunnerForTest(async () => ({
+        success: true,
+        seriesTitle: "Lnori Series",
+        author: "Lnori Author",
+        importedCount: 2,
+        skippedCount: 0,
+        totalCount: 2,
+        tags: ["Light Novel"],
+        calibreBookIds: [501, 502],
+        duplicateCount: 0,
+      }));
+
+      try {
+        await runDirectLnoriFallback(999, 1234, "https://lnori.com/series/555/test");
+        const enrichJobs = enqueuedJobs.filter((j) => j.type === "metadata_enrich");
+        expect(enrichJobs.length).toBe(0);
+      } finally {
+        (jq as any).enqueue = origEnqueue;
+        setIngestLnoriSeriesRunnerForTest(null as any);
+      }
+    });
+
+    it("metadata_enrich job handler refuses to overwrite volume titles and covers when volume numbers mismatch", async () => {
+      const { DurableJobQueue } = await import("./jobs");
+      const { Database } = await import("bun:sqlite");
+      const testDb = new Database(":memory:");
+      const testQueue = new DurableJobQueue(testDb);
+      registerJobHandlers(testQueue);
+
+      const handler = (testQueue as any).handlers.get("metadata_enrich");
+      expect(handler).toBeDefined();
+
+      let applyCalled = false;
+      let searchedPreserveVolume: boolean | undefined = undefined;
+
+      setSearchUniversalMetadataRunnerForTest(async (_query: string, hint?: any) => {
+        searchedPreserveVolume = hint?.preserveVolume;
+        return [
+          {
+            title: "Goblin Slayer, Vol. 1",
+            authors: "Kumo Kagyu",
+            confidence: 0.95,
+            source: "RanobeDB",
+            coverUrl: "https://images.ranobedb.org/vol1.jpg",
+            tags: ["Light Novel"],
+          },
+        ];
+      });
+
+      setApplyMetadataToCalibreRunnerForTest(async () => {
+        applyCalled = true;
+        return true;
+      });
+
+      try {
+        const res = await handler({
+          bookId: 304,
+          title: "Goblin Slayer Vol 4",
+          author: "Kumo Kagyu",
+          tags: ["Light Novel"],
+        });
+
+        expect(searchedPreserveVolume).toBe(true);
+        expect(applyCalled).toBe(false);
+        expect(res.success).toBe(true);
+        expect(res.message).toContain("Volume conflict");
+        expect(res.message).toContain("Preserved original title and cover");
+      } finally {
+        setSearchUniversalMetadataRunnerForTest(null);
+        setApplyMetadataToCalibreRunnerForTest(null);
+        testDb.close();
       }
     });
   });

@@ -17,6 +17,7 @@ import {
   extractEpubDescription,
   autoEnrichBookSynopsis,
   isSameBookAsync,
+  extractVolumeNumber,
 } from "./scraper";
 import {
   isArchiveFile,
@@ -123,6 +124,8 @@ export interface ServerDependencies {
     dependencies?: any,
   ) => Promise<any>;
   getCalibreBooks?: (forceFresh?: boolean) => any;
+  searchUniversalMetadata?: typeof searchUniversalMetadata;
+  applyMetadataToCalibre?: typeof applyMetadataToCalibre;
   detectKindleVolume?: (volumesDir?: string) => string | null;
   cleanKindleDeviceDuplicates?: (
     mountPath: string,
@@ -518,10 +521,8 @@ export function executeLnoriIngestTask(
         recordCompletedLnoriJob(activeLnoriState);
         return { success: false, error: errMsg };
       } else {
-        let bookList: any[] = [];
         try {
-          const freshBooks = refreshBooks(true);
-          bookList = Array.isArray(freshBooks) ? freshBooks : [];
+          refreshBooks(true);
         } catch (rfErr) {
           console.debug("[Lnori] refreshBooks failed:", rfErr);
         }
@@ -536,43 +537,6 @@ export function executeLnoriIngestTask(
           tags: result.tags,
           calibreBookIds: result.calibreBookIds,
         };
-
-        // Enqueue durable metadata_enrich jobs for newly imported books (best-effort, never fails ingestion)
-        if (Array.isArray(result.calibreBookIds) && result.calibreBookIds.length > 0) {
-          try {
-            const defaultTags: string[] = Array.isArray(result.tags)
-              ? result.tags
-              : typeof result.tags === "string"
-                ? result.tags.split(",").map((t: string) => t.trim()).filter(Boolean)
-                : ["Light Novel"];
-
-            for (const newId of result.calibreBookIds) {
-              const found = bookList.find((b: any) => b.id === newId);
-              const bookTitle = found?.title || result.seriesTitle;
-              const bookAuthor = found?.authors || result.author;
-              const bookTags: string[] = Array.isArray(found?.tags)
-                ? found.tags
-                : typeof found?.tags === "string"
-                  ? found.tags.split(",").map((t: string) => t.trim()).filter(Boolean)
-                  : defaultTags;
-              const isManga = bookTags.some((t: string) => /manga|comic/i.test(t));
-
-              try {
-                jobQueue.enqueue("metadata_enrich", {
-                  bookId: newId,
-                  title: bookTitle,
-                  author: bookAuthor,
-                  tags: bookTags,
-                  isManga,
-                });
-              } catch (qErr) {
-                console.warn(`[Lnori] Failed to enqueue metadata_enrich job for #${newId}:`, qErr);
-              }
-            }
-          } catch (enrichErr) {
-            console.warn("[Lnori] Failed to process metadata_enrich queueing:", enrichErr);
-          }
-        }
 
         activeLnoriState.active = false;
         activeLnoriState.phase = "complete";
@@ -919,7 +883,7 @@ export const cacheDb = {
 } as unknown as Database;
 
 let _serverJobQueue: DurableJobQueue | null = null;
-function registerJobHandlers(q: DurableJobQueue) {
+export function registerJobHandlers(q: DurableJobQueue) {
   q.registerHandler(
     "metadata_enrich",
     async (payload: {
@@ -930,25 +894,68 @@ function registerJobHandlers(q: DurableJobQueue) {
       tags?: string[];
       isManga?: boolean;
     }) => {
+      const searchFn = serverDependencies.searchUniversalMetadata ?? searchUniversalMetadata;
+      const applyFn = serverDependencies.applyMetadataToCalibre ?? applyMetadataToCalibre;
+      const getBooks = serverDependencies.getCalibreBooks ?? getCalibreBooks;
+
       console.log(
         `[JobQueue:MetadataEnrich] Background enrichment for book ID ${payload.bookId} ("${payload.title}")...`,
       );
-      const matches = await searchUniversalMetadata(payload.title, {
+
+      // Detect if target book has a volume number
+      let targetVol =
+        extractVolumeNumber(payload.title) ??
+        (payload.filename ? extractVolumeNumber(payload.filename) : null);
+      const calibreBooks = getBooks(true);
+      const targetBook = Array.isArray(calibreBooks) ? calibreBooks.find((b: any) => b.id === payload.bookId) : null;
+      if (targetVol === null && targetBook) {
+        if (
+          targetBook.series &&
+          targetBook.series_index !== undefined &&
+          targetBook.series_index !== null &&
+          !isNaN(Number(targetBook.series_index)) &&
+          Number(targetBook.series_index) > 0
+        ) {
+          targetVol = Number(targetBook.series_index);
+        } else if (targetBook.title) {
+          targetVol = extractVolumeNumber(targetBook.title);
+        }
+      }
+      const hasVolume = targetVol !== null;
+
+      const matches = await searchFn(payload.title, {
         isManga: payload.isManga,
         author: payload.author,
         filename: payload.filename,
         tags: payload.tags,
+        preserveVolume: hasVolume,
       });
       if (matches.length > 0) {
         const top = matches[0];
         console.log(
           `[JobQueue:MetadataEnrich] Top match: "${top.title}" by "${top.authors}" (Confidence: ${top.confidence}, Source: ${top.source})`,
         );
-        if (top.confidence >= 0.85) {
-          const applied = await applyMetadataToCalibre(payload.bookId, top);
-          getCalibreBooks(true);
+
+        // Volume conflict check:
+        // If target book has a volume, verify candidate does not have a conflicting volume
+        const candidateVol = top.title ? extractVolumeNumber(top.title) : null;
+        const isVolumeConflict =
+          targetVol !== null &&
+          ((candidateVol !== null && candidateVol !== targetVol) ||
+            (targetVol > 1 && candidateVol === null));
+
+        if (isVolumeConflict) {
+          console.warn(
+            `[JobQueue:MetadataEnrich] Volume conflict for book ID ${payload.bookId}: target is Vol ${targetVol} but top match is "${top.title}" (Vol ${candidateVol ?? "none"}). Rejecting match to preserve original title and cover.`,
+          );
+        }
+
+        if (top.confidence >= 0.85 && !isVolumeConflict) {
+          const applied = await applyFn(payload.bookId, top);
+          getBooks(true);
           // Check if comments is still empty; if so, auto-populate synopsis
-          const fresh = getCalibreBooks(true).find((b: any) => b.id === payload.bookId);
+          const freshList = getBooks(true);
+          const fresh = Array.isArray(freshList) ? freshList.find((b: any) => b.id === payload.bookId) : null;
           if (!fresh || isCommentsEmpty(fresh.comments)) {
             await autoEnrichBookSynopsis(payload.bookId, {
               title: payload.title,
@@ -956,7 +963,7 @@ function registerJobHandlers(q: DurableJobQueue) {
               filename: payload.filename,
               tags: payload.tags,
             });
-            getCalibreBooks(true);
+            getBooks(true);
           }
           return {
             success: applied,
@@ -965,17 +972,19 @@ function registerJobHandlers(q: DurableJobQueue) {
             source: top.source,
           };
         } else {
-          // If match confidence < 0.85, still auto-populate synopsis if comments is empty
+          // If match confidence < 0.85 or volume conflict, still auto-populate synopsis if comments is empty
           await autoEnrichBookSynopsis(payload.bookId, {
             title: payload.title,
             author: payload.author,
             filename: payload.filename,
             tags: payload.tags,
           });
-          getCalibreBooks(true);
+          getBooks(true);
           return {
             success: true,
-            message: `Match confidence ${top.confidence} < 0.85. Preserved original title.`,
+            message: isVolumeConflict
+              ? `Volume conflict: target is Vol ${targetVol}, top match is "${top.title}". Preserved original title and cover.`
+              : `Match confidence ${top.confidence} < 0.85. Preserved original title.`,
             topMatch: top.title,
             source: top.source,
           };

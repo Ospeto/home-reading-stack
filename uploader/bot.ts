@@ -3655,6 +3655,16 @@ process.on("SIGTERM", () => {
   isPollingRunning = false;
 });
 
+let _searchUniversalMetadataRunner: typeof searchUniversalMetadata | null = null;
+export function setSearchUniversalMetadataRunnerForTest(runner: typeof searchUniversalMetadata | null): void {
+  _searchUniversalMetadataRunner = runner;
+}
+
+let _applyMetadataToCalibreRunner: typeof applyMetadataToCalibre | null = null;
+export function setApplyMetadataToCalibreRunnerForTest(runner: typeof applyMetadataToCalibre | null): void {
+  _applyMetadataToCalibreRunner = runner;
+}
+
 export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
   q.registerHandler(
     "metadata_enrich",
@@ -3670,19 +3680,69 @@ export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
       log(
         `[JobQueue:MetadataEnrich] Background enrichment for book ID ${payload.bookId} ("${payload.title}")...`,
       );
-      const matches = await searchUniversalMetadata(payload.title, {
+
+      // Detect if target book has a volume number
+      let targetVol =
+        extractVolumeNumber(payload.title) ??
+        (payload.filename ? extractVolumeNumber(payload.filename) : null);
+      try {
+        const db = new Database(getCalibreDbPath(), { readonly: true });
+        const bookRow = db
+          .prepare(
+            "SELECT b.title, b.series_index, s.name as series FROM books b LEFT JOIN books_series_link bsl ON b.id = bsl.book LEFT JOIN series s ON bsl.series = s.id WHERE b.id = ?",
+          )
+          .get(payload.bookId) as any;
+        db.close();
+        if (targetVol === null && bookRow) {
+          if (
+            bookRow.series &&
+            bookRow.series_index !== undefined &&
+            bookRow.series_index !== null &&
+            !isNaN(Number(bookRow.series_index)) &&
+            Number(bookRow.series_index) > 0
+          ) {
+            targetVol = Number(bookRow.series_index);
+          } else if (bookRow.title) {
+            targetVol = extractVolumeNumber(bookRow.title);
+          }
+        }
+      } catch (_dbErr) {
+        void _dbErr;
+      }
+      const hasVolume = targetVol !== null;
+
+      const searchFn = _searchUniversalMetadataRunner ?? searchUniversalMetadata;
+      const applyFn = _applyMetadataToCalibreRunner ?? applyMetadataToCalibre;
+
+      const matches = await searchFn(payload.title, {
         isManga: payload.isManga,
         author: payload.author,
         filename: payload.filename,
         tags: payload.tags,
+        preserveVolume: hasVolume,
       });
       if (matches.length > 0) {
         const top = matches[0];
         log(
           `[JobQueue:MetadataEnrich] Top match: "${top.title}" by "${top.authors}" (Confidence: ${top.confidence}, Source: ${top.source})`,
         );
-        if (top.confidence >= 0.85) {
-          const applied = await applyMetadataToCalibre(payload.bookId, top);
+
+        // Volume conflict check:
+        // If target book has a volume, verify candidate does not have a conflicting volume
+        const candidateVol = top.title ? extractVolumeNumber(top.title) : null;
+        const isVolumeConflict =
+          targetVol !== null &&
+          ((candidateVol !== null && candidateVol !== targetVol) ||
+            (targetVol > 1 && candidateVol === null));
+
+        if (isVolumeConflict) {
+          log(
+            `[JobQueue:MetadataEnrich] Volume conflict for book ID ${payload.bookId}: target is Vol ${targetVol} but top match is "${top.title}" (Vol ${candidateVol ?? "none"}). Rejecting match to preserve original title and cover.`,
+          );
+        }
+
+        if (top.confidence >= 0.85 && !isVolumeConflict) {
+          const applied = await applyFn(payload.bookId, top);
           // Check if comments is still empty; if so, auto-populate synopsis
           try {
             const db = new Database(getCalibreDbPath(), { readonly: true });
@@ -3722,7 +3782,7 @@ export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
             source: top.source,
           };
         } else {
-          // If match confidence < 0.85, still auto-populate synopsis if comments is empty
+          // If match confidence < 0.85 or volume conflict, still auto-populate synopsis if comments is empty
           try {
             await autoEnrichBookSynopsis(payload.bookId, {
               title: payload.title,
@@ -3735,7 +3795,9 @@ export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
           }
           return {
             success: true,
-            message: `Match confidence ${top.confidence} < 0.85. Preserved original title.`,
+            message: isVolumeConflict
+              ? `Volume conflict: target is Vol ${targetVol}, top match is "${top.title}". Preserved original title and cover.`
+              : `Match confidence ${top.confidence} < 0.85. Preserved original title.`,
             topMatch: top.title,
             source: top.source,
           };
@@ -4047,35 +4109,6 @@ export async function runDirectLnoriFallback(
         );
 
         if (result && result.success) {
-          // Durable metadata enrichment via Job Queue for newly imported volumes
-          if (Array.isArray(result.calibreBookIds) && result.calibreBookIds.length > 0) {
-            try {
-              const defaultTags: string[] = Array.isArray(result.tags)
-                ? result.tags
-                : typeof result.tags === "string"
-                  ? result.tags.split(",").map((t: string) => t.trim()).filter(Boolean)
-                  : ["Light Novel"];
-
-              const jq = getJobQueue(getCacheDb());
-              for (const newId of result.calibreBookIds) {
-                try {
-                  jq.enqueue("metadata_enrich", {
-                    bookId: newId,
-                    title: result.seriesTitle,
-                    author: result.author,
-                    tags: defaultTags,
-                    isManga: defaultTags.some((t: string) => /manga|comic/i.test(t)),
-                    chatId: activeChatId,
-                  });
-                } catch (qErr) {
-                  logError(`Failed to enqueue metadata_enrich for book #${newId}: ${qErr}`);
-                }
-              }
-            } catch (enrichErr) {
-              logError(`Failed to process metadata_enrich queueing: ${enrichErr}`);
-            }
-          }
-
           if (result.importedCount === 0 && result.skippedCount === 0) {
             await sendLnoriIncompleteCard(activeChatId, activeMsgId, activeUrl);
           } else {
