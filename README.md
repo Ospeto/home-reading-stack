@@ -548,7 +548,7 @@ Background tasks and asynchronous workflows run via a durable SQLite job queue (
    - `file_ingest`: Single book file ingestion into Calibre with format validation and deduplication.
    - `archive_extract`: Safe extraction of archive packages, importing canonical EPUB files.
    - `url_article_ingest`: Web article extraction, conversion to EPUB, and Calibre ingestion.
-   - `metadata_enrich`: Background metadata and cover art scraping for newly imported books.
+   - `metadata_enrich`: Background metadata and cover art scraping for newly imported books with volume conflict guards and title/cover overwrite protection.
    - `cover_backfill`: Batch generation of typographic covers for web articles lacking covers.
 2. **Resilience & Crash Recovery:**
    - Bounded exponential backoff: Failed jobs auto-retry up to 3 times (2s, 4s, 8s backoff) before entering `failed` status.

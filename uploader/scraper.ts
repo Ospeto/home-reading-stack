@@ -1,7 +1,9 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { Database } from "bun:sqlite";
 import { safeFetchWithSsrf, isPrivateOrInternalIp, getBsdtarPath, getUnzipPath } from "./security";
 import {
   isJunkAuthorExtended,
@@ -33,6 +35,73 @@ export function getCalibredbPath(): string {
     if (fs.existsSync(cand)) return cand;
   }
   return "calibredb";
+}
+
+const LIGHTHOUSE_ROOT =
+  process.env.LIGHTHOUSE_ROOT ||
+  path.resolve((import.meta as { dir?: string }).dir || process.cwd(), "..");
+
+export function getCalibreDbPath(): string {
+  if (process.env.CALIBRE_DB_PATH) {
+    return path.isAbsolute(process.env.CALIBRE_DB_PATH)
+      ? process.env.CALIBRE_DB_PATH
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_DB_PATH);
+  }
+  if (process.env.CALIBRE_LIBRARY_DIR) {
+    const libDir = path.isAbsolute(process.env.CALIBRE_LIBRARY_DIR)
+      ? process.env.CALIBRE_LIBRARY_DIR
+      : path.resolve(LIGHTHOUSE_ROOT, process.env.CALIBRE_LIBRARY_DIR);
+    return path.join(libDir, "metadata.db");
+  }
+  const home = process.env.HOME || os.homedir();
+  return path.join(
+    home,
+    "Calibre Libraries",
+    "Agent Library",
+    "metadata.db",
+  );
+}
+
+export function getBookCalibreMetadata(
+  bookId: number,
+  dbPath = getCalibreDbPath(),
+): { title?: string; series_index?: number; has_cover?: boolean | number; series?: string } | null {
+  try {
+    if (!fs.existsSync(dbPath)) return null;
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      db.run("PRAGMA busy_timeout = 3000;");
+      const row = db
+        .prepare(
+          `
+        SELECT b.id, b.title, b.has_cover, b.series_index, s.name as series
+        FROM books b
+        LEFT JOIN books_series_link bsl ON b.id = bsl.book
+        LEFT JOIN series s ON bsl.series = s.id
+        WHERE b.id = ?
+      `,
+        )
+        .get(bookId) as any;
+      if (!row) return null;
+      return {
+        title: row.title,
+        series_index:
+          row.series_index !== null && row.series_index !== undefined
+            ? Number(row.series_index)
+            : undefined,
+        has_cover: Boolean(row.has_cover),
+        series: row.series,
+      };
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    console.debug(
+      `[AutoScraper] Failed to inspect Calibre metadata for book #${bookId}:`,
+      err,
+    );
+    return null;
+  }
 }
 
 const SERVER_URL = "http://127.0.0.1:8088";
@@ -1238,7 +1307,8 @@ export function parseRanobeBook(
   query: string,
   fallbackHit?: any,
 ): ScrapedMetadata {
-  const cleanQ = cleanQuery(query);
+  const targetVol = extractVolumeNumber(query);
+  const cleanQ = cleanQuery(query, { preserveVolume: targetVol !== null });
   const title =
     book.title ||
     book.title_orig ||
@@ -1275,15 +1345,37 @@ export function parseRanobeBook(
     ? `https://images.ranobedb.org/${filename}`
     : undefined;
 
-  const sim = Math.max(
+  let candidateVol: number | null = null;
+  if (title) candidateVol = extractVolumeNumber(title);
+  if (candidateVol === null && book.title_orig) candidateVol = extractVolumeNumber(book.title_orig);
+  if (candidateVol === null && fallbackHit?.title) candidateVol = extractVolumeNumber(fallbackHit.title);
+  if (candidateVol === null && book.volume !== undefined && book.volume !== null && !isNaN(Number(book.volume))) {
+    candidateVol = Number(book.volume);
+  }
+
+  let sim = Math.max(
     stringSimilarity(cleanQ, title),
     stringSimilarity(cleanQ, book.title_orig || fallbackHit?.title_orig || ""),
     stringSimilarity(cleanQ, book.romaji || fallbackHit?.romaji || ""),
-    stringSimilarity(
-      cleanQ,
-      book.series?.title || fallbackHit?.series?.title || "",
-    ),
+    targetVol === null
+      ? stringSimilarity(
+          cleanQ,
+          book.series?.title || fallbackHit?.series?.title || "",
+        )
+      : 0,
   );
+
+  // Volume conflict guard: if searching with a specific volume number V_target,
+  // any candidate book with an identifiable volume number V_candidate != V_target
+  // must NOT be assigned high confidence. Penalize confidence to 0 so mismatched
+  // volumes never trigger the >= 0.85 auto-apply threshold.
+  if (targetVol !== null && candidateVol !== null && candidateVol !== targetVol) {
+    sim = 0;
+  } else if (targetVol !== null && candidateVol === null && targetVol > 1) {
+    // If target has volume > 1 but candidate has no volume, cap confidence < 0.85
+    // so generic series entries never auto-overwrite volume books.
+    sim = Math.min(sim, 0.7);
+  }
 
   return {
     title,
@@ -1393,12 +1485,12 @@ export async function searchRanobeDB(
           if (bRes.ok) {
             const bJson: any = await bRes.json();
             const book = bJson.book || bJson;
-            return parseRanobeBook(book, cleanQ, hit);
+            return parseRanobeBook(book, query, hit);
           }
         } catch {
-          return parseRanobeBook(hit, cleanQ);
+          return parseRanobeBook(hit, query);
         }
-        return parseRanobeBook(hit, cleanQ);
+        return parseRanobeBook(hit, query);
       }),
     );
 
@@ -1809,6 +1901,15 @@ export async function searchUniversalMetadata(
   if (hint && typeof hint === "object") {
     hintPreserveVolume = Boolean(hint.preserveVolume);
   }
+  const targetVol =
+    extractVolumeNumber(query) ??
+    (hint && typeof hint === "object" && hint.filename
+      ? extractVolumeNumber(hint.filename)
+      : null);
+
+  if (targetVol !== null) {
+    hintPreserveVolume = true;
+  }
   const cleanQ = cleanQuery(query, { preserveVolume: hintPreserveVolume });
   if (!cleanQ) return results;
 
@@ -1972,6 +2073,18 @@ export async function searchUniversalMetadata(
     }
   }
 
+  // Volume conflict guard across all candidate results
+  if (targetVol !== null) {
+    for (const r of results) {
+      const candidateVol = r.title ? extractVolumeNumber(r.title) : null;
+      if (candidateVol !== null && candidateVol !== targetVol) {
+        r.confidence = 0;
+      } else if (candidateVol === null && targetVol > 1) {
+        r.confidence = Math.min(r.confidence, 0.7);
+      }
+    }
+  }
+
   // Sort results: prioritize RanobeDB when query matches light novel patterns or has high title similarity
   results.sort((a, b) => {
     if (isLnTarget) {
@@ -2068,10 +2181,93 @@ export function isAllowedCoverUrl(rawUrl: string): boolean {
 export async function applyMetadataToCalibre(
   bookId: number,
   meta: ScrapedMetadata,
+  dependencies?: {
+    getBookMetadata?: (
+      id: number,
+    ) => {
+      title?: string;
+      series_index?: number;
+      has_cover?: boolean | number;
+      series?: string;
+    } | null;
+    spawnSync?: typeof spawnSync;
+    fetchFn?: typeof safeFetchWithSsrf;
+  },
 ): Promise<boolean> {
   try {
+    const getMeta = dependencies?.getBookMetadata ?? getBookCalibreMetadata;
+    const runSpawn = dependencies?.spawnSync ?? spawnSync;
+    const doFetch = dependencies?.fetchFn ?? safeFetchWithSsrf;
+
+    // Check the book's existing metadata (title, series_index, has_cover) in Calibre
+    const existing = getMeta(bookId);
+    let existingVol: number | null = null;
+    let existingSeriesIndex: number | null = null;
+    let existingHasCover = false;
+
+    if (existing) {
+      if (existing.title) existingVol = extractVolumeNumber(existing.title);
+      if (
+        existing.series_index !== undefined &&
+        existing.series_index !== null &&
+        !isNaN(Number(existing.series_index))
+      ) {
+        existingSeriesIndex = Number(existing.series_index);
+        if (existingVol === null && existingSeriesIndex > 0) {
+          existingVol = existingSeriesIndex;
+        }
+      }
+      existingHasCover = Boolean(existing.has_cover);
+    }
+
+    const candidateVol = meta.title ? extractVolumeNumber(meta.title) : null;
+
+    // Volume guards:
+    // 1. Never overwrite title if the book already has a volume number or series index > 1
+    //    and meta.title has a different volume or no volume.
+    const hasVolumeOrMultiVolSeries =
+      (existingVol !== null && existingVol > 1) ||
+      (existingSeriesIndex !== null && existingSeriesIndex > 1);
+
+    const isDifferentVolume =
+      existingVol !== null &&
+      candidateVol !== null &&
+      candidateVol !== existingVol;
+
+    const isMissingVolumeWhenBookHasVolume =
+      hasVolumeOrMultiVolSeries && candidateVol === null;
+
+    const skipTitleOverwrite = Boolean(
+      meta.title && (isDifferentVolume || isMissingVolumeWhenBookHasVolume),
+    );
+
+    if (skipTitleOverwrite) {
+      console.warn(
+        `[AutoScraper] Refusing to overwrite title for book #${bookId}: ` +
+          `existing has volume ${existingVol ?? existingSeriesIndex} ("${existing?.title}"), ` +
+          `candidate has volume ${candidateVol ?? "none"} ("${meta.title}").`,
+      );
+    }
+
+    // 2. Never overwrite an existing cover if the candidate metadata volume mismatches the book's volume.
+    const volumeMismatchForCover =
+      existingVol !== null &&
+      ((candidateVol !== null && candidateVol !== existingVol) ||
+        (existingVol > 1 && candidateVol === null));
+
+    const skipCover =
+      !meta.coverUrl || (existingHasCover && volumeMismatchForCover) || volumeMismatchForCover;
+
+    if (meta.coverUrl && volumeMismatchForCover) {
+      console.warn(
+        `[AutoScraper] Refusing to overwrite cover for book #${bookId}: ` +
+          `volume mismatch (target is Vol ${existingVol}, candidate is Vol ${candidateVol ?? "none"}${existingHasCover ? ", existing cover preserved" : ""}).`,
+      );
+    }
+
     const args = ["set_metadata", String(bookId), "--with-library", SERVER_URL];
-    if (meta.title) args.push("--field", `title:${meta.title}`);
+    if (meta.title && !skipTitleOverwrite)
+      args.push("--field", `title:${meta.title}`);
     if (meta.authors && meta.authors !== "Unknown")
       args.push("--field", `authors:${meta.authors}`);
     if (meta.publisher) args.push("--field", `publisher:${meta.publisher}`);
@@ -2079,14 +2275,15 @@ export async function applyMetadataToCalibre(
       args.push("--field", `pubdate:${meta.publishedDate}`);
     if (meta.tags && meta.tags.length > 0)
       args.push("--field", `tags:${meta.tags.join(",")}`);
-    if (meta.description) args.push("--field", `comments:${meta.description}`);
+    if (meta.description && !isDifferentVolume)
+      args.push("--field", `comments:${meta.description}`);
 
-    // Download cover to temporary file if coverUrl exists and passes URL validation
+    // Download cover to temporary file if coverUrl exists, passes validation, and cover overwrite is not skipped
     let tempCoverPath = "";
-    if (meta.coverUrl && isAllowedCoverUrl(meta.coverUrl)) {
+    if (meta.coverUrl && !skipCover && isAllowedCoverUrl(meta.coverUrl)) {
       tempCoverPath = `/tmp/cover_${bookId}_${Date.now()}.jpg`;
       const coverUrl = meta.coverUrl;
-      const imgRes = await safeFetchWithSsrf(coverUrl, {
+      const imgRes = await doFetch(coverUrl, {
         signal: AbortSignal.timeout(COVER_TIMEOUT_MS),
         proxy: PROXY,
       } as any);
@@ -2107,7 +2304,7 @@ export async function applyMetadataToCalibre(
     env.PATH =
       "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env.PATH || "");
 
-    const res = spawnSync(getCalibredbPath(), args, {
+    const res = runSpawn(getCalibredbPath(), args, {
       encoding: "utf8",
       env,
       timeout: 30000,

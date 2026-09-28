@@ -24,6 +24,7 @@ import {
   paceAniListRequest,
   resetAniListPacing,
   autoEnrichBookSynopsis,
+  applyMetadataToCalibre,
   type ScrapedMetadata,
 } from "./scraper";
 
@@ -1893,6 +1894,222 @@ id  title      authors    comments
 
       expect(res.enriched).toBe(false);
       expect(setMetadataCalled).toBe(false);
+    });
+  });
+
+  describe("Series Volume Overwrite Protection (parseRanobeBook, searchUniversalMetadata, applyMetadataToCalibre)", () => {
+    describe("parseRanobeBook volume conflict guards", () => {
+      it("penalizes confidence to 0 when query volume conflicts with candidate book volume", () => {
+        const candidateBook = {
+          id: 1,
+          title: "Goblin Slayer, Vol. 1",
+          title_orig: "ゴブリンスレイヤー 1",
+          image: { filename: "gs1.jpg" },
+          series: { title: "Goblin Slayer", tags: [{ name: "fantasy" }] },
+          editions: [{ staff: [{ name: "Kumo Kagyu", role_type: "author" }] }],
+        };
+
+        // Querying for Volume 3 but candidate is Volume 1
+        const res = parseRanobeBook(candidateBook, "Goblin Slayer Vol 3");
+
+        expect(res.confidence).toBe(0);
+        expect(res.title).toBe("Goblin Slayer, Vol. 1");
+      });
+
+      it("assigns high confidence when query volume matches candidate book volume", () => {
+        const candidateBook = {
+          id: 1,
+          title: "Goblin Slayer, Vol. 1",
+          title_orig: "ゴブリンスレイヤー 1",
+          image: { filename: "gs1.jpg" },
+          series: { title: "Goblin Slayer", tags: [{ name: "fantasy" }] },
+          editions: [{ staff: [{ name: "Kumo Kagyu", role_type: "author" }] }],
+        };
+
+        // Querying for Volume 1 and candidate is Volume 1
+        const res = parseRanobeBook(candidateBook, "Goblin Slayer Vol 1");
+
+        expect(res.confidence).toBeGreaterThanOrEqual(0.85);
+        expect(res.title).toBe("Goblin Slayer, Vol. 1");
+      });
+
+      it("does not allow series title match alone to inflate confidence when query has a volume", () => {
+        const candidateBook = {
+          id: 99,
+          title: "Goblin Slayer",
+          image: { filename: "gs_franchise.jpg" },
+          series: { title: "Goblin Slayer" },
+          editions: [{ staff: [{ name: "Kumo Kagyu", role_type: "author" }] }],
+        };
+
+        // Query has volume 4, but book has no volume (it is just the series name)
+        const res = parseRanobeBook(candidateBook, "Goblin Slayer Vol 4");
+
+        // Confidence must not be >= 0.85 from series title match
+        expect(res.confidence).toBeLessThan(0.85);
+      });
+    });
+
+    describe("searchUniversalMetadata volume conflict guards", () => {
+      it("penalizes candidate confidence to 0 when candidate volume mismatches query volume", async () => {
+        // Query for Vol 2 with RanobeDB returning Vol 1 mock
+        const mockFetch = async (urlStr: string) => {
+          if (urlStr.includes("/api/v0/books")) {
+            return new Response(
+              JSON.stringify({
+                books: [
+                  {
+                    id: 101,
+                    title: "Goblin Slayer, Vol. 1",
+                    image: { filename: "vol1.jpg" },
+                    series: { title: "Goblin Slayer" },
+                  },
+                ],
+              }),
+              { status: 200 },
+            );
+          }
+          if (urlStr.includes("/api/v0/book/101")) {
+            return new Response(
+              JSON.stringify({
+                book: {
+                  id: 101,
+                  title: "Goblin Slayer, Vol. 1",
+                  image: { filename: "vol1.jpg" },
+                  series: { title: "Goblin Slayer" },
+                  editions: [{ staff: [{ name: "Kumo Kagyu", role_type: "author" }] }],
+                },
+              }),
+              { status: 200 },
+            );
+          }
+          return new Response("Not Found", { status: 404 });
+        };
+
+        const results = await searchRanobeDB("Goblin Slayer Vol 2", {
+          fetchFn: mockFetch as any,
+          preserveVolume: true,
+        });
+
+        // The Vol 1 result must have confidence penalized to 0
+        expect(results.length).toBeGreaterThan(0);
+        expect(results[0].confidence).toBe(0);
+      });
+    });
+
+    describe("applyMetadataToCalibre volume mismatch guards", () => {
+      it("never overwrites title when existing book has volume/series_index > 1 and candidate volume mismatches", async () => {
+        let capturedArgs: string[] = [];
+        const mockSpawn = (_bin: string, args: string[]) => {
+          capturedArgs = args;
+          return { status: 0, stdout: "", stderr: "" } as any;
+        };
+
+        const mockMeta: ScrapedMetadata = {
+          title: "Goblin Slayer, Vol. 1",
+          authors: "Kumo Kagyu",
+          coverUrl: "https://images.ranobedb.org/vol1.jpg",
+          tags: ["Light Novel"],
+          source: "RanobeDB",
+          confidence: 0.95,
+        };
+
+        // Existing book is Volume 3
+        const mockGetBookMetadata = (_id: number) => ({
+          title: "Goblin Slayer Vol 3",
+          series_index: 3,
+          has_cover: true,
+          series: "Goblin Slayer",
+        });
+
+        const success = await applyMetadataToCalibre(303, mockMeta, {
+          getBookMetadata: mockGetBookMetadata,
+          spawnSync: mockSpawn as any,
+          fetchFn: (async () => new Response("fake", { status: 200 })) as any,
+        });
+
+        expect(success).toBe(true);
+        // Verify title: was NOT included in args because candidate is Vol 1 while book is Vol 3
+        const hasTitleField = capturedArgs.some((a) => a.startsWith("title:"));
+        expect(hasTitleField).toBe(false);
+
+        // Verify cover: was NOT overwritten because existing cover is preserved on volume mismatch
+        const hasCoverField = capturedArgs.some((a) => a.startsWith("cover:"));
+        expect(hasCoverField).toBe(false);
+
+        // Authors and tags can still be safely applied
+        expect(capturedArgs).toContain("authors:Kumo Kagyu");
+      });
+
+      it("never overwrites title when existing book has volume/series_index > 1 and candidate has NO volume", async () => {
+        let capturedArgs: string[] = [];
+        const mockSpawn = (_bin: string, args: string[]) => {
+          capturedArgs = args;
+          return { status: 0, stdout: "", stderr: "" } as any;
+        };
+
+        // Candidate has generic unnumbered title
+        const mockMeta: ScrapedMetadata = {
+          title: "Goblin Slayer",
+          authors: "Kumo Kagyu",
+          tags: ["Light Novel"],
+          source: "RanobeDB",
+          confidence: 0.85,
+        };
+
+        const mockGetBookMetadata = (_id: number) => ({
+          title: "Goblin Slayer Vol 4",
+          series_index: 4,
+          has_cover: true,
+          series: "Goblin Slayer",
+        });
+
+        const success = await applyMetadataToCalibre(304, mockMeta, {
+          getBookMetadata: mockGetBookMetadata,
+          spawnSync: mockSpawn as any,
+        });
+
+        expect(success).toBe(true);
+        const hasTitleField = capturedArgs.some((a) => a.startsWith("title:"));
+        expect(hasTitleField).toBe(false);
+      });
+
+      it("applies title and cover when candidate volume matches existing book volume", async () => {
+        let capturedArgs: string[] = [];
+        const mockSpawn = (_bin: string, args: string[]) => {
+          capturedArgs = args;
+          return { status: 0, stdout: "", stderr: "" } as any;
+        };
+
+        const mockMeta: ScrapedMetadata = {
+          title: "Goblin Slayer, Vol. 1",
+          authors: "Kumo Kagyu",
+          coverUrl: "https://images.ranobedb.org/vol1.jpg",
+          tags: ["Light Novel"],
+          source: "RanobeDB",
+          confidence: 0.95,
+        };
+
+        // Existing book is Volume 1
+        const mockGetBookMetadata = (_id: number) => ({
+          title: "Goblin Slayer Vol 1",
+          series_index: 1,
+          has_cover: false,
+          series: "Goblin Slayer",
+        });
+
+        const success = await applyMetadataToCalibre(301, mockMeta, {
+          getBookMetadata: mockGetBookMetadata,
+          spawnSync: mockSpawn as any,
+          fetchFn: (async () => new Response(new ArrayBuffer(100), { status: 200 })) as any,
+        });
+
+        expect(success).toBe(true);
+        expect(capturedArgs).toContain("title:Goblin Slayer, Vol. 1");
+        expect(capturedArgs).toContain("authors:Kumo Kagyu");
+        const hasCoverField = capturedArgs.some((a) => a.startsWith("cover:"));
+        expect(hasCoverField).toBe(true);
+      });
     });
   });
 });
