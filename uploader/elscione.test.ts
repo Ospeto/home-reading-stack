@@ -836,6 +836,98 @@ describe("Elscione Light Novel Ingestion Module", () => {
         manifest.volumes.some((v) => v.filename.includes("Index NT")),
       ).toBe(false);
     });
+
+    it("extractElscioneManifest rejects scheme-absolute off-host hrefs and other-folder hrefs", async () => {
+      const mockH5aiResponse = {
+        items: [
+          // Scheme-absolute off-host malware href (must be dropped)
+          {
+            href: "https://evil.example/malware.epub",
+            size: 500,
+          },
+          // Protocol-relative off-host href (must be dropped)
+          {
+            href: "//evil.example/phishing.epub",
+            size: 500,
+          },
+          // Scheme-absolute sibling series href (must be dropped)
+          {
+            href: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Other%20Series/Other.epub",
+            size: 1500,
+          },
+          // Scheme-absolute mirror host sibling series href (must be dropped)
+          {
+            href: "https://server.elsci.one/Officially%20Translated%20Light%20Novels/Other%20Series/Other.epub",
+            size: 1500,
+          },
+          // Root-relative sibling folder href (must be dropped)
+          {
+            href: "/Officially%20Translated%20Light%20Novels/Other%20Series/Secret.epub",
+            size: 1200,
+          },
+          // Double-encoded path traversal attempt (must be dropped)
+          {
+            href: "/Officially%20Translated%20Light%20Novels/A%20Certain%20Magical%20Index/%252e%252e/Other%20Series/Bypass.epub",
+            size: 1100,
+          },
+          // Backslash traversal attempt (must be dropped)
+          {
+            href: "/Officially%20Translated%20Light%20Novels/A%20Certain%20Magical%20Index/..\\Other%20Series\\BypassBackslash.epub",
+            size: 1100,
+          },
+          // Encoded backslash traversal attempt (must be dropped)
+          {
+            href: "..%5c..%5cOther.epub",
+            size: 1100,
+          },
+          // Valid in-folder root-relative EPUB (must be kept)
+          {
+            href: "/Officially%20Translated%20Light%20Novels/A%20Certain%20Magical%20Index/Index%20Vol%201.epub",
+            size: 1000,
+          },
+          // Valid in-folder relative EPUB (must be kept)
+          {
+            href: "Index%20Vol%202.epub",
+            size: 2000,
+          },
+          // Valid in-folder scheme-absolute same-folder EPUB (must be kept)
+          {
+            href: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Certain%20Magical%20Index/Index%20Vol%203.epub",
+            size: 3000,
+          },
+        ],
+      };
+
+      const mockFetch = async (_url: string, init?: any) => {
+        if (init?.method === "POST") {
+          return new Response(JSON.stringify(mockH5aiResponse), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("OK", { status: 200 });
+      };
+
+      const manifest = await extractElscioneManifest(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Certain%20Magical%20Index/",
+        { fetch: mockFetch as any },
+      );
+
+      expect(manifest.volumes.length).toBe(3);
+      expect(manifest.volumes.map((v) => v.filename)).toEqual([
+        "Index Vol 1.epub",
+        "Index Vol 2.epub",
+        "Index Vol 3.epub",
+      ]);
+      expect(manifest.volumes.some((v) => v.filename.includes("malware"))).toBe(false);
+      expect(manifest.volumes.some((v) => v.filename.includes("phishing"))).toBe(false);
+      expect(manifest.volumes.some((v) => v.filename.includes("Other"))).toBe(false);
+      expect(manifest.volumes.some((v) => v.filename.includes("Secret"))).toBe(false);
+      for (const vol of manifest.volumes) {
+        expect(isElscioneUrl(vol.downloadUrl)).toBe(true);
+        expect(vol.downloadUrl.includes("A%20Certain%20Magical%20Index")).toBe(true);
+      }
+    });
   });
 
   describe("Cover & Metadata Extraction", () => {
@@ -1112,6 +1204,88 @@ describe("Elscione Light Novel Ingestion Module", () => {
       expect(fs.existsSync(destPath)).toBe(true);
       fs.rmSync(tempDir, { recursive: true, force: true });
     });
+
+    it("downloadElscioneEpub rejects off-host URLs and never attaches cookies to off-host requests", async () => {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "elscione-sec-dl-"));
+      const destPath = path.join(tempDir, "malware.epub");
+      setElscioneSessionCookies("anubis-auth=secret_token_12345");
+
+      let receivedHeaders: Record<string, string> = {};
+      const mockFetch = async (_url: string, init?: RequestInit) => {
+        receivedHeaders = (init?.headers || {}) as Record<string, string>;
+        return new Response(createSyntheticEpub(), {
+          status: 200,
+          headers: { "Content-Type": "application/epub+zip" },
+        });
+      };
+
+      // 1. Direct downloadElscioneEpub with off-host URL must throw and not fetch
+      await expect(
+        downloadElscioneEpub(
+          "https://evil.example/malware.epub",
+          destPath,
+          undefined,
+          { fetch: mockFetch as any },
+        ),
+      ).rejects.toThrow(/non-Elscione host/i);
+
+      // 2. Direct fetchWithAnubis on off-host URL must never attach Elscione Cookie header
+      await fetchWithAnubis("https://evil.example/info.json", {}, { fetch: mockFetch as any });
+      expect(receivedHeaders["Cookie"]).toBeUndefined();
+
+      // 3. fetchWithAnubis on valid Elscione URL attaches the Cookie header
+      await fetchWithAnubis("https://server.elscione.com/test.json", {}, { fetch: mockFetch as any });
+      expect(receivedHeaders["Cookie"]).toBe("anubis-auth=secret_token_12345");
+
+      // 4. fetchWithAnubis following redirect to off-host target must be refused and not leak cookies
+      const redirectFetch = async (url: string, init?: RequestInit) => {
+        receivedHeaders = (init?.headers || {}) as Record<string, string>;
+        if (url === "https://server.elscione.com/redirect-to-evil") {
+          return new Response("", {
+            status: 302,
+            headers: { Location: "https://evil.example/intercepted" },
+          });
+        }
+        return new Response("OK", { status: 200 });
+      };
+      await expect(
+        fetchWithAnubis(
+          "https://server.elscione.com/redirect-to-evil",
+          {},
+          { fetch: redirectFetch as any },
+        ),
+      ).rejects.toThrow(/off-host target/i);
+
+      // 5. fetchWithAnubis on off-host challenge response must never submit solution with Elscione cookies
+      let passChallengeHeaders: Record<string, string> = {};
+      const evilChallengeFetch = async (url: string, init?: RequestInit) => {
+        if (url.includes("pass-challenge")) {
+          passChallengeHeaders = (init?.headers || {}) as Record<string, string>;
+          return new Response("OK", { status: 200 });
+        }
+        const challengeHtml = `
+          <!DOCTYPE html>
+          <html>
+          <script id="anubis_challenge" type="application/json">
+            {"id":"ch_evil","difficulty":0,"randomData":"seed"}
+          </script>
+          </html>
+        `;
+        return new Response(challengeHtml, {
+          status: 403,
+          headers: { "Content-Type": "text/html" },
+        });
+      };
+      await fetchWithAnubis(
+        "https://evil.example/challenge",
+        {},
+        { fetch: evilChallengeFetch as any },
+      );
+      expect(passChallengeHeaders["Cookie"]).toBeUndefined();
+
+      resetElscioneSessionForTest();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    });
   });
 
   describe("Elscione Python Helper CLI Integration", () => {
@@ -1160,6 +1334,83 @@ describe("Elscione Light Novel Ingestion Module", () => {
       expect(manifest.seriesTitle).toBe("Test Series");
       expect(manifest.volumes.length).toBe(1);
       expect(manifest.volumes[0].volumeNumber).toBe(1);
+    });
+
+    it("runElscioneHelperManifest drops off-host items returned by helper", async () => {
+      const mockSpawnSync = () => ({
+        status: 0,
+        stdout: JSON.stringify({
+          success: true,
+          seriesTitle: "Test Series",
+          url: "https://server.elscione.com/Test%20Series/",
+          isSingleVolume: false,
+          totalCount: 2,
+          volumes: [
+            {
+              volumeNumber: 1,
+              filename: "Test - Volume 01.epub",
+              downloadUrl:
+                "https://server.elscione.com/Test%20Series/Test%20-%20Volume%2001.epub",
+              title: "Test Series: Volume 1",
+            },
+            {
+              volumeNumber: 2,
+              filename: "malware.epub",
+              downloadUrl: "https://evil.example/malware.epub",
+              title: "Malware",
+            },
+          ],
+        }),
+        stderr: "",
+      });
+
+      const manifest = await runElscioneHelperManifest(
+        "https://server.elscione.com/Test%20Series/",
+        { spawnSync: mockSpawnSync as any },
+      );
+      expect(manifest.volumes.length).toBe(1);
+      expect(manifest.volumes[0].filename).toBe("Test - Volume 01.epub");
+      expect(manifest.volumes.some((v) => v.downloadUrl.includes("evil.example"))).toBe(false);
+      expect(manifest.totalCount).toBe(1);
+    });
+
+    it("runElscioneHelperManifest drops other-folder items returned by helper", async () => {
+      const mockSpawnSync = () => ({
+        status: 0,
+        stdout: JSON.stringify({
+          success: true,
+          seriesTitle: "Test Series",
+          url: "https://server.elscione.com/Test%20Series/",
+          isSingleVolume: false,
+          totalCount: 2,
+          volumes: [
+            {
+              volumeNumber: 1,
+              filename: "Test - Volume 01.epub",
+              downloadUrl:
+                "https://server.elscione.com/Test%20Series/Test%20-%20Volume%2001.epub",
+              title: "Test Series: Volume 1",
+            },
+            {
+              volumeNumber: 2,
+              filename: "Other.epub",
+              downloadUrl:
+                "https://server.elscione.com/Other%20Series/Other.epub",
+              title: "Other",
+            },
+          ],
+        }),
+        stderr: "",
+      });
+
+      const manifest = await runElscioneHelperManifest(
+        "https://server.elscione.com/Test%20Series/",
+        { spawnSync: mockSpawnSync as any },
+      );
+      expect(manifest.volumes.length).toBe(1);
+      expect(manifest.volumes[0].filename).toBe("Test - Volume 01.epub");
+      expect(manifest.volumes.some((v) => v.downloadUrl.includes("Other%20Series"))).toBe(false);
+      expect(manifest.totalCount).toBe(1);
     });
 
     it("runElscioneHelperManifest throws on non-zero exit or invalid JSON", async () => {

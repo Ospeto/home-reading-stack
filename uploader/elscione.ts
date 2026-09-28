@@ -484,9 +484,11 @@ export async function submitAnubisSolution(
     "User-Agent": USER_AGENT,
     Referer: baseUrl,
   };
-  const currentCookies = getElscioneSessionCookies();
-  if (currentCookies) {
-    headers["Cookie"] = currentCookies;
+  if (isElscioneUrl(passUrl.toString())) {
+    const currentCookies = getElscioneSessionCookies();
+    if (currentCookies) {
+      headers["Cookie"] = currentCookies;
+    }
   }
 
   let res: Response;
@@ -525,7 +527,10 @@ export async function fetchWithAnubis(
 ): Promise<Response> {
   const fetcher = dependencies?.fetch ?? safeFetchWithSsrf;
 
-  const buildHeaders = (baseHeaders?: HeadersInit): Record<string, string> => {
+  const buildHeaders = (
+    baseHeaders?: HeadersInit,
+    target: string = targetUrl,
+  ): Record<string, string> => {
     const h: Record<string, string> = {
       "User-Agent": USER_AGENT,
     };
@@ -542,36 +547,72 @@ export async function fetchWithAnubis(
         Object.assign(h, baseHeaders);
       }
     }
-    const cookies = getElscioneSessionCookies();
-    if (cookies && !h["Cookie"]) {
-      h["Cookie"] = cookies;
+    // Only attach Elscione session cookies if target is an allowed Elscione host
+    if (isElscioneUrl(target)) {
+      const cookies = getElscioneSessionCookies();
+      if (cookies && !h["Cookie"]) {
+        h["Cookie"] = cookies;
+      }
     }
     return h;
   };
 
-  const doFetch = async (useProxy: boolean, reqHeaders: Record<string, string>): Promise<Response> => {
+  const doFetch = async (
+    target: string,
+    useProxy: boolean,
+    reqHeaders: Record<string, string>,
+  ): Promise<Response> => {
     const reqInit: any = {
       ...init,
       headers: reqHeaders,
+      redirect: "manual",
       signal: composeSignal(30000, dependencies?.signal),
     };
     if (useProxy) {
       reqInit.proxy = PROXY_URL;
     }
-    return await fetcher(targetUrl, reqInit);
+    return await fetcher(target, reqInit);
   };
 
-  let res: Response;
-  try {
-    res = await doFetch(false, buildHeaders(init?.headers));
-  } catch {
-    if (dependencies?.signal?.aborted) {
-      throw new Error("Elscione request aborted by client");
+  const fetchWithRetry = async (target: string): Promise<Response> => {
+    try {
+      return await doFetch(target, false, buildHeaders(init?.headers, target));
+    } catch {
+      if (dependencies?.signal?.aborted) {
+        throw new Error("Elscione request aborted by client");
+      }
+      return await doFetch(target, true, buildHeaders(init?.headers, target));
     }
-    res = await doFetch(true, buildHeaders(init?.headers));
+  };
+
+  let currentUrl = targetUrl;
+  let res: Response = await fetchWithRetry(currentUrl);
+
+  // Handle redirects safely: never follow redirects off allowed Elscione hosts
+  let redirectCount = 0;
+  const MAX_REDIRECTS = 5;
+  while (res.status >= 300 && res.status < 400 && redirectCount < MAX_REDIRECTS) {
+    const location = res.headers.get("location");
+    if (!location) break;
+    const redirectUrlObj = safeCreateUrl(location, currentUrl);
+    if (!redirectUrlObj) {
+      throw new Error(`Invalid redirect location from Elscione: ${location}`);
+    }
+    const nextUrl = redirectUrlObj.toString();
+    if (!isElscioneUrl(nextUrl)) {
+      throw new Error(
+        `Refusing to follow redirect from Elscione to off-host target: ${nextUrl}`,
+      );
+    }
+    redirectCount++;
+    currentUrl = nextUrl;
+    res = await fetchWithRetry(currentUrl);
   }
 
-  updateCookiesFromResponse(res);
+  // Only capture session cookies if landing response URL is an allowed Elscione host
+  if (isElscioneUrl(currentUrl)) {
+    updateCookiesFromResponse(res);
+  }
 
   // Check if response contains Anubis challenge HTML
   const contentType = (res.headers.get("content-type") || "").toLowerCase();
@@ -580,9 +621,11 @@ export async function fetchWithAnubis(
     contentType.includes("application/zip") ||
     contentType.includes("application/octet-stream");
 
-  // Only check for Anubis challenge if it could be an HTML challenge page;
+  // Only check for Anubis challenge if targetUrl is an allowed Elscione host
+  // and response could be an HTML challenge page;
   // NEVER clone or read full text on large binary EPUB/ZIP downloads!
   const couldBeChallenge =
+    isElscioneUrl(currentUrl) &&
     !isBinaryPayload &&
     (res.status === 403 ||
       res.status === 401 ||
@@ -599,15 +642,10 @@ export async function fetchWithAnubis(
       await submitAnubisSolution(targetUrl, solution, redirPath, dependencies);
 
       // Retry original request with newly acquired session cookies
-      try {
-        res = await doFetch(false, buildHeaders(init?.headers));
-      } catch {
-        if (dependencies?.signal?.aborted) {
-          throw new Error("Elscione request retry aborted by client");
-        }
-        res = await doFetch(true, buildHeaders(init?.headers));
+      res = await fetchWithRetry(currentUrl);
+      if (isElscioneUrl(currentUrl)) {
+        updateCookiesFromResponse(res);
       }
-      updateCookiesFromResponse(res);
     }
   }
 
@@ -616,11 +654,27 @@ export async function fetchWithAnubis(
 
 export function safeDecodeURIComponent(str: string): string {
   if (!str) return "";
-  try {
-    return decodeURIComponent(str);
-  } catch {
-    return str;
+  let curr = str;
+  for (let i = 0; i < 15; i++) {
+    try {
+      const nxt = decodeURIComponent(curr);
+      if (nxt === curr) break;
+      curr = nxt;
+    } catch {
+      break;
+    }
   }
+  return curr;
+}
+
+export function normalizeScopedPath(pathStr: string): string {
+  if (!pathStr) return "";
+  const fullyDecoded = safeDecodeURIComponent(pathStr).replace(/\\/g, "/");
+  // If encoded dot/slash sequences or percent signs still linger after 15 decodes, reject as invalid traversal
+  if (/%2[eef]/i.test(fullyDecoded) || /%25/i.test(fullyDecoded)) {
+    return "/__DISALLOWED_RECURSIVE_ENCODING__";
+  }
+  return path.posix.normalize(fullyDecoded);
 }
 
 export function getElscioneHelperPath(dependencies?: ElscioneDependencies): string {
@@ -697,21 +751,39 @@ export async function runElscioneHelperManifest(
     throw new Error(parsed.error || "Elscione helper returned unsuccessful manifest");
   }
 
+  const parsedUrl = parseElscioneUrl(url);
+  const targetFolder = parsedUrl && !parsedUrl.isEpub ? parsedUrl.folderPath : null;
+  const normTargetFolder = targetFolder
+    ? normalizeScopedPath(targetFolder).replace(/\/+$/, "") + "/"
+    : null;
+
+  const filteredVolumes = parsed.volumes
+    .filter((v: any) => {
+      if (!v || typeof v.downloadUrl !== "string") return false;
+      if (!isElscioneUrl(v.downloadUrl)) return false;
+      if (normTargetFolder) {
+        const itemUrl = safeCreateUrl(v.downloadUrl);
+        if (!itemUrl) return false;
+        const normItemPath = normalizeScopedPath(itemUrl.pathname);
+        if (!normItemPath.startsWith(normTargetFolder)) return false;
+      }
+      return true;
+    })
+    .map((v: any) => ({
+      volumeNumber: v.volumeNumber,
+      partNumber: typeof v.partNumber === "number" ? v.partNumber : undefined,
+      filename: v.filename,
+      downloadUrl: v.downloadUrl,
+      title: v.title,
+      size: typeof v.size === "number" ? v.size : undefined,
+    }));
+
   return {
     seriesTitle: parsed.seriesTitle || "Light Novel",
     url: parsed.url || url,
     isSingleVolume: Boolean(parsed.isSingleVolume),
-    totalCount: typeof parsed.totalCount === "number" ? parsed.totalCount : parsed.volumes.length,
-    volumes: parsed.volumes
-      .filter((v: any) => v && typeof v.downloadUrl === "string" && isElscioneUrl(v.downloadUrl))
-      .map((v: any) => ({
-        volumeNumber: v.volumeNumber,
-        partNumber: typeof v.partNumber === "number" ? v.partNumber : undefined,
-        filename: v.filename,
-        downloadUrl: v.downloadUrl,
-        title: v.title,
-        size: typeof v.size === "number" ? v.size : undefined,
-      })),
+    totalCount: filteredVolumes.length,
+    volumes: filteredVolumes,
   };
 }
 
@@ -963,29 +1035,29 @@ export async function extractElscioneManifest(
   const numberedItems: RawItemInfo[] = [];
   const unnumberedItems: RawItemInfo[] = [];
 
-  const unquotedTarget = safeDecodeURIComponent(folderPath);
-  const normTarget = path.posix.normalize(unquotedTarget).replace(/\/+$/, "") + "/";
+  const normTarget = normalizeScopedPath(folderPath).replace(/\/+$/, "") + "/";
 
   for (const item of rawItems) {
     const href = item.href || item.name;
     if (!href || typeof href !== "string") continue;
     if (!/\.epub$/i.test(href)) continue;
 
-    const unquotedRaw = safeDecodeURIComponent(href);
-    const absUnquoted = unquotedRaw.startsWith("/")
-      ? path.posix.normalize(unquotedRaw)
-      : path.posix.normalize(path.posix.join(normTarget, unquotedRaw));
+    // Resolve each listing href against target folder URL
+    const downloadUrlObj = safeCreateUrl(href, targetFolderUrl);
+    if (!downloadUrlObj) continue;
 
-    // Strict folder scoping check
-    if (!absUnquoted.startsWith(normTarget)) continue;
+    // Require host to be an allowed Elscione host
+    if (!isElscioneUrl(downloadUrlObj.toString())) continue;
 
-    const filename = path.posix.basename(absUnquoted);
+    // Require path to stay inside the target folder (with full recursive decode and backslash normalization)
+    const resolvedNormPath = normalizeScopedPath(downloadUrlObj.pathname);
+    if (!resolvedNormPath.startsWith(normTarget)) continue;
+
+    const filename = path.posix.basename(resolvedNormPath);
     const volNum = extractVolumeNumberFromFilename(filename);
     const partMatch = filename.match(/Part\s*(\d+)/i);
     const partNum = partMatch ? parseInt(partMatch[1], 10) : undefined;
-    const downloadUrlObj = safeCreateUrl(href, targetFolderUrl);
-    const downloadUrl = downloadUrlObj ? downloadUrlObj.toString() : "";
-    if (!downloadUrl) continue;
+    const downloadUrl = downloadUrlObj.toString();
 
     const rawInfo: RawItemInfo = {
       volNum,
@@ -1278,6 +1350,11 @@ export async function downloadElscioneEpub(
   dependencies?: ElscioneDependencies,
 ): Promise<void> {
   const normalizedDownloadUrl = cleanAndNormalizeNovelUrl(downloadUrl);
+  if (!isElscioneUrl(normalizedDownloadUrl)) {
+    throw new Error(
+      `Refusing to download EPUB from non-Elscione host: ${normalizedDownloadUrl}`,
+    );
+  }
   const isTestEnv =
     process.argv.some((a: string) => a.includes(".test.") || a.includes("test")) ||
     process.env.NODE_ENV === "test";
