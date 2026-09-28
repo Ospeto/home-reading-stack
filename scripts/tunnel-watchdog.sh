@@ -148,6 +148,35 @@ probe_http_status() {
   echo "$CLEAN_CODE"
 }
 
+is_proxy_reachable() {
+  local p="${1:-}"
+  [ -z "$p" ] && return 1
+  local host_port="${p#*://}"
+  host_port="${host_port%%/*}"
+  # Strip userinfo if present (user:pass@host:port)
+  host_port="${host_port##*@}"
+  local host="${host_port%:*}"
+  local port="${host_port##*:}"
+  if [ "$host" = "$port" ]; then
+    port=80
+  fi
+  nc -z -w 1 "$host" "$port" 2>/dev/null
+}
+
+probe_wan_endpoint() {
+  local TARGET_URL="$1"
+  local INSECURE_FLAG="${2:-0}"
+  local TIMEOUT_SEC="${3:-8}"
+
+  local CODE
+  CODE=$(probe_http_status "$TARGET_URL" "" "$INSECURE_FLAG" "$TIMEOUT_SEC")
+  if [ "$CODE" = "000" ] && [ -n "$PROXY_URL" ] && is_proxy_reachable "$PROXY_URL"; then
+    log "Direct probe for ${TARGET_URL} returned 000; retrying via proxy (${PROXY_URL})..." >&2
+    CODE=$(probe_http_status "$TARGET_URL" "$PROXY_URL" "$INSECURE_FLAG" "$TIMEOUT_SEC")
+  fi
+  echo "$CODE"
+}
+
 send_telegram_alert() {
   local ALERT_TEXT="$1"
   if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_BACKUP_CHAT_ID" ]; then
@@ -328,9 +357,9 @@ fi
 # 4. Monitor & Auto-Heal: Singapore Reverse Tunnel (sg-vps)
 # ==============================================================================
 # Strict TLS validation on port 8443 (INSECURE_FLAG = 0)
-SG_80_CODE=$(probe_http_status "$SG_OPDS_80_URL" "" 0 8)
-SG_8443_CODE=$(probe_http_status "$SG_OPDS_8443_URL" "" 0 8)
-SG_KOSYNC_CODE=$(probe_http_status "$SG_KOSYNC_URL" "" 0 8)
+SG_80_CODE=$(probe_wan_endpoint "$SG_OPDS_80_URL" 0 8)
+SG_8443_CODE=$(probe_wan_endpoint "$SG_OPDS_8443_URL" 0 8)
+SG_KOSYNC_CODE=$(probe_wan_endpoint "$SG_KOSYNC_URL" 0 8)
 
 # Check for collision marker in recent logs
 SG_COLLISION=0
@@ -372,9 +401,9 @@ else
 
   # Step D: Allow connection to establish, then re-probe with strict TLS
   sleep 4
-  SG_RE_80_CODE=$(probe_http_status "$SG_OPDS_80_URL" "" 0 8)
-  SG_RE_8443_CODE=$(probe_http_status "$SG_OPDS_8443_URL" "" 0 8)
-  SG_RE_KOSYNC_CODE=$(probe_http_status "$SG_KOSYNC_URL" "" 0 8)
+  SG_RE_80_CODE=$(probe_wan_endpoint "$SG_OPDS_80_URL" 0 8)
+  SG_RE_8443_CODE=$(probe_wan_endpoint "$SG_OPDS_8443_URL" 0 8)
+  SG_RE_KOSYNC_CODE=$(probe_wan_endpoint "$SG_KOSYNC_URL" 0 8)
 
   if { [ "$SG_RE_80_CODE" = "200" ] || [ "$SG_RE_80_CODE" = "302" ]; } && \
      { [ "$SG_RE_8443_CODE" = "200" ] || [ "$SG_RE_8443_CODE" = "302" ]; } && \
