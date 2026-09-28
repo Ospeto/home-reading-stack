@@ -12,6 +12,8 @@ import {
   getCalibreDbETag,
   getBookPath,
   getMasterCoverPath,
+  getCoverCacheDir,
+  purgeCoverCache,
   SipsConcurrencyLimiter,
   sipsLimiter,
   downscaleImageAsync,
@@ -701,6 +703,65 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
       const jpegBytes = new Uint8Array(await nonWebpRes.arrayBuffer());
       expect(jpegBytes[0]).toBe(0xff);
       expect(jpegBytes[1]).toBe(0xd8);
+    });
+
+    it("Dynamic mtime invalidation regenerates cover when master cover.jpg is updated", async () => {
+      const masterPath = getMasterCoverPath(1)!;
+      expect(fs.existsSync(masterPath)).toBe(true);
+
+      // 1. Initial thumbnail request generates cached thumbnail
+      const initialReq = new Request("http://127.0.0.1:8086/api/books/1/cover?w=128", { method: "GET" });
+      const initialRes = await handleRequest(initialReq);
+      expect(initialRes.status).toBe(200);
+
+      const cacheDir = getCoverCacheDir();
+      const thumbJpg = path.join(cacheDir, "1_128.jpg");
+      expect(fs.existsSync(thumbJpg)).toBe(true);
+
+      // 2. Artificially back-date the cached thumbnail
+      const pastTime = new Date(Date.now() - 30000);
+      fs.utimesSync(thumbJpg, pastTime, pastTime);
+
+      // 3. Update master cover.jpg with a fresh timestamp and distinct data
+      const nowTime = new Date();
+      fs.utimesSync(masterPath, nowTime, nowTime);
+
+      // 4. Requesting cover again must detect that master cover is newer than cache and regenerate
+      const freshReq = new Request("http://127.0.0.1:8086/api/books/1/cover?w=128", { method: "GET" });
+      const freshRes = await handleRequest(freshReq);
+      expect(freshRes.status).toBe(200);
+
+      // Verify the cached thumbnail's mtime was updated to >= nowTime
+      const updatedThumbMtime = fs.statSync(thumbJpg).mtimeMs;
+      expect(updatedThumbMtime).toBeGreaterThanOrEqual(pastTime.getTime());
+    });
+
+    it("purgeCoverCache removes all cached thumbnail variants and master WebP files", () => {
+      const cacheDir = getCoverCacheDir();
+      const thumbJpg = path.join(cacheDir, "101_256.jpg");
+      const thumbWebp = path.join(cacheDir, "101_256.webp");
+      const masterWebp = path.join(cacheDir, "master_101.webp");
+      const otherBookThumb = path.join(cacheDir, "99_256.webp");
+
+      fs.writeFileSync(thumbJpg, "dummy-jpg");
+      fs.writeFileSync(thumbWebp, "dummy-webp");
+      fs.writeFileSync(masterWebp, "dummy-master-webp");
+      fs.writeFileSync(otherBookThumb, "other-book-webp");
+
+      expect(fs.existsSync(thumbJpg)).toBe(true);
+      expect(fs.existsSync(thumbWebp)).toBe(true);
+      expect(fs.existsSync(masterWebp)).toBe(true);
+      expect(fs.existsSync(otherBookThumb)).toBe(true);
+
+      const purged = purgeCoverCache(101);
+      expect(purged).toBe(3);
+
+      expect(fs.existsSync(thumbJpg)).toBe(false);
+      expect(fs.existsSync(thumbWebp)).toBe(false);
+      expect(fs.existsSync(masterWebp)).toBe(false);
+      expect(fs.existsSync(otherBookThumb)).toBe(true); // Unaffected
+
+      fs.unlinkSync(otherBookThumb);
     });
 
     it("Cover downscaling falls back safely to JPEG without cache poisoning if WebP fails", async () => {

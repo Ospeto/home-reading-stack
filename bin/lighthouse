@@ -1608,6 +1608,15 @@ cmd_restore() {
   echo "Run 'bin/lighthouse status' or 'bin/lighthouse up' to verify or start the stack."
 }
 
+cmd_heal_covers() {
+  local script_path="${LIGHTHOUSE_ROOT}/scripts/heal-volume-covers.ts"
+  if [ ! -f "$script_path" ]; then
+    echo "Error: ${script_path} not found" >&2
+    exit 1
+  fi
+  exec bun run "$script_path" "$@"
+}
+
 cmd_categorize() {
   local script_path="${LIGHTHOUSE_ROOT}/scripts/categorize-library.ts"
   if [ ! -f "$script_path" ]; then
@@ -1768,6 +1777,7 @@ Commands:
   enrich-synopsis [options] Batch enrich missing book synopses from local EPUBs and online APIs
   sync-obsidian [options]  Sync highlights and reading notes from KOReader/Kindle to Obsidian
   sync-kindle [options]    Two-way sync: push books & pull highlights from USB-C Kindle/e-Reader
+  heal-covers [options]    Audit & heal Calibre volume covers, purge stale thumbnail caches
   firecrawl <cmd> [options] Control self-hosted Firecrawl on-demand cluster (status|up|down)
   backup-ssd [options]     Incremental whole-library backup to external SSD (rsync + hot SQLite DBs)
   install-daemons          Dynamically generate and register macOS LaunchAgents for current user
@@ -1807,6 +1817,13 @@ Sync-Kindle Options:
   --vault-path <path>      Custom Obsidian books directory (default: ~/MAS/03-Resources/Books)
   --eject                  Safely unmount/eject Kindle upon successful sync
   --verbose                Enable detailed progress logging
+Heal-Covers Options:
+  --dry-run                Preview stale/duplicate thumbnail cache detection without deleting (default)
+  --apply                  Purge stale thumbnails and restore missing covers from EPUBs
+  --series <name>          Filter healing to a specific series title
+  --book-id <id>           Filter healing to a specific book ID
+  --verbose                Enable verbose logging of cover and cache inspection
+
 Firecrawl Commands:
   status                   Inspect cluster running state, endpoint URL, and auto-sleep timer (default)
   up                       Wake and start containers via docker compose
@@ -1854,6 +1871,7 @@ case "$ACTION" in
   health) cmd_health "$@" ;;
   categorize) cmd_categorize "$@" ;;
   enrich-synopsis) cmd_enrich_synopsis "$@" ;;
+  heal-covers) cmd_heal_covers "$@" ;;
   sync-obsidian) cmd_sync_obsidian "$@" ;;
   sync-kindle) cmd_sync_kindle "$@" ;;
   firecrawl) cmd_firecrawl "$@" ;;

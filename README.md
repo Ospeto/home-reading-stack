@@ -108,6 +108,7 @@ LightHouse includes a portable management CLI (`bin/lighthouse`) for service lif
 | `bin/lighthouse health` | Probes HTTP/TCP endpoints, checks response codes, and auto-heals stale remote listeners (`fuser -k`). |
 | `bin/lighthouse categorize` | Classifies book languages (`mya`, `eng`, `other`), assigns standardized category tags, and prunes promotional tags. |
 | `bin/lighthouse enrich-synopsis` | Populates descriptions for Calibre books prioritizing per-volume lookups (EPUB metadata, online volume queries) with AniList series fallback and duplicate series overview re-enrichment. |
+| `bin/lighthouse heal-covers` | Audits and heals Calibre on-disk volume covers from EPUBs and purges stale/duplicate downscaled thumbnail caches. |
 | `bin/lighthouse sync-kindle` | Two-way USB-C sync: pushes active/unread books from Calibre to Kindle (/Volumes/Kindle/books) and pulls clippings & KOReader highlights to Obsidian. |
 | `bin/lighthouse sync-obsidian` | Syncs highlights, notes, and progress from KOReader/Kindle to Obsidian with idempotent markers. |
 | `bin/lighthouse firecrawl <cmd>` | Control self-hosted Firecrawl on-demand cluster (`status`, `up`, `down`) to conserve host RAM (~2.5 GB). |
@@ -143,6 +144,12 @@ bin/lighthouse enrich-synopsis --apply --limit 20 --source=online
 
 # Re-enrich volumes holding duplicate series overviews with true volume synopses
 bin/lighthouse enrich-synopsis --apply --re-enrich-duplicates
+
+# Preview stale/duplicate cover thumbnail audit across library (safe dry-run)
+bin/lighthouse heal-covers
+
+# Apply cover healing: restore missing covers from EPUBs and purge stale thumbnail caches
+bin/lighthouse heal-covers --apply
 
 # Preview Type-C USB Kindle two-way sync (safe dry-run)
 bin/lighthouse sync-kindle

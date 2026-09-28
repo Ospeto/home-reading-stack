@@ -43,6 +43,7 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(stdout).toContain("health");
       expect(stdout).toContain("categorize");
       expect(stdout).toContain("enrich-synopsis");
+      expect(stdout).toContain("heal-covers");
       expect(stdout).toContain("sync-obsidian");
       expect(stdout).toContain("sync-kindle");
       expect(stdout).toContain("install-daemons");
@@ -74,6 +75,19 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(res.stdout).toContain("--limit");
       expect(res.stdout).toContain("--source");
     });
+    it("bin/lighthouse heal-covers --help outputs heal-covers options", () => {
+      const res = spawnSync(LIGHTHOUSE_BIN, ["heal-covers", "--help"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain("LightHouse Cover Cache & Volume Integrity Healer");
+      expect(res.stdout).toContain("--dry-run");
+      expect(res.stdout).toContain("--apply");
+      expect(res.stdout).toContain("--series");
+      expect(res.stdout).toContain("--book-id");
+    });
+
     it("bin/lighthouse sync-obsidian --help outputs sync-obsidian options", () => {
       const res = spawnSync(LIGHTHOUSE_BIN, ["sync-obsidian", "--help"], {
         encoding: "utf8",
