@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u
 
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+export PATH="${PATH}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
 # Robust symlink resolution loop
 SOURCE="${BASH_SOURCE[0]:-${0}}"
@@ -338,9 +338,11 @@ if [ -f "$SG_LOG_FILE" ] && tail -n 15 "$SG_LOG_FILE" 2>/dev/null | grep -q "rem
   SG_COLLISION=1
 fi
 
-# Singapore tunnel is healthy when all endpoints respond 200.
-# Only trigger auto-healing if at least one endpoint probe has ALSO failed (probe status != 200).
-if [ "$SG_80_CODE" = "200" ] && [ "$SG_8443_CODE" = "200" ] && [ "$SG_KOSYNC_CODE" = "200" ]; then
+# Singapore tunnel is healthy when probes return acceptable status codes (200 or 302).
+# Only trigger auto-healing if at least one endpoint probe has ALSO failed (probe status != 200 and != 302).
+if { [ "$SG_80_CODE" = "200" ] || [ "$SG_80_CODE" = "302" ]; } && \
+   { [ "$SG_8443_CODE" = "200" ] || [ "$SG_8443_CODE" = "302" ]; } && \
+   { [ "$SG_KOSYNC_CODE" = "200" ] || [ "$SG_KOSYNC_CODE" = "302" ]; }; then
   PREV_SG_FAILURES=$(cat "$SG_FAIL_COUNT_FILE" 2>/dev/null || echo 0)
   if [ "$PREV_SG_FAILURES" -gt 0 ]; then
     log "Singapore Tunnel recovered! All endpoints healthy. Resetting SG failure counter (was ${PREV_SG_FAILURES})."
@@ -354,7 +356,7 @@ else
 
   # Step A: Terminate hanging local SSH process for Singapore tunnel using precise port-forwarding pattern
   log "Auto-healing (Singapore): Terminating stale local tunnel process..."
-  pkill -f "ssh.*${LOCAL_HTTP_PORT}.*${SG_REMOTE_HOST}" 2>/dev/null || true
+  pkill -f "ssh.*-R.*127\.0\.0\.1:${LOCAL_HTTP_PORT}.*${SG_REMOTE_HOST}" 2>/dev/null || true
 
   # Step B: Clear orphaned listeners on remote Singapore VPS (sg-vps)
   log "Auto-healing (Singapore): Clearing orphaned sockets on remote host ${SG_REMOTE_HOST}..."
@@ -374,7 +376,9 @@ else
   SG_RE_8443_CODE=$(probe_http_status "$SG_OPDS_8443_URL" "" 0 8)
   SG_RE_KOSYNC_CODE=$(probe_http_status "$SG_KOSYNC_URL" "" 0 8)
 
-  if [ "$SG_RE_80_CODE" = "200" ] && [ "$SG_RE_8443_CODE" = "200" ] && [ "$SG_RE_KOSYNC_CODE" = "200" ]; then
+  if { [ "$SG_RE_80_CODE" = "200" ] || [ "$SG_RE_80_CODE" = "302" ]; } && \
+     { [ "$SG_RE_8443_CODE" = "200" ] || [ "$SG_RE_8443_CODE" = "302" ]; } && \
+     { [ "$SG_RE_KOSYNC_CODE" = "200" ] || [ "$SG_RE_KOSYNC_CODE" = "302" ]; }; then
     log "Auto-healing (Singapore) SUCCESS: Singapore tunnel restored and verified healthy. Resetting failure counter."
     echo 0 > "$SG_FAIL_COUNT_FILE"
     rm -f "$SG_ALERT_TRACK_FILE" 2>/dev/null || true
