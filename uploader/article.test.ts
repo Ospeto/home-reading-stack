@@ -18,7 +18,11 @@ import {
   convertHtmlToEpub,
   ingestArticleFromUrl,
   extractUrlFromText,
+  isBotChallengeTitle,
+  isCloudflareChallenge,
 } from "./article";
+import { isElscioneUrl } from "./elscione";
+import { evaluateJunkGate } from "./jev-shelf";
 import { setFirecrawlEnabled } from "./firecrawl";
 
 let originalFetch = globalThis.fetch;
@@ -738,6 +742,24 @@ describe("URL Extraction from Conversational Text (extractUrlFromText)", () => {
     );
   });
 
+  test("extracts server.elsci.one URLs with spaces in path and normalizes them", () => {
+    const text =
+      "Check this out: https://server.elsci.one/Officially Translated Light Novels/Are You Okay With a Slightly Older Girlfriend/";
+    const url = extractUrlFromText(text);
+    expect(url).toBe(
+      "https://server.elsci.one/Officially%20Translated%20Light%20Novels/Are%20You%20Okay%20With%20a%20Slightly%20Older%20Girlfriend/",
+    );
+  });
+
+  test("extracts server.elsci.one URLs missing https:// protocol and prepends it", () => {
+    const text =
+      "server.elsci.one/Officially Translated Light Novels/Are You Okay With a Slightly Older Girlfriend/";
+    const url = extractUrlFromText(text);
+    expect(url).toBe(
+      "https://server.elsci.one/Officially%20Translated%20Light%20Novels/Are%20You%20Okay%20With%20a%20Slightly%20Older%20Girlfriend/",
+    );
+  });
+
   test("extracts server.elscione.com URLs missing https:// protocol and prepends it", () => {
     const text =
       "server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/";
@@ -889,6 +911,74 @@ describe("URL Extraction from Conversational Text (extractUrlFromText)", () => {
 
     const tMeLink = "Join our channel https://t.me/reading_stack";
     expect(extractUrlFromText(tMeLink)).toBeNull();
+  });
+
+  test("rejects bot challenge pages in article ingestion and evaluateJunkGate (including HTML entities)", async () => {
+    const challengeTitles = [
+      "Making sure you're not a bot!",
+      "Making sure you’re not a bot!",
+      "Making sure you&#39;re not a bot!",
+      "Making sure you&#x27;re not a bot!",
+      "Making sure you&apos;re not a bot!",
+      "Making sure you&rsquo;re not a bot!",
+      "Attention Required! | Cloudflare",
+      "Just a moment...",
+      "Just a moment…",
+      "Just a moment&hellip;",
+      "Anubis Challenge",
+    ];
+
+    for (const title of challengeTitles) {
+      expect(isBotChallengeTitle(title)).toBe(true);
+      const gateResult = await evaluateJunkGate(title, "challenge.epub", "Unknown");
+      expect(gateResult.quarantined).toBe(true);
+      expect(gateResult.action).toBe("deterministic_quarantine");
+    }
+
+    expect(isBotChallengeTitle("Normal Light Novel Title")).toBe(false);
+    expect(isBotChallengeTitle("Just a moment... of peace")).toBe(false);
+    expect(isBotChallengeTitle("Just a moment… of peace")).toBe(false);
+  });
+
+  test("isCloudflareChallenge detects Anubis and Cloudflare challenge variants", () => {
+    expect(isCloudflareChallenge("<title>Making sure you&#x27;re not a bot!</title>")).toBe(true);
+    expect(isCloudflareChallenge("<title>Making sure you&#39;re not a bot!</title>")).toBe(true);
+    expect(isCloudflareChallenge("<title>Just a moment...</title>")).toBe(true);
+    expect(isCloudflareChallenge("<title>Just a moment…</title>")).toBe(true);
+    expect(isCloudflareChallenge("<title>Just a moment&hellip;</title>")).toBe(true);
+    expect(isCloudflareChallenge("<title>Anubis Challenge</title>")).toBe(true);
+    expect(isCloudflareChallenge("<p>Normal article content</p>")).toBe(false);
+  });
+
+  test("extracts space-containing Elscione URLs after colon or equals delimiter", () => {
+    const afterColon =
+      "Read:https://server.elsci.one/Officially Translated Light Novels/Are You Okay With a Slightly Older Girlfriend/";
+    expect(extractUrlFromText(afterColon)).toBe(
+      "https://server.elsci.one/Officially%20Translated%20Light%20Novels/Are%20You%20Okay%20With%20a%20Slightly%20Older%20Girlfriend/",
+    );
+
+    const afterEquals =
+      "url=https://server.elsci.one/Officially Translated Light Novels/Are You Okay With a Slightly Older Girlfriend/";
+    expect(extractUrlFromText(afterEquals)).toBe(
+      "https://server.elsci.one/Officially%20Translated%20Light%20Novels/Are%20You%20Okay%20With%20a%20Slightly%20Older%20Girlfriend/",
+    );
+  });
+
+  test("does not match Elscione domain mid-label or mid-path", () => {
+    const notElsci = "https://notelsci.one/path";
+    const evilElsci = "https://evil-elsci.one/secret";
+    const notElscione = "https://notelscione.com/story";
+    const whyLeft = "https://example.com/why-i-left-elscione.com/story";
+
+    expect(isElscioneUrl(notElsci)).toBe(false);
+    expect(isElscioneUrl(evilElsci)).toBe(false);
+    expect(isElscioneUrl(notElscione)).toBe(false);
+    expect(isElscioneUrl(whyLeft)).toBe(false);
+
+    expect(extractUrlFromText(`Check ${notElsci}`)).toBe(notElsci);
+    expect(extractUrlFromText(`Check ${evilElsci}`)).toBe(evilElsci);
+    expect(extractUrlFromText(`Check ${notElscione}`)).toBe(notElscione);
+    expect(extractUrlFromText(`Check ${whyLeft}`)).toBe(whyLeft);
   });
 });
 

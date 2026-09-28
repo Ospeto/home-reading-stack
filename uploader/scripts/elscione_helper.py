@@ -34,17 +34,48 @@ MAX_VOLUMES_PER_REQUEST = 50
 SUBPROCESS_TIMEOUT = 30
 DOWNLOAD_TIMEOUT = 300  # 5 minutes for streaming large EPUBs
 
-ALLOWED_HOSTS = {"server.elscione.com", "elscione.com"}
-ALLOWED_HOST_SUFFIX = ".elscione.com"
+ALLOWED_HOSTS = {
+    "server.elscione.com",
+    "elscione.com",
+    "server.elsci.one",
+    "elsci.one",
+}
+ALLOWED_HOST_SUFFIXES = (".elscione.com", ".elsci.one")
 
 
-def assert_elscione_host(hostname: str) -> None:
+def assert_elscione_host(host_input: str) -> str:
     """
-    SSRF guard: verifies that target host is strictly server.elscione.com or *.elscione.com.
+    SSRF guard: verifies that target host is strictly server.elscione.com / server.elsci.one or *.elscione.com / *.elsci.one.
+    Rejects userinfo (@, %40), encoded characters, and invalid port strings.
+    Returns the validated, clean hostname string.
     """
-    h = (hostname or "").lower().rstrip(".")
-    if h not in ALLOWED_HOSTS and not h.endswith(ALLOWED_HOST_SUFFIX):
-        raise RuntimeError(f"Refusing non-Elscione host: {hostname}")
+    if not host_input:
+        raise RuntimeError("Refusing empty host")
+
+    raw = host_input.strip().lower()
+    # Reject userinfo or URL-encoded userinfo / host bytes
+    if "@" in raw or "%" in raw:
+        raise RuntimeError(f"Refusing credentials or encoded characters in host: {host_input}")
+
+    # If port is present (e.g. host:443), strictly validate that port is ASCII numeric and within 1..65535
+    if ":" in raw:
+        parts = raw.split(":", 1)
+        raw_host = parts[0]
+        port_str = parts[1]
+        if not port_str.isascii() or not port_str.isdigit():
+            raise RuntimeError(f"Invalid non-numeric port in host: {host_input}")
+        port_num = int(port_str)
+        if not (1 <= port_num <= 65535):
+            raise RuntimeError(f"Port out of range (1..65535) in host: {host_input}")
+    else:
+        raw_host = raw
+
+    h = raw_host.rstrip(".")
+    if not h or h.startswith("."):
+        raise RuntimeError(f"Refusing malformed host: {host_input}")
+    if h not in ALLOWED_HOSTS and not any(h.endswith(suffix) for suffix in ALLOWED_HOST_SUFFIXES):
+        raise RuntimeError(f"Refusing non-Elscione host: {host_input}")
+    return h
 
 
 def safe_unquote(path_str: str) -> str:
@@ -64,14 +95,25 @@ def normalize_elscione_url(url: str) -> dict:
     Normalizes any Elscione URL variation (quotes, spaces, encoded %27, trailing slashes).
     """
     clean = url.strip()
+    clean_lower = clean.lower()
     if clean.startswith("//"):
         clean = "https:" + clean
-    elif not clean.startswith("http://") and not clean.startswith("https://"):
+    elif not clean_lower.startswith("http://") and not clean_lower.startswith("https://"):
         clean = "https://" + clean.lstrip("/")
 
-    parts = urlsplit(clean)
-    hostname = parts.netloc.lower()
-    assert_elscione_host(hostname)
+    # Safe urlsplit
+    try:
+        parts = urlsplit(clean)
+    except Exception as e:
+        raise RuntimeError(f"Malformed URL: {url} ({e})") from e
+
+    if not parts.netloc:
+        raise RuntimeError(f"Invalid URL missing network location: {url}")
+
+    # Validate netloc first with assert_elscione_host (catches out-of-range ports and bad chars cleanly)
+    hostname = assert_elscione_host(parts.netloc)
+    if parts.hostname:
+        assert_elscione_host(parts.hostname)
 
     unquoted_path = safe_unquote(parts.path)
     is_epub = unquoted_path.lower().endswith(".epub")
@@ -80,7 +122,15 @@ def normalize_elscione_url(url: str) -> dict:
 
     # Standard browser quoting: safe='/'
     normalized_path = quote(unquoted_path, safe="/")
-    canonical_url = f"{parts.scheme}://{hostname}{normalized_path}"
+    port_part = ""
+    if ":" in parts.netloc:
+        p_str = parts.netloc.split(":", 1)[1]
+        if p_str.isascii() and p_str.isdigit():
+            p_val = int(p_str)
+            if p_val not in (80, 443):
+                port_part = f":{p_val}"
+
+    canonical_url = f"{parts.scheme.lower()}://{hostname}{port_part}{normalized_path}"
 
     segments = [s for s in unquoted_path.split("/") if s]
     if is_epub:

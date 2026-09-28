@@ -3,6 +3,40 @@ import fs from "node:fs";
 import os from "node:os";
 import { safeFetchWithSsrf, cleanString } from "./security";
 
+function decodeEntitiesLocal(str: string): string {
+  if (!str) return "";
+  return str
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&lsquo;/g, "'")
+    .replace(/&rsquo;/g, "'")
+    .replace(/&ldquo;/g, '"')
+    .replace(/&rdquo;/g, '"')
+    .replace(/&mdash;/g, "—")
+    .replace(/&ndash;/g, "–")
+    .replace(/&hellip;/g, "...")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&#(\d+);/g, (_, dec) => {
+      try {
+        return String.fromCharCode(parseInt(dec, 10));
+      } catch {
+        return "";
+      }
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
+      try {
+        return String.fromCharCode(parseInt(hex, 16));
+      } catch {
+        return "";
+      }
+    });
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -224,10 +258,12 @@ export function isDeterministicJunk(title: string, filename: string = ""): boole
     /truncated[_\s-]+\d{8,}[_\s-]+[a-z0-9]{2,10}(?:\.epub)?$/i,
     /healed[_\s-]+book[_\s-]+\d{8,}/i,
     /^truncated_\d+_[a-z0-9]+\.epub$/i,
+    /^(?:Making sure you(?:'re|’re|\s+are)\s+not\s+a\s+bot!?|Attention Required!\s*\|\s*Cloudflare|Just a moment(?:\.\.\.|…)|Anubis Challenge)$/i,
+    /\banubis(?:_challenge|\s+challenge)\b/i,
   ];
 
   for (const str of candidates) {
-    const trimmed = str.trim();
+    const trimmed = decodeEntitiesLocal(str).trim();
     for (const pat of patterns) {
       if (pat.test(trimmed)) {
         return true;

@@ -204,6 +204,27 @@ describe("Elscione Light Novel Ingestion Module", () => {
       ).toBe(true);
     });
 
+    it("isElscioneUrl correctly identifies server.elsci.one and elsci.one mirror URLs", () => {
+      expect(
+        isElscioneUrl(
+          "https://server.elsci.one/Officially%20Translated%20Light%20Novels/Are%20You%20Okay%20With%20a%20Slightly%20Older%20Girlfriend/",
+        ),
+      ).toBe(true);
+      expect(
+        isElscioneUrl(
+          "https://server.elsci.one/Officially%20Translated%20Light%20Novels/Are%20You%20Okay%20With%20a%20Slightly%20Older%20Girlfriend/Volume%2001.epub",
+        ),
+      ).toBe(true);
+      expect(isElscioneUrl("http://server.elsci.one/test")).toBe(true);
+      expect(isElscioneUrl("https://mirror.server.elsci.one/folder/")).toBe(true);
+      expect(isElscioneUrl("https://elsci.one/folder/")).toBe(true);
+      expect(
+        isElscioneUrl(
+          "server.elsci.one/Officially Translated Light Novels/Are You Okay With a Slightly Older Girlfriend/",
+        ),
+      ).toBe(true);
+    });
+
     it("isElscioneUrl rejects non-Elscione or invalid URLs", () => {
       expect(isElscioneUrl("https://lnori.com/series/8046")).toBe(false);
       expect(isElscioneUrl("https://example.com/books/")).toBe(false);
@@ -233,6 +254,19 @@ describe("Elscione Light Novel Ingestion Module", () => {
       expect(parsed!.seriesTitle).toBe("Overlord");
       expect(parsed!.folderPath).toBe(
         "/Officially%20Translated%20Light%20Novels/Overlord/",
+      );
+    });
+
+    it("parseElscioneUrl correctly parses server.elsci.one URLs", () => {
+      const parsed = parseElscioneUrl(
+        "https://server.elsci.one/Officially%20Translated%20Light%20Novels/Are%20You%20Okay%20With%20a%20Slightly%20Older%20Girlfriend/",
+      );
+      expect(parsed).not.toBeNull();
+      expect(parsed!.hostname).toBe("server.elsci.one");
+      expect(parsed!.isEpub).toBe(false);
+      expect(parsed!.seriesTitle).toBe("Are You Okay With a Slightly Older Girlfriend");
+      expect(parsed!.folderPath).toBe(
+        "/Officially%20Translated%20Light%20Novels/Are%20You%20Okay%20With%20a%20Slightly%20Older%20Girlfriend/",
       );
     });
 

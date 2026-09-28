@@ -3500,6 +3500,85 @@ describe("Lnori Queue & Telegram Bot Integration", () => {
       resetLocalLnoriQueueForTest();
     }
   });
+  it("handleTextMessage detects server.elsci.one mirror URL with raw spaces and missing protocol", async () => {
+    resetLocalLnoriQueueForTest();
+    const sentTelegramBodies: any[] = [];
+    const origFetch = globalThis.fetch;
+    let postedIngestUrl = "";
+
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentTelegramBodies.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 1013 } }), {
+          status: 200,
+        });
+      }
+      if (url.includes("/api/lnori/ingest")) {
+        const body = JSON.parse(init?.body || "{}");
+        postedIngestUrl = body.url;
+        return new Response(
+          JSON.stringify({
+            success: true,
+            queued: true,
+            queuePosition: 1,
+            queueLength: 1,
+            runId: "elsci-one-123",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.includes("/api/lnori/progress")) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            active: false,
+            state: {
+              runId: "elsci-one-123",
+              phase: "complete",
+              total: 1,
+              data: {
+                success: true,
+                seriesTitle: "Are You Okay With a Slightly Older Girlfriend",
+                author: "Kota Nozomi",
+                importedCount: 1,
+                skippedCount: 0,
+                totalCount: 1,
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      await handleTextMessage(
+        12345,
+        "Read this novel: https://server.elsci.one/Officially%20Translated%20Light%20Novels/Are%20You%20Okay%20With%20a%20Slightly%20Older%20Girlfriend/",
+        "reader",
+      );
+
+      // Verify it was detected as Elscione Light Novel Series rather than a web article
+      expect(sentTelegramBodies.length).toBeGreaterThan(0);
+      const firstMsg = sentTelegramBodies[0];
+      expect(firstMsg.text).toContain("Detected Elscione Light Novel Series");
+
+      // Verify URL sent to ingest queue
+      expect(postedIngestUrl).toBe(
+        "https://server.elsci.one/Officially%20Translated%20Light%20Novels/Are%20You%20Okay%20With%20a%20Slightly%20Older%20Girlfriend/",
+      );
+
+      const lastMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(lastMsg.text).toContain("Light Novel Series Imported Successfully!");
+      expect(lastMsg.text).toContain("Are You Okay With a Slightly Older Girlfriend");
+    } finally {
+      globalThis.fetch = origFetch;
+      resetLocalLnoriQueueForTest();
+    }
+  });
 
   describe("/get and /get@bot Command Parsing", () => {
     it("handles /get@bot <id> and /get <id> identically without falling into default EPUB prompt", async () => {
