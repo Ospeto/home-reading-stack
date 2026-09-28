@@ -143,7 +143,7 @@ function cleanExtractedUrl(urlStr: string): string {
  */
 function extractElscioneUrlCandidate(text: string): string | null {
   const elscioneRegex =
-    /(?:^|[\s<>"'(\[\u201C\u2018])((?:https?:\/\/|\/\/)?(?:[a-zA-Z0-9-]+\.)*(?:server\.)?(?:elscione\.com|elsci\.one)\/[^\r\n<>"\[\]{}|\\^`\u201C\u201D\u2018\u2019]+)/gi;
+    /(?:^|[\s<>"'(\[\u201C\u2018:=])((?:https?:\/\/|\/\/)?(?:[a-zA-Z0-9-]+\.)*(?:server\.)?(?:elscione\.com|elsci\.one)\/[^\r\n<>"\[\]{}|\\^`\u201C\u201D\u2018\u2019]+)/gi;
   const matches: string[] = [];
   let m: RegExpExecArray | null;
   while ((m = elscioneRegex.exec(text)) !== null) {
@@ -710,6 +710,8 @@ export function isCloudflareChallenge(html: string): boolean {
   if (!html) return false;
   return (
     html.includes("Just a moment...") ||
+    html.includes("Just a moment…") ||
+    html.includes("Just a moment&hellip;") ||
     html.includes("cf-browser-verification") ||
     html.includes("Attention Required! | Cloudflare") ||
     html.includes("challenge-running") ||
@@ -1358,16 +1360,16 @@ export async function extractArticleViaJina(
 
   const cleanedHtml = markdownToHtml(cleanedBodyMarkdown);
 
-  // Validate content quality & detect paywalls or garbage dumps
-  const paywallCheck = isPaywallOrGarbage(cleanedBodyMarkdown);
-  if (paywallCheck.isPaywall) {
-    throw new Error(PAYWALL_ERROR_MESSAGE);
-  }
-
   if (isBotChallengeTitle(parsed.title || "") || isBotChallengeTitle(title)) {
     throw new Error(
       "Site returned a bot verification or challenge page (e.g. Cloudflare / Anubis). Please paste the article text directly or access the source page.",
     );
+  }
+
+  // Validate content quality & detect paywalls or garbage dumps
+  const paywallCheck = isPaywallOrGarbage(cleanedBodyMarkdown);
+  if (paywallCheck.isPaywall) {
+    throw new Error(PAYWALL_ERROR_MESSAGE);
   }
 
   const textOnly = decodeHtmlEntities(
@@ -1555,18 +1557,18 @@ export async function buildArticleFromFirecrawl(
   validatedHref: string,
   hostname: string,
 ): Promise<ExtractedArticle | null> {
+  if (isBotChallengeTitle(fcArticle.title || "")) {
+    console.log(
+      `[Article] Firecrawl content rejected as bot challenge page ("${fcArticle.title}"), falling back...`,
+    );
+    return null;
+  }
+
   const cleanedBodyMarkdown = cleanMarkdownNoise(fcArticle.markdown);
   const paywallCheck = isPaywallOrGarbage(cleanedBodyMarkdown);
   if (paywallCheck.isPaywall) {
     console.log(
       `[Article] Firecrawl content failed paywall check (${paywallCheck.reason || "detected paywall"}), falling back...`,
-    );
-    return null;
-  }
-
-  if (isBotChallengeTitle(fcArticle.title || "")) {
-    console.log(
-      `[Article] Firecrawl content rejected as bot challenge page ("${fcArticle.title}"), falling back...`,
     );
     return null;
   }
@@ -1988,16 +1990,17 @@ export async function extractArticle(
   cleaned = cleaned.replace(/<p\s*>\s*(&nbsp;|\s)*<\/p>/gi, "");
   cleaned = cleaned.replace(/<div\s*>\s*<\/div>/gi, "");
 
-  // Validate content quality & detect paywalls or garbage dumps
-  const paywallCheck = isPaywallOrGarbage(cleaned);
-  if (paywallCheck.isPaywall) {
-    throw new Error(PAYWALL_ERROR_MESSAGE);
-  }
-
+  // Check for bot verification or challenge pages before paywall/garbage checks
   if (isBotChallengeTitle(title)) {
     throw new Error(
       "Site returned a bot verification or challenge page (e.g. Cloudflare / Anubis). Please paste the article text directly or access the source page.",
     );
+  }
+
+  // Validate content quality & detect paywalls or garbage dumps
+  const paywallCheck = isPaywallOrGarbage(cleaned);
+  if (paywallCheck.isPaywall) {
+    throw new Error(PAYWALL_ERROR_MESSAGE);
   }
 
   // Calculate word count & reading time

@@ -944,8 +944,24 @@ describe("URL Extraction from Conversational Text (extractUrlFromText)", () => {
     expect(isCloudflareChallenge("<title>Making sure you&#x27;re not a bot!</title>")).toBe(true);
     expect(isCloudflareChallenge("<title>Making sure you&#39;re not a bot!</title>")).toBe(true);
     expect(isCloudflareChallenge("<title>Just a moment...</title>")).toBe(true);
+    expect(isCloudflareChallenge("<title>Just a moment…</title>")).toBe(true);
+    expect(isCloudflareChallenge("<title>Just a moment&hellip;</title>")).toBe(true);
     expect(isCloudflareChallenge("<title>Anubis Challenge</title>")).toBe(true);
     expect(isCloudflareChallenge("<p>Normal article content</p>")).toBe(false);
+  });
+
+  test("extracts space-containing Elscione URLs after colon or equals delimiter", () => {
+    const afterColon =
+      "Read:https://server.elsci.one/Officially Translated Light Novels/Are You Okay With a Slightly Older Girlfriend/";
+    expect(extractUrlFromText(afterColon)).toBe(
+      "https://server.elsci.one/Officially%20Translated%20Light%20Novels/Are%20You%20Okay%20With%20a%20Slightly%20Older%20Girlfriend/",
+    );
+
+    const afterEquals =
+      "url=https://server.elsci.one/Officially Translated Light Novels/Are You Okay With a Slightly Older Girlfriend/";
+    expect(extractUrlFromText(afterEquals)).toBe(
+      "https://server.elsci.one/Officially%20Translated%20Light%20Novels/Are%20You%20Okay%20With%20a%20Slightly%20Older%20Girlfriend/",
+    );
   });
 
   test("does not match Elscione domain mid-label or mid-path", () => {
