@@ -905,7 +905,7 @@ export async function pullHighlightsFromKindle(
     fs.mkdirSync(obsidianBooksDir, { recursive: true });
   }
 
-  // Map of book title -> collected HighlightEntry[]
+  // Map of book title/author -> collected HighlightEntry[]
   const highlightsByBook = new Map<
     string,
     {
@@ -915,6 +915,33 @@ export async function pullHighlightsFromKindle(
       progress?: number;
     }
   >();
+
+  // Detect shared titles in Calibre database
+  const sharedTitlesInCalibre = new Set<string>();
+  if (calibreDbPath && fs.existsSync(calibreDbPath)) {
+    try {
+      const cDb = new Database(calibreDbPath, { readonly: true });
+      const dupRows = cDb
+        .query(
+          "SELECT lower(trim(title)) as norm_title FROM books GROUP BY lower(trim(title)) HAVING COUNT(*) > 1;",
+        )
+        .all() as Array<{ norm_title: string }>;
+      for (const dr of dupRows) {
+        if (dr.norm_title) sharedTitlesInCalibre.add(dr.norm_title);
+      }
+      cDb.close();
+    } catch {
+      // Ignore
+    }
+  }
+
+  interface RawDiscoveredBook {
+    title: string;
+    author?: string;
+    highlights: HighlightEntry[];
+    progress?: number;
+  }
+  const rawList: RawDiscoveredBook[] = [];
 
   // 1. Scan KOReader .sdr directories across BOTH books/ and documents/
   const candidateDirs = mount.candidateDirs && mount.candidateDirs.length > 0
@@ -957,22 +984,14 @@ export async function pullHighlightsFromKindle(
       bookTitle = bookTitle.trim();
       if (!bookTitle) continue;
 
-      const existing = highlightsByBook.get(bookTitle.toLowerCase()) || {
+      rawList.push({
         title: bookTitle,
         author: extracted.author,
-        highlights: [] as HighlightEntry[],
+        highlights: extracted.highlights,
         progress: extracted.percentFinished
           ? normalizeProgress(extracted.percentFinished)
           : undefined,
-      };
-
-      if (!existing.author && extracted.author) existing.author = extracted.author;
-      if (existing.progress === undefined && extracted.percentFinished) {
-        existing.progress = normalizeProgress(extracted.percentFinished);
-      }
-
-      existing.highlights.push(...extracted.highlights);
-      highlightsByBook.set(bookTitle.toLowerCase(), existing);
+      });
     } catch {
       // Skip broken lua file
     }
@@ -986,23 +1005,60 @@ export async function pullHighlightsFromKindle(
       const parsedClippings = extractKindleClippings(clipContent);
 
       for (const [_, clipBook] of parsedClippings) {
-        const titleKey = clipBook.title.toLowerCase().trim();
-        const existing = highlightsByBook.get(titleKey) || {
+        rawList.push({
           title: clipBook.title,
-          author: clipBook.author,
-          highlights: [] as HighlightEntry[],
-        };
-
-        if (!existing.author && clipBook.author && clipBook.author !== "Unknown") {
-          existing.author = clipBook.author;
-        }
-
-        existing.highlights.push(...clipBook.highlights);
-        highlightsByBook.set(titleKey, existing);
+          author: clipBook.author && clipBook.author !== "Unknown" ? clipBook.author : undefined,
+          highlights: clipBook.highlights,
+        });
       }
     } catch {
       // Skip broken clippings file
     }
+  }
+
+  // Discover if multiple distinct authors exist for the same title on Kindle
+  const authorsPerTitle = new Map<string, Set<string>>();
+  for (const item of rawList) {
+    const normTitle = item.title.toLowerCase().trim();
+    const normAuthor = (item.author || "").toLowerCase().trim();
+    if (normAuthor && normAuthor !== "unknown") {
+      let aSet = authorsPerTitle.get(normTitle);
+      if (!aSet) {
+        aSet = new Set();
+        authorsPerTitle.set(normTitle, aSet);
+      }
+      aSet.add(normAuthor);
+    }
+  }
+
+  // Populate highlightsByBook: key by title plus author when two books share a title
+  for (const item of rawList) {
+    const normTitle = item.title.toLowerCase().trim();
+    const normAuthor = (item.author || "").toLowerCase().trim();
+    const isShared =
+      sharedTitlesInCalibre.has(normTitle) ||
+      (authorsPerTitle.get(normTitle)?.size || 0) > 1;
+
+    const key = isShared && normAuthor && normAuthor !== "unknown"
+      ? `${normTitle}___${normAuthor}`
+      : normTitle;
+
+    const existing = highlightsByBook.get(key) || {
+      title: item.title,
+      author: item.author,
+      highlights: [] as HighlightEntry[],
+      progress: item.progress,
+    };
+
+    if (!existing.author && item.author && item.author !== "Unknown") {
+      existing.author = item.author;
+    }
+    if (existing.progress === undefined && item.progress !== undefined) {
+      existing.progress = item.progress;
+    }
+
+    existing.highlights.push(...item.highlights);
+    highlightsByBook.set(key, existing);
   }
 
   let totalImported = 0;
@@ -1013,8 +1069,16 @@ export async function pullHighlightsFromKindle(
     if (bookData.highlights.length === 0) continue;
 
     const bookTitle = bookData.title.trim();
+    const normTitle = bookTitle.toLowerCase();
+    const isSharedTitle =
+      sharedTitlesInCalibre.has(normTitle) ||
+      (authorsPerTitle.get(normTitle)?.size || 0) > 1;
+
     const sanitizedName = sanitizeTitle(bookTitle);
-    const notePath = path.join(obsidianBooksDir, `${sanitizedName}.md`);
+    const noteFilename = isSharedTitle && bookData.author && bookData.author !== "Unknown"
+      ? `${sanitizedName} - ${sanitizeTitle(bookData.author)}.md`
+      : `${sanitizedName}.md`;
+    const notePath = path.join(obsidianBooksDir, noteFilename);
 
     // Refuse symbolic links to prevent vault path traversal attacks
     if (fs.existsSync(notePath)) {
@@ -1036,8 +1100,8 @@ export async function pullHighlightsFromKindle(
       }
     }
 
-    // Match with Calibre metadata
-    const bookId = resolveBookIdFromTitle(bookTitle, calibreDbPath);
+    // Match with Calibre metadata passing author to disambiguate shared titles
+    const bookId = resolveBookIdFromTitle(bookTitle, calibreDbPath, bookData.author);
     let calibreSynopsis: string | undefined;
     let calibreSeries: string | undefined;
     let calibreSeriesIndex: number | undefined;
@@ -1086,9 +1150,12 @@ export async function pullHighlightsFromKindle(
     }
 
     // Match reading progress from KOSync
-    const kosyncInfo = kosyncProgressMap.get(bookTitle.toLowerCase());
-    const progressPct =
-      bookData.progress ?? (kosyncInfo ? kosyncInfo.progress : 0);
+    const kosyncInfo =
+      (bookData.author ? kosyncProgressMap.get(`${bookTitle.toLowerCase()}___${bookData.author.toLowerCase().trim()}`) : undefined) ||
+      kosyncProgressMap.get(bookTitle.toLowerCase());
+
+    let progressPct: number | undefined =
+      bookData.progress !== undefined ? bookData.progress : (kosyncInfo ? kosyncInfo.progress : undefined);
 
     // Merge existing highlights if note already exists
     let existingNoteContent = "";
@@ -1120,6 +1187,23 @@ export async function pullHighlightsFromKindle(
         }
       } catch {
         // Continue
+      }
+    }
+
+    // If both device progress and kosync are absent, preserve existing note's progress
+    if (progressPct === undefined) {
+      if (existingNoteContent) {
+        const fmMatch = existingNoteContent.match(/^progress:\s*(\d+)/m);
+        const bodyMatch = existingNoteContent.match(/\*\*Progress:\*\*\s*(\d+)%/);
+        if (fmMatch) {
+          progressPct = parseInt(fmMatch[1], 10);
+        } else if (bodyMatch) {
+          progressPct = parseInt(bodyMatch[1], 10);
+        } else {
+          progressPct = 0;
+        }
+      } else {
+        progressPct = 0;
       }
     }
 
@@ -1173,12 +1257,16 @@ export async function pullHighlightsFromKindle(
 
         // Index merged highlights directly into cache.db
         if (cacheDb) {
+          const dbTitle = isSharedTitle && bookData.author && bookData.author !== "Unknown"
+            ? `${bookTitle} - ${bookData.author.trim()}`
+            : bookTitle;
+
           const dbRecords: Omit<HighlightRecord, "id" | "created_at">[] =
             mergedHighlights
               .filter((h) => h.text && h.text.trim())
               .map((h) => ({
                 book_id: bookId ?? null,
-                book_title: bookTitle,
+                book_title: dbTitle,
                 chapter: h.chapter || null,
                 page:
                   typeof h.page === "number"

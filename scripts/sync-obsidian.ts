@@ -23,6 +23,7 @@ import {
   getHighlightsCacheDb,
   batchUpsertHighlights,
   cleanQuoteText,
+  parseHighlightsFromMarkdown,
 } from "../uploader/highlights";
 
 // ----------------------------------------------------------------------------
@@ -414,7 +415,7 @@ function parseHighlightEntry(item: any): HighlightEntry | null {
   const text = item.text || item.highlight || item.quote;
   const notes = item.notes || item.note || item.comment || "";
   const chapter = item.chapter || item.chapter_name;
-  const rawPage = item.pageno !== undefined ? item.pageno : item.page;
+  const rawPage = item.pageno === undefined ? item.page : item.pageno;
   const page = rawPage === undefined ? undefined : rawPage;
   const datetime =
     item.datetime || item.date || item.created_at || item.time || "";
@@ -741,11 +742,13 @@ export function mergeNoteContent(
     return generateBookMarkdown(data);
   }
 
-  const newHighlightsBlock = generateHighlightsSection(data.highlights);
-  const progressPct = normalizeProgress(data.progress);
+  let progressPct: number | undefined;
+  if (data.progress !== undefined) {
+    progressPct = normalizeProgress(data.progress);
+  }
 
   let status = data.status;
-  if (!status) {
+  if (!status && progressPct !== undefined) {
     if (progressPct >= 99) {
       status = "finished";
     } else if (progressPct > 0) {
@@ -756,7 +759,6 @@ export function mergeNoteContent(
   }
 
   const dateSynced = new Date().toISOString();
-  const progressBar = renderProgressBar(progressPct, 8);
   let content = existingContent;
 
   // 1. Update YAML Frontmatter if present
@@ -792,8 +794,12 @@ export function mergeNoteContent(
       }
 
       // Update standard keys
-      fmMap.set("progress", String(progressPct));
-      fmMap.set("status", status);
+      if (progressPct !== undefined) {
+        fmMap.set("progress", String(progressPct));
+      }
+      if (status) {
+        fmMap.set("status", status);
+      }
       fmMap.set("date_synced", dateSynced);
       if (data.title && !fmMap.has("title")) {
         fmMap.set("title", JSON.stringify(data.title));
@@ -831,10 +837,13 @@ export function mergeNoteContent(
   }
 
   // 2. Refresh live Progress Bar & Last Read in note body
-  const progressLineRegex = /^\*\*Progress:\*\*.*$/m;
-  const newProgressLine = `**Progress:** ${progressPct}% [${progressBar}]`;
-  if (progressLineRegex.test(content)) {
-    content = content.replace(progressLineRegex, newProgressLine);
+  if (progressPct !== undefined) {
+    const progressBar = renderProgressBar(progressPct, 8);
+    const progressLineRegex = /^\*\*Progress:\*\*.*$/m;
+    const newProgressLine = `**Progress:** ${progressPct}% [${progressBar}]`;
+    if (progressLineRegex.test(content)) {
+      content = content.replace(progressLineRegex, newProgressLine);
+    }
   }
 
   if (data.lastReadDate) {
@@ -842,8 +851,12 @@ export function mergeNoteContent(
     const newLastReadLine = `**Last Read:** ${data.lastReadDate}`;
     if (lastReadLineRegex.test(content)) {
       content = content.replace(lastReadLineRegex, newLastReadLine);
-    } else if (progressLineRegex.test(content)) {
-      content = content.replace(newProgressLine, `${newProgressLine}\n${newLastReadLine}`);
+    } else {
+      const progressLineRegex = /^\*\*Progress:\*\*.*$/m;
+      const m = content.match(progressLineRegex);
+      if (m) {
+        content = content.replace(m[0], `${m[0]}\n${newLastReadLine}`);
+      }
     }
   }
 
@@ -852,24 +865,68 @@ export function mergeNoteContent(
   const endIdx = content.indexOf(HIGHLIGHTS_END_MARKER);
 
   if (startIdx !== -1 && endIdx !== -1 && endIdx >= startIdx) {
-    const existingBlock = content.slice(
-      startIdx + HIGHLIGHTS_START_MARKER.length,
-      endIdx,
-    );
-    const existingHasHighlights =
-      existingBlock.includes("> ") ||
-      (existingBlock.trim() !== "" &&
-        !existingBlock.includes("*No highlights recorded yet.*"));
-
-    // If incoming highlights are empty and existing note already has highlights, preserve them!
-    if (data.highlights.length === 0 && existingHasHighlights) {
+    // If incoming highlights are empty, preserve the block untouched!
+    if (data.highlights.length === 0) {
       // Keep existing highlights block untouched, only frontmatter and progress were refreshed
     } else {
+      let existingRecords: any[] = [];
+      try {
+        existingRecords = parseHighlightsFromMarkdown(
+          content,
+          data.title,
+          data.bookId,
+        );
+      } catch {
+        existingRecords = [];
+      }
+
+      const quoteMap = new Map<string, HighlightEntry>();
+      for (const er of existingRecords) {
+        const cleaned = cleanQuoteText(er.quote);
+        const key = cleaned.toLowerCase();
+        if (key) {
+          quoteMap.set(key, {
+            text: cleaned,
+            notes: er.note || undefined,
+            chapter: er.chapter || undefined,
+            page: er.page ?? undefined,
+            datetime: er.timestamp || undefined,
+          });
+        }
+      }
+
+      for (const nh of data.highlights) {
+        const cleaned = cleanQuoteText(nh.text);
+        if (!cleaned) continue;
+
+        const key = cleaned.toLowerCase();
+        const existing = quoteMap.get(key);
+        if (existing) {
+          if (!existing.notes && nh.notes) existing.notes = nh.notes;
+          if (!existing.page && nh.page) existing.page = nh.page;
+          if (!existing.chapter && nh.chapter) existing.chapter = nh.chapter;
+          if (!existing.datetime && nh.datetime) existing.datetime = nh.datetime;
+        } else {
+          quoteMap.set(key, {
+            text: cleaned,
+            notes: nh.notes,
+            chapter: nh.chapter,
+            page: nh.page,
+            datetime: nh.datetime,
+          });
+        }
+      }
+
+      const mergedHighlights = Array.from(quoteMap.values());
+      data.highlights = mergedHighlights;
+      const unionedBlock = generateHighlightsSection(mergedHighlights);
+
       const before = content.slice(0, startIdx);
       const after = content.slice(endIdx + HIGHLIGHTS_END_MARKER.length);
-      content = before + newHighlightsBlock + after;
+      content = before + unionedBlock + after;
     }
   } else {
+    const newHighlightsBlock = generateHighlightsSection(data.highlights);
     content =
       content.trimEnd() +
       "\n\n## Highlights & Notes\n" +
@@ -1104,8 +1161,18 @@ export function getCalibreBooksMap(calibreDbPath: string): Map<
           )
           .all() as any[]);
 
+    const titleCounts = new Map<string, number>();
     for (const r of rows) {
       if (r.title) {
+        const t = r.title.toLowerCase().trim();
+        titleCounts.set(t, (titleCounts.get(t) || 0) + 1);
+      }
+    }
+
+    for (const r of rows) {
+      if (r.title) {
+        const normTitle = r.title.toLowerCase().trim();
+        const normAuthors = (r.authors || "Unknown").toLowerCase().trim();
         const entry = {
           id: r.id,
           title: r.title,
@@ -1114,8 +1181,63 @@ export function getCalibreBooksMap(calibreDbPath: string): Map<
           seriesIndex: r.series_index || undefined,
           comments: r.comments || undefined,
         };
-        map.set(r.title.toLowerCase().trim(), entry);
+        // Always index by id
         map.set(String(r.id), entry);
+
+        // Always index by title + author
+        map.set(`${normTitle}___${normAuthors}`, entry);
+
+        const cleanTokens = (s: string) =>
+          s
+            .toLowerCase()
+            .replace(/[\p{P}\p{S}]+/gu, " ")
+            .trim()
+            .split(/\s+/)
+            .filter(Boolean)
+            .sort()
+            .join(" ");
+
+        const sortedAuthor = cleanTokens(normAuthors);
+        if (sortedAuthor) {
+          map.set(`${normTitle}___${sortedAuthor}`, entry);
+        }
+
+        // Handle Last, First ↔ First Last (e.g. "Fry, Stephen" ↔ "Stephen Fry")
+        if (normAuthors.includes(",")) {
+          const cParts = normAuthors.split(",").map((p: string) => p.trim()).filter(Boolean);
+          if (cParts.length === 2) {
+            const firstLast = `${cParts[1]} ${cParts[0]}`;
+            map.set(`${normTitle}___${firstLast}`, entry);
+            map.set(`${normTitle}___${cleanTokens(firstLast)}`, entry);
+          }
+        } else {
+          const words = normAuthors.split(/\s+/);
+          if (words.length >= 2) {
+            const lastFirst = `${words[words.length - 1]}, ${words.slice(0, -1).join(" ")}`;
+            map.set(`${normTitle}___${lastFirst}`, entry);
+            map.set(`${normTitle}___${cleanTokens(lastFirst)}`, entry);
+          }
+        }
+
+        // Also index individual authors if multi-author (split by & or and)
+        const authorParts = normAuthors
+          .split(/&|\band\b/)
+          .map((a: string) => a.trim())
+          .filter(Boolean);
+        for (const ap of authorParts) {
+          map.set(`${normTitle}___${ap}`, entry);
+          const sAp = cleanTokens(ap);
+          if (sAp) map.set(`${normTitle}___${sAp}`, entry);
+        }
+
+        // Only index by title alone if the title is UNIQUE in Calibre!
+        if (titleCounts.get(normTitle) === 1) {
+          map.set(normTitle, entry);
+        } else {
+          // If title is shared, record marker and delete title-only mapping so it never points to an arbitrary book
+          map.set(`__shared__${normTitle}`, entry);
+          map.delete(normTitle);
+        }
       }
     }
   } catch (_dbErr) {
@@ -1287,9 +1409,58 @@ export async function syncObsidian(
   for (const book of booksToSync) {
     try {
       const normTitle = book.title.toLowerCase().trim();
-      const calibreMatch =
-        calibreMap.get(normTitle) ||
-        (book.bookId ? calibreMap.get(String(book.bookId)) : undefined);
+      const normAuthor = (book.author || "").toLowerCase().trim();
+      const titleAuthorKey = `${normTitle}___${normAuthor}`;
+
+      const cleanTokens = (s: string) =>
+        s
+          .toLowerCase()
+          .replace(/[\p{P}\p{S}]+/gu, " ")
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean)
+          .sort()
+          .join(" ");
+
+      const sortedAuthor = cleanTokens(normAuthor);
+
+      // 1. Calibre lookup: match by ID first, then by title+author, then title-only (if unique)
+      let calibreMatch =
+        (book.bookId ? calibreMap.get(String(book.bookId)) : undefined) ||
+        (normAuthor && normAuthor !== "unknown" ? calibreMap.get(titleAuthorKey) : undefined) ||
+        (sortedAuthor ? calibreMap.get(`${normTitle}___${sortedAuthor}`) : undefined);
+
+      if (!calibreMatch && normAuthor && normAuthor !== "unknown") {
+        if (normAuthor.includes(",")) {
+          const cParts = normAuthor.split(",").map((p) => p.trim()).filter(Boolean);
+          if (cParts.length === 2) {
+            calibreMatch =
+              calibreMap.get(`${normTitle}___${cParts[1]} ${cParts[0]}`) ||
+              calibreMap.get(`${normTitle}___${cleanTokens(`${cParts[1]} ${cParts[0]}`)}`);
+          }
+        } else {
+          const words = normAuthor.split(/\s+/);
+          if (words.length >= 2) {
+            calibreMatch =
+              calibreMap.get(`${normTitle}___${words[words.length - 1]}, ${words.slice(0, -1).join(" ")}`) ||
+              calibreMap.get(`${normTitle}___${cleanTokens(`${words[words.length - 1]}, ${words.slice(0, -1).join(" ")}`)}`);
+          }
+        }
+      }
+
+      if (!calibreMatch && normAuthor && normAuthor !== "unknown") {
+        for (const ap of normAuthor.split(/&|\band\b/).map((a) => a.trim()).filter(Boolean)) {
+          const match = calibreMap.get(`${normTitle}___${ap}`) || calibreMap.get(`${normTitle}___${cleanTokens(ap)}`);
+          if (match) {
+            calibreMatch = match;
+            break;
+          }
+        }
+      }
+
+      if (!calibreMatch) {
+        calibreMatch = calibreMap.get(normTitle);
+      }
 
       const finalTitle = calibreMatch?.title || book.title;
       let finalAuthor = book.author;
@@ -1305,6 +1476,7 @@ export async function syncObsidian(
         calibreMatch?.comments || book.synopsis || undefined;
 
       const kosyncMatch =
+        (normAuthor ? kosyncMap.get(`${normTitle}___${normAuthor}`) : undefined) ||
         kosyncMap.get(normTitle) ||
         (calibreMatch ? kosyncMap.get(calibreMatch.title.toLowerCase().trim()) : undefined);
 
@@ -1342,8 +1514,14 @@ export async function syncObsidian(
 
       result.totalHighlightsFound += book.highlights.length;
 
+      const isSharedTitle =
+        booksToSync.filter((b) => b.title.toLowerCase().trim() === normTitle).length > 1 ||
+        calibreMap.has(`__shared__${normTitle}`);
+
       const sanitized = sanitizeTitle(finalTitle);
-      const noteFilename = `${sanitized}.md`;
+      const noteFilename = isSharedTitle && finalAuthor && finalAuthor !== "Unknown"
+        ? `${sanitized} - ${sanitizeTitle(finalAuthor)}.md`
+        : `${sanitized}.md`;
       const notePath = path.join(booksDir, noteFilename);
 
       // Defense-in-depth: assert path containment inside booksDir
@@ -1375,6 +1553,10 @@ export async function syncObsidian(
       // Index highlights into cache.db for LightHouse Web Highlights Viewer
       if (!dryRun && mergedData.highlights && mergedData.highlights.length > 0) {
         try {
+          const dbTitle = isSharedTitle && finalAuthor && finalAuthor !== "Unknown"
+            ? `${finalTitle.trim()} - ${finalAuthor.trim()}`
+            : finalTitle.trim();
+
           const records = mergedData.highlights
             .map((h) => {
               let pageNum: number | null = null;
@@ -1387,7 +1569,7 @@ export async function syncObsidian(
               if (!quote) return null;
               return {
                 book_id: mergedData.bookId ?? null,
-                book_title: finalTitle.trim(),
+                book_title: dbTitle,
                 chapter: h.chapter || null,
                 page: pageNum,
                 quote,
