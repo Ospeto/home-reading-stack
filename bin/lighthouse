@@ -358,7 +358,43 @@ probe_http_code() {
   cmd+=("$url")
   local res
   res=$("${cmd[@]}" 2>/dev/null || echo "000")
-  echo "$res" | grep -oE '[0-9]{3}' | head -n 1 || echo "000"
+  local code
+  code=$(echo "$res" | grep -oE '[0-9]{3}' | head -n 1 || echo "000")
+  [ -z "$code" ] && code="000"
+
+  # Fallback to local proxy if direct probe returned 000 and proxy was not already explicitly specified
+  if [ "$code" = "000" ] && [ -z "$proxy" ]; then
+    local fallback_proxy="${LOCAL_PROXY_URL:-${PROXY_URL:-http://127.0.0.1:7890}}"
+    local host_port="${fallback_proxy#*://}"
+    host_port="${host_port%%/*}"
+    # Strip userinfo if present (user:pass@host:port)
+    host_port="${host_port##*@}"
+    local proxy_host="${host_port%:*}"
+    local proxy_port="${host_port##*:}"
+    if [ "$proxy_host" = "$proxy_port" ]; then
+      proxy_port=80
+    fi
+    local proxy_reachable=0
+    if [ "$proxy_host" = "127.0.0.1" ] || [ "$proxy_host" = "localhost" ]; then
+      if is_port_listening "$proxy_port"; then
+        proxy_reachable=1
+      fi
+    elif command -v nc >/dev/null 2>&1; then
+      if nc -z -w 1 "$proxy_host" "$proxy_port" 2>/dev/null; then
+        proxy_reachable=1
+      fi
+    fi
+
+    if [ "$proxy_reachable" -eq 1 ]; then
+      local retry_cmd=(curl -s -o /dev/null -w "%{http_code}" -m "$timeout" --proxy "$fallback_proxy" "$url")
+      local retry_res
+      retry_res=$("${retry_cmd[@]}" 2>/dev/null || echo "000")
+      code=$(echo "$retry_res" | grep -oE '[0-9]{3}' | head -n 1 || echo "000")
+      [ -z "$code" ] && code="000"
+    fi
+  fi
+
+  echo "$code"
 }
 
 # ------------------------------------------------------------------------------
