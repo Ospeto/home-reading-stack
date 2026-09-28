@@ -2175,6 +2175,91 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
         resetActiveLnoriStateForTest();
       }
     });
+
+    it("POST /api/lnori/ingest and /api/elscione/ingest auto-normalize raw spaces and missing protocol", async () => {
+      resetActiveLnoriStateForTest();
+      let capturedElscioneUrl = "";
+      let capturedLnoriUrl = "";
+
+      setServerDependenciesForTest({
+        ingestElscioneSeries: async (url: string) => {
+          capturedElscioneUrl = url;
+          return {
+            success: true,
+            seriesTitle: "A Sister's All You Need",
+            author: "Hirasaka Yomi",
+            importedCount: 1,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 1,
+            tags: ["Light Novel", "Elscione"],
+            calibreBookIds: [501],
+          };
+        },
+        ingestLnoriSeries: async (url: string) => {
+          capturedLnoriUrl = url;
+          return {
+            success: true,
+            seriesTitle: "Genius Prince",
+            author: "Toru Toba",
+            importedCount: 1,
+            skippedCount: 0,
+            duplicateCount: 0,
+            totalCount: 1,
+            tags: "Light Novel",
+            calibreBookIds: [502],
+          };
+        },
+        getCalibreBooks: () => [],
+      });
+
+      try {
+        // 1. Raw spaces and unencoded quotes
+        const req1 = new Request("http://127.0.0.1:8086/api/elscione/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/",
+          }),
+        });
+        const res1 = await handleRequest(req1, localServer);
+        expect(res1.status).toBe(200);
+        expect(capturedElscioneUrl).toBe(
+          "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+        );
+
+        // 2. Missing https:// prefix and raw spaces
+        const req2 = new Request("http://127.0.0.1:8086/api/elscione/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/",
+          }),
+        });
+        const res2 = await handleRequest(req2, localServer);
+        expect(res2.status).toBe(200);
+        expect(capturedElscioneUrl).toBe(
+          "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+        );
+
+        // 3. Lnori URL missing https:// prefix via POST /api/lnori/ingest
+        const req3 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "lnori.com/series/8046/the-genius-princes-guide",
+          }),
+        });
+        const res3 = await handleRequest(req3, localServer);
+        expect(res3.status).toBe(200);
+        expect(capturedLnoriUrl).toBe(
+          "https://lnori.com/series/8046/the-genius-princes-guide",
+        );
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
   });
 
   describe("Auto-Populate Synopses on Ingest", () => {

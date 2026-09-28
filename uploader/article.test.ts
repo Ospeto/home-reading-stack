@@ -17,6 +17,7 @@ import {
   parseJinaMarkdown,
   convertHtmlToEpub,
   ingestArticleFromUrl,
+  extractUrlFromText,
 } from "./article";
 import { setFirecrawlEnabled } from "./firecrawl";
 
@@ -719,6 +720,170 @@ describe("Article Extraction: Firecrawl Tier 1 & Fail-Open Fallback", () => {
       expect(err).not.toBeNull();
       expect(err?.message).toMatch(/Internal or local network URLs|SSRF guard blocked/);
     }
+  });
+});
+
+describe("URL Extraction from Conversational Text (extractUrlFromText)", () => {
+  test("extracts server.elscione.com URLs with spaces in path and normalizes them", () => {
+    const text =
+      "Check this out: https://server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/";
+    const url = extractUrlFromText(text);
+    expect(url).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+    );
+  });
+
+  test("extracts server.elscione.com URLs missing https:// protocol and prepends it", () => {
+    const text =
+      "server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/";
+    const url = extractUrlFromText(text);
+    expect(url).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+    );
+  });
+
+  test("extracts space-containing Elscione URLs enclosed in delimiters (markdown brackets, angle brackets, quotes)", () => {
+    const inBrackets =
+      "[https://server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/]";
+    expect(extractUrlFromText(inBrackets)).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+    );
+
+    const inAngles =
+      "<https://server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/>";
+    expect(extractUrlFromText(inAngles)).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+    );
+
+    const inQuotes =
+      "\"https://server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/\"";
+    expect(extractUrlFromText(inQuotes)).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+    );
+
+    const onNewline =
+      "Here is the series:\nhttps://server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/\nEnjoy reading!";
+    expect(extractUrlFromText(onNewline)).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+    );
+  });
+
+  test("handles /epub and /read commands with space-containing URLs and missing protocols", () => {
+    const cmdWithSpaces =
+      "/epub https://server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/";
+    expect(extractUrlFromText(cmdWithSpaces)).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+    );
+
+    const cmdNoProto =
+      "/read server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/";
+    expect(extractUrlFromText(cmdNoProto)).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+    );
+
+    // Standard URL command stops at whitespace and does not absorb trailing words
+    const cmdWithTrailingProse =
+      "/article https://paulgraham.com/foundermode.html please";
+    expect(extractUrlFromText(cmdWithTrailingProse)).toBe(
+      "https://paulgraham.com/foundermode.html",
+    );
+
+    // Bare non-URL words are rejected and not converted to https://
+    expect(extractUrlFromText("/epub not-a-url")).toBeNull();
+  });
+
+  test("properly bounds space-containing Elscione URLs and does not eat trailing prose", () => {
+    // Trailing exclamation or prose after slash
+    const textWithThanks =
+      "Here: https://server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/ thanks!";
+    expect(extractUrlFromText(textWithThanks)).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+    );
+
+    // Trailing comma and prose
+    const textWithComma =
+      "Check out https://server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/, and more";
+    expect(extractUrlFromText(textWithComma)).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+    );
+
+    // .epub file followed by prose
+    const textWithEpubProse =
+      "Download server.elscione.com/Officially Translated/Overlord/bar.epub is ready";
+    expect(extractUrlFromText(textWithEpubProse)).toBe(
+      "https://server.elscione.com/Officially%20Translated/Overlord/bar.epub",
+    );
+
+    // Folder with trailing slash followed by prose
+    const textWithFolderProse =
+      "Please grab server.elscione.com/Officially Translated Light Novels/Grimgar/ please read";
+    expect(extractUrlFromText(textWithFolderProse)).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar/",
+    );
+
+    // .epub followed by exclamation mark
+    const textWithEpubExclamation =
+      "Download https://server.elscione.com/Officially Translated/Overlord/vol 01.epub!";
+    expect(extractUrlFromText(textWithEpubExclamation)).toBe(
+      "https://server.elscione.com/Officially%20Translated/Overlord/vol%2001.epub",
+    );
+
+    // Folder followed by hyphen / dash and commentary
+    const textWithDashCommentary =
+      "Check out https://server.elscione.com/Officially Translated Light Novels/Grimgar/ - great series";
+    expect(extractUrlFromText(textWithDashCommentary)).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar/",
+    );
+
+    // Wrapped in Unicode double curly quotes (“...”)
+    const textWithDoubleCurly =
+      "“https://server.elscione.com/Officially Translated Light Novels/Grimgar/”";
+    expect(extractUrlFromText(textWithDoubleCurly)).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar/",
+    );
+
+    // Wrapped in Unicode single curly quotes (‘...’)
+    const textWithSingleCurly =
+      "‘https://server.elscione.com/Officially Translated Light Novels/Grimgar/’";
+    expect(extractUrlFromText(textWithSingleCurly)).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar/",
+    );
+
+    // .epub followed by extension like .backup is preserved, not truncated early
+    const textWithBackup =
+      "https://server.elscione.com/files/file.epub.backup";
+    expect(extractUrlFromText(textWithBackup)).toBe(
+      "https://server.elscione.com/files/file.epub.backup",
+    );
+
+    // Folder followed by em-dash without space
+    const textWithEmDash =
+      "Check out https://server.elscione.com/Officially Translated Light Novels/Grimgar/—great";
+    expect(extractUrlFromText(textWithEmDash)).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar/",
+    );
+
+    // Spaced URL without trailing slash followed by dash commentary
+    const textWithNoSlashDash =
+      "Check https://server.elscione.com/Officially Translated Light Novels/Grimgar - great series";
+    expect(extractUrlFromText(textWithNoSlashDash)).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar",
+    );
+
+    // Spaced URL without trailing slash followed by em-dash commentary
+    const textWithNoSlashEmDash =
+      "Check https://server.elscione.com/Officially Translated Light Novels/Grimgar — great series";
+    expect(extractUrlFromText(textWithNoSlashEmDash)).toBe(
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar",
+    );
+  });
+
+  test("preserves standard web URLs and ignores internal Telegram URLs", () => {
+    const webArticle = "Check this: https://paulgraham.com/foundermode.html";
+    expect(extractUrlFromText(webArticle)).toBe("https://paulgraham.com/foundermode.html");
+
+    const tMeLink = "Join our channel https://t.me/reading_stack";
+    expect(extractUrlFromText(tMeLink)).toBeNull();
   });
 });
 

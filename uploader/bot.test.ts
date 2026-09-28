@@ -3419,6 +3419,87 @@ describe("Lnori Queue & Telegram Bot Integration", () => {
       resetLocalLnoriQueueForTest();
     }
   });
+
+  it("handleTextMessage detects Elscione URL with raw spaces and missing protocol, auto-normalizing as light novel", async () => {
+    resetLocalLnoriQueueForTest();
+    const sentTelegramBodies: any[] = [];
+    const origFetch = globalThis.fetch;
+    let postedIngestUrl = "";
+
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input?.url || "";
+      if (url.includes("sendMessage") || url.includes("editMessageText")) {
+        const body = JSON.parse(init?.body || "{}");
+        sentTelegramBodies.push(body);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 1012 } }), {
+          status: 200,
+        });
+      }
+      if (url.includes("/api/lnori/ingest")) {
+        const body = JSON.parse(init?.body || "{}");
+        postedIngestUrl = body.url;
+        return new Response(
+          JSON.stringify({
+            success: true,
+            queued: true,
+            queuePosition: 1,
+            queueLength: 1,
+            runId: "elscione-space-123",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.includes("/api/lnori/progress")) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            active: false,
+            state: {
+              runId: "elscione-space-123",
+              phase: "complete",
+              total: 1,
+              data: {
+                success: true,
+                seriesTitle: "A Sister's All You Need",
+                author: "Hirasaka Yomi",
+                importedCount: 1,
+                skippedCount: 0,
+                totalCount: 1,
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      // User pastes link without https:// and with raw spaces and single quote
+      await handleTextMessage(
+        12345,
+        "Please import server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/",
+        "reader",
+      );
+
+      // Verify it was detected as Elscione Light Novel Series rather than an article
+      expect(sentTelegramBodies.length).toBeGreaterThan(0);
+      const firstMsg = sentTelegramBodies[0];
+      expect(firstMsg.text).toContain("Detected Elscione Light Novel Series");
+
+      // Verify the URL posted to the ingest endpoint is normalized
+      expect(postedIngestUrl).toBe(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+      );
+
+      const lastMsg = sentTelegramBodies[sentTelegramBodies.length - 1];
+      expect(lastMsg.text).toContain("Light Novel Series Imported Successfully!");
+      expect(lastMsg.text).toContain("A Sister's All You Need");
+    } finally {
+      globalThis.fetch = origFetch;
+      resetLocalLnoriQueueForTest();
+    }
+  });
 });
 
 

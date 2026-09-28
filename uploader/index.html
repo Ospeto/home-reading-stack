@@ -1923,7 +1923,7 @@
         Paste any series or volume URL from <code class="text-zinc-300 font-mono text-[11px]">lnori.com</code> (<code class="text-zinc-300 font-mono text-[11px]">/series/...</code> or <code class="text-zinc-300 font-mono text-[11px]">/book/...</code>) or <code class="text-zinc-300 font-mono text-[11px]">server.elscione.com</code> (series folder or direct <code class="text-zinc-300 font-mono text-[11px]">.epub</code>). LightHouse solves Anubis PoW challenges, extracts folder manifests, downloads EPUBs, converts covers, indexes series volumes, and syncs directly into Calibre.
       </p>
 
-      <form onsubmit="handleLnoriIngest(event)" class="space-y-3">
+      <form onsubmit="handleLnoriIngest(event)" novalidate class="space-y-3">
         <div>
           <label for="lnoriUrlInput" class="block text-[11px] font-semibold text-zinc-300 mb-1.5">Light Novel URL (Lnori or Elscione)</label>
           <div class="relative">
@@ -2537,7 +2537,7 @@
               <span>Lnori &amp; Elscione Light Novel Ingestion</span>
             </div>
             <p class="text-[11px] text-zinc-400 leading-relaxed">
-              Download and ingest light novel series or individual volumes directly from <code class="text-zinc-200">lnori.com</code> and <code class="text-zinc-200">server.elscione.com</code> via the Web UI (Upload Modal &rarr; <code class="text-zinc-200">Add Light Novel</code>) or Telegram Bot. Links sent to the Telegram bot are enqueued to the centralized Uploader server queue (<code class="text-zinc-200">POST /api/lnori/ingest</code>), reporting live queue positions, streaming active volume progress, and delivering completion cards with 1-tap Reading HQ buttons (also supported at <code class="text-zinc-200">POST /api/elscione/ingest</code>). For Elscione, LightHouse automatically solves Anubis Proof-of-Work SHA-256 challenges, queries the _h5ai folder directory API, downloads EPUB volumes, extracts covers via <code class="text-zinc-200">sips</code>, and enriches Calibre metadata.
+              Download and ingest light novel series or individual volumes directly from <code class="text-zinc-200">lnori.com</code> and <code class="text-zinc-200">server.elscione.com</code> via the Web UI (Upload Modal &rarr; <code class="text-zinc-200">Add Light Novel</code>) or Telegram Bot. Links sent to the Telegram bot are enqueued to the centralized Uploader server queue (<code class="text-zinc-200">POST /api/lnori/ingest</code>), reporting live queue positions, streaming active volume progress, and delivering completion cards with 1-tap Reading HQ buttons (also supported at <code class="text-zinc-200">POST /api/elscione/ingest</code>). URLs with raw spaces, unencoded quotes, or missing protocol prefixes are automatically normalized. For Elscione, LightHouse automatically solves Anubis Proof-of-Work SHA-256 challenges, queries the _h5ai folder directory API, downloads EPUB volumes, extracts covers via <code class="text-zinc-200">sips</code>, and enriches Calibre metadata.
             </p>
           </div>
           <div class="space-y-1 pt-1 border-t border-zinc-800/80">
@@ -5206,14 +5206,74 @@
       handleLnoriIngest(fakeEvent, true, initialState);
     }
 
+    function cleanAndNormalizeNovelUrl(raw) {
+      if (!raw || typeof raw !== 'string') return '';
+      let clean = raw.trim();
+      if (!clean) return '';
+
+      // Strip wrapping quotes/angle brackets (including Unicode curly quotes) if present
+      if (
+        (clean.startsWith('"') && clean.endsWith('"')) ||
+        (clean.startsWith("'") && clean.endsWith("'")) ||
+        (clean.startsWith('<') && clean.endsWith('>')) ||
+        (clean.startsWith('\u201C') && clean.endsWith('\u201D')) ||
+        (clean.startsWith('\u2018') && clean.endsWith('\u2019'))
+      ) {
+        clean = clean.slice(1, -1).trim();
+      }
+      // Strip unmatched leading or trailing wrapping quote characters
+      clean = clean
+        .replace(/^[\u201C\u2018"'<]+/, '')
+        .replace(/[\u201D\u2019"'>]+$/, '')
+        .trim();
+      if (!clean) return '';
+
+      // 1. Missing protocol prefix
+      if (clean.startsWith('//')) {
+        clean = 'https:' + clean;
+      } else if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(clean)) {
+        clean = 'https://' + clean.replace(/^\/+/, '');
+      }
+
+      // 2. Separate origin/authority from pathname + search + hash
+      const match = clean.match(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#]+)(.*)$/s);
+      if (!match) return clean;
+
+      const origin = match[1];
+      const rest = match[2] || '';
+      if (!rest) return origin;
+
+      const restMatch = rest.match(/^([^?#]*)(?:\?([^#]*))?(?:#(.*))?$/s);
+      let pathname = restMatch ? restMatch[1] : rest;
+      const search = restMatch && restMatch[2] !== undefined ? restMatch[2] : null;
+      const hash = restMatch && restMatch[3] !== undefined ? restMatch[3] : null;
+
+      // Auto-encode unencoded spaces in path as %20
+      pathname = pathname.replace(/[ \t\u00A0]/g, '%20');
+
+      let result = origin + pathname;
+      if (search !== null) {
+        result += '?' + search.replace(/[ \t\u00A0]/g, '%20');
+      }
+      if (hash !== null) {
+        result += '#' + hash.replace(/[ \t\u00A0]/g, '%20');
+      }
+
+      return result;
+    }
+
     async function handleLnoriIngest(e, isResuming = false, existingState = null) {
       if (e && e.preventDefault) e.preventDefault();
       const input = document.getElementById('lnoriUrlInput');
       const btn = document.getElementById('lnoriIngestBtn');
       const cancelBtn = document.getElementById('lnoriCancelBtn');
       const status = document.getElementById('lnoriIngestStatus');
-      const targetUrl = (existingState?.targetUrl || input.value || '').trim();
+      const rawUrl = (existingState?.targetUrl || input.value || '').trim();
+      const targetUrl = cleanAndNormalizeNovelUrl(rawUrl);
       if (!targetUrl || isLnoriIngesting) return;
+      if (input && !isResuming) {
+        input.value = targetUrl;
+      }
 
       isLnoriIngesting = true;
       const runController = new AbortController();
