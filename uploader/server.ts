@@ -4480,7 +4480,7 @@ async function handleRequestCore(
         return jsonResponse(
           {
             success: false,
-            error: "Target URL must be a valid server.elscione.com series or book URL",
+            error: "Target URL must be a valid server.elscione.com or server.elsci.one series or book URL",
           },
           400,
           corsOrigin,
@@ -4491,7 +4491,7 @@ async function handleRequestCore(
         return jsonResponse(
           {
             success: false,
-            error: "Target URL must be a valid lnori.com series or book URL (or server.elscione.com)",
+            error: "Target URL must be a valid lnori.com series or book URL (or server.elscione.com / server.elsci.one)",
           },
           400,
           corsOrigin,
@@ -4502,7 +4502,7 @@ async function handleRequestCore(
         return jsonResponse(
           {
             success: false,
-            error: "Target URL must be a valid lnori.com or server.elscione.com series or book URL",
+            error: "Target URL must be a valid lnori.com, server.elscione.com, or server.elsci.one series or book URL",
           },
           400,
           corsOrigin,

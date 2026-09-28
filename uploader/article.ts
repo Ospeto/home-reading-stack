@@ -138,12 +138,18 @@ function cleanExtractedUrl(urlStr: string): string {
 /**
  * Detects and extracts an Elscione light novel URL from text, properly bounding
  * space-containing path names at .epub, trailing slash before whitespace/prose, or delimiter/EOS.
+ * Supports both domain spellings: elscione.com and elsci.one (e.g. server.elsci.one, server.elscione.com).
+ * Enforces left boundary (start of string, whitespace, or opening delimiter) so domains cannot match mid-label or mid-path.
  */
 function extractElscioneUrlCandidate(text: string): string | null {
   const elscioneRegex =
-    /(?:https?:\/\/|\/\/)?(?:[a-zA-Z0-9-]+\.)*server\.elscione\.com\/[^\r\n<>"\[\]{}|\\^`\u201C\u201D\u2018\u2019]+/gi;
-  const matches = text.match(elscioneRegex);
-  if (!matches) return null;
+    /(?:^|[\s<>"'(\[\u201C\u2018])((?:https?:\/\/|\/\/)?(?:[a-zA-Z0-9-]+\.)*(?:server\.)?(?:elscione\.com|elsci\.one)\/[^\r\n<>"\[\]{}|\\^`\u201C\u201D\u2018\u2019]+)/gi;
+  const matches: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = elscioneRegex.exec(text)) !== null) {
+    if (m[1]) matches.push(m[1]);
+  }
+  if (matches.length === 0) return null;
 
   for (const raw of matches) {
     // 1. Direct .epub URL: terminate immediately after .epub (drop trailing prose/punctuation like '!', but not extensions like .backup)
@@ -228,7 +234,7 @@ export function extractUrlFromText(text: string): string | null {
     }
   }
 
-  // Recognize server.elscione.com/ URLs in conversational text with spaces in the path
+  // Recognize server.elscione.com/ or server.elsci.one/ URLs in conversational text with spaces in the path
   const elscioneMatch = extractElscioneUrlCandidate(trimmed);
   if (elscioneMatch) {
     const candidate = cleanAndNormalizeNovelUrl(elscioneMatch);
@@ -698,7 +704,7 @@ export function validateArticleUrl(rawUrl: string): URL {
 }
 
 /**
- * Check if HTML content indicates a Cloudflare bot wall or challenge page.
+ * Check if HTML content indicates a Cloudflare or Anubis bot wall / challenge page.
  */
 export function isCloudflareChallenge(html: string): boolean {
   if (!html) return false;
@@ -708,7 +714,28 @@ export function isCloudflareChallenge(html: string): boolean {
     html.includes("Attention Required! | Cloudflare") ||
     html.includes("challenge-running") ||
     html.includes("cf-turnstile") ||
-    (html.includes("Cloudflare") && /Ray ID:/i.test(html))
+    (html.includes("Cloudflare") && /Ray ID:/i.test(html)) ||
+    html.includes("anubis_challenge") ||
+    /<title[^>]*>\s*Anubis Challenge\s*<\/title>/i.test(html) ||
+    /making\s+sure\s+you(?:'re|’re|\s+are|&#39;re|&#x27;re|&apos;re|&rsquo;re|&#8217;re)\s+not\s+a\s+bot!?/i.test(
+      html,
+    )
+  );
+}
+
+/**
+ * Checks if a title or text indicates a bot challenge page.
+ */
+export function isBotChallengeTitle(title: string): boolean {
+  if (!title) return false;
+  const decoded = decodeHtmlEntities(title).replace(/…/g, "...").trim();
+  return (
+    /^(?:Making sure you(?:'re|’re|\s+are)\s+not\s+a\s+bot!?|Attention Required!\s*\|\s*Cloudflare|Just a moment(?:\.\.\.|…)|Anubis Challenge)$/i.test(
+      decoded,
+    ) ||
+    /making sure you(?:'re|’re|\s+are)\s+not\s+a\s+bot/i.test(decoded) ||
+    /attention required!\s*\|\s*cloudflare/i.test(decoded) ||
+    /\banubis challenge\b/i.test(decoded)
   );
 }
 
@@ -1337,6 +1364,12 @@ export async function extractArticleViaJina(
     throw new Error(PAYWALL_ERROR_MESSAGE);
   }
 
+  if (isBotChallengeTitle(parsed.title || "") || isBotChallengeTitle(title)) {
+    throw new Error(
+      "Site returned a bot verification or challenge page (e.g. Cloudflare / Anubis). Please paste the article text directly or access the source page.",
+    );
+  }
+
   const textOnly = decodeHtmlEntities(
     cleanedHtml
       .replace(/<[^>]+>/g, " ")
@@ -1527,6 +1560,13 @@ export async function buildArticleFromFirecrawl(
   if (paywallCheck.isPaywall) {
     console.log(
       `[Article] Firecrawl content failed paywall check (${paywallCheck.reason || "detected paywall"}), falling back...`,
+    );
+    return null;
+  }
+
+  if (isBotChallengeTitle(fcArticle.title || "")) {
+    console.log(
+      `[Article] Firecrawl content rejected as bot challenge page ("${fcArticle.title}"), falling back...`,
     );
     return null;
   }
@@ -1952,6 +1992,12 @@ export async function extractArticle(
   const paywallCheck = isPaywallOrGarbage(cleaned);
   if (paywallCheck.isPaywall) {
     throw new Error(PAYWALL_ERROR_MESSAGE);
+  }
+
+  if (isBotChallengeTitle(title)) {
+    throw new Error(
+      "Site returned a bot verification or challenge page (e.g. Cloudflare / Anubis). Please paste the article text directly or access the source page.",
+    );
   }
 
   // Calculate word count & reading time

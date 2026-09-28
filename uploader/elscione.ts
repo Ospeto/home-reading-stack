@@ -235,7 +235,7 @@ export function cleanAndNormalizeNovelUrl(raw: string): string {
 }
 
 /**
- * URL Detection: returns true if the URL points to server.elscione.com
+ * URL Detection: returns true if the URL points to server.elscione.com or server.elsci.one (and mirror domains)
  */
 export function isElscioneUrl(url: string): boolean {
   if (!url || typeof url !== "string") return false;
@@ -243,9 +243,14 @@ export function isElscioneUrl(url: string): boolean {
     const clean = cleanAndNormalizeNovelUrl(url);
     if (!clean) return false;
     const parsed = new URL(clean);
+    const host = parsed.hostname.toLowerCase();
     return (
-      parsed.hostname === "server.elscione.com" ||
-      parsed.hostname.endsWith(".elscione.com")
+      host === "server.elscione.com" ||
+      host === "elscione.com" ||
+      host.endsWith(".elscione.com") ||
+      host === "server.elsci.one" ||
+      host === "elsci.one" ||
+      host.endsWith(".elsci.one")
     );
   } catch {
     return false;
@@ -840,7 +845,7 @@ export async function extractElscioneManifest(
   const normalizedUrl = cleanAndNormalizeNovelUrl(url);
   const parsed = parseElscioneUrl(normalizedUrl);
   if (!parsed) {
-    throw new Error(`Invalid Elscione URL: ${url}. Expected server.elscione.com URL.`);
+    throw new Error(`Invalid Elscione URL: ${url}. Expected server.elscione.com or server.elsci.one URL.`);
   }
 
   // 1. Direct .epub file URL: treat as 1-volume manifest
