@@ -92,7 +92,7 @@ export const isLegacyOrNonCanonicalFormat = isNonEpubBook;
 
 /**
  * Validates an archive entry name strictly BEFORE any normalization.
- * Rejects entries containing '..', leading '/', '\', drive letters, null bytes,
+ * Rejects entries containing '..' path traversal segments, leading '/', '\', drive letters, null bytes,
  * or newline / carriage return characters.
  */
 export function validateArchiveEntryName(entryName: string): {
@@ -115,21 +115,8 @@ export function validateArchiveEntryName(entryName: string): {
     };
   }
 
-  // Check for path traversal '..' before any normalization
-  if (
-    entryName === ".." ||
-    entryName.includes("/../") ||
-    entryName.includes("\\..\\") ||
-    entryName.startsWith("../") ||
-    entryName.startsWith("..\\") ||
-    entryName.endsWith("/..") ||
-    entryName.endsWith("\\..") ||
-    entryName.includes("/..") ||
-    entryName.includes("\\..") ||
-    entryName.includes("../") ||
-    entryName.includes("..\\") ||
-    entryName.includes("..")
-  ) {
+  // Check for path traversal '..' before any normalization (reject '..' only as a path segment)
+  if (entryName.split(/[/\\]/).includes("..")) {
     return {
       valid: false,
       error: `Path traversal detected in archive entry: "${entryName}"`,

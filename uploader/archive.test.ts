@@ -210,6 +210,29 @@ with zipfile.ZipFile("${traversalZip}", "w") as zf:
       }
     });
 
+    it("allows archive entries containing multiple dots or ellipses without path traversal error", () => {
+      const ellipsisZip = path.join(
+        "/tmp",
+        `test_ellipsis_${Date.now()}.zip`,
+      );
+      const pythonScript = `
+import zipfile
+with zipfile.ZipFile("${ellipsisZip}", "w") as zf:
+    zf.writestr("ReZero....epub", "mock epub content")
+`;
+      spawnSync("python3", ["-c", pythonScript]);
+
+      try {
+        const inspection = inspectArchiveSafety(ellipsisZip);
+        expect(inspection.safe).toBe(true);
+        expect(inspection.error).toBeUndefined();
+      } finally {
+        if (fs.existsSync(ellipsisZip)) {
+          fs.unlinkSync(ellipsisZip);
+        }
+      }
+    });
+
     it("detects decompression bomb ratio exceeding limits", () => {
       const bombZip = path.join("/tmp", `test_bomb_${Date.now()}.zip`);
       // Create a zip with 10MB of zeroes that compresses down to ~10KB (> 50:1 ratio)
@@ -358,6 +381,9 @@ with zipfile.ZipFile("${largeNewlineZip}", "w") as z:
       // Path traversal
       expect(validateArchiveEntryName("../secret.txt").valid).toBe(false);
       expect(validateArchiveEntryName("foo/../../bar.epub").valid).toBe(false);
+      expect(validateArchiveEntryName("foo/../bar").valid).toBe(false);
+      expect(validateArchiveEntryName("foo/..").valid).toBe(false);
+      expect(validateArchiveEntryName("/..").valid).toBe(false);
       expect(validateArchiveEntryName("..\\windows\\system32").valid).toBe(
         false,
       );
@@ -371,6 +397,9 @@ with zipfile.ZipFile("${largeNewlineZip}", "w") as z:
       // Clean relative entries
       expect(validateArchiveEntryName("OEBPS/content.opf").valid).toBe(true);
       expect(validateArchiveEntryName("Title - Author.epub").valid).toBe(true);
+      expect(validateArchiveEntryName("ReZero....epub").valid).toBe(true);
+      expect(validateArchiveEntryName("Dr.. Strange.epub").valid).toBe(true);
+      expect(validateArchiveEntryName("Vol..01.epub").valid).toBe(true);
     });
 
     it("preserves exact multiple consecutive spaces in filenames and handles owner/group spacing", () => {
