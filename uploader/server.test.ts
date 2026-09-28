@@ -2784,4 +2784,148 @@ exit 0
       expect(html).toContain("deviceDuplicatesCount");
     });
   });
+
+  describe("Web Ingest & Download Bug Regressions (4 defects)", () => {
+    const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+
+    it("Defect 1: short title in library does not swallow longer title via startsWith", async () => {
+      const { isSameBookAsync } = await import("./scraper");
+
+      // Book in library titled "Foundation"
+      const libBook1 = {
+        title: "Foundation",
+        authors: "Isaac Asimov",
+      };
+
+      // Candidate book titled "Foundation and Empire"
+      const candidate1 = {
+        title: "Foundation and Empire",
+        author: "Isaac Asimov",
+      };
+
+      // Candidate book titled "Foundation Course in Carpentry"
+      const candidate2 = {
+        title: "Foundation Course in Carpentry",
+        author: "John Doe",
+      };
+
+      // Book in library titled "A"
+      const libBookA = {
+        title: "A",
+        authors: "Author A",
+      };
+
+      // Candidate book titled "A Wizard of Earthsea"
+      const candidateWizard = {
+        title: "A Wizard of Earthsea",
+        author: "Ursula K. Le Guin",
+      };
+
+      expect(await isSameBookAsync(libBook1, candidate1)).toBe(false);
+      expect(await isSameBookAsync(libBook1, candidate2)).toBe(false);
+      expect(await isSameBookAsync(libBookA, candidateWizard)).toBe(false);
+
+      // Exact title remains duplicate
+      expect(await isSameBookAsync(libBook1, { title: "Foundation", author: "Isaac Asimov" })).toBe(true);
+    });
+
+    it("Defect 2: non-ASCII (Burmese and Japanese) EPUB download builds valid RFC 5987 Content-Disposition", async () => {
+      const burmeseTitle = "စာဖတ်သူ - သူရိယဝင်";
+      const japaneseTitle = "オーバーロード 1 不死者の王";
+      const asciiTitle = "Clean Architecture";
+
+      // Test buildContentDisposition directly on non-ASCII titles
+      const { buildContentDisposition } = await import("./filename");
+      const dispBurmese = buildContentDisposition(`${burmeseTitle}.epub`);
+      expect(dispBurmese).toContain("filename=");
+      expect(dispBurmese).toContain("filename*=UTF-8''");
+      expect(() => new Headers({ "Content-Disposition": dispBurmese })).not.toThrow();
+
+      const dispJapanese = buildContentDisposition(`${japaneseTitle}.epub`);
+      expect(dispJapanese).toContain("filename=");
+      expect(dispJapanese).toContain("filename*=UTF-8''");
+      expect(() => new Headers({ "Content-Disposition": dispJapanese })).not.toThrow();
+
+      const dispAscii = buildContentDisposition(`${asciiTitle}.epub`);
+      expect(dispAscii).toContain(`filename="${asciiTitle}.epub"`);
+      expect(() => new Headers({ "Content-Disposition": dispAscii })).not.toThrow();
+    });
+
+    it("Defect 3: archive upload returns HTTP 400 when all extracted books failed to import", async () => {
+      // Create a valid zip with valid EPUB structure that unpackArchive accepts,
+      // but whose content fails ingestBookFile (e.g. invalid container or rejected).
+      const tempZip = `/tmp/test_archive_all_fail_${Date.now()}.zip`;
+      const pythonScript = `
+import zipfile, io
+epub_buf = io.BytesIO()
+with zipfile.ZipFile(epub_buf, "w") as ez:
+    ez.writestr("mimetype", "application/epub+zip")
+    ez.writestr("META-INF/container.xml", "<invalid-container-no-rootfile/>")
+with zipfile.ZipFile("${tempZip}", "w") as z:
+    z.writestr("broken1.epub", epub_buf.getvalue())
+    z.writestr("broken2.epub", epub_buf.getvalue())
+`;
+      spawnSync("python3", ["-c", pythonScript]);
+
+      try {
+        const zipBuffer = fs.readFileSync(tempZip);
+        const formData = new FormData();
+        const blob = new Blob([zipBuffer], { type: "application/zip" });
+        formData.append("file", blob, "all_failed.zip");
+
+        const req = new Request("http://127.0.0.1:8086/api/upload", {
+          method: "POST",
+          headers: { host: "127.0.0.1:8086" },
+          body: formData,
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(400);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(false);
+        expect(data.isArchive).toBe(true);
+        expect(data.imported).toBe(0);
+        expect(data.failed).toBe(2);
+        expect(data.error).toContain("failed");
+      } finally {
+        if (fs.existsSync(tempZip)) fs.unlinkSync(tempZip);
+      }
+    });
+
+    it("Defect 4: POST /api/jobs/:id/retry refuses non-failed jobs and succeeds on failed jobs", async () => {
+      const { getJobQueue } = await import("./jobs");
+      const jq = getJobQueue();
+
+      const job = jq.enqueue("metadata_enrich", { bookId: 9999 });
+
+      // Job is 'pending' -> retry must return 400
+      const reqPending = new Request(`http://127.0.0.1:8086/api/jobs/${job.id}/retry`, {
+        method: "POST",
+        headers: { host: "127.0.0.1:8086" },
+      });
+      const resPending = await handleRequest(reqPending, localServer);
+      expect(resPending.status).toBe(400);
+      const dataPending = (await resPending.json()) as any;
+      expect(dataPending.success).toBe(false);
+      expect(dataPending.error).toContain("only failed jobs can be retried");
+
+      // Mark job as failed directly in db
+      (jq as any).db.prepare("UPDATE jobs SET status = 'failed', error = 'Timeout' WHERE id = ?").run(job.id);
+
+      // Now retry must succeed with 200
+      const reqFailed = new Request(`http://127.0.0.1:8086/api/jobs/${job.id}/retry`, {
+        method: "POST",
+        headers: { host: "127.0.0.1:8086" },
+      });
+      const resFailed = await handleRequest(reqFailed, localServer);
+      expect(resFailed.status).toBe(200);
+      const dataFailed = (await resFailed.json()) as any;
+      expect(dataFailed.success).toBe(true);
+      expect(dataFailed.job.status).toBe("pending");
+
+      // Retrying again immediately fails because it is now 'pending'
+      const resPending2 = await handleRequest(reqFailed, localServer);
+      expect(resPending2.status).toBe(400);
+    });
+  });
 });

@@ -209,22 +209,25 @@ export class DurableJobQueue {
 
   /**
    * Manually resets a failed job back to 'pending' state for immediate retry.
+   * Only jobs with status === 'failed' can be retried.
    */
   public retryJob(id: string): JobRecord | null {
     const job = this.getJob(id);
-    if (!job) return null;
+    if (!job || job.status !== "failed") return null;
 
     const now = Date.now();
-    this.db
+    const updateRes = this.db
       .prepare(
         `UPDATE jobs
          SET status = 'pending',
              next_run_at = ?,
              updated_at = ?,
              error = NULL
-         WHERE id = ?`
+         WHERE id = ? AND status = 'failed'`
       )
       .run(now, now, id);
+
+    if (updateRes.changes === 0) return null;
 
     return this.getJob(id);
   }
@@ -283,7 +286,7 @@ export class DurableJobQueue {
                result = ?,
                updated_at = ?,
                error = NULL
-           WHERE id = ?`
+           WHERE id = ? AND status = 'processing'`
         )
         .run(resultStr, finishedAt, job.id);
 
@@ -306,7 +309,7 @@ export class DurableJobQueue {
                  next_run_at = ?,
                  updated_at = ?,
                  error = ?
-             WHERE id = ?`
+             WHERE id = ? AND status = 'processing'`
           )
           .run(nextRetry, nextRunAt, failedAt, sanitizedErr, job.id);
       } else {
@@ -318,7 +321,7 @@ export class DurableJobQueue {
                  retries = ?,
                  updated_at = ?,
                  error = ?
-             WHERE id = ?`
+             WHERE id = ? AND status = 'processing'`
           )
           .run(nextRetry, failedAt, sanitizedErr, job.id);
       }
