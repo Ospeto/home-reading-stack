@@ -23,6 +23,7 @@ import {
   parseRetryAfterMs,
   paceAniListRequest,
   resetAniListPacing,
+  autoEnrichBookSynopsis,
   type ScrapedMetadata,
 } from "./scraper";
 
@@ -1719,6 +1720,146 @@ describe("RanobeDB Scraper & Light Novel Metadata Engine", () => {
         // Q2 was held behind Q1, and when released, enforced the minimum 700ms interval
         expect(recordedSleeps.some((s) => s.query === "q2")).toBe(true);
       });
+    });
+  });
+
+  describe("autoEnrichBookSynopsis Overwrite Protection & calibredb list Hygiene", () => {
+    it("passes --for-machine to calibredb list invocation", async () => {
+      let capturedListArgs: string[] = [];
+      const mockRunner = (args: string[]) => {
+        if (args[0] === "list") {
+          capturedListArgs = args;
+          return {
+            status: 0,
+            stdout: JSON.stringify([{ id: 401, title: "Test Book", comments: "Already present" }]),
+            stderr: "",
+          };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      };
+
+      const res = await autoEnrichBookSynopsis(401, {
+        title: "Test Book",
+        calibredbRunner: mockRunner,
+      });
+
+      expect(capturedListArgs).toContain("--for-machine");
+      expect(res.enriched).toBe(false);
+      expect(res.synopsis).toBe("Already present");
+    });
+
+    it("returns without writing when calibredb list exits non-zero", async () => {
+      let setMetadataCalled = false;
+      const mockRunner = (args: string[]) => {
+        if (args[0] === "list") {
+          return {
+            status: 1,
+            stdout: "",
+            stderr: "calibredb error: database locked",
+          };
+        }
+        if (args[0] === "set_metadata") {
+          setMetadataCalled = true;
+          return { status: 0, stdout: "", stderr: "" };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      };
+
+      const res = await autoEnrichBookSynopsis(402, {
+        title: "Test Book",
+        author: "Author",
+        calibredbRunner: mockRunner,
+      });
+
+      expect(res.enriched).toBe(false);
+      expect(setMetadataCalled).toBe(false);
+    });
+
+    it("returns without calling set_metadata when calibredb list stdout is a non-JSON human table", async () => {
+      let setMetadataCalled = false;
+      const humanTable = `
+id  title      authors    comments
+403 Test Book  Author     A real synopsis that an operator already wrote in Calibre.
+`;
+      const mockRunner = (args: string[]) => {
+        if (args[0] === "list") {
+          return {
+            status: 0,
+            stdout: humanTable,
+            stderr: "",
+          };
+        }
+        if (args[0] === "set_metadata") {
+          setMetadataCalled = true;
+          return { status: 0, stdout: "", stderr: "" };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      };
+
+      const res = await autoEnrichBookSynopsis(403, {
+        title: "Test Book",
+        author: "Author",
+        calibredbRunner: mockRunner,
+      });
+
+      expect(res.enriched).toBe(false);
+      expect(setMetadataCalled).toBe(false);
+    });
+
+    it("preserves synopsis and does not call set_metadata when JSON list has non-empty comments", async () => {
+      let setMetadataCalled = false;
+      const mockRunner = (args: string[]) => {
+        if (args[0] === "list") {
+          return {
+            status: 0,
+            stdout: JSON.stringify([
+              {
+                id: 404,
+                title: "Existing Book",
+                authors: "Author",
+                comments: "<p>Existing curated synopsis.</p>",
+              },
+            ]),
+            stderr: "",
+          };
+        }
+        if (args[0] === "set_metadata") {
+          setMetadataCalled = true;
+          return { status: 0, stdout: "", stderr: "" };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      };
+
+      const res = await autoEnrichBookSynopsis(404, {
+        title: "Existing Book",
+        calibredbRunner: mockRunner,
+      });
+
+      expect(res.enriched).toBe(false);
+      expect(res.synopsis).toBe("<p>Existing curated synopsis.</p>");
+      expect(setMetadataCalled).toBe(false);
+    });
+
+    it("returns without writing when runner throws an exception during list", async () => {
+      let setMetadataCalled = false;
+      const mockRunner = (args: string[]) => {
+        if (args[0] === "list") {
+          throw new Error("spawnSync ENOENT");
+        }
+        if (args[0] === "set_metadata") {
+          setMetadataCalled = true;
+          return { status: 0, stdout: "", stderr: "" };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      };
+
+      const res = await autoEnrichBookSynopsis(405, {
+        title: "Crashing Runner",
+        calibredbRunner: mockRunner,
+      });
+
+      expect(res.enriched).toBe(false);
+      expect(setMetadataCalled).toBe(false);
     });
   });
 });

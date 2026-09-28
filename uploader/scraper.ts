@@ -2641,10 +2641,19 @@ export async function autoEnrichBookSynopsis(
       `id:${bookId}`,
       "--fields",
       "id,title,authors,comments,series,series_index",
+      "--for-machine",
     ]);
-    if (listRes.status === 0 && listRes.stdout) {
-      const parsed = safeParseJson(listRes.stdout);
-      if (Array.isArray(parsed) && parsed[0]) {
+
+    // A runner whose list exits non-zero must return without writing
+    if (listRes.status !== 0) {
+      return { enriched: false };
+    }
+
+    const stdout = listRes.stdout || "";
+    const parsed = safeParseJson(stdout);
+
+    if (Array.isArray(parsed)) {
+      if (parsed[0]) {
         const book = parsed[0];
         if (!isCommentsEmpty(book.comments)) {
           return { enriched: false, synopsis: book.comments };
@@ -2656,9 +2665,16 @@ export async function autoEnrichBookSynopsis(
           currentSeriesIndex = book.series_index;
         }
       }
+    } else {
+      // Non-JSON stdout: e.g. human table output or unexpected formatting.
+      // A runner whose list stdout is a non-JSON table containing a real synopsis must not call set_metadata.
+      // If parsing fails, we cannot safely know if comments were empty, so return without writing.
+      return { enriched: false };
     }
-  } catch (_err) {
-    void _err;
+  } catch (err) {
+    // If list invocation throws an error, return without writing to prevent overwriting
+    console.debug(`[autoEnrichBookSynopsis] Failed to inspect existing metadata for book ${bookId}:`, err);
+    return { enriched: false };
   }
 
   // Tier 1: Local EPUB Inspection
