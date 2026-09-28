@@ -1,121 +1,172 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 380" width="100%" height="100%">
   <defs>
-    <!-- Lantern Core Light -->
+    <!-- Left Facet (Key-Light Platinum Gradient) -->
+    <linearGradient id="markFacetKey" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="30%" stop-color="#f8fafc" />
+      <stop offset="70%" stop-color="#e2e8f0" />
+      <stop offset="100%" stop-color="#cbd5e1" />
+    </linearGradient>
+
+    <!-- Right Facet (Inner Shadow Titanium Gradient) -->
+    <linearGradient id="markFacetFill" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#cbd5e1" />
+      <stop offset="45%" stop-color="#94a3b8" />
+      <stop offset="100%" stop-color="#64748b" />
+    </linearGradient>
+
+    <!-- Foot Shelf Facet (Horizontal Base Plane) -->
+    <linearGradient id="markFacetShelf" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#cbd5e1" />
+      <stop offset="35%" stop-color="#e2e8f0" />
+      <stop offset="80%" stop-color="#f8fafc" />
+      <stop offset="100%" stop-color="#ffffff" />
+    </linearGradient>
+
+    <!-- Golden Focal Beacon Gradient (id="markBeacon" required by tests) -->
     <radialGradient id="markBeacon" cx="50%" cy="50%" r="50%">
       <stop offset="0%" stop-color="#ffffff" />
-      <stop offset="30%" stop-color="#ffecb3" />
-      <stop offset="70%" stop-color="#ffb300" />
-      <stop offset="100%" stop-color="rgba(255, 153, 0, 0)" />
+      <stop offset="22%" stop-color="#fef08a" />
+      <stop offset="55%" stop-color="#f59e0b" />
+      <stop offset="85%" stop-color="#d97706" />
+      <stop offset="100%" stop-color="rgba(217, 119, 6, 0)" />
     </radialGradient>
 
-    <!-- Beams of Light -->
-    <linearGradient id="markLeftBeam" x1="100%" y1="20%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="rgba(255, 236, 179, 0.45)" />
-      <stop offset="50%" stop-color="rgba(77, 208, 225, 0.18)" />
-      <stop offset="100%" stop-color="rgba(38, 198, 218, 0)" />
+    <!-- Cinematic Focused Primary Beam (id="markRightBeam" required by tests) -->
+    <linearGradient id="markRightBeam" x1="0%" y1="15%" x2="100%" y2="85%">
+      <stop offset="0%" stop-color="rgba(255, 247, 214, 0.70)" />
+      <stop offset="20%" stop-color="rgba(251, 191, 36, 0.30)" />
+      <stop offset="55%" stop-color="rgba(245, 158, 11, 0.08)" />
+      <stop offset="90%" stop-color="rgba(245, 158, 11, 0.01)" />
+      <stop offset="100%" stop-color="rgba(245, 158, 11, 0)" />
     </linearGradient>
 
-    <linearGradient id="markRightBeam" x1="0%" y1="20%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="rgba(255, 236, 179, 0.55)" />
-      <stop offset="50%" stop-color="rgba(255, 167, 38, 0.22)" />
-      <stop offset="100%" stop-color="rgba(255, 143, 0, 0)" />
+    <!-- Atmospheric Secondary Beam (id="markLeftBeam" required by tests) -->
+    <linearGradient id="markLeftBeam" x1="100%" y1="15%" x2="0%" y2="85%">
+      <stop offset="0%" stop-color="rgba(255, 247, 214, 0.45)" />
+      <stop offset="30%" stop-color="rgba(125, 211, 252, 0.14)" />
+      <stop offset="80%" stop-color="rgba(56, 189, 248, 0.02)" />
+      <stop offset="100%" stop-color="rgba(56, 189, 248, 0)" />
     </linearGradient>
 
-    <!-- Book Spine Styles -->
-    <linearGradient id="markSpine1" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#181c26" />
-      <stop offset="30%" stop-color="#2c3448" />
-      <stop offset="70%" stop-color="#202636" />
-      <stop offset="100%" stop-color="#141722" />
+    <!-- Ambient Beacon Aura -->
+    <radialGradient id="markAura" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="rgba(245, 158, 11, 0.45)" />
+      <stop offset="35%" stop-color="rgba(251, 191, 36, 0.18)" />
+      <stop offset="70%" stop-color="rgba(245, 158, 11, 0.03)" />
+      <stop offset="100%" stop-color="rgba(0, 0, 0, 0)" />
+    </radialGradient>
+
+    <!-- Specular Micro-Ridge Stroke -->
+    <linearGradient id="markRidgeSpecular" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="rgba(255, 255, 255, 0.95)" />
+      <stop offset="50%" stop-color="rgba(255, 255, 255, 0.55)" />
+      <stop offset="100%" stop-color="rgba(255, 255, 255, 0.20)" />
     </linearGradient>
 
-    <linearGradient id="markSpine2" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#202534" />
-      <stop offset="30%" stop-color="#3b4660" />
-      <stop offset="75%" stop-color="#282f42" />
-      <stop offset="100%" stop-color="#191c28" />
+    <!-- Shelf Gold Accent Line -->
+    <linearGradient id="markShelfAccent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="rgba(245, 158, 11, 0.85)" />
+      <stop offset="45%" stop-color="rgba(251, 191, 36, 0.35)" />
+      <stop offset="100%" stop-color="rgba(251, 191, 36, 0.0)" />
     </linearGradient>
 
-    <linearGradient id="markSpineTeal" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#132328" />
-      <stop offset="30%" stop-color="#23424c" />
-      <stop offset="75%" stop-color="#192e35" />
-      <stop offset="100%" stop-color="#101c20" />
-    </linearGradient>
-
-    <!-- Gilded Pages -->
-    <linearGradient id="markGoldPages" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#fff8e1" />
-      <stop offset="40%" stop-color="#ffe082" />
-      <stop offset="80%" stop-color="#ffca28" />
-      <stop offset="100%" stop-color="#ffa000" />
-    </linearGradient>
-
-    <linearGradient id="markRoof" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#3d4454" />
-      <stop offset="50%" stop-color="#242834" />
-      <stop offset="100%" stop-color="#141720" />
-    </linearGradient>
-
-    <filter id="markGlow" x="-20%" y="-20%" width="140%" height="140%">
-      <feGaussianBlur stdDeviation="8" result="blur" />
+    <!-- Filters (id="markGlow" preserved for test / template compatibility) -->
+    <filter id="markGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="5" result="blur" />
       <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <filter id="markBeamSpread" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" />
+    </filter>
+    <filter id="markAmbientSpread" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="20" />
+    </filter>
+    <filter id="markDropShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000000" flood-opacity="0.55" />
     </filter>
   </defs>
 
-  <!-- Light Cones -->
-  <polygon points="160,85 20,330 0,315 145,80" fill="url(#markLeftBeam)" />
-  <polygon points="160,85 300,330 320,315 175,80" fill="url(#markRightBeam)" />
+  <!-- 1. Volumetric Light Rays (Lighthouse Searchlight) -->
+  <!-- Beacon Apex at (102, 70) -->
+  <circle cx="102" cy="70" r="110" fill="url(#markAura)" filter="url(#markAmbientSpread)" />
 
-  <!-- Base Shadow -->
-  <ellipse cx="160" cy="355" rx="120" ry="12" fill="rgba(0, 0, 0, 0.4)" />
+  <!-- Right Primary Beam (Sweeping across upper-right field) -->
+  <polygon points="102,70 315,40 315,160 108,76" fill="url(#markRightBeam)" filter="url(#markBeamSpread)" />
+  <!-- Left Atmospheric Secondary Beam -->
+  <polygon points="102,70 5,100 5,170 96,76" fill="url(#markLeftBeam)" filter="url(#markBeamSpread)" />
 
-  <!-- Book 1 (Base) -->
-  <path d="M72,320 C72,320 160,310 248,320 C256,320 262,326 262,334 L262,346 C262,354 256,360 248,360 C160,350 72,360 72,360 C64,360 58,354 58,346 L58,334 C58,326 64,320 72,320 Z" fill="url(#markSpine1)" />
-  <path d="M240,323 C252,324 258,328 258,334 L258,344 C258,350 252,354 240,355 Z" fill="url(#markGoldPages)" opacity="0.95" />
-  <line x1="76" y1="330" x2="76" y2="350" stroke="#d4af37" stroke-width="2" stroke-linecap="round" opacity="0.8" />
-  <line x1="82" y1="330" x2="82" y2="350" stroke="#d4af37" stroke-width="2" stroke-linecap="round" opacity="0.8" />
+  <!-- 2. Ground Contact Shadow -->
+  <ellipse cx="159" cy="326" rx="105" ry="12" fill="rgba(0, 0, 0, 0.5)" filter="url(#markBeamSpread)" />
 
-  <!-- Book 2 -->
-  <path d="M82,275 C82,275 160,268 238,275 C245,275 251,281 251,288 L251,300 C251,307 245,313 238,313 C160,305 82,313 82,313 C75,313 69,307 69,300 L69,288 C69,281 75,275 82,275 Z" fill="url(#markSpine2)" />
-  <path d="M80,279 C72,281 70,285 70,289 L70,298 C70,303 73,306 80,308 Z" fill="url(#markGoldPages)" opacity="0.95" />
-  <line x1="234" y1="283" x2="234" y2="305" stroke="#d4af37" stroke-width="2" stroke-linecap="round" opacity="0.75" />
+  <!-- 3. Sculpted Monogram 'L' (Architectural 3D Chiseled Geometry) -->
+  <!-- Stem: X=74..130 (width 56), Ridge at X=102 -->
+  <!-- Foot: Y=254..310 (height 56), Length: X=74..244 (width 170) -->
+  <!-- Bounding box: [74, 244] x [70, 310] -> Center is (159, 190) in 320x380! -->
+  <g filter="url(#markDropShadow)">
+    <!-- Left / Outer Facet (Vertical Stem Column) -->
+    <path d="
+      M 84,70
+      L 102,70
+      L 102,282
+      L 74,310
+      L 74,80
+      A 10,10 0 0 1 84,70
+      Z
+    " fill="url(#markFacetKey)" />
 
-  <!-- Book 3 -->
-  <path d="M94,232 C94,232 160,226 226,232 C233,232 239,237 239,244 L239,256 C239,263 233,268 226,268 C160,261 94,268 94,268 C87,268 81,263 81,256 L81,244 C81,237 87,232 94,232 Z" fill="url(#markSpineTeal)" />
-  <path d="M216,235 C228,237 233,241 233,246 L233,254 C233,259 228,263 216,264 Z" fill="url(#markGoldPages)" opacity="0.9" />
+    <!-- Right / Inner Bevel Facet (Vertical Stem Depth Plane) -->
+    <path d="
+      M 102,70
+      L 120,70
+      A 10,10 0 0 1 130,80
+      L 130,254
+      L 102,282
+      Z
+    " fill="url(#markFacetFill)" />
 
-  <!-- Book 4 -->
-  <path d="M106,190 C106,190 160,185 214,190 C220,190 226,195 226,202 L226,213 C226,220 220,225 214,225 C160,219 106,225 106,225 C100,225 94,220 94,213 L94,202 C94,195 100,190 106,190 Z" fill="url(#markSpine1)" />
-  <path d="M104,193 C96,195 95,199 95,203 L95,211 C95,216 97,219 104,221 Z" fill="url(#markGoldPages)" opacity="0.95" />
+    <!-- Horizontal Foot Base Facet (Grounded Foundation) -->
+    <path d="
+      M 74,310
+      L 102,282
+      L 130,254
+      L 234,254
+      A 10,10 0 0 1 244,264
+      L 244,300
+      A 10,10 0 0 1 234,310
+      Z
+    " fill="url(#markFacetShelf)" />
 
-  <!-- Book 5 -->
-  <path d="M118,150 C118,150 160,146 202,150 C208,150 213,155 213,161 L213,172 C213,178 208,183 202,183 C160,178 118,183 118,183 C112,183 107,178 107,172 L107,161 C107,155 112,150 118,150 Z" fill="url(#markSpine2)" />
-  <path d="M194,153 C202,155 207,158 207,162 L207,169 C207,173 202,176 194,178 Z" fill="url(#markGoldPages)" opacity="0.9" />
+    <!-- Architectural Ridge Lines (Crisp 3D Bevels) -->
+    <line x1="102" y1="70" x2="102" y2="282" stroke="url(#markRidgeSpecular)" stroke-width="1.25" />
+    <line x1="74" y1="310" x2="102" y2="282" stroke="url(#markRidgeSpecular)" stroke-width="1.25" />
+    <line x1="102" y1="282" x2="130" y2="254" stroke="url(#markRidgeSpecular)" stroke-width="1.25" />
 
-  <!-- Balcony Deck & Railing -->
-  <path d="M108,144 L212,144 L218,150 L102,150 Z" fill="#2d3345" stroke="#424b63" stroke-width="1" />
-  <line x1="106" y1="138" x2="214" y2="138" stroke="#64748b" stroke-width="1.5" />
-  <line x1="120" y1="138" x2="120" y2="144" stroke="#64748b" stroke-width="1.5" />
-  <line x1="140" y1="138" x2="140" y2="144" stroke="#64748b" stroke-width="1.5" />
-  <line x1="160" y1="138" x2="160" y2="144" stroke="#64748b" stroke-width="1.5" />
-  <line x1="180" y1="138" x2="180" y2="144" stroke="#64748b" stroke-width="1.5" />
-  <line x1="200" y1="138" x2="200" y2="144" stroke="#64748b" stroke-width="1.5" />
+    <!-- Outer Specular Edge Contour -->
+    <path d="
+      M 74,310
+      L 74,80
+      A 10,10 0 0 1 84,70
+      L 120,70
+      A 10,10 0 0 1 130,80
+      L 130,254
+      L 234,254
+      A 10,10 0 0 1 244,264
+    " fill="none" stroke="rgba(255, 255, 255, 0.85)" stroke-width="1.1" stroke-linecap="round" />
 
-  <!-- Lantern Chamber & Glowing Beacon -->
-  <rect x="124" y="82" width="72" height="56" rx="2" fill="#0d1017" stroke="#333b4e" stroke-width="2" opacity="0.95" />
-  <circle cx="160" cy="110" r="30" fill="url(#markBeacon)" filter="url(#markGlow)" />
-  <circle cx="160" cy="110" r="12" fill="#ffffff" />
-  <line x1="124" y1="82" x2="124" y2="138" stroke="#2c3345" stroke-width="2" />
-  <line x1="148" y1="82" x2="148" y2="138" stroke="#2c3345" stroke-width="2" />
-  <line x1="172" y1="82" x2="172" y2="138" stroke="#2c3345" stroke-width="2" />
-  <line x1="196" y1="82" x2="196" y2="138" stroke="#2c3345" stroke-width="2" />
-  <line x1="124" y1="110" x2="196" y2="110" stroke="#3d465d" stroke-width="1.5" />
+    <!-- Architectural Lantern Gallery Deck Line at Apex -->
+    <line x1="80" y1="70" x2="124" y2="70" stroke="#f59e0b" stroke-width="2.2" stroke-linecap="round" />
 
-  <!-- Cupola Roof & Spire -->
-  <path d="M116,82 L204,82 L198,78 L122,78 Z" fill="#475569" />
-  <path d="M120,78 C120,78 134,48 160,42 C186,48 200,78 200,78 Z" fill="url(#markRoof)" stroke="#475569" stroke-width="1.5" />
-  <circle cx="160" cy="38" r="4.5" fill="#f59e0b" />
-  <line x1="160" y1="33" x2="160" y2="18" stroke="#f59e0b" stroke-width="2.5" stroke-linecap="round" />
-  <circle cx="160" cy="18" r="2.5" fill="#ffffff" filter="url(#markGlow)" />
+    <!-- Warm Amber Caustic Reflection Line along Shelf Base -->
+    <line x1="130" y1="254" x2="234" y2="254" stroke="url(#markShelfAccent)" stroke-width="1.75" stroke-linecap="round" />
+
+    <!-- Corner Focal Prism Jewel -->
+    <circle cx="102" cy="282" r="3" fill="#f59e0b" opacity="0.9" filter="url(#markGlow)" />
+    <circle cx="102" cy="282" r="1.2" fill="#ffffff" />
+  </g>
+
+  <!-- 4. Luminous Focal Beacon Jewel at Crown Apex (102, 70) -->
+  <circle cx="102" cy="70" r="12" fill="url(#markBeacon)" filter="url(#markGlow)" />
+  <circle cx="102" cy="70" r="4.5" fill="#ffffff" />
+  <circle cx="102" cy="70" r="1.8" fill="#fffbeb" />
 </svg>
