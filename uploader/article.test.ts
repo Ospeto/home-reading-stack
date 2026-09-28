@@ -913,6 +913,50 @@ describe("URL Extraction from Conversational Text (extractUrlFromText)", () => {
     expect(extractUrlFromText(tMeLink)).toBeNull();
   });
 
+  test("preserves URLs with apostrophes and balanced parentheses without truncating (Schrödinger's cat, C_(programming_language), path(1)/page)", () => {
+    // 1. URL with apostrophe (Schrödinger's cat)
+    const schrodinger = "Check out https://en.wikipedia.org/wiki/Schrödinger's_cat for quantum mechanics";
+    expect(extractUrlFromText(schrodinger)).toBe("https://en.wikipedia.org/wiki/Schrödinger's_cat");
+    expect(extractUrlFromText("https://en.wikipedia.org/wiki/Schrödinger's_cat")).toBe(
+      "https://en.wikipedia.org/wiki/Schrödinger's_cat",
+    );
+
+    // 2. URL with closing parenthesis balancing a parenthesis inside the URL (C_(programming_language))
+    const cLang = "Learn https://en.wikipedia.org/wiki/C_(programming_language) today";
+    expect(extractUrlFromText(cLang)).toBe("https://en.wikipedia.org/wiki/C_(programming_language)");
+    expect(extractUrlFromText("https://en.wikipedia.org/wiki/C_(programming_language)")).toBe(
+      "https://en.wikipedia.org/wiki/C_(programming_language)",
+    );
+
+    // 3. URL with parenthesized component in the middle of path (path(1)/page)
+    const numberedPath = "Visit https://example.com/path(1)/page now";
+    expect(extractUrlFromText(numberedPath)).toBe("https://example.com/path(1)/page");
+    expect(extractUrlFromText("https://example.com/path(1)/page")).toBe("https://example.com/path(1)/page");
+
+    // 4. Enclosing conversational parentheses: strips outer parenthesis while keeping inner closing parenthesis
+    const enclosedCLang = "(see https://en.wikipedia.org/wiki/C_(programming_language))";
+    expect(extractUrlFromText(enclosedCLang)).toBe("https://en.wikipedia.org/wiki/C_(programming_language)");
+
+    const enclosedNumbered = "(see https://example.com/path(1)/page)";
+    expect(extractUrlFromText(enclosedNumbered)).toBe("https://example.com/path(1)/page");
+
+    // 5. Parentheses with trailing conversational punctuation (period, question mark)
+    expect(extractUrlFromText("Did you read https://en.wikipedia.org/wiki/C_(programming_language)?")).toBe(
+      "https://en.wikipedia.org/wiki/C_(programming_language)",
+    );
+    expect(extractUrlFromText("Check https://en.wikipedia.org/wiki/Schrödinger's_cat.")).toBe(
+      "https://en.wikipedia.org/wiki/Schrödinger's_cat",
+    );
+
+    // 6. Explicit command formats
+    expect(extractUrlFromText("/article https://en.wikipedia.org/wiki/C_(programming_language)")).toBe(
+      "https://en.wikipedia.org/wiki/C_(programming_language)",
+    );
+    expect(extractUrlFromText("/read https://en.wikipedia.org/wiki/Schrödinger's_cat")).toBe(
+      "https://en.wikipedia.org/wiki/Schrödinger's_cat",
+    );
+  });
+
   test("rejects bot challenge pages in article ingestion and evaluateJunkGate (including HTML entities)", async () => {
     const challengeTitles = [
       "Making sure you're not a bot!",
