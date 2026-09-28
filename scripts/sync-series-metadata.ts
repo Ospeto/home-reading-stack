@@ -77,6 +77,90 @@ export interface ExtractedSeries {
 }
 
 /**
+ * Normalizes text for matching comparisons (lowercased, punctuation replaced by spaces, collapsed).
+ */
+export function normalizeForMatch(str: string): string {
+  if (!str) return "";
+  return str
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+/**
+ * Extracts author folder from Calibre relative path: "Author Name/Title (123)" -> "Author Name"
+ */
+export function extractAuthorFromPath(calibrePath: string): string {
+  if (!calibrePath) return "";
+  const parts = calibrePath.split("/").map((p) => p.trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    return parts[0];
+  }
+  return "";
+}
+
+/**
+ * Checks whether target book and candidate source book match on title or author.
+ */
+export function isTitleOrAuthorMatch(
+  tgtTitle: string,
+  tgtPath: string,
+  srcTitle: string,
+  srcPath: string,
+  tgtAuthor?: string,
+  srcAuthor?: string,
+): boolean {
+  const normTgtTitle = normalizeForMatch(tgtTitle);
+  const normSrcTitle = normalizeForMatch(srcTitle);
+
+  // 1. Direct title match or strong containment
+  if (normTgtTitle && normSrcTitle) {
+    if (normTgtTitle === normSrcTitle) return true;
+    if (
+      normTgtTitle.length >= 5 &&
+      normSrcTitle.length >= 5 &&
+      (normTgtTitle.includes(normSrcTitle) || normSrcTitle.includes(normTgtTitle))
+    ) {
+      return true;
+    }
+  }
+
+  // 2. Title from path match
+  const tgtTitleFromPath = normalizeForMatch(
+    stripBookIdFromPath(tgtPath).split("/").slice(1).join("/"),
+  );
+  const srcTitleFromPath = normalizeForMatch(
+    stripBookIdFromPath(srcPath).split("/").slice(1).join("/"),
+  );
+  if (tgtTitleFromPath && srcTitleFromPath) {
+    if (tgtTitleFromPath === srcTitleFromPath) return true;
+    if (
+      tgtTitleFromPath.length >= 5 &&
+      srcTitleFromPath.length >= 5 &&
+      (tgtTitleFromPath.includes(srcTitleFromPath) || srcTitleFromPath.includes(tgtTitleFromPath))
+    ) {
+      return true;
+    }
+  }
+
+  // 3. Author match (from metadata or path)
+  const tAuth = normalizeForMatch(tgtAuthor || extractAuthorFromPath(tgtPath));
+  const sAuth = normalizeForMatch(srcAuthor || extractAuthorFromPath(srcPath));
+  if (tAuth && sAuth) {
+    if (tAuth === sAuth) return true;
+    if (
+      tAuth.length >= 4 &&
+      sAuth.length >= 4 &&
+      (tAuth.includes(sAuth) || sAuth.includes(tAuth))
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Strips Calibre's book ID folder suffix: "Author/Title (123)" -> "Author/Title"
  */
 export function stripBookIdFromPath(calibrePath: string): string {
@@ -122,6 +206,31 @@ export function parseBurmeseNumber(str: string): number {
   return n || 1;
 }
 
+const INVALID_SERIES_WORDS = new Set([
+  "my",
+  "your",
+  "his",
+  "her",
+  "its",
+  "our",
+  "their",
+  "this",
+  "that",
+  "these",
+  "those",
+  "the",
+  "a",
+  "an",
+  "finished",
+  "reading",
+  "unread",
+  "completed",
+  "sample",
+]);
+
+const DANGLING_PREPOSITION_OR_ARTICLE_REGEX =
+  /\b(?:of|in|on|at|to|for|from|with|by|about|and|or|the|a|an)$/i;
+
 const TITLE_SERIES_PATTERNS = [
   // 1. <Series Name>, Vol(ume).? N (with optional subtitle or parenthetical)
   // e.g. "Overlord, Vol. 14: The Witch of the Doomed Kingdom"
@@ -140,13 +249,14 @@ const TITLE_SERIES_PATTERNS = [
     regex:
       /^(.*?)(?:,\s*|\s+-\s+|\s+)#(\d+(?:\.\d+)?)(?:\s*[:\-–—]\s*.*|\s*\([^)]*\))?$/i,
   },
-  // 3. <Series Name> Book <N> (with optional subtitle)
+  // 3. <Series Name> Book <N> (with optional subtitle or parenthetical)
   // e.g. "The Beginning After the End: Book 10: Retribution"
   // e.g. "Providence, Book 11"
+  // e.g. "Warriors Book 1" or "Series Name (Book 2)"
   {
     name: "book",
     regex:
-      /^(.*?)(?:,\s*|\s+-\s+|\s+)Book\s*#?(\d+(?:\.\d+)?)(?:\s*[:\-–—]\s*.*|\s*\([^)]*\))?$/i,
+      /^(.*?)(?:,\s*|\s*[:\-–—]\s*|\s+|\s*\()\s*Book\s*#?(\d+(?:\.\d+)?)\)?(?:\s*[:\-–—]\s*.*|\s*\([^)]*\))?$/i,
   },
   // 4. Burmese: <Series Name> (အတွဲ N) or အတွဲ N
   // e.g. "စစ်နှင့်ငြိမ်းချမ်းရေး (အတွဲ ၂)"
@@ -180,7 +290,13 @@ export function extractSeriesFromTitle(title: string): ExtractedSeries | null {
           ? parseBurmeseNumber(m[2])
           : parseFloat(m[2]);
 
-      if (series.length >= 2 && !isNaN(vol) && vol > 0) {
+      if (
+        series.length >= 2 &&
+        !isNaN(vol) &&
+        vol > 0 &&
+        !INVALID_SERIES_WORDS.has(series.toLowerCase()) &&
+        !DANGLING_PREPOSITION_OR_ARTICLE_REGEX.test(series)
+      ) {
         return { series, volume: vol, pattern: pat.name };
       }
     }
@@ -285,14 +401,14 @@ export function setCalibreMetadataAsync(
       resolve({ success: false, error: `calibredb timed out after ${timeoutMs}ms` });
     }, timeoutMs);
 
-    child.stdout?.on("data", (d) => {
+    child.stdout?.on("data", (d: any) => {
       stdout += d.toString();
     });
-    child.stderr?.on("data", (d) => {
+    child.stderr?.on("data", (d: any) => {
       stderr += d.toString();
     });
 
-    child.on("close", (code) => {
+    child.on("close", (code: any) => {
       clearTimeout(timer);
       if (code === 0) {
         resolve({ success: true });
@@ -302,7 +418,7 @@ export function setCalibreMetadataAsync(
       }
     });
 
-    child.on("error", (err) => {
+    child.on("error", (err: any) => {
       clearTimeout(timer);
       resolve({ success: false, error: err.message });
     });
@@ -315,7 +431,7 @@ export function setCalibreMetadataAsync(
 export function flushReadingCache(cacheDbPath?: string): void {
   const lighthouseRoot =
     process.env.LIGHTHOUSE_ROOT ||
-    path.resolve(import.meta.dir, "..");
+    path.resolve((import.meta as any).dir, "..");
   const candidates = [
     cacheDbPath,
     process.env.CACHE_DB_PATH,
@@ -401,10 +517,25 @@ export async function syncSeriesMetadata(
   srcDb.run("PRAGMA busy_timeout = 5000;");
   tgtDb.run("PRAGMA busy_timeout = 5000;");
 
-  // Query source library for books with series
+  // Check if authors and books_authors_link tables exist in databases
+  const srcHasAuthors =
+    !!srcDb.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='authors';").get() &&
+    !!srcDb.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='books_authors_link';").get();
+  const tgtHasAuthors =
+    !!tgtDb.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='authors';").get() &&
+    !!tgtDb.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='books_authors_link';").get();
+
+  const srcAuthorCol = srcHasAuthors
+    ? `(SELECT GROUP_CONCAT(a.name, ' & ') FROM books_authors_link bal JOIN authors a ON bal.author = a.id WHERE bal.book = b.id) as src_author,`
+    : `'' as src_author,`;
+  const tgtAuthorCol = tgtHasAuthors
+    ? `(SELECT GROUP_CONCAT(a.name, ' & ') FROM books_authors_link bal JOIN authors a ON bal.author = a.id WHERE bal.book = b.id) as tgt_author,`
+    : `'' as tgt_author,`;
+
   const srcRows = srcDb
     .query(`
     SELECT b.id as src_id, b.title as src_title, b.path as src_path, b.series_index as src_series_index,
+           ${srcAuthorCol}
            s.name as series, d.uncompressed_size as src_size, d.name as src_filename
     FROM books b
     JOIN books_series_link bsl ON b.id = bsl.book
@@ -418,6 +549,7 @@ export async function syncSeriesMetadata(
   const tgtRows = tgtDb
     .query(`
     SELECT b.id as tgt_id, b.title as tgt_title, b.path as tgt_path, b.series_index as tgt_series_index,
+           ${tgtAuthorCol}
            s.name as tgt_series, d.uncompressed_size as tgt_size, d.name as tgt_filename
     FROM books b
     JOIN data d ON b.id = d.book
@@ -474,11 +606,23 @@ export async function syncSeriesMetadata(
     // 1. Primary: exact relative path without ID + uncompressed size
     let match = srcByPathAndSize.get(key);
 
-    // 2. Secondary: unique file size match
+    // 2. Secondary: unique file size match WITH title or author validation
     if (!match) {
       const candidates = srcBySize.get(t.tgt_size) || [];
       if (candidates.length === 1) {
-        match = candidates[0];
+        const candidate = candidates[0];
+        if (
+          isTitleOrAuthorMatch(
+            t.tgt_title,
+            t.tgt_path,
+            candidate.src_title,
+            candidate.src_path,
+            t.tgt_author,
+            candidate.src_author,
+          )
+        ) {
+          match = candidate;
+        }
       }
     }
 
