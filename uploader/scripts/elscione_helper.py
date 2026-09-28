@@ -64,7 +64,10 @@ def assert_elscione_host(host_input: str) -> str:
         port_str = parts[1]
         if not port_str.isascii() or not port_str.isdigit():
             raise RuntimeError(f"Invalid non-numeric port in host: {host_input}")
-        port_num = int(port_str)
+        try:
+            port_num = int(port_str)
+        except ValueError as e:
+            raise RuntimeError(f"Invalid port in host: {host_input}") from e
         if not (1 <= port_num <= 65535):
             raise RuntimeError(f"Port out of range (1..65535) in host: {host_input}")
     else:
@@ -80,14 +83,33 @@ def assert_elscione_host(host_input: str) -> str:
 
 def safe_unquote(path_str: str) -> str:
     """
-    Safe unquote that never throws on malformed percent sequences.
+    Safe recursive unquote that resolves multi-encoded traversal markers (e.g. %252e%252e)
+    and never throws on malformed percent sequences.
     """
     if not path_str:
         return ""
-    try:
-        return unquote(path_str)
-    except Exception:
-        return path_str
+    curr = path_str
+    for _ in range(15):
+        try:
+            nxt = unquote(curr)
+        except Exception:
+            break
+        if nxt == curr:
+            break
+        curr = nxt
+    return curr
+
+
+def normalize_scoped_path(path_str: str) -> str:
+    """
+    Decodes recursively, maps backslashes to forward slashes, and normalizes posix path.
+    """
+    if not path_str:
+        return ""
+    decoded = safe_unquote(path_str).replace("\\", "/")
+    if re.search(r"%2[eef]|%25", decoded, flags=re.IGNORECASE):
+        return "/__DISALLOWED_RECURSIVE_ENCODING__"
+    return posixpath.normpath(decoded)
 
 
 def normalize_elscione_url(url: str) -> dict:
@@ -126,9 +148,12 @@ def normalize_elscione_url(url: str) -> dict:
     if ":" in parts.netloc:
         p_str = parts.netloc.split(":", 1)[1]
         if p_str.isascii() and p_str.isdigit():
-            p_val = int(p_str)
-            if p_val not in (80, 443):
-                port_part = f":{p_val}"
+            try:
+                p_val = int(p_str)
+                if p_val not in (80, 443):
+                    port_part = f":{p_val}"
+            except ValueError:
+                port_part = ""
 
     canonical_url = f"{parts.scheme.lower()}://{hostname}{port_part}{normalized_path}"
 
@@ -472,11 +497,7 @@ def cmd_manifest(url: str):
     elif isinstance(items_container, dict):
         raw_items = list(items_container.values())
 
-    unquoted_target = safe_unquote(folder_path)
-    norm_target = posixpath.normpath(unquoted_target).rstrip("/") + "/"
-
-    parsed_parts = urlsplit(folder_url)
-    origin = f"{parsed_parts.scheme}://{parsed_parts.netloc}"
+    norm_target = normalize_scoped_path(folder_path).rstrip("/") + "/"
 
     numbered_items = []
     unnumbered_items = []
@@ -488,23 +509,35 @@ def cmd_manifest(url: str):
         if not raw_href.lower().endswith(".epub"):
             continue
 
-        unquoted_raw = safe_unquote(raw_href)
-        # Normalize relative or absolute href against target folder
-        if unquoted_raw.startswith("/"):
-            abs_unquoted = posixpath.normpath(unquoted_raw)
-        else:
-            abs_unquoted = posixpath.normpath(posixpath.join(norm_target, unquoted_raw))
-
-        # Strict folder scoping check: must reside inside normalized target folder
-        if not abs_unquoted.startswith(norm_target):
+        resolved_url = urljoin(folder_url, raw_href)
+        try:
+            resolved_parts = urlsplit(resolved_url)
+        except Exception as e:
+            sys.stderr.write(f"[ElscioneHelper] Skipping malformed href {raw_href}: {e}\n")
             continue
 
-        filename = posixpath.basename(abs_unquoted)
+        try:
+            assert_elscione_host(resolved_parts.netloc)
+            if resolved_parts.hostname:
+                assert_elscione_host(resolved_parts.hostname)
+        except Exception as e:
+            # Drop off-host or invalid host items
+            sys.stderr.write(f"[ElscioneHelper] Rejecting off-host or invalid host for href {raw_href}: {e}\n")
+            continue
+
+        # Strict folder scoping check: must stay inside normalized target folder (recursive decode & backslash normalize)
+        resolved_norm_path = normalize_scoped_path(resolved_parts.path)
+        if not resolved_norm_path.startswith(norm_target):
+            continue
+
+        filename = posixpath.basename(resolved_norm_path)
         vol_info = parse_volume_info(filename)
         vol_num = vol_info["volume"]
         part_num = vol_info["part"]
 
-        download_url = f"{origin}{quote(abs_unquoted, safe='/')}"
+        # Canonicalize download URL: preserve origin of resolved target while ensuring valid quoting
+        res_origin = f"{resolved_parts.scheme}://{resolved_parts.netloc}"
+        download_url = f"{res_origin}{quote(safe_unquote(resolved_parts.path), safe='/')}"
 
         item_info = {
             "part": part_num,
@@ -602,6 +635,50 @@ def validate_destination_path(dest_path: str) -> str:
     return real
 
 
+def safe_get_with_redirect_check(session: requests.Session, target_url: str, headers: dict, stream: bool = False, timeout: int = DOWNLOAD_TIMEOUT) -> requests.Response:
+    """
+    Performs GET request following redirects manually, asserting each hop remains on an allowed Elscione host.
+    """
+    current_url = target_url
+    max_redirects = 5
+
+    res = session.get(
+        current_url,
+        headers=headers,
+        stream=stream,
+        allow_redirects=False,
+        timeout=timeout,
+    )
+    for _ in range(max_redirects):
+        parsed = urlsplit(current_url)
+        assert_elscione_host(parsed.netloc)
+        if parsed.hostname:
+            assert_elscione_host(parsed.hostname)
+
+        if res.status_code in (301, 302, 303, 307, 308):
+            loc = res.headers.get("location") or res.headers.get("Location")
+            if not loc:
+                return res
+            next_url = urljoin(current_url, loc)
+            next_parts = urlsplit(next_url)
+            assert_elscione_host(next_parts.netloc)
+            if next_parts.hostname:
+                assert_elscione_host(next_parts.hostname)
+            current_url = next_url
+            res = session.get(
+                current_url,
+                headers=headers,
+                stream=stream,
+                allow_redirects=False,
+                timeout=timeout,
+            )
+            continue
+
+        return res
+
+    return res
+
+
 def cmd_download(file_url: str, dest_path: str):
     validated_dest = validate_destination_path(dest_path)
     norm = normalize_elscione_url(file_url)
@@ -642,31 +719,25 @@ def cmd_download(file_url: str, dest_path: str):
             # Authenticate on folder first
             ensure_authenticated_session(session, folder_url)
 
-            res = session.get(
+            res = safe_get_with_redirect_check(
+                session,
                 canonical_file_url,
                 headers=headers,
                 stream=True,
-                allow_redirects=True,
                 timeout=DOWNLOAD_TIMEOUT,
             )
-
-            # Assert final landing URL stays on allowed Elscione host
-            if getattr(res, "url", None):
-                assert_elscione_host(urlsplit(res.url).netloc)
 
             # Check for challenge or non-EPUB HTML response
             content_type = (res.headers.get("content-type") or "").lower()
             if res.status_code == 403 or "text/html" in content_type:
                 ensure_authenticated_session(session, folder_url)
-                res = session.get(
+                res = safe_get_with_redirect_check(
+                    session,
                     canonical_file_url,
                     headers=headers,
                     stream=True,
-                    allow_redirects=True,
                     timeout=DOWNLOAD_TIMEOUT,
                 )
-                if getattr(res, "url", None):
-                    assert_elscione_host(urlsplit(res.url).netloc)
 
             if res.status_code != 200:
                 raise RuntimeError(f"Failed to download EPUB (HTTP {res.status_code}): {canonical_file_url}")
