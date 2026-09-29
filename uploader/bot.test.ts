@@ -511,6 +511,103 @@ describe("Telegram Mini App (TMA) Integration", () => {
     // 7. Burmese category filter handling in JavaScript
     expect(html).toContain("activeFilter.value === 'burmese'");
     expect(html).toContain("Burmese Literature");
+
+    // 8. Discover tab integrated into capsule alongside All Volumes and Reading
+    expect(html).toContain('id="chip-discover"');
+    expect(html).toContain('visionos-tab-discover');
+    expect(html).toContain('id="quickDiscoverBadge"');
+    expect(html).toContain("switchView('discover')");
+  });
+
+  it("index.html implements Apple-aesthetic Discover shelf (VisionOS capsule tab, Trending vs New Releases segregated feeds, multi-facet filtering, rich cards, #discoverModal, and 1-click ingest)", () => {
+    const htmlPath = path.join((import.meta as any).dir, "index.html");
+    const html = fs.readFileSync(htmlPath, "utf8");
+
+    // 1. VisionOS Capsule Navigation Integration
+    expect(html).toContain('id="chip-discover"');
+    expect(html).toContain('class="visionos-tab visionos-tab-discover"');
+    expect(html).toContain("Discover");
+    expect(html).toContain(".visionos-tab-discover:hover");
+    expect(html).toContain(".visionos-tab-discover.visionos-tab-active");
+
+    // 2. Separate "Trending" vs "New Releases" Segmented Controls
+    expect(html).toContain('id="discoverView"');
+    expect(html).toContain('id="discoverTabTrending"');
+    expect(html).toContain('id="discoverTabNewReleases"');
+    expect(html).toContain('id="discoverTrendingBadge"');
+    expect(html).toContain('id="discoverNewReleasesBadge"');
+    expect(html).toContain("switchDiscoverTab('trending')");
+    expect(html).toContain("switchDiscoverTab('new_releases')");
+    expect(html).toContain(".discover-tab");
+    expect(html).toContain(".discover-tab-active");
+
+    // 3. Interactive Multi-Facet Filters Bar
+    // Source filter buttons
+    expect(html).toContain('id="discoverSource-all"');
+    expect(html).toContain('id="discoverSource-lnori"');
+    expect(html).toContain('id="discoverSource-elscione"');
+    expect(html).toContain("setDiscoverSourceFilter('all')");
+    expect(html).toContain("setDiscoverSourceFilter('lnori')");
+    expect(html).toContain("setDiscoverSourceFilter('elscione')");
+
+    // Library status buttons
+    expect(html).toContain('id="discoverStatus-all"');
+    expect(html).toContain('id="discoverStatus-ready"');
+    expect(html).toContain('id="discoverStatus-in_library"');
+    expect(html).toContain("setDiscoverStatusFilter('all')");
+    expect(html).toContain("setDiscoverStatusFilter('ready')");
+    expect(html).toContain("setDiscoverStatusFilter('in_library')");
+
+    // Live search input & clear button
+    expect(html).toContain('id="discoverSearchInput"');
+    expect(html).toContain('id="discoverSearchClearBtn"');
+    expect(html).toContain("handleDiscoverSearch(this.value)");
+    expect(html).toContain("clearDiscoverSearch()");
+
+    // Sort select
+    expect(html).toContain('id="discoverSortSelect"');
+    expect(html).toContain("setDiscoverSort(this.value)");
+
+    // Horizontal scrollable genre pills container
+    expect(html).toContain('id="discoverGenrePills"');
+
+    // Discover Grid & Empty State
+    expect(html).toContain('id="discoverGrid"');
+    expect(html).toContain('id="discoverEmptyState"');
+    expect(html).toContain("resetDiscoverFilters()");
+
+    // 4. Novel Preview Modal (#discoverModal)
+    expect(html).toContain('id="discoverModal"');
+    expect(html).toContain('id="discoverModalCover"');
+    expect(html).toContain('id="discoverModalTitle"');
+    expect(html).toContain('id="discoverModalRomaji"');
+    expect(html).toContain('id="discoverModalAuthor"');
+    expect(html).toContain('id="discoverModalVolumes"');
+    expect(html).toContain('id="discoverModalRelease"');
+    expect(html).toContain('id="discoverModalRating"');
+    expect(html).toContain('id="discoverModalGenres"');
+    expect(html).toContain('id="discoverModalSources"');
+    expect(html).toContain('id="discoverModalSynopsis"');
+    expect(html).toContain('id="discoverModalStatusBadge"');
+    expect(html).toContain('id="discoverModalLibraryNote"');
+    expect(html).toContain('id="discoverModalIngestBtn"');
+    expect(html).toContain("closeDiscoverModal()");
+    expect(html).toContain("handleDiscoverModalIngest()");
+
+    // 5. JavaScript functions and state
+    expect(html).toContain("function switchView");
+    expect(html).toContain("function switchDiscoverTab");
+    expect(html).toContain("function loadDiscoverFeed");
+    expect(html).toContain("function renderDiscoverCards");
+    expect(html).toContain("function openDiscoverModal");
+    expect(html).toContain("function triggerDiscoverIngest");
+    expect(html).toContain("/api/discover/feed");
+    expect(html).toContain("/api/discover/ingest");
+    expect(html).toContain("Ingestion queued! Downloading in background...");
+
+    // 6. Telegram native BackButton and Escape modal management includes discoverModal
+    expect(html).toContain("'discoverModal'");
+    expect(html).toContain("closeDiscoverModal()");
   });
 
   it("harmonizes header and navigation with visionOS glass tokens and Proposal 1 muted pastel accent tones", () => {
