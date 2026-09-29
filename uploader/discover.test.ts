@@ -18,6 +18,12 @@ import {
   stripEmojis,
   resolveFallbackSynopsis,
   ensureAllNovelsHaveSynopses,
+  findRealElscioneFolder,
+  findRealLnoriSeries,
+  resolveRealDownloadSources,
+  assignPrimarySource,
+  REAL_ELSCIONE_FOLDERS,
+  REAL_LNORI_SERIES,
   type DiscoveredNovel,
 } from "./discover";
 import {
@@ -788,6 +794,136 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
     });
   });
 
+  describe("Real Download Sources Guarantee & Elimination of Synthetic Fabrication", () => {
+    it("rejects non-existent titles (such as Sayonara Lara) and returns null", () => {
+      const match = resolveRealDownloadSources("Sayonara Lara");
+      expect(match).toBeNull();
+
+      const elFolder = findRealElscioneFolder("Sayonara Lara");
+      expect(elFolder).toBeNull();
+
+      const lnSeries = findRealLnoriSeries("Sayonara Lara");
+      expect(lnSeries).toBeNull();
+    });
+
+    it("rejects partial fragments or mismatched spin-offs (e.g. Full Metal, Overlord of Darkness)", () => {
+      // Shorter fragments or extended false spin-offs must not false-positive match
+      expect(resolveRealDownloadSources("Full Metal")).toBeNull();
+      expect(resolveRealDownloadSources("Overlord of Darkness")).toBeNull();
+      expect(resolveRealDownloadSources("DanMachi Novel Edition Extra Special")).toBeNull();
+    });
+
+    it("anchors real titles to verified Elscione folders and Lnori series without synthetic fabrication", () => {
+      // Overlord: real on both
+      const overlord = resolveRealDownloadSources("Overlord");
+      expect(overlord).not.toBeNull();
+      expect(overlord?.source).toBe("both");
+      expect(overlord?.primarySource).toBe("elscione");
+      expect(overlord?.primaryUrl).toBe(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Overlord/",
+      );
+      expect(overlord?.sourceUrls.elscione).toBe(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Overlord/",
+      );
+      expect(overlord?.sourceUrls.lnori).toBe(
+        "https://lnori.com/series/2405/overlord",
+      );
+
+      // The Angel Next Door Spoils Me Rotten: real on both
+      const angel = resolveRealDownloadSources("The Angel Next Door Spoils Me Rotten");
+      expect(angel).not.toBeNull();
+      expect(angel?.source).toBe("both");
+      expect(angel?.primarySource).toBe("elscione");
+      expect(angel?.sourceUrls.elscione).toBe(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Angel%20Next%20Door%20Spoils%20Me%20Rotten/",
+      );
+      expect(angel?.sourceUrls.lnori).toBe(
+        "https://lnori.com/series/9601/the-angel-next-door-spoils-me-rotten",
+      );
+
+      // 86--EIGHTY-SIX: real on both (Elscione folder '86')
+      const eightySix = resolveRealDownloadSources("86--EIGHTY-SIX");
+      expect(eightySix).not.toBeNull();
+      expect(eightySix?.source).toBe("both");
+      expect(eightySix?.primarySource).toBe("elscione");
+      expect(eightySix?.sourceUrls.elscione).toBe(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/86/",
+      );
+      expect(eightySix?.sourceUrls.lnori).toBe(
+        "https://lnori.com/series/4808/86-eighty-six",
+      );
+    });
+
+    it("filters out unverified AniList titles and only includes novels backed by real sources", async () => {
+      // Mock an online AniList response containing Sayonara Lara alongside Overlord and Monogatari
+      const mockAniListMedia = [
+        {
+          id: 170942,
+          title: { english: "Sayonara Lara", romaji: "Sayonara Lara" },
+          coverImage: { large: "https://example.com/lara.jpg" },
+          description: "A mermaid reincarnates in modern Tokyo.",
+          genres: ["Drama", "Supernatural"],
+          averageScore: 78,
+          popularity: 5000,
+          startDate: { year: 2024, month: 3, day: 1 },
+          volumes: 2,
+        },
+        {
+          id: 2405,
+          title: { english: "Overlord", romaji: "Overlord" },
+          coverImage: { large: "https://example.com/overlord.jpg" },
+          description: "A veteran player stays logged into a shutdown MMORPG.",
+          genres: ["Fantasy", "Action"],
+          averageScore: 87,
+          popularity: 89000,
+          startDate: { year: 2012, month: 7, day: 30 },
+          volumes: 16,
+        },
+      ];
+
+      const mockFetch = async (url: string, _init?: RequestInit): Promise<Response> => {
+        if (url.includes("graphql.anilist.co")) {
+          return new Response(
+            JSON.stringify({ data: { Page: { media: mockAniListMedia } } }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("{}", { status: 404 });
+      };
+
+      const feed = await fetchDiscoverFeed("trending", {
+        fetch: mockFetch,
+        cacheDb: tempCacheDb,
+        enableOnline: true,
+      });
+
+      // Sayonara Lara must be completely excluded because it does not exist on Elscione or Lnori
+      const lara = feed.find((n) => n.title.toLowerCase().includes("lara"));
+      expect(lara).toBeUndefined();
+
+      // Overlord must be included and backed by real Elscione & Lnori URLs
+      const overlord = feed.find((n) => n.title === "Overlord");
+      expect(overlord).toBeDefined();
+      expect(overlord?.source).toBe("both");
+      expect(overlord?.primarySource).toBe("elscione");
+      expect(overlord?.sourceUrls.elscione).toBe(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Overlord/",
+      );
+      expect(overlord?.sourceUrls.lnori).toBe(
+        "https://lnori.com/series/2405/overlord",
+      );
+    });
+
+    it("indexes directly from the 880+ Lnori series and 1200+ Elscione folders", () => {
+      expect(REAL_ELSCIONE_FOLDERS.length).toBeGreaterThanOrEqual(1200);
+      expect(REAL_LNORI_SERIES.length).toBeGreaterThanOrEqual(880);
+      expect(REAL_ELSCIONE_FOLDERS).toContain("Overlord");
+      expect(REAL_ELSCIONE_FOLDERS).toContain("Classroom of the Elite");
+      expect(REAL_LNORI_SERIES.some((s) => s.slug === "overlord")).toBe(true);
+      expect(REAL_LNORI_SERIES.some((s) => s.slug === "classroom-of-the-elite")).toBe(true);
+    });
+  });
+
   describe("Source Preference (Elscione over Lnori when both available)", () => {
     it("prefers Elscione as primarySource and primaryUrl when novel source is both", async () => {
       const res = await getDiscoverNovels({ tab: "trending" }, { cacheDb: tempCacheDb });
@@ -798,6 +934,34 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         expect(novel.primarySource).toBe("elscione");
         expect(novel.primaryUrl).toBe(novel.sourceUrls.elscione);
       }
+    });
+
+    it("assignPrimarySource guarantees Elscione as primary whenever both source URLs exist", () => {
+      const sampleNovel: DiscoveredNovel = {
+        id: "sample-novel",
+        title: "Sample Novel",
+        coverUrl: "https://example.com/cover.jpg",
+        synopsis: "A complete engaging synopsis with more than 30 characters.",
+        genres: ["Fantasy"],
+        score: 85,
+        popularity: 10000,
+        releaseDate: "2024-01-01",
+        volumeCount: 5,
+        source: "both",
+        sourceUrls: {
+          lnori: "https://lnori.com/series/123/sample-novel",
+          elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Sample%20Novel/",
+        },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const result = assignPrimarySource(sampleNovel);
+      expect(result.source).toBe("both");
+      expect(result.primarySource).toBe("elscione");
+      expect(result.primaryUrl).toBe(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Sample%20Novel/",
+      );
     });
   });
 

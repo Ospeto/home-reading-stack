@@ -466,34 +466,41 @@ LightHouse features end-to-end automated light novel series and volume ingestion
 
 ---
 
-## ✨ Discover Shelf (Trending & New Releases)
+## Discover Shelf (Trending & New Releases)
 
 LightHouse features an Apple-aesthetic **Discover Shelf** across both the **Web UI** and the **Telegram Mini App** for effortless exploration and 1-click downloads of top Light Novels and Web Novels:
 
 1. **VisionOS Capsule Navigation:**
-   - Dedicated `✨ Discover` tab seamlessly integrated into the floating island capsule alongside `All Volumes` and `Reading`.
+   - Dedicated `Discover` tab seamlessly integrated into the floating island capsule alongside `All Volumes` and `Reading`.
    - Distinctive warm amber/gold aesthetic with tactile active touch response (`:active { transform: scale(0.96); }`).
 2. **Strictly Segregated Feeds:**
-   - Top segmented pill toggle: `[ 🔥 Trending ]` vs `[ ✨ New Releases ]`.
+   - Top segmented pill toggle: `[ Trending ]` vs `[ New Releases ]`.
    - Feeds are strictly kept separate and never mashed together into a combined list.
-3. **Interactive Multi-Facet Filtering Bar:**
+3. **Real Download Sources Guarantee:**
+   - Every discovered novel is strictly anchored to real, existing series from Elscione or Lnori (indexed directly against 1200+ Elscione folders and 880+ Lnori series).
+   - Eliminates synthetic URL fabrication (preventing 403 errors).
+   - AniList media entries are included only if verified to exist on Elscione or Lnori.
+   - When available on both sources, Elscione is automatically preferred as the primary download source (`primarySource = "elscione"`).
+4. **Complete Engaging Synopses:**
+   - Every novel in the feed is guaranteed to have a complete, readable synopsis (never blank or missing), enriched via curated catalogs and genre-aware synthesis.
+5. **Interactive Multi-Facet Filtering Bar:**
    - **Source Filter:** `[ All Sources ]`, `[ Lnori ]`, `[ Elsci.one ]`.
    - **Genre Filter:** Horizontal scrollable pills (`All`, `Fantasy`, `Isekai`, `Romance`, `Sci-Fi`, `Action`, `Psychological`, `Comedy`, `Mystery`, `Drama`, `Slice of Life`, `Adventure`).
-   - **Library Status Filter:** `[ All ]`, `[ Ready to Download ⚡ ]`, `[ In Library ✓ ]`.
+   - **Library Status Filter:** `[ All ]`, `[ Ready to Download ]`, `[ In Library ]`.
    - **Live Search:** Instant responsive filtering across English titles, Romaji titles, authors, and genres.
    - **Sorting:** `Most Popular`, `Highest Rated`, `Newest`.
-4. **Sleek Translucent Glass Cards & Novel Preview Modal (`#discoverModal`):**
+6. **Sleek Translucent Glass Cards & Novel Preview Modal (`#discoverModal`):**
    - Translucent glass styling with ambient shadows, aspect-[2/3] covers with 3D spine curvature, volume count badges, star ratings, and source chips.
    - Comprehensive preview modal displaying high-res covers, full volume synopses, authors, release dates, and direct source links.
-5. **1-Click Direct Ingestion (`POST /api/discover/ingest`):**
+7. **1-Click Direct Ingestion & Live Progress (`POST /api/discover/ingest`):**
    - 1-tap download from card or modal enqueues background ingestion into Calibre.
-   - Immediate feedback toast: *"Ingestion queued! Downloading in background..."*.
-   - Dynamic card state transition with progress spinner, updating to `✓ In Library` upon completion.
-   - Developer endpoints: `GET /api/discover/feed?tab=trending|new_releases` and `POST /api/discover/ingest`.
+   - Real-time live download progress tracked via `GET /api/discover/progress/:jobId`.
+   - Developer endpoints: `GET /api/discover/feed?tab=trending|new_releases`, `POST /api/discover/ingest`, and `GET /api/discover/progress/:jobId`.
+   - Strictly zero emojis across all backend responses and logs.
 
 ---
 
-## 🎨 Apple WWDC Fluid Interface Design System
+## Apple WWDC Fluid Interface Design System
 
 The LightHouse web interface (`uploader/index.html`) is built according to Apple WWDC fluid interface design principles:
 

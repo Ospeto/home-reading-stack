@@ -207,12 +207,23 @@ export function getDiscoverJobProgress(
 
   const parsedNumeric =
     typeof rawJobId === "number" ? rawJobId : parseInt(rawStr, 10);
-  const cleanJobId = Number.isFinite(parsedNumeric)
+  let cleanJobId = Number.isFinite(parsedNumeric)
     ? parsedNumeric
     : parseInt(rawStr.replace(/\D+/g, ""), 10) || 0;
 
   // 1. Lookup in discoverJobRegistry
-  const registered = discoverJobRegistry.get(cleanJobId);
+  let registered = discoverJobRegistry.get(cleanJobId);
+  if (!registered && rawStr) {
+    for (const reg of discoverJobRegistry.values()) {
+      if (reg.runId === rawStr) {
+        registered = reg;
+        if (cleanJobId === 0) {
+          cleanJobId = reg.jobId;
+        }
+        break;
+      }
+    }
+  }
   const runId = registered?.runId;
   const targetUrl = registered?.targetUrl;
 

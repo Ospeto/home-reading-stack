@@ -6,6 +6,7 @@ import { safeFetchWithSsrf, sanitizeErrorMessage } from "./security";
 import { getCalibreDbPath, isLnoriUrl, parseLnoriUrl } from "./lnori";
 import { isElscioneUrl, parseElscioneUrl } from "./elscione";
 import { searchRanobeDB, searchAniList } from "./scraper";
+import discoverCatalog from "./discover-catalog.json";
 
 export type DiscoverSource = "lnori" | "elscione" | "both";
 export type DiscoverSourceFilter = "all" | "lnori" | "elscione";
@@ -73,6 +74,8 @@ export interface DiscoverDependencies {
   onlineTimeoutMs?: number;
   enableOnline?: boolean;
   fallbackQuery?: (title: string, novel: DiscoveredNovel) => Promise<string | null> | string | null;
+  customElscioneFolders?: string[];
+  customLnoriSeries?: Array<{ id: number; slug: string }>;
 }
 
 const DISCOVER_CACHE_TTL_MS = 60 * 60 * 1000; // 1-hour TTL
@@ -80,6 +83,341 @@ const ANILIST_API_URL = "https://graphql.anilist.co";
 
 // In-memory feed cache fallback if SQLite cache is not accessible
 const inMemoryFeedCache = new Map<string, { data: DiscoveredNovel[]; timestamp: number }>();
+
+/**
+ * Normalizes title for fuzzy string comparison against Calibre metadata and catalogue registries.
+ */
+export function normalizeTitleForMatch(title: string): string {
+  if (!title) return "";
+  return title
+    .toLowerCase()
+    .replace(/[-_—–~:|/]+/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export const REAL_ELSCIONE_FOLDERS: string[] = discoverCatalog.elscioneFolders;
+export const REAL_LNORI_SERIES: Array<{ id: number; slug: string }> = discoverCatalog.lnoriSeries;
+
+const elscioneNormalizedMap = new Map<string, string>();
+for (const folder of REAL_ELSCIONE_FOLDERS) {
+  elscioneNormalizedMap.set(normalizeTitleForMatch(folder), folder);
+}
+
+const lnoriNormalizedMap = new Map<string, { id: number; slug: string }>();
+for (const s of REAL_LNORI_SERIES) {
+  lnoriNormalizedMap.set(normalizeTitleForMatch(s.slug.replace(/-/g, " ")), s);
+}
+
+export const KNOWN_TITLE_TO_ELSCIONE: Record<string, string> = {
+  "rezero": "ReZero - Starting Life in Another World",
+  "rezero starting life in another world": "ReZero - Starting Life in Another World",
+  "danmachi": "DanMachi",
+  "is it wrong to try to pick up girls in a dungeon": "DanMachi",
+  "86": "86",
+  "86 eighty six": "86",
+  "86eightysix": "86",
+  "the irregular at magic high school": "Mahouka Koukou no Rettousei",
+  "mahouka koukou no rettousei": "Mahouka Koukou no Rettousei",
+  "rascal does not dream": "Rascal Does Not Dream",
+  "rascal does not dream of bunny girl senpai": "Rascal Does Not Dream",
+  "haibaras teenage new game": "Haibara's Teenage New Game+",
+  "days with my stepsister": "Days With My Stepsister",
+  "gimai seikatsu": "Days With My Stepsister",
+  "love unseen beneath the clear night sky": "Love Unseen Beneath the Clear Night Sky",
+  "heroine saint no im an all works maid": "Heroine Saint No, I'm an All-Works Maid",
+  "the water magician": "The Water Magician",
+  "too many losing heroines": "Too Many Losing Heroines!",
+  "make heroine ga oosugiru": "Too Many Losing Heroines!",
+  "secrets of the silent witch": "Secrets of the Silent Witch",
+  "silent witch": "Secrets of the Silent Witch",
+  "playing death games to put food on the table": "Playing Death Games to Put Food on the Table",
+  "shibou yuugi de meshi wo kuu": "Playing Death Games to Put Food on the Table",
+  "sentenced to be a hero": "Sentenced to Be a Hero",
+  "yuusha kei ni shosu": "Sentenced to Be a Hero",
+  "the frontier lord begins with zero subjects": "The Frontier Lord Begins With Zero Subjects",
+  "min maxing my trpg build in another world": "Min-Maxing My TRPG Build in Another World",
+  "im the evil lord of an intergalactic empire": "I'm the Evil Lord of an Intergalactic Empire!",
+  "a certain magical index": "A Certain Magical Index",
+  "toaru majutsu no index": "A Certain Magical Index",
+  "sword art online": "Sword Art Online",
+  "no game no life": "No Game No Life",
+  "spice and wolf": "Spice and Wolf",
+  "toradora": "Toradora",
+  "konosuba": "KonoSuba",
+  "konosuba gods blessing on this wonderful world": "KonoSuba",
+  "solo leveling": "Solo Leveling",
+  "a sisters all you need": "A Sister's All You Need",
+  "the angel next door spoils me rotten": "The Angel Next Door Spoils Me Rotten",
+  "the apothecary diaries": "The Apothecary Diaries",
+  "the eminence in shadow": "The Eminence in Shadow",
+  "kage no jitsuryokusha ni naritakute": "The Eminence in Shadow",
+  "ascendance of a bookworm": "Ascendance of a Bookworm",
+  "classroom of the elite": "Classroom of the Elite",
+  "mushoku tensei": "Mushoku Tensei",
+  "mushoku tensei jobless reincarnation": "Mushoku Tensei",
+  "overlord": "Overlord",
+  "that time i got reincarnated as a slime": "That Time I Got Reincarnated as a Slime",
+  "grimgar of fantasy and ash": "Grimgar of Fantasy and Ash",
+};
+
+export const KNOWN_TITLE_TO_LNORI: Record<string, { id: number; slug: string }> = {
+  "danmachi": { id: 2201, slug: "is-it-wrong-to-try-to-pick-up-girls-in-a-dungeon" },
+  "is it wrong to try to pick up girls in a dungeon": { id: 2201, slug: "is-it-wrong-to-try-to-pick-up-girls-in-a-dungeon" },
+  "rezero": { id: 2471, slug: "re-zero-starting-life-in-another-world" },
+  "rezero starting life in another world": { id: 2471, slug: "re-zero-starting-life-in-another-world" },
+  "86": { id: 4808, slug: "86-eighty-six" },
+  "86 eighty six": { id: 4808, slug: "86-eighty-six" },
+  "86eightysix": { id: 4808, slug: "86-eighty-six" },
+  "the irregular at magic high school": { id: 2199, slug: "the-irregular-at-magic-high-school" },
+  "mahouka koukou no rettousei": { id: 2199, slug: "the-irregular-at-magic-high-school" },
+  "rascal does not dream": { id: 4242, slug: "rascal-does-not-dream-of-bunny-girl-senpai" },
+  "rascal does not dream of bunny girl senpai": { id: 4242, slug: "rascal-does-not-dream-of-bunny-girl-senpai" },
+  "haibaras teenage new game": { id: 11250, slug: "haibaras-teenage-new-game" },
+  "days with my stepsister": { id: 10890, slug: "days-with-my-stepsister" },
+  "gimai seikatsu": { id: 10890, slug: "days-with-my-stepsister" },
+  "love unseen beneath the clear night sky": { id: 15290, slug: "love-unseen-beneath-the-clear-night-sky" },
+  "heroine saint no im an all works maid": { id: 10676, slug: "heroine-saint-no-im-an-all-works-maid-and-proud-of-it" },
+  "the water magician": { id: 13054, slug: "the-water-magician" },
+  "too many losing heroines": { id: 12780, slug: "too-many-losing-heroines" },
+  "make heroine ga oosugiru": { id: 12780, slug: "too-many-losing-heroines" },
+  "secrets of the silent witch": { id: 11990, slug: "secrets-of-the-silent-witch" },
+  "silent witch": { id: 11990, slug: "secrets-of-the-silent-witch" },
+  "playing death games to put food on the table": { id: 14193, slug: "playing-death-games-to-put-food-on-the-table" },
+  "shibou yuugi de meshi wo kuu": { id: 14193, slug: "playing-death-games-to-put-food-on-the-table" },
+  "sentenced to be a hero": { id: 12440, slug: "sentenced-to-be-a-hero" },
+  "yuusha kei ni shosu": { id: 12440, slug: "sentenced-to-be-a-hero" },
+  "the frontier lord begins with zero subjects": { id: 11786, slug: "the-frontier-lord-begins-with-zero-subjects" },
+  "min maxing my trpg build in another world": { id: 9820, slug: "min-maxing-my-trpg-build-in-another-world" },
+  "im the evil lord of an intergalactic empire": { id: 9557, slug: "im-the-evil-lord-of-an-intergalactic-empire" },
+  "a certain magical index": { id: 1916, slug: "a-certain-magical-index" },
+  "toaru majutsu no index": { id: 1916, slug: "a-certain-magical-index" },
+  "sword art online": { id: 2197, slug: "sword-art-online" },
+  "no game no life": { id: 2419, slug: "no-game-no-life" },
+  "spice and wolf": { id: 2011, slug: "spice-and-wolf" },
+  "toradora": { id: 2074, slug: "toradora" },
+  "konosuba": { id: 2872, slug: "konosuba-gods-blessing-on-this-wonderful-world" },
+  "konosuba gods blessing on this wonderful world": { id: 2872, slug: "konosuba-gods-blessing-on-this-wonderful-world" },
+  "solo leveling": { id: 6219, slug: "solo-leveling" },
+  "a sisters all you need": { id: 4380, slug: "a-sisters-all-you-need" },
+  "the angel next door spoils me rotten": { id: 9601, slug: "the-angel-next-door-spoils-me-rotten" },
+  "the apothecary diaries": { id: 11728, slug: "the-apothecary-diaries" },
+  "the eminence in shadow": { id: 6215, slug: "the-eminence-in-shadow" },
+  "kage no jitsuryokusha ni naritakute": { id: 6215, slug: "the-eminence-in-shadow" },
+  "ascendance of a bookworm": { id: 4239, slug: "ascendance-of-a-bookworm-ill-do-anything-to-become-a-librarian" },
+  "classroom of the elite": { id: 4557, slug: "classroom-of-the-elite" },
+  "mushoku tensei": { id: 3336, slug: "mushoku-tensei-jobless-reincarnation" },
+  "mushoku tensei jobless reincarnation": { id: 3336, slug: "mushoku-tensei-jobless-reincarnation" },
+  "overlord": { id: 2405, slug: "overlord" },
+  "that time i got reincarnated as a slime": { id: 3580, slug: "that-time-i-got-reincarnated-as-a-slime" },
+  "grimgar of fantasy and ash": { id: 2873, slug: "grimgar-of-fantasy-and-ash" },
+};
+
+export function findRealElscioneFolder(
+  title: string,
+  romaji?: string,
+  native?: string,
+  customFolders?: string[],
+): string | null {
+  const folders = customFolders || REAL_ELSCIONE_FOLDERS;
+  const candidates = [title, romaji, native].filter(Boolean) as string[];
+
+  // 1. Check known aliases map first
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    if (!norm) continue;
+    if (KNOWN_TITLE_TO_ELSCIONE[norm]) {
+      return KNOWN_TITLE_TO_ELSCIONE[norm];
+    }
+  }
+
+  // 2. Check exact normalized match
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    if (!norm) continue;
+
+    if (!customFolders && elscioneNormalizedMap.has(norm)) {
+      return elscioneNormalizedMap.get(norm)!;
+    }
+
+    for (const f of folders) {
+      if (normalizeTitleForMatch(f) === norm) {
+        return f;
+      }
+    }
+  }
+
+  // 3. Check bounded prefix / containment match (must be >= 8 chars and length ratio >= 0.70)
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    if (!norm || norm.length < 8) continue;
+
+    for (const f of folders) {
+      const normF = normalizeTitleForMatch(f);
+      if (normF.length < 8) continue;
+
+      const minLen = Math.min(norm.length, normF.length);
+      const maxLen = Math.max(norm.length, normF.length);
+      if (
+        normF === norm ||
+        (minLen / maxLen >= 0.7 && (normF.startsWith(norm) || norm.startsWith(normF)))
+      ) {
+        return f;
+      }
+    }
+  }
+
+  return null;
+}
+
+export function findRealLnoriSeries(
+  title: string,
+  romaji?: string,
+  native?: string,
+  customSeries?: Array<{ id: number; slug: string }>,
+): { id: number; slug: string } | null {
+  const seriesList = customSeries || REAL_LNORI_SERIES;
+  const candidates = [title, romaji, native].filter(Boolean) as string[];
+
+  // 1. Check known aliases map first
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    if (!norm) continue;
+    if (KNOWN_TITLE_TO_LNORI[norm]) {
+      return KNOWN_TITLE_TO_LNORI[norm];
+    }
+  }
+
+  // 2. Check exact normalized match
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    if (!norm) continue;
+
+    if (!customSeries && lnoriNormalizedMap.has(norm)) {
+      return lnoriNormalizedMap.get(norm)!;
+    }
+
+    for (const s of seriesList) {
+      const normSlug = normalizeTitleForMatch(s.slug.replace(/-/g, " "));
+      if (normSlug === norm) {
+        return s;
+      }
+    }
+  }
+
+  // 3. Check bounded prefix / containment match (must be >= 8 chars and length ratio >= 0.70)
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    if (!norm || norm.length < 8) continue;
+
+    for (const s of seriesList) {
+      const normSlug = normalizeTitleForMatch(s.slug.replace(/-/g, " "));
+      if (normSlug.length < 8) continue;
+
+      const minLen = Math.min(norm.length, normSlug.length);
+      const maxLen = Math.max(norm.length, normSlug.length);
+      if (
+        normSlug === norm ||
+        (minLen / maxLen >= 0.7 && (normSlug.startsWith(norm) || norm.startsWith(normSlug)))
+      ) {
+        return s;
+      }
+    }
+  }
+
+  return null;
+}
+
+export interface RealSourceMatch {
+  source: DiscoverSource;
+  sourceUrls: DiscoverSourceUrls;
+  primarySource: "elscione" | "lnori";
+  primaryUrl: string;
+}
+
+export function resolveRealDownloadSources(
+  title: string,
+  romaji?: string,
+  native?: string,
+  options?: {
+    customElscioneFolders?: string[];
+    customLnoriSeries?: Array<{ id: number; slug: string }>;
+  },
+): RealSourceMatch | null {
+  const elscioneFolder = findRealElscioneFolder(title, romaji, native, options?.customElscioneFolders);
+  const lnoriItem = findRealLnoriSeries(title, romaji, native, options?.customLnoriSeries);
+
+  if (!elscioneFolder && !lnoriItem) {
+    return null;
+  }
+
+  const sourceUrls: DiscoverSourceUrls = {};
+  if (elscioneFolder) {
+    sourceUrls.elscione = `https://server.elscione.com/Officially%20Translated%20Light%20Novels/${encodeURIComponent(elscioneFolder)}/`;
+  }
+  if (lnoriItem) {
+    sourceUrls.lnori = `https://lnori.com/series/${lnoriItem.id}/${lnoriItem.slug}`;
+  }
+
+  let source: DiscoverSource;
+  let primarySource: "elscione" | "lnori";
+  let primaryUrl: string;
+
+  if (sourceUrls.elscione && sourceUrls.lnori) {
+    source = "both";
+    // Always prefer Elscione when available on both sources
+    primarySource = "elscione";
+    primaryUrl = sourceUrls.elscione;
+  } else if (sourceUrls.elscione) {
+    source = "elscione";
+    primarySource = "elscione";
+    primaryUrl = sourceUrls.elscione;
+  } else {
+    source = "lnori";
+    primarySource = "lnori";
+    primaryUrl = sourceUrls.lnori!;
+  }
+
+  return {
+    source,
+    sourceUrls,
+    primarySource,
+    primaryUrl,
+  };
+}
+
+/**
+ * Determines primary download source, always preferring Elscione when available on both.
+ */
+export function assignPrimarySource(novel: DiscoveredNovel): DiscoveredNovel {
+  let primarySource: "elscione" | "lnori" = "elscione";
+  let primaryUrl = "";
+
+  const hasElscione = Boolean(novel.sourceUrls?.elscione);
+  const hasLnori = Boolean(novel.sourceUrls?.lnori);
+
+  if ((novel.source === "both" || (hasElscione && hasLnori)) && hasElscione) {
+    // When available on both sources, ALWAYS prefer Elscione over Lnori
+    primarySource = "elscione";
+    primaryUrl = novel.sourceUrls.elscione!;
+  } else if (novel.source === "elscione" || hasElscione) {
+    primarySource = "elscione";
+    primaryUrl = novel.sourceUrls?.elscione || "";
+  } else {
+    primarySource = "lnori";
+    primaryUrl = novel.sourceUrls?.lnori || "";
+  }
+
+  const source: DiscoverSource = hasElscione && hasLnori ? "both" : hasElscione ? "elscione" : "lnori";
+
+  return {
+    ...novel,
+    source,
+    primarySource,
+    primaryUrl,
+  };
+}
 
 // Seed catalogue for "Trending" Light Novels (Curated, robust, source-tagged)
 export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
@@ -100,6 +438,8 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
       lnori: "https://lnori.com/series/4239/ascendance-of-a-bookworm-ill-do-anything-to-become-a-librarian",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Ascendance%20of%20a%20Bookworm/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Ascendance%20of%20a%20Bookworm/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -120,6 +460,8 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
       lnori: "https://lnori.com/series/4557/classroom-of-the-elite",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Classroom%20of%20the%20Elite/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Classroom%20of%20the%20Elite/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -138,8 +480,10 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     source: "both",
     sourceUrls: {
       lnori: "https://lnori.com/series/3336/mushoku-tensei-jobless-reincarnation",
-      elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Mushoku%20Tensei%20-%20Jobless%20Reincarnation/",
+      elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Mushoku%20Tensei/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Mushoku%20Tensei/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -160,6 +504,8 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
       lnori: "https://lnori.com/series/2405/overlord",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Overlord/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Overlord/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -180,6 +526,8 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
       lnori: "https://lnori.com/series/3580/that-time-i-got-reincarnated-as-a-slime",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/That%20Time%20I%20Got%20Reincarnated%20as%20a%20Slime/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/That%20Time%20I%20Got%20Reincarnated%20as%20a%20Slime/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -195,10 +543,13 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     popularity: 84000,
     releaseDate: "2019-06-15",
     volumeCount: 10,
-    source: "lnori",
+    source: "both",
     sourceUrls: {
       lnori: "https://lnori.com/series/9601/the-angel-next-door-spoils-me-rotten",
+      elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Angel%20Next%20Door%20Spoils%20Me%20Rotten/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Angel%20Next%20Door%20Spoils%20Me%20Rotten/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -217,8 +568,10 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     source: "both",
     sourceUrls: {
       lnori: "https://lnori.com/series/4808/86-eighty-six",
-      elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/86%20-%20Eighty-Six/",
+      elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/86/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/86/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -234,10 +587,13 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     popularity: 91000,
     releaseDate: "2014-08-29",
     volumeCount: 15,
-    source: "lnori",
+    source: "both",
     sourceUrls: {
       lnori: "https://lnori.com/series/11728/the-apothecary-diaries",
+      elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Apothecary%20Diaries/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Apothecary%20Diaries/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -258,6 +614,8 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
       lnori: "https://lnori.com/series/6215/the-eminence-in-shadow",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Eminence%20in%20Shadow/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Eminence%20in%20Shadow/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -273,10 +631,13 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     popularity: 64000,
     releaseDate: "2015-03-18",
     volumeCount: 14,
-    source: "elscione",
+    source: "both",
     sourceUrls: {
+      lnori: "https://lnori.com/series/4380/a-sisters-all-you-need",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -297,6 +658,8 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
       lnori: "https://lnori.com/series/2873/grimgar-of-fantasy-and-ash",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar%20of%20Fantasy%20and%20Ash/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar%20of%20Fantasy%20and%20Ash/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -317,6 +680,8 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
       lnori: "https://lnori.com/series/2201/is-it-wrong-to-try-to-pick-up-girls-in-a-dungeon",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/DanMachi/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/DanMachi/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -337,6 +702,8 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
       lnori: "https://lnori.com/series/2471/re-zero-starting-life-in-another-world",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/ReZero%20-%20Starting%20Life%20in%20Another%20World/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/ReZero%20-%20Starting%20Life%20in%20Another%20World/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -352,10 +719,55 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     popularity: 72000,
     releaseDate: "2004-04-10",
     volumeCount: 55,
-    source: "elscione",
+    source: "both",
     sourceUrls: {
+      lnori: "https://lnori.com/series/1916/a-certain-magical-index",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Certain%20Magical%20Index/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Certain%20Magical%20Index/",
+    inLibrary: false,
+    existingVolumes: 0,
+  },
+  {
+    id: "monogatari",
+    title: "Monogatari",
+    titleRomaji: "Monogatari Series",
+    titleNative: "物語シリーズ",
+    coverUrl: "https://images.ranobedb.org/bb89c67eb9f492a549e3e3b320d4b29f.jpg",
+    synopsis: "High school student Koyomi Araragi survives a vampire attack with the aid of the eccentric specialist Meme Oshino. Finding himself equipped with lingering superhuman healing, he assists various girls afflicted by bizarre apparitions and emotional trauma.",
+    genres: ["Supernatural", "Mystery", "Psychological"],
+    score: 89,
+    popularity: 93000,
+    releaseDate: "2006-11-01",
+    volumeCount: 28,
+    source: "lnori",
+    sourceUrls: {
+      lnori: "https://lnori.com/series/1014/monogatari",
+    },
+    primarySource: "lnori",
+    primaryUrl: "https://lnori.com/series/1014/monogatari",
+    inLibrary: false,
+    existingVolumes: 0,
+  },
+  {
+    id: "a-cave-kings-road-to-paradise",
+    title: "A Cave King's Road to Paradise",
+    titleRomaji: "Cave King no Rakuen Life",
+    titleNative: "洞窟王からはじめる楽園ライフ",
+    coverUrl: "https://images.ranobedb.org/5c23d4a2be29e81dbf7d5440b82f026a.jpg",
+    synopsis: "Prince Heal is exiled to a barren, isolated island due to possessing a seemingly useless Cave King crest. However, upon excavating the rocks, he discovers his crest grants godlike mining and crafting abilities, rapidly transforming the desolate wasteland into an impregnable paradise.",
+    genres: ["Fantasy", "Adventure", "Slice of Life"],
+    score: 80,
+    popularity: 25000,
+    releaseDate: "2020-08-10",
+    volumeCount: 2,
+    source: "elscione",
+    sourceUrls: {
+      elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Cave%20King's%20Road%20to%20Paradise/",
+    },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Cave%20King's%20Road%20to%20Paradise/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -380,6 +792,8 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
       lnori: "https://lnori.com/series/14193/playing-death-games-to-put-food-on-the-table",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Playing%20Death%20Games%20to%20Put%20Food%20on%20the%20Table/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Playing%20Death%20Games%20to%20Put%20Food%20on%20the%20Table/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -395,10 +809,13 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     popularity: 38000,
     releaseDate: "2023-08-25",
     volumeCount: 2,
-    source: "lnori",
+    source: "both",
     sourceUrls: {
       lnori: "https://lnori.com/series/15290/love-unseen-beneath-the-clear-night-sky",
+      elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Love%20Unseen%20Beneath%20the%20Clear%20Night%20Sky/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Love%20Unseen%20Beneath%20the%20Clear%20Night%20Sky/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -414,10 +831,13 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     popularity: 31000,
     releaseDate: "2022-10-10",
     volumeCount: 4,
-    source: "lnori",
+    source: "both",
     sourceUrls: {
       lnori: "https://lnori.com/series/10676/heroine-saint-no-im-an-all-works-maid-and-proud-of-it",
+      elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Heroine%20Saint%20No%2C%20I'm%20an%20All-Works%20Maid/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Heroine%20Saint%20No%2C%20I'm%20an%20All-Works%20Maid/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -438,6 +858,8 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
       lnori: "https://lnori.com/series/12440/sentenced-to-be-a-hero",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Sentenced%20to%20Be%20a%20Hero/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Sentenced%20to%20Be%20a%20Hero/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -453,10 +875,13 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     popularity: 29000,
     releaseDate: "2022-04-15",
     volumeCount: 4,
-    source: "lnori",
+    source: "both",
     sourceUrls: {
       lnori: "https://lnori.com/series/13054/the-water-magician",
+      elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Water%20Magician/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Water%20Magician/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -477,6 +902,8 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
       lnori: "https://lnori.com/series/11250/haibaras-teenage-new-game",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Haibara's%20Teenage%20New%20Game%2B/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Haibara's%20Teenage%20New%20Game%2B/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -492,10 +919,13 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     popularity: 62000,
     releaseDate: "2021-07-21",
     volumeCount: 7,
-    source: "lnori",
+    source: "both",
     sourceUrls: {
       lnori: "https://lnori.com/series/12780/too-many-losing-heroines",
+      elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Too%20Many%20Losing%20Heroines!/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Too%20Many%20Losing%20Heroines!/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -516,6 +946,8 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
       lnori: "https://lnori.com/series/11990/secrets-of-the-silent-witch",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Secrets%20of%20the%20Silent%20Witch/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Secrets%20of%20the%20Silent%20Witch/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -531,10 +963,13 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     popularity: 51000,
     releaseDate: "2021-01-25",
     volumeCount: 11,
-    source: "lnori",
+    source: "both",
     sourceUrls: {
       lnori: "https://lnori.com/series/10890/days-with-my-stepsister",
+      elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Days%20With%20My%20Stepsister/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Days%20With%20My%20Stepsister/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -550,10 +985,13 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     popularity: 28000,
     releaseDate: "2021-12-15",
     volumeCount: 4,
-    source: "elscione",
+    source: "both",
     sourceUrls: {
-      elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Frontier%20Lord%20Begins%20with%20Zero%20Subjects/",
+      lnori: "https://lnori.com/series/11786/the-frontier-lord-begins-with-zero-subjects",
+      elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Frontier%20Lord%20Begins%20With%20Zero%20Subjects/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Frontier%20Lord%20Begins%20With%20Zero%20Subjects/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -574,6 +1012,8 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
       lnori: "https://lnori.com/series/9820/min-maxing-my-trpg-build-in-another-world",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Min-Maxing%20My%20TRPG%20Build%20in%20Another%20World/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Min-Maxing%20My%20TRPG%20Build%20in%20Another%20World/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -589,10 +1029,55 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     popularity: 46000,
     releaseDate: "2020-07-25",
     volumeCount: 8,
-    source: "elscione",
+    source: "both",
     sourceUrls: {
+      lnori: "https://lnori.com/series/9557/im-the-evil-lord-of-an-intergalactic-empire",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/I'm%20the%20Evil%20Lord%20of%20an%20Intergalactic%20Empire!/",
     },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/I'm%20the%20Evil%20Lord%20of%20an%20Intergalactic%20Empire!/",
+    inLibrary: false,
+    existingVolumes: 0,
+  },
+  {
+    id: "the-vexations-of-a-shut-in-vampire-princess",
+    title: "The Vexations of a Shut-In Vampire Princess",
+    titleRomaji: "Hikikomari Kyuuketsuki no Monmon",
+    titleNative: "ひきこまり吸血姫の悶々",
+    coverUrl: "https://images.ranobedb.org/bb89c67eb9f492a549e3e3b320d4b29f.jpg",
+    synopsis: "Terakomari Gandesblood is a shut-in vampire who cannot drink blood or cast magic. When she is suddenly appointed as a supreme commander in the imperial army, she must bluff her way through lethal battles and conspiracies alongside her devoted maid.",
+    genres: ["Fantasy", "Comedy", "Action"],
+    score: 84,
+    popularity: 39000,
+    releaseDate: "2020-01-11",
+    volumeCount: 13,
+    source: "lnori",
+    sourceUrls: {
+      lnori: "https://lnori.com/series/10426/the-vexations-of-a-shut-in-vampire-princess",
+    },
+    primarySource: "lnori",
+    primaryUrl: "https://lnori.com/series/10426/the-vexations-of-a-shut-in-vampire-princess",
+    inLibrary: false,
+    existingVolumes: 0,
+  },
+  {
+    id: "a-contract-marriage-with-the-maid",
+    title: "A Contract Marriage with the Maid",
+    titleRomaji: "Meido-san to no Keiyaku Kekkon",
+    titleNative: "メイドさんとの契約結婚",
+    coverUrl: "https://images.ranobedb.org/88e4091a13e55138122c66d2f34aa0b1.jpg",
+    synopsis: "To escape political machinations and high-society obligations, a prominent nobleman proposes a convenient marriage of convenience with his reserved, diligent housemaid. What begins as a calculated formal arrangement soon deepens into a warm and sincere bond.",
+    genres: ["Romance", "Drama", "Slice of Life"],
+    score: 82,
+    popularity: 27000,
+    releaseDate: "2021-04-15",
+    volumeCount: 1,
+    source: "elscione",
+    sourceUrls: {
+      elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Contract%20Marriage%20with%20the%20Maid/",
+    },
+    primarySource: "elscione",
+    primaryUrl: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Contract%20Marriage%20with%20the%20Maid/",
     inLibrary: false,
     existingVolumes: 0,
   },
@@ -765,6 +1250,14 @@ export const KNOWN_SERIES_SYNOPSES: Record<string, string> = {
     "Reincarnated into a tabletop RPG ruleset realm, a hardcore min-maxer carefully allocates his stats and character points to construct an unassailable build.",
   "im the evil lord of an intergalactic empire":
     "Liam Sera Banfield was betrayed and died in debt. Reborn into a sci-fi space empire, he vows to become a ruthless corrupt lord only for his every act to accidentally enrich his people.",
+  "monogatari":
+    "High school student Koyomi Araragi survives a vampire attack with the aid of the eccentric specialist Meme Oshino. Finding himself equipped with lingering superhuman healing, he assists various girls afflicted by bizarre apparitions and emotional trauma.",
+  "a cave kings road to paradise":
+    "Prince Heal is exiled to a barren, isolated island due to possessing a seemingly useless Cave King crest. However, upon excavating the rocks, he discovers his crest grants godlike mining and crafting abilities, rapidly transforming the desolate wasteland into an impregnable paradise.",
+  "the vexations of a shut in vampire princess":
+    "Terakomari Gandesblood is a shut-in vampire who cannot drink blood or cast magic. When she is suddenly appointed as a supreme commander in the imperial army, she must bluff her way through lethal battles and conspiracies alongside her devoted maid.",
+  "a contract marriage with the maid":
+    "To escape political machinations and high-society obligations, a prominent nobleman proposes a convenient marriage of convenience with his reserved, diligent housemaid. What begins as a calculated formal arrangement soon deepens into a warm and sincere bond.",
 };
 
 /**
@@ -784,10 +1277,11 @@ export function findKnownSeriesSynopsis(novel: DiscoveredNovel): string | null {
 
     for (const [key, synopsis] of Object.entries(KNOWN_SERIES_SYNOPSES)) {
       const normKey = normalizeTitleForMatch(key);
+      const minLen = Math.min(norm.length, normKey.length);
+      const maxLen = Math.max(norm.length, normKey.length);
       if (
         norm === normKey ||
-        (norm.length >= 6 && normKey.includes(norm)) ||
-        (normKey.length >= 6 && norm.includes(normKey))
+        (minLen >= 8 && minLen / maxLen >= 0.7 && (normKey.startsWith(norm) || norm.startsWith(normKey)))
       ) {
         if (!isSynopsisInsufficient(synopsis)) {
           return synopsis;
@@ -895,32 +1389,6 @@ export async function resolveFallbackSynopsis(
 }
 
 /**
- * Determines primary download source, always preferring Elscione when available on both.
- */
-export function assignPrimarySource(novel: DiscoveredNovel): DiscoveredNovel {
-  let primarySource: "elscione" | "lnori" = "elscione";
-  let primaryUrl = "";
-
-  if (novel.source === "both") {
-    // When available on both sources, ALWAYS prefer Elscione over Lnori
-    primarySource = "elscione";
-    primaryUrl = novel.sourceUrls.elscione || novel.sourceUrls.lnori || "";
-  } else if (novel.source === "elscione") {
-    primarySource = "elscione";
-    primaryUrl = novel.sourceUrls.elscione || "";
-  } else {
-    primarySource = "lnori";
-    primaryUrl = novel.sourceUrls.lnori || "";
-  }
-
-  return {
-    ...novel,
-    primarySource,
-    primaryUrl,
-  };
-}
-
-/**
  * Guarantees that 100% of novels have complete, engaging, non-empty synopses.
  */
 export async function ensureAllNovelsHaveSynopses(
@@ -946,18 +1414,6 @@ export async function ensureAllNovelsHaveSynopses(
       });
     }),
   );
-}
-
-/**
- * Normalizes title for fuzzy string comparison against Calibre metadata.
- */
-export function normalizeTitleForMatch(title: string): string {
-  if (!title) return "";
-  return title
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, "")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 /**
@@ -1316,24 +1772,20 @@ async function fetchOnlineFeedWithFallback(
       const day = String(item.startDate?.day || 1).padStart(2, "0");
       const releaseDate = `${year}-${month}-${day}`;
 
-      // Construct source URLs and determine source availability
-      const lnoriUrl = `https://lnori.com/series/${item.id}/${slug}`;
-      const elscioneUrl = `https://server.elscione.com/Officially%20Translated%20Light%20Novels/${encodeURIComponent(title)}/`;
+      // Verify real download sources on Elscione and/or Lnori.
+      // If neither exists, SKIP to eliminate synthetic URL fabrication (e.g. Sayonara Lara)
+      const realSources = resolveRealDownloadSources(
+        title,
+        item.title?.romaji,
+        item.title?.native,
+        {
+          customElscioneFolders: dependencies?.customElscioneFolders,
+          customLnoriSeries: dependencies?.customLnoriSeries,
+        },
+      );
 
-      // Distribute availability realistically across Lnori, Elscione, or both
-      let source: DiscoverSource = "both";
-      const sourceUrls: DiscoverSourceUrls = {};
-
-      if (item.id % 3 === 0) {
-        source = "lnori";
-        sourceUrls.lnori = lnoriUrl;
-      } else if (item.id % 3 === 1) {
-        source = "elscione";
-        sourceUrls.elscione = elscioneUrl;
-      } else {
-        source = "both";
-        sourceUrls.lnori = lnoriUrl;
-        sourceUrls.elscione = elscioneUrl;
+      if (!realSources) {
+        continue;
       }
 
       results.push({
@@ -1348,11 +1800,26 @@ async function fetchOnlineFeedWithFallback(
         popularity: item.popularity || 10000,
         releaseDate,
         volumeCount: item.volumes || 1,
-        source,
-        sourceUrls,
+        source: realSources.source,
+        primarySource: realSources.primarySource,
+        primaryUrl: realSources.primaryUrl,
+        sourceUrls: realSources.sourceUrls,
         inLibrary: false,
         existingVolumes: 0,
       });
+    }
+
+    // If online matching yielded fewer than 10 verified items, supplement with verified seed entries
+    const seedCandidates = tab === "trending"
+      ? (dependencies?.seedTrendingNovels ?? SEED_TRENDING_NOVELS)
+      : (dependencies?.seedNewNovels ?? SEED_NEW_NOVELS);
+
+    const existingTitles = new Set(results.map((r) => normalizeTitleForMatch(r.title)));
+    for (const seed of seedCandidates) {
+      if (!existingTitles.has(normalizeTitleForMatch(seed.title))) {
+        results.push({ ...seed });
+        existingTitles.add(normalizeTitleForMatch(seed.title));
+      }
     }
 
     return results.length > 0 ? results : null;
