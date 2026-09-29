@@ -1058,6 +1058,47 @@
       color: #ffffff;
     }
 
+    /* Tab: Discover (Warm Amber & Gold with Sparkle) */
+    .visionos-tab-discover:hover {
+      color: #fef08a;
+      background-color: rgba(245, 158, 11, 0.08);
+    }
+    .visionos-tab-discover.visionos-tab-active,
+    .visionos-tab-discover.active {
+      color: #fef08a;
+      background: rgba(245, 158, 11, 0.18);
+      border-color: rgba(251, 191, 36, 0.35);
+      box-shadow: 0 2px 10px rgba(245, 158, 11, 0.22), inset 0 1px 0 rgba(251, 191, 36, 0.30);
+    }
+    .visionos-tab.visionos-tab-discover.visionos-tab-active .visionos-badge-discover {
+      background: rgba(245, 158, 11, 0.30);
+      color: #ffffff;
+    }
+    .visionos-badge-discover {
+      background: rgba(245, 158, 11, 0.18);
+      color: #fde047;
+      border: 1px solid rgba(245, 158, 11, 0.25);
+    }
+
+    /* Discover Segmented Tabs */
+    .discover-tab {
+      transition: all 150ms cubic-bezier(0.16, 1, 0.3, 1);
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+    .discover-tab:hover {
+      background-color: rgba(255, 255, 255, 0.06);
+    }
+    .discover-tab:active {
+      transform: scale(0.96) !important;
+    }
+    .discover-tab-active {
+      background: rgba(255, 255, 255, 0.16) !important;
+      color: #ffffff !important;
+      border: 1px solid rgba(255, 255, 255, 0.20) !important;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.2) !important;
+    }
+
     /* Tab: Light Novels (Muted Pastel Lavender / Periwinkle) */
     .visionos-tab-ln:hover {
       color: #e0e7ff;
@@ -1538,6 +1579,13 @@
               <span id="quickReadingCount" class="visionos-badge visionos-badge-reading">0</span>
             </button>
 
+            <!-- Discover Tab ✨ -->
+            <button onclick="switchView('discover')" id="chip-discover" role="tab" aria-selected="false" class="visionos-tab visionos-tab-discover" title="Discover Light Novels">
+              <span class="text-amber-400">✨</span>
+              <span>Discover</span>
+              <span id="quickDiscoverBadge" class="visionos-badge visionos-badge-discover">Hot</span>
+            </button>
+
             <!-- Subtle Vertical Divider -->
             <div class="h-4 w-px bg-white/10 shrink-0 mx-0.5" aria-hidden="true"></div>
 
@@ -1653,6 +1701,95 @@
           </thead>
           <tbody id="libraryTableBody" class="divide-y divide-white/5"></tbody>
         </table>
+      </div>
+
+      <!-- DISCOVER SHELF (TRENDING & NEW RELEASES) -->
+      <div id="discoverView" class="hidden flex-1 flex flex-col space-y-4 w-full">
+        <!-- Top Segmented Pill Toggle: Trending vs New Releases (STRICTLY NOT COMBINED) -->
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-white/5">
+          <!-- Segmented Toggle -->
+          <div class="inline-flex items-center bg-zinc-900/90 border border-white/10 rounded-full p-1 shadow-lg gap-1 self-start sm:self-auto" role="tablist" aria-label="Discover Feeds">
+            <button onclick="switchDiscoverTab('trending')" id="discoverTabTrending" role="tab" aria-selected="true" class="discover-tab discover-tab-active px-4 py-1.5 rounded-full text-xs font-bold transition-all duration-150 flex items-center gap-1.5 cursor-pointer active:scale-[0.96]" title="Browse Trending Light Novels">
+              <span>🔥</span>
+              <span>Trending</span>
+              <span id="discoverTrendingBadge" class="px-1.5 py-0.5 rounded-full text-[10px] font-mono font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30">0</span>
+            </button>
+            <button onclick="switchDiscoverTab('new_releases')" id="discoverTabNewReleases" role="tab" aria-selected="false" class="discover-tab px-4 py-1.5 rounded-full text-xs font-bold text-zinc-400 hover:text-white transition-all duration-150 flex items-center gap-1.5 cursor-pointer active:scale-[0.96]" title="Browse New Light Novel Releases">
+              <span>✨</span>
+              <span>New Releases</span>
+              <span id="discoverNewReleasesBadge" class="px-1.5 py-0.5 rounded-full text-[10px] font-mono font-medium bg-white/10 text-zinc-300 border border-white/10">0</span>
+            </button>
+          </div>
+
+          <!-- Live Feed Status / Info -->
+          <div class="flex items-center gap-2 text-xs text-zinc-400">
+            <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+            <span id="discoverFeedStatus">Live Feeds from Lnori &amp; Elsci.one</span>
+          </div>
+        </div>
+
+        <!-- Interactive Filters Bar -->
+        <div class="bg-zinc-900/40 backdrop-blur-xl border border-white/10 rounded-2xl p-3 sm:p-4 space-y-3 shadow-lg">
+          <!-- Row 1: Source Filter + Library Status Filter + Sort + Live Search -->
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <!-- Source Filter Segmented Control -->
+            <div class="flex items-center gap-1.5">
+              <span class="text-[11px] font-semibold text-zinc-400 hidden sm:inline">Source:</span>
+              <div class="inline-flex bg-zinc-950/80 border border-white/10 rounded-xl p-0.5 text-xs">
+                <button onclick="setDiscoverSourceFilter('all')" id="discoverSource-all" class="px-2.5 py-1 rounded-lg bg-white/15 text-white font-semibold transition-all cursor-pointer active:scale-[0.96]">All Sources</button>
+                <button onclick="setDiscoverSourceFilter('lnori')" id="discoverSource-lnori" class="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]">Lnori</button>
+                <button onclick="setDiscoverSourceFilter('elscione')" id="discoverSource-elscione" class="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]">Elsci.one</button>
+              </div>
+            </div>
+
+            <!-- Library Status Filter Segmented Control -->
+            <div class="flex items-center gap-1.5">
+              <span class="text-[11px] font-semibold text-zinc-400 hidden sm:inline">Library:</span>
+              <div class="inline-flex bg-zinc-950/80 border border-white/10 rounded-xl p-0.5 text-xs">
+                <button onclick="setDiscoverStatusFilter('all')" id="discoverStatus-all" class="px-2.5 py-1 rounded-lg bg-white/15 text-white font-semibold transition-all cursor-pointer active:scale-[0.96]">All</button>
+                <button onclick="setDiscoverStatusFilter('ready')" id="discoverStatus-ready" class="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]">Ready to Download ⚡</button>
+                <button onclick="setDiscoverStatusFilter('in_library')" id="discoverStatus-in_library" class="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]">In Library ✓</button>
+              </div>
+            </div>
+
+            <!-- Sort & Live Search -->
+            <div class="flex items-center gap-2 w-full sm:w-auto">
+              <!-- Live Search Input -->
+              <div class="relative flex-1 sm:w-56">
+                <svg class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500"><use href="#icon-magnifying-glass"/></svg>
+                <input type="text" id="discoverSearchInput" oninput="handleDiscoverSearch(this.value)" placeholder="Search discover..."
+                  class="w-full h-8 pl-8 pr-7 bg-zinc-950/80 border border-white/10 rounded-xl text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-amber-400/50 transition-colors">
+                <button id="discoverSearchClearBtn" onclick="clearDiscoverSearch()" class="hidden absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 cursor-pointer">
+                  <svg class="w-3 h-3"><use href="#icon-xmark"/></svg>
+                </button>
+              </div>
+
+              <!-- Sort Dropdown -->
+              <select id="discoverSortSelect" onchange="setDiscoverSort(this.value)" class="h-8 bg-zinc-950/80 border border-white/10 rounded-xl text-xs text-zinc-300 px-2.5 focus:outline-none focus:border-amber-400/50 cursor-pointer">
+                <option value="popular">Most Popular</option>
+                <option value="rating">Highest Rated</option>
+                <option value="newest">Newest</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Row 2: Genre Filter (Horizontal Scrollable Pills) -->
+          <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+            <span class="text-[11px] font-semibold text-zinc-500 shrink-0">Genre:</span>
+            <div id="discoverGenrePills" class="flex items-center gap-1.5 shrink-0"></div>
+          </div>
+        </div>
+
+        <!-- Discover Card Grid -->
+        <div id="discoverGrid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-5 w-full pt-2"></div>
+
+        <!-- Discover Empty State -->
+        <div id="discoverEmptyState" class="hidden text-center py-16 px-4 bg-zinc-900/30 border border-white/5 rounded-2xl text-xs space-y-2">
+          <div class="text-2xl">🔍</div>
+          <div class="text-zinc-200 font-bold">No novels found</div>
+          <div class="text-zinc-500 text-[11px]">Try adjusting your genre, source, or search query.</div>
+          <button onclick="resetDiscoverFilters()" class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-semibold mt-2 cursor-pointer active:scale-[0.96]">Reset Filters</button>
+        </div>
       </div>
 
       <!-- Bottom Status Bar -->
@@ -1953,6 +2090,77 @@
           </button>
         </div>
       </form>
+
+    </div>
+  </div>
+
+  <!-- DISCOVER NOVEL PREVIEW MODAL -->
+  <div id="discoverModal" class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-end sm:items-center justify-center p-0 sm:p-4" onclick="if(event.target === this) closeDiscoverModal()">
+    <div class="ui-card apple-material-modal w-full sm:max-w-2xl max-h-[92vh] rounded-t-3xl sm:rounded-2xl border border-white/10 p-5 sm:p-7 shadow-2xl flex flex-col overflow-hidden bg-zinc-950/90">
+      
+      <!-- Modal Header -->
+      <div class="flex items-center justify-between pb-4 border-b border-white/10 shrink-0">
+        <div class="flex items-center gap-2">
+          <span class="text-amber-400 text-lg">✨</span>
+          <h3 id="discoverModalHeaderTitle" class="tracking-optical-display text-sm sm:text-base font-bold text-white leading-tight">Light Novel Discovery</h3>
+        </div>
+        <button onclick="closeDiscoverModal()" class="w-10 h-10 rounded-xl bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer active:scale-[0.96] transition-all" title="Close (Esc)">
+          <svg class="w-4 h-4"><use href="#icon-xmark"/></svg>
+        </button>
+      </div>
+
+      <!-- Modal Body (Scrollable) -->
+      <div class="flex-1 overflow-y-auto py-5 space-y-6 no-scrollbar">
+        <div class="flex flex-col sm:flex-row gap-5 items-start">
+          <!-- Extra-large high-res cover -->
+          <div class="relative w-36 sm:w-48 aspect-[2/3] shrink-0 rounded-xl overflow-hidden shadow-2xl border border-white/10 mx-auto sm:mx-0 book-spine-effect bg-zinc-900">
+            <img id="discoverModalCover" src="" alt="Cover" class="w-full h-full object-cover">
+            <div id="discoverModalStatusBadge" class="absolute top-2 left-2 px-2 py-0.5 rounded-full text-[10px] font-bold backdrop-blur-md"></div>
+          </div>
+
+          <!-- Metadata & details -->
+          <div class="flex-1 min-w-0 space-y-3">
+            <div>
+              <h2 id="discoverModalTitle" class="text-base sm:text-lg font-bold text-white leading-snug"></h2>
+              <div id="discoverModalRomaji" class="text-xs text-amber-300/80 font-medium italic mt-0.5"></div>
+              <div id="discoverModalAuthor" class="text-xs text-zinc-400 mt-1"></div>
+            </div>
+
+            <!-- Meta attributes row -->
+            <div class="flex flex-wrap items-center gap-2 text-xs">
+              <span id="discoverModalVolumes" class="px-2.5 py-1 rounded-lg bg-white/5 border border-white/5 text-zinc-300 font-mono text-[11px]"></span>
+              <span id="discoverModalRelease" class="px-2.5 py-1 rounded-lg bg-white/5 border border-white/5 text-zinc-300 font-mono text-[11px]"></span>
+              <div id="discoverModalRating" class="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 font-mono text-[11px]"></div>
+            </div>
+
+            <!-- Genre chips -->
+            <div id="discoverModalGenres" class="flex flex-wrap gap-1.5 pt-1"></div>
+
+            <!-- Available Sources -->
+            <div class="pt-2">
+              <span class="text-[11px] font-semibold text-zinc-400 block mb-1.5">Available Ingestion Sources:</span>
+              <div id="discoverModalSources" class="flex flex-col gap-2"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Synopsis Section -->
+        <div class="space-y-2 pt-2 border-t border-white/5">
+          <h4 class="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Synopsis</h4>
+          <p id="discoverModalSynopsis" class="text-xs sm:text-sm text-zinc-300 leading-relaxed whitespace-pre-line bg-white/[0.02] p-4 rounded-xl border border-white/5"></p>
+        </div>
+      </div>
+
+      <!-- Modal Footer (Action Bar) -->
+      <div class="pt-4 border-t border-white/10 shrink-0 flex flex-col sm:flex-row items-center justify-between gap-3">
+        <div id="discoverModalLibraryNote" class="text-xs text-zinc-400 flex items-center gap-1.5"></div>
+        <div class="flex items-center gap-2 w-full sm:w-auto justify-end">
+          <button type="button" onclick="closeDiscoverModal()" class="px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-semibold cursor-pointer active:scale-[0.96] transition-all">Close</button>
+          <button id="discoverModalIngestBtn" type="button" onclick="handleDiscoverModalIngest()" class="flex-1 sm:flex-none px-5 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-zinc-950 font-bold text-xs rounded-xl shadow-lg transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]">
+            <span>⚡ 1-Click Ingest to Library</span>
+          </button>
+        </div>
+      </div>
 
     </div>
   </div>
@@ -2441,6 +2649,24 @@
             <div>• <strong>Auto-Sleep Idle Timer:</strong> After 15 minutes of inactivity without new scrapes, containers automatically shut down (<code class="text-zinc-200">docker compose stop</code>), immediately releasing ~2.5 GB RAM back to macOS.</div>
             <div>• <strong>Fail-Open Fallback:</strong> If Docker or Firecrawl is offline, article ingestion seamlessly falls back to direct browser fetch and Jina Reader.</div>
             <div>• <strong>CLI Control:</strong> Manage cluster state manually via <code class="text-zinc-200">bin/lighthouse firecrawl status|up|down</code>.</div>
+          </div>
+        </div>
+
+        <!-- Feature 7: Discover Shelf (Trending & New Releases) -->
+        <div class="p-3.5 bg-zinc-900/80 rounded-xl border border-zinc-800 space-y-2 text-xs text-zinc-300">
+          <div class="font-bold text-white flex items-center justify-between">
+            <div class="flex items-center gap-1.5">
+              <span class="w-5 h-5 rounded-full bg-amber-950 text-amber-400 border border-amber-800/60 flex items-center justify-center text-[11px] font-mono font-bold shrink-0">7</span>
+              <span>Discover Shelf (Trending &amp; New Releases)</span>
+            </div>
+            <span class="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/60 text-amber-300 font-mono border border-amber-800/50">✨ Discover</span>
+          </div>
+          <div class="text-[11px] text-zinc-400 space-y-1.5 pl-7 leading-relaxed">
+            <div>Browse curated feeds of top light novels and web novels from Lnori and Elsci.one with live Calibre library reconciliation:</div>
+            <div>• <strong>VisionOS Capsule Navigation:</strong> Tap <code class="text-zinc-200">✨ Discover</code> in the top navigation bar to access separate <code class="text-zinc-200">🔥 Trending</code> and <code class="text-zinc-200">✨ New Releases</code> views (strictly segregated).</div>
+            <div>• <strong>Custom Interactive Filtering:</strong> Filter by Source (<code class="text-zinc-200">Lnori</code>, <code class="text-zinc-200">Elsci.one</code>), Genre (<code class="text-zinc-200">Fantasy</code>, <code class="text-zinc-200">Isekai</code>, <code class="text-zinc-200">Romance</code>, etc.), Library Status (<code class="text-zinc-200">Ready to Ingest</code> vs <code class="text-zinc-200">In Library</code>), Live Search, and Sorting (<code class="text-zinc-200">Most Popular</code>, <code class="text-zinc-200">Highest Rated</code>, <code class="text-zinc-200">Newest</code>).</div>
+            <div>• <strong>1-Click Direct Ingestion:</strong> Tap <code class="text-zinc-200">⚡ Ingest</code> on any card or inside the preview modal (<code class="text-zinc-200">#discoverModal</code>) to automatically enqueue background downloading directly into Calibre via <code class="text-zinc-200">POST /api/discover/ingest</code>.</div>
+            <div>• <strong>Developer Endpoints:</strong> <code class="text-zinc-200">GET /api/discover/feed?tab=trending|new_releases</code> and <code class="text-zinc-200">POST /api/discover/ingest</code>.</div>
           </div>
         </div>
 
@@ -3664,7 +3890,7 @@
     }
 
     function hasActiveModal() {
-      const modalIds = ['filterDrawer', 'bookDetailModal', 'urlModal', 'uploadModal', 'editModal', 'guideModal', 'lnoriModal'];
+      const modalIds = ['filterDrawer', 'bookDetailModal', 'urlModal', 'uploadModal', 'editModal', 'guideModal', 'lnoriModal', 'discoverModal'];
       return modalIds.some(id => {
         const el = document.getElementById(id);
         return el && !el.classList.contains('hidden');
@@ -3689,6 +3915,7 @@
       closeEditModal();
       closeGuideModal();
       closeLnoriModal();
+      closeDiscoverModal();
       updateBackButton();
     }
 
@@ -3736,6 +3963,24 @@
     let currentRenderLimit = PAGE_SIZE;
     let catalogObserver = null;
     let booksEtag = null;
+
+    // DISCOVER SHELF STATE
+    let currentView = 'library'; // 'library' or 'discover'
+    let discoverTab = 'trending'; // 'trending' or 'new_releases'
+    let discoverFilter = {
+      source: 'all',
+      genre: 'All',
+      status: 'all',
+      q: '',
+      sort: 'popular',
+    };
+    let discoverFeedCache = {
+      trending: null,
+      new_releases: null,
+    };
+    let activeDiscoverItem = null;
+    let ingestingDiscoverIds = new Set();
+    let discoverSearchDebounceTimer = null;
 
     function getStoredItem(key) {
       try {
@@ -3812,6 +4057,13 @@
       }
       try {
         await Promise.all([loadBooks(), loadFacets(), loadKosync()]);
+        // Warm up discover counts in background
+        fetch('/api/discover/feed?tab=trending').then(r => r.json()).then(data => {
+          if (data && data.counts && typeof data.counts.trending === 'number') {
+            const b = document.getElementById('quickDiscoverBadge');
+            if (b) b.textContent = `${data.counts.trending}`;
+          }
+        }).catch(() => {});
       } catch (err) {
         console.error('Init error:', err);
       }
@@ -3985,6 +4237,19 @@
       try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
       tgHaptic.light();
       activeFilter = { type, value };
+
+      if (currentView === 'discover') {
+        currentView = 'library';
+        document.getElementById('discoverView')?.classList.add('hidden');
+        document.querySelector('[data-purpose="library-grid-header"]')?.classList.remove('hidden');
+        setViewMode(viewMode || 'grid');
+      }
+      const chipDiscover = document.getElementById('chip-discover');
+      if (chipDiscover) {
+        chipDiscover.classList.remove('visionos-tab-active');
+        chipDiscover.setAttribute('aria-selected', 'false');
+      }
+
       const box = document.getElementById('activeFilterBox');
       const badge = document.getElementById('activeFilterBadge');
       const mobileBadge = document.getElementById('mobileFilterBadgeCount');
@@ -4130,6 +4395,620 @@
       const s2 = document.getElementById('drawerSortSelect');
       if (s1) s1.value = 'recent';
       if (s2) s2.value = 'recent';
+    }
+
+    // DISCOVER NAVIGATION & VIEW SWITCHER
+    function switchView(view) {
+      try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
+      tgHaptic.light();
+      if (view === 'discover') {
+        currentView = 'discover';
+        // Hide library views & header
+        document.getElementById('libraryGridView')?.classList.add('hidden');
+        document.getElementById('libraryTableView')?.classList.add('hidden');
+        document.querySelector('[data-purpose="library-grid-header"]')?.classList.add('hidden');
+        document.getElementById('bulkToolbar')?.classList.add('hidden');
+        // Show discover view
+        document.getElementById('discoverView')?.classList.remove('hidden');
+
+        // Deactivate other capsule tabs
+        const tabIds = ['chip-all', 'chip-series', 'chip-reading', 'chip-ln', 'chip-burmese'];
+        tabIds.forEach(id => {
+          const el = document.getElementById(id);
+          if (el) {
+            el.classList.remove('visionos-tab-active');
+            el.setAttribute('aria-selected', 'false');
+          }
+        });
+        const chipDiscover = document.getElementById('chip-discover');
+        if (chipDiscover) {
+          chipDiscover.classList.add('visionos-tab-active');
+          chipDiscover.setAttribute('aria-selected', 'true');
+        }
+
+        loadDiscoverFeed();
+      } else {
+        currentView = 'library';
+        document.getElementById('discoverView')?.classList.add('hidden');
+        document.querySelector('[data-purpose="library-grid-header"]')?.classList.remove('hidden');
+        const chipDiscover = document.getElementById('chip-discover');
+        if (chipDiscover) {
+          chipDiscover.classList.remove('visionos-tab-active');
+          chipDiscover.setAttribute('aria-selected', 'false');
+        }
+        setViewMode(viewMode || 'grid');
+      }
+    }
+
+    function switchDiscoverTab(tab) {
+      if (discoverTab === tab) return;
+      try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
+      tgHaptic.light();
+      discoverTab = tab;
+
+      const btnTrending = document.getElementById('discoverTabTrending');
+      const btnReleases = document.getElementById('discoverTabNewReleases');
+
+      if (tab === 'trending') {
+        btnTrending?.classList.add('discover-tab-active');
+        btnTrending?.setAttribute('aria-selected', 'true');
+        btnReleases?.classList.remove('discover-tab-active');
+        btnReleases?.setAttribute('aria-selected', 'false');
+      } else {
+        btnReleases?.classList.add('discover-tab-active');
+        btnReleases?.setAttribute('aria-selected', 'true');
+        btnTrending?.classList.remove('discover-tab-active');
+        btnTrending?.setAttribute('aria-selected', 'false');
+      }
+
+      loadDiscoverFeed();
+    }
+
+    function renderDiscoverGenrePills(genres) {
+      const container = document.getElementById('discoverGenrePills');
+      if (!container) return;
+      const allGenres = ['All', ...(genres || []).filter(g => g !== 'All')];
+      const pillsHtml = allGenres.map(g => {
+        const isSelected = discoverFilter.genre === g;
+        const activeCls = isSelected
+          ? 'bg-amber-500 text-zinc-950 font-bold border-amber-400'
+          : 'bg-zinc-900/80 text-zinc-400 hover:text-white border-white/5';
+        return `
+          <button type="button" onclick="setDiscoverGenre('${escapeHtml(g)}')" class="px-3 py-1 rounded-full text-xs transition-all border ${activeCls} cursor-pointer active:scale-[0.96]">
+            ${escapeHtml(g)}
+          </button>
+        `;
+      }).join('');
+      setHtml(container, pillsHtml);
+    }
+
+    function renderDiscoverSkeletons() {
+      return Array.from({ length: 6 }).map(() => `
+        <div class="bg-zinc-900/40 border border-white/5 rounded-2xl p-3 space-y-3 animate-pulse">
+          <div class="w-full aspect-[2/3] rounded-xl bg-zinc-800/60"></div>
+          <div class="h-3.5 bg-zinc-800/80 rounded w-3/4"></div>
+          <div class="h-2.5 bg-zinc-800/60 rounded w-1/2"></div>
+          <div class="flex gap-1 pt-1">
+            <div class="h-4 bg-zinc-800/60 rounded w-12"></div>
+            <div class="h-4 bg-zinc-800/60 rounded w-12"></div>
+          </div>
+          <div class="h-8 bg-zinc-800/80 rounded-xl w-full"></div>
+        </div>
+      `).join('');
+    }
+
+    async function loadDiscoverFeed(forceRefresh = false) {
+      const feedContainer = document.getElementById('discoverGrid');
+      const emptyState = document.getElementById('discoverEmptyState');
+
+      const tab = discoverTab;
+      const { source, genre, status, q, sort } = discoverFilter;
+
+      const params = new URLSearchParams();
+      params.set('tab', tab);
+      if (source && source !== 'all') params.set('source', source);
+      if (genre && genre !== 'All') params.set('genre', genre);
+      if (status && status !== 'all') params.set('status', status);
+      if (q && q.trim()) params.set('q', q.trim());
+      if (sort) params.set('sort', sort);
+
+      const cacheKey = `${tab}:${params.toString()}`;
+
+      try {
+        if (!discoverFeedCache[cacheKey] || forceRefresh) {
+          if (feedContainer && !discoverFeedCache[cacheKey]) {
+            setHtml(feedContainer, renderDiscoverSkeletons());
+          }
+        }
+
+        const res = await fetch(`/api/discover/feed?${params.toString()}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        if (data.counts) {
+          const tBadge = document.getElementById('discoverTrendingBadge');
+          const nrBadge = document.getElementById('discoverNewReleasesBadge');
+          if (tBadge) tBadge.textContent = String(data.counts.trending || 0);
+          if (nrBadge) nrBadge.textContent = String(data.counts.newReleases || 0);
+        }
+
+        if (data.genres) {
+          renderDiscoverGenrePills(data.genres);
+        }
+
+        discoverFeedCache[cacheKey] = data;
+        discoverFeedCache[tab] = data;
+        const novelList = data.novels || data.items || [];
+        renderDiscoverCards(novelList);
+      } catch (err) {
+        console.error('Failed to load discover feed:', err);
+        if (feedContainer) {
+          setHtml(feedContainer, `
+            <div class="col-span-full text-center py-12 px-4 ui-card rounded-xl text-xs space-y-2">
+              <div class="text-rose-400 font-bold">⚠️ Failed to load Discover feed (${escapeHtml(err.message)})</div>
+              <div class="text-zinc-500 text-[11px]">Please check connection or tap below to retry.</div>
+              <button onclick="loadDiscoverFeed(true)" class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-semibold mt-2 cursor-pointer active:scale-[0.96]">Retry</button>
+            </div>
+          `);
+        }
+      }
+    }
+
+    function handleDiscoverSearch(val) {
+      const clearBtn = document.getElementById('discoverSearchClearBtn');
+      if (clearBtn) {
+        clearBtn.classList.toggle('hidden', !val || !val.trim());
+      }
+      clearTimeout(discoverSearchDebounceTimer);
+      discoverSearchDebounceTimer = setTimeout(() => {
+        discoverFilter.q = val;
+        loadDiscoverFeed();
+      }, 250);
+    }
+
+    function clearDiscoverSearch() {
+      const input = document.getElementById('discoverSearchInput');
+      const clearBtn = document.getElementById('discoverSearchClearBtn');
+      if (input) input.value = '';
+      if (clearBtn) clearBtn.classList.add('hidden');
+      discoverFilter.q = '';
+      loadDiscoverFeed();
+    }
+
+    function setDiscoverSourceFilter(src) {
+      try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
+      tgHaptic.light();
+      discoverFilter.source = src;
+
+      ['all', 'lnori', 'elscione'].forEach(s => {
+        const btn = document.getElementById(`discoverSource-${s}`);
+        if (!btn) return;
+        if (s === src) {
+          btn.className = 'px-2.5 py-1 rounded-lg bg-white/15 text-white font-semibold transition-all cursor-pointer active:scale-[0.96]';
+        } else {
+          btn.className = 'px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]';
+        }
+      });
+
+      loadDiscoverFeed();
+    }
+
+    function setDiscoverStatusFilter(st) {
+      try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
+      tgHaptic.light();
+      discoverFilter.status = st;
+
+      ['all', 'ready', 'in_library'].forEach(s => {
+        const btn = document.getElementById(`discoverStatus-${s}`);
+        if (!btn) return;
+        if (s === st) {
+          btn.className = 'px-2.5 py-1 rounded-lg bg-white/15 text-white font-semibold transition-all cursor-pointer active:scale-[0.96]';
+        } else {
+          btn.className = 'px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]';
+        }
+      });
+
+      loadDiscoverFeed();
+    }
+
+    function setDiscoverGenre(g) {
+      try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
+      tgHaptic.light();
+      discoverFilter.genre = g;
+      const pillsContainer = document.getElementById('discoverGenrePills');
+      if (pillsContainer) {
+        pillsContainer.querySelectorAll('button').forEach(btn => {
+          const isSelected = btn.textContent.trim() === g;
+          btn.className = isSelected
+            ? 'px-3 py-1 rounded-full text-xs transition-all border bg-amber-500 text-zinc-950 font-bold border-amber-400 cursor-pointer active:scale-[0.96]'
+            : 'px-3 py-1 rounded-full text-xs transition-all border bg-zinc-900/80 text-zinc-400 hover:text-white border-white/5 cursor-pointer active:scale-[0.96]';
+        });
+      }
+      loadDiscoverFeed();
+    }
+
+    function setDiscoverSort(val) {
+      discoverFilter.sort = val;
+      loadDiscoverFeed();
+    }
+
+    function resetDiscoverFilters() {
+      discoverFilter = {
+        source: 'all',
+        genre: 'All',
+        status: 'all',
+        q: '',
+        sort: discoverTab === 'trending' ? 'popular' : 'newest',
+      };
+      setDiscoverSourceFilter('all');
+      setDiscoverStatusFilter('all');
+      clearDiscoverSearch();
+      const sortSelect = document.getElementById('discoverSortSelect');
+      if (sortSelect) sortSelect.value = discoverFilter.sort;
+      loadDiscoverFeed();
+    }
+
+    function renderDiscoverCards(items) {
+      const container = document.getElementById('discoverGrid');
+      const emptyState = document.getElementById('discoverEmptyState');
+      if (!container) return;
+
+      if (!items || items.length === 0) {
+        container.classList.add('hidden');
+        if (emptyState) emptyState.classList.remove('hidden');
+        return;
+      }
+
+      container.classList.remove('hidden');
+      if (emptyState) emptyState.classList.add('hidden');
+
+      const cardsHtml = items.map(item => {
+        const isIngesting = ingestingDiscoverIds.has(item.id);
+        const inLib = (item.inLibrary !== undefined) ? item.inLibrary : item.isInLibrary;
+        const libCount = (item.existingVolumes !== undefined) ? item.existingVolumes : (item.inLibraryVolumes || 0);
+
+        let statusBadgeHtml = '';
+        if (isIngesting) {
+          statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/30 text-amber-200 border border-amber-500/40 animate-pulse flex items-center gap-1 shadow-sm">
+            <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping"></span>
+            <span>Downloading...</span>
+          </span>`;
+        } else if (inLib) {
+          statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm">
+            ✓ In Library (${libCount}v)
+          </span>`;
+        } else {
+          statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-sky-500/30 text-sky-200 border border-sky-500/40 shadow-sm">
+            ⚡ Ready to Ingest
+          </span>`;
+        }
+
+        const sourceBadges = [];
+        if (item.sourceUrls?.lnori || item.source === 'lnori' || item.source === 'both') {
+          sourceBadges.push({ name: 'Lnori', cls: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30' });
+        }
+        if (item.sourceUrls?.elscione || item.source === 'elscione' || item.source === 'both') {
+          sourceBadges.push({ name: 'Elsci.one', cls: 'bg-rose-500/15 text-rose-300 border-rose-500/30' });
+        }
+        if (sourceBadges.length === 0 && Array.isArray(item.sources)) {
+          item.sources.forEach(s => {
+            const isLn = s.source === 'lnori';
+            sourceBadges.push({
+              name: isLn ? 'Lnori' : 'Elsci.one',
+              cls: isLn ? 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30' : 'bg-rose-500/15 text-rose-300 border-rose-500/30',
+            });
+          });
+        }
+        const sourceBadgesHtml = sourceBadges.map(b => `<span class="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium border ${b.cls}">${b.name}</span>`).join('');
+
+        const genreChipsHtml = (item.genres || []).slice(0, 2).map(g =>
+          `<span class="px-1.5 py-0.5 rounded text-[9px] bg-white/5 text-zinc-400 border border-white/5">${escapeHtml(g)}</span>`
+        ).join('');
+
+        const primaryUrl = item.sourceUrls?.lnori || item.sourceUrls?.elscione || (item.sources && item.sources[0]?.url) || '';
+        const primarySourceName = item.sourceUrls?.lnori ? 'lnori' : (item.sourceUrls?.elscione ? 'elscione' : (item.sources && item.sources[0]?.source ? item.sources[0].source : 'lnori'));
+        const ratingVal = item.rating || (item.score ? (item.score / 20) : 4.8);
+        const romaji = item.titleRomaji || item.romajiTitle || '';
+        const authorName = item.author || 'Light Novel';
+
+        return `
+          <div class="discover-card group relative flex flex-col bg-zinc-900/50 hover:bg-zinc-900/80 backdrop-blur-xl border border-white/10 hover:border-white/20 rounded-2xl p-2.5 sm:p-3 transition-all duration-200 shadow-xl justify-between" data-novel-id="${escapeHtml(item.id)}">
+            <div>
+              <!-- Cover Container -->
+              <div class="relative w-full aspect-[2/3] rounded-xl overflow-hidden mb-2.5 bg-zinc-950 book-spine-effect cursor-pointer" onclick="openDiscoverModal('${escapeHtml(item.id)}')">
+                <img src="${escapeHtml(item.coverUrl)}" alt="${escapeHtml(item.title)}" loading="lazy" decoding="async" class="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300">
+                
+                <div class="absolute top-2 left-2 flex items-center gap-1 z-10">
+                  ${statusBadgeHtml}
+                </div>
+
+                <div class="absolute bottom-2 right-2 px-1.5 py-0.5 rounded-md text-[9px] font-mono font-semibold bg-black/70 text-zinc-200 backdrop-blur-md border border-white/10">
+                  ${item.volumeCount} vols
+                </div>
+              </div>
+
+              <!-- Metadata -->
+              <div class="space-y-1">
+                <div class="flex items-center gap-1 mb-1">
+                  ${sourceBadgesHtml}
+                  <span class="text-[10px] text-amber-400/90 font-mono ml-auto">★ ${ratingVal.toFixed(1)}</span>
+                </div>
+
+                <h3 class="text-xs sm:text-sm font-bold text-white leading-snug line-clamp-2 hover:text-amber-300 transition-colors cursor-pointer" onclick="openDiscoverModal('${escapeHtml(item.id)}')" title="${escapeHtml(item.title)}">
+                  ${escapeHtml(item.title)}
+                </h3>
+                ${romaji ? `<div class="text-[10px] text-zinc-500 truncate italic" title="${escapeHtml(romaji)}">${escapeHtml(romaji)}</div>` : ''}
+                
+                <div class="text-[10px] text-zinc-400 truncate pt-0.5">
+                  By <span class="text-zinc-300">${escapeHtml(authorName)}</span>
+                </div>
+
+                <div class="flex flex-wrap gap-1 pt-1">
+                  ${genreChipsHtml}
+                </div>
+              </div>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="pt-3 mt-2 border-t border-white/5 flex items-center gap-1.5">
+              <button type="button" onclick="openDiscoverModal('${escapeHtml(item.id)}')" class="flex-1 py-1.5 px-2 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white text-[11px] font-semibold rounded-xl border border-white/5 transition-colors cursor-pointer text-center active:scale-[0.96]">
+                Preview
+              </button>
+              <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', '${encodeURIComponent(primaryUrl)}', '${primarySourceName}', event)" ${isIngesting ? 'disabled' : ''} class="flex-1 py-1.5 px-2 ${inLib ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300' : 'bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold'} text-[11px] rounded-xl transition-all shadow-sm flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96] disabled:opacity-60 disabled:cursor-not-allowed">
+                ${isIngesting ? `
+                  <svg class="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
+                  <span>Ingesting</span>
+                ` : (inLib ? `
+                  <span>Re-Ingest</span>
+                ` : `
+                  <span>⚡ Ingest</span>
+                `)}
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      setHtml(container, cardsHtml);
+    }
+
+    function openDiscoverModal(novelId) {
+      try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
+      tgHaptic.light();
+
+      const feed = discoverFeedCache[discoverTab];
+      const item = (feed?.items || []).find(it => it.id === novelId);
+      if (!item) return;
+
+      activeDiscoverItem = item;
+
+      const cover = document.getElementById('discoverModalCover');
+      const title = document.getElementById('discoverModalTitle');
+      const romaji = document.getElementById('discoverModalRomaji');
+      const author = document.getElementById('discoverModalAuthor');
+      const volumes = document.getElementById('discoverModalVolumes');
+      const release = document.getElementById('discoverModalRelease');
+      const rating = document.getElementById('discoverModalRating');
+      const genres = document.getElementById('discoverModalGenres');
+      const sources = document.getElementById('discoverModalSources');
+      const synopsis = document.getElementById('discoverModalSynopsis');
+      const statusBadge = document.getElementById('discoverModalStatusBadge');
+      const libraryNote = document.getElementById('discoverModalLibraryNote');
+      const ingestBtn = document.getElementById('discoverModalIngestBtn');
+
+      if (cover) cover.src = item.coverUrl || '';
+      if (title) title.textContent = item.title;
+      if (romaji) romaji.textContent = item.romajiTitle || '';
+      if (author) author.textContent = `Author: ${item.author}`;
+      if (volumes) volumes.textContent = `${item.volumeCount} Volumes`;
+      if (release) release.textContent = `Released: ${item.releaseDate || 'Recent'}`;
+      if (rating) setHtml(rating, `<span>★</span><span>${item.rating.toFixed(1)} / 5.0</span><span class="text-zinc-500 font-normal">(${item.popularityScore}% pop)</span>`);
+
+      if (genres) {
+        setHtml(genres, (item.genres || []).map(g =>
+          `<span class="px-2 py-0.5 rounded-full text-xs bg-white/5 border border-white/10 text-zinc-300">${escapeHtml(g)}</span>`
+        ).join(''));
+      }
+
+      if (sources) {
+        const sourceEntries = [];
+        if (item.sourceUrls?.lnori) {
+          sourceEntries.push({ name: 'Lnori', url: item.sourceUrls.lnori, source: 'lnori', color: 'text-indigo-400 border-indigo-500/30 bg-indigo-500/10' });
+        }
+        if (item.sourceUrls?.elscione) {
+          sourceEntries.push({ name: 'Elsci.one', url: item.sourceUrls.elscione, source: 'elscione', color: 'text-rose-400 border-rose-500/30 bg-rose-500/10' });
+        }
+        if (sourceEntries.length === 0 && Array.isArray(item.sources)) {
+          item.sources.forEach(s => {
+            const isLn = s.source === 'lnori';
+            sourceEntries.push({
+              name: isLn ? 'Lnori' : 'Elsci.one',
+              url: s.url,
+              source: s.source,
+              color: isLn ? 'text-indigo-400 border-indigo-500/30 bg-indigo-500/10' : 'text-rose-400 border-rose-500/30 bg-rose-500/10',
+            });
+          });
+        }
+        setHtml(sources, sourceEntries.map((s) => `
+          <div class="flex items-center justify-between p-2.5 rounded-xl border ${s.color} text-xs">
+            <div class="flex items-center gap-2">
+              <span class="font-bold font-mono">${s.name}</span>
+              <span class="text-zinc-400">• ${item.volumeCount} vols available</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" class="underline text-zinc-400 hover:text-white flex items-center gap-1 text-[11px]">
+                <span>Browse Source</span>
+              </a>
+              <button type="button" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', '${encodeURIComponent(s.url)}', '${s.source}', event)" class="px-2.5 py-1 bg-white/10 hover:bg-white/20 text-white rounded-lg font-semibold text-[11px] cursor-pointer active:scale-[0.96]">
+                ⚡ Ingest
+              </button>
+            </div>
+          </div>
+        `).join(''));
+      }
+
+      if (synopsis) synopsis.textContent = item.synopsis || 'No synopsis available.';
+
+      const inLib = (item.inLibrary !== undefined) ? item.inLibrary : item.isInLibrary;
+      const libCount = (item.existingVolumes !== undefined) ? item.existingVolumes : (item.inLibraryVolumes || 0);
+      const isIngesting = ingestingDiscoverIds.has(item.id);
+
+      if (statusBadge) {
+        if (isIngesting) {
+          statusBadge.className = 'absolute top-2 left-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/30 text-amber-200 border border-amber-500/50 backdrop-blur-md animate-pulse';
+          statusBadge.textContent = '⏳ Downloading...';
+        } else if (inLib) {
+          statusBadge.className = 'absolute top-2 left-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/50 backdrop-blur-md';
+          statusBadge.textContent = `✓ In Library (${libCount} vols)`;
+        } else {
+          statusBadge.className = 'absolute top-2 left-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-500/30 text-sky-200 border border-sky-500/50 backdrop-blur-md';
+          statusBadge.textContent = '⚡ Ready to Ingest';
+        }
+      }
+
+      if (libraryNote) {
+        if (inLib) {
+          setHtml(libraryNote, `<span class="text-emerald-400">✓ You have ${libCount || 1} volume(s) in Calibre.</span>`);
+        } else {
+          setHtml(libraryNote, `<span class="text-zinc-400">Not in your Calibre library yet. Tap 1-Click Ingest below.</span>`);
+        }
+      }
+
+      if (ingestBtn) {
+        if (isIngesting) {
+          ingestBtn.setAttribute('disabled', 'true');
+          setHtml(ingestBtn, `
+            <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
+            <span>Downloading in Background...</span>
+          `);
+        } else {
+          ingestBtn.removeAttribute('disabled');
+          setHtml(ingestBtn, `<span>⚡ 1-Click Ingest to Library</span>`);
+        }
+      }
+
+      const modal = document.getElementById('discoverModal');
+      if (modal) modal.classList.remove('hidden');
+      updateBackButton();
+    }
+
+    function closeDiscoverModal() {
+      const modal = document.getElementById('discoverModal');
+      if (modal) modal.classList.add('hidden');
+      activeDiscoverItem = null;
+      updateBackButton();
+    }
+
+    function handleDiscoverModalIngest() {
+      if (!activeDiscoverItem) return;
+      const primaryUrl = activeDiscoverItem.sourceUrls?.lnori || activeDiscoverItem.sourceUrls?.elscione || (activeDiscoverItem.sources && activeDiscoverItem.sources[0]?.url) || '';
+      const primarySource = activeDiscoverItem.sourceUrls?.lnori ? 'lnori' : (activeDiscoverItem.sourceUrls?.elscione ? 'elscione' : (activeDiscoverItem.sources && activeDiscoverItem.sources[0]?.source ? activeDiscoverItem.sources[0].source : 'lnori'));
+      if (!primaryUrl) return;
+      triggerDiscoverIngest(activeDiscoverItem.id, encodeURIComponent(primaryUrl), primarySource);
+      
+      const modalBtn = document.getElementById('discoverModalIngestBtn');
+      if (modalBtn) {
+        modalBtn.setAttribute('disabled', 'true');
+        setHtml(modalBtn, `
+          <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
+          <span>Downloading in Background...</span>
+        `);
+      }
+    }
+
+    async function triggerDiscoverIngest(novelId, rawUrl, sourceName, event) {
+      if (event) event.stopPropagation();
+      try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('medium'); } catch {}
+      tgHaptic.light();
+
+      const url = decodeURIComponent(rawUrl);
+      if (!url) {
+        showToast('No valid source URL found for this novel', 'error');
+        return;
+      }
+
+      ingestingDiscoverIds.add(novelId);
+      showToast('Ingestion queued! Downloading in background...');
+
+      const cardBtn = document.getElementById(`cardIngestBtn-${novelId}`);
+      if (cardBtn) {
+        cardBtn.setAttribute('disabled', 'true');
+        setHtml(cardBtn, `
+          <svg class="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
+          <span>Ingesting</span>
+        `);
+      }
+
+      try {
+        const res = await fetch('/api/discover/ingest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url,
+            source: sourceName,
+            novelId,
+            background: true,
+          }),
+        });
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || `HTTP ${res.status}`);
+        }
+
+        const data = await res.json();
+        const runId = data.runId;
+        if (runId) {
+          pollDiscoverIngestProgress(novelId, runId);
+        }
+      } catch (err) {
+        console.error('Discover ingest failed to start:', err);
+        ingestingDiscoverIds.delete(novelId);
+        showToast(`Ingestion failed: ${err.message}`, 'error');
+        if (cardBtn) {
+          cardBtn.removeAttribute('disabled');
+          setHtml(cardBtn, `<span>⚡ Ingest</span>`);
+        }
+      }
+    }
+
+    async function pollDiscoverIngestProgress(novelId, runId) {
+      let attempts = 0;
+      const maxAttempts = 60;
+
+      const interval = setInterval(async () => {
+        attempts++;
+        if (attempts > maxAttempts) {
+          clearInterval(interval);
+          ingestingDiscoverIds.delete(novelId);
+          return;
+        }
+
+        try {
+          const res = await fetch(`/api/lnori/progress?runId=${encodeURIComponent(runId)}`);
+          if (!res.ok) return;
+          const status = await res.json();
+
+          if (status.phase === 'complete') {
+            clearInterval(interval);
+            ingestingDiscoverIds.delete(novelId);
+            showToast(`Ingested "${status.volumeTitle || 'Light Novel'}" into library!`);
+            await loadBooks();
+            loadDiscoverFeed(true);
+          } else if (status.phase === 'error') {
+            clearInterval(interval);
+            ingestingDiscoverIds.delete(novelId);
+            showToast(`Ingestion failed: ${status.error || 'Download failed'}`, 'error');
+            const cardBtn = document.getElementById(`cardIngestBtn-${novelId}`);
+            if (cardBtn) {
+              cardBtn.removeAttribute('disabled');
+              setHtml(cardBtn, `<span>⚡ Ingest</span>`);
+            }
+          }
+        } catch {
+          // ignore transient poll errors
+        }
+      }, 3000);
     }
 
     function syncSort(val) {

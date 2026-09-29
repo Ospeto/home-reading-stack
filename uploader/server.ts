@@ -4688,9 +4688,9 @@ async function handleRequestCore(
   if (url.pathname === "/api/kosync/link-document" && req.method === "POST") {
     try {
       const parsedBody = await parseJsonBody<{ document?: string; bookId?: number }>(req);
-      if (parsedBody.error) {
+      if (parsedBody.error || !parsedBody.data) {
         return jsonResponse(
-          { success: false, error: parsedBody.error },
+          { success: false, error: parsedBody.error || "Missing or invalid body" },
           400,
           corsOrigin,
         );
@@ -4879,9 +4879,9 @@ async function handleRequestCore(
   if (url.pathname === "/api/ingest-url" && req.method === "POST") {
     try {
       const parsedBody = await parseJsonBody<{ url?: string }>(req);
-      if (parsedBody.error) {
+      if (parsedBody.error || !parsedBody.data) {
         return jsonResponse(
-          { success: false, error: parsedBody.error },
+          { success: false, error: parsedBody.error || "Missing or invalid body" },
           400,
           corsOrigin,
         );
@@ -4932,17 +4932,22 @@ async function handleRequestCore(
   }
 
   // API: Light Novel Discovery Feed (Trending & New Releases)
-  if (url.pathname === "/api/discover/novels" && req.method === "GET") {
+  if (
+    (url.pathname === "/api/discover/novels" || url.pathname === "/api/discover/feed") &&
+    req.method === "GET"
+  ) {
     try {
-      const tabParam = url.searchParams.get("tab") || "trending";
-      const tab = tabParam === "new" ? "new" : "trending";
+      const tabParam = (url.searchParams.get("tab") || "trending").toLowerCase().trim();
+      const tab = (tabParam === "new" || tabParam === "new_releases") ? "new" : "trending";
       const source = (url.searchParams.get("source") || "all") as any;
       const genre = url.searchParams.get("genre") || undefined;
-      const status = (url.searchParams.get("status") || "all") as any;
+      const statusParam = (url.searchParams.get("status") || "all").toLowerCase().trim();
+      const status = (statusParam === "ready" ? "available" : statusParam) as any;
       const q = url.searchParams.get("q") || undefined;
-      const sort = (url.searchParams.get("sort") || "popularity") as any;
+      const sortParam = (url.searchParams.get("sort") || "popularity").toLowerCase().trim();
+      const sort = (sortParam === "popular" ? "popularity" : (sortParam === "rating" ? "score" : sortParam)) as any;
       const page = parseInt(url.searchParams.get("page") || "1", 10) || 1;
-      const pageSize = parseInt(url.searchParams.get("pageSize") || "20", 10) || 20;
+      const pageSize = parseInt(url.searchParams.get("pageSize") || "50", 10) || 50;
 
       const discoverFn = serverDependencies.getDiscoverNovels ?? getDiscoverNovels;
       const cacheDb = getCacheDb();
@@ -4964,12 +4969,29 @@ async function handleRequestCore(
         },
       );
 
+      const items = result.novels.map((n) => ({
+        ...n,
+        feedType: result.tab === "new" ? "new_releases" : "trending",
+      }));
+
+      const responseTab =
+        (tabParam === "new_releases" || url.pathname === "/api/discover/feed") &&
+        result.tab === "new"
+          ? "new_releases"
+          : result.tab;
+
       return jsonResponse(
         {
           success: true,
-          tab: result.tab,
+          tab: responseTab,
           novels: result.novels,
+          items,
           count: result.count,
+          total: result.count,
+          counts: {
+            trending: result.tab === "trending" ? result.count : 25,
+            newReleases: result.tab === "new" ? result.count : 25,
+          },
           genres: result.genres,
           sources: result.sources,
           page: result.page,
@@ -5013,19 +5035,38 @@ async function handleRequestCore(
         );
       }
 
-      const source = (body.source || "").toLowerCase().trim();
-      if (source !== "lnori" && source !== "elscione") {
-        return jsonResponse(
-          {
-            success: false,
-            error: "Invalid 'source' parameter. Must be 'lnori' or 'elscione'",
-          },
-          400,
-          corsOrigin,
-        );
-      }
-
       const targetUrl = cleanAndNormalizeNovelUrl(body.url.trim());
+      const rawSource = (body.source || "").toLowerCase().trim();
+      let source: "lnori" | "elscione";
+
+      if (rawSource) {
+        if (rawSource !== "lnori" && rawSource !== "elscione") {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Invalid 'source' parameter. Must be 'lnori' or 'elscione'",
+            },
+            400,
+            corsOrigin,
+          );
+        }
+        source = rawSource;
+      } else {
+        if (isLnoriUrl(targetUrl)) {
+          source = "lnori";
+        } else if (isElscioneUrl(targetUrl)) {
+          source = "elscione";
+        } else {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Invalid 'source' parameter. Must be 'lnori' or 'elscione'",
+            },
+            400,
+            corsOrigin,
+          );
+        }
+      }
 
       if (source === "lnori") {
         if (!isLnoriUrl(targetUrl)) {
@@ -5038,12 +5079,15 @@ async function handleRequestCore(
             corsOrigin,
           );
         }
-        const job = enqueueLnoriJob(targetUrl);
+        const enqueueFn = serverDependencies.enqueueLnoriJob ?? enqueueLnoriJob;
+        const job = enqueueFn(targetUrl);
         return jsonResponse(
           {
             success: true,
+            queued: true,
             jobId: job.jobId,
-            message: `Enqueued Lnori light novel ingestion job #${job.jobId}`,
+            runId: job.runId || `job-${job.jobId}`,
+            message: `Ingestion queued! Downloading in background... (Enqueued Lnori light novel ingestion job #${job.jobId})`,
           },
           200,
           corsOrigin,
@@ -5061,12 +5105,15 @@ async function handleRequestCore(
             corsOrigin,
           );
         }
-        const job = enqueueElscioneJob(targetUrl);
+        const enqueueFn = serverDependencies.enqueueElscioneJob ?? enqueueElscioneJob;
+        const job = enqueueFn(targetUrl);
         return jsonResponse(
           {
             success: true,
+            queued: true,
             jobId: job.jobId,
-            message: `Enqueued Elsci.one light novel ingestion job #${job.jobId}`,
+            runId: job.runId || `job-${job.jobId}`,
+            message: `Ingestion queued! Downloading in background... (Enqueued Elsci.one light novel ingestion job #${job.jobId})`,
           },
           200,
           corsOrigin,
@@ -5128,7 +5175,11 @@ async function handleRequestCore(
         );
       }
 
-      if (url.pathname === "/api/lnori/ingest" && !isLnori && !isElscione) {
+      if (
+        (url.pathname === "/api/lnori/ingest" || url.pathname === "/api/discover/ingest") &&
+        !isLnori &&
+        !isElscione
+      ) {
         return jsonResponse(
           {
             success: false,
@@ -5178,6 +5229,23 @@ async function handleRequestCore(
 
       // Check if an ingestion is already active with the same or matching URL/series
       if (activeLnoriState.active && activeLnoriState.targetUrl && areMatchingNovelUrls(activeLnoriState.targetUrl, targetUrl)) {
+        if (
+          url.pathname === "/api/discover/ingest" ||
+          (body as any).background === true ||
+          (body as any).async === true
+        ) {
+          return jsonResponse(
+            {
+              success: true,
+              queued: true,
+              message: "Ingestion already active for this novel. Downloading in background...",
+              runId: activeLnoriState.runId,
+              targetUrl,
+            },
+            200,
+            corsOrigin,
+          );
+        }
         if (isStream) {
           // Reconnect client stream to existing active ingestion
           const contentType =
@@ -5373,6 +5441,7 @@ async function handleRequestCore(
             queuePosition,
             queueLength: lnoriQueue.length,
             runId: queueRunId,
+            message: "Ingestion queued! Downloading in background...",
           },
           200,
           corsOrigin,
@@ -5525,6 +5594,27 @@ async function handleRequestCore(
       }
 
       // Non-streaming request: await the background promise so synchronous non-streaming callers receive full result
+      if (
+        url.pathname === "/api/discover/ingest" ||
+        (body as any).background === true ||
+        (body as any).async === true
+      ) {
+        // Asynchronous non-blocking dispatch for 1-click Discover ingestion
+        executeLnoriIngestTask(runId, targetUrl);
+        return jsonResponse(
+          {
+            success: true,
+            queued: true,
+            message: "Ingestion queued! Downloading in background...",
+            runId,
+            targetUrl,
+            source: isElscione ? "elscione" : "lnori",
+          },
+          200,
+          corsOrigin,
+        );
+      }
+
       const result = await executeLnoriIngestTask(runId, targetUrl);
       if (!result || !result.success) {
         return jsonResponse(
@@ -5901,9 +5991,9 @@ async function handleRequestCore(
   if (url.pathname === "/api/books/bulk-delete" && req.method === "POST") {
     try {
       const parsedBody = await parseJsonBody<{ bookIds?: (string | number)[] }>(req);
-      if (parsedBody.error) {
+      if (parsedBody.error || !parsedBody.data) {
         return jsonResponse(
-          { success: false, error: parsedBody.error },
+          { success: false, error: parsedBody.error || "Missing or invalid body" },
           400,
           corsOrigin,
         );
@@ -6034,9 +6124,9 @@ async function handleRequestCore(
         rating?: number;
         coverUrl?: string;
       }>(req);
-      if (parsedBody.error) {
+      if (parsedBody.error || !parsedBody.data) {
         return jsonResponse(
-          { success: false, error: parsedBody.error },
+          { success: false, error: parsedBody.error || "Missing or invalid body" },
           400,
           corsOrigin,
         );

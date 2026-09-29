@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 import { spawnSync } from "node:child_process";
 import {
   handleRequest,
@@ -3298,6 +3299,112 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
       expect(quoteRow).toBeDefined();
       expect(quoteRow.quote).toBe("Knowledge is power.");
       expect(quoteRow.chapter).toBe("Intro");
+    });
+
+    it("GET /api/discover/feed returns trending and new releases feeds separately", async () => {
+      // Test trending tab
+      const trendingReq = new Request("http://127.0.0.1:8086/api/discover/feed?tab=trending", {
+        headers: { host: "127.0.0.1:8086" },
+      });
+      const trendingRes = await handleRequest(trendingReq, localServer);
+      expect(trendingRes.status).toBe(200);
+      const trendingData = await trendingRes.json();
+      expect(trendingData.tab).toBe("trending");
+      expect(trendingData.items.length).toBeGreaterThan(0);
+      expect(trendingData.items.every((it: any) => it.feedType === "trending")).toBe(true);
+
+      // Test new_releases tab
+      const releasesReq = new Request("http://127.0.0.1:8086/api/discover/feed?tab=new_releases", {
+        headers: { host: "127.0.0.1:8086" },
+      });
+      const releasesRes = await handleRequest(releasesReq, localServer);
+      expect(releasesRes.status).toBe(200);
+      const releasesData = await releasesRes.json();
+      expect(releasesData.tab).toBe("new_releases");
+      expect(releasesData.items.length).toBeGreaterThan(0);
+      expect(releasesData.items.every((it: any) => it.feedType === "new_releases")).toBe(true);
+
+      // Verify feeds are strictly separate
+      const trendingTitles = new Set(trendingData.items.map((i: any) => i.id));
+      const releaseTitles = new Set(releasesData.items.map((i: any) => i.id));
+      for (const id of trendingTitles) {
+        expect(releaseTitles.has(id)).toBe(false);
+      }
+    });
+
+    it("POST /api/discover/ingest validates URL and queues background download with immediate feedback", async () => {
+      // Rejects invalid URL
+      const invalidReq = new Request("http://127.0.0.1:8086/api/discover/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", host: "127.0.0.1:8086" },
+        body: JSON.stringify({ url: "https://example.com/not-a-novel" }),
+      });
+      const invalidRes = await handleRequest(invalidReq, localServer);
+      expect(invalidRes.status).toBe(400);
+
+      try {
+        setServerDependenciesForTest({
+          enqueueLnoriJob: (_url: string) => ({
+            jobId: 999,
+            runId: "test-run-999",
+          }),
+          ingestLnoriSeries: async () => ({
+            success: true,
+            seriesTitle: "The Genius Prince's Guide",
+            author: "Toru Toba",
+            importedCount: 1,
+            skippedCount: 0,
+            totalCount: 1,
+            tags: ["Light Novel"],
+            calibreBookIds: [999],
+          }),
+        });
+
+        // Accepts valid Lnori URL and returns queued status immediately
+        const validReq = new Request("http://127.0.0.1:8086/api/discover/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", host: "127.0.0.1:8086" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/the-genius-princes-guide",
+          }),
+        });
+        const validRes = await handleRequest(validReq, localServer);
+        expect(validRes.status).toBe(200);
+        const data = await validRes.json();
+        expect(data.success).toBe(true);
+        expect(data.queued).toBe(true);
+        expect(data.message).toContain("Ingestion queued! Downloading in background...");
+        expect(data.runId).toBeDefined();
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("POST /api/discover/ingest blocks unauthenticated WAN requests with 401 when apiKey is configured", async () => {
+      const origKey = process.env.READING_API_KEY;
+      try {
+        process.env.READING_API_KEY = "test-secret-key";
+        const wanServer = {
+          requestIP: () => ({ address: "198.46.146.17" }),
+        };
+
+        const req = new Request("http://127.0.0.1:8086/api/discover/ingest", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            origin: "https://reading-sg.wavypremium.xyz:8443",
+          },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/the-genius-princes-guide",
+          }),
+        });
+
+        const res = await handleRequest(req, wanServer);
+        expect(res.status).toBe(401);
+      } finally {
+        if (origKey) process.env.READING_API_KEY = origKey;
+        else delete process.env.READING_API_KEY;
+      }
     });
   });
 });
