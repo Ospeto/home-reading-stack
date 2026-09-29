@@ -14,6 +14,7 @@ import {
   parseHighlightsFromMarkdown,
   cleanQuoteText,
   parseRawHighlightEntry,
+  splitNoteIntoHighlightBlocks,
   backfillHighlightsFromObsidian,
   ensureBookHighlightsIndexed,
   resolveBookIdFromTitle,
@@ -1049,6 +1050,121 @@ author: "Stephen Fry"
       } finally {
         fs.rmSync(booksDir, { recursive: true, force: true });
         if (fs.existsSync(customCalibreDb)) fs.unlinkSync(customCalibreDb);
+      }
+    });
+
+    it("cleanQuoteText strips diverse international and smart quote pairs cleanly", () => {
+      expect(cleanQuoteText("'Single quoted text'")).toBe("Single quoted text");
+      expect(cleanQuoteText("‘Smart single quoted text’")).toBe("Smart single quoted text");
+      expect(cleanQuoteText("«French guillemets»")).toBe("French guillemets");
+      expect(cleanQuoteText("「Japanese corner brackets」")).toBe("Japanese corner brackets");
+      expect(cleanQuoteText("『White corner brackets』")).toBe("White corner brackets");
+    });
+
+    it("parses ### Location and Pos entries in parseRawHighlightEntry and splitNoteIntoHighlightBlocks", () => {
+      const entry = parseRawHighlightEntry("### Location 450 @ 2026-09-24\n> Highlight text here\n");
+      expect(entry).not.toBeNull();
+      expect(entry?.page).toBe(450);
+      expect(entry?.timestamp).toBe("2026-09-24");
+      expect(entry?.quote).toBe("Highlight text here");
+
+      const blocks = splitNoteIntoHighlightBlocks("### Page 1\n> First\n\n### Location 450\n> Second\n");
+      expect(blocks.length).toBe(2);
+    });
+
+    it("preserves chapter, page, and timestamp on highlight updates via COALESCE", () => {
+      const db = new Database(":memory:");
+      initHighlightsTable(db);
+
+      // Initial insert with full location metadata
+      insertOrUpdateHighlight(db, {
+        book_id: 1,
+        book_title: "Test Book",
+        chapter: "Chapter 3",
+        page: 42,
+        quote: "Persistent location quote",
+        note: "Initial note",
+        timestamp: "2026-01-01",
+      });
+
+      // Update from another source that only provides quote and updated note
+      insertOrUpdateHighlight(db, {
+        book_id: 1,
+        book_title: "Test Book",
+        chapter: null,
+        page: null,
+        quote: "Persistent location quote",
+        note: "Updated note",
+        timestamp: null,
+      });
+
+      const rows = getHighlightsForBook(db, 1);
+      expect(rows.length).toBe(1);
+      expect(rows[0].chapter).toBe("Chapter 3");
+      expect(rows[0].page).toBe(42);
+      expect(rows[0].timestamp).toBe("2026-01-01");
+      expect(rows[0].note).toBe("Updated note");
+    });
+
+    it("updates created_at timestamp on batchUpsertHighlights conflict", async () => {
+      const db = new Database(":memory:");
+      initHighlightsTable(db);
+
+      batchUpsertHighlights(db, [
+        {
+          book_id: 1,
+          book_title: "Book",
+          chapter: null,
+          page: 1,
+          quote: "Quote to update",
+          note: null,
+          timestamp: null,
+        },
+      ]);
+
+      const initial = db.query("SELECT created_at FROM book_highlights WHERE book_id = 1;").get() as any;
+      expect(initial.created_at).toBeDefined();
+
+      // Wait a tick and update
+      await new Promise((r) => setTimeout(r, 1100));
+
+      batchUpsertHighlights(db, [
+        {
+          book_id: 1,
+          book_title: "Book",
+          chapter: null,
+          page: 1,
+          quote: "Quote to update",
+          note: "New note",
+          timestamp: null,
+        },
+      ]);
+
+      const updated = db.query("SELECT created_at, note FROM book_highlights WHERE book_id = 1;").get() as any;
+      expect(updated.note).toBe("New note");
+      expect(updated.created_at).not.toBe(initial.created_at);
+    });
+
+    it("matches accented authors and titles across NFC and NFD Unicode representations", () => {
+      const nfcAuthor = "Hélène Cixous".normalize("NFC");
+      const nfdAuthor = "Hélène Cixous".normalize("NFD");
+      expect(authorsMatch(nfcAuthor, nfdAuthor)).toBe(true);
+
+      const customDb = path.join(os.tmpdir(), `calibre-accent-${Date.now()}.db`);
+      const db = new Database(customDb);
+      db.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT);");
+      db.run("CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);");
+      db.run("CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);");
+      db.run("INSERT INTO books VALUES (1, ?);", ["Le Café de Flore".normalize("NFC")]);
+      db.run("INSERT INTO authors VALUES (1, ?);", [nfcAuthor]);
+      db.run("INSERT INTO books_authors_link VALUES (1, 1, 1);");
+      db.close();
+
+      try {
+        const resolvedId = resolveBookIdFromTitle("Le Café de Flore".normalize("NFD"), customDb, nfdAuthor);
+        expect(resolvedId).toBe(1);
+      } finally {
+        if (fs.existsSync(customDb)) fs.unlinkSync(customDb);
       }
     });
   });

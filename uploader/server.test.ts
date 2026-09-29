@@ -3090,4 +3090,214 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
       expect(resPending2.status).toBe(400);
     });
   });
+
+  describe("KOSync Progress Tracking & Highlights Server Integration Regressions", () => {
+    const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+    let testKosyncDir: string;
+    let testKosyncDbPath: string;
+    let origKosyncEnv: string | undefined;
+
+    beforeEach(() => {
+      testKosyncDir = fs.mkdtempSync(path.join(os.tmpdir(), "kosync-server-test-"));
+      testKosyncDbPath = path.join(testKosyncDir, "koreader-sync.db");
+      origKosyncEnv = process.env.KOSYNC_DB_PATH;
+      process.env.KOSYNC_DB_PATH = testKosyncDbPath;
+
+      setServerDependenciesForTest({
+        getCalibreBooks: () => [
+          { id: 1, title: "Dune", authors: "Frank Herbert", cover: true },
+        ],
+      });
+
+      const kDb = new Database(testKosyncDbPath);
+      kDb.run(`
+        CREATE TABLE progress (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          document TEXT NOT NULL,
+          progress TEXT,
+          percentage REAL,
+          device TEXT,
+          device_id TEXT,
+          filename TEXT,
+          title TEXT,
+          authors TEXT,
+          timestamp INTEGER
+        );
+      `);
+      kDb.close();
+    });
+
+    afterEach(() => {
+      resetServerDependenciesForTest();
+      if (origKosyncEnv) {
+        process.env.KOSYNC_DB_PATH = origKosyncEnv;
+      } else {
+        delete process.env.KOSYNC_DB_PATH;
+      }
+      try {
+        fs.rmSync(testKosyncDir, { recursive: true, force: true });
+      } catch (_e) {
+        void _e;
+      }
+    });
+
+    it("GET /api/kosync/stats normalizes percentage and deduplicates multiple sessions of the same book", async () => {
+      const kDb = new Database(testKosyncDbPath);
+      const now = Math.floor(Date.now() / 1000);
+
+      // Book 1: Synced twice with integer percentage 100% and 50%
+      kDb.run(
+        "INSERT INTO progress (document, percentage, title, authors, timestamp) VALUES (?, ?, ?, ?, ?);",
+        ["doc_dune", 100, "Dune", "Frank Herbert", now],
+      );
+      kDb.run(
+        "INSERT INTO progress (document, percentage, title, authors, timestamp) VALUES (?, ?, ?, ?, ?);",
+        ["doc_dune", 50, "Dune", "Frank Herbert", now - 3600],
+      );
+
+      // Book 2: Synced with 45% (should be classified as active, NOT finished)
+      kDb.run(
+        "INSERT INTO progress (document, percentage, title, authors, timestamp) VALUES (?, ?, ?, ?, ?);",
+        ["doc_active", 45, "Active Book", "Author", now],
+      );
+      kDb.close();
+
+      const req = new Request("http://127.0.0.1:8086/api/kosync/stats", {
+        method: "GET",
+        headers: { host: "127.0.0.1:8086" },
+      });
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+
+      expect(data.totalSessions).toBe(3);
+      expect(data.finishedCount).toBe(1);
+      expect(data.finishedBooks.length).toBe(1);
+      expect(data.finishedBooks[0].title).toBe("Dune");
+      expect(data.activeBooks.length).toBe(1);
+      expect(data.activeBooks[0].title).toBe("Active Book");
+    });
+
+    it("POST /api/kosync/link-document auto-creates document_aliases table and links successfully", async () => {
+      // testKosyncDbPath starts with NO document_aliases table
+      const kDb = new Database(testKosyncDbPath);
+      kDb.run(
+        "INSERT INTO progress (document, percentage, timestamp) VALUES ('hash1234567890abcdef', 0.5, 123456);",
+      );
+      kDb.close();
+
+      const req = new Request("http://127.0.0.1:8086/api/kosync/link-document", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", host: "127.0.0.1:8086" },
+        body: JSON.stringify({
+          document: "hash1234567890abcdef",
+          bookId: 1, // Calibre book 1 is 'Dune'
+        }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(true);
+
+      // Verify that progress and document_aliases in kosync DB were updated
+      const verifyDb = new Database(testKosyncDbPath, { readonly: true });
+      const aliasRow = verifyDb
+        .query("SELECT * FROM document_aliases WHERE document_hash = 'hash1234567890abcdef';")
+        .get() as any;
+      expect(aliasRow).toBeDefined();
+      expect(aliasRow.normalized_title).toBe("Dune");
+
+      const progRow = verifyDb
+        .query("SELECT title FROM progress WHERE document = 'hash1234567890abcdef';")
+        .get() as any;
+      expect(progRow.title).toBe("Dune");
+      verifyDb.close();
+    });
+
+    it("DELETE /api/kosync/progress/:idOrDoc deletes progress by 32-char hex document hash", async () => {
+      const kDb = new Database(testKosyncDbPath);
+      const docHash = "a1b2c3d4e5f6789012345678abcdef01";
+      kDb.run(
+        "INSERT INTO progress (document, percentage, title, timestamp) VALUES (?, 0.3, 'Deletable Doc', 100);",
+        [docHash],
+      );
+      kDb.close();
+
+      const req = new Request(`http://127.0.0.1:8086/api/kosync/progress/${docHash}`, {
+        method: "DELETE",
+        headers: { host: "127.0.0.1:8086" },
+      });
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+
+      const checkDb = new Database(testKosyncDbPath, { readonly: true });
+      const row = checkDb.query("SELECT id FROM progress WHERE document = ?;").get(docHash);
+      expect(row).toBeNull();
+      checkDb.close();
+    });
+
+    it("/api/auth/session supports cookie handoff on POST and clears cookies on DELETE", async () => {
+      const origKey = process.env.READING_API_KEY;
+      process.env.READING_API_KEY = "test-secret-session-key";
+
+      try {
+        // Authenticate via POST Bearer
+        const postReq = new Request("http://127.0.0.1:8086/api/auth/session", {
+          method: "POST",
+          headers: {
+            host: "127.0.0.1:8086",
+            Authorization: "Bearer test-secret-session-key",
+          },
+        });
+        const postRes = await handleRequest(postReq, localServer);
+        expect(postRes.status).toBe(200);
+        const setCookie = postRes.headers.get("Set-Cookie");
+        expect(setCookie).toBeDefined();
+        expect(setCookie).toContain("reading_session=");
+        expect(setCookie).toContain("HttpOnly");
+
+        // Logout via DELETE
+        const delReq = new Request("http://127.0.0.1:8086/api/auth/session", {
+          method: "DELETE",
+          headers: { host: "127.0.0.1:8086" },
+        });
+        const delRes = await handleRequest(delReq, localServer);
+        expect(delRes.status).toBe(200);
+        const delCookie = delRes.headers.get("Set-Cookie");
+        expect(delCookie).toContain("Max-Age=0");
+      } finally {
+        if (origKey) process.env.READING_API_KEY = origKey;
+        else delete process.env.READING_API_KEY;
+      }
+    });
+
+    it("POST /api/highlights/sync indexes highlights directly into cache.db book_highlights table", async () => {
+      const payload = {
+        title: "Direct Highlight Sync Test",
+        author: "Sync Author",
+        highlights: [
+          { text: "Knowledge is power.", chapter: "Intro", page: 1 },
+        ],
+      };
+
+      const req = new Request("http://127.0.0.1:8086/api/highlights/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", host: "127.0.0.1:8086" },
+        body: JSON.stringify(payload),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+
+      // Verify that the quote was indexed in cache.db
+      const cDb = (await import("./server")).getCacheDb();
+      const quoteRow = cDb
+        .query("SELECT * FROM book_highlights WHERE book_title = 'Direct Highlight Sync Test';")
+        .get() as any;
+      expect(quoteRow).toBeDefined();
+      expect(quoteRow.quote).toBe("Knowledge is power.");
+      expect(quoteRow.chapter).toBe("Intro");
+    });
+  });
 });

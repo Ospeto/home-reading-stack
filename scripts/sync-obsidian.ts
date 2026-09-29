@@ -591,11 +591,17 @@ export function sanitizeTitle(title: string): string {
   s = s.replace(/\[.*?(ebook|pdf|epub|channel|tg|myanmar).*?\]/gi, " ");
   s = s.replace(/\((.*?)(ebook|pdf|epub|channel|tg|myanmar)(.*?)\)/gi, " ");
 
-  // Replace colons and vertical bars with clean separators
-  s = s.replace(/[:|]/g, " - ");
+  // Replace colons (including fullwidth) and vertical bars with clean separators
+  s = s.replace(/[:|：｜]/g, " - ");
 
   // Strip illegal filesystem characters: <>"/\|?*#^[]
   s = s.replace(/[<>"/\\|?*#^[\]]/g, " ");
+
+  // Replace newlines, carriage returns, tabs, and invisible line separators with space before filtering
+  s = s.replace(/[\r\n\t\u2028\u2029]+/g, " ");
+
+  // Strip zero-width spaces and BOM marks
+  s = s.replace(/[\u200B\uFEFF]/g, "");
 
   // Filter out any invisible ASCII control characters safely
   s = Array.from(s)
@@ -1057,7 +1063,7 @@ export function getKosyncProgressMap(
     db = new Database(kosyncDbPath, { readonly: true });
     const rows = db
       .query(
-        "SELECT title, filename, percentage, timestamp FROM progress ORDER BY timestamp DESC;",
+        "SELECT title, authors, filename, percentage, timestamp FROM progress ORDER BY timestamp DESC;",
       )
       .all() as any[];
 
@@ -1067,6 +1073,13 @@ export function getKosyncProgressMap(
         const normTitle = r.title.toLowerCase().trim();
         if (!map.has(normTitle)) {
           map.set(normTitle, { progress: pct, timestamp: r.timestamp });
+        }
+        if (r.authors) {
+          const normAuth = r.authors.toLowerCase().trim();
+          const taKey = `${normTitle}___${normAuth}`;
+          if (!map.has(taKey)) {
+            map.set(taKey, { progress: pct, timestamp: r.timestamp });
+          }
         }
       }
       if (r.filename) {
@@ -1281,22 +1294,40 @@ export async function syncObsidian(
       return;
     }
 
-    // Merge highlights with deduplication
-    const seen = new Set<string>();
-    const mergedHighlights: HighlightEntry[] = [];
+    // Merge highlights with deduplication based on normalized quote text
+    const seen = new Map<string, HighlightEntry>();
+    const cleanKey = (text: string) =>
+      text
+        .replace(/^==([\s\S]*?)==$/, "$1")
+        .replace(/^>\s?/gm, "")
+        .replace(/^[“”"'"‘'«»「」『』]+|[“”"'"‘'«»「」『』]+$/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+
     for (const h of existing.highlights) {
-      const hKey = `${(h.text || "").trim()}___${h.page ?? ""}___${h.datetime ?? ""}`;
-      seen.add(hKey);
-      mergedHighlights.push(h);
-    }
-    for (const h of incoming.highlights) {
-      const hKey = `${(h.text || "").trim()}___${h.page ?? ""}___${h.datetime ?? ""}`;
-      if (!seen.has(hKey)) {
-        seen.add(hKey);
-        mergedHighlights.push(h);
+      const hKey = cleanKey(h.text || "");
+      if (hKey) {
+        seen.set(hKey, h);
       }
     }
-    existing.highlights = mergedHighlights;
+    for (const h of incoming.highlights) {
+      const hKey = cleanKey(h.text || "");
+      if (hKey) {
+        const ex = seen.get(hKey);
+        if (ex) {
+          if (!ex.notes && h.notes) ex.notes = h.notes;
+          if (!ex.page && h.page) ex.page = h.page;
+          if (!ex.chapter && h.chapter) ex.chapter = h.chapter;
+          if (!ex.datetime && h.datetime) ex.datetime = h.datetime;
+        } else {
+          existing.highlights.push(h);
+          seen.set(hKey, h);
+        }
+      } else {
+        existing.highlights.push(h);
+      }
+    }
 
     // Maximize progress and preserve non-empty metadata
     const exProg = normalizeProgress(existing.progress);
@@ -1304,7 +1335,15 @@ export async function syncObsidian(
     existing.progress = Math.max(exProg, inProg);
     if (!existing.synopsis && incoming.synopsis) existing.synopsis = incoming.synopsis;
     if (!existing.series && incoming.series) existing.series = incoming.series;
-    if (!existing.lastReadDate && incoming.lastReadDate) existing.lastReadDate = incoming.lastReadDate;
+    if (incoming.lastReadDate) {
+      const inTime = new Date(incoming.lastReadDate).getTime();
+      const exTime = existing.lastReadDate
+        ? new Date(existing.lastReadDate).getTime()
+        : 0;
+      if (!existing.lastReadDate || (!Number.isNaN(inTime) && inTime > exTime)) {
+        existing.lastReadDate = incoming.lastReadDate;
+      }
+    }
     if (!existing.bookId && incoming.bookId) existing.bookId = incoming.bookId;
   }
 
@@ -1486,8 +1525,14 @@ export async function syncObsidian(
       if (kosyncMatch) {
         finalProgress = Math.max(finalProgress, kosyncMatch.progress);
         if (kosyncMatch.timestamp) {
-          const d = new Date(kosyncMatch.timestamp * 1000);
-          lastReadDate = d.toISOString().replace("T", " ").slice(0, 16);
+          const kosyncTime = kosyncMatch.timestamp * 1000;
+          const existingTime = lastReadDate
+            ? new Date(lastReadDate).getTime()
+            : 0;
+          if (!lastReadDate || (!Number.isNaN(existingTime) && kosyncTime > existingTime)) {
+            const d = new Date(kosyncTime);
+            lastReadDate = d.toISOString().replace("T", " ").slice(0, 16);
+          }
         }
       }
 

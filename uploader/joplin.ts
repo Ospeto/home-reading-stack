@@ -33,6 +33,7 @@ import {
   batchUpsertHighlights,
   parseHighlightsFromMarkdown,
   resolveBookIdFromTitle,
+  isTitleUniqueForBook,
 } from "./highlights";
 
 // ----------------------------------------------------------------------------
@@ -59,6 +60,7 @@ export interface JoplinOptions {
   calibreDbPath?: string;
   cacheDb?: Database;
   cacheDbPath?: string;
+  author?: string;
 }
 
 export interface JoplinNotePayload {
@@ -177,11 +179,17 @@ export function sanitizeTitle(title: string): string {
   s = s.replace(/\[.*?(ebook|pdf|epub|channel|tg|myanmar).*?\]/gi, " ");
   s = s.replace(/\((.*?)(ebook|pdf|epub|channel|tg|myanmar)(.*?)\)/gi, " ");
 
-  // Replace colons and vertical bars with clean separators
-  s = s.replace(/[:|]/g, " - ");
+  // Replace colons (including fullwidth) and vertical bars with clean separators
+  s = s.replace(/[:|：｜]/g, " - ");
 
   // Strip illegal filesystem characters: <>"/\|?*#^[]
   s = s.replace(/[<>"/\\|?*#^[\]]/g, " ");
+
+  // Replace newlines, carriage returns, tabs, and invisible line separators with space before filtering
+  s = s.replace(/[\r\n\t\u2028\u2029]+/g, " ");
+
+  // Strip zero-width spaces and BOM marks
+  s = s.replace(/[\u200B\uFEFF]/g, "");
 
   // Filter out any invisible ASCII control characters safely
   s = Array.from(s)
@@ -608,7 +616,7 @@ function writeNoteAtomically(
  */
 export function normalizeQuote(text: string): string {
   if (!text) return "";
-  let clean = text;
+  let clean = text.normalize("NFC");
 
   // Remove markdown headers
   clean = clean.replace(/^#{1,6}\s+.*$/gm, "");
@@ -621,6 +629,13 @@ export function normalizeQuote(text: string): string {
 
   // Remove horizontal rules
   clean = clean.replace(/^[-*_]{3,}\s*$/gm, "");
+
+  // Normalize typographic / smart quotes and apostrophes to standard ASCII
+  clean = clean.replace(/[‘’`]/g, "'");
+  clean = clean.replace(/[“”«»]/g, '"');
+
+  // Strip invisible zero-width spaces and BOM marks
+  clean = clean.replace(/[\u200B\uFEFF]/g, "");
 
   // Remove markdown formatting tokens
   clean = clean.replace(/[=>*~_`#+]/g, "");
@@ -788,7 +803,11 @@ export function extractQuoteKey(raw: string): string {
     const trimmed = line.trim();
     if (!trimmed) continue;
     if (/^#{1,6}\s+/.test(trimmed)) continue;
-    if (/^---\s*$/.test(trimmed) || /^[-*_]{3,}\s*$/.test(trimmed)) {
+    if (
+      /^---\s*$/.test(trimmed) ||
+      /^[-*_]{3,}\s*$/.test(trimmed) ||
+      /^\*{0,2}Note:\*{0,2}/i.test(trimmed)
+    ) {
       inAnnotation = true;
       continue;
     }
@@ -803,8 +822,17 @@ export function extractAnnotation(raw: string): string {
   const lines: string[] = [];
   let seen = false;
   for (const line of raw.split("\n")) {
-    if (/^---\s*$/.test(line.trim()) || /^[-*_]{3,}\s*$/.test(line.trim())) {
+    const trimmed = line.trim();
+    if (
+      /^---\s*$/.test(trimmed) ||
+      /^[-*_]{3,}\s*$/.test(trimmed) ||
+      /^\*{0,2}Note:\*{0,2}\s*/i.test(trimmed)
+    ) {
       seen = true;
+      const strippedNote = trimmed.replace(/^\*{0,2}Note:\*{0,2}\s*/i, "");
+      if (strippedNote && !/^---\s*$/.test(trimmed) && !/^[-*_]{3,}\s*$/.test(trimmed)) {
+        lines.push(strippedNote);
+      }
       continue;
     }
     if (seen) lines.push(line);
@@ -813,15 +841,27 @@ export function extractAnnotation(raw: string): string {
 }
 
 function incomingDeclaresAnnotation(raw: string): boolean {
-  return raw.split("\n").some(
-    (line) => /^---\s*$/.test(line.trim()) || /^[-*_]{3,}\s*$/.test(line.trim()),
-  );
+  return raw
+    .split("\n")
+    .some(
+      (line) =>
+        /^---\s*$/.test(line.trim()) ||
+        /^[-*_]{3,}\s*$/.test(line.trim()) ||
+        /^\*{0,2}Note:\*{0,2}/i.test(line.trim()),
+    );
 }
 
 function replaceAnnotation(raw: string, annotation: string): string {
   const head: string[] = [];
   for (const line of raw.split("\n")) {
-    if (/^---\s*$/.test(line.trim()) || /^[-*_]{3,}\s*$/.test(line.trim())) break;
+    const trimmed = line.trim();
+    if (
+      /^---\s*$/.test(trimmed) ||
+      /^[-*_]{3,}\s*$/.test(trimmed) ||
+      /^\*{0,2}Note:\*{0,2}/i.test(trimmed)
+    ) {
+      break;
+    }
     head.push(line);
   }
   const base = head.join("\n").trimEnd();
@@ -1529,6 +1569,8 @@ export function mergeJoplinHighlights(
 // 5. Note Processing & File Persistence
 // ----------------------------------------------------------------------------
 
+const _noteWriteLocks = new Map<string, Promise<any>>();
+
 export async function processJoplinNote(
   payload: JoplinNotePayload,
   options: JoplinOptions = {},
@@ -1621,11 +1663,45 @@ export async function processJoplinNote(
   let safeTitle: string;
   let notePath: string;
 
+  // Extract author early so shared titles resolve to disambiguated files
+  let author = options.author;
+  if (!author && rawBody) {
+    const authorMatch = rawBody.match(/^#####?\s+([^\n]+)/m);
+    if (authorMatch) {
+      const parsedAuthor = authorMatch[1].trim();
+      if (
+        parsedAuthor !== "N/A" &&
+        parsedAuthor !== "(Author not found in book's metadata)"
+      ) {
+        author = parsedAuthor;
+      }
+    }
+  }
+  const calibreMeta = queryCalibreMetadata(title, options.calibreDbPath);
+  if (!author && calibreMeta?.author) {
+    author = calibreMeta.author;
+  }
+
+  const hDb = getHighlightsCacheDb(options.cacheDb || options.cacheDbPath);
+  const resolvedBookId = resolveBookIdFromTitle(
+    title,
+    options.calibreDbPath,
+    author,
+  );
+  const isShared = resolvedBookId
+    ? !isTitleUniqueForBook(hDb, resolvedBookId, title, options.calibreDbPath)
+    : false;
+
+  const fileTitle =
+    isShared && author && author !== "Unknown"
+      ? `${title} - ${author}`
+      : title;
+
   if (pinnedNotePath && pinnedSafeTitle) {
     notePath = pinnedNotePath;
     safeTitle = pinnedSafeTitle;
   } else {
-    const resolved = getBookNotePath(title, realDir, {
+    const resolved = getBookNotePath(fileTitle, realDir, {
       disambiguateCase: true,
     });
     notePath = resolved.notePath;
@@ -1634,46 +1710,74 @@ export async function processJoplinNote(
 
   let fileExisted = false;
   let existingContent = "";
-  try {
-    const st = fs.lstatSync(notePath);
-    if (st.isSymbolicLink()) {
-      throw new JoplinPathError("Refusing to write through a symlink");
-    }
-    if (st.isDirectory()) {
-      throw new JoplinPathError("Refusing to overwrite a directory");
-    }
-    if (st.isFile()) {
-      // On case-insensitive filesystems (such as APFS on Darwin), verify that
-      // the existing file on disk actually matches notePath (not a collision
-      // from an existing note with different casing).
-      const check = checkNotePathExistence(notePath);
-      if (check.exists && !check.exactMatch) {
-        throw new JoplinPathError(
-          "Refusing to write to note path with case collision",
-        );
-      }
-      if (check.exactMatch) {
-        fileExisted = true;
-        existingContent = fs.readFileSync(notePath, "utf8");
-      }
-    }
-  } catch (err: any) {
-    if (err?.code !== "ENOENT") throw err;
-  }
+  let merged = "";
 
-  const merged = mergeJoplinHighlights(existingContent, rawBody, title, {
-    booksDir: realDir,
-    calibreDbPath: options.calibreDbPath,
+  // Serialize note writes per target note path to prevent race conditions during rapid concurrent sync
+  const lockKey = notePath;
+  const currentLock = _noteWriteLocks.get(lockKey) || Promise.resolve();
+  let releaseLock!: () => void;
+  const nextLock = new Promise<void>((resolve) => {
+    releaseLock = resolve;
   });
+  _noteWriteLocks.set(
+    lockKey,
+    currentLock.then(() => nextLock).catch(() => nextLock),
+  );
 
-  writeNoteAtomically(realDir, notePath, merged);
+  await currentLock.catch(() => {});
+  try {
+    try {
+      const st = fs.lstatSync(notePath);
+      if (st.isSymbolicLink()) {
+        throw new JoplinPathError("Refusing to write through a symlink");
+      }
+      if (st.isDirectory()) {
+        throw new JoplinPathError("Refusing to overwrite a directory");
+      }
+      if (st.isFile()) {
+        // On case-insensitive filesystems (such as APFS on Darwin), verify that
+        // the existing file on disk actually matches notePath (not a collision
+        // from an existing note with different casing).
+        const check = checkNotePathExistence(notePath);
+        if (check.exists && !check.exactMatch) {
+          throw new JoplinPathError(
+            "Refusing to write to note path with case collision",
+          );
+        }
+        if (check.exactMatch) {
+          fileExisted = true;
+          existingContent = fs.readFileSync(notePath, "utf8");
+        }
+      }
+    } catch (err: any) {
+      if (err?.code !== "ENOENT") throw err;
+    }
+
+    merged = mergeJoplinHighlights(existingContent, rawBody, title, {
+      booksDir: realDir,
+      calibreDbPath: options.calibreDbPath,
+    });
+
+    writeNoteAtomically(realDir, notePath, merged);
+  } finally {
+    releaseLock();
+    if (_noteWriteLocks.get(lockKey) === nextLock) {
+      _noteWriteLocks.delete(lockKey);
+    }
+  }
 
   // Index highlights into SQLite cache database for LightHouse Web Viewer
   try {
-    const bookId = resolveBookIdFromTitle(title, options.calibreDbPath);
+    const bookId = resolvedBookId;
     const highlights = parseHighlightsFromMarkdown(merged, title, bookId);
     if (highlights.length > 0) {
-      const hDb = getHighlightsCacheDb(options.cacheDb || options.cacheDbPath);
+      // Check if title is shared across books; if so, disambiguate title to prevent cross-book highlight overwriting
+      if (isShared && author && author !== "Unknown") {
+        const disambiguatedTitle = `${title.trim()} - ${author.trim()}`;
+        for (const h of highlights) {
+          h.book_title = disambiguatedTitle;
+        }
+      }
       batchUpsertHighlights(hDb, highlights);
     }
   } catch (_indexErr) {
@@ -1760,6 +1864,19 @@ export async function handleJoplinRequest(
   if (options.corsOrigin) {
     corsHeaders["Access-Control-Allow-Origin"] = options.corsOrigin;
     corsHeaders["Vary"] = "Origin";
+  }
+
+  // Handle CORS OPTIONS preflight
+  if (method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        ...corsHeaders,
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, HEAD, OPTIONS",
+        "Access-Control-Allow-Headers":
+          "Authorization, Content-Type, X-API-Key, X-Token, token",
+      },
+    });
   }
 
   // 1. GET /ping (KOReader Joplin Exporter reachability check)
@@ -1928,8 +2045,9 @@ export async function handleJoplinRequest(
           throw err;
         }
 
-        // If the note exists on disk, return its true logical title from frontmatter / heading
+        // If the note exists on disk, return its true logical title from frontmatter / heading and content if requested
         let displayTitle = decodedId;
+        let noteBody: string | undefined;
         try {
           const realDir = resolveRealBooksDir(options.booksDir);
           let safeId = sanitizeTitle(decodedId);
@@ -1943,17 +2061,33 @@ export async function handleJoplinRequest(
               if (docTitle) {
                 displayTitle = docTitle;
               }
+              try {
+                noteBody = fs.readFileSync(candidatePath, "utf8");
+              } catch {
+                // Ignore read error
+              }
             }
           }
         } catch (_e) {
           void _e;
         }
 
+        const noteResponseData: {
+          id: string | undefined;
+          title: string;
+          parent_id: string;
+          body?: string;
+        } = {
+          id: decodedId || noteId,
+          title: displayTitle,
+          parent_id: JOPLIN_FOLDER_ID,
+        };
+        if (noteBody !== undefined) {
+          noteResponseData.body = noteBody;
+        }
+
         return new Response(
-          JSON.stringify({
-            id: noteId,
-            title: displayTitle,
-          }),
+          JSON.stringify(noteResponseData),
           {
             status: 200,
             headers: {

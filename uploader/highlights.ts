@@ -173,6 +173,7 @@ export function authorsMatch(a?: string, b?: string): boolean {
   if (!a || !b) return false;
   const tokenize = (s: string) =>
     s
+      .normalize("NFC")
       .toLowerCase()
       .replace(/[\p{P}\p{S}]+/gu, " ")
       .trim()
@@ -211,7 +212,8 @@ export function resolveBookIdFromTitle(
     const db = new Database(dbPath, { readonly: true });
     try {
       db.run("PRAGMA busy_timeout = 2000;");
-      const normalizedTitle = title.trim();
+      const normalizedTitle = title.normalize("NFC").trim();
+      const normalizedAuthor = author?.normalize("NFC").trim();
 
       const hasAuthorsTable = Boolean(
         db
@@ -227,9 +229,9 @@ export function resolveBookIdFromTitle(
           return Number(rows[0].id);
         }
         // Shared title (rows.length > 1): require a positive author match
-        if (author && author.trim() && author !== "Unknown") {
+        if (normalizedAuthor && normalizedAuthor !== "Unknown") {
           for (const r of rows) {
-            if (authorsMatch(r.authors, author)) {
+            if (authorsMatch(r.authors, normalizedAuthor)) {
               return Number(r.id);
             }
           }
@@ -329,7 +331,7 @@ export function resolveBookIdFromTitle(
 
 export function cleanQuoteText(raw: string): string {
   if (!raw) return "";
-  let text = raw.trim();
+  let text = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
 
   // Strip leading highlight markers ==...==
   const markedMatch = text.match(/^==([\s\S]*?)==$/);
@@ -348,12 +350,25 @@ export function cleanQuoteText(raw: string): string {
 
   text = lines.join("\n").trim();
 
-  // Strip surrounding quotes if wrapped
-  if (
-    (text.startsWith('"') && text.endsWith('"') && text.length >= 2) ||
-    (text.startsWith('“') && text.endsWith('”') && text.length >= 2)
-  ) {
-    text = text.slice(1, -1).trim();
+  // Strip surrounding quotes if wrapped: "", “”, '', ‘’, «», 「」, 『』
+  const quotePairs: Array<[string, string]> = [
+    ['"', '"'],
+    ["“", "”"],
+    ["'", "'"],
+    ["‘", "’"],
+    ["«", "»"],
+    ["「", "」"],
+    ["『", "』"],
+  ];
+  for (const [open, close] of quotePairs) {
+    if (
+      text.startsWith(open) &&
+      text.endsWith(close) &&
+      text.length >= open.length + close.length
+    ) {
+      text = text.slice(open.length, -close.length).trim();
+      break;
+    }
   }
 
   return text;
@@ -398,9 +413,9 @@ export function parseRawHighlightEntry(
       continue;
     }
 
-    // Check for KOReader ### Page heading: "### Page 42 @ 2026-09-24 10:00:00"
+    // Check for KOReader ### Page / Location heading: "### Page 42 @ 2026-09-24 10:00:00" or "### Location 120"
     const pageHeadingMatch = trimmed.match(
-      /^###\s+Page\s+(\d+)(?:\s*@\s*([^\n]+))?/i,
+      /^###\s+(?:Page|Location|Pos|Position)\s+(\d+)(?:\s*[@·,]\s*([^\n]+))?/i,
     );
     if (pageHeadingMatch) {
       page = parseInt(pageHeadingMatch[1], 10);
@@ -419,7 +434,7 @@ export function parseRawHighlightEntry(
       continue;
     }
 
-    // Check for metadata line: "— *Chapter 1*, Page 42, 2026-09-24" or "- Page 10"
+    // Check for metadata line: "— *Chapter 1*, Page 42, 2026-09-24" or "- Page 10" or "— Location 100"
     if (/^[—\-]\s+/.test(trimmed)) {
       const metaContent = trimmed.replace(/^[—\-]\s+/, "");
       // Extract chapter in asterisks: *Chapter 1*
@@ -427,8 +442,8 @@ export function parseRawHighlightEntry(
       if (chMatch) {
         chapter = chMatch[1].trim();
       }
-      // Extract Page \d+
-      const pMatch = metaContent.match(/\bPage\s+(\d+)\b/i);
+      // Extract Page \d+ or Location \d+
+      const pMatch = metaContent.match(/\b(?:Page|Location|Pos|Position)\s+(\d+)\b/i);
       if (pMatch) {
         page = parseInt(pMatch[1], 10);
       }
@@ -488,7 +503,7 @@ export function parseRawHighlightEntry(
 }
 
 function isPageHeading(trimmed: string): boolean {
-  return /^###\s+Page\b/i.test(trimmed);
+  return /^###\s+(?:Page|Location|Pos|Position)\b/i.test(trimmed);
 }
 
 /**
@@ -506,6 +521,8 @@ export function splitNoteIntoHighlightBlocks(markdown: string): Array<{
   const endIdx = content.indexOf(HIGHLIGHTS_END_MARKER);
   if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
     content = content.slice(startIdx + HIGHLIGHTS_START_MARKER.length, endIdx);
+  } else if (startIdx !== -1 && (endIdx === -1 || endIdx < startIdx)) {
+    content = content.slice(startIdx + HIGHLIGHTS_START_MARKER.length);
   }
 
   const lines = content.replace(/\r\n/g, "\n").split("\n");
@@ -523,7 +540,9 @@ export function splitNoteIntoHighlightBlocks(markdown: string): Array<{
     currentLines = [];
   }
 
-  const hasPageHeaders = lines.some((l) => /^###\s+Page\b/i.test(l.trim()));
+  const hasPageHeaders = lines.some((l) =>
+    /^###\s+(?:Page|Location|Pos|Position)\b/i.test(l.trim()),
+  );
   const hasBlockquotes = lines.some((l) => /^>\s+/.test(l.trim()));
 
   if (hasPageHeaders) {
@@ -541,8 +560,8 @@ export function splitNoteIntoHighlightBlocks(markdown: string): Array<{
         continue;
       }
 
-      // Entry start: "### Page ..."
-      if (/^###\s+Page\b/i.test(trimmed)) {
+      // Entry start: "### Page ..." or "### Location ..."
+      if (/^###\s+(?:Page|Location|Pos|Position)\b/i.test(trimmed)) {
         flush();
         currentLines.push(line);
         continue;
@@ -642,10 +661,11 @@ export function insertOrUpdateHighlight(
     VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(book_title, quote) DO UPDATE SET
       book_id = COALESCE(excluded.book_id, book_highlights.book_id),
-      chapter = excluded.chapter,
-      page = excluded.page,
+      chapter = COALESCE(excluded.chapter, book_highlights.chapter),
+      page = COALESCE(excluded.page, book_highlights.page),
       note = excluded.note,
-      timestamp = excluded.timestamp;
+      timestamp = COALESCE(excluded.timestamp, book_highlights.timestamp),
+      created_at = datetime('now');
   `);
 
   stmt.run(
@@ -675,10 +695,11 @@ export function batchUpsertHighlights(
     VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(book_title, quote) DO UPDATE SET
       book_id = COALESCE(excluded.book_id, book_highlights.book_id),
-      chapter = excluded.chapter,
-      page = excluded.page,
+      chapter = COALESCE(excluded.chapter, book_highlights.chapter),
+      page = COALESCE(excluded.page, book_highlights.page),
       note = excluded.note,
-      timestamp = excluded.timestamp;
+      timestamp = COALESCE(excluded.timestamp, book_highlights.timestamp),
+      created_at = datetime('now');
   `);
 
   db.transaction(() => {
@@ -707,7 +728,7 @@ export function batchUpsertHighlights(
 /**
  * Checks whether a title is unique to the given book across both book_highlights and Calibre metadata.
  */
-function isTitleUniqueForBook(
+export function isTitleUniqueForBook(
   db: Database,
   bookId: number,
   cleanTitle: string,
@@ -1280,8 +1301,18 @@ export function ensureBookHighlightsIndexed(
                   .get(bookId, title.trim()) as any);
 
             if (latestCreated?.max_c) {
-              const latestMs = new Date(latestCreated.max_c + "Z").getTime();
-              if (st.mtimeMs > latestMs) {
+              const str = String(latestCreated.max_c).trim();
+              const isoStr = str.endsWith("Z")
+                ? str
+                : str.includes("T")
+                  ? `${str}Z`
+                  : `${str.replace(" ", "T")}Z`;
+              const parsed = new Date(isoStr).getTime();
+              const latestMs = Number.isNaN(parsed)
+                ? new Date(str).getTime()
+                : parsed;
+              // Guard threshold of 1000ms prevents infinite reindexing loops from sub-second SQLite datetime truncation
+              if (!Number.isNaN(latestMs) && st.mtimeMs > latestMs + 1000) {
                 shouldReindex = true;
               }
             }

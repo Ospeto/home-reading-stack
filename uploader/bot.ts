@@ -313,18 +313,27 @@ export function getKOReaderBinary256(filePath: string): string | null {
   try {
     const stats = fs.statSync(filePath);
     const fd = fs.openSync(filePath, "r");
-    const KOREADER_HASH_ALGO = "md5";
-    const hasher = crypto.createHash(KOREADER_HASH_ALGO);
-    const size = 1024;
-    for (let i = -1; i <= 10; i++) {
-      const offset = i === -1 ? 256 : 1024 * 4 ** i;
-      if (offset >= stats.size) break;
-      const buf = new Uint8Array(size);
-      const bytesRead = fs.readSync(fd, buf, 0, size, offset);
-      if (bytesRead > 0) hasher.update(buf.subarray(0, bytesRead));
+    try {
+      const KOREADER_HASH_ALGO = "md5";
+      const hasher = crypto.createHash(KOREADER_HASH_ALGO);
+      const size = 1024;
+      if (stats.size <= 256) {
+        const buf = new Uint8Array(Math.max(1, stats.size));
+        const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+        if (bytesRead > 0) hasher.update(buf.subarray(0, bytesRead));
+      } else {
+        for (let i = -1; i <= 10; i++) {
+          const offset = i === -1 ? 256 : 1024 * 4 ** i;
+          if (offset >= stats.size) break;
+          const buf = new Uint8Array(size);
+          const bytesRead = fs.readSync(fd, buf, 0, size, offset);
+          if (bytesRead > 0) hasher.update(buf.subarray(0, bytesRead));
+        }
+      }
+      return hasher.digest("hex");
+    } finally {
+      fs.closeSync(fd);
     }
-    fs.closeSync(fd);
-    return hasher.digest("hex");
   } catch (_err) {
     void _err;
     return null;
