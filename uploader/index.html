@@ -1490,6 +1490,9 @@
         <line x1="6" y1="16" x2="6.01" y2="16" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         <line x1="10" y1="16" x2="10.01" y2="16" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
       </symbol>
+      <symbol id="icon-triangle-exclamation" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+      </symbol>
     </defs>
   </svg>
 
@@ -4774,7 +4777,10 @@
           sourceBadges.push({ name: 'Lnori', cls: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30' });
         }
         if (sourceBadges.length === 0 && Array.isArray(item.sources)) {
-          const sortedSources = [...item.sources].sort((a, b) => (a.source === 'elscione' ? -1 : 1));
+          const sortedSources = [...item.sources].sort((a, b) => {
+            if (a.source === b.source) return 0;
+            return a.source === 'elscione' ? -1 : 1;
+          });
           sortedSources.forEach(s => {
             const isLn = s.source === 'lnori';
             sourceBadges.push({
@@ -4921,23 +4927,6 @@
       }
 
       populateDiscoverModal(item);
-
-      // If synopsis is missing or short placeholder, immediately fetch full novel details on the fly
-      if (!item.synopsis || !item.synopsis.trim() || item.synopsis.length < 30) {
-        fetch(`/api/discover/novel/${encodeURIComponent(item.id)}`)
-          .then(r => r.json())
-          .then(data => {
-            if (data.novel?.synopsis) {
-              item.synopsis = data.novel.synopsis;
-              discoverNovelsMap.set(item.id, item);
-              if (activeDiscoverItem?.id === item.id) {
-                const sEl = document.getElementById('discoverModalSynopsis');
-                if (sEl) sEl.textContent = item.synopsis.trim();
-              }
-            }
-          })
-          .catch(() => {});
-      }
     }
 
     function renderDiscoverModalSkeleton() {
@@ -4999,7 +4988,10 @@
         }
         if (sourceEntries.length === 0 && Array.isArray(item.sources)) {
           // Sort to prioritize elscione
-          const sortedSources = [...item.sources].sort((a, b) => (a.source === 'elscione' ? -1 : 1));
+          const sortedSources = [...item.sources].sort((a, b) => {
+            if (a.source === b.source) return 0;
+            return a.source === 'elscione' ? -1 : 1;
+          });
           sortedSources.forEach(s => {
             const isLn = s.source === 'lnori';
             sourceEntries.push({
@@ -5029,11 +5021,11 @@
       }
 
       if (synopsis) {
-        if (item.synopsis && item.synopsis.trim()) {
+        if (item.synopsis && item.synopsis.trim() && item.synopsis.trim().length >= 30) {
           synopsis.textContent = item.synopsis.trim();
         } else {
           setHtml(synopsis, renderSynopsisSkeleton());
-          // Fetch novel to load full synopsis if missing
+          // Fetch novel to load full synopsis if missing or short
           fetch(`/api/discover/novel/${encodeURIComponent(item.id)}`)
             .then(r => r.json())
             .then(data => {
@@ -5044,11 +5036,11 @@
                   synopsis.textContent = item.synopsis.trim();
                 }
               } else {
-                synopsis.textContent = 'No synopsis available for this volume.';
+                synopsis.textContent = item.synopsis && item.synopsis.trim() ? item.synopsis.trim() : 'No synopsis available for this volume.';
               }
             })
             .catch(() => {
-              synopsis.textContent = 'No synopsis available.';
+              synopsis.textContent = item.synopsis && item.synopsis.trim() ? item.synopsis.trim() : 'No synopsis available.';
             });
         }
       }
