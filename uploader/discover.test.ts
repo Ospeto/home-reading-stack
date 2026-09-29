@@ -833,4 +833,60 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(stripped).toBe("Ingesting volume 1... [Volume 1/5] Done!");
     });
   });
+
+
+  describe("Discover UI Contract Invariants (uploader/index.html)", () => {
+    const htmlPath = path.join((import.meta as any).dir, "index.html");
+    const html = fs.readFileSync(htmlPath, "utf8");
+
+    it("verifies zero emojis across the entire index.html", () => {
+      const emojiRegex = /(\p{Extended_Pictographic}|\p{Emoji_Presentation})/gu;
+      const matches: string[] = [];
+      for (const m of html.matchAll(emojiRegex)) {
+        if (!/[0-9#*]/.test(m[0])) {
+          matches.push(m[0]);
+        }
+      }
+      expect(matches).toEqual([]);
+    });
+
+    it("verifies live download progress polling and Apple-style progress track in index.html", () => {
+      // Button transitions immediately
+      expect(html).toContain("Downloading...");
+      expect(html).toContain("Downloading Vol");
+      // Polls /api/discover/progress/:jobId
+      expect(html).toContain("pollDiscoverIngestProgress");
+      expect(html).toContain("/api/discover/progress/");
+      expect(html).toContain("1500");
+      // Track with percentage
+      expect(html).toContain("cardProgressContainer-");
+      expect(html).toContain("cardProgressBar-");
+      expect(html).toContain("cardProgressPct-");
+      expect(html).toContain("discoverModalProgressContainer");
+      expect(html).toContain("discoverModalProgressBar");
+      expect(html).toContain("discoverModalProgressPct");
+      // Badge update on completion
+      expect(html).toContain("In Library (");
+      expect(html).toContain("Downloaded");
+    });
+
+    it("verifies complete synopsis readability and on-the-fly fetching in discoverModal", () => {
+      expect(html).toContain('id="discoverModalSynopsis"');
+      expect(html).toContain("text-sm leading-relaxed text-zinc-300");
+      expect(html).toContain("overflow-y-auto");
+      expect(html).toContain("renderSynopsisSkeleton");
+      expect(html).toContain("/api/discover/novel/");
+    });
+
+    it("verifies Elscione preference for novel source ingestion", () => {
+      expect(html).toContain("getPrimaryNovelSource");
+      expect(html).toContain("ALWAYS prefer Elscione over Lnori when both are available");
+      expect(html).toContain("item.sourceUrls?.elscione");
+    });
+
+    it("verifies error formatting replaces [path] with human-readable error text", () => {
+      expect(html).toContain("formatCleanErrorMessage");
+      expect(html).toContain(".replace(/\\[path\\]/g, 'file')");
+    });
+  });
 });
