@@ -582,6 +582,10 @@
     .bg-\[\#121418\]\/60 { background-color: rgba(18, 20, 24, 0.6); }
     .bg-\[\#18181f\] { background-color: #18181f; }
     .bg-\[\#18181f\]\/40 { background-color: rgba(24, 24, 31, 0.4); }
+    .bg-amber-400 { background-color: rgb(251 191 36); }
+    .bg-amber-500 { background-color: rgb(245 158 11); }
+    .hover\:bg-amber-300:hover { background-color: rgb(252 211 77); }
+    .hover\:bg-amber-400:hover { background-color: rgb(251 191 36); }
     .bg-blue-400 { background-color: rgb(96 165 250); }
     .bg-indigo-400 { background-color: rgb(129 140 248); }
     .bg-purple-400 { background-color: rgb(192 132 252); }
@@ -1490,6 +1494,9 @@
         <line x1="6" y1="16" x2="6.01" y2="16" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         <line x1="10" y1="16" x2="10.01" y2="16" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
       </symbol>
+      <symbol id="icon-triangle-exclamation" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+      </symbol>
     </defs>
   </svg>
 
@@ -2146,7 +2153,7 @@
         <!-- Synopsis Section -->
         <div class="space-y-2 pt-2 border-t border-white/5">
           <h4 class="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Synopsis</h4>
-          <div id="discoverModalSynopsis" class="text-sm leading-relaxed text-zinc-300 font-normal whitespace-pre-line bg-white/[0.02] p-4 sm:p-5 rounded-xl border border-white/5 max-h-60 sm:max-h-72 overflow-y-auto no-scrollbar"></div>
+          <div id="discoverModalSynopsis" class="text-sm leading-relaxed text-zinc-300 font-normal whitespace-pre-line bg-white/[0.02] p-4 sm:p-5 rounded-xl border border-white/5 max-h-72 sm:max-h-96 overflow-y-auto"></div>
         </div>
       </div>
 
@@ -2155,7 +2162,7 @@
         <div id="discoverModalLibraryNote" class="text-xs text-zinc-400 flex items-center gap-1.5"></div>
         <div class="flex items-center gap-2 w-full sm:w-auto justify-end">
           <button type="button" onclick="closeDiscoverModal()" class="px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-semibold cursor-pointer active:scale-[0.96] transition-all">Close</button>
-          <button id="discoverModalIngestBtn" type="button" onclick="handleDiscoverModalIngest()" class="flex-1 sm:flex-none px-5 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-zinc-950 font-bold text-xs rounded-xl shadow-lg transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]">
+          <button id="discoverModalIngestBtn" type="button" onclick="handleDiscoverModalIngest()" class="flex-1 sm:flex-none px-5 py-2.5 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]">
             <span>Ingest to Library</span>
           </button>
         </div>
@@ -2164,7 +2171,7 @@
       <!-- Live Download Progress Track in Modal -->
       <div id="discoverModalProgressContainer" class="hidden pt-3 border-t border-white/5 w-full space-y-1.5">
         <div class="flex items-center justify-between text-xs">
-          <span id="discoverModalProgressStatus" class="text-amber-300 font-medium truncate">Downloading Volume 1 of 5 (20%)...</span>
+          <span id="discoverModalProgressStatus" class="text-amber-300 font-medium truncate">Downloading Vol 1 of 5 (20%)...</span>
           <span id="discoverModalProgressPct" class="font-mono text-zinc-400 text-xs shrink-0 ml-2">20%</span>
         </div>
         <div class="h-1.5 w-full bg-zinc-800 rounded-full overflow-hidden">
@@ -3443,7 +3450,7 @@
   <div id="kindleAutoPrompt" class="hidden fixed bottom-6 left-4 right-4 sm:left-auto sm:right-6 z-50 sm:max-w-md w-auto rounded-2xl bg-zinc-900/95 backdrop-blur-xl border border-amber-500/50 p-4 shadow-2xl shadow-black/80 transition-all duration-300">
     <div class="flex items-start gap-3">
       <div class="w-10 h-10 rounded-xl bg-amber-950/60 text-amber-400 flex items-center justify-center border border-amber-700/60 shrink-0 text-base shadow-inner">
-        ⚡
+        <svg class="w-5 h-5"><use href="#icon-tablet"/></svg>
       </div>
       <div class="flex-1 min-w-0">
         <h4 class="text-xs font-bold text-zinc-100 flex items-center gap-1.5 leading-tight">
@@ -3515,7 +3522,7 @@
       <!-- Device Duplicate Notice Banner (shown when deviceDuplicatesCount > 0) -->
       <div id="kindleDuplicatesBanner" class="hidden p-3 rounded-xl bg-amber-950/40 border border-amber-500/40 text-xs flex items-center justify-between gap-2.5 backdrop-blur-md transition-all">
         <div class="flex items-center gap-2 text-amber-200 min-w-0">
-          <span class="text-base shrink-0">⚠️</span>
+          <svg class="w-4 h-4 shrink-0 text-amber-400"><use href="#icon-triangle-exclamation"/></svg>
           <span id="kindleDuplicatesText" class="truncate font-medium">Found 0 duplicate files on device</span>
         </div>
         <button type="button" id="kindleCleanDuplicatesBtn" onclick="cleanKindleDuplicatesAction()" style="background-color: #fbbf24 !important; color: #09090b !important; border: 1px solid rgba(245, 158, 11, 0.6) !important;" class="shrink-0 px-3 py-1.5 active:scale-[0.96] text-zinc-950 font-bold text-[11px] rounded-full shadow-md hover:shadow-amber-500/20 disabled:opacity-60 disabled:cursor-wait disabled:pointer-events-none transition-all cursor-pointer flex items-center gap-1.5">
@@ -3564,7 +3571,7 @@
           <span id="kindleLiveBytes" class="text-zinc-400">0 MB transferred</span>
         </div>
         <button type="button" id="kindleStopSyncBtn" onclick="stopKindleSyncAction()" class="w-full h-9 mt-1 bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-md flex items-center justify-center gap-1.5 transition-all cursor-pointer">
-          <span>⏹️ Stop Sync</span>
+          <span>Stop Sync</span>
         </button>
       </div>
 
@@ -3579,7 +3586,7 @@
         </div>
         <div class="pt-1">
           <button id="kindleSummaryEjectBtn" onclick="ejectKindleAction()" class="w-full h-10 bg-zinc-900 hover:bg-zinc-800 text-rose-300 hover:text-rose-200 font-bold text-xs rounded-xl border border-rose-900/50 flex items-center justify-center gap-1.5 cursor-pointer active:scale-[0.98] transition-all">
-            <span>⏏ Safe Eject Kindle</span>
+            <span>Safe Eject Kindle</span>
           </button>
         </div>
       </div>
@@ -3596,7 +3603,7 @@
             <span>Refresh</span>
           </button>
           <button id="kindleEjectBtn" onclick="ejectKindleAction()" class="min-h-[44px] h-11 py-2 bg-[#18181f] hover:bg-rose-950/60 text-zinc-300 hover:text-rose-400 font-semibold text-xs rounded-xl border border-[#23232a] flex items-center justify-center gap-1.5 transition-all duration-150 cursor-pointer active:scale-[0.98]">
-            <span>⏏ Eject</span>
+            <span>Eject</span>
           </button>
         </div>
       </div>
@@ -3785,6 +3792,15 @@
 
     function svgIcon(name, cls = "w-3.5 h-3.5") {
       return `<svg class="${cls} inline-block shrink-0" aria-hidden="true"><use href="#icon-${name}"/></svg>`;
+    }
+
+    function formatCleanErrorMessage(raw) {
+      if (!raw) return 'Operation failed';
+      let msg = typeof raw === 'string' ? raw : (raw.message || raw.error || String(raw));
+      // Strip [path] placeholders and filesystem tokens into clean phrases
+      msg = msg.replace(/\[path\]/g, 'file');
+      msg = msg.replace(/\s+/g, ' ').trim();
+      return msg || 'Operation failed';
     }
 
     // TELEGRAM NATIVE INTEGRATION & HAPTICS
@@ -4757,6 +4773,7 @@
         }
 
         const sourceBadges = [];
+        // Ensure Elscione is preferred and displayed first
         if (item.sourceUrls?.elscione || item.source === 'elscione' || item.source === 'both') {
           sourceBadges.push({ name: 'Elsci.one', cls: 'bg-rose-500/15 text-rose-300 border-rose-500/30' });
         }
@@ -4764,7 +4781,11 @@
           sourceBadges.push({ name: 'Lnori', cls: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30' });
         }
         if (sourceBadges.length === 0 && Array.isArray(item.sources)) {
-          item.sources.forEach(s => {
+          const sortedSources = [...item.sources].sort((a, b) => {
+            if (a.source === b.source) return 0;
+            return a.source === 'elscione' ? -1 : 1;
+          });
+          sortedSources.forEach(s => {
             const isLn = s.source === 'lnori';
             sourceBadges.push({
               name: isLn ? 'Lnori' : 'Elsci.one',
@@ -4839,7 +4860,7 @@
                   <button type="button" onclick="openDiscoverModal('${escapeHtml(item.id)}')" class="flex-1 py-1.5 px-2 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white text-[11px] font-semibold rounded-xl border border-white/5 transition-colors cursor-pointer text-center active:scale-[0.96]">
                     Preview
                   </button>
-                  <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event)" class="flex-1 py-1.5 px-2 ${inLib ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300' : 'bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold'} text-[11px] rounded-xl transition-all shadow-sm flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]">
+                  <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event)" class="flex-1 py-1.5 px-2 ${inLib ? 'bg-zinc-800 hover:bg-zinc-700 text-white border border-white/10 font-semibold' : 'bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md'} text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]">
                     <span>${inLib ? 'Re-Ingest' : 'Ingest'}</span>
                   </button>
                 </div>
@@ -4971,7 +4992,10 @@
         }
         if (sourceEntries.length === 0 && Array.isArray(item.sources)) {
           // Sort to prioritize elscione
-          const sortedSources = [...item.sources].sort((a, b) => (a.source === 'elscione' ? -1 : 1));
+          const sortedSources = [...item.sources].sort((a, b) => {
+            if (a.source === b.source) return 0;
+            return a.source === 'elscione' ? -1 : 1;
+          });
           sortedSources.forEach(s => {
             const isLn = s.source === 'lnori';
             sourceEntries.push({
@@ -5001,11 +5025,11 @@
       }
 
       if (synopsis) {
-        if (item.synopsis && item.synopsis.trim()) {
+        if (item.synopsis && item.synopsis.trim() && item.synopsis.trim().length >= 30) {
           synopsis.textContent = item.synopsis.trim();
         } else {
           setHtml(synopsis, renderSynopsisSkeleton());
-          // Fetch novel to load full synopsis if missing
+          // Fetch novel to load full synopsis if missing or short
           fetch(`/api/discover/novel/${encodeURIComponent(item.id)}`)
             .then(r => r.json())
             .then(data => {
@@ -5016,11 +5040,11 @@
                   synopsis.textContent = item.synopsis.trim();
                 }
               } else {
-                synopsis.textContent = 'No synopsis available for this volume.';
+                synopsis.textContent = item.synopsis && item.synopsis.trim() ? item.synopsis.trim() : 'No synopsis available for this volume.';
               }
             })
             .catch(() => {
-              synopsis.textContent = 'No synopsis available.';
+              synopsis.textContent = item.synopsis && item.synopsis.trim() ? item.synopsis.trim() : 'No synopsis available.';
             });
         }
       }
@@ -5054,13 +5078,20 @@
       if (ingestBtn) {
         if (isIngesting) {
           ingestBtn.setAttribute('disabled', 'true');
+          ingestBtn.className = 'flex-1 sm:flex-none px-5 py-2.5 bg-amber-400 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 opacity-80 cursor-wait';
           setHtml(ingestBtn, `
-            <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
+            <svg class="w-4 h-4 animate-spin text-zinc-950" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
             <span>Downloading in Background...</span>
           `);
         } else {
           ingestBtn.removeAttribute('disabled');
-          setHtml(ingestBtn, `<span>${inLib ? 'Re-Ingest to Library' : 'Ingest to Library'}</span>`);
+          if (inLib) {
+            ingestBtn.className = 'flex-1 sm:flex-none px-5 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-white border border-white/10 font-semibold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]';
+            setHtml(ingestBtn, `<span>Re-Ingest to Library</span>`);
+          } else {
+            ingestBtn.className = 'flex-1 sm:flex-none px-5 py-2.5 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]';
+            setHtml(ingestBtn, `<span>Ingest to Library</span>`);
+          }
         }
       }
 
@@ -5159,8 +5190,9 @@
         const modalBtn = document.getElementById('discoverModalIngestBtn');
         if (modalBtn) {
           modalBtn.setAttribute('disabled', 'true');
+          modalBtn.className = 'flex-1 sm:flex-none px-5 py-2.5 bg-amber-400 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 opacity-80 cursor-wait';
           setHtml(modalBtn, `
-            <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
+            <svg class="w-4 h-4 animate-spin text-zinc-950" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
             <span>Downloading in Background...</span>
           `);
         }
@@ -5208,7 +5240,8 @@
         console.error('Discover ingest failed to start:', err);
         ingestingDiscoverIds.delete(novelId);
         activeDiscoverDownloads.delete(novelId);
-        showToast(`Ingestion failed: ${err.message}`, 'error');
+        const cleanErr = formatCleanErrorMessage(err.message);
+        showToast(`Ingestion failed: ${cleanErr}`, 'error');
         renderDiscoverCards(discoverFeedCache[discoverTab]?.items || []);
         if (activeDiscoverItem?.id === novelId) {
           populateDiscoverModal(activeDiscoverItem);
@@ -5235,33 +5268,34 @@
         }
 
         try {
-          const queryParam = runId ? `runId=${encodeURIComponent(runId)}` : `jobId=${encodeURIComponent(jobId)}`;
-          const pollUrl = jobId
-            ? `/api/discover/progress/${encodeURIComponent(jobId)}?${queryParam}`
-            : `/api/discover/progress?${queryParam}`;
+          const pollUrl = `/api/discover/progress/${encodeURIComponent(jobId)}`;
 
           const res = await fetch(pollUrl);
           if (!res.ok) return;
           const data = await res.json();
           const state = data.state || data;
           const phase = data.phase || state.phase || 'downloading';
-          const total = data.total || state.total || 0;
-          const index = data.index || state.index || 0;
-          const volumeTitle = data.volumeTitle || state.volumeTitle || '';
+          const total = data.total || data.totalVolumes || state.total || 0;
+          const index = data.index || data.volumesCompleted || state.index || 0;
+          const volumeTitle = data.volumeTitle || data.currentVolume || state.volumeTitle || '';
 
           const novel = discoverNovelsMap.get(novelId) || activeDiscoverItem;
           const title = novel?.title || volumeTitle || 'Light Novel';
 
-          let progress = data.progressPercent || 0;
+          let progress = data.percent !== undefined ? data.percent : (data.progressPercent || 0);
           let statusText = data.statusText || '';
 
           if (total > 0 && !statusText) {
             const currentVol = Math.max(1, index);
-            progress = Math.min(99, Math.round((currentVol / total) * 100));
-            statusText = `Downloading Volume ${currentVol} of ${total} (${progress}%)...`;
+            if (data.percent === undefined) {
+              progress = Math.min(99, Math.round((currentVol / total) * 100));
+            }
+            statusText = `Downloading Vol ${currentVol} of ${total} (${progress}%)...`;
           } else if (!statusText) {
-            progress = Math.min(85, attempts * 5 + 10);
-            statusText = state.status || 'Downloading novel volumes...';
+            if (data.percent === undefined) {
+              progress = Math.min(85, attempts * 5 + 10);
+            }
+            statusText = state.status || `Downloading Vol 1 of ${Math.max(1, total)} (${progress}%)...`;
           }
 
           if (phase === 'complete') {
@@ -5332,6 +5366,7 @@
               const mBtn = document.getElementById('discoverModalIngestBtn');
               if (mBtn) {
                 mBtn.removeAttribute('disabled');
+                mBtn.className = 'flex-1 sm:flex-none px-5 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-white border border-white/10 font-semibold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]';
                 setHtml(mBtn, `<span>Re-Ingest to Library</span>`);
               }
             }
@@ -5354,7 +5389,9 @@
             ingestingDiscoverIds.delete(novelId);
             activeDiscoverDownloads.delete(novelId);
 
-            showToast(`Ingestion failed: ${data.error || state.error || 'Download failed'}`, 'error');
+            const rawErr = data.error || state.error || 'Download failed';
+            const cleanErr = formatCleanErrorMessage(rawErr);
+            showToast(`Ingestion failed: ${cleanErr}`, 'error');
             renderDiscoverCards(discoverFeedCache[discoverTab]?.items || []);
             if (activeDiscoverItem?.id === novelId) {
               populateDiscoverModal(activeDiscoverItem);
@@ -6482,7 +6519,7 @@
                 'text-xs p-3 rounded-xl border bg-zinc-900 border-zinc-700 text-zinc-400';
               setHtml(
                 status,
-                `<div><strong>ℹ️ Queued Job Cancelled:</strong><div class="mt-1 text-[11px] text-zinc-400">This queued download was cancelled or removed.</div></div>`,
+                `<div><strong>Queued Job Cancelled:</strong><div class="mt-1 text-[11px] text-zinc-400">This queued download was cancelled or removed.</div></div>`,
               );
               break;
             }
@@ -6635,13 +6672,13 @@
             icon = '✓ ';
           } else if (v.state === 'skipped') {
             style = 'background: rgba(120, 53, 15, 0.4); border: 1px solid rgba(245, 158, 11, 0.4); color: #fcd34d; font-weight: 600;';
-            icon = '⏭️ ';
+            icon = 'Skipped ';
           } else if (v.state === 'active') {
             style = 'background: rgba(49, 46, 129, 0.6); border: 1px solid rgba(99, 102, 241, 0.6); color: #c7d2fe; font-weight: 600;';
-            icon = '⬇️ ';
+            icon = 'Downloading ';
           } else if (v.state === 'error') {
             style = 'background: rgba(136, 19, 55, 0.5); border: 1px solid rgba(244, 63, 94, 0.5); color: #fda4af; font-weight: 600;';
-            icon = '❌ ';
+            icon = 'Failed ';
           }
           const pulseClass = v.state === 'active' ? ' animate-pulse' : '';
           html += `<span class="px-2 py-0.5 rounded-md text-[10px] select-none transition-colors${pulseClass}" style="${style}">${icon}Vol ${i}</span>`;
@@ -6952,9 +6989,9 @@
               if (v.state === 'imported') {
                 renderedChips += `<span class="px-2 py-0.5 rounded-md text-[10px]" style="background: rgba(6, 78, 59, 0.5); border: 1px solid rgba(16, 185, 129, 0.4); color: #6ee7b7; font-weight: 600;">✓ Vol ${i}</span>`;
               } else if (v.state === 'skipped') {
-                renderedChips += `<span class="px-2 py-0.5 rounded-md text-[10px]" style="background: rgba(120, 53, 15, 0.4); border: 1px solid rgba(245, 158, 11, 0.4); color: #fcd34d; font-weight: 600;">⏭️ Vol ${i}</span>`;
+                renderedChips += `<span class="px-2 py-0.5 rounded-md text-[10px]" style="background: rgba(120, 53, 15, 0.4); border: 1px solid rgba(245, 158, 11, 0.4); color: #fcd34d; font-weight: 600;">Skipped Vol ${i}</span>`;
               } else if (v.state === 'error') {
-                renderedChips += `<span class="px-2 py-0.5 rounded-md text-[10px]" style="background: rgba(136, 19, 55, 0.5); border: 1px solid rgba(244, 63, 94, 0.5); color: #fda4af; font-weight: 600;">❌ Vol ${i}</span>`;
+                renderedChips += `<span class="px-2 py-0.5 rounded-md text-[10px]" style="background: rgba(136, 19, 55, 0.5); border: 1px solid rgba(244, 63, 94, 0.5); color: #fda4af; font-weight: 600;">Failed Vol ${i}</span>`;
               }
             }
             if (renderedChips) {
@@ -7133,10 +7170,10 @@
             if (isArchiveSuccessful) {
               if (hasImported) {
                 tgHaptic.success();
-                setHtml(item, `<span class="truncate text-emerald-400 font-medium">📦 ${escapeHtml(file.name)}</span><span class="text-emerald-400 font-bold shrink-0">Unpacked ${json.imported}/${json.total}</span>`);
+                setHtml(item, `<span class="truncate text-emerald-400 font-medium">Archive: ${escapeHtml(file.name)}</span><span class="text-emerald-400 font-bold shrink-0">Unpacked ${json.imported}/${json.total}</span>`);
               } else {
                 tgHaptic.light();
-                setHtml(item, `<span class="truncate text-sky-400 font-medium">📦 ${escapeHtml(file.name)}</span><span class="text-sky-400 font-bold shrink-0">Already exists (0/${json.total})</span>`);
+                setHtml(item, `<span class="truncate text-sky-400 font-medium">Archive: ${escapeHtml(file.name)}</span><span class="text-sky-400 font-bold shrink-0">Already exists (0/${json.total})</span>`);
               }
               await init();
             } else {
@@ -7753,7 +7790,7 @@
       isKindleCancelRequested = true;
       const stopBtn = document.getElementById('kindleStopSyncBtn');
       const liveTitle = document.getElementById('kindleLiveTitle');
-      if (liveTitle) liveTitle.textContent = '⏹️ Stopping sync...';
+      if (liveTitle) liveTitle.textContent = 'Stopping sync...';
       if (stopBtn) {
         stopBtn.disabled = true;
         setHtml(stopBtn, `${svgIcon('spinner', 'w-3.5 h-3.5 animate-spin text-white')} <span>Stopping...</span>`);
@@ -8005,7 +8042,7 @@
       }
       if (stopBtn) {
         stopBtn.disabled = false;
-        setHtml(stopBtn, '<span>⏹️ Stop Sync</span>');
+        setHtml(stopBtn, '<span>Stop Sync</span>');
       }
       if (btnText) btnText.textContent = 'Syncing to Kindle...';
       if (statusArea) {
@@ -8023,7 +8060,7 @@
             terminalHandled = true;
             finishKindleSyncUI();
             tgHaptic.error();
-            if (liveTitle) liveTitle.textContent = '❌ Sync polling timed out';
+            if (liveTitle) liveTitle.textContent = 'Error: Sync polling timed out';
             showToast('Kindle sync timed out. Please check connection.', 'error');
             fetch('/api/kindle/cancel', { method: 'POST' }).catch(() => {});
             pollKindleStatus();
@@ -8045,7 +8082,7 @@
               terminalHandled = true;
               finishKindleSyncUI();
               tgHaptic.error();
-              if (liveTitle) liveTitle.textContent = '❌ Device disconnected or sync stopped';
+              if (liveTitle) liveTitle.textContent = 'Device disconnected or sync stopped';
               showToast('Kindle disconnected or sync stopped', 'error');
               pollKindleStatus();
             }
@@ -8061,14 +8098,14 @@
           if (progressPercent) progressPercent.textContent = `${pct}%`;
 
           if (p.phase === 'scanning') {
-            if (liveTitle) liveTitle.textContent = isKindleCancelRequested ? '⏹️ Stopping sync...' : 'Scanning Calibre library & Kindle storage...';
+            if (liveTitle) liveTitle.textContent = isKindleCancelRequested ? 'Stopping sync...' : 'Scanning Calibre library & Kindle storage...';
             if (liveCount) liveCount.textContent = 'Analyzing candidate books...';
           } else if (p.phase === 'transferring') {
-            if (liveTitle) liveTitle.textContent = isKindleCancelRequested ? '⏹️ Stopping sync...' : (p.currentBookTitle || 'Transferring book...');
+            if (liveTitle) liveTitle.textContent = isKindleCancelRequested ? 'Stopping sync...' : (p.currentBookTitle || 'Transferring book...');
             if (liveCount) liveCount.textContent = `Transferring ${p.currentIndex || 0} of ${p.totalCandidates || 0}...`;
             if (liveBytes) liveBytes.textContent = `${formatBytes(p.bytesTransferred)} transferred`;
           } else if (p.phase === 'highlights') {
-            if (liveTitle) liveTitle.textContent = isKindleCancelRequested ? '⏹️ Stopping sync...' : 'Syncing highlights to Obsidian MAS vault & cache.db...';
+            if (liveTitle) liveTitle.textContent = isKindleCancelRequested ? 'Stopping sync...' : 'Syncing highlights to Obsidian MAS vault & cache.db...';
             if (liveCount) liveCount.textContent = 'Scanning KOReader .sdr and My Clippings.txt...';
             if (liveBytes) liveBytes.textContent = `${formatBytes(p.bytesTransferred)} transferred`;
           } else if (p.phase === 'completed' || p.phase === 'cancelled' || p.phase === 'error') {
@@ -8121,9 +8158,10 @@
               terminalHandled = true;
               finishKindleSyncUI();
               tgHaptic.error();
-              const errMsg = p.error || 'Sync encountered an error';
-              if (liveTitle) liveTitle.textContent = `❌ Error: ${errMsg}`;
-              showToast(`Kindle sync error: ${errMsg}`, 'error');
+              const rawErr = p.error || 'Sync encountered an error';
+              const cleanErr = formatCleanErrorMessage(rawErr);
+              if (liveTitle) liveTitle.textContent = `Error: ${cleanErr}`;
+              showToast(`Kindle sync error: ${cleanErr}`, 'error');
               pollKindleStatus();
             }
           }
@@ -8164,7 +8202,7 @@
       }
       if (stopBtn) {
         stopBtn.disabled = false;
-        setHtml(stopBtn, '<span>⏹️ Stop Sync</span>');
+        setHtml(stopBtn, '<span>Stop Sync</span>');
       }
       if (btnText) btnText.textContent = 'Syncing to Kindle...';
       if (statusArea) {
@@ -8188,9 +8226,10 @@
         if (!res.ok) {
           finishKindleSyncUI();
           tgHaptic.error();
-          let errMsg = data.error || (data.results?.errors && data.results.errors[0]?.error) || 'Sync failed';
-          if (liveTitle) liveTitle.textContent = `❌ Error: ${errMsg}`;
-          showToast(`Kindle sync error: ${errMsg}`, 'error');
+          let rawErr = data.error || (data.results?.errors && data.results.errors[0]?.error) || 'Sync failed';
+          let cleanErr = formatCleanErrorMessage(rawErr);
+          if (liveTitle) liveTitle.textContent = `Error: ${cleanErr}`;
+          showToast(`Kindle sync error: ${cleanErr}`, 'error');
           return;
         }
 
@@ -8199,7 +8238,8 @@
       } catch (err) {
         finishKindleSyncUI();
         tgHaptic.error();
-        if (liveTitle) liveTitle.textContent = `❌ Network error: ${err.message || String(err)}`;
+        const cleanErr = formatCleanErrorMessage(err.message || String(err));
+        if (liveTitle) liveTitle.textContent = `Network error: ${cleanErr}`;
         showToast('Network error starting Kindle sync', 'error');
       }
     }
@@ -8256,7 +8296,7 @@
         const data = await res.json();
         if (res.ok && data.success) {
           tgHaptic.success();
-          showToast('⏏ Kindle ejected safely! You can unplug the cable.');
+          showToast('Kindle ejected safely! You can unplug the cable.');
           closeKindleModal();
           pollKindleStatus();
         } else {
@@ -8269,7 +8309,7 @@
       } finally {
         if (btn) {
           btn.disabled = false;
-          setHtml(btn, `<span>⏏ Eject</span>`);
+          setHtml(btn, `<span>Eject</span>`);
         }
       }
     }
@@ -8298,7 +8338,7 @@
           if (data.alreadySynced) {
             showToast('Book is already on Kindle!');
           } else {
-            showToast(`✅ "${data.title}" copied to Kindle!`);
+            showToast(`"${data.title}" copied to Kindle!`);
           }
           pollKindleStatus();
         } else {
