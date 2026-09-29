@@ -18,6 +18,7 @@ import {
   autoEnrichBookSynopsis,
   isSameBookAsync,
   extractVolumeNumber,
+  isAllowedCoverUrl,
 } from "./scraper";
 import {
   isArchiveFile,
@@ -732,7 +733,44 @@ export function getKosyncDbPath(): string {
   const home = process.env.HOME || os.homedir();
   return path.join(home, "kosync-server", "data", "koreader-sync.db");
 }
-const KOSYNC_DB_PATH = getKosyncDbPath();
+
+export function withKosyncDb<T>(action: (db: Database) => T): T | null {
+  const dbPath = getKosyncDbPath();
+  if (!fs.existsSync(dbPath)) return null;
+  let db: Database | null = null;
+  try {
+    db = new Database(dbPath);
+    db.run("PRAGMA journal_mode = WAL;");
+    db.run("PRAGMA busy_timeout = 5000;");
+    return action(db);
+  } catch (err) {
+    console.error("[KOSync DB] Database operation error:", err);
+    return null;
+  } finally {
+    if (db) {
+      try {
+        db.close();
+      } catch {
+        // ignore close error
+      }
+    }
+  }
+}
+
+export async function parseJsonBody<T = any>(
+  req: Request,
+): Promise<{ data: T; error: null } | { data: null; error: string }> {
+  try {
+    const text = await req.text();
+    if (!text || !text.trim()) {
+      return { data: {} as T, error: null };
+    }
+    return { data: JSON.parse(text) as T, error: null };
+  } catch {
+    return { data: null, error: "Malformed or invalid JSON payload" };
+  }
+}
+
 const MAX_UPLOAD_SIZE = MAX_ARCHIVE_SIZE_BYTES; // 100MB
 
 const FILE_EXT_PATH_REGEX =
@@ -1203,6 +1241,7 @@ export function registerJobHandlers(q: DurableJobQueue) {
 
           if (setRes.status === 0) {
             updated.push({ id: book.id, title: book.title });
+            purgeCoverCache(book.id);
             try {
               getCacheDb().run(
                 "UPDATE file_hashes SET cover = 1 WHERE book_id = ?",
@@ -2161,111 +2200,112 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
 
 function getKosyncProgress() {
   try {
-    if (fs.existsSync(KOSYNC_DB_PATH)) {
-      const db = new Database(KOSYNC_DB_PATH);
-      const rows = db
-        .query(
-          "SELECT id, document, progress, percentage, device, device_id, filename, title, authors, timestamp FROM progress ORDER BY timestamp DESC LIMIT 50;",
-        )
-        .all() as any[];
+    return (
+      withKosyncDb((db) => {
+        const rows = db
+          .query(
+            "SELECT id, document, progress, percentage, device, device_id, filename, title, authors, timestamp FROM progress ORDER BY timestamp DESC LIMIT 50;",
+          )
+          .all() as any[];
 
-      const { map, books } = getCalibreHashMap();
+        const { map, books } = getCalibreHashMap();
 
-      const norm = (s: string) =>
-        (s || "").toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, "");
+        const norm = (s: string) =>
+          (s || "").toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, "");
 
-      return rows.map((r) => {
-        let displayTitle = r.title || r.filename;
-        let displayAuthors = r.authors;
-        let bookId: number | null = null;
-        let cover: boolean = false;
+        return rows.map((r) => {
+          let displayTitle = r.title || r.filename;
+          let displayAuthors = r.authors;
+          let bookId: number | null = null;
+          let cover: boolean = false;
 
-        if (map[r.document]) {
-          displayTitle = map[r.document].title;
-          displayAuthors = map[r.document].authors;
-          bookId = map[r.document].id;
-          cover = map[r.document].cover;
-        }
-
-        if (!bookId && (r.title || r.filename)) {
-          const searchNorm = norm(r.title || r.filename);
-          const bookMatch = books.find((b: any) => {
-            const bNorm = norm(b.title);
-            return (
-              bNorm === searchNorm ||
-              (searchNorm.length > 5 &&
-                (bNorm.includes(searchNorm) || searchNorm.includes(bNorm)))
-            );
-          });
-          if (bookMatch) {
-            bookId = bookMatch.id;
-            cover = !!bookMatch.cover;
-            displayTitle = bookMatch.title;
-            displayAuthors = bookMatch.authors || displayAuthors;
+          if (map[r.document]) {
+            displayTitle = map[r.document].title;
+            displayAuthors = map[r.document].authors;
+            bookId = map[r.document].id;
+            cover = map[r.document].cover;
           }
-        }
 
-        if (!bookId) {
-          try {
-            const alias = db
-              .query(
-                "SELECT canonical_id, normalized_title, normalized_authors FROM document_aliases WHERE document_hash = ?",
-              )
-              .get(r.document) as any;
-
-            if (alias) {
-              const aliasNorm = norm(alias.normalized_title);
-              const bookMatch = books.find(
-                (b: any) => norm(b.title) === aliasNorm,
+          if (!bookId && (r.title || r.filename)) {
+            const searchNorm = norm(r.title || r.filename);
+            const bookMatch = books.find((b: any) => {
+              const bNorm = norm(b.title);
+              return (
+                bNorm === searchNorm ||
+                (searchNorm.length > 5 &&
+                  (bNorm.includes(searchNorm) || searchNorm.includes(bNorm)))
               );
-              if (bookMatch) {
-                bookId = bookMatch.id;
-                cover = !!bookMatch.cover;
-                displayTitle = bookMatch.title;
-                displayAuthors = bookMatch.authors || displayAuthors;
-              } else {
-                displayTitle = alias.normalized_title;
-                displayAuthors = alias.normalized_authors || "Unknown Author";
-              }
+            });
+            if (bookMatch) {
+              bookId = bookMatch.id;
+              cover = !!bookMatch.cover;
+              displayTitle = bookMatch.title;
+              displayAuthors = bookMatch.authors || displayAuthors;
             }
-          } catch (_e) {
-            void _e;
           }
-        }
 
-        if (!displayTitle) {
-          const match = books.find(
-            (b: any) =>
-              cleanString(b.title).toLowerCase() ===
-              cleanString(r.filename || "").toLowerCase(),
-          );
-          if (match) {
-            displayTitle = match.title;
-            displayAuthors = match.authors;
-            bookId = match.id;
-            cover = !!match.cover;
-          } else {
-            displayTitle = "Active Reading Session";
-            displayAuthors = "KOReader Document";
+          if (!bookId) {
+            try {
+              const alias = db
+                .query(
+                  "SELECT canonical_id, normalized_title, normalized_authors FROM document_aliases WHERE document_hash = ?",
+                )
+                .get(r.document) as any;
+
+              if (alias) {
+                const aliasNorm = norm(alias.normalized_title);
+                const bookMatch = books.find(
+                  (b: any) => norm(b.title) === aliasNorm,
+                );
+                if (bookMatch) {
+                  bookId = bookMatch.id;
+                  cover = !!bookMatch.cover;
+                  displayTitle = bookMatch.title;
+                  displayAuthors = bookMatch.authors || displayAuthors;
+                } else {
+                  displayTitle = alias.normalized_title;
+                  displayAuthors = alias.normalized_authors || "Unknown Author";
+                }
+              }
+            } catch (_e) {
+              void _e;
+            }
           }
-        }
 
-        if (displayTitle) {
-          displayTitle = cleanString(displayTitle);
-          if (displayTitle.endsWith(".epub")) {
-            displayTitle = displayTitle.replace(/\.epub$/i, "");
+          if (!displayTitle) {
+            const match = books.find(
+              (b: any) =>
+                cleanString(b.title).toLowerCase() ===
+                cleanString(r.filename || "").toLowerCase(),
+            );
+            if (match) {
+              displayTitle = match.title;
+              displayAuthors = match.authors;
+              bookId = match.id;
+              cover = !!match.cover;
+            } else {
+              displayTitle = "Active Reading Session";
+              displayAuthors = "KOReader Document";
+            }
           }
-        }
 
-        return {
-          ...r,
-          displayTitle,
-          displayAuthors: cleanString(displayAuthors) || "Unknown Author",
-          bookId,
-          cover,
-        };
-      });
-    }
+          if (displayTitle) {
+            displayTitle = cleanString(displayTitle);
+            if (displayTitle.endsWith(".epub")) {
+              displayTitle = displayTitle.replace(/\.epub$/i, "");
+            }
+          }
+
+          return {
+            ...r,
+            displayTitle,
+            displayAuthors: cleanString(displayAuthors) || "Unknown Author",
+            bookId,
+            cover,
+          };
+        });
+      }) || []
+    );
   } catch (e) {
     console.error("Error reading kosync db:", e);
   }
@@ -3279,34 +3319,28 @@ async function handleRequestCore(
     );
   }
 
-  if (url.pathname.startsWith("/api/jobs/") && req.method === "GET") {
-    const jobId = url.pathname.split("/")[3];
-    if (!jobId)
-      return jsonResponse(
-        { success: false, error: "Missing job ID" },
-        400,
-        corsOrigin,
-      );
-    const job = jobQueue.getJob(jobId);
-    if (!job)
-      return jsonResponse(
-        { success: false, error: "Job not found" },
-        404,
-        corsOrigin,
-      );
+  const jobDetailMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
+  if (jobDetailMatch && req.method === "GET") {
+    const jobId = jobDetailMatch[1];
+    if (jobId !== "recent") {
+      const job = jobQueue.getJob(jobId);
+      if (!job)
+        return jsonResponse(
+          { success: false, error: "Job not found" },
+          404,
+          corsOrigin,
+        );
 
-    return jsonResponse(
-      { success: true, job: sanitizeJobForResponse(job) },
-      200,
-      corsOrigin,
-    );
+      return jsonResponse(
+        { success: true, job: sanitizeJobForResponse(job) },
+        200,
+        corsOrigin,
+      );
+    }
   }
 
-  if (
-    url.pathname.startsWith("/api/jobs/") &&
-    url.pathname.endsWith("/retry") &&
-    req.method === "POST"
-  ) {
+  const jobRetryMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/retry$/);
+  if (jobRetryMatch && req.method === "POST") {
     if (isWan) {
       const auth = authenticateRequest(req, authOpts);
       if (!auth.authenticated) {
@@ -3322,7 +3356,7 @@ async function handleRequestCore(
       }
     }
 
-    const jobId = url.pathname.split("/")[3];
+    const jobId = jobRetryMatch[1];
     if (!jobId)
       return jsonResponse(
         { success: false, error: "Missing job ID" },
@@ -3366,12 +3400,9 @@ async function handleRequestCore(
   }
 
   // API: Book Cover Proxy & Native Downscaled Thumbnail Cache
-  if (
-    url.pathname.startsWith("/api/books/") &&
-    url.pathname.endsWith("/cover")
-  ) {
-    const parts = url.pathname.split("/");
-    const bookId = validateIntegerId(parts[3]);
+  const bookCoverMatch = url.pathname.match(/^\/api\/books\/([^/]+)\/cover$/);
+  if (bookCoverMatch) {
+    const bookId = validateIntegerId(bookCoverMatch[1]);
     if (!bookId) return new Response("Invalid book ID", { status: 400 });
 
     const acceptHeader = req.headers.get("accept") || "";
@@ -3735,13 +3766,12 @@ async function handleRequestCore(
   }
 
   // API: Book Download Proxy (Delivers clean sanitized metadata-based filename)
-  if (
-    url.pathname.startsWith("/api/books/") &&
-    url.pathname.includes("/download/")
-  ) {
-    const parts = url.pathname.split("/");
-    const bookId = validateIntegerId(parts[3]);
-    const format = validateBookFormat(parts[5]);
+  const bookDownloadMatch = url.pathname.match(
+    /^\/api\/books\/([^/]+)\/download\/([^/]+)$/,
+  );
+  if (bookDownloadMatch) {
+    const bookId = validateIntegerId(bookDownloadMatch[1]);
+    const format = validateBookFormat(bookDownloadMatch[2]);
 
     if (!bookId || !format) {
       return new Response("Invalid book ID or format", { status: 400 });
@@ -3834,8 +3864,10 @@ async function handleRequestCore(
           setArgs.push("--field", `authors:${clean.author}`);
           hasChanges = true;
         }
-        if (clean.tags) {
-          setArgs.push("--field", `tags:${clean.tags.join(",")}`);
+        const currentTags = (Array.isArray(b.tags) ? b.tags : b.tags ? [b.tags] : []).join(",");
+        const newTags = (clean.tags || []).join(",");
+        if (newTags !== currentTags) {
+          setArgs.push("--field", `tags:${newTags}`);
           hasChanges = true;
         }
 
@@ -3903,13 +3935,11 @@ async function handleRequestCore(
   }
 
   // API: Get highlights for a specific book
-  if (
-    url.pathname.startsWith("/api/books/") &&
-    url.pathname.endsWith("/highlights") &&
-    req.method === "GET"
-  ) {
-    const parts = url.pathname.split("/");
-    const bookId = validateIntegerId(parts[3]);
+  const bookHighlightsMatch = url.pathname.match(
+    /^\/api\/books\/([^/]+)\/highlights$/,
+  );
+  if (bookHighlightsMatch && req.method === "GET") {
+    const bookId = validateIntegerId(bookHighlightsMatch[1]);
     if (!bookId) {
       return jsonResponse(
         { success: false, error: "Invalid book ID" },
@@ -4064,12 +4094,11 @@ async function handleRequestCore(
   }
 
   // API: Export Obsidian Markdown with Real Highlights
-  if (
-    url.pathname.startsWith("/api/books/") &&
-    url.pathname.endsWith("/obsidian.md")
-  ) {
-    const parts = url.pathname.split("/");
-    const bookId = validateIntegerId(parts[3]);
+  const bookObsidianMatch = url.pathname.match(
+    /^\/api\/books\/([^/]+)\/obsidian\.md$/,
+  );
+  if (bookObsidianMatch) {
+    const bookId = validateIntegerId(bookObsidianMatch[1]);
     if (!bookId) return new Response("Invalid book ID", { status: 400 });
 
     const books = getCalibreBooks();
@@ -4367,7 +4396,15 @@ async function handleRequestCore(
   // API: Link Unmapped KOSync Document to Calibre Book
   if (url.pathname === "/api/kosync/link-document" && req.method === "POST") {
     try {
-      const body = (await req.json()) as { document: string; bookId: number };
+      const parsedBody = await parseJsonBody<{ document?: string; bookId?: number }>(req);
+      if (parsedBody.error) {
+        return jsonResponse(
+          { success: false, error: parsedBody.error },
+          400,
+          corsOrigin,
+        );
+      }
+      const body = parsedBody.data;
       const bookId = validateIntegerId(body.bookId);
       if (!body.document || !bookId) {
         return jsonResponse(
@@ -4393,8 +4430,7 @@ async function handleRequestCore(
         cleanString(book.authors || "").toLowerCase();
       const now = Math.floor(Date.now() / 1000);
 
-      if (fs.existsSync(KOSYNC_DB_PATH)) {
-        const db = new Database(KOSYNC_DB_PATH);
+      const linked = withKosyncDb((db) => {
         db.prepare(
           `INSERT INTO document_aliases (document_hash, canonical_id, normalized_title, normalized_authors, created_at)
            VALUES (?, ?, ?, ?, ?)
@@ -4403,7 +4439,7 @@ async function handleRequestCore(
              normalized_title = excluded.normalized_title,
              normalized_authors = excluded.normalized_authors`,
         ).run(
-          body.document,
+          body.document!,
           canonicalId,
           book.title,
           book.authors || "Unknown",
@@ -4414,8 +4450,11 @@ async function handleRequestCore(
           `UPDATE progress
            SET title = ?, authors = ?
            WHERE document = ?`,
-        ).run(book.title, book.authors || "Unknown", body.document);
+        ).run(book.title, book.authors || "Unknown", body.document!);
+        return true;
+      });
 
+      if (linked) {
         return jsonResponse(
           {
             success: true,
@@ -4441,13 +4480,12 @@ async function handleRequestCore(
   }
 
   // API: Delete Single KOSync Progress Entry
-  if (
-    url.pathname.startsWith("/api/kosync/progress/") &&
-    req.method === "DELETE"
-  ) {
+  const kosyncProgressMatch = url.pathname.match(
+    /^\/api\/kosync\/progress\/([^/]+)$/,
+  );
+  if (kosyncProgressMatch && req.method === "DELETE") {
     try {
-      const parts = url.pathname.split("/");
-      const progressId = validateIntegerId(parts[4]);
+      const progressId = validateIntegerId(kosyncProgressMatch[1]);
       if (!progressId) {
         return jsonResponse(
           { success: false, error: "Invalid progress ID" },
@@ -4456,9 +4494,12 @@ async function handleRequestCore(
         );
       }
 
-      if (fs.existsSync(KOSYNC_DB_PATH)) {
-        const db = new Database(KOSYNC_DB_PATH);
+      const deleted = withKosyncDb((db) => {
         db.run("DELETE FROM progress WHERE id = ?;", [progressId]);
+        return true;
+      });
+
+      if (deleted) {
         return jsonResponse(
           { success: true, message: `Removed progress entry ${progressId}` },
           200,
@@ -4482,9 +4523,11 @@ async function handleRequestCore(
   // API: Clear All KOSync Progress Entries
   if (url.pathname === "/api/kosync/progress/clear" && req.method === "POST") {
     try {
-      if (fs.existsSync(KOSYNC_DB_PATH)) {
-        const db = new Database(KOSYNC_DB_PATH);
+      const cleared = withKosyncDb((db) => {
         db.run("DELETE FROM progress;");
+        return true;
+      });
+      if (cleared) {
         return jsonResponse(
           { success: true, message: "Cleared all sync sessions" },
           200,
@@ -4508,7 +4551,15 @@ async function handleRequestCore(
   // API: Ingest Web Article from URL (Read Later EPUB with SSRF Protection)
   if (url.pathname === "/api/ingest-url" && req.method === "POST") {
     try {
-      const body = (await req.json()) as { url?: string };
+      const parsedBody = await parseJsonBody<{ url?: string }>(req);
+      if (parsedBody.error) {
+        return jsonResponse(
+          { success: false, error: parsedBody.error },
+          400,
+          corsOrigin,
+        );
+      }
+      const body = parsedBody.data;
       if (!body.url || typeof body.url !== "string") {
         return jsonResponse(
           { success: false, error: "Missing or invalid 'url' parameter" },
@@ -5326,9 +5377,9 @@ async function handleRequestCore(
   }
 
   // API: Delete Book
-  if (url.pathname.startsWith("/api/books/") && req.method === "DELETE") {
-    const parts = url.pathname.split("/");
-    const bookId = validateIntegerId(parts[3]);
+  const deleteBookMatch = url.pathname.match(/^\/api\/books\/([^/]+)$/);
+  if (deleteBookMatch && req.method === "DELETE") {
+    const bookId = validateIntegerId(deleteBookMatch[1]);
     if (!bookId) {
       return jsonResponse(
         { success: false, error: "Invalid book ID" },
@@ -5351,6 +5402,7 @@ async function handleRequestCore(
     getCalibreBooks(true);
     if (delRes.status === 0) {
       deleteHighlightsForBook(getCacheDb(), bookId, bookTitle);
+      purgeCoverCache(bookId);
       return jsonResponse(
         { success: true, message: `Removed book ${bookId}` },
         200,
@@ -5371,7 +5423,15 @@ async function handleRequestCore(
   // API: Bulk Delete Books
   if (url.pathname === "/api/books/bulk-delete" && req.method === "POST") {
     try {
-      const body = (await req.json()) as { bookIds: (string | number)[] };
+      const parsedBody = await parseJsonBody<{ bookIds?: (string | number)[] }>(req);
+      if (parsedBody.error) {
+        return jsonResponse(
+          { success: false, error: parsedBody.error },
+          400,
+          corsOrigin,
+        );
+      }
+      const body = parsedBody.data;
       if (
         !body.bookIds ||
         !Array.isArray(body.bookIds) ||
@@ -5415,6 +5475,7 @@ async function handleRequestCore(
       if (delRes.status === 0) {
         for (const id of validIds) {
           deleteHighlightsForBook(getCacheDb(), id, titleMap.get(id));
+          purgeCoverCache(id);
         }
         return jsonResponse(
           { success: true, message: `Removed ${validIds.length} books` },
@@ -5443,8 +5504,15 @@ async function handleRequestCore(
   // API: Multi-Source Metadata Lookup
   if (url.pathname === "/api/metadata/lookup" && req.method === "POST") {
     try {
-      const body = (await req.json()) as { query: string };
-      const query = body.query;
+      const parsedBody = await parseJsonBody<{ query?: string }>(req);
+      if (parsedBody.error) {
+        return jsonResponse(
+          { success: false, results: [], error: parsedBody.error },
+          400,
+          corsOrigin,
+        );
+      }
+      const query = parsedBody.data?.query;
       if (!query) return jsonResponse({ results: [] }, 200, corsOrigin);
 
       const isManga = req.url.includes("manga=true");
@@ -5465,14 +5533,12 @@ async function handleRequestCore(
   }
 
   // API: Update Metadata & Cover
-  if (
-    url.pathname.startsWith("/api/books/") &&
-    url.pathname.endsWith("/metadata") &&
-    req.method === "POST"
-  ) {
+  const bookMetadataMatch = url.pathname.match(
+    /^\/api\/books\/([^/]+)\/metadata$/,
+  );
+  if (bookMetadataMatch && req.method === "POST") {
     try {
-      const parts = url.pathname.split("/");
-      const bookId = validateIntegerId(parts[3]);
+      const bookId = validateIntegerId(bookMetadataMatch[1]);
       if (!bookId) {
         return jsonResponse(
           { success: false, error: "Invalid book ID" },
@@ -5481,7 +5547,7 @@ async function handleRequestCore(
         );
       }
 
-      const body = (await req.json()) as {
+      const parsedBody = await parseJsonBody<{
         title?: string;
         authors?: string;
         tags?: string;
@@ -5490,7 +5556,15 @@ async function handleRequestCore(
         comments?: string;
         rating?: number;
         coverUrl?: string;
-      };
+      }>(req);
+      if (parsedBody.error) {
+        return jsonResponse(
+          { success: false, error: parsedBody.error },
+          400,
+          corsOrigin,
+        );
+      }
+      const body = parsedBody.data;
 
       const cleanTitle = cleanString(body.title || "");
       const cleanAuth = cleanString(body.authors || "");
@@ -5521,6 +5595,16 @@ async function handleRequestCore(
       let tempCover = "";
       if (body.coverUrl) {
         const coverUrl = body.coverUrl;
+        if (!isAllowedCoverUrl(coverUrl)) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Cover domain not permitted",
+            },
+            400,
+            corsOrigin,
+          );
+        }
         const ssrfCheck = await validateUrlForSSRF(coverUrl, {
           allowProxyBypass: true,
         });
@@ -5537,11 +5621,19 @@ async function handleRequestCore(
         }
 
         try {
-          const cRes = await safeFetchWithSsrf(coverUrl);
+          const cRes = await safeFetchWithSsrf(coverUrl, {
+            signal: AbortSignal.timeout(15000),
+          });
           if (cRes.ok) {
-            tempCover = `/tmp/cover_${bookId}_${Date.now()}.jpg`;
-            fs.writeFileSync(tempCover, Buffer.from(await cRes.arrayBuffer()));
-            args.push("--field", `cover:${tempCover}`);
+            const cType = cRes.headers.get("content-type") || "";
+            if (!cType || cType.includes("image") || cType.includes("octet-stream")) {
+              const cBuf = Buffer.from(await cRes.arrayBuffer());
+              if (cBuf.length >= 512 && cBuf.length <= 25 * 1024 * 1024) {
+                tempCover = path.join(os.tmpdir(), `cover_${bookId}_${Date.now()}.jpg`);
+                fs.writeFileSync(tempCover, cBuf);
+                args.push("--field", `cover:${tempCover}`);
+              }
+            }
           }
         } catch (e) {
           console.error("Cover download error:", e);
@@ -5904,14 +5996,12 @@ async function handleRequestCore(
   }
 
   // API: Single Book Send to Kindle
-  if (
-    url.pathname.startsWith("/api/books/") &&
-    url.pathname.endsWith("/send-kindle") &&
-    req.method === "POST"
-  ) {
+  const bookSendKindleMatch = url.pathname.match(
+    /^\/api\/books\/([^/]+)\/send-kindle$/,
+  );
+  if (bookSendKindleMatch && req.method === "POST") {
     try {
-      const parts = url.pathname.split("/");
-      const bookId = validateIntegerId(parts[3]);
+      const bookId = validateIntegerId(bookSendKindleMatch[1]);
       if (!bookId) {
         return jsonResponse(
           { success: false, error: "Invalid book ID" },
@@ -6064,6 +6154,15 @@ async function handleRequestCore(
     }
   }
 
+  // 404 handler for unmatched API routes
+  if (url.pathname.startsWith("/api/")) {
+    return jsonResponse(
+      { success: false, error: "API endpoint not found" },
+      404,
+      corsOrigin,
+    );
+  }
+
   // Serve SPA HTML
   try {
     if (fs.existsSync(HTML_PATH)) {
@@ -6135,8 +6234,34 @@ export async function handleRequest(
   req: Request,
   server?: any,
 ): Promise<Response> {
-  const res = await handleRequestCore(req, server);
-  return compressResponseIfNeeded(res, req);
+  try {
+    const res = await handleRequestCore(req, server);
+    return compressResponseIfNeeded(res, req);
+  } catch (err: any) {
+    console.error("[Server] Unhandled request error:", err);
+    let origin = "";
+    try {
+      origin = req?.headers?.get("origin") || "";
+    } catch {
+      // ignore header access errors
+    }
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json; charset=utf-8",
+      "X-Content-Type-Options": "nosniff",
+    };
+    if (origin && isAllowedOrigin(origin)) {
+      headers["Access-Control-Allow-Origin"] = origin;
+      headers["Access-Control-Allow-Credentials"] = "true";
+      headers["Vary"] = "Origin";
+    }
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: sanitizeErrorMessage(err) || "Internal server error",
+      }),
+      { status: 500, headers },
+    );
+  }
 }
 
 // Start Server & Background Job Queue Worker when run directly
@@ -6149,9 +6274,7 @@ if ((import.meta as any).main) {
   (globalThis as any).Bun.serve({
     port: listenPort,
     hostname: "0.0.0.0",
-    fetch(req: any, server: any) {
-      return handleRequest(req, server);
-    },
+    fetch: handleRequest,
   });
   console.log(
     `[Server] Reading HQ Web Uploader listening on http://0.0.0.0:${listenPort}`,

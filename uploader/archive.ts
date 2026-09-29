@@ -154,6 +154,14 @@ export interface ArchiveInspection {
 export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
   try {
     const stat = fs.statSync(archivePath);
+    if (stat.size === 0) {
+      return {
+        safe: false,
+        error: "Archive file is empty (0 bytes)",
+        entryCount: 0,
+        totalUncompressedBytes: 0,
+      };
+    }
     if (stat.size > MAX_ARCHIVE_SIZE_BYTES) {
       return {
         safe: false,
@@ -170,69 +178,77 @@ export function inspectArchiveSafety(archivePath: string): ArchiveInspection {
     const chunkView = new DataView(chunkBuf.buffer);
     let offset = 0;
     const fileSize = stat.size;
+    let newlineFound = false;
 
-    while (offset < fileSize) {
-      const readSize = Math.min(CHUNK_SIZE, fileSize - offset);
-      const bytesRead = fs.readSync(fd, chunkBuf, 0, readSize, offset);
-      if (bytesRead <= 4) break;
+    try {
+      while (offset < fileSize) {
+        const readSize = Math.min(CHUNK_SIZE, fileSize - offset);
+        const bytesRead = fs.readSync(fd, chunkBuf, 0, readSize, offset);
+        if (bytesRead <= 4) break;
 
-      for (let i = 0; i < bytesRead - 4; i++) {
-        if (
-          chunkBuf[i] === 0x50 &&
-          chunkBuf[i + 1] === 0x4b &&
-          ((chunkBuf[i + 2] === 0x03 && chunkBuf[i + 3] === 0x04) ||
-            (chunkBuf[i + 2] === 0x01 && chunkBuf[i + 3] === 0x02))
-        ) {
-          const nameLenOffset = chunkBuf[i + 2] === 0x03 ? i + 26 : i + 28;
-          const nameStartOffset = chunkBuf[i + 2] === 0x03 ? i + 30 : i + 46;
-          if (nameStartOffset <= bytesRead && nameLenOffset + 2 <= bytesRead) {
-            const nameLen = chunkView.getUint16(nameLenOffset, true);
-            if (nameStartOffset + nameLen <= bytesRead) {
-              const entryNameBuf = chunkBuf.subarray(
-                nameStartOffset,
-                nameStartOffset + nameLen,
-              );
-              if (entryNameBuf.includes(0x0a) || entryNameBuf.includes(0x0d)) {
-                fs.closeSync(fd);
-                return {
-                  safe: false,
-                  error:
-                    "Archive entry names containing newline characters are strictly rejected",
-                  entryCount: 0,
-                  totalUncompressedBytes: 0,
-                };
+        for (let i = 0; i < bytesRead - 4; i++) {
+          if (
+            chunkBuf[i] === 0x50 &&
+            chunkBuf[i + 1] === 0x4b &&
+            ((chunkBuf[i + 2] === 0x03 && chunkBuf[i + 3] === 0x04) ||
+              (chunkBuf[i + 2] === 0x01 && chunkBuf[i + 3] === 0x02))
+          ) {
+            const nameLenOffset = chunkBuf[i + 2] === 0x03 ? i + 26 : i + 28;
+            const nameStartOffset = chunkBuf[i + 2] === 0x03 ? i + 30 : i + 46;
+            if (nameStartOffset <= bytesRead && nameLenOffset + 2 <= bytesRead) {
+              const nameLen = chunkView.getUint16(nameLenOffset, true);
+              if (nameStartOffset + nameLen <= bytesRead) {
+                const entryNameBuf = chunkBuf.subarray(
+                  nameStartOffset,
+                  nameStartOffset + nameLen,
+                );
+                if (entryNameBuf.includes(0x0a) || entryNameBuf.includes(0x0d)) {
+                  newlineFound = true;
+                  break;
+                }
               }
             }
           }
         }
-      }
+        if (newlineFound) break;
 
-      // Check TAR header boundaries (512 bytes) for newline entry names
-      for (let b = 0; b <= bytesRead - 512; b += 512) {
-        if (
-          chunkBuf[b + 257] === 0x75 && // 'u'
-          chunkBuf[b + 258] === 0x73 && // 's'
-          chunkBuf[b + 259] === 0x74 && // 't'
-          chunkBuf[b + 260] === 0x61 && // 'a'
-          chunkBuf[b + 261] === 0x72 // 'r'
-        ) {
-          const tarNameBuf = chunkBuf.subarray(b, b + 100);
-          if (tarNameBuf.includes(0x0a) || tarNameBuf.includes(0x0d)) {
-            fs.closeSync(fd);
-            return {
-              safe: false,
-              error:
-                "Archive entry names containing newline characters are strictly rejected",
-              entryCount: 0,
-              totalUncompressedBytes: 0,
-            };
+        // Check TAR header boundaries (512 bytes) for newline entry names
+        for (let b = 0; b <= bytesRead - 512; b += 512) {
+          if (
+            chunkBuf[b + 257] === 0x75 && // 'u'
+            chunkBuf[b + 258] === 0x73 && // 's'
+            chunkBuf[b + 259] === 0x74 && // 't'
+            chunkBuf[b + 260] === 0x61 && // 'a'
+            chunkBuf[b + 261] === 0x72 // 'r'
+          ) {
+            const tarNameBuf = chunkBuf.subarray(b, b + 100);
+            if (tarNameBuf.includes(0x0a) || tarNameBuf.includes(0x0d)) {
+              newlineFound = true;
+              break;
+            }
           }
         }
-      }
+        if (newlineFound) break;
 
-      offset += Math.max(1, bytesRead - 2048);
+        offset += Math.max(1, bytesRead - 2048);
+      }
+    } finally {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Ignore close error
+      }
     }
-    fs.closeSync(fd);
+
+    if (newlineFound) {
+      return {
+        safe: false,
+        error:
+          "Archive entry names containing newline characters are strictly rejected",
+        entryCount: 0,
+        totalUncompressedBytes: 0,
+      };
+    }
 
     // Run bsdtar -tvf to inspect entry headers and sizes
     const bsdtarBin = getBsdtarPath();

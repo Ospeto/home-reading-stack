@@ -222,6 +222,7 @@ describe("Firecrawl On-Demand Cluster Manager (uploader/firecrawl.ts)", () => {
     it("stops containers via docker compose stop", async () => {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fc-test-stop-"));
       process.env.FIRECRAWL_COMPOSE_DIR = tempDir;
+      process.env.FIRECRAWL_ACTIVITY_DIR = path.join(tempDir, "activity");
 
       resetFirecrawlIdleTimer();
       expect(isFirecrawlIdleTimerActive()).toBe(true);
