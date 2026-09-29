@@ -1231,8 +1231,8 @@ export async function downloadCoverImage(
   }
 
   const randomSuffix = `${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
-  const tempRaw = `/tmp/raw_cover_${randomSuffix}`;
-  const tempJpg = `/tmp/article_cover_${randomSuffix}.jpg`;
+  const tempRaw = path.join(os.tmpdir(), `raw_cover_${randomSuffix}`);
+  const tempJpg = path.join(os.tmpdir(), `article_cover_${randomSuffix}.jpg`);
 
   try {
     const res = await safeFetchWithSsrf(resolvedUrl, {
@@ -1257,7 +1257,7 @@ export async function downloadCoverImage(
     }
 
     const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length < 1024) return null;
+    if (buf.length < 1024 || buf.length > 25 * 1024 * 1024) return null;
 
     fs.writeFileSync(tempRaw, buf);
 
@@ -1280,9 +1280,23 @@ export async function downloadCoverImage(
         return tempJpg;
       }
     }
+    if (fs.existsSync(tempJpg)) {
+      try {
+        fs.unlinkSync(tempJpg);
+      } catch (_unlinkErr) {
+        void _unlinkErr;
+      }
+    }
     return null;
   } catch (_err) {
     void _err;
+    if (fs.existsSync(tempJpg)) {
+      try {
+        fs.unlinkSync(tempJpg);
+      } catch (_unlinkErr) {
+        void _unlinkErr;
+      }
+    }
     return null;
   } finally {
     if (fs.existsSync(tempRaw)) {
@@ -2213,6 +2227,13 @@ export function convertHtmlToEpub(
     const convertRes = runEbookConvert(convertArgs);
 
     if (convertRes.status !== 0 || !fs.existsSync(tempEpub)) {
+      if (fs.existsSync(tempEpub)) {
+        try {
+          fs.unlinkSync(tempEpub);
+        } catch (_unlinkErr) {
+          void _unlinkErr;
+        }
+      }
       const err =
         convertRes.stderr ||
         convertRes.stdout ||
@@ -2400,9 +2421,15 @@ export async function ingestArticleFromUrl(
         String(bookId),
         "--with-library",
         SERVER_URL,
-        "--cover",
-        article.coverImagePath,
+        "--field",
+        `cover:${article.coverImagePath}`,
       ]);
+      try {
+        const { purgeCoverCache } = await import("./server.ts");
+        purgeCoverCache(bookId);
+      } catch {
+        // ignore
+      }
     }
 
     return {

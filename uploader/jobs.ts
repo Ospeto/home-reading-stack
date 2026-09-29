@@ -183,7 +183,11 @@ export class DurableJobQueue {
    * Retrieves a list of recent jobs for inspection and status monitoring.
    */
   public getRecentJobs(options: { limit?: number; status?: JobStatus; type?: JobType } = {}): JobRecord[] {
-    const limit = Math.min(options.limit || 50, 200);
+    const rawLimit = options.limit ?? 50;
+    const limit = Math.max(
+      1,
+      Math.min(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 50, 200),
+    );
     const conditions: string[] = [];
     const params: any[] = [];
 
@@ -220,6 +224,7 @@ export class DurableJobQueue {
       .prepare(
         `UPDATE jobs
          SET status = 'pending',
+             retries = 0,
              next_run_at = ?,
              updated_at = ?,
              error = NULL
@@ -372,6 +377,18 @@ export class DurableJobQueue {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
+    }
+  }
+
+  /**
+   * Closes the worker loop and the underlying database connection.
+   */
+  public close(): void {
+    this.stopWorker();
+    try {
+      this.db.close();
+    } catch {
+      // ignore
     }
   }
 

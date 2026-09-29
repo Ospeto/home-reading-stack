@@ -36,6 +36,13 @@ export interface StopFirecrawlOptions {
   spawnCmd?: (cmd: string, args: string[], opts: any) => any;
 }
 
+export function getFirecrawlActivityDir(): string {
+  if (process.env.FIRECRAWL_ACTIVITY_DIR) {
+    return process.env.FIRECRAWL_ACTIVITY_DIR;
+  }
+  return path.join(os.tmpdir(), "lighthouse-firecrawl-activity");
+}
+
 export const FIRECRAWL_ACTIVITY_DIR = path.join(
   os.tmpdir(),
   "lighthouse-firecrawl-activity",
@@ -43,20 +50,23 @@ export const FIRECRAWL_ACTIVITY_DIR = path.join(
 
 function ensureActivityDir(): void {
   try {
-    if (!fs.existsSync(FIRECRAWL_ACTIVITY_DIR)) {
-      fs.mkdirSync(FIRECRAWL_ACTIVITY_DIR, { recursive: true });
+    const actDir = getFirecrawlActivityDir();
+    if (!fs.existsSync(actDir)) {
+      fs.mkdirSync(actDir, { recursive: true });
     }
   } catch {
     // Ignore error
   }
 }
 
-const HEARTBEAT_FILE = path.join(FIRECRAWL_ACTIVITY_DIR, "last_active");
+function getActivityHeartbeatPath(): string {
+  return path.join(getFirecrawlActivityDir(), "last_active");
+}
 
 function updateActivityHeartbeat(): void {
   try {
     ensureActivityDir();
-    fs.writeFileSync(HEARTBEAT_FILE, String(Date.now()), "utf8");
+    fs.writeFileSync(getActivityHeartbeatPath(), String(Date.now()), "utf8");
   } catch {
     // Ignore error
   }
@@ -64,11 +74,12 @@ function updateActivityHeartbeat(): void {
 
 export function getLastActivityAt(): number {
   try {
-    if (fs.existsSync(HEARTBEAT_FILE)) {
-      const raw = fs.readFileSync(HEARTBEAT_FILE, "utf8").trim();
+    const heartbeatPath = getActivityHeartbeatPath();
+    if (fs.existsSync(heartbeatPath)) {
+      const raw = fs.readFileSync(heartbeatPath, "utf8").trim();
       const val = parseInt(raw, 10);
       if (!isNaN(val) && val > 0) return val;
-      const stat = fs.statSync(HEARTBEAT_FILE);
+      const stat = fs.statSync(heartbeatPath);
       return stat.mtimeMs;
     }
   } catch {
@@ -93,12 +104,13 @@ function isPidAlive(pid: number): boolean {
 export function getActiveLockCount(): number {
   ensureActivityDir();
   let activeCount = 0;
+  const actDir = getFirecrawlActivityDir();
   try {
-    const files = fs.readdirSync(FIRECRAWL_ACTIVITY_DIR);
+    const files = fs.readdirSync(actDir);
     const now = Date.now();
     for (const f of files) {
       if (!f.endsWith(".lock")) continue;
-      const fullPath = path.join(FIRECRAWL_ACTIVITY_DIR, f);
+      const fullPath = path.join(actDir, f);
       // Format: <pid>_<timestamp>_<rand>.lock
       const parts = f.replace(/\.lock$/, "").split("_");
       const pid = parseInt(parts[0], 10);
@@ -136,8 +148,9 @@ export function createScrapeLock(): string {
   localInFlightScrapes++;
   ensureActivityDir();
   updateActivityHeartbeat();
+  const actDir = getFirecrawlActivityDir();
   const lockFileName = `${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.lock`;
-  const lockPath = path.join(FIRECRAWL_ACTIVITY_DIR, lockFileName);
+  const lockPath = path.join(actDir, lockFileName);
   try {
     fs.writeFileSync(lockPath, String(process.pid), { flag: "wx" });
   } catch {
@@ -419,11 +432,12 @@ export async function stopFirecrawl(
 
   // Clear directory lock files on stop
   try {
-    if (fs.existsSync(FIRECRAWL_ACTIVITY_DIR)) {
-      const files = fs.readdirSync(FIRECRAWL_ACTIVITY_DIR);
+    const actDir = getFirecrawlActivityDir();
+    if (fs.existsSync(actDir)) {
+      const files = fs.readdirSync(actDir);
       for (const f of files) {
         try {
-          fs.unlinkSync(path.join(FIRECRAWL_ACTIVITY_DIR, f));
+          fs.unlinkSync(path.join(actDir, f));
         } catch {
           // Ignore unlink error
         }

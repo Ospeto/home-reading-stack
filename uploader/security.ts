@@ -1203,9 +1203,17 @@ export function validateEpubContent(filePath: string): EpubValidationResult {
     }
 
     const fd = fs.openSync(filePath, "r");
+    let bytesRead = 0;
     const headerBuf = Buffer.alloc(128);
-    const bytesRead = fs.readSync(fd, headerBuf, 0, 128, 0);
-    fs.closeSync(fd);
+    try {
+      bytesRead = fs.readSync(fd, headerBuf, 0, 128, 0);
+    } finally {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Ignore close error
+      }
+    }
 
     if (bytesRead < 30) {
       return { valid: false, error: "Truncated file header" };
