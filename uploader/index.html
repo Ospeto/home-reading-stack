@@ -1579,9 +1579,8 @@
               <span id="quickReadingCount" class="visionos-badge visionos-badge-reading">0</span>
             </button>
 
-            <!-- Discover Tab ✨ -->
+            <!-- Discover Tab -->
             <button onclick="switchView('discover')" id="chip-discover" role="tab" aria-selected="false" class="visionos-tab visionos-tab-discover" title="Discover Light Novels">
-              <span class="text-amber-400">✨</span>
               <span>Discover</span>
               <span id="quickDiscoverBadge" class="visionos-badge visionos-badge-discover">Hot</span>
             </button>
@@ -1710,12 +1709,10 @@
           <!-- Segmented Toggle -->
           <div class="inline-flex items-center bg-zinc-900/90 border border-white/10 rounded-full p-1 shadow-lg gap-1 self-start sm:self-auto" role="tablist" aria-label="Discover Feeds">
             <button onclick="switchDiscoverTab('trending')" id="discoverTabTrending" role="tab" aria-selected="true" class="discover-tab discover-tab-active px-4 py-1.5 rounded-full text-xs font-bold transition-all duration-150 flex items-center gap-1.5 cursor-pointer active:scale-[0.96]" title="Browse Trending Light Novels">
-              <span>🔥</span>
               <span>Trending</span>
               <span id="discoverTrendingBadge" class="px-1.5 py-0.5 rounded-full text-[10px] font-mono font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30">0</span>
             </button>
             <button onclick="switchDiscoverTab('new_releases')" id="discoverTabNewReleases" role="tab" aria-selected="false" class="discover-tab px-4 py-1.5 rounded-full text-xs font-bold text-zinc-400 hover:text-white transition-all duration-150 flex items-center gap-1.5 cursor-pointer active:scale-[0.96]" title="Browse New Light Novel Releases">
-              <span>✨</span>
               <span>New Releases</span>
               <span id="discoverNewReleasesBadge" class="px-1.5 py-0.5 rounded-full text-[10px] font-mono font-medium bg-white/10 text-zinc-300 border border-white/10">0</span>
             </button>
@@ -1747,8 +1744,8 @@
               <span class="text-[11px] font-semibold text-zinc-400 hidden sm:inline">Library:</span>
               <div class="inline-flex bg-zinc-950/80 border border-white/10 rounded-xl p-0.5 text-xs">
                 <button onclick="setDiscoverStatusFilter('all')" id="discoverStatus-all" class="px-2.5 py-1 rounded-lg bg-white/15 text-white font-semibold transition-all cursor-pointer active:scale-[0.96]">All</button>
-                <button onclick="setDiscoverStatusFilter('ready')" id="discoverStatus-ready" class="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]">Ready to Download ⚡</button>
-                <button onclick="setDiscoverStatusFilter('in_library')" id="discoverStatus-in_library" class="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]">In Library ✓</button>
+                <button onclick="setDiscoverStatusFilter('ready')" id="discoverStatus-ready" class="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]">Available</button>
+                <button onclick="setDiscoverStatusFilter('in_library')" id="discoverStatus-in_library" class="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]">In Library</button>
               </div>
             </div>
 
@@ -1785,7 +1782,9 @@
 
         <!-- Discover Empty State -->
         <div id="discoverEmptyState" class="hidden text-center py-16 px-4 bg-zinc-900/30 border border-white/5 rounded-2xl text-xs space-y-2">
-          <div class="text-2xl">🔍</div>
+          <div class="w-10 h-10 mx-auto rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-zinc-400 mb-2">
+            <svg class="w-4 h-4"><use href="#icon-magnifying-glass"/></svg>
+          </div>
           <div class="text-zinc-200 font-bold">No novels found</div>
           <div class="text-zinc-500 text-[11px]">Try adjusting your genre, source, or search query.</div>
           <button onclick="resetDiscoverFilters()" class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-semibold mt-2 cursor-pointer active:scale-[0.96]">Reset Filters</button>
@@ -2101,7 +2100,7 @@
       <!-- Modal Header -->
       <div class="flex items-center justify-between pb-4 border-b border-white/10 shrink-0">
         <div class="flex items-center gap-2">
-          <span class="text-amber-400 text-lg">✨</span>
+          <svg class="w-4 h-4 text-amber-400"><use href="#icon-book-open"/></svg>
           <h3 id="discoverModalHeaderTitle" class="tracking-optical-display text-sm sm:text-base font-bold text-white leading-tight">Light Novel Discovery</h3>
         </div>
         <button onclick="closeDiscoverModal()" class="w-10 h-10 rounded-xl bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer active:scale-[0.96] transition-all" title="Close (Esc)">
@@ -2130,7 +2129,7 @@
             <div class="flex flex-wrap items-center gap-2 text-xs">
               <span id="discoverModalVolumes" class="px-2.5 py-1 rounded-lg bg-white/5 border border-white/5 text-zinc-300 font-mono text-[11px]"></span>
               <span id="discoverModalRelease" class="px-2.5 py-1 rounded-lg bg-white/5 border border-white/5 text-zinc-300 font-mono text-[11px]"></span>
-              <div id="discoverModalRating" class="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 font-mono text-[11px]"></div>
+              <div id="discoverModalRating" class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 font-mono text-[11px]"></div>
             </div>
 
             <!-- Genre chips -->
@@ -2147,7 +2146,7 @@
         <!-- Synopsis Section -->
         <div class="space-y-2 pt-2 border-t border-white/5">
           <h4 class="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Synopsis</h4>
-          <p id="discoverModalSynopsis" class="text-xs sm:text-sm text-zinc-300 leading-relaxed whitespace-pre-line bg-white/[0.02] p-4 rounded-xl border border-white/5"></p>
+          <div id="discoverModalSynopsis" class="text-sm leading-relaxed text-zinc-300 font-normal whitespace-pre-line bg-white/[0.02] p-4 sm:p-5 rounded-xl border border-white/5 max-h-60 sm:max-h-72 overflow-y-auto no-scrollbar"></div>
         </div>
       </div>
 
@@ -2157,8 +2156,19 @@
         <div class="flex items-center gap-2 w-full sm:w-auto justify-end">
           <button type="button" onclick="closeDiscoverModal()" class="px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-semibold cursor-pointer active:scale-[0.96] transition-all">Close</button>
           <button id="discoverModalIngestBtn" type="button" onclick="handleDiscoverModalIngest()" class="flex-1 sm:flex-none px-5 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-zinc-950 font-bold text-xs rounded-xl shadow-lg transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]">
-            <span>⚡ 1-Click Ingest to Library</span>
+            <span>Ingest to Library</span>
           </button>
+        </div>
+      </div>
+
+      <!-- Live Download Progress Track in Modal -->
+      <div id="discoverModalProgressContainer" class="hidden pt-3 border-t border-white/5 w-full space-y-1.5">
+        <div class="flex items-center justify-between text-xs">
+          <span id="discoverModalProgressStatus" class="text-amber-300 font-medium truncate">Downloading Volume 1 of 5 (20%)...</span>
+          <span id="discoverModalProgressPct" class="font-mono text-zinc-400 text-xs shrink-0 ml-2">20%</span>
+        </div>
+        <div class="h-1.5 w-full bg-zinc-800 rounded-full overflow-hidden">
+          <div id="discoverModalProgressBar" class="h-full bg-amber-500 rounded-full transition-all duration-300" style="width: 0%"></div>
         </div>
       </div>
 
@@ -2659,13 +2669,13 @@
               <span class="w-5 h-5 rounded-full bg-amber-950 text-amber-400 border border-amber-800/60 flex items-center justify-center text-[11px] font-mono font-bold shrink-0">7</span>
               <span>Discover Shelf (Trending &amp; New Releases)</span>
             </div>
-            <span class="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/60 text-amber-300 font-mono border border-amber-800/50">✨ Discover</span>
+            <span class="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/60 text-amber-300 font-mono border border-amber-800/50">Discover</span>
           </div>
           <div class="text-[11px] text-zinc-400 space-y-1.5 pl-7 leading-relaxed">
             <div>Browse curated feeds of top light novels and web novels from Lnori and Elsci.one with live Calibre library reconciliation:</div>
-            <div>• <strong>VisionOS Capsule Navigation:</strong> Tap <code class="text-zinc-200">✨ Discover</code> in the top navigation bar to access separate <code class="text-zinc-200">🔥 Trending</code> and <code class="text-zinc-200">✨ New Releases</code> views (strictly segregated).</div>
-            <div>• <strong>Custom Interactive Filtering:</strong> Filter by Source (<code class="text-zinc-200">Lnori</code>, <code class="text-zinc-200">Elsci.one</code>), Genre (<code class="text-zinc-200">Fantasy</code>, <code class="text-zinc-200">Isekai</code>, <code class="text-zinc-200">Romance</code>, etc.), Library Status (<code class="text-zinc-200">Ready to Ingest</code> vs <code class="text-zinc-200">In Library</code>), Live Search, and Sorting (<code class="text-zinc-200">Most Popular</code>, <code class="text-zinc-200">Highest Rated</code>, <code class="text-zinc-200">Newest</code>).</div>
-            <div>• <strong>1-Click Direct Ingestion:</strong> Tap <code class="text-zinc-200">⚡ Ingest</code> on any card or inside the preview modal (<code class="text-zinc-200">#discoverModal</code>) to automatically enqueue background downloading directly into Calibre via <code class="text-zinc-200">POST /api/discover/ingest</code>.</div>
+            <div>• <strong>VisionOS Capsule Navigation:</strong> Tap <code class="text-zinc-200">Discover</code> in the top navigation bar to access separate <code class="text-zinc-200">Trending</code> and <code class="text-zinc-200">New Releases</code> views (strictly segregated).</div>
+            <div>• <strong>Custom Interactive Filtering:</strong> Filter by Source (<code class="text-zinc-200">Lnori</code>, <code class="text-zinc-200">Elsci.one</code>), Genre (<code class="text-zinc-200">Fantasy</code>, <code class="text-zinc-200">Isekai</code>, <code class="text-zinc-200">Romance</code>, etc.), Library Status (<code class="text-zinc-200">Available</code> vs <code class="text-zinc-200">In Library</code>), Live Search, and Sorting (<code class="text-zinc-200">Most Popular</code>, <code class="text-zinc-200">Highest Rated</code>, <code class="text-zinc-200">Newest</code>).</div>
+            <div>• <strong>1-Click Direct Ingestion:</strong> Tap <code class="text-zinc-200">Ingest</code> on any card or inside the preview modal (<code class="text-zinc-200">#discoverModal</code>) to automatically enqueue background downloading directly into Calibre via <code class="text-zinc-200">POST /api/discover/ingest</code>.</div>
             <div>• <strong>Developer Endpoints:</strong> <code class="text-zinc-200">GET /api/discover/feed?tab=trending|new_releases</code> and <code class="text-zinc-200">POST /api/discover/ingest</code>.</div>
           </div>
         </div>
@@ -3967,6 +3977,9 @@
     // DISCOVER SHELF STATE
     let currentView = 'library'; // 'library' or 'discover'
     let discoverTab = 'trending'; // 'trending' or 'new_releases'
+    const discoverNovelsMap = new Map(); // Global registry for 100% reliable card tapping
+    const activeDiscoverDownloads = new Map(); // Tracks live download progress per novelId: { jobId, runId, progress, statusText, phase, title }
+    const discoverPollIntervals = new Map(); // Tracks active polling timers per novelId
     let discoverFilter = {
       source: 'all',
       genre: 'All',
@@ -4059,6 +4072,9 @@
         await Promise.all([loadBooks(), loadFacets(), loadKosync()]);
         // Warm up discover counts in background
         fetch('/api/discover/feed?tab=trending').then(r => r.json()).then(data => {
+          if (data && data.items) {
+            data.items.forEach(n => { if (n && n.id) discoverNovelsMap.set(n.id, n); });
+          }
           if (data && data.counts && typeof data.counts.trending === 'number') {
             const b = document.getElementById('quickDiscoverBadge');
             if (b) b.textContent = `${data.counts.trending}`;
@@ -4121,7 +4137,7 @@
         console.error('Failed to load books:', e);
         const grid = document.getElementById('libraryGridView');
         if (grid && allBooks.length === 0) {
-          setHtml(grid, `<div class="col-span-full text-center py-12 px-4 ui-card rounded-xl text-xs space-y-2"><div class="text-rose-400 font-bold">⚠️ Failed to connect to LightHouse API (${escapeHtml(e.message)})</div><div class="text-zinc-500 text-[11px]">Please check connection or tap below to reload.</div><button onclick="init()" class="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-semibold mt-2">Retry</button></div>`);
+          setHtml(grid, `<div class="col-span-full text-center py-12 px-4 ui-card rounded-xl text-xs space-y-2"><div class="text-rose-400 font-bold">Failed to connect to LightHouse API (${escapeHtml(e.message)})</div><div class="text-zinc-500 text-[11px]">Please check connection or tap below to reload.</div><button onclick="init()" class="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-semibold mt-2">Retry</button></div>`);
         }
       }
     }
@@ -4536,6 +4552,12 @@
           renderDiscoverGenrePills(data.genres);
         }
 
+        if (data.items) {
+          data.items.forEach(n => { if (n && n.id) discoverNovelsMap.set(n.id, n); });
+        }
+        if (data.novels) {
+          data.novels.forEach(n => { if (n && n.id) discoverNovelsMap.set(n.id, n); });
+        }
         discoverFeedCache[cacheKey] = data;
         discoverFeedCache[tab] = data;
         const novelList = data.novels || data.items || [];
@@ -4545,7 +4567,7 @@
         if (feedContainer) {
           setHtml(feedContainer, `
             <div class="col-span-full text-center py-12 px-4 ui-card rounded-xl text-xs space-y-2">
-              <div class="text-rose-400 font-bold">⚠️ Failed to load Discover feed (${escapeHtml(err.message)})</div>
+              <div class="text-rose-400 font-bold">Failed to load Discover feed (${escapeHtml(err.message)})</div>
               <div class="text-zinc-500 text-[11px]">Please check connection or tap below to retry.</div>
               <button onclick="loadDiscoverFeed(true)" class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-semibold mt-2 cursor-pointer active:scale-[0.96]">Retry</button>
             </div>
@@ -4648,6 +4670,51 @@
       loadDiscoverFeed();
     }
 
+    function getPrimaryNovelSource(item, preferredSource) {
+      if (!item) return { url: '', source: 'elscione' };
+
+      if (preferredSource) {
+        if (preferredSource === 'elscione' && item.sourceUrls?.elscione) {
+          return { url: item.sourceUrls.elscione, source: 'elscione' };
+        }
+        if (preferredSource === 'lnori' && item.sourceUrls?.lnori) {
+          return { url: item.sourceUrls.lnori, source: 'lnori' };
+        }
+        if (Array.isArray(item.sources)) {
+          const match = item.sources.find(s => s.source === preferredSource);
+          if (match?.url) return { url: match.url, source: match.source };
+        }
+      }
+
+      // Captain requirement: ALWAYS prefer Elscione over Lnori when both are available
+      if (item.sourceUrls?.elscione) {
+        return { url: item.sourceUrls.elscione, source: 'elscione' };
+      }
+      if (Array.isArray(item.sources)) {
+        const elscioneSrc = item.sources.find(s => s.source === 'elscione');
+        if (elscioneSrc?.url) {
+          return { url: elscioneSrc.url, source: 'elscione' };
+        }
+      }
+
+      // Fallback to Lnori
+      if (item.sourceUrls?.lnori) {
+        return { url: item.sourceUrls.lnori, source: 'lnori' };
+      }
+      if (Array.isArray(item.sources)) {
+        const lnoriSrc = item.sources.find(s => s.source === 'lnori');
+        if (lnoriSrc?.url) {
+          return { url: lnoriSrc.url, source: 'lnori' };
+        }
+      }
+
+      if (Array.isArray(item.sources) && item.sources.length > 0 && item.sources[0]?.url) {
+        return { url: item.sources[0].url, source: item.sources[0].source || 'elscione' };
+      }
+
+      return { url: '', source: 'elscione' };
+    }
+
     function renderDiscoverCards(items) {
       const container = document.getElementById('discoverGrid');
       const emptyState = document.getElementById('discoverEmptyState');
@@ -4662,8 +4729,14 @@
       container.classList.remove('hidden');
       if (emptyState) emptyState.classList.add('hidden');
 
+      // Register all items into global registry for 100% reliable click opening
+      items.forEach(item => {
+        if (item && item.id) discoverNovelsMap.set(item.id, item);
+      });
+
       const cardsHtml = items.map(item => {
         const isIngesting = ingestingDiscoverIds.has(item.id);
+        const downloadState = activeDiscoverDownloads.get(item.id);
         const inLib = (item.inLibrary !== undefined) ? item.inLibrary : item.isInLibrary;
         const libCount = (item.existingVolumes !== undefined) ? item.existingVolumes : (item.inLibraryVolumes || 0);
 
@@ -4675,20 +4748,20 @@
           </span>`;
         } else if (inLib) {
           statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm">
-            ✓ In Library (${libCount}v)
+            In Library (${libCount}v)
           </span>`;
         } else {
           statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-sky-500/30 text-sky-200 border border-sky-500/40 shadow-sm">
-            ⚡ Ready to Ingest
+            Available
           </span>`;
         }
 
         const sourceBadges = [];
-        if (item.sourceUrls?.lnori || item.source === 'lnori' || item.source === 'both') {
-          sourceBadges.push({ name: 'Lnori', cls: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30' });
-        }
         if (item.sourceUrls?.elscione || item.source === 'elscione' || item.source === 'both') {
           sourceBadges.push({ name: 'Elsci.one', cls: 'bg-rose-500/15 text-rose-300 border-rose-500/30' });
+        }
+        if (item.sourceUrls?.lnori || item.source === 'lnori' || item.source === 'both') {
+          sourceBadges.push({ name: 'Lnori', cls: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30' });
         }
         if (sourceBadges.length === 0 && Array.isArray(item.sources)) {
           item.sources.forEach(s => {
@@ -4705,11 +4778,11 @@
           `<span class="px-1.5 py-0.5 rounded text-[9px] bg-white/5 text-zinc-400 border border-white/5">${escapeHtml(g)}</span>`
         ).join('');
 
-        const primaryUrl = item.primaryUrl || item.sourceUrls?.elscione || item.sourceUrls?.lnori || (item.sources && item.sources[0]?.url) || '';
-        const primarySourceName = item.primarySource || (item.sourceUrls?.elscione ? 'elscione' : (item.sourceUrls?.lnori ? 'lnori' : (item.sources && item.sources[0]?.source ? item.sources[0].source : 'elscione')));
         const ratingVal = item.rating || (item.score ? (item.score / 20) : 4.8);
         const romaji = item.titleRomaji || item.romajiTitle || '';
         const authorName = item.author || 'Light Novel';
+
+        const starSvg = `<svg class="w-2.5 h-2.5 inline fill-amber-400 mr-0.5" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>`;
 
         return `
           <div class="discover-card group relative flex flex-col bg-zinc-900/50 hover:bg-zinc-900/80 backdrop-blur-xl border border-white/10 hover:border-white/20 rounded-2xl p-2.5 sm:p-3 transition-all duration-200 shadow-xl justify-between" data-novel-id="${escapeHtml(item.id)}">
@@ -4718,12 +4791,12 @@
               <div class="relative w-full aspect-[2/3] rounded-xl overflow-hidden mb-2.5 bg-zinc-950 book-spine-effect cursor-pointer" onclick="openDiscoverModal('${escapeHtml(item.id)}')">
                 <img src="${escapeHtml(item.coverUrl)}" alt="${escapeHtml(item.title)}" loading="lazy" decoding="async" class="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300">
                 
-                <div class="absolute top-2 left-2 flex items-center gap-1 z-10">
+                <div class="absolute top-2 left-2 flex items-center gap-1 z-10" id="cardBadge-${escapeHtml(item.id)}">
                   ${statusBadgeHtml}
                 </div>
 
                 <div class="absolute bottom-2 right-2 px-1.5 py-0.5 rounded-md text-[9px] font-mono font-semibold bg-black/70 text-zinc-200 backdrop-blur-md border border-white/10">
-                  ${item.volumeCount} vols
+                  ${item.volumeCount || 1} vols
                 </div>
               </div>
 
@@ -4731,7 +4804,7 @@
               <div class="space-y-1">
                 <div class="flex items-center gap-1 mb-1">
                   ${sourceBadgesHtml}
-                  <span class="text-[10px] text-amber-400/90 font-mono ml-auto">★ ${ratingVal.toFixed(1)}</span>
+                  <span class="text-[10px] text-amber-400/90 font-mono ml-auto flex items-center">${starSvg}${ratingVal.toFixed(1)}</span>
                 </div>
 
                 <h3 class="text-xs sm:text-sm font-bold text-white leading-snug line-clamp-2 hover:text-amber-300 transition-colors cursor-pointer" onclick="openDiscoverModal('${escapeHtml(item.id)}')" title="${escapeHtml(item.title)}">
@@ -4749,21 +4822,28 @@
               </div>
             </div>
 
-            <!-- Action Buttons -->
-            <div class="pt-3 mt-2 border-t border-white/5 flex items-center gap-1.5">
-              <button type="button" onclick="openDiscoverModal('${escapeHtml(item.id)}')" class="flex-1 py-1.5 px-2 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white text-[11px] font-semibold rounded-xl border border-white/5 transition-colors cursor-pointer text-center active:scale-[0.96]">
-                Preview
-              </button>
-              <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', '${encodeURIComponent(primaryUrl)}', '${primarySourceName}', event)" ${isIngesting ? 'disabled' : ''} class="flex-1 py-1.5 px-2 ${inLib ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300' : 'bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold'} text-[11px] rounded-xl transition-all shadow-sm flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96] disabled:opacity-60 disabled:cursor-not-allowed">
-                ${isIngesting ? `
-                  <svg class="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
-                  <span>Ingesting</span>
-                ` : (inLib ? `
-                  <span>Re-Ingest</span>
-                ` : `
-                  <span>⚡ Ingest</span>
-                `)}
-              </button>
+            <!-- Action Buttons / Live Download Progress Track -->
+            <div class="pt-3 mt-2 border-t border-white/5" id="cardActions-${escapeHtml(item.id)}">
+              ${isIngesting ? `
+                <div class="w-full space-y-1.5" id="cardProgressContainer-${escapeHtml(item.id)}">
+                  <div class="flex items-center justify-between text-[10px]">
+                    <span class="truncate font-medium text-amber-300" id="cardProgressText-${escapeHtml(item.id)}">${escapeHtml(downloadState?.statusText || 'Downloading...')}</span>
+                    <span class="font-mono text-zinc-400 shrink-0 ml-1" id="cardProgressPct-${escapeHtml(item.id)}">${downloadState?.progress || 0}%</span>
+                  </div>
+                  <div class="h-1.5 w-full bg-zinc-800 rounded-full overflow-hidden">
+                    <div id="cardProgressBar-${escapeHtml(item.id)}" class="h-full bg-amber-500 rounded-full transition-all duration-300" style="width: ${downloadState?.progress || 0}%"></div>
+                  </div>
+                </div>
+              ` : `
+                <div class="flex items-center gap-1.5">
+                  <button type="button" onclick="openDiscoverModal('${escapeHtml(item.id)}')" class="flex-1 py-1.5 px-2 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white text-[11px] font-semibold rounded-xl border border-white/5 transition-colors cursor-pointer text-center active:scale-[0.96]">
+                    Preview
+                  </button>
+                  <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event)" class="flex-1 py-1.5 px-2 ${inLib ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300' : 'bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold'} text-[11px] rounded-xl transition-all shadow-sm flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]">
+                    <span>${inLib ? 'Re-Ingest' : 'Ingest'}</span>
+                  </button>
+                </div>
+              `}
             </div>
           </div>
         `;
@@ -4772,14 +4852,80 @@
       setHtml(container, cardsHtml);
     }
 
-    function openDiscoverModal(novelId) {
-      try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
+    function renderSynopsisSkeleton() {
+      return `
+        <div class="space-y-2.5 py-1 animate-pulse" role="status" aria-label="Loading synopsis">
+          <div class="h-3.5 bg-white/10 rounded w-full"></div>
+          <div class="h-3.5 bg-white/10 rounded w-11/12"></div>
+          <div class="h-3.5 bg-white/10 rounded w-4/5"></div>
+          <div class="h-3.5 bg-white/10 rounded w-3/4"></div>
+        </div>
+      `;
+    }
+
+    async function openDiscoverModal(novelId) {
       tgHaptic.light();
 
-      const feed = discoverFeedCache[discoverTab];
-      const item = (feed?.items || []).find(it => it.id === novelId);
-      if (!item) return;
+      // 1. Look up in global Map first
+      let item = discoverNovelsMap.get(novelId);
 
+      // 2. Fallback search across feed cache keys
+      if (!item) {
+        for (const k of Object.keys(discoverFeedCache)) {
+          const list = discoverFeedCache[k]?.items || discoverFeedCache[k]?.novels || [];
+          const found = list.find(it => it.id === novelId);
+          if (found) {
+            item = found;
+            discoverNovelsMap.set(novelId, item);
+            break;
+          }
+        }
+      }
+
+      const modal = document.getElementById('discoverModal');
+      if (modal) modal.classList.remove('hidden');
+      updateBackButton();
+
+      // 3. If item is not in memory yet, show pulse skeleton and fetch smoothly
+      if (!item) {
+        renderDiscoverModalSkeleton();
+        try {
+          const res = await fetch(`/api/discover/novel/${encodeURIComponent(novelId)}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.novel) {
+              item = data.novel;
+              discoverNovelsMap.set(novelId, item);
+            }
+          }
+        } catch {}
+      }
+
+      if (!item) {
+        const titleEl = document.getElementById('discoverModalTitle');
+        if (titleEl) titleEl.textContent = 'Light Novel';
+        const synopsisEl = document.getElementById('discoverModalSynopsis');
+        if (synopsisEl) synopsisEl.textContent = 'Novel details could not be retrieved. Please check your connection.';
+        return;
+      }
+
+      populateDiscoverModal(item);
+    }
+
+    function renderDiscoverModalSkeleton() {
+      const title = document.getElementById('discoverModalTitle');
+      const romaji = document.getElementById('discoverModalRomaji');
+      const author = document.getElementById('discoverModalAuthor');
+      const synopsis = document.getElementById('discoverModalSynopsis');
+      const cover = document.getElementById('discoverModalCover');
+      if (cover) cover.src = '';
+      if (title) setHtml(title, '<div class="h-5 bg-white/10 rounded w-3/4 animate-pulse"></div>');
+      if (romaji) setHtml(romaji, '<div class="h-3 bg-white/5 rounded w-1/2 animate-pulse mt-1"></div>');
+      if (author) setHtml(author, '<div class="h-3 bg-white/5 rounded w-1/3 animate-pulse mt-1"></div>');
+      if (synopsis) setHtml(synopsis, renderSynopsisSkeleton());
+    }
+
+    function populateDiscoverModal(item) {
       activeDiscoverItem = item;
 
       const cover = document.getElementById('discoverModalCover');
@@ -4795,14 +4941,18 @@
       const statusBadge = document.getElementById('discoverModalStatusBadge');
       const libraryNote = document.getElementById('discoverModalLibraryNote');
       const ingestBtn = document.getElementById('discoverModalIngestBtn');
+      const progressContainer = document.getElementById('discoverModalProgressContainer');
 
       if (cover) cover.src = item.coverUrl || '';
       if (title) title.textContent = item.title;
-      if (romaji) romaji.textContent = item.romajiTitle || '';
-      if (author) author.textContent = `Author: ${item.author}`;
-      if (volumes) volumes.textContent = `${item.volumeCount} Volumes`;
+      if (romaji) romaji.textContent = item.romajiTitle || item.titleRomaji || '';
+      if (author) author.textContent = `Author: ${item.author || 'Unknown'}`;
+      if (volumes) volumes.textContent = `${item.volumeCount || 1} Volumes`;
       if (release) release.textContent = `Released: ${item.releaseDate || 'Recent'}`;
-      if (rating) setHtml(rating, `<span>★</span><span>${item.rating.toFixed(1)} / 5.0</span><span class="text-zinc-500 font-normal">(${item.popularityScore}% pop)</span>`);
+
+      const ratingVal = item.rating || (item.score ? (item.score / 20) : 4.8);
+      const starSvg = `<svg class="w-3 h-3 fill-amber-400" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>`;
+      if (rating) setHtml(rating, `${starSvg}<span>${ratingVal.toFixed(1)} / 5.0</span><span class="text-zinc-500 font-normal">(${item.popularityScore || 85}% pop)</span>`);
 
       if (genres) {
         setHtml(genres, (item.genres || []).map(g =>
@@ -4812,14 +4962,17 @@
 
       if (sources) {
         const sourceEntries = [];
-        if (item.sourceUrls?.lnori) {
-          sourceEntries.push({ name: 'Lnori', url: item.sourceUrls.lnori, source: 'lnori', color: 'text-indigo-400 border-indigo-500/30 bg-indigo-500/10' });
-        }
+        // Show Elscione first (preferred)
         if (item.sourceUrls?.elscione) {
           sourceEntries.push({ name: 'Elsci.one', url: item.sourceUrls.elscione, source: 'elscione', color: 'text-rose-400 border-rose-500/30 bg-rose-500/10' });
         }
+        if (item.sourceUrls?.lnori) {
+          sourceEntries.push({ name: 'Lnori', url: item.sourceUrls.lnori, source: 'lnori', color: 'text-indigo-400 border-indigo-500/30 bg-indigo-500/10' });
+        }
         if (sourceEntries.length === 0 && Array.isArray(item.sources)) {
-          item.sources.forEach(s => {
+          // Sort to prioritize elscione
+          const sortedSources = [...item.sources].sort((a, b) => (a.source === 'elscione' ? -1 : 1));
+          sortedSources.forEach(s => {
             const isLn = s.source === 'lnori';
             sourceEntries.push({
               name: isLn ? 'Lnori' : 'Elsci.one',
@@ -4833,44 +4986,68 @@
           <div class="flex items-center justify-between p-2.5 rounded-xl border ${s.color} text-xs">
             <div class="flex items-center gap-2">
               <span class="font-bold font-mono">${s.name}</span>
-              <span class="text-zinc-400">• ${item.volumeCount} vols available</span>
+              <span class="text-zinc-400">• ${item.volumeCount || 1} vols available</span>
             </div>
             <div class="flex items-center gap-2">
               <a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" class="underline text-zinc-400 hover:text-white flex items-center gap-1 text-[11px]">
                 <span>Browse Source</span>
               </a>
-              <button type="button" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', '${encodeURIComponent(s.url)}', '${s.source}', event)" class="px-2.5 py-1 bg-white/10 hover:bg-white/20 text-white rounded-lg font-semibold text-[11px] cursor-pointer active:scale-[0.96]">
-                ⚡ Ingest
+              <button type="button" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event, '${s.source}')" class="px-2.5 py-1 bg-white/10 hover:bg-white/20 text-white rounded-lg font-semibold text-[11px] cursor-pointer active:scale-[0.96]">
+                Ingest
               </button>
             </div>
           </div>
         `).join(''));
       }
 
-      if (synopsis) synopsis.textContent = item.synopsis || 'No synopsis available.';
+      if (synopsis) {
+        if (item.synopsis && item.synopsis.trim()) {
+          synopsis.textContent = item.synopsis.trim();
+        } else {
+          setHtml(synopsis, renderSynopsisSkeleton());
+          // Fetch novel to load full synopsis if missing
+          fetch(`/api/discover/novel/${encodeURIComponent(item.id)}`)
+            .then(r => r.json())
+            .then(data => {
+              if (data.novel?.synopsis) {
+                item.synopsis = data.novel.synopsis;
+                discoverNovelsMap.set(item.id, item);
+                if (activeDiscoverItem?.id === item.id) {
+                  synopsis.textContent = item.synopsis.trim();
+                }
+              } else {
+                synopsis.textContent = 'No synopsis available for this volume.';
+              }
+            })
+            .catch(() => {
+              synopsis.textContent = 'No synopsis available.';
+            });
+        }
+      }
 
       const inLib = (item.inLibrary !== undefined) ? item.inLibrary : item.isInLibrary;
       const libCount = (item.existingVolumes !== undefined) ? item.existingVolumes : (item.inLibraryVolumes || 0);
       const isIngesting = ingestingDiscoverIds.has(item.id);
+      const downloadState = activeDiscoverDownloads.get(item.id);
 
       if (statusBadge) {
         if (isIngesting) {
           statusBadge.className = 'absolute top-2 left-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/30 text-amber-200 border border-amber-500/50 backdrop-blur-md animate-pulse';
-          statusBadge.textContent = '⏳ Downloading...';
+          statusBadge.textContent = 'Downloading...';
         } else if (inLib) {
           statusBadge.className = 'absolute top-2 left-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/50 backdrop-blur-md';
-          statusBadge.textContent = `✓ In Library (${libCount} vols)`;
+          statusBadge.textContent = `In Library (${libCount} vols)`;
         } else {
           statusBadge.className = 'absolute top-2 left-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-500/30 text-sky-200 border border-sky-500/50 backdrop-blur-md';
-          statusBadge.textContent = '⚡ Ready to Ingest';
+          statusBadge.textContent = 'Available';
         }
       }
 
       if (libraryNote) {
         if (inLib) {
-          setHtml(libraryNote, `<span class="text-emerald-400">✓ You have ${libCount || 1} volume(s) in Calibre.</span>`);
+          setHtml(libraryNote, `<span class="text-emerald-400">You have ${libCount || 1} volume(s) in Calibre.</span>`);
         } else {
-          setHtml(libraryNote, `<span class="text-zinc-400">Not in your Calibre library yet. Tap 1-Click Ingest below.</span>`);
+          setHtml(libraryNote, `<span class="text-zinc-400">Not in your Calibre library yet. Tap Ingest below.</span>`);
         }
       }
 
@@ -4883,13 +5060,23 @@
           `);
         } else {
           ingestBtn.removeAttribute('disabled');
-          setHtml(ingestBtn, `<span>⚡ 1-Click Ingest to Library</span>`);
+          setHtml(ingestBtn, `<span>${inLib ? 'Re-Ingest to Library' : 'Ingest to Library'}</span>`);
         }
       }
 
-      const modal = document.getElementById('discoverModal');
-      if (modal) modal.classList.remove('hidden');
-      updateBackButton();
+      if (progressContainer) {
+        if (isIngesting && downloadState) {
+          progressContainer.classList.remove('hidden');
+          const pStatus = document.getElementById('discoverModalProgressStatus');
+          const pPct = document.getElementById('discoverModalProgressPct');
+          const pBar = document.getElementById('discoverModalProgressBar');
+          if (pStatus) pStatus.textContent = downloadState.statusText || 'Downloading...';
+          if (pPct) pPct.textContent = `${downloadState.progress || 0}%`;
+          if (pBar) pBar.style.width = `${downloadState.progress || 0}%`;
+        } else {
+          progressContainer.classList.add('hidden');
+        }
+      }
     }
 
     function closeDiscoverModal() {
@@ -4901,43 +5088,93 @@
 
     function handleDiscoverModalIngest() {
       if (!activeDiscoverItem) return;
-      const primaryUrl = activeDiscoverItem.primaryUrl || activeDiscoverItem.sourceUrls?.elscione || activeDiscoverItem.sourceUrls?.lnori || (activeDiscoverItem.sources && activeDiscoverItem.sources[0]?.url) || '';
-      const primarySource = activeDiscoverItem.primarySource || (activeDiscoverItem.sourceUrls?.elscione ? 'elscione' : (activeDiscoverItem.sourceUrls?.lnori ? 'lnori' : (activeDiscoverItem.sources && activeDiscoverItem.sources[0]?.source ? activeDiscoverItem.sources[0].source : 'elscione')));
-      if (!primaryUrl) return;
-      triggerDiscoverIngest(activeDiscoverItem.id, encodeURIComponent(primaryUrl), primarySource);
-      
-      const modalBtn = document.getElementById('discoverModalIngestBtn');
-      if (modalBtn) {
-        modalBtn.setAttribute('disabled', 'true');
-        setHtml(modalBtn, `
-          <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
-          <span>Downloading in Background...</span>
-        `);
-      }
+      triggerDiscoverIngest(activeDiscoverItem.id);
     }
 
-    async function triggerDiscoverIngest(novelId, rawUrl, sourceName, event) {
+    async function triggerDiscoverIngest(novelId, event, preferredSource) {
       if (event) event.stopPropagation();
-      try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('medium'); } catch {}
-      tgHaptic.light();
+      tgHaptic.medium();
 
-      const url = decodeURIComponent(rawUrl);
+      let novel = discoverNovelsMap.get(novelId) || activeDiscoverItem;
+      if (!novel) {
+        for (const k of Object.keys(discoverFeedCache)) {
+          const list = discoverFeedCache[k]?.items || discoverFeedCache[k]?.novels || [];
+          const found = list.find(it => it.id === novelId);
+          if (found) {
+            novel = found;
+            discoverNovelsMap.set(novelId, novel);
+            break;
+          }
+        }
+      }
+
+      const { url, source: sourceName } = getPrimaryNovelSource(novel, preferredSource);
+
       if (!url) {
         showToast('No valid source URL found for this novel', 'error');
         return;
       }
 
-      ingestingDiscoverIds.add(novelId);
-      showToast('Ingestion queued! Downloading in background...');
+      const title = novel?.title || 'Light Novel';
 
-      const cardBtn = document.getElementById(`cardIngestBtn-${novelId}`);
-      if (cardBtn) {
-        cardBtn.setAttribute('disabled', 'true');
-        setHtml(cardBtn, `
-          <svg class="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
-          <span>Ingesting</span>
+      ingestingDiscoverIds.add(novelId);
+      activeDiscoverDownloads.set(novelId, {
+        jobId: null,
+        runId: null,
+        progress: 10,
+        statusText: 'Preparing download...',
+        phase: 'downloading',
+        title: title,
+      });
+
+      // Update card UI immediately to show inline progress track
+      const cardActions = document.getElementById(`cardActions-${novelId}`);
+      if (cardActions) {
+        setHtml(cardActions, `
+          <div class="w-full space-y-1.5" id="cardProgressContainer-${escapeHtml(novelId)}">
+            <div class="flex items-center justify-between text-[10px]">
+              <span class="truncate font-medium text-amber-300" id="cardProgressText-${escapeHtml(novelId)}">Preparing download...</span>
+              <span class="font-mono text-zinc-400 shrink-0 ml-1" id="cardProgressPct-${escapeHtml(novelId)}">10%</span>
+            </div>
+            <div class="h-1.5 w-full bg-zinc-800 rounded-full overflow-hidden">
+              <div id="cardProgressBar-${escapeHtml(novelId)}" class="h-full bg-amber-500 rounded-full transition-all duration-300" style="width: 10%"></div>
+            </div>
+          </div>
         `);
       }
+
+      // Update card badge
+      const cardBadge = document.getElementById(`cardBadge-${novelId}`);
+      if (cardBadge) {
+        setHtml(cardBadge, `
+          <span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/30 text-amber-200 border border-amber-500/40 animate-pulse flex items-center gap-1 shadow-sm">
+            <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping"></span>
+            <span>Downloading...</span>
+          </span>
+        `);
+      }
+
+      // If modal is open for this novel, show progress track
+      if (activeDiscoverItem?.id === novelId) {
+        const modalBtn = document.getElementById('discoverModalIngestBtn');
+        if (modalBtn) {
+          modalBtn.setAttribute('disabled', 'true');
+          setHtml(modalBtn, `
+            <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
+            <span>Downloading in Background...</span>
+          `);
+        }
+        const pCont = document.getElementById('discoverModalProgressContainer');
+        if (pCont) pCont.classList.remove('hidden');
+        const pStatus = document.getElementById('discoverModalProgressStatus');
+        const pPct = document.getElementById('discoverModalProgressPct');
+        const pBar = document.getElementById('discoverModalProgressBar');
+        if (pStatus) pStatus.textContent = 'Preparing download...';
+        if (pPct) pPct.textContent = '10%';
+        if (pBar) pBar.style.width = '10%';
+      }
+
+      showToast('Ingestion queued! Downloading in background...');
 
       try {
         const res = await fetch('/api/discover/ingest', {
@@ -4958,57 +5195,177 @@
 
         const data = await res.json();
         const runId = data.runId;
-        if (runId) {
-          pollDiscoverIngestProgress(novelId, runId);
+        const jobId = data.jobId;
+
+        const downloadObj = activeDiscoverDownloads.get(novelId);
+        if (downloadObj) {
+          downloadObj.runId = runId;
+          downloadObj.jobId = jobId;
         }
+
+        pollDiscoverIngestProgress(novelId, jobId, runId);
       } catch (err) {
         console.error('Discover ingest failed to start:', err);
         ingestingDiscoverIds.delete(novelId);
+        activeDiscoverDownloads.delete(novelId);
         showToast(`Ingestion failed: ${err.message}`, 'error');
-        if (cardBtn) {
-          cardBtn.removeAttribute('disabled');
-          setHtml(cardBtn, `<span>⚡ Ingest</span>`);
+        renderDiscoverCards(discoverFeedCache[discoverTab]?.items || []);
+        if (activeDiscoverItem?.id === novelId) {
+          populateDiscoverModal(activeDiscoverItem);
         }
       }
     }
 
-    async function pollDiscoverIngestProgress(novelId, runId) {
-      let attempts = 0;
-      const maxAttempts = 60;
+    function pollDiscoverIngestProgress(novelId, jobId, runId) {
+      if (discoverPollIntervals.has(novelId)) {
+        clearInterval(discoverPollIntervals.get(novelId));
+      }
 
-      const interval = setInterval(async () => {
+      let attempts = 0;
+      const maxAttempts = 120; // 3 minutes max
+
+      const timer = setInterval(async () => {
         attempts++;
         if (attempts > maxAttempts) {
-          clearInterval(interval);
+          clearInterval(timer);
+          discoverPollIntervals.delete(novelId);
           ingestingDiscoverIds.delete(novelId);
+          activeDiscoverDownloads.delete(novelId);
           return;
         }
 
         try {
-          const res = await fetch(`/api/lnori/progress?runId=${encodeURIComponent(runId)}`);
-          if (!res.ok) return;
-          const status = await res.json();
+          const queryParam = runId ? `runId=${encodeURIComponent(runId)}` : `jobId=${encodeURIComponent(jobId)}`;
+          const pollUrl = jobId
+            ? `/api/discover/progress/${encodeURIComponent(jobId)}?${queryParam}`
+            : `/api/discover/progress?${queryParam}`;
 
-          if (status.phase === 'complete') {
-            clearInterval(interval);
+          const res = await fetch(pollUrl);
+          if (!res.ok) return;
+          const data = await res.json();
+          const state = data.state || data;
+          const phase = data.phase || state.phase || 'downloading';
+          const total = data.total || state.total || 0;
+          const index = data.index || state.index || 0;
+          const volumeTitle = data.volumeTitle || state.volumeTitle || '';
+
+          const novel = discoverNovelsMap.get(novelId) || activeDiscoverItem;
+          const title = novel?.title || volumeTitle || 'Light Novel';
+
+          let progress = data.progressPercent || 0;
+          let statusText = data.statusText || '';
+
+          if (total > 0 && !statusText) {
+            const currentVol = Math.max(1, index);
+            progress = Math.min(99, Math.round((currentVol / total) * 100));
+            statusText = `Downloading Volume ${currentVol} of ${total} (${progress}%)...`;
+          } else if (!statusText) {
+            progress = Math.min(85, attempts * 5 + 10);
+            statusText = state.status || 'Downloading novel volumes...';
+          }
+
+          if (phase === 'complete') {
+            progress = 100;
+            statusText = `Downloaded ${title} into library`;
+          }
+
+          // Update active state
+          const dl = activeDiscoverDownloads.get(novelId);
+          if (dl) {
+            dl.progress = progress;
+            dl.statusText = statusText;
+            dl.phase = phase;
+          }
+
+          // Update card DOM
+          const cText = document.getElementById(`cardProgressText-${novelId}`);
+          const cPct = document.getElementById(`cardProgressPct-${novelId}`);
+          const cBar = document.getElementById(`cardProgressBar-${novelId}`);
+          if (cText) cText.textContent = statusText;
+          if (cPct) cPct.textContent = `${progress}%`;
+          if (cBar) cBar.style.width = `${progress}%`;
+
+          // Update modal DOM if open for this novel
+          if (activeDiscoverItem?.id === novelId) {
+            const mStatus = document.getElementById('discoverModalProgressStatus');
+            const mPct = document.getElementById('discoverModalProgressPct');
+            const mBar = document.getElementById('discoverModalProgressBar');
+            if (mStatus) mStatus.textContent = statusText;
+            if (mPct) mPct.textContent = `${progress}%`;
+            if (mBar) mBar.style.width = `${progress}%`;
+          }
+
+          if (phase === 'complete') {
+            clearInterval(timer);
+            discoverPollIntervals.delete(novelId);
+
+            showToast(`Downloaded "${volumeTitle || title}" into library`);
+
+            // Update cached novel
+            if (novel) {
+              novel.inLibrary = true;
+              novel.isInLibrary = true;
+              novel.existingVolumes = total || novel.volumeCount || 1;
+            }
+
+            // Update badge on card
+            const cBadge = document.getElementById(`cardBadge-${novelId}`);
+            if (cBadge) {
+              setHtml(cBadge, `
+                <span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm">
+                  In Library (${novel?.existingVolumes || 1}v)
+                </span>
+              `);
+            }
+
+            // If modal open, update modal fields
+            if (activeDiscoverItem?.id === novelId) {
+              const mBadge = document.getElementById('discoverModalStatusBadge');
+              if (mBadge) {
+                mBadge.className = 'absolute top-2 left-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/50 backdrop-blur-md';
+                mBadge.textContent = `In Library (${novel?.existingVolumes || 1} vols)`;
+              }
+              const mNote = document.getElementById('discoverModalLibraryNote');
+              if (mNote) {
+                setHtml(mNote, `<span class="text-emerald-400">You have ${novel?.existingVolumes || 1} volume(s) in Calibre.</span>`);
+              }
+              const mBtn = document.getElementById('discoverModalIngestBtn');
+              if (mBtn) {
+                mBtn.removeAttribute('disabled');
+                setHtml(mBtn, `<span>Re-Ingest to Library</span>`);
+              }
+            }
+
+            // After a brief delay to show 100%, reset card action buttons and refresh
+            setTimeout(() => {
+              ingestingDiscoverIds.delete(novelId);
+              activeDiscoverDownloads.delete(novelId);
+              const mProgressCont = document.getElementById('discoverModalProgressContainer');
+              if (mProgressCont && activeDiscoverItem?.id === novelId) {
+                mProgressCont.classList.add('hidden');
+              }
+              renderDiscoverCards(discoverFeedCache[discoverTab]?.items || []);
+              loadBooks();
+            }, 1200);
+
+          } else if (phase === 'error') {
+            clearInterval(timer);
+            discoverPollIntervals.delete(novelId);
             ingestingDiscoverIds.delete(novelId);
-            showToast(`Ingested "${status.volumeTitle || 'Light Novel'}" into library!`);
-            await loadBooks();
-            loadDiscoverFeed(true);
-          } else if (status.phase === 'error') {
-            clearInterval(interval);
-            ingestingDiscoverIds.delete(novelId);
-            showToast(`Ingestion failed: ${status.error || 'Download failed'}`, 'error');
-            const cardBtn = document.getElementById(`cardIngestBtn-${novelId}`);
-            if (cardBtn) {
-              cardBtn.removeAttribute('disabled');
-              setHtml(cardBtn, `<span>⚡ Ingest</span>`);
+            activeDiscoverDownloads.delete(novelId);
+
+            showToast(`Ingestion failed: ${data.error || state.error || 'Download failed'}`, 'error');
+            renderDiscoverCards(discoverFeedCache[discoverTab]?.items || []);
+            if (activeDiscoverItem?.id === novelId) {
+              populateDiscoverModal(activeDiscoverItem);
             }
           }
         } catch {
-          // ignore transient poll errors
+          // ignore transient poll error
         }
-      }, 3000);
+      }, 1500);
+
+      discoverPollIntervals.set(novelId, timer);
     }
 
     function syncSort(val) {
@@ -5947,7 +6304,7 @@
           invalidateCatalogCache();
           status.className = 'text-xs p-3 rounded-lg border bg-emerald-950/40 border-emerald-800 text-emerald-300';
           const detailsLink = data.bookId ? `<a href="#book_id=${data.bookId}&panel=book_details" class="underline font-bold ml-1 text-emerald-200">View Book Details</a>` : '';
-          setHtml(status, `<div><strong>✅ Article Ingested Successfully!</strong><div class="mt-1 text-[11px] text-zinc-300">"${escapeHtml(data.title)}" by <em>${escapeHtml(data.authors || 'Unknown')}</em> (~${data.readTimeMinutes} min read, ${data.wordCount} words). ${detailsLink}</div></div>`);
+          setHtml(status, `<div><strong>Article Ingested Successfully</strong><div class="mt-1 text-[11px] text-zinc-300">"${escapeHtml(data.title)}" by <em>${escapeHtml(data.authors || 'Unknown')}</em> (~${data.readTimeMinutes} min read, ${data.wordCount} words). ${detailsLink}</div></div>`);
           showToast(`Ingested "${data.title}"!`);
           input.value = '';
           await init();
@@ -5957,7 +6314,7 @@
       } catch (err) {
         tgHaptic.error();
         status.className = 'text-xs p-3 rounded-lg border bg-rose-950/40 border-rose-800 text-rose-300';
-        setHtml(status, `<div><strong>❌ Ingestion Failed:</strong><div class="mt-1 text-[11px] text-rose-200">${escapeHtml(err.message)}</div></div>`);
+        setHtml(status, `<div><strong>Ingestion Failed:</strong><div class="mt-1 text-[11px] text-rose-200">${escapeHtml(err.message)}</div></div>`);
       } finally {
         btn.disabled = false;
         setHtml(btn, `${svgIcon('file-arrow-down', 'w-3.5 h-3.5')} <span>Convert & Ingest</span>`);
@@ -6649,7 +7006,7 @@
             'text-xs p-3 rounded-xl border bg-zinc-900 border-zinc-700 text-zinc-400';
           setHtml(
             status,
-            `<div><strong>ℹ️ Ingestion Running in Background:</strong><div class="mt-1 text-[11px] text-zinc-400">Modal was closed or client detached. Light novel download continues in background on the server. Re-open to resume monitoring.</div></div>`,
+            `<div><strong>Ingestion Running in Background:</strong><div class="mt-1 text-[11px] text-zinc-400">Modal was closed or client detached. Light novel download continues in background on the server. Re-open to resume monitoring.</div></div>`,
           );
         } else {
           tgHaptic.error();
@@ -6657,7 +7014,7 @@
             'text-xs p-3 rounded-xl border bg-rose-950/40 border-rose-800 text-rose-300';
           setHtml(
             status,
-            `<div><strong>❌ Ingestion Failed:</strong><div class="mt-1 text-[11px] text-rose-200">${escapeHtml(err.message)}</div></div>`,
+            `<div><strong>Ingestion Failed:</strong><div class="mt-1 text-[11px] text-rose-200">${escapeHtml(err.message)}</div></div>`,
           );
         }
       } finally {
