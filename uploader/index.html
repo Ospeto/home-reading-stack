@@ -2120,7 +2120,7 @@
         <div class="flex flex-col sm:flex-row gap-5 items-start">
           <!-- Extra-large high-res cover -->
           <div class="relative w-36 sm:w-48 aspect-[2/3] shrink-0 rounded-xl overflow-hidden shadow-2xl border border-white/10 mx-auto sm:mx-0 book-spine-effect bg-zinc-900">
-            <img id="discoverModalCover" src="" alt="Cover" class="w-full h-full object-cover">
+            <img id="discoverModalCover" src="" alt="Cover" class="w-full h-full object-cover" onerror="handleCoverError(this)">
             <div id="discoverModalStatusBadge" class="absolute top-2 left-2 px-2 py-0.5 rounded-full text-[10px] font-bold backdrop-blur-md"></div>
           </div>
 
@@ -2164,6 +2164,19 @@
           <button type="button" onclick="closeDiscoverModal()" class="px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-semibold cursor-pointer active:scale-[0.96] transition-all">Close</button>
           <button id="discoverModalIngestBtn" type="button" onclick="handleDiscoverModalIngest()" class="flex-1 sm:flex-none px-5 py-2.5 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]">
             <span>Ingest to Library</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Ingestion Error Banner in Modal -->
+      <div id="discoverModalErrorBanner" class="hidden pt-3 border-t border-white/5 w-full">
+        <div class="p-3 rounded-xl bg-rose-950/40 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between gap-2.5 backdrop-blur-md">
+          <div class="flex items-center gap-2 min-w-0">
+            <svg class="w-4 h-4 text-rose-400 shrink-0"><use href="#icon-triangle-exclamation"/></svg>
+            <span id="discoverModalErrorText" class="truncate font-medium"></span>
+          </div>
+          <button type="button" onclick="hideDiscoverModalError()" class="text-rose-400 hover:text-white shrink-0 cursor-pointer p-0.5" title="Dismiss">
+            <svg class="w-3.5 h-3.5"><use href="#icon-xmark"/></svg>
           </button>
         </div>
       </div>
@@ -3798,11 +3811,80 @@
     function formatCleanErrorMessage(raw) {
       if (!raw) return 'Operation failed';
       let msg = typeof raw === 'string' ? raw : (raw.message || raw.error || String(raw));
+
+      // Remove any emojis or pictographs
+      msg = msg.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{2300}-\u{23FF}\u{2B50}\u{200D}]/gu, '');
+      msg = msg.replace(/\p{Extended_Pictographic}/gu, '');
+
+      // Clean common node/system/prefix artifacts
+      msg = msg.replace(/^Error:\s*/i, '');
+      msg = msg.replace(/^Uncaught\s+(?:Error:\s*)?/i, '');
+      msg = msg.replace(/^(?:ENOENT|EACCES|EEXIST|EBUSY|EISDIR|ENOTDIR|EMFILE|ENOSPC):\s*/i, '');
+
+      // Replace multiple consecutive path tokens like [path]/[path] or [path]
+      msg = msg.replace(/(?:\[path\][/\\]*)+/g, '[path]');
+
       // Strip [path] placeholders and filesystem tokens into clean phrases
       msg = msg.replace(/\[path\]/g, 'file');
+
+      // Clean up duplicated "file file" or "file/file" artifacts
+      msg = msg.replace(/\bfile(?:\s*[/\\-]\s*file)+\b/gi, 'file');
+      msg = msg.replace(/\bfile\s+file\b/gi, 'file');
+      msg = msg.replace(/open\s+['"]?file['"]?/gi, 'open target file');
+
+      // Clean common node/network phrases into friendly explanations
+      if (/no such file or directory/i.test(msg)) {
+        msg = 'File or directory not found';
+      } else if (/failed to fetch|network\s*error/i.test(msg)) {
+        msg = 'Network connection failed. Please check your connection.';
+      } else if (/timed?\s*out/i.test(msg)) {
+        msg = 'Connection timed out. Please try again.';
+      }
+
       msg = msg.replace(/\s+/g, ' ').trim();
+      if (msg.length > 0) {
+        msg = msg.charAt(0).toUpperCase() + msg.slice(1);
+      }
       return msg || 'Operation failed';
     }
+
+    function getCoverPlaceholderDataUri(title) {
+      const safeTitle = (title || 'Light Novel').replace(/<[^>]+>/g, '').trim();
+      const words = safeTitle.split(/\s+/);
+      const lines = [];
+      let currentLine = '';
+      for (const word of words) {
+        if ((currentLine + ' ' + word).trim().length <= 18) {
+          currentLine = (currentLine + ' ' + word).trim();
+        } else {
+          if (currentLine) lines.push(currentLine);
+          currentLine = word.slice(0, 18);
+        }
+        if (lines.length >= 3) break;
+      }
+      if (currentLine && lines.length < 3) lines.push(currentLine);
+      if (lines.length === 0) lines.push(safeTitle.slice(0, 18));
+
+      const escapeXml = (str) => String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+
+      const textTspans = lines.map((line, idx) => {
+        const y = 145 + (idx * 16) - ((lines.length - 1) * 8);
+        return `<text x="105" y="${y}" fill="#e4e4e7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" text-anchor="middle">${escapeXml(line)}</text>`;
+      }).join('');
+
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 300" width="200" height="300"><defs><linearGradient id="pBg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#1c1917"/><stop offset="50%" stop-color="#18181b"/><stop offset="100%" stop-color="#09090b"/></linearGradient><linearGradient id="pSpine" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#27272a"/><stop offset="80%" stop-color="#18181b"/><stop offset="100%" stop-color="#09090b"/></linearGradient></defs><rect width="200" height="300" fill="url(#pBg)"/><rect x="0" y="0" width="12" height="300" fill="url(#pSpine)"/><line x1="12" y1="0" x2="12" y2="300" stroke="#3f3f46" stroke-width="0.75" stroke-opacity="0.5"/><g transform="translate(88, 80)"><path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" stroke="#71717a" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></g>${textTspans}<text x="105" y="240" fill="#71717a" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9" font-weight="500" letter-spacing="1" text-anchor="middle">LIGHT NOVEL</text></svg>`;
+
+      return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    }
+
+    function handleCoverError(img) {
+      if (!img) return;
+      img.onerror = null;
+      const title = img.getAttribute('data-title') || img.alt || 'Light Novel';
+      img.src = getCoverPlaceholderDataUri(title);
+    }
+    window.handleCoverError = handleCoverError;
+    window.getCoverPlaceholderDataUri = getCoverPlaceholderDataUri;
 
     // TELEGRAM NATIVE INTEGRATION & HAPTICS
     const tgHaptic = {
@@ -4584,7 +4666,7 @@
         if (feedContainer) {
           setHtml(feedContainer, `
             <div class="col-span-full text-center py-12 px-4 ui-card rounded-xl text-xs space-y-2">
-              <div class="text-rose-400 font-bold">Failed to load Discover feed (${escapeHtml(err.message)})</div>
+              <div class="text-rose-400 font-bold">Failed to load Discover feed (${escapeHtml(formatCleanErrorMessage(err.message))})</div>
               <div class="text-zinc-500 text-[11px]">Please check connection or tap below to retry.</div>
               <button onclick="loadDiscoverFeed(true)" class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-semibold mt-2 cursor-pointer active:scale-[0.96]">Retry</button>
             </div>
@@ -4802,7 +4884,7 @@
 
         const ratingVal = item.rating || (item.score ? (item.score / 20) : 4.8);
         const romaji = item.titleRomaji || item.romajiTitle || '';
-        const authorName = item.author || 'Light Novel';
+        const authorName = item.author || 'Author Unknown';
 
         const starSvg = `<svg class="w-2.5 h-2.5 inline fill-amber-400 mr-0.5" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>`;
 
@@ -4811,7 +4893,7 @@
             <div>
               <!-- Cover Container -->
               <div class="relative w-full aspect-[2/3] rounded-xl overflow-hidden mb-2.5 bg-zinc-950 book-spine-effect cursor-pointer" onclick="openDiscoverModal('${escapeHtml(item.id)}')">
-                <img src="${escapeHtml(item.coverUrl)}" alt="${escapeHtml(item.title)}" loading="lazy" decoding="async" class="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300">
+                <img src="${item.coverUrl ? escapeHtml(item.coverUrl) : getCoverPlaceholderDataUri(item.title)}" alt="${escapeHtml(item.title)}" loading="lazy" decoding="async" data-title="${escapeHtml(item.title)}" onerror="handleCoverError(this)" class="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300">
                 
                 <div class="absolute top-2 left-2 flex items-center gap-1 z-10" id="cardBadge-${escapeHtml(item.id)}">
                   ${statusBadgeHtml}
@@ -4949,6 +5031,7 @@
 
     function populateDiscoverModal(item) {
       activeDiscoverItem = item;
+      hideDiscoverModalError();
 
       const cover = document.getElementById('discoverModalCover');
       const title = document.getElementById('discoverModalTitle');
@@ -4965,10 +5048,14 @@
       const ingestBtn = document.getElementById('discoverModalIngestBtn');
       const progressContainer = document.getElementById('discoverModalProgressContainer');
 
-      if (cover) cover.src = item.coverUrl || '';
+      if (cover) {
+        cover.setAttribute('data-title', item.title || '');
+        cover.onerror = () => handleCoverError(cover);
+        cover.src = item.coverUrl || getCoverPlaceholderDataUri(item.title);
+      }
       if (title) title.textContent = item.title;
       if (romaji) romaji.textContent = item.romajiTitle || item.titleRomaji || '';
-      if (author) author.textContent = `Author: ${item.author || 'Unknown'}`;
+      if (author) author.textContent = `By ${item.author || 'Author Unknown'}`;
       if (volumes) volumes.textContent = `${item.volumeCount || 1} Volumes`;
       if (release) release.textContent = `Released: ${item.releaseDate || 'Recent'}`;
 
@@ -5008,16 +5095,16 @@
           });
         }
         setHtml(sources, sourceEntries.map((s) => `
-          <div class="flex items-center justify-between p-2.5 rounded-xl border ${s.color} text-xs">
-            <div class="flex items-center gap-2">
-              <span class="font-bold font-mono">${s.name}</span>
-              <span class="text-zinc-400">• ${item.volumeCount || 1} vols available</span>
+          <div class="flex flex-wrap gap-2 items-center justify-between p-3 rounded-xl border ${s.color} text-xs">
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="font-bold font-mono shrink-0">${escapeHtml(s.name)}</span>
+              <span class="text-zinc-400 truncate">&bull; ${item.volumeCount || 1} vols available</span>
             </div>
-            <div class="flex items-center gap-2">
-              <a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" class="underline text-zinc-400 hover:text-white flex items-center gap-1 text-[11px]">
+            <div class="flex items-center gap-2 shrink-0 ml-auto sm:ml-0">
+              <a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" class="underline text-zinc-400 hover:text-white flex items-center gap-1 text-[11px] shrink-0">
                 <span>Browse Source</span>
               </a>
-              <button type="button" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event, '${s.source}')" class="px-2.5 py-1 bg-white/10 hover:bg-white/20 text-white rounded-lg font-semibold text-[11px] cursor-pointer active:scale-[0.96]">
+              <button type="button" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event, '${escapeHtml(s.source)}')" class="px-2.5 py-1 bg-white/10 hover:bg-white/20 text-white rounded-lg font-semibold text-[11px] cursor-pointer active:scale-[0.96] shrink-0">
                 Ingest
               </button>
             </div>
@@ -5114,8 +5201,23 @@
     function closeDiscoverModal() {
       const modal = document.getElementById('discoverModal');
       if (modal) modal.classList.add('hidden');
+      hideDiscoverModalError();
       activeDiscoverItem = null;
       updateBackButton();
+    }
+
+    function showDiscoverModalError(errorMsg) {
+      const banner = document.getElementById('discoverModalErrorBanner');
+      const text = document.getElementById('discoverModalErrorText');
+      if (banner && text) {
+        text.textContent = formatCleanErrorMessage(errorMsg);
+        banner.classList.remove('hidden');
+      }
+    }
+
+    function hideDiscoverModalError() {
+      const banner = document.getElementById('discoverModalErrorBanner');
+      if (banner) banner.classList.add('hidden');
     }
 
     function handleDiscoverModalIngest() {
@@ -5246,6 +5348,7 @@
         renderDiscoverCards(discoverFeedCache[discoverTab]?.items || []);
         if (activeDiscoverItem?.id === novelId) {
           populateDiscoverModal(activeDiscoverItem);
+          showDiscoverModalError(err.message);
         }
       }
     }
@@ -5396,6 +5499,7 @@
             renderDiscoverCards(discoverFeedCache[discoverTab]?.items || []);
             if (activeDiscoverItem?.id === novelId) {
               populateDiscoverModal(activeDiscoverItem);
+              showDiscoverModalError(rawErr);
             }
           }
         } catch {
