@@ -11,6 +11,7 @@ import {
   sanitizeSynopsis,
   extractEpubDescription,
   fetchOnlineSynopsis,
+  extractVolumeNumber,
 } from "./scraper";
 
 const PROXY_URL = "http://127.0.0.1:7890";
@@ -769,12 +770,19 @@ export function parseVolumeAppData(html: string, fallbackBookId?: string): Lnori
 
     // Infer volume number from book name, epub filename, or part
     let volumeNumber: number | undefined;
-    const volMatch = `${name} ${epubFilename}`.match(
-      /(?:vol(?:ume)?\.?|#)\s*([0-9]+(?:\.[0-9]+)?)/i,
-    );
-    if (volMatch) {
-      const parsedVol = parseFloat(volMatch[1]);
-      if (!isNaN(parsedVol)) volumeNumber = parsedVol;
+    const volNumCandidate =
+      extractVolumeNumber(name) ??
+      (epubFilename ? extractVolumeNumber(epubFilename) : null);
+    if (volNumCandidate !== null && !Number.isNaN(volNumCandidate)) {
+      volumeNumber = volNumCandidate;
+    } else {
+      const volMatch = `${name} ${epubFilename}`.match(
+        /(?:vol(?:ume)?\.?|#)\s*([0-9]+(?:\.[0-9]+)?)/i,
+      );
+      if (volMatch) {
+        const parsedVol = parseFloat(volMatch[1]);
+        if (!Number.isNaN(parsedVol)) volumeNumber = parsedVol;
+      }
     }
 
     return {

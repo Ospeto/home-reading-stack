@@ -18,6 +18,7 @@ import {
   sanitizeSynopsis,
   extractEpubDescription,
   autoEnrichBookSynopsis,
+  purgeBookCoverCache,
 } from "./scraper";
 import { isArchiveFile, unpackArchive, isCanonicalEpub } from "./archive";
 import { extractUrlFromText, ingestArticleFromUrl, generateTypographicCover } from "./article";
@@ -3856,6 +3857,7 @@ export function registerJobHandlers(q = getJobQueue(getCacheDb())) {
                 void _unlinkErr;
               }
               if (calRes.status === 0) {
+                purgeBookCoverCache(payload.bookId);
                 return {
                   success: true,
                   message: "Generated local typographic cover for Burmese literature.",

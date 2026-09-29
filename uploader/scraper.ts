@@ -377,6 +377,12 @@ export function parseBurmeseOrAsciiNumber(str: string): number | null {
   return !isNaN(num) ? num : null;
 }
 
+const ROMAN_NUMERAL_VOLUME_MAP: Record<string, number> = {
+  i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7, viii: 8, ix: 9, x: 10,
+  xi: 11, xii: 12, xiii: 13, xiv: 14, xv: 15, xvi: 16, xvii: 17, xviii: 18, xix: 19, xx: 20,
+  xxi: 21, xxii: 22, xxiii: 23, xxiv: 24, xxv: 25, xxvi: 26, xxvii: 27, xxviii: 28, xxix: 29, xxx: 30,
+};
+
 /**
  * Extract volume number from title or filename.
  */
@@ -384,8 +390,21 @@ export function extractVolumeNumber(title: string): number | null {
   if (!title) return null;
   const s = title.trim();
 
+  // 1. Check Roman numeral volume patterns (e.g. "Vol. IV", "Volume II", "Book III", "[Vol. V]")
+  const romanPatterns = [
+    /[\[\(]\s*(?:vol(?:ume)?|v|book|bk|part|pt)\.?\s*([ivx]+)\s*[\]\)]/i,
+    /\b(?:vol(?:ume)?|v|book|bk|part|pt)\.?\s*([ivx]+)\b/i,
+  ];
+  for (const rp of romanPatterns) {
+    const rm = s.match(rp);
+    if (rm && rm[1]) {
+      const romanVal = ROMAN_NUMERAL_VOLUME_MAP[rm[1].toLowerCase()];
+      if (romanVal !== undefined) return romanVal;
+    }
+  }
+
   const patterns = [
-    /[\[\(]\s*(?:vol(?:ume)?|v|book|bk|part|pt)?\.?\s*0*(\d+(?:\.\d+)?)\s*[\]\)]/i,
+    /[\[\(（［{]\s*(?:vol(?:ume)?|v|book|bk|part|pt)?\.?\s*0*(\d+(?:\.\d+)?)\s*[\]\)）］}]/i,
     /\b(?:vol(?:ume)?|v|book|bk|part|pt)\.?\s*0*(\d+(?:\.\d+)?)\b/i,
     /#\s*0*(\d+(?:\.\d+)?)\b/i,
     /(?:အတွဲ|အပိုင်း|အခန်း)\s*([၀-၉]+|\d+(?:\.\d+)?)/,
@@ -396,10 +415,16 @@ export function extractVolumeNumber(title: string): number | null {
   for (const p of patterns) {
     const m = s.match(p);
     if (m) {
+      const isBracketed =
+        m[0].startsWith("(") ||
+        m[0].startsWith("[") ||
+        m[0].startsWith("（") ||
+        m[0].startsWith("［") ||
+        m[0].startsWith("{");
       if (
-        m[0].startsWith("(") &&
+        isBracketed &&
         m[1].length === 4 &&
-        parseInt(m[1], 10) >= 1900 &&
+        parseInt(m[1], 10) >= 1800 &&
         parseInt(m[1], 10) <= 2100 &&
         !/[vb#]/i.test(m[0])
       ) {
@@ -2313,7 +2338,13 @@ export async function applyMetadataToCalibre(
       fs.unlinkSync(tempCoverPath);
     }
 
-    return res.status === 0;
+    if (res.status === 0) {
+      if (args.some((a) => a.startsWith("cover:"))) {
+        purgeBookCoverCache(bookId);
+      }
+      return true;
+    }
+    return false;
   } catch (e) {
     console.error(
       `[AutoScraper] Failed to apply metadata to book ${bookId}:`,
@@ -2321,6 +2352,36 @@ export async function applyMetadataToCalibre(
     );
     return false;
   }
+}
+
+export function purgeBookCoverCache(bookId: number): number {
+  if (!bookId || Number.isNaN(bookId) || bookId <= 0) return 0;
+  const cacheDir =
+    process.env.COVER_CACHE_DIR ||
+    path.resolve(process.cwd(), "cache", "covers");
+  if (!fs.existsSync(cacheDir)) return 0;
+
+  let purgedCount = 0;
+  try {
+    const files = fs.readdirSync(cacheDir);
+    for (const file of files) {
+      if (
+        file.startsWith(`${bookId}_`) ||
+        file.startsWith(`master_${bookId}.`) ||
+        file.startsWith(`${bookId}.`)
+      ) {
+        try {
+          fs.unlinkSync(path.join(cacheDir, file));
+          purgedCount++;
+        } catch (_unErr) {
+          void _unErr;
+        }
+      }
+    }
+  } catch (_readErr) {
+    void _readErr;
+  }
+  return purgedCount;
 }
 
 export function safeParseJson(str: string): any {

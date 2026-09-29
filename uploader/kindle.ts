@@ -150,6 +150,16 @@ export interface KindleFileCandidate {
 
 // 50 MB safety margin for FAT32 / filesystem metadata overhead
 export const SAFETY_BUFFER_BYTES = 50 * 1024 * 1024;
+export const FAT32_CLUSTER_SIZE = 32 * 1024; // 32KB standard FAT32 cluster size
+export const MAX_FAT32_FILE_SIZE = 0xFFFFFFFF; // 4,294,967,295 bytes (4GB - 1 byte)
+
+/**
+ * Calculates disk space consumed on FAT32 accounting for cluster allocation slack.
+ */
+export function calculateClusterAllocatedSize(fileSize: number, clusterSize = FAT32_CLUSTER_SIZE): number {
+  if (fileSize <= 0) return 0;
+  return Math.ceil(fileSize / clusterSize) * clusterSize;
+}
 
 // Standard Kindle book extensions in priority order
 export const KINDLE_FORMAT_PREFERENCE = ["EPUB", "AZW3", "KFX", "MOBI", "PDF"];
@@ -569,7 +579,12 @@ export function sanitizeFat32Filename(name: string): string {
   const extBytes = Buffer.byteLength(ext, "utf8");
   const maxBaseBytes = Math.max(1, 180 - extBytes);
   const boundedBase = truncateUtf8Bytes(base, maxBaseBytes);
-  const finalBase = boundedBase.replace(/[\s.]+$/, "").trim() || "document";
+  let finalBase = boundedBase.replace(/[\s.]+$/, "").trim() || "document";
+
+  // Check DOS reserved device names on FAT32 (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(finalBase)) {
+    finalBase = `_${finalBase}`;
+  }
 
   return `${finalBase}${ext}`;
 }
@@ -1187,13 +1202,26 @@ export function getKindleDiskSpace(mountPath: string): { freeBytes: number; tota
 
     // Method 1: fs.statfsSync if supported by Bun / Node
     // SAFETY: Node.js 19.6+ and Bun provide fs.statfsSync which may not be present in standard ambient Node definitions
-    const fsAny = fs as unknown as { statfsSync?: (p: string) => { bsize: number; bavail: number; bfree: number; blocks: number } };
+    const fsAny = fs as unknown as {
+      statfsSync?: (p: string) => {
+        bsize: number;
+        frsize?: number;
+        bavail: number;
+        bfree: number;
+        blocks: number;
+      };
+    };
     if (typeof fsAny.statfsSync === "function") {
       try {
         const stats = fsAny.statfsSync(mountPath);
-        const bsize = Number(stats.bsize || 4096);
-        const freeBytes = Number(stats.bavail || stats.bfree || 0) * bsize;
-        const totalBytes = Number(stats.blocks || 0) * bsize;
+        // In POSIX/Node statfs, allocation block counts are scaled by frsize if available, else bsize
+        const bsize = Number(stats.frsize && stats.frsize > 0 ? stats.frsize : stats.bsize || 4096);
+        const freeBlocks =
+          stats.bavail !== undefined && stats.bavail !== null
+            ? Number(stats.bavail)
+            : Number(stats.bfree || 0);
+        const freeBytes = Math.max(0, freeBlocks) * bsize;
+        const totalBytes = Math.max(0, Number(stats.blocks || 0)) * bsize;
         if (totalBytes > 0) {
           return { freeBytes, totalBytes, freeMb: Math.round(freeBytes / (1024 * 1024)) };
         }
@@ -1202,23 +1230,30 @@ export function getKindleDiskSpace(mountPath: string): { freeBytes: number; tota
       }
     }
 
-    // Method 2: df -k using spawnSync
-    const dfRes = spawnSync("df", ["-k", mountPath], {
+    // Method 2: df -k -P (POSIX standard single line output) using spawnSync
+    const dfRes = spawnSync("df", ["-k", "-P", mountPath], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 5000,
     });
     if (dfRes.status === 0 && dfRes.stdout) {
       const lines = dfRes.stdout.trim().split("\n");
-      if (lines.length >= 2) {
-        const tokens = lines[1].trim().split(/\s+/);
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        const tokens = line.split(/\s+/);
+        // Handle wrapped lines where line 1 is only filesystem name
+        if (tokens.length < 4 && i + 1 < lines.length) {
+          const nextTokens = lines[i + 1].trim().split(/\s+/);
+          tokens.push(...nextTokens);
+        }
         if (tokens.length >= 4) {
           const total1024 = parseInt(tokens[1], 10);
           const avail1024 = parseInt(tokens[3], 10);
           if (!Number.isNaN(total1024) && !Number.isNaN(avail1024)) {
-            const freeBytes = avail1024 * 1024;
+            const freeBytes = Math.max(0, avail1024) * 1024;
             return {
-              totalBytes: total1024 * 1024,
+              totalBytes: Math.max(0, total1024) * 1024,
               freeBytes,
               freeMb: Math.round(freeBytes / (1024 * 1024)),
             };
@@ -2151,7 +2186,7 @@ Consider:
 /**
  * Checks whether two indexed Kindle entries represent duplicate copies of the same book.
  */
-function areKindleEntriesDuplicates(
+export function areKindleEntriesDuplicates(
   a: KindleIndexedBook,
   b: KindleIndexedBook,
 ): { isDuplicate: boolean; matchedBy: string } {
@@ -2261,6 +2296,11 @@ function areKindleEntriesDuplicates(
       .filter((w) => w.length >= 3 && !/^(the|a|an|and|of|in|to|vol|volume|book|part|edition|special|deluxe|anniversary|retail|official|epub)$/.test(w));
 
     if (aTokens.length > 0 && bTokens.length > 0) {
+      // Require author compatibility: if both entries have authors, they must not conflict
+      if (aAuthor && bAuthor && !authorMatchesString(aAuthor, bAuthor) && !authorMatchesString(bAuthor, aAuthor)) {
+        return { isDuplicate: false, matchedBy: "" };
+      }
+
       const exactMatch =
         aTokens.length === bTokens.length && aTokens.every((t) => bTokens.includes(t));
 
@@ -2268,6 +2308,9 @@ function areKindleEntriesDuplicates(
         return { isDuplicate: true, matchedBy: "filesize_and_token" };
       }
     } else if (a.normalizedTitle && b.normalizedTitle && a.normalizedTitle === b.normalizedTitle) {
+      if (aAuthor && bAuthor && !authorMatchesString(aAuthor, bAuthor) && !authorMatchesString(bAuthor, aAuthor)) {
+        return { isDuplicate: false, matchedBy: "" };
+      }
       return { isDuplicate: true, matchedBy: "filesize_and_token" };
     }
   }
@@ -2916,7 +2959,13 @@ export function cleanKindleDeviceDuplicates(
                   }
                 }
                 // Migrate duplicate's active progress to canonical KOReader format (*.epub.sdr)
-                fs.renameSync(realDupSdr, canonicalFullSdr);
+                try {
+                  fs.renameSync(realDupSdr, canonicalFullSdr);
+                } catch {
+                  // Fall back to recursive copy and unlink on EXDEV or permissions
+                  fs.cpSync(realDupSdr, canonicalFullSdr, { recursive: true, force: true });
+                  fs.rmSync(realDupSdr, { recursive: true, force: true });
+                }
                 canonicalHasAnySidecar = true;
                 canonicalHasActiveProgress = hasActiveReadingProgress(canonicalFullSdr);
               } else {
@@ -3533,8 +3582,11 @@ export function previewKindleSync(
         continue;
       }
     }
+    if (c.fileSize >= MAX_FAT32_FILE_SIZE) {
+      continue;
+    }
     pendingCount++;
-    pendingBytes += c.fileSize;
+    pendingBytes += calculateClusterAllocatedSize(c.fileSize);
   }
 
   const requiredBytes = pendingCount > 0 ? pendingBytes + SAFETY_BUFFER_BYTES : 0;
@@ -3574,8 +3626,14 @@ export function safeCopyFileToKindle(srcPath: string, destPath: string): void {
     fs.mkdirSync(destDir, { recursive: true });
   }
 
-  const nonce = crypto.randomBytes(6).toString("hex");
-  const tmpPath = `${destPath}.tmp.${Date.now()}.${nonce}`;
+  const nonce = crypto.randomBytes(4).toString("hex");
+  const destBase = path.basename(destPath);
+  const ext = path.extname(destBase);
+  // Ensure temp filename stays within FAT32 255-byte limit using byte-aware UTF-8 truncation
+  const extBytes = Buffer.byteLength(ext, "utf8");
+  const maxTempBaseBytes = Math.max(1, 200 - extBytes);
+  const safeBase = truncateUtf8Bytes(destBase, maxTempBaseBytes);
+  const tmpPath = path.join(destDir, `${safeBase}.tmp.${Date.now()}.${nonce}`);
   try {
     fs.copyFileSync(srcPath, tmpPath);
     fs.renameSync(tmpPath, destPath);
@@ -3670,6 +3728,16 @@ export async function syncSingleBookToKindle(
         bytesTransferred: 0,
       };
     }
+  }
+
+  // Check FAT32 4GB file size limit
+  if (candidate.fileSize >= MAX_FAT32_FILE_SIZE) {
+    return {
+      success: false,
+      bookId,
+      title: candidate.title,
+      error: `File size (${(candidate.fileSize / 1024 / 1024).toFixed(1)}MB) exceeds FAT32 maximum file size limit (4GB)`,
+    };
   }
 
   // Check disk capacity
@@ -3880,11 +3948,21 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
         }
       }
 
+      if (candidate.fileSize >= MAX_FAT32_FILE_SIZE) {
+        errors.push({
+          bookId: candidate.bookId,
+          title: candidate.title,
+          error: `File size (${(candidate.fileSize / 1024 / 1024).toFixed(1)}MB) exceeds FAT32 maximum file size limit (4GB)`,
+        });
+        failed++;
+        continue;
+      }
+
       if (existsAndMatches) {
         alreadySynced++;
       } else {
         pendingCandidates.push(candidate);
-        totalRequiredBytes += candidate.fileSize;
+        totalRequiredBytes += calculateClusterAllocatedSize(candidate.fileSize);
       }
     }
 
