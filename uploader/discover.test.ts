@@ -12,6 +12,12 @@ import {
   getCachedFeed,
   setCachedFeed,
   enqueueDiscoverIngest,
+  isSynopsisInsufficient,
+  synthesizeEngagingSynopsis,
+  cleanSynopsisText,
+  stripEmojis,
+  resolveFallbackSynopsis,
+  ensureAllNovelsHaveSynopses,
   type DiscoveredNovel,
 } from "./discover";
 import {
@@ -21,10 +27,13 @@ import {
   resetActiveLnoriStateForTest,
   enqueueLnoriJob,
   enqueueElscioneJob,
+  getDiscoverJobProgress,
+  registerDiscoverJob,
 } from "./server";
 
 describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
   let tempCacheDb: Database;
+  const localServer = { requestIP: () => ({ address: "127.0.0.1" }) } as any;
 
   beforeEach(() => {
     tempCacheDb = new Database(":memory:");
@@ -434,7 +443,6 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
   });
 
   describe("REST API Endpoints Integration (uploader/server.ts)", () => {
-    const localServer = { requestIP: () => ({ address: "127.0.0.1" }) } as any;
 
     it("GET /api/discover/novels returns trending novels by default", async () => {
       const req = new Request("http://127.0.0.1:8086/api/discover/novels");
@@ -480,7 +488,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       }
     });
 
-    it("POST /api/discover/ingest queues Lnori series with numeric jobId", async () => {
+    it("POST /api/discover/ingest queues Lnori series with numeric jobId and runId", async () => {
       let enqueuedUrl: string | null = null;
       setServerDependenciesForTest({
         enqueueLnoriJob: (url: string) => {
@@ -504,10 +512,15 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(data.success).toBe(true);
       expect(data.jobId).toBe(12345);
       expect(typeof data.jobId).toBe("number");
+      expect(data.runId).toBeDefined();
+      expect(typeof data.runId).toBe("string");
+      expect(data.message).toBeDefined();
+      expect(typeof data.message).toBe("string");
+      expect(/\p{Extended_Pictographic}/u.test(data.message)).toBe(false);
       expect(enqueuedUrl).toBe("https://lnori.com/series/4239/ascendance-of-a-bookworm");
     });
 
-    it("POST /api/discover/ingest queues Elsci.one series with numeric jobId", async () => {
+    it("POST /api/discover/ingest queues Elsci.one series with numeric jobId and runId", async () => {
       let enqueuedUrl: string | null = null;
       setServerDependenciesForTest({
         enqueueElscioneJob: (url: string) => {
@@ -531,6 +544,11 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(data.success).toBe(true);
       expect(data.jobId).toBe(67890);
       expect(typeof data.jobId).toBe("number");
+      expect(data.runId).toBeDefined();
+      expect(typeof data.runId).toBe("string");
+      expect(data.message).toBeDefined();
+      expect(typeof data.message).toBe("string");
+      expect(/\p{Extended_Pictographic}/u.test(data.message)).toBe(false);
       expect(enqueuedUrl).toBe(
         "https://server.elscione.com/Officially%20Translated%20Light%20Novels/DanMachi/",
       );
@@ -569,6 +587,250 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       });
       const resOffDomain = await handleRequest(reqOffDomain, localServer);
       expect(resOffDomain.status).toBe(400);
+    });
+  });
+
+  describe("100% Synopsis Completeness & Quality Guarantee", () => {
+    it("guarantees 100% of discovered light novels across trending and new feeds have synopsis length >= 30", async () => {
+      const trendingRes = await getDiscoverNovels({ tab: "trending" }, { cacheDb: tempCacheDb });
+      const newRes = await getDiscoverNovels({ tab: "new" }, { cacheDb: tempCacheDb });
+
+      expect(trendingRes.novels.length).toBeGreaterThan(0);
+      expect(newRes.novels.length).toBeGreaterThan(0);
+
+      for (const novel of trendingRes.novels) {
+        expect(novel.synopsis).toBeDefined();
+        expect(typeof novel.synopsis).toBe("string");
+        expect(novel.synopsis.trim().length).toBeGreaterThanOrEqual(30);
+        expect(isSynopsisInsufficient(novel.synopsis)).toBe(false);
+      }
+
+      for (const novel of newRes.novels) {
+        expect(novel.synopsis).toBeDefined();
+        expect(typeof novel.synopsis).toBe("string");
+        expect(novel.synopsis.trim().length).toBeGreaterThanOrEqual(30);
+        expect(isSynopsisInsufficient(novel.synopsis)).toBe(false);
+      }
+    });
+
+    it("ensures no discovered novel has empty, blank, or placeholder 'No synopsis available' text", async () => {
+      const allRes = await getDiscoverNovels({}, { cacheDb: tempCacheDb });
+      for (const novel of allRes.novels) {
+        const lower = novel.synopsis.toLowerCase();
+        expect(lower).not.toBe("no synopsis available");
+        expect(lower).not.toBe("no synopsis available.");
+        expect(lower).not.toBe("*no synopsis available.*");
+        expect(lower).not.toBe("no summary provided.");
+        expect(lower.startsWith("no synopsis")).toBe(false);
+      }
+    });
+
+    it("enriches items with missing/blank synopses via online/curated fallback or engaging synthesis", async () => {
+      const dummyNovel: DiscoveredNovel = {
+        id: "test-novel-missing-synopsis",
+        title: "Test Novel Reincarnated as a Hero",
+        coverUrl: "https://example.com/cover.jpg",
+        synopsis: "",
+        genres: ["Fantasy", "Isekai"],
+        score: 85,
+        popularity: 10000,
+        releaseDate: "2024-01-01",
+        volumeCount: 1,
+        source: "elscione",
+        sourceUrls: { elscione: "https://server.elscione.com/novel" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const [enriched] = await ensureAllNovelsHaveSynopses([dummyNovel]);
+      expect(enriched.synopsis).toBeDefined();
+      expect(enriched.synopsis.length).toBeGreaterThanOrEqual(30);
+      expect(enriched.synopsis).toContain("Test Novel Reincarnated as a Hero");
+      expect(isSynopsisInsufficient(enriched.synopsis)).toBe(false);
+    });
+
+    it("uses custom fallbackQuery dependency to resolve missing synopsis", async () => {
+      const dummyNovel: DiscoveredNovel = {
+        id: "test-custom-fallback",
+        title: "Mysterious Artifact Chronicles",
+        coverUrl: "https://example.com/cover.jpg",
+        synopsis: "Short",
+        genres: ["Mystery", "Adventure"],
+        score: 80,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 1,
+        source: "lnori",
+        sourceUrls: { lnori: "https://lnori.com/series/1/novel" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const [enriched] = await ensureAllNovelsHaveSynopses([dummyNovel], {
+        fallbackQuery: async (title) =>
+          `A gripping chronicles of ${title} uncovering ancient artifacts and resolving forgotten secrets across continents.`,
+      });
+
+      expect(enriched.synopsis).toContain("ancient artifacts");
+      expect(enriched.synopsis.length).toBeGreaterThanOrEqual(30);
+    });
+  });
+
+  describe("Live Job Progress Tracking (GET /api/discover/progress/:jobId & /job/:jobId)", () => {
+    it("returns detailed live progress for in-flight job querying activeLnoriState", async () => {
+      // Register and start a simulated job
+      const testJobId = 987654;
+      const testRunId = "elscione-987654-test";
+      registerDiscoverJob(
+        testJobId,
+        testRunId,
+        "elscione",
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/DanMachi/",
+      );
+
+      // Inject server dependency mock to simulate downloading progress
+      setServerDependenciesForTest({
+        getDiscoverProgress: (id) => {
+          if (Number(id) === testJobId) {
+            return {
+              success: true,
+              jobId: testJobId,
+              phase: "downloading",
+              percent: 60,
+              currentVolume: "DanMachi: Volume 6",
+              volumesCompleted: 6,
+              totalVolumes: 10,
+            };
+          }
+          return null;
+        },
+      });
+
+      const req = new Request(`http://127.0.0.1:8086/api/discover/progress/${testJobId}`);
+      const res = await handleRequest(req, localServer);
+
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(true);
+      expect(data.jobId).toBe(testJobId);
+      expect(data.phase).toBe("downloading");
+      expect(data.percent).toBe(60);
+      expect(data.currentVolume).toBe("DanMachi: Volume 6");
+      expect(data.volumesCompleted).toBe(6);
+      expect(data.totalVolumes).toBe(10);
+      expect(/\p{Extended_Pictographic}/u.test(JSON.stringify(data))).toBe(false);
+    });
+
+    it("supports GET /api/discover/job/:jobId as an exact alias for progress", async () => {
+      const testJobId = 112233;
+      setServerDependenciesForTest({
+        getDiscoverProgress: (id) => {
+          if (Number(id) === testJobId) {
+            return {
+              success: true,
+              jobId: testJobId,
+              phase: "complete",
+              percent: 100,
+              currentVolume: "Ascendance of a Bookworm: Volume 33",
+              volumesCompleted: 33,
+              totalVolumes: 33,
+            };
+          }
+          return null;
+        },
+      });
+
+      const req = new Request(`http://127.0.0.1:8086/api/discover/job/${testJobId}`);
+      const res = await handleRequest(req, localServer);
+
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(true);
+      expect(data.jobId).toBe(testJobId);
+      expect(data.phase).toBe("complete");
+      expect(data.percent).toBe(100);
+    });
+
+    it("returns 404 for unknown job ID", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/discover/progress/999999999");
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(404);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(false);
+      expect(data.error).toBe("Job not found");
+    });
+
+    it("verifies live progress states: queued, downloading, processing, complete, error", async () => {
+      const phases = ["queued", "downloading", "processing", "complete", "error"] as const;
+      for (const phase of phases) {
+        const jobId = 5000 + phases.indexOf(phase);
+        setServerDependenciesForTest({
+          getDiscoverProgress: (id) => ({
+            success: true,
+            jobId: Number(id),
+            phase,
+            percent: phase === "complete" ? 100 : phase === "queued" ? 0 : 50,
+            volumesCompleted: phase === "complete" ? 5 : 2,
+            totalVolumes: 5,
+            error: phase === "error" ? "Simulated network failure" : undefined,
+          }),
+        });
+
+        const req = new Request(`http://127.0.0.1:8086/api/discover/progress/${jobId}`);
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        const data = (await res.json()) as any;
+        expect(data.phase).toBe(phase);
+        if (phase === "error") {
+          expect(data.error).toBeDefined();
+        }
+      }
+    });
+  });
+
+  describe("Source Preference (Elscione over Lnori when both available)", () => {
+    it("prefers Elscione as primarySource and primaryUrl when novel source is both", async () => {
+      const res = await getDiscoverNovels({ tab: "trending" }, { cacheDb: tempCacheDb });
+      const bothNovels = res.novels.filter((n) => n.source === "both");
+      expect(bothNovels.length).toBeGreaterThan(0);
+
+      for (const novel of bothNovels) {
+        expect(novel.primarySource).toBe("elscione");
+        expect(novel.primaryUrl).toBe(novel.sourceUrls.elscione);
+      }
+    });
+  });
+
+  describe("Strict Zero Emojis Compliance", () => {
+    it("verifies that API responses across discover endpoints contain zero emojis", async () => {
+      // 1. Check /api/discover/novels
+      const reqNovels = new Request("http://127.0.0.1:8086/api/discover/novels");
+      const resNovels = await handleRequest(reqNovels);
+      const textNovels = await resNovels.text();
+      expect(/\p{Extended_Pictographic}/u.test(textNovels)).toBe(false);
+
+      // 2. Check /api/discover/ingest
+      setServerDependenciesForTest({
+        enqueueElscioneJob: () => ({ jobId: 77777, runId: "elscione-77777" }),
+      });
+      const reqIngest = new Request("http://127.0.0.1:8086/api/discover/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/DanMachi/",
+          source: "elscione",
+        }),
+      });
+      const resIngest = await handleRequest(reqIngest, localServer);
+      const textIngest = await resIngest.text();
+      expect(/\p{Extended_Pictographic}/u.test(textIngest)).toBe(false);
+    });
+
+    it("verifies that stripEmojis removes all emojis and pictographs", () => {
+      const input = "⏳ Ingesting volume 1... 🚀 ✨ 📚 [Volume 1/5] Done! 🎉";
+      const stripped = stripEmojis(input);
+      expect(/\p{Extended_Pictographic}/u.test(stripped)).toBe(false);
+      expect(stripped).toBe("Ingesting volume 1... [Volume 1/5] Done!");
     });
   });
 });

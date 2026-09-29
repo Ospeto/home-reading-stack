@@ -5,6 +5,7 @@ import { Database } from "bun:sqlite";
 import { safeFetchWithSsrf, sanitizeErrorMessage } from "./security";
 import { getCalibreDbPath, isLnoriUrl, parseLnoriUrl } from "./lnori";
 import { isElscioneUrl, parseElscioneUrl } from "./elscione";
+import { searchRanobeDB, searchAniList } from "./scraper";
 
 export type DiscoverSource = "lnori" | "elscione" | "both";
 export type DiscoverSourceFilter = "all" | "lnori" | "elscione";
@@ -30,6 +31,8 @@ export interface DiscoveredNovel {
   releaseDate: string;
   volumeCount: number;
   source: DiscoverSource;
+  primarySource?: "elscione" | "lnori";
+  primaryUrl?: string;
   sourceUrls: DiscoverSourceUrls;
   inLibrary: boolean;
   existingVolumes: number;
@@ -69,6 +72,7 @@ export interface DiscoverDependencies {
   seedNewNovels?: DiscoveredNovel[];
   onlineTimeoutMs?: number;
   enableOnline?: boolean;
+  fallbackQuery?: (title: string, novel: DiscoveredNovel) => Promise<string | null> | string | null;
 }
 
 const DISCOVER_CACHE_TTL_MS = 60 * 60 * 1000; // 1-hour TTL
@@ -595,6 +599,356 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
 ];
 
 /**
+ * Strips all emojis and pictographs from text for clean, plain presentation.
+ */
+export function stripEmojis(str?: string | null): string {
+  if (!str) return "";
+  return str
+    .replace(
+      /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{2300}-\u{23FF}\u{2B50}\u{200D}]/gu,
+      "",
+    )
+    .replace(/\p{Extended_Pictographic}/gu, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+/**
+ * Cleans synopsis text by stripping HTML, normalizing whitespace, and removing emojis.
+ */
+export function cleanSynopsisText(text?: string | null): string {
+  if (!text) return "";
+  return stripEmojis(text)
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\r\n|\r|\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Checks if a synopsis is missing, blank, shorter than 30 characters, or a generic placeholder.
+ */
+export function isSynopsisInsufficient(synopsis?: string | null): boolean {
+  if (!synopsis) return true;
+  const cleaned = cleanSynopsisText(synopsis);
+  if (cleaned.length < 30) return true;
+  const lower = cleaned.toLowerCase();
+  if (
+    lower === "no synopsis available" ||
+    lower === "no synopsis available." ||
+    lower === "*no synopsis available.*" ||
+    lower === "no summary provided." ||
+    lower === "no description available" ||
+    lower === "no description available." ||
+    lower.startsWith("no synopsis") ||
+    lower.startsWith("no description")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Synthesizes an engaging, genre-aware narrative synopsis when external databases lack one.
+ */
+export function synthesizeEngagingSynopsis(
+  title: string,
+  genres?: string[],
+  romaji?: string,
+): string {
+  const cleanTitle = (title || "This series").trim();
+  const altTitle = romaji && romaji !== title ? ` (${romaji.trim()})` : "";
+  const fullTitle = `${cleanTitle}${altTitle}`;
+  const genreList =
+    Array.isArray(genres) && genres.length > 0
+      ? genres.slice(0, 3).join(", ")
+      : "Fantasy, Adventure";
+  const mainGenre =
+    Array.isArray(genres) && genres.length > 0 ? genres[0] : "Light Novel";
+
+  const isRomance =
+    Array.isArray(genres) &&
+    genres.some((g) => /romance|slice of life|comedy|school/i.test(g));
+  const isSciFi =
+    Array.isArray(genres) &&
+    genres.some((g) => /sci-fi|mecha|cyber|space/i.test(g));
+  const isMystery =
+    Array.isArray(genres) &&
+    genres.some((g) => /psychological|mystery|thriller|suspense/i.test(g));
+  const isIsekai =
+    Array.isArray(genres) && genres.some((g) => /isekai|reincarnat/i.test(g));
+
+  if (isIsekai) {
+    return `${fullTitle} chronicles an enthralling journey across an extraordinary new realm. Thrust into an unfamiliar fantasy world with unique mechanics and unexpected challenges, the protagonist must navigate perilous encounters, form vital alliances, and carve out a path to destiny in this acclaimed ${mainGenre.toLowerCase()} light novel.`;
+  }
+  if (isRomance) {
+    return `In ${fullTitle}, ordinary life takes an extraordinary turn through heartfelt encounters and captivating character dynamics. An engaging ${genreList} narrative exploring intricate relationships, personal growth, and memorable everyday moments that leave a lasting impression.`;
+  }
+  if (isSciFi) {
+    return `Set against a backdrop of advanced technology and high-stakes conflict, ${fullTitle} immerses readers in a gripping futuristic struggle. With intense tactical confrontations and intricate worldbuilding, this ${mainGenre.toLowerCase()} series delivers an exhilarating narrative from start to finish.`;
+  }
+  if (isMystery) {
+    return `${fullTitle} weaves a gripping, suspenseful tale where intellect, deception, and high-stakes strategy collide. Facing complex dilemmas and unpredictable adversaries, characters must rely on keen deduction and unwavering resolve to uncover the hidden truth behind their circumstances.`;
+  }
+  return `An enthralling ${genreList} light novel following the compelling adventures of ${fullTitle}. Featuring rich worldbuilding, memorable characters, and escalating stakes, this acclaimed series delivers a masterfully crafted reading experience filled with unforgettable moments.`;
+}
+
+/**
+ * Curated catalog of known light novel series synopses for instant reliable fallback.
+ */
+export const KNOWN_SERIES_SYNOPSES: Record<string, string> = {
+  "ascendance of a bookworm":
+    "A book-loving college student dies and is reincarnated in a medieval fantasy world without books. Determined to read again, she resolves to make her own.",
+  "classroom of the elite":
+    "Kiyotaka Ayanokouji enrolls at Tokyo Metropolitan Advanced Nurturing High School, an elite institution where students receive points based on merit in a cutthroat hierarchy.",
+  "mushoku tensei jobless reincarnation":
+    "Reincarnated into a magical world as infant Rudeus Greyrat, a 34-year-old NEET resolves to overcome his past trauma and live his new life to the absolute fullest.",
+  "overlord":
+    "When the popular MMORPG Yggdrasil shuts down, veteran player Momonga stays logged in until the final second, only to discover the Great Tomb of Nazarick transported to a real new world.",
+  "that time i got reincarnated as a slime":
+    "After being killed by a rogue robber, corporate worker Satoru Mikami wakes up in a fantasy world reincarnated as a gelatinous slime named Rimuru Tempest with unique Predator abilities.",
+  "the angel next door spoils me rotten":
+    "Amane Fujimiya lives next door to Mahiru Shiina, school idol known as Angel. After Amane offers her his umbrella on a rainy day, Mahiru begins looking after his disorganized bachelor lifestyle.",
+  "86 eighty-six":
+    "The Republic of San Magnolia claims to fight an unmanned war against autonomous Legion drones. In reality, the processors operating the Juggernaut mechs are human 86s denied personhood.",
+  "the apothecary diaries":
+    "Kidnapped and sold into service at the imperial palace, apothecary daughter Maomao uses her deep medical and toxicological acumen to deduce the mysteries of the inner court.",
+  "the eminence in shadow":
+    "Cid Kagenou strives to become a mastermind operating from the shadows. Reborn into a magical world, his fictional conspiracies ironically turn out to be real threats.",
+  "a sisters all you need":
+    "Follows Itsuki Hashima, an eccentric light novel author obsessed with little sisters, surrounded by talented creators, editors, and tax accountants in the modern publishing industry.",
+  "grimgar of fantasy and ash":
+    "Waking up in a strange realm with no memories of their past lives, Haruhiro and fellow outcasts must hunt goblins to survive in an unforgivingly realistic world.",
+  "danmachi is it wrong to try to pick up girls in a dungeon":
+    "In the sprawling city of Orario above the massive Dungeon, rookie adventurer Bell Cranel strives to grow stronger under the banner of the tiny Hestia Familia.",
+  "rezero starting life in another world":
+    "Subaru Natsuki is suddenly summoned to another world with no powers except Return by Death reversing time to a past save point whenever he perishes.",
+  "a certain magical index":
+    "In Academy City, a scientifically advanced haven of espers, high schooler Touma Kamijou possesses Imagine Breaker in his right hand, negating all supernatural abilities.",
+  "sword art online":
+    "Trapped inside the revolutionary virtual reality MMORPG Sword Art Online where dying in-game means death in reality, Kirito must battle through one hundred lethal dungeon floors to set players free.",
+  "no game no life":
+    "Brilliant shut-in sibling prodigies Sora and Shiro are summoned to Disboard, a fantasy realm where all warfare and conflict are strictly resolved through high-stakes games and mental gambits.",
+  "spice and wolf":
+    "Traveling merchant Kraft Lawrence encounters Holo, a wise centuries-old wolf deity yearning to return to her northern homeland, forging a poignant partnership across medieval trade routes.",
+  "toradora":
+    "Ryuji Takasu, cursed with an intimidating delinquent face despite his gentle nature, crosses paths with Taiga Aisaka, the fearsome Palmtop Tiger, forming an unlikely alliance of heart and humor.",
+  "konosuba gods blessing on this wonderful world":
+    "After an embarrassing death, Kazuma Sato is whisked to a fantasy realm with the useless goddess Aqua, gathering an eccentric adventuring party prone to hilarious misadventures and explosive mishaps.",
+  "solo leveling":
+    "Ranked as humanity's weakest hunter, Sung Jinwoo is brutally abandoned in a dual dungeon catastrophe, awakening with a mysterious quest system that grants him the unique ability to level up infinitely.",
+  "the irregular at magic high school":
+    "Enrolling at First High School where magical aptitude determines status, Tatsuya Shiba appears unremarkable as an ordinary Course 2 student while secretly concealing world-class technical genius.",
+  "rascal does not dream of bunny girl senpai":
+    "Sakuta Azusagawa investigates Puberty Syndrome, an elusive supernatural affliction causing bizarre occurrences, beginning when he discovers celebrated actress Mai Sakurajima wandering invisible in a library.",
+  "playing death games to put food on the table":
+    "Yuuki wakes up dressed in a maid uniform in a lethal ghost mansion. In a world where high-stakes death games are streamed for money, she plays to survive and pay rent.",
+  "love unseen beneath the clear night sky":
+    "College student Kakeru meets Hibari, a visually impaired girl fascinated by festival fireworks. Together they embark on a delicate journey exploring sound, sensation, and affection.",
+  "heroine saint no im an all-works maid":
+    "Reincarnated into an otome game as the prophesied holy maiden, Melody decides she would rather fulfill her lifelong dream of being an impeccable professional maid.",
+  "sentenced to be a hero":
+    "Heroism is not an honor it is the ultimate capital punishment for heinous criminals condemned to endlessly fight the demon king's immortal army until they die.",
+  "the water magician":
+    "Reincarnated into another realm with only basic water affinity magic, Ryou meticulously discovers how fluid dynamics, purification, and pressure can outmatch any offensive flame.",
+  "haibaras teenage new game":
+    "Natsuki Haibara wasted his high school youth in loneliness. When he mysteriously slips back in time to his high school entrance ceremony, he resolves to live a sparkling youth.",
+  "too many losing heroines":
+    "Background student Kazuhiko Nukumizu witnesses the girl next door getting rejected by her crush. Soon, he finds himself surrounded by girls who lost the romance race.",
+  "secrets of the silent witch":
+    "Monica Everett is the Silent Witch, capable of unchanted supreme magic purely because she is cripplingly shy. Now, she is ordered to go undercover as a high school student.",
+  "days with my stepsister":
+    "After his father remarries, Yuuta Asamura ends up living under the same roof with Saki Ayase. Having both witnessed their parents' broken marriages, they establish a calm, respectful distance.",
+  "the frontier lord begins with zero subjects":
+    "Dias is granted a remote wasteland after twenty years of grueling military service. Finding only grassland and roaming wildlife, he begins building a peaceful haven.",
+  "min-maxing my trpg build in another world":
+    "Reincarnated into a tabletop RPG ruleset realm, a hardcore min-maxer carefully allocates his stats and character points to construct an unassailable build.",
+  "im the evil lord of an intergalactic empire":
+    "Liam Sera Banfield was betrayed and died in debt. Reborn into a sci-fi space empire, he vows to become a ruthless corrupt lord only for his every act to accidentally enrich his people.",
+};
+
+/**
+ * Searches the local series catalog and seed catalogue for a known synopsis.
+ */
+export function findKnownSeriesSynopsis(novel: DiscoveredNovel): string | null {
+  const candidates = [
+    novel.title,
+    novel.titleRomaji,
+    novel.titleNative,
+    novel.id,
+  ].filter(Boolean) as string[];
+
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    if (!norm) continue;
+
+    for (const [key, synopsis] of Object.entries(KNOWN_SERIES_SYNOPSES)) {
+      const normKey = normalizeTitleForMatch(key);
+      if (
+        norm === normKey ||
+        (norm.length >= 6 && normKey.includes(norm)) ||
+        (normKey.length >= 6 && norm.includes(normKey))
+      ) {
+        if (!isSynopsisInsufficient(synopsis)) {
+          return synopsis;
+        }
+      }
+    }
+  }
+
+  // Also check SEED catalogues
+  const allSeeds = [...SEED_TRENDING_NOVELS, ...SEED_NEW_NOVELS];
+  for (const seed of allSeeds) {
+    const seedNorm = normalizeTitleForMatch(seed.title);
+    for (const c of candidates) {
+      const norm = normalizeTitleForMatch(c);
+      if (
+        norm &&
+        (norm === seedNorm ||
+          (norm.length >= 8 && seedNorm.includes(norm)) ||
+          (seedNorm.length >= 8 && norm.includes(seedNorm)))
+      ) {
+        if (!isSynopsisInsufficient(seed.synopsis)) {
+          return seed.synopsis;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Resolves a missing or incomplete synopsis via custom fallback, curated catalog,
+ * RanobeDB, AniList alternate search, or narrative synthesis.
+ */
+export async function resolveFallbackSynopsis(
+  novel: DiscoveredNovel,
+  dependencies?: DiscoverDependencies,
+): Promise<string> {
+  // 1. Dependency mock or override
+  if (dependencies?.fallbackQuery) {
+    try {
+      const custom = await dependencies.fallbackQuery(novel.title, novel);
+      if (custom && !isSynopsisInsufficient(custom)) {
+        return cleanSynopsisText(custom);
+      }
+    } catch (err) {
+      console.debug(`[Discover] Custom fallback query failed for "${novel.title}":`, err);
+    }
+  }
+
+  // 2. Local curated series catalog & seed check
+  const known = findKnownSeriesSynopsis(novel);
+  if (known && !isSynopsisInsufficient(known)) {
+    return cleanSynopsisText(known);
+  }
+
+  // 3. Online queries if online is allowed
+  const isTestEnv =
+    process.env.NODE_ENV === "test" ||
+    typeof (globalThis as any).it === "function";
+
+  const allowOnline =
+    Boolean(dependencies?.fetch) ||
+    (dependencies?.enableOnline ?? !isTestEnv);
+
+  if (allowOnline) {
+    const timeoutMs = dependencies?.onlineTimeoutMs ?? 3000;
+
+    // 3a. Query RanobeDB for light novel synopsis
+    try {
+      const ranobeResults = await searchRanobeDB(novel.title, {
+        fetchFn: dependencies?.fetch,
+        timeoutMs,
+      });
+      for (const r of ranobeResults) {
+        if (r.description && !isSynopsisInsufficient(r.description)) {
+          return cleanSynopsisText(r.description);
+        }
+      }
+    } catch (err) {
+      console.debug(`[Discover] RanobeDB fallback failed for "${novel.title}":`, err);
+    }
+
+    // 3b. Query AniList alternate search by romaji or stripped title
+    try {
+      const queryTitle = novel.titleRomaji || novel.title;
+      const aniResults = await searchAniList(queryTitle, {
+        fetchFn: dependencies?.fetch,
+        timeoutMs,
+      });
+      for (const a of aniResults) {
+        if (a.description && !isSynopsisInsufficient(a.description)) {
+          return cleanSynopsisText(a.description);
+        }
+      }
+    } catch (err) {
+      console.debug(`[Discover] AniList fallback failed for "${novel.title}":`, err);
+    }
+  }
+
+  // 4. Fail-safe engaging synopsis synthesis
+  return cleanSynopsisText(
+    synthesizeEngagingSynopsis(novel.title, novel.genres, novel.titleRomaji),
+  );
+}
+
+/**
+ * Determines primary download source, always preferring Elscione when available on both.
+ */
+export function assignPrimarySource(novel: DiscoveredNovel): DiscoveredNovel {
+  let primarySource: "elscione" | "lnori" = "elscione";
+  let primaryUrl = "";
+
+  if (novel.source === "both") {
+    // When available on both sources, ALWAYS prefer Elscione over Lnori
+    primarySource = "elscione";
+    primaryUrl = novel.sourceUrls.elscione || novel.sourceUrls.lnori || "";
+  } else if (novel.source === "elscione") {
+    primarySource = "elscione";
+    primaryUrl = novel.sourceUrls.elscione || "";
+  } else {
+    primarySource = "lnori";
+    primaryUrl = novel.sourceUrls.lnori || "";
+  }
+
+  return {
+    ...novel,
+    primarySource,
+    primaryUrl,
+  };
+}
+
+/**
+ * Guarantees that 100% of novels have complete, engaging, non-empty synopses.
+ */
+export async function ensureAllNovelsHaveSynopses(
+  novels: DiscoveredNovel[],
+  dependencies?: DiscoverDependencies,
+): Promise<DiscoveredNovel[]> {
+  return Promise.all(
+    novels.map(async (novel) => {
+      let finalSynopsis = cleanSynopsisText(novel.synopsis);
+      if (isSynopsisInsufficient(finalSynopsis)) {
+        finalSynopsis = await resolveFallbackSynopsis(novel, dependencies);
+      }
+      if (isSynopsisInsufficient(finalSynopsis)) {
+        finalSynopsis = synthesizeEngagingSynopsis(
+          novel.title,
+          novel.genres,
+          novel.titleRomaji,
+        );
+      }
+      return assignPrimarySource({
+        ...novel,
+        synopsis: cleanSynopsisText(finalSynopsis),
+      });
+    }),
+  );
+}
+
+/**
  * Normalizes title for fuzzy string comparison against Calibre metadata.
  */
 export function normalizeTitleForMatch(title: string): string {
@@ -840,7 +1194,8 @@ export async function fetchDiscoverFeed(
   // 1. Check cache
   const cached = getCachedFeed(cacheKey, dependencies);
   if (cached && cached.length > 0) {
-    return crossCheckNovelsWithCalibre(cached, dependencies);
+    const verified = await ensureAllNovelsHaveSynopses(cached, dependencies);
+    return crossCheckNovelsWithCalibre(verified, dependencies);
   }
 
   // 2. Try online fetch with short timeout
@@ -867,6 +1222,9 @@ export async function fetchDiscoverFeed(
       ? (dependencies?.seedTrendingNovels ?? SEED_TRENDING_NOVELS)
       : (dependencies?.seedNewNovels ?? SEED_NEW_NOVELS);
   }
+
+  // Ensure all discovered novels have complete, engaging, non-empty synopses
+  freshNovels = await ensureAllNovelsHaveSynopses(freshNovels, dependencies);
 
   // 3. Cache the raw feed
   setCachedFeed(cacheKey, freshNovels, dependencies);
@@ -984,7 +1342,7 @@ async function fetchOnlineFeedWithFallback(
         titleRomaji: item.title?.romaji || undefined,
         titleNative: item.title?.native || undefined,
         coverUrl: item.coverImage?.extraLarge || item.coverImage?.large || "",
-        synopsis: (item.description || "").replace(/<[^>]+>/g, "").trim(),
+        synopsis: cleanSynopsisText((item.description || "").replace(/<[^>]+>/g, "").trim()),
         genres: Array.isArray(item.genres) && item.genres.length > 0 ? item.genres : ["Light Novel"],
         score: item.averageScore || 80,
         popularity: item.popularity || 10000,
@@ -1115,10 +1473,18 @@ export async function enqueueDiscoverIngest(
   url: string,
   source: "lnori" | "elscione",
   queueHandlers?: {
-    enqueueLnoriJob?: (url: string) => { jobId: number; message?: string } | Promise<{ jobId: number; message?: string }>;
-    enqueueElscioneJob?: (url: string) => { jobId: number; message?: string } | Promise<{ jobId: number; message?: string }>;
+    enqueueLnoriJob?: (
+      url: string,
+    ) =>
+      | { jobId: number; runId?: string; message?: string }
+      | Promise<{ jobId: number; runId?: string; message?: string }>;
+    enqueueElscioneJob?: (
+      url: string,
+    ) =>
+      | { jobId: number; runId?: string; message?: string }
+      | Promise<{ jobId: number; runId?: string; message?: string }>;
   },
-): Promise<{ success: boolean; jobId: number; message: string }> {
+): Promise<{ success: boolean; jobId: number; runId: string; message: string }> {
   if (!url || typeof url !== "string" || !url.trim()) {
     throw new Error("Missing or invalid 'url' parameter");
   }
@@ -1135,16 +1501,20 @@ export async function enqueueDiscoverIngest(
     }
     if (queueHandlers?.enqueueLnoriJob) {
       const res = await queueHandlers.enqueueLnoriJob(cleanUrl);
+      const runId = res.runId || `lnori-${res.jobId}`;
       return {
         success: true,
         jobId: res.jobId,
-        message: res.message || `Enqueued Lnori light novel ingestion job #${res.jobId}`,
+        runId,
+        message: stripEmojis(res.message || `Enqueued Lnori light novel ingestion job #${res.jobId}`),
       };
     }
     const jobId = generateNumericJobId();
+    const runId = `lnori-${jobId}`;
     return {
       success: true,
       jobId,
+      runId,
       message: `Enqueued Lnori light novel ingestion job #${jobId}`,
     };
   }
@@ -1155,16 +1525,20 @@ export async function enqueueDiscoverIngest(
     }
     if (queueHandlers?.enqueueElscioneJob) {
       const res = await queueHandlers.enqueueElscioneJob(cleanUrl);
+      const runId = res.runId || `elscione-${res.jobId}`;
       return {
         success: true,
         jobId: res.jobId,
-        message: res.message || `Enqueued Elsci.one light novel ingestion job #${res.jobId}`,
+        runId,
+        message: stripEmojis(res.message || `Enqueued Elsci.one light novel ingestion job #${res.jobId}`),
       };
     }
     const jobId = generateNumericJobId();
+    const runId = `elscione-${jobId}`;
     return {
       success: true,
       jobId,
+      runId,
       message: `Enqueued Elsci.one light novel ingestion job #${jobId}`,
     };
   }

@@ -4705,8 +4705,8 @@
           `<span class="px-1.5 py-0.5 rounded text-[9px] bg-white/5 text-zinc-400 border border-white/5">${escapeHtml(g)}</span>`
         ).join('');
 
-        const primaryUrl = item.sourceUrls?.lnori || item.sourceUrls?.elscione || (item.sources && item.sources[0]?.url) || '';
-        const primarySourceName = item.sourceUrls?.lnori ? 'lnori' : (item.sourceUrls?.elscione ? 'elscione' : (item.sources && item.sources[0]?.source ? item.sources[0].source : 'lnori'));
+        const primaryUrl = item.primaryUrl || item.sourceUrls?.elscione || item.sourceUrls?.lnori || (item.sources && item.sources[0]?.url) || '';
+        const primarySourceName = item.primarySource || (item.sourceUrls?.elscione ? 'elscione' : (item.sourceUrls?.lnori ? 'lnori' : (item.sources && item.sources[0]?.source ? item.sources[0].source : 'elscione')));
         const ratingVal = item.rating || (item.score ? (item.score / 20) : 4.8);
         const romaji = item.titleRomaji || item.romajiTitle || '';
         const authorName = item.author || 'Light Novel';
@@ -4901,8 +4901,8 @@
 
     function handleDiscoverModalIngest() {
       if (!activeDiscoverItem) return;
-      const primaryUrl = activeDiscoverItem.sourceUrls?.lnori || activeDiscoverItem.sourceUrls?.elscione || (activeDiscoverItem.sources && activeDiscoverItem.sources[0]?.url) || '';
-      const primarySource = activeDiscoverItem.sourceUrls?.lnori ? 'lnori' : (activeDiscoverItem.sourceUrls?.elscione ? 'elscione' : (activeDiscoverItem.sources && activeDiscoverItem.sources[0]?.source ? activeDiscoverItem.sources[0].source : 'lnori'));
+      const primaryUrl = activeDiscoverItem.primaryUrl || activeDiscoverItem.sourceUrls?.elscione || activeDiscoverItem.sourceUrls?.lnori || (activeDiscoverItem.sources && activeDiscoverItem.sources[0]?.url) || '';
+      const primarySource = activeDiscoverItem.primarySource || (activeDiscoverItem.sourceUrls?.elscione ? 'elscione' : (activeDiscoverItem.sourceUrls?.lnori ? 'lnori' : (activeDiscoverItem.sources && activeDiscoverItem.sources[0]?.source ? activeDiscoverItem.sources[0].source : 'elscione')));
       if (!primaryUrl) return;
       triggerDiscoverIngest(activeDiscoverItem.id, encodeURIComponent(primaryUrl), primarySource);
       
