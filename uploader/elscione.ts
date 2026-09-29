@@ -1566,7 +1566,7 @@ export async function ingestElscioneSeries(
           index: i + 1,
           total: totalCount,
           volumeTitle: title,
-          status: `⏭️ _[Volume ${escapeTelegramMarkdown(String(i + 1))}/${escapeTelegramMarkdown(String(totalCount))}] Volume ${escapeTelegramMarkdown(String(volNum))} already in library, skipping..._`,
+          status: `_[Volume ${escapeTelegramMarkdown(String(i + 1))}/${escapeTelegramMarkdown(String(totalCount))}] Volume ${escapeTelegramMarkdown(String(volNum))} already in library, skipping..._`,
           data: {
             action: "skipped",
             reason: "already_exists",
@@ -1583,7 +1583,7 @@ export async function ingestElscioneSeries(
         index: i + 1,
         total: totalCount,
         volumeTitle: title,
-        status: `⬇️ _[Volume ${escapeTelegramMarkdown(String(i + 1))}/${escapeTelegramMarkdown(String(totalCount))}] Downloading EPUB..._\n*${escapeTelegramMarkdown(vol.filename)}*`,
+        status: `_[Volume ${escapeTelegramMarkdown(String(i + 1))}/${escapeTelegramMarkdown(String(totalCount))}] Downloading EPUB..._\n*${escapeTelegramMarkdown(vol.filename)}*`,
         data: {
           action: "downloading",
           volumeIndex: volNum,
@@ -1620,7 +1620,7 @@ export async function ingestElscioneSeries(
             index: i + 1,
             total: totalCount,
             volumeTitle: title,
-            status: `⚠️ _[Volume ${escapeTelegramMarkdown(String(i + 1))}/${escapeTelegramMarkdown(String(totalCount))}] Skipped volume due to download error, continuing with next volume..._\n*${escapeTelegramMarkdown(vol.filename)}*`,
+            status: `_[Volume ${escapeTelegramMarkdown(String(i + 1))}/${escapeTelegramMarkdown(String(totalCount))}] Skipped volume due to download error, continuing with next volume..._\n*${escapeTelegramMarkdown(vol.filename)}*`,
             data: {
               action: "skipped",
               reason: "download_error",
@@ -1638,7 +1638,7 @@ export async function ingestElscioneSeries(
           index: i + 1,
           total: totalCount,
           volumeTitle: title,
-          status: `📚 _[Volume ${escapeTelegramMarkdown(String(i + 1))}/${escapeTelegramMarkdown(String(totalCount))}] Ingesting into Calibre library..._\n*Volume ${escapeTelegramMarkdown(String(volNum))}*`,
+          status: `_[Volume ${escapeTelegramMarkdown(String(i + 1))}/${escapeTelegramMarkdown(String(totalCount))}] Ingesting into Calibre library..._\n*Volume ${escapeTelegramMarkdown(String(volNum))}*`,
           data: {
             action: "adding_calibre",
             volumeIndex: volNum,
@@ -1821,7 +1821,7 @@ export async function ingestElscioneSeries(
           index: i + 1,
           total: totalCount,
           volumeTitle: title,
-          status: `⚠️ _[Volume ${escapeTelegramMarkdown(String(i + 1))}/${escapeTelegramMarkdown(String(totalCount))}] Skipped volume due to error, continuing with next volume..._\n*${escapeTelegramMarkdown(vol.filename)}*`,
+          status: `_[Volume ${escapeTelegramMarkdown(String(i + 1))}/${escapeTelegramMarkdown(String(totalCount))}] Skipped volume due to error, continuing with next volume..._\n*${escapeTelegramMarkdown(vol.filename)}*`,
           data: {
             action: "skipped",
             reason: "import_error",

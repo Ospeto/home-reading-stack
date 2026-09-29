@@ -1289,7 +1289,7 @@ export async function ingestLnoriSeries(
 
   await reportProgress(onProgress, {
     phase: "manifest",
-    status: `⏳ _Fetching volume manifest for Lnori ${parsed.type}..._`,
+    status: `_Fetching volume manifest for Lnori ${parsed.type}..._`,
     data: { action: "fetching_manifest", type: parsed.type, url },
   });
 
@@ -1350,7 +1350,7 @@ export async function ingestLnoriSeries(
         index: volNum,
         total: totalCount,
         volumeTitle: `${manifest.seriesTitle} (Vol ${volNum})`,
-        status: `⏳ _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Inspecting volume metadata..._\n\`${escapeTelegramMarkdown(fullVolUrl)}\``,
+        status: `_[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Inspecting volume metadata..._\n\`${escapeTelegramMarkdown(fullVolUrl)}\``,
         data: {
           action: "inspecting",
           volumeIndex: volNum,
@@ -1381,7 +1381,7 @@ export async function ingestLnoriSeries(
           index: volNum,
           total: totalCount,
           volumeTitle: `${manifest.seriesTitle} (Vol ${volNum})`,
-          status: `⚠️ [Volume ${volNum}/${totalCount}] Skipping volume without EPUB filename`,
+          status: `[Volume ${volNum}/${totalCount}] Skipping volume without EPUB filename`,
           data: {
             action: "skipped",
             reason: "missing_epub",
@@ -1405,7 +1405,7 @@ export async function ingestLnoriSeries(
           index: volNum,
           total: totalCount,
           volumeTitle: title,
-          status: `⏭️ _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Volume ${escapeTelegramMarkdown(String(assignedIndex))} already in library, skipping..._`,
+          status: `_[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Volume ${escapeTelegramMarkdown(String(assignedIndex))} already in library, skipping..._`,
           data: {
             action: "skipped",
             reason: "already_exists",
@@ -1422,7 +1422,7 @@ export async function ingestLnoriSeries(
         index: volNum,
         total: totalCount,
         volumeTitle: title,
-        status: `⬇️ _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Downloading EPUB..._\n*${escapeTelegramMarkdown(volMeta.epubFilename)}*`,
+        status: `_[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Downloading EPUB..._\n*${escapeTelegramMarkdown(volMeta.epubFilename)}*`,
         data: {
           action: "downloading",
           volumeIndex: assignedIndex,
@@ -1443,7 +1443,7 @@ export async function ingestLnoriSeries(
           index: volNum,
           total: totalCount,
           volumeTitle: title,
-          status: `📚 _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Ingesting into Calibre library..._\n*Volume ${escapeTelegramMarkdown(String(assignedIndex))}*`,
+          status: `_[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Ingesting into Calibre library..._\n*Volume ${escapeTelegramMarkdown(String(assignedIndex))}*`,
           data: {
             action: "adding_calibre",
             volumeIndex: assignedIndex,
@@ -1521,7 +1521,7 @@ export async function ingestLnoriSeries(
               index: volNum,
               total: totalCount,
               volumeTitle: title,
-              status: `🎨 Converting WebP cover for Volume ${assignedIndex}...`,
+              status: `Converting WebP cover for Volume ${assignedIndex}...`,
               data: {
                 action: "converting_cover",
                 volumeIndex: assignedIndex,
@@ -1649,7 +1649,7 @@ export async function ingestLnoriSeries(
           index: volNum,
           total: totalCount,
           volumeTitle: title,
-          status: `⚠️ _[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Skipped volume due to error, continuing with next volume..._\n*${escapeTelegramMarkdown(volMeta.epubFilename)}*`,
+          status: `_[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Skipped volume due to error, continuing with next volume..._\n*${escapeTelegramMarkdown(volMeta.epubFilename)}*`,
           data: {
             action: "skipped",
             reason: "import_error",
