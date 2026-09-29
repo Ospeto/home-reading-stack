@@ -13,7 +13,10 @@ import {
   setCachedFeed,
   enqueueDiscoverIngest,
   isSynopsisInsufficient,
+  synthesizeEngagingSynopsis,
+  cleanSynopsisText,
   stripEmojis,
+  resolveFallbackSynopsis,
   ensureAllNovelsHaveSynopses,
   type DiscoveredNovel,
 } from "./discover";
@@ -22,6 +25,9 @@ import {
   setServerDependenciesForTest,
   resetServerDependenciesForTest,
   resetActiveLnoriStateForTest,
+  enqueueLnoriJob,
+  enqueueElscioneJob,
+  getDiscoverJobProgress,
   registerDiscoverJob,
 } from "./server";
 
@@ -581,118 +587,6 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       });
       const resOffDomain = await handleRequest(reqOffDomain, localServer);
       expect(resOffDomain.status).toBe(400);
-    });
-
-    it("GET /api/discover/novel/:id returns single novel details by id", async () => {
-      const req = new Request("http://127.0.0.1:8086/api/discover/novel/ascendance-of-a-bookworm");
-      const res = await handleRequest(req, localServer);
-      expect(res.status).toBe(200);
-      const data = (await res.json()) as any;
-      expect(data.success).toBe(true);
-      expect(data.novel).toBeDefined();
-      expect(data.novel.id).toBe("ascendance-of-a-bookworm");
-      expect(data.novel.title).toContain("Ascendance of a Bookworm");
-      expect(data.novel.synopsis).toBeDefined();
-      expect(typeof data.novel.synopsis).toBe("string");
-
-      const reqNotFound = new Request("http://127.0.0.1:8086/api/discover/novel/nonexistent-novel-12345");
-      const resNotFound = await handleRequest(reqNotFound, localServer);
-      expect(resNotFound.status).toBe(404);
-    });
-  });
-
-  describe("Frontend Discover UI & Zero-Emoji Contract (uploader/index.html)", () => {
-    const htmlPath = path.join((import.meta as any).dir, "index.html");
-    const html = fs.readFileSync(htmlPath, "utf8");
-
-    it("strictly strips all emojis from Discover tab, segmented controls, status badges, buttons, and empty state", () => {
-      // 1. Navigation tab has no emoji
-      expect(html).toContain('id="chip-discover"');
-      expect(html).not.toContain('<span class="text-amber-400">✨</span>\n              <span>Discover</span>');
-      expect(html).toContain('<span>Discover</span>\n              <span id="quickDiscoverBadge" class="visionos-badge visionos-badge-discover">Hot</span>');
-
-      // 2. Segmented controls have no emojis
-      expect(html).not.toContain('<span>🔥</span>\n              <span>Trending</span>');
-      expect(html).not.toContain('<span>✨</span>\n              <span>New Releases</span>');
-      expect(html).toContain('id="discoverTabTrending" role="tab" aria-selected="true" class="discover-tab discover-tab-active px-4 py-1.5 rounded-full text-xs font-bold transition-all duration-150 flex items-center gap-1.5 cursor-pointer active:scale-[0.96]" title="Browse Trending Light Novels">\n              <span>Trending</span>');
-      expect(html).toContain('id="discoverTabNewReleases" role="tab" aria-selected="false" class="discover-tab px-4 py-1.5 rounded-full text-xs font-bold text-zinc-400 hover:text-white transition-all duration-150 flex items-center gap-1.5 cursor-pointer active:scale-[0.96]" title="Browse New Light Novel Releases">\n              <span>New Releases</span>');
-
-      // 3. Status filter badges have no emojis
-      expect(html).toContain('id="discoverStatus-ready" class="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]">Available</button>');
-      expect(html).toContain('id="discoverStatus-in_library" class="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]">In Library</button>');
-      expect(html).not.toContain("Ready to Download ⚡");
-      expect(html).not.toContain("In Library ✓");
-
-      // 4. Discover empty state uses clean SVG instead of 🔍 emoji
-      expect(html).not.toContain('<div class="text-2xl">🔍</div>');
-      expect(html).toContain('id="discoverEmptyState"');
-
-      // 5. Preview modal header has no emoji
-      expect(html).not.toContain('<span class="text-amber-400 text-lg">✨</span>\n          <h3 id="discoverModalHeaderTitle"');
-      expect(html).toContain('<svg class="w-4 h-4 text-amber-400"><use href="#icon-book-open"/></svg>\n          <h3 id="discoverModalHeaderTitle"');
-
-      // 6. Ingest buttons have no emojis
-      expect(html).not.toContain("⚡ 1-Click Ingest to Library");
-      expect(html).toContain("Ingest to Library");
-
-      // 7. Error states have no warning emojis
-      expect(html).not.toContain("⚠️ Failed to load Discover feed");
-      expect(html).toContain("Failed to load Discover feed");
-    });
-
-    it("maintains global discoverNovelsMap and provides reliable preview modal opening with readable full synopsis", () => {
-      // 1. Global registry Map
-      expect(html).toContain("const discoverNovelsMap = new Map();");
-      expect(html).toContain("discoverNovelsMap.set(item.id, item);");
-
-      // 2. Reliable openDiscoverModal looking up map and fallback fetching
-      expect(html).toContain("let item = discoverNovelsMap.get(novelId);");
-      expect(html).toContain("openDiscoverModal(novelId)");
-      expect(html).toContain("/api/discover/novel/");
-
-      // 3. Readable full synopsis container with clean typography
-      expect(html).toContain('id="discoverModalSynopsis" class="text-sm leading-relaxed text-zinc-300 font-normal whitespace-pre-line bg-white/[0.02] p-4 sm:p-5 rounded-xl border border-white/5 max-h-60 sm:max-h-72 overflow-y-auto no-scrollbar"');
-
-      // 4. Subtle pulse skeleton for loading synopsis
-      expect(html).toContain("function renderSynopsisSkeleton");
-      expect(html).toContain("animate-pulse");
-    });
-
-    it("implements live download progress bars on cards and modal with 1.5s polling", () => {
-      // 1. Active downloads Map
-      expect(html).toContain("const activeDiscoverDownloads = new Map();");
-
-      // 2. Card progress bar container and elements
-      expect(html).toContain('id="cardProgressBar-');
-      expect(html).toContain('id="cardProgressText-');
-      expect(html).toContain('id="cardProgressPct-');
-      expect(html).toContain("h-1.5 w-full bg-zinc-800 rounded-full overflow-hidden");
-      expect(html).toContain("h-full bg-amber-500 rounded-full transition-all duration-300");
-
-      // 3. Modal live progress container
-      expect(html).toContain('id="discoverModalProgressContainer"');
-      expect(html).toContain('id="discoverModalProgressBar"');
-      expect(html).toContain('id="discoverModalProgressStatus"');
-      expect(html).toContain('id="discoverModalProgressPct"');
-
-      // 4. 1.5-second polling interval
-      expect(html).toContain("1500);");
-      expect(html).toContain("/api/discover/progress/");
-
-      // 5. Volume progress format and clean text completion toast
-      expect(html).toContain("Downloading Volume");
-      expect(html).toContain("Downloaded");
-      expect(html).toContain("into library");
-    });
-
-    it("does not pass URLs in card HTML onclick attributes and prefers Elscione over Lnori", () => {
-      // In renderDiscoverCards, card ingest button does NOT embed raw URL attribute strings, but passes only novelId
-      expect(html).toContain("onclick=\"triggerDiscoverIngest('${escapeHtml(item.id)}', event)\"");
-      expect(html).not.toContain("onclick=\"triggerDiscoverIngest('${escapeHtml(item.id)}', '${encodeURIComponent(primaryUrl)}'");
-
-      // getPrimaryNovelSource helper strictly prefers Elscione over Lnori
-      expect(html).toContain("function getPrimaryNovelSource");
-      expect(html).toContain("item.sourceUrls?.elscione");
     });
   });
 

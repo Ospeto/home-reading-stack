@@ -5318,66 +5318,6 @@ async function handleRequestCore(
     }
   }
 
-  // API: Light Novel Discovery Single Novel Lookup
-  const discoverSingleNovelMatch = url.pathname.match(/^\/api\/discover\/novel(?:s)?\/([^/]+)$/);
-  if (
-    discoverSingleNovelMatch &&
-    discoverSingleNovelMatch[1] !== "feed" &&
-    discoverSingleNovelMatch[1] !== "ingest" &&
-    discoverSingleNovelMatch[1] !== "progress" &&
-    req.method === "GET"
-  ) {
-    try {
-      const novelId = decodeURIComponent(discoverSingleNovelMatch[1]).trim();
-      const discoverFn = serverDependencies.getDiscoverNovels ?? getDiscoverNovels;
-      const cacheDb = getCacheDb();
-      const getCalibreBooksFn = serverDependencies.getCalibreBooks ?? getCalibreBooks;
-
-      // Check trending feed first, then new releases feed
-      const trendingRes = await discoverFn(
-        { tab: "trending", pageSize: 100 },
-        { cacheDb, getCalibreBooks: getCalibreBooksFn },
-      );
-      let found = trendingRes.novels.find((n) => n.id === novelId);
-      if (!found) {
-        const newRes = await discoverFn(
-          { tab: "new", pageSize: 100 },
-          { cacheDb, getCalibreBooks: getCalibreBooksFn },
-        );
-        found = newRes.novels.find((n) => n.id === novelId);
-      }
-
-      if (!found) {
-        // Search query fallback
-        const searchRes = await discoverFn(
-          { tab: "trending", q: novelId, pageSize: 20 },
-          { cacheDb, getCalibreBooks: getCalibreBooksFn },
-        );
-        found = searchRes.novels.find((n) => n.id === novelId);
-      }
-
-      if (!found) {
-        return jsonResponse(
-          { success: false, error: "Novel not found" },
-          404,
-          corsOrigin,
-        );
-      }
-
-      return jsonResponse(
-        { success: true, novel: found },
-        200,
-        corsOrigin,
-      );
-    } catch (err: any) {
-      return jsonResponse(
-        { success: false, error: sanitizeErrorMessage(err?.message || err) },
-        500,
-        corsOrigin,
-      );
-    }
-  }
-
   // API: Light Novel Discovery Ingest (Lnori & Elsci.one 1-Click Queue)
   if (url.pathname === "/api/discover/ingest" && req.method === "POST") {
     try {
@@ -5502,15 +5442,11 @@ async function handleRequestCore(
 
   // API: Light Novel Discovery Live Job Progress
   const discoverProgressMatch = url.pathname.match(
-    /^\/api\/discover\/(?:progress|job)(?:\/([^/]+))?$/,
+    /^\/api\/discover\/(?:progress|job)\/([^/]+)$/,
   );
   if (discoverProgressMatch && req.method === "GET") {
     try {
-      const rawJobId =
-        discoverProgressMatch[1] ||
-        url.searchParams.get("jobId") ||
-        url.searchParams.get("runId") ||
-        "";
+      const rawJobId = discoverProgressMatch[1];
       const progress = getDiscoverJobProgress(rawJobId);
       if (!progress) {
         return jsonResponse(
