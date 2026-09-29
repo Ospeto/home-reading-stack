@@ -82,6 +82,7 @@ import {
   deleteHighlightsForBook,
   cleanQuoteText,
   invalidateHighlightCountsCache,
+  type HighlightRecord,
 } from "./highlights";
 
 export { invalidateHighlightCountsCache };
@@ -733,14 +734,27 @@ export function getKosyncDbPath(): string {
   const home = process.env.HOME || os.homedir();
   return path.join(home, "kosync-server", "data", "koreader-sync.db");
 }
+// @deprecated Use getKosyncDbPath() for dynamic path resolution
+export const KOSYNC_DB_PATH = getKosyncDbPath();
 
-export function withKosyncDb<T>(action: (db: Database) => T): T | null {
+export function withKosyncDb<T>(
+  action: (db: Database) => T,
+  options?: { readonly?: boolean },
+): T | null {
   const dbPath = getKosyncDbPath();
   if (!fs.existsSync(dbPath)) return null;
   let db: Database | null = null;
   try {
-    db = new Database(dbPath);
-    db.run("PRAGMA journal_mode = WAL;");
+    db = options?.readonly
+      ? new Database(dbPath, { readonly: true })
+      : new Database(dbPath);
+    if (!options?.readonly) {
+      try {
+        db.run("PRAGMA journal_mode = WAL;");
+      } catch (_e) {
+        void _e;
+      }
+    }
     db.run("PRAGMA busy_timeout = 5000;");
     return action(db);
   } catch (err) {
@@ -770,7 +784,6 @@ export async function parseJsonBody<T = any>(
     return { data: null, error: "Malformed or invalid JSON payload" };
   }
 }
-
 const MAX_UPLOAD_SIZE = MAX_ARCHIVE_SIZE_BYTES; // 100MB
 
 const FILE_EXT_PATH_REGEX =
@@ -1302,17 +1315,26 @@ function getKOReaderBinary256(filePath: string): string | null {
   try {
     const stats = fs.statSync(filePath);
     const fd = fs.openSync(filePath, "r");
-    const md5 = crypto.createHash(KOREADER_HASH_ALGO);
-    const size = 1024;
-    for (let i = -1; i <= 10; i++) {
-      const offset = i === -1 ? 256 : 1024 * 4 ** i;
-      if (offset >= stats.size) break;
-      const buf = Buffer.alloc(size);
-      const bytesRead = fs.readSync(fd, buf, 0, size, offset);
-      if (bytesRead > 0) md5.update(buf.subarray(0, bytesRead));
+    try {
+      const md5 = crypto.createHash(KOREADER_HASH_ALGO);
+      const size = 1024;
+      if (stats.size <= 256) {
+        const buf = Buffer.alloc(Math.max(1, stats.size));
+        const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+        if (bytesRead > 0) md5.update(buf.subarray(0, bytesRead));
+      } else {
+        for (let i = -1; i <= 10; i++) {
+          const offset = i === -1 ? 256 : 1024 * 4 ** i;
+          if (offset >= stats.size) break;
+          const buf = Buffer.alloc(size);
+          const bytesRead = fs.readSync(fd, buf, 0, size, offset);
+          if (bytesRead > 0) md5.update(buf.subarray(0, bytesRead));
+        }
+      }
+      return md5.digest("hex");
+    } finally {
+      fs.closeSync(fd);
     }
-    fs.closeSync(fd);
-    return md5.digest("hex");
   } catch {
     return null;
   }
@@ -1322,16 +1344,25 @@ function getKOReaderPartial512(filePath: string): string | null {
   try {
     const stats = fs.statSync(filePath);
     const fd = fs.openSync(filePath, "r");
-    const md5 = crypto.createHash(KOREADER_HASH_ALGO);
-    let offset = 512;
-    const buf = Buffer.alloc(1024);
-    while (offset < stats.size) {
-      const bytesRead = fs.readSync(fd, buf, 0, 1024, offset);
-      if (bytesRead > 0) md5.update(buf.subarray(0, bytesRead));
-      offset *= 4;
+    try {
+      const md5 = crypto.createHash(KOREADER_HASH_ALGO);
+      if (stats.size <= 512) {
+        const buf = Buffer.alloc(Math.max(1, stats.size));
+        const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+        if (bytesRead > 0) md5.update(buf.subarray(0, bytesRead));
+      } else {
+        let offset = 512;
+        const buf = Buffer.alloc(1024);
+        while (offset < stats.size) {
+          const bytesRead = fs.readSync(fd, buf, 0, 1024, offset);
+          if (bytesRead > 0) md5.update(buf.subarray(0, bytesRead));
+          offset *= 4;
+        }
+      }
+      return md5.digest("hex");
+    } finally {
+      fs.closeSync(fd);
     }
-    fs.closeSync(fd);
-    return md5.digest("hex");
   } catch {
     return null;
   }
@@ -1903,16 +1934,22 @@ function getCalibreHashMap() {
           const cached = selectStmt.get(full + "#bin256", mtime) as any;
           if (!cached) {
             const parentDir = path.basename(path.dirname(full));
-            const bookMatch = books.find(
-              (b: any) =>
-                parentDir.includes(`(${b.id})`) ||
-                b.title
-                  .toLowerCase()
-                  .includes(
-                    path.basename(e.name, path.extname(e.name)).toLowerCase(),
-                  ) ||
-                e.name.toLowerCase().includes(b.title.toLowerCase()),
-            );
+            const idMatch = parentDir.match(/\((\d+)\)$/);
+            const matchedById = idMatch
+              ? books.find((b: any) => b.id === Number(idMatch[1]))
+              : null;
+
+            const bookMatch =
+              matchedById ||
+              books.find(
+                (b: any) =>
+                  b.title
+                    .toLowerCase()
+                    .includes(
+                      path.basename(e.name, path.extname(e.name)).toLowerCase(),
+                    ) ||
+                  e.name.toLowerCase().includes(b.title.toLowerCase()),
+              );
             const bId = bookMatch ? bookMatch.id : null;
             const bTitle = bookMatch
               ? bookMatch.title
@@ -1947,6 +1984,16 @@ function getCalibreHashMap() {
                 cover: !!bCover,
               };
             }
+            // Insert cache sentinel row so selectStmt hits cache on subsequent scans
+            insertStmt.run(
+              full + "#bin256",
+              mtime,
+              h1 || "sentinel",
+              bId,
+              bTitle,
+              bAuthors,
+              bCover,
+            );
           }
         }
       }
@@ -2201,110 +2248,134 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
 function getKosyncProgress() {
   try {
     return (
-      withKosyncDb((db) => {
-        const rows = db
-          .query(
-            "SELECT id, document, progress, percentage, device, device_id, filename, title, authors, timestamp FROM progress ORDER BY timestamp DESC LIMIT 50;",
-          )
-          .all() as any[];
+      withKosyncDb(
+        (db) => {
+          const rows = db
+            .query(
+              "SELECT id, document, progress, percentage, device, device_id, filename, title, authors, timestamp FROM progress ORDER BY timestamp DESC LIMIT 50;",
+            )
+            .all() as any[];
 
-        const { map, books } = getCalibreHashMap();
+          const { map } = getCalibreHashMap();
+          const getBooksFn =
+            serverDependencies.getCalibreBooks ?? getCalibreBooks;
+          const books = getBooksFn();
 
-        const norm = (s: string) =>
-          (s || "").toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, "");
+          const norm = (s: string) =>
+            (s || "").toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, "");
 
-        return rows.map((r) => {
-          let displayTitle = r.title || r.filename;
-          let displayAuthors = r.authors;
-          let bookId: number | null = null;
-          let cover: boolean = false;
+          return rows.map((r) => {
+            let displayTitle = r.title || r.filename;
+            let displayAuthors = r.authors;
+            let bookId: number | null = null;
+            let cover: boolean = false;
 
-          if (map[r.document]) {
-            displayTitle = map[r.document].title;
-            displayAuthors = map[r.document].authors;
-            bookId = map[r.document].id;
-            cover = map[r.document].cover;
-          }
-
-          if (!bookId && (r.title || r.filename)) {
-            const searchNorm = norm(r.title || r.filename);
-            const bookMatch = books.find((b: any) => {
-              const bNorm = norm(b.title);
-              return (
-                bNorm === searchNorm ||
-                (searchNorm.length > 5 &&
-                  (bNorm.includes(searchNorm) || searchNorm.includes(bNorm)))
-              );
-            });
-            if (bookMatch) {
-              bookId = bookMatch.id;
-              cover = !!bookMatch.cover;
-              displayTitle = bookMatch.title;
-              displayAuthors = bookMatch.authors || displayAuthors;
+            if (map[r.document]) {
+              displayTitle = map[r.document].title;
+              displayAuthors = map[r.document].authors;
+              bookId = map[r.document].id;
+              cover = map[r.document].cover;
             }
-          }
 
-          if (!bookId) {
-            try {
-              const alias = db
-                .query(
-                  "SELECT canonical_id, normalized_title, normalized_authors FROM document_aliases WHERE document_hash = ?",
-                )
-                .get(r.document) as any;
+            if (!bookId && (r.title || r.filename)) {
+              const searchNorm = norm(r.title || r.filename);
 
-              if (alias) {
-                const aliasNorm = norm(alias.normalized_title);
-                const bookMatch = books.find(
-                  (b: any) => norm(b.title) === aliasNorm,
-                );
-                if (bookMatch) {
-                  bookId = bookMatch.id;
-                  cover = !!bookMatch.cover;
-                  displayTitle = bookMatch.title;
-                  displayAuthors = bookMatch.authors || displayAuthors;
-                } else {
-                  displayTitle = alias.normalized_title;
-                  displayAuthors = alias.normalized_authors || "Unknown Author";
-                }
+              // Pass 1: exact normalized match across all books
+              let bookMatch = books.find((b: any) => norm(b.title) === searchNorm);
+
+              // Pass 2: only if no exact match exists, attempt bounded substring match with length threshold
+              if (!bookMatch && searchNorm.length > 5) {
+                bookMatch = books.find((b: any) => {
+                  const bNorm = norm(b.title);
+                  return (
+                    bNorm.length > 5 &&
+                    (bNorm.includes(searchNorm) || searchNorm.includes(bNorm))
+                  );
+                });
               }
-            } catch (_e) {
-              void _e;
-            }
-          }
 
-          if (!displayTitle) {
-            const match = books.find(
-              (b: any) =>
-                cleanString(b.title).toLowerCase() ===
-                cleanString(r.filename || "").toLowerCase(),
-            );
-            if (match) {
-              displayTitle = match.title;
-              displayAuthors = match.authors;
-              bookId = match.id;
-              cover = !!match.cover;
-            } else {
-              displayTitle = "Active Reading Session";
-              displayAuthors = "KOReader Document";
+              if (bookMatch) {
+                bookId = bookMatch.id;
+                cover = !!bookMatch.cover;
+                displayTitle = bookMatch.title;
+                displayAuthors = bookMatch.authors || displayAuthors;
+              }
             }
-          }
 
-          if (displayTitle) {
-            displayTitle = cleanString(displayTitle);
-            if (displayTitle.endsWith(".epub")) {
-              displayTitle = displayTitle.replace(/\.epub$/i, "");
+            if (!bookId) {
+              try {
+                const alias = db
+                  .query(
+                    "SELECT canonical_id, normalized_title, normalized_authors FROM document_aliases WHERE document_hash = ?",
+                  )
+                  .get(r.document) as any;
+
+                if (alias) {
+                  const aliasNorm = norm(alias.normalized_title);
+                  const bookMatch = books.find(
+                    (b: any) => norm(b.title) === aliasNorm,
+                  );
+                  if (bookMatch) {
+                    bookId = bookMatch.id;
+                    cover = !!bookMatch.cover;
+                    displayTitle = bookMatch.title;
+                    displayAuthors = bookMatch.authors || displayAuthors;
+                  } else {
+                    displayTitle = alias.normalized_title;
+                    displayAuthors =
+                      alias.normalized_authors || "Unknown Author";
+                  }
+                }
+              } catch (_e) {
+                void _e;
+              }
             }
-          }
 
-          return {
-            ...r,
-            displayTitle,
-            displayAuthors: cleanString(displayAuthors) || "Unknown Author",
-            bookId,
-            cover,
-          };
-        });
-      }) || []
+            if (!displayTitle) {
+              const match = books.find(
+                (b: any) =>
+                  cleanString(b.title).toLowerCase() ===
+                  cleanString(r.filename || "").toLowerCase(),
+              );
+              if (match) {
+                displayTitle = match.title;
+                displayAuthors = match.authors;
+                bookId = match.id;
+                cover = !!match.cover;
+              } else {
+                displayTitle = "Active Reading Session";
+                displayAuthors = "KOReader Document";
+              }
+            }
+
+            if (displayTitle) {
+              displayTitle = cleanString(displayTitle);
+              if (displayTitle.endsWith(".epub")) {
+                displayTitle = displayTitle.replace(/\.epub$/i, "");
+              }
+            }
+
+            // Normalize percentage to a clean 0..1 float ratio
+            let rawPct =
+              typeof r.percentage === "number"
+                ? r.percentage
+                : parseFloat(r.percentage);
+            if (Number.isNaN(rawPct) || rawPct === undefined) rawPct = 0;
+            const normalizedRatio = rawPct > 1 ? rawPct / 100 : rawPct;
+            const percentage = Math.max(0, Math.min(1, normalizedRatio));
+
+            return {
+              ...r,
+              percentage,
+              displayTitle,
+              displayAuthors: cleanString(displayAuthors) || "Unknown Author",
+              bookId,
+              cover,
+            };
+          });
+        },
+        { readonly: true },
+      ) || []
     );
   } catch (e) {
     console.error("Error reading kosync db:", e);
@@ -3168,10 +3239,27 @@ async function handleRequestCore(
   // API: Session Verification & Cookie Handoff
   if (
     url.pathname === "/api/auth/session" &&
-    (req.method === "GET" || req.method === "POST")
+    (req.method === "GET" || req.method === "POST" || req.method === "DELETE")
   ) {
+    if (req.method === "DELETE") {
+      const response = jsonResponse(
+        { success: true, message: "Logged out" },
+        200,
+        corsOrigin,
+      );
+      response.headers.append(
+        "Set-Cookie",
+        "reading_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+      );
+      response.headers.append(
+        "Set-Cookie",
+        "reading_tma=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+      );
+      return response;
+    }
+
     const auth = authenticateRequest(req, authOpts);
-    return jsonResponse(
+    const response = jsonResponse(
       {
         success: auth.authenticated,
         method: auth.method,
@@ -3181,6 +3269,32 @@ async function handleRequestCore(
       auth.authenticated ? 200 : 401,
       corsOrigin,
     );
+
+    if (auth.authenticated && req.method === "POST") {
+      const apiKey = authOpts.apiKey || process.env.READING_API_KEY || "";
+      const cookieOpts = `Path=/; HttpOnly; SameSite=Lax${isWan ? "; Secure" : ""}; Max-Age=2592000`; // 30 days
+      const authHeader = req.headers.get("authorization") || "";
+      const xApiKey = req.headers.get("x-api-key") || "";
+      const providedKey = authHeader.startsWith("Bearer ")
+        ? authHeader.substring(7).trim()
+        : xApiKey || apiKey;
+
+      if (
+        apiKey &&
+        (providedKey === apiKey ||
+          auth.method === "bearer" ||
+          auth.method === "api_key" ||
+          auth.method === "cookie" ||
+          auth.method === "lan")
+      ) {
+        response.headers.append(
+          "Set-Cookie",
+          `reading_session=${encodeURIComponent(apiKey)}; ${cookieOpts}`,
+        );
+      }
+    }
+
+    return response;
   }
 
   // API: List books
@@ -3812,8 +3926,21 @@ async function handleRequestCore(
   // API: Reading Stats
   if (url.pathname === "/api/kosync/stats" && req.method === "GET") {
     const progress = getKosyncProgress();
-    const finishedBooks = progress.filter((p) => p.percentage >= 0.99);
-    const activeBooks = progress.filter(
+
+    // Group by distinct book/document keeping the latest session
+    const latestByBook = new Map<string, any>();
+    for (const p of progress) {
+      const key = p.bookId
+        ? `book_${p.bookId}`
+        : p.document || p.displayTitle;
+      if (!latestByBook.has(key)) {
+        latestByBook.set(key, p);
+      }
+    }
+
+    const uniqueBooks = Array.from(latestByBook.values());
+    const finishedBooks = uniqueBooks.filter((p) => p.percentage >= 0.99);
+    const activeBooks = uniqueBooks.filter(
       (p) => p.percentage < 0.99 && p.percentage > 0,
     );
 
@@ -4302,7 +4429,12 @@ async function handleRequestCore(
           title = body.title;
           author = body.author;
           progress =
-            typeof body.progress === "number" ? body.progress : undefined;
+            typeof body.progress === "number"
+              ? body.progress
+              : typeof body.progress === "string" &&
+                  !Number.isNaN(parseFloat(body.progress))
+                ? parseFloat(body.progress)
+                : undefined;
           const rawEntries = body.entries || body.highlights || [];
           if (Array.isArray(rawEntries)) {
             for (const e of rawEntries) {
@@ -4370,7 +4502,33 @@ async function handleRequestCore(
       });
 
       const syncedItem = syncResult.items[0];
-      invalidateHighlightCountsCache(getCacheDb());
+      const hCacheDb = getCacheDb();
+
+      // Index newly synced highlights into book_highlights table so web reader has them immediately
+      try {
+        if (highlights.length > 0 && (syncedItem?.title || title)) {
+          const syncTitle = syncedItem?.title || title || "Untitled";
+          const hRecords: HighlightRecord[] = highlights
+            .map((h) => ({
+              book_id: bookId ?? null,
+              book_title: syncTitle,
+              chapter: h.chapter || null,
+              page: h.page ?? null,
+              quote: cleanQuoteText(h.text || ""),
+              note: h.notes || null,
+              timestamp: h.datetime || null,
+            }))
+            .filter((r) => r.quote.length > 0);
+
+          if (hRecords.length > 0) {
+            batchUpsertHighlights(hCacheDb, hRecords);
+          }
+        }
+      } catch (_idxErr) {
+        void _idxErr;
+      }
+
+      invalidateHighlightCountsCache(hCacheDb);
       const relPath = syncedItem?.filename ? path.join("Books", syncedItem.filename) : "";
       return jsonResponse(
         {
@@ -4406,7 +4564,8 @@ async function handleRequestCore(
       }
       const body = parsedBody.data;
       const bookId = validateIntegerId(body.bookId);
-      if (!body.document || !bookId) {
+      const cleanDoc = (body.document || "").trim();
+      if (!cleanDoc || !bookId) {
         return jsonResponse(
           { success: false, error: "Valid document and bookId required" },
           400,
@@ -4414,7 +4573,8 @@ async function handleRequestCore(
         );
       }
 
-      const books = getCalibreBooks();
+      const getBooksFn = serverDependencies.getCalibreBooks ?? getCalibreBooks;
+      const books = getBooksFn();
       const book = books.find((b: any) => b.id === bookId);
       if (!book) {
         return jsonResponse(
@@ -4431,6 +4591,16 @@ async function handleRequestCore(
       const now = Math.floor(Date.now() / 1000);
 
       const linked = withKosyncDb((db) => {
+        db.run(`
+          CREATE TABLE IF NOT EXISTS document_aliases (
+            document_hash TEXT PRIMARY KEY,
+            canonical_id TEXT,
+            normalized_title TEXT,
+            normalized_authors TEXT,
+            created_at INTEGER
+          );
+        `);
+
         db.prepare(
           `INSERT INTO document_aliases (document_hash, canonical_id, normalized_title, normalized_authors, created_at)
            VALUES (?, ?, ?, ?, ?)
@@ -4439,7 +4609,7 @@ async function handleRequestCore(
              normalized_title = excluded.normalized_title,
              normalized_authors = excluded.normalized_authors`,
         ).run(
-          body.document!,
+          cleanDoc,
           canonicalId,
           book.title,
           book.authors || "Unknown",
@@ -4450,15 +4620,31 @@ async function handleRequestCore(
           `UPDATE progress
            SET title = ?, authors = ?
            WHERE document = ?`,
-        ).run(book.title, book.authors || "Unknown", body.document!);
+        ).run(book.title, book.authors || "Unknown", cleanDoc);
         return true;
       });
 
       if (linked) {
+        // Cache mapping in cache.db file_hashes
+        try {
+          cacheDb.run(
+            "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            `alias:${cleanDoc}`,
+            Date.now(),
+            cleanDoc,
+            book.id,
+            book.title,
+            book.authors || "Unknown",
+            book.cover ? 1 : 0,
+          );
+        } catch (_cErr) {
+          void _cErr;
+        }
+
         return jsonResponse(
           {
             success: true,
-            message: `Linked hash ${body.document.substring(0, 8)}... to "${book.title}"`,
+            message: `Linked hash ${cleanDoc.substring(0, 8)}... to "${book.title}"`,
           },
           200,
           corsOrigin,
@@ -4485,23 +4671,31 @@ async function handleRequestCore(
   );
   if (kosyncProgressMatch && req.method === "DELETE") {
     try {
-      const progressId = validateIntegerId(kosyncProgressMatch[1]);
-      if (!progressId) {
+      const targetParam = kosyncProgressMatch[1]?.trim();
+      const progressId = validateIntegerId(targetParam);
+      const isDocHash =
+        !progressId && /^[a-f0-9]{16,64}$/i.test(targetParam || "");
+
+      if (!progressId && !isDocHash) {
         return jsonResponse(
-          { success: false, error: "Invalid progress ID" },
+          { success: false, error: "Invalid progress ID or document hash" },
           400,
           corsOrigin,
         );
       }
 
       const deleted = withKosyncDb((db) => {
-        db.run("DELETE FROM progress WHERE id = ?;", [progressId]);
+        if (progressId) {
+          db.run("DELETE FROM progress WHERE id = ?;", [progressId]);
+        } else if (isDocHash) {
+          db.run("DELETE FROM progress WHERE document = ?;", [targetParam]);
+        }
         return true;
       });
 
       if (deleted) {
         return jsonResponse(
-          { success: true, message: `Removed progress entry ${progressId}` },
+          { success: true, message: `Removed progress entry ${targetParam}` },
           200,
           corsOrigin,
         );

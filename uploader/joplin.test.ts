@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Database } from "bun:sqlite";
 import {
   handleJoplinRequest,
   isJoplinRoute,
@@ -10,7 +11,6 @@ import {
   sanitizeTitle,
   normalizeQuote,
   splitHighlightEntries,
-  cleanIncomingHighlightBody,
   mergeJoplinHighlights,
   isQuoteInExisting,
   processJoplinNote,
@@ -20,7 +20,10 @@ import {
   JOPLIN_FOLDER_TITLE,
   HIGHLIGHTS_START_MARKER,
   HIGHLIGHTS_END_MARKER,
+  extractQuoteKey,
+  extractAnnotation,
 } from "./joplin";
+import { getHighlightsForBook, initHighlightsTable } from "./highlights";
 import { handleRequest } from "./server";
 import { mergeNoteContent } from "../scripts/sync-obsidian";
 
@@ -1979,6 +1982,168 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
         expect(res2.path.startsWith(realBooks)).toBe(true);
       } finally {
         try { fs.unlinkSync(secretFile); } catch (_e) { void _e; }
+      }
+    });
+
+    it("collapses fullwidth colons and vertical bars to match ASCII equivalents in sanitizeTitle", () => {
+      const ascii = sanitizeTitle("Re:Zero - Starting Life in Another World");
+      const fullwidth = sanitizeTitle("Re：Zero - Starting Life in Another World");
+      const vbar = sanitizeTitle("Re｜Zero - Starting Life in Another World");
+
+      expect(ascii).toBe("Re - Zero - Starting Life in Another World");
+      expect(fullwidth).toBe(ascii);
+      expect(vbar).toBe(ascii);
+    });
+
+    it("preserves spaces between words separated by newlines and strips zero-width chars in sanitizeTitle", () => {
+      const withNewlines = sanitizeTitle("Hello\nWorld\r\nAgain\tTest");
+      expect(withNewlines).toBe("Hello World Again Test");
+
+      const withZeroWidth = sanitizeTitle("Dune\u200B\uFEFF");
+      expect(withZeroWidth).toBe("Dune");
+    });
+
+    it("normalizes typographic quotes and Unicode variants to prevent duplicate highlights", async () => {
+      // First export with typographic/smart quotes and apostrophes
+      const res1 = await processJoplinNote(
+        { title: "Typographic Book", body: "### Page 1\n==It’s a “wonderful” world==\n" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(res1.action).toBe("created");
+
+      // Second export with straight quotes and apostrophes for the same quote
+      const res2 = await processJoplinNote(
+        { title: "Typographic Book", body: "### Page 1\n==It's a \"wonderful\" world==\n" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(res2.action).toBe("updated");
+
+      const content = fs.readFileSync(res1.path, "utf8");
+      // Must not duplicate the highlight
+      const matches = content.match(/wonderful/gi) || [];
+      expect(matches.length).toBe(1);
+    });
+
+    it("extracts and updates annotations formatted with **Note:** without duplicating quote or stacking notes", async () => {
+      const bodyWithNote = "> ==Truth is rarely pure.==\n**Note:** Initial thought";
+      const key = extractQuoteKey(bodyWithNote);
+      expect(key).not.toContain("initial thought");
+      expect(extractAnnotation(bodyWithNote)).toBe("Initial thought");
+
+      const res1 = await processJoplinNote(
+        { title: "Wilde Notes", body: bodyWithNote },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(res1.action).toBe("created");
+
+      // Re-export with updated note
+      const updatedBody = "> ==Truth is rarely pure.==\n**Note:** Updated reflection";
+      const res2 = await processJoplinNote(
+        { title: "Wilde Notes", body: updatedBody },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      expect(res2.action).toBe("updated");
+
+      const content = fs.readFileSync(res1.path, "utf8");
+      expect(content).toContain("Updated reflection");
+      expect(content).not.toContain("Initial thought");
+    });
+
+    it("handles CORS OPTIONS preflight cleanly with 204 on Joplin routes", async () => {
+      const req = new Request("http://localhost:8086/notes", { method: "OPTIONS" });
+      const url = new URL(req.url);
+      const res = await handleJoplinRequest(req, url, { expectedToken: "valid-token" });
+
+      expect(res.status).toBe(204);
+      expect(res.headers.get("Access-Control-Allow-Methods")).toContain("GET");
+      expect(res.headers.get("Access-Control-Allow-Methods")).toContain("POST");
+      expect(res.headers.get("Access-Control-Allow-Methods")).toContain("OPTIONS");
+    });
+
+    it("returns note body and details when GET /notes/:id is requested", async () => {
+      await processJoplinNote(
+        { title: "Retrievable Note", body: "### Page 1\n==some memorable quote==\n" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      const req = new Request("http://localhost:8086/notes/Retrievable%20Note?token=valid-token", {
+        method: "GET",
+      });
+      const url = new URL(req.url);
+      const res = await handleJoplinRequest(req, url, { expectedToken: "valid-token", booksDir });
+
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.id).toBe("Retrievable Note");
+      expect(data.title).toBe("Retrievable Note");
+      expect(data.body).toContain("some memorable quote");
+    });
+
+    it("serializes concurrent note writes to the same book path without dropping highlights", async () => {
+      const p1 = processJoplinNote(
+        { title: "Concurrent Book", body: "### Page 1\n==Highlight One==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+      const p2 = processJoplinNote(
+        { title: "Concurrent Book", body: "### Page 2\n==Highlight Two==" },
+        { booksDir, calibreDbPath: missingCalibre() },
+      );
+
+      const [r1, r2] = await Promise.all([p1, p2]);
+      expect(r1.path).toBe(r2.path);
+
+      const content = fs.readFileSync(r1.path, "utf8");
+      expect(content).toContain("Highlight One");
+      expect(content).toContain("Highlight Two");
+    });
+
+    it("isolates highlights in SQLite cache when two books share a title during Joplin export", async () => {
+      const hCache = new Database(":memory:");
+      initHighlightsTable(hCache);
+
+      // Create a Calibre database with two distinct books sharing the title "Mythos"
+      const cPath = path.join(path.dirname(booksDir), "shared-joplin-calibre.db");
+      const cDb = new Database(cPath);
+      cDb.run(`
+        CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT);
+        CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+      `);
+      cDb.run("INSERT INTO books (id, title) VALUES (10, 'Mythos'), (20, 'Mythos');");
+      cDb.run("INSERT INTO authors (id, name) VALUES (1, 'Stephen Fry'), (2, 'Homer');");
+      cDb.run("INSERT INTO books_authors_link (book, author) VALUES (10, 1), (20, 2);");
+      cDb.close();
+
+      try {
+        // Export Stephen Fry's book
+        await processJoplinNote(
+          {
+            title: "Mythos",
+            body: "##### Stephen Fry\n### Page 10\n==Fry quote about Zeus==",
+          },
+          { booksDir, calibreDbPath: cPath, cacheDb: hCache },
+        );
+
+        // Export Homer's book
+        await processJoplinNote(
+          {
+            title: "Mythos",
+            body: "##### Homer\n### Page 20\n==Homer quote about Achilles==",
+          },
+          { booksDir, calibreDbPath: cPath, cacheDb: hCache },
+        );
+
+        const fryHighlights = getHighlightsForBook(hCache, 10, "Mythos", 100, cPath);
+        const homerHighlights = getHighlightsForBook(hCache, 20, "Mythos", 100, cPath);
+
+        expect(fryHighlights.length).toBe(1);
+        expect(fryHighlights[0].quote).toBe("Fry quote about Zeus");
+
+        expect(homerHighlights.length).toBe(1);
+        expect(homerHighlights[0].quote).toBe("Homer quote about Achilles");
+      } finally {
+        try { fs.unlinkSync(cPath); } catch (_e) { void _e; }
+        hCache.close();
       }
     });
   });
