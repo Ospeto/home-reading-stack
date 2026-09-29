@@ -582,6 +582,10 @@
     .bg-\[\#121418\]\/60 { background-color: rgba(18, 20, 24, 0.6); }
     .bg-\[\#18181f\] { background-color: #18181f; }
     .bg-\[\#18181f\]\/40 { background-color: rgba(24, 24, 31, 0.4); }
+    .bg-amber-400 { background-color: rgb(251 191 36); }
+    .bg-amber-500 { background-color: rgb(245 158 11); }
+    .hover\:bg-amber-300:hover { background-color: rgb(252 211 77); }
+    .hover\:bg-amber-400:hover { background-color: rgb(251 191 36); }
     .bg-blue-400 { background-color: rgb(96 165 250); }
     .bg-indigo-400 { background-color: rgb(129 140 248); }
     .bg-purple-400 { background-color: rgb(192 132 252); }
@@ -2158,7 +2162,7 @@
         <div id="discoverModalLibraryNote" class="text-xs text-zinc-400 flex items-center gap-1.5"></div>
         <div class="flex items-center gap-2 w-full sm:w-auto justify-end">
           <button type="button" onclick="closeDiscoverModal()" class="px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-semibold cursor-pointer active:scale-[0.96] transition-all">Close</button>
-          <button id="discoverModalIngestBtn" type="button" onclick="handleDiscoverModalIngest()" class="flex-1 sm:flex-none px-5 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-zinc-950 font-bold text-xs rounded-xl shadow-lg transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]">
+          <button id="discoverModalIngestBtn" type="button" onclick="handleDiscoverModalIngest()" class="flex-1 sm:flex-none px-5 py-2.5 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]">
             <span>Ingest to Library</span>
           </button>
         </div>
@@ -4856,7 +4860,7 @@
                   <button type="button" onclick="openDiscoverModal('${escapeHtml(item.id)}')" class="flex-1 py-1.5 px-2 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white text-[11px] font-semibold rounded-xl border border-white/5 transition-colors cursor-pointer text-center active:scale-[0.96]">
                     Preview
                   </button>
-                  <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event)" class="flex-1 py-1.5 px-2 ${inLib ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300' : 'bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold'} text-[11px] rounded-xl transition-all shadow-sm flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]">
+                  <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event)" class="flex-1 py-1.5 px-2 ${inLib ? 'bg-zinc-800 hover:bg-zinc-700 text-white border border-white/10 font-semibold' : 'bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md'} text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]">
                     <span>${inLib ? 'Re-Ingest' : 'Ingest'}</span>
                   </button>
                 </div>
@@ -5074,13 +5078,20 @@
       if (ingestBtn) {
         if (isIngesting) {
           ingestBtn.setAttribute('disabled', 'true');
+          ingestBtn.className = 'flex-1 sm:flex-none px-5 py-2.5 bg-amber-400 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 opacity-80 cursor-wait';
           setHtml(ingestBtn, `
-            <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
+            <svg class="w-4 h-4 animate-spin text-zinc-950" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
             <span>Downloading in Background...</span>
           `);
         } else {
           ingestBtn.removeAttribute('disabled');
-          setHtml(ingestBtn, `<span>${inLib ? 'Re-Ingest to Library' : 'Ingest to Library'}</span>`);
+          if (inLib) {
+            ingestBtn.className = 'flex-1 sm:flex-none px-5 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-white border border-white/10 font-semibold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]';
+            setHtml(ingestBtn, `<span>Re-Ingest to Library</span>`);
+          } else {
+            ingestBtn.className = 'flex-1 sm:flex-none px-5 py-2.5 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]';
+            setHtml(ingestBtn, `<span>Ingest to Library</span>`);
+          }
         }
       }
 
@@ -5179,8 +5190,9 @@
         const modalBtn = document.getElementById('discoverModalIngestBtn');
         if (modalBtn) {
           modalBtn.setAttribute('disabled', 'true');
+          modalBtn.className = 'flex-1 sm:flex-none px-5 py-2.5 bg-amber-400 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 opacity-80 cursor-wait';
           setHtml(modalBtn, `
-            <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
+            <svg class="w-4 h-4 animate-spin text-zinc-950" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
             <span>Downloading in Background...</span>
           `);
         }
@@ -5354,6 +5366,7 @@
               const mBtn = document.getElementById('discoverModalIngestBtn');
               if (mBtn) {
                 mBtn.removeAttribute('disabled');
+                mBtn.className = 'flex-1 sm:flex-none px-5 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-white border border-white/10 font-semibold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]';
                 setHtml(mBtn, `<span>Re-Ingest to Library</span>`);
               }
             }
