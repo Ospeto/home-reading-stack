@@ -72,6 +72,9 @@ import {
   ingestElscioneSeries,
   cleanAndNormalizeNovelUrl,
 } from "./elscione";
+import {
+  getDiscoverNovels,
+} from "./discover";
 import { isJoplinRoute, handleJoplinRequest } from "./joplin";
 import {
   initHighlightsTable,
@@ -140,6 +143,9 @@ export interface ServerDependencies {
     mountPath: string,
     options?: { useJev?: boolean; groups?: any[] },
   ) => Promise<{ cleanedCount: number; bytesFreed: number; duplicates?: any[] }>;
+  enqueueLnoriJob?: (url: string) => { jobId: number; runId: string };
+  enqueueElscioneJob?: (url: string) => { jobId: number; runId: string };
+  getDiscoverNovels?: typeof getDiscoverNovels;
 }
 
 let serverDependencies: ServerDependencies = {};
@@ -219,6 +225,50 @@ function recordCompletedLnoriJob(state: ActiveLnoriState): void {
 
 export function getLnoriQueue(): LnoriQueueItem[] {
   return lnoriQueue.map((item) => ({ ...item }));
+}
+
+let nextNumericJobCounter = Date.now();
+
+export function enqueueLnoriJob(targetUrl: string): { jobId: number; runId: string } {
+  if (serverDependencies.enqueueLnoriJob) {
+    return serverDependencies.enqueueLnoriJob(targetUrl);
+  }
+  const cleanUrl = cleanAndNormalizeNovelUrl(targetUrl);
+  const parsed = parseLnoriUrl(cleanUrl);
+  const jobId = ++nextNumericJobCounter;
+  const runId = `lnori-${jobId}-${Math.random().toString(36).slice(2, 6)}`;
+
+  if (activeLnoriState.active) {
+    lnoriQueue.push({
+      id: runId,
+      targetUrl: cleanUrl,
+      seriesId: parsed?.id,
+      createdAt: new Date().toISOString(),
+    });
+  } else {
+    executeLnoriIngestTask(runId, cleanUrl);
+  }
+  return { jobId, runId };
+}
+
+export function enqueueElscioneJob(targetUrl: string): { jobId: number; runId: string } {
+  if (serverDependencies.enqueueElscioneJob) {
+    return serverDependencies.enqueueElscioneJob(targetUrl);
+  }
+  const cleanUrl = cleanAndNormalizeNovelUrl(targetUrl);
+  const jobId = ++nextNumericJobCounter;
+  const runId = `elscione-${jobId}-${Math.random().toString(36).slice(2, 6)}`;
+
+  if (activeLnoriState.active) {
+    lnoriQueue.push({
+      id: runId,
+      targetUrl: cleanUrl,
+      createdAt: new Date().toISOString(),
+    });
+  } else {
+    executeLnoriIngestTask(runId, cleanUrl);
+  }
+  return { jobId, runId };
 }
 
 export function getActiveLnoriState(): ActiveLnoriState {
@@ -4875,6 +4925,156 @@ async function handleRequestCore(
           error:
             sanitizeErrorMessage(err) || "Failed to ingest article from URL",
         },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Light Novel Discovery Feed (Trending & New Releases)
+  if (url.pathname === "/api/discover/novels" && req.method === "GET") {
+    try {
+      const tabParam = url.searchParams.get("tab") || "trending";
+      const tab = tabParam === "new" ? "new" : "trending";
+      const source = (url.searchParams.get("source") || "all") as any;
+      const genre = url.searchParams.get("genre") || undefined;
+      const status = (url.searchParams.get("status") || "all") as any;
+      const q = url.searchParams.get("q") || undefined;
+      const sort = (url.searchParams.get("sort") || "popularity") as any;
+      const page = parseInt(url.searchParams.get("page") || "1", 10) || 1;
+      const pageSize = parseInt(url.searchParams.get("pageSize") || "20", 10) || 20;
+
+      const discoverFn = serverDependencies.getDiscoverNovels ?? getDiscoverNovels;
+      const cacheDb = getCacheDb();
+
+      const result = await discoverFn(
+        {
+          tab,
+          source,
+          genre,
+          status,
+          q,
+          sort,
+          page,
+          pageSize,
+        },
+        {
+          cacheDb,
+          getCalibreBooks: serverDependencies.getCalibreBooks ?? getCalibreBooks,
+        },
+      );
+
+      return jsonResponse(
+        {
+          success: true,
+          tab: result.tab,
+          novels: result.novels,
+          count: result.count,
+          genres: result.genres,
+          sources: result.sources,
+          page: result.page,
+          pageSize: result.pageSize,
+          totalPages: result.totalPages,
+        },
+        200,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err?.message || err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Light Novel Discovery Ingest (Lnori & Elsci.one 1-Click Queue)
+  if (url.pathname === "/api/discover/ingest" && req.method === "POST") {
+    try {
+      let body: {
+        url?: string;
+        source?: string;
+      };
+      try {
+        body = (await req.json()) as any;
+      } catch {
+        return jsonResponse(
+          { success: false, error: "Missing or invalid request body" },
+          400,
+          corsOrigin,
+        );
+      }
+
+      if (!body || !body.url || typeof body.url !== "string" || !body.url.trim()) {
+        return jsonResponse(
+          { success: false, error: "Missing or invalid 'url' parameter" },
+          400,
+          corsOrigin,
+        );
+      }
+
+      const source = (body.source || "").toLowerCase().trim();
+      if (source !== "lnori" && source !== "elscione") {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Invalid 'source' parameter. Must be 'lnori' or 'elscione'",
+          },
+          400,
+          corsOrigin,
+        );
+      }
+
+      const targetUrl = cleanAndNormalizeNovelUrl(body.url.trim());
+
+      if (source === "lnori") {
+        if (!isLnoriUrl(targetUrl)) {
+          return jsonResponse(
+            {
+              success: false,
+              error: `Target URL must be a valid lnori.com series or book URL`,
+            },
+            400,
+            corsOrigin,
+          );
+        }
+        const job = enqueueLnoriJob(targetUrl);
+        return jsonResponse(
+          {
+            success: true,
+            jobId: job.jobId,
+            message: `Enqueued Lnori light novel ingestion job #${job.jobId}`,
+          },
+          200,
+          corsOrigin,
+        );
+      }
+
+      if (source === "elscione") {
+        if (!isElscioneUrl(targetUrl)) {
+          return jsonResponse(
+            {
+              success: false,
+              error: `Target URL must be a valid server.elscione.com or server.elsci.one series or book URL`,
+            },
+            400,
+            corsOrigin,
+          );
+        }
+        const job = enqueueElscioneJob(targetUrl);
+        return jsonResponse(
+          {
+            success: true,
+            jobId: job.jobId,
+            message: `Enqueued Elsci.one light novel ingestion job #${job.jobId}`,
+          },
+          200,
+          corsOrigin,
+        );
+      }
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err?.message || err) },
         500,
         corsOrigin,
       );
