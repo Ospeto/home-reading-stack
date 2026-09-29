@@ -116,6 +116,31 @@ export async function extractCoverFromEpub(epubPath: string, outputPath: string)
       const data = new Uint8Array(await new Response(extractProc.stdout).arrayBuffer());
       const exitCode = await extractProc.exited;
       if (exitCode === 0 && data.length > 512) {
+        // If extracted format is not JPEG (e.g. PNG or WebP), convert to JPEG via sips so cover.jpg is valid
+        const ext = path.extname(coverInternalPath).toLowerCase();
+        if (ext === ".png" || ext === ".webp") {
+          const tmpRaw = outputPath + `.orig${ext}`;
+          try {
+            fs.writeFileSync(tmpRaw, data);
+            const conv = Bun.spawn(["sips", "-s", "format", "jpeg", tmpRaw, "--out", outputPath], {
+              stdout: "ignore",
+              stderr: "ignore",
+            });
+            await conv.exited;
+            if (fs.existsSync(tmpRaw)) {
+              try { fs.unlinkSync(tmpRaw); } catch {}
+            }
+            if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 512) {
+              return true;
+            }
+          } catch {
+            if (fs.existsSync(tmpRaw)) {
+              try { fs.unlinkSync(tmpRaw); } catch {}
+            }
+          }
+          // Do not write raw non-JPEG bytes to cover.jpg if conversion failed
+          return false;
+        }
         fs.writeFileSync(outputPath, data);
         return true;
       }
@@ -131,7 +156,7 @@ export async function healVolumeCovers(
   options: HealCoversOptions = {},
 ): Promise<HealCoversSummary> {
   const dryRun = options.dryRun !== false; // Default true (safe)
-  const verbose = Boolean(options.verbose);
+  const _verbose = Boolean(options.verbose);
 
   const home = process.env.HOME || os.homedir();
   const libraryDir =
@@ -204,6 +229,8 @@ export async function healVolumeCovers(
         } else if (f.includes("_")) {
           const idPart = f.split("_")[0];
           bid = parseInt(idPart, 10);
+        } else if (/^\d+\.(?:jpe?g|webp|png)$/i.test(f)) {
+          bid = Number.parseInt(f.split(".")[0], 10);
         }
         if (bid && !isNaN(bid)) {
           const fullPath = path.join(cacheDir, f);
@@ -294,7 +321,7 @@ export async function healVolumeCovers(
       try {
         if (fs.existsSync(bookFolder)) {
           const entries = fs.readdirSync(bookFolder);
-          const epub = entries.find((e) => e.endsWith(".epub"));
+          const epub = entries.find((e: string) => e.endsWith(".epub"));
           if (epub) {
             const epubPath = path.join(bookFolder, epub);
             if (!dryRun) {
@@ -311,6 +338,20 @@ export async function healVolumeCovers(
           }
         }
       } catch {}
+    }
+
+    // Sync Calibre database has_cover flag if cover.jpg exists on disk
+    if (diskCoverExists && (!row.has_cover || row.has_cover === 0)) {
+      if (!dryRun) {
+        try {
+          const writeDb = new Database(calibreDbPath);
+          writeDb.run("PRAGMA busy_timeout = 3000;");
+          writeDb.prepare("UPDATE books SET has_cover = 1 WHERE id = ?").run(row.id);
+          writeDb.close();
+        } catch (_dbErr) {
+          void _dbErr;
+        }
+      }
     }
 
     const diskMtime = diskCoverExists ? fs.statSync(diskCoverPath).mtimeMs : 0;
@@ -356,7 +397,7 @@ export async function healVolumeCovers(
 }
 
 // CLI runner
-if (import.meta.main) {
+if ((import.meta as any).main) {
   const args = process.argv.slice(2);
   const options: HealCoversOptions = {
     dryRun: true,

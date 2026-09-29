@@ -363,17 +363,19 @@ export async function setCalibreCommentsAndCoverAsync(
     }
 
     if (child.status === 0) {
+      if (coverApplied) {
+        purgeCoverCacheForEnrichment(bookId);
+      }
       return { success: true, coverApplied };
-    } else {
-      return {
-        success: false,
-        coverApplied: false,
-        error:
-          child.stderr?.trim() ||
-          child.stdout?.trim() ||
-          `calibredb exited with code ${child.status}`,
-      };
     }
+    return {
+      success: false,
+      coverApplied: false,
+      error:
+        child.stderr?.trim() ||
+        child.stdout?.trim() ||
+        `calibredb exited with code ${child.status}`,
+    };
   } catch (err: any) {
     if (tempCoverPath && fs.existsSync(tempCoverPath)) {
       try {
@@ -384,6 +386,19 @@ export async function setCalibreCommentsAndCoverAsync(
     }
     return { success: false, coverApplied: false, error: err.message };
   }
+}
+
+export function purgeCoverCacheForEnrichment(bookId: number): void {
+  const cacheDir = process.env.COVER_CACHE_DIR || path.resolve(process.cwd(), "cache", "covers");
+  if (!fs.existsSync(cacheDir)) return;
+  try {
+    const files = fs.readdirSync(cacheDir);
+    for (const f of files) {
+      if (f.startsWith(`${bookId}_`) || f.startsWith(`master_${bookId}.`) || f.startsWith(`${bookId}.`)) {
+        try { fs.unlinkSync(path.join(cacheDir, f)); } catch {}
+      }
+    }
+  } catch {}
 }
 
 export function flushReadingCache(_cacheDbPath?: string): void {

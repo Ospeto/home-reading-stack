@@ -316,6 +316,11 @@ export function parseElscioneUrl(url: string): {
   }
 }
 
+const ELSCIONE_ROMAN_NUMERALS: Record<string, number> = {
+  i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7, viii: 8, ix: 9, x: 10,
+  xi: 11, xii: 12, xiii: 13, xiv: 14, xv: 15, xvi: 16, xvii: 17, xviii: 18, xix: 19, xx: 20,
+};
+
 /**
  * Extracts volume index from filename using standard light novel naming conventions
  */
@@ -332,6 +337,12 @@ export function extractVolumeNumberFromFilename(filename: string): number | unde
   const volMatch = name.match(/(?:vol(?:ume)?|book)\.?\s*([0-9]+(?:\.[0-9]+)?)/i);
   if (volMatch) return parseFloat(volMatch[1]);
 
+  // Roman numeral patterns (e.g. "Vol. IV", "Volume II", "Book III")
+  const romanMatch = name.match(/(?:^|[\s_\-\[\(])(?:vol(?:ume)?|book)\.?\s*([ivx]+)(?:$|[\s_\-\]\):])/i);
+  if (romanMatch && ELSCIONE_ROMAN_NUMERALS[romanMatch[1].toLowerCase()]) {
+    return ELSCIONE_ROMAN_NUMERALS[romanMatch[1].toLowerCase()];
+  }
+
   // v(\d+) (e.g. "Series v01.epub" or "Series - v02.epub")
   const vMatch = name.match(/(?:^|[\s_\-\[\(])v([0-9]+(?:\.[0-9]+)?)(?:$|[\s_\-\]\)])/i);
   if (vMatch) return parseFloat(vMatch[1]);
@@ -344,9 +355,16 @@ export function extractVolumeNumberFromFilename(filename: string): number | unde
   const dashNumMatch = name.match(/(?:^|\s)-\s*([0-9]+(?:\.[0-9]+)?)(?:\s|-|$)/);
   if (dashNumMatch) return parseFloat(dashNumMatch[1]);
 
-  // Trailing numbers like "Series 01"
+  // Trailing numbers like "Series 01" (guard against 4-digit years like 1984 or 2077)
   const trailingNumMatch = name.match(/\b([0-9]+(?:\.[0-9]+)?)\s*$/);
-  if (trailingNumMatch) return parseFloat(trailingNumMatch[1]);
+  if (trailingNumMatch) {
+    const rawDigits = trailingNumMatch[1];
+    const val = parseFloat(rawDigits);
+    if (rawDigits.length === 4 && val >= 1800 && val <= 2100) {
+      return undefined;
+    }
+    return val;
+  }
 
   return undefined;
 }

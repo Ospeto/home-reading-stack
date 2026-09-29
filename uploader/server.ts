@@ -26,6 +26,7 @@ import {
   MAX_ARCHIVE_SIZE_BYTES,
 } from "./archive";
 import { ingestArticleFromUrl, generateTypographicCover } from "./article";
+import { generateOpdsFeed, rewriteOpdsXml } from "./opds";
 import {
   isWanRequest,
   authenticateRequest,
@@ -648,7 +649,11 @@ export function purgeCoverCache(bookId: number): number {
   try {
     const files = fs.readdirSync(cacheDir);
     for (const file of files) {
-      if (file.startsWith(`${bookId}_`) || file.startsWith(`master_${bookId}.`)) {
+      if (
+        file.startsWith(`${bookId}_`) ||
+        file.startsWith(`master_${bookId}.`) ||
+        file.startsWith(`${bookId}.`)
+      ) {
         try {
           fs.unlinkSync(path.join(cacheDir, file));
           purgedCount++;
@@ -1657,6 +1662,7 @@ export function getBookPath(bookId: number): string | null {
     if (fs.existsSync(dbPath)) {
       const db = new Database(dbPath, { readonly: true });
       try {
+        db.run("PRAGMA busy_timeout = 3000;");
         const row = db.query("SELECT path FROM books WHERE id = ?").get(bookId) as any;
         if (row?.path) return row.path;
       } finally {
@@ -3089,6 +3095,29 @@ async function handleRequestCore(
         proxyHeaders.set("X-Skip-Compression", "1");
       }
 
+      // If upstream returned OPDS XML, rewrite any internal loopback URLs (127.0.0.1:8088 / localhost:8088)
+      // to client-facing host/protocol so remote devices can resolve links and covers
+      const upstreamContentType = proxyHeaders.get("content-type") || "";
+      if (
+        (upstreamContentType.includes("application/atom+xml") ||
+          upstreamContentType.includes("application/xml") ||
+          upstreamContentType.includes("text/xml")) &&
+        upstreamRes.body
+      ) {
+        const rawXml = await upstreamRes.text();
+        const rewritten = rewriteOpdsXml(
+          rawXml,
+          url.host,
+          url.protocol.replace(":", ""),
+          serverBase,
+        );
+        return new Response(rewritten, {
+          status: upstreamRes.status,
+          statusText: upstreamRes.statusText,
+          headers: proxyHeaders,
+        });
+      }
+
       // Stream body responses for large file downloads (ReadableStream from fetch)
       return new Response(upstreamRes.body, {
         status: upstreamRes.status,
@@ -3111,6 +3140,39 @@ async function handleRequestCore(
         headers: errorHeaders,
       });
     }
+  }
+
+  // API: Native OPDS 1.2 Catalog Delivery (from metadata.db)
+  if (
+    url.pathname === "/api/opds" ||
+    url.pathname === "/api/opds/feed" ||
+    url.pathname === "/api/opds/catalog"
+  ) {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      return new Response("Method Not Allowed", { status: 405 });
+    }
+    const books = getCalibreBooks();
+    const opdsXml = generateOpdsFeed(books, {
+      title: "LightHouse OPDS Catalog",
+      feedUrl: url.pathname,
+      publicBaseUrl: `${url.protocol}//${url.host}`,
+    });
+
+    const opdsHeaders: Record<string, string> = {
+      "Content-Type":
+        "application/atom+xml;profile=opds-catalog;kind=acquisition;charset=utf-8",
+      "Cache-Control": "public, max-age=60, must-revalidate",
+      "X-Content-Type-Options": "nosniff",
+    };
+    if (corsOrigin && isAllowedOrigin(corsOrigin)) {
+      opdsHeaders["Access-Control-Allow-Origin"] = corsOrigin;
+      opdsHeaders["Access-Control-Allow-Credentials"] = "true";
+      opdsHeaders["Vary"] = "Origin";
+    }
+    if (req.method === "HEAD") {
+      return new Response(null, { status: 200, headers: opdsHeaders });
+    }
+    return new Response(opdsXml, { status: 200, headers: opdsHeaders });
   }
 
   const isMutating = ["POST", "PUT", "DELETE", "PATCH"].includes(
@@ -3475,20 +3537,25 @@ async function handleRequestCore(
         masterInputPath = diskCoverPath;
       } else {
         // Fallback: Fetch master cover from Calibre server loopback
-        const masterRes = await safeFetchWithSsrf(
-          `${SERVER_URL}/get/cover/${bookId}/Agent_Library`,
-          {},
-          5,
-          { allowCalibreServer: true },
-        );
-        if (!masterRes.ok) {
+        try {
+          const masterRes = await safeFetchWithSsrf(
+            `${SERVER_URL}/get/cover/${bookId}/Agent_Library`,
+            {},
+            5,
+            { allowCalibreServer: true },
+          );
+          if (!masterRes.ok) {
+            return new Response("Cover not found", { status: 404 });
+          }
+
+          masterBuffer = Buffer.from(await masterRes.arrayBuffer());
+          tempMasterPath = `/tmp/master_cover_${bookId}_${Date.now()}.jpg`;
+          fs.writeFileSync(tempMasterPath, masterBuffer);
+          masterInputPath = tempMasterPath;
+        } catch (_fetchErr: any) {
+          console.error(`[Server] Master cover fetch failed for book #${bookId}:`, _fetchErr?.message || _fetchErr);
           return new Response("Cover not found", { status: 404 });
         }
-
-        masterBuffer = Buffer.from(await masterRes.arrayBuffer());
-        tempMasterPath = `/tmp/master_cover_${bookId}_${Date.now()}.jpg`;
-        fs.writeFileSync(tempMasterPath, masterBuffer);
-        masterInputPath = tempMasterPath;
       }
 
       try {
@@ -3732,35 +3799,39 @@ async function handleRequestCore(
     }
 
     // Fallback: Fetch master cover from Calibre server loopback if not on disk
-    const coverRes = await safeFetchWithSsrf(
-      `${SERVER_URL}/get/cover/${bookId}/Agent_Library`,
-      {},
-      5,
-      { allowCalibreServer: true },
-    );
-    if (coverRes.ok) {
-      const coverBuf = Buffer.from(await coverRes.arrayBuffer());
-      const etag = `"${coverBuf.length.toString(16)}-${crypto.createHash("sha256").update(coverBuf).digest("hex").slice(0, 16)}"`;
+    try {
+      const coverRes = await safeFetchWithSsrf(
+        `${SERVER_URL}/get/cover/${bookId}/Agent_Library`,
+        {},
+        5,
+        { allowCalibreServer: true },
+      );
+      if (coverRes.ok) {
+        const coverBuf = Buffer.from(await coverRes.arrayBuffer());
+        const etag = `"${coverBuf.length.toString(16)}-${crypto.createHash("sha256").update(coverBuf).digest("hex").slice(0, 16)}"`;
 
-      if (req.headers.get("if-none-match") === etag) {
-        return new Response(null, {
-          status: 304,
+        if (req.headers.get("if-none-match") === etag) {
+          return new Response(null, {
+            status: 304,
+            headers: {
+              ETag: etag,
+              "Cache-Control": "public, max-age=86400",
+              Vary: "Accept",
+            },
+          });
+        }
+
+        return new Response(coverBuf, {
           headers: {
-            ETag: etag,
+            "Content-Type": coverRes.headers.get("Content-Type") || "image/jpeg",
             "Cache-Control": "public, max-age=86400",
+            ETag: etag,
             Vary: "Accept",
           },
         });
       }
-
-      return new Response(coverBuf, {
-        headers: {
-          "Content-Type": coverRes.headers.get("Content-Type") || "image/jpeg",
-          "Cache-Control": "public, max-age=86400",
-          ETag: etag,
-          Vary: "Accept",
-        },
-      });
+    } catch (_coverErr) {
+      void _coverErr;
     }
     return new Response("Cover not found", { status: 404 });
   }
@@ -3777,12 +3848,24 @@ async function handleRequestCore(
       return new Response("Invalid book ID or format", { status: 400 });
     }
 
-    const fileRes = await safeFetchWithSsrf(
-      `${SERVER_URL}/get/${format}/${bookId}/Agent_Library`,
-      {},
-      5,
-      { allowCalibreServer: true },
-    );
+    let fileRes: Response;
+    try {
+      fileRes = await safeFetchWithSsrf(
+        `${SERVER_URL}/get/${format}/${bookId}/Agent_Library`,
+        {},
+        5,
+        { allowCalibreServer: true },
+      );
+    } catch (err: any) {
+      console.error(`[Server] Calibre download fetch error for book ${bookId}:`, err);
+      return new Response("Bad Gateway: Unable to connect to Calibre server", {
+        status: 502,
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
     if (fileRes.ok) {
       const books = getCalibreBooks();
       const book = books.find((b: any) => b.id === bookId) || {
