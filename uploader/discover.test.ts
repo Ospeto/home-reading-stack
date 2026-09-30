@@ -1220,18 +1220,20 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(html).toContain("item.sourceUrls?.elscione");
     });
 
-    it("verifies error formatting replaces [path] with human-readable error text", () => {
+    it("verifies error formatting replaces [path] and [file] with human-readable error text and removes mangled URL regex artifacts", () => {
       expect(html).toContain("formatCleanErrorMessage");
       expect(html).toContain(".replace(/\\[path\\]/g, 'file')");
+      expect(html).toContain(".replace(/\\[file\\]/g, 'file')");
+      expect(html).toContain("https?:\\/\\/?(?:\\[path\\]|\\[file\\])");
     });
 
-    it("verifies modal sources layout uses responsive flex-wrap, proper spacing, and shrink-0 buttons", () => {
-      // Clean flexbox / grid layout with flex-wrap gap-2 items-center justify-between p-3
-      expect(html).toContain("flex flex-wrap gap-2 items-center justify-between p-3");
+    it("verifies modal sources layout uses responsive flex-col sm:flex-row, proper spacing, and shrink-0 buttons", () => {
+      // Clean flexbox layout with flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl border
+      expect(html).toContain("flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl border");
       // Action buttons have shrink-0 so they never overlap or truncate text
       expect(html).toContain('class="underline text-zinc-400 hover:text-white flex items-center gap-1 text-[11px] shrink-0"');
       expect(html).toContain("cursor-pointer active:scale-[0.96] shrink-0");
-      expect(html).toContain("shrink-0 ml-auto sm:ml-0");
+      expect(html).toContain("shrink-0 self-end sm:self-auto");
     });
 
     it("verifies author display uses real author with Author Unknown fallback, never 'Light Novel'", () => {
@@ -1251,12 +1253,13 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(html).toContain("window.handleCoverError = handleCoverError;");
       expect(html).toContain("window.getCoverPlaceholderDataUri = getCoverPlaceholderDataUri;");
 
-      // Card cover onerror
+      // Card cover onerror and uncropped styling
       expect(html).toContain('onerror="this.onerror=null; this.src=generateFallbackCoverSvg(this.alt);"');
       expect(html).toContain('data-title="${escapeHtml(item.title)}"');
+      expect(html).toContain('class="w-full h-full object-cover object-top rounded-xl bg-zinc-950 group-hover:scale-[1.03] transition-transform duration-300"');
 
-      // Modal cover onerror
-      expect(html).toContain('id="discoverModalCover" src="" alt="Cover" class="w-full h-full object-cover" onerror="this.onerror=null; this.src=generateFallbackCoverSvg(this.alt);"');
+      // Modal cover onerror and top-aligned uncropped styling
+      expect(html).toContain('id="discoverModalCover" src="" alt="Cover" class="w-full h-full object-cover object-top rounded-xl bg-zinc-950" onerror="this.onerror=null; this.src=generateFallbackCoverSvg(this.alt);"');
 
       // SVG placeholder styling
       expect(html).toContain("viewBox=\"0 0 200 300\"");
