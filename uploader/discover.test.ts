@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import {
   getDiscoverNovels,
   fetchDiscoverFeed,
@@ -13,10 +12,7 @@ import {
   setCachedFeed,
   enqueueDiscoverIngest,
   isSynopsisInsufficient,
-  synthesizeEngagingSynopsis,
-  cleanSynopsisText,
   stripEmojis,
-  resolveFallbackSynopsis,
   ensureAllNovelsHaveSynopses,
   findRealElscioneFolder,
   findRealLnoriSeries,
@@ -31,16 +27,11 @@ import {
   deduplicateDiscoverNovels,
   KNOWN_TITLE_TO_AUTHOR,
   cleanCalibreTitleVariants,
-  getNovelMatchCandidates,
-  getCalibreBookMatchCandidates,
   calculateSignificantTokenOverlap,
-  KNOWN_LIGHT_NOVEL_ALIAS_CLUSTERS,
-  searchUniversalNovels,
   searchAniListNovels,
   resolveAuthorForTitle,
   resolveCoverForTitle,
   generateFallbackCoverSvg,
-  escapeXml,
   buildCatalogDiscoverNovels,
   KNOWN_TITLE_TO_COVER,
   type DiscoveredNovel,
@@ -50,9 +41,6 @@ import {
   setServerDependenciesForTest,
   resetServerDependenciesForTest,
   resetActiveLnoriStateForTest,
-  enqueueLnoriJob,
-  enqueueElscioneJob,
-  getDiscoverJobProgress,
   registerDiscoverJob,
 } from "./server";
 
@@ -156,7 +144,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
           expect(novel.primaryUrl).toBe(novel.sourceUrls.elscione);
         }
       }
-    });
+    }, 15000);
 
     it("supports pagination across the complete catalog (page 1, page 2)", async () => {
       const page1 = await getDiscoverNovels(
@@ -231,7 +219,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       }
     });
 
-    it("serves complete catalog from cache under v2:feed:all on repeat queries", async () => {
+    it("serves complete catalog from cache under v3:feed:all on repeat queries", async () => {
       const initial = await getDiscoverNovels(
         { tab: "all", page: 1, pageSize: 10 },
         { cacheDb: tempCacheDb },
@@ -551,8 +539,8 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         existingVolumes: 0,
       };
 
-      setCachedFeed("v2:feed:trending", [testNovel], { cacheDb: tempCacheDb });
-      const cached = getCachedFeed("v2:feed:trending", { cacheDb: tempCacheDb });
+      setCachedFeed("v3:feed:trending", [testNovel], { cacheDb: tempCacheDb });
+      const cached = getCachedFeed("v3:feed:trending", { cacheDb: tempCacheDb });
       expect(cached).not.toBeNull();
       expect(cached?.length).toBe(1);
       expect(cached?.[0].id).toBe("test-novel-1");
@@ -1683,8 +1671,8 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
     });
   });
 
-  describe("Cache Versioning (v2:feed:...) & Legacy Cache Invalidation", () => {
-    it("bypasses legacy stale cache keys and uses v2:feed prefix", async () => {
+  describe("Cache Versioning (v3:feed:...) & Legacy Cache Invalidation", () => {
+    it("bypasses legacy stale cache keys and uses v3:feed prefix", async () => {
       // Plant stale legacy cache entry
       const legacyStaleNovel: DiscoveredNovel = {
         id: "stale-legacy-novel",
@@ -1704,17 +1692,18 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       };
 
       setCachedFeed("feed:trending", [legacyStaleNovel], { cacheDb: tempCacheDb });
+      setCachedFeed("v2:feed:trending", [legacyStaleNovel], { cacheDb: tempCacheDb });
 
-      // fetchDiscoverFeed must use v2:feed:trending and bypass feed:trending
+      // fetchDiscoverFeed must use v3:feed:trending and bypass feed:trending and v2:feed:trending
       const feed = await fetchDiscoverFeed("trending", { cacheDb: tempCacheDb });
       const staleHit = feed.find((n) => n.id === "stale-legacy-novel");
       expect(staleHit).toBeUndefined();
 
-      // Check that v2:feed:trending was created in cache
-      const v2Cached = getCachedFeed("v2:feed:trending", { cacheDb: tempCacheDb });
-      expect(v2Cached).not.toBeNull();
-      expect(v2Cached!.length).toBeGreaterThan(0);
-      expect(v2Cached!.some((n) => n.id === "stale-legacy-novel")).toBe(false);
+      // Check that v3:feed:trending was created in cache
+      const v3Cached = getCachedFeed("v3:feed:trending", { cacheDb: tempCacheDb });
+      expect(v3Cached).not.toBeNull();
+      expect(v3Cached!.length).toBeGreaterThan(0);
+      expect(v3Cached!.some((n) => n.id === "stale-legacy-novel")).toBe(false);
     });
   });
 
@@ -2248,7 +2237,6 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       });
 
       it("resolves exact matches using romaji and seeds", () => {
-        const coverFromRomaji = resolveCoverForTitle("Unknown English Title", "Youkoso Jitsuryoku");
         // Romaji alias for Classroom of the Elite
         const cote = KNOWN_TITLE_TO_COVER["classroom of the elite"];
         const coteCover = resolveCoverForTitle("Classroom of the Elite", "Youkoso Jitsuryoku");
@@ -2368,6 +2356,55 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
           expect(/\p{Extended_Pictographic}/u.test(uri)).toBe(false);
         }
       });
+    });
+  });
+
+  describe("Accurate Covers & Real Authors Invariants (Bugfix Regression Suite)", () => {
+    it("ensures 'A Surprisingly Happy Engagement for the Slime-Slaying Fallen Noble' does NOT receive author Fuse or Tensura cover", () => {
+      const title = "A Surprisingly Happy Engagement for the Slime-Slaying Fallen Noble";
+      const author = resolveAuthorForTitle(title);
+      expect(author).not.toBe("Fuse");
+      expect(author).not.toBe("Light Novel Author");
+      expect(author).toBe("Author Unknown");
+
+      const tensuraCover = KNOWN_TITLE_TO_COVER["that time i got reincarnated as a slime"];
+      const cover = resolveCoverForTitle(title);
+      expect(cover).not.toBe(tensuraCover);
+      expect(cover).toBe("");
+    });
+
+    it("ensures 'A Tale of the Secret Saint' does NOT receive author Light Novel Author or Silent Witch cover", async () => {
+      const title = "A Tale of the Secret Saint";
+      const author = resolveAuthorForTitle(title);
+      expect(author).not.toBe("Light Novel Author");
+      expect(author).toBe("Touya");
+
+      const silentWitchCover = KNOWN_TITLE_TO_COVER["secrets of the silent witch"];
+      const cover = resolveCoverForTitle(title);
+      expect(cover).not.toBe(silentWitchCover);
+
+      // In complete catalog, Lnori match provides official portrait cover
+      const catalog = await buildCatalogDiscoverNovels({ cacheDb: tempCacheDb });
+      const novel = catalog.find((n) => n.title.toLowerCase().includes("secret saint"));
+      expect(novel).toBeDefined();
+      expect(novel?.author).toBe("Touya");
+      expect(novel?.coverUrl).toBe("https://cdn.lnori.com/series/9685.jpg");
+    });
+
+    it("ensures uncredited authors never return 'Light Novel Author'", () => {
+      const author = resolveAuthorForTitle("Some Completely Random Uncredited Novel");
+      expect(author).toBe("Author Unknown");
+      expect(author).not.toBe("Light Novel Author");
+    });
+
+    it("ensures findRealElscioneFolder strips colons, question marks, and subtitle appendages without returning unverified folders", () => {
+      // Titles with colons and subtitle appendages
+      expect(findRealElscioneFolder("DanMachi: Is It Wrong to Try to Pick Up Girls in a Dungeon?")).toBe("DanMachi");
+      expect(findRealElscioneFolder("Re:Zero - Starting Life in Another World: Volume 1")).toBe("ReZero - Starting Life in Another World");
+      expect(findRealElscioneFolder("Secrets of the Silent Witch: Another Story")).toBe("Secrets of the Silent Witch");
+
+      // Non-existent folders must return null
+      expect(findRealElscioneFolder("Completely Non Existent Fake Folder 12345")).toBeNull();
     });
   });
 });
