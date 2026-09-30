@@ -9,9 +9,9 @@ import discoverCatalog from "./discover-catalog.json";
 
 export type DiscoverSource = "lnori" | "elscione" | "both";
 export type DiscoverSourceFilter = "all" | "lnori" | "elscione";
-export type DiscoverTab = "trending" | "new";
+export type DiscoverTab = "trending" | "new" | "all";
 export type DiscoverStatus = "all" | "available" | "in_library";
-export type DiscoverSort = "popularity" | "score" | "newest";
+export type DiscoverSort = "popularity" | "score" | "newest" | "title_asc";
 
 export interface DiscoverSourceUrls {
   lnori?: string;
@@ -192,8 +192,8 @@ export const KNOWN_TITLE_TO_LNORI: Record<string, { id: number; slug: string }> 
   "86": { id: 4808, slug: "86-eighty-six" },
   "86 eighty six": { id: 4808, slug: "86-eighty-six" },
   "86eightysix": { id: 4808, slug: "86-eighty-six" },
-  "the irregular at magic high school": { id: 2199, slug: "the-irregular-at-magic-high-school" },
-  "mahouka koukou no rettousei": { id: 2199, slug: "the-irregular-at-magic-high-school" },
+  "the irregular at magic high school": { id: 1941, slug: "the-irregular-at-magic-high-school" },
+  "mahouka koukou no rettousei": { id: 1941, slug: "the-irregular-at-magic-high-school" },
   "rascal does not dream": { id: 4242, slug: "rascal-does-not-dream-of-bunny-girl-senpai" },
   "rascal does not dream of bunny girl senpai": { id: 4242, slug: "rascal-does-not-dream-of-bunny-girl-senpai" },
   "haibaras teenage new game": { id: 11250, slug: "haibaras-teenage-new-game" },
@@ -215,7 +215,7 @@ export const KNOWN_TITLE_TO_LNORI: Record<string, { id: number; slug: string }> 
   "im the evil lord of an intergalactic empire": { id: 9557, slug: "im-the-evil-lord-of-an-intergalactic-empire" },
   "a certain magical index": { id: 1916, slug: "a-certain-magical-index" },
   "toaru majutsu no index": { id: 1916, slug: "a-certain-magical-index" },
-  "sword art online": { id: 2197, slug: "sword-art-online" },
+  "sword art online": { id: 1234, slug: "sword-art-online" },
   "no game no life": { id: 2419, slug: "no-game-no-life" },
   "spice and wolf": { id: 677, slug: "spice-and-wolf" },
   "spice wolf": { id: 677, slug: "spice-and-wolf" },
@@ -2275,8 +2275,162 @@ function queryCalibreLibraryBooks(db: Database): any[] {
 }
 
 /**
- * Discovers and builds the feed for a requested tab ("trending" | "new").
- * Enforces strict separation: trending and new feeds are distinct and never combined.
+ * Aggregates and enriches the complete catalog of light novels across both sources
+ * (Lnori and Elsci.one), deduplicating by normalized title, enriching with real authors,
+ * high-res covers, genres, and full synopses, and prioritizing Elsci.one as primary.
+ */
+export async function buildCompleteCatalogNovels(
+  dependencies?: DiscoverDependencies,
+): Promise<DiscoveredNovel[]> {
+  const elscioneFolders = dependencies?.customElscioneFolders || REAL_ELSCIONE_FOLDERS;
+  const lnoriSeries = dependencies?.customLnoriSeries || REAL_LNORI_SERIES;
+
+  const allSeeds = [
+    ...(dependencies?.seedTrendingNovels ?? SEED_TRENDING_NOVELS),
+    ...(dependencies?.seedNewNovels ?? SEED_NEW_NOVELS),
+  ];
+
+  const seedMap = new Map<string, DiscoveredNovel>();
+  for (const s of allSeeds) {
+    seedMap.set(canonicalTitleKey(s.title), s);
+    seedMap.set(normalizeTitleForMatch(s.title), s);
+    if (s.titleRomaji) {
+      seedMap.set(canonicalTitleKey(s.titleRomaji), s);
+      seedMap.set(normalizeTitleForMatch(s.titleRomaji), s);
+    }
+  }
+
+  const seenKeys = new Set<string>();
+  const novels: DiscoveredNovel[] = [];
+
+  // 1. Ingest all Elsci.one folders (~1,200+ series)
+  for (const folder of elscioneFolders) {
+    const norm = normalizeTitleForMatch(folder);
+    const can = canonicalTitleKey(folder);
+    if (seenKeys.has(norm) || seenKeys.has(can)) continue;
+
+    const real = resolveRealDownloadSources(folder, undefined, undefined, {
+      customElscioneFolders: dependencies?.customElscioneFolders,
+      customLnoriSeries: dependencies?.customLnoriSeries,
+    });
+    if (!real) continue;
+
+    const seed = seedMap.get(can) || seedMap.get(norm);
+    const author = seed?.author || resolveAuthorForTitle(folder, undefined, allSeeds);
+    const coverUrl = seed?.coverUrl || resolveCoverForTitle(folder, undefined, allSeeds);
+    const knownSyn = findKnownSeriesSynopsis({ title: folder, author });
+    const rawSynopsis = seed?.synopsis || knownSyn || synthesizeEngagingSynopsis(folder, ["Light Novel", "Fantasy"]);
+    const synopsis = cleanSynopsisText(rawSynopsis);
+    const genres = seed?.genres && seed.genres.length > 0 ? seed.genres : ["Light Novel", "Fantasy"];
+    const score = seed?.score ?? 85;
+    const popularity = seed?.popularity ?? (real.source === "both" ? 7500 : 5000);
+    const releaseDate = seed?.releaseDate ?? "2024-01-01";
+    const volumeCount = seed?.volumeCount ?? 1;
+
+    const slug = folder
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+
+    const novel = assignPrimarySource({
+      id: seed?.id || `elscione-${slug}`,
+      title: seed?.title || folder,
+      titleRomaji: seed?.titleRomaji,
+      titleNative: seed?.titleNative,
+      author,
+      coverUrl,
+      synopsis,
+      genres,
+      score,
+      popularity,
+      releaseDate,
+      volumeCount,
+      source: real.source,
+      primarySource: real.primarySource,
+      primaryUrl: real.primaryUrl,
+      sourceUrls: real.sourceUrls,
+      inLibrary: false,
+      existingVolumes: 0,
+    });
+
+    seenKeys.add(norm);
+    seenKeys.add(can);
+    if (seed?.titleRomaji) {
+      seenKeys.add(normalizeTitleForMatch(seed.titleRomaji));
+      seenKeys.add(canonicalTitleKey(seed.titleRomaji));
+    }
+
+    novels.push(novel);
+  }
+
+  // 2. Ingest all Lnori series (~880+ series)
+  for (const s of lnoriSeries) {
+    const slugTitle = s.slug.replace(/-/g, " ");
+    const norm = normalizeTitleForMatch(slugTitle);
+    const can = canonicalTitleKey(slugTitle);
+    if (seenKeys.has(norm) || seenKeys.has(can)) continue;
+
+    const real = resolveRealDownloadSources(slugTitle, undefined, undefined, {
+      customElscioneFolders: dependencies?.customElscioneFolders,
+      customLnoriSeries: dependencies?.customLnoriSeries,
+    });
+    if (!real) continue;
+
+    const displayTitle = slugTitle
+      .split(" ")
+      .map((w) => (w.length > 0 ? w[0].toUpperCase() + w.slice(1) : ""))
+      .join(" ");
+
+    const seed = seedMap.get(can) || seedMap.get(norm);
+    const author = seed?.author || resolveAuthorForTitle(displayTitle, undefined, allSeeds);
+    const coverUrl = seed?.coverUrl || resolveCoverForTitle(displayTitle, undefined, allSeeds);
+    const knownSyn = findKnownSeriesSynopsis({ title: displayTitle, author });
+    const rawSynopsis = seed?.synopsis || knownSyn || synthesizeEngagingSynopsis(displayTitle, ["Light Novel", "Fantasy"]);
+    const synopsis = cleanSynopsisText(rawSynopsis);
+    const genres = seed?.genres && seed.genres.length > 0 ? seed.genres : ["Light Novel", "Fantasy"];
+    const score = seed?.score ?? 85;
+    const popularity = seed?.popularity ?? (real.source === "both" ? 7500 : 5000);
+    const releaseDate = seed?.releaseDate ?? "2024-01-01";
+    const volumeCount = seed?.volumeCount ?? 1;
+
+    const novel = assignPrimarySource({
+      id: seed?.id || `lnori-${s.id}-${s.slug}`,
+      title: seed?.title || displayTitle,
+      titleRomaji: seed?.titleRomaji,
+      titleNative: seed?.titleNative,
+      author,
+      coverUrl,
+      synopsis,
+      genres,
+      score,
+      popularity,
+      releaseDate,
+      volumeCount,
+      source: real.source,
+      primarySource: real.primarySource,
+      primaryUrl: real.primaryUrl,
+      sourceUrls: real.sourceUrls,
+      inLibrary: false,
+      existingVolumes: 0,
+    });
+
+    seenKeys.add(norm);
+    seenKeys.add(can);
+    if (seed?.titleRomaji) {
+      seenKeys.add(normalizeTitleForMatch(seed.titleRomaji));
+      seenKeys.add(canonicalTitleKey(seed.titleRomaji));
+    }
+
+    novels.push(novel);
+  }
+
+  return novels;
+}
+
+/**
+ * Discovers and builds the feed for a requested tab ("trending" | "new" | "all").
+ * Enforces strict separation: trending and new feeds are distinct and never combined,
+ * while "all" represents the unified complete library of light novels across sources.
  */
 export async function fetchDiscoverFeed(
   tab: DiscoverTab,
@@ -2291,7 +2445,15 @@ export async function fetchDiscoverFeed(
     return crossCheckNovelsWithCalibre(verified, dependencies);
   }
 
-  // 2. Try online fetch with short timeout
+  // 2. Tab "all": Build complete catalogue from Elscione & Lnori
+  if (tab === "all") {
+    let allNovels = await buildCompleteCatalogNovels(dependencies);
+    allNovels = await ensureAllNovelsHaveSynopses(allNovels, dependencies);
+    setCachedFeed(cacheKey, allNovels, dependencies);
+    return crossCheckNovelsWithCalibre(allNovels, dependencies);
+  }
+
+  // 3. Try online fetch with short timeout for trending/new
   let freshNovels: DiscoveredNovel[] | null = null;
   const isTestEnv =
     process.env.NODE_ENV === "test" ||
@@ -3108,14 +3270,19 @@ export async function getDiscoverNovels(
   params: DiscoverNovelsParams = {},
   dependencies?: DiscoverDependencies,
 ): Promise<DiscoverNovelsResult> {
-  const tab: DiscoverTab = params.tab === "new" ? "new" : "trending";
+  let tab: DiscoverTab = "trending";
+  if (params.tab === "new") {
+    tab = "new";
+  } else if (params.tab === "all") {
+    tab = "all";
+  }
   const sourceFilter: DiscoverSourceFilter = params.source || "all";
   const genreFilter = (params.genre || "").trim().toLowerCase();
   const statusFilter: DiscoverStatus = params.status || "all";
   const searchQuery = (params.q || "").trim().toLowerCase();
   const sortBy: DiscoverSort = params.sort || "popularity";
   const page = Math.max(1, params.page || 1);
-  const pageSize = Math.max(1, Math.min(100, params.pageSize || 20));
+  const pageSize = Math.max(1, Math.min(100, params.pageSize || 36));
 
   // 1. Fetch novels: Universal search across all catalogs if q is provided, otherwise active tab feed
   let allNovels: DiscoveredNovel[];
@@ -3197,6 +3364,9 @@ export async function getDiscoverNovels(
       if (sortBy === "newest") {
         return b.releaseDate.localeCompare(a.releaseDate);
       }
+      if (sortBy === "title_asc") {
+        return a.title.localeCompare(b.title);
+      }
       const relDiff = getRelevance(b) - getRelevance(a);
       if (relDiff !== 0) return relDiff;
       if (b.popularity !== a.popularity) return b.popularity - a.popularity;
@@ -3213,6 +3383,9 @@ export async function getDiscoverNovels(
       if (sortBy === "newest") {
         return b.releaseDate.localeCompare(a.releaseDate);
       }
+      if (sortBy === "title_asc") {
+        return a.title.localeCompare(b.title);
+      }
       return 0;
     });
   }
@@ -3220,7 +3393,8 @@ export async function getDiscoverNovels(
   // 7. Pagination
   const totalCount = filtered.length;
   const totalPages = Math.ceil(totalCount / pageSize) || 1;
-  const startIndex = (page - 1) * pageSize;
+  const clampedPage = totalCount > 0 ? Math.min(page, totalPages) : 1;
+  const startIndex = (clampedPage - 1) * pageSize;
   const paginatedNovels = filtered.slice(startIndex, startIndex + pageSize);
 
   return {
@@ -3230,7 +3404,7 @@ export async function getDiscoverNovels(
     count: totalCount,
     genres: availableGenres,
     sources: ["all", "lnori", "elscione"],
-    page,
+    page: clampedPage,
     pageSize,
     totalPages,
   };

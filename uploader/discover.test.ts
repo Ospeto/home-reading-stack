@@ -119,6 +119,131 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
     });
   });
 
+  describe("Complete Catalog Tab (tab=all)", () => {
+    it("aggregates the complete catalog from both Lnori and Elsci.one without duplicates", async () => {
+      const res = await getDiscoverNovels(
+        { tab: "all", page: 1, pageSize: 36 },
+        { cacheDb: tempCacheDb },
+      );
+
+      expect(res.success).toBe(true);
+      expect(res.tab).toBe("all");
+      expect(res.count).toBeGreaterThan(1200);
+      expect(res.novels.length).toBe(36);
+      expect(res.totalPages).toBeGreaterThan(30);
+
+      // Verify no duplicate IDs on the returned page
+      const ids = new Set(res.novels.map((n) => n.id));
+      expect(ids.size).toBe(res.novels.length);
+
+      // Verify sources present
+      const sources = new Set(res.novels.map((n) => n.source));
+      expect(sources.has("elscione") || sources.has("both")).toBe(true);
+
+      // Verify each novel has real author, coverUrl, synopsis >= 30, and valid primary source
+      for (const novel of res.novels) {
+        expect(novel.author).toBeDefined();
+        expect(novel.author.length).toBeGreaterThan(0);
+        expect(novel.synopsis).toBeDefined();
+        expect(novel.synopsis.length).toBeGreaterThanOrEqual(30);
+        expect(["elscione", "lnori"]).toContain(novel.primarySource);
+        if (novel.source === "both") {
+          expect(novel.primarySource).toBe("elscione");
+          expect(novel.primaryUrl).toBe(novel.sourceUrls.elscione);
+        }
+      }
+    });
+
+    it("supports pagination across the complete catalog (page 1, page 2)", async () => {
+      const page1 = await getDiscoverNovels(
+        { tab: "all", page: 1, pageSize: 20 },
+        { cacheDb: tempCacheDb },
+      );
+      const page2 = await getDiscoverNovels(
+        { tab: "all", page: 2, pageSize: 20 },
+        { cacheDb: tempCacheDb },
+      );
+
+      expect(page1.novels.length).toBe(20);
+      expect(page2.novels.length).toBe(20);
+      expect(page1.page).toBe(1);
+      expect(page2.page).toBe(2);
+      expect(page1.totalPages).toBe(page2.totalPages);
+
+      const page1Ids = new Set(page1.novels.map((n) => n.id));
+      for (const novel of page2.novels) {
+        expect(page1Ids.has(novel.id)).toBe(false);
+      }
+    });
+
+    it("filters complete catalog by source (all, lnori, elscione)", async () => {
+      const resLnori = await getDiscoverNovels(
+        { tab: "all", source: "lnori", page: 1, pageSize: 50 },
+        { cacheDb: tempCacheDb },
+      );
+      for (const novel of resLnori.novels) {
+        expect(novel.source === "lnori" || novel.source === "both").toBe(true);
+      }
+
+      const resElscione = await getDiscoverNovels(
+        { tab: "all", source: "elscione", page: 1, pageSize: 50 },
+        { cacheDb: tempCacheDb },
+      );
+      for (const novel of resElscione.novels) {
+        expect(novel.source === "elscione" || novel.source === "both").toBe(true);
+      }
+    });
+
+    it("filters complete catalog by genre and library status", async () => {
+      const resGenre = await getDiscoverNovels(
+        { tab: "all", genre: "Fantasy", page: 1, pageSize: 36 },
+        { cacheDb: tempCacheDb },
+      );
+      expect(resGenre.novels.length).toBeGreaterThan(0);
+      for (const novel of resGenre.novels) {
+        expect(novel.genres.some((g) => g.toLowerCase() === "fantasy")).toBe(true);
+      }
+
+      const mockCalibreBooks = [
+        { id: 1, title: "DanMachi Vol 1", series: "DanMachi", series_index: 1 },
+      ];
+      const resStatus = await getDiscoverNovels(
+        { tab: "all", status: "in_library" },
+        { cacheDb: tempCacheDb, getCalibreBooks: () => mockCalibreBooks },
+      );
+      for (const novel of resStatus.novels) {
+        expect(novel.inLibrary).toBe(true);
+      }
+    });
+
+    it("supports sorting by title_asc (A-Z) and newest on complete catalog", async () => {
+      const resAsc = await getDiscoverNovels(
+        { tab: "all", sort: "title_asc", page: 1, pageSize: 20 },
+        { cacheDb: tempCacheDb },
+      );
+      expect(resAsc.novels.length).toBe(20);
+      for (let i = 1; i < resAsc.novels.length; i++) {
+        expect(resAsc.novels[i].title.localeCompare(resAsc.novels[i - 1].title)).toBeGreaterThanOrEqual(0);
+      }
+    });
+
+    it("serves complete catalog from cache under v2:feed:all on repeat queries", async () => {
+      const initial = await getDiscoverNovels(
+        { tab: "all", page: 1, pageSize: 10 },
+        { cacheDb: tempCacheDb },
+      );
+      expect(initial.success).toBe(true);
+
+      const cached = await getDiscoverNovels(
+        { tab: "all", page: 1, pageSize: 10 },
+        { cacheDb: tempCacheDb },
+      );
+      expect(cached.success).toBe(true);
+      expect(cached.count).toBe(initial.count);
+      expect(cached.novels.length).toBe(initial.novels.length);
+    });
+  });
+
   describe("Download Source Support (Lnori, Elsci.one, Both)", () => {
     it("tags each discovered title with its available source and direct source URLs", async () => {
       const res = await getDiscoverNovels(
@@ -490,6 +615,22 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(data.success).toBe(true);
       expect(data.tab).toBe("new");
       expect(data.novels.length).toBeGreaterThan(0);
+    });
+
+    it("GET /api/discover/novels?tab=all returns complete catalog with pagination", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/discover/novels?tab=all&page=1&pageSize=36");
+      const res = await handleRequest(req);
+
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(true);
+      expect(data.tab).toBe("all");
+      expect(data.novels.length).toBe(36);
+      expect(data.page).toBe(1);
+      expect(data.pageSize).toBe(36);
+      expect(data.count).toBeGreaterThan(1200);
+      expect(data.totalPages).toBeGreaterThan(30);
+      expect(data.counts?.all).toBeGreaterThan(1200);
     });
 
     it("GET /api/discover/novels supports source, genre, q, and sort query parameters", async () => {
@@ -1123,6 +1264,31 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(html).toContain("function showDiscoverModalError");
       expect(html).toContain("function hideDiscoverModalError");
       expect(html).toContain("hideDiscoverModalError()");
+    });
+
+    it("verifies All Titles segmented control tab and Apple-style pagination controls in index.html", () => {
+      // 1. All Titles segmented toggle
+      expect(html).toContain('id="discoverTabAll"');
+      expect(html).toContain('id="discoverAllBadge"');
+      expect(html).toContain("switchDiscoverTab('all')");
+      expect(html).toContain("All Titles");
+
+      // 2. Pagination controls markup
+      expect(html).toContain('id="discoverPagination"');
+      expect(html).toContain('id="discoverPaginationInfo"');
+      expect(html).toContain('id="discoverPrevPageBtn"');
+      expect(html).toContain('id="discoverNextPageBtn"');
+      expect(html).toContain('id="discoverPageIndicator"');
+      expect(html).toContain("changeDiscoverPage(-1)");
+      expect(html).toContain("changeDiscoverPage(1)");
+
+      // 3. JavaScript state and functions
+      expect(html).toContain("function renderDiscoverPagination");
+      expect(html).toContain("function changeDiscoverPage");
+      expect(html).toContain("discoverPaginationState");
+      expect(html).toContain("Showing ");
+      expect(html).toContain(" of ");
+      expect(html).toContain("Page ");
     });
   });
 
@@ -1878,7 +2044,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
     });
 
     it("executes live online AniList search when dependencies.fetch is provided and prioritizes Elsci.one", async () => {
-      const mockAnilistFetch = async (url: string, init?: RequestInit) => {
+      const mockAnilistFetch = async (url: string, _init?: RequestInit) => {
         if (url.includes("graphql.anilist.co")) {
           return new Response(
             JSON.stringify({

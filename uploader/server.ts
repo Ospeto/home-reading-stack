@@ -5251,23 +5251,31 @@ async function handleRequestCore(
     }
   }
 
-  // API: Light Novel Discovery Feed (Trending & New Releases)
+  // API: Light Novel Discovery Feed (Trending, New Releases, All Titles)
   if (
     (url.pathname === "/api/discover/novels" || url.pathname === "/api/discover/feed") &&
     req.method === "GET"
   ) {
     try {
       const tabParam = (url.searchParams.get("tab") || "trending").toLowerCase().trim();
-      const tab = (tabParam === "new" || tabParam === "new_releases") ? "new" : "trending";
+      let tab: "trending" | "new" | "all" = "trending";
+      if (tabParam === "new" || tabParam === "new_releases") {
+        tab = "new";
+      } else if (tabParam === "all" || tabParam === "all_titles") {
+        tab = "all";
+      }
       const source = (url.searchParams.get("source") || "all") as any;
       const genre = url.searchParams.get("genre") || undefined;
       const statusParam = (url.searchParams.get("status") || "all").toLowerCase().trim();
       const status = (statusParam === "ready" ? "available" : statusParam) as any;
       const q = url.searchParams.get("q") || undefined;
       const sortParam = (url.searchParams.get("sort") || "popularity").toLowerCase().trim();
-      const sort = (sortParam === "popular" ? "popularity" : (sortParam === "rating" ? "score" : sortParam)) as any;
+      let sort: any = sortParam;
+      if (sortParam === "popular") sort = "popularity";
+      else if (sortParam === "rating") sort = "score";
+      else if (sortParam === "title" || sortParam === "title_asc" || sortParam === "alphabetical") sort = "title_asc";
       const page = parseInt(url.searchParams.get("page") || "1", 10) || 1;
-      const pageSize = parseInt(url.searchParams.get("pageSize") || "50", 10) || 50;
+      const pageSize = parseInt(url.searchParams.get("pageSize") || "36", 10) || 36;
 
       const discoverFn = serverDependencies.getDiscoverNovels ?? getDiscoverNovels;
       const cacheDb = getCacheDb();
@@ -5291,14 +5299,14 @@ async function handleRequestCore(
 
       const items = result.novels.map((n) => ({
         ...n,
-        feedType: result.tab === "new" ? "new_releases" : "trending",
+        feedType: result.tab === "new" ? "new_releases" : (result.tab === "all" ? "all_titles" : "trending"),
       }));
 
       const responseTab =
         (tabParam === "new_releases" || url.pathname === "/api/discover/feed") &&
         result.tab === "new"
           ? "new_releases"
-          : result.tab;
+          : (tabParam === "all_titles" && result.tab === "all" ? "all_titles" : result.tab);
 
       return jsonResponse(
         {
@@ -5311,6 +5319,7 @@ async function handleRequestCore(
           counts: {
             trending: result.tab === "trending" ? result.count : 25,
             newReleases: result.tab === "new" ? result.count : 25,
+            all: result.tab === "all" ? result.count : 1400,
           },
           genres: result.genres,
           sources: result.sources,

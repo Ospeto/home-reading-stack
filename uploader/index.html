@@ -1723,6 +1723,10 @@
               <span>New Releases</span>
               <span id="discoverNewReleasesBadge" class="px-1.5 py-0.5 rounded-full text-[10px] font-mono font-medium bg-white/10 text-zinc-300 border border-white/10">0</span>
             </button>
+            <button onclick="switchDiscoverTab('all')" id="discoverTabAll" role="tab" aria-selected="false" class="discover-tab px-4 py-1.5 rounded-full text-xs font-bold text-zinc-400 hover:text-white transition-all duration-150 flex items-center gap-1.5 cursor-pointer active:scale-[0.96]" title="Browse All Light Novels">
+              <span>All Titles</span>
+              <span id="discoverAllBadge" class="px-1.5 py-0.5 rounded-full text-[10px] font-mono font-medium bg-white/10 text-zinc-300 border border-white/10">0</span>
+            </button>
           </div>
 
           <!-- Live Feed Status / Info -->
@@ -1773,6 +1777,7 @@
                 <option value="popular">Most Popular</option>
                 <option value="rating">Highest Rated</option>
                 <option value="newest">Newest</option>
+                <option value="title_asc">Title A-Z</option>
               </select>
             </div>
           </div>
@@ -1786,6 +1791,24 @@
 
         <!-- Discover Card Grid -->
         <div id="discoverGrid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-5 w-full pt-2"></div>
+
+        <!-- Discover Pagination Controls -->
+        <div id="discoverPagination" class="hidden flex flex-col sm:flex-row items-center justify-between gap-3 pt-6 pb-2 border-t border-white/5 text-xs text-zinc-400 w-full">
+          <div id="discoverPaginationInfo" class="text-zinc-400 font-medium">
+            Showing 1 - 36 of 0 titles
+          </div>
+          <div class="flex items-center gap-2">
+            <button id="discoverPrevPageBtn" onclick="changeDiscoverPage(-1)" class="px-3.5 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 disabled:opacity-30 disabled:pointer-events-none text-zinc-200 font-semibold border border-white/10 transition-all cursor-pointer active:scale-[0.96]">
+              Previous
+            </button>
+            <span id="discoverPageIndicator" class="px-3 py-1.5 rounded-xl bg-white/5 border border-white/5 text-zinc-300 font-mono text-[11px]">
+              Page 1 of 1
+            </span>
+            <button id="discoverNextPageBtn" onclick="changeDiscoverPage(1)" class="px-3.5 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 disabled:opacity-30 disabled:pointer-events-none text-zinc-200 font-semibold border border-white/10 transition-all cursor-pointer active:scale-[0.96]">
+              Next
+            </button>
+          </div>
+        </div>
 
         <!-- Discover Empty State -->
         <div id="discoverEmptyState" class="hidden text-center py-16 px-4 bg-zinc-900/30 border border-white/5 rounded-2xl text-xs space-y-2">
@@ -4075,7 +4098,7 @@
 
     // DISCOVER SHELF STATE
     let currentView = 'library'; // 'library' or 'discover'
-    let discoverTab = 'trending'; // 'trending' or 'new_releases'
+    let discoverTab = 'trending'; // 'trending', 'new_releases', or 'all'
     const discoverNovelsMap = new Map(); // Global registry for 100% reliable card tapping
     const activeDiscoverDownloads = new Map(); // Tracks live download progress per novelId: { jobId, runId, progress, statusText, phase, title }
     const discoverPollIntervals = new Map(); // Tracks active polling timers per novelId
@@ -4085,10 +4108,19 @@
       status: 'all',
       q: '',
       sort: 'popular',
+      page: 1,
+      pageSize: 36,
+    };
+    let discoverPaginationState = {
+      page: 1,
+      pageSize: 36,
+      totalCount: 0,
+      totalPages: 1,
     };
     let discoverFeedCache = {
       trending: null,
       new_releases: null,
+      all: null,
     };
     let activeDiscoverItem = null;
     let ingestingDiscoverIds = new Set();
@@ -4560,20 +4592,28 @@
       try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
       tgHaptic.light();
       discoverTab = tab;
+      discoverFilter.page = 1;
 
       const btnTrending = document.getElementById('discoverTabTrending');
       const btnReleases = document.getElementById('discoverTabNewReleases');
+      const btnAll = document.getElementById('discoverTabAll');
+
+      btnTrending?.classList.remove('discover-tab-active');
+      btnTrending?.setAttribute('aria-selected', 'false');
+      btnReleases?.classList.remove('discover-tab-active');
+      btnReleases?.setAttribute('aria-selected', 'false');
+      btnAll?.classList.remove('discover-tab-active');
+      btnAll?.setAttribute('aria-selected', 'false');
 
       if (tab === 'trending') {
         btnTrending?.classList.add('discover-tab-active');
         btnTrending?.setAttribute('aria-selected', 'true');
-        btnReleases?.classList.remove('discover-tab-active');
-        btnReleases?.setAttribute('aria-selected', 'false');
+      } else if (tab === 'all') {
+        btnAll?.classList.add('discover-tab-active');
+        btnAll?.setAttribute('aria-selected', 'true');
       } else {
         btnReleases?.classList.add('discover-tab-active');
         btnReleases?.setAttribute('aria-selected', 'true');
-        btnTrending?.classList.remove('discover-tab-active');
-        btnTrending?.setAttribute('aria-selected', 'false');
       }
 
       loadDiscoverFeed();
@@ -4617,7 +4657,7 @@
       const emptyState = document.getElementById('discoverEmptyState');
 
       const tab = discoverTab;
-      const { source, genre, status, q, sort } = discoverFilter;
+      const { source, genre, status, q, sort, page, pageSize } = discoverFilter;
 
       const params = new URLSearchParams();
       params.set('tab', tab);
@@ -4626,6 +4666,8 @@
       if (status && status !== 'all') params.set('status', status);
       if (q && q.trim()) params.set('q', q.trim());
       if (sort) params.set('sort', sort);
+      if (page) params.set('page', String(page));
+      if (pageSize) params.set('pageSize', String(pageSize));
 
       const cacheKey = `${tab}:${params.toString()}`;
 
@@ -4643,8 +4685,10 @@
         if (data.counts) {
           const tBadge = document.getElementById('discoverTrendingBadge');
           const nrBadge = document.getElementById('discoverNewReleasesBadge');
+          const allBadge = document.getElementById('discoverAllBadge');
           if (tBadge) tBadge.textContent = String(data.counts.trending || 0);
           if (nrBadge) nrBadge.textContent = String(data.counts.newReleases || 0);
+          if (allBadge) allBadge.textContent = String(data.counts.all || (data.tab === 'all' ? data.count : 1400));
         }
 
         if (data.genres) {
@@ -4659,8 +4703,15 @@
         }
         discoverFeedCache[cacheKey] = data;
         discoverFeedCache[tab] = data;
+
+        discoverPaginationState.page = data.page || page || 1;
+        discoverPaginationState.pageSize = data.pageSize || pageSize || 36;
+        discoverPaginationState.totalCount = (data.count !== undefined) ? data.count : (data.total || 0);
+        discoverPaginationState.totalPages = data.totalPages || 1;
+
         const novelList = data.novels || data.items || [];
         renderDiscoverCards(novelList);
+        renderDiscoverPagination();
       } catch (err) {
         console.error('Failed to load discover feed:', err);
         if (feedContainer) {
@@ -4672,7 +4723,65 @@
             </div>
           `);
         }
+        const pagEl = document.getElementById('discoverPagination');
+        if (pagEl) pagEl.classList.add('hidden');
       }
+    }
+
+    function renderDiscoverPagination() {
+      const pagEl = document.getElementById('discoverPagination');
+      if (!pagEl) return;
+
+      const { page, pageSize, totalCount, totalPages } = discoverPaginationState;
+
+      // Always show pagination when tab === 'all' or when totalPages > 1
+      if (discoverTab === 'all' || totalPages > 1) {
+        pagEl.classList.remove('hidden');
+      } else {
+        pagEl.classList.add('hidden');
+        return;
+      }
+
+      const infoEl = document.getElementById('discoverPaginationInfo');
+      const prevBtn = document.getElementById('discoverPrevPageBtn');
+      const nextBtn = document.getElementById('discoverNextPageBtn');
+      const indicatorEl = document.getElementById('discoverPageIndicator');
+
+      const start = totalCount > 0 ? (page - 1) * pageSize + 1 : 0;
+      const end = Math.min(totalCount, page * pageSize);
+
+      if (infoEl) {
+        infoEl.textContent = `Showing ${start} - ${end} of ${totalCount.toLocaleString()} titles`;
+      }
+
+      if (indicatorEl) {
+        indicatorEl.textContent = `Page ${page} of ${Math.max(1, totalPages)}`;
+      }
+
+      if (prevBtn) {
+        prevBtn.disabled = page <= 1;
+      }
+      if (nextBtn) {
+        nextBtn.disabled = page >= totalPages;
+      }
+    }
+
+    function changeDiscoverPage(delta) {
+      const targetPage = discoverPaginationState.page + delta;
+      if (targetPage < 1 || targetPage > discoverPaginationState.totalPages) return;
+      try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
+      tgHaptic.light();
+      discoverFilter.page = targetPage;
+
+      // Smoothly scroll back to the top of the grid
+      const grid = document.getElementById('discoverGrid');
+      if (grid) {
+        grid.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } else {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+
+      loadDiscoverFeed();
     }
 
     function handleDiscoverSearch(val) {
@@ -4683,6 +4792,7 @@
       clearTimeout(discoverSearchDebounceTimer);
       discoverSearchDebounceTimer = setTimeout(() => {
         discoverFilter.q = val;
+        discoverFilter.page = 1;
         loadDiscoverFeed();
       }, 250);
     }
@@ -4693,6 +4803,7 @@
       if (input) input.value = '';
       if (clearBtn) clearBtn.classList.add('hidden');
       discoverFilter.q = '';
+      discoverFilter.page = 1;
       loadDiscoverFeed();
     }
 
@@ -4700,6 +4811,7 @@
       try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
       tgHaptic.light();
       discoverFilter.source = src;
+      discoverFilter.page = 1;
 
       ['all', 'lnori', 'elscione'].forEach(s => {
         const btn = document.getElementById(`discoverSource-${s}`);
@@ -4718,6 +4830,7 @@
       try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
       tgHaptic.light();
       discoverFilter.status = st;
+      discoverFilter.page = 1;
 
       ['all', 'ready', 'in_library'].forEach(s => {
         const btn = document.getElementById(`discoverStatus-${s}`);
@@ -4736,6 +4849,7 @@
       try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
       tgHaptic.light();
       discoverFilter.genre = g;
+      discoverFilter.page = 1;
       const pillsContainer = document.getElementById('discoverGenrePills');
       if (pillsContainer) {
         pillsContainer.querySelectorAll('button').forEach(btn => {
@@ -4750,6 +4864,7 @@
 
     function setDiscoverSort(val) {
       discoverFilter.sort = val;
+      discoverFilter.page = 1;
       loadDiscoverFeed();
     }
 
@@ -4759,7 +4874,9 @@
         genre: 'All',
         status: 'all',
         q: '',
-        sort: discoverTab === 'trending' ? 'popular' : 'newest',
+        sort: discoverTab === 'trending' ? 'popular' : (discoverTab === 'all' ? 'popular' : 'newest'),
+        page: 1,
+        pageSize: 36,
       };
       setDiscoverSourceFilter('all');
       setDiscoverStatusFilter('all');
