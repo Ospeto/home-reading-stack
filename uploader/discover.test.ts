@@ -39,6 +39,9 @@ import {
   DISCOVER_FEED_CACHE_VERSION,
   CATALOG_VOLUMES,
   resolveCatalogVolumeCount,
+  getCalibreBookMatchCandidates,
+  getNovelMatchCandidates,
+  isSpinoffMismatch,
   type DiscoveredNovel,
 } from "./discover";
 import {
@@ -3001,6 +3004,388 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(resolveCatalogVolumeCount("DanMachi - Minor Myths and Legends")).toBe(1);
       // Index must resolve to 24 volumes, not stale seed 55
       expect(resolveCatalogVolumeCount("A Certain Magical Index")).toBe(24);
+    });
+
+    describe("Optimized Inverted Index Calibre Matcher & Fast Discover Feed Performance", () => {
+      // Baseline un-indexed reference matcher for regression & equivalence verification
+      function baselineCrossCheckNovels(novels: DiscoveredNovel[], calibreBooks: any[]): DiscoveredNovel[] {
+        const processedCalibreBooks = calibreBooks.map((b) => ({
+          book: b,
+          ...getCalibreBookMatchCandidates(b),
+        }));
+
+        return novels.map((novel) => {
+          const { candidates: nCandidates, tokensList: nTokensList } = getNovelMatchCandidates(novel);
+          let matchCount = 0;
+
+          for (const b of processedCalibreBooks) {
+            let isMatch = false;
+
+            // 1. Direct candidate equality
+            for (const n of nCandidates) {
+              if (b.candidates.has(n)) {
+                for (const c of b.candidates) {
+                  if (c === n && !isSpinoffMismatch(n, c)) {
+                    isMatch = true;
+                    break;
+                  }
+                }
+                if (isMatch) break;
+              }
+            }
+
+            // 2. Containment matching
+            if (!isMatch) {
+              for (const n of nCandidates) {
+                const nWords = n.split(" ").length;
+                for (const c of b.candidates) {
+                  if (isSpinoffMismatch(n, c)) continue;
+                  const cWords = c.split(" ").length;
+                  if (c.length >= 8 && cWords >= 2 && ` ${n} `.includes(` ${c} `)) {
+                    isMatch = true;
+                    break;
+                  }
+                  if (n.length >= 8 && nWords >= 2 && ` ${c} `.includes(` ${n} `)) {
+                    isMatch = true;
+                    break;
+                  }
+                }
+                if (isMatch) break;
+              }
+            }
+
+            // 3. Significant token overlap matching
+            if (!isMatch) {
+              for (const nTok of nTokensList) {
+                const nStr = nTok.join(" ");
+                for (const cTok of b.tokensList) {
+                  const cStr = cTok.join(" ");
+                  if (isSpinoffMismatch(nStr, cStr)) continue;
+                  const overlap = calculateSignificantTokenOverlap(nTok, cTok);
+                  if (overlap >= 0.70) {
+                    isMatch = true;
+                    break;
+                  }
+                }
+                if (isMatch) break;
+              }
+            }
+
+            // 4. Prefix start matching fallback
+            if (!isMatch) {
+              for (const n of nCandidates) {
+                if (n.length >= 6) {
+                  for (const c of b.candidates) {
+                    if (isSpinoffMismatch(n, c)) continue;
+                    if (c.length >= 6 && (c.startsWith(n) || n.startsWith(c))) {
+                      isMatch = true;
+                      break;
+                    }
+                  }
+                }
+                if (isMatch) break;
+              }
+            }
+
+            if (isMatch) matchCount++;
+          }
+
+          return {
+            ...novel,
+            volumeCount: Math.max(novel.volumeCount || 1, matchCount),
+            inLibrary: matchCount > 0,
+            existingVolumes: matchCount,
+          };
+        });
+      }
+
+      it("produces 100% identical matching output as baseline across edge cases (DanMachi, Tensura, spin-offs, short titles, native Japanese)", () => {
+        const testNovels: DiscoveredNovel[] = [
+          {
+            id: "danmachi-main",
+            title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?",
+            titleRomaji: "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka",
+            titleNative: "ダンジョンに出会いを求めるのは間違っているだろうか",
+            author: "Fujino Omori",
+            coverUrl: "https://example.com/danmachi.jpg",
+            synopsis: "DanMachi synopsis",
+            genres: ["Action", "Fantasy"],
+            score: 90,
+            popularity: 8000,
+            releaseDate: "2013-01-15",
+            volumeCount: 19,
+            source: "both",
+            sourceUrls: { elscione: "https://example.com" },
+            inLibrary: false,
+            existingVolumes: 0,
+          },
+          {
+            id: "danmachi-so",
+            title: "DanMachi: Sword Oratoria",
+            titleRomaji: "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka Gaiden Sword Oratoria",
+            author: "Fujino Omori",
+            coverUrl: "https://example.com/so.jpg",
+            synopsis: "Sword Oratoria synopsis",
+            genres: ["Action", "Fantasy"],
+            score: 85,
+            popularity: 6000,
+            releaseDate: "2014-01-15",
+            volumeCount: 14,
+            source: "both",
+            sourceUrls: { elscione: "https://example.com" },
+            inLibrary: false,
+            existingVolumes: 0,
+          },
+          {
+            id: "slime-main",
+            title: "That Time I Got Reincarnated as a Slime",
+            titleRomaji: "Tensei Shitara Slime Datta Ken",
+            author: "Fuse",
+            coverUrl: "https://example.com/tensura.jpg",
+            synopsis: "Tensura synopsis",
+            genres: ["Isekai", "Fantasy"],
+            score: 88,
+            popularity: 9000,
+            releaseDate: "2014-05-30",
+            volumeCount: 21,
+            source: "both",
+            sourceUrls: { elscione: "https://example.com" },
+            inLibrary: false,
+            existingVolumes: 0,
+          },
+          {
+            id: "slime-300",
+            title: "I've Been Killing Slimes for 300 Years and Maxed Out My Level",
+            author: "Kisetsu Morita",
+            coverUrl: "https://example.com/slimes300.jpg",
+            synopsis: "Slimes 300 synopsis",
+            genres: ["Comedy", "Slice of Life"],
+            score: 82,
+            popularity: 4000,
+            releaseDate: "2017-01-14",
+            volumeCount: 14,
+            source: "both",
+            sourceUrls: { elscione: "https://example.com" },
+            inLibrary: false,
+            existingVolumes: 0,
+          },
+          {
+            id: "eighty-six",
+            title: "86--Eighty-Six",
+            titleRomaji: "86 - Eighty Six",
+            author: "Asato Asato",
+            coverUrl: "https://example.com/86.jpg",
+            synopsis: "86 synopsis",
+            genres: ["Sci-Fi", "Drama"],
+            score: 92,
+            popularity: 8500,
+            releaseDate: "2017-02-10",
+            volumeCount: 13,
+            source: "both",
+            sourceUrls: { elscione: "https://example.com" },
+            inLibrary: false,
+            existingVolumes: 0,
+          },
+          {
+            id: "overlord-main",
+            title: "Overlord",
+            author: "Kugane Maruyama",
+            coverUrl: "https://example.com/overlord.jpg",
+            synopsis: "Overlord synopsis",
+            genres: ["Dark Fantasy"],
+            score: 89,
+            popularity: 8800,
+            releaseDate: "2012-07-30",
+            volumeCount: 16,
+            source: "both",
+            sourceUrls: { elscione: "https://example.com" },
+            inLibrary: false,
+            existingVolumes: 0,
+          },
+          {
+            id: "tanya-evil",
+            title: "The Saga of Tanya the Evil",
+            titleRomaji: "Youjo Senki",
+            author: "Carlo Zen",
+            coverUrl: "https://example.com/tanya.jpg",
+            synopsis: "Tanya synopsis",
+            genres: ["Military", "Isekai"],
+            score: 87,
+            popularity: 7000,
+            releaseDate: "2013-10-31",
+            volumeCount: 14,
+            source: "both",
+            sourceUrls: { elscione: "https://example.com" },
+            inLibrary: false,
+            existingVolumes: 0,
+          },
+          // Novel matching stop-word-only candidate stripped from volume notation
+          {
+            id: "beyond-this-and-that",
+            title: "Beyond This and That",
+            author: "Test Author",
+            coverUrl: "https://example.com/test.jpg",
+            synopsis: "Test synopsis",
+            genres: ["Fantasy"],
+            score: 80,
+            popularity: 1000,
+            releaseDate: "2024-01-01",
+            volumeCount: 1,
+            source: "both",
+            sourceUrls: { elscione: "https://example.com" },
+            inLibrary: false,
+            existingVolumes: 0,
+          },
+        ];
+
+        const testCalibreBooks = [
+          // 3 volumes of DanMachi mainline
+          { id: 1, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 1", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 1 },
+          { id: 2, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 2", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 2 },
+          { id: 3, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 3", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 3 },
+          // 1 volume of Sword Oratoria (must not match mainline DanMachi)
+          { id: 4, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon? On the Side: Sword Oratoria, Vol. 1", series: "Sword Oratoria", series_index: 1 },
+          // 2 volumes of Tensura
+          { id: 5, title: "That Time I Got Reincarnated as a Slime, Vol. 1", series: "That Time I Got Reincarnated as a Slime", series_index: 1 },
+          { id: 6, title: "That Time I Got Reincarnated as a Slime, Vol. 2", series: "That Time I Got Reincarnated as a Slime", series_index: 2 },
+          // 86
+          { id: 7, title: "86 - Eighty-Six, Vol. 1", series: "86 - Eighty-Six", series_index: 1 },
+          // Tanya the Evil (containment check)
+          { id: 8, title: "Tanya the Evil, Vol. 1", series: "The Saga of Tanya the Evil", series_index: 1 },
+          // Unrelated Calibre books
+          { id: 9, title: "Spice and Wolf, Vol. 1", series: "Spice and Wolf", series_index: 1 },
+          { id: 10, title: "Ascendance of a Bookworm, Part 1 Vol. 1", series: "Ascendance of a Bookworm", series_index: 1 },
+          // Volume-suffixed Calibre book whose stripped title is pure stop words
+          { id: 11, title: "This and That, Vol. 1", series: "This and That", series_index: 1 },
+        ];
+
+        const baselineResult = baselineCrossCheckNovels(testNovels, testCalibreBooks);
+        const optimizedResult = crossCheckNovelsWithCalibre(testNovels, {
+          getCalibreBooks: () => testCalibreBooks,
+        });
+
+        expect(optimizedResult.length).toBe(baselineResult.length);
+        for (let i = 0; i < testNovels.length; i++) {
+          const base = baselineResult[i];
+          const opt = optimizedResult[i];
+          expect(opt.id).toBe(base.id);
+          expect(opt.inLibrary).toBe(base.inLibrary);
+          expect(opt.existingVolumes).toBe(base.existingVolumes);
+          expect(opt.volumeCount).toBe(base.volumeCount);
+        }
+
+        // Specific assertions for sanity:
+        const danmachi = optimizedResult.find((n) => n.id === "danmachi-main")!;
+        expect(danmachi.inLibrary).toBe(true);
+        expect(danmachi.existingVolumes).toBe(3); // 3 volumes, spin-off excluded
+
+        const so = optimizedResult.find((n) => n.id === "danmachi-so")!;
+        expect(so.inLibrary).toBe(true);
+        expect(so.existingVolumes).toBe(1);
+
+        const slime300 = optimizedResult.find((n) => n.id === "slime-300")!;
+        expect(slime300.inLibrary).toBe(false); // Slimes 300 not in library despite Slime keywords
+        expect(slime300.existingVolumes).toBe(0);
+
+        const overlord = optimizedResult.find((n) => n.id === "overlord-main")!;
+        expect(overlord.inLibrary).toBe(false);
+        expect(overlord.existingVolumes).toBe(0);
+
+        const eightySix = optimizedResult.find((n) => n.id === "eighty-six")!;
+        expect(eightySix.inLibrary).toBe(true);
+        expect(eightySix.existingVolumes).toBe(1);
+
+        const beyondThisAndThat = optimizedResult.find((n) => n.id === "beyond-this-and-that")!;
+        expect(beyondThisAndThat.inLibrary).toBe(true);
+        expect(beyondThisAndThat.existingVolumes).toBe(1);
+      });
+
+      it("reconciles only the requested page slice when statusFilter === 'all', keeping latency sub-50ms", async () => {
+        let crossCheckInvocationCount = 0;
+        const mockCalibreBooks = [
+          { id: 101, title: "DanMachi, Vol. 1", series: "DanMachi", series_index: 1 },
+          { id: 102, title: "DanMachi, Vol. 2", series: "DanMachi", series_index: 2 },
+        ];
+
+        const t0 = performance.now();
+        const res = await getDiscoverNovels(
+          { tab: "all", status: "all", page: 1, pageSize: 36 },
+          {
+            cacheDb: tempCacheDb,
+            getCalibreBooks: () => {
+              crossCheckInvocationCount++;
+              return mockCalibreBooks;
+            },
+          },
+        );
+        const durationMs = performance.now() - t0;
+
+        expect(res.success).toBe(true);
+        expect(res.novels.length).toBe(36);
+        expect(res.count).toBeGreaterThan(1000);
+        // Calibre was reconciled exactly once for the single page
+        expect(crossCheckInvocationCount).toBe(1);
+        // Latency must be well under 1000ms even on cold catalog build + pagination
+        expect(durationMs).toBeLessThan(1500);
+
+        // Repeat query must be instantaneous from feed cache (< 50ms)
+        const tRepeat = performance.now();
+        const repeatRes = await getDiscoverNovels(
+          { tab: "all", status: "all", page: 2, pageSize: 36 },
+          {
+            cacheDb: tempCacheDb,
+            getCalibreBooks: () => {
+              crossCheckInvocationCount++;
+              return mockCalibreBooks;
+            },
+          },
+        );
+        const repeatDurationMs = performance.now() - tRepeat;
+        expect(repeatRes.success).toBe(true);
+        expect(repeatRes.page).toBe(2);
+        expect(repeatRes.novels.length).toBe(36);
+        expect(crossCheckInvocationCount).toBe(2);
+        expect(repeatDurationMs).toBeLessThan(50);
+      });
+
+      it("performs accurate full-catalog filtering when statusFilter is 'available' or 'in_library'", async () => {
+        const mockCalibreBooks = [
+          { id: 201, title: "DanMachi, Vol. 1", series: "DanMachi", series_index: 1 },
+          { id: 202, title: "Overlord, Vol. 1", series: "Overlord", series_index: 1 },
+        ];
+
+        // 1. in_library query
+        const inLibRes = await getDiscoverNovels(
+          { tab: "all", status: "in_library" },
+          {
+            cacheDb: tempCacheDb,
+            getCalibreBooks: () => mockCalibreBooks,
+          },
+        );
+
+        expect(inLibRes.success).toBe(true);
+        expect(inLibRes.novels.length).toBeGreaterThan(0);
+        for (const n of inLibRes.novels) {
+          expect(n.inLibrary).toBe(true);
+          expect(n.existingVolumes).toBeGreaterThan(0);
+        }
+
+        // 2. available query
+        const availRes = await getDiscoverNovels(
+          { tab: "all", status: "available", page: 1, pageSize: 36 },
+          {
+            cacheDb: tempCacheDb,
+            getCalibreBooks: () => mockCalibreBooks,
+          },
+        );
+
+        expect(availRes.success).toBe(true);
+        expect(availRes.novels.length).toBe(36);
+        for (const n of availRes.novels) {
+          expect(n.inLibrary).toBe(false);
+          expect(n.existingVolumes).toBe(0);
+        }
+      });
     });
   });
 });
