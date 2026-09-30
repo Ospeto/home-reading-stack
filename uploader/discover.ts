@@ -102,6 +102,8 @@ export const REAL_ELSCIONE_FOLDERS: string[] = discoverCatalog.elscioneFolders;
 export const REAL_LNORI_SERIES: Array<{ id: number; slug: string }> = discoverCatalog.lnoriSeries;
 export const CATALOG_COVERS: Record<string, string> =
   (discoverCatalog as any).catalogCovers || {};
+export const CATALOG_VOLUMES: Record<string, number> =
+  (discoverCatalog as any).catalogVolumes || {};
 
 export function resolveCatalogCover(title: string, romaji?: string): string | null {
   const rawCandidates = [title, romaji].filter(Boolean) as string[];
@@ -941,7 +943,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     score: 87,
     popularity: 89000,
     releaseDate: "2012-07-30",
-    volumeCount: 16,
+    volumeCount: 18,
     source: "both",
     sourceUrls: {
       lnori: "https://lnori.com/series/2405/overlord",
@@ -1148,7 +1150,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     score: 88,
     popularity: 94000,
     releaseDate: "2014-01-24",
-    volumeCount: 37,
+    volumeCount: 38,
     source: "both",
     sourceUrls: {
       lnori: "https://lnori.com/series/3343/re-zero-starting-life-in-another-world",
@@ -1171,7 +1173,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     score: 83,
     popularity: 72000,
     releaseDate: "2004-04-10",
-    volumeCount: 55,
+    volumeCount: 24,
     source: "both",
     sourceUrls: {
       lnori: "https://lnori.com/series/1916/a-certain-magical-index",
@@ -2016,15 +2018,28 @@ export const STOP_WORDS = new Set([
 ]);
 
 export const KNOWN_LIGHT_NOVEL_ALIAS_CLUSTERS: string[][] = [
-  // DanMachi
+  // DanMachi (Mainline)
   [
     "danmachi",
     "is it wrong to try to pick up girls in a dungeon",
-    "is it wrong to try to pick up girls in a dungeon on the side sword oratoria",
     "dungeon ni deai wo motomeru no wa machigatteiru darou ka",
+  ],
+  // DanMachi - Sword Oratoria
+  [
     "danmachi sword oratoria",
+    "sword oratoria",
+    "is it wrong to try to pick up girls in a dungeon on the side sword oratoria",
+    "dungeon ni deai wo motomeru no wa machigatteiru darou ka gaiden sword oratoria",
+  ],
+  // DanMachi - Familia Chronicle
+  [
     "danmachi familia chronicle",
+    "familia chronicle",
+  ],
+  // DanMachi - Minor Myths and Legends
+  [
     "danmachi minor myths and legends",
+    "minor myths and legends",
   ],
   // Re:Zero
   [
@@ -2098,6 +2113,61 @@ for (const cluster of KNOWN_LIGHT_NOVEL_ALIAS_CLUSTERS) {
   }
 }
 
+export const DISTINCT_SPINOFF_MARKERS: RegExp[] = [
+  /\bprogressive\b/i,
+  /\balternative\b/i,
+  /\bgun gale online\b/i,
+  /\bsword oratoria\b/i,
+  /\bmagian company\b/i,
+  /\bex\b/i,
+  /\bclovers? regret\b/i,
+  /\bgaiden\b/i,
+  /\bside stor(?:y|ies)\b/i,
+  /\bshort stor(?:y|ies)\b/i,
+  /\bafter stor(?:y|ies)\b/i,
+  /\ban explosion on this wonderful world\b/i,
+  /\bparchment and wolf\b/i,
+  /\bnt\b/i,
+  /\bgt\b/i,
+  /\bss\b/i,
+  /\bfamilia chronicle\b/i,
+  /\bminor myths and legends\b/i,
+];
+
+function extractYearMarker(str: string): string | null {
+  const match = str.toLowerCase().match(/\byear\s*([1-9])\b/);
+  return match ? match[1] : null;
+}
+
+export function isSpinoffMismatch(candA: string, candB: string): boolean {
+  const normA = normalizeTitleForMatch(candA);
+  const normB = normalizeTitleForMatch(candB);
+
+  if (!normA || !normB || normA === normB) return false;
+
+  // If explicitly declared same-cluster aliases, not a mismatch
+  if (aliasLookupMap.get(normA)?.includes(normB)) return false;
+
+  // Year marker check (e.g. Year 2 vs Year 3 vs mainline without year)
+  const yearA = extractYearMarker(normA);
+  const yearB = extractYearMarker(normB);
+  if (yearA !== yearB) {
+    if (yearA !== null || yearB !== null) return true;
+  }
+
+  for (const regex of DISTINCT_SPINOFF_MARKERS) {
+    // If both titles share sword oratoria, gaiden is an equivalent subtitle, not a conflict
+    if (regex.source.includes("gaiden") && normA.includes("sword oratoria") && normB.includes("sword oratoria")) {
+      continue;
+    }
+    const hasA = regex.test(normA);
+    const hasB = regex.test(normB);
+    if (hasA !== hasB) return true;
+  }
+
+  return false;
+}
+
 export function getSignificantTokens(str: string): string[] {
   return normalizeTitleForMatch(str)
     .split(/\s+/)
@@ -2131,6 +2201,9 @@ export function cleanCalibreTitleVariants(raw: string): string[] {
     /[\[\(（【]\s*(?:year\s*\d+\s*)?(?:vol(?:ume)?|v|book|bk|part|pt|#|第)?\.?\s*0*\d+(?:\.\d+)?\s*(?:巻)?\s*[\]\)）】]/gi,
     " ",
   );
+  if (s.trim().length >= 2 && !isSpinoffMismatch(raw, s.trim())) {
+    results.add(s.trim());
+  }
 
   const volumeSuffixPatterns = [
     /[,:\-–—\s]+(?:year\s*\d+\s*)?(?:vol(?:ume)?|v|book|bk|part|pt|#)\.?\s*0*\d+.*$/i,
@@ -2146,6 +2219,7 @@ export function cleanCalibreTitleVariants(raw: string): string[] {
   for (const pat of volumeSuffixPatterns) {
     const stripped = s.replace(pat, "").trim();
     if (stripped.length >= 2) {
+      if (isSpinoffMismatch(raw, stripped)) continue;
       results.add(stripped);
     }
   }
@@ -2173,6 +2247,7 @@ export function getNovelMatchCandidates(novel: DiscoveredNovel): {
       for (const p of parts) {
         const pNorm = normalizeTitleForMatch(p);
         if (pNorm && pNorm.length >= 2) {
+          if (isSpinoffMismatch(raw, p)) continue;
           candidates.add(pNorm);
         }
       }
@@ -2189,6 +2264,7 @@ export function getNovelMatchCandidates(novel: DiscoveredNovel): {
     const aliases = aliasLookupMap.get(c);
     if (aliases) {
       for (const a of aliases) {
+        if (isSpinoffMismatch(c, a)) continue;
         candidates.add(a);
       }
     }
@@ -2226,6 +2302,7 @@ export function getCalibreBookMatchCandidates(book: { title?: string; series?: s
         for (const p of parts) {
           const pNorm = normalizeTitleForMatch(p);
           if (pNorm && pNorm.length >= 2) {
+            if (isSpinoffMismatch(v, p)) continue;
             candidates.add(pNorm);
           }
         }
@@ -2242,6 +2319,7 @@ export function getCalibreBookMatchCandidates(book: { title?: string; series?: s
     const aliases = aliasLookupMap.get(c);
     if (aliases) {
       for (const a of aliases) {
+        if (isSpinoffMismatch(c, a)) continue;
         candidates.add(a);
       }
     }
@@ -2256,6 +2334,93 @@ export function getCalibreBookMatchCandidates(book: { title?: string; series?: s
   }
 
   return { candidates, tokensList };
+}
+
+/**
+ * Resolves the real volume count for a catalog light novel series.
+ * Checks seed metadata, the pre-indexed CATALOG_VOLUMES mapping,
+ * title variants, and known alias clusters before falling back to 1.
+ */
+export function resolveCatalogVolumeCount(
+  title: string,
+  romaji?: string,
+  seed?: DiscoveredNovel,
+): number {
+  let mappedCount: number | null = null;
+
+  const rawCandidates = [title, romaji].filter(Boolean) as string[];
+  const candidates: string[] = [];
+  for (const c of rawCandidates) {
+    if (!candidates.includes(c)) candidates.push(c);
+    for (const v of cleanCalibreTitleVariants(c)) {
+      if (!candidates.includes(v)) candidates.push(v);
+    }
+  }
+
+  // 1. Direct exact normalized match
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    if (norm && CATALOG_VOLUMES[norm] && !isSpinoffMismatch(c, norm)) {
+      mappedCount = CATALOG_VOLUMES[norm];
+      break;
+    }
+  }
+
+  // 2. Direct exact slug match
+  if (!mappedCount) {
+    for (const c of candidates) {
+      const slug = c.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      if (slug && CATALOG_VOLUMES[slug] && !isSpinoffMismatch(c, slug)) {
+        mappedCount = CATALOG_VOLUMES[slug];
+        break;
+      }
+    }
+  }
+
+  // 3. Exact canonical match (guarding against spin-off mismatch)
+  if (!mappedCount) {
+    for (const c of candidates) {
+      const can = canonicalTitleKey(c);
+      if (can && CATALOG_VOLUMES[can] && !isSpinoffMismatch(c, can)) {
+        mappedCount = CATALOG_VOLUMES[can];
+        break;
+      }
+    }
+  }
+
+  // 4. Exact alias cluster match (EXACT match on candidate === normItem, NEVER loose includes!)
+  if (!mappedCount) {
+    const normCandidates = candidates.map(normalizeTitleForMatch);
+    for (const cluster of KNOWN_LIGHT_NOVEL_ALIAS_CLUSTERS) {
+      const normCluster = cluster.map(normalizeTitleForMatch);
+      const exactMatch = normCandidates.find((cand) =>
+        normCluster.includes(cand),
+      );
+      if (exactMatch) {
+        for (const item of normCluster) {
+          if (CATALOG_VOLUMES[item] && !isSpinoffMismatch(exactMatch, item)) {
+            mappedCount = CATALOG_VOLUMES[item];
+            break;
+          }
+        }
+      }
+      if (mappedCount) break;
+    }
+  }
+
+  // Authoritative verified catalog volume count ALWAYS takes precedence when present
+  if (mappedCount !== null && mappedCount !== undefined) {
+    return mappedCount;
+  }
+
+  // Fallback to seed ONLY if seed is a compatible series (not a parent seed for a spin-off)
+  if (seed?.volumeCount && seed.volumeCount > 1) {
+    if (!isSpinoffMismatch(title, seed.title)) {
+      return seed.volumeCount;
+    }
+  }
+
+  return 1;
 }
 
 /**
@@ -2310,11 +2475,16 @@ export function crossCheckNovelsWithCalibre(
     for (const b of processedCalibreBooks) {
       let isMatch = false;
 
-      // 1. Direct candidate equality (O(1) Set lookup)
+      // 1. Direct candidate equality (O(1) Set lookup with spinoff mismatch protection)
       for (const n of nCandidates) {
         if (b.candidates.has(n)) {
-          isMatch = true;
-          break;
+          for (const c of b.candidates) {
+            if (c === n && !isSpinoffMismatch(n, c)) {
+              isMatch = true;
+              break;
+            }
+          }
+          if (isMatch) break;
         }
       }
 
@@ -2323,6 +2493,7 @@ export function crossCheckNovelsWithCalibre(
         for (const n of nCandidates) {
           const nWords = n.split(" ").length;
           for (const c of b.candidates) {
+            if (isSpinoffMismatch(n, c)) continue;
             const cWords = c.split(" ").length;
             // c inside n
             if (c.length >= 8 && cWords >= 2 && ` ${n} `.includes(` ${c} `)) {
@@ -2342,7 +2513,10 @@ export function crossCheckNovelsWithCalibre(
       // 3. Significant token overlap matching (>= 70% significant word overlap)
       if (!isMatch) {
         for (const nTok of nTokensList) {
+          const nStr = nTok.join(" ");
           for (const cTok of b.tokensList) {
+            const cStr = cTok.join(" ");
+            if (isSpinoffMismatch(nStr, cStr)) continue;
             const overlap = calculateSignificantTokenOverlap(nTok, cTok);
             if (overlap >= 0.70) {
               isMatch = true;
@@ -2358,6 +2532,7 @@ export function crossCheckNovelsWithCalibre(
         for (const n of nCandidates) {
           if (n.length >= 6) {
             for (const c of b.candidates) {
+              if (isSpinoffMismatch(n, c)) continue;
               if (c.length >= 6 && (c.startsWith(n) || n.startsWith(c))) {
                 isMatch = true;
                 break;
@@ -2375,6 +2550,7 @@ export function crossCheckNovelsWithCalibre(
 
     return {
       ...novel,
+      volumeCount: Math.max(novel.volumeCount || 1, matchCount),
       inLibrary: matchCount > 0,
       existingVolumes: matchCount,
     };
@@ -2446,7 +2622,7 @@ export async function buildCompleteCatalogNovels(
     const score = seed?.score ?? 85;
     const popularity = seed?.popularity ?? (real.source === "both" ? 7500 : 5000);
     const releaseDate = seed?.releaseDate ?? "2024-01-01";
-    const volumeCount = seed?.volumeCount ?? 1;
+    const volumeCount = resolveCatalogVolumeCount(folder, seed?.titleRomaji, seed);
 
     const slug = folder
       .toLowerCase()
@@ -2517,7 +2693,7 @@ export async function buildCompleteCatalogNovels(
     const score = seed?.score ?? 85;
     const popularity = seed?.popularity ?? (real.source === "both" ? 7500 : 5000);
     const releaseDate = seed?.releaseDate ?? "2024-01-01";
-    const volumeCount = seed?.volumeCount ?? 1;
+    const volumeCount = resolveCatalogVolumeCount(displayTitle, seed?.titleRomaji, seed);
 
     const novel = assignPrimarySource({
       id: seed?.id || `lnori-${s.id}-${s.slug}`,
@@ -2556,7 +2732,7 @@ export async function buildCompleteCatalogNovels(
 // Alias matching specification naming
 export const buildCatalogDiscoverNovels = buildCompleteCatalogNovels;
 
-export const DISCOVER_FEED_CACHE_VERSION = "v5";
+export const DISCOVER_FEED_CACHE_VERSION = "v6";
 
 /**
  * Discovers and builds the feed for a requested tab ("trending" | "new" | "all").
@@ -3389,6 +3565,9 @@ export async function searchUniversalNovels(
       if (novel.sourceUrls?.lnori && !existing.sourceUrls?.lnori) {
         existing.sourceUrls.lnori = novel.sourceUrls.lnori;
       }
+      if (novel.volumeCount && novel.volumeCount > (existing.volumeCount || 1)) {
+        existing.volumeCount = novel.volumeCount;
+      }
       if (existing.sourceUrls?.elscione && existing.sourceUrls?.lnori) {
         existing.source = "both";
         existing.primarySource = "elscione";
@@ -3467,6 +3646,13 @@ export async function searchUniversalNovels(
           knownSyn ||
           synthesizeEngagingSynopsis(folder, ["Light Novel", "Fantasy"]);
 
+        const seed = allSeeds.find(
+          (s) =>
+            normalizeTitleForMatch(s.title) === normF ||
+            canonicalTitleKey(s.title) === canonicalTitleKey(folder),
+        );
+        const volumeCount = resolveCatalogVolumeCount(folder, seed?.titleRomaji, seed);
+
         const slug = folder
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, "-")
@@ -3482,7 +3668,7 @@ export async function searchUniversalNovels(
           score: 85,
           popularity: 5000,
           releaseDate: "2024-01-01",
-          volumeCount: 1,
+          volumeCount,
           source: real.source,
           primarySource: real.primarySource,
           primaryUrl: real.primaryUrl,
@@ -3529,6 +3715,14 @@ export async function searchUniversalNovels(
           knownSyn ||
           synthesizeEngagingSynopsis(displayTitle, ["Light Novel", "Fantasy"]);
 
+        const can = canonicalTitleKey(displayTitle);
+        const seed = allSeeds.find(
+          (s) =>
+            normalizeTitleForMatch(s.title) === normS ||
+            canonicalTitleKey(s.title) === can,
+        );
+        const volumeCount = resolveCatalogVolumeCount(displayTitle, seed?.titleRomaji, seed);
+
         addNovel({
           id: `lnori-${s.id}-${s.slug}`,
           title: displayTitle,
@@ -3539,7 +3733,7 @@ export async function searchUniversalNovels(
           score: 85,
           popularity: 5000,
           releaseDate: "2024-01-01",
-          volumeCount: 1,
+          volumeCount,
           source: real.source,
           primarySource: real.primarySource,
           primaryUrl: real.primaryUrl,

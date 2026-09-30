@@ -37,6 +37,8 @@ import {
   KNOWN_TITLE_TO_COVER,
   KNOWN_TITLE_TO_LNORI,
   DISCOVER_FEED_CACHE_VERSION,
+  CATALOG_VOLUMES,
+  resolveCatalogVolumeCount,
   type DiscoveredNovel,
 } from "./discover";
 import {
@@ -222,7 +224,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       }
     });
 
-    it("serves complete catalog from cache under v5:feed:all on repeat queries", async () => {
+    it("serves complete catalog from cache under v6:feed:all on repeat queries", async () => {
       const initial = await getDiscoverNovels(
         { tab: "all", page: 1, pageSize: 10 },
         { cacheDb: tempCacheDb },
@@ -1171,10 +1173,11 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
 
     it("verifies badge and button consistency for in-library vs available novels in index.html", () => {
       // In Library badge and Re-Ingest button
-      expect(html).toContain("In Library (${libCount}v)");
+      expect(html).toContain("In Library (${libCount} vols)");
+      expect(html).toContain("Available (${item.volumeCount || 1} vols)");
+      expect(html).toContain("${item.volumeCount || 1} vols");
       expect(html).toContain("${inLib ? 'Re-Ingest' : 'Ingest'}");
       expect(html).toContain("bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md");
-      expect(html).toContain("Available");
     });
 
     it("verifies live download progress polling and Apple-style progress track in index.html", () => {
@@ -1677,9 +1680,9 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
     });
   });
 
-  describe("Cache Versioning (v5:feed:...) & Legacy Cache Invalidation", () => {
-    it("bypasses legacy stale cache keys and uses v5:feed prefix", async () => {
-      expect(DISCOVER_FEED_CACHE_VERSION).toBe("v5");
+  describe("Cache Versioning (v6:feed:...) & Legacy Cache Invalidation", () => {
+    it("bypasses legacy stale cache keys and uses v6:feed prefix", async () => {
+      expect(DISCOVER_FEED_CACHE_VERSION).toBe("v6");
 
       // Plant stale legacy cache entry
       const legacyStaleNovel: DiscoveredNovel = {
@@ -1703,17 +1706,18 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       setCachedFeed("v2:feed:trending", [legacyStaleNovel], { cacheDb: tempCacheDb });
       setCachedFeed("v3:feed:trending", [legacyStaleNovel], { cacheDb: tempCacheDb });
       setCachedFeed("v4:feed:trending", [legacyStaleNovel], { cacheDb: tempCacheDb });
+      setCachedFeed("v5:feed:trending", [legacyStaleNovel], { cacheDb: tempCacheDb });
 
-      // fetchDiscoverFeed must use v5:feed:trending and bypass feed:trending, v2:feed:trending, v3:feed:trending, and v4:feed:trending
+      // fetchDiscoverFeed must use v6:feed:trending and bypass feed:trending, v2:feed:trending, v3:feed:trending, v4:feed:trending, and v5:feed:trending
       const feed = await fetchDiscoverFeed("trending", { cacheDb: tempCacheDb });
       const staleHit = feed.find((n) => n.id === "stale-legacy-novel");
       expect(staleHit).toBeUndefined();
 
-      // Check that v5:feed:trending was created in cache
-      const v5Cached = getCachedFeed(`${DISCOVER_FEED_CACHE_VERSION}:feed:trending`, { cacheDb: tempCacheDb });
-      expect(v5Cached).not.toBeNull();
-      expect(v5Cached!.length).toBeGreaterThan(0);
-      expect(v5Cached!.some((n) => n.id === "stale-legacy-novel")).toBe(false);
+      // Check that v6:feed:trending was created in cache
+      const v6Cached = getCachedFeed(`${DISCOVER_FEED_CACHE_VERSION}:feed:trending`, { cacheDb: tempCacheDb });
+      expect(v6Cached).not.toBeNull();
+      expect(v6Cached!.length).toBeGreaterThan(0);
+      expect(v6Cached!.some((n) => n.id === "stale-legacy-novel")).toBe(false);
     });
   });
 
@@ -1839,7 +1843,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         // 7. SAO <-> Sword Art Online
         { novelTitle: "SAO", calibreTitle: "Sword Art Online 25: Unital Ring IV" },
         // 8. COTE <-> Classroom of the Elite
-        { novelTitle: "COTE", calibreTitle: "Classroom of the Elite: Year 2 Vol. 9" },
+        { novelTitle: "COTE", calibreTitle: "Classroom of the Elite, Vol. 1" },
         // 9. Roshidere <-> Alya Sometimes Hides Her Feelings in Russian
         { novelTitle: "Roshidere", calibreTitle: "Alya Sometimes Hides Her Feelings in Russian, Vol. 1" },
         // 10. Monogatari / Bakemonogatari <-> Monster Tale
@@ -2586,6 +2590,417 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
 
       const coverageRatio = verifiedPortraitCount / catalog.length;
       expect(coverageRatio).toBeGreaterThanOrEqual(0.80);
+    });
+  });
+
+  describe("Discover Volume Count Reconciliation & Visibility Invariants", () => {
+    it("reconciles novel volumeCount with Calibre library count (e.g. Accel World 27 volumes)", () => {
+      const novel: DiscoveredNovel = {
+        id: "elscione-accel-world",
+        title: "Accel World",
+        author: "Reki Kawahara",
+        coverUrl: "https://example.com/cover.jpg",
+        synopsis: "Accel World synopsis",
+        genres: ["Sci-Fi", "Action"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 1, // Suppose novel was unseeded with 1
+        source: "elscione",
+        sourceUrls: { elscione: "https://example.com" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const mockCalibre = Array.from({ length: 27 }, (_, i) => ({
+        id: 1000 + i,
+        title: `Accel World, Vol. ${i + 1}`,
+        series: "Accel World",
+        series_index: i + 1,
+      }));
+
+      const [reconciled] = crossCheckNovelsWithCalibre([novel], {
+        getCalibreBooks: () => mockCalibre,
+      });
+
+      expect(reconciled.inLibrary).toBe(true);
+      expect(reconciled.existingVolumes).toBe(27);
+      expect(reconciled.volumeCount).toBe(27);
+    });
+
+    it("preserves higher catalog volumeCount when library holds a partial subset", () => {
+      const novel: DiscoveredNovel = {
+        id: "elscione-sao",
+        title: "Sword Art Online",
+        author: "Reki Kawahara",
+        coverUrl: "https://example.com/sao.jpg",
+        synopsis: "SAO synopsis",
+        genres: ["Fantasy"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 28,
+        source: "both",
+        sourceUrls: { elscione: "https://example.com" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const mockCalibre = [
+        { id: 1, title: "Sword Art Online 1: Aincrad", series: "Sword Art Online", series_index: 1 },
+        { id: 2, title: "Sword Art Online 2: Aincrad", series: "Sword Art Online", series_index: 2 },
+      ];
+
+      const [reconciled] = crossCheckNovelsWithCalibre([novel], {
+        getCalibreBooks: () => mockCalibre,
+      });
+
+      expect(reconciled.inLibrary).toBe(true);
+      expect(reconciled.existingVolumes).toBe(2);
+      expect(reconciled.volumeCount).toBe(28); // Preserves 28
+    });
+
+    it("resolves catalog volume counts for popular long-running series from CATALOG_VOLUMES and seeds", () => {
+      expect(resolveCatalogVolumeCount("Accel World")).toBe(27);
+      expect(resolveCatalogVolumeCount("Sword Art Online")).toBe(28);
+      expect(resolveCatalogVolumeCount("Overlord")).toBe(18);
+      expect(resolveCatalogVolumeCount("That Time I Got Reincarnated as a Slime")).toBe(21);
+      expect(resolveCatalogVolumeCount("DanMachi")).toBe(19);
+      expect(resolveCatalogVolumeCount("Is It Wrong to Try to Pick Up Girls in a Dungeon?")).toBe(19);
+      expect(resolveCatalogVolumeCount("The Irregular at Magic High School")).toBe(32);
+      expect(resolveCatalogVolumeCount("A Certain Magical Index")).toBe(24);
+      expect(resolveCatalogVolumeCount("A Certain Magical Index NT")).toBe(23);
+      expect(resolveCatalogVolumeCount("A Certain Magical Index GT")).toBe(10);
+      expect(resolveCatalogVolumeCount("Monogatari Series")).toBe(28);
+      expect(resolveCatalogVolumeCount("Mushoku Tensei")).toBe(26);
+      expect(resolveCatalogVolumeCount("Classroom of the Elite")).toBe(28);
+      expect(resolveCatalogVolumeCount("KonoSuba")).toBe(17);
+      expect(resolveCatalogVolumeCount("Re:ZERO -Starting Life in Another World-")).toBe(38);
+    });
+
+    it("renders card status badges and metadata with prominent volume counts in index.html", () => {
+      const htmlPath = path.join((import.meta as any).dir, "index.html");
+      const html = fs.readFileSync(htmlPath, "utf8");
+
+      // In Library badge with vols count
+      expect(html).toContain("In Library (${libCount} vols)");
+      // Available badge with vols count
+      expect(html).toContain("Available (${item.volumeCount || 1} vols)");
+      // Metadata row volume badge
+      expect(html).toContain("${item.volumeCount || 1} vols");
+      // Modal volume rendering (never hardcoded 1 when existingVolumes is higher)
+      expect(html).toContain("const totalVols = Math.max(item.volumeCount || 1, item.existingVolumes || item.inLibraryVolumes || 0);");
+      expect(html).toContain("volumes.textContent = `${totalVols} Volumes`;");
+    });
+
+    it("ensures updated catalog volume counts take precedence over seeds in complete catalog and search", async () => {
+      const catalog = await buildCatalogDiscoverNovels({ cacheDb: tempCacheDb });
+      const overlord = catalog.find((n) => n.id === "overlord" || n.title.toLowerCase() === "overlord");
+      const rezero = catalog.find((n) => n.title.toLowerCase().includes("re:zero") || n.id === "rezero");
+
+      expect(overlord).toBeDefined();
+      expect(overlord?.volumeCount).toBe(18); // Corrected from stale seed 16
+
+      expect(rezero).toBeDefined();
+      expect(rezero?.volumeCount).toBe(38); // Corrected from stale seed 37
+
+      const searchOverlord = await searchUniversalNovels("overlord", { cacheDb: tempCacheDb });
+      expect(searchOverlord.length).toBeGreaterThan(0);
+      expect(searchOverlord[0].volumeCount).toBe(18);
+
+      const searchRezero = await searchUniversalNovels("rezero", { cacheDb: tempCacheDb });
+      expect(searchRezero.length).toBeGreaterThan(0);
+      expect(searchRezero[0].volumeCount).toBe(38);
+    });
+
+    it("prevents fuzzy alias transfer between unrelated series and spin-offs (e.g. Slimes 300 vs Tensura, Clover's Regret vs SAO)", () => {
+      // Unrelated titles with common words must NOT inherit 21 from Tensura
+      const slimes300 = resolveCatalogVolumeCount("I've Been Killing Slimes for 300 Years");
+      expect(slimes300).not.toBe(21);
+      expect(slimes300).toBe(15);
+
+      const slimeDuke = resolveCatalogVolumeCount("A Surprisingly Happy Engagement for the Slime Duke and the Fallen Noble Lady");
+      expect(slimeDuke).not.toBe(21);
+      expect(slimeDuke).toBe(2);
+
+      // Spin-off must NOT inherit 28 from mainline SAO
+      const cloversRegret = resolveCatalogVolumeCount("Sword Art Online Alternative - Clover's Regret");
+      expect(cloversRegret).not.toBe(28);
+      expect(cloversRegret).toBe(3);
+
+      // Distinct series in franchise must resolve to their own specific counts
+      expect(resolveCatalogVolumeCount("DanMachi - Sword Oratoria")).toBe(14);
+      expect(resolveCatalogVolumeCount("Sword Art Online - Progressive")).toBe(8);
+      expect(resolveCatalogVolumeCount("Sword Art Online")).toBe(28);
+      expect(resolveCatalogVolumeCount("DanMachi")).toBe(19);
+      expect(resolveCatalogVolumeCount("That Time I Got Reincarnated as a Slime")).toBe(21);
+    });
+
+    it("prevents library volume inflation when library contains both mainline and spin-off books", () => {
+      const saoMain: DiscoveredNovel = {
+        id: "sao-main",
+        title: "Sword Art Online",
+        author: "Reki Kawahara",
+        coverUrl: "https://example.com/sao.jpg",
+        synopsis: "SAO synopsis",
+        genres: ["Fantasy"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 28,
+        source: "both",
+        sourceUrls: { elscione: "https://example.com" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const saoProg: DiscoveredNovel = {
+        id: "sao-prog",
+        title: "Sword Art Online - Progressive",
+        author: "Reki Kawahara",
+        coverUrl: "https://example.com/prog.jpg",
+        synopsis: "Progressive synopsis",
+        genres: ["Fantasy"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 8,
+        source: "both",
+        sourceUrls: { elscione: "https://example.com" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const mockCalibre = [
+        ...Array.from({ length: 28 }, (_, i) => ({
+          id: 1 + i,
+          title: `Sword Art Online, Vol. ${i + 1}`,
+          series: "Sword Art Online",
+          series_index: i + 1,
+        })),
+        ...Array.from({ length: 8 }, (_, i) => ({
+          id: 100 + i,
+          title: `Sword Art Online - Progressive, Vol. ${i + 1}`,
+          series: "Sword Art Online - Progressive",
+          series_index: i + 1,
+        })),
+      ];
+
+      const [resMain, resProg] = crossCheckNovelsWithCalibre([saoMain, saoProg], {
+        getCalibreBooks: () => mockCalibre,
+      });
+
+      // Mainline SAO must strictly count only the 28 mainline books
+      expect(resMain.existingVolumes).toBe(28);
+      expect(resMain.volumeCount).toBe(28);
+
+      // Progressive must strictly count only the 8 Progressive books
+      expect(resProg.existingVolumes).toBe(8);
+      expect(resProg.volumeCount).toBe(8);
+    });
+
+    it("prevents cleaned variants and containment from leaking spin-off ownership to mainline series", () => {
+      // 1. COTE Year 2 must not mark mainline COTE as owned
+      const coteMain: DiscoveredNovel = {
+        id: "cote-main",
+        title: "Classroom of the Elite",
+        author: "Shogo Kinugasa",
+        coverUrl: "https://example.com/cote.jpg",
+        synopsis: "COTE synopsis",
+        genres: ["Drama"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 28,
+        source: "both",
+        sourceUrls: { elscione: "https://example.com" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const coteY2: DiscoveredNovel = {
+        id: "cote-y2",
+        title: "Classroom of the Elite - Year 2",
+        author: "Shogo Kinugasa",
+        coverUrl: "https://example.com/cotey2.jpg",
+        synopsis: "COTE Y2 synopsis",
+        genres: ["Drama"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 12,
+        source: "both",
+        sourceUrls: { elscione: "https://example.com" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const mockCoteCalibre = [
+        { id: 1, title: "Classroom of the Elite - Year 2, Vol. 1", series: "Classroom of the Elite - Year 2", series_index: 1 },
+      ];
+
+      const [resCoteMain, resCoteY2] = crossCheckNovelsWithCalibre([coteMain, coteY2], {
+        getCalibreBooks: () => mockCoteCalibre,
+      });
+
+      expect(resCoteMain.inLibrary).toBe(false);
+      expect(resCoteMain.existingVolumes).toBe(0);
+      expect(resCoteY2.inLibrary).toBe(true);
+      expect(resCoteY2.existingVolumes).toBe(1);
+
+      // 2. DanMachi Familia Chronicle must not mark mainline DanMachi as owned
+      const danmachiMain: DiscoveredNovel = {
+        id: "danmachi-main",
+        title: "DanMachi",
+        author: "Fujino Omori",
+        coverUrl: "https://example.com/danmachi.jpg",
+        synopsis: "DanMachi synopsis",
+        genres: ["Fantasy"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 19,
+        source: "both",
+        sourceUrls: { elscione: "https://example.com" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const danmachiFC: DiscoveredNovel = {
+        id: "danmachi-fc",
+        title: "DanMachi - Familia Chronicle",
+        author: "Fujino Omori",
+        coverUrl: "https://example.com/fc.jpg",
+        synopsis: "FC synopsis",
+        genres: ["Fantasy"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 2,
+        source: "both",
+        sourceUrls: { elscione: "https://example.com" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const mockDanmachiCalibre = [
+        { id: 1, title: "DanMachi - Familia Chronicle, Vol. 1", series: "DanMachi - Familia Chronicle", series_index: 1 },
+      ];
+
+      const [resDanMain, resDanFC] = crossCheckNovelsWithCalibre([danmachiMain, danmachiFC], {
+        getCalibreBooks: () => mockDanmachiCalibre,
+      });
+
+      expect(resDanMain.inLibrary).toBe(false);
+      expect(resDanMain.existingVolumes).toBe(0);
+      expect(resDanFC.inLibrary).toBe(true);
+      expect(resDanFC.existingVolumes).toBe(1);
+
+      // 3. Index NT must not mark mainline Index as owned through containment
+      const indexMain: DiscoveredNovel = {
+        id: "index-main",
+        title: "A Certain Magical Index",
+        author: "Kazuma Kamachi",
+        coverUrl: "https://example.com/index.jpg",
+        synopsis: "Index synopsis",
+        genres: ["Sci-Fi"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 24,
+        source: "both",
+        sourceUrls: { elscione: "https://example.com" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const indexNT: DiscoveredNovel = {
+        id: "index-nt",
+        title: "A Certain Magical Index NT",
+        author: "Kazuma Kamachi",
+        coverUrl: "https://example.com/nt.jpg",
+        synopsis: "NT synopsis",
+        genres: ["Sci-Fi"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 23,
+        source: "both",
+        sourceUrls: { elscione: "https://example.com" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const mockIndexCalibre = [
+        { id: 1, title: "A Certain Magical Index NT, Vol. 1", series: "A Certain Magical Index NT", series_index: 1 },
+      ];
+
+      const [resIndexMain, resIndexNT] = crossCheckNovelsWithCalibre([indexMain, indexNT], {
+        getCalibreBooks: () => mockIndexCalibre,
+      });
+
+      expect(resIndexMain.inLibrary).toBe(false);
+      expect(resIndexMain.existingVolumes).toBe(0);
+      expect(resIndexNT.inLibrary).toBe(true);
+      expect(resIndexNT.existingVolumes).toBe(1);
+
+      // 4. Year 2 must not mark Year 3 as owned
+      const coteY3: DiscoveredNovel = {
+        id: "cote-y3",
+        title: "Classroom of the Elite - Year 3",
+        author: "Shogo Kinugasa",
+        coverUrl: "https://example.com/cotey3.jpg",
+        synopsis: "COTE Y3 synopsis",
+        genres: ["Drama"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 1,
+        source: "both",
+        sourceUrls: { elscione: "https://example.com" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const [resY2Only, resY3Only] = crossCheckNovelsWithCalibre([coteY2, coteY3], {
+        getCalibreBooks: () => mockCoteCalibre, // contains Year 2 Vol. 1
+      });
+      expect(resY2Only.inLibrary).toBe(true);
+      expect(resY2Only.existingVolumes).toBe(1);
+      expect(resY3Only.inLibrary).toBe(false);
+      expect(resY3Only.existingVolumes).toBe(0);
+
+      // 5. Sword Oratoria declared Romaji Gaiden alias matches and resolves to 14 volumes
+      const romajiSO = "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka Gaiden Sword Oratoria";
+      expect(resolveCatalogVolumeCount(romajiSO)).toBe(14);
+
+      const soNovel: DiscoveredNovel = {
+        id: "danmachi-so",
+        title: "DanMachi - Sword Oratoria",
+        author: "Fujino Omori",
+        coverUrl: "https://example.com/so.jpg",
+        synopsis: "SO synopsis",
+        genres: ["Fantasy"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 14,
+        source: "both",
+        sourceUrls: { elscione: "https://example.com" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const [resSO] = crossCheckNovelsWithCalibre([soNovel], {
+        getCalibreBooks: () => [{ id: 99, title: `${romajiSO}, Vol. 1`, series: romajiSO, series_index: 1 }],
+      });
+      expect(resSO.inLibrary).toBe(true);
+      expect(resSO.existingVolumes).toBe(1);
+
+      // Minor Myths must resolve to 1 volume, not parent DanMachi 19
+      expect(resolveCatalogVolumeCount("DanMachi - Minor Myths and Legends")).toBe(1);
+      // Index must resolve to 24 volumes, not stale seed 55
+      expect(resolveCatalogVolumeCount("A Certain Magical Index")).toBe(24);
     });
   });
 });
