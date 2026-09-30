@@ -75,6 +75,7 @@ import {
 import {
   getDiscoverNovels,
   stripEmojis,
+  REAL_ELSCIONE_FOLDERS,
 } from "./discover";
 import { isJoplinRoute, handleJoplinRequest } from "./joplin";
 import {
@@ -5425,6 +5426,29 @@ async function handleRequestCore(
             400,
             corsOrigin,
           );
+        }
+        const parsed = parseElscioneUrl(targetUrl);
+        if (parsed?.seriesTitle) {
+          if (/[:?*"<>|/\\]/.test(parsed.seriesTitle)) {
+            return jsonResponse(
+              {
+                success: false,
+                error: `Target Elscione folder contains invalid characters: ${parsed.seriesTitle}`,
+              },
+              400,
+              corsOrigin,
+            );
+          }
+          if (!REAL_ELSCIONE_FOLDERS.includes(parsed.seriesTitle)) {
+            return jsonResponse(
+              {
+                success: false,
+                error: `Target Elscione folder does not exist in catalog: ${parsed.seriesTitle}`,
+              },
+              400,
+              corsOrigin,
+            );
+          }
         }
         const enqueueFn = serverDependencies.enqueueElscioneJob ?? enqueueElscioneJob;
         const job = enqueueFn(targetUrl);
