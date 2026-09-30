@@ -2143,7 +2143,7 @@
         <div class="flex flex-col sm:flex-row gap-5 items-start">
           <!-- Extra-large high-res cover -->
           <div class="relative w-36 sm:w-48 aspect-[2/3] shrink-0 rounded-xl overflow-hidden shadow-2xl border border-white/10 mx-auto sm:mx-0 book-spine-effect bg-zinc-900">
-            <img id="discoverModalCover" src="" alt="Cover" class="w-full h-full object-cover" onerror="handleCoverError(this)">
+            <img id="discoverModalCover" src="" alt="Cover" class="w-full h-full object-cover" onerror="this.onerror=null; this.src=generateFallbackCoverSvg(this.alt);">
             <div id="discoverModalStatusBadge" class="absolute top-2 left-2 px-2 py-0.5 rounded-full text-[10px] font-bold backdrop-blur-md"></div>
           </div>
 
@@ -3871,43 +3871,64 @@
       return msg || 'Operation failed';
     }
 
-    function getCoverPlaceholderDataUri(title) {
-      const safeTitle = (title || 'Light Novel').replace(/<[^>]+>/g, '').trim();
+    function escapeXml(str) {
+      return String(str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+    }
+
+    function generateFallbackCoverSvg(title, author) {
+      const safeTitle = (title || 'Light Novel').trim();
+      const safeAuthor = (author && author !== 'Light Novel Author' && author !== 'Author Unknown')
+        ? author.trim()
+        : '';
+
       const words = safeTitle.split(/\s+/);
       const lines = [];
       let currentLine = '';
       for (const word of words) {
-        if ((currentLine + ' ' + word).trim().length <= 18) {
+        if ((currentLine + ' ' + word).trim().length <= 16) {
           currentLine = (currentLine + ' ' + word).trim();
         } else {
           if (currentLine) lines.push(currentLine);
-          currentLine = word.slice(0, 18);
+          currentLine = word.slice(0, 16);
         }
-        if (lines.length >= 3) break;
+        if (lines.length >= 4) break;
       }
-      if (currentLine && lines.length < 3) lines.push(currentLine);
-      if (lines.length === 0) lines.push(safeTitle.slice(0, 18));
-
-      const escapeXml = (str) => String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+      if (currentLine && lines.length < 4) lines.push(currentLine);
+      if (lines.length === 0) lines.push(safeTitle.slice(0, 16));
 
       const textTspans = lines.map((line, idx) => {
-        const y = 145 + (idx * 16) - ((lines.length - 1) * 8);
-        return `<text x="105" y="${y}" fill="#e4e4e7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" text-anchor="middle">${escapeXml(line)}</text>`;
+        const y = 145 + idx * 16 - ((lines.length - 1) * 8);
+        return `<text x="105" y="${y}" fill="#f4f4f5" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="700" text-anchor="middle">${escapeXml(line)}</text>`;
       }).join('');
 
-      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 300" width="200" height="300"><defs><linearGradient id="pBg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#1c1917"/><stop offset="50%" stop-color="#18181b"/><stop offset="100%" stop-color="#09090b"/></linearGradient><linearGradient id="pSpine" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#27272a"/><stop offset="80%" stop-color="#18181b"/><stop offset="100%" stop-color="#09090b"/></linearGradient></defs><rect width="200" height="300" fill="url(#pBg)"/><rect x="0" y="0" width="12" height="300" fill="url(#pSpine)"/><line x1="12" y1="0" x2="12" y2="300" stroke="#3f3f46" stroke-width="0.75" stroke-opacity="0.5"/><g transform="translate(88, 80)"><path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" stroke="#71717a" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></g>${textTspans}<text x="105" y="240" fill="#71717a" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9" font-weight="500" letter-spacing="1" text-anchor="middle">LIGHT NOVEL</text></svg>`;
+      const authorSvg = safeAuthor
+        ? `<text x="105" y="${165 + (lines.length * 8)}" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif" font-size="8.5" font-weight="500" text-anchor="middle">${escapeXml(safeAuthor)}</text>`
+        : '';
+
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 300" width="200" height="300"><defs><linearGradient id="appleDarkBg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#18181b"/><stop offset="50%" stop-color="#121214"/><stop offset="100%" stop-color="#09090b"/></linearGradient><linearGradient id="appleSpine" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#27272a"/><stop offset="80%" stop-color="#18181b"/><stop offset="100%" stop-color="#09090b"/></linearGradient><linearGradient id="accentGlow" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#f59e0b" stop-opacity="0.12"/><stop offset="100%" stop-color="#f59e0b" stop-opacity="0"/></linearGradient></defs><rect width="200" height="300" fill="url(#appleDarkBg)"/><rect x="0" y="0" width="200" height="120" fill="url(#accentGlow)"/><rect x="0" y="0" width="12" height="300" fill="url(#appleSpine)"/><line x1="12" y1="0" x2="12" y2="300" stroke="#3f3f46" stroke-width="0.75" stroke-opacity="0.4"/><rect x="20" y="18" width="164" height="264" rx="4" fill="none" stroke="#27272a" stroke-width="0.75" stroke-opacity="0.5"/><g transform="translate(93, 72)"><path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" stroke="#f59e0b" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></g>${textTspans}${authorSvg}<text x="105" y="255" fill="#71717a" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif" font-size="8" font-weight="600" letter-spacing="2" text-anchor="middle">LIGHT NOVEL</text></svg>`;
 
       return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    }
+
+    function getCoverPlaceholderDataUri(title, author) {
+      return generateFallbackCoverSvg(title, author);
     }
 
     function handleCoverError(img) {
       if (!img) return;
       img.onerror = null;
       const title = img.getAttribute('data-title') || img.alt || 'Light Novel';
-      img.src = getCoverPlaceholderDataUri(title);
+      const author = img.getAttribute('data-author') || '';
+      img.src = generateFallbackCoverSvg(title, author);
     }
-    window.handleCoverError = handleCoverError;
+    window.generateFallbackCoverSvg = generateFallbackCoverSvg;
     window.getCoverPlaceholderDataUri = getCoverPlaceholderDataUri;
+    window.handleCoverError = handleCoverError;
 
     // TELEGRAM NATIVE INTEGRATION & HAPTICS
     const tgHaptic = {
@@ -5010,7 +5031,7 @@
             <div>
               <!-- Cover Container -->
               <div class="relative w-full aspect-[2/3] rounded-xl overflow-hidden mb-2.5 bg-zinc-950 book-spine-effect cursor-pointer" onclick="openDiscoverModal('${escapeHtml(item.id)}')">
-                <img src="${item.coverUrl ? escapeHtml(item.coverUrl) : getCoverPlaceholderDataUri(item.title)}" alt="${escapeHtml(item.title)}" loading="lazy" decoding="async" data-title="${escapeHtml(item.title)}" onerror="handleCoverError(this)" class="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300">
+                <img src="${item.coverUrl ? escapeHtml(item.coverUrl) : generateFallbackCoverSvg(item.title, item.author)}" alt="${escapeHtml(item.title)}" loading="lazy" decoding="async" data-title="${escapeHtml(item.title)}" data-author="${escapeHtml(item.author || '')}" onerror="this.onerror=null; this.src=generateFallbackCoverSvg(this.alt);" class="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300">
                 
                 <div class="absolute top-2 left-2 flex items-center gap-1 z-10" id="cardBadge-${escapeHtml(item.id)}">
                   ${statusBadgeHtml}
@@ -5167,8 +5188,9 @@
 
       if (cover) {
         cover.setAttribute('data-title', item.title || '');
+        cover.setAttribute('data-author', item.author || '');
         cover.onerror = () => handleCoverError(cover);
-        cover.src = item.coverUrl || getCoverPlaceholderDataUri(item.title);
+        cover.src = item.coverUrl || generateFallbackCoverSvg(item.title, item.author);
       }
       if (title) title.textContent = item.title;
       if (romaji) romaji.textContent = item.romajiTitle || item.titleRomaji || '';

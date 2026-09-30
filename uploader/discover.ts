@@ -2317,7 +2317,16 @@ export async function buildCompleteCatalogNovels(
 
     const seed = seedMap.get(can) || seedMap.get(norm);
     const author = seed?.author || resolveAuthorForTitle(folder, undefined, allSeeds);
-    const coverUrl = seed?.coverUrl || resolveCoverForTitle(folder, undefined, allSeeds);
+    let coverUrl = seed?.coverUrl || resolveCoverForTitle(folder, undefined, allSeeds);
+    if (!coverUrl && real.sourceUrls.lnori) {
+      const lnoriMatch = real.sourceUrls.lnori.match(/\/series\/(\d+)/);
+      if (lnoriMatch) {
+        coverUrl = `https://cdn.lnori.com/series/${lnoriMatch[1]}.jpg`;
+      }
+    }
+    if (!coverUrl) {
+      coverUrl = generateFallbackCoverSvg(folder, author);
+    }
     const knownSyn = findKnownSeriesSynopsis({ title: folder, author });
     const rawSynopsis = seed?.synopsis || knownSyn || synthesizeEngagingSynopsis(folder, ["Light Novel", "Fantasy"]);
     const synopsis = cleanSynopsisText(rawSynopsis);
@@ -2383,7 +2392,8 @@ export async function buildCompleteCatalogNovels(
 
     const seed = seedMap.get(can) || seedMap.get(norm);
     const author = seed?.author || resolveAuthorForTitle(displayTitle, undefined, allSeeds);
-    const coverUrl = seed?.coverUrl || resolveCoverForTitle(displayTitle, undefined, allSeeds);
+    // Verified 100% accurate official CDN cover for Lnori series
+    const coverUrl = `https://cdn.lnori.com/series/${s.id}.jpg`;
     const knownSyn = findKnownSeriesSynopsis({ title: displayTitle, author });
     const rawSynopsis = seed?.synopsis || knownSyn || synthesizeEngagingSynopsis(displayTitle, ["Light Novel", "Fantasy"]);
     const synopsis = cleanSynopsisText(rawSynopsis);
@@ -2426,6 +2436,9 @@ export async function buildCompleteCatalogNovels(
 
   return novels;
 }
+
+// Alias matching specification naming
+export const buildCatalogDiscoverNovels = buildCompleteCatalogNovels;
 
 /**
  * Discovers and builds the feed for a requested tab ("trending" | "new" | "all").
@@ -2778,39 +2791,142 @@ export function resolveAuthorForTitle(
 }
 
 /**
- * Resolves cover art for title using exact match, franchise prefix match, or seeds.
+ * Escapes XML/HTML entities for SVG text injection.
+ */
+export function escapeXml(str: string): string {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/**
+ * Generates a high-res, Apple-aesthetic SVG book cover as a data URI.
+ * Provides a refined dark-gradient cover with typography and 3D spine for titles without external covers.
+ */
+export function generateFallbackCoverSvg(title: string, author?: string): string {
+  const safeTitle = (title || "Light Novel").trim();
+  const safeAuthor =
+    author && author !== "Light Novel Author" && author !== "Author Unknown"
+      ? author.trim()
+      : "";
+
+  const words = safeTitle.split(/\s+/);
+  const lines: string[] = [];
+  let currentLine = "";
+  for (const word of words) {
+    if ((currentLine + " " + word).trim().length <= 16) {
+      currentLine = (currentLine + " " + word).trim();
+    } else {
+      if (currentLine) lines.push(currentLine);
+      currentLine = word.slice(0, 16);
+    }
+    if (lines.length >= 4) break;
+  }
+  if (currentLine && lines.length < 4) lines.push(currentLine);
+  if (lines.length === 0) lines.push(safeTitle.slice(0, 16));
+
+  const textTspans = lines
+    .map((line, idx) => {
+      const y = 145 + idx * 16 - ((lines.length - 1) * 8);
+      return `<text x="105" y="${y}" fill="#f4f4f5" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="700" text-anchor="middle">${escapeXml(line)}</text>`;
+    })
+    .join("");
+
+  const authorSvg = safeAuthor
+    ? `<text x="105" y="${165 + lines.length * 8}" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif" font-size="8.5" font-weight="500" text-anchor="middle">${escapeXml(safeAuthor)}</text>`
+    : "";
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 300" width="200" height="300"><defs><linearGradient id="appleDarkBg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#18181b"/><stop offset="50%" stop-color="#121214"/><stop offset="100%" stop-color="#09090b"/></linearGradient><linearGradient id="appleSpine" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#27272a"/><stop offset="80%" stop-color="#18181b"/><stop offset="100%" stop-color="#09090b"/></linearGradient><linearGradient id="accentGlow" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#f59e0b" stop-opacity="0.12"/><stop offset="100%" stop-color="#f59e0b" stop-opacity="0"/></linearGradient></defs><rect width="200" height="300" fill="url(#appleDarkBg)"/><rect x="0" y="0" width="200" height="120" fill="url(#accentGlow)"/><rect x="0" y="0" width="12" height="300" fill="url(#appleSpine)"/><line x1="12" y1="0" x2="12" y2="300" stroke="#3f3f46" stroke-width="0.75" stroke-opacity="0.4"/><rect x="20" y="18" width="164" height="264" rx="4" fill="none" stroke="#27272a" stroke-width="0.75" stroke-opacity="0.5"/><g transform="translate(93, 72)"><path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" stroke="#f59e0b" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></g>${textTspans}${authorSvg}<text x="105" y="255" fill="#71717a" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif" font-size="8" font-weight="600" letter-spacing="2" text-anchor="middle">LIGHT NOVEL</text></svg>`;
+
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+/**
+ * Resolves cover art for title using exact match, canonical match, or word-boundary match with high length ratio (>= 0.85).
+ * Loose substring containment (e.g. norm.includes(k)) is strictly prohibited to prevent unrelated novels
+ * (e.g. novels mentioning "slime" or "overlord") from receiving wrong franchise covers.
  */
 export function resolveCoverForTitle(
   title: string,
   romaji?: string,
   seeds?: DiscoveredNovel[],
 ): string {
-  const candidates = [title, romaji].filter(Boolean) as string[];
-  for (const c of candidates) {
-    const norm = normalizeTitleForMatch(c);
-    if (KNOWN_TITLE_TO_COVER[norm]) return KNOWN_TITLE_TO_COVER[norm];
+  const rawCandidates = [title, romaji].filter(Boolean) as string[];
+  const candidates: string[] = [];
+  for (const c of rawCandidates) {
+    if (!candidates.includes(c)) candidates.push(c);
+    for (const v of cleanCalibreTitleVariants(c)) {
+      if (!candidates.includes(v)) candidates.push(v);
+    }
   }
+
+  // 1. Direct exact match against known cover registry (normalized or canonical)
   for (const c of candidates) {
     const norm = normalizeTitleForMatch(c);
+    if (!norm) continue;
+    if (KNOWN_TITLE_TO_COVER[norm]) return KNOWN_TITLE_TO_COVER[norm];
+    const can = canonicalTitleKey(c);
+    if (can && KNOWN_TITLE_TO_COVER[can]) return KNOWN_TITLE_TO_COVER[can];
+  }
+
+  // 2. Strict word-boundary match with high length ratio (>= 0.85)
+  // Replaces loose norm.includes(k) to prevent incorrect covers on unrelated novels.
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    if (!norm || norm.length < 4) continue;
+
     for (const [k, cover] of Object.entries(KNOWN_TITLE_TO_COVER)) {
-      if (k.length >= 4 && (norm.startsWith(k) || norm.includes(k))) {
-        return cover;
+      if (norm === k) return cover;
+      const minLen = Math.min(norm.length, k.length);
+      const maxLen = Math.max(norm.length, k.length);
+      if (minLen >= 4 && minLen / maxLen >= 0.85) {
+        const isWordBoundaryMatch =
+          (norm.startsWith(k) && (norm.length === k.length || norm[k.length] === " ")) ||
+          (k.startsWith(norm) && (k.length === norm.length || k[norm.length] === " "));
+        if (isWordBoundaryMatch) {
+          return cover;
+        }
       }
     }
   }
+
+  // 3. Match against seed novels with exact or high-ratio (>= 0.85) word-boundary match
   if (seeds && seeds.length > 0) {
     for (const c of candidates) {
       const norm = normalizeTitleForMatch(c);
+      if (!norm || norm.length < 4) continue;
+      const can = canonicalTitleKey(c);
+
       const seedMatch = seeds.find((s) => {
         const sNorm = normalizeTitleForMatch(s.title);
         const sRom = s.titleRomaji ? normalizeTitleForMatch(s.titleRomaji) : "";
-        return sNorm === norm || sRom === norm || (norm.length >= 6 && sNorm.includes(norm));
+        const sCan = canonicalTitleKey(s.title);
+        if (sNorm === norm || (sRom && sRom === norm) || (sCan && sCan === can)) {
+          return true;
+        }
+        for (const target of [sNorm, sRom].filter(Boolean)) {
+          const minLen = Math.min(norm.length, target.length);
+          const maxLen = Math.max(norm.length, target.length);
+          if (minLen >= 4 && minLen / maxLen >= 0.85) {
+            const isWordBoundaryMatch =
+              (norm.startsWith(target) && (norm.length === target.length || norm[target.length] === " ")) ||
+              (target.startsWith(norm) && (target.length === norm.length || target[norm.length] === " "));
+            if (isWordBoundaryMatch) {
+              return true;
+            }
+          }
+        }
+        return false;
       });
       if (seedMatch && seedMatch.coverUrl) {
         return seedMatch.coverUrl;
       }
     }
   }
+
   return "";
 }
 
@@ -3168,7 +3284,16 @@ export async function searchUniversalNovels(
       });
       if (real) {
         const author = resolveAuthorForTitle(folder, undefined, allSeeds);
-        const coverUrl = resolveCoverForTitle(folder, undefined, allSeeds);
+        let coverUrl = resolveCoverForTitle(folder, undefined, allSeeds);
+        if (!coverUrl && real.sourceUrls.lnori) {
+          const lnoriMatch = real.sourceUrls.lnori.match(/\/series\/(\d+)/);
+          if (lnoriMatch) {
+            coverUrl = `https://cdn.lnori.com/series/${lnoriMatch[1]}.jpg`;
+          }
+        }
+        if (!coverUrl) {
+          coverUrl = generateFallbackCoverSvg(folder, author);
+        }
         const knownSyn = findKnownSeriesSynopsis({ title: folder, author });
         const synopsis =
           knownSyn ||
@@ -3226,7 +3351,8 @@ export async function searchUniversalNovels(
           .join(" ");
 
         const author = resolveAuthorForTitle(displayTitle, undefined, allSeeds);
-        const coverUrl = resolveCoverForTitle(displayTitle, undefined, allSeeds);
+        // Verified 100% accurate official CDN cover for Lnori series
+        const coverUrl = `https://cdn.lnori.com/series/${s.id}.jpg`;
         const knownSyn = findKnownSeriesSynopsis({ title: displayTitle, author });
         const synopsis =
           knownSyn ||

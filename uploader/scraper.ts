@@ -2164,6 +2164,8 @@ export const KNOWN_COVER_DOMAINS = new Set([
   "s4.anilist.co",
   "media.anilist.co",
   "anilistcdn.com",
+  "cdn.lnori.com",
+  "lnori.com",
 ]);
 
 export function isAllowedCoverUrl(rawUrl: string): boolean {
@@ -2191,7 +2193,9 @@ export function isAllowedCoverUrl(rawUrl: string): boolean {
       h === "anilist.co" ||
       h.endsWith(".anilist.co") ||
       h === "anilistcdn.com" ||
-      h.endsWith(".anilistcdn.com")
+      h.endsWith(".anilistcdn.com") ||
+      h === "lnori.com" ||
+      h.endsWith(".lnori.com")
     ) {
       return true;
     }
