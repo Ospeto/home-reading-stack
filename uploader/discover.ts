@@ -1826,6 +1826,255 @@ export function setCachedFeed(
   }
 }
 
+export const STOP_WORDS = new Set([
+  "a", "an", "the",
+  "in", "on", "at", "to", "for", "of", "with", "by", "from", "into", "through",
+  "and", "or", "but", "nor", "so", "yet",
+  "is", "are", "was", "were", "be", "been", "being",
+  "it", "its", "as", "if", "that", "this", "my", "your", "his", "her", "their",
+  // Japanese particles in romaji
+  "no", "ni", "wa", "ga", "de", "wo", "o", "ka", "mo", "e",
+]);
+
+export const KNOWN_LIGHT_NOVEL_ALIAS_CLUSTERS: string[][] = [
+  // DanMachi
+  [
+    "danmachi",
+    "is it wrong to try to pick up girls in a dungeon",
+    "is it wrong to try to pick up girls in a dungeon on the side sword oratoria",
+    "dungeon ni deai wo motomeru no wa machigatteiru darou ka",
+  ],
+  // Re:Zero
+  [
+    "rezero",
+    "re zero",
+    "starting life in another world",
+    "re zero starting life in another world",
+    "re zero kara hajimeru isekai seikatsu",
+  ],
+  // Oregairu
+  [
+    "oregairu",
+    "my youth romantic comedy is wrong as i expected",
+    "my teen romantic comedy is in reverse as i expected",
+    "my teen romantic comedy is wrong as i expected",
+    "yahari ore no seishun love come wa machigatteiru",
+  ],
+  // KonoSuba
+  [
+    "konosuba",
+    "gods blessing on this wonderful world",
+    "kono subarashii sekai ni shukufuku wo",
+    "konosuba gods blessing on this wonderful world",
+  ],
+  // Tensura / Slime
+  [
+    "slime",
+    "tensura",
+    "that time i got reincarnated as a slime",
+    "tensei shitara slime datta ken",
+  ],
+  // Mahouka
+  [
+    "mahouka",
+    "the irregular at magic high school",
+    "mahouka koukou no rettousei",
+  ],
+  // SAO
+  [
+    "sao",
+    "sword art online",
+  ],
+  // COTE
+  [
+    "cote",
+    "classroom of the elite",
+    "youkoso jitsuryoku shijou shugi no kyoushitsu e",
+  ],
+  // Roshidere
+  [
+    "roshidere",
+    "alya sometimes hides her feelings in russian",
+    "tokidoki bosotto roshia go de dereru tonari no alya san",
+  ],
+  // Monogatari
+  [
+    "monogatari",
+    "bakemonogatari",
+    "monster tale",
+  ],
+];
+
+const aliasLookupMap = new Map<string, string[]>();
+for (const cluster of KNOWN_LIGHT_NOVEL_ALIAS_CLUSTERS) {
+  const normCluster = cluster.map((s) => normalizeTitleForMatch(s)).filter(Boolean);
+  for (const item of normCluster) {
+    const existing = aliasLookupMap.get(item) || [];
+    const others = normCluster.filter((x) => x !== item);
+    aliasLookupMap.set(item, Array.from(new Set([...existing, ...others])));
+  }
+}
+
+export function getSignificantTokens(str: string): string[] {
+  return normalizeTitleForMatch(str)
+    .split(/\s+/)
+    .filter((w) => w.length > 0 && !STOP_WORDS.has(w));
+}
+
+export function calculateSignificantTokenOverlap(tokensA: string[], tokensB: string[]): number {
+  if (tokensA.length === 0 || tokensB.length === 0) return 0;
+  const setA = new Set(tokensA);
+  const setB = new Set(tokensB);
+  let common = 0;
+  for (const t of setA) {
+    if (setB.has(t)) common++;
+  }
+  const maxLen = Math.max(setA.size, setB.size);
+  return common / maxLen;
+}
+
+/**
+ * Strips volume suffixes and brackets from Calibre book and series titles.
+ * Returns array of cleaned variants.
+ */
+export function cleanCalibreTitleVariants(raw: string): string[] {
+  if (!raw) return [];
+  const results = new Set<string>();
+  const trimmed = raw.trim();
+  results.add(trimmed);
+
+  // Strip brackets with volume info: (Vol. 1), [Volume 02], etc.
+  const s = trimmed.replace(
+    /[\[\(（【]\s*(?:year\s*\d+\s*)?(?:vol(?:ume)?|v|book|bk|part|pt|#|第)?\.?\s*0*\d+(?:\.\d+)?\s*(?:巻)?\s*[\]\)）】]/gi,
+    " ",
+  );
+
+  const volumeSuffixPatterns = [
+    /[,:\-–—\s]+(?:year\s*\d+\s*)?(?:vol(?:ume)?|v|book|bk|part|pt|#)\.?\s*0*\d+.*$/i,
+    /[,:\-–—\s]+year\s*\d+\b.*$/i,
+    /[,:\-–—\s]+part\s*\d+\b.*$/i,
+    /\b(?:vol(?:ume)?|v|book|bk|part|pt)\.?\s*0*\d+\b.*$/i,
+    /[,:\-–—\s]+#\s*0*\d+.*$/i,
+    /[,:\-–—\s]+第?\s*0*\d+\s*巻.*$/i,
+    /[,:\-–—\s]+(?:အတွဲ|အခန်း)\s*0*[\d၀-၉]+.*$/i,
+    /(?<=[a-zA-Z\u00A0-\uFFFF]\s+)0*\d{1,3}(?:\s*[-–—:].*)?$/i,
+  ];
+
+  for (const pat of volumeSuffixPatterns) {
+    const stripped = s.replace(pat, "").trim();
+    if (stripped.length >= 2) {
+      results.add(stripped);
+    }
+  }
+
+  return Array.from(results);
+}
+
+/**
+ * Expands candidate matching strings and token lists for a discovered novel.
+ */
+export function getNovelMatchCandidates(novel: DiscoveredNovel): {
+  candidates: Set<string>;
+  tokensList: string[][];
+} {
+  const candidates = new Set<string>();
+
+  function addRaw(raw?: string) {
+    if (!raw) return;
+    const norm = normalizeTitleForMatch(raw);
+    if (norm) candidates.add(norm);
+
+    // Subtitle and prefix components when splitting by : or - or — or – or | or /
+    const parts = raw.split(/[:\-–—|/]+/);
+    if (parts.length > 1) {
+      for (const p of parts) {
+        const pNorm = normalizeTitleForMatch(p);
+        if (pNorm && pNorm.length >= 2) {
+          candidates.add(pNorm);
+        }
+      }
+    }
+  }
+
+  addRaw(novel.title);
+  addRaw(novel.titleRomaji);
+  addRaw(novel.titleNative);
+
+  // Expand known aliases
+  const current = Array.from(candidates);
+  for (const c of current) {
+    const aliases = aliasLookupMap.get(c);
+    if (aliases) {
+      for (const a of aliases) {
+        candidates.add(a);
+      }
+    }
+  }
+
+  const tokensList: string[][] = [];
+  for (const c of candidates) {
+    const tokens = getSignificantTokens(c);
+    if (tokens.length >= 2) {
+      tokensList.push(tokens);
+    }
+  }
+
+  return { candidates, tokensList };
+}
+
+/**
+ * Expands candidate matching strings and token lists for a Calibre book record.
+ */
+export function getCalibreBookMatchCandidates(book: { title?: string; series?: string }): {
+  candidates: Set<string>;
+  tokensList: string[][];
+} {
+  const candidates = new Set<string>();
+
+  function addString(raw?: string) {
+    if (!raw) return;
+    const variants = cleanCalibreTitleVariants(raw);
+    for (const v of variants) {
+      const norm = normalizeTitleForMatch(v);
+      if (norm) candidates.add(norm);
+
+      const parts = v.split(/[:\-–—|/]+/);
+      if (parts.length > 1) {
+        for (const p of parts) {
+          const pNorm = normalizeTitleForMatch(p);
+          if (pNorm && pNorm.length >= 2) {
+            candidates.add(pNorm);
+          }
+        }
+      }
+    }
+  }
+
+  addString(book.series);
+  addString(book.title);
+
+  // Expand known aliases for Calibre book variants as well
+  const current = Array.from(candidates);
+  for (const c of current) {
+    const aliases = aliasLookupMap.get(c);
+    if (aliases) {
+      for (const a of aliases) {
+        candidates.add(a);
+      }
+    }
+  }
+
+  const tokensList: string[][] = [];
+  for (const c of candidates) {
+    const tokens = getSignificantTokens(c);
+    if (tokens.length >= 2) {
+      tokensList.push(tokens);
+    }
+  }
+
+  return { candidates, tokensList };
+}
+
 /**
  * Cross-references discovered light novels against the local Calibre library.
  * Tags each novel with inLibrary: boolean and existingVolumes: number.
@@ -1864,46 +2113,75 @@ export function crossCheckNovelsWithCalibre(
     }
   }
 
-  // Pre-normalize Calibre book records for fast indexed matching
-  interface NormalizedBook {
-    title: string;
-    series: string;
-  }
-  const normCalibreBooks: NormalizedBook[] = calibreBooks.map((b) => ({
-    title: normalizeTitleForMatch(b.title || ""),
-    series: normalizeTitleForMatch(b.series || ""),
+  // Preprocess Calibre books for fast indexed matching
+  const processedCalibreBooks = calibreBooks.map((b) => ({
+    book: b,
+    ...getCalibreBookMatchCandidates(b),
   }));
 
   return novels.map((novel) => {
-    const nTitle = normalizeTitleForMatch(novel.title);
-    const nRomaji = novel.titleRomaji ? normalizeTitleForMatch(novel.titleRomaji) : "";
+    const { candidates: nCandidates, tokensList: nTokensList } = getNovelMatchCandidates(novel);
 
     let matchCount = 0;
 
-    for (const b of normCalibreBooks) {
+    for (const b of processedCalibreBooks) {
       let isMatch = false;
 
-      // 1. Direct series match
-      if (b.series) {
-        if (
-          b.series === nTitle ||
-          (nRomaji && b.series === nRomaji) ||
-          (nTitle.length >= 6 && b.series.startsWith(nTitle)) ||
-          (nRomaji.length >= 6 && b.series.startsWith(nRomaji))
-        ) {
+      // 1. Direct candidate equality (O(1) Set lookup)
+      for (const n of nCandidates) {
+        if (b.candidates.has(n)) {
           isMatch = true;
+          break;
         }
       }
 
-      // 2. Direct title match or title starts with series name
-      if (!isMatch && b.title) {
-        if (
-          b.title === nTitle ||
-          (nRomaji && b.title === nRomaji) ||
-          (nTitle.length >= 8 && b.title.startsWith(nTitle)) ||
-          (nRomaji.length >= 8 && b.title.startsWith(nRomaji))
-        ) {
-          isMatch = true;
+      // 2. Containment matching (where either contains the other, bounded, length >= 8 and >= 2 words)
+      if (!isMatch) {
+        for (const n of nCandidates) {
+          const nWords = n.split(" ").length;
+          for (const c of b.candidates) {
+            const cWords = c.split(" ").length;
+            // c inside n
+            if (c.length >= 8 && cWords >= 2 && (" " + n + " ").includes(" " + c + " ")) {
+              isMatch = true;
+              break;
+            }
+            // n inside c
+            if (n.length >= 8 && nWords >= 2 && (" " + c + " ").includes(" " + n + " ")) {
+              isMatch = true;
+              break;
+            }
+          }
+          if (isMatch) break;
+        }
+      }
+
+      // 3. Significant token overlap matching (>= 70% significant word overlap)
+      if (!isMatch) {
+        for (const nTok of nTokensList) {
+          for (const cTok of b.tokensList) {
+            const overlap = calculateSignificantTokenOverlap(nTok, cTok);
+            if (overlap >= 0.70) {
+              isMatch = true;
+              break;
+            }
+          }
+          if (isMatch) break;
+        }
+      }
+
+      // 4. Prefix start matching fallback
+      if (!isMatch) {
+        for (const n of nCandidates) {
+          if (n.length >= 6) {
+            for (const c of b.candidates) {
+              if (c.length >= 6 && (c.startsWith(n) || n.startsWith(c))) {
+                isMatch = true;
+                break;
+              }
+            }
+          }
+          if (isMatch) break;
         }
       }
 

@@ -30,6 +30,11 @@ import {
   sanitizeTitleForFolderMatch,
   deduplicateDiscoverNovels,
   KNOWN_TITLE_TO_AUTHOR,
+  cleanCalibreTitleVariants,
+  getNovelMatchCandidates,
+  getCalibreBookMatchCandidates,
+  calculateSignificantTokenOverlap,
+  KNOWN_LIGHT_NOVEL_ALIAS_CLUSTERS,
   type DiscoveredNovel,
 } from "./discover";
 import {
@@ -1024,6 +1029,14 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(matches).toEqual([]);
     });
 
+    it("verifies badge and button consistency for in-library vs available novels in index.html", () => {
+      // In Library badge and Re-Ingest button
+      expect(html).toContain("In Library (${libCount}v)");
+      expect(html).toContain("${inLib ? 'Re-Ingest' : 'Ingest'}");
+      expect(html).toContain("bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md");
+      expect(html).toContain("Available");
+    });
+
     it("verifies live download progress polling and Apple-style progress track in index.html", () => {
       // Button transitions immediately
       expect(html).toContain("Downloading...");
@@ -1526,6 +1539,241 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(v2Cached).not.toBeNull();
       expect(v2Cached!.length).toBeGreaterThan(0);
       expect(v2Cached!.some((n) => n.id === "stale-legacy-novel")).toBe(false);
+    });
+  });
+
+  describe("Multi-Lingual, Alias & Subtitle Library Matching (crossCheckNovelsWithCalibre)", () => {
+    const baseDanmachiNovel: DiscoveredNovel = {
+      id: "danmachi",
+      title: "DanMachi: Is It Wrong to Try to Pick Up Girls in a Dungeon?",
+      titleRomaji: "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka",
+      titleNative: "ダンジョンに出会いを求めるのは間違っているだろうか",
+      author: "Fujino Omori",
+      coverUrl: "https://s4.anilist.co/danmachi.jpg",
+      synopsis: "In the sprawling city of Orario above the massive Dungeon, rookie adventurer Bell Cranel strives to grow stronger.",
+      genres: ["Fantasy", "Action"],
+      score: 86,
+      popularity: 85000,
+      releaseDate: "2013-01-15",
+      volumeCount: 19,
+      source: "both",
+      sourceUrls: { lnori: "https://lnori.com/series/2201", elscione: "https://server.elscione.com/DanMachi" },
+      inLibrary: false,
+      existingVolumes: 0,
+    };
+
+    it("matches DanMachi: Is It Wrong to Try to Pick Up Girls in a Dungeon? to Calibre book Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 18", () => {
+      const mockCalibreBooks = [
+        {
+          id: 501,
+          title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 18",
+          series: "",
+        },
+      ];
+
+      const result = crossCheckNovelsWithCalibre([baseDanmachiNovel], {
+        getCalibreBooks: () => mockCalibreBooks,
+      });
+
+      expect(result[0].inLibrary).toBe(true);
+      expect(result[0].existingVolumes).toBe(1);
+    });
+
+    it("matches multiple Calibre volumes of DanMachi accurately counting existingVolumes", () => {
+      const mockCalibreBooks = [
+        { id: 501, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 1", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?" },
+        { id: 502, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 2", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?" },
+        { id: 503, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 18", series: "" },
+      ];
+
+      const result = crossCheckNovelsWithCalibre([baseDanmachiNovel], {
+        getCalibreBooks: () => mockCalibreBooks,
+      });
+
+      expect(result[0].inLibrary).toBe(true);
+      expect(result[0].existingVolumes).toBe(3);
+    });
+
+    it("matches by Romaji alternate title when Calibre stores romanized Japanese", () => {
+      const slimeNovel: DiscoveredNovel = {
+        id: "slime",
+        title: "That Time I Got Reincarnated as a Slime",
+        titleRomaji: "Tensei shitara Slime Datta Ken",
+        titleNative: "転生したらスライムだった件",
+        author: "Fuse",
+        coverUrl: "https://s4.anilist.co/slime.jpg",
+        synopsis: "Thirty-seven-year-old Satoru Mikami is reincarnated into another world as a slime monster.",
+        genres: ["Fantasy", "Isekai"],
+        score: 87,
+        popularity: 90000,
+        releaseDate: "2014-05-30",
+        volumeCount: 21,
+        source: "both",
+        sourceUrls: { lnori: "https://lnori.com/series/3336" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const mockCalibreBooks = [
+        {
+          id: 601,
+          title: "Tensei shitara Slime Datta Ken, Vol. 16",
+          series: "",
+        },
+      ];
+
+      const result = crossCheckNovelsWithCalibre([slimeNovel], {
+        getCalibreBooks: () => mockCalibreBooks,
+      });
+
+      expect(result[0].inLibrary).toBe(true);
+      expect(result[0].existingVolumes).toBe(1);
+    });
+
+    it("matches by Japanese native title when Calibre book has native Japanese title with volume notation", () => {
+      const mockCalibreBooks = [
+        {
+          id: 701,
+          title: "ダンジョンに出会いを求めるのは間違っているだろうか 第18巻",
+          series: "",
+        },
+      ];
+
+      const result = crossCheckNovelsWithCalibre([baseDanmachiNovel], {
+        getCalibreBooks: () => mockCalibreBooks,
+      });
+
+      expect(result[0].inLibrary).toBe(true);
+      expect(result[0].existingVolumes).toBe(1);
+    });
+
+    it("matches all 10 universal light novel alias pairs bidirectionally", () => {
+      const aliasTests: Array<{ novelTitle: string; calibreTitle: string }> = [
+        // 1. DanMachi <-> Is It Wrong to Try to Pick Up Girls in a Dungeon
+        { novelTitle: "DanMachi", calibreTitle: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 1" },
+        // 2. Re:Zero <-> Starting Life in Another World
+        { novelTitle: "Re:Zero", calibreTitle: "Starting Life in Another World, Vol. 21" },
+        // 3. Oregairu <-> My Youth Romantic Comedy Is Wrong As I Expected
+        { novelTitle: "Oregairu", calibreTitle: "My Youth Romantic Comedy Is Wrong, As I Expected, Vol. 1" },
+        // 4. KonoSuba <-> God's Blessing on This Wonderful World
+        { novelTitle: "KonoSuba", calibreTitle: "God's Blessing on This Wonderful World!, Vol. 1" },
+        // 5. Tensura / Slime <-> That Time I Got Reincarnated as a Slime
+        { novelTitle: "Tensura", calibreTitle: "That Time I Got Reincarnated as a Slime, Vol. 1" },
+        // 6. Mahouka <-> The Irregular at Magic High School
+        { novelTitle: "Mahouka", calibreTitle: "The Irregular at Magic High School, Vol. 1" },
+        // 7. SAO <-> Sword Art Online
+        { novelTitle: "SAO", calibreTitle: "Sword Art Online 25: Unital Ring IV" },
+        // 8. COTE <-> Classroom of the Elite
+        { novelTitle: "COTE", calibreTitle: "Classroom of the Elite: Year 2 Vol. 9" },
+        // 9. Roshidere <-> Alya Sometimes Hides Her Feelings in Russian
+        { novelTitle: "Roshidere", calibreTitle: "Alya Sometimes Hides Her Feelings in Russian, Vol. 1" },
+        // 10. Monogatari / Bakemonogatari <-> Monster Tale
+        { novelTitle: "Bakemonogatari", calibreTitle: "Monster Tale, Part 1" },
+      ];
+
+      for (const pair of aliasTests) {
+        const testNovel: DiscoveredNovel = {
+          id: `test-${pair.novelTitle.toLowerCase().replace(/[^a-z0-9]/g, "-")}`,
+          title: pair.novelTitle,
+          author: "Author",
+          coverUrl: "https://s4.anilist.co/cover.jpg",
+          synopsis: "Engaging plot summary for this light novel series.",
+          genres: ["Fantasy"],
+          score: 85,
+          popularity: 50000,
+          releaseDate: "2020-01-01",
+          volumeCount: 10,
+          source: "lnori",
+          sourceUrls: { lnori: "https://lnori.com/series/1" },
+          inLibrary: false,
+          existingVolumes: 0,
+        };
+
+        const result = crossCheckNovelsWithCalibre([testNovel], {
+          getCalibreBooks: () => [{ id: 801, title: pair.calibreTitle, series: "" }],
+        });
+
+        expect(result[0].inLibrary).toBe(true);
+        expect(result[0].existingVolumes).toBe(1);
+      }
+    });
+
+    it("cleans diverse Calibre volume notations and suffixes cleanly", () => {
+      const sampleTitles = [
+        "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 18",
+        "Classroom of the Elite: Year 2 Vol. 9",
+        "Ascendance of a Bookworm: Part 1 Volume 1",
+        "Sword Art Online #1",
+        "That Time I Got Reincarnated as a Slime Volume 16",
+        "Re:Zero - Starting Life in Another World-, Vol. 21",
+        "ダンジョンに出会いを求めるのは間違っているだろうか 第1巻",
+      ];
+
+      for (const raw of sampleTitles) {
+        const cleaned = cleanCalibreTitleVariants(raw);
+        expect(cleaned.length).toBeGreaterThan(1);
+      }
+    });
+
+    it("supports token overlap matching (>= 70% significant word overlap)", () => {
+      const novelTokens = ["wrong", "try", "pick", "girls", "dungeon", "danmachi"];
+      const calibreTokens = ["wrong", "try", "pick", "girls", "dungeon"];
+
+      const overlap = calculateSignificantTokenOverlap(novelTokens, calibreTokens);
+      expect(overlap).toBeGreaterThanOrEqual(0.70);
+    });
+
+    it("does NOT falsely match unrelated titles sharing single common words", () => {
+      const heroNovel: DiscoveredNovel = {
+        id: "sentenced-to-be-a-hero",
+        title: "Sentenced to Be a Hero",
+        author: "Rocket Shokai",
+        coverUrl: "https://s4.anilist.co/hero.jpg",
+        synopsis: "Heroism is a punishment for criminals in this dark fantasy world.",
+        genres: ["Fantasy", "Action"],
+        score: 82,
+        popularity: 30000,
+        releaseDate: "2021-09-17",
+        volumeCount: 5,
+        source: "both",
+        sourceUrls: { lnori: "https://lnori.com/series/12440" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const mockCalibreBooks = [
+        { id: 901, title: "The Hero, Vol. 1", series: "" },
+        { id: 902, title: "A Sister's All You Need, Vol. 1", series: "" },
+        { id: 903, title: "Overlord, Vol. 1", series: "" },
+      ];
+
+      const result = crossCheckNovelsWithCalibre([heroNovel], {
+        getCalibreBooks: () => mockCalibreBooks,
+      });
+
+      expect(result[0].inLibrary).toBe(false);
+      expect(result[0].existingVolumes).toBe(0);
+    });
+
+    it("integrates seamlessly into getDiscoverNovels and filters status=in_library", async () => {
+      const mockCalibreBooks = [
+        {
+          id: 1001,
+          title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 18",
+          series: "",
+        },
+      ];
+
+      const inLibRes = await getDiscoverNovels(
+        { tab: "trending", status: "in_library" },
+        { cacheDb: tempCacheDb, getCalibreBooks: () => mockCalibreBooks },
+      );
+
+      expect(inLibRes.success).toBe(true);
+      const danmachiHit = inLibRes.novels.find((n) => n.id === "danmachi");
+      expect(danmachiHit).toBeDefined();
+      expect(danmachiHit?.inLibrary).toBe(true);
+      expect(danmachiHit?.existingVolumes).toBe(1);
     });
   });
 });
