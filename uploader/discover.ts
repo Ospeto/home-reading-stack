@@ -207,10 +207,10 @@ export const KNOWN_TITLE_TO_ELSCIONE: Record<string, string> = {
 export const KNOWN_TITLE_TO_LNORI: Record<string, { id: number; slug: string }> = {
   "danmachi": { id: 2201, slug: "is-it-wrong-to-try-to-pick-up-girls-in-a-dungeon" },
   "is it wrong to try to pick up girls in a dungeon": { id: 2201, slug: "is-it-wrong-to-try-to-pick-up-girls-in-a-dungeon" },
-  "rezero": { id: 2471, slug: "re-zero-starting-life-in-another-world" },
-  "rezero starting life in another world": { id: 2471, slug: "re-zero-starting-life-in-another-world" },
-  "re zero": { id: 2471, slug: "re-zero-starting-life-in-another-world" },
-  "re zero starting life in another world": { id: 2471, slug: "re-zero-starting-life-in-another-world" },
+  "rezero": { id: 3343, slug: "re-zero-starting-life-in-another-world" },
+  "rezero starting life in another world": { id: 3343, slug: "re-zero-starting-life-in-another-world" },
+  "re zero": { id: 3343, slug: "re-zero-starting-life-in-another-world" },
+  "re zero starting life in another world": { id: 3343, slug: "re-zero-starting-life-in-another-world" },
   "86": { id: 4808, slug: "86-eighty-six" },
   "86 eighty six": { id: 4808, slug: "86-eighty-six" },
   "86eightysix": { id: 4808, slug: "86-eighty-six" },
@@ -251,7 +251,9 @@ export const KNOWN_TITLE_TO_LNORI: Record<string, { id: number; slug: string }> 
   "solo leveling": { id: 6219, slug: "solo-leveling" },
   "a sisters all you need": { id: 4380, slug: "a-sisters-all-you-need" },
   "the angel next door spoils me rotten": { id: 9601, slug: "the-angel-next-door-spoils-me-rotten" },
-  "the apothecary diaries": { id: 11728, slug: "the-apothecary-diaries" },
+  "the apothecary diaries": { id: 3768, slug: "the-apothecary-diaries" },
+  "apothecary diaries": { id: 3768, slug: "the-apothecary-diaries" },
+  "kusuriya no hitorigoto": { id: 3768, slug: "the-apothecary-diaries" },
   "the eminence in shadow": { id: 6215, slug: "the-eminence-in-shadow" },
   "kage no jitsuryokusha ni naritakute": { id: 6215, slug: "the-eminence-in-shadow" },
   "ascendance of a bookworm": { id: 4239, slug: "ascendance-of-a-bookworm-ill-do-anything-to-become-a-librarian" },
@@ -999,7 +1001,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     volumeCount: 15,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/11728/the-apothecary-diaries",
+      lnori: "https://lnori.com/series/3768/the-apothecary-diaries",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Apothecary%20Diaries/",
     },
     primarySource: "elscione",
@@ -1114,7 +1116,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     volumeCount: 37,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/2471/re-zero-starting-life-in-another-world",
+      lnori: "https://lnori.com/series/3343/re-zero-starting-life-in-another-world",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/ReZero%20-%20Starting%20Life%20in%20Another%20World/",
     },
     primarySource: "elscione",
@@ -2397,19 +2399,10 @@ export async function buildCompleteCatalogNovels(
 
     const seed = seedMap.get(can) || seedMap.get(norm);
     const author = seed?.author || resolveAuthorForTitle(folder, undefined, allSeeds);
-    let coverUrl = "";
-    if (real.sourceUrls.lnori) {
-      const lnoriMatch = real.sourceUrls.lnori.match(/\/series\/(\d+)/);
-      if (lnoriMatch) {
-        coverUrl = `https://cdn.lnori.com/series/${lnoriMatch[1]}.jpg`;
-      }
-    }
-    if (!coverUrl) {
-      coverUrl = seed?.coverUrl || resolveCoverForTitle(folder, undefined, allSeeds);
-    }
-    if (!coverUrl) {
-      coverUrl = generateFallbackCoverSvg(folder, author);
-    }
+    const coverUrl =
+      seed?.coverUrl ||
+      resolveCoverForTitle(folder, undefined, allSeeds) ||
+      generateFallbackCoverSvg(folder, author);
     const knownSyn = findKnownSeriesSynopsis({ title: folder, author });
     const rawSynopsis = seed?.synopsis || knownSyn || synthesizeEngagingSynopsis(folder, ["Light Novel", "Fantasy"]);
     const synopsis = cleanSynopsisText(rawSynopsis);
@@ -2475,8 +2468,10 @@ export async function buildCompleteCatalogNovels(
 
     const seed = seedMap.get(can) || seedMap.get(norm);
     const author = seed?.author || resolveAuthorForTitle(displayTitle, undefined, allSeeds);
-    // Verified 100% accurate official CDN cover for Lnori series
-    const coverUrl = `https://cdn.lnori.com/series/${s.id}.jpg`;
+    const coverUrl =
+      seed?.coverUrl ||
+      resolveCoverForTitle(displayTitle, undefined, allSeeds) ||
+      generateFallbackCoverSvg(displayTitle, author);
     const knownSyn = findKnownSeriesSynopsis({ title: displayTitle, author });
     const rawSynopsis = seed?.synopsis || knownSyn || synthesizeEngagingSynopsis(displayTitle, ["Light Novel", "Fantasy"]);
     const synopsis = cleanSynopsisText(rawSynopsis);
@@ -2523,6 +2518,8 @@ export async function buildCompleteCatalogNovels(
 // Alias matching specification naming
 export const buildCatalogDiscoverNovels = buildCompleteCatalogNovels;
 
+export const DISCOVER_FEED_CACHE_VERSION = "v4";
+
 /**
  * Discovers and builds the feed for a requested tab ("trending" | "new" | "all").
  * Enforces strict separation: trending and new feeds are distinct and never combined,
@@ -2532,7 +2529,7 @@ export async function fetchDiscoverFeed(
   tab: DiscoverTab,
   dependencies?: DiscoverDependencies,
 ): Promise<DiscoveredNovel[]> {
-  const cacheKey = `v3:feed:${tab}`;
+  const cacheKey = `${DISCOVER_FEED_CACHE_VERSION}:feed:${tab}`;
 
   // 1. Check cache
   const cached = getCachedFeed(cacheKey, dependencies);
@@ -3338,7 +3335,11 @@ export async function searchUniversalNovels(
       ) {
         existing.author = novel.author;
       }
-      if (!existing.coverUrl && novel.coverUrl) {
+      if (
+        (!existing.coverUrl || existing.coverUrl.startsWith("data:image/svg+xml")) &&
+        novel.coverUrl &&
+        !novel.coverUrl.startsWith("data:image/svg+xml")
+      ) {
         existing.coverUrl = novel.coverUrl;
       }
       if (isSynopsisInsufficient(existing.synopsis) && !isSynopsisInsufficient(novel.synopsis)) {
@@ -3419,19 +3420,9 @@ export async function searchUniversalNovels(
       });
       if (real) {
         const author = resolveAuthorForTitle(folder, undefined, allSeeds);
-        let coverUrl = "";
-        if (real.sourceUrls.lnori) {
-          const lnoriMatch = real.sourceUrls.lnori.match(/\/series\/(\d+)/);
-          if (lnoriMatch) {
-            coverUrl = `https://cdn.lnori.com/series/${lnoriMatch[1]}.jpg`;
-          }
-        }
-        if (!coverUrl) {
-          coverUrl = resolveCoverForTitle(folder, undefined, allSeeds);
-        }
-        if (!coverUrl) {
-          coverUrl = generateFallbackCoverSvg(folder, author);
-        }
+        const coverUrl =
+          resolveCoverForTitle(folder, undefined, allSeeds) ||
+          generateFallbackCoverSvg(folder, author);
         const knownSyn = findKnownSeriesSynopsis({ title: folder, author });
         const synopsis =
           knownSyn ||
@@ -3489,8 +3480,9 @@ export async function searchUniversalNovels(
           .join(" ");
 
         const author = resolveAuthorForTitle(displayTitle, undefined, allSeeds);
-        // Verified 100% accurate official CDN cover for Lnori series
-        const coverUrl = `https://cdn.lnori.com/series/${s.id}.jpg`;
+        const coverUrl =
+          resolveCoverForTitle(displayTitle, undefined, allSeeds) ||
+          generateFallbackCoverSvg(displayTitle, author);
         const knownSyn = findKnownSeriesSynopsis({ title: displayTitle, author });
         const synopsis =
           knownSyn ||

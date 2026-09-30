@@ -29,11 +29,14 @@ import {
   cleanCalibreTitleVariants,
   calculateSignificantTokenOverlap,
   searchAniListNovels,
+  searchUniversalNovels,
   resolveAuthorForTitle,
   resolveCoverForTitle,
   generateFallbackCoverSvg,
   buildCatalogDiscoverNovels,
   KNOWN_TITLE_TO_COVER,
+  KNOWN_TITLE_TO_LNORI,
+  DISCOVER_FEED_CACHE_VERSION,
   type DiscoveredNovel,
 } from "./discover";
 import {
@@ -219,7 +222,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       }
     });
 
-    it("serves complete catalog from cache under v3:feed:all on repeat queries", async () => {
+    it("serves complete catalog from cache under v4:feed:all on repeat queries", async () => {
       const initial = await getDiscoverNovels(
         { tab: "all", page: 1, pageSize: 10 },
         { cacheDb: tempCacheDb },
@@ -539,8 +542,8 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         existingVolumes: 0,
       };
 
-      setCachedFeed("v3:feed:trending", [testNovel], { cacheDb: tempCacheDb });
-      const cached = getCachedFeed("v3:feed:trending", { cacheDb: tempCacheDb });
+      setCachedFeed("v4:feed:trending", [testNovel], { cacheDb: tempCacheDb });
+      const cached = getCachedFeed("v4:feed:trending", { cacheDb: tempCacheDb });
       expect(cached).not.toBeNull();
       expect(cached?.length).toBe(1);
       expect(cached?.[0].id).toBe("test-novel-1");
@@ -1674,8 +1677,10 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
     });
   });
 
-  describe("Cache Versioning (v3:feed:...) & Legacy Cache Invalidation", () => {
-    it("bypasses legacy stale cache keys and uses v3:feed prefix", async () => {
+  describe("Cache Versioning (v4:feed:...) & Legacy Cache Invalidation", () => {
+    it("bypasses legacy stale cache keys and uses v4:feed prefix", async () => {
+      expect(DISCOVER_FEED_CACHE_VERSION).toBe("v4");
+
       // Plant stale legacy cache entry
       const legacyStaleNovel: DiscoveredNovel = {
         id: "stale-legacy-novel",
@@ -1696,17 +1701,18 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
 
       setCachedFeed("feed:trending", [legacyStaleNovel], { cacheDb: tempCacheDb });
       setCachedFeed("v2:feed:trending", [legacyStaleNovel], { cacheDb: tempCacheDb });
+      setCachedFeed("v3:feed:trending", [legacyStaleNovel], { cacheDb: tempCacheDb });
 
-      // fetchDiscoverFeed must use v3:feed:trending and bypass feed:trending and v2:feed:trending
+      // fetchDiscoverFeed must use v4:feed:trending and bypass feed:trending, v2:feed:trending, and v3:feed:trending
       const feed = await fetchDiscoverFeed("trending", { cacheDb: tempCacheDb });
       const staleHit = feed.find((n) => n.id === "stale-legacy-novel");
       expect(staleHit).toBeUndefined();
 
-      // Check that v3:feed:trending was created in cache
-      const v3Cached = getCachedFeed("v3:feed:trending", { cacheDb: tempCacheDb });
-      expect(v3Cached).not.toBeNull();
-      expect(v3Cached!.length).toBeGreaterThan(0);
-      expect(v3Cached!.some((n) => n.id === "stale-legacy-novel")).toBe(false);
+      // Check that v4:feed:trending was created in cache
+      const v4Cached = getCachedFeed(`${DISCOVER_FEED_CACHE_VERSION}:feed:trending`, { cacheDb: tempCacheDb });
+      expect(v4Cached).not.toBeNull();
+      expect(v4Cached!.length).toBeGreaterThan(0);
+      expect(v4Cached!.some((n) => n.id === "stale-legacy-novel")).toBe(false);
     });
   });
 
@@ -2273,21 +2279,25 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       });
     });
 
-    describe("Lnori Official CDN Covers (https://cdn.lnori.com/series/${series.id}.jpg)", () => {
-      it("guarantees 100% of Lnori series entries in discoverCatalog have valid IDs for CDN covers", () => {
+    describe("Portrait Covers & Elimination of Lnori Landscape Social Banners", () => {
+      it("guarantees 100% of Lnori series entries in discoverCatalog have valid numeric IDs and slugs", () => {
         expect(REAL_LNORI_SERIES.length).toBe(883);
         for (const s of REAL_LNORI_SERIES) {
           expect(typeof s.id).toBe("number");
           expect(s.id).toBeGreaterThan(0);
           expect(s.slug.length).toBeGreaterThan(0);
-          const cdnCover = `https://cdn.lnori.com/series/${s.id}.jpg`;
-          expect(cdnCover).toMatch(/^https:\/\/cdn\.lnori\.com\/series\/\d+\.jpg$/);
         }
       });
 
-      it("assigns https://cdn.lnori.com/series/${id}.jpg for Lnori series in complete catalog", async () => {
+      it("never assigns 1200x630 series banners (cdn.lnori.com/series/) and falls back to clean SVG for unseeded titles", async () => {
         const catalog = await buildCatalogDiscoverNovels();
         expect(catalog.length).toBeGreaterThan(500);
+
+        // Entire catalog must contain zero 1200x630 series banner URLs
+        for (const novel of catalog) {
+          expect(novel.coverUrl).toBeDefined();
+          expect(novel.coverUrl.includes("cdn.lnori.com/series/")).toBe(false);
+        }
 
         // Filter novels that originate purely from Lnori
         const lnoriNovels = catalog.filter((n) => n.id.startsWith("lnori-"));
@@ -2295,7 +2305,76 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
 
         for (const novel of lnoriNovels) {
           expect(novel.coverUrl).toBeDefined();
-          expect(novel.coverUrl).toMatch(/^https:\/\/cdn\.lnori\.com\/series\/\d+\.jpg$/);
+          expect(novel.coverUrl.includes("cdn.lnori.com/series/")).toBe(false);
+          // Unseeded pure-Lnori titles should have clean SVG fallback or verified portrait cover
+          const isSvgFallback = novel.coverUrl.startsWith("data:image/svg+xml");
+          const isPortraitCover = novel.coverUrl.startsWith("https://s4.anilist.co/");
+          expect(isSvgFallback || isPortraitCover).toBe(true);
+        }
+      });
+
+      it("preserves seeded portrait cover precedence in complete catalog for affected titles", async () => {
+        const catalog = await buildCatalogDiscoverNovels();
+
+        const targets = [
+          { query: "Ascendance of a Bookworm", coverSub: "bx110800" },
+          { query: "Classroom of the Elite", coverSub: "bx94970" },
+          { query: "Re:ZERO", coverSub: "bx85737" },
+          { query: "Monogatari", coverSub: "bx44893" },
+          { query: "Mushoku Tensei", coverSub: "nx85470" },
+          { query: "The Apothecary Diaries", coverSub: "nx99026" },
+        ];
+
+        for (const t of targets) {
+          const match = catalog.find((n) =>
+            n.title.toLowerCase().includes(t.query.toLowerCase()) && !n.title.toLowerCase().includes("genji")
+          );
+          expect(match).toBeDefined();
+          expect(match!.coverUrl).toBeDefined();
+          expect(match!.coverUrl.includes("cdn.lnori.com/series/")).toBe(false);
+          expect(match!.coverUrl).toContain(t.coverSub);
+          expect(match!.coverUrl.startsWith("https://s4.anilist.co/")).toBe(true);
+        }
+      });
+
+      it("has verified and corrected Lnori series IDs for Re:ZERO (3343) and The Apothecary Diaries (3768)", async () => {
+        expect(KNOWN_TITLE_TO_LNORI["rezero"].id).toBe(3343);
+        expect(KNOWN_TITLE_TO_LNORI["re zero"].id).toBe(3343);
+        expect(KNOWN_TITLE_TO_LNORI["the apothecary diaries"].id).toBe(3768);
+
+        const catalog = await buildCatalogDiscoverNovels();
+        const rezero = catalog.find((n) => n.id === "re-zero");
+        expect(rezero).toBeDefined();
+        expect(rezero?.sourceUrls?.lnori).toBe("https://lnori.com/series/3343/re-zero-starting-life-in-another-world");
+
+        const apothecary = catalog.find((n) => n.id === "the-apothecary-diaries");
+        expect(apothecary).toBeDefined();
+        expect(apothecary?.sourceUrls?.lnori).toBe("https://lnori.com/series/3768/the-apothecary-diaries");
+      });
+
+      it("preserves portrait cover precedence and clean SVG fallback in searchUniversalNovels without banner URLs", async () => {
+        const rezeroResults = await searchUniversalNovels("rezero");
+        expect(rezeroResults.length).toBeGreaterThan(0);
+        const mainRezero = rezeroResults.find((r) => r.id === "re-zero");
+        expect(mainRezero).toBeDefined();
+        expect(mainRezero!.coverUrl.startsWith("https://s4.anilist.co/")).toBe(true);
+        expect(mainRezero!.coverUrl.includes("cdn.lnori.com/series/")).toBe(false);
+        expect(mainRezero!.sourceUrls?.lnori).toBe("https://lnori.com/series/3343/re-zero-starting-life-in-another-world");
+
+        const apothecaryResults = await searchUniversalNovels("the apothecary diaries");
+        expect(apothecaryResults.length).toBeGreaterThan(0);
+        const mainApothecary = apothecaryResults.find((r) => r.id === "the-apothecary-diaries");
+        expect(mainApothecary).toBeDefined();
+        expect(mainApothecary!.coverUrl.startsWith("https://s4.anilist.co/")).toBe(true);
+        expect(mainApothecary!.coverUrl.includes("cdn.lnori.com/series/")).toBe(false);
+        expect(mainApothecary!.sourceUrls?.lnori).toBe("https://lnori.com/series/3768/the-apothecary-diaries");
+
+        // Verify that all returned search results never use landscape social banners
+        for (const res of [...rezeroResults, ...apothecaryResults]) {
+          expect(res.coverUrl.includes("cdn.lnori.com/series/")).toBe(false);
+          const isSvgFallback = res.coverUrl.startsWith("data:image/svg+xml");
+          const isPortraitCover = res.coverUrl.startsWith("https://s4.anilist.co/");
+          expect(isSvgFallback || isPortraitCover).toBe(true);
         }
       });
     });
@@ -2386,12 +2465,13 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       const cover = resolveCoverForTitle(title);
       expect(cover).not.toBe(silentWitchCover);
 
-      // In complete catalog, Lnori match provides official portrait cover
+      // In complete catalog, unseeded novel without known cover gets clean SVG fallback, not landscape banner
       const catalog = await buildCatalogDiscoverNovels({ cacheDb: tempCacheDb });
       const novel = catalog.find((n) => n.title.toLowerCase().includes("secret saint"));
       expect(novel).toBeDefined();
       expect(novel?.author).toBe("Touya");
-      expect(novel?.coverUrl).toBe("https://cdn.lnori.com/series/9685.jpg");
+      expect(novel?.coverUrl).not.toContain("cdn.lnori.com/series/");
+      expect(novel?.coverUrl.startsWith("data:image/svg+xml")).toBe(true);
     });
 
     it("ensures uncredited authors never return 'Light Novel Author'", () => {
