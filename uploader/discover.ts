@@ -100,6 +100,29 @@ export function normalizeTitleForMatch(title: string): string {
 
 export const REAL_ELSCIONE_FOLDERS: string[] = discoverCatalog.elscioneFolders;
 export const REAL_LNORI_SERIES: Array<{ id: number; slug: string }> = discoverCatalog.lnoriSeries;
+export const CATALOG_COVERS: Record<string, string> =
+  (discoverCatalog as any).catalogCovers || {};
+
+export function resolveCatalogCover(title: string, romaji?: string): string | null {
+  const rawCandidates = [title, romaji].filter(Boolean) as string[];
+  const candidates: string[] = [];
+  for (const c of rawCandidates) {
+    if (!candidates.includes(c)) candidates.push(c);
+    for (const v of cleanCalibreTitleVariants(c)) {
+      if (!candidates.includes(v)) candidates.push(v);
+    }
+  }
+
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    if (norm && CATALOG_COVERS[norm]) return CATALOG_COVERS[norm];
+    const can = canonicalTitleKey(c);
+    if (can && CATALOG_COVERS[can]) return CATALOG_COVERS[can];
+    const slug = c.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    if (slug && CATALOG_COVERS[slug]) return CATALOG_COVERS[slug];
+  }
+  return null;
+}
 
 const elscioneNormalizedMap = new Map<string, string>();
 for (const folder of REAL_ELSCIONE_FOLDERS) {
@@ -433,6 +456,18 @@ export const KNOWN_TITLE_TO_COVER: Record<string, string> = {
   "the apothecary diaries": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/nx99026-5Eg650WAd9Rj.jpg",
   "the eminence in shadow": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx108428-wTg20rSpvkU9.jpg",
   "a sisters all you need": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/nx97894-ZQmIZQsc5Wea.jpg",
+  "a pale moon reverie": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx183547-5JAYNtUzwUPw.jpg",
+  "a-pale-moon-reverie": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx183547-5JAYNtUzwUPw.jpg",
+  "a surprisingly happy engagement for the slime duke": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx177505-fJxf7Qfrnl3u.jpg",
+  "a surprisingly happy engagement for the slime duke and the fallen noble lady": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx177505-fJxf7Qfrnl3u.jpg",
+  "a-surprisingly-happy-engagement-for-the-slime-duke-and-the-fallen-noble-lady": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx177505-fJxf7Qfrnl3u.jpg",
+  "slime duke": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx177505-fJxf7Qfrnl3u.jpg",
+  "a tale of the secret saint": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx114203-fIdB2UHuf3Ut.jpg",
+  "a-tale-of-the-secret-saint": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx114203-fIdB2UHuf3Ut.jpg",
+  "a wild last boss appeared": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx99776-P4wYNhmbvyKo.jpg",
+  "a-wild-last-boss-appeared": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx99776-P4wYNhmbvyKo.jpg",
+  "a young lady finds her true calling living with the enemy": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx204803-Q127XMSQOrQ0.jpg",
+  "a-young-lady-finds-her-true-calling-living-with-the-enemy": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx204803-Q127XMSQOrQ0.jpg",
   "grimgar of fantasy and ash": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx86365-1H3Lp87JUnxr.jpg",
   "danmachi": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx85162-Fpd3ejAlFWP8.jpg",
   "is it wrong to try to pick up girls in a dungeon": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx85162-Fpd3ejAlFWP8.jpg",
@@ -2402,6 +2437,7 @@ export async function buildCompleteCatalogNovels(
     const coverUrl =
       seed?.coverUrl ||
       resolveCoverForTitle(folder, undefined, allSeeds) ||
+      resolveCatalogCover(folder) ||
       generateFallbackCoverSvg(folder, author);
     const knownSyn = findKnownSeriesSynopsis({ title: folder, author });
     const rawSynopsis = seed?.synopsis || knownSyn || synthesizeEngagingSynopsis(folder, ["Light Novel", "Fantasy"]);
@@ -2471,6 +2507,8 @@ export async function buildCompleteCatalogNovels(
     const coverUrl =
       seed?.coverUrl ||
       resolveCoverForTitle(displayTitle, undefined, allSeeds) ||
+      resolveCatalogCover(displayTitle) ||
+      resolveCatalogCover(s.slug) ||
       generateFallbackCoverSvg(displayTitle, author);
     const knownSyn = findKnownSeriesSynopsis({ title: displayTitle, author });
     const rawSynopsis = seed?.synopsis || knownSyn || synthesizeEngagingSynopsis(displayTitle, ["Light Novel", "Fantasy"]);
@@ -2518,7 +2556,7 @@ export async function buildCompleteCatalogNovels(
 // Alias matching specification naming
 export const buildCatalogDiscoverNovels = buildCompleteCatalogNovels;
 
-export const DISCOVER_FEED_CACHE_VERSION = "v4";
+export const DISCOVER_FEED_CACHE_VERSION = "v5";
 
 /**
  * Discovers and builds the feed for a requested tab ("trending" | "new" | "all").
@@ -3422,6 +3460,7 @@ export async function searchUniversalNovels(
         const author = resolveAuthorForTitle(folder, undefined, allSeeds);
         const coverUrl =
           resolveCoverForTitle(folder, undefined, allSeeds) ||
+          resolveCatalogCover(folder) ||
           generateFallbackCoverSvg(folder, author);
         const knownSyn = findKnownSeriesSynopsis({ title: folder, author });
         const synopsis =
@@ -3482,6 +3521,8 @@ export async function searchUniversalNovels(
         const author = resolveAuthorForTitle(displayTitle, undefined, allSeeds);
         const coverUrl =
           resolveCoverForTitle(displayTitle, undefined, allSeeds) ||
+          resolveCatalogCover(displayTitle) ||
+          resolveCatalogCover(s.slug) ||
           generateFallbackCoverSvg(displayTitle, author);
         const knownSyn = findKnownSeriesSynopsis({ title: displayTitle, author });
         const synopsis =

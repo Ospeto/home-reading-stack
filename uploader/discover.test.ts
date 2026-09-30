@@ -222,7 +222,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       }
     });
 
-    it("serves complete catalog from cache under v4:feed:all on repeat queries", async () => {
+    it("serves complete catalog from cache under v5:feed:all on repeat queries", async () => {
       const initial = await getDiscoverNovels(
         { tab: "all", page: 1, pageSize: 10 },
         { cacheDb: tempCacheDb },
@@ -542,8 +542,8 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         existingVolumes: 0,
       };
 
-      setCachedFeed("v4:feed:trending", [testNovel], { cacheDb: tempCacheDb });
-      const cached = getCachedFeed("v4:feed:trending", { cacheDb: tempCacheDb });
+      setCachedFeed(`${DISCOVER_FEED_CACHE_VERSION}:feed:trending`, [testNovel], { cacheDb: tempCacheDb });
+      const cached = getCachedFeed(`${DISCOVER_FEED_CACHE_VERSION}:feed:trending`, { cacheDb: tempCacheDb });
       expect(cached).not.toBeNull();
       expect(cached?.length).toBe(1);
       expect(cached?.[0].id).toBe("test-novel-1");
@@ -1677,9 +1677,9 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
     });
   });
 
-  describe("Cache Versioning (v4:feed:...) & Legacy Cache Invalidation", () => {
-    it("bypasses legacy stale cache keys and uses v4:feed prefix", async () => {
-      expect(DISCOVER_FEED_CACHE_VERSION).toBe("v4");
+  describe("Cache Versioning (v5:feed:...) & Legacy Cache Invalidation", () => {
+    it("bypasses legacy stale cache keys and uses v5:feed prefix", async () => {
+      expect(DISCOVER_FEED_CACHE_VERSION).toBe("v5");
 
       // Plant stale legacy cache entry
       const legacyStaleNovel: DiscoveredNovel = {
@@ -1702,17 +1702,18 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       setCachedFeed("feed:trending", [legacyStaleNovel], { cacheDb: tempCacheDb });
       setCachedFeed("v2:feed:trending", [legacyStaleNovel], { cacheDb: tempCacheDb });
       setCachedFeed("v3:feed:trending", [legacyStaleNovel], { cacheDb: tempCacheDb });
+      setCachedFeed("v4:feed:trending", [legacyStaleNovel], { cacheDb: tempCacheDb });
 
-      // fetchDiscoverFeed must use v4:feed:trending and bypass feed:trending, v2:feed:trending, and v3:feed:trending
+      // fetchDiscoverFeed must use v5:feed:trending and bypass feed:trending, v2:feed:trending, v3:feed:trending, and v4:feed:trending
       const feed = await fetchDiscoverFeed("trending", { cacheDb: tempCacheDb });
       const staleHit = feed.find((n) => n.id === "stale-legacy-novel");
       expect(staleHit).toBeUndefined();
 
-      // Check that v4:feed:trending was created in cache
-      const v4Cached = getCachedFeed(`${DISCOVER_FEED_CACHE_VERSION}:feed:trending`, { cacheDb: tempCacheDb });
-      expect(v4Cached).not.toBeNull();
-      expect(v4Cached!.length).toBeGreaterThan(0);
-      expect(v4Cached!.some((n) => n.id === "stale-legacy-novel")).toBe(false);
+      // Check that v5:feed:trending was created in cache
+      const v5Cached = getCachedFeed(`${DISCOVER_FEED_CACHE_VERSION}:feed:trending`, { cacheDb: tempCacheDb });
+      expect(v5Cached).not.toBeNull();
+      expect(v5Cached!.length).toBeGreaterThan(0);
+      expect(v5Cached!.some((n) => n.id === "stale-legacy-novel")).toBe(false);
     });
   });
 
@@ -2308,7 +2309,9 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
           expect(novel.coverUrl.includes("cdn.lnori.com/series/")).toBe(false);
           // Unseeded pure-Lnori titles should have clean SVG fallback or verified portrait cover
           const isSvgFallback = novel.coverUrl.startsWith("data:image/svg+xml");
-          const isPortraitCover = novel.coverUrl.startsWith("https://s4.anilist.co/");
+          const isPortraitCover =
+            novel.coverUrl.startsWith("https://s4.anilist.co/") ||
+            novel.coverUrl.startsWith("https://cdn.lnori.com/cover/");
           expect(isSvgFallback || isPortraitCover).toBe(true);
         }
       });
@@ -2471,7 +2474,11 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(novel).toBeDefined();
       expect(novel?.author).toBe("Touya");
       expect(novel?.coverUrl).not.toContain("cdn.lnori.com/series/");
-      expect(novel?.coverUrl.startsWith("data:image/svg+xml")).toBe(true);
+      expect(novel?.coverUrl.startsWith("data:image/svg+xml")).toBe(false);
+      expect(
+        novel?.coverUrl.startsWith("https://s4.anilist.co/") ||
+        novel?.coverUrl.startsWith("https://cdn.lnori.com/cover/")
+      ).toBe(true);
     });
 
     it("ensures uncredited authors never return 'Light Novel Author'", () => {
@@ -2488,6 +2495,97 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
 
       // Non-existent folders must return null
       expect(findRealElscioneFolder("Completely Non Existent Fake Folder 12345")).toBeNull();
+    });
+
+    it("verifies captain-observed series receive verified portrait covers in complete catalog without SVG fallback", async () => {
+      const catalog = await buildCatalogDiscoverNovels({ cacheDb: tempCacheDb });
+
+      const targets = [
+        {
+          name: "A Pale Moon Reverie",
+          query: "pale moon reverie",
+        },
+        {
+          name: "A Surprisingly Happy Engagement for the Slime Duke",
+          query: "slime duke",
+        },
+        {
+          name: "A Tale of the Secret Saint",
+          query: "secret saint",
+        },
+        {
+          name: "A Wild Last Boss Appeared",
+          query: "wild last boss",
+        },
+        {
+          name: "A Young Lady Finds Her True Calling Living With the Enemy",
+          query: "young lady finds her true calling",
+        },
+      ];
+
+      for (const t of targets) {
+        const novel = catalog.find((n) => n.title.toLowerCase().includes(t.query.toLowerCase()));
+        expect(novel).toBeDefined();
+        expect(novel!.coverUrl).toBeDefined();
+
+        // Must NEVER fall back to placeholder SVG when real portrait cover is available
+        expect(novel!.coverUrl.startsWith("data:image/svg+xml")).toBe(false);
+
+        // Must NEVER assign 1200x630 landscape series banners
+        expect(novel!.coverUrl.includes("cdn.lnori.com/series/")).toBe(false);
+
+        // Must be verified high-resolution portrait cover from AniList or Lnori volume 1
+        const isVerifiedPortrait =
+          novel!.coverUrl.startsWith("https://s4.anilist.co/") ||
+          novel!.coverUrl.startsWith("https://cdn.lnori.com/cover/");
+        expect(isVerifiedPortrait).toBe(true);
+      }
+    });
+
+    it("verifies universal search assigns verified portrait covers for catalog series", async () => {
+      const targets = [
+        { query: "A Pale Moon Reverie", titleSub: "pale moon reverie" },
+        { query: "A Tale of the Secret Saint", titleSub: "secret saint" },
+        { query: "A Wild Last Boss Appeared", titleSub: "wild last boss" },
+        { query: "Slime Duke", titleSub: "slime duke" },
+        { query: "A Young Lady Finds Her True Calling", titleSub: "young lady finds her true calling" },
+      ];
+
+      for (const t of targets) {
+        const results = await searchUniversalNovels(t.query);
+        expect(results.length).toBeGreaterThan(0);
+        const match = results.find((r) => r.title.toLowerCase().includes(t.titleSub.toLowerCase()));
+        expect(match).toBeDefined();
+        expect(match!.coverUrl).toBeDefined();
+        expect(match!.coverUrl.startsWith("data:image/svg+xml")).toBe(false);
+        expect(match!.coverUrl.includes("cdn.lnori.com/series/")).toBe(false);
+        const isVerifiedPortrait =
+          match!.coverUrl.startsWith("https://s4.anilist.co/") ||
+          match!.coverUrl.startsWith("https://cdn.lnori.com/cover/");
+        expect(isVerifiedPortrait).toBe(true);
+      }
+    });
+
+    it("verifies catalog-wide portrait cover coverage exceeds 80% with zero landscape banners", async () => {
+      const catalog = await buildCatalogDiscoverNovels({ cacheDb: tempCacheDb });
+      expect(catalog.length).toBeGreaterThan(1000);
+
+      let verifiedPortraitCount = 0;
+      for (const novel of catalog) {
+        // Zero landscape banners anywhere in catalog
+        expect(novel.coverUrl.includes("cdn.lnori.com/series/")).toBe(false);
+
+        if (!novel.coverUrl.startsWith("data:image/svg+xml")) {
+          verifiedPortraitCount++;
+          const isVerifiedPortrait =
+            novel.coverUrl.startsWith("https://s4.anilist.co/") ||
+            novel.coverUrl.startsWith("https://cdn.lnori.com/cover/");
+          expect(isVerifiedPortrait).toBe(true);
+        }
+      }
+
+      const coverageRatio = verifiedPortraitCount / catalog.length;
+      expect(coverageRatio).toBeGreaterThanOrEqual(0.80);
     });
   });
 });
