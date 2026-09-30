@@ -2889,6 +2889,69 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(resProg.volumeCount).toBe(8);
     });
 
+    it("prevents Trapped in a Dating Sim mainline and Marie-route spinoff volume leakage", () => {
+      const mobuMain: DiscoveredNovel = {
+        id: "mobu-main",
+        title: "Trapped in a Dating Sim",
+        author: "Yomu Mishima",
+        coverUrl: "https://example.com/mobu.jpg",
+        synopsis: "Mainline synopsis",
+        genres: ["Fantasy"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 13,
+        source: "both",
+        sourceUrls: { elscione: "https://example.com" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const mobuSpinoff: DiscoveredNovel = {
+        id: "mobu-spinoff",
+        title: "Trapped in a Dating Sim - Otome Games Are Tough For Us, Too!",
+        author: "Yomu Mishima",
+        coverUrl: "https://example.com/spinoff.jpg",
+        synopsis: "Marie route synopsis",
+        genres: ["Fantasy"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 3,
+        source: "both",
+        sourceUrls: { elscione: "https://example.com" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const mockCalibre = [
+        ...Array.from({ length: 13 }, (_, i) => ({
+          id: 1 + i,
+          title: `Trapped in a Dating Sim: The World of Otome Games is Tough for Mobs, Vol. ${i + 1}`,
+          series: "Trapped in a Dating Sim: The World of Otome Games is Tough for Mobs",
+          series_index: i + 1,
+        })),
+        ...Array.from({ length: 3 }, (_, i) => ({
+          id: 100 + i,
+          title: `Trapped in a Dating Sim - Otome Games Are Tough For Us, Too!, Vol. ${i + 1}`,
+          series: "Trapped in a Dating Sim - Otome Games Are Tough For Us, Too!",
+          series_index: i + 1,
+        })),
+      ];
+
+      const [resMain, resSpinoff] = crossCheckNovelsWithCalibre([mobuMain, mobuSpinoff], {
+        getCalibreBooks: () => mockCalibre,
+      });
+
+      // Mainline must strictly count only the 13 mainline volumes
+      expect(resMain.existingVolumes).toBe(13);
+      expect(resMain.volumeCount).toBe(13);
+
+      // Spinoff (Marie route) must strictly count only the 3 spinoff volumes
+      expect(resSpinoff.existingVolumes).toBe(3);
+      expect(resSpinoff.volumeCount).toBe(3);
+    });
+
     it("prevents cleaned variants and containment from leaking spin-off ownership to mainline series", () => {
       // 1. COTE Year 2 must not mark mainline COTE as owned
       const coteMain: DiscoveredNovel = {

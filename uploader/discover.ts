@@ -2288,7 +2288,7 @@ export const DISTINCT_SPINOFF_MARKERS: RegExp[] = [
   /\bss\b/i,
   /\bfamilia chronicle\b/i,
   /\bminor myths and legends\b/i,
-  /\b(?:otome games are tough for us|for us\s*too|marie route)\b/i,
+  /\b(?:otome games are tough (?:for )?us|tough (?:for )?us too|for us\s*too|us too|marie route)\b/i,
 ];
 
 function extractYearMarker(str: string): string | null {
@@ -2819,34 +2819,44 @@ export function crossCheckNovelsWithCalibre(
 
       // 3. Significant token overlap matching (>= 70% significant word overlap)
       if (!isMatch) {
-        for (const nTok of nTokensList) {
-          const nStr = nTok.join(" ");
-          for (const cTok of b.tokensList) {
-            const cStr = cTok.join(" ");
-            if (isSpinoffMismatch(nStr, cStr)) continue;
-            const overlap = calculateSignificantTokenOverlap(nTok, cTok);
-            if (overlap >= 0.70) {
-              isMatch = true;
-              break;
+        const hasSpinoffConflict = Array.from(nCandidates).some((n) =>
+          Array.from(b.candidates).some((c) => isSpinoffMismatch(n, c)),
+        );
+        if (!hasSpinoffConflict) {
+          for (const nTok of nTokensList) {
+            const nStr = nTok.join(" ");
+            for (const cTok of b.tokensList) {
+              const cStr = cTok.join(" ");
+              if (isSpinoffMismatch(nStr, cStr)) continue;
+              const overlap = calculateSignificantTokenOverlap(nTok, cTok);
+              if (overlap >= 0.70) {
+                isMatch = true;
+                break;
+              }
             }
+            if (isMatch) break;
           }
-          if (isMatch) break;
         }
       }
 
       // 4. Prefix start matching fallback
       if (!isMatch) {
-        for (const n of nCandidates) {
-          if (n.length >= 6) {
-            for (const c of b.candidates) {
-              if (isSpinoffMismatch(n, c)) continue;
-              if (c.length >= 6 && (c.startsWith(n) || n.startsWith(c))) {
-                isMatch = true;
-                break;
+        const hasSpinoffConflict = Array.from(nCandidates).some((n) =>
+          Array.from(b.candidates).some((c) => isSpinoffMismatch(n, c)),
+        );
+        if (!hasSpinoffConflict) {
+          for (const n of nCandidates) {
+            if (n.length >= 6) {
+              for (const c of b.candidates) {
+                if (isSpinoffMismatch(n, c)) continue;
+                if (c.length >= 6 && (c.startsWith(n) || n.startsWith(c))) {
+                  isMatch = true;
+                  break;
+                }
               }
             }
+            if (isMatch) break;
           }
-          if (isMatch) break;
         }
       }
 
