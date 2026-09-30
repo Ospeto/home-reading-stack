@@ -491,7 +491,7 @@ LightHouse features an Apple-aesthetic **Discover Shelf** across both the **Web 
    - **Sorting:** `Most Popular`, `Highest Rated`, `Newest`.
 6. **Prominent Card-Level Volume Visibility & Library Volume Reconciliation:**
    - Prominent volume count indicators displayed directly on cards without opening the modal:
-     - Card status badge: `In Library (${libCount} vols)` when series is owned in Calibre, or `Available (${item.volumeCount || 1} vols)` when available to ingest.
+     - Card status badge: `In Library (${libCount} vols)` when series is owned in Calibre (or `In Library (${libCount}/${item.volumeCount} vols)` when partially owned), or `Available (${item.volumeCount || 1} vols)` when available to ingest.
      - Card metadata row: dedicated volume badge (`${item.volumeCount || 1} vols`) alongside source tags and ratings.
      - Novel preview modal (`#discoverModal`): displays true total volumes (`${totalVols} Volumes`) reconciled with local Calibre volumes (`Math.max(catalogVolumes, libraryCount)`).
    - Reconciles catalog volume counts with local Calibre ownership while preventing spin-off/mainline volume count pollution.

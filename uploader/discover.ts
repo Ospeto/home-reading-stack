@@ -228,6 +228,63 @@ export const KNOWN_TITLE_TO_ELSCIONE: Record<string, string> = {
   "bakemonogatari": "Monogatari Series",
   "monogatari series": "Monogatari Series",
   "grimgar of fantasy and ash": "Grimgar of Fantasy and Ash",
+  "black bullet": "Black Bullet",
+  "black-bullet": "Black Bullet",
+  "the rising of the shield hero": "The Rising of the Shield Hero",
+  "shield hero": "The Rising of the Shield Hero",
+  "tate no yuusha no nariagari": "The Rising of the Shield Hero",
+  "tate no yuusha": "The Rising of the Shield Hero",
+  "bunny girl senpai": "Rascal Does Not Dream Series",
+  "rascal does not dream series": "Rascal Does Not Dream Series",
+  "trapped in a dating sim": "Trapped in a Dating Sim",
+  "mobuseka": "Trapped in a Dating Sim",
+  "how a realist hero rebuilt the kingdom": "How a Realist Hero Rebuilt the Kingdom",
+  "realist hero": "How a Realist Hero Rebuilt the Kingdom",
+  "hell mode": "Hell Mode",
+  "reincarnated as a sword": "Reincarnated as a Sword",
+  "tenken": "Reincarnated as a Sword",
+  "the genius princes guide to raising a nation out of debt": "The Genius Prince's Guide to Raising a Nation Out of Debt",
+  "genius prince": "The Genius Prince's Guide to Raising a Nation Out of Debt",
+  "campfire cooking in another world with my absurd skill": "Campfire Cooking in Another World With My Absurd Skill",
+  "campfire cooking": "Campfire Cooking in Another World With My Absurd Skill",
+  "the asterisk war": "The Asterisk War",
+  "asterisk war": "The Asterisk War",
+  "gakusen toshi asterisk": "The Asterisk War",
+  "combatants will be dispatched": "Combatants Will Be Dispatched",
+  "7th time loop": "7th Time Loop",
+  "7th time loop the villainess enjoys a carefree life": "7th Time Loop",
+  "sound euphonium": "Hibike! Euphonium",
+  "hibike euphonium": "Hibike! Euphonium",
+  "kinos journey": "Kino no Tabi",
+  "kino no tabi": "Kino no Tabi",
+  "the beginning after the end": "The Beginning After The End",
+  "tbate": "The Beginning After The End",
+  "the magical revolution of the reincarnated princess": "The Magical Revolution of the Reincarnated Princess and the Genius Young Lady",
+  "magical revolution": "The Magical Revolution of the Reincarnated Princess and the Genius Young Lady",
+  "the worlds finest assassin gets reincarnated in another world": "The World's Finest Assassin Gets Reincarnated in Another World",
+  "worlds finest assassin": "The World's Finest Assassin Gets Reincarnated in Another World",
+  "bloom into you": "Bloom Into You",
+  "adachi and shimamura": "Adachi and Shimamura",
+  "another": "Another",
+  "another world survival": "Another World Survival",
+  "gosick": "Gosick",
+  "otherside picnic": "Otherside Picnic",
+  "restaurant to another world": "Restaurant to Another World",
+  "trinity blood": "Trinity Blood - Rage Against the Moons",
+  "blood": "Blood+",
+  "blood+": "Blood+",
+  "jk haru is a sex worker in another world": "JK Haru is a Sex Worker in Another World",
+  "a cave kings road to paradise": "A Cave King's Road to Paradise",
+  "a late start tamers laid back life": "A Late-Start Tamer's Laid-Back Life",
+  "a livid ladys guide to getting even": "A Livid Lady's Guide to Getting Even",
+  "a mysterious job called oda nobunaga": "A Mysterious Job Called Oda Nobunaga",
+  "are you okay with a slightly older girlfriend": "Are You Okay With a Slightly Older Girlfriend",
+  "free life fantasy online": "Free Life Fantasy Online - Immortal Princess",
+  "from old country bumpkin to master swordsman": "From Old Country Bumpkin to Master Swordsman",
+  "heroine saint no im an all works maid and proud of it": "Heroine Saint No, I'm an All-Works Maid",
+  "victoria of many faces": "Victoria of Many Faces",
+  "you like me not my daughter": "You Like Me, Not My Daughter",
+  "almark": "Almark",
 };
 
 export const KNOWN_TITLE_TO_LNORI: Record<string, { id: number; slug: string }> = {
@@ -2102,6 +2159,87 @@ export const KNOWN_LIGHT_NOVEL_ALIAS_CLUSTERS: string[][] = [
     "monogatari series",
     "monster tale",
   ],
+  // Black Bullet
+  [
+    "black bullet",
+    "burakku buretto",
+  ],
+  // The Rising of the Shield Hero
+  [
+    "the rising of the shield hero",
+    "shield hero",
+    "tate no yuusha no nariagari",
+    "tate no yuusha",
+  ],
+  // Rascal Does Not Dream / Bunny Girl Senpai
+  [
+    "rascal does not dream",
+    "rascal does not dream series",
+    "rascal does not dream of bunny girl senpai",
+    "bunny girl senpai",
+    "seishun buta yarou",
+  ],
+  // Trapped in a Dating Sim / Mobuseka
+  [
+    "trapped in a dating sim",
+    "trapped in a dating sim otome games are tough for us too",
+    "mobuseka",
+    "otome game sekai wa mob ni kibishii sekai desu",
+  ],
+  // How a Realist Hero Rebuilt the Kingdom
+  [
+    "how a realist hero rebuilt the kingdom",
+    "realist hero",
+    "genjitsu shugi yuusha no oukoku saikenki",
+  ],
+  // Reincarnated as a Sword / Tenken
+  [
+    "reincarnated as a sword",
+    "tenken",
+    "tensei shitara ken deshita",
+  ],
+  // The Asterisk War
+  [
+    "the asterisk war",
+    "asterisk war",
+    "gakusen toshi asterisk",
+  ],
+  // Combatants Will Be Dispatched
+  [
+    "combatants will be dispatched",
+    "sentoin hakenshimasu",
+  ],
+  // 7th Time Loop
+  [
+    "7th time loop",
+    "7th time loop the villainess enjoys a carefree life",
+    "loop 7 kaime no akuyaku reijou wa",
+  ],
+  // Sound! Euphonium / Hibike! Euphonium
+  [
+    "sound euphonium",
+    "hibike euphonium",
+  ],
+  // Kino no Tabi / Kino's Journey
+  [
+    "kinos journey",
+    "kino no tabi",
+  ],
+  // The Beginning After The End
+  [
+    "the beginning after the end",
+    "tbate",
+  ],
+  // Secrets of the Silent Witch
+  [
+    "secrets of the silent witch",
+    "silent witch",
+  ],
+  // Sentenced to Be a Hero
+  [
+    "sentenced to be a hero",
+    "yuusha kei ni shosu",
+  ],
 ];
 
 const aliasLookupMap = new Map<string, string[]>();
@@ -2358,6 +2496,28 @@ export function resolveCatalogVolumeCount(
     }
   }
 
+  // Check KNOWN_TITLE_TO_ELSCIONE mapping so shorthand aliases (e.g. black bullet, cote, danmachi, sao, slime, shield hero)
+  // cleanly map to their parent Elscione folder and resolve volume counts, guarded against spin-off mismatch.
+  const elscioneTargets: string[] = [];
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    const slug = c.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const can = canonicalTitleKey(c);
+    const target =
+      (norm && KNOWN_TITLE_TO_ELSCIONE[norm]) ||
+      (slug && KNOWN_TITLE_TO_ELSCIONE[slug]) ||
+      (can && KNOWN_TITLE_TO_ELSCIONE[can]);
+    if (target && !isSpinoffMismatch(c, target) && !elscioneTargets.includes(target)) {
+      elscioneTargets.push(target);
+    }
+  }
+  for (const target of elscioneTargets) {
+    if (!candidates.includes(target)) candidates.push(target);
+    for (const v of cleanCalibreTitleVariants(target)) {
+      if (!candidates.includes(v)) candidates.push(v);
+    }
+  }
+
   // 1. Direct exact normalized match
   for (const c of candidates) {
     const norm = normalizeTitleForMatch(c);
@@ -2406,6 +2566,27 @@ export function resolveCatalogVolumeCount(
         }
       }
       if (mappedCount) break;
+    }
+  }
+
+  // 5. Direct lookup of mapped Elscione target folder in CATALOG_VOLUMES
+  if (!mappedCount) {
+    for (const target of elscioneTargets) {
+      const normT = normalizeTitleForMatch(target);
+      const slugT = target.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      const canT = canonicalTitleKey(target);
+      if (normT && CATALOG_VOLUMES[normT] && !isSpinoffMismatch(title, target)) {
+        mappedCount = CATALOG_VOLUMES[normT];
+        break;
+      }
+      if (slugT && CATALOG_VOLUMES[slugT] && !isSpinoffMismatch(title, target)) {
+        mappedCount = CATALOG_VOLUMES[slugT];
+        break;
+      }
+      if (canT && CATALOG_VOLUMES[canT] && !isSpinoffMismatch(title, target)) {
+        mappedCount = CATALOG_VOLUMES[canT];
+        break;
+      }
     }
   }
 
