@@ -2143,7 +2143,7 @@
         <div class="flex flex-col sm:flex-row gap-5 items-start">
           <!-- Extra-large high-res cover -->
           <div class="relative w-36 sm:w-48 aspect-[2/3] shrink-0 rounded-xl overflow-hidden shadow-2xl border border-white/10 mx-auto sm:mx-0 book-spine-effect bg-zinc-900">
-            <img id="discoverModalCover" src="" alt="Cover" class="w-full h-full object-cover" onerror="this.onerror=null; this.src=generateFallbackCoverSvg(this.alt);">
+            <img id="discoverModalCover" src="" alt="Cover" class="w-full h-full object-cover object-top rounded-xl bg-zinc-950" onerror="this.onerror=null; this.src=generateFallbackCoverSvg(this.alt);">
             <div id="discoverModalStatusBadge" class="absolute top-2 left-2 px-2 py-0.5 rounded-full text-[10px] font-bold backdrop-blur-md"></div>
           </div>
 
@@ -2196,7 +2196,7 @@
         <div class="p-3 rounded-xl bg-rose-950/40 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between gap-2.5 backdrop-blur-md">
           <div class="flex items-center gap-2 min-w-0">
             <svg class="w-4 h-4 text-rose-400 shrink-0"><use href="#icon-triangle-exclamation"/></svg>
-            <span id="discoverModalErrorText" class="truncate font-medium"></span>
+            <span id="discoverModalErrorText" class="font-medium break-words line-clamp-3 sm:line-clamp-2"></span>
           </div>
           <button type="button" onclick="hideDiscoverModalError()" class="text-rose-400 hover:text-white shrink-0 cursor-pointer p-0.5" title="Dismiss">
             <svg class="w-3.5 h-3.5"><use href="#icon-xmark"/></svg>
@@ -3844,16 +3844,26 @@
       msg = msg.replace(/^Uncaught\s+(?:Error:\s*)?/i, '');
       msg = msg.replace(/^(?:ENOENT|EACCES|EEXIST|EBUSY|EISDIR|ENOTDIR|EMFILE|ENOSPC):\s*/i, '');
 
-      // Replace multiple consecutive path tokens like [path]/[path] or [path]
-      msg = msg.replace(/(?:\[path\][/\\]*)+/g, '[path]');
+      // Clean mangled URL regex artifacts like https://[path]%20..., https:[path]%20..., http://[path]...
+      msg = msg.replace(/https?:\/\/?(?:\[path\]|\[file\])(?:%20|[/\\])*(?:[a-zA-Z0-9._% -]+)?/gi, 'remote source');
+      msg = msg.replace(/https?:\/\/?(?:\[path\]|\[file\])/gi, 'remote source');
+
+      // Replace URL-encoded spaces (%20) with standard clean spaces
+      msg = msg.replace(/%20/g, ' ');
+
+      // Clean open '[path]' or open '[file]' or open 'file'
+      msg = msg.replace(/open\s+['"]?(?:\[path\]|\[file\]|file)['"]?/gi, 'open target file');
+
+      // Replace multiple consecutive path/file tokens like [path]/[path] or [file]/[file]
+      msg = msg.replace(/(?:\[(?:path|file)\][/\\]*)+/gi, 'file');
 
       // Strip [path] placeholders and filesystem tokens into clean phrases
       msg = msg.replace(/\[path\]/g, 'file');
+      msg = msg.replace(/\[file\]/g, 'file');
 
       // Clean up duplicated "file file" or "file/file" artifacts
       msg = msg.replace(/\bfile(?:\s*[/\\-]\s*file)+\b/gi, 'file');
       msg = msg.replace(/\bfile\s+file\b/gi, 'file');
-      msg = msg.replace(/open\s+['"]?file['"]?/gi, 'open target file');
 
       // Clean common node/network phrases into friendly explanations
       if (/no such file or directory/i.test(msg)) {
@@ -4979,16 +4989,16 @@
 
         let statusBadgeHtml = '';
         if (isIngesting) {
-          statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/30 text-amber-200 border border-amber-500/40 animate-pulse flex items-center gap-1 shadow-sm">
-            <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping"></span>
-            <span>Downloading...</span>
+          statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/30 text-amber-200 border border-amber-500/40 animate-pulse flex items-center gap-1 shadow-sm max-w-full truncate">
+            <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping shrink-0"></span>
+            <span class="truncate">Downloading...</span>
           </span>`;
         } else if (inLib) {
-          statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm">
+          statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm truncate max-w-full">
             In Library (${libCount}v)
           </span>`;
         } else {
-          statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-sky-500/30 text-sky-200 border border-sky-500/40 shadow-sm">
+          statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-sky-500/30 text-sky-200 border border-sky-500/40 shadow-sm truncate max-w-full">
             Available
           </span>`;
         }
@@ -5031,13 +5041,13 @@
             <div>
               <!-- Cover Container -->
               <div class="relative w-full aspect-[2/3] rounded-xl overflow-hidden mb-2.5 bg-zinc-950 book-spine-effect cursor-pointer" onclick="openDiscoverModal('${escapeHtml(item.id)}')">
-                <img src="${item.coverUrl ? escapeHtml(item.coverUrl) : generateFallbackCoverSvg(item.title, item.author)}" alt="${escapeHtml(item.title)}" loading="lazy" decoding="async" data-title="${escapeHtml(item.title)}" data-author="${escapeHtml(item.author || '')}" onerror="this.onerror=null; this.src=generateFallbackCoverSvg(this.alt);" class="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300">
+                <img src="${item.coverUrl ? escapeHtml(item.coverUrl) : generateFallbackCoverSvg(item.title, item.author)}" alt="${escapeHtml(item.title)}" loading="lazy" decoding="async" data-title="${escapeHtml(item.title)}" data-author="${escapeHtml(item.author || '')}" onerror="this.onerror=null; this.src=generateFallbackCoverSvg(this.alt);" class="w-full h-full object-cover object-top rounded-xl bg-zinc-950 group-hover:scale-[1.03] transition-transform duration-300">
                 
-                <div class="absolute top-2 left-2 flex items-center gap-1 z-10" id="cardBadge-${escapeHtml(item.id)}">
+                <div class="absolute top-2 left-2 flex items-center gap-1 z-10 max-w-[calc(100%-16px)] pointer-events-none" id="cardBadge-${escapeHtml(item.id)}">
                   ${statusBadgeHtml}
                 </div>
 
-                <div class="absolute bottom-2 right-2 px-1.5 py-0.5 rounded-md text-[9px] font-mono font-semibold bg-black/70 text-zinc-200 backdrop-blur-md border border-white/10">
+                <div class="absolute bottom-2 right-2 px-1.5 py-0.5 rounded-md text-[9px] font-mono font-semibold bg-black/70 text-zinc-200 backdrop-blur-md border border-white/10 z-10 pointer-events-none max-w-[80%] truncate">
                   ${item.volumeCount || 1} vols
                 </div>
               </div>
@@ -5234,12 +5244,12 @@
           });
         }
         setHtml(sources, sourceEntries.map((s) => `
-          <div class="flex flex-wrap gap-2 items-center justify-between p-3 rounded-xl border ${s.color} text-xs">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl border ${s.color} text-xs">
             <div class="flex items-center gap-2 min-w-0">
               <span class="font-bold font-mono shrink-0">${escapeHtml(s.name)}</span>
               <span class="text-zinc-400 truncate">&bull; ${item.volumeCount || 1} vols available</span>
             </div>
-            <div class="flex items-center gap-2 shrink-0 ml-auto sm:ml-0">
+            <div class="flex items-center gap-2 shrink-0 self-end sm:self-auto">
               <a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" class="underline text-zinc-400 hover:text-white flex items-center gap-1 text-[11px] shrink-0">
                 <span>Browse Source</span>
               </a>
@@ -6595,7 +6605,7 @@
       } catch (err) {
         tgHaptic.error();
         status.className = 'text-xs p-3 rounded-lg border bg-rose-950/40 border-rose-800 text-rose-300';
-        setHtml(status, `<div><strong>Ingestion Failed:</strong><div class="mt-1 text-[11px] text-rose-200">${escapeHtml(err.message)}</div></div>`);
+        setHtml(status, `<div><strong>Ingestion Failed:</strong><div class="mt-1 text-[11px] text-rose-200">${escapeHtml(formatCleanErrorMessage(err.message))}</div></div>`);
       } finally {
         btn.disabled = false;
         setHtml(btn, `${svgIcon('file-arrow-down', 'w-3.5 h-3.5')} <span>Convert & Ingest</span>`);
@@ -7295,7 +7305,7 @@
             'text-xs p-3 rounded-xl border bg-rose-950/40 border-rose-800 text-rose-300';
           setHtml(
             status,
-            `<div><strong>Ingestion Failed:</strong><div class="mt-1 text-[11px] text-rose-200">${escapeHtml(err.message)}</div></div>`,
+            `<div><strong>Ingestion Failed:</strong><div class="mt-1 text-[11px] text-rose-200">${escapeHtml(formatCleanErrorMessage(err.message))}</div></div>`,
           );
         }
       } finally {
@@ -7725,7 +7735,8 @@
       const toast = document.getElementById('toastNotification');
       const icon = document.getElementById('toastIcon');
       const msgEl = document.getElementById('toastMessage');
-      msgEl.textContent = msg;
+      const cleanMsg = type === 'error' ? formatCleanErrorMessage(msg) : msg;
+      msgEl.textContent = cleanMsg;
       if (type === 'error') {
         toast.className = 'fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-rose-600 text-white px-4 py-2 rounded-xl text-xs font-bold shadow-2xl flex items-center gap-2 border border-white/20 transition-all duration-300';
         setHtml(icon, svgIcon('xmark', 'w-3.5 h-3.5 text-white'));

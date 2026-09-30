@@ -2519,7 +2519,8 @@ export async function safeFetchWithSsrf(
 }
 /**
  * Sanitizes an error to prevent leaking server filesystem paths, internal stack traces,
- * or host usernames in public HTTP responses.
+ * or host usernames in public HTTP responses. Preserves valid web URLs so they don't
+ * get mangled into https:[path] artifacts, while strictly redacting secrets and credentials.
  */
 export function sanitizeErrorMessage(err: any): string {
   if (!err) return "An unexpected error occurred";
@@ -2528,18 +2529,39 @@ export function sanitizeErrorMessage(err: any): string {
       ? err
       : err.message || "An unexpected error occurred";
 
+  // Temporarily preserve valid web URLs so they don't get shredded into https:[path]
+  const urls: string[] = [];
+  let sanitized = rawMsg.replace(/https?:\/\/[^\s"'<>]+/gi, (url: string) => {
+    // Strip user:password@ credentials from URL authority to prevent credential leaks
+    const cleanUrl = url.replace(/^(https?:\/\/)[^/@\s]+@/i, "$1");
+    urls.push(cleanUrl);
+    return `__URL_PLACEHOLDER_${urls.length - 1}__`;
+  });
+
   // Remove filesystem paths (e.g. /Users/ospeto/..., /tmp/..., C:\...)
-  let sanitized = rawMsg
+  sanitized = sanitized
     .replace(/(?:\/[a-zA-Z0-9._-]+)+/g, "[path]")
     .replace(/[a-zA-Z]:\\[a-zA-Z0-9._\-\\]+/g, "[path]")
     .replace(/at\s+.*\(.*:[0-9]+:[0-9]+\)/g, "") // Stack trace fragments
     .trim();
 
-  // Strip token/key patterns
+  // Restore preserved URLs, decoding only %20 into spaces (never full decodeURI to avoid XSS injection)
+  sanitized = sanitized.replace(/__URL_PLACEHOLDER_(\d+)__/g, (_, idx) => {
+    const rawUrl = urls[Number(idx)] || "";
+    // Only decode %20, and strip dangerous angle brackets
+    return rawUrl.replace(/%20/g, " ").replace(/[<>]/g, "");
+  });
+
+  // Strip token/key/secret/password patterns across the ENTIRE message including restored URLs
   sanitized = sanitized.replace(
-    /(token|key|secret)=[a-zA-Z0-9_-]+/gi,
+    /(token|key|secret|password|auth)=[a-zA-Z0-9_-]+/gi,
     "$1=[REDACTED]",
   );
+
+  // Clean any pre-existing mangled URL regex artifacts like https://[path]%20...
+  sanitized = sanitized
+    .replace(/https?:\/\/?\[path\](?:%20|\/|[^\s"'<>])*/gi, "remote source")
+    .replace(/%20/g, " ");
 
   if (sanitized.length > 300) {
     sanitized = sanitized.substring(0, 300) + "...";

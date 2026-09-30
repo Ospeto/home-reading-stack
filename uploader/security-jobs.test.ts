@@ -162,8 +162,8 @@ describe("Public WAN & API Surface Hardening — SSRF Protection", () => {
       expect(dynamicPortAllowed.safe).toBe(true);
       expect(dynamicPortAllowed.resolvedIp).toBe("127.0.0.1");
     } finally {
-      if (origLocalUrl !== undefined) process.env.LOCAL_UPLOADER_URL = origLocalUrl;
-      else delete process.env.LOCAL_UPLOADER_URL;
+      if (origLocalUrl === undefined) delete process.env.LOCAL_UPLOADER_URL;
+      else process.env.LOCAL_UPLOADER_URL = origLocalUrl;
     }
   });
 
@@ -827,6 +827,46 @@ describe("Public WAN & API Surface Hardening — ID, Format & Filename Sanitizat
     expect(sanitizedSecret).toContain("token=[REDACTED]");
     expect(sanitizedSecret).toContain("key=[REDACTED]");
     expect(sanitizedSecret).not.toContain("abc12345secret");
+
+    // Preserves web URLs without shredding them into https:[path]
+    const errWithUrl = new Error(
+      "Failed to download EPUB (404): https://server.elscione.com/Light-Novels/Classroom%20of%20the%20Elite/Vol%2001.epub",
+    );
+    const sanitizedUrl = sanitizeErrorMessage(errWithUrl);
+    expect(sanitizedUrl).not.toContain("[path]");
+    expect(sanitizedUrl).toContain("https://server.elscione.com/Light-Novels/Classroom of the Elite/Vol 01.epub");
+
+    // Redacts secrets, tokens, and credentials even when inside URLs
+    const errWithUrlSecret = new Error(
+      "Failed: https://api.com/v1/download?token=secret12345&key=mySecretApiKey",
+    );
+    const sanitizedUrlSecret = sanitizeErrorMessage(errWithUrlSecret);
+    expect(sanitizedUrlSecret).toContain("token=[REDACTED]");
+    expect(sanitizedUrlSecret).toContain("key=[REDACTED]");
+    expect(sanitizedUrlSecret).not.toContain("secret12345");
+    expect(sanitizedUrlSecret).not.toContain("mySecretApiKey");
+
+    // Strips user:password@ credentials from preserved URLs
+    const errWithCreds = new Error(
+      "Auth failed: https://user:secretpass@example.com/books/1",
+    );
+    const sanitizedCreds = sanitizeErrorMessage(errWithCreds);
+    expect(sanitizedCreds).not.toContain("user:secretpass@");
+    expect(sanitizedCreds).toContain("https://example.com/books/1");
+
+    // Does not decode script tags or malicious HTML into executable tags
+    const errWithXss = new Error(
+      "Failed URL: https://example.com/%3Cscript%3Ealert(1)%3C/script%3E",
+    );
+    const sanitizedXss = sanitizeErrorMessage(errWithXss);
+    expect(sanitizedXss).not.toContain("<script>");
+    expect(sanitizedXss).not.toContain("</script>");
+
+    // Cleans pre-existing mangled regex artifacts
+    const errWithMangled = "Error: https://[path]%20Mushoku%20Tensei: timeout";
+    const sanitizedMangled = sanitizeErrorMessage(errWithMangled);
+    expect(sanitizedMangled).not.toContain("[path]");
+    expect(sanitizedMangled).toContain("remote source");
   });
 
   it("validateEpubContent validates ZIP magic bytes, mimetype, and required container", () => {
@@ -1658,7 +1698,7 @@ describe("Durable Ingestion Job Queue Lifecycle & Crash Recovery", () => {
     const queue = new DurableJobQueue(testDb);
 
     let handlerResolve: (value: any) => void;
-    let handlerPromise = new Promise((resolve) => {
+    const handlerPromise = new Promise((resolve) => {
       handlerResolve = resolve;
     });
 
@@ -1785,8 +1825,8 @@ describe("Server Integration Endpoints & Hardened API Surface", () => {
       expect(data.success).toBe(false);
       expect(data.error).toContain("Authentication required");
     } finally {
-      if (origKey !== undefined) process.env.READING_API_KEY = origKey;
-      else delete process.env.READING_API_KEY;
+      if (origKey === undefined) delete process.env.READING_API_KEY;
+      else process.env.READING_API_KEY = origKey;
     }
   });
 
