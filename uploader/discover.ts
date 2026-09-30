@@ -243,6 +243,8 @@ export const KNOWN_TITLE_CANONICAL_MAP: Record<string, string> = {
   "goblin slayer": "goblin slayer",
   "rezero": "rezero",
   "rezero starting life in another world": "rezero",
+  "re zero": "rezero",
+  "re zero starting life in another world": "rezero",
   "danmachi": "danmachi",
   "is it wrong to try to pick up girls in a dungeon": "danmachi",
   "86": "86",
@@ -397,8 +399,12 @@ export function canonicalTitleKey(title: string): string {
     return KNOWN_TITLE_CANONICAL_MAP[norm];
   }
   for (const [alias, canonical] of Object.entries(KNOWN_TITLE_CANONICAL_MAP)) {
-    if (alias.length >= 6 && (norm.startsWith(alias) || alias.startsWith(norm))) {
-      return canonical;
+    if (alias.length >= 6 && norm.length >= 6) {
+      const minLen = Math.min(norm.length, alias.length);
+      const maxLen = Math.max(norm.length, alias.length);
+      if (minLen / maxLen >= 0.7 && (norm.startsWith(alias) || alias.startsWith(norm))) {
+        return canonical;
+      }
     }
   }
   return norm;
