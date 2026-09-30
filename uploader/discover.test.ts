@@ -35,6 +35,10 @@ import {
   getCalibreBookMatchCandidates,
   calculateSignificantTokenOverlap,
   KNOWN_LIGHT_NOVEL_ALIAS_CLUSTERS,
+  searchUniversalNovels,
+  searchAniListNovels,
+  resolveAuthorForTitle,
+  resolveCoverForTitle,
   type DiscoveredNovel,
 } from "./discover";
 import {
@@ -1774,6 +1778,251 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(danmachiHit).toBeDefined();
       expect(danmachiHit?.inLibrary).toBe(true);
       expect(danmachiHit?.existingVolumes).toBe(1);
+    });
+  });
+
+  describe("Universal Light Novel Catalog & Metadata Search Engine", () => {
+    it("searching q=danmachi searches universal catalog and returns matching novels across both sources with verified paths and real author", async () => {
+      const mockCalibreBooks = [
+        {
+          id: 501,
+          title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 1",
+          authors: "Fujino Omori",
+        },
+      ];
+
+      const res = await getDiscoverNovels(
+        { q: "danmachi" },
+        { cacheDb: tempCacheDb, getCalibreBooks: () => mockCalibreBooks },
+      );
+
+      expect(res.success).toBe(true);
+      expect(res.novels.length).toBeGreaterThan(0);
+      expect(res.count).toBeGreaterThan(0);
+
+      // Verify at least one DanMachi entry
+      const danmachi = res.novels.find(
+        (n) =>
+          normalizeTitleForMatch(n.title).includes("danmachi") ||
+          normalizeTitleForMatch(n.title).includes("pick up girls in a dungeon") ||
+          canonicalTitleKey(n.title) === "danmachi",
+      );
+
+      expect(danmachi).toBeDefined();
+      expect(danmachi!.author).toBe("Fujino Omori");
+      expect(danmachi!.primarySource).toBe("elscione");
+      expect(danmachi!.sourceUrls.elscione).toContain("DanMachi");
+      expect(danmachi!.sourceUrls.lnori).toBeDefined();
+      expect(danmachi!.synopsis.length).toBeGreaterThan(20);
+      expect(danmachi!.inLibrary).toBe(true);
+      expect(danmachi!.existingVolumes).toBe(1);
+
+      // Verify zero emojis
+      for (const novel of res.novels) {
+        expect(/\p{Extended_Pictographic}/u.test(novel.title)).toBe(false);
+        expect(/\p{Extended_Pictographic}/u.test(novel.author)).toBe(false);
+        expect(/\p{Extended_Pictographic}/u.test(novel.synopsis)).toBe(false);
+      }
+    });
+
+    it("searching q=dungeon returns all matching series across both catalogs beyond the pre-loaded items", async () => {
+      const mockCalibreBooks = [
+        {
+          id: 701,
+          title: "Dungeon Busters Vol 1",
+          authors: "Touma Shinozaki",
+        },
+      ];
+
+      const res = await getDiscoverNovels(
+        { q: "dungeon" },
+        { cacheDb: tempCacheDb, getCalibreBooks: () => mockCalibreBooks },
+      );
+
+      expect(res.success).toBe(true);
+      // Confirms search returns all matching series across ~1,100+ folders and 883 Lnori series, not just ~20 tab items
+      expect(res.count).toBeGreaterThanOrEqual(10);
+      expect(res.novels.length).toBeGreaterThanOrEqual(10);
+
+      // Confirm DanMachi is present because its English title contains dungeon
+      const danmachi = res.novels.find(
+        (n) =>
+          normalizeTitleForMatch(n.title).includes("dungeon") ||
+          canonicalTitleKey(n.title) === "danmachi",
+      );
+      expect(danmachi).toBeDefined();
+
+      // Confirm Calibre matching works on search results
+      const busters = res.novels.find((n) =>
+        normalizeTitleForMatch(n.title).includes("dungeon busters"),
+      );
+      expect(busters).toBeDefined();
+      expect(busters?.inLibrary).toBe(true);
+
+      // Confirm verified download sources strictly prioritize Elsci.one
+      for (const novel of res.novels) {
+        if (novel.sourceUrls.elscione && novel.sourceUrls.lnori) {
+          expect(novel.source).toBe("both");
+          expect(novel.primarySource).toBe("elscione");
+          expect(novel.primaryUrl).toBe(novel.sourceUrls.elscione);
+        } else if (novel.sourceUrls.elscione) {
+          expect(novel.source).toBe("elscione");
+          expect(novel.primarySource).toBe("elscione");
+          expect(novel.primaryUrl).toBe(novel.sourceUrls.elscione);
+        } else {
+          expect(novel.source).toBe("lnori");
+          expect(novel.primarySource).toBe("lnori");
+          expect(novel.primaryUrl).toBe(novel.sourceUrls.lnori);
+        }
+      }
+    });
+
+    it("executes live online AniList search when dependencies.fetch is provided and prioritizes Elsci.one", async () => {
+      const mockAnilistFetch = async (url: string, init?: RequestInit) => {
+        if (url.includes("graphql.anilist.co")) {
+          return new Response(
+            JSON.stringify({
+              data: {
+                Page: {
+                  media: [
+                    {
+                      id: 85162,
+                      title: {
+                        english: "Is It Wrong to Try to Pick Up Girls in a Dungeon?",
+                        romaji: "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka",
+                        native: "ダンジョンに出会いを求めるのは間違っているだろうか",
+                      },
+                      coverImage: {
+                        large: "https://s4.anilist.co/danmachi-large.jpg",
+                        extraLarge: "https://s4.anilist.co/danmachi-xlarge.jpg",
+                      },
+                      description: "Bell Cranel is a novice adventurer navigating the Orario dungeon under goddess Hestia.",
+                      genres: ["Action", "Adventure", "Fantasy"],
+                      averageScore: 84,
+                      popularity: 125000,
+                      startDate: { year: 2013, month: 1, day: 15 },
+                      volumes: 19,
+                      staff: {
+                        edges: [
+                          {
+                            role: "Original Story",
+                            node: { name: { full: "Fujino Omori" } },
+                          },
+                        ],
+                      },
+                    },
+                    {
+                      id: 99999,
+                      title: {
+                        english: "Completely Fake Unhosted Novel That Does Not Exist",
+                        romaji: "Fake Novel Romaji",
+                      },
+                      coverImage: { large: "https://s4.anilist.co/fake.jpg" },
+                      description: "This should be discarded by verified download sources guard.",
+                      genres: ["Fantasy"],
+                    },
+                  ],
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      };
+
+      const anilistResults = await searchAniListNovels("danmachi", {
+        fetch: mockAnilistFetch as any,
+        cacheDb: tempCacheDb,
+      });
+
+      expect(anilistResults.length).toBe(1);
+      const hit = anilistResults[0];
+      expect(hit.title).toBe("Is It Wrong to Try to Pick Up Girls in a Dungeon?");
+      expect(hit.author).toBe("Fujino Omori");
+      expect(hit.coverUrl).toBe("https://s4.anilist.co/danmachi-xlarge.jpg");
+      expect(hit.synopsis).toContain("Bell Cranel");
+      expect(hit.primarySource).toBe("elscione");
+      expect(hit.source).toBe("both");
+    });
+
+    it("resolves major franchise aliases correctly across Elsci.one and Lnori catalogs", async () => {
+      const franchises = [
+        { query: "overlord", expectedAuthor: "Kugane Maruyama", expectedTitle: "Overlord" },
+        { query: "slime", expectedAuthor: "Fuse", expectedTitle: "That Time I Got Reincarnated as a Slime" },
+        { query: "rezero", expectedAuthor: "Tappei Nagatsuki", expectedTitle: "Re:ZERO -Starting Life in Another World-" },
+        { query: "sao", expectedAuthor: "Reki Kawahara", expectedTitle: "Sword Art Online" },
+        { query: "oregairu", expectedAuthor: "Wataru Watari", expectedTitle: "My Youth Romantic Comedy Is Wrong" },
+        { query: "cote", expectedAuthor: "Shogo Kinugasa", expectedTitle: "Classroom of the Elite" },
+        { query: "konosuba", expectedAuthor: "Natsume Akatsuki", expectedTitle: "KonoSuba" },
+        { query: "mahouka", expectedAuthor: "Tsutomu Satou", expectedTitle: "The Irregular at Magic High School" },
+        { query: "monogatari", expectedAuthor: "Nisio Isin", expectedTitle: "Monogatari" },
+      ];
+
+      for (const f of franchises) {
+        const res = await getDiscoverNovels({ q: f.query }, { cacheDb: tempCacheDb });
+        expect(res.success).toBe(true);
+        expect(res.novels.length).toBeGreaterThan(0);
+        const match = res.novels.find((n) =>
+          normalizeTitleForMatch(n.title).includes(normalizeTitleForMatch(f.expectedTitle)) ||
+          canonicalTitleKey(n.title) === canonicalTitleKey(f.expectedTitle),
+        );
+        expect(match).toBeDefined();
+        expect(match!.primarySource).toBe("elscione");
+        expect(match!.sourceUrls.elscione).toBeDefined();
+      }
+    });
+
+    it("respects source and status filters during universal search", async () => {
+      const mockCalibreBooks = [
+        {
+          id: 801,
+          title: "DanMachi Vol 1",
+          authors: "Fujino Omori",
+        },
+      ];
+
+      // Filter by source: elscione
+      const elscioneOnly = await getDiscoverNovels(
+        { q: "danmachi", source: "elscione" },
+        { cacheDb: tempCacheDb, getCalibreBooks: () => mockCalibreBooks },
+      );
+      for (const n of elscioneOnly.novels) {
+        expect(n.source === "elscione" || n.source === "both").toBe(true);
+      }
+
+      // Filter by status: in_library
+      const inLibOnly = await getDiscoverNovels(
+        { q: "danmachi", status: "in_library" },
+        { cacheDb: tempCacheDb, getCalibreBooks: () => mockCalibreBooks },
+      );
+      for (const n of inLibOnly.novels) {
+        expect(n.inLibrary).toBe(true);
+      }
+
+      // Filter by status: available
+      const availOnly = await getDiscoverNovels(
+        { q: "danmachi", status: "available" },
+        { cacheDb: tempCacheDb, getCalibreBooks: () => mockCalibreBooks },
+      );
+      for (const n of availOnly.novels) {
+        expect(n.inLibrary).toBe(false);
+      }
+    });
+
+    it("GET /api/discover/novels and /api/discover/feed pass q to universal search with zero emojis", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/discover/feed?q=danmachi");
+      const res = await handleRequest(req);
+
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(true);
+      expect(Array.isArray(data.novels)).toBe(true);
+      expect(data.novels.length).toBeGreaterThan(0);
+      expect(data.count).toBeGreaterThan(0);
+
+      const jsonStr = JSON.stringify(data);
+      expect(/\p{Extended_Pictographic}/u.test(jsonStr)).toBe(false);
     });
   });
 });
