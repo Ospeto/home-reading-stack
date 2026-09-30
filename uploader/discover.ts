@@ -76,6 +76,7 @@ export interface DiscoverDependencies {
   fallbackQuery?: (title: string, novel: DiscoveredNovel) => Promise<string | null> | string | null;
   customElscioneFolders?: string[];
   customLnoriSeries?: Array<{ id: number; slug: string }>;
+  skipCrossCheck?: boolean;
 }
 
 const DISCOVER_CACHE_TTL_MS = 60 * 60 * 1000; // 1-hour TTL
@@ -2461,18 +2462,125 @@ export function crossCheckNovelsWithCalibre(
     }
   }
 
+  if (calibreBooks.length === 0) {
+    return novels.map((novel) => ({
+      ...novel,
+      volumeCount: novel.volumeCount || 1,
+      inLibrary: false,
+      existingVolumes: 0,
+    }));
+  }
+
   // Preprocess Calibre books for fast indexed matching
-  const processedCalibreBooks = calibreBooks.map((b) => ({
+  interface ProcessedCalibreBook {
+    book: any;
+    candidates: Set<string>;
+    tokensList: string[][];
+  }
+
+  const processedCalibreBooks: ProcessedCalibreBook[] = calibreBooks.map((b) => ({
     book: b,
     ...getCalibreBookMatchCandidates(b),
   }));
 
+  // Build multi-tier inverted indices over Calibre books:
+  // 1. exactCandidateMap: instant O(1) lookup for direct candidate equality
+  // 2. prefixMap: prefix buckets (length >= 6) for prefix matching
+  // 3. tokenMap: significant token buckets for token overlap & containment
+  // 4. stopWordOnlyBooks: books whose candidates contain zero significant tokens
+  const exactCandidateMap = new Map<string, ProcessedCalibreBook[]>();
+  const prefixMap = new Map<string, ProcessedCalibreBook[]>();
+  const tokenMap = new Map<string, ProcessedCalibreBook[]>();
+  const stopWordOnlyBooks: ProcessedCalibreBook[] = [];
+
+  for (const b of processedCalibreBooks) {
+    let hasContainmentStopWordCandidate = false;
+    for (const c of b.candidates) {
+      // 1. Direct candidate equality map
+      let exactList = exactCandidateMap.get(c);
+      if (!exactList) {
+        exactList = [];
+        exactCandidateMap.set(c, exactList);
+      }
+      exactList.push(b);
+
+      // 2. Prefix map (c.length >= 6)
+      if (c.length >= 6) {
+        const p = c.slice(0, 6);
+        let pList = prefixMap.get(p);
+        if (!pList) {
+          pList = [];
+          prefixMap.set(p, pList);
+        }
+        pList.push(b);
+      }
+
+      // 3. Significant tokens map
+      const tokens = getSignificantTokens(c);
+      if (tokens.length > 0) {
+        for (const t of tokens) {
+          let tList = tokenMap.get(t);
+          if (!tList) {
+            tList = [];
+            tokenMap.set(t, tList);
+          }
+          tList.push(b);
+        }
+      } else if (c.length >= 8 && c.split(" ").length >= 2) {
+        hasContainmentStopWordCandidate = true;
+      }
+    }
+
+    if (hasContainmentStopWordCandidate) {
+      stopWordOnlyBooks.push(b);
+    }
+  }
+
   return novels.map((novel) => {
     const { candidates: nCandidates, tokensList: nTokensList } = getNovelMatchCandidates(novel);
 
+    // Collect plausible matching candidate books via inverted indices
+    const candidateSet = new Set<ProcessedCalibreBook>();
+    let checkAllBooks = false;
+
+    for (const b of stopWordOnlyBooks) {
+      candidateSet.add(b);
+    }
+
+    for (const n of nCandidates) {
+      // 1. Direct candidate equality candidates
+      const exactList = exactCandidateMap.get(n);
+      if (exactList) {
+        for (const b of exactList) candidateSet.add(b);
+      }
+
+      // 2. Prefix candidates (length >= 6)
+      if (n.length >= 6) {
+        const p = n.slice(0, 6);
+        const pList = prefixMap.get(p);
+        if (pList) {
+          for (const b of pList) candidateSet.add(b);
+        }
+      }
+
+      // 3. Significant token candidates
+      const nSigTokens = getSignificantTokens(n);
+      if (nSigTokens.length === 0 && n.length >= 8 && n.split(" ").length >= 2) {
+        // Safe fail-open for novel candidate composed entirely of stop words
+        checkAllBooks = true;
+      }
+      for (const t of nSigTokens) {
+        const tList = tokenMap.get(t);
+        if (tList) {
+          for (const b of tList) candidateSet.add(b);
+        }
+      }
+    }
+
+    const booksToEvaluate = checkAllBooks ? processedCalibreBooks : Array.from(candidateSet);
     let matchCount = 0;
 
-    for (const b of processedCalibreBooks) {
+    for (const b of booksToEvaluate) {
       let isMatch = false;
 
       // 1. Direct candidate equality (O(1) Set lookup with spinoff mismatch protection)
@@ -2749,6 +2857,7 @@ export async function fetchDiscoverFeed(
   const cached = getCachedFeed(cacheKey, dependencies);
   if (cached && cached.length > 0) {
     const verified = await ensureAllNovelsHaveSynopses(cached, dependencies);
+    if (dependencies?.skipCrossCheck) return verified;
     return crossCheckNovelsWithCalibre(verified, dependencies);
   }
 
@@ -2757,6 +2866,7 @@ export async function fetchDiscoverFeed(
     let allNovels = await buildCompleteCatalogNovels(dependencies);
     allNovels = await ensureAllNovelsHaveSynopses(allNovels, dependencies);
     setCachedFeed(cacheKey, allNovels, dependencies);
+    if (dependencies?.skipCrossCheck) return allNovels;
     return crossCheckNovelsWithCalibre(allNovels, dependencies);
   }
 
@@ -2789,7 +2899,10 @@ export async function fetchDiscoverFeed(
   // - Deduplicate within feed
   // - Ensure New Releases does not contain titles already present in Trending
   if (tab === "new") {
-    const trendingNovels = await fetchDiscoverFeed("trending", dependencies);
+    const trendingNovels = await fetchDiscoverFeed("trending", {
+      ...dependencies,
+      skipCrossCheck: true,
+    });
     const trendingTitleKeys = new Set<string>();
     for (const t of trendingNovels) {
       trendingTitleKeys.add(normalizeTitleForMatch(t.title));
@@ -2847,6 +2960,7 @@ export async function fetchDiscoverFeed(
   setCachedFeed(cacheKey, freshNovels, dependencies);
 
   // 4. Cross-check against Calibre
+  if (dependencies?.skipCrossCheck) return freshNovels;
   return crossCheckNovelsWithCalibre(freshNovels, dependencies);
 }
 
@@ -3749,6 +3863,7 @@ export async function searchUniversalNovels(
   const novelsWithSynopses = await ensureAllNovelsHaveSynopses(results, dependencies);
 
   // 6. Cross-check against Calibre
+  if (dependencies?.skipCrossCheck) return novelsWithSynopses;
   return crossCheckNovelsWithCalibre(novelsWithSynopses, dependencies);
 }
 
@@ -3775,12 +3890,21 @@ export async function getDiscoverNovels(
   const page = Math.max(1, params.page || 1);
   const pageSize = Math.max(1, Math.min(100, params.pageSize || 36));
 
-  // 1. Fetch novels: Universal search across all catalogs if q is provided, otherwise active tab feed
+  const needsFullCrossCheck = statusFilter === "available" || statusFilter === "in_library";
+
+  // 1. Fetch novels: Universal search across all catalogs if q is provided, otherwise active tab feed.
+  // Always skip full-catalog cross-checking during initial fetch to eliminate redundant double-reconciliation
+  // and ensure instant feed retrieval across all status filter modes.
+  const fetchDeps: DiscoverDependencies = {
+    ...dependencies,
+    skipCrossCheck: true,
+  };
+
   let allNovels: DiscoveredNovel[];
   if (searchQuery) {
-    allNovels = await searchUniversalNovels(searchQuery, dependencies);
+    allNovels = await searchUniversalNovels(searchQuery, fetchDeps);
   } else {
-    allNovels = await fetchDiscoverFeed(tab, dependencies);
+    allNovels = await fetchDiscoverFeed(tab, fetchDeps);
   }
 
   // 2. Extract unique available genres from this feed
@@ -3826,10 +3950,14 @@ export async function getDiscoverNovels(
   }
 
   // 5. Filter by library status (all | available | in_library)
-  if (statusFilter === "available") {
-    filtered = filtered.filter((n) => !n.inLibrary);
-  } else if (statusFilter === "in_library") {
-    filtered = filtered.filter((n) => n.inLibrary);
+  if (needsFullCrossCheck) {
+    // If not already cross-checked, run inverted-index cross-check over the filtered candidate set
+    filtered = crossCheckNovelsWithCalibre(filtered, dependencies);
+    if (statusFilter === "available") {
+      filtered = filtered.filter((n) => !n.inLibrary);
+    } else if (statusFilter === "in_library") {
+      filtered = filtered.filter((n) => n.inLibrary);
+    }
   }
 
   // 6. Sort
@@ -3888,10 +4016,15 @@ export async function getDiscoverNovels(
   const startIndex = (clampedPage - 1) * pageSize;
   const paginatedNovels = filtered.slice(startIndex, startIndex + pageSize);
 
+  // 8. Reconcile with Calibre for page if unconstrained view (statusFilter === "all")
+  const finalNovels = needsFullCrossCheck
+    ? paginatedNovels
+    : crossCheckNovelsWithCalibre(paginatedNovels, dependencies);
+
   return {
     success: true,
     tab,
-    novels: paginatedNovels,
+    novels: finalNovels,
     count: totalCount,
     genres: availableGenres,
     sources: ["all", "lnori", "elscione"],
