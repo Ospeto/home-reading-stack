@@ -1,9 +1,8 @@
 import fs from "node:fs";
-import path from "node:path";
 import process from "node:process";
 import { Database } from "bun:sqlite";
-import { safeFetchWithSsrf, sanitizeErrorMessage } from "./security";
-import { getCalibreDbPath, isLnoriUrl, parseLnoriUrl } from "./lnori";
+import { safeFetchWithSsrf } from "./security";
+import { getCalibreDbPath, isLnoriUrl } from "./lnori";
 import { isElscioneUrl, parseElscioneUrl } from "./elscione";
 import { searchRanobeDB, searchAniList } from "./scraper";
 import discoverCatalog from "./discover-catalog.json";
@@ -122,8 +121,9 @@ export const KNOWN_TITLE_TO_ELSCIONE: Record<string, string> = {
   "86": "86",
   "86 eighty six": "86",
   "86eightysix": "86",
-  "the irregular at magic high school": "Mahouka Koukou no Rettousei",
-  "mahouka koukou no rettousei": "Mahouka Koukou no Rettousei",
+  "the irregular at magic high school": "The Irregular at Magic High School",
+  "mahouka koukou no rettousei": "The Irregular at Magic High School",
+  "mahouka": "The Irregular at Magic High School",
   "rascal does not dream": "Rascal Does Not Dream",
   "rascal does not dream of bunny girl senpai": "Rascal Does Not Dream",
   "haibaras teenage new game": "Haibara's Teenage New Game+",
@@ -146,6 +146,7 @@ export const KNOWN_TITLE_TO_ELSCIONE: Record<string, string> = {
   "a certain magical index": "A Certain Magical Index",
   "toaru majutsu no index": "A Certain Magical Index",
   "sword art online": "Sword Art Online",
+  "sao": "Sword Art Online",
   "no game no life": "No Game No Life",
   "spice and wolf": "Spice and Wolf",
   "spice wolf": "Spice and Wolf",
@@ -165,10 +166,19 @@ export const KNOWN_TITLE_TO_ELSCIONE: Record<string, string> = {
   "kage no jitsuryokusha ni naritakute": "The Eminence in Shadow",
   "ascendance of a bookworm": "Ascendance of a Bookworm",
   "classroom of the elite": "Classroom of the Elite",
+  "cote": "Classroom of the Elite",
   "mushoku tensei": "Mushoku Tensei",
   "mushoku tensei jobless reincarnation": "Mushoku Tensei",
   "overlord": "Overlord",
   "that time i got reincarnated as a slime": "That Time I Got Reincarnated as a Slime",
+  "slime": "That Time I Got Reincarnated as a Slime",
+  "tensura": "That Time I Got Reincarnated as a Slime",
+  "oregairu": "My Youth Romantic Comedy is Wrong",
+  "my youth romantic comedy is wrong": "My Youth Romantic Comedy is Wrong",
+  "my youth romantic comedy is wrong as i expected": "My Youth Romantic Comedy is Wrong",
+  "monogatari": "Monogatari Series",
+  "bakemonogatari": "Monogatari Series",
+  "monogatari series": "Monogatari Series",
   "grimgar of fantasy and ash": "Grimgar of Fantasy and Ash",
 };
 
@@ -228,6 +238,17 @@ export const KNOWN_TITLE_TO_LNORI: Record<string, { id: number; slug: string }> 
   "mushoku tensei jobless reincarnation": { id: 3336, slug: "mushoku-tensei-jobless-reincarnation" },
   "overlord": { id: 2405, slug: "overlord" },
   "that time i got reincarnated as a slime": { id: 3580, slug: "that-time-i-got-reincarnated-as-a-slime" },
+  "slime": { id: 3580, slug: "that-time-i-got-reincarnated-as-a-slime" },
+  "tensura": { id: 3580, slug: "that-time-i-got-reincarnated-as-a-slime" },
+  "oregairu": { id: 1844, slug: "my-youth-romantic-comedy-is-wrong-as-i-expected" },
+  "my youth romantic comedy is wrong": { id: 1844, slug: "my-youth-romantic-comedy-is-wrong-as-i-expected" },
+  "my youth romantic comedy is wrong as i expected": { id: 1844, slug: "my-youth-romantic-comedy-is-wrong-as-i-expected" },
+  "cote": { id: 4557, slug: "classroom-of-the-elite" },
+  "sao": { id: 1234, slug: "sword-art-online" },
+  "mahouka": { id: 1941, slug: "the-irregular-at-magic-high-school" },
+  "monogatari": { id: 1014, slug: "monogatari" },
+  "bakemonogatari": { id: 1014, slug: "monogatari" },
+  "monogatari series": { id: 1014, slug: "monogatari" },
   "grimgar of fantasy and ash": { id: 2873, slug: "grimgar-of-fantasy-and-ash" },
 };
 
@@ -251,10 +272,19 @@ export const KNOWN_TITLE_CANONICAL_MAP: Record<string, string> = {
   "86 eighty six": "86",
   "86eightysix": "86",
   "classroom of the elite": "classroom of the elite",
+  "cote": "classroom of the elite",
   "mushoku tensei": "mushoku tensei",
   "mushoku tensei jobless reincarnation": "mushoku tensei",
   "overlord": "overlord",
   "that time i got reincarnated as a slime": "that time i got reincarnated as a slime",
+  "slime": "that time i got reincarnated as a slime",
+  "tensura": "that time i got reincarnated as a slime",
+  "oregairu": "oregairu",
+  "my youth romantic comedy is wrong": "oregairu",
+  "my youth romantic comedy is wrong as i expected": "oregairu",
+  "the irregular at magic high school": "mahouka",
+  "mahouka koukou no rettousei": "mahouka",
+  "mahouka": "mahouka",
   "the angel next door spoils me rotten": "the angel next door spoils me rotten",
   "the apothecary diaries": "the apothecary diaries",
   "the eminence in shadow": "the eminence in shadow",
@@ -278,6 +308,10 @@ export const KNOWN_TITLE_CANONICAL_MAP: Record<string, string> = {
   "a certain magical index": "a certain magical index",
   "toaru majutsu no index": "a certain magical index",
   "sword art online": "sword art online",
+  "sao": "sword art online",
+  "monogatari": "monogatari",
+  "bakemonogatari": "monogatari",
+  "monogatari series": "monogatari",
   "no game no life": "no game no life",
   "toradora": "toradora",
   "konosuba": "konosuba",
@@ -345,17 +379,31 @@ export const KNOWN_TITLE_TO_AUTHOR: Record<string, string> = {
   "kagerou daze": "Jin",
   "the irregular at magic high school": "Tsutomu Sato",
   "mahouka koukou no rettousei": "Tsutomu Sato",
+  "mahouka": "Tsutomu Sato",
   "rascal does not dream": "Hajime Kamoshida",
   "rascal does not dream of bunny girl senpai": "Hajime Kamoshida",
+  "oregairu": "Wataru Watari",
+  "my youth romantic comedy is wrong": "Wataru Watari",
+  "my youth romantic comedy is wrong as i expected": "Wataru Watari",
+  "slime": "Fuse",
+  "tensura": "Fuse",
+  "sao": "Reki Kawahara",
+  "cote": "Shogo Kinugasa",
+  "monogatari series": "Nisio Isin",
+  "re zero": "Tappei Nagatsuki",
+  "re zero starting life in another world": "Tappei Nagatsuki",
 };
 
 export const KNOWN_TITLE_TO_COVER: Record<string, string> = {
   "ascendance of a bookworm": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx110800-buaDMQpwzfds.jpg",
   "classroom of the elite": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx94970-q77X5sfRIKvU.jpg",
+  "cote": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx94970-q77X5sfRIKvU.jpg",
   "mushoku tensei": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/nx85470-jt6BF9tDWB2X.jpg",
   "mushoku tensei jobless reincarnation": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/nx85470-jt6BF9tDWB2X.jpg",
   "overlord": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx85976-hVr99G1kD1M5.png",
   "that time i got reincarnated as a slime": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx86355-pGwmLqVTwwE4.jpg",
+  "slime": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx86355-pGwmLqVTwwE4.jpg",
+  "tensura": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx86355-pGwmLqVTwwE4.jpg",
   "the angel next door spoils me rotten": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx113533-u3D4i0jHzt2z.jpg",
   "86": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx98610-TIf7R1gkU0vc.jpg",
   "86 eighty six": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx98610-TIf7R1gkU0vc.jpg",
@@ -369,6 +417,8 @@ export const KNOWN_TITLE_TO_COVER: Record<string, string> = {
   "rezero starting life in another world": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx85737-WkWOr5EgwPyo.jpg",
   "a certain magical index": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx42854-IOa3uoHblsCB.png",
   "monogatari": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx44893-aV0XRP0OfWf7.jpg",
+  "monogatari series": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx44893-aV0XRP0OfWf7.jpg",
+  "bakemonogatari": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx44893-aV0XRP0OfWf7.jpg",
   "a cave kings road to paradise": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx119518-W0uUHej9hS3h.jpg",
   "spice and wolf": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx39115-2uLgBuM30i1b.jpg",
   "spice wolf": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx39115-2uLgBuM30i1b.jpg",
@@ -390,6 +440,16 @@ export const KNOWN_TITLE_TO_COVER: Record<string, string> = {
   "im the evil lord of an intergalactic empire": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx133484-bWRiNkdBrnuv.jpg",
   "the vexations of a shut in vampire princess": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx119283-iuhI6oQSEuSS.jpg",
   "a contract marriage with the maid": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx124522-yceI38rJDLl9.jpg",
+  "oregairu": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx67015-ZqYjE19XkL8L.jpg",
+  "my youth romantic comedy is wrong": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx67015-ZqYjE19XkL8L.jpg",
+  "my youth romantic comedy is wrong as i expected": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx67015-ZqYjE19XkL8L.jpg",
+  "mahouka": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx41490-v85t5sFpX7F3.jpg",
+  "mahouka koukou no rettousei": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx41490-v85t5sFpX7F3.jpg",
+  "the irregular at magic high school": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx41490-v85t5sFpX7F3.jpg",
+  "sao": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx32143-oWmsvO0P8kS2.jpg",
+  "sword art online": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx32143-oWmsvO0P8kS2.jpg",
+  "konosuba": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx86238-XbE1r2x0tF11.jpg",
+  "konosuba gods blessing on this wonderful world": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx86238-XbE1r2x0tF11.jpg",
 };
 
 export function canonicalTitleKey(title: string): string {
@@ -1556,7 +1616,9 @@ export const KNOWN_SERIES_SYNOPSES: Record<string, string> = {
 /**
  * Searches the local series catalog and seed catalogue for a known synopsis.
  */
-export function findKnownSeriesSynopsis(novel: DiscoveredNovel): string | null {
+export function findKnownSeriesSynopsis(
+  novel: { title: string; titleRomaji?: string; titleNative?: string; id?: string; [key: string]: unknown },
+): string | null {
   const candidates = [
     novel.title,
     novel.titleRomaji,
@@ -1843,18 +1905,21 @@ export const KNOWN_LIGHT_NOVEL_ALIAS_CLUSTERS: string[][] = [
     "is it wrong to try to pick up girls in a dungeon",
     "is it wrong to try to pick up girls in a dungeon on the side sword oratoria",
     "dungeon ni deai wo motomeru no wa machigatteiru darou ka",
+    "danmachi sword oratoria",
+    "danmachi familia chronicle",
+    "danmachi minor myths and legends",
   ],
   // Re:Zero
   [
     "rezero",
     "re zero",
-    "starting life in another world",
     "re zero starting life in another world",
     "re zero kara hajimeru isekai seikatsu",
   ],
   // Oregairu
   [
     "oregairu",
+    "my youth romantic comedy is wrong",
     "my youth romantic comedy is wrong as i expected",
     "my teen romantic comedy is in reverse as i expected",
     "my teen romantic comedy is wrong as i expected",
@@ -1901,6 +1966,7 @@ export const KNOWN_LIGHT_NOVEL_ALIAS_CLUSTERS: string[][] = [
   [
     "monogatari",
     "bakemonogatari",
+    "monogatari series",
     "monster tale",
   ],
 ];
@@ -2513,6 +2579,527 @@ async function fetchOnlineFeedWithFallback(
 }
 
 /**
+ * Resolves real author for title using exact match, franchise prefix match, or seeds.
+ */
+export function resolveAuthorForTitle(
+  title: string,
+  romaji?: string,
+  seeds?: DiscoveredNovel[],
+): string {
+  const candidates = [title, romaji].filter(Boolean) as string[];
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    if (KNOWN_TITLE_TO_AUTHOR[norm]) return KNOWN_TITLE_TO_AUTHOR[norm];
+  }
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    for (const [k, author] of Object.entries(KNOWN_TITLE_TO_AUTHOR)) {
+      if (k.length >= 4 && (norm.startsWith(k) || norm.includes(k))) {
+        return author;
+      }
+    }
+  }
+  if (seeds && seeds.length > 0) {
+    for (const c of candidates) {
+      const norm = normalizeTitleForMatch(c);
+      const seedMatch = seeds.find((s) => {
+        const sNorm = normalizeTitleForMatch(s.title);
+        const sRom = s.titleRomaji ? normalizeTitleForMatch(s.titleRomaji) : "";
+        return sNorm === norm || sRom === norm || (norm.length >= 6 && sNorm.includes(norm));
+      });
+      if (seedMatch && seedMatch.author && seedMatch.author !== "Light Novel Author") {
+        return seedMatch.author;
+      }
+    }
+  }
+  return "Light Novel Author";
+}
+
+/**
+ * Resolves cover art for title using exact match, franchise prefix match, or seeds.
+ */
+export function resolveCoverForTitle(
+  title: string,
+  romaji?: string,
+  seeds?: DiscoveredNovel[],
+): string {
+  const candidates = [title, romaji].filter(Boolean) as string[];
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    if (KNOWN_TITLE_TO_COVER[norm]) return KNOWN_TITLE_TO_COVER[norm];
+  }
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    for (const [k, cover] of Object.entries(KNOWN_TITLE_TO_COVER)) {
+      if (k.length >= 4 && (norm.startsWith(k) || norm.includes(k))) {
+        return cover;
+      }
+    }
+  }
+  if (seeds && seeds.length > 0) {
+    for (const c of candidates) {
+      const norm = normalizeTitleForMatch(c);
+      const seedMatch = seeds.find((s) => {
+        const sNorm = normalizeTitleForMatch(s.title);
+        const sRom = s.titleRomaji ? normalizeTitleForMatch(s.titleRomaji) : "";
+        return sNorm === norm || sRom === norm || (norm.length >= 6 && sNorm.includes(norm));
+      });
+      if (seedMatch && seedMatch.coverUrl) {
+        return seedMatch.coverUrl;
+      }
+    }
+  }
+  return "";
+}
+
+/**
+ * Executes live online AniList search across light novels.
+ */
+export async function searchAniListNovels(
+  searchQuery: string,
+  dependencies?: DiscoverDependencies,
+): Promise<DiscoveredNovel[]> {
+  const isTestEnv =
+    process.env.NODE_ENV === "test" ||
+    typeof (globalThis as any).it === "function";
+
+  const allowOnline =
+    Boolean(dependencies?.fetch) ||
+    (dependencies?.enableOnline ?? !isTestEnv);
+
+  if (!allowOnline) {
+    return [];
+  }
+
+  const fetcher = dependencies?.fetch ?? safeFetchWithSsrf;
+  const timeoutMs = dependencies?.onlineTimeoutMs ?? 5000;
+
+  const query = `
+    query ($search: String) {
+      Page(page: 1, perPage: 25) {
+        media(type: MANGA, format_in: [NOVEL], search: $search) {
+          id
+          title {
+            english
+            romaji
+            native
+          }
+          coverImage {
+            large
+            extraLarge
+          }
+          description(asHtml: false)
+          genres
+          averageScore
+          popularity
+          startDate {
+            year
+            month
+            day
+          }
+          volumes
+          staff {
+            edges {
+              role
+              node {
+                name {
+                  full
+                }
+              }
+            }
+            nodes {
+              name {
+                full
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetcher(ANILIST_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ query, variables: { search: searchQuery } }),
+      signal: controller.signal,
+    } as any);
+
+    if (!res.ok) {
+      return [];
+    }
+
+    const json = (await res.json()) as any;
+    const media = json?.data?.Page?.media;
+    if (!Array.isArray(media) || media.length === 0) {
+      return [];
+    }
+
+    const results: DiscoveredNovel[] = [];
+    for (const item of media) {
+      const title = item.title?.english || item.title?.romaji;
+      if (!title) continue;
+
+      const realSources = resolveRealDownloadSources(
+        title,
+        item.title?.romaji,
+        item.title?.native,
+        {
+          customElscioneFolders: dependencies?.customElscioneFolders,
+          customLnoriSeries: dependencies?.customLnoriSeries,
+        },
+      );
+
+      // Only surface titles that have verified download paths on Elscione and/or Lnori.
+      if (!realSources) {
+        continue;
+      }
+
+      const slug = title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "");
+
+      const year = item.startDate?.year || 2024;
+      const month = String(item.startDate?.month || 1).padStart(2, "0");
+      const day = String(item.startDate?.day || 1).padStart(2, "0");
+      const releaseDate = `${year}-${month}-${day}`;
+
+      let author = "";
+      if (Array.isArray(item.staff?.edges) && item.staff.edges.length > 0) {
+        const storyEdge = item.staff.edges.find((e: any) =>
+          /original\s*story|story|author|creator|writer/i.test(e?.role || ""),
+        );
+        if (storyEdge?.node?.name?.full) {
+          author = storyEdge.node.name.full.trim();
+        } else if (item.staff.edges[0]?.node?.name?.full) {
+          author = item.staff.edges[0].node.name.full.trim();
+        }
+      }
+      if (!author && Array.isArray(item.staff?.nodes) && item.staff.nodes.length > 0) {
+        for (const n of item.staff.nodes) {
+          if (n?.name?.full) {
+            author = n.name.full.trim();
+            break;
+          }
+        }
+      }
+      if (!author) {
+        author = resolveAuthorForTitle(title, item.title?.romaji);
+      }
+
+      let coverUrl = item.coverImage?.extraLarge || item.coverImage?.large || "";
+      if (!coverUrl || coverUrl.includes("images.ranobedb.org")) {
+        coverUrl = resolveCoverForTitle(title, item.title?.romaji);
+      }
+
+      const rawSynopsis = (item.description || "").replace(/<[^>]+>/g, "").trim();
+      const synopsis =
+        cleanSynopsisText(rawSynopsis) ||
+        synthesizeEngagingSynopsis(title, item.genres || ["Light Novel"], item.title?.romaji);
+
+      results.push({
+        id: `anilist-${item.id}-${slug}`,
+        title,
+        titleRomaji: item.title?.romaji || undefined,
+        titleNative: item.title?.native || undefined,
+        author,
+        coverUrl,
+        synopsis,
+        genres: Array.isArray(item.genres) && item.genres.length > 0 ? item.genres : ["Light Novel"],
+        score: item.averageScore || 80,
+        popularity: item.popularity || 10000,
+        releaseDate,
+        volumeCount: item.volumes || 1,
+        source: realSources.source,
+        primarySource: realSources.primarySource,
+        primaryUrl: realSources.primaryUrl,
+        sourceUrls: realSources.sourceUrls,
+        inLibrary: false,
+        existingVolumes: 0,
+      });
+    }
+
+    return results;
+  } catch (err) {
+    console.debug("[Discover] Live AniList search failed:", err);
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Universal Catalog & Metadata Search Engine.
+ * Searches across:
+ * 1. Live AniList search (high-res cover art, full synopses, real author names, genre tags, scores)
+ * 2. Seeds & feed cache
+ * 3. All ~1,100+ officially translated series folders in discoverCatalog.elscioneFolders (and known alias mappings)
+ * 4. All 883 series in discoverCatalog.lnoriSeries
+ * Strictly resolves verified download sources, prioritizing Elsci.one as primarySource.
+ * Cross-checks against Calibre for library ownership.
+ */
+export async function searchUniversalNovels(
+  searchQuery: string,
+  dependencies?: DiscoverDependencies,
+): Promise<DiscoveredNovel[]> {
+  const normQuery = normalizeTitleForMatch(searchQuery);
+  if (!normQuery) return [];
+
+  const queryTokens = getSignificantTokens(searchQuery);
+
+  // 1. Gather all alias variations
+  const queryAliases: string[] = [normQuery];
+  for (const cluster of KNOWN_LIGHT_NOVEL_ALIAS_CLUSTERS) {
+    const normC = cluster.map((s) => normalizeTitleForMatch(s)).filter(Boolean);
+    const matchesCluster = normC.some(
+      (alias) =>
+        alias === normQuery ||
+        (alias.length >= 4 && normQuery.includes(alias)) ||
+        (normQuery.length >= 4 && alias.includes(normQuery)),
+    );
+    if (matchesCluster) {
+      for (const a of normC) {
+        if (!queryAliases.includes(a)) {
+          queryAliases.push(a);
+        }
+      }
+    }
+  }
+
+  // Also check KNOWN_TITLE_TO_ELSCIONE
+  for (const [k, folder] of Object.entries(KNOWN_TITLE_TO_ELSCIONE)) {
+    if (k === normQuery || (normQuery.length >= 4 && k.includes(normQuery))) {
+      const normF = normalizeTitleForMatch(folder);
+      if (!queryAliases.includes(normF)) queryAliases.push(normF);
+    }
+  }
+
+  const results: DiscoveredNovel[] = [];
+
+  const allSeeds = [
+    ...(dependencies?.seedTrendingNovels ?? SEED_TRENDING_NOVELS),
+    ...(dependencies?.seedNewNovels ?? SEED_NEW_NOVELS),
+  ];
+
+  const matchesNovel = (existing: DiscoveredNovel, novel: DiscoveredNovel): boolean => {
+    const normA = normalizeTitleForMatch(existing.title);
+    const normB = normalizeTitleForMatch(novel.title);
+    if (normA === normB) return true;
+    const canA = canonicalTitleKey(existing.title);
+    const canB = canonicalTitleKey(novel.title);
+    if (canA && canB && canA === canB) return true;
+    if (existing.primaryUrl && novel.primaryUrl && existing.primaryUrl === novel.primaryUrl) return true;
+    if (
+      existing.sourceUrls?.elscione &&
+      novel.sourceUrls?.elscione &&
+      existing.sourceUrls.elscione === novel.sourceUrls.elscione
+    ) {
+      return true;
+    }
+    if (
+      existing.sourceUrls?.lnori &&
+      novel.sourceUrls?.lnori &&
+      existing.sourceUrls.lnori === novel.sourceUrls.lnori
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  const addNovel = (novel: DiscoveredNovel) => {
+    const existing = results.find((r) => matchesNovel(r, novel));
+    if (existing) {
+      // Upgrade metadata if new candidate is richer
+      if (
+        (!existing.author || existing.author === "Light Novel Author") &&
+        novel.author &&
+        novel.author !== "Light Novel Author"
+      ) {
+        existing.author = novel.author;
+      }
+      if (!existing.coverUrl && novel.coverUrl) {
+        existing.coverUrl = novel.coverUrl;
+      }
+      if (isSynopsisInsufficient(existing.synopsis) && !isSynopsisInsufficient(novel.synopsis)) {
+        existing.synopsis = novel.synopsis;
+      }
+      if (novel.sourceUrls?.elscione && !existing.sourceUrls?.elscione) {
+        existing.sourceUrls.elscione = novel.sourceUrls.elscione;
+      }
+      if (novel.sourceUrls?.lnori && !existing.sourceUrls?.lnori) {
+        existing.sourceUrls.lnori = novel.sourceUrls.lnori;
+      }
+      if (existing.sourceUrls?.elscione && existing.sourceUrls?.lnori) {
+        existing.source = "both";
+        existing.primarySource = "elscione";
+        existing.primaryUrl = existing.sourceUrls.elscione;
+      }
+      return;
+    }
+
+    results.push(novel);
+  };
+
+  // 1. Live online AniList search
+  const anilistNovels = await searchAniListNovels(searchQuery, dependencies);
+  for (const novel of anilistNovels) {
+    addNovel(novel);
+  }
+
+  // 2. Search seeds & cached feed items
+  for (const seed of allSeeds) {
+    const normS = normalizeTitleForMatch(seed.title);
+    const normRom = seed.titleRomaji ? normalizeTitleForMatch(seed.titleRomaji) : "";
+    const matchesSeed =
+      normS.includes(normQuery) ||
+      (normRom && normRom.includes(normQuery)) ||
+      queryAliases.some((a) => normS.includes(a) || (normRom && normRom.includes(a))) ||
+      (queryTokens.length > 1 && queryTokens.every((t) => normS.includes(t) || (normRom && normRom.includes(t)))) ||
+      seed.synopsis.toLowerCase().includes(searchQuery.toLowerCase());
+
+    if (matchesSeed) {
+      const real = resolveRealDownloadSources(
+        seed.title,
+        seed.titleRomaji,
+        seed.titleNative,
+        {
+          customElscioneFolders: dependencies?.customElscioneFolders,
+          customLnoriSeries: dependencies?.customLnoriSeries,
+        },
+      );
+      if (real) {
+        addNovel({
+          ...seed,
+          source: real.source,
+          primarySource: real.primarySource,
+          primaryUrl: real.primaryUrl,
+          sourceUrls: real.sourceUrls,
+        });
+      }
+    }
+  }
+
+  // 3. Search ALL Elsci.one folders (~1,100+ folders)
+  const elscioneFolders = dependencies?.customElscioneFolders || REAL_ELSCIONE_FOLDERS;
+  for (const folder of elscioneFolders) {
+    const normF = normalizeTitleForMatch(folder);
+    const folderTokens = getSignificantTokens(folder);
+
+    const matchesFolder =
+      normF.includes(normQuery) ||
+      queryAliases.some((a) => normF.includes(a) || (a.length >= 8 && normF.startsWith(a))) ||
+      (queryTokens.length > 1 && queryTokens.every((t) => normF.includes(t))) ||
+      (queryTokens.length >= 2 && folderTokens.length >= 2 && calculateSignificantTokenOverlap(queryTokens, folderTokens) >= 0.7);
+
+    if (matchesFolder) {
+      const real = resolveRealDownloadSources(folder, undefined, undefined, {
+        customElscioneFolders: dependencies?.customElscioneFolders,
+        customLnoriSeries: dependencies?.customLnoriSeries,
+      });
+      if (real) {
+        const author = resolveAuthorForTitle(folder, undefined, allSeeds);
+        const coverUrl = resolveCoverForTitle(folder, undefined, allSeeds);
+        const knownSyn = findKnownSeriesSynopsis({ title: folder, author });
+        const synopsis =
+          knownSyn ||
+          synthesizeEngagingSynopsis(folder, ["Light Novel", "Fantasy"]);
+
+        const slug = folder
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-|-$/g, "");
+
+        addNovel({
+          id: `elscione-${slug}`,
+          title: folder,
+          author,
+          coverUrl,
+          synopsis,
+          genres: ["Light Novel", "Fantasy"],
+          score: 85,
+          popularity: 5000,
+          releaseDate: "2024-01-01",
+          volumeCount: 1,
+          source: real.source,
+          primarySource: real.primarySource,
+          primaryUrl: real.primaryUrl,
+          sourceUrls: real.sourceUrls,
+          inLibrary: false,
+          existingVolumes: 0,
+        });
+      }
+    }
+  }
+
+  // 4. Search ALL Lnori series (883 series)
+  const lnoriSeries = dependencies?.customLnoriSeries || REAL_LNORI_SERIES;
+  for (const s of lnoriSeries) {
+    const slugTitle = s.slug.replace(/-/g, " ");
+    const normS = normalizeTitleForMatch(slugTitle);
+    const seriesTokens = getSignificantTokens(slugTitle);
+
+    const matchesSeries =
+      normS.includes(normQuery) ||
+      queryAliases.some((a) => normS.includes(a) || (a.length >= 8 && normS.startsWith(a))) ||
+      (queryTokens.length > 1 && queryTokens.every((t) => normS.includes(t))) ||
+      (queryTokens.length >= 2 && seriesTokens.length >= 2 && calculateSignificantTokenOverlap(queryTokens, seriesTokens) >= 0.7);
+
+    if (matchesSeries) {
+      const real = resolveRealDownloadSources(slugTitle, undefined, undefined, {
+        customElscioneFolders: dependencies?.customElscioneFolders,
+        customLnoriSeries: dependencies?.customLnoriSeries,
+      });
+      if (real) {
+        const displayTitle = slugTitle
+          .split(" ")
+          .map((w) => (w.length > 0 ? w[0].toUpperCase() + w.slice(1) : ""))
+          .join(" ");
+
+        const author = resolveAuthorForTitle(displayTitle, undefined, allSeeds);
+        const coverUrl = resolveCoverForTitle(displayTitle, undefined, allSeeds);
+        const knownSyn = findKnownSeriesSynopsis({ title: displayTitle, author });
+        const synopsis =
+          knownSyn ||
+          synthesizeEngagingSynopsis(displayTitle, ["Light Novel", "Fantasy"]);
+
+        addNovel({
+          id: `lnori-${s.id}-${s.slug}`,
+          title: displayTitle,
+          author,
+          coverUrl,
+          synopsis,
+          genres: ["Light Novel", "Fantasy"],
+          score: 85,
+          popularity: 5000,
+          releaseDate: "2024-01-01",
+          volumeCount: 1,
+          source: real.source,
+          primarySource: real.primarySource,
+          primaryUrl: real.primaryUrl,
+          sourceUrls: real.sourceUrls,
+          inLibrary: false,
+          existingVolumes: 0,
+        });
+      }
+    }
+  }
+
+  // 5. Ensure all novels have non-empty synopses and assign primary source
+  const novelsWithSynopses = await ensureAllNovelsHaveSynopses(results, dependencies);
+
+  // 6. Cross-check against Calibre
+  return crossCheckNovelsWithCalibre(novelsWithSynopses, dependencies);
+}
+
+/**
  * Main discovery query engine.
  * Applies source filtering, genre filtering, library status filtering, keyword search,
  * sorting, and pagination over the requested feed.
@@ -2530,8 +3117,13 @@ export async function getDiscoverNovels(
   const page = Math.max(1, params.page || 1);
   const pageSize = Math.max(1, Math.min(100, params.pageSize || 20));
 
-  // 1. Fetch the raw feed for this tab (strictly separate sets)
-  const allNovels = await fetchDiscoverFeed(tab, dependencies);
+  // 1. Fetch novels: Universal search across all catalogs if q is provided, otherwise active tab feed
+  let allNovels: DiscoveredNovel[];
+  if (searchQuery) {
+    allNovels = await searchUniversalNovels(searchQuery, dependencies);
+  } else {
+    allNovels = await fetchDiscoverFeed(tab, dependencies);
+  }
 
   // 2. Extract unique available genres from this feed
   const genreSet = new Set<string>();
@@ -2540,7 +3132,21 @@ export async function getDiscoverNovels(
       if (g) genreSet.add(g);
     }
   }
-  const availableGenres = Array.from(genreSet).sort();
+  const availableGenres =
+    genreSet.size > 0
+      ? Array.from(genreSet).sort()
+      : [
+          "Action",
+          "Adventure",
+          "Comedy",
+          "Drama",
+          "Fantasy",
+          "Isekai",
+          "Psychological",
+          "Romance",
+          "Sci-Fi",
+          "Slice of Life",
+        ];
 
   // 3. Filter by source (all | lnori | elscione)
   let filtered = allNovels.filter((n) => {
@@ -2568,31 +3174,50 @@ export async function getDiscoverNovels(
     filtered = filtered.filter((n) => n.inLibrary);
   }
 
-  // 6. Filter by keyword search (case-insensitive across English/Romaji titles and synopses)
+  // 6. Sort
   if (searchQuery) {
-    filtered = filtered.filter((n) => {
-      const matchTitle = n.title.toLowerCase().includes(searchQuery);
-      const matchRomaji = n.titleRomaji?.toLowerCase().includes(searchQuery) ?? false;
-      const matchSynopsis = n.synopsis.toLowerCase().includes(searchQuery);
-      return matchTitle || matchRomaji || matchSynopsis;
+    const normQ = normalizeTitleForMatch(searchQuery);
+    const qTokens = normQ.split(/\s+/).filter(Boolean);
+
+    const getRelevance = (n: DiscoveredNovel): number => {
+      const normT = normalizeTitleForMatch(n.title);
+      const normR = n.titleRomaji ? normalizeTitleForMatch(n.titleRomaji) : "";
+      if (normT === normQ || normR === normQ) return 5000;
+      if (normT.startsWith(normQ) || (normR && normR.startsWith(normQ))) return 2000;
+      if (normT.includes(normQ) || (normR && normR.includes(normQ))) return 1000;
+      if (qTokens.length > 1 && qTokens.every((t) => normT.includes(t) || (normR && normR.includes(t)))) return 800;
+      if (n.synopsis.toLowerCase().includes(searchQuery)) return 200;
+      return 50;
+    };
+
+    filtered.sort((a, b) => {
+      if (sortBy === "score") {
+        return b.score - a.score;
+      }
+      if (sortBy === "newest") {
+        return b.releaseDate.localeCompare(a.releaseDate);
+      }
+      const relDiff = getRelevance(b) - getRelevance(a);
+      if (relDiff !== 0) return relDiff;
+      if (b.popularity !== a.popularity) return b.popularity - a.popularity;
+      return b.score - a.score;
+    });
+  } else {
+    filtered.sort((a, b) => {
+      if (sortBy === "popularity") {
+        return b.popularity - a.popularity;
+      }
+      if (sortBy === "score") {
+        return b.score - a.score;
+      }
+      if (sortBy === "newest") {
+        return b.releaseDate.localeCompare(a.releaseDate);
+      }
+      return 0;
     });
   }
 
-  // 7. Sort (popularity | score | newest)
-  filtered.sort((a, b) => {
-    if (sortBy === "popularity") {
-      return b.popularity - a.popularity;
-    }
-    if (sortBy === "score") {
-      return b.score - a.score;
-    }
-    if (sortBy === "newest") {
-      return b.releaseDate.localeCompare(a.releaseDate);
-    }
-    return 0;
-  });
-
-  // 8. Pagination
+  // 7. Pagination
   const totalCount = filtered.length;
   const totalPages = Math.ceil(totalCount / pageSize) || 1;
   const startIndex = (page - 1) * pageSize;
