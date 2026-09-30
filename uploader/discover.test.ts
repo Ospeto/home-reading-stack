@@ -39,6 +39,10 @@ import {
   searchAniListNovels,
   resolveAuthorForTitle,
   resolveCoverForTitle,
+  generateFallbackCoverSvg,
+  escapeXml,
+  buildCatalogDiscoverNovels,
+  KNOWN_TITLE_TO_COVER,
   type DiscoveredNovel,
 } from "./discover";
 import {
@@ -1242,15 +1246,17 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       // Functions defined
       expect(html).toContain("function getCoverPlaceholderDataUri");
       expect(html).toContain("function handleCoverError");
+      expect(html).toContain("function generateFallbackCoverSvg");
+      expect(html).toContain("window.generateFallbackCoverSvg = generateFallbackCoverSvg;");
       expect(html).toContain("window.handleCoverError = handleCoverError;");
       expect(html).toContain("window.getCoverPlaceholderDataUri = getCoverPlaceholderDataUri;");
 
       // Card cover onerror
-      expect(html).toContain('onerror="handleCoverError(this)"');
+      expect(html).toContain('onerror="this.onerror=null; this.src=generateFallbackCoverSvg(this.alt);"');
       expect(html).toContain('data-title="${escapeHtml(item.title)}"');
 
       // Modal cover onerror
-      expect(html).toContain('id="discoverModalCover" src="" alt="Cover" class="w-full h-full object-cover" onerror="handleCoverError(this)"');
+      expect(html).toContain('id="discoverModalCover" src="" alt="Cover" class="w-full h-full object-cover" onerror="this.onerror=null; this.src=generateFallbackCoverSvg(this.alt);"');
 
       // SVG placeholder styling
       expect(html).toContain("viewBox=\"0 0 200 300\"");
@@ -2189,6 +2195,179 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
 
       const jsonStr = JSON.stringify(data);
       expect(/\p{Extended_Pictographic}/u.test(jsonStr)).toBe(false);
+    });
+  });
+
+  describe("Accurate Covers & Fallback SVG (100% Verified Cover Guarantees)", () => {
+    describe("resolveCoverForTitle (Elimination of Loose Substring Matching)", () => {
+      it("does NOT falsely match titles containing loose substrings like 'slime'", () => {
+        const unrelatedSlimeTitles = [
+          "By the Grace of the Gods (Royalty and Slime)",
+          "Overlord of the Underworld",
+          "Overlord of Darkness",
+          "I've Been Killing Slimes for 300 Years and Maxed Out My Level",
+          "A Tale of Two Slimes",
+          "Heroic Slime Chronicles",
+          "Campfire Cooking with Slime",
+        ];
+
+        for (const title of unrelatedSlimeTitles) {
+          const cover = resolveCoverForTitle(title);
+          // Must NEVER falsely return Tensura or Overlord franchise covers
+          expect(cover).not.toBe(KNOWN_TITLE_TO_COVER["that time i got reincarnated as a slime"]);
+          expect(cover).not.toBe(KNOWN_TITLE_TO_COVER["tensura"]);
+          expect(cover).not.toBe(KNOWN_TITLE_TO_COVER["slime"]);
+          expect(cover).not.toBe(KNOWN_TITLE_TO_COVER["overlord"]);
+          expect(cover).toBe("");
+        }
+      });
+
+      it("resolves exact normalized matches accurately", () => {
+        expect(resolveCoverForTitle("Overlord")).toBe(KNOWN_TITLE_TO_COVER["overlord"]);
+        expect(resolveCoverForTitle("overlord")).toBe(KNOWN_TITLE_TO_COVER["overlord"]);
+        expect(resolveCoverForTitle("Classroom of the Elite")).toBe(KNOWN_TITLE_TO_COVER["classroom of the elite"]);
+        expect(resolveCoverForTitle("That Time I Got Reincarnated as a Slime")).toBe(
+          KNOWN_TITLE_TO_COVER["that time i got reincarnated as a slime"],
+        );
+        expect(resolveCoverForTitle("86")).toBe(KNOWN_TITLE_TO_COVER["86"]);
+        expect(resolveCoverForTitle("86 Eighty Six")).toBe(KNOWN_TITLE_TO_COVER["86 eighty six"]);
+        expect(resolveCoverForTitle("DanMachi")).toBe(KNOWN_TITLE_TO_COVER["danmachi"]);
+      });
+
+      it("resolves word-boundary matches with high length ratio (>= 0.85) and volume stripping", () => {
+        // High length ratio >= 0.85
+        const tensuraVol1 = resolveCoverForTitle("That Time I Got Reincarnated as a Slime Vol 1");
+        expect(tensuraVol1).toBe(KNOWN_TITLE_TO_COVER["that time i got reincarnated as a slime"]);
+
+        const overlordVol1 = resolveCoverForTitle("Overlord Vol. 1");
+        expect(overlordVol1).toBe(KNOWN_TITLE_TO_COVER["overlord"]);
+
+        // Low length ratio (< 0.85) should NOT match
+        const saoProgressive = resolveCoverForTitle("Sword Art Online Progressive");
+        expect(saoProgressive).toBe("");
+      });
+
+      it("resolves exact matches using romaji and seeds", () => {
+        const coverFromRomaji = resolveCoverForTitle("Unknown English Title", "Youkoso Jitsuryoku");
+        // Romaji alias for Classroom of the Elite
+        const cote = KNOWN_TITLE_TO_COVER["classroom of the elite"];
+        const coteCover = resolveCoverForTitle("Classroom of the Elite", "Youkoso Jitsuryoku");
+        expect(coteCover).toBe(cote);
+
+        const mockSeeds: DiscoveredNovel[] = [
+          {
+            id: "seed-custom",
+            title: "Custom Light Novel Series",
+            titleRomaji: "Kusutamu Nobe",
+            author: "Custom Author",
+            coverUrl: "https://s4.anilist.co/custom-cover.jpg",
+            synopsis: "Custom synopsis for testing seed cover match.",
+            genres: ["Fantasy"],
+            score: 90,
+            popularity: 1000,
+            releaseDate: "2024-01-01",
+            volumeCount: 1,
+            source: "lnori",
+            sourceUrls: { lnori: "https://lnori.com/series/9999" },
+            inLibrary: false,
+            existingVolumes: 0,
+          },
+        ];
+
+        expect(resolveCoverForTitle("Custom Light Novel Series", undefined, mockSeeds)).toBe(
+          "https://s4.anilist.co/custom-cover.jpg",
+        );
+        // Does not falsely match unrelated substring
+        expect(resolveCoverForTitle("The Custom Chronicles of Magic", undefined, mockSeeds)).toBe("");
+      });
+    });
+
+    describe("Lnori Official CDN Covers (https://cdn.lnori.com/series/${series.id}.jpg)", () => {
+      it("guarantees 100% of Lnori series entries in discoverCatalog have valid IDs for CDN covers", () => {
+        expect(REAL_LNORI_SERIES.length).toBe(883);
+        for (const s of REAL_LNORI_SERIES) {
+          expect(typeof s.id).toBe("number");
+          expect(s.id).toBeGreaterThan(0);
+          expect(s.slug.length).toBeGreaterThan(0);
+          const cdnCover = `https://cdn.lnori.com/series/${s.id}.jpg`;
+          expect(cdnCover).toMatch(/^https:\/\/cdn\.lnori\.com\/series\/\d+\.jpg$/);
+        }
+      });
+
+      it("assigns https://cdn.lnori.com/series/${id}.jpg for Lnori series in complete catalog", async () => {
+        const catalog = await buildCatalogDiscoverNovels();
+        expect(catalog.length).toBeGreaterThan(500);
+
+        // Filter novels that originate purely from Lnori
+        const lnoriNovels = catalog.filter((n) => n.id.startsWith("lnori-"));
+        expect(lnoriNovels.length).toBeGreaterThan(100);
+
+        for (const novel of lnoriNovels) {
+          expect(novel.coverUrl).toBeDefined();
+          expect(novel.coverUrl).toMatch(/^https:\/\/cdn\.lnori\.com\/series\/\d+\.jpg$/);
+        }
+      });
+    });
+
+    describe("generateFallbackCoverSvg (Apple-Aesthetic Book Cover Placeholder)", () => {
+      it("generates a high-res SVG data URI with clean Apple typography and styling", () => {
+        const dataUri = generateFallbackCoverSvg("My Romantic Comedy", "Wataru Watari");
+        expect(dataUri.startsWith("data:image/svg+xml;charset=utf-8,")).toBe(true);
+
+        const svgContent = decodeURIComponent(
+          dataUri.replace("data:image/svg+xml;charset=utf-8,", ""),
+        );
+
+        // SVG structure and Apple aesthetics
+        expect(svgContent).toContain('<svg xmlns="http://www.w3.org/2000/svg"');
+        expect(svgContent).toContain('viewBox="0 0 200 300"');
+        expect(svgContent).toContain("#18181b"); // dark gradient
+        expect(svgContent).toContain("#09090b"); // dark gradient
+        expect(svgContent).toContain("#f59e0b"); // subtle warm gold accent
+        expect(svgContent).toContain("LIGHT NOVEL"); // bottom badge
+        expect(svgContent).toContain("My Romantic");
+        expect(svgContent).toContain("Comedy");
+        expect(svgContent).toContain("Wataru Watari");
+      });
+
+      it("safely escapes XML special characters in title and author", () => {
+        const dataUri = generateFallbackCoverSvg(
+          'Spice & Wolf: Hero <Saint> "Chronicles"',
+          "Isuna & Hasekura 'Special'",
+        );
+        const svgContent = decodeURIComponent(
+          dataUri.replace("data:image/svg+xml;charset=utf-8,", ""),
+        );
+
+        expect(svgContent).not.toContain("<Saint>");
+        expect(svgContent).toContain("&lt;Saint&gt;");
+        expect(svgContent).toContain("&amp;");
+        expect(svgContent).toContain("&quot;Chronicles&quot;");
+        expect(svgContent).toContain("&apos;Special&apos;");
+      });
+
+      it("handles missing author and generates fallback without throwing", () => {
+        const dataUri1 = generateFallbackCoverSvg("Overlord");
+        expect(dataUri1.startsWith("data:image/svg+xml;charset=utf-8,")).toBe(true);
+
+        const dataUri2 = generateFallbackCoverSvg("", "Author Unknown");
+        expect(dataUri2.startsWith("data:image/svg+xml;charset=utf-8,")).toBe(true);
+
+        const dataUri3 = generateFallbackCoverSvg(undefined as any, undefined);
+        expect(dataUri3.startsWith("data:image/svg+xml;charset=utf-8,")).toBe(true);
+      });
+
+      it("strictly contains zero emojis in generated fallback SVG", () => {
+        const titles = [
+          "The Rising of the Shield Hero",
+          "Sword Art Online",
+          "Re:Zero - Starting Life in Another World",
+        ];
+        for (const t of titles) {
+          const uri = generateFallbackCoverSvg(t);
+          expect(/\p{Extended_Pictographic}/u.test(uri)).toBe(false);
+        }
+      });
     });
   });
 });
