@@ -489,9 +489,13 @@ LightHouse features an Apple-aesthetic **Discover Shelf** across both the **Web 
    - **Library Status Filter:** `[ All ]`, `[ Ready to Download ]`, `[ In Library ]`.
    - **Live Search:** Instant responsive filtering across English titles, Romaji titles, authors, and genres.
    - **Sorting:** `Most Popular`, `Highest Rated`, `Newest`.
-6. **Sleek Translucent Glass Cards & Novel Preview Modal (`#discoverModal`):**
-   - Translucent glass styling with ambient shadows, aspect-[2/3] covers with 3D spine curvature, volume count badges, star ratings, and source chips.
-   - Comprehensive preview modal displaying high-res covers, full volume synopses, authors, release dates, and direct source links.
+6. **Prominent Card-Level Volume Visibility & Library Volume Reconciliation:**
+   - Prominent volume count indicators displayed directly on cards without opening the modal:
+     - Card status badge: `In Library (${libCount} vols)` when series is owned in Calibre, or `Available (${item.volumeCount || 1} vols)` when available to ingest.
+     - Card metadata row: dedicated volume badge (`${item.volumeCount || 1} vols`) alongside source tags and ratings.
+     - Novel preview modal (`#discoverModal`): displays true total volumes (`${totalVols} Volumes`) reconciled with local Calibre volumes (`Math.max(catalogVolumes, libraryCount)`).
+   - Reconciles catalog volume counts with local Calibre ownership while preventing spin-off/mainline volume count pollution.
+   - Pre-indexed catalog volume counts for popular long-running series in `discover-catalog.json` and `CATALOG_VOLUMES` in `uploader/discover.ts`.
 7. **1-Click Direct Ingestion & Live Progress (`POST /api/discover/ingest`):**
    - 1-tap download from card or modal enqueues background ingestion into Calibre.
    - Real-time live download progress tracked via `GET /api/discover/progress/:jobId`.

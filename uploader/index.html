@@ -2719,6 +2719,7 @@
             <div>• <strong>VisionOS Capsule Navigation:</strong> Tap <code class="text-zinc-200">Discover</code> in the top navigation bar to access separate <code class="text-zinc-200">Trending</code> and <code class="text-zinc-200">New Releases</code> views (strictly segregated).</div>
             <div>• <strong>Custom Interactive Filtering:</strong> Filter by Source (<code class="text-zinc-200">Lnori</code>, <code class="text-zinc-200">Elsci.one</code>), Genre (<code class="text-zinc-200">Fantasy</code>, <code class="text-zinc-200">Isekai</code>, <code class="text-zinc-200">Romance</code>, etc.), Library Status (<code class="text-zinc-200">Available</code> vs <code class="text-zinc-200">In Library</code>), Live Search, and Sorting (<code class="text-zinc-200">Most Popular</code>, <code class="text-zinc-200">Highest Rated</code>, <code class="text-zinc-200">Newest</code>).</div>
             <div>• <strong>Real Download Sources Guarantee:</strong> Feeds are strictly anchored to real, existing series on Elsci.one and Lnori (indexed directly against 1200+ Elscione folders and 880+ Lnori series with zero synthetic URLs), preferring Elsci.one as primary download source whenever available on both.</div>
+            <div>• <strong>Card-Level Volume Visibility &amp; Calibre Reconciliation:</strong> Prominent volume count indicators displayed directly on cards (<code class="text-zinc-200">In Library (X vols)</code> and <code class="text-zinc-200">Available (Y vols)</code> badges, plus card metadata row volume badges) with automatic Calibre library volume reconciliation.</div>
             <div>• <strong>1-Click Direct Ingestion &amp; Live Progress:</strong> Tap <code class="text-zinc-200">Ingest</code> on any card or inside the preview modal (<code class="text-zinc-200">#discoverModal</code>) to automatically enqueue background downloading directly into Calibre via <code class="text-zinc-200">POST /api/discover/ingest</code>, tracked in real-time via <code class="text-zinc-200">GET /api/discover/progress/:jobId</code>.</div>
             <div>• <strong>Developer Endpoints:</strong> <code class="text-zinc-200">GET /api/discover/feed?tab=trending|new_releases</code>, <code class="text-zinc-200">POST /api/discover/ingest</code>, and <code class="text-zinc-200">GET /api/discover/progress/:jobId</code>.</div>
           </div>
@@ -4995,11 +4996,11 @@
           </span>`;
         } else if (inLib) {
           statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm truncate max-w-full">
-            In Library (${libCount}v)
+            In Library (${libCount} vols)
           </span>`;
         } else {
           statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-sky-500/30 text-sky-200 border border-sky-500/40 shadow-sm truncate max-w-full">
-            Available
+            Available (${item.volumeCount || 1} vols)
           </span>`;
         }
 
@@ -5054,9 +5055,12 @@
 
               <!-- Metadata -->
               <div class="space-y-1">
-                <div class="flex items-center gap-1 mb-1">
+                <div class="flex items-center gap-1 mb-1 flex-wrap">
                   ${sourceBadgesHtml}
-                  <span class="text-[10px] text-amber-400/90 font-mono ml-auto flex items-center">${starSvg}${ratingVal.toFixed(1)}</span>
+                  <span class="px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold bg-white/10 text-zinc-300 border border-white/10 shrink-0">
+                    ${item.volumeCount || 1} vols
+                  </span>
+                  <span class="text-[10px] text-amber-400/90 font-mono ml-auto flex items-center shrink-0">${starSvg}${ratingVal.toFixed(1)}</span>
                 </div>
 
                 <h3 class="text-xs sm:text-sm font-bold text-white leading-snug line-clamp-2 hover:text-amber-300 transition-colors cursor-pointer" onclick="openDiscoverModal('${escapeHtml(item.id)}')" title="${escapeHtml(item.title)}">
@@ -5196,6 +5200,8 @@
       const ingestBtn = document.getElementById('discoverModalIngestBtn');
       const progressContainer = document.getElementById('discoverModalProgressContainer');
 
+      const totalVols = Math.max(item.volumeCount || 1, item.existingVolumes || item.inLibraryVolumes || 0);
+
       if (cover) {
         cover.setAttribute('data-title', item.title || '');
         cover.setAttribute('data-author', item.author || '');
@@ -5205,7 +5211,7 @@
       if (title) title.textContent = item.title;
       if (romaji) romaji.textContent = item.romajiTitle || item.titleRomaji || '';
       if (author) author.textContent = `By ${item.author || 'Author Unknown'}`;
-      if (volumes) volumes.textContent = `${item.volumeCount || 1} Volumes`;
+      if (volumes) volumes.textContent = `${totalVols} Volumes`;
       if (release) release.textContent = `Released: ${item.releaseDate || 'Recent'}`;
 
       const ratingVal = item.rating || (item.score ? (item.score / 20) : 4.8);
@@ -5247,7 +5253,7 @@
           <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl border ${s.color} text-xs">
             <div class="flex items-center gap-2 min-w-0">
               <span class="font-bold font-mono shrink-0">${escapeHtml(s.name)}</span>
-              <span class="text-zinc-400 truncate">&bull; ${item.volumeCount || 1} vols available</span>
+              <span class="text-zinc-400 truncate">&bull; ${totalVols} vols available</span>
             </div>
             <div class="flex items-center gap-2 shrink-0 self-end sm:self-auto">
               <a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" class="underline text-zinc-400 hover:text-white flex items-center gap-1 text-[11px] shrink-0">
@@ -5300,7 +5306,7 @@
           statusBadge.textContent = `In Library (${libCount} vols)`;
         } else {
           statusBadge.className = 'absolute top-2 left-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-500/30 text-sky-200 border border-sky-500/50 backdrop-blur-md';
-          statusBadge.textContent = 'Available';
+          statusBadge.textContent = `Available (${totalVols} vols)`;
         }
       }
 
@@ -5600,7 +5606,7 @@
             if (cBadge) {
               setHtml(cBadge, `
                 <span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm">
-                  In Library (${novel?.existingVolumes || 1}v)
+                  In Library (${novel?.existingVolumes || 1} vols)
                 </span>
               `);
             }
