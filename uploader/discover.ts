@@ -237,13 +237,18 @@ export const KNOWN_TITLE_TO_ELSCIONE: Record<string, string> = {
   "bunny girl senpai": "Rascal Does Not Dream Series",
   "rascal does not dream series": "Rascal Does Not Dream Series",
   "trapped in a dating sim": "Trapped in a Dating Sim",
+  "trapped in a dating sim the world of otome games is tough for mobs": "Trapped in a Dating Sim",
   "mobuseka": "Trapped in a Dating Sim",
+  "trapped in a dating sim otome games are tough for us too": "Trapped in a Dating Sim - Otome Games Are Tough For Us, Too!",
+  "otome games are tough for us too": "Trapped in a Dating Sim - Otome Games Are Tough For Us, Too!",
   "how a realist hero rebuilt the kingdom": "How a Realist Hero Rebuilt the Kingdom",
   "realist hero": "How a Realist Hero Rebuilt the Kingdom",
   "hell mode": "Hell Mode",
+  "hell mode the hardcore gamer dominates in another world with garbage balancing": "Hell Mode",
   "reincarnated as a sword": "Reincarnated as a Sword",
   "tenken": "Reincarnated as a Sword",
   "the genius princes guide to raising a nation out of debt": "The Genius Prince's Guide to Raising a Nation Out of Debt",
+  "the genius princes guide to raising a nation out of debt hey how about treason": "The Genius Prince's Guide to Raising a Nation Out of Debt",
   "genius prince": "The Genius Prince's Guide to Raising a Nation Out of Debt",
   "campfire cooking in another world with my absurd skill": "Campfire Cooking in Another World With My Absurd Skill",
   "campfire cooking": "Campfire Cooking in Another World With My Absurd Skill",
@@ -253,6 +258,7 @@ export const KNOWN_TITLE_TO_ELSCIONE: Record<string, string> = {
   "combatants will be dispatched": "Combatants Will Be Dispatched",
   "7th time loop": "7th Time Loop",
   "7th time loop the villainess enjoys a carefree life": "7th Time Loop",
+  "7th time loop the villainess enjoys a carefree life married to her worst enemy": "7th Time Loop",
   "sound euphonium": "Hibike! Euphonium",
   "hibike euphonium": "Hibike! Euphonium",
   "kinos journey": "Kino no Tabi",
@@ -262,6 +268,7 @@ export const KNOWN_TITLE_TO_ELSCIONE: Record<string, string> = {
   "the magical revolution of the reincarnated princess": "The Magical Revolution of the Reincarnated Princess and the Genius Young Lady",
   "magical revolution": "The Magical Revolution of the Reincarnated Princess and the Genius Young Lady",
   "the worlds finest assassin gets reincarnated in another world": "The World's Finest Assassin Gets Reincarnated in Another World",
+  "the worlds finest assassin gets reincarnated in another world as an aristocrat": "The World's Finest Assassin Gets Reincarnated in Another World",
   "worlds finest assassin": "The World's Finest Assassin Gets Reincarnated in Another World",
   "bloom into you": "Bloom Into You",
   "adachi and shimamura": "Adachi and Shimamura",
@@ -275,13 +282,17 @@ export const KNOWN_TITLE_TO_ELSCIONE: Record<string, string> = {
   "blood+": "Blood+",
   "jk haru is a sex worker in another world": "JK Haru is a Sex Worker in Another World",
   "a cave kings road to paradise": "A Cave King's Road to Paradise",
+  "a cave kings road to paradise climbing to the top with my almighty mining skills": "A Cave King's Road to Paradise",
   "a late start tamers laid back life": "A Late-Start Tamer's Laid-Back Life",
   "a livid ladys guide to getting even": "A Livid Lady's Guide to Getting Even",
+  "a livid ladys guide to getting even how i crushed my homeland with my mighty grimoires": "A Livid Lady's Guide to Getting Even",
   "a mysterious job called oda nobunaga": "A Mysterious Job Called Oda Nobunaga",
   "are you okay with a slightly older girlfriend": "Are You Okay With a Slightly Older Girlfriend",
   "free life fantasy online": "Free Life Fantasy Online - Immortal Princess",
   "from old country bumpkin to master swordsman": "From Old Country Bumpkin to Master Swordsman",
+  "from old country bumpkin to master swordsman my hotshot disciples are all grown up now and they wont leave me alone": "From Old Country Bumpkin to Master Swordsman",
   "heroine saint no im an all works maid and proud of it": "Heroine Saint No, I'm an All-Works Maid",
+  "the worlds strongest rearguard labyrinth countrys novice seeker": "The World's Strongest Rearguard",
   "victoria of many faces": "Victoria of Many Faces",
   "you like me not my daughter": "You Like Me, Not My Daughter",
   "almark": "Almark",
@@ -1794,7 +1805,7 @@ export const KNOWN_SERIES_SYNOPSES: Record<string, string> = {
  * Searches the local series catalog and seed catalogue for a known synopsis.
  */
 export function findKnownSeriesSynopsis(
-  novel: { title: string; titleRomaji?: string; titleNative?: string; id?: string; [key: string]: unknown },
+  novel: { title: string; titleRomaji?: string; titleNative?: string; id?: string; author?: string },
 ): string | null {
   const candidates = [
     novel.title,
@@ -2179,12 +2190,18 @@ export const KNOWN_LIGHT_NOVEL_ALIAS_CLUSTERS: string[][] = [
     "bunny girl senpai",
     "seishun buta yarou",
   ],
-  // Trapped in a Dating Sim / Mobuseka
+  // Trapped in a Dating Sim / Mobuseka (Mainline)
   [
     "trapped in a dating sim",
-    "trapped in a dating sim otome games are tough for us too",
+    "trapped in a dating sim the world of otome games is tough for mobs",
     "mobuseka",
     "otome game sekai wa mob ni kibishii sekai desu",
+  ],
+  // Trapped in a Dating Sim - Otome Games Are Tough For Us, Too! (Spinoff)
+  [
+    "trapped in a dating sim otome games are tough for us too",
+    "otome games are tough for us too",
+    "ano sekai wa mob ni kibishii sekai desu marie route",
   ],
   // How a Realist Hero Rebuilt the Kingdom
   [
@@ -2271,6 +2288,7 @@ export const DISTINCT_SPINOFF_MARKERS: RegExp[] = [
   /\bss\b/i,
   /\bfamilia chronicle\b/i,
   /\bminor myths and legends\b/i,
+  /\b(?:otome games are tough for us|for us\s*too|marie route)\b/i,
 ];
 
 function extractYearMarker(str: string): string | null {

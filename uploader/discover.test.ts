@@ -2749,6 +2749,21 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       // Strict spinoff protection: DanMachi Sword Oratoria and SAO Progressive must not map to mainline volume counts
       expect(resolveCatalogVolumeCount("DanMachi Sword Oratoria")).toBe(14);
       expect(resolveCatalogVolumeCount("Sword Art Online Progressive")).toBe(8);
+
+      // Spinoff isolation: Trapped in a Dating Sim spinoff (Marie route) has 3 volumes, distinct from mainline 13 volumes
+      expect(resolveCatalogVolumeCount("Trapped in a Dating Sim")).toBe(13);
+      expect(resolveCatalogVolumeCount("Trapped in a Dating Sim: The World of Otome Games is Tough for Mobs")).toBe(13);
+      expect(resolveCatalogVolumeCount("Trapped in a Dating Sim: Otome Games Are Tough for Us, Too!")).toBe(3);
+      expect(resolveCatalogVolumeCount("Otome Games Are Tough for Us, Too!")).toBe(3);
+
+      // Full Lnori registry identifiers resolve accurately
+      expect(resolveCatalogVolumeCount("7th Time Loop The Villainess Enjoys A Carefree Life Married To Her Worst Enemy")).toBe(6);
+      expect(resolveCatalogVolumeCount("Hell Mode The Hardcore Gamer Dominates In Another World With Garbage Balancing")).toBe(11);
+      expect(resolveCatalogVolumeCount("The Genius Princes Guide To Raising A Nation Out Of Debt Hey How About Treason")).toBe(12);
+      expect(resolveCatalogVolumeCount("A Cave Kings Road To Paradise Climbing To The Top With My Almighty Mining Skills")).toBe(6);
+      expect(resolveCatalogVolumeCount("A Livid Ladys Guide To Getting Even How I Crushed My Homeland With My Mighty Grimoires")).toBe(6);
+      expect(resolveCatalogVolumeCount("From Old Country Bumpkin To Master Swordsman My Hotshot Disciples Are All Grown Up Now And They Wont Leave Me Alone")).toBe(9);
+      expect(resolveCatalogVolumeCount("The Worlds Strongest Rearguard Labyrinth Countrys Novice Seeker")).toBe(8);
     });
 
     it("renders card status badges and metadata with prominent volume counts in index.html", () => {
