@@ -1052,5 +1052,50 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(html).toContain("formatCleanErrorMessage");
       expect(html).toContain(".replace(/\\[path\\]/g, 'file')");
     });
+
+    it("verifies modal sources layout uses responsive flex-wrap, proper spacing, and shrink-0 buttons", () => {
+      // Clean flexbox / grid layout with flex-wrap gap-2 items-center justify-between p-3
+      expect(html).toContain("flex flex-wrap gap-2 items-center justify-between p-3");
+      // Action buttons have shrink-0 so they never overlap or truncate text
+      expect(html).toContain('class="underline text-zinc-400 hover:text-white flex items-center gap-1 text-[11px] shrink-0"');
+      expect(html).toContain("cursor-pointer active:scale-[0.96] shrink-0");
+      expect(html).toContain("shrink-0 ml-auto sm:ml-0");
+    });
+
+    it("verifies author display uses real author with Author Unknown fallback, never 'Light Novel'", () => {
+      // In cards
+      expect(html).toContain("item.author || 'Author Unknown'");
+      expect(html).not.toContain("const authorName = item.author || 'Light Novel'");
+      // In modal
+      expect(html).toContain("`By ${item.author || 'Author Unknown'}`");
+    });
+
+    it("verifies robust cover image onerror fallback with dark SVG placeholder", () => {
+      // Functions defined
+      expect(html).toContain("function getCoverPlaceholderDataUri");
+      expect(html).toContain("function handleCoverError");
+      expect(html).toContain("window.handleCoverError = handleCoverError;");
+      expect(html).toContain("window.getCoverPlaceholderDataUri = getCoverPlaceholderDataUri;");
+
+      // Card cover onerror
+      expect(html).toContain('onerror="handleCoverError(this)"');
+      expect(html).toContain('data-title="${escapeHtml(item.title)}"');
+
+      // Modal cover onerror
+      expect(html).toContain('id="discoverModalCover" src="" alt="Cover" class="w-full h-full object-cover" onerror="handleCoverError(this)"');
+
+      // SVG placeholder styling
+      expect(html).toContain("viewBox=\"0 0 200 300\"");
+      expect(html).toContain("LIGHT NOVEL");
+      expect(html).toContain("data:image/svg+xml;charset=utf-8,");
+    });
+
+    it("verifies clean error banner formatting without [path] or emojis in discover modal", () => {
+      expect(html).toContain('id="discoverModalErrorBanner"');
+      expect(html).toContain('id="discoverModalErrorText"');
+      expect(html).toContain("function showDiscoverModalError");
+      expect(html).toContain("function hideDiscoverModalError");
+      expect(html).toContain("hideDiscoverModalError()");
+    });
   });
 });
