@@ -24,6 +24,12 @@ import {
   assignPrimarySource,
   REAL_ELSCIONE_FOLDERS,
   REAL_LNORI_SERIES,
+  SEED_TRENDING_NOVELS,
+  SEED_NEW_NOVELS,
+  canonicalTitleKey,
+  sanitizeTitleForFolderMatch,
+  deduplicateDiscoverNovels,
+  KNOWN_TITLE_TO_AUTHOR,
   type DiscoveredNovel,
 } from "./discover";
 import {
@@ -390,6 +396,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       const testNovel: DiscoveredNovel = {
         id: "test-novel-1",
         title: "Test Cached Novel",
+        author: "Test Author",
         coverUrl: "https://example.com/cover.jpg",
         synopsis: "Test synopsis",
         genres: ["Fantasy"],
@@ -406,8 +413,8 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         existingVolumes: 0,
       };
 
-      setCachedFeed("feed:trending", [testNovel], { cacheDb: tempCacheDb });
-      const cached = getCachedFeed("feed:trending", { cacheDb: tempCacheDb });
+      setCachedFeed("v2:feed:trending", [testNovel], { cacheDb: tempCacheDb });
+      const cached = getCachedFeed("v2:feed:trending", { cacheDb: tempCacheDb });
       expect(cached).not.toBeNull();
       expect(cached?.length).toBe(1);
       expect(cached?.[0].id).toBe("test-novel-1");
@@ -635,6 +642,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       const dummyNovel: DiscoveredNovel = {
         id: "test-novel-missing-synopsis",
         title: "Test Novel Reincarnated as a Hero",
+        author: "Test Author",
         coverUrl: "https://example.com/cover.jpg",
         synopsis: "",
         genres: ["Fantasy", "Isekai"],
@@ -659,6 +667,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       const dummyNovel: DiscoveredNovel = {
         id: "test-custom-fallback",
         title: "Mysterious Artifact Chronicles",
+        author: "Test Author",
         coverUrl: "https://example.com/cover.jpg",
         synopsis: "Short",
         genres: ["Mystery", "Adventure"],
@@ -940,6 +949,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       const sampleNovel: DiscoveredNovel = {
         id: "sample-novel",
         title: "Sample Novel",
+        author: "Test Author",
         coverUrl: "https://example.com/cover.jpg",
         synopsis: "A complete engaging synopsis with more than 30 characters.",
         genres: ["Fantasy"],
@@ -1096,6 +1106,426 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(html).toContain("function showDiscoverModalError");
       expect(html).toContain("function hideDiscoverModalError");
       expect(html).toContain("hideDiscoverModalError()");
+    });
+  });
+
+  describe("Author Field & Real Author Names Guarantee", () => {
+    it("ensures every novel in SEED_TRENDING_NOVELS and SEED_NEW_NOVELS has a real non-empty author", () => {
+      const allSeeds = [...SEED_TRENDING_NOVELS, ...SEED_NEW_NOVELS];
+      for (const novel of allSeeds) {
+        expect(novel.author).toBeDefined();
+        expect(typeof novel.author).toBe("string");
+        expect(novel.author.trim().length).toBeGreaterThan(0);
+        expect(novel.author).not.toBe("Light Novel");
+        expect(novel.author).not.toBe("Unknown");
+        expect(novel.author).not.toBe("By Light Novel");
+      }
+    });
+
+    it("verifies accurate real authors for popular light novel series", () => {
+      const findAuthor = (titleSub: string) => {
+        const allSeeds = [...SEED_TRENDING_NOVELS, ...SEED_NEW_NOVELS];
+        const hit = allSeeds.find((n) => n.title.toLowerCase().includes(titleSub.toLowerCase()));
+        return hit?.author;
+      };
+
+      expect(findAuthor("Bookworm")).toBe("Miya Kazuki");
+      expect(findAuthor("Classroom of the Elite")).toBe("Shogo Kinugasa");
+      expect(findAuthor("Mushoku Tensei")).toBe("Rifujin na Magonote");
+      expect(findAuthor("Overlord")).toBe("Kugane Maruyama");
+      expect(findAuthor("Slime")).toBe("Fuse");
+      expect(findAuthor("Angel Next Door")).toBe("Saekisan");
+      expect(findAuthor("86")).toBe("Asato Asato");
+      expect(findAuthor("Apothecary Diaries")).toBe("Natsu Hyuuga");
+      expect(findAuthor("Eminence in Shadow")).toBe("Daisuke Aizawa");
+      expect(findAuthor("DanMachi")).toBe("Fujino Omori");
+      expect(findAuthor("Re:ZERO")).toBe("Tappei Nagatsuki");
+      expect(findAuthor("Magical Index")).toBe("Kazuma Kamachi");
+      expect(findAuthor("Death Games")).toBe("Yuushi Ukai");
+      expect(findAuthor("Stepsister")).toBe("Ghost Mikawa");
+      expect(findAuthor("Losing Heroines")).toBe("Takibi Amamori");
+      expect(findAuthor("Silent Witch")).toBe("Matsuri Isora");
+
+      // Known map entries
+      expect(KNOWN_TITLE_TO_AUTHOR["spice and wolf"]).toBe("Isuna Hasekura");
+      expect(KNOWN_TITLE_TO_AUTHOR["worldend"]).toBe("Akira Kareno");
+      expect(KNOWN_TITLE_TO_AUTHOR["goblin slayer"]).toBe("Kumo Kagyu");
+    });
+
+    it("returns author on all novels in getDiscoverNovels for trending and new feeds", async () => {
+      const trendingRes = await getDiscoverNovels({ tab: "trending" }, { cacheDb: tempCacheDb });
+      for (const novel of trendingRes.novels) {
+        expect(novel.author).toBeDefined();
+        expect(novel.author.length).toBeGreaterThan(0);
+        expect(novel.author).not.toBe("Light Novel");
+        expect(novel.author).not.toBe("By Light Novel");
+      }
+
+      const newRes = await getDiscoverNovels({ tab: "new" }, { cacheDb: tempCacheDb });
+      for (const novel of newRes.novels) {
+        expect(novel.author).toBeDefined();
+        expect(novel.author.length).toBeGreaterThan(0);
+        expect(novel.author).not.toBe("Light Novel");
+        expect(novel.author).not.toBe("By Light Novel");
+      }
+    });
+
+    it("extracts author from AniList staff edges or nodes and falls back to author metadata", async () => {
+      const mockAniListMedia = [
+        {
+          id: 11111,
+          title: { english: "Overlord", romaji: "Overlord" },
+          coverImage: { large: "https://s4.anilist.co/overlord.jpg" },
+          description: "Overlord summary",
+          genres: ["Action", "Fantasy"],
+          averageScore: 90,
+          popularity: 50000,
+          startDate: { year: 2012, month: 7, day: 30 },
+          volumes: 16,
+          staff: {
+            edges: [
+              {
+                role: "Original Story",
+                node: { name: { full: "Kugane Maruyama" } },
+              },
+            ],
+          },
+        },
+        {
+          id: 22222,
+          title: { english: "86--EIGHTY-SIX", romaji: "86" },
+          coverImage: { large: "https://s4.anilist.co/86.jpg" },
+          description: "86 summary",
+          genres: ["Sci-Fi"],
+          averageScore: 90,
+          popularity: 50000,
+          startDate: { year: 2017, month: 2, day: 10 },
+          volumes: 13,
+          staff: {
+            nodes: [
+              { name: { full: "Asato Asato" } },
+            ],
+          },
+        },
+        {
+          id: 33333,
+          title: { english: "Classroom of the Elite", romaji: "Youkoso Jitsuryoku" },
+          coverImage: { large: "https://s4.anilist.co/cote.jpg" },
+          description: "COTE summary",
+          genres: ["Drama"],
+          averageScore: 90,
+          popularity: 50000,
+          startDate: { year: 2015, month: 5, day: 25 },
+          volumes: 28,
+          staff: {}, // empty staff -> falls back to KNOWN_TITLE_TO_AUTHOR
+        },
+      ];
+
+      const mockFetch = async (url: string): Promise<Response> => {
+        if (url.includes("graphql.anilist.co")) {
+          return new Response(
+            JSON.stringify({ data: { Page: { media: mockAniListMedia } } }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("{}", { status: 404 });
+      };
+
+      const feed = await fetchDiscoverFeed("trending", {
+        fetch: mockFetch,
+        cacheDb: tempCacheDb,
+        enableOnline: true,
+      });
+
+      const overlord = feed.find((n) => n.title === "Overlord");
+      expect(overlord?.author).toBe("Kugane Maruyama");
+
+      const eightySix = feed.find((n) => n.title.includes("86"));
+      expect(eightySix?.author).toBe("Asato Asato");
+
+      const cote = feed.find((n) => n.title.includes("Classroom of the Elite"));
+      expect(cote?.author).toBe("Shogo Kinugasa");
+    });
+  });
+
+  describe("Working Cover CDNs (Elimination of 404 RanobeDB URLs)", () => {
+    it("ensures 100% of novels in SEED_NEW_NOVELS have working CDN cover URLs from s4.anilist.co or cdn.lnori.com", () => {
+      for (const novel of SEED_NEW_NOVELS) {
+        expect(novel.coverUrl).toBeDefined();
+        const isAnilist = novel.coverUrl.includes("s4.anilist.co");
+        const isLnori = novel.coverUrl.includes("cdn.lnori.com");
+        expect(isAnilist || isLnori).toBe(true);
+        expect(novel.coverUrl.includes("images.ranobedb.org")).toBe(false);
+      }
+    });
+
+    it("ensures zero broken RanobeDB URLs exist across both SEED_TRENDING_NOVELS and SEED_NEW_NOVELS", () => {
+      const allSeeds = [...SEED_TRENDING_NOVELS, ...SEED_NEW_NOVELS];
+      for (const novel of allSeeds) {
+        expect(novel.coverUrl.includes("images.ranobedb.org")).toBe(false);
+        const isAnilist = novel.coverUrl.includes("s4.anilist.co");
+        const isLnori = novel.coverUrl.includes("cdn.lnori.com");
+        expect(isAnilist || isLnori).toBe(true);
+      }
+    });
+  });
+
+  describe("Strict Title Deduplication & Cross-Feed Separation", () => {
+    it("normalizes ampersand (&) to 'and' so variants like 'Spice & Wolf' match 'Spice and Wolf'", () => {
+      const norm1 = normalizeTitleForMatch("Spice & Wolf");
+      const norm2 = normalizeTitleForMatch("Spice and Wolf");
+      expect(norm1).toBe("spice and wolf");
+      expect(norm2).toBe("spice and wolf");
+      expect(norm1).toBe(norm2);
+    });
+
+    it("deduplicates novels within a feed using deduplicateDiscoverNovels", () => {
+      const duplicateList: DiscoveredNovel[] = [
+        {
+          id: "spice-1",
+          title: "Spice and Wolf",
+          author: "Isuna Hasekura",
+          coverUrl: "https://s4.anilist.co/cover1.jpg",
+          synopsis: "A merchant travels with a wolf deity across trade routes.",
+          genres: ["Fantasy"],
+          score: 90,
+          popularity: 80000,
+          releaseDate: "2006-02-10",
+          volumeCount: 24,
+          source: "both",
+          sourceUrls: { lnori: "https://lnori.com/1", elscione: "https://server.elscione.com/1" },
+          inLibrary: false,
+          existingVolumes: 0,
+        },
+        {
+          id: "spice-2",
+          title: "Spice & Wolf",
+          author: "Isuna Hasekura",
+          coverUrl: "https://s4.anilist.co/cover2.jpg",
+          synopsis: "Another edition of Spice & Wolf.",
+          genres: ["Fantasy"],
+          score: 90,
+          popularity: 80000,
+          releaseDate: "2006-02-10",
+          volumeCount: 24,
+          source: "both",
+          sourceUrls: { lnori: "https://lnori.com/1", elscione: "https://server.elscione.com/1" },
+          inLibrary: false,
+          existingVolumes: 0,
+        },
+        {
+          id: "worldend-1",
+          title: "WorldEnd",
+          author: "Akira Kareno",
+          coverUrl: "https://s4.anilist.co/cover3.jpg",
+          synopsis: "What do you do at the end of the world? Are you busy?",
+          genres: ["Sci-Fi", "Fantasy"],
+          score: 87,
+          popularity: 70000,
+          releaseDate: "2014-11-01",
+          volumeCount: 5,
+          source: "both",
+          sourceUrls: { lnori: "https://lnori.com/2", elscione: "https://server.elscione.com/2" },
+          inLibrary: false,
+          existingVolumes: 0,
+        },
+        {
+          id: "worldend-2",
+          title: "WorldEnd: What Do You Do at the End of the World? Are You Busy? Will You Save Us?",
+          author: "Akira Kareno",
+          coverUrl: "https://s4.anilist.co/cover4.jpg",
+          synopsis: "Full title edition of WorldEnd.",
+          genres: ["Sci-Fi", "Fantasy"],
+          score: 87,
+          popularity: 70000,
+          releaseDate: "2014-11-01",
+          volumeCount: 5,
+          source: "both",
+          sourceUrls: { lnori: "https://lnori.com/2", elscione: "https://server.elscione.com/2" },
+          inLibrary: false,
+          existingVolumes: 0,
+        },
+        {
+          id: "gimai-1",
+          title: "Days with My Stepsister",
+          author: "Ghost Mikawa",
+          coverUrl: "https://s4.anilist.co/cover5.jpg",
+          synopsis: "Living under the same roof with calm respectful distance.",
+          genres: ["Romance"],
+          score: 84,
+          popularity: 50000,
+          releaseDate: "2021-01-25",
+          volumeCount: 11,
+          source: "both",
+          sourceUrls: { lnori: "https://lnori.com/3", elscione: "https://server.elscione.com/3" },
+          inLibrary: false,
+          existingVolumes: 0,
+        },
+        {
+          id: "gimai-2",
+          title: "Gimai Seikatsu",
+          author: "Ghost Mikawa",
+          coverUrl: "https://s4.anilist.co/cover6.jpg",
+          synopsis: "Japanese title edition of Days with My Stepsister.",
+          genres: ["Romance"],
+          score: 84,
+          popularity: 50000,
+          releaseDate: "2021-01-25",
+          volumeCount: 11,
+          source: "both",
+          sourceUrls: { lnori: "https://lnori.com/3", elscione: "https://server.elscione.com/3" },
+          inLibrary: false,
+          existingVolumes: 0,
+        },
+      ];
+
+      const deduped = deduplicateDiscoverNovels(duplicateList);
+      expect(deduped.length).toBe(3);
+
+      const titles = deduped.map((n) => n.title);
+      expect(titles.filter((t) => t.toLowerCase().includes("spice")).length).toBe(1);
+      expect(titles.filter((t) => t.toLowerCase().includes("worldend")).length).toBe(1);
+      expect(titles.filter((t) => t.toLowerCase().includes("stepsister") || t.toLowerCase().includes("gimai")).length).toBe(1);
+    });
+
+    it("guarantees New Releases does not contain titles already present in Trending", async () => {
+      const trendingNovels = await fetchDiscoverFeed("trending", { cacheDb: tempCacheDb });
+      const newNovels = await fetchDiscoverFeed("new", { cacheDb: tempCacheDb });
+
+      const trendingCanonical = new Set(
+        trendingNovels.map((n) => canonicalTitleKey(n.title)),
+      );
+
+      for (const novel of newNovels) {
+        const canKey = canonicalTitleKey(novel.title);
+        expect(trendingCanonical.has(canKey)).toBe(false);
+      }
+    });
+  });
+
+  describe("Elscione Folder Validation, Sanitization & 403 Prevention", () => {
+    it("sanitizeTitleForFolderMatch strips colons, question marks, and illegal filesystem characters", () => {
+      expect(sanitizeTitleForFolderMatch("Heroine? Saint? No, I'm an All-Works Maid")).toBe(
+        "Heroine Saint No, I'm an All-Works Maid",
+      );
+      expect(sanitizeTitleForFolderMatch("Re:ZERO -Starting Life in Another World-")).toBe(
+        "Re ZERO -Starting Life in Another World-",
+      );
+      expect(sanitizeTitleForFolderMatch("What/If: Evil*Title?")).toBe("What If Evil Title");
+    });
+
+    it("findRealElscioneFolder resolves titles with question marks and colons to exact real folders without illegal characters", () => {
+      const heroine = findRealElscioneFolder("Heroine? Saint? No, I'm an All-Works Maid");
+      expect(heroine).toBe("Heroine Saint No, I'm an All-Works Maid");
+      expect(heroine?.includes("?")).toBe(false);
+      expect(REAL_ELSCIONE_FOLDERS).toContain(heroine!);
+
+      const rezero = findRealElscioneFolder("Re:ZERO -Starting Life in Another World-");
+      expect(rezero).toBe("ReZero - Starting Life in Another World");
+      expect(rezero?.includes(":")).toBe(false);
+      expect(REAL_ELSCIONE_FOLDERS).toContain(rezero!);
+    });
+
+    it("findRealElscioneFolder never returns any folder containing illegal characters or not in discover-catalog.json", () => {
+      for (const folder of REAL_ELSCIONE_FOLDERS) {
+        expect(/[:?*"<>|/\\]/.test(folder)).toBe(false);
+      }
+
+      // Non-existent title must return null
+      expect(findRealElscioneFolder("NonExistentNovelTitle12345")).toBeNull();
+      // Title with colons that doesn't exist must return null, never fabricated
+      expect(findRealElscioneFolder("Fake: Novel: Series")).toBeNull();
+    });
+
+    it("resolveRealDownloadSources never generates Elscione URLs with illegal characters or non-existent folders", () => {
+      const match = resolveRealDownloadSources("Re:ZERO -Starting Life in Another World-");
+      expect(match).not.toBeNull();
+      expect(match?.sourceUrls.elscione).toBeDefined();
+      expect(match?.sourceUrls.elscione).toContain("ReZero%20-%20Starting%20Life%20in%20Another%20World");
+      expect(new URL(match!.sourceUrls.elscione!).pathname.includes(":")).toBe(false);
+    });
+
+    it("enqueueDiscoverIngest and /api/discover/ingest reject Elscione URLs containing colons or non-existent folders with error", async () => {
+      // 1. Direct helper rejects illegal character in folder
+      await expect(
+        enqueueDiscoverIngest(
+          "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Re:Zero/",
+          "elscione",
+        ),
+      ).rejects.toThrow("invalid characters");
+
+      // 2. Direct helper rejects non-existent folder
+      await expect(
+        enqueueDiscoverIngest(
+          "https://server.elscione.com/Officially%20Translated%20Light%20Novels/CompletelyFakeFolder999/",
+          "elscione",
+        ),
+      ).rejects.toThrow("does not exist in catalog");
+
+      // 3. REST API rejects illegal characters with 400
+      const reqColon = new Request("http://127.0.0.1:8086/api/discover/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Re:Zero/",
+          source: "elscione",
+        }),
+      });
+      const resColon = await handleRequest(reqColon, localServer);
+      expect(resColon.status).toBe(400);
+      const jsonColon = (await resColon.json()) as any;
+      expect(jsonColon.success).toBe(false);
+      expect(jsonColon.error).toContain("invalid characters");
+
+      // 4. REST API rejects non-existent folder with 400
+      const reqFake = new Request("http://127.0.0.1:8086/api/discover/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/FakeFolder12345/",
+          source: "elscione",
+        }),
+      });
+      const resFake = await handleRequest(reqFake, localServer);
+      expect(resFake.status).toBe(400);
+      const jsonFake = (await resFake.json()) as any;
+      expect(jsonFake.success).toBe(false);
+      expect(jsonFake.error).toContain("does not exist in catalog");
+    });
+  });
+
+  describe("Cache Versioning (v2:feed:...) & Legacy Cache Invalidation", () => {
+    it("bypasses legacy stale cache keys and uses v2:feed prefix", async () => {
+      // Plant stale legacy cache entry
+      const legacyStaleNovel: DiscoveredNovel = {
+        id: "stale-legacy-novel",
+        title: "Old Stale Novel",
+        author: "Old Author",
+        coverUrl: "https://images.ranobedb.org/old-404.jpg",
+        synopsis: "Old stale cached synopsis text here.",
+        genres: ["Fantasy"],
+        score: 50,
+        popularity: 1000,
+        releaseDate: "2010-01-01",
+        volumeCount: 1,
+        source: "both",
+        sourceUrls: { lnori: "https://lnori.com/1", elscione: "https://server.elscione.com/1" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      setCachedFeed("feed:trending", [legacyStaleNovel], { cacheDb: tempCacheDb });
+
+      // fetchDiscoverFeed must use v2:feed:trending and bypass feed:trending
+      const feed = await fetchDiscoverFeed("trending", { cacheDb: tempCacheDb });
+      const staleHit = feed.find((n) => n.id === "stale-legacy-novel");
+      expect(staleHit).toBeUndefined();
+
+      // Check that v2:feed:trending was created in cache
+      const v2Cached = getCachedFeed("v2:feed:trending", { cacheDb: tempCacheDb });
+      expect(v2Cached).not.toBeNull();
+      expect(v2Cached!.length).toBeGreaterThan(0);
+      expect(v2Cached!.some((n) => n.id === "stale-legacy-novel")).toBe(false);
     });
   });
 });

@@ -24,7 +24,7 @@ export interface DiscoveredNovel {
   title: string;
   titleRomaji?: string;
   titleNative?: string;
-  author?: string;
+  author: string;
   coverUrl: string;
   synopsis: string;
   genres: string[];
@@ -92,6 +92,7 @@ export function normalizeTitleForMatch(title: string): string {
   if (!title) return "";
   return title
     .toLowerCase()
+    .replace(/&/g, " and ")
     .replace(/[-_—–~:|/]+/g, " ")
     .replace(/[^\p{L}\p{N}\s]/gu, "")
     .replace(/\s+/g, " ")
@@ -114,6 +115,8 @@ for (const s of REAL_LNORI_SERIES) {
 export const KNOWN_TITLE_TO_ELSCIONE: Record<string, string> = {
   "rezero": "ReZero - Starting Life in Another World",
   "rezero starting life in another world": "ReZero - Starting Life in Another World",
+  "re zero": "ReZero - Starting Life in Another World",
+  "re zero starting life in another world": "ReZero - Starting Life in Another World",
   "danmachi": "DanMachi",
   "is it wrong to try to pick up girls in a dungeon": "DanMachi",
   "86": "86",
@@ -145,6 +148,12 @@ export const KNOWN_TITLE_TO_ELSCIONE: Record<string, string> = {
   "sword art online": "Sword Art Online",
   "no game no life": "No Game No Life",
   "spice and wolf": "Spice and Wolf",
+  "spice wolf": "Spice and Wolf",
+  "worldend": "WorldEnd",
+  "worldend what do you do at the end of the world are you busy will you save us": "WorldEnd",
+  "suka suka": "WorldEnd",
+  "shuumatsu nani shitemasu ka isogashii desu ka sukutte moratte ii desu ka": "WorldEnd",
+  "goblin slayer": "Goblin Slayer",
   "toradora": "Toradora",
   "konosuba": "KonoSuba",
   "konosuba gods blessing on this wonderful world": "KonoSuba",
@@ -168,6 +177,8 @@ export const KNOWN_TITLE_TO_LNORI: Record<string, { id: number; slug: string }> 
   "is it wrong to try to pick up girls in a dungeon": { id: 2201, slug: "is-it-wrong-to-try-to-pick-up-girls-in-a-dungeon" },
   "rezero": { id: 2471, slug: "re-zero-starting-life-in-another-world" },
   "rezero starting life in another world": { id: 2471, slug: "re-zero-starting-life-in-another-world" },
+  "re zero": { id: 2471, slug: "re-zero-starting-life-in-another-world" },
+  "re zero starting life in another world": { id: 2471, slug: "re-zero-starting-life-in-another-world" },
   "86": { id: 4808, slug: "86-eighty-six" },
   "86 eighty six": { id: 4808, slug: "86-eighty-six" },
   "86eightysix": { id: 4808, slug: "86-eighty-six" },
@@ -196,7 +207,12 @@ export const KNOWN_TITLE_TO_LNORI: Record<string, { id: number; slug: string }> 
   "toaru majutsu no index": { id: 1916, slug: "a-certain-magical-index" },
   "sword art online": { id: 2197, slug: "sword-art-online" },
   "no game no life": { id: 2419, slug: "no-game-no-life" },
-  "spice and wolf": { id: 2011, slug: "spice-and-wolf" },
+  "spice and wolf": { id: 677, slug: "spice-and-wolf" },
+  "spice wolf": { id: 677, slug: "spice-and-wolf" },
+  "worldend": { id: 4031, slug: "worldend-what-do-you-do-at-the-end-of-the-world-are-you-busy-will-you-save-us" },
+  "worldend what do you do at the end of the world are you busy will you save us": { id: 4031, slug: "worldend-what-do-you-do-at-the-end-of-the-world-are-you-busy-will-you-save-us" },
+  "suka suka": { id: 4031, slug: "worldend-what-do-you-do-at-the-end-of-the-world-are-you-busy-will-you-save-us" },
+  "goblin slayer": { id: 5304, slug: "goblin-slayer" },
   "toradora": { id: 2074, slug: "toradora" },
   "konosuba": { id: 2872, slug: "konosuba-gods-blessing-on-this-wonderful-world" },
   "konosuba gods blessing on this wonderful world": { id: 2872, slug: "konosuba-gods-blessing-on-this-wonderful-world" },
@@ -215,6 +231,223 @@ export const KNOWN_TITLE_TO_LNORI: Record<string, { id: number; slug: string }> 
   "grimgar of fantasy and ash": { id: 2873, slug: "grimgar-of-fantasy-and-ash" },
 };
 
+export const KNOWN_TITLE_CANONICAL_MAP: Record<string, string> = {
+  "spice and wolf": "spice and wolf",
+  "spice wolf": "spice and wolf",
+  "worldend": "worldend",
+  "worldend what do you do at the end of the world are you busy will you save us": "worldend",
+  "suka suka": "worldend",
+  "shuumatsu nani shitemasu ka isogashii desu ka sukutte moratte ii desu ka": "worldend",
+  "days with my stepsister": "days with my stepsister",
+  "gimai seikatsu": "days with my stepsister",
+  "goblin slayer": "goblin slayer",
+  "rezero": "rezero",
+  "rezero starting life in another world": "rezero",
+  "re zero": "rezero",
+  "re zero starting life in another world": "rezero",
+  "danmachi": "danmachi",
+  "is it wrong to try to pick up girls in a dungeon": "danmachi",
+  "86": "86",
+  "86 eighty six": "86",
+  "86eightysix": "86",
+  "classroom of the elite": "classroom of the elite",
+  "mushoku tensei": "mushoku tensei",
+  "mushoku tensei jobless reincarnation": "mushoku tensei",
+  "overlord": "overlord",
+  "that time i got reincarnated as a slime": "that time i got reincarnated as a slime",
+  "the angel next door spoils me rotten": "the angel next door spoils me rotten",
+  "the apothecary diaries": "the apothecary diaries",
+  "the eminence in shadow": "the eminence in shadow",
+  "kage no jitsuryokusha ni naritakute": "the eminence in shadow",
+  "ascendance of a bookworm": "ascendance of a bookworm",
+  "honzuki no gekokujou": "ascendance of a bookworm",
+  "too many losing heroines": "too many losing heroines",
+  "make heroine ga oosugiru": "too many losing heroines",
+  "secrets of the silent witch": "secrets of the silent witch",
+  "silent witch": "secrets of the silent witch",
+  "playing death games to put food on the table": "playing death games to put food on the table",
+  "shibou yuugi de meshi wo kuu": "playing death games to put food on the table",
+  "sentenced to be a hero": "sentenced to be a hero",
+  "yuusha kei ni shosu": "sentenced to be a hero",
+  "the water magician": "the water magician",
+  "haibaras teenage new game": "haibaras teenage new game",
+  "haibara kun no tsuyokute seishun new game": "haibaras teenage new game",
+  "the frontier lord begins with zero subjects": "the frontier lord begins with zero subjects",
+  "min maxing my trpg build in another world": "min maxing my trpg build in another world",
+  "im the evil lord of an intergalactic empire": "im the evil lord of an intergalactic empire",
+  "a certain magical index": "a certain magical index",
+  "toaru majutsu no index": "a certain magical index",
+  "sword art online": "sword art online",
+  "no game no life": "no game no life",
+  "toradora": "toradora",
+  "konosuba": "konosuba",
+  "konosuba gods blessing on this wonderful world": "konosuba",
+  "solo leveling": "solo leveling",
+  "a sisters all you need": "a sisters all you need",
+  "grimgar of fantasy and ash": "grimgar of fantasy and ash",
+};
+
+export const KNOWN_TITLE_TO_AUTHOR: Record<string, string> = {
+  "ascendance of a bookworm": "Miya Kazuki",
+  "classroom of the elite": "Shogo Kinugasa",
+  "classroom of the elite year 2": "Shogo Kinugasa",
+  "mushoku tensei": "Rifujin na Magonote",
+  "mushoku tensei jobless reincarnation": "Rifujin na Magonote",
+  "overlord": "Kugane Maruyama",
+  "that time i got reincarnated as a slime": "Fuse",
+  "the angel next door spoils me rotten": "Saekisan",
+  "86": "Asato Asato",
+  "86 eighty six": "Asato Asato",
+  "the apothecary diaries": "Natsu Hyuuga",
+  "the eminence in shadow": "Daisuke Aizawa",
+  "a sisters all you need": "Yomi Hirasaka",
+  "grimgar of fantasy and ash": "Ao Jyumonji",
+  "danmachi": "Fujino Omori",
+  "is it wrong to try to pick up girls in a dungeon": "Fujino Omori",
+  "rezero": "Tappei Nagatsuki",
+  "rezero starting life in another world": "Tappei Nagatsuki",
+  "a certain magical index": "Kazuma Kamachi",
+  "monogatari": "Nisio Isin",
+  "bakemonogatari": "Nisio Isin",
+  "spice and wolf": "Isuna Hasekura",
+  "spice wolf": "Isuna Hasekura",
+  "worldend": "Akira Kareno",
+  "worldend what do you do at the end of the world are you busy will you save us": "Akira Kareno",
+  "suka suka": "Akira Kareno",
+  "goblin slayer": "Kumo Kagyu",
+  "sword art online": "Reki Kawahara",
+  "sword art online progressive": "Reki Kawahara",
+  "no game no life": "Yuu Kamiya",
+  "toradora": "Yuyuko Takemiya",
+  "konosuba": "Natsume Akatsuki",
+  "konosuba gods blessing on this wonderful world": "Natsume Akatsuki",
+  "solo leveling": "Chugong",
+  "playing death games to put food on the table": "Yuushi Ukai",
+  "love unseen beneath the clear night sky": "Misaki Sano",
+  "heroine saint no im an all works maid": "Kyouka",
+  "sentenced to be a hero": "Rocket Shokai",
+  "the water magician": "Tadashi Kubou",
+  "haibaras teenage new game": "Kazuki Amamiya",
+  "too many losing heroines": "Takibi Amamori",
+  "secrets of the silent witch": "Matsuri Isora",
+  "days with my stepsister": "Ghost Mikawa",
+  "gimai seikatsu": "Ghost Mikawa",
+  "the frontier lord begins with zero subjects": "Fuurou",
+  "min maxing my trpg build in another world": "Schuld",
+  "im the evil lord of an intergalactic empire": "Yomu Mishima",
+  "the vexations of a shut in vampire princess": "Kotei Kobayashi",
+  "a contract marriage with the maid": "Dalsaeowl",
+  "a cave kings road to paradise": "Hajime Naehara",
+  "amagi brilliant park": "Shoji Gatoh",
+  "the empty box and zeroth maria": "Eiji Mikage",
+  "chivalry of a failed knight": "Riku Misora",
+  "the tunnel to summer the exit of goodbyes": "Mei Hachimoku",
+  "kagerou daze": "Jin",
+  "the irregular at magic high school": "Tsutomu Sato",
+  "mahouka koukou no rettousei": "Tsutomu Sato",
+  "rascal does not dream": "Hajime Kamoshida",
+  "rascal does not dream of bunny girl senpai": "Hajime Kamoshida",
+};
+
+export const KNOWN_TITLE_TO_COVER: Record<string, string> = {
+  "ascendance of a bookworm": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx110800-buaDMQpwzfds.jpg",
+  "classroom of the elite": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx94970-q77X5sfRIKvU.jpg",
+  "mushoku tensei": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/nx85470-jt6BF9tDWB2X.jpg",
+  "mushoku tensei jobless reincarnation": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/nx85470-jt6BF9tDWB2X.jpg",
+  "overlord": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx85976-hVr99G1kD1M5.png",
+  "that time i got reincarnated as a slime": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx86355-pGwmLqVTwwE4.jpg",
+  "the angel next door spoils me rotten": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx113533-u3D4i0jHzt2z.jpg",
+  "86": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx98610-TIf7R1gkU0vc.jpg",
+  "86 eighty six": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx98610-TIf7R1gkU0vc.jpg",
+  "the apothecary diaries": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/nx99026-5Eg650WAd9Rj.jpg",
+  "the eminence in shadow": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx108428-wTg20rSpvkU9.jpg",
+  "a sisters all you need": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/nx97894-ZQmIZQsc5Wea.jpg",
+  "grimgar of fantasy and ash": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx86365-1H3Lp87JUnxr.jpg",
+  "danmachi": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx85162-Fpd3ejAlFWP8.jpg",
+  "is it wrong to try to pick up girls in a dungeon": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx85162-Fpd3ejAlFWP8.jpg",
+  "rezero": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx85737-WkWOr5EgwPyo.jpg",
+  "rezero starting life in another world": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx85737-WkWOr5EgwPyo.jpg",
+  "a certain magical index": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx42854-IOa3uoHblsCB.png",
+  "monogatari": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx44893-aV0XRP0OfWf7.jpg",
+  "a cave kings road to paradise": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx119518-W0uUHej9hS3h.jpg",
+  "spice and wolf": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx39115-2uLgBuM30i1b.jpg",
+  "spice wolf": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx39115-2uLgBuM30i1b.jpg",
+  "worldend": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx87284-Drq2dMfE67cf.jpg",
+  "worldend what do you do at the end of the world are you busy will you save us": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx87284-Drq2dMfE67cf.jpg",
+  "suka suka": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx87284-Drq2dMfE67cf.jpg",
+  "goblin slayer": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx87320-Q7A3KfMPykcm.jpg",
+  "playing death games to put food on the table": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx154060-vFViZxxlVH9F.png",
+  "love unseen beneath the clear night sky": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx175916-UH4p840mvvLk.png",
+  "heroine saint no im an all works maid": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/b128801-t8xoJTwtiBmb.jpg",
+  "sentenced to be a hero": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx142687-BFy2lofGgPKx.jpg",
+  "the water magician": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx142688-ShdIyM8TGqO8.jpg",
+  "haibaras teenage new game": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx143071-1FRtRk64oI5L.jpg",
+  "too many losing heroines": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx135276-BGRuVuGlHIQY.jpg",
+  "secrets of the silent witch": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx136833-gbVDB7CgEUYT.jpg",
+  "days with my stepsister": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx126268-c3BmsZ0LlJWr.png",
+  "the frontier lord begins with zero subjects": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/nx106767-3SvzEtMGx5dX.jpg",
+  "min maxing my trpg build in another world": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx136341-etgs2NuVx5qN.jpg",
+  "im the evil lord of an intergalactic empire": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx133484-bWRiNkdBrnuv.jpg",
+  "the vexations of a shut in vampire princess": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx119283-iuhI6oQSEuSS.jpg",
+  "a contract marriage with the maid": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx124522-yceI38rJDLl9.jpg",
+};
+
+export function canonicalTitleKey(title: string): string {
+  if (!title) return "";
+  const norm = normalizeTitleForMatch(title);
+  if (KNOWN_TITLE_CANONICAL_MAP[norm]) {
+    return KNOWN_TITLE_CANONICAL_MAP[norm];
+  }
+  for (const [alias, canonical] of Object.entries(KNOWN_TITLE_CANONICAL_MAP)) {
+    if (alias.length >= 6 && norm.length >= 6) {
+      const minLen = Math.min(norm.length, alias.length);
+      const maxLen = Math.max(norm.length, alias.length);
+      if (minLen / maxLen >= 0.7 && (norm.startsWith(alias) || alias.startsWith(norm))) {
+        return canonical;
+      }
+    }
+  }
+  return norm;
+}
+
+export function sanitizeTitleForFolderMatch(raw: string): string {
+  if (!raw) return "";
+  return raw
+    .replace(/[:?*"<>|/\\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function deduplicateDiscoverNovels(novels: DiscoveredNovel[]): DiscoveredNovel[] {
+  const seenKeys = new Set<string>();
+  const result: DiscoveredNovel[] = [];
+
+  for (const novel of novels) {
+    const normTitle = normalizeTitleForMatch(novel.title);
+    const canTitle = canonicalTitleKey(novel.title);
+    const normRomaji = novel.titleRomaji ? normalizeTitleForMatch(novel.titleRomaji) : "";
+    const canRomaji = novel.titleRomaji ? canonicalTitleKey(novel.titleRomaji) : "";
+
+    if (
+      seenKeys.has(normTitle) ||
+      seenKeys.has(canTitle) ||
+      (normRomaji && seenKeys.has(normRomaji)) ||
+      (canRomaji && seenKeys.has(canRomaji))
+    ) {
+      continue;
+    }
+
+    seenKeys.add(normTitle);
+    seenKeys.add(canTitle);
+    if (normRomaji) seenKeys.add(normRomaji);
+    if (canRomaji) seenKeys.add(canRomaji);
+
+    result.push(novel);
+  }
+
+  return result;
+}
+
 export function findRealElscioneFolder(
   title: string,
   romaji?: string,
@@ -222,14 +455,32 @@ export function findRealElscioneFolder(
   customFolders?: string[],
 ): string | null {
   const folders = customFolders || REAL_ELSCIONE_FOLDERS;
-  const candidates = [title, romaji, native].filter(Boolean) as string[];
+  const rawCandidates = [title, romaji, native].filter(Boolean) as string[];
+
+  // Expand candidates with sanitized versions (stripping colons, question marks, illegal characters)
+  const candidates: string[] = [];
+  for (const c of rawCandidates) {
+    candidates.push(c);
+    const sanitized = sanitizeTitleForFolderMatch(c);
+    if (sanitized && sanitized !== c) {
+      candidates.push(sanitized);
+    }
+  }
+
+  const validateFolder = (folderName: string | null | undefined): string | null => {
+    if (!folderName) return null;
+    if (/[:?*"<>|/\\]/.test(folderName)) return null;
+    if (!folders.includes(folderName)) return null;
+    return folderName;
+  };
 
   // 1. Check known aliases map first
   for (const c of candidates) {
     const norm = normalizeTitleForMatch(c);
     if (!norm) continue;
     if (KNOWN_TITLE_TO_ELSCIONE[norm]) {
-      return KNOWN_TITLE_TO_ELSCIONE[norm];
+      const match = validateFolder(KNOWN_TITLE_TO_ELSCIONE[norm]);
+      if (match) return match;
     }
   }
 
@@ -239,12 +490,14 @@ export function findRealElscioneFolder(
     if (!norm) continue;
 
     if (!customFolders && elscioneNormalizedMap.has(norm)) {
-      return elscioneNormalizedMap.get(norm)!;
+      const match = validateFolder(elscioneNormalizedMap.get(norm));
+      if (match) return match;
     }
 
     for (const f of folders) {
       if (normalizeTitleForMatch(f) === norm) {
-        return f;
+        const match = validateFolder(f);
+        if (match) return match;
       }
     }
   }
@@ -264,7 +517,8 @@ export function findRealElscioneFolder(
         normF === norm ||
         (minLen / maxLen >= 0.7 && (normF.startsWith(norm) || norm.startsWith(normF)))
       ) {
-        return f;
+        const match = validateFolder(f);
+        if (match) return match;
       }
     }
   }
@@ -349,13 +603,21 @@ export function resolveRealDownloadSources(
   const elscioneFolder = findRealElscioneFolder(title, romaji, native, options?.customElscioneFolders);
   const lnoriItem = findRealLnoriSeries(title, romaji, native, options?.customLnoriSeries);
 
-  if (!elscioneFolder && !lnoriItem) {
+  const realFolders = options?.customElscioneFolders || REAL_ELSCIONE_FOLDERS;
+  const validElscioneFolder =
+    elscioneFolder &&
+    realFolders.includes(elscioneFolder) &&
+    !/[:?*"<>|/\\]/.test(elscioneFolder)
+      ? elscioneFolder
+      : null;
+
+  if (!validElscioneFolder && !lnoriItem) {
     return null;
   }
 
   const sourceUrls: DiscoverSourceUrls = {};
-  if (elscioneFolder) {
-    sourceUrls.elscione = `https://server.elscione.com/Officially%20Translated%20Light%20Novels/${encodeURIComponent(elscioneFolder)}/`;
+  if (validElscioneFolder) {
+    sourceUrls.elscione = `https://server.elscione.com/Officially%20Translated%20Light%20Novels/${encodeURIComponent(validElscioneFolder)}/`;
   }
   if (lnoriItem) {
     sourceUrls.lnori = `https://lnori.com/series/${lnoriItem.id}/${lnoriItem.slug}`;
@@ -428,7 +690,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Honzuki no Gekokujou: Shisho ni Naru Tame ni wa Shudan wo Erandeiraremasen",
     titleNative: "本好きの下剋上 ～司書になるためには手段を選んでいられません～",
     author: "Miya Kazuki",
-    coverUrl: "https://images.ranobedb.org/b619d854e488d0ce2438318b7ae29fa7.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx110800-buaDMQpwzfds.jpg",
     synopsis: "A book-loving college student dies and is reincarnated in a medieval fantasy world without books. Determined to read again, she resolves to make her own.",
     genres: ["Fantasy", "Isekai", "Slice of Life"],
     score: 91,
@@ -450,8 +712,8 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     title: "Classroom of the Elite",
     titleRomaji: "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e",
     titleNative: "ようこそ実力至上主義の教室へ",
-    author: "Shougo Kinugasa",
-    coverUrl: "https://images.ranobedb.org/5c23d4a2be29e81dbf7d5440b82f026a.jpg",
+    author: "Shogo Kinugasa",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx94970-q77X5sfRIKvU.jpg",
     synopsis: "Kiyotaka Ayanokouji enrolls at Tokyo Metropolitan Advanced Nurturing High School, an elite institution where students receive points based on merit in a cutthroat hierarchy.",
     genres: ["Psychological", "Drama", "Mystery"],
     score: 89,
@@ -474,7 +736,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Mushoku Tensei: Isekai Ittara Honki Dasu",
     titleNative: "無職転生 ～異世界行ったら本気だす～",
     author: "Rifujin na Magonote",
-    coverUrl: "https://images.ranobedb.org/f726cbbe98ce0a9f5d34208a381180eb.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/nx85470-jt6BF9tDWB2X.jpg",
     synopsis: "Reincarnated into a magical world as infant Rudeus Greyrat, a 34-year-old NEET resolves to overcome his past trauma and live his new life to the absolute fullest.",
     genres: ["Fantasy", "Isekai", "Adventure"],
     score: 88,
@@ -497,7 +759,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Overlord",
     titleNative: "オーバーロード",
     author: "Kugane Maruyama",
-    coverUrl: "https://images.ranobedb.org/bb89c67eb9f492a549e3e3b320d4b29f.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx85976-hVr99G1kD1M5.png",
     synopsis: "When the popular MMORPG Yggdrasil shuts down, veteran player Momonga stays logged in until the final second, only to discover the Great Tomb of Nazarick transported to a real new world.",
     genres: ["Fantasy", "Action", "Supernatural"],
     score: 87,
@@ -520,7 +782,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Tensei Shitara Slime Datta Ken",
     titleNative: "転生したらスライムだった件",
     author: "Fuse",
-    coverUrl: "https://images.ranobedb.org/c789a421b8f10398ab762194840d859e.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx86355-pGwmLqVTwwE4.jpg",
     synopsis: "After being killed by a rogue robber, corporate worker Satoru Mikami wakes up in a fantasy world reincarnated as a gelatinous slime named Rimuru Tempest with unique Predator abilities.",
     genres: ["Fantasy", "Isekai", "Comedy", "Action"],
     score: 86,
@@ -543,7 +805,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Otonari no Tenshi-sama ni Itsu no Ma ni ka Dame Ningen ni Sareteita Ken",
     titleNative: "お隣の天使様にいつの間にか駄目人間にされていた件",
     author: "Saekisan",
-    coverUrl: "https://images.ranobedb.org/73f08b3ba94e77ddf406691461ff360a.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx113533-u3D4i0jHzt2z.jpg",
     synopsis: "Amane Fujimiya lives next door to Mahiru Shiina, school idol known as Angel. After Amane offers her his umbrella on a rainy day, Mahiru begins looking after his disorganized bachelor lifestyle.",
     genres: ["Romance", "Comedy", "Slice of Life"],
     score: 85,
@@ -566,7 +828,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "86--Eighty Six",
     titleNative: "86―エイティシックス―",
     author: "Asato Asato",
-    coverUrl: "https://images.ranobedb.org/6945be1fcde833df82aa376f92a01490.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx98610-TIf7R1gkU0vc.jpg",
     synopsis: "The Republic of San Magnolia claims to fight an unmanned war against autonomous Legion drones. In reality, the processors operating the Juggernaut mechs are human 86s denied personhood.",
     genres: ["Sci-Fi", "Action", "Drama", "Psychological"],
     score: 89,
@@ -589,7 +851,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Kusuriya no Hitorigoto",
     titleNative: "薬屋のひとりごと",
     author: "Natsu Hyuuga",
-    coverUrl: "https://images.ranobedb.org/88e4091a13e55138122c66d2f34aa0b1.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/nx99026-5Eg650WAd9Rj.jpg",
     synopsis: "Kidnapped and sold into service at the imperial palace, apothecary daughter Maomao uses her deep medical and toxicological acumen to deduce the mysteries of the inner court.",
     genres: ["Mystery", "Drama", "Historical"],
     score: 90,
@@ -612,7 +874,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Kage no Jitsuryokusha ni Naritakute!",
     titleNative: "陰の実力者になりたくて！",
     author: "Daisuke Aizawa",
-    coverUrl: "https://images.ranobedb.org/218cb72e01b359f518a47466ebc194e1.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx108428-wTg20rSpvkU9.jpg",
     synopsis: "Cid Kagenou strives to become a mastermind operating from the shadows. Reborn into a magical world, his fictional conspiracies ironically turn out to be real threats.",
     genres: ["Action", "Comedy", "Fantasy"],
     score: 86,
@@ -635,7 +897,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Imouto sae Ireba Ii.",
     titleNative: "妹さえいればいい。",
     author: "Yomi Hirasaka",
-    coverUrl: "https://images.ranobedb.org/99f3583bb2225a0928929944a9561b34.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/nx97894-ZQmIZQsc5Wea.jpg",
     synopsis: "Follows itsuki Hashima, an eccentric light novel author obsessed with little sisters, surrounded by talented creators, editors, and tax accountants in the modern publishing industry.",
     genres: ["Comedy", "Romance", "Slice of Life"],
     score: 82,
@@ -657,8 +919,8 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     title: "Grimgar of Fantasy and Ash",
     titleRomaji: "Hai to Gensou no Grimgar",
     titleNative: "灰と幻想のグリムガル",
-    author: "Ao Juumonji",
-    coverUrl: "https://images.ranobedb.org/a468b6d4948ff11e515d91df3e070c79.jpg",
+    author: "Ao Jyumonji",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx86365-1H3Lp87JUnxr.jpg",
     synopsis: "Waking up in a strange realm with no memories of their past lives, Haruhiro and fellow outcasts must hunt goblins to survive in a unforgivingly realistic world.",
     genres: ["Fantasy", "Action", "Drama"],
     score: 84,
@@ -680,8 +942,8 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     title: "DanMachi: Is It Wrong to Try to Pick Up Girls in a Dungeon?",
     titleRomaji: "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka",
     titleNative: "ダンジョンに出会いを求めるのは間違っているだろうか",
-    author: "Fujino Oomori",
-    coverUrl: "https://images.ranobedb.org/e2ab34934d4ec311bc40c6b12a8064ae.jpg",
+    author: "Fujino Omori",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx85162-Fpd3ejAlFWP8.jpg",
     synopsis: "In the sprawling city of Orario above the massive Dungeon, rookie adventurer Bell Cranel strives to grow stronger under the banner of the tiny Hestia Familia.",
     genres: ["Fantasy", "Action", "Adventure"],
     score: 86,
@@ -704,7 +966,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Re:Zero kara Hajimeru Isekai Seikatsu",
     titleNative: "Re:ゼロから始める異世界生活",
     author: "Tappei Nagatsuki",
-    coverUrl: "https://images.ranobedb.org/a46875bc4911f9db678912e9b9409890.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx85737-WkWOr5EgwPyo.jpg",
     synopsis: "Subaru Natsuki is suddenly summoned to another world with no powers except Return by Death—reversing time to a past save point whenever he perishes.",
     genres: ["Fantasy", "Psychological", "Drama", "Isekai"],
     score: 88,
@@ -727,7 +989,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Toaru Majutsu no Index",
     titleNative: "とある魔術の禁書目録",
     author: "Kazuma Kamachi",
-    coverUrl: "https://images.ranobedb.org/4c6792374e64ba23381e46934a31de5b.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx42854-IOa3uoHblsCB.png",
     synopsis: "In Academy City, a scientifically advanced haven of espers, high schooler Touma Kamijou possesses Imagine Breaker in his right hand, negating all supernatural abilities.",
     genres: ["Sci-Fi", "Supernatural", "Action"],
     score: 83,
@@ -750,7 +1012,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Monogatari Series",
     titleNative: "物語シリーズ",
     author: "Nisio Isin",
-    coverUrl: "https://images.ranobedb.org/bb89c67eb9f492a549e3e3b320d4b29f.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx44893-aV0XRP0OfWf7.jpg",
     synopsis: "High school student Koyomi Araragi survives a vampire attack with the aid of the eccentric specialist Meme Oshino. Finding himself equipped with lingering superhuman healing, he assists various girls afflicted by bizarre apparitions and emotional trauma.",
     genres: ["Supernatural", "Mystery", "Psychological"],
     score: 89,
@@ -771,8 +1033,8 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     title: "A Cave King's Road to Paradise",
     titleRomaji: "Cave King no Rakuen Life",
     titleNative: "洞窟王からはじめる楽園ライフ",
-    author: "Sanoushi",
-    coverUrl: "https://images.ranobedb.org/5c23d4a2be29e81dbf7d5440b82f026a.jpg",
+    author: "Hajime Naehara",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx119518-W0uUHej9hS3h.jpg",
     synopsis: "Prince Heal is exiled to a barren, isolated island due to possessing a seemingly useless Cave King crest. However, upon excavating the rocks, he discovers his crest grants godlike mining and crafting abilities, rapidly transforming the desolate wasteland into an impregnable paradise.",
     genres: ["Fantasy", "Adventure", "Slice of Life"],
     score: 80,
@@ -797,8 +1059,8 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     title: "Playing Death Games to Put Food on the Table",
     titleRomaji: "Shibou Yuugi de Meshi wo Kuu.",
     titleNative: "死亡遊戯で飯を食う。",
-    author: "Yushi Ukai",
-    coverUrl: "https://images.ranobedb.org/b619d854e488d0ce2438318b7ae29fa7.jpg",
+    author: "Yuushi Ukai",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx154060-vFViZxxlVH9F.png",
     synopsis: "Yuuki wakes up dressed in a maid uniform in a lethal ghost mansion. In a world where high-stakes death games are streamed for money, she plays to survive and pay rent.",
     genres: ["Psychological", "Action", "Mystery"],
     score: 84,
@@ -821,7 +1083,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Toumei na Yoru ni Kakeru Kimi to, Me ni Mienai Koi wo Shita.",
     titleNative: "透明な夜に駆ける君と、目に見えない恋をした。",
     author: "Misaki Sano",
-    coverUrl: "https://images.ranobedb.org/73f08b3ba94e77ddf406691461ff360a.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx175916-UH4p840mvvLk.png",
     synopsis: "College student Kakeru meets Hibari, a visually impaired girl fascinated by festival fireworks. Together they embark on a delicate journey exploring sound, sensation, and affection.",
     genres: ["Romance", "Drama", "Slice of Life"],
     score: 86,
@@ -843,8 +1105,8 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     title: "Heroine? Saint? No, I'm an All-Works Maid",
     titleRomaji: "Heroine? Seijo? Iie, All-Works Maid desu!",
     titleNative: "ヒロイン？聖女？いいえ、オールワークスメイドです！",
-    author: "Amane",
-    coverUrl: "https://images.ranobedb.org/88e4091a13e55138122c66d2f34aa0b1.jpg",
+    author: "Kyouka",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/b128801-t8xoJTwtiBmb.jpg",
     synopsis: "Reincarnated into an otome game as the prophesied holy maiden, Melody decides she would rather fulfill her lifelong dream of being an impeccable professional maid.",
     genres: ["Fantasy", "Comedy", "Slice of Life"],
     score: 80,
@@ -867,7 +1129,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Yuusha Kei ni Shosu: Choubatsu Yuusha 9004-tai Keimu Kiroku",
     titleNative: "勇者刑に処す 懲罰勇者9004隊刑務記録",
     author: "Rocket Shokai",
-    coverUrl: "https://images.ranobedb.org/6945be1fcde833df82aa376f92a01490.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx142687-BFy2lofGgPKx.jpg",
     synopsis: "Heroism is not an honor—it is the ultimate capital punishment for heinous criminals condemned to endlessly fight the demon king's immortal army until they die.",
     genres: ["Fantasy", "Action", "Dark Fantasy"],
     score: 85,
@@ -889,8 +1151,8 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     title: "The Water Magician",
     titleRomaji: "Mizu Zokusei no Mahoutsukai",
     titleNative: "水属性の魔法使い",
-    author: "Tadashi Kubota",
-    coverUrl: "https://images.ranobedb.org/5c23d4a2be29e81dbf7d5440b82f026a.jpg",
+    author: "Tadashi Kubou",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx142688-ShdIyM8TGqO8.jpg",
     synopsis: "Reincarnated into another realm with only basic water affinity magic, Ryou meticulously discovers how fluid dynamics, purification, and pressure can outmatch any offensive flame.",
     genres: ["Fantasy", "Adventure", "Slice of Life"],
     score: 81,
@@ -913,7 +1175,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Haibara-kun no Tsuyokute Seishun New Game",
     titleNative: "灰原くんの強くて青春ニューゲーム",
     author: "Kazuki Amamiya",
-    coverUrl: "https://images.ranobedb.org/f726cbbe98ce0a9f5d34208a381180eb.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx143071-1FRtRk64oI5L.jpg",
     synopsis: "Natsuki Haibara wasted his high school youth in loneliness. When he mysteriously slips back in time to his high school entrance ceremony, he resolves to live a sparkling youth.",
     genres: ["Romance", "Comedy", "Slice of Life"],
     score: 82,
@@ -936,7 +1198,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Make Heroine ga Oosugiru!",
     titleNative: "負けヒロインが多すぎる！",
     author: "Takibi Amamori",
-    coverUrl: "https://images.ranobedb.org/218cb72e01b359f518a47466ebc194e1.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx135276-BGRuVuGlHIQY.jpg",
     synopsis: "Background student Kazuhiko Nukumizu witnesses the girl next door getting rejected by her crush. Soon, he finds himself surrounded by girls who lost the romance race.",
     genres: ["Comedy", "Romance", "Slice of Life"],
     score: 88,
@@ -959,7 +1221,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Silent Witch: Chinmoku no Majo no Kakushigoto",
     titleNative: "サイレント・ウィッチ 沈黙の魔女の隠しごと",
     author: "Matsuri Isora",
-    coverUrl: "https://images.ranobedb.org/bb89c67eb9f492a549e3e3b320d4b29f.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx136833-gbVDB7CgEUYT.jpg",
     synopsis: "Monica Everett is the Silent Witch, capable of unchanted supreme magic purely because she is cripplingly shy. Now, she is ordered to go undercover as a high school student.",
     genres: ["Fantasy", "Mystery", "Comedy"],
     score: 85,
@@ -982,7 +1244,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Gimai Seikatsu",
     titleNative: "義妹生活",
     author: "Ghost Mikawa",
-    coverUrl: "https://images.ranobedb.org/c789a421b8f10398ab762194840d859e.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx126268-c3BmsZ0LlJWr.png",
     synopsis: "After his father remarries, Yuuta Asamura ends up living under the same roof with Saki Ayase. Having both witnessed their parents' broken marriages, they establish a calm, respectful distance.",
     genres: ["Romance", "Slice of Life", "Drama"],
     score: 84,
@@ -1005,7 +1267,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Ryouchi Henkyou kara Hajimeru Ryouchi Unei",
     titleNative: "領地辺境から始める領地運営",
     author: "Fuurou",
-    coverUrl: "https://images.ranobedb.org/99f3583bb2225a0928929944a9561b34.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/nx106767-3SvzEtMGx5dX.jpg",
     synopsis: "Dias is granted a remote wasteland after twenty years of grueling military service. Finding only grassland and roaming wildlife, he begins building a peaceful haven.",
     genres: ["Fantasy", "Isekai", "Adventure"],
     score: 81,
@@ -1027,8 +1289,8 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     title: "Min-Maxing My TRPG Build in Another World",
     titleRomaji: "TRPG Player ga Isekai de Saikyou Build wo Mezasu",
     titleNative: "TRPGプレイヤーが異世界で最強ビルドを目指す",
-    author: "Schoppen",
-    coverUrl: "https://images.ranobedb.org/a468b6d4948ff11e515d91df3e070c79.jpg",
+    author: "Schuld",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx136341-etgs2NuVx5qN.jpg",
     synopsis: "Reincarnated into a tabletop RPG ruleset realm, a hardcore min-maxer carefully allocates his stats and character points to construct an unassailable build.",
     genres: ["Fantasy", "Isekai", "Adventure"],
     score: 83,
@@ -1051,7 +1313,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Ore wa Seikan Kokka no Akutoku Ryoushu!",
     titleNative: "俺は星間国家の悪徳領主！",
     author: "Yomu Mishima",
-    coverUrl: "https://images.ranobedb.org/e2ab34934d4ec311bc40c6b12a8064ae.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx133484-bWRiNkdBrnuv.jpg",
     synopsis: "Liam Sera Banfield was betrayed and died in debt. Reborn into a sci-fi space empire, he vows to become a ruthless corrupt lord—only for his every act to accidentally enrich his people.",
     genres: ["Sci-Fi", "Action", "Comedy", "Isekai"],
     score: 83,
@@ -1074,7 +1336,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     titleRomaji: "Hikikomari Kyuuketsuki no Monmon",
     titleNative: "ひきこまり吸血姫の悶々",
     author: "Kotei Kobayashi",
-    coverUrl: "https://images.ranobedb.org/bb89c67eb9f492a549e3e3b320d4b29f.jpg",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx119283-iuhI6oQSEuSS.jpg",
     synopsis: "Terakomari Gandesblood is a shut-in vampire who cannot drink blood or cast magic. When she is suddenly appointed as a supreme commander in the imperial army, she must bluff her way through lethal battles and conspiracies alongside her devoted maid.",
     genres: ["Fantasy", "Comedy", "Action"],
     score: 84,
@@ -1095,8 +1357,8 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     title: "A Contract Marriage with the Maid",
     titleRomaji: "Meido-san to no Keiyaku Kekkon",
     titleNative: "メイドさんとの契約結婚",
-    author: "Ryo Arihara",
-    coverUrl: "https://images.ranobedb.org/88e4091a13e55138122c66d2f34aa0b1.jpg",
+    author: "Dalsaeowl",
+    coverUrl: "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx124522-yceI38rJDLl9.jpg",
     synopsis: "To escape political machinations and high-society obligations, a prominent nobleman proposes a convenient marriage of convenience with his reserved, diligent housemaid. What begins as a calculated formal arrangement soon deepens into a warm and sincere bond.",
     genres: ["Romance", "Drama", "Slice of Life"],
     score: 82,
@@ -1676,7 +1938,7 @@ export async function fetchDiscoverFeed(
   tab: DiscoverTab,
   dependencies?: DiscoverDependencies,
 ): Promise<DiscoveredNovel[]> {
-  const cacheKey = `feed:${tab}`;
+  const cacheKey = `v2:feed:${tab}`;
 
   // 1. Check cache
   const cached = getCachedFeed(cacheKey, dependencies);
@@ -1708,6 +1970,61 @@ export async function fetchDiscoverFeed(
     freshNovels = tab === "trending"
       ? (dependencies?.seedTrendingNovels ?? SEED_TRENDING_NOVELS)
       : (dependencies?.seedNewNovels ?? SEED_NEW_NOVELS);
+  }
+
+  // Strict Deduplication:
+  // - Deduplicate within feed
+  // - Ensure New Releases does not contain titles already present in Trending
+  if (tab === "new") {
+    const trendingNovels = await fetchDiscoverFeed("trending", dependencies);
+    const trendingTitleKeys = new Set<string>();
+    for (const t of trendingNovels) {
+      trendingTitleKeys.add(normalizeTitleForMatch(t.title));
+      trendingTitleKeys.add(canonicalTitleKey(t.title));
+      if (t.titleRomaji) {
+        trendingTitleKeys.add(normalizeTitleForMatch(t.titleRomaji));
+        trendingTitleKeys.add(canonicalTitleKey(t.titleRomaji));
+      }
+    }
+
+    freshNovels = freshNovels.filter((n) => {
+      const norm = normalizeTitleForMatch(n.title);
+      const can = canonicalTitleKey(n.title);
+      const normRom = n.titleRomaji ? normalizeTitleForMatch(n.titleRomaji) : "";
+      const canRom = n.titleRomaji ? canonicalTitleKey(n.titleRomaji) : "";
+
+      const inTrending =
+        trendingTitleKeys.has(norm) ||
+        trendingTitleKeys.has(can) ||
+        (normRom && trendingTitleKeys.has(normRom)) ||
+        (canRom && trendingTitleKeys.has(canRom));
+
+      return !inTrending;
+    });
+
+    freshNovels = deduplicateDiscoverNovels(freshNovels);
+
+    const seedCandidates = dependencies?.seedNewNovels ?? SEED_NEW_NOVELS;
+    for (const seed of seedCandidates) {
+      const norm = normalizeTitleForMatch(seed.title);
+      const can = canonicalTitleKey(seed.title);
+      const normRom = seed.titleRomaji ? normalizeTitleForMatch(seed.titleRomaji) : "";
+      const canRom = seed.titleRomaji ? canonicalTitleKey(seed.titleRomaji) : "";
+
+      const inTrending =
+        trendingTitleKeys.has(norm) ||
+        trendingTitleKeys.has(can) ||
+        (normRom && trendingTitleKeys.has(normRom)) ||
+        (canRom && trendingTitleKeys.has(canRom));
+
+      if (!inTrending) {
+        freshNovels.push({ ...seed });
+      }
+    }
+
+    freshNovels = deduplicateDiscoverNovels(freshNovels);
+  } else {
+    freshNovels = deduplicateDiscoverNovels(freshNovels);
   }
 
   // Ensure all discovered novels have complete, engaging, non-empty synopses
@@ -1758,6 +2075,21 @@ async function fetchOnlineFeedWithFallback(
             day
           }
           volumes
+          staff {
+            edges {
+              role
+              node {
+                name {
+                  full
+                }
+              }
+            }
+            nodes {
+              name {
+                full
+              }
+            }
+          }
         }
       }
     }
@@ -1819,12 +2151,44 @@ async function fetchOnlineFeedWithFallback(
         continue;
       }
 
+      let author = "";
+      if (Array.isArray(item.staff?.edges) && item.staff.edges.length > 0) {
+        const storyEdge = item.staff.edges.find((e: any) =>
+          /original\s*story|story|author|creator|writer/i.test(e?.role || ""),
+        );
+        if (storyEdge?.node?.name?.full) {
+          author = storyEdge.node.name.full.trim();
+        } else if (item.staff.edges[0]?.node?.name?.full) {
+          author = item.staff.edges[0].node.name.full.trim();
+        }
+      }
+      if (!author && Array.isArray(item.staff?.nodes) && item.staff.nodes.length > 0) {
+        for (const n of item.staff.nodes) {
+          if (n?.name?.full) {
+            author = n.name.full.trim();
+            break;
+          }
+        }
+      }
+      if (!author) {
+        const norm = normalizeTitleForMatch(title);
+        const normRomaji = item.title?.romaji ? normalizeTitleForMatch(item.title.romaji) : "";
+        author = KNOWN_TITLE_TO_AUTHOR[norm] || (normRomaji ? KNOWN_TITLE_TO_AUTHOR[normRomaji] : "") || "Light Novel Author";
+      }
+
+      let coverUrl = item.coverImage?.extraLarge || item.coverImage?.large || "";
+      if (!coverUrl || coverUrl.includes("images.ranobedb.org")) {
+        const norm = normalizeTitleForMatch(title);
+        coverUrl = KNOWN_TITLE_TO_COVER[norm] || "";
+      }
+
       results.push({
         id: `anilist-${item.id}-${slug}`,
         title,
         titleRomaji: item.title?.romaji || undefined,
         titleNative: item.title?.native || undefined,
-        coverUrl: item.coverImage?.extraLarge || item.coverImage?.large || "",
+        author,
+        coverUrl,
         synopsis: cleanSynopsisText((item.description || "").replace(/<[^>]+>/g, "").trim()),
         genres: Array.isArray(item.genres) && item.genres.length > 0 ? item.genres : ["Light Novel"],
         score: item.averageScore || 80,
@@ -1846,10 +2210,21 @@ async function fetchOnlineFeedWithFallback(
       : (dependencies?.seedNewNovels ?? SEED_NEW_NOVELS);
 
     const existingTitles = new Set(results.map((r) => normalizeTitleForMatch(r.title)));
+    for (const r of results) {
+      existingTitles.add(canonicalTitleKey(r.title));
+      if (r.titleRomaji) {
+        existingTitles.add(normalizeTitleForMatch(r.titleRomaji));
+        existingTitles.add(canonicalTitleKey(r.titleRomaji));
+      }
+    }
+
     for (const seed of seedCandidates) {
-      if (!existingTitles.has(normalizeTitleForMatch(seed.title))) {
+      const norm = normalizeTitleForMatch(seed.title);
+      const can = canonicalTitleKey(seed.title);
+      if (!existingTitles.has(norm) && !existingTitles.has(can)) {
         results.push({ ...seed });
-        existingTitles.add(normalizeTitleForMatch(seed.title));
+        existingTitles.add(norm);
+        existingTitles.add(can);
       }
     }
 
@@ -2020,6 +2395,15 @@ export async function enqueueDiscoverIngest(
   if (source === "elscione") {
     if (!isElscioneUrl(cleanUrl)) {
       throw new Error(`Target URL is not a valid server.elscione.com or server.elsci.one URL: ${cleanUrl}`);
+    }
+    const parsed = parseElscioneUrl(cleanUrl);
+    if (parsed?.seriesTitle) {
+      if (/[:?*"<>|/\\]/.test(parsed.seriesTitle)) {
+        throw new Error(`Target Elscione folder contains invalid characters: ${parsed.seriesTitle}`);
+      }
+      if (!REAL_ELSCIONE_FOLDERS.includes(parsed.seriesTitle)) {
+        throw new Error(`Target Elscione folder does not exist in catalog: ${parsed.seriesTitle}`);
+      }
     }
     if (queueHandlers?.enqueueElscioneJob) {
       const res = await queueHandlers.enqueueElscioneJob(cleanUrl);
