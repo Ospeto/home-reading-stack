@@ -111,6 +111,28 @@ for (const s of REAL_LNORI_SERIES) {
   lnoriNormalizedMap.set(normalizeTitleForMatch(s.slug.replace(/-/g, " ")), s);
 }
 
+interface NormalizedLnoriSeries {
+  id: number;
+  slug: string;
+  normSlug: string;
+}
+
+const precomputedRealLnoriSeries: NormalizedLnoriSeries[] = REAL_LNORI_SERIES.map((s) => ({
+  id: s.id,
+  slug: s.slug,
+  normSlug: normalizeTitleForMatch(s.slug.replace(/-/g, " ")),
+}));
+
+interface NormalizedElscioneFolder {
+  folder: string;
+  normFolder: string;
+}
+
+const precomputedRealElscioneFolders: NormalizedElscioneFolder[] = REAL_ELSCIONE_FOLDERS.map((f) => ({
+  folder: f,
+  normFolder: normalizeTitleForMatch(f),
+}));
+
 export const KNOWN_TITLE_TO_ELSCIONE: Record<string, string> = {
   "rezero": "ReZero - Starting Life in Another World",
   "rezero starting life in another world": "ReZero - Starting Life in Another World",
@@ -238,7 +260,6 @@ export const KNOWN_TITLE_TO_LNORI: Record<string, { id: number; slug: string }> 
   "mushoku tensei jobless reincarnation": { id: 3336, slug: "mushoku-tensei-jobless-reincarnation" },
   "overlord": { id: 2405, slug: "overlord" },
   "that time i got reincarnated as a slime": { id: 3580, slug: "that-time-i-got-reincarnated-as-a-slime" },
-  "slime": { id: 3580, slug: "that-time-i-got-reincarnated-as-a-slime" },
   "tensura": { id: 3580, slug: "that-time-i-got-reincarnated-as-a-slime" },
   "oregairu": { id: 1844, slug: "my-youth-romantic-comedy-is-wrong-as-i-expected" },
   "my youth romantic comedy is wrong": { id: 1844, slug: "my-youth-romantic-comedy-is-wrong-as-i-expected" },
@@ -277,7 +298,6 @@ export const KNOWN_TITLE_CANONICAL_MAP: Record<string, string> = {
   "mushoku tensei jobless reincarnation": "mushoku tensei",
   "overlord": "overlord",
   "that time i got reincarnated as a slime": "that time i got reincarnated as a slime",
-  "slime": "that time i got reincarnated as a slime",
   "tensura": "that time i got reincarnated as a slime",
   "oregairu": "oregairu",
   "my youth romantic comedy is wrong": "oregairu",
@@ -384,8 +404,10 @@ export const KNOWN_TITLE_TO_AUTHOR: Record<string, string> = {
   "rascal does not dream of bunny girl senpai": "Hajime Kamoshida",
   "oregairu": "Wataru Watari",
   "my youth romantic comedy is wrong": "Wataru Watari",
+  "a tale of the secret saint": "Touya",
+  "a tale of the secret saint zero": "Touya",
+  "a surprisingly happy engagement for the slime duke and the fallen noble lady": "Maya Yoshioka",
   "my youth romantic comedy is wrong as i expected": "Wataru Watari",
-  "slime": "Fuse",
   "tensura": "Fuse",
   "sao": "Reki Kawahara",
   "cote": "Shogo Kinugasa",
@@ -402,7 +424,6 @@ export const KNOWN_TITLE_TO_COVER: Record<string, string> = {
   "mushoku tensei jobless reincarnation": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/nx85470-jt6BF9tDWB2X.jpg",
   "overlord": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx85976-hVr99G1kD1M5.png",
   "that time i got reincarnated as a slime": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx86355-pGwmLqVTwwE4.jpg",
-  "slime": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx86355-pGwmLqVTwwE4.jpg",
   "tensura": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx86355-pGwmLqVTwwE4.jpg",
   "the angel next door spoils me rotten": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx113533-u3D4i0jHzt2z.jpg",
   "86": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx98610-TIf7R1gkU0vc.jpg",
@@ -517,13 +538,32 @@ export function findRealElscioneFolder(
   const folders = customFolders || REAL_ELSCIONE_FOLDERS;
   const rawCandidates = [title, romaji, native].filter(Boolean) as string[];
 
-  // Expand candidates with sanitized versions (stripping colons, question marks, illegal characters)
+  // Expand candidates with sanitized versions (stripping colons, question marks, illegal characters, and subtitle appendages)
   const candidates: string[] = [];
   for (const c of rawCandidates) {
-    candidates.push(c);
+    if (!candidates.includes(c)) candidates.push(c);
     const sanitized = sanitizeTitleForFolderMatch(c);
-    if (sanitized && sanitized !== c) {
+    if (sanitized && !candidates.includes(sanitized)) {
       candidates.push(sanitized);
+    }
+    // Subtitle parts before colons, dashes, question marks
+    const subParts = c.split(/[:\-–—?]+/);
+    if (subParts.length > 1) {
+      for (const p of subParts) {
+        const trimmed = p.trim();
+        if (trimmed.length >= 3 && !candidates.includes(trimmed)) {
+          candidates.push(trimmed);
+        }
+      }
+      const beforeSeparator = subParts[0].trim();
+      if (beforeSeparator.length >= 3 && !candidates.includes(beforeSeparator)) {
+        candidates.push(beforeSeparator);
+      }
+    }
+    for (const v of cleanCalibreTitleVariants(c)) {
+      if (!candidates.includes(v)) candidates.push(v);
+      const vSanitized = sanitizeTitleForFolderMatch(v);
+      if (vSanitized && !candidates.includes(vSanitized)) candidates.push(vSanitized);
     }
   }
 
@@ -554,21 +594,27 @@ export function findRealElscioneFolder(
       if (match) return match;
     }
 
-    for (const f of folders) {
-      if (normalizeTitleForMatch(f) === norm) {
-        const match = validateFolder(f);
-        if (match) return match;
+    if (customFolders) {
+      for (const f of folders) {
+        if (normalizeTitleForMatch(f) === norm) {
+          const match = validateFolder(f);
+          if (match) return match;
+        }
       }
     }
   }
 
   // 3. Check bounded prefix / containment match (must be >= 8 chars and length ratio >= 0.70)
+  const folderEntries = customFolders
+    ? folders.map((f) => ({ folder: f, normFolder: normalizeTitleForMatch(f) }))
+    : precomputedRealElscioneFolders;
+
   for (const c of candidates) {
     const norm = normalizeTitleForMatch(c);
     if (!norm || norm.length < 8) continue;
 
-    for (const f of folders) {
-      const normF = normalizeTitleForMatch(f);
+    for (const entry of folderEntries) {
+      const normF = entry.normFolder;
       if (normF.length < 8) continue;
 
       const minLen = Math.min(norm.length, normF.length);
@@ -577,7 +623,7 @@ export function findRealElscioneFolder(
         normF === norm ||
         (minLen / maxLen >= 0.7 && (normF.startsWith(norm) || norm.startsWith(normF)))
       ) {
-        const match = validateFolder(f);
+        const match = validateFolder(entry.folder);
         if (match) return match;
       }
     }
@@ -593,7 +639,29 @@ export function findRealLnoriSeries(
   customSeries?: Array<{ id: number; slug: string }>,
 ): { id: number; slug: string } | null {
   const seriesList = customSeries || REAL_LNORI_SERIES;
-  const candidates = [title, romaji, native].filter(Boolean) as string[];
+  const rawCandidates = [title, romaji, native].filter(Boolean) as string[];
+  const candidates: string[] = [];
+  for (const c of rawCandidates) {
+    if (!candidates.includes(c)) candidates.push(c);
+    const sanitized = sanitizeTitleForFolderMatch(c);
+    if (sanitized && !candidates.includes(sanitized)) candidates.push(sanitized);
+    const subParts = c.split(/[:\-–—?]+/);
+    if (subParts.length > 1) {
+      for (const p of subParts) {
+        const trimmed = p.trim();
+        if (trimmed.length >= 3 && !candidates.includes(trimmed)) {
+          candidates.push(trimmed);
+        }
+      }
+      const beforeSeparator = subParts[0].trim();
+      if (beforeSeparator.length >= 3 && !candidates.includes(beforeSeparator)) {
+        candidates.push(beforeSeparator);
+      }
+    }
+    for (const v of cleanCalibreTitleVariants(c)) {
+      if (!candidates.includes(v)) candidates.push(v);
+    }
+  }
 
   // 1. Check known aliases map first
   for (const c of candidates) {
@@ -613,21 +681,27 @@ export function findRealLnoriSeries(
       return lnoriNormalizedMap.get(norm)!;
     }
 
-    for (const s of seriesList) {
-      const normSlug = normalizeTitleForMatch(s.slug.replace(/-/g, " "));
-      if (normSlug === norm) {
-        return s;
+    if (customSeries) {
+      for (const s of seriesList) {
+        const normSlug = normalizeTitleForMatch(s.slug.replace(/-/g, " "));
+        if (normSlug === norm) {
+          return s;
+        }
       }
     }
   }
 
   // 3. Check bounded prefix / containment match (must be >= 8 chars and length ratio >= 0.70)
+  const seriesEntries = customSeries
+    ? seriesList.map((s) => ({ id: s.id, slug: s.slug, normSlug: normalizeTitleForMatch(s.slug.replace(/-/g, " ")) }))
+    : precomputedRealLnoriSeries;
+
   for (const c of candidates) {
     const norm = normalizeTitleForMatch(c);
     if (!norm || norm.length < 8) continue;
 
-    for (const s of seriesList) {
-      const normSlug = normalizeTitleForMatch(s.slug.replace(/-/g, " "));
+    for (const s of seriesEntries) {
+      const normSlug = s.normSlug;
       if (normSlug.length < 8) continue;
 
       const minLen = Math.min(norm.length, normSlug.length);
@@ -636,7 +710,7 @@ export function findRealLnoriSeries(
         normSlug === norm ||
         (minLen / maxLen >= 0.7 && (normSlug.startsWith(norm) || norm.startsWith(normSlug)))
       ) {
-        return s;
+        return { id: s.id, slug: s.slug };
       }
     }
   }
@@ -732,7 +806,12 @@ export function assignPrimarySource(novel: DiscoveredNovel): DiscoveredNovel {
     primaryUrl = novel.sourceUrls?.lnori || "";
   }
 
-  const source: DiscoverSource = hasElscione && hasLnori ? "both" : hasElscione ? "elscione" : "lnori";
+  let source: DiscoverSource = "lnori";
+  if (hasElscione && hasLnori) {
+    source = "both";
+  } else if (hasElscione) {
+    source = "elscione";
+  }
 
   return {
     ...novel,
@@ -1443,9 +1522,10 @@ export function stripEmojis(str?: string | null): string {
   if (!str) return "";
   return str
     .replace(
-      /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{2300}-\u{23FF}\u{2B50}\u{200D}]/gu,
+      /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F900}-\u{1F9FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{2300}-\u{23FF}\u{2B50}]/gu,
       "",
     )
+    .replace(/[\uFE00-\uFE0F\u200D]/g, "")
     .replace(/\p{Extended_Pictographic}/gu, "")
     .replace(/\s{2,}/g, " ")
     .trim();
@@ -2208,12 +2288,12 @@ export function crossCheckNovelsWithCalibre(
           for (const c of b.candidates) {
             const cWords = c.split(" ").length;
             // c inside n
-            if (c.length >= 8 && cWords >= 2 && (" " + n + " ").includes(" " + c + " ")) {
+            if (c.length >= 8 && cWords >= 2 && ` ${n} `.includes(` ${c} `)) {
               isMatch = true;
               break;
             }
             // n inside c
-            if (n.length >= 8 && nWords >= 2 && (" " + c + " ").includes(" " + n + " ")) {
+            if (n.length >= 8 && nWords >= 2 && ` ${c} `.includes(` ${n} `)) {
               isMatch = true;
               break;
             }
@@ -2317,12 +2397,15 @@ export async function buildCompleteCatalogNovels(
 
     const seed = seedMap.get(can) || seedMap.get(norm);
     const author = seed?.author || resolveAuthorForTitle(folder, undefined, allSeeds);
-    let coverUrl = seed?.coverUrl || resolveCoverForTitle(folder, undefined, allSeeds);
-    if (!coverUrl && real.sourceUrls.lnori) {
+    let coverUrl = "";
+    if (real.sourceUrls.lnori) {
       const lnoriMatch = real.sourceUrls.lnori.match(/\/series\/(\d+)/);
       if (lnoriMatch) {
         coverUrl = `https://cdn.lnori.com/series/${lnoriMatch[1]}.jpg`;
       }
+    }
+    if (!coverUrl) {
+      coverUrl = seed?.coverUrl || resolveCoverForTitle(folder, undefined, allSeeds);
     }
     if (!coverUrl) {
       coverUrl = generateFallbackCoverSvg(folder, author);
@@ -2449,7 +2532,7 @@ export async function fetchDiscoverFeed(
   tab: DiscoverTab,
   dependencies?: DiscoverDependencies,
 ): Promise<DiscoveredNovel[]> {
-  const cacheKey = `v2:feed:${tab}`;
+  const cacheKey = `v3:feed:${tab}`;
 
   // 1. Check cache
   const cached = getCachedFeed(cacheKey, dependencies);
@@ -2692,7 +2775,7 @@ async function fetchOnlineFeedWithFallback(
       if (!author) {
         const norm = normalizeTitleForMatch(title);
         const normRomaji = item.title?.romaji ? normalizeTitleForMatch(item.title.romaji) : "";
-        author = KNOWN_TITLE_TO_AUTHOR[norm] || (normRomaji ? KNOWN_TITLE_TO_AUTHOR[normRomaji] : "") || "Light Novel Author";
+        author = KNOWN_TITLE_TO_AUTHOR[norm] || (normRomaji ? KNOWN_TITLE_TO_AUTHOR[normRomaji] : "") || "Author Unknown";
       }
 
       let coverUrl = item.coverImage?.extraLarge || item.coverImage?.large || "";
@@ -2754,40 +2837,90 @@ async function fetchOnlineFeedWithFallback(
 }
 
 /**
- * Resolves real author for title using exact match, franchise prefix match, or seeds.
+ * Resolves real author for title using exact match, canonical match, or seeds.
+ * Loose substring matching (norm.includes(k) or norm.startsWith(k)) is strictly prohibited
+ * to prevent unrelated novels from receiving incorrect authors.
+ * Uncredited authors return "Author Unknown", never "Light Novel Author".
  */
 export function resolveAuthorForTitle(
   title: string,
   romaji?: string,
   seeds?: DiscoveredNovel[],
 ): string {
-  const candidates = [title, romaji].filter(Boolean) as string[];
-  for (const c of candidates) {
-    const norm = normalizeTitleForMatch(c);
-    if (KNOWN_TITLE_TO_AUTHOR[norm]) return KNOWN_TITLE_TO_AUTHOR[norm];
+  const rawCandidates = [title, romaji].filter(Boolean) as string[];
+  const candidates: string[] = [];
+  for (const c of rawCandidates) {
+    if (!candidates.includes(c)) candidates.push(c);
+    for (const v of cleanCalibreTitleVariants(c)) {
+      if (!candidates.includes(v)) candidates.push(v);
+    }
   }
+
+  // 1. Direct exact match against known author registry (normalized or canonical)
   for (const c of candidates) {
     const norm = normalizeTitleForMatch(c);
+    if (!norm) continue;
+    if (KNOWN_TITLE_TO_AUTHOR[norm]) return KNOWN_TITLE_TO_AUTHOR[norm];
+    const can = canonicalTitleKey(c);
+    if (can && KNOWN_TITLE_TO_AUTHOR[can]) return KNOWN_TITLE_TO_AUTHOR[can];
+  }
+
+  // 2. Strict word-boundary match with high length ratio (>= 0.85)
+  // Replaces loose norm.includes(k) and norm.startsWith(k) to prevent incorrect authors
+  for (const c of candidates) {
+    const norm = normalizeTitleForMatch(c);
+    if (!norm || norm.length < 4) continue;
+
     for (const [k, author] of Object.entries(KNOWN_TITLE_TO_AUTHOR)) {
-      if (k.length >= 4 && (norm.startsWith(k) || norm.includes(k))) {
-        return author;
+      if (norm === k) return author;
+      const minLen = Math.min(norm.length, k.length);
+      const maxLen = Math.max(norm.length, k.length);
+      if (minLen >= 4 && minLen / maxLen >= 0.85) {
+        const isWordBoundaryMatch =
+          (norm.startsWith(k) && (norm.length === k.length || norm[k.length] === " ")) ||
+          (k.startsWith(norm) && (k.length === norm.length || k[norm.length] === " "));
+        if (isWordBoundaryMatch) {
+          return author;
+        }
       }
     }
   }
+
+  // 3. Match against seed novels with exact or high-ratio (>= 0.85) word-boundary match
   if (seeds && seeds.length > 0) {
     for (const c of candidates) {
       const norm = normalizeTitleForMatch(c);
+      if (!norm || norm.length < 4) continue;
+      const can = canonicalTitleKey(c);
+
       const seedMatch = seeds.find((s) => {
         const sNorm = normalizeTitleForMatch(s.title);
         const sRom = s.titleRomaji ? normalizeTitleForMatch(s.titleRomaji) : "";
-        return sNorm === norm || sRom === norm || (norm.length >= 6 && sNorm.includes(norm));
+        const sCan = canonicalTitleKey(s.title);
+        if (sNorm === norm || (sRom && sRom === norm) || (sCan && sCan === can)) {
+          return true;
+        }
+        for (const target of [sNorm, sRom].filter(Boolean)) {
+          const minLen = Math.min(norm.length, target.length);
+          const maxLen = Math.max(norm.length, target.length);
+          if (minLen >= 4 && minLen / maxLen >= 0.85) {
+            const isWordBoundaryMatch =
+              (norm.startsWith(target) && (norm.length === target.length || norm[target.length] === " ")) ||
+              (target.startsWith(norm) && (target.length === norm.length || target[norm.length] === " "));
+            if (isWordBoundaryMatch) {
+              return true;
+            }
+          }
+        }
+        return false;
       });
-      if (seedMatch && seedMatch.author && seedMatch.author !== "Light Novel Author") {
+      if (seedMatch && seedMatch.author && seedMatch.author !== "Light Novel Author" && seedMatch.author !== "Author Unknown") {
         return seedMatch.author;
       }
     }
   }
-  return "Light Novel Author";
+
+  return "Author Unknown";
 }
 
 /**
@@ -2817,8 +2950,9 @@ export function generateFallbackCoverSvg(title: string, author?: string): string
   const lines: string[] = [];
   let currentLine = "";
   for (const word of words) {
-    if ((currentLine + " " + word).trim().length <= 16) {
-      currentLine = (currentLine + " " + word).trim();
+    const candidateLine = currentLine ? `${currentLine} ${word}` : word;
+    if (candidateLine.length <= 16) {
+      currentLine = candidateLine;
     } else {
       if (currentLine) lines.push(currentLine);
       currentLine = word.slice(0, 16);
@@ -3197,9 +3331,10 @@ export async function searchUniversalNovels(
     if (existing) {
       // Upgrade metadata if new candidate is richer
       if (
-        (!existing.author || existing.author === "Light Novel Author") &&
+        (!existing.author || existing.author === "Light Novel Author" || existing.author === "Author Unknown") &&
         novel.author &&
-        novel.author !== "Light Novel Author"
+        novel.author !== "Light Novel Author" &&
+        novel.author !== "Author Unknown"
       ) {
         existing.author = novel.author;
       }
@@ -3284,12 +3419,15 @@ export async function searchUniversalNovels(
       });
       if (real) {
         const author = resolveAuthorForTitle(folder, undefined, allSeeds);
-        let coverUrl = resolveCoverForTitle(folder, undefined, allSeeds);
-        if (!coverUrl && real.sourceUrls.lnori) {
+        let coverUrl = "";
+        if (real.sourceUrls.lnori) {
           const lnoriMatch = real.sourceUrls.lnori.match(/\/series\/(\d+)/);
           if (lnoriMatch) {
             coverUrl = `https://cdn.lnori.com/series/${lnoriMatch[1]}.jpg`;
           }
+        }
+        if (!coverUrl) {
+          coverUrl = resolveCoverForTitle(folder, undefined, allSeeds);
         }
         if (!coverUrl) {
           coverUrl = generateFallbackCoverSvg(folder, author);
