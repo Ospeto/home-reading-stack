@@ -54,6 +54,7 @@ import {
   resetServerDependenciesForTest,
   resetActiveLnoriStateForTest,
   registerDiscoverJob,
+  getActiveDiscoverJobs,
 } from "./server";
 
 describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
@@ -992,6 +993,265 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
           expect(data.error).toBeDefined();
         }
       }
+    });
+
+    it("GET /api/discover/jobs/active returns currently in-flight and queued discover jobs and excludes non-existent or finished jobs", async () => {
+      resetActiveLnoriStateForTest();
+
+      // Empty state
+      const emptyReq = new Request("http://127.0.0.1:8086/api/discover/jobs/active");
+      const emptyRes = await handleRequest(emptyReq, localServer);
+      expect(emptyRes.status).toBe(200);
+      const emptyJson = (await emptyRes.json()) as any;
+      expect(emptyJson.success).toBe(true);
+      expect(emptyJson.jobs).toEqual([]);
+
+      // Register test jobs: 1 in-flight, 1 queued, 1 completed
+      registerDiscoverJob(
+        9001,
+        "run-9001",
+        "elscione",
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Overlord/",
+        "overlord-main",
+        "Overlord",
+      );
+      registerDiscoverJob(
+        9002,
+        "run-9002",
+        "lnori",
+        "https://lnori.com/series/8046/the-genius-princes-guide",
+        "genius-prince",
+        "The Genius Prince's Guide",
+      );
+      registerDiscoverJob(
+        9003,
+        "run-9003",
+        "lnori",
+        "https://lnori.com/series/9999/done-novel",
+        "done-novel",
+        "Done Novel",
+      );
+
+      setServerDependenciesForTest({
+        getDiscoverProgress: (id) => {
+          const numId = Number(id);
+          if (numId === 9001) {
+            return {
+              success: true,
+              jobId: 9001,
+              runId: "run-9001",
+              novelId: "overlord-main",
+              title: "Overlord",
+              phase: "downloading",
+              percent: 75,
+              currentVolume: "Volume 3",
+              volumesCompleted: 3,
+              totalVolumes: 4,
+            };
+          }
+          if (numId === 9002) {
+            return {
+              success: true,
+              jobId: 9002,
+              runId: "run-9002",
+              novelId: "genius-prince",
+              title: "The Genius Prince's Guide",
+              phase: "queued",
+              percent: 0,
+              volumesCompleted: 0,
+              totalVolumes: 0,
+            };
+          }
+          if (numId === 9003) {
+            return {
+              success: true,
+              jobId: 9003,
+              runId: "run-9003",
+              novelId: "done-novel",
+              title: "Done Novel",
+              phase: "complete",
+              percent: 100,
+              volumesCompleted: 1,
+              totalVolumes: 1,
+            };
+          }
+          return null;
+        },
+      });
+
+      try {
+        const activeReq = new Request("http://127.0.0.1:8086/api/discover/jobs/active");
+        const activeRes = await handleRequest(activeReq, localServer);
+        expect(activeRes.status).toBe(200);
+        const data = (await activeRes.json()) as any;
+        expect(data.success).toBe(true);
+        expect(Array.isArray(data.jobs)).toBe(true);
+        // Completed job 9003 must be excluded from active listing
+        expect(data.jobs.length).toBe(2);
+
+        const j1 = data.jobs.find((j: any) => j.jobId === 9001);
+        expect(j1).toBeDefined();
+        expect(j1.novelId).toBe("overlord-main");
+        expect(j1.title).toBe("Overlord");
+        expect(j1.phase).toBe("downloading");
+        expect(j1.percent).toBe(75);
+
+        const j2 = data.jobs.find((j: any) => j.jobId === 9002);
+        expect(j2).toBeDefined();
+        expect(j2.novelId).toBe("genius-prince");
+        expect(j2.title).toBe("The Genius Prince's Guide");
+        expect(j2.phase).toBe("queued");
+
+        // Calling progress for non-existent job must return 404
+        const req404 = new Request("http://127.0.0.1:8086/api/discover/progress/999999");
+        const res404 = await handleRequest(req404, localServer);
+        expect(res404.status).toBe(404);
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
+
+    it("verifies persistent discover downloads and duplicate blocking contracts in index.html", () => {
+      const htmlPath = path.join((import.meta as any).dir, "index.html");
+      const html = fs.readFileSync(htmlPath, "utf8");
+
+      // 1. Client-Side Persistence in localStorage
+      expect(html).toContain("DISCOVER_ACTIVE_DOWNLOADS_KEY = 'discover_active_downloads'");
+      expect(html).toContain("getStoredActiveDiscoverDownloads");
+      expect(html).toContain("saveStoredActiveDiscoverDownload");
+      expect(html).toContain("removeStoredActiveDiscoverDownload");
+      expect(html).toContain("syncActiveDiscoverDownloads");
+
+      // 2. Active jobs API integration
+      expect(html).toContain("/api/discover/jobs/active");
+
+      // 3. Duplicate Ingest Submissions Blocked
+      expect(html).toContain("Download already in progress");
+
+      // 4. Removal of the arbitrary 120-attempt (~3 minute) cutoff
+      expect(html).not.toContain("attempts > maxAttempts");
+      expect(html).not.toContain("maxAttempts = 120");
+
+      // 5. Network error backoff & subtle Reconnecting status
+      expect(html).toContain("Reconnecting...");
+      expect(html).toContain("consecutiveFailures");
+
+      // 6. Complete and error lifecycle cleanup
+      expect(html).toContain("removeStoredActiveDiscoverDownload(novelId)");
+      expect(html).toContain("phase === 'complete'");
+      expect(html).toContain("phase === 'error'");
+      expect(html).toContain("Downloaded");
+      expect(html).toContain("Ingestion failed:");
+
+      // 7. Page initialization & tab render triggers
+      expect(html).toContain("syncActiveDiscoverDownloads()");
+    });
+
+    it("simulates client-side localStorage lifecycle: store, restore, duplicate block, and 24h prune", () => {
+      // Mock storage map
+      const mockStorage: Record<string, string> = {};
+      const key = "discover_active_downloads";
+
+      function getStored(): Record<string, any> {
+        try {
+          return mockStorage[key] ? JSON.parse(mockStorage[key]) : {};
+        } catch {
+          return {};
+        }
+      }
+
+      function saveStored(novelId: string, item: any) {
+        const all = getStored();
+        all[novelId] = {
+          jobId: item.jobId ?? null,
+          runId: item.runId ?? null,
+          title: item.title || "Light Novel",
+          startedAt: item.startedAt || Date.now(),
+          phase: item.phase || "downloading",
+          percent: item.percent ?? 10,
+          statusText: item.statusText || "Downloading...",
+          updatedAt: Date.now(),
+        };
+        mockStorage[key] = JSON.stringify(all);
+      }
+
+      function removeStored(novelId: string) {
+        const all = getStored();
+        delete all[novelId];
+        mockStorage[key] = JSON.stringify(all);
+      }
+
+      // Step 1: User initiates download
+      saveStored("danmachi-main", {
+        jobId: 55555,
+        runId: "lnori-55555",
+        title: "DanMachi",
+        startedAt: Date.now(),
+        phase: "downloading",
+        percent: 25,
+        statusText: "Downloading Vol 1 of 5 (25%)...",
+      });
+
+      let stored = getStored();
+      expect(stored["danmachi-main"]).toBeDefined();
+      expect(stored["danmachi-main"].jobId).toBe(55555);
+      expect(stored["danmachi-main"].percent).toBe(25);
+
+      // Step 2: Duplicate click must be blocked
+      const isDuplicate = !!(
+        stored["danmachi-main"] &&
+        stored["danmachi-main"].phase !== "complete" &&
+        stored["danmachi-main"].phase !== "error"
+      );
+      expect(isDuplicate).toBe(true);
+
+      // Step 3: Page refresh simulation (restore active downloads)
+      const ingestingIds = new Set<string>();
+      const activeDownloads = new Map<string, any>();
+      const now = Date.now();
+      const MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+      for (const [id, item] of Object.entries(stored)) {
+        if ((now - item.startedAt) > MAX_AGE_MS) {
+          removeStored(id);
+          continue;
+        }
+        if (item.phase === "complete" || item.phase === "error") {
+          removeStored(id);
+          continue;
+        }
+        ingestingIds.add(id);
+        activeDownloads.set(id, item);
+      }
+
+      expect(ingestingIds.has("danmachi-main")).toBe(true);
+      expect(activeDownloads.get("danmachi-main").jobId).toBe(55555);
+
+      // Step 4: Download completes -> cleanup
+      removeStored("danmachi-main");
+      ingestingIds.delete("danmachi-main");
+      activeDownloads.delete("danmachi-main");
+
+      expect(getStored()["danmachi-main"]).toBeUndefined();
+      expect(ingestingIds.has("danmachi-main")).toBe(false);
+
+      // Step 5: Expired download (> 24 hours) is automatically pruned
+      saveStored("old-stale-novel", {
+        jobId: 11111,
+        runId: "lnori-11111",
+        title: "Old Novel",
+        startedAt: Date.now() - (25 * 60 * 60 * 1000), // 25 hours ago
+        phase: "downloading",
+      });
+
+      stored = getStored();
+      for (const [id, item] of Object.entries(stored)) {
+        if ((Date.now() - item.startedAt) > MAX_AGE_MS) {
+          removeStored(id);
+        }
+      }
+      expect(getStored()["old-stale-novel"]).toBeUndefined();
     });
   });
 

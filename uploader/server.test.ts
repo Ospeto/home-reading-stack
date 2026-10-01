@@ -14,6 +14,8 @@ import {
   ingestBookFile,
   jobQueue,
   registerJobHandlers,
+  getActiveDiscoverJobs,
+  registerDiscoverJob,
 } from "./server";
 import { validateUrlForSSRF, getBsdtarPath } from "./security";
 import { autoEnrichBookSynopsis } from "./scraper";
@@ -3404,6 +3406,168 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
       } finally {
         if (origKey) process.env.READING_API_KEY = origKey;
         else delete process.env.READING_API_KEY;
+      }
+    });
+
+    it("GET /api/discover/jobs/active returns active discover jobs and excludes complete/failed jobs", async () => {
+      resetActiveLnoriStateForTest();
+
+      // Initially empty
+      const emptyReq = new Request("http://127.0.0.1:8086/api/discover/jobs/active");
+      const emptyRes = await handleRequest(emptyReq, localServer);
+      expect(emptyRes.status).toBe(200);
+      const emptyData = (await emptyRes.json()) as any;
+      expect(emptyData.success).toBe(true);
+      expect(Array.isArray(emptyData.jobs)).toBe(true);
+      expect(emptyData.jobs.length).toBe(0);
+
+      // Register an active in-flight job, a queued job, and a completed job
+      registerDiscoverJob(
+        1001,
+        "lnori-1001",
+        "lnori",
+        "https://lnori.com/series/8046/the-genius-princes-guide",
+        "genius-prince",
+        "The Genius Prince's Guide",
+      );
+      registerDiscoverJob(
+        1002,
+        "elscione-1002",
+        "elscione",
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/DanMachi/",
+        "danmachi",
+        "DanMachi",
+      );
+      registerDiscoverJob(
+        1003,
+        "lnori-1003",
+        "lnori",
+        "https://lnori.com/series/1234/completed-series",
+        "completed-novel",
+        "Completed Novel",
+      );
+
+      setServerDependenciesForTest({
+        getDiscoverProgress: (id) => {
+          const numId = Number(id);
+          if (numId === 1001) {
+            return {
+              success: true,
+              jobId: 1001,
+              runId: "lnori-1001",
+              novelId: "genius-prince",
+              title: "The Genius Prince's Guide",
+              phase: "downloading",
+              percent: 45,
+              currentVolume: "Volume 2",
+              volumesCompleted: 1,
+              totalVolumes: 5,
+            };
+          }
+          if (numId === 1002) {
+            return {
+              success: true,
+              jobId: 1002,
+              runId: "elscione-1002",
+              novelId: "danmachi",
+              title: "DanMachi",
+              phase: "queued",
+              percent: 0,
+              volumesCompleted: 0,
+              totalVolumes: 0,
+            };
+          }
+          if (numId === 1003) {
+            return {
+              success: true,
+              jobId: 1003,
+              runId: "lnori-1003",
+              novelId: "completed-novel",
+              title: "Completed Novel",
+              phase: "complete",
+              percent: 100,
+              volumesCompleted: 5,
+              totalVolumes: 5,
+            };
+          }
+          return null;
+        },
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/discover/jobs/active");
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(true);
+        expect(Array.isArray(data.jobs)).toBe(true);
+        // Completed job 1003 must be excluded from active listing
+        expect(data.jobs.length).toBe(2);
+
+        const job1 = data.jobs.find((j: any) => j.jobId === 1001);
+        expect(job1).toBeDefined();
+        expect(job1.novelId).toBe("genius-prince");
+        expect(job1.title).toBe("The Genius Prince's Guide");
+        expect(job1.phase).toBe("downloading");
+        expect(job1.percent).toBe(45);
+
+        const job2 = data.jobs.find((j: any) => j.jobId === 1002);
+        expect(job2).toBeDefined();
+        expect(job2.novelId).toBe("danmachi");
+        expect(job2.title).toBe("DanMachi");
+        expect(job2.phase).toBe("queued");
+
+        // Verify direct call to getActiveDiscoverJobs
+        const directActive = getActiveDiscoverJobs();
+        expect(directActive.length).toBe(2);
+        expect(directActive.some((j) => j.jobId === 1003)).toBe(false);
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
+
+    it("POST /api/discover/ingest preserves novelId and title in discoverJobRegistry and active jobs listing", async () => {
+      resetActiveLnoriStateForTest();
+      try {
+        setServerDependenciesForTest({
+          enqueueLnoriJob: (_url: string) => ({
+            jobId: 7890,
+            runId: "lnori-7890-test",
+          }),
+        });
+
+        const req = new Request("http://127.0.0.1:8086/api/discover/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", host: "127.0.0.1:8086" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/the-genius-princes-guide",
+            source: "lnori",
+            novelId: "genius-prince-lnori",
+            title: "The Genius Prince's Guide to Treason",
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.success).toBe(true);
+        expect(data.jobId).toBe(7890);
+
+        // Verify active jobs listing returns the novelId and title
+        const activeReq = new Request("http://127.0.0.1:8086/api/discover/jobs/active");
+        const activeRes = await handleRequest(activeReq, localServer);
+        expect(activeRes.status).toBe(200);
+        const activeData = await activeRes.json();
+        expect(activeData.success).toBe(true);
+        const found = activeData.jobs.find((j: any) => j.jobId === 7890);
+        expect(found).toBeDefined();
+        expect(found.novelId).toBe("genius-prince-lnori");
+        expect(found.title).toBe("The Genius Prince's Guide to Treason");
+        expect(found.phase).toBe("queued");
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
       }
     });
   });

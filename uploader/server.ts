@@ -149,11 +149,17 @@ export interface ServerDependencies {
   enqueueElscioneJob?: (url: string) => { jobId: number; runId: string };
   getDiscoverNovels?: typeof getDiscoverNovels;
   getDiscoverProgress?: (jobId: string | number) => DiscoverJobProgress | null;
+  getActiveDiscoverJobs?: () => DiscoverJobProgress[];
 }
 
 export interface DiscoverJobProgress {
   success: boolean;
   jobId: number;
+  runId?: string;
+  targetUrl?: string;
+  source?: "lnori" | "elscione";
+  novelId?: string;
+  title?: string;
   phase: "queued" | "downloading" | "processing" | "complete" | "error";
   percent: number;
   currentVolume?: string;
@@ -167,6 +173,8 @@ export interface RegisteredDiscoverJob {
   runId: string;
   source: "lnori" | "elscione";
   targetUrl: string;
+  novelId?: string;
+  title?: string;
   createdAt: number;
 }
 
@@ -178,14 +186,19 @@ export function registerDiscoverJob(
   runId: string,
   source: "lnori" | "elscione",
   targetUrl: string,
+  novelId?: string,
+  title?: string,
 ): void {
   const normalizedUrl = cleanAndNormalizeNovelUrl(targetUrl);
+  const existing = discoverJobRegistry.get(jobId);
   discoverJobRegistry.set(jobId, {
     jobId,
     runId,
     source,
     targetUrl: normalizedUrl,
-    createdAt: Date.now(),
+    novelId: novelId ?? existing?.novelId,
+    title: title ?? existing?.title,
+    createdAt: existing?.createdAt ?? Date.now(),
   });
   if (discoverJobRegistry.size > MAX_DISCOVER_REGISTRY_SIZE) {
     const oldestKey = discoverJobRegistry.keys().next().value;
@@ -216,7 +229,7 @@ export function getDiscoverJobProgress(
   let registered = discoverJobRegistry.get(cleanJobId);
   if (!registered && rawStr) {
     for (const reg of discoverJobRegistry.values()) {
-      if (reg.runId === rawStr) {
+      if (reg.runId === rawStr || (reg.novelId && reg.novelId === rawStr)) {
         registered = reg;
         if (cleanJobId === 0) {
           cleanJobId = reg.jobId;
@@ -227,6 +240,23 @@ export function getDiscoverJobProgress(
   }
   const runId = registered?.runId;
   const targetUrl = registered?.targetUrl;
+
+  const decorateWithRegistered = (
+    progress: DiscoverJobProgress,
+  ): DiscoverJobProgress => {
+    if (registered) {
+      if (!progress.runId && registered.runId) progress.runId = registered.runId;
+      if (!progress.targetUrl && registered.targetUrl)
+        progress.targetUrl = registered.targetUrl;
+      if (!progress.source && registered.source)
+        progress.source = registered.source;
+      if (!progress.novelId && registered.novelId)
+        progress.novelId = registered.novelId;
+      if (!progress.title && registered.title)
+        progress.title = registered.title;
+    }
+    return progress;
+  };
 
   const matchesId = (
     idToCheck?: string | null,
@@ -312,13 +342,13 @@ export function getDiscoverJobProgress(
         activeLnoriState.error || activeLnoriState.status || "Ingestion error",
       );
     }
-    return res;
+    return decorateWithRegistered(res);
   }
 
   // 3. Check queued items in lnoriQueue
   const queued = lnoriQueue.find((item) => matchesId(item.id, item.targetUrl));
   if (queued) {
-    return {
+    const res: DiscoverJobProgress = {
       success: true,
       jobId: cleanJobId,
       phase: "queued",
@@ -326,6 +356,7 @@ export function getDiscoverJobProgress(
       volumesCompleted: 0,
       totalVolumes: 0,
     };
+    return decorateWithRegistered(res);
   }
 
   // 4. Check completedLnoriJobs history buffer
@@ -382,7 +413,7 @@ export function getDiscoverJobProgress(
         completedState.error || completedState.status || "Ingestion failed",
       );
     }
-    return res;
+    return decorateWithRegistered(res);
   }
 
   // 5. Check durable SQLite jobQueue (jobs.ts)
@@ -430,7 +461,7 @@ export function getDiscoverJobProgress(
       if (phase === "error") {
         res.error = stripEmojis(job.error || "Job failed");
       }
-      return res;
+      return decorateWithRegistered(res);
     }
   } catch (err) {
     console.debug("[Discover] jobQueue lookup failed:", err);
@@ -438,17 +469,83 @@ export function getDiscoverJobProgress(
 
   // If registered job exists but hasn't started yet
   if (registered) {
-    return {
+    return decorateWithRegistered({
       success: true,
       jobId: cleanJobId,
       phase: "queued",
       percent: 0,
       volumesCompleted: 0,
       totalVolumes: 0,
-    };
+    });
   }
 
   return null;
+}
+
+export function getActiveDiscoverJobs(): DiscoverJobProgress[] {
+  if (serverDependencies.getActiveDiscoverJobs) {
+    return serverDependencies.getActiveDiscoverJobs();
+  }
+
+  const activeJobs: DiscoverJobProgress[] = [];
+  const seenJobIds = new Set<number>();
+  const toDelete: number[] = [];
+
+  for (const [jobId, reg] of discoverJobRegistry.entries()) {
+    const progress = getDiscoverJobProgress(jobId);
+    if (!progress) {
+      if (Date.now() - reg.createdAt > 2 * 3600 * 1000) {
+        toDelete.push(jobId);
+      }
+      continue;
+    }
+
+    if (progress.phase === "complete" || progress.phase === "error") {
+      if (Date.now() - reg.createdAt > 10 * 60 * 1000) {
+        toDelete.push(jobId);
+      }
+      continue;
+    }
+
+    seenJobIds.add(jobId);
+    activeJobs.push(progress);
+  }
+
+  // Also check activeLnoriState if active and not already captured
+  if (activeLnoriState.active && activeLnoriState.runId) {
+    const activeProgress = getDiscoverJobProgress(activeLnoriState.runId);
+    if (
+      activeProgress &&
+      activeProgress.phase !== "complete" &&
+      activeProgress.phase !== "error" &&
+      !seenJobIds.has(activeProgress.jobId)
+    ) {
+      seenJobIds.add(activeProgress.jobId);
+      activeJobs.push(activeProgress);
+    }
+  }
+
+  // Also check queued items in lnoriQueue
+  for (const item of lnoriQueue) {
+    if (item.id) {
+      const qProgress = getDiscoverJobProgress(item.id);
+      if (
+        qProgress &&
+        qProgress.phase !== "complete" &&
+        qProgress.phase !== "error" &&
+        !seenJobIds.has(qProgress.jobId)
+      ) {
+        seenJobIds.add(qProgress.jobId);
+        activeJobs.push(qProgress);
+      }
+    }
+  }
+
+  for (const id of toDelete) {
+    discoverJobRegistry.delete(id);
+  }
+
+  return activeJobs;
 }
 
 let serverDependencies: ServerDependencies = {};
@@ -5350,6 +5447,8 @@ async function handleRequestCore(
       let body: {
         url?: string;
         source?: string;
+        novelId?: string;
+        title?: string;
       };
       try {
         body = (await req.json()) as any;
@@ -5416,7 +5515,14 @@ async function handleRequestCore(
         const enqueueFn = serverDependencies.enqueueLnoriJob ?? enqueueLnoriJob;
         const job = enqueueFn(targetUrl);
         const runId = job.runId || `lnori-${job.jobId}`;
-        registerDiscoverJob(job.jobId, runId, "lnori", targetUrl);
+        registerDiscoverJob(
+          job.jobId,
+          runId,
+          "lnori",
+          targetUrl,
+          body.novelId,
+          body.title,
+        );
         return jsonResponse(
           {
             success: true,
@@ -5467,7 +5573,14 @@ async function handleRequestCore(
         const enqueueFn = serverDependencies.enqueueElscioneJob ?? enqueueElscioneJob;
         const job = enqueueFn(targetUrl);
         const runId = job.runId || `elscione-${job.jobId}`;
-        registerDiscoverJob(job.jobId, runId, "elscione", targetUrl);
+        registerDiscoverJob(
+          job.jobId,
+          runId,
+          "elscione",
+          targetUrl,
+          body.novelId,
+          body.title,
+        );
         return jsonResponse(
           {
             success: true,
@@ -5480,6 +5593,22 @@ async function handleRequestCore(
           corsOrigin,
         );
       }
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err?.message || err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Light Novel Discovery Active Jobs Listing
+  if (url.pathname === "/api/discover/jobs/active" && req.method === "GET") {
+    try {
+      const getActiveFn =
+        serverDependencies.getActiveDiscoverJobs ?? getActiveDiscoverJobs;
+      const jobs = getActiveFn();
+      return jsonResponse({ success: true, jobs }, 200, corsOrigin);
     } catch (err: any) {
       return jsonResponse(
         { success: false, error: sanitizeErrorMessage(err?.message || err) },

@@ -2720,8 +2720,8 @@
             <div>• <strong>Custom Interactive Filtering:</strong> Filter by Source (<code class="text-zinc-200">Lnori</code>, <code class="text-zinc-200">Elsci.one</code>), Genre (<code class="text-zinc-200">Fantasy</code>, <code class="text-zinc-200">Isekai</code>, <code class="text-zinc-200">Romance</code>, etc.), Library Status (<code class="text-zinc-200">Available</code> vs <code class="text-zinc-200">In Library</code>), Live Search, and Sorting (<code class="text-zinc-200">Most Popular</code>, <code class="text-zinc-200">Highest Rated</code>, <code class="text-zinc-200">Newest</code>).</div>
             <div>• <strong>Real Download Sources Guarantee:</strong> Feeds are strictly anchored to real, existing series on Elsci.one and Lnori (indexed directly against 1200+ Elscione folders and 880+ Lnori series with zero synthetic URLs), preferring Elsci.one as primary download source whenever available on both.</div>
             <div>• <strong>Card-Level Volume Visibility &amp; Calibre Reconciliation:</strong> Prominent volume count indicators displayed directly on cards (<code class="text-zinc-200">In Library (X vols)</code>, partial ownership <code class="text-zinc-200">In Library (X/Y vols)</code>, and <code class="text-zinc-200">Available (Y vols)</code> badges, plus card metadata row volume badges) with automatic Calibre library volume reconciliation.</div>
-            <div>• <strong>1-Click Direct Ingestion &amp; Live Progress:</strong> Tap <code class="text-zinc-200">Ingest</code> on any card or inside the preview modal (<code class="text-zinc-200">#discoverModal</code>) to automatically enqueue background downloading directly into Calibre via <code class="text-zinc-200">POST /api/discover/ingest</code>, tracked in real-time via <code class="text-zinc-200">GET /api/discover/progress/:jobId</code>.</div>
-            <div>• <strong>Developer Endpoints:</strong> <code class="text-zinc-200">GET /api/discover/feed?tab=trending|new_releases</code>, <code class="text-zinc-200">GET /api/discover/catalog</code>, <code class="text-zinc-200">POST /api/discover/ingest</code>, and <code class="text-zinc-200">GET /api/discover/progress/:jobId</code>.</div>
+            <div>• <strong>1-Click Direct Ingestion, Persistent Downloads &amp; Live Progress:</strong> Tap <code class="text-zinc-200">Ingest</code> on any card or inside the preview modal (<code class="text-zinc-200">#discoverModal</code>) to automatically enqueue background downloading directly into Calibre via <code class="text-zinc-200">POST /api/discover/ingest</code>, tracked in real-time via <code class="text-zinc-200">GET /api/discover/progress/:jobId</code> with persistent state surviving page refreshes and tab closures (<code class="text-zinc-200">localStorage</code>), duplicate submission blocking, and resilient reconnection polling.</div>
+            <div>• <strong>Developer Endpoints:</strong> <code class="text-zinc-200">GET /api/discover/feed?tab=trending|new_releases</code>, <code class="text-zinc-200">GET /api/discover/catalog</code>, <code class="text-zinc-200">POST /api/discover/ingest</code>, <code class="text-zinc-200">GET /api/discover/progress/:jobId</code>, and <code class="text-zinc-200">GET /api/discover/jobs/active</code>.</div>
           </div>
         </div>
 
@@ -4176,6 +4176,146 @@
       try { localStorage.removeItem(key); } catch {}
     }
 
+    const DISCOVER_ACTIVE_DOWNLOADS_KEY = 'discover_active_downloads';
+
+    function getStoredActiveDiscoverDownloads() {
+      try {
+        const raw = localStorage.getItem(DISCOVER_ACTIVE_DOWNLOADS_KEY);
+        if (!raw) return {};
+        const parsed = JSON.parse(raw);
+        return (parsed && typeof parsed === 'object') ? parsed : {};
+      } catch (e) {
+        console.debug('Failed to read discover_active_downloads:', e);
+        return {};
+      }
+    }
+
+    function saveStoredActiveDiscoverDownload(novelId, item) {
+      try {
+        const all = getStoredActiveDiscoverDownloads();
+        all[novelId] = {
+          jobId: item.jobId ?? null,
+          runId: item.runId ?? null,
+          title: item.title || 'Light Novel',
+          startedAt: item.startedAt || Date.now(),
+          phase: item.phase || 'downloading',
+          percent: typeof item.percent === 'number' ? item.percent : (item.progress || 0),
+          statusText: item.statusText || 'Preparing download...',
+          updatedAt: Date.now(),
+        };
+        localStorage.setItem(DISCOVER_ACTIVE_DOWNLOADS_KEY, JSON.stringify(all));
+      } catch (e) {
+        console.debug('Failed to save discover_active_downloads:', e);
+      }
+    }
+
+    function removeStoredActiveDiscoverDownload(novelId) {
+      try {
+        const all = getStoredActiveDiscoverDownloads();
+        if (all && novelId in all) {
+          delete all[novelId];
+          localStorage.setItem(DISCOVER_ACTIVE_DOWNLOADS_KEY, JSON.stringify(all));
+        }
+      } catch (e) {
+        console.debug('Failed to remove from discover_active_downloads:', e);
+      }
+    }
+
+    function findNovelIdForJob(job) {
+      if (!job) return null;
+      if (job.novelId) return job.novelId;
+      for (const [id, novel] of discoverNovelsMap.entries()) {
+        if (!novel) continue;
+        if (job.targetUrl) {
+          if (novel.sourceUrls?.lnori === job.targetUrl || novel.sourceUrls?.elscione === job.targetUrl) {
+            return id;
+          }
+        }
+        if (job.title && novel.title && novel.title.toLowerCase() === job.title.toLowerCase()) {
+          return id;
+        }
+      }
+      return null;
+    }
+
+    async function syncActiveDiscoverDownloads() {
+      const stored = getStoredActiveDiscoverDownloads();
+      const now = Date.now();
+      const MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+      for (const [novelId, item] of Object.entries(stored)) {
+        if (!item) continue;
+        const startedAt = item.startedAt || 0;
+        const isExpired = (now - startedAt) > MAX_AGE_MS;
+        const isTerminal = item.phase === 'complete' || item.phase === 'error';
+
+        if (isExpired || isTerminal) {
+          removeStoredActiveDiscoverDownload(novelId);
+          continue;
+        }
+
+        ingestingDiscoverIds.add(novelId);
+        const progressVal = typeof item.percent === 'number' ? item.percent : 10;
+        activeDiscoverDownloads.set(novelId, {
+          jobId: item.jobId,
+          runId: item.runId,
+          progress: progressVal,
+          percent: progressVal,
+          statusText: item.statusText || 'Downloading...',
+          phase: item.phase || 'downloading',
+          title: item.title || 'Light Novel',
+          startedAt: item.startedAt || now,
+        });
+
+        if (item.jobId && !discoverPollIntervals.has(novelId)) {
+          pollDiscoverIngestProgress(novelId, item.jobId, item.runId);
+        }
+      }
+
+      // Query active jobs API to discover in-flight jobs from other tabs or devices
+      try {
+        const res = await fetch('/api/discover/jobs/active');
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.success && Array.isArray(data.jobs)) {
+            for (const job of data.jobs) {
+              const novelId = job.novelId || findNovelIdForJob(job);
+              if (novelId) {
+                const currentDl = activeDiscoverDownloads.get(novelId);
+                const isNew = !ingestingDiscoverIds.has(novelId);
+                if (isNew || !currentDl?.jobId) {
+                  ingestingDiscoverIds.add(novelId);
+                  const progressVal = typeof job.percent === 'number' ? job.percent : 10;
+                  const state = {
+                    jobId: job.jobId,
+                    runId: job.runId,
+                    progress: progressVal,
+                    percent: progressVal,
+                    statusText: job.currentVolume ? `Downloading ${job.currentVolume}...` : 'Downloading in background...',
+                    phase: job.phase || 'downloading',
+                    title: job.title || 'Light Novel',
+                    startedAt: now,
+                  };
+                  activeDiscoverDownloads.set(novelId, state);
+                  saveStoredActiveDiscoverDownload(novelId, state);
+                  if (!discoverPollIntervals.has(novelId)) {
+                    pollDiscoverIngestProgress(novelId, job.jobId, job.runId);
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.debug('Failed to query active discover jobs:', err);
+      }
+
+      // If in discover view, refresh cards so restored progress bars display
+      if (currentView === 'discover' && discoverFeedCache[discoverTab]?.items) {
+        renderDiscoverCards(discoverFeedCache[discoverTab].items);
+      }
+    }
+
     function loadCachedData() {
       try {
         const cachedBooks = getStoredItem(CACHE_KEY_BOOKS);
@@ -4226,6 +4366,7 @@
 
     async function init() {
       loadCachedData();
+      syncActiveDiscoverDownloads();
 
       const grid = document.getElementById('libraryGridView');
       if (grid && allBooks.length === 0) {
@@ -4605,6 +4746,7 @@
           chipDiscover.setAttribute('aria-selected', 'true');
         }
 
+        syncActiveDiscoverDownloads();
         loadDiscoverFeed();
       } else {
         currentView = 'library';
@@ -4744,6 +4886,7 @@
         const novelList = data.novels || data.items || [];
         renderDiscoverCards(novelList);
         renderDiscoverPagination();
+        syncActiveDiscoverDownloads();
       } catch (err) {
         console.error('Failed to load discover feed:', err);
         if (feedContainer) {
@@ -5392,6 +5535,17 @@
       if (event) event.stopPropagation();
       tgHaptic.medium();
 
+      const storedActive = getStoredActiveDiscoverDownloads();
+      if (
+        ingestingDiscoverIds.has(novelId) ||
+        (storedActive[novelId] &&
+          storedActive[novelId].phase !== 'complete' &&
+          storedActive[novelId].phase !== 'error')
+      ) {
+        showToast('Download already in progress');
+        return;
+      }
+
       let novel = discoverNovelsMap.get(novelId) || activeDiscoverItem;
       if (!novel) {
         for (const k of Object.keys(discoverFeedCache)) {
@@ -5415,14 +5569,18 @@
       const title = novel?.title || 'Light Novel';
 
       ingestingDiscoverIds.add(novelId);
-      activeDiscoverDownloads.set(novelId, {
+      const downloadState = {
         jobId: null,
         runId: null,
         progress: 10,
+        percent: 10,
         statusText: 'Preparing download...',
         phase: 'downloading',
         title: title,
-      });
+        startedAt: Date.now(),
+      };
+      activeDiscoverDownloads.set(novelId, downloadState);
+      saveStoredActiveDiscoverDownload(novelId, downloadState);
 
       // Update card UI immediately to show inline progress track
       const cardActions = document.getElementById(`cardActions-${novelId}`);
@@ -5482,6 +5640,7 @@
             url,
             source: sourceName,
             novelId,
+            title,
             background: true,
           }),
         });
@@ -5499,6 +5658,7 @@
         if (downloadObj) {
           downloadObj.runId = runId;
           downloadObj.jobId = jobId;
+          saveStoredActiveDiscoverDownload(novelId, downloadObj);
         }
 
         pollDiscoverIngestProgress(novelId, jobId, runId);
@@ -5506,6 +5666,7 @@
         console.error('Discover ingest failed to start:', err);
         ingestingDiscoverIds.delete(novelId);
         activeDiscoverDownloads.delete(novelId);
+        removeStoredActiveDiscoverDownload(novelId);
         const cleanErr = formatCleanErrorMessage(err.message);
         showToast(`Ingestion failed: ${cleanErr}`, 'error');
         renderDiscoverCards(discoverFeedCache[discoverTab]?.items || []);
@@ -5518,27 +5679,48 @@
 
     function pollDiscoverIngestProgress(novelId, jobId, runId) {
       if (discoverPollIntervals.has(novelId)) {
+        clearTimeout(discoverPollIntervals.get(novelId));
         clearInterval(discoverPollIntervals.get(novelId));
+        discoverPollIntervals.delete(novelId);
       }
 
-      let attempts = 0;
-      const maxAttempts = 120; // 3 minutes max
+      let consecutiveFailures = 0;
+      let consecutive404s = 0;
 
-      const timer = setInterval(async () => {
-        attempts++;
-        if (attempts > maxAttempts) {
-          clearInterval(timer);
+      async function pollStep() {
+        if (!ingestingDiscoverIds.has(novelId)) {
           discoverPollIntervals.delete(novelId);
-          ingestingDiscoverIds.delete(novelId);
-          activeDiscoverDownloads.delete(novelId);
           return;
         }
 
+        let nextDelay = 2000;
+
         try {
           const pollUrl = `/api/discover/progress/${encodeURIComponent(jobId)}`;
-
           const res = await fetch(pollUrl);
-          if (!res.ok) return;
+
+          if (!res.ok) {
+            if (res.status === 404) {
+              consecutive404s++;
+              if (consecutive404s >= 5) {
+                discoverPollIntervals.delete(novelId);
+                ingestingDiscoverIds.delete(novelId);
+                activeDiscoverDownloads.delete(novelId);
+                removeStoredActiveDiscoverDownload(novelId);
+                showToast('Download job expired or not found', 'error');
+                renderDiscoverCards(discoverFeedCache[discoverTab]?.items || []);
+                if (activeDiscoverItem?.id === novelId) {
+                  populateDiscoverModal(activeDiscoverItem);
+                }
+                return;
+              }
+            }
+            throw new Error(`HTTP ${res.status}`);
+          }
+
+          consecutive404s = 0;
+          consecutiveFailures = 0;
+
           const data = await res.json();
           const state = data.state || data;
           const phase = data.phase || state.phase || 'downloading';
@@ -5547,7 +5729,7 @@
           const volumeTitle = data.volumeTitle || data.currentVolume || state.volumeTitle || '';
 
           const novel = discoverNovelsMap.get(novelId) || activeDiscoverItem;
-          const title = novel?.title || volumeTitle || 'Light Novel';
+          const title = novel?.title || volumeTitle || data.title || 'Light Novel';
 
           let progress = data.percent !== undefined ? data.percent : (data.progressPercent || 0);
           let statusText = data.statusText || '';
@@ -5560,7 +5742,7 @@
             statusText = `Downloading Vol ${currentVol} of ${total} (${progress}%)...`;
           } else if (!statusText) {
             if (data.percent === undefined) {
-              progress = Math.min(85, attempts * 5 + 10);
+              progress = 10;
             }
             statusText = state.status || `Downloading Vol 1 of ${Math.max(1, total)} (${progress}%)...`;
           }
@@ -5570,12 +5752,14 @@
             statusText = `Downloaded ${title} into library`;
           }
 
-          // Update active state
+          // Update active state in-memory and in localStorage
           const dl = activeDiscoverDownloads.get(novelId);
           if (dl) {
             dl.progress = progress;
+            dl.percent = progress;
             dl.statusText = statusText;
             dl.phase = phase;
+            saveStoredActiveDiscoverDownload(novelId, dl);
           }
 
           // Update card DOM
@@ -5597,8 +5781,8 @@
           }
 
           if (phase === 'complete') {
-            clearInterval(timer);
             discoverPollIntervals.delete(novelId);
+            removeStoredActiveDiscoverDownload(novelId);
 
             showToast(`Downloaded "${volumeTitle || title}" into library`);
 
@@ -5662,9 +5846,11 @@
               loadBooks();
             }, 1200);
 
+            return;
+
           } else if (phase === 'error') {
-            clearInterval(timer);
             discoverPollIntervals.delete(novelId);
+            removeStoredActiveDiscoverDownload(novelId);
             ingestingDiscoverIds.delete(novelId);
             activeDiscoverDownloads.delete(novelId);
 
@@ -5676,13 +5862,34 @@
               populateDiscoverModal(activeDiscoverItem);
               showDiscoverModalError(rawErr);
             }
+            return;
           }
-        } catch {
-          // ignore transient poll error
-        }
-      }, 1500);
 
-      discoverPollIntervals.set(novelId, timer);
+          nextDelay = 2000;
+        } catch (err) {
+          consecutiveFailures++;
+          nextDelay = Math.min(10000, 1500 * Math.pow(1.5, Math.min(consecutiveFailures, 5)));
+
+          const cText = document.getElementById(`cardProgressText-${novelId}`);
+          if (cText) cText.textContent = 'Reconnecting...';
+          const mStatus = document.getElementById('discoverModalProgressStatus');
+          if (mStatus && activeDiscoverItem?.id === novelId) {
+            mStatus.textContent = 'Reconnecting...';
+          }
+          const dl = activeDiscoverDownloads.get(novelId);
+          if (dl) {
+            dl.statusText = 'Reconnecting...';
+          }
+        }
+
+        if (ingestingDiscoverIds.has(novelId)) {
+          const timerId = setTimeout(pollStep, nextDelay);
+          discoverPollIntervals.set(novelId, timerId);
+        }
+      }
+
+      const timerId = setTimeout(pollStep, 1000);
+      discoverPollIntervals.set(novelId, timerId);
     }
 
     function syncSort(val) {

@@ -496,10 +496,13 @@ LightHouse features an Apple-aesthetic **Discover Shelf** across both the **Web 
      - Novel preview modal (`#discoverModal`): displays true total volumes (`${totalVols} Volumes`) reconciled with local Calibre volumes (`Math.max(catalogVolumes, libraryCount)`).
    - Reconciles catalog volume counts with local Calibre ownership while preventing spin-off/mainline volume count pollution.
    - Pre-indexed catalog volume counts for popular long-running series in `discover-catalog.json` and `CATALOG_VOLUMES` in `uploader/discover.ts`.
-7. **1-Click Direct Ingestion & Live Progress (`POST /api/discover/ingest`):**
+7. **1-Click Direct Ingestion, Persistent Downloads & Live Progress (`POST /api/discover/ingest`):**
    - 1-tap download from card or modal enqueues background ingestion into Calibre.
-   - Real-time live download progress tracked via `GET /api/discover/progress/:jobId`.
-   - Developer endpoints: `GET /api/discover/feed?tab=trending|new_releases`, `GET /api/discover/catalog`, `POST /api/discover/ingest`, and `GET /api/discover/progress/:jobId`.
+   - Real-time live download progress tracked via `GET /api/discover/progress/:jobId` with active download state persistently tracked in browser `localStorage` (`discover_active_downloads`).
+   - Active downloads automatically resume polling and live progress bars across page refreshes, tab closures, and navigation without losing progress or allowing duplicate download submissions.
+   - Cross-tab active job synchronization via `GET /api/discover/jobs/active` discovering in-flight jobs started from other tabs or devices.
+   - Resilient polling without arbitrary timeout cutoffs, featuring exponential backoff and subtle reconnection feedback upon transient network interruptions.
+   - Developer endpoints: `GET /api/discover/feed?tab=trending|new_releases`, `GET /api/discover/catalog`, `POST /api/discover/ingest`, `GET /api/discover/progress/:jobId`, and `GET /api/discover/jobs/active`.
    - Optimized with in-memory Calibre matching index reuse and signature invalidation, cooperative event-loop yielding every 200 items on catalog-wide status scans, HTTP response compression (Gzip/Deflate), and 24-hour cover caching.
    - Strictly zero emojis across all backend responses and logs.
 
