@@ -5546,14 +5546,28 @@ async function handleRequestCore(
         activeLnoriState.targetUrl &&
         areMatchingNovelUrls(activeLnoriState.targetUrl, targetUrl)
       ) {
+        const runId = activeLnoriState.runId || "";
+        const extractedJobId =
+          parseInt(runId.replace(/\D+/g, ""), 10) || ++nextNumericJobCounter;
+        const sourceName: "lnori" | "elscione" = isElscioneUrl(targetUrl)
+          ? "elscione"
+          : "lnori";
+        registerDiscoverJob(
+          extractedJobId,
+          runId,
+          sourceName,
+          targetUrl,
+          cleanNovelId,
+          cleanTitle,
+        );
         return jsonResponse(
           {
             success: true,
             queued: true,
             alreadyActive: true,
-            jobId: 0,
-            runId: activeLnoriState.runId,
-            message: `Ingestion already in progress for this novel`,
+            jobId: extractedJobId,
+            runId,
+            message: `Ingestion already in progress for this novel (job #${extractedJobId})`,
           },
           200,
           corsOrigin,
@@ -5562,14 +5576,28 @@ async function handleRequestCore(
 
       for (const item of lnoriQueue) {
         if (item.targetUrl && areMatchingNovelUrls(item.targetUrl, targetUrl)) {
+          const runId = item.id || "";
+          const extractedJobId =
+            parseInt(runId.replace(/\D+/g, ""), 10) || ++nextNumericJobCounter;
+          const sourceName: "lnori" | "elscione" = isElscioneUrl(targetUrl)
+            ? "elscione"
+            : "lnori";
+          registerDiscoverJob(
+            extractedJobId,
+            runId,
+            sourceName,
+            targetUrl,
+            cleanNovelId,
+            cleanTitle,
+          );
           return jsonResponse(
             {
               success: true,
               queued: true,
               alreadyActive: true,
-              jobId: 0,
-              runId: item.id,
-              message: `Ingestion already in progress for this novel`,
+              jobId: extractedJobId,
+              runId,
+              message: `Ingestion already in progress for this novel (job #${extractedJobId})`,
             },
             200,
             corsOrigin,

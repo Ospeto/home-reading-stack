@@ -3668,5 +3668,87 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
         resetActiveLnoriStateForTest();
       }
     });
+
+    it("POST /api/discover/ingest recovers and registers activeLnoriState job started via /api/lnori/ingest", async () => {
+      resetActiveLnoriStateForTest();
+      try {
+        let releaseTask: (() => void) | undefined;
+        const taskHoldPromise = new Promise<void>((resolve) => {
+          releaseTask = resolve;
+        });
+
+        setServerDependenciesForTest({
+          ingestLnoriSeries: async () => {
+            await taskHoldPromise;
+            return {
+              success: true,
+              seriesTitle: "The Genius Prince's Guide",
+              author: "Toru Toba",
+              importedCount: 1,
+              skippedCount: 0,
+              totalCount: 1,
+              tags: "Light Novel",
+              calibreBookIds: [8046],
+            };
+          },
+        });
+
+        // Step 1: Start job through native /api/lnori/ingest (which does not use registerDiscoverJob upfront)
+        const lnoriReq = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/the-genius-princes-guide",
+            stream: true,
+          }),
+        });
+        const lnoriRes = await handleRequest(lnoriReq, localServer);
+        expect(lnoriRes.status).toBe(200);
+
+        // Step 2: Discover UI attempts to ingest the same novel while active
+        const discoverReq = new Request("http://127.0.0.1:8086/api/discover/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/the-genius-princes-guide",
+            source: "lnori",
+            novelId: "genius-prince-card",
+            title: "The Genius Prince's Guide",
+          }),
+        });
+        const discoverRes = await handleRequest(discoverReq, localServer);
+        expect(discoverRes.status).toBe(200);
+        const discoverData = await discoverRes.json();
+        expect(discoverData.success).toBe(true);
+        expect(discoverData.alreadyActive).toBe(true);
+        expect(discoverData.jobId).toBeGreaterThan(0);
+        expect(discoverData.runId).toBeDefined();
+
+        // Step 3: Polling with returned jobId must succeed (not return 404)
+        const pollReq = new Request(`http://127.0.0.1:8086/api/discover/progress/${discoverData.jobId}`);
+        const pollRes = await handleRequest(pollReq, localServer);
+        expect(pollRes.status).toBe(200);
+        const pollData = await pollRes.json();
+        expect(pollData.success).toBe(true);
+        expect(pollData.jobId).toBe(discoverData.jobId);
+        expect(["downloading", "processing", "queued"]).toContain(pollData.phase);
+
+        // Step 4: Active jobs API must include the registered job
+        const activeReq = new Request("http://127.0.0.1:8086/api/discover/jobs/active");
+        const activeRes = await handleRequest(activeReq, localServer);
+        expect(activeRes.status).toBe(200);
+        const activeData = await activeRes.json();
+        const activeJob = activeData.jobs.find((j: any) => j.jobId === discoverData.jobId || j.runId === discoverData.runId);
+        expect(activeJob).toBeDefined();
+        expect(activeJob.novelId).toBe("genius-prince-card");
+        expect(activeJob.title).toBe("The Genius Prince's Guide");
+
+        // Release the task
+        if (releaseTask) releaseTask();
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
   });
 });

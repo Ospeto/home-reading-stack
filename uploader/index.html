@@ -4256,8 +4256,8 @@
           continue;
         }
 
-        // If draft has no jobId yet (interrupted or failed initial request)
-        if (!item.jobId) {
+        // If draft has no jobId and no runId yet (interrupted or failed initial request)
+        if (!item.jobId && !item.runId) {
           if ((now - startedAt) > SUBMISSION_GRACE_PERIOD_MS) {
             // Older than 15s: prune unacknowledged draft immediately so novel is not permanently blocked
             removeStoredActiveDiscoverDownload(novelId);
@@ -4268,11 +4268,12 @@
           continue;
         }
 
+        const pollId = item.jobId || item.runId;
         ingestingDiscoverIds.add(novelId);
         const progressVal = typeof item.percent === 'number' ? item.percent : 10;
         activeDiscoverDownloads.set(novelId, {
-          jobId: item.jobId,
-          runId: item.runId,
+          jobId: item.jobId || item.runId,
+          runId: item.runId || String(item.jobId),
           progress: progressVal,
           percent: progressVal,
           statusText: item.statusText || 'Downloading...',
@@ -4281,8 +4282,8 @@
           startedAt: item.startedAt || now,
         });
 
-        if (item.jobId && !discoverPollIntervals.has(novelId)) {
-          pollDiscoverIngestProgress(novelId, item.jobId, item.runId);
+        if (pollId && !discoverPollIntervals.has(novelId)) {
+          pollDiscoverIngestProgress(novelId, pollId, item.runId);
         }
       }
 
@@ -4326,7 +4327,8 @@
 
       // Any pending draft not reconciled by server's active jobs gets pruned
       for (const draftId of pendingDraftIds) {
-        if (!activeDiscoverDownloads.has(draftId) || !activeDiscoverDownloads.get(draftId)?.jobId) {
+        const activeItem = activeDiscoverDownloads.get(draftId);
+        if (!activeItem || (!activeItem.jobId && !activeItem.runId)) {
           removeStoredActiveDiscoverDownload(draftId);
           ingestingDiscoverIds.delete(draftId);
           activeDiscoverDownloads.delete(draftId);
@@ -5676,14 +5678,15 @@
         const runId = data.runId;
         const jobId = data.jobId;
 
+        const pollId = jobId || runId;
         const downloadObj = activeDiscoverDownloads.get(novelId);
         if (downloadObj) {
           downloadObj.runId = runId;
-          downloadObj.jobId = jobId;
+          downloadObj.jobId = pollId;
           saveStoredActiveDiscoverDownload(novelId, downloadObj);
         }
 
-        pollDiscoverIngestProgress(novelId, jobId, runId);
+        pollDiscoverIngestProgress(novelId, pollId, runId);
       } catch (err) {
         console.error('Discover ingest failed to start:', err);
         ingestingDiscoverIds.delete(novelId);
@@ -5706,6 +5709,9 @@
         discoverPollIntervals.delete(novelId);
       }
 
+      const pollTargetId = jobId || runId;
+      if (!pollTargetId) return;
+
       let consecutiveFailures = 0;
       let consecutive404s = 0;
 
@@ -5718,7 +5724,7 @@
         let nextDelay = 2000;
 
         try {
-          const pollUrl = `/api/discover/progress/${encodeURIComponent(jobId)}`;
+          const pollUrl = `/api/discover/progress/${encodeURIComponent(pollTargetId)}`;
           const res = await fetch(pollUrl);
 
           if (!res.ok) {
