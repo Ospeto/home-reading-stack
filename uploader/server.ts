@@ -524,8 +524,9 @@ export function getActiveDiscoverJobs(): DiscoverJobProgress[] {
   const activeJobs: DiscoverJobProgress[] = [];
   const seenJobIds = new Set<number>();
   const toDelete: number[] = [];
+  const registeredEntries = Array.from(discoverJobRegistry.entries());
 
-  for (const [jobId, reg] of discoverJobRegistry.entries()) {
+  for (const [jobId, reg] of registeredEntries) {
     const progress = getDiscoverJobProgress(jobId);
     if (!progress) {
       if (Date.now() - reg.createdAt > 2 * 3600 * 1000) {

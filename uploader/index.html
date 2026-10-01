@@ -5705,7 +5705,6 @@
     function pollDiscoverIngestProgress(novelId, jobId, runId) {
       if (discoverPollIntervals.has(novelId)) {
         clearTimeout(discoverPollIntervals.get(novelId));
-        clearInterval(discoverPollIntervals.get(novelId));
         discoverPollIntervals.delete(novelId);
       }
 
