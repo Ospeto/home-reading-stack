@@ -1252,6 +1252,70 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         }
       }
       expect(getStored()["old-stale-novel"]).toBeUndefined();
+
+      // Step 6: Unacknowledged draft submission (jobId: null) older than grace period is pruned and never permanently blocks novel
+      saveStored("interrupted-draft-novel", {
+        jobId: null,
+        runId: null,
+        title: "Interrupted Novel",
+        startedAt: Date.now() - 20_000, // 20s ago
+        phase: "downloading",
+      });
+
+      stored = getStored();
+      const SUBMISSION_GRACE_PERIOD_MS = 15_000;
+      for (const [id, item] of Object.entries(stored)) {
+        if (!item.jobId && (Date.now() - item.startedAt) > SUBMISSION_GRACE_PERIOD_MS) {
+          removeStored(id);
+        }
+      }
+      expect(getStored()["interrupted-draft-novel"]).toBeUndefined();
+    });
+
+    it("prevents phantom job resurrection: expired registered jobs without active execution return null and are pruned", async () => {
+      resetActiveLnoriStateForTest();
+
+      const phantomJobId = 887766;
+      registerDiscoverJob(
+        phantomJobId,
+        "phantom-run",
+        "lnori",
+        "https://lnori.com/series/8877/phantom",
+        "phantom-novel",
+        "Phantom Novel",
+      );
+
+      // Artificially age the registered job beyond the 60s grace window
+      // We directly query getDiscoverJobProgress after time travel / timestamp modification
+      const req = new Request(`http://127.0.0.1:8086/api/discover/progress/${phantomJobId}`);
+      // Within grace window (freshly registered), returns queued
+      const resFresh = await handleRequest(req, localServer);
+      expect(resFresh.status).toBe(200);
+      const dataFresh = await resFresh.json();
+      expect(dataFresh.phase).toBe("queued");
+
+      // Beyond grace window, without any task in activeLnoriState, lnoriQueue, or completedJobs:
+      // It must prune the registry entry and return 404
+      const oldReq = new Request(`http://127.0.0.1:8086/api/discover/progress/${phantomJobId}`);
+      // Simulate timestamp aging
+      const origNow = Date.now;
+      try {
+        Date.now = () => origNow() + 120_000; // +2 minutes
+        const resAged = await handleRequest(oldReq, localServer);
+        expect(resAged.status).toBe(404);
+
+        // Active jobs listing must not resurrect it
+        const directJobs = getActiveDiscoverJobs();
+        expect(directJobs.some((j) => j.jobId === phantomJobId)).toBe(false);
+
+        const activeReq = new Request("http://127.0.0.1:8086/api/discover/jobs/active");
+        const activeRes = await handleRequest(activeReq, localServer);
+        const activeData = await activeRes.json();
+        expect(activeData.jobs.some((j: any) => j.jobId === phantomJobId)).toBe(false);
+      } finally {
+        Date.now = origNow;
+        resetActiveLnoriStateForTest();
+      }
     });
   });
 

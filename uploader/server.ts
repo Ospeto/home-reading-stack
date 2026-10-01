@@ -190,14 +190,23 @@ export function registerDiscoverJob(
   title?: string,
 ): void {
   const normalizedUrl = cleanAndNormalizeNovelUrl(targetUrl);
+  const cleanNovelId =
+    novelId && typeof novelId === "string"
+      ? stripEmojis(novelId.trim().slice(0, 128))
+      : undefined;
+  const cleanTitle =
+    title && typeof title === "string"
+      ? stripEmojis(title.trim().slice(0, 256))
+      : undefined;
+
   const existing = discoverJobRegistry.get(jobId);
   discoverJobRegistry.set(jobId, {
     jobId,
     runId,
     source,
     targetUrl: normalizedUrl,
-    novelId: novelId ?? existing?.novelId,
-    title: title ?? existing?.title,
+    novelId: cleanNovelId ?? existing?.novelId,
+    title: cleanTitle ?? existing?.title,
     createdAt: existing?.createdAt ?? Date.now(),
   });
   if (discoverJobRegistry.size > MAX_DISCOVER_REGISTRY_SIZE) {
@@ -467,16 +476,20 @@ export function getDiscoverJobProgress(
     console.debug("[Discover] jobQueue lookup failed:", err);
   }
 
-  // If registered job exists but hasn't started yet
+  // If registered job exists but hasn't started yet, only treat as queued during initial registration grace window (60s)
   if (registered) {
-    return decorateWithRegistered({
-      success: true,
-      jobId: cleanJobId,
-      phase: "queued",
-      percent: 0,
-      volumesCompleted: 0,
-      totalVolumes: 0,
-    });
+    if (Date.now() - registered.createdAt < 60_000) {
+      return decorateWithRegistered({
+        success: true,
+        jobId: cleanJobId,
+        phase: "queued",
+        percent: 0,
+        volumesCompleted: 0,
+        totalVolumes: 0,
+      });
+    }
+    // Older than grace window and not found in activeLnoriState, lnoriQueue, completedLnoriJobs, or jobQueue: prune
+    discoverJobRegistry.delete(cleanJobId);
   }
 
   return null;
@@ -491,19 +504,15 @@ export function getActiveDiscoverJobs(): DiscoverJobProgress[] {
   const seenJobIds = new Set<number>();
   const toDelete: number[] = [];
 
-  for (const [jobId, reg] of discoverJobRegistry.entries()) {
+  for (const jobId of discoverJobRegistry.keys()) {
     const progress = getDiscoverJobProgress(jobId);
     if (!progress) {
-      if (Date.now() - reg.createdAt > 2 * 3600 * 1000) {
-        toDelete.push(jobId);
-      }
+      toDelete.push(jobId);
       continue;
     }
 
     if (progress.phase === "complete" || progress.phase === "error") {
-      if (Date.now() - reg.createdAt > 10 * 60 * 1000) {
-        toDelete.push(jobId);
-      }
+      toDelete.push(jobId);
       continue;
     }
 
@@ -733,7 +742,27 @@ export function cancelActiveLnoriIngest(targetRunId?: string): boolean {
   if (targetRunId) {
     const queueIdx = lnoriQueue.findIndex((item) => item.id === targetRunId);
     if (queueIdx !== -1) {
-      lnoriQueue.splice(queueIdx, 1);
+      const removed = lnoriQueue.splice(queueIdx, 1)[0];
+      recordCompletedLnoriJob({
+        runId: removed.id,
+        active: false,
+        targetUrl: removed.targetUrl,
+        phase: "error",
+        status: `${activeSource} ingestion cancelled by user`,
+        error: `${activeSource} ingestion cancelled by user`,
+        index: 0,
+        total: 0,
+        volumeTitle: null,
+        data: { error: `${activeSource} ingestion cancelled by user`, aborted: true },
+        completedData: null,
+        startedAt: removed.createdAt,
+        updatedAt: new Date().toISOString(),
+      });
+      for (const [jobId, reg] of discoverJobRegistry.entries()) {
+        if (reg.runId === targetRunId) {
+          discoverJobRegistry.delete(jobId);
+        }
+      }
       return true;
     }
     // If not in queue, check if it matches the active job
@@ -762,6 +791,11 @@ export function cancelActiveLnoriIngest(targetRunId?: string): boolean {
 
       scheduleLnoriDrain();
       recordCompletedLnoriJob(activeLnoriState);
+      for (const [jobId, reg] of discoverJobRegistry.entries()) {
+        if (reg.runId === targetRunId) {
+          discoverJobRegistry.delete(jobId);
+        }
+      }
       return true;
     }
     return false;
@@ -5469,6 +5503,80 @@ async function handleRequestCore(
       }
 
       const targetUrl = cleanAndNormalizeNovelUrl(body.url.trim());
+      const cleanNovelId =
+        body.novelId && typeof body.novelId === "string"
+          ? stripEmojis(body.novelId.trim().slice(0, 128))
+          : undefined;
+      const cleanTitle =
+        body.title && typeof body.title === "string"
+          ? stripEmojis(body.title.trim().slice(0, 256))
+          : undefined;
+
+      // Server-side atomic duplicate check: if already active or queued for this targetUrl or novelId, reuse existing job
+      for (const [existingJobId, reg] of discoverJobRegistry.entries()) {
+        const urlMatches = areMatchingNovelUrls(reg.targetUrl, targetUrl);
+        const novelIdMatches =
+          cleanNovelId && reg.novelId && reg.novelId === cleanNovelId;
+        if (urlMatches || novelIdMatches) {
+          const progress = getDiscoverJobProgress(existingJobId);
+          if (
+            progress &&
+            (progress.phase === "queued" ||
+              progress.phase === "downloading" ||
+              progress.phase === "processing")
+          ) {
+            return jsonResponse(
+              {
+                success: true,
+                queued: true,
+                alreadyActive: true,
+                jobId: existingJobId,
+                runId: reg.runId,
+                message: `Ingestion already in progress for this novel (job #${existingJobId})`,
+              },
+              200,
+              corsOrigin,
+            );
+          }
+        }
+      }
+
+      if (
+        activeLnoriState.active &&
+        activeLnoriState.targetUrl &&
+        areMatchingNovelUrls(activeLnoriState.targetUrl, targetUrl)
+      ) {
+        return jsonResponse(
+          {
+            success: true,
+            queued: true,
+            alreadyActive: true,
+            jobId: 0,
+            runId: activeLnoriState.runId,
+            message: `Ingestion already in progress for this novel`,
+          },
+          200,
+          corsOrigin,
+        );
+      }
+
+      for (const item of lnoriQueue) {
+        if (item.targetUrl && areMatchingNovelUrls(item.targetUrl, targetUrl)) {
+          return jsonResponse(
+            {
+              success: true,
+              queued: true,
+              alreadyActive: true,
+              jobId: 0,
+              runId: item.id,
+              message: `Ingestion already in progress for this novel`,
+            },
+            200,
+            corsOrigin,
+          );
+        }
+      }
+
       const rawSource = (body.source || "").toLowerCase().trim();
       let source: "lnori" | "elscione";
 
@@ -5520,8 +5628,8 @@ async function handleRequestCore(
           runId,
           "lnori",
           targetUrl,
-          body.novelId,
-          body.title,
+          cleanNovelId,
+          cleanTitle,
         );
         return jsonResponse(
           {
@@ -5578,8 +5686,8 @@ async function handleRequestCore(
           runId,
           "elscione",
           targetUrl,
-          body.novelId,
-          body.title,
+          cleanNovelId,
+          cleanTitle,
         );
         return jsonResponse(
           {

@@ -4242,6 +4242,8 @@
       const stored = getStoredActiveDiscoverDownloads();
       const now = Date.now();
       const MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+      const SUBMISSION_GRACE_PERIOD_MS = 15 * 1000; // 15s for in-flight submission acknowledgement
+      const pendingDraftIds = [];
 
       for (const [novelId, item] of Object.entries(stored)) {
         if (!item) continue;
@@ -4251,6 +4253,18 @@
 
         if (isExpired || isTerminal) {
           removeStoredActiveDiscoverDownload(novelId);
+          continue;
+        }
+
+        // If draft has no jobId yet (interrupted or failed initial request)
+        if (!item.jobId) {
+          if ((now - startedAt) > SUBMISSION_GRACE_PERIOD_MS) {
+            // Older than 15s: prune unacknowledged draft immediately so novel is not permanently blocked
+            removeStoredActiveDiscoverDownload(novelId);
+          } else {
+            // Recently submitted within 15s: keep temporarily to reconcile with active jobs API
+            pendingDraftIds.push(novelId);
+          }
           continue;
         }
 
@@ -4308,6 +4322,15 @@
         }
       } catch (err) {
         console.debug('Failed to query active discover jobs:', err);
+      }
+
+      // Any pending draft not reconciled by server's active jobs gets pruned
+      for (const draftId of pendingDraftIds) {
+        if (!activeDiscoverDownloads.has(draftId) || !activeDiscoverDownloads.get(draftId)?.jobId) {
+          removeStoredActiveDiscoverDownload(draftId);
+          ingestingDiscoverIds.delete(draftId);
+          activeDiscoverDownloads.delete(draftId);
+        }
       }
 
       // If in discover view, refresh cards so restored progress bars display
@@ -5580,7 +5603,6 @@
         startedAt: Date.now(),
       };
       activeDiscoverDownloads.set(novelId, downloadState);
-      saveStoredActiveDiscoverDownload(novelId, downloadState);
 
       // Update card UI immediately to show inline progress track
       const cardActions = document.getElementById(`cardActions-${novelId}`);

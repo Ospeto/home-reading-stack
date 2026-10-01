@@ -3570,5 +3570,103 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
         resetActiveLnoriStateForTest();
       }
     });
+
+    it("POST /api/discover/ingest blocks duplicate submissions server-side and reuses active job", async () => {
+      resetActiveLnoriStateForTest();
+      let enqueueCount = 0;
+      try {
+        setServerDependenciesForTest({
+          enqueueLnoriJob: (_url: string) => {
+            enqueueCount++;
+            return {
+              jobId: 8888,
+              runId: "lnori-8888-active",
+            };
+          },
+        });
+
+        // First ingest submission
+        const req1 = new Request("http://127.0.0.1:8086/api/discover/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", host: "127.0.0.1:8086" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/the-genius-princes-guide",
+            source: "lnori",
+            novelId: "genius-prince-lnori",
+            title: "The Genius Prince's Guide",
+          }),
+        });
+        const res1 = await handleRequest(req1, localServer);
+        expect(res1.status).toBe(200);
+        const data1 = await res1.json();
+        expect(data1.success).toBe(true);
+        expect(data1.jobId).toBe(8888);
+        expect(enqueueCount).toBe(1);
+
+        // Second ingest submission for the same novel / URL (simulating another tab or concurrent device)
+        const req2 = new Request("http://127.0.0.1:8086/api/discover/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", host: "127.0.0.1:8086" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/the-genius-princes-guide",
+            source: "lnori",
+            novelId: "genius-prince-lnori",
+            title: "The Genius Prince's Guide",
+          }),
+        });
+        const res2 = await handleRequest(req2, localServer);
+        expect(res2.status).toBe(200);
+        const data2 = await res2.json();
+        expect(data2.success).toBe(true);
+        expect(data2.alreadyActive).toBe(true);
+        expect(data2.jobId).toBe(8888);
+        expect(data2.runId).toBe("lnori-8888-active");
+        expect(data2.message).toContain("already in progress");
+        // Must NOT call enqueueLnoriJob again
+        expect(enqueueCount).toBe(1);
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
+
+    it("POST /api/discover/ingest and registerDiscoverJob strip emojis from novelId and title", async () => {
+      resetActiveLnoriStateForTest();
+      try {
+        setServerDependenciesForTest({
+          enqueueLnoriJob: (_url: string) => ({
+            jobId: 9999,
+            runId: "lnori-9999-emoji",
+          }),
+        });
+
+        const req = new Request("http://127.0.0.1:8086/api/discover/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", host: "127.0.0.1:8086" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/the-genius-princes-guide",
+            source: "lnori",
+            novelId: "danmachi-✨-novel",
+            title: "DanMachi 🚀 ✨ Super Magic 📚",
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+
+        const activeReq = new Request("http://127.0.0.1:8086/api/discover/jobs/active");
+        const activeRes = await handleRequest(activeReq, localServer);
+        const activeData = await activeRes.json();
+        const job = activeData.jobs.find((j: any) => j.jobId === 9999);
+        expect(job).toBeDefined();
+        // Emojis must be cleanly stripped
+        expect(/\p{Extended_Pictographic}/u.test(job.novelId)).toBe(false);
+        expect(/\p{Extended_Pictographic}/u.test(job.title)).toBe(false);
+        expect(job.title).toBe("DanMachi Super Magic");
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
   });
 });
