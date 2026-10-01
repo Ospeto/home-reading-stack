@@ -499,7 +499,8 @@ LightHouse features an Apple-aesthetic **Discover Shelf** across both the **Web 
 7. **1-Click Direct Ingestion & Live Progress (`POST /api/discover/ingest`):**
    - 1-tap download from card or modal enqueues background ingestion into Calibre.
    - Real-time live download progress tracked via `GET /api/discover/progress/:jobId`.
-   - Developer endpoints: `GET /api/discover/feed?tab=trending|new_releases`, `POST /api/discover/ingest`, and `GET /api/discover/progress/:jobId`.
+   - Developer endpoints: `GET /api/discover/feed?tab=trending|new_releases`, `GET /api/discover/catalog`, `POST /api/discover/ingest`, and `GET /api/discover/progress/:jobId`.
+   - Optimized with in-memory Calibre matching index reuse and signature invalidation, cooperative event-loop yielding every 200 items on catalog-wide status scans, HTTP response compression (Gzip/Deflate), and 24-hour cover caching.
    - Strictly zero emojis across all backend responses and logs.
 
 ---

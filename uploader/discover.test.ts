@@ -42,6 +42,10 @@ import {
   getCalibreBookMatchCandidates,
   getNovelMatchCandidates,
   isSpinoffMismatch,
+  getOrCreateCalibreInvertedIndex,
+  invalidateCalibreInvertedIndex,
+  crossCheckNovelsWithCalibreAsync,
+  computeCalibreBooksSignature,
   type DiscoveredNovel,
 } from "./discover";
 import {
@@ -631,6 +635,44 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(data.count).toBeGreaterThan(1200);
       expect(data.totalPages).toBeGreaterThan(30);
       expect(data.counts?.all).toBeGreaterThan(1200);
+    });
+
+    it("GET /api/discover/catalog serves complete catalog with pagination, filters, and gzip compression", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/discover/catalog?page=1&pageSize=36", {
+        headers: { "Accept-Encoding": "gzip" },
+      });
+      const res = await handleRequest(req);
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Encoding")).toBe("gzip");
+      expect(res.headers.get("Vary")).toContain("Accept-Encoding");
+
+      const compressedBuf = new Uint8Array(await res.arrayBuffer());
+      const decompressed = (globalThis as any).Bun?.gunzipSync
+        ? (globalThis as any).Bun.gunzipSync(compressedBuf)
+        : require("node:zlib").gunzipSync(compressedBuf);
+
+      const data = JSON.parse(Buffer.from(decompressed).toString("utf8"));
+      expect(data.success).toBe(true);
+      expect(data.tab).toBe("all");
+      expect(data.novels.length).toBe(36);
+      expect(data.count).toBeGreaterThan(1200);
+
+      // Verify Deflate compression also supported on /api/discover/feed
+      const reqDeflate = new Request("http://127.0.0.1:8086/api/discover/feed?tab=all&page=1&pageSize=36", {
+        headers: { "Accept-Encoding": "deflate" },
+      });
+      const resDeflate = await handleRequest(reqDeflate);
+      expect(resDeflate.status).toBe(200);
+      expect(resDeflate.headers.get("Content-Encoding")).toBe("deflate");
+      expect(resDeflate.headers.get("Vary")).toContain("Accept-Encoding");
+
+      // Verify uncompressed fallback when Accept-Encoding omitted
+      const reqPlain = new Request("http://127.0.0.1:8086/api/discover/novels?tab=all&page=1&pageSize=36");
+      const resPlain = await handleRequest(reqPlain);
+      expect(resPlain.status).toBe(200);
+      expect(resPlain.headers.get("Content-Encoding")).toBeNull();
+      expect(resPlain.headers.get("Vary")).toContain("Accept-Encoding");
     });
 
     it("GET /api/discover/novels supports source, genre, q, and sort query parameters", async () => {
@@ -3535,6 +3577,84 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
           expect(n.inLibrary).toBe(false);
           expect(n.existingVolumes).toBe(0);
         }
+      });
+
+      it("reuses inverted index in memory and invalidates immediately when Calibre books change", () => {
+        invalidateCalibreInvertedIndex();
+
+        const initialBooks = [
+          { id: 1, title: "Overlord, Vol. 1", series: "Overlord", series_index: 1 },
+        ];
+
+        const idx1 = getOrCreateCalibreInvertedIndex(initialBooks);
+        expect(idx1).toBeDefined();
+        expect(idx1.signature).toBe(computeCalibreBooksSignature(initialBooks));
+
+        // Calling again with same data must return identical reference
+        const idx2 = getOrCreateCalibreInvertedIndex(initialBooks);
+        expect(idx2).toBe(idx1);
+
+        // Same-count change (edit title/series) must invalidate index due to signature change
+        const editedBooks = [
+          { id: 1, title: "Overlord II, Vol. 1", series: "Overlord II", series_index: 1 },
+        ];
+        const idxEdited = getOrCreateCalibreInvertedIndex(editedBooks);
+        expect(idxEdited).not.toBe(idx1);
+        expect(idxEdited.signature).toBe(computeCalibreBooksSignature(editedBooks));
+
+        // Added book must invalidate index
+        const expandedBooks = [
+          { id: 1, title: "Overlord II, Vol. 1", series: "Overlord II", series_index: 1 },
+          { id: 2, title: "DanMachi, Vol. 1", series: "DanMachi", series_index: 1 },
+        ];
+        const idxExpanded = getOrCreateCalibreInvertedIndex(expandedBooks);
+        expect(idxExpanded).not.toBe(idxEdited);
+
+        // Delimiter collision regression test: distinct books with colons must produce different signatures
+        const bookColon1 = [{ id: 1, title: "Alpha:Beta", series: "Gamma", series_index: 1 }];
+        const bookColon2 = [{ id: 1, title: "Alpha", series: "Beta:Gamma", series_index: 1 }];
+        expect(computeCalibreBooksSignature(bookColon1)).not.toBe(computeCalibreBooksSignature(bookColon2));
+
+        // Manual invalidation works cleanly
+        invalidateCalibreInvertedIndex();
+        const idxFresh = getOrCreateCalibreInvertedIndex(expandedBooks);
+        expect(idxFresh).toBeDefined();
+      });
+
+      it("cooperatively yields event loop every 200 items in crossCheckNovelsWithCalibreAsync", async () => {
+        const dummyNovels: DiscoveredNovel[] = Array.from({ length: 450 }, (_, i) => ({
+          id: `novel-${i}`,
+          title: i === 0 ? "DanMachi Mainline Quest" : `Unique Novel Omega Title ${i}`,
+          author: `Author ${i}`,
+          coverUrl: "https://example.com/cover.jpg",
+          synopsis: `Synopsis for sample novel series ${i}`,
+          genres: ["Fantasy"],
+          score: 80,
+          popularity: 1000,
+          releaseDate: "2024-01-01",
+          volumeCount: 1,
+          source: "both",
+          sourceUrls: { elscione: `https://server.elscione.com/${i}` },
+          inLibrary: false,
+          existingVolumes: 0,
+        }));
+
+        let timerExecuted = false;
+        // Schedule a macrotask timer
+        setTimeout(() => {
+          timerExecuted = true;
+        }, 0);
+
+        // Run async cross check across 450 items (yields at i=200 and i=400)
+        const checked = await crossCheckNovelsWithCalibreAsync(dummyNovels, {
+          getCalibreBooks: () => [{ id: 10, title: "DanMachi Mainline Quest, Vol. 1", series: "DanMachi Mainline Quest", series_index: 1 }],
+        }, 200);
+
+        expect(checked.length).toBe(450);
+        expect(checked[0].inLibrary).toBe(true);
+        expect(checked[1].inLibrary).toBe(false);
+        // Macrotask timer should have been granted a tick before 450-item async loop settled
+        expect(timerExecuted).toBe(true);
       });
     });
   });
