@@ -3750,5 +3750,113 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
         resetActiveLnoriStateForTest();
       }
     });
+
+    it("GET /api/discover/jobs/active preserves terminal registry mappings so polling continues returning complete", async () => {
+      resetActiveLnoriStateForTest();
+      const terminalJobId = 123456;
+      const terminalRunId = "lnori-123456-suffix";
+      registerDiscoverJob(
+        terminalJobId,
+        terminalRunId,
+        "lnori",
+        "https://lnori.com/series/8046/terminal-test",
+        "terminal-novel",
+        "Terminal Novel",
+      );
+
+      setServerDependenciesForTest({
+        getDiscoverProgress: (id) => {
+          if (Number(id) === terminalJobId) {
+            return {
+              success: true,
+              jobId: terminalJobId,
+              runId: terminalRunId,
+              phase: "complete",
+              percent: 100,
+              volumesCompleted: 1,
+              totalVolumes: 1,
+            };
+          }
+          return null;
+        },
+      });
+
+      try {
+        // Step 1: Active jobs listing is requested by another tab
+        const activeReq = new Request("http://127.0.0.1:8086/api/discover/jobs/active");
+        const activeRes = await handleRequest(activeReq, localServer);
+        expect(activeRes.status).toBe(200);
+        const activeData = await activeRes.json();
+        // Completed job is excluded from active listing
+        expect(activeData.jobs.some((j: any) => j.jobId === terminalJobId)).toBe(false);
+
+        // Step 2: The original tab's client continues polling progress for terminalJobId
+        // The mapping must NOT have been deleted; progress must return complete, not 404
+        const pollReq = new Request(`http://127.0.0.1:8086/api/discover/progress/${terminalJobId}`);
+        const pollRes = await handleRequest(pollReq, localServer);
+        expect(pollRes.status).toBe(200);
+        const pollData = await pollRes.json();
+        expect(pollData.success).toBe(true);
+        expect(pollData.phase).toBe("complete");
+        expect(pollData.percent).toBe(100);
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
+
+    it("active jobs fallback surfaces native active and queued jobs with targetUrl and runId", async () => {
+      resetActiveLnoriStateForTest();
+      try {
+        let releaseTask: (() => void) | undefined;
+        const holdPromise = new Promise<void>((resolve) => {
+          releaseTask = resolve;
+        });
+
+        setServerDependenciesForTest({
+          ingestLnoriSeries: async () => {
+            await holdPromise;
+            return {
+              success: true,
+              seriesTitle: "Native Series",
+              author: "Native Author",
+              importedCount: 1,
+              skippedCount: 0,
+              totalCount: 1,
+              tags: "Light Novel",
+              calibreBookIds: [1234],
+            };
+          },
+        });
+
+        // Start job 1 via native streaming
+        const req1 = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8046/native-series",
+            stream: true,
+          }),
+        });
+        const res1 = await handleRequest(req1, localServer);
+        expect(res1.status).toBe(200);
+
+        // Active jobs listing must surface it with targetUrl and runId
+        const activeReq = new Request("http://127.0.0.1:8086/api/discover/jobs/active");
+        const activeRes = await handleRequest(activeReq, localServer);
+        expect(activeRes.status).toBe(200);
+        const activeData = await activeRes.json();
+        expect(activeData.jobs.length).toBeGreaterThan(0);
+        const nativeJob = activeData.jobs[0];
+        expect(nativeJob.runId).toBeDefined();
+        expect(nativeJob.targetUrl).toContain("native-series");
+        expect(nativeJob.source).toBe("lnori");
+
+        if (releaseTask) releaseTask();
+      } finally {
+        resetServerDependenciesForTest();
+        resetActiveLnoriStateForTest();
+      }
+    });
   });
 });

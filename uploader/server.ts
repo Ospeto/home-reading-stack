@@ -338,6 +338,13 @@ export function getDiscoverJobProgress(
     const res: DiscoverJobProgress = {
       success: true,
       jobId: cleanJobId,
+      runId: activeLnoriState.runId || undefined,
+      targetUrl: activeLnoriState.targetUrl || undefined,
+      source: activeLnoriState.targetUrl
+        ? isElscioneUrl(activeLnoriState.targetUrl)
+          ? "elscione"
+          : "lnori"
+        : undefined,
       phase,
       percent,
       volumesCompleted,
@@ -360,6 +367,13 @@ export function getDiscoverJobProgress(
     const res: DiscoverJobProgress = {
       success: true,
       jobId: cleanJobId,
+      runId: queued.id || undefined,
+      targetUrl: queued.targetUrl || undefined,
+      source: queued.targetUrl
+        ? isElscioneUrl(queued.targetUrl)
+          ? "elscione"
+          : "lnori"
+        : undefined,
       phase: "queued",
       percent: 0,
       volumesCompleted: 0,
@@ -409,6 +423,13 @@ export function getDiscoverJobProgress(
     const res: DiscoverJobProgress = {
       success: true,
       jobId: cleanJobId,
+      runId: completedState.runId || undefined,
+      targetUrl: completedState.targetUrl || undefined,
+      source: completedState.targetUrl
+        ? isElscioneUrl(completedState.targetUrl)
+          ? "elscione"
+          : "lnori"
+        : undefined,
       phase,
       percent,
       volumesCompleted,
@@ -504,15 +525,17 @@ export function getActiveDiscoverJobs(): DiscoverJobProgress[] {
   const seenJobIds = new Set<number>();
   const toDelete: number[] = [];
 
-  for (const jobId of discoverJobRegistry.keys()) {
+  for (const [jobId, reg] of discoverJobRegistry.entries()) {
     const progress = getDiscoverJobProgress(jobId);
     if (!progress) {
-      toDelete.push(jobId);
+      if (Date.now() - reg.createdAt > 2 * 3600 * 1000) {
+        toDelete.push(jobId);
+      }
       continue;
     }
 
     if (progress.phase === "complete" || progress.phase === "error") {
-      toDelete.push(jobId);
+      // Exclude terminal jobs from active listing without deleting their mapping
       continue;
     }
 
@@ -521,8 +544,30 @@ export function getActiveDiscoverJobs(): DiscoverJobProgress[] {
   }
 
   // Also check activeLnoriState if active and not already captured
-  if (activeLnoriState.active && activeLnoriState.runId) {
-    const activeProgress = getDiscoverJobProgress(activeLnoriState.runId);
+  if (
+    activeLnoriState.active &&
+    activeLnoriState.runId &&
+    activeLnoriState.targetUrl
+  ) {
+    const runId = activeLnoriState.runId;
+    const targetUrl = activeLnoriState.targetUrl;
+    let existingJobId = 0;
+    for (const [jid, reg] of discoverJobRegistry.entries()) {
+      if (reg.runId === runId || areMatchingNovelUrls(reg.targetUrl, targetUrl)) {
+        existingJobId = jid;
+        break;
+      }
+    }
+    const resolvedJobId =
+      existingJobId ||
+      parseInt(runId.replace(/\D+/g, ""), 10) ||
+      ++nextNumericJobCounter;
+    const sourceName: "lnori" | "elscione" = isElscioneUrl(targetUrl)
+      ? "elscione"
+      : "lnori";
+    registerDiscoverJob(resolvedJobId, runId, sourceName, targetUrl);
+
+    const activeProgress = getDiscoverJobProgress(resolvedJobId);
     if (
       activeProgress &&
       activeProgress.phase !== "complete" &&
@@ -536,8 +581,26 @@ export function getActiveDiscoverJobs(): DiscoverJobProgress[] {
 
   // Also check queued items in lnoriQueue
   for (const item of lnoriQueue) {
-    if (item.id) {
-      const qProgress = getDiscoverJobProgress(item.id);
+    if (item.id && item.targetUrl) {
+      const runId = item.id;
+      const targetUrl = item.targetUrl;
+      let existingJobId = 0;
+      for (const [jid, reg] of discoverJobRegistry.entries()) {
+        if (reg.runId === runId || areMatchingNovelUrls(reg.targetUrl, targetUrl)) {
+          existingJobId = jid;
+          break;
+        }
+      }
+      const resolvedJobId =
+        existingJobId ||
+        parseInt(runId.replace(/\D+/g, ""), 10) ||
+        ++nextNumericJobCounter;
+      const sourceName: "lnori" | "elscione" = isElscioneUrl(targetUrl)
+        ? "elscione"
+        : "lnori";
+      registerDiscoverJob(resolvedJobId, runId, sourceName, targetUrl);
+
+      const qProgress = getDiscoverJobProgress(resolvedJobId);
       if (
         qProgress &&
         qProgress.phase !== "complete" &&
@@ -758,11 +821,6 @@ export function cancelActiveLnoriIngest(targetRunId?: string): boolean {
         startedAt: removed.createdAt,
         updatedAt: new Date().toISOString(),
       });
-      for (const [jobId, reg] of discoverJobRegistry.entries()) {
-        if (reg.runId === targetRunId) {
-          discoverJobRegistry.delete(jobId);
-        }
-      }
       return true;
     }
     // If not in queue, check if it matches the active job
@@ -791,11 +849,6 @@ export function cancelActiveLnoriIngest(targetRunId?: string): boolean {
 
       scheduleLnoriDrain();
       recordCompletedLnoriJob(activeLnoriState);
-      for (const [jobId, reg] of discoverJobRegistry.entries()) {
-        if (reg.runId === targetRunId) {
-          discoverJobRegistry.delete(jobId);
-        }
-      }
       return true;
     }
     return false;
