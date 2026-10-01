@@ -3992,7 +3992,7 @@ async function handleRequestCore(
             status: 304,
             headers: {
               ETag: etag,
-              "Cache-Control": "public, max-age=604800, immutable",
+              "Cache-Control": "public, max-age=86400",
               Vary: "Accept",
             },
           });
@@ -4005,7 +4005,7 @@ async function handleRequestCore(
         return new Response(file, {
           headers: {
             "Content-Type": contentType,
-            "Cache-Control": "public, max-age=604800, immutable",
+            "Cache-Control": "public, max-age=86400",
             ETag: etag,
             Vary: "Accept",
           },
@@ -4076,7 +4076,7 @@ async function handleRequestCore(
               status: 304,
               headers: {
                 ETag: etag,
-                "Cache-Control": "public, max-age=604800, immutable",
+                "Cache-Control": "public, max-age=86400",
                 Vary: "Accept",
               },
             });
@@ -4089,7 +4089,7 @@ async function handleRequestCore(
           return new Response(file, {
             headers: {
               "Content-Type": contentType,
-              "Cache-Control": "public, max-age=604800, immutable",
+              "Cache-Control": "public, max-age=86400",
               ETag: etag,
               Vary: "Accept",
             },
@@ -4113,7 +4113,7 @@ async function handleRequestCore(
             status: 304,
             headers: {
               ETag: etag,
-              "Cache-Control": "public, max-age=604800, immutable",
+              "Cache-Control": "public, max-age=86400",
               Vary: "Accept",
             },
           });
@@ -4124,7 +4124,7 @@ async function handleRequestCore(
         return new Response(file, {
           headers: {
             "Content-Type": "image/jpeg",
-            "Cache-Control": "public, max-age=604800, immutable",
+            "Cache-Control": "public, max-age=86400",
             ETag: etag,
             Vary: "Accept",
           },
@@ -4138,7 +4138,7 @@ async function handleRequestCore(
             status: 304,
             headers: {
               ETag: etag,
-              "Cache-Control": "public, max-age=604800, immutable",
+              "Cache-Control": "public, max-age=86400",
               Vary: "Accept",
             },
           });
@@ -4146,7 +4146,7 @@ async function handleRequestCore(
         return new Response(masterBuffer, {
           headers: {
             "Content-Type": "image/jpeg",
-            "Cache-Control": "public, max-age=604800, immutable",
+            "Cache-Control": "public, max-age=86400",
             ETag: etag,
             Vary: "Accept",
           },
@@ -5251,18 +5251,23 @@ async function handleRequestCore(
     }
   }
 
-  // API: Light Novel Discovery Feed (Trending, New Releases, All Titles)
+  // API: Light Novel Discovery Feed (Trending, New Releases, All Titles / Complete Catalog)
   if (
-    (url.pathname === "/api/discover/novels" || url.pathname === "/api/discover/feed") &&
+    (url.pathname === "/api/discover/novels" ||
+      url.pathname === "/api/discover/feed" ||
+      url.pathname === "/api/discover/catalog") &&
     req.method === "GET"
   ) {
     try {
-      const tabParam = (url.searchParams.get("tab") || "trending").toLowerCase().trim();
-      let tab: "trending" | "new" | "all" = "trending";
+      const isCatalogRoute = url.pathname === "/api/discover/catalog";
+      const tabParam = (url.searchParams.get("tab") || (isCatalogRoute ? "all" : "trending")).toLowerCase().trim();
+      let tab: "trending" | "new" | "all" = isCatalogRoute ? "all" : "trending";
       if (tabParam === "new" || tabParam === "new_releases") {
         tab = "new";
       } else if (tabParam === "all" || tabParam === "all_titles") {
         tab = "all";
+      } else if (tabParam === "trending") {
+        tab = "trending";
       }
       const source = (url.searchParams.get("source") || "all") as any;
       const genre = url.searchParams.get("genre") || undefined;

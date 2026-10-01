@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import process from "node:process";
 import { Database } from "bun:sqlite";
 import { safeFetchWithSsrf } from "./security";
@@ -2623,70 +2624,56 @@ export function resolveCatalogVolumeCount(
   return 1;
 }
 
+export interface ProcessedCalibreBook {
+  book: any;
+  candidates: Set<string>;
+  tokensList: string[][];
+}
+
+export interface CalibreInvertedIndex {
+  processedCalibreBooks: ProcessedCalibreBook[];
+  exactCandidateMap: Map<string, ProcessedCalibreBook[]>;
+  prefixMap: Map<string, ProcessedCalibreBook[]>;
+  tokenMap: Map<string, ProcessedCalibreBook[]>;
+  stopWordOnlyBooks: ProcessedCalibreBook[];
+  signature: string;
+}
+
+let _cachedCalibreInvertedIndex: CalibreInvertedIndex | null = null;
+
 /**
- * Cross-references discovered light novels against the local Calibre library.
- * Tags each novel with inLibrary: boolean and existingVolumes: number.
+ * Computes a content-based signature over Calibre books for index invalidation.
+ * Serializes [id, title, series, series_index] via JSON to avoid delimiter collisions.
  */
-export function crossCheckNovelsWithCalibre(
-  novels: DiscoveredNovel[],
-  dependencies?: DiscoverDependencies,
-): DiscoveredNovel[] {
-  let calibreBooks: any[] = [];
-
-  if (dependencies?.getCalibreBooks) {
-    try {
-      calibreBooks = dependencies.getCalibreBooks(false) || [];
-    } catch {
-      calibreBooks = [];
-    }
-  } else {
-    const dbPath = dependencies?.calibreDbPath || getCalibreDbPath();
-    if (dependencies?.calibreDb) {
-      try {
-        calibreBooks = queryCalibreLibraryBooks(dependencies.calibreDb);
-      } catch {
-        calibreBooks = [];
-      }
-    } else if (fs.existsSync(dbPath)) {
-      try {
-        const db = new Database(dbPath, { readonly: true });
-        try {
-          calibreBooks = queryCalibreLibraryBooks(db);
-        } finally {
-          db.close();
-        }
-      } catch {
-        calibreBooks = [];
-      }
-    }
+export function computeCalibreBooksSignature(books: any[]): string {
+  if (!books || books.length === 0) return "empty:0";
+  const hash = crypto.createHash("sha256");
+  hash.update(String(books.length));
+  for (const b of books) {
+    hash.update(JSON.stringify([
+      b.id ?? null,
+      b.title ?? null,
+      b.series ?? null,
+      b.series_index ?? null,
+    ]));
   }
+  return hash.digest("hex");
+}
 
-  if (calibreBooks.length === 0) {
-    return novels.map((novel) => ({
-      ...novel,
-      volumeCount: novel.volumeCount || 1,
-      inLibrary: false,
-      existingVolumes: 0,
-    }));
-  }
-
-  // Preprocess Calibre books for fast indexed matching
-  interface ProcessedCalibreBook {
-    book: any;
-    candidates: Set<string>;
-    tokensList: string[][];
-  }
-
+/**
+ * Builds multi-tier inverted indices over Calibre books:
+ * 1. exactCandidateMap: instant O(1) lookup for direct candidate equality
+ * 2. prefixMap: prefix buckets (length >= 6) for prefix matching
+ * 3. tokenMap: significant token buckets for token overlap & containment
+ * 4. stopWordOnlyBooks: books whose candidates contain zero significant tokens
+ */
+export function buildCalibreInvertedIndex(calibreBooks: any[], signature?: string): CalibreInvertedIndex {
+  const sig = signature ?? computeCalibreBooksSignature(calibreBooks);
   const processedCalibreBooks: ProcessedCalibreBook[] = calibreBooks.map((b) => ({
     book: b,
     ...getCalibreBookMatchCandidates(b),
   }));
 
-  // Build multi-tier inverted indices over Calibre books:
-  // 1. exactCandidateMap: instant O(1) lookup for direct candidate equality
-  // 2. prefixMap: prefix buckets (length >= 6) for prefix matching
-  // 3. tokenMap: significant token buckets for token overlap & containment
-  // 4. stopWordOnlyBooks: books whose candidates contain zero significant tokens
   const exactCandidateMap = new Map<string, ProcessedCalibreBook[]>();
   const prefixMap = new Map<string, ProcessedCalibreBook[]>();
   const tokenMap = new Map<string, ProcessedCalibreBook[]>();
@@ -2735,143 +2722,277 @@ export function crossCheckNovelsWithCalibre(
     }
   }
 
-  return novels.map((novel) => {
-    const { candidates: nCandidates, tokensList: nTokensList } = getNovelMatchCandidates(novel);
+  return {
+    processedCalibreBooks,
+    exactCandidateMap,
+    prefixMap,
+    tokenMap,
+    stopWordOnlyBooks,
+    signature: sig,
+  };
+}
 
-    // Collect plausible matching candidate books via inverted indices
-    const candidateSet = new Set<ProcessedCalibreBook>();
-    let checkAllBooks = false;
+/**
+ * Gets or builds the cached Calibre inverted index, invalidating when library signature changes.
+ */
+export function getOrCreateCalibreInvertedIndex(calibreBooks: any[]): CalibreInvertedIndex {
+  const currentSig = computeCalibreBooksSignature(calibreBooks);
+  if (_cachedCalibreInvertedIndex && _cachedCalibreInvertedIndex.signature === currentSig) {
+    return _cachedCalibreInvertedIndex;
+  }
+  const index = buildCalibreInvertedIndex(calibreBooks, currentSig);
+  _cachedCalibreInvertedIndex = index;
+  return index;
+}
 
-    for (const b of stopWordOnlyBooks) {
-      candidateSet.add(b);
+/**
+ * Invalidates the cached Calibre inverted index immediately.
+ */
+export function invalidateCalibreInvertedIndex(): void {
+  _cachedCalibreInvertedIndex = null;
+}
+
+/**
+ * Matches a single discovered novel against the prebuilt Calibre inverted index.
+ */
+export function matchNovelWithCalibreIndex(
+  novel: DiscoveredNovel,
+  index: CalibreInvertedIndex,
+): DiscoveredNovel {
+  const { candidates: nCandidates, tokensList: nTokensList } = getNovelMatchCandidates(novel);
+
+  // Collect plausible matching candidate books via inverted indices
+  const candidateSet = new Set<ProcessedCalibreBook>();
+  let checkAllBooks = false;
+
+  for (const b of index.stopWordOnlyBooks) {
+    candidateSet.add(b);
+  }
+
+  for (const n of nCandidates) {
+    // 1. Direct candidate equality candidates
+    const exactList = index.exactCandidateMap.get(n);
+    if (exactList) {
+      for (const b of exactList) candidateSet.add(b);
     }
 
+    // 2. Prefix candidates (length >= 6)
+    if (n.length >= 6) {
+      const p = n.slice(0, 6);
+      const pList = index.prefixMap.get(p);
+      if (pList) {
+        for (const b of pList) candidateSet.add(b);
+      }
+    }
+
+    // 3. Significant token candidates
+    const nSigTokens = getSignificantTokens(n);
+    if (nSigTokens.length === 0 && n.length >= 8 && n.split(" ").length >= 2) {
+      // Safe fail-open for novel candidate composed entirely of stop words
+      checkAllBooks = true;
+    }
+    for (const t of nSigTokens) {
+      const tList = index.tokenMap.get(t);
+      if (tList) {
+        for (const b of tList) candidateSet.add(b);
+      }
+    }
+  }
+
+  const booksToEvaluate = checkAllBooks ? index.processedCalibreBooks : Array.from(candidateSet);
+  let matchCount = 0;
+
+  for (const b of booksToEvaluate) {
+    let isMatch = false;
+
+    // 1. Direct candidate equality (O(1) Set lookup with spinoff mismatch protection)
     for (const n of nCandidates) {
-      // 1. Direct candidate equality candidates
-      const exactList = exactCandidateMap.get(n);
-      if (exactList) {
-        for (const b of exactList) candidateSet.add(b);
-      }
-
-      // 2. Prefix candidates (length >= 6)
-      if (n.length >= 6) {
-        const p = n.slice(0, 6);
-        const pList = prefixMap.get(p);
-        if (pList) {
-          for (const b of pList) candidateSet.add(b);
+      if (b.candidates.has(n)) {
+        for (const c of b.candidates) {
+          if (c === n && !isSpinoffMismatch(n, c)) {
+            isMatch = true;
+            break;
+          }
         }
+        if (isMatch) break;
       }
+    }
 
-      // 3. Significant token candidates
-      const nSigTokens = getSignificantTokens(n);
-      if (nSigTokens.length === 0 && n.length >= 8 && n.split(" ").length >= 2) {
-        // Safe fail-open for novel candidate composed entirely of stop words
-        checkAllBooks = true;
+    // 2. Containment matching (where either contains the other, bounded, length >= 8 and >= 2 words)
+    if (!isMatch) {
+      for (const n of nCandidates) {
+        const nWords = n.split(" ").length;
+        for (const c of b.candidates) {
+          if (isSpinoffMismatch(n, c)) continue;
+          const cWords = c.split(" ").length;
+          // c inside n
+          if (c.length >= 8 && cWords >= 2 && ` ${n} `.includes(` ${c} `)) {
+            isMatch = true;
+            break;
+          }
+          // n inside c
+          if (n.length >= 8 && nWords >= 2 && ` ${c} `.includes(` ${n} `)) {
+            isMatch = true;
+            break;
+          }
+        }
+        if (isMatch) break;
       }
-      for (const t of nSigTokens) {
-        const tList = tokenMap.get(t);
-        if (tList) {
-          for (const b of tList) candidateSet.add(b);
+    }
+
+    // 3. Significant token overlap matching (>= 70% significant word overlap)
+    if (!isMatch) {
+      const hasSpinoffConflict = Array.from(nCandidates).some((n) =>
+        Array.from(b.candidates).some((c) => isSpinoffMismatch(n, c)),
+      );
+      if (!hasSpinoffConflict) {
+        for (const nTok of nTokensList) {
+          const nStr = nTok.join(" ");
+          for (const cTok of b.tokensList) {
+            const cStr = cTok.join(" ");
+            if (isSpinoffMismatch(nStr, cStr)) continue;
+            const overlap = calculateSignificantTokenOverlap(nTok, cTok);
+            if (overlap >= 0.70) {
+              isMatch = true;
+              break;
+            }
+          }
+          if (isMatch) break;
         }
       }
     }
 
-    const booksToEvaluate = checkAllBooks ? processedCalibreBooks : Array.from(candidateSet);
-    let matchCount = 0;
-
-    for (const b of booksToEvaluate) {
-      let isMatch = false;
-
-      // 1. Direct candidate equality (O(1) Set lookup with spinoff mismatch protection)
-      for (const n of nCandidates) {
-        if (b.candidates.has(n)) {
-          for (const c of b.candidates) {
-            if (c === n && !isSpinoffMismatch(n, c)) {
-              isMatch = true;
-              break;
-            }
-          }
-          if (isMatch) break;
-        }
-      }
-
-      // 2. Containment matching (where either contains the other, bounded, length >= 8 and >= 2 words)
-      if (!isMatch) {
+    // 4. Prefix start matching fallback
+    if (!isMatch) {
+      const hasSpinoffConflict = Array.from(nCandidates).some((n) =>
+        Array.from(b.candidates).some((c) => isSpinoffMismatch(n, c)),
+      );
+      if (!hasSpinoffConflict) {
         for (const n of nCandidates) {
-          const nWords = n.split(" ").length;
-          for (const c of b.candidates) {
-            if (isSpinoffMismatch(n, c)) continue;
-            const cWords = c.split(" ").length;
-            // c inside n
-            if (c.length >= 8 && cWords >= 2 && ` ${n} `.includes(` ${c} `)) {
-              isMatch = true;
-              break;
-            }
-            // n inside c
-            if (n.length >= 8 && nWords >= 2 && ` ${c} `.includes(` ${n} `)) {
-              isMatch = true;
-              break;
-            }
-          }
-          if (isMatch) break;
-        }
-      }
-
-      // 3. Significant token overlap matching (>= 70% significant word overlap)
-      if (!isMatch) {
-        const hasSpinoffConflict = Array.from(nCandidates).some((n) =>
-          Array.from(b.candidates).some((c) => isSpinoffMismatch(n, c)),
-        );
-        if (!hasSpinoffConflict) {
-          for (const nTok of nTokensList) {
-            const nStr = nTok.join(" ");
-            for (const cTok of b.tokensList) {
-              const cStr = cTok.join(" ");
-              if (isSpinoffMismatch(nStr, cStr)) continue;
-              const overlap = calculateSignificantTokenOverlap(nTok, cTok);
-              if (overlap >= 0.70) {
+          if (n.length >= 6) {
+            for (const c of b.candidates) {
+              if (isSpinoffMismatch(n, c)) continue;
+              if (c.length >= 6 && (c.startsWith(n) || n.startsWith(c))) {
                 isMatch = true;
                 break;
               }
             }
-            if (isMatch) break;
           }
+          if (isMatch) break;
         }
-      }
-
-      // 4. Prefix start matching fallback
-      if (!isMatch) {
-        const hasSpinoffConflict = Array.from(nCandidates).some((n) =>
-          Array.from(b.candidates).some((c) => isSpinoffMismatch(n, c)),
-        );
-        if (!hasSpinoffConflict) {
-          for (const n of nCandidates) {
-            if (n.length >= 6) {
-              for (const c of b.candidates) {
-                if (isSpinoffMismatch(n, c)) continue;
-                if (c.length >= 6 && (c.startsWith(n) || n.startsWith(c))) {
-                  isMatch = true;
-                  break;
-                }
-              }
-            }
-            if (isMatch) break;
-          }
-        }
-      }
-
-      if (isMatch) {
-        matchCount++;
       }
     }
 
-    return {
+    if (isMatch) {
+      matchCount++;
+    }
+  }
+
+  return {
+    ...novel,
+    volumeCount: Math.max(novel.volumeCount || 1, matchCount),
+    inLibrary: matchCount > 0,
+    existingVolumes: matchCount,
+  };
+}
+
+/**
+ * Resolves Calibre books using dependencies or local SQLite database.
+ */
+export function resolveCalibreBooks(dependencies?: DiscoverDependencies): any[] {
+  let calibreBooks: any[] = [];
+  if (dependencies?.getCalibreBooks) {
+    try {
+      calibreBooks = dependencies.getCalibreBooks(false) || [];
+    } catch {
+      calibreBooks = [];
+    }
+  } else {
+    const dbPath = dependencies?.calibreDbPath || getCalibreDbPath();
+    if (dependencies?.calibreDb) {
+      try {
+        calibreBooks = queryCalibreLibraryBooks(dependencies.calibreDb);
+      } catch {
+        calibreBooks = [];
+      }
+    } else if (fs.existsSync(dbPath)) {
+      try {
+        const db = new Database(dbPath, { readonly: true });
+        try {
+          calibreBooks = queryCalibreLibraryBooks(db);
+        } finally {
+          db.close();
+        }
+      } catch {
+        calibreBooks = [];
+      }
+    }
+  }
+  return calibreBooks;
+}
+
+/**
+ * Yields control to the Node/Bun event loop.
+ */
+export function yieldEventLoop(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/**
+ * Asynchronously cross-references discovered light novels against the local Calibre library,
+ * cooperatively yielding the event loop every `yieldEvery` items (default 200).
+ * Acquires a single prebuilt inverted index up front for the entire scan.
+ */
+export async function crossCheckNovelsWithCalibreAsync(
+  novels: DiscoveredNovel[],
+  dependencies?: DiscoverDependencies,
+  yieldEvery = 200,
+): Promise<DiscoveredNovel[]> {
+  const calibreBooks = resolveCalibreBooks(dependencies);
+
+  if (calibreBooks.length === 0) {
+    return novels.map((novel) => ({
       ...novel,
-      volumeCount: Math.max(novel.volumeCount || 1, matchCount),
-      inLibrary: matchCount > 0,
-      existingVolumes: matchCount,
-    };
-  });
+      volumeCount: novel.volumeCount || 1,
+      inLibrary: false,
+      existingVolumes: 0,
+    }));
+  }
+
+  const index = getOrCreateCalibreInvertedIndex(calibreBooks);
+  const results: DiscoveredNovel[] = [];
+
+  for (let i = 0; i < novels.length; i++) {
+    if (i > 0 && i % yieldEvery === 0) {
+      await yieldEventLoop();
+    }
+    results.push(matchNovelWithCalibreIndex(novels[i], index));
+  }
+
+  return results;
+}
+
+/**
+ * Cross-references discovered light novels against the local Calibre library.
+ * Tags each novel with inLibrary: boolean and existingVolumes: number.
+ */
+export function crossCheckNovelsWithCalibre(
+  novels: DiscoveredNovel[],
+  dependencies?: DiscoverDependencies,
+): DiscoveredNovel[] {
+  const calibreBooks = resolveCalibreBooks(dependencies);
+
+  if (calibreBooks.length === 0) {
+    return novels.map((novel) => ({
+      ...novel,
+      volumeCount: novel.volumeCount || 1,
+      inLibrary: false,
+      existingVolumes: 0,
+    }));
+  }
+
+  const index = getOrCreateCalibreInvertedIndex(calibreBooks);
+  return novels.map((novel) => matchNovelWithCalibreIndex(novel, index));
 }
 
 function queryCalibreLibraryBooks(db: Database): any[] {
@@ -3076,7 +3197,7 @@ export async function fetchDiscoverFeed(
     allNovels = await ensureAllNovelsHaveSynopses(allNovels, dependencies);
     setCachedFeed(cacheKey, allNovels, dependencies);
     if (dependencies?.skipCrossCheck) return allNovels;
-    return crossCheckNovelsWithCalibre(allNovels, dependencies);
+    return crossCheckNovelsWithCalibreAsync(allNovels, dependencies, 200);
   }
 
   // 3. Try online fetch with short timeout for trending/new
@@ -4160,8 +4281,8 @@ export async function getDiscoverNovels(
 
   // 5. Filter by library status (all | available | in_library)
   if (needsFullCrossCheck) {
-    // If not already cross-checked, run inverted-index cross-check over the filtered candidate set
-    filtered = crossCheckNovelsWithCalibre(filtered, dependencies);
+    // If not already cross-checked, run cooperative inverted-index cross-check over the filtered candidate set
+    filtered = await crossCheckNovelsWithCalibreAsync(filtered, dependencies, 200);
     if (statusFilter === "available") {
       filtered = filtered.filter((n) => !n.inLibrary);
     } else if (statusFilter === "in_library") {

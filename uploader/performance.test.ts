@@ -628,7 +628,7 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
       const thumbRes = await handleRequest(thumbReq);
       expect(thumbRes.status).toBe(200);
       expect(thumbRes.headers.get("Content-Type")).toBe("image/jpeg");
-      expect(thumbRes.headers.get("Cache-Control")).toBe("public, max-age=604800, immutable");
+      expect(thumbRes.headers.get("Cache-Control")).toBe("public, max-age=86400");
 
       const thumbEtag = thumbRes.headers.get("ETag");
       expect(thumbEtag).not.toBeNull();
@@ -641,7 +641,7 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
       const condThumbRes = await handleRequest(condThumbReq);
       expect(condThumbRes.status).toBe(304);
       expect(condThumbRes.headers.get("ETag")).toBe(thumbEtag);
-      expect(condThumbRes.headers.get("Cache-Control")).toBe("public, max-age=604800, immutable");
+      expect(condThumbRes.headers.get("Cache-Control")).toBe("public, max-age=86400");
       expect(condThumbRes.headers.get("Vary")).toBe("Accept");
 
       // Content negotiation: Accept: image/webp serves WebP thumbnail with Vary: Accept
@@ -652,7 +652,7 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
       const webpThumbRes = await handleRequest(webpThumbReq);
       expect(webpThumbRes.status).toBe(200);
       expect(webpThumbRes.headers.get("Content-Type")).toBe("image/webp");
-      expect(webpThumbRes.headers.get("Cache-Control")).toBe("public, max-age=604800, immutable");
+      expect(webpThumbRes.headers.get("Cache-Control")).toBe("public, max-age=86400");
       expect(webpThumbRes.headers.get("Vary")).toBe("Accept");
       const webpThumbEtag = webpThumbRes.headers.get("ETag");
       expect(webpThumbEtag).not.toBeNull();
@@ -673,7 +673,7 @@ describe("Reading HQ Server Performance & In-Process SQLite Engine", () => {
       const condWebpThumbRes = await handleRequest(condWebpThumbReq);
       expect(condWebpThumbRes.status).toBe(304);
       expect(condWebpThumbRes.headers.get("ETag")).toBe(webpThumbEtag);
-      expect(condWebpThumbRes.headers.get("Cache-Control")).toBe("public, max-age=604800, immutable");
+      expect(condWebpThumbRes.headers.get("Cache-Control")).toBe("public, max-age=86400");
       expect(condWebpThumbRes.headers.get("Vary")).toBe("Accept");
 
       // Content negotiation: Accept: image/webp on master cover serves WebP format with Vary: Accept
