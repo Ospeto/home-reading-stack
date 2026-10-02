@@ -31,6 +31,7 @@ export interface LnoriDependencies {
   sleep?: (ms: number) => Promise<void>;
   signal?: AbortSignal;
   fetchOnlineSynopsis?: typeof fetchOnlineSynopsis;
+  force?: boolean;
 }
 
 export function composeSignal(timeoutMs: number, userSignal?: AbortSignal): AbortSignal {
@@ -304,6 +305,9 @@ export function isVolumeAlreadyInCalibre(
   title: string,
   dependencies?: LnoriDependencies,
 ): boolean {
+  if (dependencies?.force) {
+    return false;
+  }
   if (dependencies?.isVolumeInLibrary) {
     return dependencies.isVolumeInLibrary(seriesTitle, assignedIndex, title);
   }
@@ -334,10 +338,44 @@ export function isVolumeAlreadyInCalibre(
         LIMIT 1
       `).get(title);
 
-      db.close();
       if (titleMatch) {
+        db.close();
         return true;
       }
+
+      // Additional resilient check: check if any book has title matching series and exact volume number
+      const normSeries = seriesTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      if (normSeries && normSeries.length >= 3) {
+        const titleSearchPrefix = seriesTitle.slice(0, 20).toLowerCase();
+        const candidateRows = db.query(`
+          SELECT b.id, b.title, b.series_index FROM books b
+          WHERE LOWER(b.title) LIKE ?
+          LIMIT 100
+        `).all(`%${titleSearchPrefix}%`);
+
+        for (const row of candidateRows as any[]) {
+          const rowTitle = (row.title || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+          if (rowTitle && (rowTitle.includes(normSeries) || normSeries.includes(rowTitle))) {
+            let rowVol: number | null = null;
+            if (
+              row.series_index !== undefined &&
+              row.series_index !== null &&
+              !isNaN(Number(row.series_index)) &&
+              Number(row.series_index) > 0
+            ) {
+              rowVol = Number(row.series_index);
+            } else if (row.title) {
+              rowVol = extractVolumeNumber(row.title);
+            }
+            if (rowVol !== null && Math.abs(rowVol - assignedIndex) < 0.01) {
+              db.close();
+              return true;
+            }
+          }
+        }
+      }
+
+      db.close();
     } catch (err: any) {
       console.warn(`[Lnori] SQLite duplicate check failed, trying calibredb: ${err?.message || err}`);
     }
@@ -1692,13 +1730,18 @@ export async function ingestLnoriSeries(
     calibreBookIds,
   };
 
+  const summaryStatus = `Finished: ${importedCount} new volumes added, ${duplicateCount} existing volumes preserved.`;
+
   await reportProgress(onProgress, {
     phase: "complete",
     index: totalCount,
     total: totalCount,
     volumeTitle: manifest.seriesTitle,
-    status: `Completed: ${importedCount} imported, ${totalSkipped} skipped of ${totalCount} volumes`,
-    data: result,
+    status: summaryStatus,
+    data: {
+      ...result,
+      summary: summaryStatus,
+    },
   });
 
   return result;
