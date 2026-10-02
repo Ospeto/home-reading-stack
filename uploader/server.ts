@@ -74,6 +74,7 @@ import {
 } from "./elscione";
 import {
   getDiscoverNovels,
+  getDiscoverNovelById,
   stripEmojis,
   REAL_ELSCIONE_FOLDERS,
 } from "./discover";
@@ -145,9 +146,10 @@ export interface ServerDependencies {
     mountPath: string,
     options?: { useJev?: boolean; groups?: any[] },
   ) => Promise<{ cleanedCount: number; bytesFreed: number; duplicates?: any[] }>;
-  enqueueLnoriJob?: (url: string) => { jobId: number; runId: string };
-  enqueueElscioneJob?: (url: string) => { jobId: number; runId: string };
+  enqueueLnoriJob?: (url: string, force?: boolean) => { jobId: number; runId: string };
+  enqueueElscioneJob?: (url: string, force?: boolean) => { jobId: number; runId: string };
   getDiscoverNovels?: typeof getDiscoverNovels;
+  getDiscoverNovelById?: typeof getDiscoverNovelById;
   getDiscoverProgress?: (jobId: string | number) => DiscoverJobProgress | null;
   getActiveDiscoverJobs?: () => DiscoverJobProgress[];
 }
@@ -165,6 +167,8 @@ export interface DiscoverJobProgress {
   currentVolume?: string;
   volumesCompleted: number;
   totalVolumes: number;
+  statusText?: string;
+  summary?: string;
   error?: string;
 }
 
@@ -349,6 +353,8 @@ export function getDiscoverJobProgress(
       percent,
       volumesCompleted,
       totalVolumes,
+      statusText: activeLnoriState.status || undefined,
+      summary: activeLnoriState.status || undefined,
     };
     if (activeLnoriState.volumeTitle) {
       res.currentVolume = stripEmojis(activeLnoriState.volumeTitle);
@@ -434,6 +440,8 @@ export function getDiscoverJobProgress(
       percent,
       volumesCompleted,
       totalVolumes,
+      statusText: completedState.status || undefined,
+      summary: completedState.status || undefined,
     };
     if (completedState.volumeTitle) {
       res.currentVolume = stripEmojis(completedState.volumeTitle);
@@ -636,6 +644,7 @@ export interface LnoriQueueItem {
   targetUrl: string;
   seriesId?: string;
   createdAt: string;
+  force?: boolean;
 }
 
 export interface ActiveLnoriState {
@@ -702,9 +711,9 @@ export function getLnoriQueue(): LnoriQueueItem[] {
 
 let nextNumericJobCounter = Date.now();
 
-export function enqueueLnoriJob(targetUrl: string): { jobId: number; runId: string } {
+export function enqueueLnoriJob(targetUrl: string, force?: boolean): { jobId: number; runId: string } {
   if (serverDependencies.enqueueLnoriJob) {
-    const res = serverDependencies.enqueueLnoriJob(targetUrl);
+    const res = serverDependencies.enqueueLnoriJob(targetUrl, force);
     registerDiscoverJob(
       res.jobId,
       res.runId,
@@ -725,16 +734,17 @@ export function enqueueLnoriJob(targetUrl: string): { jobId: number; runId: stri
       targetUrl: cleanUrl,
       seriesId: parsed?.id,
       createdAt: new Date().toISOString(),
+      force,
     });
   } else {
-    executeLnoriIngestTask(runId, cleanUrl);
+    executeLnoriIngestTask(runId, cleanUrl, force);
   }
   return { jobId, runId };
 }
 
-export function enqueueElscioneJob(targetUrl: string): { jobId: number; runId: string } {
+export function enqueueElscioneJob(targetUrl: string, force?: boolean): { jobId: number; runId: string } {
   if (serverDependencies.enqueueElscioneJob) {
-    const res = serverDependencies.enqueueElscioneJob(targetUrl);
+    const res = serverDependencies.enqueueElscioneJob(targetUrl, force);
     registerDiscoverJob(
       res.jobId,
       res.runId,
@@ -753,9 +763,10 @@ export function enqueueElscioneJob(targetUrl: string): { jobId: number; runId: s
       id: runId,
       targetUrl: cleanUrl,
       createdAt: new Date().toISOString(),
+      force,
     });
   } else {
-    executeLnoriIngestTask(runId, cleanUrl);
+    executeLnoriIngestTask(runId, cleanUrl, force);
   }
   return { jobId, runId };
 }
@@ -961,12 +972,13 @@ export function processNextLnoriQueueItem(): void {
   if (!nextItem) {
     return;
   }
-  executeLnoriIngestTask(nextItem.id, nextItem.targetUrl);
+  executeLnoriIngestTask(nextItem.id, nextItem.targetUrl, nextItem.force);
 }
 
 export function executeLnoriIngestTask(
   runId: string,
   targetUrl: string,
+  force?: boolean,
 ): Promise<any> {
   const isElscione = isElscioneUrl(targetUrl);
   const sourceName = isElscione ? "Elscione" : "Lnori";
@@ -1053,7 +1065,7 @@ export function executeLnoriIngestTask(
           }
           broadcastEvent(event);
         },
-        { signal: backgroundAbortController.signal },
+        { signal: backgroundAbortController.signal, force },
       );
 
       if (activeLnoriState.runId !== runId) {
@@ -1102,7 +1114,7 @@ export function executeLnoriIngestTask(
         activeLnoriState.index = result.totalCount;
         activeLnoriState.total = result.totalCount;
         activeLnoriState.volumeTitle = result.seriesTitle;
-        activeLnoriState.status = `Completed: ${result.importedCount} imported, ${result.skippedCount} skipped of ${result.totalCount} volumes`;
+        activeLnoriState.status = `Finished: ${result.importedCount} new volumes added, ${result.duplicateCount ?? result.skippedCount} existing volumes preserved.`;
         activeLnoriState.updatedAt = new Date().toISOString();
 
         if (!hasCompleted) {
@@ -5436,6 +5448,45 @@ async function handleRequestCore(
     }
   }
 
+  // API: Light Novel Discovery Single Novel Details
+  const discoverNovelDetailMatch = url.pathname.match(
+    /^\/api\/discover\/novel\/([^/]+)$/,
+  );
+  if (discoverNovelDetailMatch && req.method === "GET") {
+    try {
+      const rawNovelId = decodeURIComponent(discoverNovelDetailMatch[1]).trim();
+      const getNovelFn = serverDependencies.getDiscoverNovelById ?? getDiscoverNovelById;
+      const cacheDb = getCacheDb();
+      const novel = await getNovelFn(rawNovelId, {
+        cacheDb,
+        getCalibreBooks: serverDependencies.getCalibreBooks ?? getCalibreBooks,
+      });
+
+      if (!novel) {
+        return jsonResponse(
+          { success: false, error: "Novel not found" },
+          404,
+          corsOrigin,
+        );
+      }
+
+      return jsonResponse(
+        {
+          success: true,
+          novel,
+        },
+        200,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err?.message || err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
   // API: Light Novel Discovery Feed (Trending, New Releases, All Titles / Complete Catalog)
   if (
     (url.pathname === "/api/discover/novels" ||
@@ -5457,7 +5508,16 @@ async function handleRequestCore(
       const source = (url.searchParams.get("source") || "all") as any;
       const genre = url.searchParams.get("genre") || undefined;
       const statusParam = (url.searchParams.get("status") || "all").toLowerCase().trim();
-      const status = (statusParam === "ready" ? "available" : statusParam) as any;
+      let status: any = statusParam;
+      if (statusParam === "ready") {
+        status = "available";
+      } else if (
+        statusParam === "incomplete" ||
+        statusParam === "missing" ||
+        statusParam === "missing_volumes"
+      ) {
+        status = "incomplete";
+      }
       const q = url.searchParams.get("q") || undefined;
       const sortParam = (url.searchParams.get("sort") || "popularity").toLowerCase().trim();
       let sort: any = sortParam;
@@ -5537,6 +5597,7 @@ async function handleRequestCore(
         source?: string;
         novelId?: string;
         title?: string;
+        force?: boolean;
       };
       try {
         body = (await req.json()) as any;
@@ -5703,7 +5764,8 @@ async function handleRequestCore(
           );
         }
         const enqueueFn = serverDependencies.enqueueLnoriJob ?? enqueueLnoriJob;
-        const job = enqueueFn(targetUrl);
+        const isForce = Boolean(body.force);
+        const job = enqueueFn(targetUrl, isForce);
         const runId = job.runId || `lnori-${job.jobId}`;
         registerDiscoverJob(
           job.jobId,
@@ -5761,7 +5823,8 @@ async function handleRequestCore(
           }
         }
         const enqueueFn = serverDependencies.enqueueElscioneJob ?? enqueueElscioneJob;
-        const job = enqueueFn(targetUrl);
+        const isForce = Boolean(body.force);
+        const job = enqueueFn(targetUrl, isForce);
         const runId = job.runId || `elscione-${job.jobId}`;
         registerDiscoverJob(
           job.jobId,

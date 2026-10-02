@@ -5,13 +5,13 @@ import { Database } from "bun:sqlite";
 import { safeFetchWithSsrf } from "./security";
 import { getCalibreDbPath, isLnoriUrl } from "./lnori";
 import { isElscioneUrl, parseElscioneUrl } from "./elscione";
-import { searchRanobeDB, searchAniList } from "./scraper";
+import { searchRanobeDB, searchAniList, extractVolumeNumber } from "./scraper";
 import discoverCatalog from "./discover-catalog.json";
 
 export type DiscoverSource = "lnori" | "elscione" | "both";
 export type DiscoverSourceFilter = "all" | "lnori" | "elscione";
 export type DiscoverTab = "trending" | "new" | "all";
-export type DiscoverStatus = "all" | "available" | "in_library";
+export type DiscoverStatus = "all" | "available" | "in_library" | "incomplete" | "missing_volumes";
 export type DiscoverSort = "popularity" | "score" | "newest" | "title_asc";
 
 export interface DiscoverSourceUrls {
@@ -38,6 +38,9 @@ export interface DiscoveredNovel {
   sourceUrls: DiscoverSourceUrls;
   inLibrary: boolean;
   existingVolumes: number;
+  ownedVolumeIndices?: number[];
+  missingVolumeIndices?: number[];
+  missingVolumeCount?: number;
 }
 
 export interface DiscoverNovelsParams {
@@ -2801,6 +2804,7 @@ export function matchNovelWithCalibreIndex(
 
   const booksToEvaluate = checkAllBooks ? index.processedCalibreBooks : Array.from(candidateSet);
   let matchCount = 0;
+  const ownedVolumeSet = new Set<number>();
 
   for (const b of booksToEvaluate) {
     let isMatch = false;
@@ -2885,14 +2889,52 @@ export function matchNovelWithCalibreIndex(
 
     if (isMatch) {
       matchCount++;
+      let volNum: number | null = null;
+      if (
+        b.book.series_index !== undefined &&
+        b.book.series_index !== null &&
+        !isNaN(Number(b.book.series_index)) &&
+        Number(b.book.series_index) > 0
+      ) {
+        volNum = Math.round(Number(b.book.series_index));
+      } else if (b.book.title) {
+        volNum = extractVolumeNumber(b.book.title);
+      }
+      if (volNum !== null && volNum > 0) {
+        ownedVolumeSet.add(volNum);
+      }
     }
   }
 
+  if (matchCount > 0 && ownedVolumeSet.size === 0) {
+    for (let i = 1; i <= matchCount; i++) {
+      ownedVolumeSet.add(i);
+    }
+  }
+
+  const ownedVolumeIndices = Array.from(ownedVolumeSet).sort((a, b) => a - b);
+  const existingVolumes = ownedVolumeIndices.length > 0 ? ownedVolumeIndices.length : matchCount;
+  const maxOwned = ownedVolumeIndices.length > 0 ? Math.max(...ownedVolumeIndices) : 0;
+  const totalVolumeCount = Math.max(novel.volumeCount || 1, matchCount, maxOwned);
+
+  const missingVolumeIndices: number[] = [];
+  if (totalVolumeCount > existingVolumes) {
+    for (let v = 1; v <= totalVolumeCount; v++) {
+      if (!ownedVolumeSet.has(v)) {
+        missingVolumeIndices.push(v);
+      }
+    }
+  }
+  const missingVolumeCount = missingVolumeIndices.length;
+
   return {
     ...novel,
-    volumeCount: Math.max(novel.volumeCount || 1, matchCount),
+    volumeCount: totalVolumeCount,
     inLibrary: matchCount > 0,
-    existingVolumes: matchCount,
+    existingVolumes,
+    ownedVolumeIndices,
+    missingVolumeIndices,
+    missingVolumeCount,
   };
 }
 
@@ -2951,12 +2993,19 @@ export async function crossCheckNovelsWithCalibreAsync(
   const calibreBooks = resolveCalibreBooks(dependencies);
 
   if (calibreBooks.length === 0) {
-    return novels.map((novel) => ({
-      ...novel,
-      volumeCount: novel.volumeCount || 1,
-      inLibrary: false,
-      existingVolumes: 0,
-    }));
+    return novels.map((novel) => {
+      const volCount = novel.volumeCount || 1;
+      const missing = Array.from({ length: volCount }, (_, i) => i + 1);
+      return {
+        ...novel,
+        volumeCount: volCount,
+        inLibrary: false,
+        existingVolumes: 0,
+        ownedVolumeIndices: [],
+        missingVolumeIndices: missing,
+        missingVolumeCount: volCount,
+      };
+    });
   }
 
   const index = getOrCreateCalibreInvertedIndex(calibreBooks);
@@ -2983,12 +3032,19 @@ export function crossCheckNovelsWithCalibre(
   const calibreBooks = resolveCalibreBooks(dependencies);
 
   if (calibreBooks.length === 0) {
-    return novels.map((novel) => ({
-      ...novel,
-      volumeCount: novel.volumeCount || 1,
-      inLibrary: false,
-      existingVolumes: 0,
-    }));
+    return novels.map((novel) => {
+      const volCount = novel.volumeCount || 1;
+      const missing = Array.from({ length: volCount }, (_, i) => i + 1);
+      return {
+        ...novel,
+        volumeCount: volCount,
+        inLibrary: false,
+        existingVolumes: 0,
+        ownedVolumeIndices: [],
+        missingVolumeIndices: missing,
+        missingVolumeCount: volCount,
+      };
+    });
   }
 
   const index = getOrCreateCalibreInvertedIndex(calibreBooks);
@@ -4220,7 +4276,11 @@ export async function getDiscoverNovels(
   const page = Math.max(1, params.page || 1);
   const pageSize = Math.max(1, Math.min(100, params.pageSize || 36));
 
-  const needsFullCrossCheck = statusFilter === "available" || statusFilter === "in_library";
+  const needsFullCrossCheck =
+    statusFilter === "available" ||
+    statusFilter === "in_library" ||
+    statusFilter === "incomplete" ||
+    statusFilter === "missing_volumes";
 
   // 1. Fetch novels: Universal search across all catalogs if q is provided, otherwise active tab feed.
   // Always skip full-catalog cross-checking during initial fetch to eliminate redundant double-reconciliation
@@ -4287,6 +4347,10 @@ export async function getDiscoverNovels(
       filtered = filtered.filter((n) => !n.inLibrary);
     } else if (statusFilter === "in_library") {
       filtered = filtered.filter((n) => n.inLibrary);
+    } else if (statusFilter === "incomplete" || statusFilter === "missing_volumes") {
+      filtered = filtered.filter(
+        (n) => n.inLibrary && n.existingVolumes > 0 && n.existingVolumes < n.volumeCount,
+      );
     }
   }
 
@@ -4458,3 +4522,87 @@ export async function enqueueDiscoverIngest(
 
   throw new Error("Unsupported source");
 }
+
+/**
+ * Retrieves a single discovered novel by ID or title, cross-checked with Calibre
+ * and returning complete volume audit data (ownedVolumeIndices, missingVolumeIndices, missingVolumeCount).
+ */
+export async function getDiscoverNovelById(
+  novelId: string,
+  dependencies?: DiscoverDependencies,
+): Promise<DiscoveredNovel | null> {
+  if (!novelId || typeof novelId !== "string" || !novelId.trim()) {
+    return null;
+  }
+  const cleanId = novelId.trim();
+  const normId = normalizeTitleForMatch(cleanId);
+  const canId = canonicalTitleKey(cleanId);
+
+  // 1. Search in trending/new seeds first
+  const allSeeds = [
+    ...(dependencies?.seedTrendingNovels ?? SEED_TRENDING_NOVELS),
+    ...(dependencies?.seedNewNovels ?? SEED_NEW_NOVELS),
+  ];
+
+  let candidate: DiscoveredNovel | null = null;
+  for (const s of allSeeds) {
+    if (
+      s.id === cleanId ||
+      normalizeTitleForMatch(s.id) === normId ||
+      canonicalTitleKey(s.id) === canId ||
+      normalizeTitleForMatch(s.title) === normId ||
+      canonicalTitleKey(s.title) === canId ||
+      (s.titleRomaji &&
+        (normalizeTitleForMatch(s.titleRomaji) === normId ||
+          canonicalTitleKey(s.titleRomaji) === canId))
+    ) {
+      candidate = { ...s };
+      break;
+    }
+  }
+
+  // 2. If not found in seeds, check complete catalog
+  if (!candidate) {
+    const catalog = await buildCompleteCatalogNovels(dependencies);
+    for (const n of catalog) {
+      if (
+        n.id === cleanId ||
+        normalizeTitleForMatch(n.id) === normId ||
+        canonicalTitleKey(n.id) === canId ||
+        normalizeTitleForMatch(n.title) === normId ||
+        canonicalTitleKey(n.title) === canId ||
+        (n.titleRomaji &&
+          (normalizeTitleForMatch(n.titleRomaji) === normId ||
+            canonicalTitleKey(n.titleRomaji) === canId))
+      ) {
+        candidate = { ...n };
+        break;
+      }
+    }
+  }
+
+  // 3. Fallback: universal search
+  if (!candidate) {
+    const searchResults = await searchUniversalNovels(cleanId, dependencies);
+    if (searchResults.length > 0) {
+      candidate = { ...searchResults[0] };
+    }
+  }
+
+  if (!candidate) {
+    return null;
+  }
+
+  // Ensure synopsis
+  if (!candidate.synopsis || candidate.synopsis.length < 30) {
+    const fallbackSyn = await resolveFallbackSynopsis(candidate, dependencies);
+    if (fallbackSyn) {
+      candidate.synopsis = fallbackSyn;
+    }
+  }
+
+  // Cross check with Calibre to guarantee exact volume audit
+  const reconciled = crossCheckNovelsWithCalibre([candidate], dependencies);
+  return reconciled[0] || candidate;
+}
+

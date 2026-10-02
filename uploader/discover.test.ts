@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import fs from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 import {
   getDiscoverNovels,
   fetchDiscoverFeed,
@@ -37,7 +38,6 @@ import {
   KNOWN_TITLE_TO_COVER,
   KNOWN_TITLE_TO_LNORI,
   DISCOVER_FEED_CACHE_VERSION,
-  CATALOG_VOLUMES,
   resolveCatalogVolumeCount,
   getCalibreBookMatchCandidates,
   getNovelMatchCandidates,
@@ -46,6 +46,7 @@ import {
   invalidateCalibreInvertedIndex,
   crossCheckNovelsWithCalibreAsync,
   computeCalibreBooksSignature,
+  getDiscoverNovelById,
   type DiscoveredNovel,
 } from "./discover";
 import {
@@ -56,6 +57,7 @@ import {
   registerDiscoverJob,
   getActiveDiscoverJobs,
 } from "./server";
+import { ingestElscioneSeries } from "./elscione";
 
 describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
   let tempCacheDb: Database;
@@ -1541,11 +1543,13 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
     });
 
     it("verifies badge and button consistency for in-library vs available novels in index.html", () => {
-      // In Library badge and Re-Ingest button
+      // In Library badge and dynamic smart action buttons
       expect(html).toContain("In Library (${libCount} vols)");
       expect(html).toContain("Available (${item.volumeCount || 1} vols)");
       expect(html).toContain("${item.volumeCount || 1} vols");
-      expect(html).toContain("${inLib ? 'Re-Ingest' : 'Ingest'}");
+      expect(html).toContain("Download Remaining (${missingCount} vols)");
+      expect(html).toContain("All Volumes in Library (${totalVols}/${totalVols})");
+      expect(html).toContain("Download All (${totalVols} vols)");
       expect(html).toContain("bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md");
     });
 
@@ -3994,6 +3998,342 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         // Macrotask timer should have been granted a tick before 450-item async loop settled
         expect(timerExecuted).toBe(true);
       });
+    });
+  });
+
+  describe("Volume Available vs Library Volume Audit & Auto-Download Engine", () => {
+    const testNovel: DiscoveredNovel = {
+      id: "danmachi-test",
+      title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?",
+      titleRomaji: "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka",
+      author: "Fujino Omori",
+      coverUrl: "https://example.com/danmachi.jpg",
+      synopsis: "DanMachi test synopsis exceeding thirty characters for completeness.",
+      genres: ["Action", "Fantasy"],
+      score: 90,
+      popularity: 8000,
+      releaseDate: "2013-01-15",
+      volumeCount: 10,
+      source: "both",
+      sourceUrls: { elscione: "https://server.elscione.com/DanMachi" },
+      inLibrary: false,
+      existingVolumes: 0,
+    };
+
+    it("correctly audits ownedVolumeIndices, missingVolumeIndices, and missingVolumeCount for partial series", () => {
+      // Library contains volumes 1, 2, 3
+      const mockCalibre = [
+        { id: 1, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 1", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 1 },
+        { id: 2, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 2", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 2 },
+        { id: 3, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 3", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 3 },
+      ];
+
+      const [res] = crossCheckNovelsWithCalibre([testNovel], {
+        getCalibreBooks: () => mockCalibre,
+      });
+
+      expect(res.inLibrary).toBe(true);
+      expect(res.existingVolumes).toBe(3);
+      expect(res.volumeCount).toBe(10);
+      expect(res.ownedVolumeIndices).toEqual([1, 2, 3]);
+      expect(res.missingVolumeIndices).toEqual([4, 5, 6, 7, 8, 9, 10]);
+      expect(res.missingVolumeCount).toBe(7);
+    });
+
+    it("correctly audits series with gaps in library volumes", () => {
+      // Library contains volumes 1, 3, 5
+      const mockCalibre = [
+        { id: 1, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 1", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 1 },
+        { id: 3, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 3", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 3 },
+        { id: 5, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 5", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 5 },
+      ];
+
+      const [res] = crossCheckNovelsWithCalibre([testNovel], {
+        getCalibreBooks: () => mockCalibre,
+      });
+
+      expect(res.inLibrary).toBe(true);
+      expect(res.existingVolumes).toBe(3);
+      expect(res.volumeCount).toBe(10);
+      expect(res.ownedVolumeIndices).toEqual([1, 3, 5]);
+      expect(res.missingVolumeIndices).toEqual([2, 4, 6, 7, 8, 9, 10]);
+      expect(res.missingVolumeCount).toBe(7);
+    });
+
+    it("correctly audits completely owned series (existingVolumes >= volumeCount)", () => {
+      // Library contains all 10 volumes
+      const mockCalibre = Array.from({ length: 10 }, (_, i) => ({
+        id: i + 1,
+        title: `Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. ${i + 1}`,
+        series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?",
+        series_index: i + 1,
+      }));
+
+      const [res] = crossCheckNovelsWithCalibre([testNovel], {
+        getCalibreBooks: () => mockCalibre,
+      });
+
+      expect(res.inLibrary).toBe(true);
+      expect(res.existingVolumes).toBe(10);
+      expect(res.volumeCount).toBe(10);
+      expect(res.ownedVolumeIndices).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      expect(res.missingVolumeIndices).toEqual([]);
+      expect(res.missingVolumeCount).toBe(0);
+    });
+
+    it("correctly audits unowned series (0 owned volumes)", () => {
+      const [res] = crossCheckNovelsWithCalibre([testNovel], {
+        getCalibreBooks: () => [],
+      });
+
+      expect(res.inLibrary).toBe(false);
+      expect(res.existingVolumes).toBe(0);
+      expect(res.volumeCount).toBe(10);
+      expect(res.ownedVolumeIndices).toEqual([]);
+      expect(res.missingVolumeIndices).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      expect(res.missingVolumeCount).toBe(10);
+    });
+
+    it("getDiscoverNovelById returns complete volume audit for single novel", async () => {
+      const mockCalibre = [
+        { id: 1, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 1", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 1 },
+        { id: 2, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 2", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 2 },
+      ];
+
+      const novel = await getDiscoverNovelById("danmachi", {
+        getCalibreBooks: () => mockCalibre,
+      });
+
+      expect(novel).toBeDefined();
+      expect(novel?.id).toBe("danmachi");
+      expect(novel?.inLibrary).toBe(true);
+      expect(novel?.existingVolumes).toBe(2);
+      expect(novel?.ownedVolumeIndices).toEqual([1, 2]);
+      expect(novel?.missingVolumeCount).toBeGreaterThan(0);
+      expect(novel?.missingVolumeIndices?.includes(3)).toBe(true);
+    });
+
+    it("GET /api/discover/novel/:id serves complete volume audit with HTTP 200", async () => {
+      const mockCalibre = [
+        { id: 1, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 1", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 1 },
+      ];
+      setServerDependenciesForTest({
+        getCalibreBooks: () => mockCalibre,
+      });
+
+      const req = new Request("http://127.0.0.1:8086/api/discover/novel/danmachi");
+      const res = await handleRequest(req);
+      expect(res.status).toBe(200);
+
+      const data = await res.json();
+      expect(data.success).toBe(true);
+      expect(data.novel).toBeDefined();
+      expect(data.novel.id).toBe("danmachi");
+      expect(data.novel.inLibrary).toBe(true);
+      expect(data.novel.existingVolumes).toBe(1);
+      expect(data.novel.ownedVolumeIndices).toEqual([1]);
+      expect(data.novel.missingVolumeCount).toBeGreaterThan(0);
+    });
+
+    it("GET /api/discover/novel/:id returns 404 for non-existent novel", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/discover/novel/nonexistent-xyz-999");
+      const res = await handleRequest(req);
+      expect(res.status).toBe(404);
+
+      const data = await res.json();
+      expect(data.success).toBe(false);
+      expect(data.error).toBe("Novel not found");
+    });
+
+    it("filters incomplete series via status=incomplete parameter", async () => {
+      const mockCalibre = [
+        // DanMachi is partial (1 volume in library out of 19)
+        { id: 1, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 1", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 1 },
+      ];
+
+      const res = await getDiscoverNovels(
+        { tab: "trending", status: "incomplete" },
+        { getCalibreBooks: () => mockCalibre },
+      );
+
+      expect(res.success).toBe(true);
+      expect(res.novels.length).toBeGreaterThan(0);
+      for (const n of res.novels) {
+        expect(n.inLibrary).toBe(true);
+        expect(n.existingVolumes).toBeGreaterThan(0);
+        expect(n.existingVolumes).toBeLessThan(n.volumeCount);
+      }
+    });
+
+    it("GET /api/discover/novels?status=incomplete filters incomplete series over HTTP", async () => {
+      const mockCalibre = [
+        { id: 1, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 1", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 1 },
+      ];
+      setServerDependenciesForTest({
+        getCalibreBooks: () => mockCalibre,
+      });
+
+      const req = new Request("http://127.0.0.1:8086/api/discover/novels?status=incomplete");
+      const res = await handleRequest(req);
+      expect(res.status).toBe(200);
+
+      const data = await res.json();
+      expect(data.success).toBe(true);
+      expect(data.novels.length).toBeGreaterThan(0);
+      for (const n of data.novels) {
+        expect(n.inLibrary).toBe(true);
+        expect(n.existingVolumes).toBeLessThan(n.volumeCount);
+      }
+    });
+
+    it("verifies dynamic button labels, status note, and force re-download in index.html", () => {
+      const htmlPath = path.join((import.meta as any).dir, "index.html");
+      const html = fs.readFileSync(htmlPath, "utf8");
+
+      // Dynamic action button labels
+      expect(html).toContain("Download Remaining (${missingCount} vols)");
+      expect(html).toContain("All Volumes in Library (${totalVols}/${totalVols})");
+      expect(html).toContain("Download All (${totalVols} vols)");
+
+      // Status notes with volume breakdown
+      expect(html).toContain("In Library:</span> ${escapeHtml(ownedStr)} &bull; <span class=\"text-amber-400 font-semibold\">Missing:</span> ${escapeHtml(missingStr)}");
+      expect(html).toContain("will be downloaded");
+      expect(html).toContain("formatVolumeRangeString");
+
+      // Force re-download link and handler
+      expect(html).toContain("discoverModalForceContainer");
+      expect(html).toContain("Force re-download all volumes");
+      expect(html).toContain("handleDiscoverModalForceIngest");
+
+      // Incomplete status filter button in segmented control
+      expect(html).toContain("discoverStatus-incomplete");
+      expect(html).toContain("setDiscoverStatusFilter('incomplete')");
+    });
+
+    it("verifies zero emojis across all discover responses, status messages, and index.html", async () => {
+      const htmlPath = path.join((import.meta as any).dir, "index.html");
+      const html = fs.readFileSync(htmlPath, "utf8");
+      const emojiRegex = /(\p{Extended_Pictographic}|\p{Emoji_Presentation})/gu;
+
+      const htmlMatches: string[] = [];
+      for (const m of html.matchAll(emojiRegex)) {
+        if (!/[0-9#*]/.test(m[0])) {
+          htmlMatches.push(m[0]);
+        }
+      }
+      expect(htmlMatches).toEqual([]);
+
+      // Check novel detail API response
+      const req = new Request("http://127.0.0.1:8086/api/discover/novel/danmachi");
+      const res = await handleRequest(req);
+      const text = await res.text();
+      expect(/\p{Extended_Pictographic}/u.test(text)).toBe(false);
+    });
+
+    it("guarantees zero duplicate creation and reports preserved volumes during partial series auto-download", async () => {
+      function createSyntheticEpub(): Buffer {
+        function makeEntry(name: string, data: Buffer, compMethod = 0, compData: Buffer | null = null): Buffer {
+          const nameBuf = Buffer.from(name);
+          const payload = compData || data;
+          const crc = zlib.crc32(data);
+          const h = Buffer.alloc(30 + nameBuf.length);
+          h.writeUInt32LE(0x04034b50, 0);
+          h.writeUInt16LE(20, 4);
+          h.writeUInt16LE(0, 6);
+          h.writeUInt16LE(compMethod, 8);
+          h.writeUInt16LE(0, 10);
+          h.writeUInt16LE(0, 12);
+          h.writeUInt32LE(crc, 14);
+          h.writeUInt32LE(payload.length, 18);
+          h.writeUInt32LE(data.length, 22);
+          h.writeUInt16LE(nameBuf.length, 26);
+          h.writeUInt16LE(0, 28);
+          nameBuf.copy(h, 30);
+          return Buffer.concat([h, payload]);
+        }
+
+        const mimeData = Buffer.from("application/epub+zip");
+        const mimePart = makeEntry("mimetype", mimeData, 0);
+        const containerXml = Buffer.from(
+          '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+        );
+        const containerPart = makeEntry("META-INF/container.xml", containerXml, 8, zlib.deflateRawSync(containerXml));
+        const opfXml = Buffer.from(
+          '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>DanMachi Vol 3</dc:title><dc:creator>Fujino Omori</dc:creator></metadata><manifest/><spine/></package>',
+        );
+        const opfPart = makeEntry("content.opf", opfXml, 8, zlib.deflateRawSync(opfXml));
+        return Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(512, 0)]);
+      }
+
+      const syntheticEpub = createSyntheticEpub();
+      const progressEvents: any[] = [];
+      const mockFetch = async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              items: [
+                { href: "/Officially%20Translated%20Light%20Novels/DanMachi/DanMachi%20Volume%2001.epub", size: 1000 },
+                { href: "/Officially%20Translated%20Light%20Novels/DanMachi/DanMachi%20Volume%2002.epub", size: 1000 },
+                { href: "/Officially%20Translated%20Light%20Novels/DanMachi/DanMachi%20Volume%2003.epub", size: 1000 },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(syntheticEpub, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/epub+zip",
+            "Content-Length": String(syntheticEpub.length),
+          },
+        });
+      };
+
+      const addedIds: number[] = [];
+      const mockSpawnSync = (bin: string, args: string[]) => {
+        if (bin === "calibredb" || bin.includes("calibredb")) {
+          if (args[0] === "add") {
+            const newId = 100 + addedIds.length;
+            addedIds.push(newId);
+            return { status: 0, stdout: `Added book ids: ${newId}` };
+          }
+          return { status: 0, stdout: "Metadata set" };
+        }
+        return { status: 0, stdout: "" };
+      };
+
+      // Mock duplicate check: Volumes 1 and 2 already in library, only Volume 3 is missing
+      const mockIsVolumeInLibrary = (_seriesTitle: string, volumeIndex: number) => {
+        return volumeIndex === 1 || volumeIndex === 2;
+      };
+
+      const result = await ingestElscioneSeries(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/DanMachi/",
+        (event) => {
+          progressEvents.push(event);
+        },
+        {
+          fetch: mockFetch as any,
+          spawnSync: mockSpawnSync as any,
+          isVolumeInLibrary: mockIsVolumeInLibrary,
+        },
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.totalCount).toBe(3);
+      expect(result.duplicateCount).toBe(2);
+      expect(result.importedCount).toBe(1);
+      expect(addedIds.length).toBe(1); // Only 1 volume added to Calibre! Zero duplicate files created
+
+      const skippedEvents = progressEvents.filter((e) => e.phase === "volume" && e.data?.action === "skipped");
+      expect(skippedEvents.length).toBe(2);
+
+      const downloadedEvents = progressEvents.filter((e) => e.phase === "volume" && e.data?.action === "downloading");
+      expect(downloadedEvents.length).toBe(1);
+
+      const completeEvent = progressEvents.find((e) => e.phase === "complete");
+      expect(completeEvent).toBeDefined();
+      expect(completeEvent?.status).toBe("Finished: 1 new volumes added, 2 existing volumes preserved.");
     });
   });
 });

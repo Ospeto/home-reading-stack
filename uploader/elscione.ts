@@ -50,6 +50,7 @@ export interface ElscioneDependencies {
   pythonPath?: string;
   useHelper?: boolean;
   fetchOnlineSynopsis?: typeof fetchOnlineSynopsis;
+  force?: boolean;
 }
 
 export interface AnubisChallenge {
@@ -1862,12 +1863,17 @@ export async function ingestElscioneSeries(
     calibreBookIds,
   };
 
+  const summaryStatus = `Finished: ${importedCount} new volumes added, ${skippedExisting} existing volumes preserved.`;
+
   await reportProgress(onProgress, {
     phase: "complete",
     total: totalCount,
     volumeTitle: manifest.seriesTitle,
-    status: `Completed: ${importedCount} imported, ${totalSkipped} skipped (${skippedExisting} duplicates, ${skippedErrors} errors) of ${totalCount} volumes`,
-    data: finalResult,
+    status: summaryStatus,
+    data: {
+      ...finalResult,
+      summary: summaryStatus,
+    },
   });
 
   return finalResult;
