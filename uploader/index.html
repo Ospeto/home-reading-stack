@@ -5422,16 +5422,16 @@
           });
         }
         setHtml(sources, sourceEntries.map((s) => `
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl border ${s.color} text-xs">
-            <div class="flex items-center gap-2 min-w-0">
+          <div class="flex flex-col gap-2 p-3 rounded-xl border ${s.color} text-xs">
+            <div class="flex items-center gap-2">
               <span class="font-bold font-mono shrink-0">${escapeHtml(s.name)}</span>
-              <span class="text-zinc-400 truncate">&bull; ${totalVols} vols available</span>
+              <span class="text-zinc-400 text-[11px]">&bull; ${totalVols} vols available</span>
             </div>
-            <div class="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+            <div class="flex items-center justify-between gap-2 pt-2 border-t border-white/10">
               <a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" class="underline text-zinc-400 hover:text-white flex items-center gap-1 text-[11px] shrink-0">
                 <span>Browse Source</span>
               </a>
-              <button type="button" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event, '${escapeHtml(s.source)}')" class="px-2.5 py-1 bg-white/10 hover:bg-white/20 text-white rounded-lg font-semibold text-[11px] cursor-pointer active:scale-[0.96] shrink-0">
+              <button type="button" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event, '${escapeHtml(s.source)}')" class="px-3 py-1 bg-white/10 hover:bg-white/20 text-white rounded-full font-semibold text-[11px] cursor-pointer active:scale-[0.96] shrink-0 transition-all">
                 Ingest
               </button>
             </div>

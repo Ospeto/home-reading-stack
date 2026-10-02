@@ -1590,13 +1590,17 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(html).toContain("https?:\\/\\/?(?:\\[path\\]|\\[file\\])");
     });
 
-    it("verifies modal sources layout uses responsive flex-col sm:flex-row, proper spacing, and shrink-0 buttons", () => {
-      // Clean flexbox layout with flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl border
-      expect(html).toContain("flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl border");
-      // Action buttons have shrink-0 so they never overlap or truncate text
+    it("verifies modal sources layout uses clean two-row Apple-aesthetic cards without text collisions", () => {
+      // Two-row card layout: flex-col, rounded-xl border, proper padding
+      expect(html).toContain("flex flex-col gap-2 p-3 rounded-xl border ${s.color} text-xs");
+      // Row 1: Source badge (bold monospace) with volume count cleanly aligned without truncating into the name
+      expect(html).toContain("font-bold font-mono shrink-0");
+      expect(html).toContain("&bull; ${totalVols} vols available");
+      // Row 2: Subtle border separator with proper padding
+      expect(html).toContain("flex items-center justify-between gap-2 pt-2 border-t border-white/10");
+      // 'Browse Source' underline text link on the left and 'Ingest' pill button on the right
       expect(html).toContain('class="underline text-zinc-400 hover:text-white flex items-center gap-1 text-[11px] shrink-0"');
-      expect(html).toContain("cursor-pointer active:scale-[0.96] shrink-0");
-      expect(html).toContain("shrink-0 self-end sm:self-auto");
+      expect(html).toContain("rounded-full font-semibold text-[11px] cursor-pointer active:scale-[0.96] shrink-0");
     });
 
     it("verifies author display uses real author with Author Unknown fallback, never 'Light Novel'", () => {
