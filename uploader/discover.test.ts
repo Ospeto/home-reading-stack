@@ -1596,9 +1596,19 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       // Row 1: Source badge (bold monospace) with volume count cleanly aligned without truncating into the name
       expect(html).toContain("font-bold font-mono shrink-0");
       expect(html).toContain("&bull; ${totalVols} vols available");
-      // Row 2: Subtle border separator with proper padding
-      expect(html).toContain("flex items-center justify-between gap-2 pt-2 border-t border-white/10");
+      // Row 2: Subtle border separator with proper padding and flex-wrap for constrained widths
+      expect(html).toContain("flex flex-wrap items-center justify-between gap-1.5 pt-2 border-t border-white/10");
       // 'Browse Source' underline text link on the left and 'Ingest' pill button on the right
+      expect(html).toContain('class="underline text-zinc-400 hover:text-white flex items-center gap-1 text-[11px] shrink-0"');
+      expect(html).toContain("rounded-full font-semibold text-[11px] cursor-pointer active:scale-[0.96] shrink-0");
+    });
+
+    it("verifies discover modal source card actions row wraps gracefully to prevent horizontal clipping when width is constrained (<145px)", () => {
+      // Action row wraps gracefully with flex-wrap and gap-1.5 when usable card width is constrained (<145px)
+      expect(html).toContain("flex flex-wrap items-center justify-between gap-1.5 pt-2 border-t border-white/10");
+      // Header row also wraps gracefully on narrow viewports
+      expect(html).toContain("flex flex-wrap items-center gap-x-2 gap-y-0.5");
+      // Actions maintain shrink-0 so text never truncates internally while container wraps
       expect(html).toContain('class="underline text-zinc-400 hover:text-white flex items-center gap-1 text-[11px] shrink-0"');
       expect(html).toContain("rounded-full font-semibold text-[11px] cursor-pointer active:scale-[0.96] shrink-0");
     });
