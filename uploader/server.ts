@@ -644,6 +644,7 @@ export interface LnoriQueueItem {
   targetUrl: string;
   seriesId?: string;
   createdAt: string;
+  force?: boolean;
 }
 
 export interface ActiveLnoriState {
@@ -734,7 +735,7 @@ export function enqueueLnoriJob(targetUrl: string, force?: boolean): { jobId: nu
       seriesId: parsed?.id,
       createdAt: new Date().toISOString(),
       force,
-    } as any);
+    });
   } else {
     executeLnoriIngestTask(runId, cleanUrl, force);
   }
@@ -763,7 +764,7 @@ export function enqueueElscioneJob(targetUrl: string, force?: boolean): { jobId:
       targetUrl: cleanUrl,
       createdAt: new Date().toISOString(),
       force,
-    } as any);
+    });
   } else {
     executeLnoriIngestTask(runId, cleanUrl, force);
   }
@@ -971,7 +972,7 @@ export function processNextLnoriQueueItem(): void {
   if (!nextItem) {
     return;
   }
-  executeLnoriIngestTask(nextItem.id, nextItem.targetUrl, (nextItem as any).force);
+  executeLnoriIngestTask(nextItem.id, nextItem.targetUrl, nextItem.force);
 }
 
 export function executeLnoriIngestTask(

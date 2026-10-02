@@ -50,6 +50,7 @@ export interface ElscioneDependencies {
   pythonPath?: string;
   useHelper?: boolean;
   fetchOnlineSynopsis?: typeof fetchOnlineSynopsis;
+  force?: boolean;
 }
 
 export interface AnubisChallenge {
