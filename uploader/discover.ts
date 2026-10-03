@@ -2370,7 +2370,7 @@ export async function resolveSourceInventory(
         source,
         url: cleanUrl,
         status: "error",
-        error: sanitizeErrorMessage(err?.message || err),
+        error: stripEmojis(sanitizeErrorMessage(err?.message || err)),
         verifiedAt: Date.now(),
       };
     }
@@ -2424,7 +2424,7 @@ export async function resolveSourceInventory(
         source,
         url: cleanUrl,
         status: "error",
-        error: sanitizeErrorMessage(err?.message || err),
+        error: stripEmojis(sanitizeErrorMessage(err?.message || err)),
         verifiedAt: Date.now(),
       };
       setCachedSourceInventory(cleanUrl, errorResult, dependencies);
@@ -2523,11 +2523,12 @@ export function attachCachedInventoriesIfAvailable(
   novel: DiscoveredNovel,
   dependencies?: DiscoverDependencies,
 ): DiscoveredNovel {
-  const hasVerifiedSource =
-    (Array.isArray(novel.sources) && novel.sources.some((s) => s.status === "verified")) ||
-    (novel.sourceInventories && Object.values(novel.sourceInventories).some((s) => s.status === "verified"));
-
-  if (novel.verifiedVolumes && novel.sourceStatus === "verified" && hasVerifiedSource) {
+  if (
+    novel.verifiedVolumes &&
+    novel.sourceStatus === "verified" &&
+    Array.isArray(novel.sources) &&
+    novel.sources.length > 0
+  ) {
     return novel;
   }
 

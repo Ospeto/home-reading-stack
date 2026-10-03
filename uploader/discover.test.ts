@@ -50,6 +50,7 @@ import {
   type DiscoveredNovel,
   resolveCanonicalVolumeNumber,
   resolveSourceInventory,
+  attachCachedInventoriesIfAvailable,
 } from "./discover";
 import { extractVolumeNumber } from "./scraper";
 import {
@@ -5545,6 +5546,86 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(invBypassed.status).toBe("verified");
       expect(invBypassed.volumeCount).toBe(1);
       expect(invBypassed.volumes).toEqual([1]);
+    });
+
+    it("attachCachedInventoriesIfAvailable strictly requires sources array and does not short-circuit on sourceInventories alone", () => {
+      const cachedInv = {
+        source: "elscione" as const,
+        url: "https://server.elscione.com/Test%20Series/",
+        status: "verified" as const,
+        volumes: [1, 2],
+        volumeCount: 2,
+      };
+      const deps = {
+        resolveSourceVolumes: () => cachedInv,
+      };
+      const novelWithoutSources: DiscoveredNovel = {
+        id: "test-novel",
+        title: "Test Novel",
+        author: "Author",
+        cover: "https://example.com/cover.jpg",
+        synopsis: "A long enough synopsis that exceeds minimum length requirements.",
+        genres: ["Fantasy"],
+        volumeCount: 2,
+        source: "elscione",
+        sourceUrls: { elscione: "https://server.elscione.com/Test%20Series/" },
+        sourceStatus: "verified",
+        verifiedVolumes: [1, 2],
+        verifiedVolumeCount: 2,
+        sourceInventories: { elscione: cachedInv },
+      };
+
+      // 1. Without sources array, it must not short-circuit even if sourceInventories has a verified entry
+      const result = attachCachedInventoriesIfAvailable(novelWithoutSources, deps);
+      expect(result).not.toBe(novelWithoutSources);
+      expect(Array.isArray(result.sources)).toBe(true);
+      expect(result.sources?.length).toBe(1);
+      expect(result.sources?.[0].status).toBe("verified");
+
+      // 2. With sources array populated, it short-circuits and returns identical reference
+      const novelWithSources: DiscoveredNovel = {
+        ...novelWithoutSources,
+        sources: [cachedInv],
+      };
+      const unchanged = attachCachedInventoriesIfAvailable(novelWithSources, deps);
+      expect(unchanged).toBe(novelWithSources);
+    });
+
+    it("resolveSourceInventory applies stripEmojis and sanitizeErrorMessage to resolver errors", async () => {
+      const emojiErr = "\u{1F4A5} Connection failed: /Users/ospeto/secret.db \u{1F6A8}";
+
+      // 1. Custom resolveSourceVolumes throws error with emoji and server path
+      const invCustom = await resolveSourceInventory(
+        "https://server.elscione.com/Error%20Series/",
+        "elscione",
+        {
+          resolveSourceVolumes: () => {
+            throw new Error(emojiErr);
+          },
+        },
+      );
+      expect(invCustom.status).toBe("error");
+      expect(invCustom.error).toBeDefined();
+      expect(/\p{Extended_Pictographic}/u.test(invCustom.error!)).toBe(false);
+      expect(invCustom.error!.includes("/Users/ospeto/secret.db")).toBe(false);
+      expect(invCustom.error!.includes("[path]")).toBe(true);
+
+      // 2. Internal resolver fetch throws error with emoji and server path
+      const invInternal = await resolveSourceInventory(
+        "https://server.elscione.com/Internal%20Error%20Series/",
+        "elscione",
+        {
+          enableOnline: true,
+          fetch: async () => {
+            throw new Error(emojiErr);
+          },
+        },
+      );
+      expect(invInternal.status).toBe("error");
+      expect(invInternal.error).toBeDefined();
+      expect(/\p{Extended_Pictographic}/u.test(invInternal.error!)).toBe(false);
+      expect(invInternal.error!.includes("/Users/ospeto/secret.db")).toBe(false);
+      expect(invInternal.error!.includes("[path]")).toBe(true);
     });
   });
 });
