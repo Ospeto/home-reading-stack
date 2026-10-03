@@ -489,14 +489,18 @@ LightHouse features an Apple-aesthetic **Discover Shelf** across both the **Web 
    - **Library Status Filter:** `[ All ]`, `[ Ready to Download ]`, `[ In Library ]`.
    - **Live Search:** Instant responsive filtering across English titles, Romaji titles, authors, and genres.
    - **Sorting:** `Most Popular`, `Highest Rated`, `Newest`.
-6. **Prominent Card-Level Volume Visibility & Library Volume Reconciliation:**
+6. **Prominent Card-Level Volume Visibility & Verified Source Inventory Reconciliation:**
+   - **Separation of Global Catalog Totals from Verified Source Inventories:** Global publication/catalog totals (`CATALOG_VOLUMES` or AniList metadata, e.g. 22 for Date A Live) are strictly separated from verified source inventories (Elsci.one folder manifests, Lnori series manifests).
+   - **Verified Downloadable Missing Volumes:** Missing volumes are computed strictly as `verified source volume identities` MINUS `owned Calibre volume identities`. Never manufactures synthetic `1..N` gaps beyond verified source holdings. For series like Date A Live where the library holds all 16 available source volumes, the missing count is 0, the status badge shows `All in Library (16/16)`, and `Download Remaining` is disabled while displaying `All Volumes in Library (16/16)`.
+   - **Source Cards with Verified Availability:** Modal source cards display exact verified volume availability (e.g. `Elsci.one • 16 vols available`, `Lnori • 15 vols available`) or an explicit unverified indicator (`vols (unverified)` / `Source offline`) rather than global publication catalog maximums.
+   - **Intelligent Missing-Volume Source Selection:** Automatically selects a source that actually contains the missing volumes when partial series downloads are requested, avoiding empty downloads when only one source holds the required volumes.
+   - **Safe Graceful Fallbacks:** Unverified or failed sources gracefully retain catalog publication totals without assuming zero availability or falsely claiming all volumes are owned.
+   - **In-Memory & SQLite Cache:** Verified source volume inventories are cached with 24-hour TTL and concurrent in-flight request deduplication.
+   - **High-Precision Title-First Volume Extraction & Multi-Part Resolution:** Prioritizes explicit volume numbers parsed from book titles (`extractVolumeNumber(b.book.title)`) over fractional Calibre `series_index` while preserving fractional volumes (e.g. 4.5, 7.5), canonical multi-part calculations (Bookworm `Part X Volume Y`), and spinoff isolation.
    - Prominent volume count indicators displayed directly on cards without opening the modal:
      - Card status badge: `In Library (${libCount} vols)` when series is owned in Calibre (or `In Library (${libCount}/${item.volumeCount} vols)` when partially owned), or `Available (${item.volumeCount || 1} vols)` when available to ingest.
      - Card metadata row: dedicated volume badge (`${item.volumeCount || 1} vols`) alongside source tags and ratings.
-     - Novel preview modal (`#discoverModal`): displays true total volumes (`${totalVols} Volumes`) reconciled with local Calibre volumes (`Math.max(catalogVolumes, libraryCount)`).
-   - Reconciles catalog volume counts with local Calibre ownership while preventing spin-off/mainline volume count pollution.
-   - Pre-indexed catalog volume counts for popular long-running series in `discover-catalog.json` and `CATALOG_VOLUMES` in `uploader/discover.ts`.
-   - **High-Precision Title-First Volume Extraction & Multi-Part Resolution:** Prioritizes explicit volume numbers parsed from book titles (`extractVolumeNumber(b.book.title)`) over fractional Calibre `series_index` (`1.1`, `1.09`, `1.08`) so all owned volumes are detected accurately rather than collapsed to index 1. Supports canonical multi-part light novel calculations (such as Ascendance of a Bookworm `Part X Volume Y` mapping to global canonical indices, e.g. Part 5 Volume 8 -> Volume 29) and preserves integer complements when side-story fractional volumes are present.
+     - Novel preview modal (`#discoverModal`): displays true total volumes (`${totalVols} Volumes`) reconciled with verified source availability and local Calibre volumes.
 7. **1-Click Direct Ingestion, Persistent Downloads & Live Progress (`POST /api/discover/ingest`):**
    - 1-tap download from card or modal enqueues background ingestion into Calibre.
    - Real-time live download progress tracked via `GET /api/discover/progress/:jobId` with active download state persistently tracked in browser `localStorage` (`discover_active_downloads`).

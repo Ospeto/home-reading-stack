@@ -398,7 +398,7 @@ export function parseMultiPartVolume(title: string): MultiPartVolumeInfo | null 
   const s = title.trim();
 
   const multiPartPattern =
-    /(?:^|[\s_\-\[\(（［{,:])(?:part|pt|အပိုင်း)\.?\s*([0-9]+|[ivx]+|[၀-၉]+)(?:[^\w\n]+(?:[a-zA-Z\s'’]+)?)?[^\w\n]+(?:vol(?:ume)?|book|bk|v(?=\.?\s*\d)|အတွဲ)\.?\s*0*(\d+(?:\.\d+)?|[ivx]+|[၀-၉]+)/i;
+    /(?:^|[\s_\-\[\(（［{,:])(?:part|pt|အပိုင်း)\.?[\s_\-]*([0-9]+|[ivx]+|[၀-၉]+)(?:[^\w\n]+(?:[a-zA-Z\s'’]+)?)?[^\w\n]+(?:vol(?:ume)?|book|bk|v(?=\.?[\s_\-]*\d)|အတွဲ)\.?[\s_\-]*0*(\d+(?:\.\d+)?|[ivx]+|[၀-၉]+)/i;
 
   const m = s.match(multiPartPattern);
   if (m) {
