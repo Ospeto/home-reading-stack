@@ -5421,5 +5421,75 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(libraryNoteText).toBe("All in Library (16/16) • All 16 verified source volumes in your Calibre library.");
       expect(ingestBtnText).toBe("All Volumes in Library (16/16)");
     });
+
+    it("resolveElscioneInventory delegates to helper when available and respects useHelper contract", async () => {
+      let helperCalled = false;
+      const mockSpawnSync = () => {
+        helperCalled = true;
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            success: true,
+            seriesTitle: "Helper Verified Series",
+            url: "https://server.elscione.com/Helper%20Verified%20Series/",
+            isSingleVolume: false,
+            totalCount: 2,
+            volumes: [
+              {
+                volumeNumber: 1,
+                filename: "Helper Verified Series - Volume 01.epub",
+                downloadUrl: "https://server.elscione.com/Helper%20Verified%20Series/Helper%20Verified%20Series%20-%20Volume%2001.epub",
+                title: "Helper Verified Series: Volume 1",
+              },
+              {
+                volumeNumber: 2,
+                filename: "Helper Verified Series - Volume 02.epub",
+                downloadUrl: "https://server.elscione.com/Helper%20Verified%20Series/Helper%20Verified%20Series%20-%20Volume%2002.epub",
+                title: "Helper Verified Series: Volume 2",
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      };
+
+      // 1. Without fetch mock, helper is allowed and executed
+      const invWithHelper = await resolveSourceInventory(
+        "https://server.elscione.com/Helper%20Verified%20Series/",
+        "elscione",
+        { spawnSync: mockSpawnSync as any, enableOnline: true },
+      );
+
+      expect(helperCalled).toBe(true);
+      expect(invWithHelper.status).toBe("verified");
+      expect(invWithHelper.volumeCount).toBe(2);
+      expect(invWithHelper.volumes).toEqual([1, 2]);
+
+      // 2. When useHelper: false is passed explicitly, helper is bypassed
+      helperCalled = false;
+      const invBypassed = await resolveSourceInventory(
+        "https://server.elscione.com/Helper%20Bypassed%20Series/",
+        "elscione",
+        {
+          spawnSync: mockSpawnSync as any,
+          useHelper: false,
+          enableOnline: true,
+          fetch: async () =>
+            new Response(
+              JSON.stringify({
+                items: [
+                  { href: "/Helper%20Bypassed%20Series/Helper%20Bypassed%20Series%20-%20Volume%2001.epub", size: 1000 },
+                ],
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+        },
+      );
+
+      expect(helperCalled).toBe(false);
+      expect(invBypassed.status).toBe("verified");
+      expect(invBypassed.volumeCount).toBe(1);
+      expect(invBypassed.volumes).toEqual([1]);
+    });
   });
 });
