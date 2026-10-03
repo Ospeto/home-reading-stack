@@ -2185,19 +2185,15 @@ async function resolveElscioneInventory(
   const validVolumes: number[] = [];
 
   for (const v of manifest.volumes) {
-    let num: number | undefined = undefined;
-    if (v.filename) {
-      num = extractVolumeNumberFromFilenameElscione(v.filename);
+    if (!v.filename) {
+      hasUnresolved = true;
+      continue;
     }
+    // Resolve canonical volume from original filename, preserving multipart Bookworm info
+    // Never parse generated v.title or synthetic v.volumeNumber for unnumbered files
+    const num = resolveCanonicalVolumeNumber(v.filename, manifest.seriesTitle);
     if (typeof num === "number" && !isNaN(num) && num > 0) {
       validVolumes.push(num);
-    } else if (typeof v.volumeNumber === "number" && !isNaN(v.volumeNumber) && v.volumeNumber > 0) {
-      const titleNum = extractVolumeNumber(v.title || "");
-      if (typeof titleNum === "number" && !isNaN(titleNum) && titleNum > 0) {
-        validVolumes.push(titleNum);
-      } else {
-        hasUnresolved = true;
-      }
     } else {
       hasUnresolved = true;
     }
@@ -2260,8 +2256,60 @@ async function resolveLnoriInventory(
   const validVolumes: number[] = [];
 
   for (const p of manifest.volumePaths) {
+    if (!p || typeof p !== "string") {
+      hasUnresolved = true;
+      continue;
+    }
+
     const decoded = safeDecodeURIComponent(p);
-    const num = extractVolumeNumber(decoded) ?? extractVolumeNumberFromFilenameElscione(decoded);
+    let clean = decoded.split(/[?#]/)[0].trim();
+    if (/^https?:\/\//i.test(clean)) {
+      try {
+        clean = new URL(clean).pathname;
+      } catch {
+        clean = clean.replace(/^https?:\/\/[^/]+/i, "");
+      }
+    }
+
+    // Match /book/<id> or /book/<id>/<slug>
+    const bookMatch = clean.match(/(?:^|\/)book\/\d+(?:\/(.*))?$/i);
+    let slug = "";
+    if (bookMatch) {
+      // The numeric book ID segment (/book/<id>) must NEVER be parsed as a volume number!
+      // If there is no slug after the book ID (e.g. /book/23021), do NOT treat the ID as volume number.
+      if (!bookMatch[1] || !bookMatch[1].trim()) {
+        hasUnresolved = true;
+        continue;
+      }
+      slug = bookMatch[1].trim();
+    } else {
+      slug = clean.replace(/^\/+/, "").trim();
+    }
+
+    if (!slug) {
+      hasUnresolved = true;
+      continue;
+    }
+
+    // Only extract volume if there is an explicit volume pattern/indicator in the slug
+    // (e.g. vol, volume, v, book, bk, part, pt, #)
+    const hasExplicitPattern =
+      /(?:^|[-_.\s])(?:vol(?:ume)?|book|bk|part|pt|v)\.?[-_.\s]*([0-9]+(?:\.[0-9]+)?|[ivx]+)(?:$|[-_.\s])/i.test(slug) ||
+      /#\s*[0-9]+(?:\.[0-9]+)?/i.test(slug) ||
+      /(?:^|[-_.\s])part[-_.\s]*\d+.*?(?:volume|vol|v)[-_.\s]*\d+/i.test(slug) ||
+      /(?:အတွဲ|အပိုင်း|အခန်း)\s*([၀-၉]+|\d+(?:\.\d+)?)/.test(slug);
+
+    if (!hasExplicitPattern) {
+      hasUnresolved = true;
+      continue;
+    }
+
+    // Resolve canonical volume from slug, preserving multipart Bookworm info
+    const normalizedSlug = slug.replace(/[-_]+/g, " ");
+    const num =
+      resolveCanonicalVolumeNumber(normalizedSlug, manifest.seriesTitle) ??
+      resolveCanonicalVolumeNumber(slug, manifest.seriesTitle);
+
     if (typeof num === "number" && !isNaN(num) && num > 0) {
       validVolumes.push(num);
     } else {
@@ -3302,12 +3350,15 @@ export function resolveCanonicalVolumeNumber(
 ): number | null {
   if (!title) return null;
 
+  // Normalize hyphens and underscores to spaces to support URL slugs and filenames
+  const normalizedTitle = title.replace(/[-_]+/g, " ");
+
   // 1. Check for multi-part series pattern (Part X ... Volume Y)
-  const multiPart = parseMultiPartVolume(title);
+  const multiPart = parseMultiPartVolume(title) || parseMultiPartVolume(normalizedTitle);
   if (multiPart) {
     const { part, volume } = multiPart;
-    const combined = `${title} ${seriesName || ""}`.toLowerCase();
-    const isBookworm = /ascendance\s*of\s*a\s*bookworm|honzuki/i.test(combined);
+    const combined = `${title} ${normalizedTitle} ${seriesName || ""}`.toLowerCase();
+    const isBookworm = /ascendance[\s_\-]*of[\s_\-]*a[\s_\-]*bookworm|honzuki/i.test(combined);
 
     if (isBookworm && part >= 1 && part <= BOOKWORM_PART_OFFSETS.length) {
       return BOOKWORM_PART_OFFSETS[part - 1] + volume;
@@ -3316,8 +3367,14 @@ export function resolveCanonicalVolumeNumber(
     return volume;
   }
 
-  // 2. Standard volume extraction
-  return extractVolumeNumber(title);
+  // 2. Standard volume extraction (supporting titles, slugs, and filenames)
+  return (
+    extractVolumeNumber(title) ??
+    extractVolumeNumber(normalizedTitle) ??
+    extractVolumeNumberFromFilenameElscione(title) ??
+    extractVolumeNumberFromFilenameElscione(normalizedTitle) ??
+    null
+  );
 }
 
 /**
