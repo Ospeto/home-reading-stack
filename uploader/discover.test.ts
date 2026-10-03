@@ -4312,6 +4312,43 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(resDefaultIncomplete.novels.some((n) => n.id === "ascendance-of-a-bookworm")).toBe(false);
     });
 
+    it("default seeds without source verification have unverified status, have no synthetic verifiedVolumes, and are excluded from status=incomplete", async () => {
+      // 1. Direct inspection of SEED_TRENDING_NOVELS
+      for (const novel of SEED_TRENDING_NOVELS) {
+        expect(novel.sourceStatus).not.toBe("verified");
+        expect(novel.verifiedVolumes).toBeUndefined();
+        expect(novel.verifiedVolumeCount).toBeUndefined();
+      }
+
+      // 2. Discover query with partial library but offline/unverified sources
+      const mockCalibre = [
+        { id: 1, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 1", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 1 },
+        { id: 2, title: "Ascendance of a Bookworm Part 1 Vol 1", series: "Ascendance of a Bookworm", series_index: 1 },
+      ];
+
+      const resAll = await getDiscoverNovels(
+        { tab: "trending", status: "all" },
+        { getCalibreBooks: () => mockCalibre },
+      );
+      expect(resAll.success).toBe(true);
+      const danmachi = resAll.novels.find((n) => n.id === "danmachi");
+      expect(danmachi).toBeDefined();
+      expect(danmachi?.inLibrary).toBe(true);
+      expect(danmachi?.sourceStatus).toBe("unverified");
+      expect(danmachi?.verifiedVolumes).toBeUndefined();
+      expect(danmachi?.missingVolumeCount).toBeUndefined();
+
+      // 3. Status=incomplete must strictly exclude all unverified seeds
+      const resIncomplete = await getDiscoverNovels(
+        { tab: "trending", status: "incomplete" },
+        { getCalibreBooks: () => mockCalibre },
+      );
+      expect(resIncomplete.success).toBe(true);
+      expect(resIncomplete.novels.some((n) => n.id === "danmachi")).toBe(false);
+      expect(resIncomplete.novels.some((n) => n.id === "ascendance-of-a-bookworm")).toBe(false);
+      expect(resIncomplete.novels.length).toBe(0);
+    });
+
     it("verifies dynamic button labels, status note, and force re-download in index.html", () => {
       const htmlPath = path.join((import.meta as any).dir, "index.html");
       const html = fs.readFileSync(htmlPath, "utf8");

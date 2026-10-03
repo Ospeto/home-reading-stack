@@ -2523,12 +2523,11 @@ export function attachCachedInventoriesIfAvailable(
   novel: DiscoveredNovel,
   dependencies?: DiscoverDependencies,
 ): DiscoveredNovel {
-  if (
-    novel.verifiedVolumes &&
-    novel.sourceStatus === "verified" &&
-    Array.isArray(novel.sources) &&
-    novel.sources.length > 0
-  ) {
+  const hasVerifiedSource =
+    (Array.isArray(novel.sources) && novel.sources.some((s) => s.status === "verified")) ||
+    (novel.sourceInventories && Object.values(novel.sourceInventories).some((s) => s.status === "verified"));
+
+  if (novel.verifiedVolumes && novel.sourceStatus === "verified" && hasVerifiedSource) {
     return novel;
   }
 
