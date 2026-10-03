@@ -2767,9 +2767,7 @@ export function resolveCanonicalVolumeNumber(
   if (multiPart) {
     const { part, volume } = multiPart;
     const combined = `${title} ${seriesName || ""}`.toLowerCase();
-    const isBookworm =
-      /ascendance\s*of\s*a\s*bookworm|honzuki/i.test(combined) ||
-      (!seriesName && /^\s*(?:part|pt|အပိုင်း)\s*[1-5]\b/i.test(title));
+    const isBookworm = /ascendance\s*of\s*a\s*bookworm|honzuki/i.test(combined);
 
     if (isBookworm && part >= 1 && part <= BOOKWORM_PART_OFFSETS.length) {
       return BOOKWORM_PART_OFFSETS[part - 1] + volume;
@@ -4383,7 +4381,13 @@ export async function getDiscoverNovels(
       filtered = filtered.filter((n) => n.inLibrary);
     } else if (statusFilter === "incomplete" || statusFilter === "missing_volumes") {
       filtered = filtered.filter(
-        (n) => n.inLibrary && n.existingVolumes > 0 && n.existingVolumes < n.volumeCount,
+        (n) =>
+          n.inLibrary &&
+          n.existingVolumes > 0 &&
+          (n.missingVolumeCount !== undefined
+            ? n.missingVolumeCount > 0
+            : (n.missingVolumeIndices && n.missingVolumeIndices.length > 0) ||
+              n.existingVolumes < n.volumeCount),
       );
     }
   }

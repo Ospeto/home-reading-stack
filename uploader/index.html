@@ -5194,9 +5194,15 @@
         const inLib = (item.inLibrary !== undefined) ? item.inLibrary : item.isInLibrary;
         const libCount = (item.existingVolumes !== undefined) ? item.existingVolumes : (item.inLibraryVolumes || 0);
         const totalVols = Math.max(item.volumeCount || 1, libCount);
-        const missingCount = item.missingVolumeCount !== undefined ? item.missingVolumeCount : Math.max(0, totalVols - libCount);
+        const missingCount = item.missingVolumeCount !== undefined
+          ? item.missingVolumeCount
+          : (Array.isArray(item.missingVolumeIndices) ? item.missingVolumeIndices.length : Math.max(0, totalVols - libCount));
+        const hasMissing = item.missingVolumeCount !== undefined
+          ? item.missingVolumeCount > 0
+          : (Array.isArray(item.missingVolumeIndices) ? item.missingVolumeIndices.length > 0 : (totalVols > libCount));
         const isPartial = libCount > 0 && item.volumeCount > libCount;
-        const isComplete = inLib && libCount >= totalVols;
+        const isPartialAudited = isPartial || (inLib && libCount > 0 && hasMissing);
+        const isComplete = inLib && !hasMissing && (libCount >= totalVols);
 
         let statusBadgeHtml = '';
         if (isIngesting) {
@@ -5209,7 +5215,7 @@
             ${verifiedCheckSvg}
             <span>In Library (${libCount} vols)</span>
           </span>`;
-        } else if (isPartial) {
+        } else if (isPartial || isPartialAudited) {
           statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm truncate max-w-full">
             In Library (${libCount}/${item.volumeCount} vols)
           </span>`;
@@ -5315,7 +5321,7 @@
                       ${verifiedCheckSvg}
                       <span>All Volumes in Library (${totalVols}/${totalVols})</span>
                     </button>
-                  ` : isPartial ? `
+                  ` : (isPartial || isPartialAudited) ? `
                     <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event)" class="flex-1 py-1.5 px-2 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]" title="Download remaining ${missingCount} volumes">
                       <span>Download Remaining (${missingCount} vols)</span>
                     </button>
@@ -5524,9 +5530,14 @@
       const downloadState = activeDiscoverDownloads.get(item.id);
       const ownedIndices = item.ownedVolumeIndices || [];
       const missingIndices = item.missingVolumeIndices || [];
-      const missingCount = item.missingVolumeCount !== undefined ? item.missingVolumeCount : Math.max(0, totalVols - libCount);
-      const isComplete = inLib && libCount >= totalVols;
-      const isPartial = inLib && libCount > 0 && libCount < totalVols;
+      const missingCount = item.missingVolumeCount !== undefined
+        ? item.missingVolumeCount
+        : (missingIndices.length > 0 ? missingIndices.length : Math.max(0, totalVols - libCount));
+      const hasMissing = item.missingVolumeCount !== undefined
+        ? item.missingVolumeCount > 0
+        : (missingIndices.length > 0 || totalVols > libCount);
+      const isComplete = inLib && !hasMissing && (libCount >= totalVols);
+      const isPartial = inLib && libCount > 0 && hasMissing;
 
       const verifiedCheckSvg = `<svg class="w-3.5 h-3.5 text-emerald-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>`;
       const downloadSvg = `<svg class="w-3.5 h-3.5 text-zinc-950 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>`;
@@ -5654,7 +5665,11 @@
       const inLib = (activeDiscoverItem.inLibrary !== undefined) ? activeDiscoverItem.inLibrary : activeDiscoverItem.isInLibrary;
       const libCount = (activeDiscoverItem.existingVolumes !== undefined) ? activeDiscoverItem.existingVolumes : (activeDiscoverItem.inLibraryVolumes || 0);
       const totalVols = Math.max(activeDiscoverItem.volumeCount || 1, libCount);
-      if (inLib && libCount >= totalVols) {
+      const hasMissing = activeDiscoverItem.missingVolumeCount !== undefined
+        ? activeDiscoverItem.missingVolumeCount > 0
+        : (Array.isArray(activeDiscoverItem.missingVolumeIndices) ? activeDiscoverItem.missingVolumeIndices.length > 0 : libCount < totalVols);
+      const isComplete = inLib && !hasMissing && libCount >= totalVols;
+      if (isComplete) {
         showToast('All volumes already in library. Use force re-download link below if needed.');
         return;
       }
@@ -5921,14 +5936,36 @@
           if (phase === 'complete') {
             discoverPollIntervals.delete(novelId);
             removeStoredActiveDiscoverDownload(novelId);
+            ingestingDiscoverIds.delete(novelId);
+            activeDiscoverDownloads.delete(novelId);
 
             showToast(`Downloaded "${volumeTitle || title}" into library`);
 
-            // Update cached novel state
-            if (novel) {
-              novel.inLibrary = true;
-              novel.isInLibrary = true;
+            const mProgressCont = document.getElementById('discoverModalProgressContainer');
+            if (mProgressCont && activeDiscoverItem?.id === novelId) {
+              mProgressCont.classList.add('hidden');
             }
+
+            const applyAuditedNovel = (audited) => {
+              if (!audited || !audited.id) return;
+              if (novel) {
+                Object.assign(novel, audited);
+              }
+              discoverNovelsMap.set(novelId, audited);
+              for (const tabKey of Object.keys(discoverFeedCache)) {
+                const list = discoverFeedCache[tabKey]?.items || discoverFeedCache[tabKey]?.novels;
+                if (Array.isArray(list)) {
+                  const idx = list.findIndex(it => it.id === novelId);
+                  if (idx !== -1) {
+                    list[idx] = { ...list[idx], ...audited };
+                  }
+                }
+              }
+              if (activeDiscoverItem?.id === novelId) {
+                populateDiscoverModal(audited);
+              }
+              renderDiscoverCards(discoverFeedCache[discoverTab]?.items || []);
+            };
 
             // Fetch freshly audited novel to ensure accurate volume counts and indices
             fetch(`/api/discover/novel/${encodeURIComponent(novelId)}`)
@@ -5936,70 +5973,31 @@
               .then(data => {
                 const audited = data?.novel || data;
                 if (audited && audited.id) {
+                  applyAuditedNovel(audited);
+                } else {
                   if (novel) {
-                    Object.assign(novel, audited);
+                    novel.inLibrary = true;
+                    novel.isInLibrary = true;
                   }
-                  discoverNovelsMap.set(novelId, audited);
                   if (activeDiscoverItem?.id === novelId) {
-                    populateDiscoverModal(audited);
+                    populateDiscoverModal(activeDiscoverItem);
                   }
                   renderDiscoverCards(discoverFeedCache[discoverTab]?.items || []);
                 }
               })
-              .catch(() => {});
-
-            // Update badge on card
-            const cBadge = document.getElementById(`cardBadge-${novelId}`);
-            if (cBadge) {
-              const curLib = novel?.existingVolumes || 1;
-              const totalV = novel?.volumeCount || 1;
-              const isPartial = curLib > 0 && totalV > curLib;
-              const libText = isPartial
-                ? `In Library (${curLib}/${totalV} vols)`
-                : `In Library (${curLib} vols)`;
-              setHtml(cBadge, `
-                <span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm">
-                  ${libText}
-                </span>
-              `);
-            }
-
-            // If modal open, update modal fields
-            if (activeDiscoverItem?.id === novelId) {
-              const mBadge = document.getElementById('discoverModalStatusBadge');
-              if (mBadge) {
-                const curLib = novel?.existingVolumes || 1;
-                const totalV = novel?.volumeCount || 1;
-                const isPartial = curLib > 0 && totalV > curLib;
-                const libText = isPartial
-                  ? `In Library (${curLib}/${totalV} vols)`
-                  : `In Library (${curLib} vols)`;
-                mBadge.className = 'absolute top-2 left-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/50 backdrop-blur-md';
-                mBadge.textContent = libText;
-              }
-              const mNote = document.getElementById('discoverModalLibraryNote');
-              if (mNote) {
-                setHtml(mNote, `<span class="text-emerald-400">You have ${novel?.existingVolumes || 1} volume(s) in Calibre.</span>`);
-              }
-              const mBtn = document.getElementById('discoverModalIngestBtn');
-              if (mBtn) {
-                mBtn.removeAttribute('disabled');
-                mBtn.className = 'flex-1 sm:flex-none px-5 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-white border border-white/10 font-semibold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]';
-                setHtml(mBtn, `<span>Re-Ingest to Library</span>`);
-              }
-            }
-
-            // After a brief delay to show 100%, reset card action buttons and refresh
-            setTimeout(() => {
-              ingestingDiscoverIds.delete(novelId);
-              activeDiscoverDownloads.delete(novelId);
-              const mProgressCont = document.getElementById('discoverModalProgressContainer');
-              if (mProgressCont && activeDiscoverItem?.id === novelId) {
-                mProgressCont.classList.add('hidden');
-              }
-              renderDiscoverCards(discoverFeedCache[discoverTab]?.items || []);
-              loadBooks();
-            }, 1200);
+              .catch(() => {
+                if (novel) {
+                  novel.inLibrary = true;
+                  novel.isInLibrary = true;
+                }
+                if (activeDiscoverItem?.id === novelId) {
+                  populateDiscoverModal(activeDiscoverItem);
+                }
+                renderDiscoverCards(discoverFeedCache[discoverTab]?.items || []);
+              })
+              .finally(() => {
+                loadBooks();
+              });
 
             return;
 

@@ -4432,9 +4432,13 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm: Part 5 Volume 8")).toBe(29);
       expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm: Part 5 Volume 12")).toBe(33);
 
-      // Standalone Part 5 Volume 8 without series prefix resolves to canonical 29
-      expect(resolveCanonicalVolumeNumber("Part 5 Volume 8")).toBe(29);
+      // With identified Bookworm series context, resolves to canonical 29
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm: Part 5 Volume 8")).toBe(29);
       expect(resolveCanonicalVolumeNumber("Part 5 Volume 8", "Ascendance of a Bookworm")).toBe(29);
+      expect(resolveCanonicalVolumeNumber("Part 5 Volume 8", "Honzuki no Gekokujou")).toBe(29);
+
+      // Bare multi-part title without Bookworm context returns part-local volume (never guesses Bookworm)
+      expect(resolveCanonicalVolumeNumber("Part 5 Volume 8")).toBe(8);
 
       // Alternate notations: daughter of a soldier, roman numerals, bracketed
       expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm - Part 1 Daughter of a Soldier v02")).toBe(2);
@@ -4537,6 +4541,47 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       // Volume 5 must NOT be hidden by fractional 4.5 cardinality
       expect(reconciled.missingVolumeIndices).toEqual([5]);
       expect(reconciled.missingVolumeCount).toBe(1);
+    });
+
+    it("backend status=incomplete filter includes series with fractional volume cardinality", async () => {
+      // Series with volumeCount 5 where user owns 5 files (1, 2, 3, 4, 4.5) but missing Volume 5
+      const mockCalibre = [
+        { id: 1, title: "Classroom of the Elite Vol. 1", series: "Classroom of the Elite", series_index: 1 },
+        { id: 2, title: "Classroom of the Elite Vol. 2", series: "Classroom of the Elite", series_index: 2 },
+        { id: 3, title: "Classroom of the Elite Vol. 3", series: "Classroom of the Elite", series_index: 3 },
+        { id: 4, title: "Classroom of the Elite Vol. 4", series: "Classroom of the Elite", series_index: 4 },
+        { id: 5, title: "Classroom of the Elite Vol. 4.5", series: "Classroom of the Elite", series_index: 4.5 },
+      ];
+
+      const res = await getDiscoverNovels(
+        { tab: "trending", status: "incomplete" },
+        { getCalibreBooks: () => mockCalibre },
+      );
+
+      expect(res.success).toBe(true);
+      const cote = res.novels.find((n) => n.id === "classroom-of-the-elite");
+      expect(cote).toBeDefined();
+      expect(cote?.inLibrary).toBe(true);
+      expect(cote?.missingVolumeCount).toBeGreaterThan(0);
+    });
+
+    it("UI completion decisions in index.html respect audited missingVolumeCount over cardinality", () => {
+      const htmlPath = path.join((import.meta as any).dir, "index.html");
+      const html = fs.readFileSync(htmlPath, "utf8");
+
+      // Verify card completion logic requires !hasMissing
+      expect(html).toContain("const hasMissing = item.missingVolumeCount !== undefined");
+      expect(html).toContain("const isComplete = inLib && !hasMissing && (libCount >= totalVols);");
+
+      // Verify modal ingest handler allows download when hasMissing is true
+      expect(html).toContain("function handleDiscoverModalIngest()");
+      expect(html).toContain("const hasMissing = activeDiscoverItem.missingVolumeCount !== undefined");
+      expect(html).toContain("if (isComplete) {");
+
+      // Verify post-download completion immediately clears ingesting state before re-audit
+      expect(html).toContain("ingestingDiscoverIds.delete(novelId);");
+      expect(html).toContain("activeDiscoverDownloads.delete(novelId);");
+      expect(html).toContain("const applyAuditedNovel = (audited) => {");
     });
   });
 });
