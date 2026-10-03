@@ -48,7 +48,11 @@ import {
   computeCalibreBooksSignature,
   getDiscoverNovelById,
   type DiscoveredNovel,
+  resolveCanonicalVolumeNumber,
+  BOOKWORM_PART_OFFSETS,
+  BOOKWORM_PART_VOLUMES,
 } from "./discover";
+import { parseMultiPartVolume, extractVolumeNumber } from "./scraper";
 import {
   handleRequest,
   setServerDependenciesForTest,
@@ -1571,6 +1575,8 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       // Badge update on completion
       expect(html).toContain("In Library (");
       expect(html).toContain("Downloaded");
+      // Audited novel unpacks data.novel or data
+      expect(html).toContain("const audited = data?.novel || data;");
     });
 
     it("verifies complete synopsis readability and on-the-fly fetching in discoverModal", () => {
@@ -4334,6 +4340,203 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       const completeEvent = progressEvents.find((e) => e.phase === "complete");
       expect(completeEvent).toBeDefined();
       expect(completeEvent?.status).toBe("Finished: 1 new volumes added, 2 existing volumes preserved.");
+    });
+  });
+
+  describe("Volume Audit Precision & Multi-Part Volume Tracking (Classroom of the Elite & Bookworm)", () => {
+    const coteNovel: DiscoveredNovel = {
+      id: "classroom-of-the-elite",
+      title: "Classroom of the Elite",
+      author: "Shogo Kinugasa",
+      coverUrl: "https://example.com/cote.jpg",
+      synopsis: "Classroom of the Elite synopsis",
+      genres: ["Psychological", "Drama"],
+      score: 89,
+      popularity: 95000,
+      releaseDate: "2015-05-25",
+      volumeCount: 28,
+      source: "both",
+      sourceUrls: { elscione: "https://example.com/cote" },
+      inLibrary: false,
+      existingVolumes: 0,
+    };
+
+    const bookwormNovel: DiscoveredNovel = {
+      id: "ascendance-of-a-bookworm",
+      title: "Ascendance of a Bookworm",
+      author: "Miya Kazuki",
+      coverUrl: "https://example.com/bookworm.jpg",
+      synopsis: "Bookworm synopsis",
+      genres: ["Fantasy", "Isekai"],
+      score: 91,
+      popularity: 98000,
+      releaseDate: "2015-01-25",
+      volumeCount: 33,
+      source: "both",
+      sourceUrls: { elscione: "https://example.com/bookworm" },
+      inLibrary: false,
+      existingVolumes: 0,
+    };
+
+    it("extracts distinct volume numbers 10, 9, 8 from titles overriding fractional Calibre series_index (1.10, 1.09, 1.08)", () => {
+      // Calibre library where volumes 8, 9, 10, 11 have fractional indices
+      const mockCalibre = [
+        { id: 1, title: "Classroom of the Elite Vol. 1", series: "Classroom of the Elite", series_index: 1 },
+        { id: 2, title: "Classroom of the Elite Vol. 2", series: "Classroom of the Elite", series_index: 2 },
+        { id: 3, title: "Classroom of the Elite Vol. 3", series: "Classroom of the Elite", series_index: 3 },
+        { id: 4, title: "Classroom of the Elite Vol. 4", series: "Classroom of the Elite", series_index: 4 },
+        { id: 5, title: "Classroom of the Elite Vol. 5", series: "Classroom of the Elite", series_index: 5 },
+        { id: 6, title: "Classroom of the Elite Vol. 6", series: "Classroom of the Elite", series_index: 6 },
+        { id: 7, title: "Classroom of the Elite Vol. 7", series: "Classroom of the Elite", series_index: 7 },
+        { id: 8, title: "Classroom of the Elite Vol. 8", series: "Classroom of the Elite", series_index: 1.08 },
+        { id: 9, title: "Classroom of the Elite Vol. 9", series: "Classroom of the Elite", series_index: 1.09 },
+        { id: 10, title: "Classroom of the Elite Vol. 10", series: "Classroom of the Elite", series_index: 1.10 },
+        { id: 11, title: "Classroom of the Elite Vol. 11", series: "Classroom of the Elite", series_index: 1.11 },
+      ];
+
+      const [reconciled] = crossCheckNovelsWithCalibre([coteNovel], {
+        getCalibreBooks: () => mockCalibre,
+      });
+
+      expect(reconciled.inLibrary).toBe(true);
+      // All 11 volumes must be recognized, never collapsed down to 5 or 7
+      expect(reconciled.existingVolumes).toBe(11);
+      expect(reconciled.ownedVolumeIndices).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+      expect(reconciled.volumeCount).toBe(28);
+
+      const expectedMissing = Array.from({ length: 17 }, (_, i) => 12 + i);
+      expect(reconciled.missingVolumeIndices).toEqual(expectedMissing);
+      expect(reconciled.missingVolumeCount).toBe(17);
+    });
+
+    it("resolves multi-part titles (Part 5 Volume 8) to canonical volume numbers", () => {
+      // Ascendance of a Bookworm Part 1 has 3 vols (1..3)
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm: Part 1 Volume 1")).toBe(1);
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm: Part 1 Volume 2")).toBe(2);
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm: Part 1 Volume 3")).toBe(3);
+
+      // Part 2 has 4 vols (vols 4..7, offset 3)
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm: Part 2 Volume 1")).toBe(4);
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm: Part 2 Volume 4")).toBe(7);
+
+      // Part 3 has 5 vols (vols 8..12, offset 7)
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm: Part 3 Volume 1")).toBe(8);
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm: Part 3 Volume 5")).toBe(12);
+
+      // Part 4 has 9 vols (vols 13..21, offset 12)
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm: Part 4 Volume 1")).toBe(13);
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm: Part 4 Volume 9")).toBe(21);
+
+      // Part 5 has 12 vols (vols 22..33, offset 21)
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm: Part 5 Volume 1")).toBe(22);
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm: Part 5 Volume 8")).toBe(29);
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm: Part 5 Volume 12")).toBe(33);
+
+      // Standalone Part 5 Volume 8 without series prefix resolves to canonical 29
+      expect(resolveCanonicalVolumeNumber("Part 5 Volume 8")).toBe(29);
+      expect(resolveCanonicalVolumeNumber("Part 5 Volume 8", "Ascendance of a Bookworm")).toBe(29);
+
+      // Alternate notations: daughter of a soldier, roman numerals, bracketed
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm - Part 1 Daughter of a Soldier v02")).toBe(2);
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm [Part 2 Vol. 3]")).toBe(6);
+      expect(resolveCanonicalVolumeNumber("Ascendance of a Bookworm, Part 1 Vol. 1")).toBe(1);
+      expect(resolveCanonicalVolumeNumber("Part V Volume VIII", "Ascendance of a Bookworm")).toBe(29);
+    });
+
+    it("reconciles multi-part Bookworm library books with exact canonical volume indices", () => {
+      const mockCalibre = [
+        { id: 101, title: "Ascendance of a Bookworm: Part 1 Volume 1", series: "Ascendance of a Bookworm", series_index: 1 },
+        { id: 102, title: "Ascendance of a Bookworm: Part 1 Volume 2", series: "Ascendance of a Bookworm", series_index: 2 },
+        { id: 103, title: "Ascendance of a Bookworm: Part 2 Volume 1", series: "Ascendance of a Bookworm", series_index: 1 },
+        { id: 104, title: "Ascendance of a Bookworm: Part 3 Volume 1", series: "Ascendance of a Bookworm", series_index: 1 },
+        { id: 105, title: "Ascendance of a Bookworm: Part 5 Volume 8", series: "Ascendance of a Bookworm", series_index: 8 },
+      ];
+
+      const [reconciled] = crossCheckNovelsWithCalibre([bookwormNovel], {
+        getCalibreBooks: () => mockCalibre,
+      });
+
+      expect(reconciled.inLibrary).toBe(true);
+      expect(reconciled.existingVolumes).toBe(5);
+      expect(reconciled.ownedVolumeIndices).toEqual([1, 2, 4, 8, 29]);
+      expect(reconciled.volumeCount).toBe(33);
+
+      const allPossible = Array.from({ length: 33 }, (_, i) => i + 1);
+      const expectedMissing = allPossible.filter((v) => ![1, 2, 4, 8, 29].includes(v));
+      expect(reconciled.missingVolumeIndices).toEqual(expectedMissing);
+      expect(reconciled.missingVolumeCount).toBe(28);
+    });
+
+    it("only falls back to series_index when title lacks explicit volume indicator", () => {
+      const mockCalibre = [
+        // Book with explicit volume in title
+        { id: 1, title: "Classroom of the Elite Vol. 10", series: "Classroom of the Elite", series_index: 1.10 },
+        // Book without explicit volume in title - falls back to series_index
+        { id: 2, title: "Classroom of the Elite", series: "Classroom of the Elite", series_index: 12 },
+      ];
+
+      const [reconciled] = crossCheckNovelsWithCalibre([coteNovel], {
+        getCalibreBooks: () => mockCalibre,
+      });
+
+      expect(reconciled.inLibrary).toBe(true);
+      expect(reconciled.existingVolumes).toBe(2);
+      expect(reconciled.ownedVolumeIndices).toEqual([10, 12]);
+    });
+
+    it("preserves part-local volume extraction in scraper.ts and never applies Bookworm offsets to unrelated multipart series", () => {
+      // Ingestion and deduplication in scraper.ts receive part-local volume
+      expect(extractVolumeNumber("Ascendance of a Bookworm: Part 1 Volume 2")).toBe(2);
+      expect(extractVolumeNumber("Ascendance of a Bookworm: Part 5 Volume 8")).toBe(8);
+      expect(extractVolumeNumber("Part 1 Volume 3")).toBe(3);
+
+      // Unrelated multi-part series must NOT receive Bookworm offsets
+      expect(resolveCanonicalVolumeNumber("The Lord of the Rings: Part 2 Volume 3", "The Lord of the Rings")).toBe(3);
+      expect(resolveCanonicalVolumeNumber("Classic Literature Part 3 Volume 1", "Classic Literature")).toBe(1);
+
+      // Standard Roman numeral extractions remain intact
+      expect(extractVolumeNumber("Overlord [Vol. IV]")).toBe(4);
+      expect(extractVolumeNumber("Sword Art Online Volume II")).toBe(2);
+      expect(extractVolumeNumber("DanMachi Vol. XIV")).toBe(14);
+    });
+
+    it("computes integer complement for missing volumes when library contains fractional volumes", () => {
+      const testNovel: DiscoveredNovel = {
+        id: "short-series",
+        title: "Short Series",
+        author: "Test Author",
+        coverUrl: "https://example.com/cover.jpg",
+        synopsis: "Short series synopsis",
+        genres: ["Fantasy"],
+        score: 80,
+        popularity: 1000,
+        releaseDate: "2024-01-01",
+        volumeCount: 5,
+        source: "both",
+        sourceUrls: { elscione: "https://example.com" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      // User owns volumes 1, 2, 3, 4, and side story 4.5. Cardinality is 5, but Volume 5 is missing!
+      const mockCalibre = [
+        { id: 1, title: "Short Series Vol. 1", series: "Short Series", series_index: 1 },
+        { id: 2, title: "Short Series Vol. 2", series: "Short Series", series_index: 2 },
+        { id: 3, title: "Short Series Vol. 3", series: "Short Series", series_index: 3 },
+        { id: 4, title: "Short Series Vol. 4", series: "Short Series", series_index: 4 },
+        { id: 5, title: "Short Series Vol. 4.5", series: "Short Series", series_index: 4.5 },
+      ];
+
+      const [reconciled] = crossCheckNovelsWithCalibre([testNovel], {
+        getCalibreBooks: () => mockCalibre,
+      });
+
+      expect(reconciled.inLibrary).toBe(true);
+      expect(reconciled.existingVolumes).toBe(5);
+      expect(reconciled.ownedVolumeIndices).toEqual([1, 2, 3, 4, 4.5]);
+      // Volume 5 must NOT be hidden by fractional 4.5 cardinality
+      expect(reconciled.missingVolumeIndices).toEqual([5]);
+      expect(reconciled.missingVolumeCount).toBe(1);
     });
   });
 });
