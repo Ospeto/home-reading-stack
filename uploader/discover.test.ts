@@ -4292,6 +4292,24 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(resFullyOwned.success).toBe(true);
       const dalFullyOwned = resFullyOwned.novels.find((n) => n.id === "date-a-live");
       expect(dalFullyOwned).toBeUndefined();
+
+      // Case 4: Default seed data without source verification must return unverified and be excluded from status=incomplete
+      const resDefault = await getDiscoverNovels(
+        { tab: "trending", status: "all" },
+        { getCalibreBooks: () => mockCalibre },
+      );
+      expect(resDefault.success).toBe(true);
+      const bookworm = resDefault.novels.find((n) => n.id === "ascendance-of-a-bookworm");
+      // Default seed must NOT be synthetic verified
+      expect(bookworm?.sourceStatus).not.toBe("verified");
+      expect(bookworm?.verifiedVolumes).toBeUndefined();
+
+      // Excluded from status=incomplete
+      const resDefaultIncomplete = await getDiscoverNovels(
+        { tab: "trending", status: "incomplete" },
+        { getCalibreBooks: () => mockCalibre },
+      );
+      expect(resDefaultIncomplete.novels.some((n) => n.id === "ascendance-of-a-bookworm")).toBe(false);
     });
 
     it("verifies dynamic button labels, status note, and force re-download in index.html", () => {

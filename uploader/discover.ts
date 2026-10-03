@@ -1359,13 +1359,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     inLibrary: false,
     existingVolumes: 0,
   },
-].map((n) => ({
-  ...n,
-  sourceStatus: n.sourceStatus || "verified",
-  verifiedVolumes: n.verifiedVolumes || Array.from({ length: n.volumeCount }, (_, i) => i + 1),
-  verifiedVolumeCount: n.verifiedVolumeCount || n.volumeCount,
-  catalogVolumeCount: n.catalogVolumeCount || n.volumeCount,
-}));
+];
 
 // Seed catalogue for "New Releases" Light Novels (Curated, distinct from Trending!)
 export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
@@ -2529,7 +2523,12 @@ export function attachCachedInventoriesIfAvailable(
   novel: DiscoveredNovel,
   dependencies?: DiscoverDependencies,
 ): DiscoveredNovel {
-  if (novel.verifiedVolumes && novel.sourceStatus === "verified") {
+  if (
+    novel.verifiedVolumes &&
+    novel.sourceStatus === "verified" &&
+    Array.isArray(novel.sources) &&
+    novel.sources.length > 0
+  ) {
     return novel;
   }
 
