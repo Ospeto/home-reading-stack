@@ -51,8 +51,9 @@ import {
   resolveCanonicalVolumeNumber,
   BOOKWORM_PART_OFFSETS,
   BOOKWORM_PART_VOLUMES,
+  resolveSourceInventory,
 } from "./discover";
-import { parseMultiPartVolume, extractVolumeNumber } from "./scraper";
+import { extractVolumeNumber } from "./scraper";
 import {
   handleRequest,
   setServerDependenciesForTest,
@@ -1605,7 +1606,8 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(html).toContain("flex flex-col gap-2 p-3 rounded-xl border ${s.color} text-xs");
       // Row 1: Source badge (bold monospace) with volume count cleanly aligned without truncating into the name
       expect(html).toContain("font-bold font-mono shrink-0");
-      expect(html).toContain("&bull; ${totalVols} vols available");
+      expect(html).toContain("&bull; ${escapeHtml(volStatusText)}");
+      expect(html).toContain("vols available");
       // Row 2: Subtle border separator with proper padding and flex-wrap for constrained widths
       expect(html).toContain("flex flex-wrap items-center justify-between gap-1.5 pt-2 border-t border-white/10");
       // 'Browse Source' underline text link on the left and 'Ingest' pill button on the right
@@ -4020,6 +4022,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       popularity: 8000,
       releaseDate: "2013-01-15",
       volumeCount: 10,
+      verifiedVolumes: Array.from({ length: 10 }, (_, i) => i + 1),
       source: "both",
       sourceUrls: { elscione: "https://server.elscione.com/DanMachi" },
       inLibrary: false,
@@ -4108,6 +4111,13 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
 
       const novel = await getDiscoverNovelById("danmachi", {
         getCalibreBooks: () => mockCalibre,
+        resolveSourceVolumes: (url, source) => ({
+          source,
+          url,
+          status: "verified",
+          volumeCount: 19,
+          volumes: Array.from({ length: 19 }, (_, i) => i + 1),
+        }),
       });
 
       expect(novel).toBeDefined();
@@ -4125,6 +4135,13 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       ];
       setServerDependenciesForTest({
         getCalibreBooks: () => mockCalibre,
+        resolveSourceVolumes: (url, source) => ({
+          source,
+          url,
+          status: "verified",
+          volumeCount: 19,
+          volumes: Array.from({ length: 19 }, (_, i) => i + 1),
+        }),
       });
 
       const req = new Request("http://127.0.0.1:8086/api/discover/novel/danmachi");
@@ -4355,6 +4372,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       popularity: 95000,
       releaseDate: "2015-05-25",
       volumeCount: 28,
+      verifiedVolumes: Array.from({ length: 28 }, (_, i) => i + 1),
       source: "both",
       sourceUrls: { elscione: "https://example.com/cote" },
       inLibrary: false,
@@ -4372,6 +4390,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       popularity: 98000,
       releaseDate: "2015-01-25",
       volumeCount: 33,
+      verifiedVolumes: Array.from({ length: 33 }, (_, i) => i + 1),
       source: "both",
       sourceUrls: { elscione: "https://example.com/bookworm" },
       inLibrary: false,
@@ -4516,6 +4535,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         popularity: 1000,
         releaseDate: "2024-01-01",
         volumeCount: 5,
+        verifiedVolumes: [1, 2, 3, 4, 5],
         source: "both",
         sourceUrls: { elscione: "https://example.com" },
         inLibrary: false,
@@ -4555,7 +4575,16 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
 
       const res = await getDiscoverNovels(
         { tab: "trending", status: "incomplete" },
-        { getCalibreBooks: () => mockCalibre },
+        {
+          getCalibreBooks: () => mockCalibre,
+          resolveSourceVolumes: (url, source) => ({
+            source,
+            url,
+            status: "verified",
+            volumeCount: 28,
+            volumes: Array.from({ length: 28 }, (_, i) => i + 1),
+          }),
+        },
       );
 
       expect(res.success).toBe(true);
@@ -4582,6 +4611,301 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(html).toContain("ingestingDiscoverIds.delete(novelId);");
       expect(html).toContain("activeDiscoverDownloads.delete(novelId);");
       expect(html).toContain("const applyAuditedNovel = (audited) => {");
+    });
+  });
+
+  describe("Verified Source Inventory vs Global Catalog Reconciliation (Date A Live Regression & Accurate Missing Volume Detection)", () => {
+    it("Date A Live regression: owned 1-16, Elsci has 16, Lnori has 15, catalog total 22 -> verified downloadable missing count is 0, zero phantom missing volumes", async () => {
+      // Calibre library owns all 16 volumes available on Elsci.one
+      const mockCalibre = Array.from({ length: 16 }, (_, i) => ({
+        id: 200 + i,
+        title: `Date A Live, Vol. ${i + 1}`,
+        series: "Date A Live",
+        series_index: i + 1,
+      }));
+
+      // Test Date A Live novel with global catalog total of 22
+      const dateALiveNovel: DiscoveredNovel = {
+        id: "date-a-live",
+        title: "Date A Live",
+        author: "Koushi Tachibana",
+        coverUrl: "https://example.com/dal.jpg",
+        synopsis: "Thirty years ago, a strange phenomenon called a spacequake devastated Eurasia...",
+        genres: ["Sci-Fi", "Comedy", "Romance", "Harem"],
+        score: 82,
+        popularity: 75000,
+        releaseDate: "2011-03-19",
+        volumeCount: 22, // Publication catalog maximum
+        catalogVolumeCount: 22,
+        source: "both",
+        sourceUrls: {
+          elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Date%20A%20Live/",
+          lnori: "https://lnori.com/series/7294/date-a-live",
+        },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const customResolver = (url: string, source: "elscione" | "lnori") => {
+        if (source === "elscione") {
+          return {
+            source,
+            url,
+            status: "verified" as const,
+            volumeCount: 16,
+            volumes: Array.from({ length: 16 }, (_, i) => i + 1),
+          };
+        }
+        return {
+          source,
+          url,
+          status: "verified" as const,
+          volumeCount: 15,
+          volumes: Array.from({ length: 15 }, (_, i) => i + 1),
+        };
+      };
+
+      const novel = await getDiscoverNovelById("date-a-live", {
+        seedTrendingNovels: [dateALiveNovel],
+        getCalibreBooks: () => mockCalibre,
+        resolveSourceVolumes: customResolver,
+      });
+
+      expect(novel).toBeDefined();
+      expect(novel?.id).toBe("date-a-live");
+      expect(novel?.inLibrary).toBe(true);
+      expect(novel?.existingVolumes).toBe(16);
+      // Volume count reflects verified available source count (16), while catalog maximum is preserved (22)
+      expect(novel?.volumeCount).toBe(16);
+      expect(novel?.catalogVolumeCount).toBe(22);
+      expect(novel?.verifiedVolumeCount).toBe(16);
+      expect(novel?.ownedVolumeIndices).toEqual(Array.from({ length: 16 }, (_, i) => i + 1));
+      // Missing volumes are strictly 0: no non-existent volumes 17-22 manufactured
+      expect(novel?.missingVolumeIndices).toEqual([]);
+      expect(novel?.missingVolumeCount).toBe(0);
+      expect(novel?.allVerifiedOwned).toBe(true);
+      expect(novel?.sourceStatus).toBe("verified");
+
+      // Per-source verified inventories
+      expect(novel?.sources).toBeDefined();
+      expect(novel?.sources?.length).toBe(2);
+      const elsci = novel?.sources?.find((s) => s.source === "elscione");
+      const lnori = novel?.sources?.find((s) => s.source === "lnori");
+      expect(elsci?.status).toBe("verified");
+      expect(elsci?.volumeCount).toBe(16);
+      expect(lnori?.status).toBe("verified");
+      expect(lnori?.volumeCount).toBe(15);
+    });
+
+    it("actual gaps: owned 1-10, verified source has 16 -> missing volumes 11-16", async () => {
+      const mockCalibre = Array.from({ length: 10 }, (_, i) => ({
+        id: 300 + i,
+        title: `Date A Live, Vol. ${i + 1}`,
+        series: "Date A Live",
+        series_index: i + 1,
+      }));
+
+      const novel = await getDiscoverNovelById("date-a-live", {
+        getCalibreBooks: () => mockCalibre,
+        resolveSourceVolumes: (url, source) => ({
+          source,
+          url,
+          status: "verified",
+          volumeCount: 16,
+          volumes: Array.from({ length: 16 }, (_, i) => i + 1),
+        }),
+      });
+
+      expect(novel).toBeDefined();
+      expect(novel?.inLibrary).toBe(true);
+      expect(novel?.existingVolumes).toBe(10);
+      expect(novel?.volumeCount).toBe(16);
+      expect(novel?.catalogVolumeCount).toBe(22);
+      expect(novel?.ownedVolumeIndices).toEqual(Array.from({ length: 10 }, (_, i) => i + 1));
+      expect(novel?.missingVolumeIndices).toEqual([11, 12, 13, 14, 15, 16]);
+      expect(novel?.missingVolumeCount).toBe(6);
+      expect(novel?.allVerifiedOwned).toBe(false);
+    });
+
+    it("non-contiguous gaps: owned 1-5 and 8-10, source has 10 -> missing volumes 6-7", async () => {
+      const owned = [1, 2, 3, 4, 5, 8, 9, 10];
+      const mockCalibre = owned.map((v, i) => ({
+        id: 400 + i,
+        title: `DanMachi, Vol. ${v}`,
+        series: "DanMachi",
+        series_index: v,
+      }));
+
+      const testNovel: DiscoveredNovel = {
+        id: "danmachi-gaps",
+        title: "DanMachi",
+        author: "Fujino Omori",
+        coverUrl: "https://example.com/danmachi.jpg",
+        synopsis: "DanMachi synopsis",
+        genres: ["Fantasy"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2013-01-15",
+        volumeCount: 19,
+        catalogVolumeCount: 19,
+        verifiedVolumes: Array.from({ length: 10 }, (_, i) => i + 1),
+        sourceStatus: "verified",
+        source: "both",
+        sourceUrls: { elscione: "https://server.elscione.com/DanMachi" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+
+      const [reconciled] = crossCheckNovelsWithCalibre([testNovel], {
+        getCalibreBooks: () => mockCalibre,
+      });
+
+      expect(reconciled.inLibrary).toBe(true);
+      expect(reconciled.existingVolumes).toBe(8);
+      expect(reconciled.ownedVolumeIndices).toEqual([1, 2, 3, 4, 5, 8, 9, 10]);
+      expect(reconciled.missingVolumeIndices).toEqual([6, 7]);
+      expect(reconciled.missingVolumeCount).toBe(2);
+      expect(reconciled.allVerifiedOwned).toBe(false);
+    });
+
+    it("unverified and failed source fallback handling: never synthesizes missing gaps from catalog totals and never claims all owned", async () => {
+      const mockCalibre = Array.from({ length: 16 }, (_, i) => ({
+        id: 500 + i,
+        title: `Date A Live, Vol. ${i + 1}`,
+        series: "Date A Live",
+        series_index: i + 1,
+      }));
+
+      // Resolver simulates network timeout / server 500 error
+      const errorResolver = (url: string, source: "elscione" | "lnori") => ({
+        source,
+        url,
+        status: "error" as const,
+        error: "Connection timeout to source server",
+      });
+
+      const novel = await getDiscoverNovelById("date-a-live", {
+        getCalibreBooks: () => mockCalibre,
+        resolveSourceVolumes: errorResolver,
+      });
+
+      expect(novel).toBeDefined();
+      expect(novel?.inLibrary).toBe(true);
+      expect(novel?.existingVolumes).toBe(16);
+      // Volume count retains catalog total without claiming zero availability
+      expect(novel?.volumeCount).toBe(22);
+      expect(novel?.catalogVolumeCount).toBe(22);
+      expect(novel?.verifiedVolumeCount).toBeUndefined();
+      expect(novel?.sourceStatus).toBe("error");
+      // Crucial: never claims all volumes are owned when unverified/failed
+      expect(novel?.allVerifiedOwned).toBe(false);
+      // Crucial: never synthesizes fake missing volumes 17-22 when source is unverified/failed
+      expect(novel?.missingVolumeIndices).toBeUndefined();
+      expect(novel?.missingVolumeCount).toBeUndefined();
+    });
+
+    it("source selection selects source actually containing missing volumes", () => {
+      // Elsci only has vols 1-10, Lnori has vols 1-15. User owns 1-10.
+      // Missing volumes are 11-15, which exist ONLY on Lnori.
+      const novel: DiscoveredNovel = {
+        id: "multi-source-novel",
+        title: "Multi Source Novel",
+        author: "Author",
+        coverUrl: "https://example.com/cover.jpg",
+        synopsis: "Synopsis for multi source novel",
+        genres: ["Fantasy"],
+        score: 85,
+        popularity: 5000,
+        releaseDate: "2024-01-01",
+        volumeCount: 15,
+        catalogVolumeCount: 20,
+        source: "both",
+        sourceUrls: {
+          elscione: "https://server.elscione.com/Multi%20Source%20Novel/",
+          lnori: "https://lnori.com/series/1234/multi-source-novel",
+        },
+        sources: [
+          {
+            source: "elscione",
+            url: "https://server.elscione.com/Multi%20Source%20Novel/",
+            status: "verified",
+            volumeCount: 10,
+            volumes: Array.from({ length: 10 }, (_, i) => i + 1),
+          },
+          {
+            source: "lnori",
+            url: "https://lnori.com/series/1234/multi-source-novel",
+            status: "verified",
+            volumeCount: 15,
+            volumes: Array.from({ length: 15 }, (_, i) => i + 1),
+          },
+        ],
+        missingVolumeIndices: [11, 12, 13, 14, 15],
+        missingVolumeCount: 5,
+        inLibrary: true,
+        existingVolumes: 10,
+      };
+
+      const selected = assignPrimarySource(novel);
+      // Because Elscione has 0 of the missing volumes (11-15), Lnori is chosen as primary
+      expect(selected.primarySource).toBe("lnori");
+      expect(selected.primaryUrl).toBe("https://lnori.com/series/1234/multi-source-novel");
+    });
+
+    it("caching: verified source inventories are cached and served from cache on repeat requests", async () => {
+      let callCount = 0;
+      const countingResolver = (url: string, source: "elscione" | "lnori") => {
+        callCount++;
+        return {
+          source,
+          url,
+          status: "verified" as const,
+          volumeCount: 16,
+          volumes: Array.from({ length: 16 }, (_, i) => i + 1),
+        };
+      };
+
+      const testUrl = "https://server.elscione.com/Test%20Cache%20Series/";
+      // First resolution calls resolver and writes to cache
+      const inv1 = await resolveSourceInventory(testUrl, "elscione", {
+        resolveSourceVolumes: countingResolver,
+        cacheDb: tempCacheDb,
+      });
+      expect(inv1.status).toBe("verified");
+      expect(inv1.volumeCount).toBe(16);
+      expect(callCount).toBe(1);
+
+      // Second resolution served from memory or SQLite cache without calling countingResolver
+      const inv2 = await resolveSourceInventory(testUrl, "elscione", {
+        cacheDb: tempCacheDb,
+      });
+      expect(inv2.status).toBe("verified");
+      expect(inv2.volumeCount).toBe(16);
+      expect(callCount).toBe(1); // Call count did not increment
+    });
+
+    it("UI contracts in index.html: verified completion disables ingest button and renders 'All Volumes in Library (16/16)'", () => {
+      const htmlPath = path.join((import.meta as any).dir, "index.html");
+      const html = fs.readFileSync(htmlPath, "utf8");
+
+      // Status badge and ingest button completion contracts
+      expect(html).toContain("All in Library (${libCount}/${totalVols})");
+      expect(html).toContain("All Volumes in Library (${totalVols}/${totalVols})");
+      expect(html).toContain("cursor-not-allowed opacity-90");
+      expect(html).toContain("All in Library (${libCount}/${totalVols}) &bull; All ${totalVols} verified source volumes in your Calibre library.");
+
+      // Verified source counts in modal cards
+      expect(html).toContain("${s.volumeCount !== undefined ? s.volumeCount : totalVols} vols available");
+      expect(html).toContain("Source offline");
+      expect(html).toContain("${s.volumeCount || totalVols} vols (unverified)");
+
+      // Modal ingest guard rejects when all verified volumes are in library
+      expect(html).toContain("showToast('All volumes already in library. Use force re-download link below if needed.');");
+      expect(html).toContain("forceContainer.classList.remove('hidden');");
+
+      // Source selection considers missing volumes
+      expect(html).toContain("elsciHasMissing");
+      expect(html).toContain("lnoriHasMissing");
     });
   });
 });

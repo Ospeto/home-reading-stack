@@ -2,9 +2,15 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import process from "node:process";
 import { Database } from "bun:sqlite";
-import { safeFetchWithSsrf } from "./security";
-import { getCalibreDbPath, isLnoriUrl } from "./lnori";
-import { isElscioneUrl, parseElscioneUrl } from "./elscione";
+import { safeFetchWithSsrf, sanitizeErrorMessage } from "./security";
+import { getCalibreDbPath, isLnoriUrl, fetchLnoriHtml, extractManifestFromHtml, parseLnoriUrl } from "./lnori";
+import {
+  isElscioneUrl,
+  parseElscioneUrl,
+  extractElscioneManifest,
+  extractVolumeNumberFromFilename as extractVolumeNumberFromFilenameElscione,
+  safeDecodeURIComponent,
+} from "./elscione";
 import { searchRanobeDB, searchAniList, extractVolumeNumber, parseMultiPartVolume } from "./scraper";
 import discoverCatalog from "./discover-catalog.json";
 
@@ -17,6 +23,16 @@ export type DiscoverSort = "popularity" | "score" | "newest" | "title_asc";
 export interface DiscoverSourceUrls {
   lnori?: string;
   elscione?: string;
+}
+
+export interface VerifiedSourceInventory {
+  source: "elscione" | "lnori";
+  url: string;
+  status: "verified" | "unverified" | "error";
+  volumeCount?: number;
+  volumes?: number[];
+  error?: string;
+  verifiedAt?: number;
 }
 
 export interface DiscoveredNovel {
@@ -32,15 +48,22 @@ export interface DiscoveredNovel {
   popularity: number;
   releaseDate: string;
   volumeCount: number;
+  catalogVolumeCount?: number;
+  verifiedVolumeCount?: number;
+  verifiedVolumes?: number[];
   source: DiscoverSource;
   primarySource?: "elscione" | "lnori";
   primaryUrl?: string;
   sourceUrls: DiscoverSourceUrls;
+  sources?: VerifiedSourceInventory[];
+  sourceInventories?: Record<string, VerifiedSourceInventory>;
   inLibrary: boolean;
   existingVolumes: number;
   ownedVolumeIndices?: number[];
   missingVolumeIndices?: number[];
   missingVolumeCount?: number;
+  sourceStatus?: "verified" | "unverified" | "error";
+  allVerifiedOwned?: boolean;
 }
 
 export interface DiscoverNovelsParams {
@@ -81,6 +104,10 @@ export interface DiscoverDependencies {
   customElscioneFolders?: string[];
   customLnoriSeries?: Array<{ id: number; slug: string }>;
   skipCrossCheck?: boolean;
+  resolveSourceVolumes?: (
+    url: string,
+    source: "elscione" | "lnori",
+  ) => Promise<VerifiedSourceInventory | null> | VerifiedSourceInventory | null;
 }
 
 const DISCOVER_CACHE_TTL_MS = 60 * 60 * 1000; // 1-hour TTL
@@ -906,8 +933,38 @@ export function assignPrimarySource(novel: DiscoveredNovel): DiscoveredNovel {
   const hasElscione = Boolean(novel.sourceUrls?.elscione);
   const hasLnori = Boolean(novel.sourceUrls?.lnori);
 
-  if ((novel.source === "both" || (hasElscione && hasLnori)) && hasElscione) {
-    // When available on both sources, ALWAYS prefer Elscione over Lnori
+  // If verified missing volumes are known, prefer a source that actually contains the missing volumes
+  if (
+    hasElscione &&
+    hasLnori &&
+    Array.isArray(novel.missingVolumeIndices) &&
+    novel.missingVolumeIndices.length > 0 &&
+    Array.isArray(novel.sources)
+  ) {
+    const elsciSrc = novel.sources.find((s) => s.source === "elscione" && s.status === "verified");
+    const lnoriSrc = novel.sources.find((s) => s.source === "lnori" && s.status === "verified");
+
+    const elsciHasMissing = Boolean(
+      elsciSrc?.volumes &&
+        novel.missingVolumeIndices.some((v) => elsciSrc.volumes!.includes(v)),
+    );
+    const lnoriHasMissing = Boolean(
+      lnoriSrc?.volumes &&
+        novel.missingVolumeIndices.some((v) => lnoriSrc.volumes!.includes(v)),
+    );
+
+    if (elsciHasMissing) {
+      primarySource = "elscione";
+      primaryUrl = novel.sourceUrls.elscione!;
+    } else if (lnoriHasMissing) {
+      primarySource = "lnori";
+      primaryUrl = novel.sourceUrls.lnori!;
+    } else {
+      primarySource = "elscione";
+      primaryUrl = novel.sourceUrls.elscione!;
+    }
+  } else if ((novel.source === "both" || (hasElscione && hasLnori)) && hasElscione) {
+    // When available on both sources and no missing-volume skew, ALWAYS prefer Elscione over Lnori
     primarySource = "elscione";
     primaryUrl = novel.sourceUrls.elscione!;
   } else if (novel.source === "elscione" || hasElscione) {
@@ -1988,6 +2045,7 @@ export function initDiscoverCacheTable(db: Database): void {
  */
 export function resetDiscoverCacheForTest(dependencies?: DiscoverDependencies): void {
   inMemoryFeedCache.clear();
+  clearSourceInventoryCache();
   try {
     const db = dependencies?.cacheDb;
     if (db) {
@@ -1997,6 +2055,488 @@ export function resetDiscoverCacheForTest(dependencies?: DiscoverDependencies): 
   } catch {
     // Ignore clear error
   }
+}
+
+// In-memory cache for verified source inventories
+const _sourceInventoryMemoryCache = new Map<string, { data: VerifiedSourceInventory; timestamp: number }>();
+const _inFlightSourceResolutions = new Map<string, Promise<VerifiedSourceInventory>>();
+export const SOURCE_INVENTORY_TTL_MS = 24 * 60 * 60 * 1000; // 24-hour TTL for verified/unverified
+export const SOURCE_INVENTORY_ERROR_TTL_MS = 60 * 1000; // 1-minute TTL for transient network errors
+
+export function clearSourceInventoryCache(): void {
+  _sourceInventoryMemoryCache.clear();
+  _inFlightSourceResolutions.clear();
+}
+
+/**
+ * Retrieves a cached source inventory from memory or SQLite cache.db.
+ */
+export function getCachedSourceInventory(
+  url: string,
+  dependencies?: DiscoverDependencies,
+): VerifiedSourceInventory | null {
+  const now = Date.now();
+  const cleanUrl = url.trim();
+
+  // 1. In-memory check
+  const mem = _sourceInventoryMemoryCache.get(cleanUrl);
+  if (mem) {
+    const ttl = mem.data.status === "error" ? SOURCE_INVENTORY_ERROR_TTL_MS : SOURCE_INVENTORY_TTL_MS;
+    if (now - mem.timestamp < ttl) {
+      return JSON.parse(JSON.stringify(mem.data));
+    }
+  }
+
+  // 2. SQLite cache.db check
+  try {
+    const db = dependencies?.cacheDb;
+    if (db) {
+      initDiscoverCacheTable(db);
+      const row = db
+        .query("SELECT data, updated_at FROM discover_cache WHERE feed_key = ? LIMIT 1")
+        .get(`v1:src_inv:${cleanUrl}`) as { data: string; updated_at: number } | undefined;
+
+      if (row) {
+        let parsed: VerifiedSourceInventory | null = null;
+        try {
+          parsed = JSON.parse(row.data) as VerifiedSourceInventory;
+        } catch {
+          parsed = null;
+        }
+        if (parsed && typeof parsed === "object") {
+          const ttl = parsed.status === "error" ? SOURCE_INVENTORY_ERROR_TTL_MS : SOURCE_INVENTORY_TTL_MS;
+          if (now - row.updated_at < ttl) {
+            _sourceInventoryMemoryCache.set(cleanUrl, { data: parsed, timestamp: row.updated_at });
+            return parsed;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.debug("[Discover] getCachedSourceInventory SQLite read failed:", err);
+  }
+
+  return null;
+}
+
+/**
+ * Stores a source inventory into memory and SQLite cache.db.
+ */
+export function setCachedSourceInventory(
+  url: string,
+  inventory: VerifiedSourceInventory,
+  dependencies?: DiscoverDependencies,
+): void {
+  const now = Date.now();
+  const cleanUrl = url.trim();
+  _sourceInventoryMemoryCache.set(cleanUrl, {
+    data: JSON.parse(JSON.stringify(inventory)),
+    timestamp: now,
+  });
+
+  try {
+    const db = dependencies?.cacheDb;
+    if (db) {
+      initDiscoverCacheTable(db);
+      db.query(
+        `INSERT INTO discover_cache (feed_key, data, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(feed_key) DO UPDATE SET
+           data = excluded.data,
+           updated_at = excluded.updated_at;`,
+      ).run(`v1:src_inv:${cleanUrl}`, JSON.stringify(inventory), now);
+    }
+  } catch (err) {
+    console.debug("[Discover] setCachedSourceInventory SQLite write failed:", err);
+  }
+}
+
+async function resolveElscioneInventory(
+  url: string,
+  dependencies?: DiscoverDependencies,
+): Promise<VerifiedSourceInventory> {
+  const parsed = parseElscioneUrl(url);
+  if (!parsed) {
+    return {
+      source: "elscione",
+      url,
+      status: "error",
+      error: "Invalid Elsci.one URL",
+      verifiedAt: Date.now(),
+    };
+  }
+
+  const manifest = await extractElscioneManifest(url, {
+    ...dependencies,
+    useHelper: dependencies?.fetch ? false : dependencies?.customElscioneFolders ? false : false,
+  });
+  if (!manifest || !Array.isArray(manifest.volumes) || manifest.volumes.length === 0) {
+    return {
+      source: "elscione",
+      url,
+      status: "unverified",
+      volumeCount: 0,
+      volumes: [],
+      verifiedAt: Date.now(),
+    };
+  }
+
+  let hasUnresolved = false;
+  const validVolumes: number[] = [];
+
+  for (const v of manifest.volumes) {
+    let num: number | undefined = undefined;
+    if (v.filename) {
+      num = extractVolumeNumberFromFilenameElscione(v.filename);
+    }
+    if (typeof num === "number" && !isNaN(num) && num > 0) {
+      validVolumes.push(num);
+    } else if (typeof v.volumeNumber === "number" && !isNaN(v.volumeNumber) && v.volumeNumber > 0) {
+      const titleNum = extractVolumeNumber(v.title || "");
+      if (typeof titleNum === "number" && !isNaN(titleNum) && titleNum > 0) {
+        validVolumes.push(titleNum);
+      } else {
+        hasUnresolved = true;
+      }
+    } else {
+      hasUnresolved = true;
+    }
+  }
+
+  // Check truncation at boundary
+  const isTruncated = manifest.totalCount >= 50 || manifest.volumes.length >= 50;
+
+  if (hasUnresolved || isTruncated || validVolumes.length === 0) {
+    return {
+      source: "elscione",
+      url,
+      status: "unverified",
+      volumeCount: manifest.volumes.length,
+      volumes: Array.from(new Set(validVolumes)).sort((a, b) => a - b),
+      verifiedAt: Date.now(),
+    };
+  }
+
+  const sorted = Array.from(new Set(validVolumes)).sort((a, b) => a - b);
+  return {
+    source: "elscione",
+    url,
+    status: "verified",
+    volumeCount: sorted.length,
+    volumes: sorted,
+    verifiedAt: Date.now(),
+  };
+}
+
+async function resolveLnoriInventory(
+  url: string,
+  dependencies?: DiscoverDependencies,
+): Promise<VerifiedSourceInventory> {
+  const parsedUrl = parseLnoriUrl(url);
+  if (!parsedUrl) {
+    return {
+      source: "lnori",
+      url,
+      status: "error",
+      error: "Invalid Lnori URL",
+      verifiedAt: Date.now(),
+    };
+  }
+
+  const html = await fetchLnoriHtml(url, dependencies);
+  const manifest = extractManifestFromHtml(html, url, parsedUrl);
+  if (!manifest || !Array.isArray(manifest.volumePaths) || manifest.volumePaths.length === 0) {
+    return {
+      source: "lnori",
+      url,
+      status: "unverified",
+      volumeCount: 0,
+      volumes: [],
+      verifiedAt: Date.now(),
+    };
+  }
+
+  let hasUnresolved = false;
+  const validVolumes: number[] = [];
+
+  for (const p of manifest.volumePaths) {
+    const decoded = safeDecodeURIComponent(p);
+    const num = extractVolumeNumber(decoded) ?? extractVolumeNumberFromFilenameElscione(decoded);
+    if (typeof num === "number" && !isNaN(num) && num > 0) {
+      validVolumes.push(num);
+    } else {
+      hasUnresolved = true;
+    }
+  }
+
+  if (hasUnresolved || validVolumes.length === 0) {
+    return {
+      source: "lnori",
+      url,
+      status: "unverified",
+      volumeCount: manifest.volumePaths.length,
+      volumes: Array.from(new Set(validVolumes)).sort((a, b) => a - b),
+      verifiedAt: Date.now(),
+    };
+  }
+
+  const sorted = Array.from(new Set(validVolumes)).sort((a, b) => a - b);
+  return {
+    source: "lnori",
+    url,
+    status: "verified",
+    volumeCount: sorted.length,
+    volumes: sorted,
+    verifiedAt: Date.now(),
+  };
+}
+
+/**
+ * Resolves verified volume inventory for a single source URL with caching and in-flight deduplication.
+ */
+export async function resolveSourceInventory(
+  url: string,
+  source: "elscione" | "lnori",
+  dependencies?: DiscoverDependencies,
+): Promise<VerifiedSourceInventory> {
+  if (!url || typeof url !== "string" || !url.trim()) {
+    return {
+      source,
+      url: "",
+      status: "error",
+      error: "Missing or invalid URL",
+      verifiedAt: Date.now(),
+    };
+  }
+
+  const cleanUrl = url.trim();
+
+  // Injectable resolver for unit tests and custom overrides
+  if (dependencies?.resolveSourceVolumes) {
+    try {
+      const custom = await dependencies.resolveSourceVolumes(cleanUrl, source);
+      if (custom) {
+        setCachedSourceInventory(cleanUrl, custom, dependencies);
+        return custom;
+      }
+    } catch (err: any) {
+      return {
+        source,
+        url: cleanUrl,
+        status: "error",
+        error: sanitizeErrorMessage(err?.message || err),
+        verifiedAt: Date.now(),
+      };
+    }
+  }
+
+  // Check cache
+  const cached = getCachedSourceInventory(cleanUrl, dependencies);
+  if (cached) {
+    return cached;
+  }
+
+  const isTestEnv = process.env.NODE_ENV === "test" || Boolean(process.env.BUN_TEST);
+  const shouldOnline = Boolean(dependencies?.enableOnline ?? !isTestEnv);
+
+  if (!shouldOnline && !dependencies?.fetch && !dependencies?.resolveSourceVolumes) {
+    return {
+      source,
+      url: cleanUrl,
+      status: "unverified",
+      error: "Online source verification disabled in test environment",
+      verifiedAt: Date.now(),
+    };
+  }
+
+  // Deduplicate concurrent in-flight requests for the same URL
+  const inFlight = _inFlightSourceResolutions.get(cleanUrl);
+  if (inFlight) {
+    return await inFlight;
+  }
+
+  const promise = (async () => {
+    try {
+      let result: VerifiedSourceInventory;
+      if (source === "elscione") {
+        result = await resolveElscioneInventory(cleanUrl, dependencies);
+      } else if (source === "lnori") {
+        result = await resolveLnoriInventory(cleanUrl, dependencies);
+      } else {
+        result = {
+          source,
+          url: cleanUrl,
+          status: "error",
+          error: "Unsupported source type",
+          verifiedAt: Date.now(),
+        };
+      }
+      setCachedSourceInventory(cleanUrl, result, dependencies);
+      return result;
+    } catch (err: any) {
+      const errorResult: VerifiedSourceInventory = {
+        source,
+        url: cleanUrl,
+        status: "error",
+        error: sanitizeErrorMessage(err?.message || err),
+        verifiedAt: Date.now(),
+      };
+      setCachedSourceInventory(cleanUrl, errorResult, dependencies);
+      return errorResult;
+    } finally {
+      _inFlightSourceResolutions.delete(cleanUrl);
+    }
+  })();
+
+  _inFlightSourceResolutions.set(cleanUrl, promise);
+  return await promise;
+}
+
+/**
+ * Resolves verified inventories across all sources associated with a discovered novel.
+ */
+export async function resolveNovelSourceInventories(
+  novel: DiscoveredNovel,
+  dependencies?: DiscoverDependencies,
+): Promise<{
+  inventories: VerifiedSourceInventory[];
+  verifiedVolumes: number[];
+  verifiedVolumeCount?: number;
+  sourceStatus: "verified" | "unverified" | "error";
+}> {
+  const sourcesToResolve: Array<{ source: "elscione" | "lnori"; url: string }> = [];
+
+  if (novel.sourceUrls?.elscione) {
+    sourcesToResolve.push({ source: "elscione", url: novel.sourceUrls.elscione });
+  }
+  if (novel.sourceUrls?.lnori) {
+    sourcesToResolve.push({ source: "lnori", url: novel.sourceUrls.lnori });
+  }
+  if (Array.isArray(novel.sources)) {
+    for (const s of novel.sources) {
+      if (s?.url && (s.source === "elscione" || s.source === "lnori")) {
+        if (!sourcesToResolve.some((item) => item.url === s.url)) {
+          sourcesToResolve.push({ source: s.source, url: s.url });
+        }
+      }
+    }
+  }
+
+  if (sourcesToResolve.length === 0) {
+    return {
+      inventories: [],
+      verifiedVolumes: [],
+      verifiedVolumeCount: undefined,
+      sourceStatus: "unverified",
+    };
+  }
+
+  const inventories = await Promise.all(
+    sourcesToResolve.map((item) => resolveSourceInventory(item.url, item.source, dependencies)),
+  );
+
+  const verifiedList = inventories.filter((inv) => inv.status === "verified");
+  const errorList = inventories.filter((inv) => inv.status === "error");
+
+  let sourceStatus: "verified" | "unverified" | "error" = "unverified";
+  if (verifiedList.length > 0) {
+    sourceStatus = "verified";
+  } else if (errorList.length === inventories.length) {
+    sourceStatus = "error";
+  } else {
+    sourceStatus = "unverified";
+  }
+
+  // Union of verified volumes across all verified sources
+  const volumeSet = new Set<number>();
+  for (const inv of verifiedList) {
+    if (Array.isArray(inv.volumes)) {
+      for (const v of inv.volumes) {
+        if (typeof v === "number" && !isNaN(v) && v > 0) {
+          volumeSet.add(v);
+        }
+      }
+    }
+  }
+
+  const verifiedVolumes = Array.from(volumeSet).sort((a, b) => a - b);
+  const verifiedVolumeCount = sourceStatus === "verified" ? verifiedVolumes.length : undefined;
+
+  return {
+    inventories,
+    verifiedVolumes,
+    verifiedVolumeCount,
+    sourceStatus,
+  };
+}
+
+/**
+ * Attaches cached inventories to a novel during catalog/feed cross-checks if already cached.
+ */
+export function attachCachedInventoriesIfAvailable(
+  novel: DiscoveredNovel,
+  dependencies?: DiscoverDependencies,
+): DiscoveredNovel {
+  if (novel.verifiedVolumes && novel.sourceStatus === "verified") {
+    return novel;
+  }
+
+  const cachedSources: VerifiedSourceInventory[] = [];
+  if (novel.sourceUrls?.elscione) {
+    let cached = getCachedSourceInventory(novel.sourceUrls.elscione, dependencies);
+    if (!cached && dependencies?.resolveSourceVolumes) {
+      try {
+        const custom = dependencies.resolveSourceVolumes(novel.sourceUrls.elscione, "elscione");
+        if (custom && typeof (custom as any).then !== "function") {
+          cached = custom as VerifiedSourceInventory;
+        }
+      } catch (_err) {
+        void _err;
+      }
+    }
+    if (cached) cachedSources.push(cached);
+  }
+  if (novel.sourceUrls?.lnori) {
+    let cached = getCachedSourceInventory(novel.sourceUrls.lnori, dependencies);
+    if (!cached && dependencies?.resolveSourceVolumes) {
+      try {
+        const custom = dependencies.resolveSourceVolumes(novel.sourceUrls.lnori, "lnori");
+        if (custom && typeof (custom as any).then !== "function") {
+          cached = custom as VerifiedSourceInventory;
+        }
+      } catch (_err) {
+        void _err;
+      }
+    }
+    if (cached) cachedSources.push(cached);
+  }
+
+  if (cachedSources.length > 0) {
+    const verifiedList = cachedSources.filter((s) => s.status === "verified");
+    if (verifiedList.length > 0) {
+      const volumeSet = new Set<number>();
+      for (const s of verifiedList) {
+        if (Array.isArray(s.volumes)) {
+          for (const v of s.volumes) {
+            if (typeof v === "number" && !isNaN(v) && v > 0) volumeSet.add(v);
+          }
+        }
+      }
+      const verifiedVolumes = Array.from(volumeSet).sort((a, b) => a - b);
+      return {
+        ...novel,
+        catalogVolumeCount: novel.catalogVolumeCount ?? novel.volumeCount,
+        sources: cachedSources,
+        sourceInventories: Object.fromEntries(cachedSources.map((s) => [s.source, s])),
+        sourceStatus: "verified",
+        verifiedVolumes,
+        verifiedVolumeCount: verifiedVolumes.length,
+        volumeCount: verifiedVolumes.length,
+      };
+    }
+  }
+
+  return novel;
 }
 
 /**
@@ -2932,7 +3472,8 @@ export function matchNovelWithCalibreIndex(
         !isNaN(Number(b.book.series_index)) &&
         Number(b.book.series_index) > 0
       ) {
-        volNum = Math.round(Number(b.book.series_index));
+        // Preserve fractional series_index values without rounding
+        volNum = Number(b.book.series_index);
       }
       if (volNum !== null && volNum > 0) {
         ownedVolumeSet.add(volNum);
@@ -2940,33 +3481,118 @@ export function matchNovelWithCalibreIndex(
     }
   }
 
-  if (matchCount > 0 && ownedVolumeSet.size === 0) {
-    for (let i = 1; i <= matchCount; i++) {
-      ownedVolumeSet.add(i);
-    }
-  }
-
   const ownedVolumeIndices = Array.from(ownedVolumeSet).sort((a, b) => a - b);
   const existingVolumes = ownedVolumeIndices.length > 0 ? ownedVolumeIndices.length : matchCount;
   const maxOwned = ownedVolumeIndices.length > 0 ? Math.max(...ownedVolumeIndices) : 0;
-  const totalVolumeCount = Math.max(novel.volumeCount || 1, matchCount, Math.ceil(maxOwned));
+  const catalogVolumeCount = novel.catalogVolumeCount ?? novel.volumeCount ?? 1;
 
-  const missingVolumeIndices: number[] = [];
-  for (let v = 1; v <= totalVolumeCount; v++) {
-    if (!ownedVolumeSet.has(v)) {
-      missingVolumeIndices.push(v);
+  // Determine verified volumes from novel.verifiedVolumes or verified sources
+  let verifiedVolumes = novel.verifiedVolumes;
+  if (!verifiedVolumes && Array.isArray(novel.sources)) {
+    const verifiedSources = novel.sources.filter((s) => s.status === "verified");
+    if (verifiedSources.length > 0) {
+      const uSet = new Set<number>();
+      for (const s of verifiedSources) {
+        if (Array.isArray(s.volumes)) {
+          for (const v of s.volumes) {
+            if (typeof v === "number" && !isNaN(v) && v > 0) uSet.add(v);
+          }
+        }
+      }
+      if (uSet.size > 0) {
+        verifiedVolumes = Array.from(uSet).sort((a, b) => a - b);
+      }
     }
   }
-  const missingVolumeCount = missingVolumeIndices.length;
+
+  const hasVerified = Array.isArray(verifiedVolumes) && verifiedVolumes.length > 0;
+  let missingVolumeIndices: number[] | undefined = undefined;
+  let missingVolumeCount: number | undefined = undefined;
+  let totalVolumeCount = hasVerified ? verifiedVolumes!.length : Math.max(catalogVolumeCount, existingVolumes, Math.ceil(maxOwned));
+  let sourceStatus: "verified" | "unverified" | "error" =
+    novel.sourceStatus || (hasVerified ? "verified" : "unverified");
+  let allVerifiedOwned = false;
+
+  if (hasVerified && verifiedVolumes) {
+    missingVolumeIndices = verifiedVolumes.filter((v) => !ownedVolumeSet.has(v));
+    missingVolumeCount = missingVolumeIndices.length;
+    totalVolumeCount = verifiedVolumes.length;
+    sourceStatus = "verified";
+    allVerifiedOwned = missingVolumeCount === 0 && (existingVolumes > 0 || ownedVolumeSet.size > 0);
+  } else {
+    // Unverified or failed: unknown availability means unknown missing count
+    // Do NOT generate 1..totalVolumeCount downloadable missing volumes!
+    missingVolumeIndices = undefined;
+    missingVolumeCount = undefined;
+    allVerifiedOwned = false;
+  }
 
   return {
     ...novel,
     volumeCount: totalVolumeCount,
+    catalogVolumeCount,
+    verifiedVolumeCount: hasVerified ? verifiedVolumes!.length : undefined,
+    verifiedVolumes: hasVerified ? verifiedVolumes : undefined,
+    sourceStatus,
+    allVerifiedOwned,
     inLibrary: matchCount > 0,
     existingVolumes,
     ownedVolumeIndices,
     missingVolumeIndices,
     missingVolumeCount,
+  };
+}
+
+/**
+ * Computes an unowned novel audit without Calibre books, respecting verified inventories.
+ */
+function computeUnownedNovelAudit(
+  novel: DiscoveredNovel,
+  dependencies?: DiscoverDependencies,
+): DiscoveredNovel {
+  const enriched = attachCachedInventoriesIfAvailable(novel, dependencies);
+  const catalogVolumeCount = enriched.catalogVolumeCount ?? enriched.volumeCount ?? 1;
+  const verifiedVolumes =
+    enriched.verifiedVolumes ??
+    (Array.isArray(enriched.sources)
+      ? Array.from(
+          new Set(
+            enriched.sources
+              .filter((s) => s.status === "verified")
+              .flatMap((s) => s.volumes || []),
+          ),
+        ).sort((a, b) => a - b)
+      : undefined);
+  const hasVerified = Array.isArray(verifiedVolumes) && verifiedVolumes.length > 0;
+
+  if (hasVerified && verifiedVolumes) {
+    return {
+      ...enriched,
+      volumeCount: verifiedVolumes.length,
+      catalogVolumeCount,
+      verifiedVolumeCount: verifiedVolumes.length,
+      verifiedVolumes,
+      sourceStatus: "verified",
+      allVerifiedOwned: false,
+      inLibrary: false,
+      existingVolumes: 0,
+      ownedVolumeIndices: [],
+      missingVolumeIndices: [...verifiedVolumes],
+      missingVolumeCount: verifiedVolumes.length,
+    };
+  }
+
+  return {
+    ...enriched,
+    volumeCount: catalogVolumeCount,
+    catalogVolumeCount,
+    sourceStatus: enriched.sourceStatus || "unverified",
+    allVerifiedOwned: false,
+    inLibrary: false,
+    existingVolumes: 0,
+    ownedVolumeIndices: [],
+    missingVolumeIndices: undefined,
+    missingVolumeCount: undefined,
   };
 }
 
@@ -3025,19 +3651,7 @@ export async function crossCheckNovelsWithCalibreAsync(
   const calibreBooks = resolveCalibreBooks(dependencies);
 
   if (calibreBooks.length === 0) {
-    return novels.map((novel) => {
-      const volCount = novel.volumeCount || 1;
-      const missing = Array.from({ length: volCount }, (_, i) => i + 1);
-      return {
-        ...novel,
-        volumeCount: volCount,
-        inLibrary: false,
-        existingVolumes: 0,
-        ownedVolumeIndices: [],
-        missingVolumeIndices: missing,
-        missingVolumeCount: volCount,
-      };
-    });
+    return novels.map((novel) => computeUnownedNovelAudit(novel, dependencies));
   }
 
   const index = getOrCreateCalibreInvertedIndex(calibreBooks);
@@ -3047,7 +3661,8 @@ export async function crossCheckNovelsWithCalibreAsync(
     if (i > 0 && i % yieldEvery === 0) {
       await yieldEventLoop();
     }
-    results.push(matchNovelWithCalibreIndex(novels[i], index));
+    const enriched = attachCachedInventoriesIfAvailable(novels[i], dependencies);
+    results.push(matchNovelWithCalibreIndex(enriched, index));
   }
 
   return results;
@@ -3064,23 +3679,14 @@ export function crossCheckNovelsWithCalibre(
   const calibreBooks = resolveCalibreBooks(dependencies);
 
   if (calibreBooks.length === 0) {
-    return novels.map((novel) => {
-      const volCount = novel.volumeCount || 1;
-      const missing = Array.from({ length: volCount }, (_, i) => i + 1);
-      return {
-        ...novel,
-        volumeCount: volCount,
-        inLibrary: false,
-        existingVolumes: 0,
-        ownedVolumeIndices: [],
-        missingVolumeIndices: missing,
-        missingVolumeCount: volCount,
-      };
-    });
+    return novels.map((novel) => computeUnownedNovelAudit(novel, dependencies));
   }
 
   const index = getOrCreateCalibreInvertedIndex(calibreBooks);
-  return novels.map((novel) => matchNovelWithCalibreIndex(novel, index));
+  return novels.map((novel) => {
+    const enriched = attachCachedInventoriesIfAvailable(novel, dependencies);
+    return matchNovelWithCalibreIndex(enriched, index);
+  });
 }
 
 function queryCalibreLibraryBooks(db: Database): any[] {
@@ -4639,8 +5245,29 @@ export async function getDiscoverNovelById(
     }
   }
 
+  // Preserve global catalog publication total
+  candidate.catalogVolumeCount = candidate.catalogVolumeCount ?? candidate.volumeCount;
+
+  // Resolve verified source inventories
+  const { inventories, verifiedVolumes, verifiedVolumeCount, sourceStatus } =
+    await resolveNovelSourceInventories(candidate, dependencies);
+
+  candidate.sources = inventories;
+  candidate.sourceInventories = Object.fromEntries(inventories.map((i) => [i.source, i]));
+  candidate.sourceStatus = sourceStatus;
+
+  if (sourceStatus === "verified" && verifiedVolumes.length > 0) {
+    candidate.verifiedVolumes = verifiedVolumes;
+    candidate.verifiedVolumeCount = verifiedVolumeCount;
+    candidate.volumeCount = verifiedVolumeCount!;
+  } else {
+    candidate.verifiedVolumes = undefined;
+    candidate.verifiedVolumeCount = undefined;
+  }
+
   // Cross check with Calibre to guarantee exact volume audit
   const reconciled = crossCheckNovelsWithCalibre([candidate], dependencies);
-  return reconciled[0] || candidate;
+  const result = reconciled[0] || candidate;
+  return assignPrimarySource(result);
 }
 

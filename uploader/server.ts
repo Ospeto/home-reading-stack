@@ -77,6 +77,7 @@ import {
   getDiscoverNovelById,
   stripEmojis,
   REAL_ELSCIONE_FOLDERS,
+  type VerifiedSourceInventory,
 } from "./discover";
 import { isJoplinRoute, handleJoplinRequest } from "./joplin";
 import {
@@ -152,6 +153,10 @@ export interface ServerDependencies {
   getDiscoverNovelById?: typeof getDiscoverNovelById;
   getDiscoverProgress?: (jobId: string | number) => DiscoverJobProgress | null;
   getActiveDiscoverJobs?: () => DiscoverJobProgress[];
+  resolveSourceVolumes?: (
+    url: string,
+    source: "elscione" | "lnori",
+  ) => Promise<VerifiedSourceInventory | null> | VerifiedSourceInventory | null;
 }
 
 export interface DiscoverJobProgress {
@@ -5460,6 +5465,7 @@ async function handleRequestCore(
       const novel = await getNovelFn(rawNovelId, {
         cacheDb,
         getCalibreBooks: serverDependencies.getCalibreBooks ?? getCalibreBooks,
+        resolveSourceVolumes: serverDependencies.resolveSourceVolumes,
       });
 
       if (!novel) {
