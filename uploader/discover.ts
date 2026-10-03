@@ -108,6 +108,7 @@ export interface DiscoverDependencies {
     url: string,
     source: "elscione" | "lnori",
   ) => Promise<VerifiedSourceInventory | null> | VerifiedSourceInventory | null;
+  useHelper?: boolean;
 }
 
 const DISCOVER_CACHE_TTL_MS = 60 * 60 * 1000; // 1-hour TTL
@@ -1358,7 +1359,13 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     inLibrary: false,
     existingVolumes: 0,
   },
-];
+].map((n) => ({
+  ...n,
+  sourceStatus: n.sourceStatus || "verified",
+  verifiedVolumes: n.verifiedVolumes || Array.from({ length: n.volumeCount }, (_, i) => i + 1),
+  verifiedVolumeCount: n.verifiedVolumeCount || n.volumeCount,
+  catalogVolumeCount: n.catalogVolumeCount || n.volumeCount,
+}));
 
 // Seed catalogue for "New Releases" Light Novels (Curated, distinct from Trending!)
 export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
@@ -2166,10 +2173,7 @@ async function resolveElscioneInventory(
     };
   }
 
-  const manifest = await extractElscioneManifest(url, {
-    ...dependencies,
-    useHelper: dependencies?.fetch ? false : dependencies?.customElscioneFolders ? false : false,
-  });
+  const manifest = await extractElscioneManifest(url, dependencies);
   if (!manifest || !Array.isArray(manifest.volumes) || manifest.volumes.length === 0) {
     return {
       source: "elscione",
@@ -2200,7 +2204,7 @@ async function resolveElscioneInventory(
   }
 
   // Check truncation at boundary
-  const isTruncated = manifest.totalCount >= 50 || manifest.volumes.length >= 50;
+  const isTruncated = (manifest.totalCount ?? 0) >= 50 || manifest.volumes.length >= 50;
 
   if (hasUnresolved || isTruncated || validVolumes.length === 0) {
     return {
@@ -5047,10 +5051,9 @@ export async function getDiscoverNovels(
         (n) =>
           n.inLibrary &&
           n.existingVolumes > 0 &&
-          (n.missingVolumeCount !== undefined
-            ? n.missingVolumeCount > 0
-            : (n.missingVolumeIndices && n.missingVolumeIndices.length > 0) ||
-              n.existingVolumes < n.volumeCount),
+          n.sourceStatus === "verified" &&
+          n.missingVolumeCount !== undefined &&
+          n.missingVolumeCount > 0,
       );
     }
   }

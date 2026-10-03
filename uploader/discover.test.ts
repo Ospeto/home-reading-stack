@@ -4174,7 +4174,16 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
 
       const res = await getDiscoverNovels(
         { tab: "trending", status: "incomplete" },
-        { getCalibreBooks: () => mockCalibre },
+        {
+          getCalibreBooks: () => mockCalibre,
+          resolveSourceVolumes: (url, source) => ({
+            source,
+            url,
+            status: "verified",
+            volumeCount: 19,
+            volumes: Array.from({ length: 19 }, (_, i) => i + 1),
+          }),
+        },
       );
 
       expect(res.success).toBe(true);
@@ -4182,7 +4191,9 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       for (const n of res.novels) {
         expect(n.inLibrary).toBe(true);
         expect(n.existingVolumes).toBeGreaterThan(0);
-        expect(n.existingVolumes).toBeLessThan(n.volumeCount);
+        expect(n.sourceStatus).toBe("verified");
+        expect(n.missingVolumeCount).toBeDefined();
+        expect(n.missingVolumeCount).toBeGreaterThan(0);
       }
     });
 
@@ -4192,6 +4203,13 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       ];
       setServerDependenciesForTest({
         getCalibreBooks: () => mockCalibre,
+        resolveSourceVolumes: (url, source) => ({
+          source,
+          url,
+          status: "verified",
+          volumeCount: 19,
+          volumes: Array.from({ length: 19 }, (_, i) => i + 1),
+        }),
       });
 
       const req = new Request("http://127.0.0.1:8086/api/discover/novels?status=incomplete");
@@ -4203,8 +4221,77 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(data.novels.length).toBeGreaterThan(0);
       for (const n of data.novels) {
         expect(n.inLibrary).toBe(true);
-        expect(n.existingVolumes).toBeLessThan(n.volumeCount);
+        expect(n.existingVolumes).toBeGreaterThan(0);
+        expect(n.sourceStatus).toBe("verified");
+        expect(n.missingVolumeCount).toBeDefined();
+        expect(n.missingVolumeCount).toBeGreaterThan(0);
       }
+    });
+
+    it("status=incomplete strictly requires verified source and verified missing data without falling back to catalog volumeCount", async () => {
+      // Date A Live: user owns 16 volumes, publication catalog volumeCount is 22
+      const mockCalibre = Array.from({ length: 16 }, (_, i) => ({
+        id: 700 + i,
+        title: `Date A Live, Vol. ${i + 1}`,
+        series: "Date A Live",
+        series_index: i + 1,
+      }));
+
+      // Case 1: Source error -> sourceStatus is "error", missingVolumeCount is undefined
+      // Must NOT be returned despite existingVolumes (16) < catalog volumeCount (22)
+      const resError = await getDiscoverNovels(
+        { tab: "trending", status: "incomplete" },
+        {
+          getCalibreBooks: () => mockCalibre,
+          resolveSourceVolumes: (url, source) => ({
+            source,
+            url,
+            status: "error",
+            error: "Source offline",
+          }),
+        },
+      );
+      expect(resError.success).toBe(true);
+      const dalError = resError.novels.find((n) => n.id === "date-a-live");
+      expect(dalError).toBeUndefined();
+
+      // Case 2: Unverified source -> sourceStatus is "unverified", missingVolumeCount is undefined
+      // Must NOT be returned
+      const resUnverified = await getDiscoverNovels(
+        { tab: "trending", status: "incomplete" },
+        {
+          getCalibreBooks: () => mockCalibre,
+          resolveSourceVolumes: (url, source) => ({
+            source,
+            url,
+            status: "unverified",
+            volumeCount: 0,
+            volumes: [],
+          }),
+        },
+      );
+      expect(resUnverified.success).toBe(true);
+      const dalUnverified = resUnverified.novels.find((n) => n.id === "date-a-live");
+      expect(dalUnverified).toBeUndefined();
+
+      // Case 3: Verified source with 16 volumes -> all owned, missingVolumeCount is 0
+      // Must NOT be returned despite existingVolumes (16) < catalog volumeCount (22)
+      const resFullyOwned = await getDiscoverNovels(
+        { tab: "trending", status: "incomplete" },
+        {
+          getCalibreBooks: () => mockCalibre,
+          resolveSourceVolumes: (url, source) => ({
+            source,
+            url,
+            status: "verified",
+            volumeCount: 16,
+            volumes: Array.from({ length: 16 }, (_, i) => i + 1),
+          }),
+        },
+      );
+      expect(resFullyOwned.success).toBe(true);
+      const dalFullyOwned = resFullyOwned.novels.find((n) => n.id === "date-a-live");
+      expect(dalFullyOwned).toBeUndefined();
     });
 
     it("verifies dynamic button labels, status note, and force re-download in index.html", () => {
