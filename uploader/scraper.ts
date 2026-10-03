@@ -383,12 +383,63 @@ const ROMAN_NUMERAL_VOLUME_MAP: Record<string, number> = {
   xxi: 21, xxii: 22, xxiii: 23, xxiv: 24, xxv: 25, xxvi: 26, xxvii: 27, xxviii: 28, xxix: 29, xxx: 30,
 };
 
+export interface MultiPartVolumeInfo {
+  part: number;
+  volume: number;
+}
+
+/**
+ * Parses multi-part volume titles like:
+ * "Part 1 Volume 2", "Part 1 Daughter of a Soldier v02", "Part 5 Volume 8",
+ * "Ascendance of a Bookworm, Part 1 Vol. 1", "အပိုင်း ၁ အတွဲ ၂", "Part IV Volume II".
+ */
+export function parseMultiPartVolume(title: string): MultiPartVolumeInfo | null {
+  if (!title) return null;
+  const s = title.trim();
+
+  const multiPartPattern =
+    /(?:^|[\s_\-\[\(（［{,:])(?:part|pt|အပိုင်း)\.?\s*([0-9]+|[ivx]+|[၀-၉]+)(?:[^\w\n]+(?:[a-zA-Z\s'’]+)?)?[^\w\n]+(?:vol(?:ume)?|book|bk|v(?=\.?\s*\d)|အတွဲ)\.?\s*0*(\d+(?:\.\d+)?|[ivx]+|[၀-၉]+)/i;
+
+  const m = s.match(multiPartPattern);
+  if (m) {
+    const rawPart = m[1];
+    const rawVol = m[2];
+
+    const partNum =
+      ROMAN_NUMERAL_VOLUME_MAP[rawPart.toLowerCase()] ??
+      parseBurmeseOrAsciiNumber(rawPart);
+
+    const volNum =
+      ROMAN_NUMERAL_VOLUME_MAP[rawVol.toLowerCase()] ??
+      parseBurmeseOrAsciiNumber(rawVol);
+
+    if (
+      partNum !== null &&
+      !isNaN(partNum) &&
+      partNum > 0 &&
+      volNum !== null &&
+      !isNaN(volNum) &&
+      volNum > 0
+    ) {
+      return { part: partNum, volume: volNum };
+    }
+  }
+
+  return null;
+}
+
 /**
  * Extract volume number from title or filename.
  */
 export function extractVolumeNumber(title: string): number | null {
   if (!title) return null;
   const s = title.trim();
+
+  // 0. Check multi-part pattern: Part X ... Volume Y selects volume Y (the volume within the part)
+  const multiPart = parseMultiPartVolume(s);
+  if (multiPart) {
+    return multiPart.volume;
+  }
 
   // 1. Check Roman numeral volume patterns (e.g. "Vol. IV", "Volume II", "Book III", "[Vol. V]")
   const romanPatterns = [

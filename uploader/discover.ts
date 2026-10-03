@@ -5,7 +5,7 @@ import { Database } from "bun:sqlite";
 import { safeFetchWithSsrf } from "./security";
 import { getCalibreDbPath, isLnoriUrl } from "./lnori";
 import { isElscioneUrl, parseElscioneUrl } from "./elscione";
-import { searchRanobeDB, searchAniList, extractVolumeNumber } from "./scraper";
+import { searchRanobeDB, searchAniList, extractVolumeNumber, parseMultiPartVolume } from "./scraper";
 import discoverCatalog from "./discover-catalog.json";
 
 export type DiscoverSource = "lnori" | "elscione" | "both";
@@ -2748,6 +2748,38 @@ export function getOrCreateCalibreInvertedIndex(calibreBooks: any[]): CalibreInv
   return index;
 }
 
+export const BOOKWORM_PART_OFFSETS = [0, 3, 7, 12, 21];
+export const BOOKWORM_PART_VOLUMES = [3, 4, 5, 9, 12];
+
+/**
+ * Resolves canonical volume numbers for discovered series, supporting
+ * multi-part light novel calculations (such as Ascendance of a Bookworm Part X Volume Y -> global volume index).
+ * For non-Bookworm titles, returns the extracted volume number.
+ */
+export function resolveCanonicalVolumeNumber(
+  title: string,
+  seriesName?: string,
+): number | null {
+  if (!title) return null;
+
+  // 1. Check for multi-part series pattern (Part X ... Volume Y)
+  const multiPart = parseMultiPartVolume(title);
+  if (multiPart) {
+    const { part, volume } = multiPart;
+    const combined = `${title} ${seriesName || ""}`.toLowerCase();
+    const isBookworm = /ascendance\s*of\s*a\s*bookworm|honzuki/i.test(combined);
+
+    if (isBookworm && part >= 1 && part <= BOOKWORM_PART_OFFSETS.length) {
+      return BOOKWORM_PART_OFFSETS[part - 1] + volume;
+    }
+
+    return volume;
+  }
+
+  // 2. Standard volume extraction
+  return extractVolumeNumber(title);
+}
+
 /**
  * Invalidates the cached Calibre inverted index immediately.
  */
@@ -2890,15 +2922,17 @@ export function matchNovelWithCalibreIndex(
     if (isMatch) {
       matchCount++;
       let volNum: number | null = null;
+      if (b.book.title) {
+        volNum = resolveCanonicalVolumeNumber(b.book.title, b.book.series || novel.title);
+      }
       if (
+        (volNum === null || volNum <= 0) &&
         b.book.series_index !== undefined &&
         b.book.series_index !== null &&
         !isNaN(Number(b.book.series_index)) &&
         Number(b.book.series_index) > 0
       ) {
         volNum = Math.round(Number(b.book.series_index));
-      } else if (b.book.title) {
-        volNum = extractVolumeNumber(b.book.title);
       }
       if (volNum !== null && volNum > 0) {
         ownedVolumeSet.add(volNum);
@@ -2915,14 +2949,12 @@ export function matchNovelWithCalibreIndex(
   const ownedVolumeIndices = Array.from(ownedVolumeSet).sort((a, b) => a - b);
   const existingVolumes = ownedVolumeIndices.length > 0 ? ownedVolumeIndices.length : matchCount;
   const maxOwned = ownedVolumeIndices.length > 0 ? Math.max(...ownedVolumeIndices) : 0;
-  const totalVolumeCount = Math.max(novel.volumeCount || 1, matchCount, maxOwned);
+  const totalVolumeCount = Math.max(novel.volumeCount || 1, matchCount, Math.ceil(maxOwned));
 
   const missingVolumeIndices: number[] = [];
-  if (totalVolumeCount > existingVolumes) {
-    for (let v = 1; v <= totalVolumeCount; v++) {
-      if (!ownedVolumeSet.has(v)) {
-        missingVolumeIndices.push(v);
-      }
+  for (let v = 1; v <= totalVolumeCount; v++) {
+    if (!ownedVolumeSet.has(v)) {
+      missingVolumeIndices.push(v);
     }
   }
   const missingVolumeCount = missingVolumeIndices.length;
@@ -4349,7 +4381,13 @@ export async function getDiscoverNovels(
       filtered = filtered.filter((n) => n.inLibrary);
     } else if (statusFilter === "incomplete" || statusFilter === "missing_volumes") {
       filtered = filtered.filter(
-        (n) => n.inLibrary && n.existingVolumes > 0 && n.existingVolumes < n.volumeCount,
+        (n) =>
+          n.inLibrary &&
+          n.existingVolumes > 0 &&
+          (n.missingVolumeCount !== undefined
+            ? n.missingVolumeCount > 0
+            : (n.missingVolumeIndices && n.missingVolumeIndices.length > 0) ||
+              n.existingVolumes < n.volumeCount),
       );
     }
   }

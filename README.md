@@ -496,6 +496,7 @@ LightHouse features an Apple-aesthetic **Discover Shelf** across both the **Web 
      - Novel preview modal (`#discoverModal`): displays true total volumes (`${totalVols} Volumes`) reconciled with local Calibre volumes (`Math.max(catalogVolumes, libraryCount)`).
    - Reconciles catalog volume counts with local Calibre ownership while preventing spin-off/mainline volume count pollution.
    - Pre-indexed catalog volume counts for popular long-running series in `discover-catalog.json` and `CATALOG_VOLUMES` in `uploader/discover.ts`.
+   - **High-Precision Title-First Volume Extraction & Multi-Part Resolution:** Prioritizes explicit volume numbers parsed from book titles (`extractVolumeNumber(b.book.title)`) over fractional Calibre `series_index` (`1.1`, `1.09`, `1.08`) so all owned volumes are detected accurately rather than collapsed to index 1. Supports canonical multi-part light novel calculations (such as Ascendance of a Bookworm `Part X Volume Y` mapping to global canonical indices, e.g. Part 5 Volume 8 -> Volume 29) and preserves integer complements when side-story fractional volumes are present.
 7. **1-Click Direct Ingestion, Persistent Downloads & Live Progress (`POST /api/discover/ingest`):**
    - 1-tap download from card or modal enqueues background ingestion into Calibre.
    - Real-time live download progress tracked via `GET /api/discover/progress/:jobId` with active download state persistently tracked in browser `localStorage` (`discover_active_downloads`).
