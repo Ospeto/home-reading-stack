@@ -511,8 +511,9 @@ export function extractVolumeNumber(title: string): number | null {
     if (romanVal !== undefined) {
       const matchIndex = bareRomanMatch.index ?? 0;
       const isStartOfTitle = matchIndex === 0 && !/[\s:–—\-\(\[\{,]/.test(s[0]);
-      // If Roman numeral is just 'i', ensure it's not the initial word of a title (like "I Was Reincarnated...")
-      if (rawRoman !== "i" || (!isStartOfTitle && s.length > 2)) {
+      // If Roman numeral is just 'i', ensure it's not the initial word of a title (like "I Was Reincarnated...") or preceded by a comma (like "Vending Machine, I")
+      const isPrecededByComma = /,\s*$/i.test(s.slice(0, matchIndex));
+      if (rawRoman !== "i" || (!isStartOfTitle && !isPrecededByComma && s.length > 2)) {
         return romanVal;
       }
     }

@@ -959,9 +959,6 @@ export function assignPrimarySource(novel: DiscoveredNovel): DiscoveredNovel {
     } else if (elsciCovered > 0) {
       primarySource = "elscione";
       primaryUrl = novel.sourceUrls.elscione!;
-    } else if (lnoriCovered > 0) {
-      primarySource = "lnori";
-      primaryUrl = novel.sourceUrls.lnori!;
     } else {
       primarySource = "elscione";
       primaryUrl = novel.sourceUrls.elscione!;

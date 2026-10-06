@@ -5311,7 +5311,7 @@
               <div class="space-y-1">
                 <div class="flex items-center gap-1 mb-1 flex-wrap">
                   ${sourceBadgesHtml}
-                  <span class="px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold bg-white/10 text-zinc-300 border border-white/10 shrink-0">
+                  <span data-card-vol-pill class="px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold bg-white/10 text-zinc-300 border border-white/10 shrink-0">
                     ${totalVols} vols
                   </span>
                   <span class="text-[10px] text-amber-400/90 font-mono ml-auto flex items-center shrink-0">${starSvg}${ratingVal.toFixed(1)}</span>
@@ -5761,12 +5761,8 @@
       const coverPill = cardEl.querySelector('.absolute.bottom-2.right-2');
       if (coverPill) coverPill.textContent = `${totalVols} vols`;
 
-      const metaPills = cardEl.querySelectorAll('span.font-mono');
-      metaPills.forEach(p => {
-        if (p.textContent && p.textContent.includes('vols')) {
-          p.textContent = `${totalVols} vols`;
-        }
-      });
+      const metaPill = cardEl.querySelector('span[data-card-vol-pill]');
+      if (metaPill) metaPill.textContent = `${totalVols} vols`;
 
       const actionsContainer = cardEl.querySelector(`#cardActions-${CSS.escape(item.id)}`);
       if (actionsContainer && !isIngesting) {
