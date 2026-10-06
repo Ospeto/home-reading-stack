@@ -51,6 +51,7 @@ import {
   resolveCanonicalVolumeNumber,
   resolveSourceInventory,
   attachCachedInventoriesIfAvailable,
+  matchNovelWithCalibreIndex,
 } from "./discover";
 import { extractVolumeNumber } from "./scraper";
 import {
@@ -1549,8 +1550,8 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
     it("verifies badge and button consistency for in-library vs available novels in index.html", () => {
       // In Library badge and dynamic smart action buttons
       expect(html).toContain("In Library (${libCount} vols)");
-      expect(html).toContain("Available (${item.volumeCount || 1} vols)");
-      expect(html).toContain("${item.volumeCount || 1} vols");
+      expect(html).toContain("Available (${totalVols} vols)");
+      expect(html).toContain("${totalVols} vols");
       expect(html).toContain("Download Remaining (${missingCount} vols)");
       expect(html).toContain("All Volumes in Library (${totalVols}/${totalVols})");
       expect(html).toContain("Download All (${totalVols} vols)");
@@ -3162,13 +3163,13 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       const html = fs.readFileSync(htmlPath, "utf8");
 
       // In Library badge with partial ownership support (libCount/total vols) and full ownership
-      expect(html).toContain("In Library (${libCount}/${item.volumeCount} vols)");
+      expect(html).toContain("In Library (${libCount}/${totalVols} vols)");
       expect(html).toContain("In Library (${libCount} vols)");
-      expect(html).toContain("const isPartial = libCount > 0 && item.volumeCount > libCount;");
+      expect(html).toContain("const isPartial = libCount > 0 && totalVols > libCount;");
       // Available badge with vols count
-      expect(html).toContain("Available (${item.volumeCount || 1} vols)");
+      expect(html).toContain("Available (${totalVols} vols)");
       // Metadata row volume badge
-      expect(html).toContain("${item.volumeCount || 1} vols");
+      expect(html).toContain("${totalVols} vols");
       // Modal volume rendering (never hardcoded 1 when existingVolumes is higher)
       expect(html).toContain("const totalVols = hasVerifiedInventory ? verifiedTotal : Math.max(item.volumeCount || 1, rawLibCount);");
       expect(html).toContain("volumes.textContent = `${totalVols} Volumes`;");
@@ -5202,9 +5203,9 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         { fetch: mockFetchMixed as any },
       );
 
-      // Explicit volumes 1 and 2 are extracted, but presence of unnumbered file marks inventory unverified
-      expect(invMixed.status).toBe("unverified");
-      expect(invMixed.volumeCount).toBe(3);
+      // Explicit volumes 1 and 2 are extracted, and presence of unnumbered bonus file does not demote inventory to unverified
+      expect(invMixed.status).toBe("verified");
+      expect(invMixed.volumeCount).toBe(2);
       expect(invMixed.volumes).toEqual([1, 2]);
     });
 
@@ -5320,9 +5321,9 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         { fetch: mockFetch as any },
       );
 
-      // Presence of slug without volume indicator leaves inventory unverified, extracting only explicit volumes 1 and 2
-      expect(inv.status).toBe("unverified");
-      expect(inv.volumeCount).toBe(3);
+      // Presence of slug without volume indicator does not demote inventory to unverified, retaining verified volumes 1 and 2
+      expect(inv.status).toBe("verified");
+      expect(inv.volumeCount).toBe(2);
       expect(inv.volumes).toEqual([1, 2]);
 
       // When all slugs have explicit volume patterns, verifies inventory
@@ -5626,6 +5627,198 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(/\p{Extended_Pictographic}/u.test(invInternal.error!)).toBe(false);
       expect(invInternal.error!.includes("/Users/ospeto/secret.db")).toBe(false);
       expect(invInternal.error!.includes("[path]")).toBe(true);
+    });
+
+    describe("Volume Accuracy and Download Fix Invariants", () => {
+      it("ignores digital edition revision tags [vX.X] / [v2.0] without hijacking volume indices", () => {
+        expect(extractVolumeNumber("Mushoku Tensei Vol. 1 [v2.0]")).toBe(1);
+        expect(extractVolumeNumber("Mushoku Tensei (Retail) [Seven Seas] [v01]")).toBe(1);
+        expect(extractVolumeNumber("Overlord Vol. 03 [v1.5]")).toBe(3);
+        expect(extractVolumeNumber("Re:Zero Vol. 04 (v2.0)")).toBe(4);
+        expect(extractVolumeNumber("DanMachi Vol. 14 [v2]")).toBe(14);
+        expect(resolveCanonicalVolumeNumber("Mushoku Tensei Vol. 1 [v2.0]")).toBe(1);
+        expect(resolveCanonicalVolumeNumber("Overlord Volume 3 [v2.1]")).toBe(3);
+      });
+
+      it("supports bare Roman numerals and prevents prefix collision on Roman numerals starting with V", () => {
+        expect(extractVolumeNumber("Overlord VI")).toBe(6);
+        expect(extractVolumeNumber("Overlord VII")).toBe(7);
+        expect(extractVolumeNumber("Overlord VIII")).toBe(8);
+        expect(extractVolumeNumber("Gosick VI")).toBe(6);
+        expect(extractVolumeNumber("Gosick VII")).toBe(7);
+        expect(extractVolumeNumber("Gosick VIII")).toBe(8);
+        expect(extractVolumeNumber("Overlord II - The Dark Warrior")).toBe(2);
+        expect(extractVolumeNumber("Overlord IV: The Lizardman Heroes")).toBe(4);
+        expect(extractVolumeNumber("Fate/Zero I")).toBe(1);
+        expect(extractVolumeNumber("Sword Art Online IV")).toBe(4);
+        expect(extractVolumeNumber("I Got a Cheat Skill")).toBeNull();
+        expect(extractVolumeNumber("Clean Code")).toBeNull();
+        expect(resolveCanonicalVolumeNumber("Overlord VI")).toBe(6);
+        expect(resolveCanonicalVolumeNumber("Overlord VII")).toBe(7);
+      });
+
+      it("supports Japanese lenticular brackets and kanji volume notations", () => {
+        expect(extractVolumeNumber("Overlord 【1】")).toBe(1);
+        expect(extractVolumeNumber("DanMachi 【Vol. 2】")).toBe(2);
+        expect(extractVolumeNumber("Re:Zero 第1巻")).toBe(1);
+        expect(extractVolumeNumber("Sword Art Online 第02巻")).toBe(2);
+        expect(extractVolumeNumber("Classroom of the Elite 3巻")).toBe(3);
+      });
+
+      it("supports fractional volumes without explicit Vol. prefix", () => {
+        expect(extractVolumeNumber("Classroom of the Elite 4.5")).toBe(4.5);
+        expect(extractVolumeNumber("DanMachi 10.5 - Side Story")).toBe(10.5);
+        expect(resolveCanonicalVolumeNumber("Classroom of the Elite 4.5")).toBe(4.5);
+      });
+
+      it("supports Volume 0 prequels in volume extraction and library matching", () => {
+        expect(extractVolumeNumber("Jujutsu Kaisen 0")).toBe(0);
+        expect(extractVolumeNumber("Overlord Volume 0")).toBe(0);
+        expect(resolveCanonicalVolumeNumber("Jujutsu Kaisen 0")).toBe(0);
+
+        const novel: DiscoveredNovel = {
+          id: "prequel-series",
+          title: "Prequel Series",
+          author: "Author",
+          coverUrl: "https://example.com/cover.jpg",
+          synopsis: "Prequel series synopsis.",
+          genres: ["Action"],
+          score: 85,
+          popularity: 5000,
+          releaseDate: "2024-01-01",
+          volumeCount: 3,
+          catalogVolumeCount: 3,
+          source: "elscione",
+          sourceUrls: { elscione: "https://server.elscione.com/Prequel%20Series/" },
+          inLibrary: false,
+          existingVolumes: 0,
+        };
+
+        const mockCalibre = [
+          { id: 991, title: "Prequel Series Volume 0", series: "Prequel Series", series_index: 0 },
+          { id: 992, title: "Prequel Series Volume 1", series: "Prequel Series", series_index: 1 },
+        ];
+
+        const index = getOrCreateCalibreInvertedIndex(mockCalibre);
+        const audited = matchNovelWithCalibreIndex(novel, index);
+
+        expect(audited.inLibrary).toBe(true);
+        expect(audited.ownedVolumeIndices).toContain(0);
+        expect(audited.ownedVolumeIndices).toContain(1);
+        expect(audited.existingVolumes).toBe(2);
+      });
+
+      it("retains verified status and numeric volumes when folders contain unnumbered bonus files", async () => {
+        const mockFetch = async () =>
+          new Response(
+            JSON.stringify({
+              items: [
+                { href: "/SeriesFolder/Series%20Vol%2001.epub", size: 1000 },
+                { href: "/SeriesFolder/Series%20Vol%2002.epub", size: 1000 },
+                { href: "/SeriesFolder/Series%20Vol%2003.epub", size: 1000 },
+                { href: "/SeriesFolder/Special%20Story.epub", size: 500 },
+                { href: "/SeriesFolder/Bonus%20Booklet.epub", size: 300 },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+
+        const inv = await resolveSourceInventory(
+          "https://server.elscione.com/SeriesFolder/",
+          "elscione",
+          { fetch: mockFetch as any },
+        );
+
+        expect(inv.status).toBe("verified");
+        expect(inv.volumeCount).toBe(3);
+        expect(inv.volumes).toEqual([1, 2, 3]);
+      });
+
+      it("max-coverage source selection chooses the source covering the highest number of missing volumes", () => {
+        const novel: DiscoveredNovel = {
+          id: "coverage-novel",
+          title: "Coverage Novel",
+          author: "Author",
+          coverUrl: "https://example.com/cover.jpg",
+          synopsis: "Synopsis for max coverage test",
+          genres: ["Fantasy"],
+          score: 85,
+          popularity: 5000,
+          releaseDate: "2024-01-01",
+          volumeCount: 16,
+          catalogVolumeCount: 22,
+          source: "both",
+          sourceUrls: {
+            elscione: "https://server.elscione.com/Coverage%20Novel/",
+            lnori: "https://lnori.com/series/555/coverage-novel",
+          },
+          sources: [
+            {
+              source: "elscione",
+              url: "https://server.elscione.com/Coverage%20Novel/",
+              status: "verified",
+              volumeCount: 11,
+              volumes: Array.from({ length: 11 }, (_, i) => i + 1), // has 1-11 (covers only 11)
+            },
+            {
+              source: "lnori",
+              url: "https://lnori.com/series/555/coverage-novel",
+              status: "verified",
+              volumeCount: 16,
+              volumes: Array.from({ length: 16 }, (_, i) => i + 1), // has 1-16 (covers all 11-16)
+            },
+          ],
+          missingVolumeIndices: [11, 12, 13, 14, 15, 16], // 6 missing volumes
+          missingVolumeCount: 6,
+          inLibrary: true,
+          existingVolumes: 10,
+        };
+
+        const assigned = assignPrimarySource(novel);
+        expect(assigned.primarySource).toBe("lnori");
+        expect(assigned.primaryUrl).toBe("https://lnori.com/series/555/coverage-novel");
+
+        // When both sources cover an equal number of missing volumes, Elscione remains preferred default
+        const equalCoverageNovel: DiscoveredNovel = {
+          ...novel,
+          sources: [
+            {
+              source: "elscione",
+              url: "https://server.elscione.com/Coverage%20Novel/",
+              status: "verified",
+              volumeCount: 16,
+              volumes: Array.from({ length: 16 }, (_, i) => i + 1),
+            },
+            {
+              source: "lnori",
+              url: "https://lnori.com/series/555/coverage-novel",
+              status: "verified",
+              volumeCount: 16,
+              volumes: Array.from({ length: 16 }, (_, i) => i + 1),
+            },
+          ],
+        };
+
+        const equalAssigned = assignPrimarySource(equalCoverageNovel);
+        expect(equalAssigned.primarySource).toBe("elscione");
+        expect(equalAssigned.primaryUrl).toBe("https://server.elscione.com/Coverage%20Novel/");
+      });
+
+      it("verifies index.html binds cover badge, metadata pill, and partial badge to totalVols", () => {
+        const htmlPath = path.join((import.meta as any).dir, "index.html");
+        const html = fs.readFileSync(htmlPath, "utf8");
+
+        // Cover bottom-right badge
+        expect(html).toContain("${totalVols} vols");
+        // Partial audited badge denominator
+        expect(html).toContain("In Library (${libCount}/${totalVols} vols)");
+        // Available badge
+        expect(html).toContain("Available (${totalVols} vols)");
+        // Modal detail header
+        expect(html).toContain("volumes.textContent = `${totalVols} Volumes`;");
+        // Grid card update on modal resolution
+        expect(html).toContain("updateDiscoverCardOnGrid(item);");
+      });
     });
   });
 });

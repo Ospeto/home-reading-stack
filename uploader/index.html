@@ -2912,7 +2912,7 @@
               <span>Discover Shelf &amp; Verified Source Volume Auditing</span>
             </div>
             <p class="text-[11px] text-zinc-400 leading-relaxed">
-              Explore curated Trending and New Releases light novel feeds with 1-click downloads. Reconciles verified source inventories (Elsci.one and Lnori manifests) against your local Calibre library, computing downloadable missing volumes strictly from verified available source files rather than synthetic catalog publication maximums. When all verified source volumes are owned, shows 'All in Library (16/16)' with disabled download prompts and verified source cards. Features canonical multi-part volume resolution (e.g. Ascendance of a Bookworm Part 5 Volume 8 mapping to Volume 29), fractional volume preservation, and spinoff separation.
+              Explore curated Trending and New Releases light novel feeds with 1-click downloads. Reconciles verified source inventories (Elsci.one and Lnori manifests) against your local Calibre library, computing downloadable missing volumes strictly from verified available source files rather than synthetic catalog publication maximums. Features max-coverage source selection that routes partial downloads to the source containing the highest number of missing volumes, hardened volume number extraction (ignoring digital revision tags like [v2.0], supporting bare Roman numerals like Overlord VI, Volume 0 prequels, and fractional volumes like 4.5), and resilient inventory verification that retains verified numeric volumes even when folders contain unnumbered bonus stories.
             </p>
           </div>
         </div>
@@ -5117,17 +5117,21 @@
         }
       }
 
-      // Check if missing volumes dictate source selection
+      // Check if missing volumes dictate source selection (max-coverage source selection)
       const hasElsci = Boolean(item.sourceUrls?.elscione);
       const hasLnori = Boolean(item.sourceUrls?.lnori);
       if (hasElsci && hasLnori && Array.isArray(item.missingVolumeIndices) && item.missingVolumeIndices.length > 0 && Array.isArray(item.sources)) {
         const elsciSrc = item.sources.find(s => s.source === 'elscione' && s.status === 'verified');
         const lnoriSrc = item.sources.find(s => s.source === 'lnori' && s.status === 'verified');
 
-        const elsciHasMissing = elsciSrc?.volumes && item.missingVolumeIndices.some(v => elsciSrc.volumes.includes(v));
-        const lnoriHasMissing = lnoriSrc?.volumes && item.missingVolumeIndices.some(v => lnoriSrc.volumes.includes(v));
+        const elsciCovered = elsciSrc?.volumes ? item.missingVolumeIndices.filter(v => elsciSrc.volumes.includes(v)).length : 0;
+        const lnoriCovered = lnoriSrc?.volumes ? item.missingVolumeIndices.filter(v => lnoriSrc.volumes.includes(v)).length : 0;
+        const elsciHasMissing = elsciCovered > 0;
+        const lnoriHasMissing = lnoriCovered > 0;
 
-        if (elsciHasMissing) {
+        if (lnoriCovered > elsciCovered) {
+          return { url: item.sourceUrls.lnori, source: 'lnori' };
+        } else if (elsciHasMissing) {
           return { url: item.sourceUrls.elscione, source: 'elscione' };
         } else if (lnoriHasMissing) {
           return { url: item.sourceUrls.lnori, source: 'lnori' };
@@ -5224,7 +5228,7 @@
         const hasMissing = item.missingVolumeCount !== undefined
           ? (isVerified && item.missingVolumeCount > 0)
           : false;
-        const isPartial = libCount > 0 && item.volumeCount > libCount;
+        const isPartial = libCount > 0 && totalVols > libCount;
         const isPartialAudited = isVerified && inLib && libCount > 0 && hasMissing;
         const isComplete = isVerified && Boolean(item.allVerifiedOwned || (inLib && !hasMissing && (libCount >= totalVols)));
 
@@ -5241,7 +5245,7 @@
           </span>`;
         } else if (isPartialAudited) {
           statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm truncate max-w-full">
-            In Library (${libCount}/${item.volumeCount} vols)
+            In Library (${libCount}/${totalVols} vols)
           </span>`;
         } else if (inLib) {
           statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm truncate max-w-full flex items-center gap-1">
@@ -5250,7 +5254,7 @@
           </span>`;
         } else {
           statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-sky-500/30 text-sky-200 border border-sky-500/40 shadow-sm truncate max-w-full">
-            Available (${item.volumeCount || 1} vols)
+            Available (${totalVols} vols)
           </span>`;
         }
 
@@ -5299,7 +5303,7 @@
                 </div>
 
                 <div class="absolute bottom-2 right-2 px-1.5 py-0.5 rounded-md text-[9px] font-mono font-semibold bg-black/70 text-zinc-200 backdrop-blur-md border border-white/10 z-10 pointer-events-none max-w-[80%] truncate">
-                  ${item.volumeCount || 1} vols
+                  ${totalVols} vols
                 </div>
               </div>
 
@@ -5308,7 +5312,7 @@
                 <div class="flex items-center gap-1 mb-1 flex-wrap">
                   ${sourceBadgesHtml}
                   <span class="px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold bg-white/10 text-zinc-300 border border-white/10 shrink-0">
-                    ${item.volumeCount || 1} vols
+                    ${totalVols} vols
                   </span>
                   <span class="text-[10px] text-amber-400/90 font-mono ml-auto flex items-center shrink-0">${starSvg}${ratingVal.toFixed(1)}</span>
                 </div>
@@ -5420,6 +5424,7 @@
             if (activeDiscoverItem?.id === novelId || !activeDiscoverItem) {
               populateDiscoverModal(item);
             }
+            updateDiscoverCardOnGrid(item);
           }
         }
       } catch (err) {
@@ -5696,6 +5701,104 @@
         } else {
           progressContainer.classList.add('hidden');
         }
+      }
+    }
+
+    function updateDiscoverCardOnGrid(item) {
+      if (!item) return;
+      const cardEl = document.querySelector(`.discover-card[data-novel-id="${escapeHtml(item.id)}"]`);
+      if (!cardEl) return;
+
+      const isIngesting = ingestingDiscoverIds.has(item.id);
+      const downloadState = activeDiscoverDownloads.get(item.id);
+      const inLib = (item.inLibrary !== undefined) ? item.inLibrary : item.isInLibrary;
+      const rawLibCount = (item.existingVolumes !== undefined) ? item.existingVolumes : (item.inLibraryVolumes || 0);
+      const isVerified = item.sourceStatus === 'verified' && Array.isArray(item.verifiedVolumes) && item.verifiedVolumes.length > 0;
+      const hasVerifiedInventory = isVerified;
+      const ownedIndices = item.ownedVolumeIndices || [];
+      const ownedSet = new Set(ownedIndices);
+      const verifiedOwnedCount = isVerified ? item.verifiedVolumes.filter(v => ownedSet.has(v)).length : rawLibCount;
+      const verifiedTotal = isVerified ? (item.verifiedVolumeCount ?? item.verifiedVolumes.length) : (item.volumeCount || 1);
+      const totalVols = hasVerifiedInventory ? verifiedTotal : Math.max(item.volumeCount || 1, rawLibCount);
+      const libCount = hasVerifiedInventory ? verifiedOwnedCount : rawLibCount;
+      const missingCount = isVerified && item.missingVolumeCount !== undefined ? item.missingVolumeCount : undefined;
+      const hasMissing = item.missingVolumeCount !== undefined ? (isVerified && item.missingVolumeCount > 0) : false;
+      const isPartial = libCount > 0 && totalVols > libCount;
+      const isPartialAudited = isVerified && inLib && libCount > 0 && hasMissing;
+      const isComplete = isVerified && Boolean(item.allVerifiedOwned || (inLib && !hasMissing && (libCount >= totalVols)));
+
+      const verifiedCheckSvg = `<svg class="w-3.5 h-3.5 text-emerald-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>`;
+
+      let statusBadgeHtml = '';
+      if (isIngesting) {
+        statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/30 text-amber-200 border border-amber-500/40 animate-pulse flex items-center gap-1 shadow-sm max-w-full truncate">
+          <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping shrink-0"></span>
+          <span class="truncate">Downloading...</span>
+        </span>`;
+      } else if (isComplete) {
+        statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm truncate max-w-full flex items-center gap-1">
+          ${verifiedCheckSvg}
+          <span>In Library (${libCount} vols)</span>
+        </span>`;
+      } else if (isPartialAudited) {
+        statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm truncate max-w-full">
+          In Library (${libCount}/${totalVols} vols)
+        </span>`;
+      } else if (inLib) {
+        statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm truncate max-w-full flex items-center gap-1">
+          ${verifiedCheckSvg}
+          <span>In Library (${libCount} vols)</span>
+        </span>`;
+      } else {
+        statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-sky-500/30 text-sky-200 border border-sky-500/40 shadow-sm truncate max-w-full">
+          Available (${totalVols} vols)
+        </span>`;
+      }
+
+      const badgeContainer = cardEl.querySelector(`#cardBadge-${CSS.escape(item.id)}`);
+      if (badgeContainer) setHtml(badgeContainer, statusBadgeHtml);
+
+      const coverPill = cardEl.querySelector('.absolute.bottom-2.right-2');
+      if (coverPill) coverPill.textContent = `${totalVols} vols`;
+
+      const metaPills = cardEl.querySelectorAll('span.font-mono');
+      metaPills.forEach(p => {
+        if (p.textContent && p.textContent.includes('vols')) {
+          p.textContent = `${totalVols} vols`;
+        }
+      });
+
+      const actionsContainer = cardEl.querySelector(`#cardActions-${CSS.escape(item.id)}`);
+      if (actionsContainer && !isIngesting) {
+        let actionBtnHtml = '';
+        if (isComplete) {
+          actionBtnHtml = `
+            <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="openDiscoverModal('${escapeHtml(item.id)}')" class="flex-1 py-1.5 px-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 font-semibold text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]" title="All ${totalVols} volumes in Calibre library">
+              ${verifiedCheckSvg}
+              <span>All Volumes in Library (${totalVols}/${totalVols})</span>
+            </button>
+          `;
+        } else if (isPartialAudited && missingCount !== undefined) {
+          actionBtnHtml = `
+            <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event)" class="flex-1 py-1.5 px-2 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]" title="Download remaining ${missingCount} volumes">
+              <span>Download Remaining (${missingCount} vols)</span>
+            </button>
+          `;
+        } else {
+          actionBtnHtml = `
+            <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event)" class="flex-1 py-1.5 px-2 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]">
+              <span>Download All (${totalVols} vols)</span>
+            </button>
+          `;
+        }
+        setHtml(actionsContainer, `
+          <div class="flex items-center gap-1.5">
+            <button type="button" onclick="openDiscoverModal('${escapeHtml(item.id)}')" class="flex-1 py-1.5 px-2 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white text-[11px] font-semibold rounded-xl border border-white/5 transition-colors cursor-pointer text-center active:scale-[0.96]">
+              Preview
+            </button>
+            ${actionBtnHtml}
+          </div>
+        `);
       }
     }
 
