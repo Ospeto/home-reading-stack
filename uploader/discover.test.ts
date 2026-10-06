@@ -1548,7 +1548,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
     });
 
     it("verifies badge and button consistency for in-library vs available novels in index.html", () => {
-      // In Library badge and dynamic smart action buttons
+      // In Library badge and modal dynamic smart action buttons
       expect(html).toContain("In Library (${libCount} vols)");
       expect(html).toContain("Available (${totalVols} vols)");
       expect(html).toContain("${totalVols} vols");
@@ -1556,6 +1556,28 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(html).toContain("All Volumes in Library (${totalVols}/${totalVols})");
       expect(html).toContain("Download All (${totalVols} vols)");
       expect(html).toContain("bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md");
+    });
+
+    it("verifies outside card download button displays clean Download without volume suffixes or library completion checks", () => {
+      // In renderDiscoverNovelsCards: clean Download button on card without volume checks or suffixes
+      expect(html).toContain(
+        '<button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest(\'${escapeHtml(item.id)}\', event)" class="flex-1 py-1.5 px-2 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]"><span>Download</span></button>'
+      );
+
+      // In updateDiscoverCardOnGrid: idle action button resets to clean Download
+      expect(html).toContain(
+        '<button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest(\'${escapeHtml(item.id)}\', event)" class="flex-1 py-1.5 px-2 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]">\n              <span>Download</span>\n            </button>'
+      );
+
+      // Verify outside card action containers do not contain dynamic volume suffixes
+      const cardActionsBlocks = html.match(/id="cardActions-\$\{escapeHtml\(item\.id\)\}"[\s\S]*?<\/div>\s*`\s*:\s*`[\s\S]*?<\/div>/g) || [];
+      expect(cardActionsBlocks.length).toBeGreaterThan(0);
+      for (const block of cardActionsBlocks) {
+        expect(block).toContain("<span>Download</span>");
+        expect(block).not.toContain("Download All (${totalVols} vols)");
+        expect(block).not.toContain("Download Remaining (${missingCount} vols)");
+        expect(block).not.toContain("All Volumes in Library (${totalVols}/${totalVols})");
+      }
     });
 
     it("verifies live download progress polling and Apple-style progress track in index.html", () => {
@@ -5072,7 +5094,9 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
 
       // Card action button and status badge unverified isolation
       expect(html).toContain("} else if (isPartialAudited) {");
-      expect(html).toContain(": (isPartialAudited && missingCount !== undefined) ?");
+      expect(html).toContain(
+        '<button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest(\'${escapeHtml(item.id)}\', event)" class="flex-1 py-1.5 px-2 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]"><span>Download</span></button>'
+      );
 
       // Simulation of modal renderer logic:
       // Case A: Errored source, catalog total 22, owned 16 books

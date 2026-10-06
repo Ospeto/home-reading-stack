@@ -5349,20 +5349,7 @@
                   <button type="button" onclick="openDiscoverModal('${escapeHtml(item.id)}')" class="flex-1 py-1.5 px-2 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white text-[11px] font-semibold rounded-xl border border-white/5 transition-colors cursor-pointer text-center active:scale-[0.96]">
                     Preview
                   </button>
-                  ${isComplete ? `
-                    <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="openDiscoverModal('${escapeHtml(item.id)}')" class="flex-1 py-1.5 px-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 font-semibold text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]" title="All ${totalVols} volumes in Calibre library">
-                      ${verifiedCheckSvg}
-                      <span>All Volumes in Library (${totalVols}/${totalVols})</span>
-                    </button>
-                  ` : (isPartialAudited && missingCount !== undefined) ? `
-                    <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event)" class="flex-1 py-1.5 px-2 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]" title="Download remaining ${missingCount} volumes">
-                      <span>Download Remaining (${missingCount} vols)</span>
-                    </button>
-                  ` : `
-                    <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event)" class="flex-1 py-1.5 px-2 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]">
-                      <span>Download All (${totalVols} vols)</span>
-                    </button>
-                  `}
+                  <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event)" class="flex-1 py-1.5 px-2 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]"><span>Download</span></button>
                 </div>
               `}
             </div>
@@ -5766,33 +5753,14 @@
 
       const actionsContainer = cardEl.querySelector(`#cardActions-${CSS.escape(item.id)}`);
       if (actionsContainer && !isIngesting) {
-        let actionBtnHtml = '';
-        if (isComplete) {
-          actionBtnHtml = `
-            <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="openDiscoverModal('${escapeHtml(item.id)}')" class="flex-1 py-1.5 px-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 font-semibold text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]" title="All ${totalVols} volumes in Calibre library">
-              ${verifiedCheckSvg}
-              <span>All Volumes in Library (${totalVols}/${totalVols})</span>
-            </button>
-          `;
-        } else if (isPartialAudited && missingCount !== undefined) {
-          actionBtnHtml = `
-            <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event)" class="flex-1 py-1.5 px-2 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]" title="Download remaining ${missingCount} volumes">
-              <span>Download Remaining (${missingCount} vols)</span>
-            </button>
-          `;
-        } else {
-          actionBtnHtml = `
-            <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event)" class="flex-1 py-1.5 px-2 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]">
-              <span>Download All (${totalVols} vols)</span>
-            </button>
-          `;
-        }
         setHtml(actionsContainer, `
           <div class="flex items-center gap-1.5">
             <button type="button" onclick="openDiscoverModal('${escapeHtml(item.id)}')" class="flex-1 py-1.5 px-2 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white text-[11px] font-semibold rounded-xl border border-white/5 transition-colors cursor-pointer text-center active:scale-[0.96]">
               Preview
             </button>
-            ${actionBtnHtml}
+            <button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event)" class="flex-1 py-1.5 px-2 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]">
+              <span>Download</span>
+            </button>
           </div>
         `);
       }
