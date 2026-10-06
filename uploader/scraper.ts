@@ -433,7 +433,12 @@ export function parseMultiPartVolume(title: string): MultiPartVolumeInfo | null 
  */
 export function extractVolumeNumber(title: string): number | null {
   if (!title) return null;
-  const s = title.trim();
+  // Pre-strip digital release version/revision tags like [v1.0], [v2.0], (v2.0), [v2.1], 【v2.0】
+  // so revision numbers do not hijack volume indices (e.g. "Mushoku Tensei Vol. 1 [v2.0]" -> Vol 1)
+  let s = title.trim();
+  s = s.replace(/[\[\(（［{【]\s*v\d+\.\d+(?:\.\d+)*\s*[\]\)）］}】]/gi, " ").trim();
+  // Also strip trailing revision tags like [v2] or (v2) if preceded by an explicit volume indicator
+  s = s.replace(/(?<=(?:vol(?:ume)?|book|bk|part|pt|#)\.?\s*0*\d+(?:\.\d+)?[^\[\(（［{【]*)[\[\(（［{【]\s*v\d+\s*[\]\)）］}】]/gi, " ").trim();
 
   // 0. Check multi-part pattern: Part X ... Volume Y selects volume Y (the volume within the part)
   const multiPart = parseMultiPartVolume(s);
@@ -441,10 +446,12 @@ export function extractVolumeNumber(title: string): number | null {
     return multiPart.volume;
   }
 
-  // 1. Check Roman numeral volume patterns (e.g. "Vol. IV", "Volume II", "Book III", "[Vol. V]")
+  // 1. Check Roman numeral volume patterns with explicit prefix (e.g. "Vol. IV", "Volume II", "Book III", "[Vol. V]")
+  // Require dot or whitespace after 'v' so Roman numerals starting with 'V' (e.g. VI, VII, VIII) do not collide
   const romanPatterns = [
-    /[\[\(]\s*(?:vol(?:ume)?|v|book|bk|part|pt)\.?\s*([ivx]+)\s*[\]\)]/i,
-    /\b(?:vol(?:ume)?|v|book|bk|part|pt)\.?\s*([ivx]+)\b/i,
+    /[\[\(（［{【]\s*(?:vol(?:ume)?|book|bk|part|pt|v\.)\s*([ivx]+)\s*[\]\)）］}】]/i,
+    /\b(?:vol(?:ume)?|book|bk|part|pt|v\.)\s*([ivx]+)\b/i,
+    /\bv\s+([ivx]+)\b/i,
   ];
   for (const rp of romanPatterns) {
     const rm = s.match(rp);
@@ -454,13 +461,21 @@ export function extractVolumeNumber(title: string): number | null {
     }
   }
 
+  // 2. Check Japanese kanji volume notations (e.g. 第1巻, 第02巻, 1巻, 3巻)
+  const kanjiMatch = s.match(/(?:第\s*0*(\d+(?:\.\d+)?)\s*[巻卷]|(?<=\s|^)0*(\d+(?:\.\d+)?)\s*[巻卷])/);
+  if (kanjiMatch) {
+    const rawKanji = kanjiMatch[1] || kanjiMatch[2];
+    const val = parseFloat(rawKanji);
+    if (!isNaN(val)) return val;
+  }
+
   const patterns = [
-    /[\[\(（［{]\s*(?:vol(?:ume)?|v|book|bk|part|pt)?\.?\s*0*(\d+(?:\.\d+)?)\s*[\]\)）］}]/i,
+    /[\[\(（［{【]\s*(?:vol(?:ume)?|v|book|bk|part|pt)?\.?\s*0*(\d+(?:\.\d+)?)\s*[\]\)）］}】]/i,
     /\b(?:vol(?:ume)?|v|book|bk|part|pt)\.?\s*0*(\d+(?:\.\d+)?)\b/i,
     /#\s*0*(\d+(?:\.\d+)?)\b/i,
     /(?:အတွဲ|အပိုင်း|အခန်း)\s*([၀-၉]+|\d+(?:\.\d+)?)/,
-    /(?<=[a-zA-Z\u00A0-\uFFFF]\s+)0*(\d{1,3})\s*[-–—:]/i,
-    /(?<=[a-zA-Z\u00A0-\uFFFF]\s+)0*(\d{1,3})$/i,
+    /(?<=[a-zA-Z\u00A0-\uFFFF]\s+)0*(\d{1,3}(?:\.\d+)?)\s*[-–—:]/i,
+    /(?<=[a-zA-Z\u00A0-\uFFFF]\s+)0*(\d{1,3}(?:\.\d+)?)$/i,
   ];
 
   for (const p of patterns) {
@@ -471,7 +486,8 @@ export function extractVolumeNumber(title: string): number | null {
         m[0].startsWith("[") ||
         m[0].startsWith("（") ||
         m[0].startsWith("［") ||
-        m[0].startsWith("{");
+        m[0].startsWith("{") ||
+        m[0].startsWith("【");
       if (
         isBracketed &&
         m[1].length === 4 &&
@@ -485,6 +501,24 @@ export function extractVolumeNumber(title: string): number | null {
       if (val !== null && !isNaN(val)) return val;
     }
   }
+
+  // 3. Bare Roman numerals (e.g. "Overlord VI", "Overlord VII", "Overlord VIII", "Gosick VI", "Fate/Zero I")
+  // Must be preceded by space or delimiter, and followed by delimiter or end-of-string
+  const bareRomanMatch = s.match(/(?:^|[\s:–—\-\(\[\{,])([ivx]+)(?:\s*[:–—\-\)\|\],]|\s*$)/i);
+  if (bareRomanMatch && bareRomanMatch[1]) {
+    const rawRoman = bareRomanMatch[1].toLowerCase();
+    const romanVal = ROMAN_NUMERAL_VOLUME_MAP[rawRoman];
+    if (romanVal !== undefined) {
+      const matchIndex = bareRomanMatch.index ?? 0;
+      const isStartOfTitle = matchIndex === 0 && !/[\s:–—\-\(\[\{,]/.test(s[0]);
+      // If Roman numeral is just 'i', ensure it's not the initial word of a title (like "I Was Reincarnated...") or preceded by a comma (like "Vending Machine, I")
+      const isPrecededByComma = /,\s*$/i.test(s.slice(0, matchIndex));
+      if (rawRoman !== "i" || (!isStartOfTitle && !isPrecededByComma && s.length > 2)) {
+        return romanVal;
+      }
+    }
+  }
+
   return null;
 }
 

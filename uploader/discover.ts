@@ -934,7 +934,7 @@ export function assignPrimarySource(novel: DiscoveredNovel): DiscoveredNovel {
   const hasElscione = Boolean(novel.sourceUrls?.elscione);
   const hasLnori = Boolean(novel.sourceUrls?.lnori);
 
-  // If verified missing volumes are known, prefer a source that actually contains the missing volumes
+  // If verified missing volumes are known, prefer the source providing max coverage of missing volumes
   if (
     hasElscione &&
     hasLnori &&
@@ -945,21 +945,20 @@ export function assignPrimarySource(novel: DiscoveredNovel): DiscoveredNovel {
     const elsciSrc = novel.sources.find((s) => s.source === "elscione" && s.status === "verified");
     const lnoriSrc = novel.sources.find((s) => s.source === "lnori" && s.status === "verified");
 
-    const elsciHasMissing = Boolean(
-      elsciSrc?.volumes &&
-        novel.missingVolumeIndices.some((v) => elsciSrc.volumes!.includes(v)),
-    );
-    const lnoriHasMissing = Boolean(
-      lnoriSrc?.volumes &&
-        novel.missingVolumeIndices.some((v) => lnoriSrc.volumes!.includes(v)),
-    );
+    const elsciCovered = elsciSrc?.volumes
+      ? novel.missingVolumeIndices.filter((v) => elsciSrc.volumes!.includes(v)).length
+      : 0;
+    const lnoriCovered = lnoriSrc?.volumes
+      ? novel.missingVolumeIndices.filter((v) => lnoriSrc.volumes!.includes(v)).length
+      : 0;
 
-    if (elsciHasMissing) {
-      primarySource = "elscione";
-      primaryUrl = novel.sourceUrls.elscione!;
-    } else if (lnoriHasMissing) {
+    // Max-coverage source selection: choose source covering the highest number of missing volumes
+    if (lnoriCovered > elsciCovered) {
       primarySource = "lnori";
       primaryUrl = novel.sourceUrls.lnori!;
+    } else if (elsciCovered > 0) {
+      primarySource = "elscione";
+      primaryUrl = novel.sourceUrls.elscione!;
     } else {
       primarySource = "elscione";
       primaryUrl = novel.sourceUrls.elscione!;
@@ -2179,39 +2178,33 @@ async function resolveElscioneInventory(
     };
   }
 
-  let hasUnresolved = false;
   const validVolumes: number[] = [];
 
   for (const v of manifest.volumes) {
     if (!v.filename) {
-      hasUnresolved = true;
       continue;
     }
     // Resolve canonical volume from original filename, preserving multipart Bookworm info
     // Never parse generated v.title or synthetic v.volumeNumber for unnumbered files
     const num = resolveCanonicalVolumeNumber(v.filename, manifest.seriesTitle);
-    if (typeof num === "number" && !isNaN(num) && num > 0) {
+    if (typeof num === "number" && !isNaN(num) && num >= 0) {
       validVolumes.push(num);
-    } else {
-      hasUnresolved = true;
     }
   }
 
-  // Check truncation at boundary
-  const isTruncated = (manifest.totalCount ?? 0) >= 50 || manifest.volumes.length >= 50;
+  const sorted = Array.from(new Set(validVolumes)).sort((a, b) => a - b);
 
-  if (hasUnresolved || isTruncated || validVolumes.length === 0) {
+  if (sorted.length === 0) {
     return {
       source: "elscione",
       url,
       status: "unverified",
       volumeCount: manifest.volumes.length,
-      volumes: Array.from(new Set(validVolumes)).sort((a, b) => a - b),
+      volumes: [],
       verifiedAt: Date.now(),
     };
   }
 
-  const sorted = Array.from(new Set(validVolumes)).sort((a, b) => a - b);
   return {
     source: "elscione",
     url,
@@ -2250,12 +2243,10 @@ async function resolveLnoriInventory(
     };
   }
 
-  let hasUnresolved = false;
   const validVolumes: number[] = [];
 
   for (const p of manifest.volumePaths) {
     if (!p || typeof p !== "string") {
-      hasUnresolved = true;
       continue;
     }
 
@@ -2276,7 +2267,6 @@ async function resolveLnoriInventory(
       // The numeric book ID segment (/book/<id>) must NEVER be parsed as a volume number!
       // If there is no slug after the book ID (e.g. /book/23021), do NOT treat the ID as volume number.
       if (!bookMatch[1] || !bookMatch[1].trim()) {
-        hasUnresolved = true;
         continue;
       }
       slug = bookMatch[1].trim();
@@ -2285,7 +2275,6 @@ async function resolveLnoriInventory(
     }
 
     if (!slug) {
-      hasUnresolved = true;
       continue;
     }
 
@@ -2298,7 +2287,6 @@ async function resolveLnoriInventory(
       /(?:အတွဲ|အပိုင်း|အခန်း)\s*([၀-၉]+|\d+(?:\.\d+)?)/.test(slug);
 
     if (!hasExplicitPattern) {
-      hasUnresolved = true;
       continue;
     }
 
@@ -2308,25 +2296,24 @@ async function resolveLnoriInventory(
       resolveCanonicalVolumeNumber(normalizedSlug, manifest.seriesTitle) ??
       resolveCanonicalVolumeNumber(slug, manifest.seriesTitle);
 
-    if (typeof num === "number" && !isNaN(num) && num > 0) {
+    if (typeof num === "number" && !isNaN(num) && num >= 0) {
       validVolumes.push(num);
-    } else {
-      hasUnresolved = true;
     }
   }
 
-  if (hasUnresolved || validVolumes.length === 0) {
+  const sorted = Array.from(new Set(validVolumes)).sort((a, b) => a - b);
+
+  if (sorted.length === 0) {
     return {
       source: "lnori",
       url,
       status: "unverified",
       volumeCount: manifest.volumePaths.length,
-      volumes: Array.from(new Set(validVolumes)).sort((a, b) => a - b),
+      volumes: [],
       verifiedAt: Date.now(),
     };
   }
 
-  const sorted = Array.from(new Set(validVolumes)).sort((a, b) => a - b);
   return {
     source: "lnori",
     url,
@@ -3526,16 +3513,16 @@ export function matchNovelWithCalibreIndex(
         volNum = resolveCanonicalVolumeNumber(b.book.title, b.book.series || novel.title);
       }
       if (
-        (volNum === null || volNum <= 0) &&
+        (volNum === null || volNum < 0) &&
         b.book.series_index !== undefined &&
         b.book.series_index !== null &&
         !isNaN(Number(b.book.series_index)) &&
-        Number(b.book.series_index) > 0
+        Number(b.book.series_index) >= 0
       ) {
         // Preserve fractional series_index values without rounding
         volNum = Number(b.book.series_index);
       }
-      if (volNum !== null && volNum > 0) {
+      if (volNum !== null && volNum >= 0) {
         ownedVolumeSet.add(volNum);
       }
     }
@@ -3544,7 +3531,10 @@ export function matchNovelWithCalibreIndex(
   const ownedVolumeIndices = Array.from(ownedVolumeSet).sort((a, b) => a - b);
   const existingVolumes = ownedVolumeIndices.length > 0 ? ownedVolumeIndices.length : matchCount;
   const maxOwned = ownedVolumeIndices.length > 0 ? Math.max(...ownedVolumeIndices) : 0;
-  const catalogVolumeCount = novel.catalogVolumeCount ?? novel.volumeCount ?? 1;
+  const catalogVolumeCount = novel.catalogVolumeCount ??
+    (novel.volumeCount && novel.volumeCount > 1
+      ? novel.volumeCount
+      : resolveCatalogVolumeCount(novel.title, novel.titleRomaji, novel));
 
   // Determine verified volumes from novel.verifiedVolumes or verified sources
   let verifiedVolumes = novel.verifiedVolumes;
@@ -3555,7 +3545,7 @@ export function matchNovelWithCalibreIndex(
       for (const s of verifiedSources) {
         if (Array.isArray(s.volumes)) {
           for (const v of s.volumes) {
-            if (typeof v === "number" && !isNaN(v) && v > 0) uSet.add(v);
+            if (typeof v === "number" && !isNaN(v) && v >= 0) uSet.add(v);
           }
         }
       }
@@ -4193,6 +4183,12 @@ async function fetchOnlineFeedWithFallback(
         coverUrl = KNOWN_TITLE_TO_COVER[norm] || "";
       }
 
+      const resolvedVolCount =
+        item.volumes && item.volumes > 0
+          ? item.volumes
+          : resolveCatalogVolumeCount(title, item.title?.romaji);
+      const volumeCount = resolvedVolCount > 0 ? resolvedVolCount : 1;
+
       results.push({
         id: `anilist-${item.id}-${slug}`,
         title,
@@ -4205,7 +4201,8 @@ async function fetchOnlineFeedWithFallback(
         score: item.averageScore || 80,
         popularity: item.popularity || 10000,
         releaseDate,
-        volumeCount: item.volumes || 1,
+        volumeCount,
+        catalogVolumeCount: volumeCount,
         source: realSources.source,
         primarySource: realSources.primarySource,
         primaryUrl: realSources.primaryUrl,
@@ -4626,6 +4623,12 @@ export async function searchAniListNovels(
         cleanSynopsisText(rawSynopsis) ||
         synthesizeEngagingSynopsis(title, item.genres || ["Light Novel"], item.title?.romaji);
 
+      const resolvedVolCount =
+        item.volumes && item.volumes > 0
+          ? item.volumes
+          : resolveCatalogVolumeCount(title, item.title?.romaji);
+      const volumeCount = resolvedVolCount > 0 ? resolvedVolCount : 1;
+
       results.push({
         id: `anilist-${item.id}-${slug}`,
         title,
@@ -4638,7 +4641,8 @@ export async function searchAniListNovels(
         score: item.averageScore || 80,
         popularity: item.popularity || 10000,
         releaseDate,
-        volumeCount: item.volumes || 1,
+        volumeCount,
+        catalogVolumeCount: volumeCount,
         source: realSources.source,
         primarySource: realSources.primarySource,
         primaryUrl: realSources.primaryUrl,
