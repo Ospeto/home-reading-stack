@@ -308,7 +308,7 @@ KOReader includes a native **Joplin** exporter that syncs your highlights, chapt
    - Optional WAN: Host `opds.wavypremium.xyz`, Port `80` (plain HTTP). The `?token=` query travels in cleartext and is written to proxy access logs.
 5. Set `JOPLIN_TOKEN` in the uploader `.env` to a long random secret (for example `openssl rand -hex 24`). If it is unset or empty, Joplin writes are rejected. Enter that same private value in KOReader under **Set authorization token**. Do not commit or publish the token.
 6. Tap **Export now** (or choose book) → **Export to Joplin**.
-7. Highlights and notes are immediately written into your Obsidian vault at `<vault>/Books/<Title>.md` with clean YAML frontmatter, book synopsis, and idempotent markers (`<!-- lighthouse:highlights:start -->` / `<!-- lighthouse:highlights:end -->`). Re-exporting never creates duplicates.
+7. Highlights and notes are immediately written into your Obsidian vault at `<vault>/Books/<Title>.md` with clean YAML frontmatter, book synopsis, and idempotent markers (`<!-- lighthouse:highlights:start -->` / `<!-- lighthouse:highlights:end -->`). Generated attribution (chapters, page numbers, timestamps from KOReader, Obsidian, or Kindle) is deduplicated while preserving quote bytes, displayed attribution, and manual notes verbatim. Re-exporting never creates duplicates.
 
 ### 4. Kindle Wi-Fi Proxy Gateway (GFW / DPI Bypass)
 

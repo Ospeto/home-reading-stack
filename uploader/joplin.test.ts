@@ -22,6 +22,7 @@ import {
   HIGHLIGHTS_END_MARKER,
   extractQuoteKey,
   extractAnnotation,
+  isGeneratedAttributionLine,
 } from "./joplin";
 import { getHighlightsForBook, initHighlightsTable } from "./highlights";
 import { handleRequest } from "./server";
@@ -2145,6 +2146,198 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
         try { fs.unlinkSync(cPath); } catch (_e) { void _e; }
         hCache.close();
       }
+    });
+  });
+
+  describe("Unit U08: Generated attribution deduplication and quote preservation", () => {
+    it("reproduces and resolves E05: re-exporting with generated attribution produces exactly one highlight with correct file and indexed readback", async () => {
+      const hCache = new Database(":memory:");
+      initHighlightsTable(hCache);
+      const notePath = path.join(booksDir, "Test.md");
+      fs.writeFileSync(
+        notePath,
+        `# Test\n\nManual notes remain.\n\n## Highlights & Notes\n${HIGHLIGHTS_START_MARKER}\n> Gold.\n— *Chapter 1*, Page 42, 2026-09-24\n**Note:** Reflection\n${HIGHLIGHTS_END_MARKER}\n`,
+      );
+
+      const url = new URL("http://localhost:8086/notes?token=" + TEST_JOPLIN_TOKEN);
+      const res = await handleJoplinRequest(
+        new Request(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: "Test",
+            body: "### Page 42 @ 2026-09-24\n> Gold.\n\n— *Chapter 1*\n**Note:** Reflection",
+          }),
+        }),
+        url,
+        { expectedToken: TEST_JOPLIN_TOKEN, booksDir, cacheDb: hCache },
+      );
+      expect(res.status).toBe(200);
+
+      const content = fs.readFileSync(notePath, "utf8");
+      expect((content.match(/> Gold\./g) || []).length).toBe(1);
+      expect(content).toContain("Manual notes remain.");
+      expect(content).toContain("— *Chapter 1*, Page 42, 2026-09-24");
+      expect(content).toContain("**Note:** Reflection");
+
+      const indexed = hCache
+        .query("SELECT quote, note, chapter, page FROM book_highlights WHERE book_title = 'Test'")
+        .all() as any[];
+      expect(indexed.length).toBe(1);
+      expect(indexed[0].quote).toBe("Gold.");
+      expect(indexed[0].note).toBe("Reflection");
+      expect(indexed[0].chapter).toBe("Chapter 1");
+      expect(indexed[0].page).toBe(42);
+      hCache.close();
+    });
+
+    it("preserves dash-prefixed dialogue inside quotes while deduplicating outside attribution", async () => {
+      const hCache = new Database(":memory:");
+      initHighlightsTable(hCache);
+      const notePath = path.join(booksDir, "Dialogue Book.md");
+      fs.writeFileSync(
+        notePath,
+        `# Dialogue Book\n\n## Highlights & Notes\n${HIGHLIGHTS_START_MARKER}\n> "Wait," he said.\n> — I don't know who you are.\n— *Chapter 1*, Page 42, 2026-09-24\n**Note:** Important revelation\n${HIGHLIGHTS_END_MARKER}\n`,
+      );
+
+      const url = new URL("http://localhost:8086/notes?token=" + TEST_JOPLIN_TOKEN);
+      const res = await handleJoplinRequest(
+        new Request(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: "Dialogue Book",
+            body: "### Page 42 @ 2026-09-24\n> \"Wait,\" he said.\n> — I don't know who you are.\n\n— *Chapter 1*\n**Note:** Important revelation",
+          }),
+        }),
+        url,
+        { expectedToken: TEST_JOPLIN_TOKEN, booksDir, cacheDb: hCache },
+      );
+      expect(res.status).toBe(200);
+
+      const content = fs.readFileSync(notePath, "utf8");
+      expect((content.match(/Wait/g) || []).length).toBe(1);
+      expect(content).toContain("> — I don't know who you are.");
+      expect(content).toContain("— *Chapter 1*, Page 42, 2026-09-24");
+
+      const key = extractQuoteKey('> "Wait," he said.\n> — I don\'t know who you are.\n— *Chapter 1*, Page 42');
+      expect(key).toContain("i don't know who you are");
+      expect(key).not.toContain("chapter 1");
+      hCache.close();
+    });
+
+    it("does not blanket-skip real dash lines when quotes begin with dialogue dash without blockquotes", () => {
+      const dialogueQuote = "— I don't know who you are.";
+      expect(extractQuoteKey(`### Page 42\n${dialogueQuote}`)).toBe("— i don't know who you are.");
+      expect(normalizeQuote(dialogueQuote)).toBe("— i don't know who you are.");
+      expect(isGeneratedAttributionLine(dialogueQuote)).toBe(false);
+      expect(isGeneratedAttributionLine("— *Wait*, he whispered.")).toBe(false);
+      expect(isGeneratedAttributionLine("- How are you doing?")).toBe(false);
+    });
+
+    it("deduplicates multiline, short, and marked quotes across PUT and POST with attribution variations", async () => {
+      const hCache = new Database(":memory:");
+      initHighlightsTable(hCache);
+      const opts = { expectedToken: TEST_JOPLIN_TOKEN, booksDir, cacheDb: hCache };
+      const postUrl = new URL("http://localhost:8086/notes?token=" + TEST_JOPLIN_TOKEN);
+
+      // Multiline quote
+      await handleJoplinRequest(new Request(postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Multi Book", body: "> Line 1.\n> Line 2.\n— *Ch 3*, Page 77" }) }), postUrl, opts);
+      const putUrl = new URL("http://localhost:8086/notes/Multi%20Book?token=" + TEST_JOPLIN_TOKEN);
+      await handleJoplinRequest(new Request(putUrl, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Multi Book", body: "### Page 77\n> Line 1.\n> Line 2.\n— *Ch 3*" }) }), putUrl, opts);
+      const multi = fs.readFileSync(path.join(booksDir, "Multi Book.md"), "utf8");
+      expect((multi.match(/Line 1/g) || []).length).toBe(1);
+
+      // Short quote
+      await handleJoplinRequest(new Request(postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Short Book", body: "> OK\n— Page 1" }) }), postUrl, opts);
+      await handleJoplinRequest(new Request(postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Short Book", body: "### Page 1\n> OK\n— *Intro*" }) }), postUrl, opts);
+      const short = fs.readFileSync(path.join(booksDir, "Short Book.md"), "utf8");
+      expect((short.match(/> OK/g) || []).length).toBe(1);
+
+      // Marked quote
+      await handleJoplinRequest(new Request(postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Marked Book", body: "==Excerpt==\n— *Ch 1*, Page 5" }) }), postUrl, opts);
+      await handleJoplinRequest(new Request(postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Marked Book", body: "### Page 5\n> ==Excerpt==\n— *Ch 1*" }) }), postUrl, opts);
+      const marked = fs.readFileSync(path.join(booksDir, "Marked Book.md"), "utf8");
+      expect((marked.match(/Excerpt/g) || []).length).toBe(1);
+      hCache.close();
+    });
+
+    it("preserves existing notes when incoming export lacks annotation, and stays idempotent across repeated exports", async () => {
+      const hCache = new Database(":memory:");
+      initHighlightsTable(hCache);
+      const opts = { expectedToken: TEST_JOPLIN_TOKEN, booksDir, cacheDb: hCache };
+      const postUrl = new URL("http://localhost:8086/notes?token=" + TEST_JOPLIN_TOKEN);
+
+      await handleJoplinRequest(new Request(postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Idempotent Book", body: "> Life quote.\n— *Apology*, Page 38\n**Note:** Deep reflection" }) }), postUrl, opts);
+      await handleJoplinRequest(new Request(postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Idempotent Book", body: "### Page 38\n> Life quote.\n— *Apology*" }) }), postUrl, opts);
+      await handleJoplinRequest(new Request(postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Idempotent Book", body: "### Page 38 @ 2026-03-01\n> Life quote." }) }), postUrl, opts);
+
+      const content = fs.readFileSync(path.join(booksDir, "Idempotent Book.md"), "utf8");
+      expect((content.match(/Life quote/g) || []).length).toBe(1);
+      expect(content).toContain("Deep reflection");
+      expect(content).toContain("— *Apology*, Page 38");
+      hCache.close();
+    });
+
+    it("preserves manual headings, leading thoughts, and trailing sections outside managed markers verbatim", async () => {
+      const notePath = path.join(booksDir, "Annotated Guide.md");
+      fs.writeFileSync(
+        notePath,
+        `---\ntitle: "Annotated Guide"\nauthor: "Curator"\n---\n\n# Annotated Guide\n\n## Reader's Foreword\nPersonal thoughts before reading.\n\n## Highlights & Notes\n${HIGHLIGHTS_START_MARKER}\n> Core insight.\n— *Chapter 1*, Page 10\n${HIGHLIGHTS_END_MARKER}\n\n## Postscript & Action Items\n1. Review chapter 1 again.\n2. Discuss with colleagues.\n`,
+      );
+
+      const postUrl = new URL("http://localhost:8086/notes?token=" + TEST_JOPLIN_TOKEN);
+      await handleJoplinRequest(new Request(postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Annotated Guide", body: "### Page 10\n> Core insight.\n— *Chapter 1*" }) }), postUrl, { expectedToken: TEST_JOPLIN_TOKEN, booksDir });
+
+      const content = fs.readFileSync(notePath, "utf8");
+      expect((content.match(/Core insight/g) || []).length).toBe(1);
+      expect(content).toContain("## Reader's Foreword");
+      expect(content).toContain("Personal thoughts before reading.");
+      expect(content).toContain("## Postscript & Action Items");
+      expect(content).toContain("1. Review chapter 1 again.");
+    });
+
+    it("safely serializes same-process concurrent exports to the same book note so both survive", async () => {
+      const postUrl = new URL("http://localhost:8086/notes?token=" + TEST_JOPLIN_TOKEN);
+      const [r1, r2] = await Promise.all([
+        handleJoplinRequest(new Request(postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Concurrent Book", body: "> Quote Alpha.\n— *Ch 1*, Page 10" }) }), postUrl, { expectedToken: TEST_JOPLIN_TOKEN, booksDir }),
+        handleJoplinRequest(new Request(postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Concurrent Book", body: "> Quote Beta.\n— *Ch 2*, Page 20" }) }), postUrl, { expectedToken: TEST_JOPLIN_TOKEN, booksDir }),
+      ]);
+      expect(r1.status).toBe(200);
+      expect(r2.status).toBe(200);
+
+      const content = fs.readFileSync(path.join(booksDir, "Concurrent Book.md"), "utf8");
+      expect(content).toContain("Quote Alpha");
+      expect(content).toContain("Quote Beta");
+      expect((content.match(new RegExp(HIGHLIGHTS_START_MARKER, "g")) || []).length).toBe(1);
+      expect((content.match(new RegExp(HIGHLIGHTS_END_MARKER, "g")) || []).length).toBe(1);
+    });
+
+    it("preserves old note on disk when atomic write or rename fails", async () => {
+      const notePath = path.join(booksDir, "Resilient Book.md");
+      const initialContent = `# Resilient Book\n\n## Highlights & Notes\n${HIGHLIGHTS_START_MARKER}\n> Original pristine quote.\n— *Chapter 1*, Page 1\n${HIGHLIGHTS_END_MARKER}\n`;
+      fs.writeFileSync(notePath, initialContent, "utf8");
+
+      const originalRename = fs.renameSync;
+      let renameErrorThrown = false;
+      fs.renameSync = ((oldP: fs.PathLike, newP: fs.PathLike) => {
+        if (String(newP).includes("Resilient Book.md")) {
+          renameErrorThrown = true;
+          throw new Error("EACCES: permission denied during atomic swap");
+        }
+        return originalRename(oldP, newP);
+      }) as any;
+
+      try {
+        const postUrl = new URL("http://localhost:8086/notes?token=" + TEST_JOPLIN_TOKEN);
+        const res = await handleJoplinRequest(new Request(postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Resilient Book", body: "> Corrupting quote." }) }), postUrl, { expectedToken: TEST_JOPLIN_TOKEN, booksDir });
+        expect(res.status).toBe(500);
+      } finally {
+        fs.renameSync = originalRename;
+      }
+
+      expect(renameErrorThrown).toBe(true);
+      expect(fs.readFileSync(notePath, "utf8")).toBe(initialContent);
     });
   });
 });
