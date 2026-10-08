@@ -2604,7 +2604,7 @@
               <div class="text-[10px] text-amber-300/90 font-medium">Optional WAN: <code class="text-zinc-300">opds.wavypremium.xyz</code> plain HTTP port <code class="text-zinc-300">80</code>. <code class="text-zinc-300">?token=</code> travels in cleartext and is logged in proxy access logs. Do not publish the token.</div>
             </div>
             <div>4. Set <code class="text-zinc-200">JOPLIN_TOKEN</code> in the uploader <code class="text-zinc-200">.env</code> to a private random secret, then enter that same value in KOReader under <strong>Set authorization token</strong>. Do not use a shared or published token. If <code class="text-zinc-200">JOPLIN_TOKEN</code> is unset, exports are rejected.</div>
-            <div class="pt-1">5. Tap <strong>Export now</strong> &rarr; <strong>Export to Joplin</strong>. Highlights, chapters, and notes are formatted with clean YAML frontmatter and saved to <code class="text-zinc-200">Books/&lt;Title&gt;.md</code>. Re-exporting is 100% idempotent and never creates duplicate highlights!</div>
+            <div class="pt-1">5. Tap <strong>Export now</strong> &rarr; <strong>Export to Joplin</strong>. Highlights, chapters, and notes are formatted with clean YAML frontmatter and saved to <code class="text-zinc-200">Books/&lt;Title&gt;.md</code>. Re-exporting deduplicates generated outside attribution while preserving quote bytes, displayed attribution, and manual notes verbatim without duplicates!</div>
           </div>
         </div>
 

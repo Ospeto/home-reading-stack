@@ -611,6 +611,31 @@ function writeNoteAtomically(
 // ----------------------------------------------------------------------------
 
 /**
+ * Detects whether a line is a generated outside attribution line (e.g. "— *Chapter 1*, Page 42, 2026-09-24").
+ * Dash-prefixed dialogue inside quotes (starting with >) is never treated as outside attribution.
+ */
+export function isGeneratedAttributionLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed.startsWith(">")) return false;
+  if (!/^[—–\-]\s+/.test(trimmed)) return false;
+
+  const content = trimmed.replace(/^[—–\-]\s+/, "").trim();
+  if (!content) return false;
+
+  const parts = content.split(/\s*[,·]\s*|\s+[—–\-]\s+/);
+  const isPartMetadata = (part: string) => {
+    const p = part.trim();
+    if (/^\*[^*]+\*$/.test(p)) return true;
+    if (/^(?:Page|Location|Pos|Position)\s+\d+(?:\s*[@·,]\s*[^\n]+)?$/i.test(p)) return true;
+    if (/^@\s*\S+/.test(p)) return true;
+    if (/^\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}(?::\d{2})?)?$/.test(p)) return true;
+    return false;
+  };
+
+  return parts.length > 0 && parts.every(isPartMetadata);
+}
+
+/**
  * Normalizes a quote string for semantic comparison and deduplication:
  * strips headers, page stamps, timestamps, backlinks, and markdown formatting.
  */
@@ -621,8 +646,11 @@ export function normalizeQuote(text: string): string {
   // Remove markdown headers
   clean = clean.replace(/^#{1,6}\s+.*$/gm, "");
 
-  // Remove attribution / timestamp lines (e.g. "— Chapter 1, Page 12 @ 2024-05-01")
-  clean = clean.replace(/^[—–-]\s+.*$/gm, "");
+  // Remove generated outside attribution lines while preserving real quote text and dialogue
+  clean = clean
+    .split("\n")
+    .filter((line) => !isGeneratedAttributionLine(line))
+    .join("\n");
 
   // Remove backlinks like "[View in book](<file://...>)"
   clean = clean.replace(/\[.*?\]\([^)]+\)/gi, "");
@@ -748,8 +776,9 @@ export function splitHighlightEntries(
         if (
           isCollectingEntry &&
           (prevTrimmed === "" ||
-            prevTrimmed.startsWith("—") ||
-            prevTrimmed.startsWith("-"))
+            isGeneratedAttributionLine(prevTrimmed) ||
+            /^\*{0,2}Note:/i.test(prevTrimmed) ||
+            /^[-*_]{3,}\s*$/.test(prevTrimmed))
         ) {
           flushCurrentEntry();
         }
@@ -812,7 +841,10 @@ export function extractQuoteKey(raw: string): string {
       continue;
     }
     if (inAnnotation) continue;
-    quoteLines.push(trimmed.replace(/^>\s?/, ""));
+    if (isGeneratedAttributionLine(trimmed)) continue;
+    const stripped = trimmed.replace(/^>\s?/, "");
+    if (!stripped && trimmed.startsWith(">")) continue;
+    quoteLines.push(stripped);
   }
   return normalizeQuote(quoteLines.join(" "));
 }
