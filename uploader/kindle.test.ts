@@ -45,6 +45,7 @@ import {
   invalidateKindleSyncPreviewCache,
   setActiveKindleProgress,
   setPullHighlightsFnForTesting,
+  MAX_FAT32_FILE_SIZE,
 } from "./kindle";
 import { handleRequest, setServerDependenciesForTest, resetServerDependenciesForTest } from "./server";
 
@@ -4324,6 +4325,228 @@ describe("Kindle USB Detection & Bulk Sync Engine", () => {
           delete process.env.KOSYNC_DB_PATH;
         }
       }
+    });
+  });
+
+  describe("16. Unit U10: FAT32 Exact File Size Limit, Preflight Accounting & TDZ Prevention", () => {
+    const MAX_FAT32 = MAX_FAT32_FILE_SIZE; // 4,294,967,295 (0xFFFFFFFF)
+    let origStatSync: typeof fs.statSync;
+
+    beforeEach(() => {
+      origStatSync = fs.statSync;
+      process.env.LIGHTHOUSE_DOT_CLEAN_BIN = "/usr/bin/true";
+    });
+
+    afterEach(() => {
+      fs.statSync = origStatSync;
+      delete process.env.LIGHTHOUSE_DOT_CLEAN_BIN;
+      delete process.env.TEST_KINDLE_FREE_BYTES;
+    });
+
+    it("accepts legal FAT32 boundary sizes max-1 and max, rejecting strictly greater max+1", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Book MaxMinusOne", author: "Author", format: "EPUB", fileContent: "tiny1" },
+        { id: 2, title: "Book MaxLegal", author: "Author", format: "EPUB", fileContent: "tiny2" },
+        { id: 3, title: "Book MaxPlusOne", author: "Author", format: "EPUB", fileContent: "tiny3" },
+      ]);
+      process.env.TEST_KINDLE_FREE_BYTES = String(10 * 1024 * 1024 * 1024);
+
+      fs.statSync = ((p: any, ...args: any[]) => {
+        const s = (origStatSync as any)(p, ...args);
+        const pStr = String(p);
+        if (pStr.includes("book_1.") || pStr.includes("Book_1")) return Object.assign(s, { size: MAX_FAT32 - 1 });
+        if (pStr.includes("book_2.") || pStr.includes("Book_2")) return Object.assign(s, { size: MAX_FAT32 });
+        if (pStr.includes("book_3.") || pStr.includes("Book_3")) return Object.assign(s, { size: MAX_FAT32 + 1 });
+        return s;
+      }) as any;
+
+      // 1. Preview: max-1 and max are pending; max+1 is excluded from pending
+      const preview = previewKindleSync(kindleMount, { scope: "all" });
+      expect(preview.totalCandidates).toBe(3);
+      expect(preview.alreadySyncedCount).toBe(0);
+      expect(preview.pendingCount).toBe(2);
+
+      // 2. Single sync: Book 2 (legal max) succeeds; Book 3 (max+1) rejected
+      const singleLegal = await syncSingleBookToKindle(2, { mountPath: kindleMount });
+      expect(singleLegal.success).toBe(true);
+      expect(singleLegal.alreadySynced).toBe(false);
+
+      const singleOversized = await syncSingleBookToKindle(3, { mountPath: kindleMount });
+      expect(singleOversized.success).toBe(false);
+      expect(singleOversized.error).toContain("exceeds FAT32 maximum file size limit (4GB)");
+
+      // 3. Bulk sync: transfers legal books 1 and 2, records error for book 3
+      fs.rmSync(path.join(kindleMount, "books"), { recursive: true, force: true });
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+      invalidateKindleBookIndex();
+
+      const bulk = await syncAllBooksToKindle({ mountPath: kindleMount, scope: "all" });
+      expect(bulk.totalBooks).toBe(3);
+      expect(bulk.transferred).toBe(2);
+      expect(bulk.failed).toBe(1);
+      expect(bulk.errors.length).toBe(1);
+      expect(bulk.errors[0].bookId).toBe(3);
+      expect(bulk.errors[0].error).toContain("exceeds FAT32 maximum file size limit (4GB)");
+    });
+
+    it("mixed valid and oversized batch transfers valid files without TDZ ReferenceError (Planner E07 regression)", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+      setupFakeCalibreDatabase([
+        { id: 10, title: "Valid First", author: "Author A", format: "EPUB", fileContent: "content-one" },
+        { id: 20, title: "Oversized Middle", author: "Author B", format: "EPUB", fileContent: "content-two" },
+        { id: 30, title: "Valid Third", author: "Author C", format: "EPUB", fileContent: "content-three" },
+      ]);
+      process.env.TEST_KINDLE_FREE_BYTES = String(10 * 1024 * 1024 * 1024);
+
+      fs.statSync = ((p: any, ...args: any[]) => {
+        const s = (origStatSync as any)(p, ...args);
+        if (String(p).includes("book_20.") || String(p).includes("Book_20")) return Object.assign(s, { size: MAX_FAT32 + 1 });
+        return s;
+      }) as any;
+
+      resetKindleProgressForTesting();
+      const res = await syncAllBooksToKindle({ mountPath: kindleMount, scope: "all" });
+      expect(res.success).toBe(false);
+      expect(res.totalBooks).toBe(3);
+      expect(res.transferred).toBe(2);
+      expect(res.failed).toBe(1);
+      expect(res.alreadySynced).toBe(0);
+      expect(res.skipped).toBe(0);
+      expect(res.transferred + res.failed + res.alreadySynced + res.skipped).toBe(res.totalBooks);
+      expect(res.errors.length).toBe(1);
+      expect(res.errors[0].bookId).toBe(20);
+      expect(res.errors[0].title).toBe("Oversized Middle");
+      expect(res.errors[0].error).toContain("exceeds FAT32 maximum file size limit (4GB)");
+
+      const destFiles = fs.readdirSync(path.join(kindleMount, "books"), { recursive: true }).map(String);
+      expect(destFiles.some((f) => f.includes("Valid First"))).toBe(true);
+      expect(destFiles.some((f) => f.includes("Valid Third"))).toBe(true);
+      expect(destFiles.some((f) => f.includes("Oversized Middle"))).toBe(false);
+    });
+
+    it("treats oversized item already present on Kindle as alreadySynced across preview, single, and bulk", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      fs.mkdirSync(booksDir, { recursive: true });
+      setupFakeCalibreDatabase([
+        { id: 42, title: "Existing Oversized", author: "Author Present", format: "EPUB", fileContent: "fixture" },
+      ]);
+      const authorFolder = path.join(booksDir, "Author Present");
+      fs.mkdirSync(authorFolder, { recursive: true });
+      fs.writeFileSync(path.join(authorFolder, "Existing Oversized - Author Present.epub"), "already-on-device", "utf8");
+
+      fs.statSync = ((p: any, ...args: any[]) => {
+        const s = (origStatSync as any)(p, ...args);
+        if (String(p).includes("book_42.") || String(p).includes("Book_42") || String(p).includes("Existing Oversized")) {
+          return Object.assign(s, { size: MAX_FAT32 + 1 });
+        }
+        return s;
+      }) as any;
+
+      const preview = previewKindleSync(kindleMount, { scope: "all" });
+      expect(preview.alreadySyncedCount).toBe(1);
+      expect(preview.pendingCount).toBe(0);
+
+      const single = await syncSingleBookToKindle(42, { mountPath: kindleMount });
+      expect(single.success).toBe(true);
+      expect(single.alreadySynced).toBe(true);
+
+      const bulk = await syncAllBooksToKindle({ mountPath: kindleMount, scope: "all" });
+      expect(bulk.success).toBe(true);
+      expect(bulk.alreadySynced).toBe(1);
+      expect(bulk.failed).toBe(0);
+      expect(bulk.transferred).toBe(0);
+
+      const bulkForced = await syncAllBooksToKindle({ mountPath: kindleMount, scope: "all", forceAll: true });
+      expect(bulkForced.success).toBe(false);
+      expect(bulkForced.failed).toBe(1);
+      expect(bulkForced.errors[0].error).toContain("exceeds FAT32 maximum file size limit (4GB)");
+    });
+
+    it("excludes rejected oversized files from total required storage calculation", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Oversized Book", author: "Author", format: "EPUB", fileContent: "huge" },
+        { id: 2, title: "Normal Book", author: "Author", format: "EPUB", fileContent: "normal" },
+      ]);
+      process.env.TEST_KINDLE_FREE_BYTES = String(60 * 1024 * 1024);
+
+      fs.statSync = ((p: any, ...args: any[]) => {
+        const s = (origStatSync as any)(p, ...args);
+        if (String(p).includes("book_1.") || String(p).includes("Book_1")) return Object.assign(s, { size: 5 * 1024 * 1024 * 1024 });
+        return s;
+      }) as any;
+
+      const res = await syncAllBooksToKindle({ mountPath: kindleMount, scope: "all" });
+      expect(res.transferred).toBe(1);
+      expect(res.failed).toBe(1);
+      expect(res.errors.length).toBe(1);
+      expect(res.errors[0].title).toBe("Oversized Book");
+    });
+
+    it("preserves preflight errors and truthful counts when pre-flight storage check fails", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      const booksDir = path.join(kindleMount, "books");
+      fs.mkdirSync(booksDir, { recursive: true });
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Already Here", author: "Author A", format: "EPUB", fileContent: "one" },
+        { id: 2, title: "Oversized One", author: "Author B", format: "EPUB", fileContent: "two" },
+        { id: 3, title: "Needs Space", author: "Author C", format: "EPUB", fileContent: "three" },
+      ]);
+      fs.mkdirSync(path.join(booksDir, "Author A"), { recursive: true });
+      fs.writeFileSync(path.join(booksDir, "Author A", "Already Here - Author A.epub"), "existing");
+
+      fs.statSync = ((p: any, ...args: any[]) => {
+        const s = (origStatSync as any)(p, ...args);
+        if (String(p).includes("book_2.") || String(p).includes("Book_2")) return Object.assign(s, { size: MAX_FAT32 + 1 });
+        return s;
+      }) as any;
+
+      process.env.TEST_KINDLE_FREE_BYTES = "100";
+      const res = await syncAllBooksToKindle({ mountPath: kindleMount, scope: "all" });
+      expect(res.success).toBe(false);
+      expect(res.totalBooks).toBe(3);
+      expect(res.alreadySynced).toBe(1);
+      expect(res.transferred).toBe(0);
+      expect(res.failed).toBe(2);
+      expect(res.skipped).toBe(0);
+      expect(res.alreadySynced + res.transferred + res.failed + res.skipped).toBe(res.totalBooks);
+      expect(res.errors.length).toBe(2);
+      expect(res.errors.some((e) => e.bookId === 2 && e.error.includes("exceeds FAT32"))).toBe(true);
+      expect(res.errors.some((e) => e.title === "Storage" && e.error.includes("Insufficient Kindle storage"))).toBe(true);
+    });
+
+    it("releases sync lock cleanly and reflects cancelled state when cancelled during transfer", async () => {
+      const kindleMount = path.join(fakeVolumesDir, "Kindle");
+      fs.mkdirSync(path.join(kindleMount, "books"), { recursive: true });
+      setupFakeCalibreDatabase([
+        { id: 1, title: "Book One", author: "Author", format: "EPUB", fileContent: "c1" },
+        { id: 2, title: "Book Two", author: "Author", format: "EPUB", fileContent: "c2" },
+        { id: 3, title: "Book Three", author: "Author", format: "EPUB", fileContent: "c3" },
+      ]);
+      process.env.TEST_KINDLE_FREE_BYTES = String(10 * 1024 * 1024 * 1024);
+
+      let cancelledAtTransfer = false;
+      const res = await syncAllBooksToKindle({
+        mountPath: kindleMount,
+        scope: "all",
+        onProgress: (p) => {
+          if (p.phase === "transferring" && !cancelledAtTransfer) {
+            cancelledAtTransfer = true;
+            cancelKindleSync();
+          }
+        },
+      });
+
+      expect(res.cancelled).toBe(true);
+      expect(res.success).toBe(false);
+      expect(isKindleSyncActive()).toBe(false);
+      expect(tryAcquireKindleSyncLock()).toBe(true);
+      releaseKindleSyncLock();
     });
   });
 });
