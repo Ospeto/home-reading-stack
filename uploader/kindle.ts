@@ -3582,7 +3582,7 @@ export function previewKindleSync(
         continue;
       }
     }
-    if (c.fileSize >= MAX_FAT32_FILE_SIZE) {
+    if (c.fileSize > MAX_FAT32_FILE_SIZE) {
       continue;
     }
     pendingCount++;
@@ -3731,7 +3731,7 @@ export async function syncSingleBookToKindle(
   }
 
   // Check FAT32 4GB file size limit
-  if (candidate.fileSize >= MAX_FAT32_FILE_SIZE) {
+  if (candidate.fileSize > MAX_FAT32_FILE_SIZE) {
     return {
       success: false,
       bookId,
@@ -3922,6 +3922,12 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
     }
 
     let alreadySynced = 0;
+    let transferred = 0;
+    let failed = 0;
+    let skipped = 0;
+    let bytesTransferred = 0;
+    const errors: Array<{ bookId: number; title: string; error: string }> = [];
+    const transferredBooks: Array<{ bookId: number; title: string; filename: string; bytes: number }> = [];
     const pendingCandidates: KindleFileCandidate[] = [];
     let totalRequiredBytes = 0;
 
@@ -3948,7 +3954,12 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
         }
       }
 
-      if (candidate.fileSize >= MAX_FAT32_FILE_SIZE) {
+      if (existsAndMatches) {
+        alreadySynced++;
+        continue;
+      }
+
+      if (candidate.fileSize > MAX_FAT32_FILE_SIZE) {
         errors.push({
           bookId: candidate.bookId,
           title: candidate.title,
@@ -3958,12 +3969,8 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
         continue;
       }
 
-      if (existsAndMatches) {
-        alreadySynced++;
-      } else {
-        pendingCandidates.push(candidate);
-        totalRequiredBytes += calculateClusterAllocatedSize(candidate.fileSize);
-      }
+      pendingCandidates.push(candidate);
+      totalRequiredBytes += calculateClusterAllocatedSize(candidate.fileSize);
     }
 
     // 3. Pre-Flight Total Storage Check
@@ -3983,11 +3990,11 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
         totalBooks: candidates.length,
         alreadySynced,
         transferred: 0,
-        failed: pendingCandidates.length,
+        failed: failed + pendingCandidates.length,
         skipped: 0,
         bytesTransferred: 0,
         highlightsPulled: 0,
-        errors: [{ bookId: 0, title: "Storage", error: errMsg }],
+        errors: [...errors, { bookId: 0, title: "Storage", error: errMsg }],
       };
 
       activeKindleProgress = {
@@ -3996,7 +4003,7 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
         totalCandidates: candidates.length,
         transferredCount: 0,
         alreadySyncedCount: alreadySynced,
-        failedCount: pendingCandidates.length,
+        failedCount: failed + pendingCandidates.length,
         skippedCount: 0,
         bytesTransferred: 0,
         percent: 0,
@@ -4011,16 +4018,12 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
     }
 
     // 4. Transfer Candidates
-    let transferred = 0;
-    let failed = 0;
-    let skipped = 0;
-    let bytesTransferred = 0;
     let currentFreeBytes = space.freeBytes;
-    const errors: Array<{ bookId: number; title: string; error: string }> = [];
-    const transferredBooks: Array<{ bookId: number; title: string; filename: string; bytes: number }> = [];
 
     activeKindleProgress.totalCandidates = candidates.length;
     activeKindleProgress.alreadySyncedCount = alreadySynced;
+    activeKindleProgress.failedCount = failed;
+    activeKindleProgress.skippedCount = skipped;
     activeKindleProgress.phase = "transferring";
 
     for (let i = 0; i < pendingCandidates.length; i++) {
@@ -4075,7 +4078,7 @@ export async function syncAllBooksToKindle(options: KindleSyncOptions = {}): Pro
           title: candidate.title,
           error: reason,
         });
-        skipped++;
+        skipped += (pendingCandidates.length - i);
         console.warn(`[Kindle] Space exhausted mid-sync. Halting transfer loop gracefully.`);
         break;
       }
