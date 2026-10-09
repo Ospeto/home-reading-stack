@@ -19,7 +19,8 @@ import {
   isSameBookAsync,
   extractVolumeNumber,
   isAllowedCoverUrl,
-  normalizeTitleForDedup,
+  normalizeAuthorForDedup,
+  isJunkAuthor,
 } from "./scraper";
 import {
   isArchiveFile,
@@ -2467,22 +2468,70 @@ export async function downscaleImageAsync(
   });
 }
 
+export function isAuthorKnown(author: string): boolean {
+  if (!author) return false;
+  const clean = author.trim().toLowerCase();
+  if (clean === "" || clean === "unknown" || clean === "anonymous") return false;
+  return !isJunkAuthor(author);
+}
+
 export function matchesActiveBookIdentity(
   activeBook: any,
   cachedTitle: string,
+  cachedAuthors?: string,
+  filepath?: string,
 ): boolean {
   if (!activeBook || !cachedTitle) return false;
-  const a = (activeBook.title || "").trim();
-  const b = (cachedTitle || "").trim();
-  if (a.toLowerCase() === b.toLowerCase()) return true;
 
-  const norm = (s: string) =>
-    (s || "").toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, "");
-  if (norm(a) && norm(a) === norm(b)) return true;
+  const activeTitle = (activeBook.title || "").trim();
+  const cTitle = (cachedTitle || "").trim();
+  if (!activeTitle || !cTitle) return false;
 
-  const dedupA = normalizeTitleForDedup(a);
-  const dedupB = normalizeTitleForDedup(b);
-  if (dedupA && dedupA === dedupB) return true;
+  // 1. Conservative Title Matching
+  // Exact case-insensitive match with standardized whitespace.
+  // Symbol-distinct titles (e.g. "Re:Zero" vs "ReZero", "Fate/Zero" vs "Fate: Zero",
+  // "Volume 1" vs "Volume 2", or distinct subtitles) are preserved as distinct.
+  const normTitleA = activeTitle.replace(/\s+/g, " ").toLowerCase();
+  const normTitleB = cTitle.replace(/\s+/g, " ").toLowerCase();
+  if (normTitleA !== normTitleB) {
+    return false;
+  }
+
+  // 2. Author Ownership Validation
+  const activeAuthorStr = (activeBook.authors || "").trim();
+  const cachedAuthorStr = (cachedAuthors || "").trim();
+
+  const isAlias = Boolean(filepath && filepath.startsWith("alias:"));
+
+  const activeKnown = isAuthorKnown(activeAuthorStr);
+  const cachedKnown = isAuthorKnown(cachedAuthorStr);
+
+  // Both authors are known: normalize and compare
+  if (activeKnown && cachedKnown) {
+    const normA = normalizeAuthorForDedup(activeAuthorStr);
+    const normB = normalizeAuthorForDedup(cachedAuthorStr);
+    if (normA !== normB) {
+      // Contradictory ownership: different authors for same active ID and title
+      return false;
+    }
+    return true;
+  }
+
+  // If one author is known and the other is different/unknown:
+  // Contradictory or unknown ownership must not be accepted by title resemblance alone
+  if (activeKnown !== cachedKnown) {
+    return false;
+  }
+
+  // Both authors are unknown / uncredited
+  if (!activeKnown && !cachedKnown) {
+    // Explicit aliases preserve established supported semantics when ownership has not demonstrably changed
+    if (isAlias) {
+      return activeAuthorStr.toLowerCase() === cachedAuthorStr.toLowerCase();
+    }
+    // For ordinary filepath hashes, unknown ownership cannot be accepted by title resemblance alone
+    return false;
+  }
 
   return false;
 }
@@ -2530,21 +2579,37 @@ export function getCalibreHashMap(knownBooks?: any[]) {
         continue;
       }
 
-      // If book-list fetch failed, we cannot confirm active identity
       if (booksFetchFailed) {
+        // When catalog fetch fails, we do NOT treat unavailable as confirmed deletion.
+        // Preserve existing cached duplicate reservation / safety checks for known cached books.
+        if (!map[row.hash]) {
+          map[row.hash] = {
+            id: row.book_id,
+            title: row.title,
+            authors: row.authors || "Unknown",
+            cover: !!row.cover,
+          };
+        }
         continue;
       }
 
-      // Active book existence check
+      // Catalog was successfully fetched: active book existence check
       const activeBook = activeBookById.get(row.book_id);
       if (!activeBook) {
-        // Book was deleted from Calibre (inactive cached identity)
+        // Book was confirmed deleted from Calibre (inactive cached identity)
         continue;
       }
 
-      // Exact identity validation (same-ID changed ownership guard)
-      if (!matchesActiveBookIdentity(activeBook, row.title)) {
-        // Ownership changed / different book reused this ID
+      // Exact identity validation (same-ID changed ownership & contradictory author guard)
+      if (
+        !matchesActiveBookIdentity(
+          activeBook,
+          row.title,
+          row.authors,
+          row.filepath,
+        )
+      ) {
+        // Ownership changed / contradictory author / symbol-distinct title
         continue;
       }
 
@@ -2719,23 +2784,44 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
   }
 
   let books: any[] = [];
+  let catalogFetchFailed = false;
   try {
     const getBooksFn = serverDependencies.getCalibreBooks ?? getCalibreBooks;
     books = getBooksFn(true);
     if (!Array.isArray(books)) {
+      catalogFetchFailed = true;
       books = [];
     }
   } catch {
+    catalogFetchFailed = true;
     books = [];
   }
   const fileHash = getKOReaderBinary256(filePath);
 
   // 1. Check if exact hash exists in Calibre Library
-  const { map } = getCalibreHashMap(books);
+  const { map, booksFetchFailed } = getCalibreHashMap(catalogFetchFailed ? undefined : books);
+  const isCatalogUnavailable = catalogFetchFailed || booksFetchFailed;
+
   if (fileHash && map[fileHash]) {
     const existing = map[fileHash];
+
+    if (isCatalogUnavailable) {
+      // Catalog is unavailable: preserve existing reservation/safety checks rather
+      // than treating unavailable as confirmed deletion.
+      return {
+        success: true,
+        duplicate: true,
+        bookId: existing.id,
+        message: `Book "${existing.title}" is already in your library.`,
+      };
+    }
+
+    // Catalog is available: verify active book identity against live catalog
     const activeBook = books.find((b: any) => b.id === existing.id);
-    if (activeBook && matchesActiveBookIdentity(activeBook, existing.title)) {
+    if (
+      activeBook &&
+      matchesActiveBookIdentity(activeBook, existing.title, existing.authors)
+    ) {
       return {
         success: true,
         duplicate: true,

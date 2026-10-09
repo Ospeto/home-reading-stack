@@ -14,6 +14,7 @@ import {
   ingestBookFile,
   getCalibreHashMap,
   matchesActiveBookIdentity,
+  isAuthorKnown,
   getCacheDb,
   getCalibreBooks,
   jobQueue,
@@ -4058,6 +4059,8 @@ exit 0
         db.run(`CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);`);
         db.run(`CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);`);
         db.run(`CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);`);
+        db.run(`INSERT INTO authors (id, name) VALUES (1, 'Kugane Maruyama');`);
+        db.run(`INSERT INTO books_authors_link (id, book, author) VALUES (1, 42, 1);`);
         db.run(`INSERT INTO books (id, title, path, has_cover, pubdate, series_index) VALUES (42, 'Overlord Volume 1', 'Overlord1', 0, '', 1);`);
         db.run(`INSERT INTO data (id, book, format, name) VALUES (1, 42, 'EPUB', 'one');`);
         db.close();
@@ -4217,12 +4220,86 @@ exit 0
       expect(map[unmatchedHash]).toBeUndefined();
     });
 
-    it("explicit aliases validate active book identity and reject deleted books", () => {
+    it("reproduces same active ID and same title but different recorded author using actual duplicate path, rejecting false duplicate and not repointing", async () => {
+      const cdb = getCacheDb();
+      const testHash = "test_same_id_different_author_duplicate_hash";
+
+      // Active Calibre library has book 12: "Inferno" by Dante Alighieri
+      const knownBooks = [
+        { id: 12, title: "Inferno", authors: "Dante Alighieri", cover: 1 },
+      ];
+
+      // Cached row has same ID 12 and same title "Inferno", but different recorded author: Dan Brown
+      cdb.run(
+        "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ["/fake/dan_brown_inferno.epub#h", 1, testHash, 12, "Inferno", "Dan Brown", 0],
+      );
+
+      // 1. getCalibreHashMap must reject the row due to contradictory author ownership
+      const { map } = getCalibreHashMap(knownBooks);
+      expect(map[testHash]).toBeUndefined();
+
+      // 2. ingestBookFile duplicate shortcut must NOT repoint to Dante's book 12
+      const activeBook = knownBooks.find((b) => b.id === 12);
+      expect(matchesActiveBookIdentity(activeBook, "Inferno", "Dan Brown")).toBe(false);
+    });
+
+    it("reproduces same active ID and same title but different recorded author using actual progress path, preventing false progress mapping", () => {
+      const cdb = getCacheDb();
+      const docHash = "test_dan_brown_inferno_progress_dochash";
+
+      // Cached row has book_id 12, title "Inferno", author "Dan Brown"
+      cdb.run(
+        "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ["/fake/inferno.epub#h", 1, docHash, 12, "Inferno", "Dan Brown", 0],
+      );
+
+      // Active catalog has book 12: "Inferno" by Dante Alighieri
+      const knownBooks = [
+        { id: 12, title: "Inferno", authors: "Dante Alighieri", cover: 1 },
+      ];
+
+      const { map } = getCalibreHashMap(knownBooks);
+
+      // getCalibreHashMap must reject the contradictory author row
+      expect(map[docHash]).toBeUndefined();
+    });
+
+    it("symbol-distinct title controls reject title resemblance when symbols distinguish works", () => {
+      const active1 = { id: 10, title: "Fate/Zero", authors: "Gen Urobuchi" };
+      expect(matchesActiveBookIdentity(active1, "Fate: Zero", "Gen Urobuchi")).toBe(false);
+      expect(matchesActiveBookIdentity(active1, "Fate Zero", "Gen Urobuchi")).toBe(false);
+
+      const active2 = { id: 11, title: "Re:Zero", authors: "Tappei Nagatsuki" };
+      expect(matchesActiveBookIdentity(active2, "ReZero", "Tappei Nagatsuki")).toBe(false);
+
+      const active3 = { id: 12, title: "Overlord (Part 1)", authors: "Kugane Maruyama" };
+      expect(matchesActiveBookIdentity(active3, "Overlord (Part 2)", "Kugane Maruyama")).toBe(false);
+    });
+
+    it("unknown or uncredited author cannot be accepted by title resemblance alone for ordinary filepath hashes", () => {
+      const active = { id: 20, title: "Genesis", authors: "Arthur C. Clarke" };
+
+      // Cached author is Unknown: cannot be accepted by title resemblance alone
+      expect(matchesActiveBookIdentity(active, "Genesis", "Unknown")).toBe(false);
+      expect(matchesActiveBookIdentity(active, "Genesis", "")).toBe(false);
+
+      // Active author is Unknown, cached is known: cannot be accepted by title resemblance alone
+      const activeUnknown = { id: 21, title: "Genesis", authors: "Unknown" };
+      expect(matchesActiveBookIdentity(activeUnknown, "Genesis", "Arthur C. Clarke")).toBe(false);
+
+      // Both authors unknown for ordinary filepath hash: rejected
+      expect(matchesActiveBookIdentity(activeUnknown, "Genesis", "Unknown", "/path/book.epub")).toBe(false);
+    });
+
+    it("explicit aliases preserve established supported semantics but reject demonstrably changed ownership", () => {
       const cdb = getCacheDb();
       const liveAliasHash = "test_alias_live_hash";
       const deadAliasHash = "test_alias_dead_hash";
+      const changedAuthorAliasHash = "test_alias_changed_author_hash";
+      const unknownAuthorAliasHash = "test_alias_unknown_author_hash";
 
-      // Alias 1: points to live book 12
+      // Alias 1: points to live book 12 with matching author
       cdb.run(
         "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
         [`alias:${liveAliasHash}`, 1, liveAliasHash, 12, "Active Alias Work", "Author A", 0],
@@ -4232,18 +4309,32 @@ exit 0
         "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
         [`alias:${deadAliasHash}`, 1, deadAliasHash, 42, "Deleted Alias Work", "Author B", 0],
       );
+      // Alias 3: points to book 12, but recorded author was Old Author and active book is Author A (changed ownership!)
+      cdb.run(
+        "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [`alias:${changedAuthorAliasHash}`, 1, changedAuthorAliasHash, 12, "Active Alias Work", "Old Author", 0],
+      );
+      // Alias 4: points to book 13, both recorded and active author are Unknown (established supported alias semantics)
+      cdb.run(
+        "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [`alias:${unknownAuthorAliasHash}`, 1, unknownAuthorAliasHash, 13, "Ancient Folktale", "Unknown", 0],
+      );
 
       const knownBooks = [
         { id: 12, title: "Active Alias Work", authors: "Author A", cover: 0 },
+        { id: 13, title: "Ancient Folktale", authors: "Unknown", cover: 0 },
       ];
 
       const { map } = getCalibreHashMap(knownBooks);
       expect(map[liveAliasHash]).toBeDefined();
       expect(map[liveAliasHash].id).toBe(12);
       expect(map[deadAliasHash]).toBeUndefined();
+      expect(map[changedAuthorAliasHash]).toBeUndefined();
+      expect(map[unknownAuthorAliasHash]).toBeDefined();
+      expect(map[unknownAuthorAliasHash].id).toBe(13);
     });
 
-    it("failed book-list fetch does not flush cache and preserves new ingestion", async () => {
+    it("failed book-list fetch does not flush cache and preserves existing reservation safety checks", async () => {
       const cdb = getCacheDb();
       const testHash = "test_fetch_failure_retention_hash";
       cdb.run(
@@ -4258,11 +4349,12 @@ exit 0
       });
 
       try {
-        // getCalibreHashMap handles failed book fetch safely
+        // getCalibreHashMap handles failed book fetch safely:
+        // Does NOT treat unavailable as confirmed deletion! Preserves cached duplicate safety checks.
         const { map, booksFetchFailed } = getCalibreHashMap();
         expect(booksFetchFailed).toBe(true);
-        // Map does not expose unverified duplicates
-        expect(map[testHash]).toBeUndefined();
+        expect(map[testHash]).toBeDefined();
+        expect(map[testHash].id).toBe(12);
 
         // Readback confirms cache rows are NOT deleted or flushed
         const row = cdb.query("SELECT * FROM file_hashes WHERE hash = ?").get(testHash) as any;
@@ -4273,27 +4365,34 @@ exit 0
       }
     });
 
-    it("matchesActiveBookIdentity handles exact match, case normalization, punctuation differences, and rejects distinct titles", () => {
-      // Exact match
-      expect(matchesActiveBookIdentity({ title: "Overlord Volume 1" }, "Overlord Volume 1")).toBe(true);
+    it("matchesActiveBookIdentity and isAuthorKnown comprehensive unit checks", () => {
+      // isAuthorKnown behavior
+      expect(isAuthorKnown("Arthur C. Clarke")).toBe(true);
+      expect(isAuthorKnown("")).toBe(false);
+      expect(isAuthorKnown("Unknown")).toBe(false);
+      expect(isAuthorKnown("unknown")).toBe(false);
+      expect(isAuthorKnown("anonymous")).toBe(false);
 
-      // Case insensitive
-      expect(matchesActiveBookIdentity({ title: "OVERLORD VOLUME 1" }, "overlord volume 1")).toBe(true);
+      // Exact match with matching authors
+      const active = { title: "Overlord Volume 1", authors: "Kugane Maruyama" };
+      expect(matchesActiveBookIdentity(active, "Overlord Volume 1", "Kugane Maruyama")).toBe(true);
 
-      // Punctuation and spacing differences
-      expect(matchesActiveBookIdentity({ title: "Overlord, Vol. 1" }, "Overlord Vol 1")).toBe(true);
+      // Case insensitive title and author
+      expect(matchesActiveBookIdentity(active, "OVERLORD VOLUME 1", "kugane maruyama")).toBe(true);
 
-      // Bracket and release metadata tags handled by normalizeTitleForDedup
-      expect(matchesActiveBookIdentity({ title: "[v1.0] Overlord Vol 1" }, "Overlord Vol 1")).toBe(true);
+      // Whitespace normalized title
+      expect(matchesActiveBookIdentity(active, "Overlord   Volume  1", "Kugane Maruyama")).toBe(true);
 
-      // Conflicting/unrelated book titles
-      expect(matchesActiveBookIdentity({ title: "Hamlet" }, "Overlord Volume 1")).toBe(false);
-      expect(matchesActiveBookIdentity({ title: "Overlord Volume 2" }, "Overlord Volume 1")).toBe(false);
+      // Contradictory author: rejected
+      expect(matchesActiveBookIdentity(active, "Overlord Volume 1", "Different Author")).toBe(false);
+
+      // Contradictory title: rejected
+      expect(matchesActiveBookIdentity(active, "Hamlet", "Kugane Maruyama")).toBe(false);
 
       // Missing or null values
-      expect(matchesActiveBookIdentity(null, "Overlord Volume 1")).toBe(false);
-      expect(matchesActiveBookIdentity({ title: "Overlord Volume 1" }, "")).toBe(false);
-      expect(matchesActiveBookIdentity({ title: "" }, "Overlord Volume 1")).toBe(false);
+      expect(matchesActiveBookIdentity(null, "Overlord Volume 1", "Kugane Maruyama")).toBe(false);
+      expect(matchesActiveBookIdentity(active, "", "Kugane Maruyama")).toBe(false);
+      expect(matchesActiveBookIdentity({ title: "" }, "Overlord Volume 1", "Kugane Maruyama")).toBe(false);
     });
   });
 });
