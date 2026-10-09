@@ -3434,6 +3434,7 @@ export async function compressResponseIfNeeded(
 
   if (bodyBuffer.length <= 1024 || bodyBuffer.length > 10 * 1024 * 1024) {
     const newHeaders = new Headers(res.headers);
+    newHeaders.set("Content-Length", String(bodyBuffer.length));
     appendVary(newHeaders, "Accept-Encoding");
     return new Response(bodyBuffer, {
       status: res.status,
@@ -3470,6 +3471,10 @@ export async function compressResponseIfNeeded(
   newHeaders.set("Content-Encoding", encoding);
   newHeaders.set("Content-Length", String(compressed.byteLength));
   appendVary(newHeaders, "Accept-Encoding");
+  const existingEtag = newHeaders.get("ETag");
+  if (existingEtag && !existingEtag.startsWith("W/")) {
+    newHeaders.set("ETag", `W/${existingEtag}`);
+  }
 
   return new Response(compressed as any, {
     status: res.status,
@@ -3621,10 +3626,12 @@ async function handleRequestCore(
       });
     }
 
-    const serverBase = (process.env.CALIBRE_SERVER_URL || SERVER_URL).replace(
-      /\/+$/,
-      "",
-    );
+    const envServerUrl = process.env.CALIBRE_SERVER_URL;
+    const serverBase = (
+      (envServerUrl && envServerUrl !== "undefined"
+        ? envServerUrl
+        : SERVER_URL) || "http://127.0.0.1:8088"
+    ).replace(/\/+$/, "");
     const targetUrl = `${serverBase}${pathCheck.canonicalPath}${url.search}`;
 
     // 3. Header Forwarding Allowlist:
@@ -3661,6 +3668,7 @@ async function handleRequestCore(
           method: req.method,
           headers: forwardedHeaders,
           redirect: "manual",
+          signal: req.signal,
         },
         5,
         { allowCalibreServer: true },
@@ -3727,6 +3735,10 @@ async function handleRequestCore(
         upstreamRes.status === 204 ||
         upstreamRes.status === 304
       ) {
+        if (upstreamRes.status === 204) {
+          proxyHeaders.delete("content-length");
+          proxyHeaders.delete("content-type");
+        }
         return new Response(null, {
           status: upstreamRes.status,
           statusText: upstreamRes.statusText,
@@ -3747,13 +3759,59 @@ async function handleRequestCore(
           upstreamContentType.includes("text/xml")) &&
         upstreamRes.body
       ) {
-        const rawXml = await upstreamRes.text();
+        let rawXml: string;
+        const upstreamEncoding = proxyHeaders.get("content-encoding")?.toLowerCase();
+        if (upstreamEncoding === "gzip" || upstreamEncoding === "deflate") {
+          const arrayBuf = await upstreamRes.arrayBuffer();
+          const buf = Buffer.from(arrayBuf);
+          if (buf.length >= 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
+            const decompressed =
+              typeof (globalThis as any).Bun?.gunzipSync === "function"
+                ? (globalThis as any).Bun.gunzipSync(buf)
+                : zlib.gunzipSync(buf);
+            rawXml = Buffer.from(decompressed).toString("utf8");
+          } else if (upstreamEncoding === "deflate") {
+            try {
+              const decompressed =
+                typeof (globalThis as any).Bun?.inflateSync === "function"
+                  ? (globalThis as any).Bun.inflateSync(buf)
+                  : zlib.inflateSync(buf);
+              rawXml = Buffer.from(decompressed).toString("utf8");
+            } catch {
+              rawXml = buf.toString("utf8");
+            }
+          } else {
+            rawXml = buf.toString("utf8");
+          }
+        } else {
+          rawXml = await upstreamRes.text();
+        }
+
+        const clientProto =
+          req.headers.get("x-forwarded-proto") ||
+          url.protocol.replace(":", "");
         const rewritten = rewriteOpdsXml(
           rawXml,
           url.host,
-          url.protocol.replace(":", ""),
+          clientProto,
           serverBase,
         );
+
+        // Clear upstream transport encoding since rawXml is now decoded text
+        proxyHeaders.delete("content-encoding");
+
+        const rewrittenBytes = Buffer.byteLength(rewritten, "utf8");
+        proxyHeaders.set("Content-Length", String(rewrittenBytes));
+
+        // Representation validator semantics (RFC 9110 Section 8.8.1):
+        // If the representation was modified (grown or shrunk), upstream validators are invalid.
+        // If unchanged, upstream validators remain valid.
+        const isChanged = rewritten !== rawXml;
+        if (isChanged) {
+          proxyHeaders.delete("etag");
+          proxyHeaders.delete("content-md5");
+        }
+
         return new Response(rewritten, {
           status: upstreamRes.status,
           statusText: upstreamRes.statusText,
@@ -3768,6 +3826,12 @@ async function handleRequestCore(
         headers: proxyHeaders,
       });
     } catch (err: any) {
+      if (req.signal?.aborted || err?.name === "AbortError") {
+        return new Response(null, {
+          status: 499,
+          statusText: "Client Closed Request",
+        });
+      }
       console.error(`[Server] OPDS reverse proxy error for ${targetUrl}:`, err);
       const errorHeaders: Record<string, string> = {
         "Content-Type": "text/plain; charset=utf-8",

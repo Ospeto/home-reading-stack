@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -4203,6 +4204,516 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
       expect(abortRes.status).toBe(200);
       // Reader disconnects without consuming full body
       expect(fs.existsSync(fakeCalibreDbPath)).toBe(true);
+    });
+  });
+
+  describe("U02: Normalized Rewritten OPDS XML Response Headers & Wire Socket Semantics", () => {
+    let origFetch: typeof globalThis.fetch;
+    let origServerUrl: string | undefined;
+
+    beforeEach(() => {
+      origFetch = globalThis.fetch;
+      origServerUrl = process.env.CALIBRE_SERVER_URL;
+      process.env.CALIBRE_SERVER_URL = "http://127.0.0.1:8088";
+    });
+
+    afterEach(() => {
+      globalThis.fetch = origFetch;
+      if (origServerUrl !== undefined && origServerUrl !== "undefined") {
+        process.env.CALIBRE_SERVER_URL = origServerUrl;
+      } else {
+        delete process.env.CALIBRE_SERVER_URL;
+      }
+    });
+
+    function sendWireRequest(
+      port: number,
+      rawRequest: string,
+    ): Promise<{
+      status: number;
+      statusText: string;
+      headers: Record<string, string>;
+      body: Buffer;
+    }> {
+      return new Promise((resolve, reject) => {
+        const socket = net.createConnection({ port, host: "127.0.0.1" }, () => {
+          socket.write(rawRequest);
+        });
+
+        const chunks: Buffer[] = [];
+        socket.on("data", (chunk) => {
+          chunks.push(chunk);
+        });
+        socket.on("end", () => {
+          const fullBuffer = Buffer.concat(chunks);
+          const headerEndIndex = fullBuffer.indexOf("\r\n\r\n");
+          if (headerEndIndex === -1) {
+            return reject(new Error("Malformed HTTP response: no header terminator"));
+          }
+          const headerStr = fullBuffer.subarray(0, headerEndIndex).toString("utf8");
+          const body = fullBuffer.subarray(headerEndIndex + 4);
+          const lines = headerStr.split("\r\n");
+          const statusParts = lines[0].split(" ");
+          const statusCode = parseInt(statusParts[1], 10);
+          const headers: Record<string, string> = {};
+          for (let i = 1; i < lines.length; i++) {
+            const colonIdx = lines[i].indexOf(":");
+            if (colonIdx > -1) {
+              const key = lines[i].slice(0, colonIdx).trim().toLowerCase();
+              const val = lines[i].slice(colonIdx + 1).trim();
+              headers[key] = val;
+            }
+          }
+          resolve({
+            status: statusCode,
+            statusText: statusParts.slice(2).join(" "),
+            headers,
+            body,
+          });
+        });
+        socket.on("error", reject);
+      });
+    }
+
+    it("corrects grown UTF-8 XML length and strips stale representation validators", async () => {
+      const upstreamXml = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>စစ်နှင့်ငြိမ်းချမ်းရေး (War and Peace)</title>
+  <link href="http://127.0.0.1:8088/opds/cover/1" rel="http://opds-spec.org/image"/>
+</feed>`;
+      const upstreamLen = Buffer.byteLength(upstreamXml, "utf8");
+
+      globalThis.fetch = (async () => {
+        return new Response(upstreamXml, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/atom+xml; charset=utf-8",
+            "Content-Length": String(upstreamLen),
+            "ETag": '"calibre-upstream-v1"',
+            "Content-MD5": "Q2hlY2tzdW0=",
+          },
+        });
+      }) as any;
+
+      const req = new Request("https://reading-sg.wavypremium.xyz:8443/opds", {
+        method: "GET",
+        headers: { Accept: "application/atom+xml" },
+      });
+
+      const res = await handleRequest(req);
+      expect(res.status).toBe(200);
+
+      const body = await res.text();
+      const expectedBytes = Buffer.byteLength(body, "utf8");
+
+      // Length grew from 127.0.0.1:8088 -> reading-sg.wavypremium.xyz:8443
+      expect(expectedBytes).toBeGreaterThan(upstreamLen);
+      expect(res.headers.get("Content-Length")).toBe(String(expectedBytes));
+      expect(res.headers.get("Content-Length")).not.toBe(String(upstreamLen));
+
+      // Stale validators deleted on changed representation
+      expect(res.headers.get("ETag")).toBeNull();
+      expect(res.headers.get("Content-MD5")).toBeNull();
+
+      // Multi-byte UTF-8 preserved and loopback replaced
+      expect(body).toContain("စစ်နှင့်ငြိမ်းချမ်းရေး");
+      expect(body).toContain("https://reading-sg.wavypremium.xyz:8443/opds/cover/1");
+      expect(body).not.toContain("127.0.0.1:8088");
+    });
+
+    it("corrects shrunk XML length and strips stale representation validators", async () => {
+      const upstreamXml = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <link href="http://localhost:8088/opds/catalog/default/navlist" rel="subsection"/>
+</feed>`;
+      const upstreamLen = Buffer.byteLength(upstreamXml, "utf8");
+
+      globalThis.fetch = (async () => {
+        return new Response(upstreamXml, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/atom+xml; charset=utf-8",
+            "Content-Length": String(upstreamLen),
+            "ETag": '"calibre-upstream-v2"',
+          },
+        });
+      }) as any;
+
+      const req = new Request("https://r.io/opds", {
+        method: "GET",
+        headers: { Accept: "application/atom+xml" },
+      });
+
+      const res = await handleRequest(req);
+      expect(res.status).toBe(200);
+
+      const body = await res.text();
+      const expectedBytes = Buffer.byteLength(body, "utf8");
+
+      // Length shrunk from http://localhost:8088 -> https://r.io
+      expect(expectedBytes).toBeLessThan(upstreamLen);
+      expect(res.headers.get("Content-Length")).toBe(String(expectedBytes));
+      expect(res.headers.get("ETag")).toBeNull();
+
+      expect(body).toContain("https://r.io/opds/catalog/default/navlist");
+      expect(body).not.toContain("localhost:8088");
+    });
+
+    it("preserves upstream ETag and validator headers on no-change payload", async () => {
+      const upstreamXml = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Clean Library Catalog</title>
+</feed>`;
+      const upstreamLen = Buffer.byteLength(upstreamXml, "utf8");
+
+      globalThis.fetch = (async () => {
+        return new Response(upstreamXml, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/atom+xml; charset=utf-8",
+            "Content-Length": String(upstreamLen),
+            "ETag": '"unchanged-etag-valid"',
+            "Last-Modified": "Sun, 04 Oct 2026 10:00:00 GMT",
+          },
+        });
+      }) as any;
+
+      const req = new Request("https://reading-sg.wavypremium.xyz:8443/opds", {
+        method: "GET",
+      });
+
+      const res = await handleRequest(req);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Length")).toBe(String(upstreamLen));
+      // Upstream ETag and Last-Modified preserved on unchanged representation
+      expect(res.headers.get("ETag")).toBe('"unchanged-etag-valid"');
+      expect(res.headers.get("Last-Modified")).toBe("Sun, 04 Oct 2026 10:00:00 GMT");
+
+      const body = await res.text();
+      expect(body).toBe(upstreamXml);
+    });
+
+    it("preserves HEAD, 304 Not Modified, and 204 No Content semantics", async () => {
+      // HEAD request
+      globalThis.fetch = (async () => {
+        return new Response(null, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/atom+xml; charset=utf-8",
+            "Content-Length": "120",
+            "ETag": '"opds-head-etag"',
+          },
+        });
+      }) as any;
+
+      const headReq = new Request("https://reading-sg.wavypremium.xyz:8443/opds", {
+        method: "HEAD",
+      });
+      const headRes = await handleRequest(headReq);
+      expect(headRes.status).toBe(200);
+      expect(await headRes.text()).toBe("");
+
+      // 304 Not Modified
+      globalThis.fetch = (async () => {
+        return new Response(null, {
+          status: 304,
+          statusText: "Not Modified",
+          headers: {
+            "ETag": '"cached-feed-1"',
+            "Cache-Control": "public, max-age=3600",
+          },
+        });
+      }) as any;
+
+      const notModReq = new Request("https://reading-sg.wavypremium.xyz:8443/opds", {
+        method: "GET",
+        headers: { "If-None-Match": '"cached-feed-1"' },
+      });
+      const notModRes = await handleRequest(notModReq);
+      expect(notModRes.status).toBe(304);
+      expect(notModRes.headers.get("ETag")).toBe('"cached-feed-1"');
+      expect(await notModRes.text()).toBe("");
+
+      // 204 No Content
+      globalThis.fetch = (async () => {
+        return new Response(null, {
+          status: 204,
+          statusText: "No Content",
+          headers: {
+            "Content-Length": "0",
+            "Content-Type": "text/plain",
+          },
+        });
+      }) as any;
+
+      const noContentReq = new Request("https://reading-sg.wavypremium.xyz:8443/opds", {
+        method: "GET",
+      });
+      const noContentRes = await handleRequest(noContentReq);
+      expect(noContentRes.status).toBe(204);
+      expect(noContentRes.headers.get("Content-Length")).toBeNull();
+      expect(noContentRes.headers.get("Content-Type")).toBeNull();
+      expect(await noContentRes.text()).toBe("");
+    });
+
+    it("leaves binary /get stream unaffected and preserves Content-Type", async () => {
+      const fakeEpubBytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x0a, 0x00, 0x00, 0x00]);
+
+      globalThis.fetch = (async () => {
+        return new Response(fakeEpubBytes, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/epub+zip",
+            "Content-Length": String(fakeEpubBytes.length),
+            "Content-Disposition": 'attachment; filename="book.epub"',
+          },
+        });
+      }) as any;
+
+      const req = new Request("https://reading-sg.wavypremium.xyz:8443/get/epub/1/Agent_Library", {
+        method: "GET",
+      });
+
+      const res = await handleRequest(req);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Type")).toBe("application/epub+zip");
+      expect(res.headers.get("Content-Disposition")).toBe('attachment; filename="book.epub"');
+
+      const bodyBuf = Buffer.from(await res.arrayBuffer());
+      expect(bodyBuf.equals(fakeEpubBytes)).toBe(true);
+    });
+
+    it("handles gzipped and ungzipped upstream responses cleanly", async () => {
+      const rawXml = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Gzip Catalog</title>
+  <link href="http://127.0.0.1:8088/opds/book/1" rel="entry"/>
+</feed>`;
+      const gzipped = typeof (globalThis as any).Bun?.gzipSync === "function"
+        ? (globalThis as any).Bun.gzipSync(Buffer.from(rawXml, "utf8"))
+        : (await import("node:zlib")).gzipSync(Buffer.from(rawXml, "utf8"));
+
+      // 1. Client does NOT accept gzip: receives uncompressed with exact length and no stale Content-Encoding
+      globalThis.fetch = (async () => {
+        return new Response(gzipped, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/atom+xml; charset=utf-8",
+            "Content-Encoding": "gzip",
+            "Content-Length": String(gzipped.length),
+            "ETag": '"gzip-etag-v1"',
+          },
+        });
+      }) as any;
+
+      const noGzipReq = new Request("https://reading-sg.wavypremium.xyz:8443/opds", {
+        method: "GET",
+        headers: {
+          Accept: "application/atom+xml",
+          "Accept-Encoding": "identity",
+        },
+      });
+
+      const noGzipRes = await handleRequest(noGzipReq);
+      expect(noGzipRes.status).toBe(200);
+      expect(noGzipRes.headers.get("Content-Encoding")).toBeNull();
+
+      const body = await noGzipRes.text();
+      const expectedBytes = Buffer.byteLength(body, "utf8");
+      expect(noGzipRes.headers.get("Content-Length")).toBe(String(expectedBytes));
+      expect(body).toContain("https://reading-sg.wavypremium.xyz:8443/opds/book/1");
+      expect(body).not.toContain("127.0.0.1:8088");
+
+      // 2. Client DOES accept gzip and response > 1024 bytes: compressed cleanly
+      const largeXml = `<feed xmlns="http://www.w3.org/2005/Atom"><title>Large</title>` +
+        Array.from({ length: 40 }, (_, i) => `<entry><id>${i}</id><link href="http://127.0.0.1:8088/opds/${i}"/></entry>`).join("") +
+        `</feed>`;
+      const largeGzipped = typeof (globalThis as any).Bun?.gzipSync === "function"
+        ? (globalThis as any).Bun.gzipSync(Buffer.from(largeXml, "utf8"))
+        : (await import("node:zlib")).gzipSync(Buffer.from(largeXml, "utf8"));
+
+      globalThis.fetch = (async () => {
+        return new Response(largeGzipped, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/atom+xml; charset=utf-8",
+            "Content-Encoding": "gzip",
+            "Content-Length": String(largeGzipped.length),
+            "ETag": '"large-v1"',
+          },
+        });
+      }) as any;
+
+      const gzipReq = new Request("https://reading-sg.wavypremium.xyz:8443/opds", {
+        method: "GET",
+        headers: {
+          Accept: "application/atom+xml",
+          "Accept-Encoding": "gzip",
+        },
+      });
+
+      const gzipRes = await handleRequest(gzipReq);
+      expect(gzipRes.status).toBe(200);
+      expect(gzipRes.headers.get("Content-Encoding")).toBe("gzip");
+
+      const wireBytes = Buffer.from(await gzipRes.arrayBuffer());
+      expect(gzipRes.headers.get("Content-Length")).toBe(String(wireBytes.length));
+
+      const gunzip = typeof (globalThis as any).Bun?.gunzipSync === "function"
+        ? (globalThis as any).Bun.gunzipSync(wireBytes)
+        : (await import("node:zlib")).gunzipSync(wireBytes);
+      const decompressed = new TextDecoder().decode(gunzip);
+      expect(decompressed).toContain("https://reading-sg.wavypremium.xyz:8443/opds/0");
+      expect(decompressed.endsWith("</feed>")).toBe(true);
+    });
+
+    it("wire socket client proves byte-exact document and abort cleanup over TCP", async () => {
+      // Restore native global fetch so Bun.serve child receives actual HTTP requests
+      globalThis.fetch = origFetch;
+      let upstreamAborted = false;
+
+      const upstreamXml = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Wire Socket OPDS Catalog</title>
+  <link href="http://127.0.0.1:8088/opds/cover/99" rel="cover"/>
+  <entry>
+    <title>Wire Book</title>
+    <link href="http://127.0.0.1:8088/opds/download/99" rel="acquisition"/>
+  </entry>
+</feed>`;
+
+      const upstreamServer = Bun.serve({
+        port: 0,
+        fetch(req) {
+          const u = new URL(req.url);
+          if (u.pathname === "/opds/hanging") {
+            req.signal.addEventListener("abort", () => {
+              upstreamAborted = true;
+            });
+            // Keep request hanging to test cancellation
+            return new Promise(() => {});
+          }
+
+          return new Response(upstreamXml, {
+            status: 200,
+            headers: {
+              "Content-Type": "application/atom+xml; charset=utf-8",
+              "Content-Length": String(Buffer.byteLength(upstreamXml, "utf8")),
+              "ETag": '"wire-upstream-etag"',
+            },
+          });
+        },
+      });
+
+      process.env.CALIBRE_SERVER_URL = `http://127.0.0.1:${upstreamServer.port}`;
+
+      const lighthouseServer = Bun.serve({
+        port: 0,
+        fetch: (req) => handleRequest(req),
+      });
+
+      try {
+        // 1. Full wire document test
+        const wireRes = await sendWireRequest(
+          lighthouseServer.port,
+          `GET /opds HTTP/1.1\r\nHost: reading-sg.wavypremium.xyz:8443\r\nX-Forwarded-Proto: https\r\nAccept: application/atom+xml\r\nConnection: close\r\n\r\n`,
+        );
+
+        expect(wireRes.status).toBe(200);
+        const reportedLen = parseInt(wireRes.headers["content-length"], 10);
+        expect(reportedLen).toBe(wireRes.body.length);
+        expect(wireRes.headers["etag"]).toBeUndefined();
+
+        const bodyStr = wireRes.body.toString("utf8");
+        expect(bodyStr.endsWith("</feed>")).toBe(true);
+        expect(bodyStr).toContain("https://reading-sg.wavypremium.xyz:8443/opds/cover/99");
+        expect(bodyStr).not.toContain("127.0.0.1:8088");
+
+        // 2. Cancellation closes upstream
+        const abortSocket = net.createConnection(
+          { port: lighthouseServer.port, host: "127.0.0.1" },
+          () => {
+            abortSocket.write(
+              `GET /opds/hanging HTTP/1.1\r\nHost: reading-sg.wavypremium.xyz:8443\r\nX-Forwarded-Proto: https\r\nConnection: close\r\n\r\n`,
+            );
+            // Immediately abort the client connection
+            setTimeout(() => {
+              abortSocket.destroy();
+            }, 25);
+          },
+        );
+
+        // Wait for abort propagation
+        for (let i = 0; i < 20; i++) {
+          if (upstreamAborted) break;
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        expect(upstreamAborted).toBe(true);
+      } finally {
+        upstreamServer.stop();
+        lighthouseServer.stop();
+      }
+    });
+
+    it("handles concurrent requests without mixed responses or cross-talk", async () => {
+      // Restore native global fetch so Bun.serve child receives actual HTTP requests
+      globalThis.fetch = origFetch;
+
+      const upstreamXml = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <link href="http://127.0.0.1:8088/opds/sub"/>
+</feed>`;
+
+      const upstreamServer = Bun.serve({
+        port: 0,
+        fetch() {
+          return new Response(upstreamXml, {
+            status: 200,
+            headers: {
+              "Content-Type": "application/atom+xml; charset=utf-8",
+              "Content-Length": String(Buffer.byteLength(upstreamXml, "utf8")),
+            },
+          });
+        },
+      });
+
+      process.env.CALIBRE_SERVER_URL = `http://127.0.0.1:${upstreamServer.port}`;
+
+      const lighthouseServer = Bun.serve({
+        port: 0,
+        fetch: (req) => handleRequest(req),
+      });
+
+      try {
+        const [resA, resB] = await Promise.all([
+          sendWireRequest(
+            lighthouseServer.port,
+            `GET /opds HTTP/1.1\r\nHost: reading-sg.wavypremium.xyz:8443\r\nX-Forwarded-Proto: https\r\nAccept: application/atom+xml\r\nConnection: close\r\n\r\n`,
+          ),
+          sendWireRequest(
+            lighthouseServer.port,
+            `GET /opds HTTP/1.1\r\nHost: reading-us.wavypremium.xyz\r\nX-Forwarded-Proto: https\r\nAccept: application/atom+xml\r\nConnection: close\r\n\r\n`,
+          ),
+        ]);
+
+        expect(resA.status).toBe(200);
+        expect(resB.status).toBe(200);
+
+        const bodyA = resA.body.toString("utf8");
+        const bodyB = resB.body.toString("utf8");
+
+        expect(resA.body.length).toBe(parseInt(resA.headers["content-length"], 10));
+        expect(resB.body.length).toBe(parseInt(resB.headers["content-length"], 10));
+
+        expect(bodyA).toContain("https://reading-sg.wavypremium.xyz:8443/opds/sub");
+        expect(bodyA).not.toContain("reading-us.wavypremium.xyz");
+
+        expect(bodyB).toContain("https://reading-us.wavypremium.xyz/opds/sub");
+        expect(bodyB).not.toContain("reading-sg.wavypremium.xyz:8443");
+      } finally {
+        upstreamServer.stop();
+        lighthouseServer.stop();
+      }
     });
   });
 });
