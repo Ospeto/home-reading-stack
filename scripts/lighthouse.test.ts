@@ -2776,4 +2776,306 @@ exit 0
       expect(fs.statSync(fixtureCache).mtimeMs).toBe(statCacheBefore);
     });
   });
+
+  describe("11. Status Tunnel Process & Endpoint Separation (U18)", () => {
+    function setupStatusMock(opts: {
+      sgRunning?: boolean;
+      sgPid?: number;
+      usRunning?: boolean;
+      usPid?: number;
+      sgCode?: string;
+      usCode?: string;
+    }) {
+      const mockBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-status-u18-"));
+      const invocationLog = path.join(mockBinDir, "invocations.log");
+
+      // launchctl stub
+      const sgLine = opts.sgRunning
+        ? `if [[ "$*" == *"reading-sg-tunnel"* ]]; then echo "state = running"; echo "pid = ${opts.sgPid || 22222}"; exit 0; fi`
+        : `if [[ "$*" == *"reading-sg-tunnel"* ]]; then exit 1; fi`;
+      const usLine = opts.usRunning
+        ? `if [[ "$*" == *"reading-vless-tunnel"* ]]; then echo "state = running"; echo "pid = ${opts.usPid || 33333}"; exit 0; fi`
+        : `if [[ "$*" == *"reading-vless-tunnel"* ]]; then exit 1; fi`;
+
+      fs.writeFileSync(
+        path.join(mockBinDir, "launchctl"),
+        `#!/bin/bash\necho "launchctl: $@" >> "${invocationLog}"\n${sgLine}\n${usLine}\nexit 1\n`,
+        { mode: 0o755 },
+      );
+
+      // curl stub
+      const sgCode = opts.sgCode ?? "200";
+      const usCode = opts.usCode ?? "200";
+      fs.writeFileSync(
+        path.join(mockBinDir, "curl"),
+        `#!/bin/bash
+echo "curl: $@" >> "${invocationLog}"
+for arg in "$@"; do
+  if [[ "$arg" == *"opds"* ]]; then
+    printf "${sgCode}"
+    exit 0
+  fi
+  if [[ "$arg" == *"reading.wavypremium.xyz"* ]]; then
+    printf "${usCode}"
+    exit 0
+  fi
+done
+printf "200"
+exit 0
+`,
+        { mode: 0o755 },
+      );
+
+      // nc stub for port listeners and proxy reachability check
+      fs.writeFileSync(
+        path.join(mockBinDir, "nc"),
+        `#!/bin/bash\nexit 0\n`,
+        { mode: 0o755 },
+      );
+
+      // ssh stub to ensure status is strictly read-only and never invokes ssh
+      fs.writeFileSync(
+        path.join(mockBinDir, "ssh"),
+        `#!/bin/bash\necho "ssh: $@" >> "${invocationLog}"\nexit 0\n`,
+        { mode: 0o755 },
+      );
+
+      return { mockBinDir, invocationLog };
+    }
+
+    it("never reports CONNECTED when tunnel daemon is running but endpoint returns 502 or 000 (E11)", () => {
+      // Test 1a: running + 502
+      const mock502 = setupStatusMock({
+        sgRunning: true,
+        sgPid: 41234,
+        sgCode: "502",
+        usCode: "000",
+      });
+      try {
+        const res502 = spawnSync(LIGHTHOUSE_BIN, ["status"], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${mock502.mockBinDir}:${process.env.PATH}`,
+            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
+            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
+          },
+        });
+        expect(res502.status).toBe(0);
+        expect(res502.stdout).toContain("SG Tunnel (sg-vps)");
+        expect(res502.stdout).toContain("Process:   [RUNNING] PID: 41234");
+        expect(res502.stdout).toContain("Endpoint:  [INACTIVE] http://opds.wavypremium.xyz/opds (HTTP 502)");
+
+        // Extract SG Tunnel section and verify [CONNECTED] is never present on 502
+        const sgBlock502 = res502.stdout.split("SG Tunnel")[1]?.split("\n\n")[0] || "";
+        expect(sgBlock502).not.toContain("[CONNECTED]");
+      } finally {
+        fs.rmSync(mock502.mockBinDir, { recursive: true, force: true });
+      }
+
+      // Test 1b: running + 000
+      const mock000 = setupStatusMock({
+        sgRunning: true,
+        sgPid: 41234,
+        sgCode: "000",
+        usCode: "000",
+      });
+      try {
+        const res000 = spawnSync(LIGHTHOUSE_BIN, ["status"], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${mock000.mockBinDir}:${process.env.PATH}`,
+            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
+            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
+          },
+        });
+        expect(res000.status).toBe(0);
+        expect(res000.stdout).toContain("Process:   [RUNNING] PID: 41234");
+        expect(res000.stdout).toContain("Endpoint:  [INACTIVE] http://opds.wavypremium.xyz/opds (HTTP 000)");
+
+        const sgBlock000 = res000.stdout.split("SG Tunnel")[1]?.split("\n\n")[0] || "";
+        expect(sgBlock000).not.toContain("[CONNECTED]");
+      } finally {
+        fs.rmSync(mock000.mockBinDir, { recursive: true, force: true });
+      }
+    });
+
+    it("reports healthy external endpoint when tunnel daemon is stopped without falsely claiming remote failure", () => {
+      const mock = setupStatusMock({
+        sgRunning: false,
+        sgCode: "200",
+      });
+      try {
+        const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${mock.mockBinDir}:${process.env.PATH}`,
+            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
+            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
+          },
+        });
+        expect(res.status).toBe(0);
+        expect(res.stdout).toContain("SG Tunnel (sg-vps)");
+        expect(res.stdout).toContain("Process:   [STOPPED] Inactive");
+        expect(res.stdout).toContain("Endpoint:  [CONNECTED] http://opds.wavypremium.xyz/opds (HTTP 200)");
+      } finally {
+        fs.rmSync(mock.mockBinDir, { recursive: true, force: true });
+      }
+    });
+
+    it("reports both process running and endpoint connected when managed tunnel is healthy", () => {
+      const mock = setupStatusMock({
+        sgRunning: true,
+        sgPid: 54321,
+        sgCode: "200",
+      });
+      try {
+        const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${mock.mockBinDir}:${process.env.PATH}`,
+            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
+            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
+          },
+        });
+        expect(res.status).toBe(0);
+        expect(res.stdout).toContain("SG Tunnel (sg-vps)");
+        expect(res.stdout).toContain("Process:   [RUNNING] PID: 54321");
+        expect(res.stdout).toContain("Endpoint:  [CONNECTED] http://opds.wavypremium.xyz/opds (HTTP 200)");
+      } finally {
+        fs.rmSync(mock.mockBinDir, { recursive: true, force: true });
+      }
+    });
+
+    it("treats HTTP 302 as redirect and unverified rather than connected until U25", () => {
+      const mock = setupStatusMock({
+        sgRunning: true,
+        sgPid: 33333,
+        sgCode: "302",
+      });
+      try {
+        const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${mock.mockBinDir}:${process.env.PATH}`,
+            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
+            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
+          },
+        });
+        expect(res.status).toBe(0);
+        expect(res.stdout).toContain("SG Tunnel (sg-vps)");
+        expect(res.stdout).toContain("Process:   [RUNNING] PID: 33333");
+        expect(res.stdout).toContain("Endpoint:  [WARN] http://opds.wavypremium.xyz/opds (HTTP 302 Redirect / Unverified)");
+
+        const sgBlock = res.stdout.split("SG Tunnel")[1]?.split("\n\n")[0] || "";
+        expect(sgBlock).not.toContain("[CONNECTED]");
+      } finally {
+        fs.rmSync(mock.mockBinDir, { recursive: true, force: true });
+      }
+    });
+
+    it("reports optional US tunnel as disabled and decommissioned when ENABLE_US_TUNNEL is 0 or unset", () => {
+      const mock = setupStatusMock({
+        usRunning: false,
+        usCode: "000",
+      });
+      const cleanEnv = { ...process.env };
+      delete cleanEnv.ENABLE_US_TUNNEL;
+
+      try {
+        // Case 1: Explicit ENABLE_US_TUNNEL=0
+        const resExplicit = spawnSync(LIGHTHOUSE_BIN, ["status"], {
+          encoding: "utf8",
+          env: {
+            ...cleanEnv,
+            PATH: `${mock.mockBinDir}:${process.env.PATH}`,
+            ENABLE_US_TUNNEL: "0",
+            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
+            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
+          },
+        });
+        expect(resExplicit.status).toBe(0);
+        expect(resExplicit.stdout).toContain("US Tunnel (panel)");
+        expect(resExplicit.stdout).toContain("Process:   [STOPPED] Disabled (ENABLE_US_TUNNEL=0)");
+        expect(resExplicit.stdout).toContain("Endpoint:  [WARN] https://reading.wavypremium.xyz (HTTP 000, Decommissioned, ENABLE_US_TUNNEL=0)");
+
+        // Case 2: Truly unset ENABLE_US_TUNNEL (defaults to "0")
+        const resUnset = spawnSync(LIGHTHOUSE_BIN, ["status"], {
+          encoding: "utf8",
+          env: {
+            ...cleanEnv,
+            PATH: `${mock.mockBinDir}:${process.env.PATH}`,
+            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
+            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
+          },
+        });
+        expect(resUnset.status).toBe(0);
+        expect(resUnset.stdout).toContain("US Tunnel (panel)");
+        expect(resUnset.stdout).toContain("Process:   [STOPPED] Disabled (ENABLE_US_TUNNEL=0)");
+        expect(resUnset.stdout).toContain("Endpoint:  [WARN] https://reading.wavypremium.xyz (HTTP 000, Decommissioned, ENABLE_US_TUNNEL=0)");
+      } finally {
+        fs.rmSync(mock.mockBinDir, { recursive: true, force: true });
+      }
+    });
+
+    it("enforces bounded probe timeout, performs fresh probes, and executes strictly read-only", () => {
+      const mock = setupStatusMock({
+        sgRunning: true,
+        sgPid: 12345,
+        sgCode: "200",
+      });
+      try {
+        const res1 = spawnSync(LIGHTHOUSE_BIN, ["status"], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${mock.mockBinDir}:${process.env.PATH}`,
+            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
+            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
+          },
+        });
+        expect(res1.status).toBe(0);
+        expect(res1.stdout).toContain("Endpoint:  [CONNECTED] http://opds.wavypremium.xyz/opds (HTTP 200)");
+
+        const logs = fs.existsSync(mock.invocationLog)
+          ? fs.readFileSync(mock.invocationLog, "utf8")
+          : "";
+
+        // Verify curl was called with bounded timeout flag (-m 4)
+        expect(logs).toContain("-m 4");
+
+        // Verify strictly read-only: status must never invoke ssh or launchctl kickstart/load/unload
+        expect(logs).not.toContain("ssh:");
+        expect(logs).not.toContain("launchctl: kickstart");
+        expect(logs).not.toContain("launchctl: unload");
+        expect(logs).not.toContain("launchctl: load");
+
+        // Update curl mock in place to return 502: verify fresh probe is performed without stale cache
+        fs.writeFileSync(
+          path.join(mock.mockBinDir, "curl"),
+          `#!/bin/bash\nprintf "502"\nexit 0\n`,
+          { mode: 0o755 },
+        );
+
+        const res2 = spawnSync(LIGHTHOUSE_BIN, ["status"], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${mock.mockBinDir}:${process.env.PATH}`,
+            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
+            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
+          },
+        });
+        expect(res2.status).toBe(0);
+        expect(res2.stdout).toContain("Endpoint:  [INACTIVE] http://opds.wavypremium.xyz/opds (HTTP 502)");
+        expect(res2.stdout).not.toContain("[CONNECTED]");
+      } finally {
+        fs.rmSync(mock.mockBinDir, { recursive: true, force: true });
+      }
+    });
+  });
 });

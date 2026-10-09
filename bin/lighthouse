@@ -485,24 +485,68 @@ cmd_status() {
   # US Tunnel Check
   local us_status
   us_status=$(get_launchagent_status "${DAEMON_PREFIX}.reading-vless-tunnel")
+  local us_proc_desc
+  if [ "$ENABLE_US_TUNNEL" != "1" ]; then
+    if [[ "$us_status" =~ ^RUNNING:(.+) ]]; then
+      us_proc_desc="$(badge_running) PID: ${BASH_REMATCH[1]} (Disabled, ENABLE_US_TUNNEL=${ENABLE_US_TUNNEL})"
+    elif [ "$us_status" = "RUNNING" ]; then
+      us_proc_desc="$(badge_running) Active (Disabled, ENABLE_US_TUNNEL=${ENABLE_US_TUNNEL})"
+    else
+      us_proc_desc="$(badge_stopped) Disabled (ENABLE_US_TUNNEL=${ENABLE_US_TUNNEL})"
+    fi
+  else
+    if [[ "$us_status" =~ ^RUNNING:(.+) ]]; then
+      us_proc_desc="$(badge_running) PID: ${BASH_REMATCH[1]}"
+    elif [ "$us_status" = "RUNNING" ]; then
+      us_proc_desc="$(badge_running) Active"
+    else
+      us_proc_desc="$(badge_stopped) Inactive"
+    fi
+  fi
+
   local us_http
   us_http=$(probe_http_code "$US_WAN_HQ_URL" 4)
-  if [[ "$us_status" =~ ^RUNNING ]] || [ "$us_http" = "200" ] || [ "$us_http" = "302" ]; then
-    echo -e "  US Tunnel (${US_REMOTE_HOST})    $(badge_connected)  ${US_WAN_HQ_URL} (HTTP ${us_http})"
+  local us_endpoint_desc
+  if [ "$us_http" = "200" ]; then
+    us_endpoint_desc="$(badge_connected) ${US_WAN_HQ_URL} (HTTP ${us_http})"
+  elif [ "$us_http" = "302" ] || [ "$us_http" = "301" ]; then
+    us_endpoint_desc="$(badge_warn) ${US_WAN_HQ_URL} (HTTP ${us_http} Redirect / Unverified)"
+  elif [ "$ENABLE_US_TUNNEL" != "1" ]; then
+    us_endpoint_desc="$(badge_warn) ${US_WAN_HQ_URL} (HTTP ${us_http}, Decommissioned, ENABLE_US_TUNNEL=${ENABLE_US_TUNNEL})"
   else
-    echo -e "  US Tunnel (${US_REMOTE_HOST})    $(badge_inactive)   ${US_WAN_HQ_URL} (HTTP ${us_http})"
+    us_endpoint_desc="$(badge_inactive) ${US_WAN_HQ_URL} (HTTP ${us_http})"
   fi
+
+  echo -e "  US Tunnel (${US_REMOTE_HOST})"
+  echo -e "    Process:   ${us_proc_desc}"
+  echo -e "    Endpoint:  ${us_endpoint_desc}"
 
   # Singapore Tunnel Check
   local sg_status
   sg_status=$(get_launchagent_status "${DAEMON_PREFIX}.reading-sg-tunnel")
+  local sg_proc_desc
+  if [[ "$sg_status" =~ ^RUNNING:(.+) ]]; then
+    sg_proc_desc="$(badge_running) PID: ${BASH_REMATCH[1]}"
+  elif [ "$sg_status" = "RUNNING" ]; then
+    sg_proc_desc="$(badge_running) Active"
+  else
+    sg_proc_desc="$(badge_stopped) Inactive"
+  fi
+
   local sg_http
   sg_http=$(probe_http_code "$SG_OPDS_80_URL" 4)
-  if [[ "$sg_status" =~ ^RUNNING ]] || [ "$sg_http" = "200" ] || [ "$sg_http" = "302" ]; then
-    echo -e "  SG Tunnel (${SG_REMOTE_HOST})    $(badge_connected)  ${SG_OPDS_80_URL} (HTTP ${sg_http})"
+  local sg_endpoint_desc
+  if [ "$sg_http" = "200" ]; then
+    sg_endpoint_desc="$(badge_connected) ${SG_OPDS_80_URL} (HTTP ${sg_http})"
+  elif [ "$sg_http" = "302" ] || [ "$sg_http" = "301" ]; then
+    sg_endpoint_desc="$(badge_warn) ${SG_OPDS_80_URL} (HTTP ${sg_http} Redirect / Unverified)"
   else
-    echo -e "  SG Tunnel (${SG_REMOTE_HOST})    $(badge_inactive)   ${SG_OPDS_80_URL} (HTTP ${sg_http})"
+    sg_endpoint_desc="$(badge_inactive) ${SG_OPDS_80_URL} (HTTP ${sg_http})"
   fi
+
+  echo -e "  SG Tunnel (${SG_REMOTE_HOST})"
+  echo -e "    Process:   ${sg_proc_desc}"
+  echo -e "    Endpoint:  ${sg_endpoint_desc}"
   echo ""
 
   # 3. Background Daemons (macOS launchd)
