@@ -58,8 +58,8 @@ export class DurableJobQueue {
   }
 
   private initSchema() {
-    this.db.run("PRAGMA journal_mode = WAL;");
     this.db.run("PRAGMA busy_timeout = 5000;");
+    this.db.run("PRAGMA journal_mode = WAL;");
     this.db.run(`
       CREATE TABLE IF NOT EXISTS jobs (
         id TEXT PRIMARY KEY,
@@ -243,17 +243,21 @@ export class DurableJobQueue {
    */
   public async processNextJob(): Promise<boolean> {
     if (this.isProcessing || this.isStopping) return false;
+    if (this.handlers.size === 0) return false;
 
+    const handlerTypes = Array.from(this.handlers.keys());
+    const placeholders = handlerTypes.map(() => "?").join(", ");
     const now = Date.now();
-    // Select the oldest pending job that is ready to run
+
+    // Select the oldest pending job that is ready to run and supported by this worker
     const candidate = this.db
       .prepare(
         `SELECT * FROM jobs
-         WHERE status = 'pending' AND next_run_at <= ?
+         WHERE status = 'pending' AND next_run_at <= ? AND type IN (${placeholders})
          ORDER BY created_at ASC
          LIMIT 1`
       )
-      .get(now) as any;
+      .get(now, ...handlerTypes) as any;
 
     if (!candidate) return false;
 
