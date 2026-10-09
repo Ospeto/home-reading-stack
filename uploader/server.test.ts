@@ -4626,5 +4626,104 @@ exit 0
         await fs.promises.rm(tempDir, { recursive: true, force: true });
       }
     });
+
+    it("matchesActiveBookIdentity handles authors as an array from calibredb fallback without throwing", () => {
+      const activeBookWithArrayAuthors = {
+        id: 77,
+        title: "Inferno",
+        authors: ["Dan Brown"],
+      };
+
+      // Exact match with author in array
+      expect(
+        matchesActiveBookIdentity(
+          activeBookWithArrayAuthors,
+          "Inferno",
+          "Dan Brown",
+        ),
+      ).toBe(true);
+
+      // Contradictory author with author in array
+      expect(
+        matchesActiveBookIdentity(
+          activeBookWithArrayAuthors,
+          "Inferno",
+          "Dante Alighieri",
+        ),
+      ).toBe(false);
+
+      // Cached author as array as well
+      expect(
+        matchesActiveBookIdentity(
+          activeBookWithArrayAuthors,
+          "Inferno",
+          ["Dan Brown"],
+        ),
+      ).toBe(true);
+    });
+
+    it("cold hash cache upload: ingestBookFile populates hash index on cold cache and detects exact-content duplicate", async () => {
+      const tempLibDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "u12-cold-upload-lib-"));
+      const tempDropDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "u12-cold-upload-drop-"));
+      const origLibDir = process.env.CALIBRE_LIBRARY_DIR;
+      process.env.CALIBRE_LIBRARY_DIR = tempLibDir;
+
+      try {
+        // 1. Create an EPUB on disk inside the Calibre library folder
+        const authorFolder = path.join(tempLibDir, "Author Beta (88)");
+        fs.mkdirSync(authorFolder, { recursive: true });
+        const libraryEpub = path.join(authorFolder, "Library Book.epub");
+        const staging = path.join(tempLibDir, "staging");
+        fs.mkdirSync(path.join(staging, "META-INF"), { recursive: true });
+        fs.mkdirSync(path.join(staging, "OEBPS"), { recursive: true });
+        fs.writeFileSync(path.join(staging, "mimetype"), "application/epub+zip");
+        fs.writeFileSync(
+          path.join(staging, "META-INF", "container.xml"),
+          `<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`,
+        );
+        fs.writeFileSync(
+          path.join(staging, "OEBPS", "content.opf"),
+          `<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Original Beta Title</dc:title><dc:creator>Author Beta</dc:creator></metadata><manifest><item id="t" href="text.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="t"/></spine></package>`,
+        );
+        fs.writeFileSync(
+          path.join(staging, "OEBPS", "text.xhtml"),
+          `<html><body>${"Prose for cold upload test. ".repeat(100)}</body></html>`,
+        );
+        spawnSync("zip", ["-q", "-X", "-0", libraryEpub, "mimetype"], { cwd: staging });
+        spawnSync("zip", ["-q", "-r", libraryEpub, "META-INF", "OEBPS"], { cwd: staging });
+
+        // 2. Active book in Calibre has the same title as on disk
+        const knownBooks = [
+          { id: 88, title: "Original Beta Title", authors: "Author Beta", cover: 0 },
+        ];
+        setServerDependenciesForTest({
+          getCalibreBooks: () => knownBooks,
+        });
+
+        // 3. Clear file_hashes to ensure a cold hash cache
+        const cdb = getCacheDb();
+        const { getKOReaderBinary256 } = await import("./bot");
+        const fileHash = getKOReaderBinary256(libraryEpub);
+        cdb.run("DELETE FROM file_hashes WHERE hash = ?", [fileHash]);
+
+        // 4. Ingest the byte-identical EPUB via ingestBookFile:
+        // Because ingestBookFile passes scanDisk: true on cold cache,
+        // it discovers the library file and detects the duplicate!
+        const uploadEpub = path.join(tempDropDir, "uploaded_beta.epub");
+        fs.copyFileSync(libraryEpub, uploadEpub);
+
+        const res = await ingestBookFile(uploadEpub, "uploaded_beta.epub");
+        expect(res.success).toBe(true);
+        expect(res.duplicate).toBe(true);
+        expect(res.bookId).toBe(88);
+        expect(res.message).toContain("already in your library");
+      } finally {
+        resetServerDependenciesForTest();
+        if (origLibDir !== undefined) process.env.CALIBRE_LIBRARY_DIR = origLibDir;
+        else delete process.env.CALIBRE_LIBRARY_DIR;
+        await fs.promises.rm(tempLibDir, { recursive: true, force: true });
+        await fs.promises.rm(tempDropDir, { recursive: true, force: true });
+      }
+    });
   });
 });

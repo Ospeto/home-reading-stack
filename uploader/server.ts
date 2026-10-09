@@ -2240,6 +2240,11 @@ export function getCalibreBooksResult(forceFresh = false): {
           })
           .map((b: any) => ({
             ...b,
+            authors: Array.isArray(b.authors)
+              ? b.authors.map((a: any) => String(a).trim()).filter(Boolean).join(", ")
+              : typeof b.authors === "string"
+                ? b.authors
+                : "Unknown",
             languages: Array.isArray(b.languages)
               ? b.languages.map((l: string) => String(l).trim().toLowerCase()).filter(Boolean)
               : typeof b.languages === "string" && b.languages
@@ -2493,17 +2498,29 @@ const UNKNOWN_AUTHOR_TOKENS = new Set([
   "none",
 ]);
 
-export function isAuthorKnown(author: string): boolean {
-  if (!author) return false;
-  const clean = author.trim().toLowerCase();
+export function stringifyAuthors(val: any): string {
+  if (!val) return "";
+  if (Array.isArray(val)) {
+    return val
+      .map((a) => String(a || "").trim())
+      .filter(Boolean)
+      .join(", ");
+  }
+  return String(val).trim();
+}
+
+export function isAuthorKnown(author: any): boolean {
+  const str = stringifyAuthors(author);
+  if (!str) return false;
+  const clean = str.trim().toLowerCase();
   if (UNKNOWN_AUTHOR_TOKENS.has(clean)) return false;
-  return !isJunkAuthor(author);
+  return !isJunkAuthor(str);
 }
 
 export function matchesActiveBookIdentity(
   activeBook: any,
   cachedTitle: string,
-  cachedAuthors?: string,
+  cachedAuthors?: string | string[] | any,
   filepath?: string,
 ): boolean {
   if (!activeBook || !cachedTitle) return false;
@@ -2523,8 +2540,8 @@ export function matchesActiveBookIdentity(
   }
 
   // 2. Author Ownership Validation
-  const activeAuthorStr = (activeBook.authors || "").trim();
-  const cachedAuthorStr = (cachedAuthors || "").trim();
+  const activeAuthorStr = stringifyAuthors(activeBook.authors);
+  const cachedAuthorStr = stringifyAuthors(cachedAuthors);
 
   const isAlias = Boolean(filepath && filepath.startsWith("alias:"));
 
@@ -2566,8 +2583,14 @@ export function matchesActiveBookIdentity(
  * on disk and updates file_hashes cache with binary/content hashes.
  */
 export function refreshCalibreHashIndex(options: { forceFreshBooks?: boolean } = {}) {
-  const getBooksFn = serverDependencies.getCalibreBooks ?? getCalibreBooks;
-  const books = getBooksFn(options.forceFreshBooks ?? false);
+  let books: any[] = [];
+  try {
+    const getBooksFn = serverDependencies.getCalibreBooks ?? getCalibreBooks;
+    books = getBooksFn(options.forceFreshBooks ?? false);
+    if (!Array.isArray(books)) books = [];
+  } catch {
+    books = [];
+  }
   const activeBookById = new Map<number, any>();
   for (const b of books) {
     if (b && typeof b.id === "number") {
@@ -2669,7 +2692,11 @@ export function getCalibreHashMap(
   options?: { scanDisk?: boolean },
 ) {
   if (options?.scanDisk) {
-    refreshCalibreHashIndex();
+    try {
+      refreshCalibreHashIndex();
+    } catch {
+      // Outage during disk refresh does not abort hash map lookup
+    }
   }
 
   const map: Record<
@@ -2855,8 +2882,10 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
   const fileHash = getKOReaderBinary256(filePath);
 
   // 1. Check if exact hash exists in Calibre Library
+  // On a cold hash cache, ensure the hash index is populated so exact-content duplicates are not missed
   const { map, booksFetchFailed } = getCalibreHashMap(
     catalogFetchFailed ? { books: [], success: false } : books,
+    { scanDisk: true },
   );
   const isCatalogUnavailable = catalogFetchFailed || booksFetchFailed;
 
