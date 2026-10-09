@@ -418,7 +418,7 @@ LightHouse integrates [TypeSafe Jev System-1](https://api.typesafe.ai/v1/systemo
 2. **Series & Volume Detection:**
    - Multi-pattern parsing extracts volume indices from standard numbering (`Vol 1`, `v2`, `#3`), Roman numerals (`Vol. IV`, `Book II`), written English numbers (`Volume One`, `Volume Two`), and Burmese volume markers (`အတွဲ ၁`).
    - When pattern regexes miss but candidate number tokens remain, `extractSeriesWithJev` invokes Jev System-1 classification (`series_volume` vs. `subtitle_same_book` vs. `unrelated`) requiring confidence `>= 0.7`.
-   - Ingestion deduplication (`uploader/scraper.ts`, `uploader/bot.ts`) isolates volume numbering so distinct volumes in a series are never merged, while invoking Jev System-1 arbitration (`isSameBookAsync`) for ambiguous title similarity scores (0.65–0.88).
+   - Ingestion deduplication (`uploader/scraper.ts`, `uploader/bot.ts`, `uploader/server.ts`) isolates volume numbering so distinct volumes in a series are never merged, while invoking Jev System-1 arbitration (`isSameBookAsync`) for ambiguous title similarity scores (0.65–0.88). Read-side active identity validation verifies active Calibre presence and matches titles before triggering duplicate shortcuts, preventing deleted or reassigned book entries from blocking legitimate re-ingestion.
 3. **Author Field Sanitization:**
    - Strips noisy release tags, pirate channel watermarks, and role annotations (e.g. `[Illustrator]`, `(Artist)`).
    - Resolves ambiguous multi-author orderings alphabetically for deterministic library deduplication and queries Jev when author identity is suspect.
