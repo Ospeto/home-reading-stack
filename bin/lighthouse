@@ -1555,7 +1555,8 @@ restore_single_db() {
   local dump_stage_dir
   dump_stage_dir="$(dirname "$src")"
   if [ ! -d "$dump_stage_dir" ] || [ ! -w "$dump_stage_dir" ]; then
-    dump_stage_dir="${TMPDIR:-/tmp}"
+    echo -e "${COLOR_RED}Error: Staging directory '${dump_stage_dir}' is not writable for dump verification.${COLOR_RESET}" >&2
+    exit 1
   fi
 
   local src_dump_tmp dest_dump_tmp
