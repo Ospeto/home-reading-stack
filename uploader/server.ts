@@ -2666,15 +2666,19 @@ export function refreshCalibreHashIndex(options: { forceFreshBooks?: boolean } =
               );
               indexedCount++;
             }
-            insertStmt.run(
-              full + "#bin256",
-              mtime,
-              h1 || "sentinel",
-              bId,
-              bTitle,
-              bAuthors,
-              bCover,
-            );
+            // Only write sentinel when successfully resolved to an active book
+            // Unresolved files will be retried on next scan once catalog is available
+            if (bId !== null && typeof bId === "number" && bookMatch) {
+              insertStmt.run(
+                full + "#bin256",
+                mtime,
+                h1 || "sentinel",
+                bId,
+                bTitle,
+                bAuthors,
+                bCover,
+              );
+            }
           }
         }
       }
@@ -3128,7 +3132,13 @@ function getKosyncProgress() {
             }
 
             if (!bookId && !wasRejected && (r.title || r.filename)) {
-              const rawTitle = (r.title || r.filename || "").trim();
+              // Strip terminal extension (.epub, .kepub.epub) from filename when title is missing
+              const rawTitle = (
+                r.title ||
+                (r.filename
+                  ? r.filename.replace(/\.(epub|kepub\.epub)$/i, "")
+                  : "")
+              ).trim();
               const bookMatch = books.find((b: any) =>
                 matchesActiveBookIdentity(b, rawTitle, r.authors),
               );
@@ -4057,12 +4067,46 @@ async function handleRequestCore(
     url.pathname === "/api/opds/catalog"
   ) {
     if (req.method !== "GET" && req.method !== "HEAD") {
-      return new Response("Method Not Allowed", { status: 405 });
+      const notAllowedHeaders: Record<string, string> = {
+        Allow: "GET, HEAD",
+        "X-Content-Type-Options": "nosniff",
+      };
+      if (corsOrigin) {
+        notAllowedHeaders["Access-Control-Allow-Origin"] = corsOrigin;
+        notAllowedHeaders["Access-Control-Allow-Credentials"] = "true";
+        notAllowedHeaders["Vary"] = "Origin";
+      }
+      return new Response("Method Not Allowed", {
+        status: 405,
+        headers: notAllowedHeaders,
+      });
     }
     const books = getCalibreBooks();
-    const opdsXml = generateOpdsFeed(books, {
-      title: "LightHouse OPDS Catalog",
-      feedUrl: url.pathname,
+    const query = (
+      url.searchParams.get("search") ??
+      url.searchParams.get("q") ??
+      url.searchParams.get("query") ??
+      ""
+    ).trim();
+
+    const filteredBooks = query
+      ? books.filter((b) => {
+          const q = query.toLowerCase();
+          const matchTitle = Boolean(b.title && b.title.toLowerCase().includes(q));
+          const matchAuthor = Boolean(b.authors && b.authors.toLowerCase().includes(q));
+          const matchSeries = Boolean(b.series && b.series.toLowerCase().includes(q));
+          return matchTitle || matchAuthor || matchSeries;
+        })
+      : books;
+
+    const feedPathWithSearch = url.pathname + (url.search || "");
+    const feedTitle = query
+      ? `LightHouse OPDS Catalog - Search: ${query}`
+      : "LightHouse OPDS Catalog";
+
+    const opdsXml = generateOpdsFeed(filteredBooks, {
+      title: feedTitle,
+      feedUrl: feedPathWithSearch,
       publicBaseUrl: `${url.protocol}//${url.host}`,
     });
 
