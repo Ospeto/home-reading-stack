@@ -1441,6 +1441,7 @@ export interface IngestLnoriResult {
   skippedErrors?: number;
   totalCount: number;
   calibreBookIds: number[];
+  volumes?: number[];
   error?: string;
   errorDetails?: {
     code?: string;
@@ -1509,6 +1510,7 @@ export async function ingestLnoriSeries(
   });
 
   const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-"));
+  const collectedVolumes: number[] = [];
 
   try {
     for (let idx = 0; idx < totalCount; idx++) {
@@ -1570,6 +1572,7 @@ export async function ingestLnoriSeries(
       }
 
       const assignedIndex = volMeta.volumeNumber === undefined ? volNum : volMeta.volumeNumber;
+      collectedVolumes.push(assignedIndex);
       const title = `${manifest.seriesTitle}: Volume ${assignedIndex}`;
 
       // Pre-download duplicate detection: check if volume already exists in Calibre
@@ -1930,6 +1933,10 @@ export async function ingestLnoriSeries(
     duplicateCount,
     skippedErrors,
     totalCount,
+    volumes:
+      collectedVolumes.length > 0
+        ? Array.from(new Set(collectedVolumes)).sort((a, b) => a - b)
+        : Array.from({ length: totalCount }, (_, i) => i + 1),
     calibreBookIds,
     ...(finalError ? { error: finalError } : {}),
     ...(finalErrorDetails ? { errorDetails: finalErrorDetails } : {}),

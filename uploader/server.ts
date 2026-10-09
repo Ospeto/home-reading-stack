@@ -78,6 +78,7 @@ import {
   getDiscoverNovelById,
   stripEmojis,
   REAL_ELSCIONE_FOLDERS,
+  setCachedSourceInventory,
   type VerifiedSourceInventory,
 } from "./discover";
 import { isJoplinRoute, handleJoplinRequest } from "./joplin";
@@ -175,6 +176,12 @@ export interface DiscoverJobProgress {
   totalVolumes: number;
   statusText?: string;
   summary?: string;
+  importedCount?: number;
+  duplicateCount?: number;
+  skippedCount?: number;
+  skippedErrors?: number;
+  failedVolumes?: any[];
+  data?: any;
   error?: string;
 }
 
@@ -432,6 +439,7 @@ export function getDiscoverJobProgress(
       (phase === "complete" ? 1 : 0);
     const percent = phase === "complete" ? 100 : phase === "error" ? 0 : 50;
 
+    const completedData = completedState.completedData || completedState.data;
     const res: DiscoverJobProgress = {
       success: true,
       jobId: cleanJobId,
@@ -448,6 +456,12 @@ export function getDiscoverJobProgress(
       totalVolumes,
       statusText: completedState.status || undefined,
       summary: completedState.status || undefined,
+      importedCount: completedData?.importedCount,
+      duplicateCount: completedData?.duplicateCount ?? completedData?.skippedCount,
+      skippedCount: completedData?.skippedCount,
+      skippedErrors: completedData?.skippedErrors,
+      failedVolumes: completedData?.failedVolumes,
+      data: completedData,
     };
     if (completedState.volumeTitle) {
       res.currentVolume = stripEmojis(completedState.volumeTitle);
@@ -1121,13 +1135,35 @@ export function executeLnoriIngestTask(
           author: result.author,
           importedCount: result.importedCount,
           skippedCount: result.skippedCount,
+          duplicateCount: result.duplicateCount ?? result.skippedCount,
           totalCount: result.totalCount,
           tags: result.tags,
           calibreBookIds: result.calibreBookIds,
+          ...(result.volumes ? { volumes: result.volumes } : {}),
           ...(result.skippedErrors ? { skippedErrors: result.skippedErrors } : {}),
           ...(result.errorDetails ? { errorDetails: result.errorDetails } : {}),
           ...(result.failedVolumes ? { failedVolumes: result.failedVolumes } : {}),
         };
+
+        if (Array.isArray(result.volumes) && result.volumes.length > 0) {
+          try {
+            const invSource = isElscione ? "elscione" : "lnori";
+            setCachedSourceInventory(
+              cleanAndNormalizeNovelUrl(targetUrl),
+              {
+                source: invSource,
+                url: cleanAndNormalizeNovelUrl(targetUrl),
+                status: "verified",
+                volumeCount: result.volumes.length,
+                volumes: result.volumes,
+                verifiedAt: Date.now(),
+              },
+              { cacheDb: getCacheDb() },
+            );
+          } catch (cErr) {
+            console.debug("[Discover] setCachedSourceInventory after ingest failed:", cErr);
+          }
+        }
 
         activeLnoriState.active = false;
         activeLnoriState.phase = "complete";

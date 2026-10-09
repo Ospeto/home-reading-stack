@@ -5180,7 +5180,7 @@
 
     function formatVolumeRangeString(indices) {
       if (!indices || !Array.isArray(indices) || indices.length === 0) return '';
-      const sorted = [...new Set(indices)].map(Number).filter(n => !isNaN(n) && n > 0).sort((a, b) => a - b);
+      const sorted = [...new Set(indices)].map(Number).filter(n => !isNaN(n) && n >= 0).sort((a, b) => a - b);
       if (sorted.length === 0) return '';
       const ranges = [];
       let start = sorted[0];
@@ -5480,6 +5480,7 @@
       const verifiedTotal = isVerified ? (item.verifiedVolumeCount ?? item.verifiedVolumes.length) : (item.volumeCount || 1);
       const totalVols = hasVerifiedInventory ? verifiedTotal : Math.max(item.volumeCount || 1, rawLibCount);
       const libCount = hasVerifiedInventory ? verifiedOwnedCount : rawLibCount;
+      const catalogTotal = item.catalogVolumeCount || item.volumeCount || totalVols;
 
       if (cover) {
         cover.setAttribute('data-title', item.title || '');
@@ -5490,7 +5491,15 @@
       if (title) title.textContent = item.title;
       if (romaji) romaji.textContent = item.romajiTitle || item.titleRomaji || '';
       if (author) author.textContent = `By ${item.author || 'Author Unknown'}`;
-      if (volumes) volumes.textContent = `${totalVols} Volumes`;
+      if (volumes) {
+        if (isVerified && catalogTotal > totalVols) {
+          volumes.textContent = `${totalVols} Vols Available (${catalogTotal} in Catalog)`;
+        } else if (!isVerified) {
+          volumes.textContent = `${catalogTotal} Volumes (Catalog)`;
+        } else {
+          volumes.textContent = `${totalVols} Volumes`;
+        }
+      }
       if (release) release.textContent = `Released: ${item.releaseDate || 'Recent'}`;
 
       const ratingVal = item.rating || (item.score ? (item.score / 20) : 4.8);
@@ -5719,11 +5728,15 @@
       const verifiedTotal = isVerified ? (item.verifiedVolumeCount ?? item.verifiedVolumes.length) : (item.volumeCount || 1);
       const totalVols = hasVerifiedInventory ? verifiedTotal : Math.max(item.volumeCount || 1, rawLibCount);
       const libCount = hasVerifiedInventory ? verifiedOwnedCount : rawLibCount;
+      const catalogTotal = item.catalogVolumeCount || item.volumeCount || totalVols;
       const missingCount = isVerified && item.missingVolumeCount !== undefined ? item.missingVolumeCount : undefined;
       const hasMissing = item.missingVolumeCount !== undefined ? (isVerified && item.missingVolumeCount > 0) : false;
       const isPartial = libCount > 0 && totalVols > libCount;
       const isPartialAudited = isVerified && inLib && libCount > 0 && hasMissing;
-      const isComplete = isVerified && Boolean(item.allVerifiedOwned || (inLib && !hasMissing && (libCount >= totalVols)));
+      const isComplete = Boolean(
+        (isVerified && (item.allVerifiedOwned || (!hasMissing && libCount >= totalVols))) ||
+        (!isVerified && inLib && catalogTotal > 0 && libCount >= catalogTotal)
+      );
 
       const verifiedCheckSvg = `<svg class="w-3.5 h-3.5 text-emerald-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>`;
 
@@ -5845,6 +5858,10 @@
       }
 
       let novel = discoverNovelsMap.get(novelId) || activeDiscoverItem;
+      if (!force && novel && (novel.allVerifiedOwned || (novel.sourceStatus === 'verified' && novel.missingVolumeCount === 0))) {
+        showToast('All available volumes already in library');
+        return;
+      }
       if (!novel) {
         for (const k of Object.keys(discoverFeedCache)) {
           const list = discoverFeedCache[k]?.items || discoverFeedCache[k]?.novels || [];
@@ -6050,7 +6067,21 @@
 
           if (phase === 'complete') {
             progress = 100;
-            statusText = `Downloaded ${title} into library`;
+            const imported = data.importedCount ?? data.data?.importedCount ?? 0;
+            const duplicate = data.duplicateCount ?? data.data?.duplicateCount ?? data.skippedCount ?? data.data?.skippedCount ?? 0;
+            const failed = data.skippedErrors ?? data.failedVolumes?.length ?? 0;
+
+            if (imported > 0 && failed === 0) {
+              statusText = `Downloaded ${imported} new volume${imported === 1 ? '' : 's'} into library`;
+            } else if (imported > 0 && failed > 0) {
+              statusText = `Added ${imported} volume${imported === 1 ? '' : 's'} (${failed} failed)`;
+            } else if (imported === 0 && duplicate > 0 && failed === 0) {
+              statusText = `All ${duplicate} available volumes already in library`;
+            } else if (failed > 0 && imported === 0) {
+              statusText = `Download failed: ${data.error || 'Source error'}`;
+            } else {
+              statusText = data.summary || data.statusText || `Downloaded ${title} into library`;
+            }
           }
 
           // Update active state in-memory and in localStorage
@@ -6087,7 +6118,19 @@
             ingestingDiscoverIds.delete(novelId);
             activeDiscoverDownloads.delete(novelId);
 
-            showToast(`Downloaded "${volumeTitle || title}" into library`);
+            const imported = data.importedCount ?? data.data?.importedCount ?? 0;
+            const duplicate = data.duplicateCount ?? data.data?.duplicateCount ?? data.skippedCount ?? data.data?.skippedCount ?? 0;
+            const failed = data.skippedErrors ?? data.failedVolumes?.length ?? 0;
+
+            if (imported === 0 && duplicate > 0 && failed === 0) {
+              showToast(`All ${duplicate} available volumes already in library`);
+            } else if (imported > 0 && failed > 0) {
+              showToast(`Added ${imported} volume${imported === 1 ? '' : 's'} to library (${failed} failed)`, 'warning');
+            } else if (imported > 0) {
+              showToast(`Downloaded ${imported} new volume${imported === 1 ? '' : 's'} into library`);
+            } else {
+              showToast(data.summary || `Finished checking "${volumeTitle || title}"`);
+            }
 
             const mProgressCont = document.getElementById('discoverModalProgressContainer');
             if (mProgressCont && activeDiscoverItem?.id === novelId) {
