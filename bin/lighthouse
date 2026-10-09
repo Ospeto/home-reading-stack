@@ -300,6 +300,8 @@ badge_connected(){ echo -e "${COLOR_GREEN}[CONNECTED]${COLOR_RESET}"; }
 badge_running()  { echo -e "${COLOR_GREEN}[RUNNING]${COLOR_RESET}"; }
 badge_stopped()  { echo -e "${COLOR_DIM}[STOPPED]${COLOR_RESET}"; }
 badge_warn()     { echo -e "${COLOR_YELLOW}[WARN]${COLOR_RESET}"; }
+badge_scheduled(){ echo -e "${COLOR_GREEN}[SCHEDULED]${COLOR_RESET}"; }
+badge_disabled() { echo -e "${COLOR_DIM}[DISABLED]${COLOR_RESET}"; }
 
 # ------------------------------------------------------------------------------
 # 3. System Inspection Primitives
@@ -332,15 +334,31 @@ get_launchagent_status() {
   local label="$1"
   if command -v launchctl >/dev/null 2>&1; then
     local out
-    out=$(launchctl print "gui/${CURRENT_UID}/${label}" 2>&1 || true)
-    if echo "$out" | grep -q "state = running"; then
-      local pid
-      pid=$(echo "$out" | grep "pid =" | grep -oE '[0-9]+' | head -n 1 || echo "")
-      if [ -n "$pid" ]; then
-        echo "RUNNING:${pid}"
+    local exit_code=0
+    out=$(launchctl print "gui/${CURRENT_UID}/${label}" 2>&1) || exit_code=$?
+    if [ "$exit_code" -eq 0 ]; then
+      if echo "$out" | grep -qE '^[[:space:]]*state = running'; then
+        local pid
+        pid=$(echo "$out" | grep -E '^[[:space:]]*pid =' | grep -oE '[0-9]+' | head -n 1 || echo "")
+        if [ -n "$pid" ]; then
+          echo "RUNNING:${pid}"
+          return 0
+        fi
+        echo "RUNNING"
         return 0
       fi
-      echo "RUNNING"
+      echo "LOADED"
+      return 0
+    elif launchctl list 2>/dev/null | awk '{print $3}' | grep -Fx "$label" >/dev/null; then
+      local line
+      line=$(launchctl list 2>/dev/null | awk -v lbl="$label" '$3 == lbl {print; exit}')
+      local l_pid
+      l_pid=$(echo "$line" | awk '{print $1}')
+      if [[ "$l_pid" =~ ^[0-9]+$ ]]; then
+        echo "RUNNING:${l_pid}"
+        return 0
+      fi
+      echo "LOADED"
       return 0
     fi
   fi
@@ -498,8 +516,11 @@ cmd_status() {
       "${DAEMON_PREFIX}.reading-vless-tunnel"
       "${DAEMON_PREFIX}.reading-sg-tunnel"
       "${DAEMON_PREFIX}.reading-stack-backup"
+      "${DAEMON_PREFIX}.reading-ssd-backup"
     )
+    local agents_dir="${LAUNCHAGENTS_DIR:-${HOME}/Library/LaunchAgents}"
     for d in "${daemons[@]}"; do
+      local plist="${agents_dir}/${d}.plist"
       local st
       st=$(get_launchagent_status "$d")
       if [[ "$st" =~ ^RUNNING:(.+) ]]; then
@@ -507,8 +528,28 @@ cmd_status() {
         printf "  %-36s $(badge_running)  PID: %s\n" "$d" "$p"
       elif [ "$st" = "RUNNING" ]; then
         printf "  %-36s $(badge_running)  Active\n" "$d"
+      elif [ "$d" = "${DAEMON_PREFIX}.reading-ssd-backup" ]; then
+        if [ ! -f "$plist" ]; then
+          printf "  %-36s $(badge_stopped)  Missing plist\n" "$d"
+        elif [ "$st" = "LOADED" ]; then
+          printf "  %-36s $(badge_scheduled) Loaded (Idle)\n" "$d"
+        else
+          printf "  %-36s $(badge_disabled) Disabled\n" "$d"
+        fi
+      elif [ "$d" = "${DAEMON_PREFIX}.reading-stack-backup" ]; then
+        if [ ! -f "$plist" ]; then
+          printf "  %-36s $(badge_stopped)  Missing plist\n" "$d"
+        elif [ "$st" = "LOADED" ]; then
+          printf "  %-36s $(badge_scheduled) Loaded (Idle)\n" "$d"
+        else
+          printf "  %-36s $(badge_stopped)  -\n" "$d"
+        fi
       else
-        printf "  %-36s $(badge_stopped)  -\n" "$d"
+        if [ ! -f "$plist" ]; then
+          printf "  %-36s $(badge_stopped)  Missing plist\n" "$d"
+        else
+          printf "  %-36s $(badge_stopped)  -\n" "$d"
+        fi
       fi
     done
     echo ""
