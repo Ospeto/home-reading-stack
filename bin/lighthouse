@@ -1424,11 +1424,16 @@ EOF
 # 9. Command: restore (WAL replay prevention, strict check, symlink/path guards)
 # ------------------------------------------------------------------------------
 restore_single_db() {
-  local src="$1"
-  local dest="$2"
-  local count_sql="$3"
-  local ts="$4"
-  local db_title="$5"
+  local src="${1:-}"
+  local dest="${2:-}"
+  local count_sql="${3:-}"
+  local ts="${4:-}"
+  local db_title="${5:-database}"
+
+  if [ -z "$src" ] || [ -z "$dest" ]; then
+    echo "Error: restore_single_db requires source and destination arguments" >&2
+    exit 1
+  fi
 
   [ -f "$src" ] || return 0
 
@@ -2116,6 +2121,7 @@ case "$ACTION" in
   install-daemons) cmd_install_daemons "$@" ;;
   backup) cmd_backup "$@" ;;
   restore) cmd_restore "$@" ;;
+  restore-single-db|restore_single_db) restore_single_db "$@" ;;
   version|--version|-v) echo "lighthouse version ${VERSION}" ;;
   help|--help|-h) cmd_help ;;
   *)

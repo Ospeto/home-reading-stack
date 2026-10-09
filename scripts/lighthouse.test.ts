@@ -1993,8 +1993,10 @@ exit 0
 
     it("fails restoration and never coerces SQL error to success when present table query errors", () => {
       const testDir = path.join(tempTestDir, "query_error_lab");
+      const mockBinDir = path.join(testDir, "mock_bin");
       fs.mkdirSync(path.join(testDir, "src"), { recursive: true });
       fs.mkdirSync(path.join(testDir, "dest"), { recursive: true });
+      fs.mkdirSync(mockBinDir, { recursive: true });
 
       const srcDb = path.join(testDir, "src", "cache.db");
       const destDb = path.join(testDir, "dest", "cache.db");
@@ -2005,21 +2007,28 @@ exit 0
       s1.run("INSERT INTO highlights VALUES (1, 'Quote In DB');");
       s1.close();
 
-      const script1 = `
-        source <(sed -n '/^restore_single_db()/,/^cmd_restore()/p' "${LIGHTHOUSE_BIN}" | sed '$d')
+      const mockSqlite = path.join(mockBinDir, "sqlite3");
+      fs.writeFileSync(
+        mockSqlite,
+        `#!/bin/bash
+real_bin=$(type -a -p sqlite3 | grep -v "$0" | head -n1)
+if [[ "$*" == *"SELECT count(*) FROM \\"highlights\\""* ]]; then
+  echo "Error: simulated SQL error on highlights table" >&2
+  exit 1
+fi
+exec "$real_bin" "$@"
+`,
+      );
+      fs.chmodSync(mockSqlite, 0o755);
 
-        sqlite3() {
-          if [[ "$*" == *"SELECT count(*) FROM \\"highlights\\""* ]]; then
-            echo "Error: simulated SQL error on highlights table" >&2
-            return 1
-          fi
-          command sqlite3 "$@"
-        }
-
-        restore_single_db "${srcDb}" "${destDb}" "" "20261009_120000" "Cache DB"
-      `;
-
-      const res1 = spawnSync("bash", ["-c", script1], { encoding: "utf8" });
+      const res1 = spawnSync(
+        LIGHTHOUSE_BIN,
+        ["restore_single_db", srcDb, destDb, "", "20261009_120000", "Cache DB"],
+        {
+          encoding: "utf8",
+          env: { ...process.env, PATH: `${mockBinDir}:${process.env.PATH}` },
+        },
+      );
       expect(res1.status).toBe(1);
       expect(res1.stderr).toContain("Error: Failed to query record count for table 'highlights'");
       expect(res1.stdout).not.toContain("Restored Cache DB");
@@ -2030,21 +2039,27 @@ exit 0
       s2.run("INSERT INTO jobs VALUES (1, 'pending');");
       s2.close();
 
-      const script2 = `
-        source <(sed -n '/^restore_single_db()/,/^cmd_restore()/p' "${LIGHTHOUSE_BIN}" | sed '$d')
+      fs.writeFileSync(
+        mockSqlite,
+        `#!/bin/bash
+real_bin=$(type -a -p sqlite3 | grep -v "$0" | head -n1)
+if [[ "$*" == *"SELECT count(*) FROM jobs;"* ]]; then
+  echo "Error: simulated failure on jobs table query" >&2
+  exit 1
+fi
+exec "$real_bin" "$@"
+`,
+      );
+      fs.chmodSync(mockSqlite, 0o755);
 
-        sqlite3() {
-          if [[ "$*" == *"SELECT count(*) FROM jobs;"* ]]; then
-            echo "Error: simulated failure on jobs table query" >&2
-            return 1
-          fi
-          command sqlite3 "$@"
-        }
-
-        restore_single_db "${srcDb}" "${destDb}" "SELECT count(*) FROM jobs;" "20261009_120000" "Cache DB"
-      `;
-
-      const res2 = spawnSync("bash", ["-c", script2], { encoding: "utf8" });
+      const res2 = spawnSync(
+        LIGHTHOUSE_BIN,
+        ["restore_single_db", srcDb, destDb, "SELECT count(*) FROM jobs;", "20261009_120000", "Cache DB"],
+        {
+          encoding: "utf8",
+          env: { ...process.env, PATH: `${mockBinDir}:${process.env.PATH}` },
+        },
+      );
       expect(res2.status).toBe(1);
       expect(res2.stderr).toContain("Error: Query failed on source Cache DB");
       expect(res2.stdout).not.toContain("Restored Cache DB");
@@ -2053,8 +2068,10 @@ exit 0
     it("detects same-count differing content in data-bearing tables and rejects restoration", () => {
       // Test that content verification in restore_single_db rejects same-count differing content
       const testDir = path.join(tempTestDir, "content_mismatch_lab");
+      const mockBinDir = path.join(testDir, "mock_bin");
       fs.mkdirSync(path.join(testDir, "src"), { recursive: true });
       fs.mkdirSync(path.join(testDir, "dest"), { recursive: true });
+      fs.mkdirSync(mockBinDir, { recursive: true });
 
       const srcDb = path.join(testDir, "src", "cache.db");
       const destDb = path.join(testDir, "dest", "cache.db");
@@ -2064,30 +2081,38 @@ exit 0
       s.run("INSERT INTO highlights VALUES (1, 'Legitimate Source Quote');");
       s.close();
 
-      // Run restore_single_db via bash sourcing where .restore is simulated to yield different content
-      const script = `
-        source <(sed -n '/^restore_single_db()/,/^cmd_restore()/p' "${LIGHTHOUSE_BIN}" | sed '$d')
+      const mockSqlite = path.join(mockBinDir, "sqlite3");
+      fs.writeFileSync(
+        mockSqlite,
+        `#!/bin/bash
+real_bin=$(type -a -p sqlite3 | grep -v "$0" | head -n1)
+if [[ "$*" == *".restore"* ]]; then
+  "$real_bin" "$1" "CREATE TABLE highlights (id INTEGER PRIMARY KEY, quote TEXT); INSERT INTO highlights VALUES (1, 'Tampered Dest Quote');"
+  exit 0
+fi
+exec "$real_bin" "$@"
+`,
+      );
+      fs.chmodSync(mockSqlite, 0o755);
 
-        sqlite3() {
-          if [[ "$*" == *".restore"* ]]; then
-            command sqlite3 "$1" "CREATE TABLE highlights (id INTEGER PRIMARY KEY, quote TEXT); INSERT INTO highlights VALUES (1, 'Tampered Dest Quote');"
-            return 0
-          fi
-          command sqlite3 "$@"
-        }
-
-        restore_single_db "${srcDb}" "${destDb}" "SELECT count(*) FROM jobs;" "20261009_120000" "Cache DB"
-      `;
-
-      const res = spawnSync("bash", ["-c", script], { encoding: "utf8" });
+      const res = spawnSync(
+        LIGHTHOUSE_BIN,
+        ["restore_single_db", srcDb, destDb, "SELECT count(*) FROM jobs;", "20261009_120000", "Cache DB"],
+        {
+          encoding: "utf8",
+          env: { ...process.env, PATH: `${mockBinDir}:${process.env.PATH}` },
+        },
+      );
       expect(res.status).toBe(1);
       expect(res.stderr).toContain("Error: Content mismatch on restored Cache DB table 'highlights'");
     });
 
     it("preserves complete rollback snapshots and fails without reporting success on interrupted copy", () => {
       const testDir = path.join(tempTestDir, "interrupted_copy_lab");
+      const mockBinDir = path.join(testDir, "mock_bin");
       fs.mkdirSync(path.join(testDir, "src"), { recursive: true });
       fs.mkdirSync(path.join(testDir, "dest"), { recursive: true });
+      fs.mkdirSync(mockBinDir, { recursive: true });
 
       const srcDb = path.join(testDir, "src", "metadata.db");
       const destDb = path.join(testDir, "dest", "metadata.db");
@@ -2104,21 +2129,27 @@ exit 0
       s.run("INSERT INTO books VALUES (1, 'New Incoming Book');");
       s.close();
 
-      // Run restore_single_db where .restore primitive fails (simulating copy failure or interruption)
-      const script = `
-        source <(sed -n '/^restore_single_db()/,/^cmd_restore()/p' "${LIGHTHOUSE_BIN}" | sed '$d')
+      const mockSqlite = path.join(mockBinDir, "sqlite3");
+      fs.writeFileSync(
+        mockSqlite,
+        `#!/bin/bash
+real_bin=$(type -a -p sqlite3 | grep -v "$0" | head -n1)
+if [[ "$*" == *".restore"* ]]; then
+  exit 1
+fi
+exec "$real_bin" "$@"
+`,
+      );
+      fs.chmodSync(mockSqlite, 0o755);
 
-        sqlite3() {
-          if [[ "$*" == *".restore"* ]]; then
-            return 1 # simulate copy failure
-          fi
-          command sqlite3 "$@"
-        }
-
-        restore_single_db "${srcDb}" "${destDb}" "SELECT count(*) FROM books;" "20261009_999999" "Calibre DB"
-      `;
-
-      const res = spawnSync("bash", ["-c", script], { encoding: "utf8" });
+      const res = spawnSync(
+        LIGHTHOUSE_BIN,
+        ["restore_single_db", srcDb, destDb, "SELECT count(*) FROM books;", "20261009_999999", "Calibre DB"],
+        {
+          encoding: "utf8",
+          env: { ...process.env, PATH: `${mockBinDir}:${process.env.PATH}` },
+        },
+      );
       expect(res.status).toBe(1);
       expect(res.stderr).toContain("Error: Failed to restore Calibre DB: .restore command failed");
       expect(res.stdout).not.toContain("Restoration complete");
