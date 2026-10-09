@@ -2229,30 +2229,32 @@ export function getCalibreBooksResult(forceFresh = false): {
     ]);
     if (res.status === 0 && res.stdout) {
       const parsed = safeParseJson(res.stdout);
-      // Clean EPUB-only collection enforcement
-      const epubBooks = (Array.isArray(parsed) ? parsed : [])
-        .filter((b: any) => {
-          const fmts = (b.formats || []).map((f: string) =>
-            String(f).toUpperCase(),
-          );
-          return fmts.includes("EPUB");
-        })
-        .map((b: any) => ({
-          ...b,
-          languages: Array.isArray(b.languages)
-            ? b.languages.map((l: string) => String(l).trim().toLowerCase()).filter(Boolean)
-            : typeof b.languages === "string" && b.languages
-              ? b.languages.split(",").map((l: string) => l.trim().toLowerCase()).filter(Boolean)
-              : [],
-          formats: ["EPUB"],
-        }));
-      calibreBooksCache = {
-        books: epubBooks,
-        timestamp: now,
-        etag: currentEtag,
-        dbPath,
-      };
-      return { books: epubBooks, success: true };
+      if (Array.isArray(parsed)) {
+        // Clean EPUB-only collection enforcement
+        const epubBooks = parsed
+          .filter((b: any) => {
+            const fmts = (b.formats || []).map((f: string) =>
+              String(f).toUpperCase(),
+            );
+            return fmts.includes("EPUB");
+          })
+          .map((b: any) => ({
+            ...b,
+            languages: Array.isArray(b.languages)
+              ? b.languages.map((l: string) => String(l).trim().toLowerCase()).filter(Boolean)
+              : typeof b.languages === "string" && b.languages
+                ? b.languages.split(",").map((l: string) => l.trim().toLowerCase()).filter(Boolean)
+                : [],
+            formats: ["EPUB"],
+          }));
+        calibreBooksCache = {
+          books: epubBooks,
+          timestamp: now,
+          etag: currentEtag,
+          dbPath,
+        };
+        return { books: epubBooks, success: true };
+      }
     }
   } catch (e) {
     console.error("Error listing calibre books via fallback:", e);
@@ -3071,20 +3073,7 @@ function getKosyncProgress() {
           let { map, books, booksFetchFailed, rejectedHashes } =
             getCalibreHashMap();
 
-          // Cold-cache resilience: if progress has entries but file_hashes is cold/empty
-          // and catalog is available, refresh the hash index explicitly so document-hash-only
-          // entries can map to their Calibre books.
-          if (
-            rows.length > 0 &&
-            Object.keys(map).length === 0 &&
-            !booksFetchFailed &&
-            books.length > 0
-          ) {
-            refreshCalibreHashIndex();
-            const refreshed = getCalibreHashMap(books);
-            map = refreshed.map;
-            rejectedHashes = refreshed.rejectedHashes;
-          }
+          let refreshedIndex = false;
 
           return rows.map((r) => {
             let displayTitle = r.title || r.filename;
@@ -3102,7 +3091,34 @@ function getKosyncProgress() {
             // If this document was explicitly rejected by U12 identity validation
             // (e.g. book deleted, or same-ID contradictory author, or symbol-distinct title),
             // do NOT allow fuzzy title-only fallback to override that rejection!
-            const wasRejected = rejectedHashes && rejectedHashes.has(r.document);
+            let wasRejected = rejectedHashes && rejectedHashes.has(r.document);
+
+            // Cold-cache resilience: if document is identified only by hash (no title/filename)
+            // and was not found in map and not rejected, refresh the hash index explicitly once
+            if (
+              !bookId &&
+              !wasRejected &&
+              r.document &&
+              !r.title &&
+              !r.filename &&
+              !booksFetchFailed &&
+              books.length > 0
+            ) {
+              if (!refreshedIndex) {
+                refreshedIndex = true;
+                refreshCalibreHashIndex();
+                const refreshed = getCalibreHashMap(books);
+                map = refreshed.map;
+                rejectedHashes = refreshed.rejectedHashes;
+                wasRejected = rejectedHashes && rejectedHashes.has(r.document);
+              }
+              if (map[r.document]) {
+                displayTitle = map[r.document].title;
+                displayAuthors = map[r.document].authors;
+                bookId = map[r.document].id;
+                cover = map[r.document].cover;
+              }
+            }
 
             if (!bookId && !wasRejected && (r.title || r.filename)) {
               const rawTitle = (r.title || r.filename || "").trim();

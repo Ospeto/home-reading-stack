@@ -4389,9 +4389,6 @@ exit 0
 
         // 5. GET /api/kosync/active: cold cache automatically invokes refreshCalibreHashIndex
         // and maps the hash-only entry to book ID 55
-        const directRefresh = refreshCalibreHashIndex();
-        expect(directRefresh.indexedCount).toBeGreaterThanOrEqual(0);
-
         const req = new Request("http://127.0.0.1:8086/api/kosync/active");
         const res = await handleRequest(req);
         expect(res.status).toBe(200);
@@ -4589,6 +4586,45 @@ exit 0
       expect(matchesActiveBookIdentity(null, "Overlord Volume 1", "Kugane Maruyama")).toBe(false);
       expect(matchesActiveBookIdentity(active, "", "Kugane Maruyama")).toBe(false);
       expect(matchesActiveBookIdentity({ title: "" }, "Overlord Volume 1", "Kugane Maruyama")).toBe(false);
+    });
+
+    it("refreshCalibreHashIndex scans library on disk and updates file_hashes", () => {
+      const res = refreshCalibreHashIndex();
+      expect(typeof res.indexedCount).toBe("number");
+      expect(res.indexedCount).toBeGreaterThanOrEqual(0);
+    });
+
+    it("getCalibreBooksResult requires a valid array and preserves catalog failure status on non-array calibredb output", async () => {
+      const origCalibreDb = process.env.CALIBRE_DB_PATH;
+      const origCalibredb = process.env.CALIBREDB_PATH;
+      process.env.CALIBRE_DB_PATH = "/nonexistent/metadata.db";
+
+      const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "u12-malformed-list-"));
+      const mockScript = path.join(tempDir, "mock_list.sh");
+      fs.writeFileSync(
+        mockScript,
+        `#!/bin/sh
+if [ "$1" = "list" ]; then
+  echo '{"error": "locked"}'
+  exit 0
+fi
+exit 0
+`,
+      );
+      fs.chmodSync(mockScript, 0o755);
+      process.env.CALIBREDB_PATH = mockScript;
+
+      try {
+        const { getCalibreBooksResult } = await import("./server");
+        const res = getCalibreBooksResult(true);
+        expect(res.success).toBe(false);
+      } finally {
+        if (origCalibreDb !== undefined) process.env.CALIBRE_DB_PATH = origCalibreDb;
+        else delete process.env.CALIBRE_DB_PATH;
+        if (origCalibredb !== undefined) process.env.CALIBREDB_PATH = origCalibredb;
+        else delete process.env.CALIBREDB_PATH;
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+      }
     });
   });
 });
