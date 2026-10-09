@@ -34,6 +34,7 @@ import {
   tryAcquireKindleSyncLock,
   releaseKindleSyncLock,
 } from "./kindle";
+import { generateMetadataFilename, buildContentDisposition } from "./filename";
 
 describe("Calibre OPDS & Asset Reverse Proxy", () => {
   it("proxies /opds GET to Calibre server and preserves XML streaming body", async () => {
@@ -5699,6 +5700,269 @@ exit 0
         upstreamServer.stop();
         lighthouseServer.stop();
       }
+    });
+  });
+
+  describe("U05: Canonical User-Facing Filename and Download Route Parity", () => {
+    const origFetch = globalThis.fetch;
+    const fixtureEpubBytes = Buffer.from("PK\x03\x04synthetic-epub-content");
+
+    const fixtureBooks = [
+      {
+        id: 101,
+        title: "Dune Messiah",
+        authors: "Frank Herbert",
+        series: "Dune",
+        series_index: 2,
+        path: "Frank Herbert/Dune Messiah (101)",
+        formats: ["EPUB"],
+      },
+      {
+        id: 102,
+        title: "Children of Dune",
+        authors: "Frank Herbert",
+        series: "Dune",
+        series_index: 3.5,
+        path: "Frank Herbert/Children of Dune (102)",
+        formats: ["EPUB"],
+      },
+      {
+        id: 103,
+        title: "Foundation and Empire",
+        authors: "Isaac Asimov",
+        series: "Foundation",
+        series_index: 10,
+        path: "Isaac Asimov/Foundation and Empire (103)",
+        formats: ["EPUB"],
+      },
+      {
+        id: 104,
+        title: "Unindexed Series Book",
+        authors: "Brandon Sanderson",
+        series: "Cosmere",
+        series_index: null,
+        path: "Brandon Sanderson/Unindexed Series Book (104)",
+        formats: ["EPUB"],
+      },
+      {
+        id: 105,
+        title: "Clean Architecture",
+        authors: "Robert C. Martin",
+        series: null,
+        series_index: null,
+        path: "Robert C. Martin/Clean Architecture (105)",
+        formats: ["EPUB"],
+      },
+      {
+        id: 106,
+        title: "စာဖတ်သူ",
+        authors: "ဆရာတင်",
+        series: "အတွဲ",
+        series_index: 1,
+        path: "ဆရာတင်/စာဖတ်သူ (106)",
+        formats: ["EPUB"],
+      },
+      {
+        id: 107,
+        title: "不死者の王",
+        authors: "丸山くがね",
+        series: "オーバーロード",
+        series_index: 1,
+        path: "丸山くがね/不死者の王 (107)",
+        formats: ["EPUB"],
+      },
+      {
+        id: 108,
+        title: "Malicious /..//etc/passwd *Edition*?",
+        authors: "Attacker\x00\x1f<Admin>\x7f",
+        series: "Exploit/..//Series",
+        series_index: 1,
+        path: "Attacker/Malicious (108)",
+        formats: ["EPUB"],
+      },
+    ];
+
+    beforeEach(() => {
+      setServerDependenciesForTest({
+        getCalibreBooks: () => fixtureBooks,
+      });
+
+      globalThis.fetch = (async (input: any) => {
+        const urlStr = typeof input === "string" ? input : input.url;
+        // Mock upstream Calibre server response for /get/:format/:id/:library
+        if (urlStr.includes("/get/epub/")) {
+          return new Response(fixtureEpubBytes, {
+            status: 200,
+            headers: {
+              "Content-Type": "application/epub+zip",
+              "Content-Length": String(fixtureEpubBytes.length),
+            },
+          });
+        }
+        return new Response("Not Found", { status: 404 });
+      }) as any;
+    });
+
+    afterEach(() => {
+      globalThis.fetch = origFetch;
+      resetServerDependenciesForTest();
+    });
+
+    it("ensures exact parity between web download route and bot delivery helper (Series 01 - Title - Author.epub)", async () => {
+      const book = fixtureBooks[0]; // Dune Messiah (series_index: 2)
+      const botExpectedName = generateMetadataFilename({
+        title: book.title,
+        authors: book.authors,
+        series: book.series,
+        seriesIndex: book.series_index,
+        format: "epub",
+        fallbackBase: `Book-${book.id}`,
+      });
+      expect(botExpectedName).toBe("Dune 02 - Dune Messiah - Frank Herbert.epub");
+
+      const req = new Request(`http://127.0.0.1:8086/api/books/${book.id}/download/epub`, {
+        method: "GET",
+      });
+      const res = await handleRequest(req);
+      expect(res.status).toBe(200);
+
+      const disposition = res.headers.get("Content-Disposition");
+      expect(disposition).toBe(buildContentDisposition(botExpectedName));
+      expect(disposition).toContain(`filename="${botExpectedName}"`);
+      expect(disposition).toContain(`filename*=UTF-8''${encodeURIComponent(botExpectedName)}`);
+    });
+
+    it("formats integer series indices with leading zero for single digits and without for double digits", async () => {
+      // Single digit series index (101: series_index = 2 -> "02")
+      const req1 = new Request("http://127.0.0.1:8086/api/books/101/download/epub");
+      const res1 = await handleRequest(req1);
+      expect(res1.status).toBe(200);
+      const disp1 = res1.headers.get("Content-Disposition")!;
+      expect(disp1).toContain('filename="Dune 02 - Dune Messiah - Frank Herbert.epub"');
+
+      // Double digit series index (103: series_index = 10 -> "10")
+      const req2 = new Request("http://127.0.0.1:8086/api/books/103/download/epub");
+      const res2 = await handleRequest(req2);
+      expect(res2.status).toBe(200);
+      const disp2 = res2.headers.get("Content-Disposition")!;
+      expect(disp2).toContain('filename="Foundation 10 - Foundation and Empire - Isaac Asimov.epub"');
+    });
+
+    it("formats fractional series indices cleanly with padded integer component", async () => {
+      // 102: series_index = 3.5 -> "03.5"
+      const req = new Request("http://127.0.0.1:8086/api/books/102/download/epub");
+      const res = await handleRequest(req);
+      expect(res.status).toBe(200);
+      const disp = res.headers.get("Content-Disposition")!;
+      expect(disp).toContain('filename="Dune 03.5 - Children of Dune - Frank Herbert.epub"');
+    });
+
+    it("handles series with missing series index and standalone books without series cleanly", async () => {
+      // 104: series present, series_index null -> "Cosmere - Unindexed Series Book - Brandon Sanderson.epub"
+      const req1 = new Request("http://127.0.0.1:8086/api/books/104/download/epub");
+      const res1 = await handleRequest(req1);
+      expect(res1.status).toBe(200);
+      const disp1 = res1.headers.get("Content-Disposition")!;
+      expect(disp1).toContain('filename="Cosmere - Unindexed Series Book - Brandon Sanderson.epub"');
+
+      // 105: standalone book without series -> "Clean Architecture - Robert C. Martin.epub"
+      const req2 = new Request("http://127.0.0.1:8086/api/books/105/download/epub");
+      const res2 = await handleRequest(req2);
+      expect(res2.status).toBe(200);
+      const disp2 = res2.headers.get("Content-Disposition")!;
+      expect(disp2).toContain('filename="Clean Architecture - Robert C. Martin.epub"');
+    });
+
+    it("delivers RFC 5987 UTF-8 encoding and ASCII fallback for non-ASCII Burmese and Japanese literature", async () => {
+      // 106: Burmese
+      const resBurmese = await handleRequest(new Request("http://127.0.0.1:8086/api/books/106/download/epub"));
+      expect(resBurmese.status).toBe(200);
+      const dispBurmese = resBurmese.headers.get("Content-Disposition")!;
+      // ASCII fallback has underscores replacing non-ASCII characters
+      expect(dispBurmese).toContain('filename="____ 01 - _______ - ______.epub"');
+      // UTF-8 encoded part decodes back to original exact name
+      const utf8Prefix = "filename*=UTF-8''";
+      const burmeseIdx = dispBurmese.indexOf(utf8Prefix);
+      expect(burmeseIdx).toBeGreaterThan(-1);
+      const burmeseEncoded = dispBurmese.slice(burmeseIdx + utf8Prefix.length);
+      expect(decodeURIComponent(burmeseEncoded)).toBe("အတွဲ 01 - စာဖတ်သူ - ဆရာတင်.epub");
+
+      // 107: Japanese
+      const resJapanese = await handleRequest(new Request("http://127.0.0.1:8086/api/books/107/download/epub"));
+      expect(resJapanese.status).toBe(200);
+      const dispJapanese = resJapanese.headers.get("Content-Disposition")!;
+      const japaneseIdx = dispJapanese.indexOf(utf8Prefix);
+      expect(japaneseIdx).toBeGreaterThan(-1);
+      const japaneseEncoded = dispJapanese.slice(japaneseIdx + utf8Prefix.length);
+      expect(decodeURIComponent(japaneseEncoded)).toBe("オーバーロード 01 - 不死者の王 - 丸山くがね.epub");
+    });
+
+    it("sanitizes path traversal and control characters from user-facing download filenames", async () => {
+      // 108: Malicious title and author with path traversal and control characters
+      const req = new Request("http://127.0.0.1:8086/api/books/108/download/epub");
+      const res = await handleRequest(req);
+      expect(res.status).toBe(200);
+      const disp = res.headers.get("Content-Disposition")!;
+      expect(disp).not.toContain("..");
+      expect(disp).not.toContain("/");
+      expect(disp).not.toContain("\x00");
+      expect(disp).not.toContain("\x1f");
+      expect(disp).not.toContain("\x7f");
+      expect(disp).toContain("Exploit Series 01 - Malicious etc passwd Edition - Attacker Admin.epub");
+    });
+
+    it("concurrent download requests derive independent filenames without cross-talk", async () => {
+      const [res101, res103, res105, res106, res107] = await Promise.all([
+        handleRequest(new Request("http://127.0.0.1:8086/api/books/101/download/epub")),
+        handleRequest(new Request("http://127.0.0.1:8086/api/books/103/download/epub")),
+        handleRequest(new Request("http://127.0.0.1:8086/api/books/105/download/epub")),
+        handleRequest(new Request("http://127.0.0.1:8086/api/books/106/download/epub")),
+        handleRequest(new Request("http://127.0.0.1:8086/api/books/107/download/epub")),
+      ]);
+
+      expect(res101.status).toBe(200);
+      expect(res103.status).toBe(200);
+      expect(res105.status).toBe(200);
+      expect(res106.status).toBe(200);
+      expect(res107.status).toBe(200);
+
+      const d101 = res101.headers.get("Content-Disposition")!;
+      const d103 = res103.headers.get("Content-Disposition")!;
+      const d105 = res105.headers.get("Content-Disposition")!;
+      const d106 = decodeURIComponent(res106.headers.get("Content-Disposition")!);
+      const d107 = decodeURIComponent(res107.headers.get("Content-Disposition")!);
+
+      expect(d101).toContain("Dune 02 - Dune Messiah - Frank Herbert.epub");
+      expect(d103).toContain("Foundation 10 - Foundation and Empire - Isaac Asimov.epub");
+      expect(d105).toContain("Clean Architecture - Robert C. Martin.epub");
+      expect(d106).toContain("အတွဲ 01 - စာဖတ်သူ - ဆရာတင်.epub");
+      expect(d107).toContain("オーバーロード 01 - 不死者の王 - 丸山くがね.epub");
+
+      // Confirm no cross-contamination between responses
+      expect(d101).not.toContain("Foundation");
+      expect(d103).not.toContain("Dune");
+      expect(d105).not.toContain("အတွဲ");
+    });
+
+    it("never mutates or renames physical Calibre library storage paths", async () => {
+      const book = fixtureBooks[0];
+      const initialPath = book.path;
+
+      const req = new Request(`http://127.0.0.1:8086/api/books/${book.id}/download/epub`);
+      const res = await handleRequest(req);
+      expect(res.status).toBe(200);
+
+      // Verify that the book object's internal path was not altered
+      expect(book.path).toBe(initialPath);
+      expect(book.path).toBe("Frank Herbert/Dune Messiah (101)");
+    });
+
+    it("falls back to Book-${id}.epub when book is not found in cache", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/books/999/download/epub");
+      const res = await handleRequest(req);
+      expect(res.status).toBe(200);
+      const disp = res.headers.get("Content-Disposition")!;
+      expect(disp).toContain('filename="Book - 999.epub"');
     });
   });
 });

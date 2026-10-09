@@ -41,7 +41,6 @@ import {
   validateBookFormat,
   isCanonicalEpub,
   validateEpubContent,
-  getDownloadFilename,
   sanitizeErrorMessage,
   cleanString,
   extractEpubMetadata,
@@ -2089,6 +2088,10 @@ export function getCalibreBooksResult(forceFresh = false): {
   books: any[];
   success: boolean;
 } {
+  if (serverDependencies.getCalibreBooks) {
+    const res = serverDependencies.getCalibreBooks(forceFresh);
+    return Array.isArray(res) ? { books: res, success: true } : res;
+  }
   const now = Date.now();
   const currentEtag = getCalibreDbETag();
   const dbPath = getCalibreDbPath();
@@ -2272,6 +2275,10 @@ export function getCalibreBooksResult(forceFresh = false): {
 }
 
 export function getCalibreBooks(forceFresh = false) {
+  if (serverDependencies.getCalibreBooks) {
+    const res = serverDependencies.getCalibreBooks(forceFresh);
+    return Array.isArray(res) ? res : res.books;
+  }
   return getCalibreBooksResult(forceFresh).books;
 }
 
@@ -4931,7 +4938,14 @@ async function handleRequestCore(
         title: `Book-${bookId}`,
         authors: "Unknown",
       };
-      const downloadFilename = getDownloadFilename(book, format);
+      const downloadFilename = generateMetadataFilename({
+        title: book.title,
+        authors: book.authors,
+        series: book.series,
+        seriesIndex: book.series_index ?? book.seriesIndex,
+        format,
+        fallbackBase: `Book-${bookId}`,
+      });
 
       return new Response(await fileRes.arrayBuffer(), {
         headers: {
