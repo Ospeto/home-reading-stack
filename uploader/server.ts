@@ -19,6 +19,8 @@ import {
   isSameBookAsync,
   extractVolumeNumber,
   isAllowedCoverUrl,
+  normalizeAuthorForDedup,
+  isJunkAuthor,
 } from "./scraper";
 import {
   isArchiveFile,
@@ -2083,7 +2085,10 @@ function runCalibredb(args: string[]) {
   });
 }
 
-export function getCalibreBooks(forceFresh = false) {
+export function getCalibreBooksResult(forceFresh = false): {
+  books: any[];
+  success: boolean;
+} {
   const now = Date.now();
   const currentEtag = getCalibreDbETag();
   const dbPath = getCalibreDbPath();
@@ -2094,7 +2099,7 @@ export function getCalibreBooks(forceFresh = false) {
     calibreBooksCache.dbPath === dbPath &&
     now - calibreBooksCache.timestamp < 10000
   ) {
-    return calibreBooksCache.books;
+    return { books: calibreBooksCache.books, success: true };
   }
 
   // 1. Direct in-process bun:sqlite query against Calibre metadata.db in read-only mode
@@ -2198,7 +2203,7 @@ export function getCalibreBooks(forceFresh = false) {
           etag: currentEtag,
           dbPath,
         };
-        return epubBooks;
+        return { books: epubBooks, success: true };
       } finally {
         db.close();
       }
@@ -2224,35 +2229,50 @@ export function getCalibreBooks(forceFresh = false) {
     ]);
     if (res.status === 0 && res.stdout) {
       const parsed = safeParseJson(res.stdout);
-      // Clean EPUB-only collection enforcement
-      const epubBooks = (Array.isArray(parsed) ? parsed : [])
-        .filter((b: any) => {
-          const fmts = (b.formats || []).map((f: string) =>
-            String(f).toUpperCase(),
-          );
-          return fmts.includes("EPUB");
-        })
-        .map((b: any) => ({
-          ...b,
-          languages: Array.isArray(b.languages)
-            ? b.languages.map((l: string) => String(l).trim().toLowerCase()).filter(Boolean)
-            : typeof b.languages === "string" && b.languages
-              ? b.languages.split(",").map((l: string) => l.trim().toLowerCase()).filter(Boolean)
-              : [],
-          formats: ["EPUB"],
-        }));
-      calibreBooksCache = {
-        books: epubBooks,
-        timestamp: now,
-        etag: currentEtag,
-        dbPath,
-      };
-      return epubBooks;
+      if (Array.isArray(parsed)) {
+        // Clean EPUB-only collection enforcement
+        const epubBooks = parsed
+          .filter((b: any) => {
+            const fmts = (b.formats || []).map((f: string) =>
+              String(f).toUpperCase(),
+            );
+            return fmts.includes("EPUB");
+          })
+          .map((b: any) => ({
+            ...b,
+            authors: Array.isArray(b.authors)
+              ? b.authors.map((a: any) => String(a).trim()).filter(Boolean).join(", ")
+              : typeof b.authors === "string"
+                ? b.authors
+                : "Unknown",
+            languages: Array.isArray(b.languages)
+              ? b.languages.map((l: string) => String(l).trim().toLowerCase()).filter(Boolean)
+              : typeof b.languages === "string" && b.languages
+                ? b.languages.split(",").map((l: string) => l.trim().toLowerCase()).filter(Boolean)
+                : [],
+            formats: ["EPUB"],
+          }));
+        calibreBooksCache = {
+          books: epubBooks,
+          timestamp: now,
+          etag: currentEtag,
+          dbPath,
+        };
+        return { books: epubBooks, success: true };
+      }
     }
   } catch (e) {
     console.error("Error listing calibre books via fallback:", e);
   }
-  return calibreBooksCache.books || [];
+
+  return {
+    books: calibreBooksCache.books || [],
+    success: false,
+  };
+}
+
+export function getCalibreBooks(forceFresh = false) {
+  return getCalibreBooksResult(forceFresh).books;
 }
 
 export function getBookPath(bookId: number): string | null {
@@ -2466,37 +2486,126 @@ export async function downscaleImageAsync(
   });
 }
 
-function getCalibreHashMap() {
-  const map: Record<
-    string,
-    { id: number; title: string; authors: string; cover: boolean }
-  > = {};
-  const books = getCalibreBooks();
+const UNKNOWN_AUTHOR_TOKENS = new Set([
+  "",
+  "unknown",
+  "anonymous",
+  "uncredited",
+  "various",
+  "various authors",
+  "n/a",
+  "na",
+  "none",
+]);
 
-  try {
-    const allCached = cacheDb
-      .query("SELECT hash, book_id, title, authors, cover FROM file_hashes")
-      .all() as any[];
-    for (const row of allCached) {
-      if (row.hash) {
-        map[row.hash] = {
-          id: row.book_id,
-          title: row.title,
-          authors: row.authors || "Unknown",
-          cover: !!row.cover,
-        };
-      }
+export function stringifyAuthors(val: any): string {
+  if (!val) return "";
+  if (Array.isArray(val)) {
+    return val
+      .map((a) => String(a || "").trim())
+      .filter(Boolean)
+      .join(", ");
+  }
+  return String(val).trim();
+}
+
+export function isAuthorKnown(author: any): boolean {
+  const str = stringifyAuthors(author);
+  if (!str) return false;
+  const clean = str.trim().toLowerCase();
+  if (UNKNOWN_AUTHOR_TOKENS.has(clean)) return false;
+  return !isJunkAuthor(str);
+}
+
+export function matchesActiveBookIdentity(
+  activeBook: any,
+  cachedTitle: string,
+  cachedAuthors?: string | string[] | any,
+  filepath?: string,
+): boolean {
+  if (!activeBook || !cachedTitle) return false;
+
+  const activeTitle = (activeBook.title || "").trim();
+  const cTitle = (cachedTitle || "").trim();
+  if (!activeTitle || !cTitle) return false;
+
+  // 1. Conservative Title Matching
+  // Exact case-insensitive match with standardized whitespace.
+  // Symbol-distinct titles (e.g. "Re:Zero" vs "ReZero", "Fate/Zero" vs "Fate: Zero",
+  // "Volume 1" vs "Volume 2", or distinct subtitles) are preserved as distinct.
+  const normTitleA = activeTitle.replace(/\s+/g, " ").toLowerCase();
+  const normTitleB = cTitle.replace(/\s+/g, " ").toLowerCase();
+  if (normTitleA !== normTitleB) {
+    return false;
+  }
+
+  // 2. Author Ownership Validation
+  const activeAuthorStr = stringifyAuthors(activeBook.authors);
+  const cachedAuthorStr = stringifyAuthors(cachedAuthors);
+
+  const isAlias = Boolean(filepath && filepath.startsWith("alias:"));
+
+  const activeKnown = isAuthorKnown(activeAuthorStr);
+  const cachedKnown = isAuthorKnown(cachedAuthorStr);
+
+  // Both authors are known: normalize and compare
+  if (activeKnown && cachedKnown) {
+    const normA = normalizeAuthorForDedup(activeAuthorStr);
+    const normB = normalizeAuthorForDedup(cachedAuthorStr);
+    if (normA !== normB) {
+      // Contradictory ownership: different authors for same active ID and title
+      return false;
     }
-  } catch (_e) {
-    void _e;
+    return true;
+  }
+
+  // If one author is known and the other is different/unknown:
+  // Contradictory or unknown ownership must not be accepted by title resemblance alone
+  if (activeKnown !== cachedKnown) {
+    return false;
+  }
+
+  // Both authors are unknown / uncredited
+  if (!activeKnown && !cachedKnown) {
+    // Explicit aliases preserve established supported semantics when ownership has not demonstrably changed
+    if (isAlias) {
+      return activeAuthorStr.toLowerCase() === cachedAuthorStr.toLowerCase();
+    }
+    // For ordinary filepath hashes, unknown ownership cannot be accepted by title resemblance alone
+    return false;
+  }
+
+  return false;
+}
+
+/**
+ * Separate, explicit hash-index refresh path that scans the Calibre library
+ * on disk and updates file_hashes cache with binary/content hashes.
+ */
+export function refreshCalibreHashIndex(options: { forceFreshBooks?: boolean } = {}) {
+  let books: any[] = [];
+  try {
+    const getBooksFn = serverDependencies.getCalibreBooks ?? getCalibreBooks;
+    books = getBooksFn(options.forceFreshBooks ?? false);
+    if (!Array.isArray(books)) books = [];
+  } catch {
+    books = [];
+  }
+  const activeBookById = new Map<number, any>();
+  for (const b of books) {
+    if (b && typeof b.id === "number") {
+      activeBookById.set(b.id, b);
+    }
   }
 
   const selectStmt = cacheDb.prepare(
-    "SELECT hash FROM file_hashes WHERE filepath = ? AND mtime = ?",
+    "SELECT hash, book_id FROM file_hashes WHERE filepath = ? AND mtime = ?",
   );
   const insertStmt = cacheDb.prepare(
     "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
   );
+
+  let indexedCount = 0;
 
   function scanDir(dir: string) {
     try {
@@ -2510,7 +2619,7 @@ function getCalibreHashMap() {
           const mtime = Math.floor(stat.mtimeMs);
 
           const cached = selectStmt.get(full + "#bin256", mtime) as any;
-          if (!cached) {
+          if (!cached || cached.book_id == null) {
             const parentDir = path.basename(path.dirname(full));
             const idMatch = parentDir.match(/\((\d+)\)$/);
             const matchedById = idMatch
@@ -2555,23 +2664,21 @@ function getCalibreHashMap() {
                 bAuthors,
                 bCover,
               );
-              map[h] = {
-                id: bId,
-                title: bTitle,
-                authors: bAuthors,
-                cover: !!bCover,
-              };
+              indexedCount++;
             }
-            // Insert cache sentinel row so selectStmt hits cache on subsequent scans
-            insertStmt.run(
-              full + "#bin256",
-              mtime,
-              h1 || "sentinel",
-              bId,
-              bTitle,
-              bAuthors,
-              bCover,
-            );
+            // Only write sentinel when successfully resolved to an active book
+            // Unresolved files will be retried on next scan once catalog is available
+            if (bId !== null && typeof bId === "number" && bookMatch) {
+              insertStmt.run(
+                full + "#bin256",
+                mtime,
+                h1 || "sentinel",
+                bId,
+                bTitle,
+                bAuthors,
+                bCover,
+              );
+            }
           }
         }
       }
@@ -2581,7 +2688,127 @@ function getCalibreHashMap() {
   }
 
   scanDir(getCalibreLibraryDir());
-  return { map, books };
+  return { indexedCount };
+}
+
+export function getCalibreHashMap(
+  knownBooksInput?: any,
+  options?: { scanDisk?: boolean },
+) {
+  if (options?.scanDisk) {
+    try {
+      refreshCalibreHashIndex();
+    } catch {
+      // Outage during disk refresh does not abort hash map lookup
+    }
+  }
+
+  const map: Record<
+    string,
+    { id: number; title: string; authors: string; cover: boolean }
+  > = {};
+  const rejectedHashes = new Set<string>();
+  let books: any[] = [];
+  let booksFetchFailed = false;
+
+  try {
+    if (
+      knownBooksInput &&
+      typeof knownBooksInput === "object" &&
+      "success" in knownBooksInput
+    ) {
+      books = knownBooksInput.books || [];
+      booksFetchFailed = !knownBooksInput.success;
+    } else if (Array.isArray(knownBooksInput)) {
+      books = knownBooksInput;
+      booksFetchFailed = false;
+    } else if (serverDependencies.getCalibreBooks) {
+      books = serverDependencies.getCalibreBooks();
+      booksFetchFailed = !Array.isArray(books);
+    } else {
+      const res = getCalibreBooksResult();
+      books = res.books;
+      booksFetchFailed = !res.success;
+    }
+  } catch {
+    booksFetchFailed = true;
+    books = [];
+  }
+
+  const activeBookById = new Map<number, any>();
+  if (!booksFetchFailed) {
+    for (const b of books) {
+      if (b && typeof b.id === "number") {
+        activeBookById.set(b.id, b);
+      }
+    }
+  }
+
+  try {
+    const allCached = cacheDb
+      .query(
+        "SELECT filepath, hash, book_id, title, authors, cover FROM file_hashes",
+      )
+      .all() as any[];
+    for (const row of allCached) {
+      if (!row.hash) continue;
+
+      // Unmatched record check: row.book_id must not be null/undefined
+      if (row.book_id == null || typeof row.book_id !== "number") {
+        continue;
+      }
+
+      if (booksFetchFailed) {
+        // When catalog fetch fails, we do NOT treat unavailable as confirmed deletion.
+        // Preserve existing cached duplicate reservation / safety checks for known cached books.
+        if (!map[row.hash]) {
+          map[row.hash] = {
+            id: row.book_id,
+            title: row.title,
+            authors: row.authors || "Unknown",
+            cover: !!row.cover,
+          };
+        }
+        continue;
+      }
+
+      // Catalog was successfully fetched: active book existence check
+      const activeBook = activeBookById.get(row.book_id);
+      if (!activeBook) {
+        // Book was confirmed deleted from Calibre (inactive cached identity)
+        rejectedHashes.add(row.hash);
+        continue;
+      }
+
+      // Exact identity validation (same-ID changed ownership & contradictory author guard)
+      if (
+        !matchesActiveBookIdentity(
+          activeBook,
+          row.title,
+          row.authors,
+          row.filepath,
+        )
+      ) {
+        // Ownership changed / contradictory author / symbol-distinct title
+        rejectedHashes.add(row.hash);
+        continue;
+      }
+
+      // Preserve live identity (neighboring same hash live identities preserved)
+      if (!map[row.hash]) {
+        map[row.hash] = {
+          id: activeBook.id,
+          title: activeBook.title,
+          authors: activeBook.authors || row.authors || "Unknown",
+          cover: !!(activeBook.cover ?? row.cover),
+        };
+      }
+    }
+  } catch (_e) {
+    void _e;
+  }
+
+  return { map, books, booksFetchFailed, rejectedHashes };
 }
 
 /**
@@ -2638,11 +2865,33 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
     };
   }
 
-  const books = getCalibreBooks(true);
+  let books: any[] = [];
+  let catalogFetchFailed = false;
+  try {
+    if (serverDependencies.getCalibreBooks) {
+      books = serverDependencies.getCalibreBooks(true);
+      if (!Array.isArray(books)) {
+        catalogFetchFailed = true;
+        books = [];
+      }
+    } else {
+      const res = getCalibreBooksResult(true);
+      books = res.books;
+      catalogFetchFailed = !res.success;
+    }
+  } catch {
+    catalogFetchFailed = true;
+    books = [];
+  }
   const fileHash = getKOReaderBinary256(filePath);
 
   // 1. Check if exact hash exists in Calibre Library
-  const { map } = getCalibreHashMap();
+  // On a cold hash cache, ensure the hash index is populated so exact-content duplicates are not missed
+  const { map } = getCalibreHashMap(
+    catalogFetchFailed ? { books: [], success: false } : books,
+    { scanDisk: true },
+  );
+
   if (fileHash && map[fileHash]) {
     const existing = map[fileHash];
     return {
@@ -2834,13 +3083,10 @@ function getKosyncProgress() {
             )
             .all() as any[];
 
-          const { map } = getCalibreHashMap();
-          const getBooksFn =
-            serverDependencies.getCalibreBooks ?? getCalibreBooks;
-          const books = getBooksFn();
+          let { map, books, booksFetchFailed, rejectedHashes } =
+            getCalibreHashMap();
 
-          const norm = (s: string) =>
-            (s || "").toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, "");
+          let refreshedIndex = false;
 
           return rows.map((r) => {
             let displayTitle = r.title || r.filename;
@@ -2855,22 +3101,47 @@ function getKosyncProgress() {
               cover = map[r.document].cover;
             }
 
-            if (!bookId && (r.title || r.filename)) {
-              const searchNorm = norm(r.title || r.filename);
+            // If this document was explicitly rejected by U12 identity validation
+            // (e.g. book deleted, or same-ID contradictory author, or symbol-distinct title),
+            // do NOT allow fuzzy title-only fallback to override that rejection!
+            let wasRejected = rejectedHashes && rejectedHashes.has(r.document);
 
-              // Pass 1: exact normalized match across all books
-              let bookMatch = books.find((b: any) => norm(b.title) === searchNorm);
-
-              // Pass 2: only if no exact match exists, attempt bounded substring match with length threshold
-              if (!bookMatch && searchNorm.length > 5) {
-                bookMatch = books.find((b: any) => {
-                  const bNorm = norm(b.title);
-                  return (
-                    bNorm.length > 5 &&
-                    (bNorm.includes(searchNorm) || searchNorm.includes(bNorm))
-                  );
-                });
+            // Cold-cache resilience: if document hash missed the map and was not rejected,
+            // refresh the hash index explicitly once before relying on title/filename fallback
+            if (
+              !bookId &&
+              !wasRejected &&
+              r.document &&
+              !booksFetchFailed &&
+              books.length > 0
+            ) {
+              if (!refreshedIndex) {
+                refreshedIndex = true;
+                refreshCalibreHashIndex();
+                const refreshed = getCalibreHashMap(books);
+                map = refreshed.map;
+                rejectedHashes = refreshed.rejectedHashes;
+                wasRejected = rejectedHashes && rejectedHashes.has(r.document);
               }
+              if (map[r.document]) {
+                displayTitle = map[r.document].title;
+                displayAuthors = map[r.document].authors;
+                bookId = map[r.document].id;
+                cover = map[r.document].cover;
+              }
+            }
+
+            if (!bookId && !wasRejected && (r.title || r.filename)) {
+              // Strip terminal extension (.epub, .kepub.epub) from filename when title is missing
+              const rawTitle = (
+                r.title ||
+                (r.filename
+                  ? r.filename.replace(/\.(epub|kepub\.epub)$/i, "")
+                  : "")
+              ).trim();
+              const bookMatch = books.find((b: any) =>
+                matchesActiveBookIdentity(b, rawTitle, r.authors),
+              );
 
               if (bookMatch) {
                 bookId = bookMatch.id;
@@ -2880,7 +3151,7 @@ function getKosyncProgress() {
               }
             }
 
-            if (!bookId) {
+            if (!bookId && !wasRejected) {
               try {
                 const alias = db
                   .query(
@@ -2889,9 +3160,13 @@ function getKosyncProgress() {
                   .get(r.document) as any;
 
                 if (alias) {
-                  const aliasNorm = norm(alias.normalized_title);
-                  const bookMatch = books.find(
-                    (b: any) => norm(b.title) === aliasNorm,
+                  const bookMatch = books.find((b: any) =>
+                    matchesActiveBookIdentity(
+                      b,
+                      alias.normalized_title,
+                      alias.normalized_authors,
+                      `alias:${r.document}`,
+                    ),
                   );
                   if (bookMatch) {
                     bookId = bookMatch.id;
