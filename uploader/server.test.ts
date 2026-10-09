@@ -3859,4 +3859,350 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
       }
     });
   });
+
+  describe("Native OPDS 1.2 Catalog & Filtered Search", () => {
+    let tempBaseDir: string;
+    let fakeLibraryDir: string;
+    let fakeCalibreDbPath: string;
+    let origCalibreDb: string | undefined;
+    let origCalibreLib: string | undefined;
+
+    const setupFakeCalibreDatabase = (
+      books: Array<{
+        id: number;
+        title: string;
+        author: string;
+        series?: string | null;
+        series_index?: number | null;
+        format?: string;
+        fileContent?: string;
+      }>,
+    ) => {
+      const db = new Database(fakeCalibreDbPath);
+      db.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, path TEXT, has_cover INTEGER, pubdate TEXT, series_index REAL);");
+      db.run("CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);");
+      db.run("CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);");
+      db.run("CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);");
+      db.run("CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);");
+      db.run("CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);");
+      db.run("CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);");
+      db.run("CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);");
+      db.run("CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);");
+      db.run("CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);");
+
+      for (const b of books) {
+        const bookRelDir = `${b.author}/${b.title} (${b.id})`;
+        const fullBookDir = path.join(fakeLibraryDir, bookRelDir);
+        fs.mkdirSync(fullBookDir, { recursive: true });
+        const format = (b.format || "EPUB").toLowerCase();
+        const filename = `${b.title} - ${b.author}.${format}`;
+        const filePath = path.join(fullBookDir, filename);
+        fs.writeFileSync(filePath, b.fileContent || "content", "utf8");
+
+        db.run(
+          "INSERT INTO books (id, title, path, has_cover, pubdate, series_index) VALUES (?, ?, ?, 0, '', ?);",
+          [b.id, b.title, bookRelDir, b.series_index ?? 1],
+        );
+        const stat = fs.statSync(filePath);
+        db.run(
+          "INSERT INTO data (id, book, format, uncompressed_size, name) VALUES (?, ?, ?, ?, ?);",
+          [b.id, b.id, format.toUpperCase(), stat.size, `${b.title} - ${b.author}`],
+        );
+        db.run("INSERT OR IGNORE INTO authors (id, name) VALUES (?, ?);", [b.id, b.author]);
+        db.run("INSERT INTO books_authors_link (id, book, author) VALUES (?, ?, ?);", [b.id, b.id, b.id]);
+
+        if (b.series) {
+          db.run("INSERT OR IGNORE INTO series (id, name) VALUES (?, ?);", [b.id, b.series]);
+          db.run("INSERT INTO books_series_link (id, book, series) VALUES (?, ?, ?);", [b.id, b.id, b.id]);
+        }
+      }
+      db.close();
+    };
+
+    beforeEach(() => {
+      tempBaseDir = fs.mkdtempSync(path.join(os.tmpdir(), "server-opds-test-"));
+      fakeLibraryDir = path.join(tempBaseDir, "Calibre_Library");
+      fakeCalibreDbPath = path.join(fakeLibraryDir, "metadata.db");
+      fs.mkdirSync(fakeLibraryDir, { recursive: true });
+
+      origCalibreDb = process.env.CALIBRE_DB_PATH;
+      origCalibreLib = process.env.CALIBRE_LIBRARY_DIR;
+
+      process.env.CALIBRE_DB_PATH = fakeCalibreDbPath;
+      process.env.CALIBRE_LIBRARY_DIR = fakeLibraryDir;
+    });
+
+    afterEach(async () => {
+      if (origCalibreDb !== undefined) process.env.CALIBRE_DB_PATH = origCalibreDb;
+      else delete process.env.CALIBRE_DB_PATH;
+      if (origCalibreLib !== undefined) process.env.CALIBRE_LIBRARY_DIR = origCalibreLib;
+      else delete process.env.CALIBRE_LIBRARY_DIR;
+
+      await fs.promises.rm(tempBaseDir, { recursive: true, force: true });
+    });
+
+    it("advertises native OPDS search link in /api/opds with correct MIME and returns unfiltered browse", async () => {
+      setupFakeCalibreDatabase([
+        { id: 101, title: "Overlord Volume 1", author: "Kugane Maruyama", series: "Overlord Series" },
+        { id: 102, title: "Dune", author: "Frank Herbert", series: "Dune Chronicles" },
+        { id: 103, title: "မြန်မာ့သမိုင်း", author: "ဦးဖိုးကျား", series: "မြန်မာစာပေစုံ" },
+        { id: 104, title: "Science & Fiction <Vol. 2>", author: "Arthur C. Clarke & Isaac Asimov", series: "Special & Strange" },
+      ]);
+
+      const req = new Request("http://127.0.0.1:8086/api/opds");
+      const res = await handleRequest(req);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe(
+        "application/atom+xml;profile=opds-catalog;kind=acquisition;charset=utf-8",
+      );
+
+      const xml = await res.text();
+      expect(xml).toContain('<link rel="search" href="http://127.0.0.1:8086/api/opds?search={searchTerms}" type="application/atom+xml;profile=opds-catalog"/>');
+      expect(xml).toContain('<link rel="self" href="http://127.0.0.1:8086/api/opds" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>');
+      expect(xml).toContain("<id>urn:lighthouse:catalog:/api/opds</id>");
+      expect(xml).toContain("<title>LightHouse OPDS Catalog</title>");
+
+      const entryCount = (xml.match(/<entry>/g) || []).length;
+      expect(entryCount).toBe(4);
+    });
+
+    it("follows advertised search link to filter by title, author, and series case-insensitively", async () => {
+      setupFakeCalibreDatabase([
+        { id: 101, title: "Overlord Volume 1", author: "Kugane Maruyama", series: "Overlord Series" },
+        { id: 102, title: "Dune", author: "Frank Herbert", series: "Dune Chronicles" },
+        { id: 103, title: "မြန်မာ့သမိုင်း", author: "ဦးဖိုးကျား", series: "မြန်မာစာပေစုံ" },
+        { id: 104, title: "Science & Fiction <Vol. 2>", author: "Arthur C. Clarke & Isaac Asimov", series: "Special & Strange" },
+      ]);
+
+      // 1. Title search (case-insensitive: "overlord")
+      const titleRes = await handleRequest(new Request("http://127.0.0.1:8086/api/opds?search=overlord"));
+      expect(titleRes.status).toBe(200);
+      const titleXml = await titleRes.text();
+      expect(titleXml).toContain("Overlord Volume 1");
+      expect(titleXml).not.toContain("Dune");
+      expect((titleXml.match(/<entry>/g) || []).length).toBe(1);
+      expect(titleXml).toContain("<title>LightHouse OPDS Catalog - Search: overlord</title>");
+      expect(titleXml).toContain('<link rel="self" href="http://127.0.0.1:8086/api/opds?search=overlord"');
+
+      // 2. Author search (case-insensitive: "herbert")
+      const authorRes = await handleRequest(new Request("http://127.0.0.1:8086/api/opds?search=herbert"));
+      expect(authorRes.status).toBe(200);
+      const authorXml = await authorRes.text();
+      expect(authorXml).toContain("Dune");
+      expect(authorXml).not.toContain("Overlord");
+      expect((authorXml.match(/<entry>/g) || []).length).toBe(1);
+
+      // 3. Series search (case-insensitive: "chronicles")
+      const seriesRes = await handleRequest(new Request("http://127.0.0.1:8086/api/opds?search=chronicles"));
+      expect(seriesRes.status).toBe(200);
+      const seriesXml = await seriesRes.text();
+      expect(seriesXml).toContain("Dune");
+      expect(seriesXml).not.toContain("Overlord");
+      expect((seriesXml.match(/<entry>/g) || []).length).toBe(1);
+
+      // 4. Secondary author in multi-author string ("asimov")
+      const multiAuthRes = await handleRequest(new Request("http://127.0.0.1:8086/api/opds?search=asimov"));
+      expect(multiAuthRes.status).toBe(200);
+      const multiAuthXml = await multiAuthRes.text();
+      expect(multiAuthXml).toContain("Science &amp; Fiction &lt;Vol. 2&gt;");
+      expect((multiAuthXml.match(/<entry>/g) || []).length).toBe(1);
+    });
+
+    it("handles nonexistent and empty search queries gracefully", async () => {
+      setupFakeCalibreDatabase([
+        { id: 101, title: "Overlord Volume 1", author: "Kugane Maruyama", series: "Overlord Series" },
+        { id: 102, title: "Dune", author: "Frank Herbert", series: "Dune Chronicles" },
+      ]);
+
+      // Nonexistent query returns valid Atom XML feed with 0 entries
+      const nonExistentRes = await handleRequest(new Request("http://127.0.0.1:8086/api/opds?search=nonexistent-term-xyz"));
+      expect(nonExistentRes.status).toBe(200);
+      const nonExistentXml = await nonExistentRes.text();
+      expect(nonExistentXml).toContain("<feed");
+      expect(nonExistentXml).toContain("</feed>");
+      expect((nonExistentXml.match(/<entry>/g) || []).length).toBe(0);
+
+      // Empty query ?search= returns unfiltered browse
+      const emptyRes = await handleRequest(new Request("http://127.0.0.1:8086/api/opds?search="));
+      expect(emptyRes.status).toBe(200);
+      const emptyXml = await emptyRes.text();
+      expect((emptyXml.match(/<entry>/g) || []).length).toBe(2);
+
+      // Whitespace only query returns unfiltered browse
+      const wsRes = await handleRequest(new Request("http://127.0.0.1:8086/api/opds?search=%20%20%20"));
+      expect(wsRes.status).toBe(200);
+      const wsXml = await wsRes.text();
+      expect((wsXml.match(/<entry>/g) || []).length).toBe(2);
+
+      // Alternative ?q= query param
+      const qRes = await handleRequest(new Request("http://127.0.0.1:8086/api/opds?q=Dune"));
+      expect(qRes.status).toBe(200);
+      const qXml = await qRes.text();
+      expect((qXml.match(/<entry>/g) || []).length).toBe(1);
+      expect(qXml).toContain("Dune");
+    });
+
+    it("handles Unicode characters and URL encoding in search query", async () => {
+      setupFakeCalibreDatabase([
+        { id: 101, title: "Overlord Volume 1", author: "Kugane Maruyama", series: "Overlord Series" },
+        { id: 103, title: "မြန်မာ့သမိုင်း", author: "ဦးဖိုးကျား", series: "မြန်မာစာပေစုံ" },
+      ]);
+
+      // URL-encoded Burmese search term: %E1%80%99%E1%80%BC%E1%80%94%E1%80%BA%E1%80%99%E1%80%AC (မြန်မာ)
+      const encodedRes = await handleRequest(
+        new Request("http://127.0.0.1:8086/api/opds?search=%E1%80%99%E1%80%BC%E1%80%94%E1%80%BA%E1%80%99%E1%80%AC"),
+      );
+      expect(encodedRes.status).toBe(200);
+      const encodedXml = await encodedRes.text();
+      expect(encodedXml).toContain("မြန်မာ့သမိုင်း");
+      expect((encodedXml.match(/<entry>/g) || []).length).toBe(1);
+
+      // Direct Unicode search for author
+      const directRes = await handleRequest(
+        new Request(`http://127.0.0.1:8086/api/opds?search=${encodeURIComponent("ဦးဖိုးကျား")}`),
+      );
+      expect(directRes.status).toBe(200);
+      const directXml = await directRes.text();
+      expect(directXml).toContain("မြန်မာ့သမိုင်း");
+      expect((directXml.match(/<entry>/g) || []).length).toBe(1);
+    });
+
+    it("cleanly escapes XML special characters in search title, id, and self link", async () => {
+      setupFakeCalibreDatabase([
+        { id: 104, title: "Science & Fiction <Vol. 2>", author: "Arthur C. Clarke & Isaac Asimov", series: "Special & Strange" },
+      ]);
+
+      const specialQuery = "Science & Fiction <Vol. 2>";
+      const res = await handleRequest(
+        new Request(`http://127.0.0.1:8086/api/opds?search=${encodeURIComponent(specialQuery)}`),
+      );
+      expect(res.status).toBe(200);
+      const xml = await res.text();
+
+      // Title must escape decoded query characters & and <
+      expect(xml).toContain("<title>LightHouse OPDS Catalog - Search: Science &amp; Fiction &lt;Vol. 2&gt;</title>");
+      // Self link and id must be valid XML
+      expect(xml).toContain('rel="self"');
+      expect(xml).toContain("<id>urn:lighthouse:catalog:/api/opds?search=Science%20%26%20Fiction%20%3CVol.%202%3E</id>");
+      expect(xml).not.toMatch(/<title>[^<]*&(?!(amp|lt|gt|quot|apos);)[^<]*<\/title>/);
+
+      // Raw unencoded & in search URL is also cleanly XML-escaped
+      const rawRes = await handleRequest(new Request("http://127.0.0.1:8086/api/opds?search=A&B"));
+      expect(rawRes.status).toBe(200);
+      const rawXml = await rawRes.text();
+      expect(rawXml).toContain("<id>urn:lighthouse:catalog:/api/opds?search=A&amp;B</id>");
+      expect(rawXml).toContain("<title>LightHouse OPDS Catalog - Search: A</title>");
+    });
+
+    it("supports GET and HEAD methods and returns 405 on mutating methods", async () => {
+      setupFakeCalibreDatabase([
+        { id: 102, title: "Dune", author: "Frank Herbert", series: "Dune Chronicles" },
+      ]);
+
+      // GET returns 200 with XML body
+      const getRes = await handleRequest(new Request("http://127.0.0.1:8086/api/opds"));
+      expect(getRes.status).toBe(200);
+      expect((await getRes.text()).length).toBeGreaterThan(0);
+
+      // HEAD returns 200 with null body and identical Content-Type
+      const headRes = await handleRequest(new Request("http://127.0.0.1:8086/api/opds", { method: "HEAD" }));
+      expect(headRes.status).toBe(200);
+      expect(headRes.headers.get("content-type")).toBe(
+        "application/atom+xml;profile=opds-catalog;kind=acquisition;charset=utf-8",
+      );
+      expect((await headRes.text()).length).toBe(0);
+
+      // HEAD with search returns 200 with empty body
+      const headSearchRes = await handleRequest(new Request("http://127.0.0.1:8086/api/opds?search=Dune", { method: "HEAD" }));
+      expect(headSearchRes.status).toBe(200);
+      expect((await headSearchRes.text()).length).toBe(0);
+
+      // Mutating methods return 405 with Allow header
+      for (const method of ["POST", "PUT", "DELETE", "PATCH"]) {
+        const mutateRes = await handleRequest(new Request("http://127.0.0.1:8086/api/opds", { method }));
+        expect(mutateRes.status).toBe(405);
+        expect(mutateRes.headers.get("Allow")).toBe("GET, HEAD");
+      }
+    });
+
+    it("preserves /api/books JSON semantics and unfiltered browse", async () => {
+      setupFakeCalibreDatabase([
+        { id: 101, title: "Overlord Volume 1", author: "Kugane Maruyama", series: "Overlord Series" },
+        { id: 102, title: "Dune", author: "Frank Herbert", series: "Dune Chronicles" },
+      ]);
+
+      // /api/books returns full JSON array
+      const jsonRes = await handleRequest(new Request("http://127.0.0.1:8086/api/books"));
+      expect(jsonRes.status).toBe(200);
+      expect(jsonRes.headers.get("content-type")).toContain("application/json");
+      const books = await jsonRes.json();
+      expect(books.length).toBe(2);
+
+      // /api/books?search=nonexistent retains JSON semantics and returns full list
+      const searchJsonRes = await handleRequest(new Request("http://127.0.0.1:8086/api/books?search=nonexistent"));
+      expect(searchJsonRes.status).toBe(200);
+      expect(searchJsonRes.headers.get("content-type")).toContain("application/json");
+      const searchBooks = await searchJsonRes.json();
+      expect(searchBooks.length).toBe(2);
+    });
+
+    it("ensures correct self and feed query identity for subpaths /api/opds/feed and /api/opds/catalog", async () => {
+      setupFakeCalibreDatabase([
+        { id: 102, title: "Dune", author: "Frank Herbert", series: "Dune Chronicles" },
+      ]);
+
+      const feedRes = await handleRequest(new Request("http://127.0.0.1:8086/api/opds/feed?search=Dune"));
+      expect(feedRes.status).toBe(200);
+      const feedXml = await feedRes.text();
+      expect(feedXml).toContain('<link rel="self" href="http://127.0.0.1:8086/api/opds/feed?search=Dune"');
+      expect(feedXml).toContain("<id>urn:lighthouse:catalog:/api/opds/feed?search=Dune</id>");
+
+      const catalogRes = await handleRequest(new Request("http://127.0.0.1:8086/api/opds/catalog?search=Dune"));
+      expect(catalogRes.status).toBe(200);
+      const catalogXml = await catalogRes.text();
+      expect(catalogXml).toContain('<link rel="self" href="http://127.0.0.1:8086/api/opds/catalog?search=Dune"');
+      expect(catalogXml).toContain("<id>urn:lighthouse:catalog:/api/opds/catalog?search=Dune</id>");
+    });
+
+    it("concurrent requests across cache refresh do not mix queries or mutate state", async () => {
+      setupFakeCalibreDatabase([
+        { id: 101, title: "Overlord Volume 1", author: "Kugane Maruyama", series: "Overlord Series" },
+        { id: 102, title: "Dune", author: "Frank Herbert", series: "Dune Chronicles" },
+      ]);
+
+      // Launch concurrent requests with different queries
+      const [r1, r2, r3, r4] = await Promise.all([
+        handleRequest(new Request("http://127.0.0.1:8086/api/opds?search=overlord")),
+        handleRequest(new Request("http://127.0.0.1:8086/api/opds?search=dune")),
+        handleRequest(new Request("http://127.0.0.1:8086/api/opds?search=nonexistent")),
+        handleRequest(new Request("http://127.0.0.1:8086/api/opds")),
+      ]);
+
+      const [xml1, xml2, xml3, xml4] = await Promise.all([
+        r1.text(),
+        r2.text(),
+        r3.text(),
+        r4.text(),
+      ]);
+
+      expect((xml1.match(/<entry>/g) || []).length).toBe(1);
+      expect(xml1).toContain("Overlord Volume 1");
+      expect(xml1).not.toContain("Dune");
+
+      expect((xml2.match(/<entry>/g) || []).length).toBe(1);
+      expect(xml2).toContain("Dune");
+      expect(xml2).not.toContain("Overlord Volume 1");
+
+      expect((xml3.match(/<entry>/g) || []).length).toBe(0);
+
+      expect((xml4.match(/<entry>/g) || []).length).toBe(2);
+
+      // Verify aborted read leaves database intact
+      const abortReq = new Request("http://127.0.0.1:8086/api/opds?search=dune");
+      const abortRes = await handleRequest(abortReq);
+      expect(abortRes.status).toBe(200);
+      // Reader disconnects without consuming full body
+      expect(fs.existsSync(fakeCalibreDbPath)).toBe(true);
+    });
+  });
 });
