@@ -767,9 +767,35 @@ cmd_install_daemons() {
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --dry-run) dry_run=1; shift ;;
-      --output-dir) output_dir="$2"; shift 2 ;;
-      *) echo "Unknown option for install-daemons: $1" >&2; exit 1 ;;
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      --output-dir)
+        if [ $# -lt 2 ] || [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
+          echo "Error: --output-dir requires a non-empty directory path argument" >&2
+          exit 1
+        fi
+        output_dir="$2"
+        shift 2
+        ;;
+      --help|-h)
+        cat << 'EOF'
+Usage: bin/lighthouse install-daemons [options]
+
+Dynamically generate and register macOS LaunchAgents for current user.
+
+Options:
+  --dry-run                Generate plists without loading into launchctl
+  --output-dir <dir>       Write plists to custom directory (default: ~/Library/LaunchAgents)
+  --help, -h               Show this help message
+EOF
+        exit 0
+        ;;
+      *)
+        echo "Unknown option for install-daemons: $1" >&2
+        exit 1
+        ;;
     esac
   done
 
@@ -1162,9 +1188,39 @@ cmd_backup() {
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --output|-o) out_file="$2"; shift 2 ;;
-      --output-dir) out_dir="$2"; shift 2 ;;
-      *) echo "Unknown option for backup: $1" >&2; exit 1 ;;
+      --output|-o)
+        if [ $# -lt 2 ] || [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
+          echo "Error: --output requires a non-empty file path argument" >&2
+          exit 1
+        fi
+        out_file="$2"
+        shift 2
+        ;;
+      --output-dir)
+        if [ $# -lt 2 ] || [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
+          echo "Error: --output-dir requires a non-empty directory path argument" >&2
+          exit 1
+        fi
+        out_dir="$2"
+        shift 2
+        ;;
+      --help|-h)
+        cat << 'EOF'
+Usage: bin/lighthouse backup [options]
+
+Create hot SQLite backup with WAL checkpoint, checksum, and manifest.
+
+Options:
+  --output, -o <path>      Explicit archive file path
+  --output-dir <dir>       Directory to store backup bundle (default: ~/.backups/reading-stack)
+  --help, -h               Show this help message
+EOF
+        exit 0
+        ;;
+      *)
+        echo "Unknown option for backup: $1" >&2
+        exit 1
+        ;;
     esac
   done
 
@@ -1406,21 +1462,64 @@ cmd_restore() {
     exit 1
   fi
 
-  local bundle="$1"
-  shift
-
+  local bundle=""
   local target_override=""
   local dry_run=0
   local force=0
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --target) target_override="$2"; shift 2 ;;
-      --dry-run) dry_run=1; shift ;;
-      --force|-f) force=1; shift ;;
-      *) echo "Unknown option for restore: $1" >&2; exit 1 ;;
+      --target)
+        if [ $# -lt 2 ] || [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
+          echo "Error: --target requires a non-empty directory path argument" >&2
+          exit 1
+        fi
+        target_override="$2"
+        shift 2
+        ;;
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      --force|-f)
+        force=1
+        shift
+        ;;
+      --help|-h)
+        cat << 'EOF'
+Usage: bin/lighthouse restore <bundle-file> [--target <dir>] [--dry-run] [--force]
+
+Verified restoration of complete stack with integrity checks.
+
+Options:
+  --target <dir>           Base directory to restore databases into
+  --dry-run                Verify checksum and integrity without modifying files
+  --force, -f              Bypass confirmation prompt
+  --help, -h               Show this help message
+EOF
+        exit 0
+        ;;
+      -*)
+        echo "Unknown option for restore: $1" >&2
+        exit 1
+        ;;
+      *)
+        if [ -z "$bundle" ]; then
+          bundle="$1"
+          shift
+        else
+          echo "Unexpected argument for restore: $1" >&2
+          exit 1
+        fi
+        ;;
     esac
   done
+
+  if [ -z "$bundle" ]; then
+    echo "Error: Missing required backup bundle file argument" >&2
+    echo "Usage: bin/lighthouse restore <bundle-file> [--target <dir>] [--dry-run] [--force]" >&2
+    exit 1
+  fi
 
   if [ ! -f "$bundle" ]; then
     echo -e "${COLOR_RED}Error: Backup bundle not found: ${bundle}${COLOR_RESET}" >&2
