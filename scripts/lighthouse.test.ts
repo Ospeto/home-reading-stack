@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import * as process from "node:process";
 import { Database } from "bun:sqlite";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..");
@@ -1487,5 +1488,267 @@ exit 0
         fs.rmSync(mockBinDir, { recursive: true, force: true });
       }
     }, 15000);
+  });
+
+  describe("8. CLI Option Argument Validation & Pre-Side-Effect Bounds (U23)", () => {
+    it("handles --help and -h cleanly for backup, install-daemons, and restore", () => {
+      for (const cmd of ["backup", "install-daemons", "restore"]) {
+        for (const flag of ["--help", "-h"]) {
+          const res = spawnSync(LIGHTHOUSE_BIN, [cmd, flag], {
+            encoding: "utf8",
+            cwd: tempTestDir,
+          });
+          expect(res.status).toBe(0);
+          expect(res.stdout).toContain(`Usage: bin/lighthouse ${cmd}`);
+          expect(res.stderr).toBe("");
+        }
+      }
+    });
+
+    it("rejects absent, empty, and next-option arguments for install-daemons --output-dir with friendly diagnostics", () => {
+      // 1. Missing argument (end of argv)
+      const resMissing = spawnSync(LIGHTHOUSE_BIN, ["install-daemons", "--output-dir"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resMissing.status).toBe(1);
+      expect(resMissing.stderr).toContain("Error: --output-dir requires a non-empty directory path argument");
+      expect(resMissing.stderr).not.toContain("unbound variable");
+
+      // 2. Empty argument
+      const resEmpty = spawnSync(LIGHTHOUSE_BIN, ["install-daemons", "--output-dir", ""], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resEmpty.status).toBe(1);
+      expect(resEmpty.stderr).toContain("Error: --output-dir requires a non-empty directory path argument");
+
+      // 3. Next option argument
+      const resNext = spawnSync(LIGHTHOUSE_BIN, ["install-daemons", "--output-dir", "--dry-run"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resNext.status).toBe(1);
+      expect(resNext.stderr).toContain("Error: --output-dir requires a non-empty directory path argument");
+
+      // 4. Unknown option
+      const resUnknown = spawnSync(LIGHTHOUSE_BIN, ["install-daemons", "--bogus-flag"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resUnknown.status).toBe(1);
+      expect(resUnknown.stderr).toContain("Unknown option for install-daemons: --bogus-flag");
+    });
+
+    it("accepts legitimate quoted paths with spaces for install-daemons --output-dir", () => {
+      const quotedDir = path.join(tempTestDir, "custom agents dir with spaces");
+      const res = spawnSync(
+        LIGHTHOUSE_BIN,
+        ["install-daemons", "--dry-run", "--output-dir", quotedDir],
+        {
+          encoding: "utf8",
+          cwd: REPO_ROOT,
+        },
+      );
+      expect(res.status).toBe(0);
+      expect(fs.existsSync(quotedDir)).toBe(true);
+      const generated = fs.readdirSync(quotedDir);
+      expect(generated.length).toBe(7);
+      expect(generated.some((f: string) => f.includes("book-uploader"))).toBe(true);
+    });
+
+    it("rejects absent, empty, and next-option arguments for backup options with friendly diagnostics", () => {
+      // 1. --output missing
+      const resOutMissing = spawnSync(LIGHTHOUSE_BIN, ["backup", "--output"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resOutMissing.status).toBe(1);
+      expect(resOutMissing.stderr).toContain("Error: --output requires a non-empty file path argument");
+      expect(resOutMissing.stderr).not.toContain("unbound variable");
+
+      // 2. -o missing
+      const resShortMissing = spawnSync(LIGHTHOUSE_BIN, ["backup", "-o"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resShortMissing.status).toBe(1);
+      expect(resShortMissing.stderr).toContain("Error: --output requires a non-empty file path argument");
+
+      // 3. --output empty
+      const resOutEmpty = spawnSync(LIGHTHOUSE_BIN, ["backup", "--output", ""], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resOutEmpty.status).toBe(1);
+      expect(resOutEmpty.stderr).toContain("Error: --output requires a non-empty file path argument");
+
+      // 4. --output followed by another flag
+      const resOutNext = spawnSync(LIGHTHOUSE_BIN, ["backup", "--output", "--output-dir"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resOutNext.status).toBe(1);
+      expect(resOutNext.stderr).toContain("Error: --output requires a non-empty file path argument");
+
+      // 5. --output-dir missing
+      const resDirMissing = spawnSync(LIGHTHOUSE_BIN, ["backup", "--output-dir"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resDirMissing.status).toBe(1);
+      expect(resDirMissing.stderr).toContain("Error: --output-dir requires a non-empty directory path argument");
+      expect(resDirMissing.stderr).not.toContain("unbound variable");
+
+      // 6. --output-dir empty
+      const resDirEmpty = spawnSync(LIGHTHOUSE_BIN, ["backup", "--output-dir", ""], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resDirEmpty.status).toBe(1);
+      expect(resDirEmpty.stderr).toContain("Error: --output-dir requires a non-empty directory path argument");
+
+      // 7. --output-dir followed by another flag
+      const resDirNext = spawnSync(LIGHTHOUSE_BIN, ["backup", "--output-dir", "--output"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resDirNext.status).toBe(1);
+      expect(resDirNext.stderr).toContain("Error: --output-dir requires a non-empty directory path argument");
+
+      // 8. Unknown option
+      const resUnknown = spawnSync(LIGHTHOUSE_BIN, ["backup", "--invalid-option"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resUnknown.status).toBe(1);
+      expect(resUnknown.stderr).toContain("Unknown option for backup: --invalid-option");
+    });
+
+    it("accepts legitimate quoted paths for backup --output-dir and --output", () => {
+      const backupDir = path.join(tempTestDir, "custom backup destination with spaces");
+      const mockCalibre = path.join(tempTestDir, "source", "metadata.db");
+      const mockEnv = path.join(tempTestDir, "source", ".env");
+      fs.mkdirSync(path.dirname(mockCalibre), { recursive: true });
+
+      const cDb = new Database(mockCalibre);
+      cDb.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT);");
+      cDb.run("INSERT INTO books (title) VALUES ('Book A');");
+      cDb.close();
+      fs.writeFileSync(mockEnv, "READING_API_KEY=test_key\n");
+
+      const res = spawnSync(
+        LIGHTHOUSE_BIN,
+        ["backup", "--output-dir", backupDir],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CALIBRE_DB_PATH: mockCalibre,
+            KOSYNC_DB_PATH: path.join(tempTestDir, "nonexistent-kosync.db"),
+            CACHE_DB_PATH: path.join(tempTestDir, "nonexistent-cache.db"),
+            ENV_FILE: mockEnv,
+          },
+        },
+      );
+      expect(res.status).toBe(0);
+      expect(fs.existsSync(backupDir)).toBe(true);
+      const files = fs.readdirSync(backupDir);
+      expect(files.some((f: string) => f.startsWith("lighthouse-backup-"))).toBe(true);
+    });
+
+    it("rejects absent, empty, and next-option arguments for restore --target and missing bundle", () => {
+      const fakeBundle = path.join(tempTestDir, "fake-backup.tar.gz");
+      fs.writeFileSync(fakeBundle, "not a real tar");
+
+      // 1. Restore without arguments prints usage
+      const resNoArgs = spawnSync(LIGHTHOUSE_BIN, ["restore"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resNoArgs.status).toBe(1);
+      expect(resNoArgs.stderr).toContain("Usage: bin/lighthouse restore");
+
+      // 2. Restore with only options and no bundle file
+      const resNoBundle = spawnSync(LIGHTHOUSE_BIN, ["restore", "--target", tempTestDir], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resNoBundle.status).toBe(1);
+      expect(resNoBundle.stderr).toContain("Error: Missing required backup bundle file argument");
+
+      // 3. --target missing argument
+      const resMissing = spawnSync(LIGHTHOUSE_BIN, ["restore", fakeBundle, "--target"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resMissing.status).toBe(1);
+      expect(resMissing.stderr).toContain("Error: --target requires a non-empty directory path argument");
+      expect(resMissing.stderr).not.toContain("unbound variable");
+
+      // 4. --target empty argument
+      const resEmpty = spawnSync(LIGHTHOUSE_BIN, ["restore", fakeBundle, "--target", ""], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resEmpty.status).toBe(1);
+      expect(resEmpty.stderr).toContain("Error: --target requires a non-empty directory path argument");
+
+      // 5. --target next option argument
+      const resNext = spawnSync(LIGHTHOUSE_BIN, ["restore", fakeBundle, "--target", "--dry-run"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resNext.status).toBe(1);
+      expect(resNext.stderr).toContain("Error: --target requires a non-empty directory path argument");
+
+      // 6. Unknown option
+      const resUnknown = spawnSync(LIGHTHOUSE_BIN, ["restore", fakeBundle, "--bogus-opt"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(resUnknown.status).toBe(1);
+      expect(resUnknown.stderr).toContain("Unknown option for restore: --bogus-opt");
+    });
+
+    it("ensures simultaneous malformed commands produce zero writes or side effects", () => {
+      const cleanMonitoredDir = path.join(tempTestDir, "isolated-monitored-clean");
+      fs.mkdirSync(cleanMonitoredDir, { recursive: true });
+
+      const malformedCmds = [
+        ["install-daemons", "--output-dir"],
+        ["install-daemons", "--output-dir", ""],
+        ["install-daemons", "--output-dir", "--dry-run"],
+        ["backup", "--output"],
+        ["backup", "-o", ""],
+        ["backup", "--output-dir"],
+        ["backup", "--output-dir", ""],
+        ["backup", "--output-dir", "--output"],
+        ["restore", "--target"],
+        ["restore", path.join(cleanMonitoredDir, "fake.tar.gz"), "--target"],
+        ["restore", path.join(cleanMonitoredDir, "fake.tar.gz"), "--target", ""],
+        ["restore", path.join(cleanMonitoredDir, "fake.tar.gz"), "--target", "--dry-run"],
+      ];
+
+      // Run all simultaneously
+      const results = malformedCmds.map((args) =>
+        spawnSync(LIGHTHOUSE_BIN, args, {
+          encoding: "utf8",
+          cwd: cleanMonitoredDir,
+        })
+      );
+
+      // Verify all failed cleanly with exit code 1 and bounded friendly diagnostic
+      for (let i = 0; i < results.length; i++) {
+        const res = results[i];
+        expect(res.status).toBe(1);
+        expect(res.stderr.length).toBeGreaterThan(0);
+        expect(res.stderr).not.toContain("unbound variable");
+      }
+
+      // Assert zero writes: clean directory must remain completely empty
+      const contents = fs.readdirSync(cleanMonitoredDir);
+      expect(contents.length).toBe(0);
+    });
   });
 });
