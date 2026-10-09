@@ -4244,7 +4244,7 @@ exit 0
       expect(matchesActiveBookIdentity(activeBook, "Inferno", "Dan Brown")).toBe(false);
     });
 
-    it("reproduces same active ID and same title but different recorded author using actual progress path, preventing false progress mapping", () => {
+    it("reproduces same active ID and same title but different recorded author using actual progress path, preventing false progress mapping", async () => {
       const cdb = getCacheDb();
       const docHash = "test_dan_brown_inferno_progress_dochash";
 
@@ -4259,10 +4259,60 @@ exit 0
         { id: 12, title: "Inferno", authors: "Dante Alighieri", cover: 1 },
       ];
 
-      const { map } = getCalibreHashMap(knownBooks);
+      const { map, rejectedHashes } = getCalibreHashMap(knownBooks);
 
-      // getCalibreHashMap must reject the contradictory author row
+      // 1. getCalibreHashMap must reject the contradictory author row
       expect(map[docHash]).toBeUndefined();
+      expect(rejectedHashes.has(docHash)).toBe(true);
+
+      // 2. Exercise actual getKosyncProgress path via GET /api/kosync/active
+      setServerDependenciesForTest({
+        getCalibreBooks: () => knownBooks,
+      });
+
+      const tempKosyncDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "u12-kosync-progress-"));
+      const kosyncDbPath = path.join(tempKosyncDir, "kosync.db");
+      const origKosyncDb = process.env.KOSYNC_DB_PATH;
+      process.env.KOSYNC_DB_PATH = kosyncDbPath;
+
+      try {
+        const kdb = new Database(kosyncDbPath);
+        kdb.run(`
+          CREATE TABLE progress (
+            id INTEGER PRIMARY KEY,
+            document TEXT,
+            progress TEXT,
+            percentage REAL,
+            device TEXT,
+            device_id TEXT,
+            filename TEXT,
+            title TEXT,
+            authors TEXT,
+            timestamp INTEGER
+          );
+        `);
+        kdb.run(
+          "INSERT INTO progress (document, progress, percentage, device, device_id, filename, title, authors, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [docHash, "p1", 0.5, "device1", "dev1", "inferno.epub", "Inferno", "Dan Brown", Date.now()],
+        );
+        kdb.close();
+
+        const req = new Request("http://127.0.0.1:8086/api/kosync/active");
+        const res = await handleRequest(req);
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(Array.isArray(data)).toBe(true);
+        expect(data.length).toBeGreaterThan(0);
+        const infernoItem = data.find((i: any) => i.document === docHash);
+        expect(infernoItem).toBeDefined();
+        // Crucial invariant: must NOT be mapped to Dante's book ID 12
+        expect(infernoItem.bookId).toBeNull();
+      } finally {
+        resetServerDependenciesForTest();
+        if (origKosyncDb !== undefined) process.env.KOSYNC_DB_PATH = origKosyncDb;
+        else delete process.env.KOSYNC_DB_PATH;
+        await fs.promises.rm(tempKosyncDir, { recursive: true, force: true });
+      }
     });
 
     it("symbol-distinct title controls reject title resemblance when symbols distinguish works", () => {
@@ -4360,6 +4410,47 @@ exit 0
         const row = cdb.query("SELECT * FROM file_hashes WHERE hash = ?").get(testHash) as any;
         expect(row).toBeDefined();
         expect(row.book_id).toBe(12);
+
+        // End-to-end ingestBookFile with cold cache and unavailable catalog:
+        // Must preserve duplicate reservation rather than treating unavailable as confirmed deletion
+        const tempEpubDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "u12-cold-outage-"));
+        try {
+          const testEpub = path.join(tempEpubDir, "outage_test.epub");
+          const staging = path.join(tempEpubDir, "staging");
+          fs.mkdirSync(path.join(staging, "META-INF"), { recursive: true });
+          fs.mkdirSync(path.join(staging, "OEBPS"), { recursive: true });
+          fs.writeFileSync(path.join(staging, "mimetype"), "application/epub+zip");
+          fs.writeFileSync(
+            path.join(staging, "META-INF", "container.xml"),
+            `<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`,
+          );
+          fs.writeFileSync(
+            path.join(staging, "OEBPS", "content.opf"),
+            `<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Retained Book</dc:title><dc:creator>Author</dc:creator></metadata><manifest><item id="t" href="text.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="t"/></spine></package>`,
+          );
+          fs.writeFileSync(
+            path.join(staging, "OEBPS", "text.xhtml"),
+            `<html><body>${"A novel chapter with meaningful original fixture prose. ".repeat(150)}</body></html>`,
+          );
+          spawnSync("zip", ["-q", "-X", "-0", testEpub, "mimetype"], { cwd: staging });
+          spawnSync("zip", ["-q", "-r", testEpub, "META-INF", "OEBPS"], { cwd: staging });
+
+          const { getKOReaderBinary256 } = await import("./bot");
+          const outageHash = getKOReaderBinary256(testEpub);
+
+          cdb.run(
+            "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [testEpub, 1, outageHash, 12, "Retained Book", "Author", 0],
+          );
+
+          // Ingesting the file with unavailable catalog must preserve the duplicate check
+          const ingestRes = await ingestBookFile(testEpub, "outage_test.epub");
+          expect(ingestRes.success).toBe(true);
+          expect(ingestRes.duplicate).toBe(true);
+          expect(ingestRes.bookId).toBe(12);
+        } finally {
+          await fs.promises.rm(tempEpubDir, { recursive: true, force: true });
+        }
       } finally {
         resetServerDependenciesForTest();
       }
@@ -4372,6 +4463,15 @@ exit 0
       expect(isAuthorKnown("Unknown")).toBe(false);
       expect(isAuthorKnown("unknown")).toBe(false);
       expect(isAuthorKnown("anonymous")).toBe(false);
+      expect(isAuthorKnown("Uncredited")).toBe(false);
+      expect(isAuthorKnown("uncredited")).toBe(false);
+      expect(isAuthorKnown("various")).toBe(false);
+      expect(isAuthorKnown("n/a")).toBe(false);
+      expect(isAuthorKnown("none")).toBe(false);
+
+      // Uncredited author must not be accepted by title resemblance alone
+      const activeUncredited = { title: "Folktale", authors: "Uncredited" };
+      expect(matchesActiveBookIdentity(activeUncredited, "Folktale", "Uncredited", "/path/folktale.epub")).toBe(false);
 
       // Exact match with matching authors
       const active = { title: "Overlord Volume 1", authors: "Kugane Maruyama" };
@@ -4396,4 +4496,3 @@ exit 0
     });
   });
 });
-
