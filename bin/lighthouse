@@ -1293,8 +1293,21 @@ EOF
         echo -e "${COLOR_RED}CORRUPTED${COLOR_RESET}" >&2
         exit 1
       }
-      cache_count=$(sqlite3 "${temp_dir}/cache.db" "SELECT count(*) FROM jobs;" 2>/dev/null || echo 0)
-      echo -e "${COLOR_GREEN}OK${COLOR_RESET} (${cache_count} jobs)"
+      local has_jobs
+      if ! has_jobs=$(sqlite3 "${temp_dir}/cache.db" "SELECT count(*) FROM sqlite_master WHERE type='table' AND LOWER(name)='jobs';" 2>&1); then
+        echo -e "${COLOR_RED}FAILED (failed to inspect jobs table in cache.db: ${has_jobs})${COLOR_RESET}" >&2
+        exit 1
+      fi
+      if [ "$has_jobs" = "1" ]; then
+        if ! cache_count=$(sqlite3 "${temp_dir}/cache.db" "SELECT count(*) FROM jobs;" 2>&1); then
+          echo -e "${COLOR_RED}FAILED (failed to query jobs count: ${cache_count})${COLOR_RESET}" >&2
+          exit 1
+        fi
+        echo -e "${COLOR_GREEN}OK${COLOR_RESET} (${cache_count} jobs)"
+      else
+        cache_count=0
+        echo -e "${COLOR_GREEN}OK${COLOR_RESET} (jobs table optional/absent)"
+      fi
       backed_up_count=$((backed_up_count + 1))
     else
       echo -e "${COLOR_RED}FAILED${COLOR_RESET}" >&2
@@ -1419,9 +1432,16 @@ restore_single_db() {
 
   [ -f "$src" ] || return 0
 
+  # Pre-screen source database for non-canonical table identifiers before touching destination
+  local src_noncanon
+  if ! src_noncanon=$(sqlite3 "$src" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name GLOB '*[^a-zA-Z0-9_]*';" 2>&1) || [ "$src_noncanon" != "0" ]; then
+    echo -e "${COLOR_RED}Security Error: Database ${db_title} contains non-canonical table identifiers. Restore aborted.${COLOR_RESET}" >&2
+    exit 1
+  fi
+
   mkdir -p "$(dirname "$dest")"
 
-  # a) Checkpoint destination if present
+  # a) Checkpoint destination if present (withstand busy checkpoint)
   if [ -f "$dest" ]; then
     sqlite3 "$dest" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
     cp "$dest" "${dest}.bak.${ts}"
@@ -1434,7 +1454,10 @@ restore_single_db() {
   rm -f "$dest" "${dest}-wal" "${dest}-shm"
 
   # d) Restore using .restore primitive
-  sqlite3 "$dest" ".restore '${src}'"
+  if ! sqlite3 "$dest" ".restore '${src}'" 2>/dev/null; then
+    echo -e "${COLOR_RED}Error: Failed to restore ${db_title}: .restore command failed${COLOR_RESET}" >&2
+    exit 1
+  fi
 
   # e) Verify PRAGMA integrity_check returns 'ok'
   local check_res
@@ -1444,16 +1467,112 @@ restore_single_db() {
     exit 1
   fi
 
-  # f) Verify record count matches source
-  local src_count dest_count
-  src_count=$(sqlite3 "$src" "$count_sql" 2>/dev/null || echo "0")
-  dest_count=$(sqlite3 "$dest" "$count_sql" 2>/dev/null || echo "-1")
-  if [ "$src_count" != "$dest_count" ]; then
-    echo -e "${COLOR_RED}Error: Record count mismatch on restored ${db_title} (src=${src_count}, dest=${dest_count})${COLOR_RESET}" >&2
+  # Secondary assertion on restored destination
+  local dest_noncanon
+  if ! dest_noncanon=$(sqlite3 "$dest" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name GLOB '*[^a-zA-Z0-9_]*';" 2>&1) || [ "$dest_noncanon" != "0" ]; then
+    echo -e "${COLOR_RED}Security Error: Restored database ${db_title} contains non-canonical table identifiers. Restore aborted.${COLOR_RESET}" >&2
     exit 1
   fi
 
-  echo -e "  ${COLOR_GREEN}✓${COLOR_RESET} Restored ${db_title}: ${dest} (${dest_count} records)"
+  # f) Inspect user tables in source and restored database
+  local src_tables dest_tables
+  if ! src_tables=$(sqlite3 "$src" "SELECT name FROM sqlite_master WHERE type='table' AND NOT (LOWER(name) GLOB 'sqlite_*') ORDER BY name;" 2>&1); then
+    echo -e "${COLOR_RED}Error: Failed to inspect tables in source ${db_title}: ${src_tables}${COLOR_RESET}" >&2
+    exit 1
+  fi
+  if ! dest_tables=$(sqlite3 "$dest" "SELECT name FROM sqlite_master WHERE type='table' AND NOT (LOWER(name) GLOB 'sqlite_*') ORDER BY name;" 2>&1); then
+    echo -e "${COLOR_RED}Error: Failed to inspect tables in restored ${db_title}: ${dest_tables}${COLOR_RESET}" >&2
+    exit 1
+  fi
+
+  if [ "$src_tables" != "$dest_tables" ]; then
+    echo -e "${COLOR_RED}Error: Schema mismatch on restored ${db_title} (table list differs from source)${COLOR_RESET}" >&2
+    exit 1
+  fi
+
+  # Check optional jobs table for Cache DB
+  local has_jobs=0
+  local is_cache_db=0
+  if [ "$db_title" = "Cache DB" ] || [ "$(basename "$src")" = "cache.db" ]; then
+    is_cache_db=1
+    local jobs_check
+    if ! jobs_check=$(sqlite3 "$src" "SELECT count(*) FROM sqlite_master WHERE type='table' AND LOWER(name)='jobs';" 2>&1); then
+      echo -e "${COLOR_RED}Error: Failed to inspect sqlite_master in source ${db_title}: ${jobs_check}${COLOR_RESET}" >&2
+      exit 1
+    fi
+    if [ "$jobs_check" = "1" ]; then
+      has_jobs=1
+    fi
+  fi
+
+  local skip_count_sql=0
+  if [ "$is_cache_db" -eq 1 ] && [ "$has_jobs" -eq 0 ]; then
+    if [[ "$count_sql" =~ [[:space:]]jobs[[:space:]\;\.]* ]]; then
+      skip_count_sql=1
+    fi
+  fi
+
+  local primary_count=0
+  if [ -n "$count_sql" ] && [ "$skip_count_sql" -eq 0 ]; then
+    local src_count dest_count
+    if ! src_count=$(sqlite3 "$src" "$count_sql" 2>&1); then
+      echo -e "${COLOR_RED}Error: Query failed on source ${db_title}: ${src_count}${COLOR_RESET}" >&2
+      exit 1
+    fi
+    if ! dest_count=$(sqlite3 "$dest" "$count_sql" 2>&1); then
+      echo -e "${COLOR_RED}Error: Query failed on restored ${db_title}: ${dest_count}${COLOR_RESET}" >&2
+      exit 1
+    fi
+    if [ "$src_count" != "$dest_count" ]; then
+      echo -e "${COLOR_RED}Error: Record count mismatch on restored ${db_title} (src=${src_count}, dest=${dest_count})${COLOR_RESET}" >&2
+      exit 1
+    fi
+    primary_count="$dest_count"
+  fi
+
+  local total_records=0
+  if [ -n "$src_tables" ]; then
+    while IFS= read -r tbl; do
+      [ -z "$tbl" ] && continue
+
+      # Strict validation: table names must be valid SQLite identifiers (alphanumeric and underscore)
+      if [[ ! "$tbl" =~ ^[a-zA-Z0-9_]+$ ]]; then
+        echo -e "${COLOR_RED}Security Error: Illegal table identifier '${tbl}' in ${db_title}. Restore aborted.${COLOR_RESET}" >&2
+        exit 1
+      fi
+
+      local tbl_escaped="${tbl//\"/\"\"}"
+
+      local tbl_src_count tbl_dest_count
+      if ! tbl_src_count=$(sqlite3 "$src" "SELECT count(*) FROM \"${tbl_escaped}\";" 2>&1); then
+        echo -e "${COLOR_RED}Error: Failed to query record count for table '${tbl}' in source ${db_title}: ${tbl_src_count}${COLOR_RESET}" >&2
+        exit 1
+      fi
+      if ! tbl_dest_count=$(sqlite3 "$dest" "SELECT count(*) FROM \"${tbl_escaped}\";" 2>&1); then
+        echo -e "${COLOR_RED}Error: Failed to query record count for table '${tbl}' in restored ${db_title}: ${tbl_dest_count}${COLOR_RESET}" >&2
+        exit 1
+      fi
+      if [ "$tbl_src_count" != "$tbl_dest_count" ]; then
+        echo -e "${COLOR_RED}Error: Record count mismatch on restored ${db_title} table '${tbl}' (src=${tbl_src_count}, dest=${tbl_dest_count})${COLOR_RESET}" >&2
+        exit 1
+      fi
+
+      total_records=$((total_records + tbl_dest_count))
+
+      # Meaningful content verification via streamed table dump comparison
+      if ! cmp -s <(sqlite3 "$src" ".dump \"${tbl_escaped}\"") <(sqlite3 "$dest" ".dump \"${tbl_escaped}\""); then
+        echo -e "${COLOR_RED}Error: Content mismatch on restored ${db_title} table '${tbl}'${COLOR_RESET}" >&2
+        exit 1
+      fi
+    done <<< "$src_tables"
+  fi
+
+  local display_count="$primary_count"
+  if [ "$skip_count_sql" -eq 1 ] || [ -z "$count_sql" ]; then
+    display_count="$total_records"
+  fi
+
+  echo -e "  ${COLOR_GREEN}✓${COLOR_RESET} Restored ${db_title}: ${dest} (${display_count} records)"
 }
 
 cmd_restore() {
@@ -1642,6 +1761,13 @@ EOF
       echo -e "${COLOR_RED}Restoration aborted: Database corruption detected in backup.${COLOR_RESET}" >&2
       exit 1
     fi
+
+    # Pre-screen table identifiers in staged database before dry-run, prompt, service stop, or any mutation
+    local staged_noncanon
+    if ! staged_noncanon=$(sqlite3 "$db_file" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name GLOB '*[^a-zA-Z0-9_]*';" 2>&1) || [ "$staged_noncanon" != "0" ]; then
+      echo -e "${COLOR_RED}Security Error: Database ${db_name} contains non-canonical table identifiers. Restore aborted.${COLOR_RESET}" >&2
+      exit 1
+    fi
   done
 
   # 5. Dry-run Mode
@@ -1688,7 +1814,19 @@ EOF
 
   restore_single_db "${staging_dir}/metadata.db" "$target_calibre" "SELECT count(*) FROM books;" "$restore_timestamp" "Calibre DB"
   restore_single_db "${staging_dir}/koreader-sync.db" "$target_kosync" "SELECT count(*) FROM progress;" "$restore_timestamp" "KOSync DB"
-  restore_single_db "${staging_dir}/cache.db" "$target_cache" "SELECT count(*) FROM jobs;" "$restore_timestamp" "Cache DB"
+
+  local cache_sql="SELECT count(*) FROM jobs;"
+  if [ -f "${staging_dir}/cache.db" ]; then
+    local cache_has_jobs
+    if ! cache_has_jobs=$(sqlite3 "${staging_dir}/cache.db" "SELECT count(*) FROM sqlite_master WHERE type='table' AND LOWER(name)='jobs';" 2>&1); then
+      echo -e "${COLOR_RED}Error: Failed to inspect sqlite_master in staged cache.db: ${cache_has_jobs}${COLOR_RESET}" >&2
+      exit 1
+    fi
+    if [ "$cache_has_jobs" = "0" ]; then
+      cache_sql=""
+    fi
+  fi
+  restore_single_db "${staging_dir}/cache.db" "$target_cache" "$cache_sql" "$restore_timestamp" "Cache DB"
   restore_single_db "${staging_dir}/manga.db" "$target_manga" "SELECT count(*) FROM sqlite_master;" "$restore_timestamp" "Manga DB"
 
   # Restore .env if present in staging and absent at destination
