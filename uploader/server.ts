@@ -2599,7 +2599,7 @@ export function refreshCalibreHashIndex(options: { forceFreshBooks?: boolean } =
   }
 
   const selectStmt = cacheDb.prepare(
-    "SELECT hash FROM file_hashes WHERE filepath = ? AND mtime = ?",
+    "SELECT hash, book_id FROM file_hashes WHERE filepath = ? AND mtime = ?",
   );
   const insertStmt = cacheDb.prepare(
     "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -2619,7 +2619,7 @@ export function refreshCalibreHashIndex(options: { forceFreshBooks?: boolean } =
           const mtime = Math.floor(stat.mtimeMs);
 
           const cached = selectStmt.get(full + "#bin256", mtime) as any;
-          if (!cached) {
+          if (!cached || cached.book_id == null) {
             const parentDir = path.basename(path.dirname(full));
             const idMatch = parentDir.match(/\((\d+)\)$/);
             const matchedById = idMatch

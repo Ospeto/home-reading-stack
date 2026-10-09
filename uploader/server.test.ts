@@ -4774,6 +4774,69 @@ exit 0
         await fs.promises.rm(tempDropDir, { recursive: true, force: true });
       }
     });
+
+    it("legacy null-ID sentinel is treated as cache miss and repaired once catalog is available", async () => {
+      const tempLibDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "u12-null-sentinel-"));
+      const origLibDir = process.env.CALIBRE_LIBRARY_DIR;
+      process.env.CALIBRE_LIBRARY_DIR = tempLibDir;
+
+      try {
+        const authorFolder = path.join(tempLibDir, "Author Gamma (66)");
+        fs.mkdirSync(authorFolder, { recursive: true });
+        const epubFile = path.join(authorFolder, "Gamma Book.epub");
+        const staging = path.join(tempLibDir, "staging");
+        fs.mkdirSync(path.join(staging, "META-INF"), { recursive: true });
+        fs.mkdirSync(path.join(staging, "OEBPS"), { recursive: true });
+        fs.writeFileSync(path.join(staging, "mimetype"), "application/epub+zip");
+        fs.writeFileSync(
+          path.join(staging, "META-INF", "container.xml"),
+          `<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`,
+        );
+        fs.writeFileSync(
+          path.join(staging, "OEBPS", "content.opf"),
+          `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Gamma Book</dc:title><dc:creator>Author Gamma</dc:creator></metadata><manifest><item id="t" href="text.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="t"/></spine></package>`,
+        );
+        fs.writeFileSync(
+          path.join(staging, "OEBPS", "text.xhtml"),
+          `<html><body>${"Prose for legacy sentinel test. ".repeat(100)}</body></html>`,
+        );
+        spawnSync("zip", ["-q", "-X", "-0", epubFile, "mimetype"], { cwd: staging });
+        spawnSync("zip", ["-q", "-r", epubFile, "META-INF", "OEBPS"], { cwd: staging });
+
+        const stat = fs.statSync(epubFile);
+        const mtime = Math.floor(stat.mtimeMs);
+
+        // Insert legacy null-ID sentinel row
+        const cdb = getCacheDb();
+        cdb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          [epubFile + "#bin256", mtime, "sentinel", null, "Unresolved", "Unknown", 0],
+        );
+
+        // Active catalog resolves book 66
+        const knownBooks = [
+          { id: 66, title: "Gamma Book", authors: "Author Gamma", cover: 0 },
+        ];
+        setServerDependenciesForTest({
+          getCalibreBooks: () => knownBooks,
+        });
+
+        // Scan must treat null-ID sentinel as cache miss and repair it with book_id = 66
+        const refreshRes = refreshCalibreHashIndex();
+        expect(refreshRes.indexedCount).toBeGreaterThan(0);
+
+        const repairedSentinel = cdb
+          .query("SELECT book_id FROM file_hashes WHERE filepath = ? AND mtime = ?")
+          .get(epubFile + "#bin256", mtime) as any;
+        expect(repairedSentinel).toBeDefined();
+        expect(repairedSentinel.book_id).toBe(66);
+      } finally {
+        resetServerDependenciesForTest();
+        if (origLibDir !== undefined) process.env.CALIBRE_LIBRARY_DIR = origLibDir;
+        else delete process.env.CALIBRE_LIBRARY_DIR;
+        await fs.promises.rm(tempLibDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("Native OPDS 1.2 Catalog & Filtered Search", () => {
