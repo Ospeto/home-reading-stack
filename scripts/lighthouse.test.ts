@@ -2022,8 +2022,8 @@ exec "$real_bin" "$@"
       fs.chmodSync(mockSqlite, 0o755);
 
       const res1 = spawnSync(
-        LIGHTHOUSE_BIN,
-        ["restore_single_db", srcDb, destDb, "", "20261009_120000", "Cache DB"],
+        "bash",
+        ["-c", `LIGHTHOUSE_SOURCE_ONLY=1 source "${LIGHTHOUSE_BIN}"; restore_single_db "${srcDb}" "${destDb}" "" "20261009_120000" "Cache DB"`],
         {
           encoding: "utf8",
           env: { ...process.env, PATH: `${mockBinDir}:${process.env.PATH}` },
@@ -2053,8 +2053,8 @@ exec "$real_bin" "$@"
       fs.chmodSync(mockSqlite, 0o755);
 
       const res2 = spawnSync(
-        LIGHTHOUSE_BIN,
-        ["restore_single_db", srcDb, destDb, "SELECT count(*) FROM jobs;", "20261009_120000", "Cache DB"],
+        "bash",
+        ["-c", `LIGHTHOUSE_SOURCE_ONLY=1 source "${LIGHTHOUSE_BIN}"; restore_single_db "${srcDb}" "${destDb}" "SELECT count(*) FROM jobs;" "20261009_120000" "Cache DB"`],
         {
           encoding: "utf8",
           env: { ...process.env, PATH: `${mockBinDir}:${process.env.PATH}` },
@@ -2096,8 +2096,8 @@ exec "$real_bin" "$@"
       fs.chmodSync(mockSqlite, 0o755);
 
       const res = spawnSync(
-        LIGHTHOUSE_BIN,
-        ["restore_single_db", srcDb, destDb, "SELECT count(*) FROM jobs;", "20261009_120000", "Cache DB"],
+        "bash",
+        ["-c", `LIGHTHOUSE_SOURCE_ONLY=1 source "${LIGHTHOUSE_BIN}"; restore_single_db "${srcDb}" "${destDb}" "SELECT count(*) FROM jobs;" "20261009_120000" "Cache DB"`],
         {
           encoding: "utf8",
           env: { ...process.env, PATH: `${mockBinDir}:${process.env.PATH}` },
@@ -2143,8 +2143,8 @@ exec "$real_bin" "$@"
       fs.chmodSync(mockSqlite, 0o755);
 
       const res = spawnSync(
-        LIGHTHOUSE_BIN,
-        ["restore_single_db", srcDb, destDb, "SELECT count(*) FROM books;", "20261009_999999", "Calibre DB"],
+        "bash",
+        ["-c", `LIGHTHOUSE_SOURCE_ONLY=1 source "${LIGHTHOUSE_BIN}"; restore_single_db "${srcDb}" "${destDb}" "SELECT count(*) FROM books;" "20261009_999999" "Calibre DB"`],
         {
           encoding: "utf8",
           env: { ...process.env, PATH: `${mockBinDir}:${process.env.PATH}` },
@@ -2163,6 +2163,30 @@ exec "$real_bin" "$@"
       expect(books.length).toBe(1);
       expect(books[0].title).toBe("Precious Original Book");
       rDb.close();
+    });
+
+    it("rejects identical source and destination paths to prevent unlinking source", () => {
+      const sameDb = path.join(tempTestDir, "same_path.db");
+      const d = new Database(sameDb);
+      d.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT);");
+      d.run("INSERT INTO books VALUES (1, 'Preserve Me');");
+      d.close();
+
+      const res = spawnSync(
+        "bash",
+        ["-c", `LIGHTHOUSE_SOURCE_ONLY=1 source "${LIGHTHOUSE_BIN}"; restore_single_db "${sameDb}" "${sameDb}" "SELECT count(*) FROM books;" "20261009_120000" "Calibre DB"`],
+        { encoding: "utf8" },
+      );
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain("Error: Source and destination cannot be the same file");
+
+      // Verify file was NOT unlinked or destroyed
+      expect(fs.existsSync(sameDb)).toBe(true);
+      const verifyDb = new Database(sameDb, { readonly: true });
+      const books = verifyDb.query("SELECT title FROM books;").all() as any[];
+      expect(books.length).toBe(1);
+      expect(books[0].title).toBe("Preserve Me");
+      verifyDb.close();
     });
 
     it("withstands destination active WAL busy checkpoint and restores cleanly", () => {

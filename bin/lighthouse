@@ -1440,6 +1440,12 @@ restore_single_db() {
     exit 1
   fi
 
+  # Reject identical source and destination paths to prevent unlinking source
+  if [ -e "$dest" ] && [ "$src" -ef "$dest" ]; then
+    echo -e "${COLOR_RED}Error: Source and destination cannot be the same file: ${src}${COLOR_RESET}" >&2
+    exit 1
+  fi
+
   # Run SQLite integrity check on source before touching destination
   local src_integrity
   src_integrity=$(sqlite3 "$src" "PRAGMA integrity_check;" 2>&1 || echo "failed")
@@ -2145,6 +2151,12 @@ EOF
 # ------------------------------------------------------------------------------
 # Main Dispatcher
 # ------------------------------------------------------------------------------
+# Allow test harnesses to source functions without triggering the main command dispatcher
+if [ "${LIGHTHOUSE_SOURCE_ONLY:-0}" = "1" ]; then
+  # shellcheck disable=SC2317
+  return 0 2>/dev/null || exit 0
+fi
+
 if [ $# -eq 0 ]; then
   cmd_status
   exit 0
@@ -2169,7 +2181,6 @@ case "$ACTION" in
   install-daemons) cmd_install_daemons "$@" ;;
   backup) cmd_backup "$@" ;;
   restore) cmd_restore "$@" ;;
-  restore-single-db|restore_single_db) restore_single_db "$@" ;;
   version|--version|-v) echo "lighthouse version ${VERSION}" ;;
   help|--help|-h) cmd_help ;;
   *)
