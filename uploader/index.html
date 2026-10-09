@@ -7502,7 +7502,15 @@
 
           const action = ev.data?.action;
           if (action === 'skipped') {
-            volumeStatuses[idx] = { state: 'skipped' };
+            if (ev.data?.reason === 'import_error' || ev.data?.error) {
+              volumeStatuses[idx] = {
+                state: 'error',
+                error: ev.data?.error,
+                storageError: ev.data?.storageError,
+              };
+            } else {
+              volumeStatuses[idx] = { state: 'skipped' };
+            }
             const skippedPct = Math.min(100, Math.round((idx / total) * 100));
             if (barEl) barEl.style.width = `${skippedPct}%`;
             if (counterEl) counterEl.textContent = `Volume ${idx} of ${total} (${skippedPct}%)`;
@@ -7537,7 +7545,12 @@
           if (counterEl) counterEl.textContent = '100%';
           if (activeTextEl) activeTextEl.textContent = 'All volumes finished!';
         } else if (ev.phase === 'error') {
-          throw new Error(ev.status || ev.data?.error || 'Ingestion encountered an error');
+          const errMsg = ev.status || ev.data?.error || 'Ingestion encountered an error';
+          const fatalErr = new Error(errMsg);
+          fatalErr.isStructuredFatal = true;
+          fatalErr.errorDetails = ev.data?.errorDetails;
+          fatalErr.failedVolumes = ev.data?.failedVolumes;
+          throw fatalErr;
         }
       }
 
@@ -7600,8 +7613,12 @@
               if (st.completedData) {
                 completedData = st.completedData;
                 return completedData;
-              } else if (st.error) {
-                throw new Error(st.error);
+              } else if (st.error || st.phase === 'error') {
+                const fatalErr = new Error(st.error || 'Background ingestion encountered an error');
+                fatalErr.isStructuredFatal = true;
+                fatalErr.errorDetails = st.data?.errorDetails;
+                fatalErr.failedVolumes = st.data?.failedVolumes;
+                throw fatalErr;
               } else {
                 throw new Error('Background ingestion completed with unknown status');
               }
@@ -7690,6 +7707,8 @@
                       const errMsg = parsed.status || parsed.data?.error || 'Ingestion encountered an error';
                       const fatalErr = new Error(errMsg);
                       fatalErr.isStructuredFatal = true;
+                      fatalErr.errorDetails = parsed.data?.errorDetails;
+                      fatalErr.failedVolumes = parsed.data?.failedVolumes;
                       throw fatalErr;
                     }
                     handleProgressEvent(parsed);
@@ -7717,6 +7736,8 @@
                     const errMsg = parsed.status || parsed.data?.error || 'Ingestion encountered an error';
                     const fatalErr = new Error(errMsg);
                     fatalErr.isStructuredFatal = true;
+                    fatalErr.errorDetails = parsed.data?.errorDetails;
+                    fatalErr.failedVolumes = parsed.data?.failedVolumes;
                     throw fatalErr;
                   }
                   handleProgressEvent(parsed);
@@ -7726,7 +7747,11 @@
               // Non-streaming response or queued response
               const data = await res.json();
               if (!res.ok || !data.success) {
-                throw new Error(data.error || 'Failed to ingest light novel');
+                const fatalErr = new Error(data.error || 'Failed to ingest light novel');
+                fatalErr.isStructuredFatal = true;
+                fatalErr.errorDetails = data.errorDetails;
+                fatalErr.failedVolumes = data.failedVolumes;
+                throw fatalErr;
               }
               if (data.queued) {
                 handedOffToQueue = true;
@@ -7764,8 +7789,25 @@
         if (completedData) {
           tgHaptic.success();
           invalidateCatalogCache();
-          status.className =
-            'text-xs p-3.5 rounded-xl border bg-emerald-950/40 border-emerald-800 text-emerald-300';
+
+          const skippedErrors = completedData.skippedErrors || (completedData.failedVolumes ? completedData.failedVolumes.length : 0);
+          const isPartial = skippedErrors > 0;
+
+          status.className = isPartial
+            ? 'text-xs p-3.5 rounded-xl border bg-amber-950/40 border-amber-800 text-amber-300'
+            : 'text-xs p-3.5 rounded-xl border bg-emerald-950/40 border-emerald-800 text-emerald-300';
+
+          const titleText = isPartial
+            ? 'Partial Series Ingestion Completed'
+            : 'Light Novel Series Ingested Successfully!';
+
+          const titleIcon = isPartial
+            ? svgIcon('triangle-exclamation', 'w-3.5 h-3.5')
+            : svgIcon('check', 'w-3.5 h-3.5');
+
+          const iconWrapperBg = isPartial
+            ? 'bg-amber-500/20 text-amber-400'
+            : 'bg-emerald-500/20 text-emerald-400';
 
           let chipsHtml = '';
           const finalTotal = completedData.totalCount || totalVolumes;
@@ -7787,28 +7829,42 @@
             }
           }
 
+          let partialNoticeHtml = '';
+          if (isPartial) {
+            const partialMsg = completedData.errorDetails?.userMessage || `${skippedErrors} volume${skippedErrors === 1 ? '' : 's'} could not be downloaded due to storage errors.`;
+            const partialSuggestion = completedData.errorDetails?.suggestion || 'You can upload missing volumes directly via Web Uploader.';
+            partialNoticeHtml = `
+              <div class="p-2.5 rounded-lg bg-zinc-950/70 border border-zinc-800/80 text-zinc-300 space-y-1 ml-7">
+                <div class="text-[10px] font-semibold uppercase tracking-wider text-amber-400">Partial Ingestion Notice</div>
+                <p class="text-[11px] leading-relaxed text-zinc-300">${escapeHtml(partialMsg)}</p>
+                <p class="text-[10px] text-zinc-400">${escapeHtml(partialSuggestion)}</p>
+              </div>
+            `;
+          }
+
           setHtml(
             status,
             `
             <div class="space-y-3">
               <div class="flex items-center gap-2 text-white font-bold text-xs">
-                <div class="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
-                  ${svgIcon('check', 'w-3.5 h-3.5')}
+                <div class="w-5 h-5 rounded-full ${iconWrapperBg} flex items-center justify-center shrink-0">
+                  ${titleIcon}
                 </div>
-                <span>Light Novel Series Ingested Successfully!</span>
+                <span>${escapeHtml(titleText)}</span>
               </div>
               <div class="text-[11px] text-zinc-300 space-y-0.5 pl-7">
                 <div class="font-medium text-white">"${escapeHtml(completedData.seriesTitle || 'Series')}"</div>
                 ${completedData.author ? `<div class="text-zinc-400">Author: ${escapeHtml(completedData.author)}</div>` : ''}
               </div>
+              ${partialNoticeHtml}
               <div class="grid grid-cols-3 gap-2 text-center text-xs">
                 <div class="p-2 rounded-xl bg-zinc-900/80 border border-zinc-800">
                   <div class="text-[10px] text-zinc-400">Imported</div>
                   <div class="text-sm font-bold text-emerald-400 mt-0.5">${completedData.importedCount || 0}</div>
                 </div>
                 <div class="p-2 rounded-xl bg-zinc-900/80 border border-zinc-800">
-                  <div class="text-[10px] text-zinc-400">Skipped</div>
-                  <div class="text-sm font-bold text-amber-400 mt-0.5">${completedData.skippedCount || 0}</div>
+                  <div class="text-[10px] text-zinc-400">Skipped/Failed</div>
+                  <div class="text-sm font-bold ${isPartial ? 'text-rose-400' : 'text-amber-400'} mt-0.5">${completedData.skippedCount || 0}</div>
                 </div>
                 <div class="p-2 rounded-xl bg-zinc-900/80 border border-zinc-800">
                   <div class="text-[10px] text-zinc-400">Total</div>
@@ -7819,7 +7875,7 @@
             </div>
           `,
           );
-          showToast(`Ingested "${completedData.seriesTitle || 'Light Novel'}"!`);
+          showToast(isPartial ? `Partial import for "${completedData.seriesTitle || 'Light Novel'}"` : `Ingested "${completedData.seriesTitle || 'Light Novel'}"!`);
           input.value = '';
           await init();
         } else {
@@ -7836,10 +7892,90 @@
         } else {
           tgHaptic.error();
           status.className =
-            'text-xs p-3 rounded-xl border bg-rose-950/40 border-rose-800 text-rose-300';
+            'text-xs p-3.5 rounded-xl border bg-rose-950/40 border-rose-800 text-rose-300';
+
+          const errorDetails = err.errorDetails || {};
+          const isOriginDnsError =
+            Boolean(errorDetails.isOriginDnsError) ||
+            /1016|origin dns error/i.test(err.message || '');
+          const isHttp530 =
+            errorDetails.code === 'HTTP_530_UNAVAILABLE' ||
+            (/\b530\b/.test(err.message || '') && !isOriginDnsError);
+
+          let headline = 'Light Novel Ingestion Failed';
+          let explanation = '';
+          let suggestion = '';
+          let technicalInfo = '';
+
+          if (isOriginDnsError) {
+            headline = 'Lnori Download Server Origin DNS Error';
+            explanation =
+              'Lnori storage (files.lnori.com) encountered an upstream Cloudflare Origin DNS resolution error (Error 1016) and cannot deliver EPUB downloads right now.';
+            suggestion =
+              'Wait for Lnori operators to restore storage infrastructure, or upload your EPUB files directly using Web Uploader.';
+            technicalInfo = 'Cloudflare Error 1016 (HTTP 530: Origin DNS error)';
+          } else if (isHttp530) {
+            headline = 'Lnori Download Server Unavailable';
+            explanation =
+              'Lnori storage returned HTTP 530 and is currently unreachable.';
+            suggestion =
+              'Wait for Lnori storage to recover, or upload your EPUB files directly using Web Uploader.';
+            technicalInfo = 'HTTP 530 (Storage Unavailable)';
+          } else {
+            explanation = formatCleanErrorMessage(err.message || 'Operation failed');
+            suggestion =
+              errorDetails.suggestion ||
+              'Verify the source link is accessible, or upload your EPUB files directly using Web Uploader.';
+            if (errorDetails.technicalDetail) {
+              technicalInfo = errorDetails.technicalDetail;
+            }
+          }
+
+          let chipsHtml = '';
+          if (totalVolumes > 0) {
+            let renderedChips = '';
+            for (let i = 1; i <= totalVolumes; i++) {
+              const v = volumeStatuses[i];
+              const state = v?.state || 'error';
+              if (state === 'imported') {
+                renderedChips += `<span class="px-2 py-0.5 rounded-md text-[10px]" style="background: rgba(6, 78, 59, 0.5); border: 1px solid rgba(16, 185, 129, 0.4); color: #6ee7b7; font-weight: 600;">✓ Vol ${i}</span>`;
+              } else if (state === 'skipped') {
+                renderedChips += `<span class="px-2 py-0.5 rounded-md text-[10px]" style="background: rgba(120, 53, 15, 0.4); border: 1px solid rgba(245, 158, 11, 0.4); color: #fcd34d; font-weight: 600;">Skipped Vol ${i}</span>`;
+              } else {
+                renderedChips += `<span class="px-2 py-0.5 rounded-md text-[10px]" style="background: rgba(136, 19, 55, 0.5); border: 1px solid rgba(244, 63, 94, 0.5); color: #fda4af; font-weight: 600;">Failed Vol ${i}</span>`;
+              }
+            }
+            if (renderedChips) {
+              chipsHtml = `<div class="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto p-1 mt-1 scrollbar-thin">${renderedChips}</div>`;
+            }
+          }
+
           setHtml(
             status,
-            `<div><strong>Ingestion Failed:</strong><div class="mt-1 text-[11px] text-rose-200">${escapeHtml(formatCleanErrorMessage(err.message))}</div></div>`,
+            `
+            <div class="space-y-2.5">
+              <div class="flex items-center gap-2 text-rose-300 font-bold text-xs">
+                <div class="w-5 h-5 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0">
+                  ${svgIcon('triangle-exclamation', 'w-3.5 h-3.5')}
+                </div>
+                <span>${escapeHtml(headline)}</span>
+              </div>
+              <div class="text-[11px] text-zinc-300 space-y-2 pl-7">
+                <p class="leading-relaxed text-rose-200/90">${escapeHtml(explanation)}</p>
+                ${chipsHtml ? `<div class="pt-0.5">${chipsHtml}</div>` : ''}
+                <div class="p-2.5 rounded-lg bg-zinc-950/70 border border-zinc-800/80 text-zinc-300 space-y-1">
+                  <div class="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">Recommended Action</div>
+                  <p class="text-[11px] leading-relaxed text-zinc-300">${escapeHtml(suggestion)}</p>
+                </div>
+                ${technicalInfo ? `
+                  <div class="flex items-center gap-1.5 text-[10px] font-mono text-zinc-400">
+                    <span class="text-zinc-500">Details:</span>
+                    <span class="px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-400">${escapeHtml(technicalInfo)}</span>
+                  </div>
+                ` : ''}
+              </div>
+            </div>
+          `,
           );
         }
       } finally {

@@ -936,6 +936,178 @@ describe("Calibre OPDS & Asset Reverse Proxy", () => {
       }
     });
 
+    it("returns 500 with structured errorDetails and failedVolumes when all volumes fail with Cloudflare 1016", async () => {
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async () => ({
+          success: false,
+          error: "Lnori download server has an origin DNS error (Cloudflare Error 1016) and cannot deliver EPUB files. Wait for Lnori storage recovery or upload EPUB files directly.",
+          seriesTitle: "Bloom Into You",
+          author: "Hitoma Iruma",
+          tags: "Light Novel",
+          importedCount: 0,
+          skippedCount: 3,
+          duplicateCount: 0,
+          skippedErrors: 3,
+          totalCount: 3,
+          calibreBookIds: [],
+          errorDetails: {
+            code: "CLOUDFLARE_DNS_1016",
+            isOriginDnsError: true,
+            userMessage: "Lnori download server has an origin DNS error (Cloudflare Error 1016) and cannot deliver EPUB files.",
+            technicalDetail: "Cloudflare Error 1016 (HTTP 530: Origin DNS error)",
+            suggestion: "Wait for Lnori storage recovery or upload EPUB files directly.",
+          },
+          failedVolumes: [
+            { volumeIndex: 1, title: "Vol 1", error: "Origin DNS error" },
+            { volumeIndex: 2, title: "Vol 2", error: "Origin DNS error" },
+            { volumeIndex: 3, title: "Vol 3", error: "Origin DNS error" },
+          ],
+        }),
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8782/bloom-into-you",
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(500);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(false);
+        expect(data.error).toContain("origin DNS error (Cloudflare Error 1016)");
+        expect(data.errorDetails).toBeDefined();
+        expect(data.errorDetails.isOriginDnsError).toBe(true);
+        expect(data.errorDetails.code).toBe("CLOUDFLARE_DNS_1016");
+        expect(data.failedVolumes).toHaveLength(3);
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("streams error phase with errorDetails when all volumes fail with Cloudflare 1016 on SSE", async () => {
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async (url: string, onProgress: any) => {
+          await onProgress({
+            phase: "error",
+            status: "Lnori download server has an origin DNS error (Cloudflare Error 1016) and cannot deliver EPUB files.",
+            data: {
+              error: "Lnori download server has an origin DNS error (Cloudflare Error 1016) and cannot deliver EPUB files.",
+              errorDetails: {
+                code: "CLOUDFLARE_DNS_1016",
+                isOriginDnsError: true,
+                suggestion: "Wait for Lnori storage recovery or upload EPUB files directly.",
+              },
+            },
+          });
+          return {
+            success: false,
+            error: "Lnori download server has an origin DNS error (Cloudflare Error 1016) and cannot deliver EPUB files.",
+            errorDetails: {
+              code: "CLOUDFLARE_DNS_1016",
+              isOriginDnsError: true,
+              suggestion: "Wait for Lnori storage recovery or upload EPUB files directly.",
+            },
+            seriesTitle: "Bloom Into You",
+            author: "Hitoma Iruma",
+            tags: "Light Novel",
+            importedCount: 0,
+            skippedCount: 1,
+            duplicateCount: 0,
+            skippedErrors: 1,
+            totalCount: 1,
+            calibreBookIds: [],
+          };
+        },
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/8782/bloom-into-you",
+            stream: true,
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        const reader = res.body!.getReader();
+        const decoder = new TextDecoder();
+        let chunks = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks += decoder.decode(value);
+        }
+        expect(chunks).toContain("CLOUDFLARE_DNS_1016");
+        expect(chunks).toContain("origin DNS error");
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("returns 200 with partial failedVolumes when some volumes succeed and some fail", async () => {
+      setServerDependenciesForTest({
+        ingestLnoriSeries: async () => ({
+          success: true,
+          seriesTitle: "Partial Series",
+          author: "Author",
+          tags: "Light Novel",
+          importedCount: 1,
+          skippedCount: 1,
+          duplicateCount: 0,
+          skippedErrors: 1,
+          totalCount: 2,
+          calibreBookIds: [1001],
+          errorDetails: {
+            code: "CLOUDFLARE_DNS_1016",
+            isOriginDnsError: true,
+            userMessage: "1 volume failed due to Lnori origin DNS error (Cloudflare Error 1016).",
+          },
+          failedVolumes: [
+            { volumeIndex: 2, title: "Vol 2", error: "Origin DNS error" },
+          ],
+        }),
+        getCalibreBooks: () => [],
+      });
+
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/lnori/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://lnori.com/series/1111/partial",
+          }),
+        });
+
+        const res = await handleRequest(req, localServer);
+        expect(res.status).toBe(200);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(true);
+        expect(data.importedCount).toBe(1);
+        expect(data.skippedErrors).toBe(1);
+        expect(data.failedVolumes).toHaveLength(1);
+        expect(data.errorDetails.isOriginDnsError).toBe(true);
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("Web UI in uploader/index.html includes Lnori origin DNS error 1016 presentation and recommendation", () => {
+      const htmlPath = path.join(import.meta.dir, "index.html");
+      const html = fs.readFileSync(htmlPath, "utf-8");
+      expect(html).toContain("Lnori Download Server Origin DNS Error");
+      expect(html).toContain("Cloudflare Error 1016");
+      expect(html).toContain("Recommended Action");
+      expect(html).toContain("Partial Ingestion Notice");
+      expect(html).not.toContain("restart local service");
+    });
+
     it("accepts www.lnori.com series and book URLs", async () => {
       let passed = "";
       setServerDependenciesForTest({

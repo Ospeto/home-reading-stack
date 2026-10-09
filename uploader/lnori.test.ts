@@ -25,6 +25,7 @@ import {
   type ParsedLnoriUrl,
   type LnoriProgressEvent,
   formatLnoriProgress,
+  classifyLnoriStorageResponse,
 } from "./lnori";
 
 describe("Lnori Light Novel Ingestion Module", () => {
@@ -2429,6 +2430,244 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
           status: "Custom explicit status",
         }),
       ).toBe("Custom explicit status");
+    });
+  });
+
+  describe("Lnori Storage Error Classification & Presentation", () => {
+    it("classifyLnoriStorageResponse identifies Cloudflare Error 1016 on HTTP 530 with plain text body", () => {
+      const result = classifyLnoriStorageResponse(530, "error code: 1016");
+      expect(result.status).toBe(530);
+      expect(result.code).toBe("CLOUDFLARE_DNS_1016");
+      expect(result.isOriginDnsError).toBe(true);
+      expect(result.userMessage).toContain("origin DNS error");
+      expect(result.technicalDetail).toContain("Cloudflare Error 1016");
+      expect(result.suggestion).toContain("Wait for Lnori storage to recover");
+      expect(result.suggestion).toContain("upload EPUB files directly");
+      expect(result.suggestion).not.toContain("restart");
+      expect(result.suggestion).not.toContain("VPN");
+    });
+
+    it("classifyLnoriStorageResponse identifies Cloudflare Error 1016 on HTTP 530 with HTML body", () => {
+      const htmlBody = `<!DOCTYPE html><html><head><title>files.lnori.com | 530: Origin DNS error</title></head>
+        <body><h1>Error 1016</h1><p>Origin DNS error</p></body></html>`;
+      const result = classifyLnoriStorageResponse(530, htmlBody, { server: "cloudflare" });
+      expect(result.isOriginDnsError).toBe(true);
+      expect(result.code).toBe("CLOUDFLARE_DNS_1016");
+      expect(result.technicalDetail).toContain("Cloudflare Error 1016");
+    });
+
+    it("classifyLnoriStorageResponse does NOT falsely classify generic HTTP 530 as DNS 1016 without evidence", () => {
+      const result = classifyLnoriStorageResponse(530, "Site temporarily down for maintenance");
+      expect(result.isOriginDnsError).toBe(false);
+      expect(result.code).toBe("HTTP_530_UNAVAILABLE");
+      expect(result.userMessage).toContain("HTTP 530");
+      expect(result.userMessage).not.toContain("1016");
+      expect(result.technicalDetail).toBe("HTTP 530 (Storage service unavailable)");
+    });
+
+    it("classifyLnoriStorageResponse classifies HTTP 404, 403, and 500 accurately", () => {
+      const res404 = classifyLnoriStorageResponse(404, "Not Found");
+      expect(res404.code).toBe("NOT_FOUND");
+      expect(res404.isOriginDnsError).toBe(false);
+      expect(res404.userMessage).toContain("HTTP 404");
+
+      const res403 = classifyLnoriStorageResponse(403, "Forbidden");
+      expect(res403.code).toBe("FORBIDDEN");
+      expect(res403.isOriginDnsError).toBe(false);
+      expect(res403.userMessage).toContain("HTTP 403");
+
+      const res500 = classifyLnoriStorageResponse(500, "Internal Server Error");
+      expect(res500.code).toBe("HTTP_500");
+      expect(res500.isOriginDnsError).toBe(false);
+      expect(res500.userMessage).toContain("HTTP 500");
+    });
+
+    it("downloadLnoriEpub attaches classified storageError and does not leak raw signed URL on HTTP 530 1016", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-test-530-"));
+      try {
+        let caughtErr: any = null;
+        try {
+          await downloadLnoriEpub("volume-01.epub", path.join(workDir, "vol.epub"), undefined, {
+            fetch: async () =>
+              new Response("error code: 1016", {
+                status: 530,
+                headers: { server: "cloudflare", "content-type": "text/plain" },
+              }),
+          });
+        } catch (err: any) {
+          caughtErr = err;
+        }
+        expect(caughtErr).not.toBeNull();
+        expect(caughtErr.message).toContain("Failed to download EPUB from Lnori storage (530)");
+        expect(caughtErr.message).toContain("Origin DNS error (Cloudflare Error 1016)");
+        expect(caughtErr.message).not.toContain("https://files.lnori.com/");
+        expect(caughtErr.storageError).toBeDefined();
+        expect(caughtErr.storageError.isOriginDnsError).toBe(true);
+        expect(caughtErr.storageError.code).toBe("CLOUDFLARE_DNS_1016");
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("ingestLnoriSeries accurately accounts all-failed series with Cloudflare 1016 and populates structured errorDetails", async () => {
+      const manifestHtml = `<title>Bloom Into You: Regarding Saeki Sayaka</title>
+        <a href="/book/8782/vol-1">Volume 1</a>
+        <a href="/book/8783/vol-2">Volume 2</a>
+        <a href="/book/8784/vol-3">Volume 3</a>`;
+
+      const volHtml = (id: number, name: string, epub: string) => `<script id="app-data" type="application/ld+json">${JSON.stringify({
+        name,
+        additionalProperty: [
+          { name: "epub_filename", value: epub },
+          { name: "book_id", value: String(id) },
+          { name: "series_title", value: "Bloom Into You: Regarding Saeki Sayaka" },
+        ],
+      })}</script>`;
+
+      const progressEvents: LnoriProgressEvent[] = [];
+
+      const result = await ingestLnoriSeries(
+        "https://lnori.com/series/8782/bloom-into-you",
+        (ev) => {
+          progressEvents.push(ev);
+        },
+        {
+          fetch: async (url: string) => {
+            if (url.includes("/series/8782")) return new Response(manifestHtml);
+            if (url.includes("/book/8782")) return new Response(volHtml(8782, "Volume 1", "vol1.epub"));
+            if (url.includes("/book/8783")) return new Response(volHtml(8783, "Volume 2", "vol2.epub"));
+            if (url.includes("/book/8784")) return new Response(volHtml(8784, "Volume 3", "vol3.epub"));
+            if (url.includes("files.lnori.com")) {
+              return new Response("error code: 1016", {
+                status: 530,
+                headers: { server: "cloudflare", "content-type": "text/plain" },
+              });
+            }
+            return new Response("not found", { status: 404 });
+          },
+          sleep: async () => {},
+        },
+      );
+
+      // Verify all-failed accounting
+      expect(result.success).toBe(false);
+      expect(result.importedCount).toBe(0);
+      expect(result.skippedErrors).toBe(3);
+      expect(result.error).toContain("origin DNS error (Cloudflare Error 1016)");
+      expect(result.error).toContain("Wait for Lnori storage recovery or upload EPUB files directly");
+      expect(result.errorDetails).toBeDefined();
+      expect(result.errorDetails!.isOriginDnsError).toBe(true);
+      expect(result.errorDetails!.code).toBe("CLOUDFLARE_DNS_1016");
+      expect(result.errorDetails!.suggestion).toContain("upload EPUB files directly");
+      expect(result.errorDetails!.failedVolumes).toHaveLength(3);
+
+      // Verify progress emitted error phase with clear status
+      const terminalEvent = progressEvents[progressEvents.length - 1];
+      expect(terminalEvent.phase).toBe("error");
+      expect(terminalEvent.status).toContain("origin DNS error (Cloudflare Error 1016)");
+      expect(terminalEvent.data?.errorDetails?.isOriginDnsError).toBe(true);
+    });
+
+    it("ingestLnoriSeries accurately accounts partial import: 1 imported, 1 failed with 1016", async () => {
+      const manifestHtml = `<title>Partial Test Series</title>
+        <a href="/book/901/vol-1">Volume 1</a>
+        <a href="/book/902/vol-2">Volume 2</a>`;
+
+      const vol1Html = `<script id="app-data" type="application/ld+json">${JSON.stringify({
+        name: "Volume 1",
+        additionalProperty: [
+          { name: "epub_filename", value: "vol1.epub" },
+          { name: "book_id", value: "901" },
+          { name: "series_title", value: "Partial Test Series" },
+        ],
+      })}</script>`;
+
+      const vol2Html = `<script id="app-data" type="application/ld+json">${JSON.stringify({
+        name: "Volume 2",
+        additionalProperty: [
+          { name: "epub_filename", value: "vol2.epub" },
+          { name: "book_id", value: "902" },
+          { name: "series_title", value: "Partial Test Series" },
+        ],
+      })}</script>`;
+
+      function makeEntry(name: string, data: Buffer): Buffer {
+        const nameBuf = Buffer.from(name);
+        const crc = zlib.crc32(data);
+        const h = Buffer.alloc(30 + nameBuf.length);
+        h.writeUInt32LE(0x04034b50, 0);
+        h.writeUInt16LE(20, 4);
+        h.writeUInt16LE(0, 6);
+        h.writeUInt16LE(0, 8);
+        h.writeUInt16LE(0, 10);
+        h.writeUInt16LE(0, 12);
+        h.writeUInt32LE(crc, 14);
+        h.writeUInt32LE(data.length, 18);
+        h.writeUInt32LE(data.length, 22);
+        h.writeUInt16LE(nameBuf.length, 26);
+        h.writeUInt16LE(0, 28);
+        nameBuf.copy(h, 30);
+        return Buffer.concat([h, data]);
+      }
+
+      const mimeData = Buffer.from("application/epub+zip");
+      const mimePart = makeEntry("mimetype", mimeData);
+      const containerXml = Buffer.from('<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>');
+      const containerPart = makeEntry("META-INF/container.xml", containerXml);
+      const opfXml = Buffer.from('<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>');
+      const opfPart = makeEntry("content.opf", opfXml);
+      const syntheticEpub = Buffer.concat([mimePart, containerPart, opfPart, Buffer.alloc(256, 0)]);
+
+      const progressEvents: LnoriProgressEvent[] = [];
+
+      const result = await ingestLnoriSeries(
+        "https://lnori.com/series/9000/partial-test",
+        (ev) => {
+          progressEvents.push(ev);
+        },
+        {
+          fetch: async (url: string) => {
+            if (url.includes("/series/9000")) return new Response(manifestHtml);
+            if (url.includes("/book/901")) return new Response(vol1Html);
+            if (url.includes("/book/902")) return new Response(vol2Html);
+            if (url.includes("vol1.epub")) return new Response(syntheticEpub, { status: 200 });
+            if (url.includes("vol2.epub")) {
+              return new Response("error code: 1016", {
+                status: 530,
+                headers: { server: "cloudflare", "content-type": "text/plain" },
+              });
+            }
+            return new Response("not found", { status: 404 });
+          },
+          spawnSync: (...args: any[]) => {
+            const cmd = args[0];
+            const cmdArgs = args[1];
+            if (cmd.includes("calibredb") && cmdArgs?.includes("add")) {
+              return { status: 0, stdout: "Added book ids: 4567\n", stderr: "" };
+            }
+            if (cmd.includes("calibredb") && cmdArgs?.includes("set_metadata")) {
+              return { status: 0, stdout: "", stderr: "" };
+            }
+            return { status: 0, stdout: "", stderr: "" };
+          },
+          fetchOnlineSynopsis: async () => null,
+          sleep: async () => {},
+        },
+      );
+
+      // Verify partial import accounting: success is true because 1 was imported
+      expect(result.success).toBe(true);
+      expect(result.importedCount).toBe(1);
+      expect(result.skippedErrors).toBe(1);
+      expect(result.failedVolumes).toBeDefined();
+      expect(result.failedVolumes).toHaveLength(1);
+      expect(result.failedVolumes![0].volumeIndex).toBe(2);
+      expect(result.errorDetails?.isOriginDnsError).toBe(true);
+
+      const terminalEvent = progressEvents[progressEvents.length - 1];
+      expect(terminalEvent.phase).toBe("complete");
+      expect(terminalEvent.status).toContain("1 new volumes added");
+      expect(terminalEvent.status).toContain("1 volumes failed");
     });
   });
 

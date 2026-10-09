@@ -1082,20 +1082,32 @@ export function executeLnoriIngestTask(
         const errMsg =
           sanitizeErrorMessage(result?.error) ||
           `Failed to ingest light novel from ${sourceName}`;
+        const errorDetails = result?.errorDetails;
+        const failedVolumes = result?.failedVolumes;
         activeLnoriState.active = false;
         activeLnoriState.phase = "error";
         activeLnoriState.error = errMsg;
         activeLnoriState.status = errMsg;
+        activeLnoriState.data = {
+          error: errMsg,
+          ...(errorDetails ? { errorDetails } : {}),
+          ...(failedVolumes ? { failedVolumes } : {}),
+        };
         activeLnoriState.updatedAt = new Date().toISOString();
         if (!hasErrored) {
           broadcastEvent({
             phase: "error",
             status: errMsg,
-            data: { error: errMsg },
+            data: activeLnoriState.data,
           });
         }
         recordCompletedLnoriJob(activeLnoriState);
-        return { success: false, error: errMsg };
+        return {
+          success: false,
+          error: errMsg,
+          ...(errorDetails ? { errorDetails } : {}),
+          ...(failedVolumes ? { failedVolumes } : {}),
+        };
       } else {
         try {
           refreshBooks(true);
@@ -1112,6 +1124,9 @@ export function executeLnoriIngestTask(
           totalCount: result.totalCount,
           tags: result.tags,
           calibreBookIds: result.calibreBookIds,
+          ...(result.skippedErrors ? { skippedErrors: result.skippedErrors } : {}),
+          ...(result.errorDetails ? { errorDetails: result.errorDetails } : {}),
+          ...(result.failedVolumes ? { failedVolumes: result.failedVolumes } : {}),
         };
 
         activeLnoriState.active = false;
@@ -1120,7 +1135,10 @@ export function executeLnoriIngestTask(
         activeLnoriState.index = result.totalCount;
         activeLnoriState.total = result.totalCount;
         activeLnoriState.volumeTitle = result.seriesTitle;
-        activeLnoriState.status = `Finished: ${result.importedCount} new volumes added, ${result.duplicateCount ?? result.skippedCount} existing volumes preserved.`;
+        activeLnoriState.status =
+          result.skippedErrors
+            ? `Finished: ${result.importedCount} new volumes added, ${result.duplicateCount ?? result.skippedCount} existing volumes preserved (${result.skippedErrors} volumes failed).`
+            : `Finished: ${result.importedCount} new volumes added, ${result.duplicateCount ?? result.skippedCount} existing volumes preserved.`;
         activeLnoriState.updatedAt = new Date().toISOString();
 
         if (!hasCompleted) {
@@ -6783,6 +6801,12 @@ async function handleRequestCore(
               sanitizeErrorMessage(result?.error) ||
               activeLnoriState.error ||
               `Failed to ingest light novel from ${sourceName}`,
+            ...(result?.errorDetails || activeLnoriState.data?.errorDetails
+              ? { errorDetails: result?.errorDetails || activeLnoriState.data?.errorDetails }
+              : {}),
+            ...(result?.failedVolumes || activeLnoriState.data?.failedVolumes
+              ? { failedVolumes: result?.failedVolumes || activeLnoriState.data?.failedVolumes }
+              : {}),
           },
           500,
           corsOrigin,
@@ -6799,6 +6823,9 @@ async function handleRequestCore(
           totalCount: result.totalCount,
           tags: result.tags,
           calibreBookIds: result.calibreBookIds,
+          ...(result.skippedErrors ? { skippedErrors: result.skippedErrors } : {}),
+          ...(result.errorDetails ? { errorDetails: result.errorDetails } : {}),
+          ...(result.failedVolumes ? { failedVolumes: result.failedVolumes } : {}),
         },
         200,
         corsOrigin,
