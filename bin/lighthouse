@@ -1435,7 +1435,18 @@ restore_single_db() {
     exit 1
   fi
 
-  [ -f "$src" ] || return 0
+  if [ ! -f "$src" ]; then
+    echo -e "${COLOR_RED}Error: Source database not found for ${db_title}: ${src}${COLOR_RESET}" >&2
+    exit 1
+  fi
+
+  # Run SQLite integrity check on source before touching destination
+  local src_integrity
+  src_integrity=$(sqlite3 "$src" "PRAGMA integrity_check;" 2>&1 || echo "failed")
+  if [ "$src_integrity" != "ok" ]; then
+    echo -e "${COLOR_RED}Error: Integrity check failed on source ${db_title}: ${src_integrity}${COLOR_RESET}" >&2
+    exit 1
+  fi
 
   # Pre-screen source database for non-canonical table identifiers before touching destination
   local src_noncanon
@@ -1570,6 +1581,12 @@ restore_single_db() {
         exit 1
       fi
     done <<< "$src_tables"
+  fi
+
+  # Comprehensive whole-database dump comparison (verifies all schema objects, indexes, triggers, views, and sequence state)
+  if ! cmp -s <(sqlite3 "$src" ".dump") <(sqlite3 "$dest" ".dump"); then
+    echo -e "${COLOR_RED}Error: Full database content mismatch on restored ${db_title}${COLOR_RESET}" >&2
+    exit 1
   fi
 
   local display_count="$primary_count"
@@ -1817,11 +1834,11 @@ EOF
     target_manga="${target_override}/manga.db"
   fi
 
-  restore_single_db "${staging_dir}/metadata.db" "$target_calibre" "SELECT count(*) FROM books;" "$restore_timestamp" "Calibre DB"
-  restore_single_db "${staging_dir}/koreader-sync.db" "$target_kosync" "SELECT count(*) FROM progress;" "$restore_timestamp" "KOSync DB"
+  [ -f "${staging_dir}/metadata.db" ] && restore_single_db "${staging_dir}/metadata.db" "$target_calibre" "SELECT count(*) FROM books;" "$restore_timestamp" "Calibre DB"
+  [ -f "${staging_dir}/koreader-sync.db" ] && restore_single_db "${staging_dir}/koreader-sync.db" "$target_kosync" "SELECT count(*) FROM progress;" "$restore_timestamp" "KOSync DB"
 
-  local cache_sql="SELECT count(*) FROM jobs;"
   if [ -f "${staging_dir}/cache.db" ]; then
+    local cache_sql="SELECT count(*) FROM jobs;"
     local cache_has_jobs
     if ! cache_has_jobs=$(sqlite3 "${staging_dir}/cache.db" "SELECT count(*) FROM sqlite_master WHERE type='table' AND LOWER(name)='jobs';" 2>&1); then
       echo -e "${COLOR_RED}Error: Failed to inspect sqlite_master in staged cache.db: ${cache_has_jobs}${COLOR_RESET}" >&2
@@ -1830,9 +1847,9 @@ EOF
     if [ "$cache_has_jobs" = "0" ]; then
       cache_sql=""
     fi
+    restore_single_db "${staging_dir}/cache.db" "$target_cache" "$cache_sql" "$restore_timestamp" "Cache DB"
   fi
-  restore_single_db "${staging_dir}/cache.db" "$target_cache" "$cache_sql" "$restore_timestamp" "Cache DB"
-  restore_single_db "${staging_dir}/manga.db" "$target_manga" "SELECT count(*) FROM sqlite_master;" "$restore_timestamp" "Manga DB"
+  [ -f "${staging_dir}/manga.db" ] && restore_single_db "${staging_dir}/manga.db" "$target_manga" "SELECT count(*) FROM sqlite_master;" "$restore_timestamp" "Manga DB"
 
   # Restore .env if present in staging and absent at destination
   local env_dest="${LIGHTHOUSE_ROOT}/.env"
