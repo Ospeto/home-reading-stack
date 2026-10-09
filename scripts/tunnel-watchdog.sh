@@ -72,6 +72,7 @@ US_REMOTE_HOST="${US_REMOTE_HOST:-panel}"
 US_WAN_HQ_URL="${US_WAN_HQ_URL:-https://reading.wavypremium.xyz}"
 US_FAIL_COUNT_FILE="${US_FAIL_COUNT_FILE:-/tmp/reading-tunnel-failures-us}"
 US_ALERT_TRACK_FILE="${US_ALERT_TRACK_FILE:-/tmp/reading-tunnel-alerted-us}"
+LEGACY_FAIL_COUNT_FILE="${LEGACY_FAIL_COUNT_FILE:-/tmp/reading-tunnel-failures}"
 # Backward compatibility for single-tunnel env var overrides
 if [ -n "${FAIL_COUNT_FILE:-}" ]; then
   US_FAIL_COUNT_FILE="$FAIL_COUNT_FILE"
@@ -100,6 +101,100 @@ SG_KOSYNC_URL="${SG_KOSYNC_URL:-http://kosync-sg.wavypremium.xyz/health}"
 SG_FAIL_COUNT_FILE="${SG_FAIL_COUNT_FILE:-/tmp/reading-tunnel-failures-sg}"
 SG_ALERT_TRACK_FILE="${SG_ALERT_TRACK_FILE:-/tmp/reading-tunnel-alerted-sg}"
 SG_LOG_FILE="${SG_LOG_FILE:-${LOG_DIR}/reading-sg-tunnel.log}"
+
+# --- Bounded Numeric Marker Configuration ---
+MAX_MARKER_VAL="${MAX_MARKER_VAL:-1000000}"
+case "$MAX_MARKER_VAL" in ''|*[!0-9]*) MAX_MARKER_VAL=1000000 ;; esac
+[ "$MAX_MARKER_VAL" -gt 1000000 ] && MAX_MARKER_VAL=1000000
+
+# Read a numeric marker file safely:
+# Only bounded canonical nonnegative decimals (no octal 08/09/overflow).
+# Missing, empty, junk, negative, or huge markers safely default with diagnostic.
+read_marker() {
+  local FILE="$1"
+  local DEFAULT="${2:-0}"
+  local MAX="${3:-$MAX_MARKER_VAL}"
+
+  if [ ! -f "$FILE" ]; then
+    log "Diagnostic: Marker file ${FILE} missing; defaulting to ${DEFAULT}." >&2
+    echo "$DEFAULT"
+    return 0
+  fi
+
+  local RAW
+  RAW=$(head -n 1 "$FILE" 2>/dev/null || true)
+  RAW=$(echo "$RAW" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+  if [ -z "$RAW" ]; then
+    log "Diagnostic: Marker file ${FILE} empty; defaulting to ${DEFAULT}." >&2
+    echo "$DEFAULT"
+    return 0
+  fi
+
+  if [[ "$RAW" =~ ^-[0-9]+$ ]]; then
+    log "Diagnostic: Marker file ${FILE} contains negative value '${RAW}'; defaulting to ${DEFAULT}." >&2
+    echo "$DEFAULT"
+    return 0
+  fi
+
+  if ! [[ "$RAW" =~ ^[0-9]+$ ]]; then
+    log "Diagnostic: Marker file ${FILE} contains non-numeric content '${RAW}'; defaulting to ${DEFAULT}." >&2
+    echo "$DEFAULT"
+    return 0
+  fi
+
+  # Guard against integer overflow by checking string length before bash arithmetic
+  if [ ${#RAW} -gt 7 ]; then
+    log "Diagnostic: Marker file ${FILE} exceeds safe string length (${#RAW} digits); defaulting to ${DEFAULT}." >&2
+    echo "$DEFAULT"
+    return 0
+  fi
+
+  local VAL
+  VAL=$(( 10#$RAW ))
+
+  if [ "$VAL" -gt "$MAX" ]; then
+    log "Diagnostic: Marker file ${FILE} value ${VAL} exceeds maximum bound ${MAX}; defaulting to ${DEFAULT}." >&2
+    echo "$DEFAULT"
+    return 0
+  fi
+
+  echo "$VAL"
+}
+
+# Write a numeric marker file atomically:
+# Writes canonical decimal value to a temp file in the same directory, then renames.
+write_marker() {
+  local FILE="$1"
+  local VAL="$2"
+  local MAX="${3:-$MAX_MARKER_VAL}"
+  local CANONICAL_VAL=0
+
+  local TRIMMED
+  TRIMMED=$(echo "$VAL" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  if [[ "$TRIMMED" =~ ^[0-9]+$ ]] && [ ${#TRIMMED} -le 7 ]; then
+    CANONICAL_VAL=$(( 10#$TRIMMED ))
+    if [ "$CANONICAL_VAL" -gt "$MAX" ]; then
+      log "Diagnostic: write_marker value ${CANONICAL_VAL} exceeds max ${MAX}; clamping to ${MAX}." >&2
+      CANONICAL_VAL="$MAX"
+    fi
+  else
+    log "Diagnostic: write_marker received non-canonical value '${VAL}'; writing 0." >&2
+    CANONICAL_VAL=0
+  fi
+
+  local DIR TMP_FILE
+  DIR="$(dirname "$FILE")"
+  mkdir -p "$DIR" 2>/dev/null || true
+  TMP_FILE="${DIR}/.$(basename "$FILE").tmp.$$.${RANDOM}"
+
+  if echo "$CANONICAL_VAL" > "$TMP_FILE" 2>/dev/null && mv -f "$TMP_FILE" "$FILE" 2>/dev/null; then
+    return 0
+  fi
+
+  rm -f "$TMP_FILE" 2>/dev/null || true
+  echo "$CANONICAL_VAL" > "$FILE" 2>/dev/null || true
+}
 
 log() {
   local NOW
@@ -268,10 +363,10 @@ fi
 if [ "$ENABLE_US_TUNNEL" != "1" ] || [ ! -f "$US_PLIST" ]; then
   PLIST_EXISTS=0
   [ -f "$US_PLIST" ] && PLIST_EXISTS=1
-  if [ -f "$US_FAIL_COUNT_FILE" ] || [ -f "$US_ALERT_TRACK_FILE" ] || [ -f /tmp/reading-tunnel-failures ]; then
+  if [ -f "$US_FAIL_COUNT_FILE" ] || [ -f "$US_ALERT_TRACK_FILE" ] || [ -f "$LEGACY_FAIL_COUNT_FILE" ]; then
     log "US VLESS tunnel monitoring skipped (ENABLE_US_TUNNEL=${ENABLE_US_TUNNEL}, plist_exists=${PLIST_EXISTS}). Cleaning up stale failure markers."
   fi
-  rm -f "$US_FAIL_COUNT_FILE" "$US_ALERT_TRACK_FILE" /tmp/reading-tunnel-failures 2>/dev/null || true
+  rm -f "$US_FAIL_COUNT_FILE" "$US_ALERT_TRACK_FILE" "$LEGACY_FAIL_COUNT_FILE" 2>/dev/null || true
 else
   US_PROBE_CODE=$(probe_http_status "$US_WAN_HQ_URL" "$PROXY_URL" 0 8)
 
@@ -284,18 +379,19 @@ else
   # Tunnel is healthy if remote probe returns 200.
   # Only treat port collision as actionable if the probe has ALSO failed (probe status != 200).
   if [ "$US_PROBE_CODE" = "200" ]; then
-    PREV_US_FAILURES=$(cat "$US_FAIL_COUNT_FILE" 2>/dev/null || echo 0)
+    PREV_US_FAILURES=$(read_marker "$US_FAIL_COUNT_FILE" 0)
     if [ "$PREV_US_FAILURES" -gt 0 ]; then
       log "US Tunnel recovered! Remote probe returned HTTP 200. Resetting US failure counter (was ${PREV_US_FAILURES})."
     fi
-    echo 0 > "$US_FAIL_COUNT_FILE"
-    # Also maintain legacy failure file if specified
-    echo 0 > /tmp/reading-tunnel-failures 2>/dev/null || true
+    write_marker "$US_FAIL_COUNT_FILE" 0
+    write_marker "$LEGACY_FAIL_COUNT_FILE" 0 2>/dev/null || true
     rm -f "$US_ALERT_TRACK_FILE" 2>/dev/null || true
   else
-    US_FAILURES=$(( $(cat "$US_FAIL_COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
-    echo "$US_FAILURES" > "$US_FAIL_COUNT_FILE"
-    echo "$US_FAILURES" > /tmp/reading-tunnel-failures 2>/dev/null || true
+    PREV_US_FAILURES=$(read_marker "$US_FAIL_COUNT_FILE" 0)
+    US_FAILURES=$(( PREV_US_FAILURES + 1 ))
+    [ "$US_FAILURES" -gt "$MAX_MARKER_VAL" ] && US_FAILURES="$MAX_MARKER_VAL"
+    write_marker "$US_FAIL_COUNT_FILE" "$US_FAILURES"
+    write_marker "$LEGACY_FAIL_COUNT_FILE" "$US_FAILURES" 2>/dev/null || true
     log "WARNING: US tunnel probe to ${US_WAN_HQ_URL} failed (HTTP ${US_PROBE_CODE}, collision=${US_COLLISION}). Consecutive failures: ${US_FAILURES}."
 
     # Step A: Terminate hanging local SSH process for US tunnel using precise port-forwarding pattern
@@ -321,8 +417,8 @@ else
 
     if [ "$US_REPROBE_CODE" = "200" ]; then
       log "Auto-healing (US) SUCCESS: US tunnel restored and verified healthy (HTTP 200). Resetting failure counter."
-      echo 0 > "$US_FAIL_COUNT_FILE"
-      echo 0 > /tmp/reading-tunnel-failures 2>/dev/null || true
+      write_marker "$US_FAIL_COUNT_FILE" 0
+      write_marker "$LEGACY_FAIL_COUNT_FILE" 0 2>/dev/null || true
       rm -f "$US_ALERT_TRACK_FILE" 2>/dev/null || true
     else
       log "Auto-healing (US) INCOMPLETE: Post-restart probe returned HTTP ${US_REPROBE_CODE}."
@@ -330,7 +426,11 @@ else
 
     # Escalate to Telegram Alert if Failures >= 3
     if [ "$US_FAILURES" -ge 3 ]; then
-      LAST_US_ALERTED=$(cat "$US_ALERT_TRACK_FILE" 2>/dev/null || echo 0)
+      LAST_US_ALERTED=$(read_marker "$US_ALERT_TRACK_FILE" 0)
+      if [ "$LAST_US_ALERTED" -gt "$US_FAILURES" ]; then
+        log "Diagnostic: Last alerted counter (${LAST_US_ALERTED}) is greater than current failures (${US_FAILURES}); resetting alert marker." >&2
+        LAST_US_ALERTED=0
+      fi
       if [ "$LAST_US_ALERTED" -eq 0 ] || [ $(( US_FAILURES - LAST_US_ALERTED )) -ge 10 ]; then
         US_ALERT_TEXT=$(cat << EOF
 🚨 *Reading Stack Tunnel Alert: US VLESS Tunnel*
@@ -346,7 +446,7 @@ _Please inspect Mac Mini host logs and VPS panel connectivity._
 EOF
 )
         if send_telegram_alert "$US_ALERT_TEXT"; then
-          echo "$US_FAILURES" > "$US_ALERT_TRACK_FILE"
+          write_marker "$US_ALERT_TRACK_FILE" "$US_FAILURES"
         fi
       fi
     fi
@@ -372,15 +472,17 @@ fi
 if { [ "$SG_80_CODE" = "200" ] || [ "$SG_80_CODE" = "302" ]; } && \
    { [ "$SG_8443_CODE" = "200" ] || [ "$SG_8443_CODE" = "302" ]; } && \
    { [ "$SG_KOSYNC_CODE" = "200" ] || [ "$SG_KOSYNC_CODE" = "302" ]; }; then
-  PREV_SG_FAILURES=$(cat "$SG_FAIL_COUNT_FILE" 2>/dev/null || echo 0)
+  PREV_SG_FAILURES=$(read_marker "$SG_FAIL_COUNT_FILE" 0)
   if [ "$PREV_SG_FAILURES" -gt 0 ]; then
     log "Singapore Tunnel recovered! All endpoints healthy. Resetting SG failure counter (was ${PREV_SG_FAILURES})."
   fi
-  echo 0 > "$SG_FAIL_COUNT_FILE"
+  write_marker "$SG_FAIL_COUNT_FILE" 0
   rm -f "$SG_ALERT_TRACK_FILE" 2>/dev/null || true
 else
-  SG_FAILURES=$(( $(cat "$SG_FAIL_COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
-  echo "$SG_FAILURES" > "$SG_FAIL_COUNT_FILE"
+  PREV_SG_FAILURES=$(read_marker "$SG_FAIL_COUNT_FILE" 0)
+  SG_FAILURES=$(( PREV_SG_FAILURES + 1 ))
+  [ "$SG_FAILURES" -gt "$MAX_MARKER_VAL" ] && SG_FAILURES="$MAX_MARKER_VAL"
+  write_marker "$SG_FAIL_COUNT_FILE" "$SG_FAILURES"
   log "WARNING: Singapore tunnel health check failed (OPDS :80=${SG_80_CODE}, OPDS :8443=${SG_8443_CODE}, KOSync=${SG_KOSYNC_CODE}, collision=${SG_COLLISION}). Consecutive failures: ${SG_FAILURES}."
 
   # Step A: Terminate hanging local SSH process for Singapore tunnel using precise port-forwarding pattern
@@ -409,7 +511,7 @@ else
      { [ "$SG_RE_8443_CODE" = "200" ] || [ "$SG_RE_8443_CODE" = "302" ]; } && \
      { [ "$SG_RE_KOSYNC_CODE" = "200" ] || [ "$SG_RE_KOSYNC_CODE" = "302" ]; }; then
     log "Auto-healing (Singapore) SUCCESS: Singapore tunnel restored and verified healthy. Resetting failure counter."
-    echo 0 > "$SG_FAIL_COUNT_FILE"
+    write_marker "$SG_FAIL_COUNT_FILE" 0
     rm -f "$SG_ALERT_TRACK_FILE" 2>/dev/null || true
   else
     log "Auto-healing (Singapore) INCOMPLETE: Post-restart probe returned OPDS :80=${SG_RE_80_CODE}, OPDS :8443=${SG_RE_8443_CODE}, KOSync=${SG_RE_KOSYNC_CODE}."
@@ -417,7 +519,11 @@ else
 
   # Escalate to Telegram Alert if Failures >= 3
   if [ "$SG_FAILURES" -ge 3 ]; then
-    LAST_SG_ALERTED=$(cat "$SG_ALERT_TRACK_FILE" 2>/dev/null || echo 0)
+    LAST_SG_ALERTED=$(read_marker "$SG_ALERT_TRACK_FILE" 0)
+    if [ "$LAST_SG_ALERTED" -gt "$SG_FAILURES" ]; then
+      log "Diagnostic: Last alerted counter (${LAST_SG_ALERTED}) is greater than current failures (${SG_FAILURES}); resetting alert marker." >&2
+      LAST_SG_ALERTED=0
+    fi
     if [ "$LAST_SG_ALERTED" -eq 0 ] || [ $(( SG_FAILURES - LAST_SG_ALERTED )) -ge 10 ]; then
       SG_ALERT_TEXT=$(cat << EOF
 🚨 *Reading Stack Tunnel Alert: Singapore Tunnel*
@@ -434,7 +540,7 @@ _Please inspect Mac Mini host logs and sg-vps remote listeners._
 EOF
 )
       if send_telegram_alert "$SG_ALERT_TEXT"; then
-        echo "$SG_FAILURES" > "$SG_ALERT_TRACK_FILE"
+        write_marker "$SG_ALERT_TRACK_FILE" "$SG_FAILURES"
       fi
     fi
   fi
@@ -443,6 +549,9 @@ fi
 # ==============================================================================
 # 5. Log Hygiene: Cap watchdog log at 2000 lines
 # ==============================================================================
-if [ -f "$LOG_FILE" ] && [ "$(wc -l <"$LOG_FILE" 2>/dev/null || echo 0)" -gt 2000 ]; then
-  tail -n 1000 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+if [ -f "$LOG_FILE" ]; then
+  LOG_LINES=$(wc -l <"$LOG_FILE" 2>/dev/null | tr -d '[:space:]')
+  if [[ "$LOG_LINES" =~ ^[0-9]+$ ]] && [ "$LOG_LINES" -gt 2000 ]; then
+    tail -n 1000 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv -f "${LOG_FILE}.tmp" "$LOG_FILE"
+  fi
 fi
