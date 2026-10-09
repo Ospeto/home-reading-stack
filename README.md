@@ -611,6 +611,7 @@ Background tasks and asynchronous workflows run via a durable SQLite job queue (
 2. **Resilience & Crash Recovery:**
    - Bounded exponential backoff: Failed jobs auto-retry up to 3 times (2s, 4s, 8s backoff) before entering `failed` status.
    - Interrupted jobs left in `processing` state across process restarts are recovered back to `pending`.
+   - Handler-aware claim filtering: Workers only claim job types matching registered handlers via atomic conditional transitions; unsupported jobs remain untouched with zero retries.
    - Single-worker sequential execution prevents Calibre SQLite locking collisions.
 3. **Observability API:**
    - `GET /api/jobs/recent`: List recent jobs with optional `?limit=`, `?status=`, `?type=` filters.

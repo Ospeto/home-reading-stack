@@ -1723,6 +1723,246 @@ describe("Durable Ingestion Job Queue Lifecycle & Crash Recovery", () => {
     // Status should NOT have been overwritten to 'completed'
     expect(queue.getJob(job.id)?.status).toBe("cancelled");
   });
+
+  it("empty-handler queue returns false without claiming jobs", async () => {
+    const testDb = new Database(":memory:");
+    const queue = new DurableJobQueue(testDb);
+
+    // Queue has no handlers registered
+    const job = queue.enqueue("file_ingest", { file: "test.epub" });
+
+    const processed = await queue.processNextJob();
+    expect(processed).toBe(false);
+
+    const jobAfter = queue.getJob(job.id);
+    expect(jobAfter?.status).toBe("pending");
+    expect(jobAfter?.retries).toBe(0);
+    expect(jobAfter?.error).toBeNull();
+  });
+
+  it("claims only registered job types and leaves unsupported jobs untouched with retries=0", async () => {
+    const testDb = new Database(":memory:");
+    const queue = new DurableJobQueue(testDb);
+
+    let executed = false;
+    queue.registerHandler("metadata_enrich", async (payload) => {
+      executed = true;
+      return { enriched: true };
+    });
+
+    const unhandledJob = queue.enqueue("url_article_ingest", {
+      url: "https://example.com/article",
+    });
+
+    const processed = await queue.processNextJob();
+    expect(processed).toBe(false);
+    expect(executed).toBe(false);
+
+    const jobAfter = queue.getJob(unhandledJob.id);
+    expect(jobAfter?.status).toBe("pending");
+    expect(jobAfter?.retries).toBe(0);
+    expect(jobAfter?.error).toBeNull();
+  });
+
+  it("disjoint handlers claim only their respective job types without stealing or failing others", async () => {
+    const testDb = new Database(":memory:");
+    const queueA = new DurableJobQueue(testDb);
+    const queueB = new DurableJobQueue(testDb);
+
+    let handlerARan = false;
+    let handlerBRan = false;
+
+    queueA.registerHandler("file_ingest", async (payload) => {
+      handlerARan = true;
+      return { ingested: payload.file };
+    });
+
+    queueB.registerHandler("metadata_enrich", async (payload) => {
+      handlerBRan = true;
+      return { enriched: payload.bookId };
+    });
+
+    const jobA = queueA.enqueue("file_ingest", { file: "novel.epub" });
+    const jobB = queueA.enqueue("metadata_enrich", { bookId: 101 });
+
+    // Queue B processes first; must only claim jobB, leaving jobA completely untouched
+    const bProcessed = await queueB.processNextJob();
+    expect(bProcessed).toBe(true);
+    expect(handlerBRan).toBe(true);
+    expect(handlerARan).toBe(false);
+
+    const jobBAfter = queueA.getJob(jobB.id);
+    expect(jobBAfter?.status).toBe("completed");
+    expect(jobBAfter?.result?.enriched).toBe(101);
+
+    const jobAAfterB = queueA.getJob(jobA.id);
+    expect(jobAAfterB?.status).toBe("pending");
+    expect(jobAAfterB?.retries).toBe(0);
+    expect(jobAAfterB?.error).toBeNull();
+
+    // Queue A now processes jobA
+    const aProcessed = await queueA.processNextJob();
+    expect(aProcessed).toBe(true);
+    expect(handlerARan).toBe(true);
+
+    const jobAAfterA = queueA.getJob(jobA.id);
+    expect(jobAAfterA?.status).toBe("completed");
+    expect(jobAAfterA?.result?.ingested).toBe("novel.epub");
+  });
+
+  it("respects due vs delayed ordering and processes oldest due first", async () => {
+    const testDb = new Database(":memory:");
+    const queue = new DurableJobQueue(testDb);
+
+    const processedOrder: string[] = [];
+    queue.registerHandler("file_ingest", async (payload) => {
+      processedOrder.push(payload.label);
+      return { done: true };
+    });
+
+    // Enqueue delayed job (60s in future)
+    const delayedJob = queue.enqueue(
+      "file_ingest",
+      { label: "delayed" },
+      { delayMs: 60000 },
+    );
+
+    // Call processNextJob; should return false since only delayed job exists
+    const delayedProcessed = await queue.processNextJob();
+    expect(delayedProcessed).toBe(false);
+    expect(queue.getJob(delayedJob.id)?.status).toBe("pending");
+
+    // Enqueue two ready jobs with distinct created_at
+    const ready1 = queue.enqueue("file_ingest", { label: "ready-1" });
+    const ready2 = queue.enqueue("file_ingest", { label: "ready-2" });
+    // Adjust created_at so ready1 < ready2
+    testDb
+      .prepare("UPDATE jobs SET created_at = ? WHERE id = ?")
+      .run(1000, ready1.id);
+    testDb
+      .prepare("UPDATE jobs SET created_at = ? WHERE id = ?")
+      .run(2000, ready2.id);
+
+    // Process first ready job -> should be ready1
+    expect(await queue.processNextJob()).toBe(true);
+    expect(processedOrder).toEqual(["ready-1"]);
+
+    // Process second ready job -> should be ready2
+    expect(await queue.processNextJob()).toBe(true);
+    expect(processedOrder).toEqual(["ready-1", "ready-2"]);
+
+    // Calling again returns false because delayedJob is still not due
+    expect(await queue.processNextJob()).toBe(false);
+    expect(queue.getJob(delayedJob.id)?.status).toBe("pending");
+  });
+
+  it("two actual children contend for same fixture job with exactly one side effect and CAS loser never running", async () => {
+    const tmpDir = path.join("/tmp", `test_contention_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+    fs.mkdirSync(tmpDir, { recursive: true });
+
+    const dbPath = path.join(tmpDir, "queue.db");
+    const effectPath = path.join(tmpDir, "effects.txt");
+    const readyDir = path.join(tmpDir, "ready");
+    fs.mkdirSync(readyDir, { recursive: true });
+    const startSignal = path.join(tmpDir, "start.signal");
+
+    // Initialize DB with WAL mode and enqueue exactly 1 candidate job
+    const initDb = new Database(dbPath);
+    const initQueue = new DurableJobQueue(initDb);
+    const fixtureJob = initQueue.enqueue("file_ingest", { target: "fixture.epub" });
+    initDb.close();
+
+    const workerScript = path.join(tmpDir, "worker.ts");
+    const jobsModulePath = path.resolve(__dirname, "jobs");
+    fs.writeFileSync(
+      workerScript,
+      `import fs from "node:fs";
+import process from "node:process";
+import { Database } from "bun:sqlite";
+import { DurableJobQueue } from "${jobsModulePath}";
+
+const childId = process.argv[2];
+const dbPath = ${JSON.stringify(dbPath)};
+const effectPath = ${JSON.stringify(effectPath)};
+const readyFile = ${JSON.stringify(readyDir)} + "/child_" + childId + ".ready";
+const startSignal = ${JSON.stringify(startSignal)};
+const resultFile = ${JSON.stringify(tmpDir)} + "/result_" + childId + ".json";
+
+const db = new Database(dbPath);
+const queue = new DurableJobQueue(db);
+
+queue.registerHandler("file_ingest", async (payload) => {
+  fs.appendFileSync(effectPath, "effect-by-child-" + childId + "\\n");
+  return { processedBy: childId };
+});
+
+fs.writeFileSync(readyFile, "ready");
+while (!fs.existsSync(startSignal)) {
+  await Bun.sleep(2);
+}
+
+const claimed = await queue.processNextJob();
+fs.writeFileSync(resultFile, JSON.stringify({ childId, claimed }));
+db.close();
+`,
+    );
+
+    try {
+      const p1 = Bun.spawn(["bun", workerScript, "1"]);
+      const p2 = Bun.spawn(["bun", workerScript, "2"]);
+
+      // Wait until both children are loaded and standing at the start barrier
+      const deadline = Date.now() + 10000;
+      while (
+        (!fs.existsSync(path.join(readyDir, "child_1.ready")) ||
+          !fs.existsSync(path.join(readyDir, "child_2.ready"))) &&
+        Date.now() < deadline
+      ) {
+        await Bun.sleep(5);
+      }
+
+      expect(fs.existsSync(path.join(readyDir, "child_1.ready"))).toBe(true);
+      expect(fs.existsSync(path.join(readyDir, "child_2.ready"))).toBe(true);
+
+      // Release both children concurrently
+      fs.writeFileSync(startSignal, "go");
+
+      await Promise.all([p1.exited, p2.exited]);
+
+      // Check results
+      const res1 = JSON.parse(
+        fs.readFileSync(path.join(tmpDir, "result_1.json"), "utf8"),
+      );
+      const res2 = JSON.parse(
+        fs.readFileSync(path.join(tmpDir, "result_2.json"), "utf8"),
+      );
+
+      // Exactly one child must have claimed true, the other false
+      const claimedResults = [res1.claimed, res2.claimed];
+      expect(claimedResults.filter((c) => c === true).length).toBe(1);
+      expect(claimedResults.filter((c) => c === false).length).toBe(1);
+
+      // Fixture side effect must have executed exactly once
+      expect(fs.existsSync(effectPath)).toBe(true);
+      const lines = fs
+        .readFileSync(effectPath, "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean);
+      expect(lines.length).toBe(1);
+
+      // Check job in DB: completed, not pending or failed
+      const verifyDb = new Database(dbPath);
+      const verifyQueue = new DurableJobQueue(verifyDb);
+      const finalJob = verifyQueue.getJob(fixtureJob.id);
+      expect(finalJob?.status).toBe("completed");
+      expect(finalJob?.retries).toBe(0);
+      expect(finalJob?.error).toBeNull();
+      verifyDb.close();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("Server Integration Endpoints & Hardened API Surface", () => {
