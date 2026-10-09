@@ -5,6 +5,7 @@ export interface BookMetadataForFilename {
   authors?: string | string[] | null;
   series?: string | null;
   seriesIndex?: number | string | null;
+  series_index?: number | string | null;
   format?: string | null;
   fallbackBase?: string | null;
 }
@@ -128,7 +129,11 @@ export function generateMetadataFilename(
 
   let title = sanitizeSegment(metadata.title || "");
   const series = sanitizeSegment(metadata.series || "");
-  const seriesIdx = formatSeriesIndex(metadata.seriesIndex);
+  const rawSeriesIndex =
+    metadata.seriesIndex !== undefined && metadata.seriesIndex !== null
+      ? metadata.seriesIndex
+      : metadata.series_index;
+  const seriesIdx = formatSeriesIndex(rawSeriesIndex);
 
   // Fallback if title is missing
   if (!title) {

@@ -23,6 +23,7 @@ describe("Sanitized Metadata-Derived Filename Generation", () => {
 
     it("formats decimal volume numbers cleanly", () => {
       expect(formatSeriesIndex(1.5)).toBe("01.5");
+      expect(formatSeriesIndex(0.5)).toBe("00.5");
       expect(formatSeriesIndex("12.5")).toBe("12.5");
     });
 
@@ -49,6 +50,10 @@ describe("Sanitized Metadata-Derived Filename Generation", () => {
       expect(sanitizeSegment("レーエンの風")).toBe("レーエンの風");
       expect(sanitizeSegment("Les Misérables")).toBe("Les Misérables");
     });
+
+    it("strips ASCII and C0/DEL control characters", () => {
+      expect(sanitizeSegment("Clean\x00Title\x07With\x1FControl\x7FChars")).toBe("Clean Title With Control Chars");
+    });
   });
 
   describe("truncateUtf8Bytes", () => {
@@ -63,6 +68,16 @@ describe("Sanitized Metadata-Derived Filename Generation", () => {
       expect(Buffer.byteLength(truncated, "utf8")).toBeLessThanOrEqual(15);
       // Valid UTF-8 check
       expect(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(truncated))).toBe(truncated);
+    });
+
+    it("never splits 4-byte surrogate pairs / astral plane characters at truncation boundary", () => {
+      // 𠮷 (U+20BB7) is 4 bytes in UTF-8 and 2 code units in UTF-16
+      const astralStr = "𠮷".repeat(10); // 40 bytes
+      const truncated = truncateUtf8Bytes(astralStr, 15);
+      // 3 characters = 12 bytes; 4 characters = 16 bytes (> 15). Must truncate to 12 bytes.
+      expect(Buffer.byteLength(truncated, "utf8")).toBe(12);
+      expect(truncated).toBe("𠮷𠮷𠮷");
+      expect(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(truncated))).toBe("𠮷𠮷𠮷");
     });
   });
 
@@ -83,6 +98,54 @@ describe("Sanitized Metadata-Derived Filename Generation", () => {
         seriesIndex: 1
       });
       expect(filename).toBe("Dune Chronicles 01 - Dune - Frank Herbert.epub");
+    });
+
+    it("supports series_index property interoperably with Calibre database records", () => {
+      const filename = generateMetadataFilename({
+        title: "Dune",
+        authors: "Frank Herbert",
+        series: "Dune Chronicles",
+        series_index: 2
+      });
+      expect(filename).toBe("Dune Chronicles 02 - Dune - Frank Herbert.epub");
+    });
+
+    it("handles fractional series indices with leading zero padding", () => {
+      const filename = generateMetadataFilename({
+        title: "Side Story",
+        authors: "Author",
+        series: "Main Series",
+        seriesIndex: 1.5
+      });
+      expect(filename).toBe("Main Series 01.5 - Side Story - Author.epub");
+    });
+
+    it("handles series with missing series index (un-indexed series)", () => {
+      const filename = generateMetadataFilename({
+        title: "Standalone in Universe",
+        authors: "Author",
+        series: "Cosmere",
+        seriesIndex: null
+      });
+      expect(filename).toBe("Cosmere - Standalone in Universe - Author.epub");
+    });
+
+    it("generates clean filenames for Burmese and Japanese literature with series", () => {
+      const burmese = generateMetadataFilename({
+        title: "စာဖတ်သူ",
+        authors: "ဆရာတင်",
+        series: "အတွဲ",
+        series_index: 1
+      });
+      expect(burmese).toBe("အတွဲ 01 - စာဖတ်သူ - ဆရာတင်.epub");
+
+      const japanese = generateMetadataFilename({
+        title: "不死者の王",
+        authors: "丸山くがね",
+        series: "オーバーロード",
+        seriesIndex: 1
+      });
+      expect(japanese).toBe("オーバーロード 01 - 不死者の王 - 丸山くがね.epub");
     });
 
     it("handles multiple authors array cleanly", () => {
@@ -165,6 +228,16 @@ describe("Sanitized Metadata-Derived Filename Generation", () => {
       const header = buildContentDisposition('Book "Special" Edition.epub');
       expect(header).not.toContain('filename="Book "Special"');
       expect(header).toContain("filename*=UTF-8''Book%20%22Special%22%20Edition.epub");
+    });
+
+    it("allows modern clients to roundtrip-decode UTF-8 filename exactly", () => {
+      const original = "オーバーロード 01 - 不死者の王 - 丸山くがね.epub";
+      const header = buildContentDisposition(original);
+      const prefix = "filename*=UTF-8''";
+      const idx = header.indexOf(prefix);
+      expect(idx).toBeGreaterThan(-1);
+      const encoded = header.slice(idx + prefix.length);
+      expect(decodeURIComponent(encoded)).toBe(original);
     });
   });
 });

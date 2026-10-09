@@ -2915,6 +2915,15 @@
               Explore curated Trending and New Releases light novel feeds with 1-click downloads. Reconciles verified source inventories (Elsci.one and Lnori manifests) against your local Calibre library, computing downloadable missing volumes strictly from verified available source files rather than synthetic catalog publication maximums. Features max-coverage source selection that routes partial downloads to the source containing the highest number of missing volumes, hardened volume number extraction (ignoring digital revision tags like [v2.0], supporting bare Roman numerals like Overlord VI, Volume 0 prequels, and fractional volumes like 4.5), and resilient inventory verification that retains verified numeric volumes even when folders contain unnumbered bonus stories.
             </p>
           </div>
+          <div class="space-y-1 pt-1 border-t border-zinc-800/80">
+            <div class="font-bold text-white flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+              <span>Canonical Metadata Filenames &amp; Download Parity</span>
+            </div>
+            <p class="text-[11px] text-zinc-400 leading-relaxed">
+              Web EPUB downloads (<code class="text-zinc-200">GET /api/books/:id/download/epub</code>) and Telegram deliveries share one canonical metadata naming standard (<code class="text-zinc-200">Series 01 - Title - Author.epub</code> or <code class="text-zinc-200">Title - Author.epub</code>) with Unicode-safe RFC 5987 / RFC 6266 headers, never altering internal Calibre storage paths.
+            </p>
+          </div>
         </div>
       </div>
 
