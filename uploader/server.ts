@@ -19,6 +19,7 @@ import {
   isSameBookAsync,
   extractVolumeNumber,
   isAllowedCoverUrl,
+  normalizeTitleForDedup,
 } from "./scraper";
 import {
   isArchiveFile,
@@ -2466,24 +2467,94 @@ export async function downscaleImageAsync(
   });
 }
 
-function getCalibreHashMap() {
+export function matchesActiveBookIdentity(
+  activeBook: any,
+  cachedTitle: string,
+): boolean {
+  if (!activeBook || !cachedTitle) return false;
+  const a = (activeBook.title || "").trim();
+  const b = (cachedTitle || "").trim();
+  if (a.toLowerCase() === b.toLowerCase()) return true;
+
+  const norm = (s: string) =>
+    (s || "").toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, "");
+  if (norm(a) && norm(a) === norm(b)) return true;
+
+  const dedupA = normalizeTitleForDedup(a);
+  const dedupB = normalizeTitleForDedup(b);
+  if (dedupA && dedupA === dedupB) return true;
+
+  return false;
+}
+
+export function getCalibreHashMap(knownBooks?: any[]) {
   const map: Record<
     string,
     { id: number; title: string; authors: string; cover: boolean }
   > = {};
-  const books = getCalibreBooks();
+  const getBooksFn = serverDependencies.getCalibreBooks ?? getCalibreBooks;
+  let books: any[] = [];
+  let booksFetchFailed = false;
+
+  try {
+    books = knownBooks ?? getBooksFn();
+    if (!Array.isArray(books)) {
+      booksFetchFailed = true;
+      books = [];
+    }
+  } catch {
+    booksFetchFailed = true;
+    books = [];
+  }
+
+  const activeBookById = new Map<number, any>();
+  if (!booksFetchFailed) {
+    for (const b of books) {
+      if (b && typeof b.id === "number") {
+        activeBookById.set(b.id, b);
+      }
+    }
+  }
 
   try {
     const allCached = cacheDb
-      .query("SELECT hash, book_id, title, authors, cover FROM file_hashes")
+      .query(
+        "SELECT filepath, hash, book_id, title, authors, cover FROM file_hashes",
+      )
       .all() as any[];
     for (const row of allCached) {
-      if (row.hash) {
+      if (!row.hash) continue;
+
+      // Unmatched record check: row.book_id must not be null/undefined
+      if (row.book_id == null || typeof row.book_id !== "number") {
+        continue;
+      }
+
+      // If book-list fetch failed, we cannot confirm active identity
+      if (booksFetchFailed) {
+        continue;
+      }
+
+      // Active book existence check
+      const activeBook = activeBookById.get(row.book_id);
+      if (!activeBook) {
+        // Book was deleted from Calibre (inactive cached identity)
+        continue;
+      }
+
+      // Exact identity validation (same-ID changed ownership guard)
+      if (!matchesActiveBookIdentity(activeBook, row.title)) {
+        // Ownership changed / different book reused this ID
+        continue;
+      }
+
+      // Preserve live identity (neighboring same hash live identities preserved)
+      if (!map[row.hash]) {
         map[row.hash] = {
-          id: row.book_id,
-          title: row.title,
-          authors: row.authors || "Unknown",
-          cover: !!row.cover,
+          id: activeBook.id,
+          title: activeBook.title,
+          authors: activeBook.authors || row.authors || "Unknown",
+          cover: !!(activeBook.cover ?? row.cover),
         };
       }
     }
@@ -2555,12 +2626,21 @@ function getCalibreHashMap() {
                 bAuthors,
                 bCover,
               );
-              map[h] = {
-                id: bId,
-                title: bTitle,
-                authors: bAuthors,
-                cover: !!bCover,
-              };
+              if (
+                bId !== null &&
+                typeof bId === "number" &&
+                bookMatch &&
+                activeBookById.has(bId)
+              ) {
+                if (!map[h]) {
+                  map[h] = {
+                    id: bId,
+                    title: bTitle,
+                    authors: bAuthors,
+                    cover: !!bCover,
+                  };
+                }
+              }
             }
             // Insert cache sentinel row so selectStmt hits cache on subsequent scans
             insertStmt.run(
@@ -2581,7 +2661,7 @@ function getCalibreHashMap() {
   }
 
   scanDir(getCalibreLibraryDir());
-  return { map, books };
+  return { map, books, booksFetchFailed };
 }
 
 /**
@@ -2638,19 +2718,31 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
     };
   }
 
-  const books = getCalibreBooks(true);
+  let books: any[] = [];
+  try {
+    const getBooksFn = serverDependencies.getCalibreBooks ?? getCalibreBooks;
+    books = getBooksFn(true);
+    if (!Array.isArray(books)) {
+      books = [];
+    }
+  } catch {
+    books = [];
+  }
   const fileHash = getKOReaderBinary256(filePath);
 
   // 1. Check if exact hash exists in Calibre Library
-  const { map } = getCalibreHashMap();
+  const { map } = getCalibreHashMap(books);
   if (fileHash && map[fileHash]) {
     const existing = map[fileHash];
-    return {
-      success: true,
-      duplicate: true,
-      bookId: existing.id,
-      message: `Book "${existing.title}" is already in your library.`,
-    };
+    const activeBook = books.find((b: any) => b.id === existing.id);
+    if (activeBook && matchesActiveBookIdentity(activeBook, existing.title)) {
+      return {
+        success: true,
+        duplicate: true,
+        bookId: activeBook.id,
+        message: `Book "${activeBook.title}" is already in your library.`,
+      };
+    }
   }
 
   // 2. Check if normalized title already exists
@@ -2834,10 +2926,7 @@ function getKosyncProgress() {
             )
             .all() as any[];
 
-          const { map } = getCalibreHashMap();
-          const getBooksFn =
-            serverDependencies.getCalibreBooks ?? getCalibreBooks;
-          const books = getBooksFn();
+          const { map, books } = getCalibreHashMap();
 
           const norm = (s: string) =>
             (s || "").toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, "");

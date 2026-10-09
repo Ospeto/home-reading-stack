@@ -12,6 +12,10 @@ import {
   resetServerDependenciesForTest,
   resetActiveLnoriStateForTest,
   ingestBookFile,
+  getCalibreHashMap,
+  matchesActiveBookIdentity,
+  getCacheDb,
+  getCalibreBooks,
   jobQueue,
   registerJobHandlers,
   getActiveDiscoverJobs,
@@ -3859,4 +3863,438 @@ with zipfile.ZipFile("${tempZip}", "w") as z:
       }
     });
   });
+
+  describe("Unit U12: Reject inactive cache identities when deciding duplicates/progress", () => {
+    it("authorized DELETE removes book from Calibre; subsequent multipart upload reaches Calibre add rather than stale duplicate", async () => {
+      const origFetch = globalThis.fetch;
+      (globalThis as any).fetch = async () => new Response("{}", { status: 404 });
+      const origJevKey = process.env.JEV_API_KEY;
+      const origTypesafeKey = process.env.TYPESAFE_API_KEY;
+      delete process.env.JEV_API_KEY;
+      delete process.env.TYPESAFE_API_KEY;
+
+      const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "u12-delete-upload-"));
+      const libDir = path.join(tempDir, "calibre-lib");
+      const dropDir = path.join(tempDir, "drop");
+      fs.mkdirSync(libDir, { recursive: true });
+      fs.mkdirSync(dropDir, { recursive: true });
+
+      const origCalibredbPath = process.env.CALIBREDB_PATH;
+      const origCalibreDbPath = process.env.CALIBRE_DB_PATH;
+      const origLibraryDir = process.env.CALIBRE_LIBRARY_DIR;
+      const origApiKey = process.env.READING_API_KEY;
+      process.env.CALIBRE_LIBRARY_DIR = libDir;
+
+      try {
+        // 1. Create a minimal fixture Calibre metadata.db
+        const mockDbPath = path.join(libDir, "metadata.db");
+        process.env.CALIBRE_DB_PATH = mockDbPath;
+        const db = new Database(mockDbPath);
+        db.run(`CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, path TEXT, has_cover INTEGER, pubdate TEXT, series_index REAL);`);
+        db.run(`CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, name TEXT);`);
+        db.run(`CREATE TABLE comments (id INTEGER PRIMARY KEY, book INTEGER, text TEXT);`);
+        db.run(`CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);`);
+        db.run(`CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);`);
+        db.run(`CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);`);
+        db.run(`CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);`);
+        db.run(`CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);`);
+        db.run(`CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);`);
+        db.run(`CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);`);
+        db.run(`CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);`);
+
+        // Insert initial books: 42 (Overlord Volume 1) and 12 (Overlord Volume 12)
+        db.run(`INSERT INTO books (id, title, path, has_cover, pubdate, series_index) VALUES (42, 'Overlord Volume 1', 'Overlord1', 0, '', 1), (12, 'Overlord Volume 12', 'Overlord12', 0, '', 12);`);
+        db.run(`INSERT INTO data (id, book, format, name) VALUES (1, 42, 'EPUB', 'one'), (2, 12, 'EPUB', 'twelve');`);
+        db.close();
+
+        // 2. Build minimal valid EPUB for Overlord Volume 1
+        const staging = path.join(tempDir, "epub-staging");
+        fs.mkdirSync(path.join(staging, "META-INF"), { recursive: true });
+        fs.mkdirSync(path.join(staging, "OEBPS"), { recursive: true });
+        fs.writeFileSync(path.join(staging, "mimetype"), "application/epub+zip");
+        fs.writeFileSync(
+          path.join(staging, "META-INF", "container.xml"),
+          `<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`,
+        );
+        fs.writeFileSync(
+          path.join(staging, "OEBPS", "content.opf"),
+          `<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Overlord Volume 1</dc:title><dc:creator>Kugane Maruyama</dc:creator></metadata><manifest><item id="t" href="text.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="t"/></spine></package>`,
+        );
+        fs.writeFileSync(
+          path.join(staging, "OEBPS", "text.xhtml"),
+          `<html><body>${"A novel chapter with meaningful original fixture prose. ".repeat(150)}</body></html>`,
+        );
+
+        const testEpubPath = path.join(dropDir, "overlord_vol_1.epub");
+        const zipRes1 = spawnSync("zip", ["-q", "-X", "-0", testEpubPath, "mimetype"], { cwd: staging });
+        expect(zipRes1.status).toBe(0);
+        const zipRes2 = spawnSync("zip", ["-q", "-r", testEpubPath, "META-INF", "OEBPS"], { cwd: staging });
+        expect(zipRes2.status).toBe(0);
+
+        const epubBytes = fs.readFileSync(testEpubPath);
+        const { getKOReaderBinary256 } = await import("./bot");
+        const fileHash = getKOReaderBinary256(testEpubPath);
+        expect(fileHash).toBeTruthy();
+
+        // 3. Populate file_hashes cache row for book 42
+        const cdb = getCacheDb();
+        cdb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          [testEpubPath, 1, fileHash, 42, "Overlord Volume 1", "Kugane Maruyama", 0],
+        );
+
+        process.env.READING_API_KEY = "u12-auth-key";
+        const authHeaders = { Authorization: "Bearer u12-auth-key" };
+
+        // 4. Setup mock calibredb that handles 'remove' by deleting book 42, and 'add' by adding book 99
+        const mockLogFile = path.join(tempDir, "calibredb.log");
+        const mockCalibreScript = path.join(tempDir, "mock_calibredb.sh");
+        fs.writeFileSync(
+          mockCalibreScript,
+          `#!/bin/sh
+echo "$*" >> "${mockLogFile}"
+if [ "$1" = "remove" ]; then
+  sqlite3 "${mockDbPath}" "DELETE FROM books WHERE id=42; DELETE FROM data WHERE book=42;"
+  exit 0
+fi
+if [ "$1" = "add" ]; then
+  sqlite3 "${mockDbPath}" "INSERT INTO books (id, title, path, has_cover, pubdate, series_index) VALUES (99, 'Overlord Volume 1', 'Overlord1_New', 0, '', 1);"
+  sqlite3 "${mockDbPath}" "INSERT INTO data (id, book, format, name) VALUES (3, 99, 'EPUB', 'new_one');"
+  echo "Added book ids: 99"
+  exit 0
+fi
+exit 0
+`,
+        );
+        fs.chmodSync(mockCalibreScript, 0o755);
+        process.env.CALIBREDB_PATH = mockCalibreScript;
+
+        // 5. Authorized DELETE /api/books/42
+        const deleteReq = new Request("http://127.0.0.1:8086/api/books/42", {
+          method: "DELETE",
+          headers: authHeaders,
+        });
+        const deleteRes = await handleRequest(deleteReq);
+        expect(deleteRes.status).toBe(200);
+
+        // Verify book 42 is now absent from Calibre catalog
+        const catalogAfterDelete = getCalibreBooks(true);
+        expect(catalogAfterDelete.map((b: any) => b.id)).not.toContain(42);
+        expect(catalogAfterDelete.map((b: any) => b.id)).toContain(12);
+
+        // Verify file_hashes row for book 42 is retained without deletion (no cache mutation!)
+        const cachedRows = cdb
+          .query("SELECT * FROM file_hashes WHERE book_id = 42")
+          .all() as any[];
+        expect(cachedRows.length).toBeGreaterThan(0);
+        expect(cachedRows.some((r: any) => r.hash === fileHash)).toBe(true);
+
+        // 6. Multipart upload POST /api/upload with the exact same EPUB
+        const fd = new FormData();
+        fd.set("file", new File([epubBytes], "overlord_vol_1.epub", { type: "application/epub+zip" }));
+        const uploadReq = new Request("http://127.0.0.1:8086/api/upload", {
+          method: "POST",
+          headers: authHeaders,
+          body: fd,
+        });
+        const uploadRes = await handleRequest(uploadReq);
+        expect(uploadRes.status).toBe(200);
+        const uploadData = await uploadRes.json();
+
+        // Must reach Calibre add and succeed with new ID 99, NOT false duplicate with stale ID 42
+        expect(uploadData.success).toBe(true);
+        expect(uploadData.duplicate).toBe(false);
+        expect(uploadData.bookId).toBe(99);
+
+        // Check calibredb log confirms 'add' was invoked
+        const log = fs.existsSync(mockLogFile) ? fs.readFileSync(mockLogFile, "utf8") : "";
+        expect(log).toContain("remove 42");
+        expect(log).toContain("add");
+
+        // Verify readback confirms file_hashes was not blanket-flushed
+        const allHashes = cdb.query("SELECT count(*) as count FROM file_hashes").get() as any;
+        expect(allHashes.count).toBeGreaterThan(0);
+      } finally {
+        globalThis.fetch = origFetch;
+        if (origJevKey !== undefined) process.env.JEV_API_KEY = origJevKey;
+        if (origTypesafeKey !== undefined) process.env.TYPESAFE_API_KEY = origTypesafeKey;
+        if (origApiKey !== undefined) process.env.READING_API_KEY = origApiKey;
+        else delete process.env.READING_API_KEY;
+        process.env.CALIBREDB_PATH = origCalibredbPath;
+        process.env.CALIBRE_DB_PATH = origCalibreDbPath;
+        process.env.CALIBRE_LIBRARY_DIR = origLibraryDir;
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("failed removal retains valid duplicate response on re-upload (counterfactual control)", async () => {
+      const origFetch = globalThis.fetch;
+      (globalThis as any).fetch = async () => new Response("{}", { status: 404 });
+
+      const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "u12-failed-delete-"));
+      const libDir = path.join(tempDir, "calibre-lib");
+      const dropDir = path.join(tempDir, "drop");
+      fs.mkdirSync(libDir, { recursive: true });
+      fs.mkdirSync(dropDir, { recursive: true });
+
+      const origCalibredbPath = process.env.CALIBREDB_PATH;
+      const origCalibreDbPath = process.env.CALIBRE_DB_PATH;
+      const origLibraryDir = process.env.CALIBRE_LIBRARY_DIR;
+      const origApiKey = process.env.READING_API_KEY;
+      process.env.CALIBRE_LIBRARY_DIR = libDir;
+
+      try {
+        const mockDbPath = path.join(libDir, "metadata.db");
+        process.env.CALIBRE_DB_PATH = mockDbPath;
+        const db = new Database(mockDbPath);
+        db.run(`CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, path TEXT, has_cover INTEGER, pubdate TEXT, series_index REAL);`);
+        db.run(`CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, name TEXT);`);
+        db.run(`CREATE TABLE comments (id INTEGER PRIMARY KEY, book INTEGER, text TEXT);`);
+        db.run(`CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);`);
+        db.run(`CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);`);
+        db.run(`CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);`);
+        db.run(`CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);`);
+        db.run(`CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);`);
+        db.run(`CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);`);
+        db.run(`CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);`);
+        db.run(`CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);`);
+        db.run(`INSERT INTO books (id, title, path, has_cover, pubdate, series_index) VALUES (42, 'Overlord Volume 1', 'Overlord1', 0, '', 1);`);
+        db.run(`INSERT INTO data (id, book, format, name) VALUES (1, 42, 'EPUB', 'one');`);
+        db.close();
+
+        // Build valid EPUB
+        const staging = path.join(tempDir, "epub-staging");
+        fs.mkdirSync(path.join(staging, "META-INF"), { recursive: true });
+        fs.mkdirSync(path.join(staging, "OEBPS"), { recursive: true });
+        fs.writeFileSync(path.join(staging, "mimetype"), "application/epub+zip");
+        fs.writeFileSync(
+          path.join(staging, "META-INF", "container.xml"),
+          `<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`,
+        );
+        fs.writeFileSync(
+          path.join(staging, "OEBPS", "content.opf"),
+          `<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Overlord Volume 1</dc:title><dc:creator>Kugane Maruyama</dc:creator></metadata><manifest><item id="t" href="text.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="t"/></spine></package>`,
+        );
+        fs.writeFileSync(
+          path.join(staging, "OEBPS", "text.xhtml"),
+          `<html><body>${"A novel chapter with meaningful original fixture prose. ".repeat(150)}</body></html>`,
+        );
+
+        const testEpubPath = path.join(dropDir, "overlord_vol_1.epub");
+        spawnSync("zip", ["-q", "-X", "-0", testEpubPath, "mimetype"], { cwd: staging });
+        spawnSync("zip", ["-q", "-r", testEpubPath, "META-INF", "OEBPS"], { cwd: staging });
+
+        const epubBytes = fs.readFileSync(testEpubPath);
+        const { getKOReaderBinary256 } = await import("./bot");
+        const fileHash = getKOReaderBinary256(testEpubPath);
+
+        const cdb = getCacheDb();
+        cdb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          [testEpubPath, 1, fileHash, 42, "Overlord Volume 1", "Kugane Maruyama", 0],
+        );
+
+        // Mock calibredb remove to fail with exit code 1
+        const mockCalibreScript = path.join(tempDir, "mock_calibredb_fail.sh");
+        fs.writeFileSync(
+          mockCalibreScript,
+          `#!/bin/sh
+if [ "$1" = "remove" ]; then
+  echo "Simulated Calibre locked error" >&2
+  exit 1
+fi
+exit 0
+`,
+        );
+        fs.chmodSync(mockCalibreScript, 0o755);
+        process.env.CALIBREDB_PATH = mockCalibreScript;
+
+        process.env.READING_API_KEY = "u12-auth-key";
+        const authHeaders = { Authorization: "Bearer u12-auth-key" };
+
+        // Attempt DELETE /api/books/42: fails with 500
+        const deleteReq = new Request("http://127.0.0.1:8086/api/books/42", {
+          method: "DELETE",
+          headers: authHeaders,
+        });
+        const deleteRes = await handleRequest(deleteReq);
+        expect(deleteRes.status).toBe(500);
+
+        // Book 42 remains active in Calibre
+        const currentBooks = getCalibreBooks(true);
+        expect(currentBooks.map((b: any) => b.id)).toContain(42);
+
+        // Re-uploading returns duplicate response with bookId 42
+        const fd = new FormData();
+        fd.set("file", new File([epubBytes], "overlord_vol_1.epub", { type: "application/epub+zip" }));
+        const uploadReq = new Request("http://127.0.0.1:8086/api/upload", {
+          method: "POST",
+          headers: authHeaders,
+          body: fd,
+        });
+        const uploadRes = await handleRequest(uploadReq);
+        expect(uploadRes.status).toBe(200);
+        const uploadData = await uploadRes.json();
+        expect(uploadData.success).toBe(true);
+        expect(uploadData.duplicate).toBe(true);
+        expect(uploadData.bookId).toBe(42);
+        expect(uploadData.message).toContain("already in your library");
+      } finally {
+        globalThis.fetch = origFetch;
+        if (origApiKey !== undefined) process.env.READING_API_KEY = origApiKey;
+        else delete process.env.READING_API_KEY;
+        process.env.CALIBREDB_PATH = origCalibredbPath;
+        process.env.CALIBRE_DB_PATH = origCalibreDbPath;
+        process.env.CALIBRE_LIBRARY_DIR = origLibraryDir;
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("neighboring live identity with the same hash is preserved when stale identity is rejected", () => {
+      const cdb = getCacheDb();
+      const sharedHash = "test_shared_hash_live_preservation";
+
+      // Row 1: deleted book 42
+      cdb.run(
+        "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ["/fake/deleted.epub#h1", 1, sharedHash, 42, "Deleted Volume", "Author A", 0],
+      );
+      // Row 2: live book 12
+      cdb.run(
+        "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ["/fake/live.epub#h1", 1, sharedHash, 12, "Live Volume", "Author B", 1],
+      );
+
+      // Only book 12 is active in Calibre
+      const knownBooks = [
+        { id: 12, title: "Live Volume", authors: "Author B", cover: 1 },
+      ];
+
+      const { map } = getCalibreHashMap(knownBooks);
+
+      // Live identity for book 12 must be preserved in map
+      expect(map[sharedHash]).toBeDefined();
+      expect(map[sharedHash].id).toBe(12);
+      expect(map[sharedHash].title).toBe("Live Volume");
+      expect(map[sharedHash].cover).toBe(true);
+    });
+
+    it("same-ID changed ownership rejects stale cached identity and does not repoint to new book", () => {
+      const cdb = getCacheDb();
+      const changedHash = "test_same_id_changed_ownership";
+
+      // Row in file_hashes has book_id 12, but title is "Original Old Work"
+      cdb.run(
+        "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ["/fake/old.epub#h", 1, changedHash, 12, "Original Old Work", "Author X", 0],
+      );
+
+      // Active Calibre book 12 has a completely different title (ID was reused)
+      const knownBooks = [
+        { id: 12, title: "Modern New Release", authors: "Author Y", cover: 1 },
+      ];
+
+      const { map } = getCalibreHashMap(knownBooks);
+
+      // Stale identity must be rejected; map[changedHash] must NOT be repointed to "Modern New Release"
+      expect(map[changedHash]).toBeUndefined();
+    });
+
+    it("unmatched record (null book_id) is rejected from duplicate map", () => {
+      const cdb = getCacheDb();
+      const unmatchedHash = "test_unmatched_record_null_id";
+
+      cdb.run(
+        "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ["/fake/unmatched.epub#h", 1, unmatchedHash, null, "Unmatched Book", "Unknown", 0],
+      );
+
+      const knownBooks = [
+        { id: 12, title: "Live Volume", authors: "Author B", cover: 1 },
+      ];
+
+      const { map } = getCalibreHashMap(knownBooks);
+      expect(map[unmatchedHash]).toBeUndefined();
+    });
+
+    it("explicit aliases validate active book identity and reject deleted books", () => {
+      const cdb = getCacheDb();
+      const liveAliasHash = "test_alias_live_hash";
+      const deadAliasHash = "test_alias_dead_hash";
+
+      // Alias 1: points to live book 12
+      cdb.run(
+        "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [`alias:${liveAliasHash}`, 1, liveAliasHash, 12, "Active Alias Work", "Author A", 0],
+      );
+      // Alias 2: points to deleted book 42
+      cdb.run(
+        "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [`alias:${deadAliasHash}`, 1, deadAliasHash, 42, "Deleted Alias Work", "Author B", 0],
+      );
+
+      const knownBooks = [
+        { id: 12, title: "Active Alias Work", authors: "Author A", cover: 0 },
+      ];
+
+      const { map } = getCalibreHashMap(knownBooks);
+      expect(map[liveAliasHash]).toBeDefined();
+      expect(map[liveAliasHash].id).toBe(12);
+      expect(map[deadAliasHash]).toBeUndefined();
+    });
+
+    it("failed book-list fetch does not flush cache and preserves new ingestion", async () => {
+      const cdb = getCacheDb();
+      const testHash = "test_fetch_failure_retention_hash";
+      cdb.run(
+        "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ["/fake/retained.epub#h", 1, testHash, 12, "Retained Book", "Author", 0],
+      );
+
+      setServerDependenciesForTest({
+        getCalibreBooks: () => {
+          throw new Error("Simulated Calibre database locked/unavailable");
+        },
+      });
+
+      try {
+        // getCalibreHashMap handles failed book fetch safely
+        const { map, booksFetchFailed } = getCalibreHashMap();
+        expect(booksFetchFailed).toBe(true);
+        // Map does not expose unverified duplicates
+        expect(map[testHash]).toBeUndefined();
+
+        // Readback confirms cache rows are NOT deleted or flushed
+        const row = cdb.query("SELECT * FROM file_hashes WHERE hash = ?").get(testHash) as any;
+        expect(row).toBeDefined();
+        expect(row.book_id).toBe(12);
+      } finally {
+        resetServerDependenciesForTest();
+      }
+    });
+
+    it("matchesActiveBookIdentity handles exact match, case normalization, punctuation differences, and rejects distinct titles", () => {
+      // Exact match
+      expect(matchesActiveBookIdentity({ title: "Overlord Volume 1" }, "Overlord Volume 1")).toBe(true);
+
+      // Case insensitive
+      expect(matchesActiveBookIdentity({ title: "OVERLORD VOLUME 1" }, "overlord volume 1")).toBe(true);
+
+      // Punctuation and spacing differences
+      expect(matchesActiveBookIdentity({ title: "Overlord, Vol. 1" }, "Overlord Vol 1")).toBe(true);
+
+      // Bracket and release metadata tags handled by normalizeTitleForDedup
+      expect(matchesActiveBookIdentity({ title: "[v1.0] Overlord Vol 1" }, "Overlord Vol 1")).toBe(true);
+
+      // Conflicting/unrelated book titles
+      expect(matchesActiveBookIdentity({ title: "Hamlet" }, "Overlord Volume 1")).toBe(false);
+      expect(matchesActiveBookIdentity({ title: "Overlord Volume 2" }, "Overlord Volume 1")).toBe(false);
+
+      // Missing or null values
+      expect(matchesActiveBookIdentity(null, "Overlord Volume 1")).toBe(false);
+      expect(matchesActiveBookIdentity({ title: "Overlord Volume 1" }, "")).toBe(false);
+      expect(matchesActiveBookIdentity({ title: "" }, "Overlord Volume 1")).toBe(false);
+    });
+  });
 });
+
