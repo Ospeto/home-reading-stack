@@ -266,6 +266,7 @@ bin/lighthouse status
 - **Archive Safety Scan:** Inspects archive members to reject symlinks and directory traversal (`..`) sequences.
 - **Automatic Service Quiescence:** Calls `cmd_down` to safely stop running services before modifying destination databases.
 - **Hermetic WAL Cleanup:** Automatically unlinks preexisting `.db-wal` and `.db-shm` sidecars to prevent stale WAL frames from replaying over restored databases.
+- **Schema-Aware Content & Optional-Table Verification:** Handles databases with optional schemas (such as `cache.db` with or without `jobs` table, or empty/populated jobs), verifying data-bearing rows (`highlights`, `file_hashes`, `jobs`) and content fidelity rather than simple row counts, while preserving present-table errors and rollback snapshots (`.bak.<timestamp>`) on failure.
 - **Pre-Execution CLI Option Validation:** Validates required options (`--output`, `--output-dir`, `--target`) upfront against missing, empty, or next-option values, preventing directory, database, or service side effects on malformed input.
 
 ---
