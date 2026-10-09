@@ -2480,12 +2480,12 @@ export async function resolveNovelSourceInventories(
     sourceStatus = "unverified";
   }
 
-  // Union of verified volumes across all verified sources
+  // Union of verified volumes across all verified sources (supporting Volume 0 prequels)
   const volumeSet = new Set<number>();
   for (const inv of verifiedList) {
     if (Array.isArray(inv.volumes)) {
       for (const v of inv.volumes) {
-        if (typeof v === "number" && !isNaN(v) && v > 0) {
+        if (typeof v === "number" && !isNaN(v) && v >= 0) {
           volumeSet.add(v);
         }
       }
@@ -2510,12 +2510,7 @@ export function attachCachedInventoriesIfAvailable(
   novel: DiscoveredNovel,
   dependencies?: DiscoverDependencies,
 ): DiscoveredNovel {
-  if (
-    novel.verifiedVolumes &&
-    novel.sourceStatus === "verified" &&
-    Array.isArray(novel.sources) &&
-    novel.sources.length > 0
-  ) {
+  if (Array.isArray(novel.sources) && novel.sources.length > 0) {
     return novel;
   }
 
@@ -2556,7 +2551,7 @@ export function attachCachedInventoriesIfAvailable(
       for (const s of verifiedList) {
         if (Array.isArray(s.volumes)) {
           for (const v of s.volumes) {
-            if (typeof v === "number" && !isNaN(v) && v > 0) volumeSet.add(v);
+            if (typeof v === "number" && !isNaN(v) && v >= 0) volumeSet.add(v);
           }
         }
       }
@@ -5244,6 +5239,28 @@ export async function getDiscoverNovelById(
   const cleanId = novelId.trim();
   const normId = normalizeTitleForMatch(cleanId);
   const canId = canonicalTitleKey(cleanId);
+  const slug = cleanId.replace(/^(?:anilist-\d+-|lnori-\d+-|elscione-)/i, "");
+  const normSlug = normalizeTitleForMatch(slug.replace(/-/g, " "));
+  const canSlug = canonicalTitleKey(slug.replace(/-/g, " "));
+
+  const isNovelMatch = (item: DiscoveredNovel): boolean => {
+    if (item.id === cleanId) return true;
+    const itemSlug = item.id.replace(/^(?:anilist-\d+-|lnori-\d+-|elscione-)/i, "");
+    if (itemSlug && slug && (itemSlug === slug || item.id === slug || cleanId === itemSlug)) return true;
+    if (normalizeTitleForMatch(item.id) === normId) return true;
+    if (canonicalTitleKey(item.id) === canId) return true;
+    if (normalizeTitleForMatch(item.title) === normId) return true;
+    if (canonicalTitleKey(item.title) === canId) return true;
+    if (normSlug && normalizeTitleForMatch(item.title) === normSlug) return true;
+    if (canSlug && canonicalTitleKey(item.title) === canSlug) return true;
+    if (item.titleRomaji) {
+      if (normalizeTitleForMatch(item.titleRomaji) === normId) return true;
+      if (canonicalTitleKey(item.titleRomaji) === canId) return true;
+      if (normSlug && normalizeTitleForMatch(item.titleRomaji) === normSlug) return true;
+      if (canSlug && canonicalTitleKey(item.titleRomaji) === canSlug) return true;
+    }
+    return false;
+  };
 
   // 1. Search in trending/new seeds first
   const allSeeds = [
@@ -5253,16 +5270,7 @@ export async function getDiscoverNovelById(
 
   let candidate: DiscoveredNovel | null = null;
   for (const s of allSeeds) {
-    if (
-      s.id === cleanId ||
-      normalizeTitleForMatch(s.id) === normId ||
-      canonicalTitleKey(s.id) === canId ||
-      normalizeTitleForMatch(s.title) === normId ||
-      canonicalTitleKey(s.title) === canId ||
-      (s.titleRomaji &&
-        (normalizeTitleForMatch(s.titleRomaji) === normId ||
-          canonicalTitleKey(s.titleRomaji) === canId))
-    ) {
+    if (isNovelMatch(s)) {
       candidate = { ...s };
       break;
     }
@@ -5272,16 +5280,7 @@ export async function getDiscoverNovelById(
   if (!candidate) {
     const catalog = await buildCompleteCatalogNovels(dependencies);
     for (const n of catalog) {
-      if (
-        n.id === cleanId ||
-        normalizeTitleForMatch(n.id) === normId ||
-        canonicalTitleKey(n.id) === canId ||
-        normalizeTitleForMatch(n.title) === normId ||
-        canonicalTitleKey(n.title) === canId ||
-        (n.titleRomaji &&
-          (normalizeTitleForMatch(n.titleRomaji) === normId ||
-            canonicalTitleKey(n.titleRomaji) === canId))
-      ) {
+      if (isNovelMatch(n)) {
         candidate = { ...n };
         break;
       }
@@ -5290,15 +5289,27 @@ export async function getDiscoverNovelById(
 
   // 3. Fallback: universal search
   if (!candidate) {
-    const searchResults = await searchUniversalNovels(cleanId, dependencies);
-    if (searchResults.length > 0) {
-      candidate = { ...searchResults[0] };
+    const searchTerms = [cleanId];
+    const strippedTerm = slug.replace(/-/g, " ").trim();
+    if (strippedTerm && strippedTerm !== cleanId && !searchTerms.includes(strippedTerm)) {
+      searchTerms.push(strippedTerm);
+    }
+    for (const term of searchTerms) {
+      const searchResults = await searchUniversalNovels(term, dependencies);
+      if (searchResults.length > 0) {
+        candidate = { ...searchResults[0] };
+        break;
+      }
     }
   }
 
   if (!candidate) {
     return null;
   }
+
+  // Preserve the exact novelId requested by caller (e.g. anilist-67523-date-a-live)
+  // so downstream client state (activeDiscoverItem, discoverNovelsMap) matches seamlessly
+  candidate.id = cleanId;
 
   // Ensure synopsis
   if (!candidate.synopsis || candidate.synopsis.length < 30) {

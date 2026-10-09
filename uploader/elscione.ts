@@ -103,9 +103,11 @@ export interface ElscioneIngestResult {
   importedCount: number;
   skippedCount: number;
   duplicateCount: number;
+  skippedErrors?: number;
   totalCount: number;
   tags: string[];
   calibreBookIds: number[];
+  volumes?: number[];
   error?: string;
 }
 
@@ -1850,6 +1852,9 @@ export async function ingestElscioneSeries(
   }
 
   const totalSkipped = skippedExisting + skippedErrors;
+  const manifestVolumes = manifest.volumes
+    .map((v) => v.volumeNumber)
+    .filter((v) => typeof v === "number" && !isNaN(v) && v >= 0);
   const finalResult: ElscioneIngestResult = {
     // Succeeded if at least one book was imported, OR if volumes already existed and there were no unhandled download/import errors
     success: importedCount > 0 || (skippedExisting > 0 && skippedErrors === 0),
@@ -1858,7 +1863,9 @@ export async function ingestElscioneSeries(
     importedCount,
     skippedCount: totalSkipped,
     duplicateCount: skippedExisting,
+    skippedErrors,
     totalCount,
+    volumes: manifestVolumes,
     tags: ["Light Novel", "Elscione"],
     calibreBookIds,
   };
