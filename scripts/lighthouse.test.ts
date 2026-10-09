@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as process from "node:process";
+import * as net from "node:net";
 import { Database } from "bun:sqlite";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..");
@@ -2475,6 +2476,304 @@ exec "$real_bin" "$@"
       expect(books[0].title).toBe("Idempotent Volume 1");
       expect(books[1].title).toBe("Idempotent Volume 2");
       rDb.close();
+    });
+  });
+
+  describe("10. Scheduler and Firecrawl Status & Config Accuracy (U29)", () => {
+    it("reports reading-ssd-backup [SCHEDULED] Loaded (Idle) when plist exists and launchctl reports loaded", () => {
+      const mockDir = path.join(tempTestDir, "mock_bin_loaded");
+      fs.mkdirSync(mockDir, { recursive: true });
+      const mockLaunchctl = path.join(mockDir, "launchctl");
+      fs.writeFileSync(
+        mockLaunchctl,
+        `#!/bin/bash
+if [ "$1" = "print" ]; then
+  echo "state = not running"
+  exit 0
+fi
+if [ "$1" = "list" ]; then
+  echo "- 0 $2"
+  exit 0
+fi
+exit 0
+`,
+        { mode: 0o755 },
+      );
+
+      const fixtureAgents = path.join(tempTestDir, "agents_loaded");
+      fs.mkdirSync(fixtureAgents, { recursive: true });
+      fs.writeFileSync(
+        path.join(fixtureAgents, "com.ospeto.reading-ssd-backup.plist"),
+        `<?xml version="1.0" encoding="UTF-8"?><plist><dict><key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer></dict></dict></plist>`,
+      );
+
+      const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+        env: {
+          ...process.env,
+          PATH: `${mockDir}:${process.env.PATH}`,
+          LIGHTHOUSE_DAEMON_PREFIX: "com.ospeto",
+          LAUNCHAGENTS_DIR: fixtureAgents,
+          US_WAN_HQ_URL: "http://127.0.0.1:1",
+          SG_OPDS_80_URL: "http://127.0.0.1:1",
+        },
+      });
+
+      expect(res.status).toBe(0);
+      const out = res.stdout;
+      expect(out).toContain("com.ospeto.reading-ssd-backup");
+      expect(out).toContain("[SCHEDULED]");
+      expect(out).toContain("Loaded (Idle)");
+      // Ensure idle calendar agent is not reported as dead/stopped process
+      expect(out).not.toMatch(/com\.ospeto\.reading-ssd-backup\s+\[STOPPED\]\s+-/);
+    });
+
+    it("reports reading-ssd-backup [DISABLED] Disabled when plist exists but service is unloaded in launchctl", () => {
+      const mockDir = path.join(tempTestDir, "mock_bin_disabled");
+      fs.mkdirSync(mockDir, { recursive: true });
+      const mockLaunchctl = path.join(mockDir, "launchctl");
+      fs.writeFileSync(
+        mockLaunchctl,
+        `#!/bin/bash
+if [ "$1" = "print" ]; then
+  echo "Could not find service" >&2
+  exit 113
+fi
+exit 1
+`,
+        { mode: 0o755 },
+      );
+
+      const fixtureAgents = path.join(tempTestDir, "agents_disabled");
+      fs.mkdirSync(fixtureAgents, { recursive: true });
+      fs.writeFileSync(
+        path.join(fixtureAgents, "com.ospeto.reading-ssd-backup.plist"),
+        `<?xml version="1.0" encoding="UTF-8"?><plist><dict><key>Label</key><string>com.ospeto.reading-ssd-backup</string></dict></plist>`,
+      );
+
+      const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+        env: {
+          ...process.env,
+          PATH: `${mockDir}:${process.env.PATH}`,
+          LIGHTHOUSE_DAEMON_PREFIX: "com.ospeto",
+          LAUNCHAGENTS_DIR: fixtureAgents,
+          US_WAN_HQ_URL: "http://127.0.0.1:1",
+          SG_OPDS_80_URL: "http://127.0.0.1:1",
+        },
+      });
+
+      expect(res.status).toBe(0);
+      const out = res.stdout;
+      expect(out).toContain("com.ospeto.reading-ssd-backup");
+      expect(out).toContain("[DISABLED]");
+      expect(out).toContain("Disabled");
+    });
+
+    it("reports reading-ssd-backup [STOPPED] Missing plist when plist does not exist on disk", () => {
+      const mockDir = path.join(tempTestDir, "mock_bin_missing");
+      fs.mkdirSync(mockDir, { recursive: true });
+      const mockLaunchctl = path.join(mockDir, "launchctl");
+      fs.writeFileSync(
+        mockLaunchctl,
+        `#!/bin/bash
+exit 0
+`,
+        { mode: 0o755 },
+      );
+
+      const fixtureAgents = path.join(tempTestDir, "agents_empty");
+      fs.mkdirSync(fixtureAgents, { recursive: true });
+
+      const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+        env: {
+          ...process.env,
+          PATH: `${mockDir}:${process.env.PATH}`,
+          LIGHTHOUSE_DAEMON_PREFIX: "com.ospeto",
+          LAUNCHAGENTS_DIR: fixtureAgents,
+          US_WAN_HQ_URL: "http://127.0.0.1:1",
+          SG_OPDS_80_URL: "http://127.0.0.1:1",
+        },
+      });
+
+      expect(res.status).toBe(0);
+      const out = res.stdout;
+      expect(out).toContain("com.ospeto.reading-ssd-backup");
+      expect(out).toContain("Missing plist");
+    });
+
+    it("displays Firecrawl awake with port and PID when port listener is active", async () => {
+      const server = net.createServer();
+      const testPort = 39871;
+      await new Promise<void>((resolve, reject) => {
+        server.listen(testPort, "127.0.0.1", () => resolve());
+        server.on("error", reject);
+      });
+
+      try {
+        const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
+          encoding: "utf8",
+          cwd: tempTestDir,
+          env: {
+            ...process.env,
+            FIRECRAWL_PORT: String(testPort),
+            US_WAN_HQ_URL: "http://127.0.0.1:1",
+            SG_OPDS_80_URL: "http://127.0.0.1:1",
+          },
+        });
+        expect(res.status).toBe(0);
+        const out = res.stdout;
+        expect(out).toContain(`Port ${testPort}`);
+        expect(out).toContain("[ACTIVE]");
+        expect(out).toContain("Firecrawl Scraper (On-Demand) PID:");
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
+
+    it("displays Firecrawl sleeping when port is not listening", () => {
+      const unusedPort = 39872;
+      const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+        env: {
+          ...process.env,
+          FIRECRAWL_PORT: String(unusedPort),
+          US_WAN_HQ_URL: "http://127.0.0.1:1",
+          SG_OPDS_80_URL: "http://127.0.0.1:1",
+        },
+      });
+      expect(res.status).toBe(0);
+      const out = res.stdout;
+      expect(out).toContain(`Port ${unusedPort}`);
+      expect(out).toContain("[STOPPED]");
+      expect(out).toContain("Firecrawl Scraper (On-Demand) Sleeping");
+    });
+
+    it("verifies documented FIRECRAWL_* configuration variables match firecrawl getters", async () => {
+      const envExamplePath = path.join(REPO_ROOT, ".env.example");
+      expect(fs.existsSync(envExamplePath)).toBe(true);
+      const envExample = fs.readFileSync(envExamplePath, "utf8");
+
+      const expectedVars = [
+        "FIRECRAWL_ENABLED",
+        "FIRECRAWL_PORT",
+        "FIRECRAWL_URL",
+        "FIRECRAWL_COMPOSE_DIR",
+        "FIRECRAWL_IDLE_TIMEOUT_MS",
+        "FIRECRAWL_ACTIVITY_DIR",
+        "FIRECRAWL_API_KEY",
+        "DOCKER_PATH",
+      ];
+
+      for (const v of expectedVars) {
+        expect(envExample).toContain(v);
+      }
+
+      const firecrawlMod = await import("../uploader/firecrawl");
+      expect(typeof firecrawlMod.getFirecrawlUrl).toBe("function");
+      expect(typeof firecrawlMod.getFirecrawlComposeDir).toBe("function");
+      expect(typeof firecrawlMod.getFirecrawlIdleTimeoutMs).toBe("function");
+      expect(typeof firecrawlMod.isFirecrawlEnabled).toBe("function");
+      expect(typeof firecrawlMod.getFirecrawlActivityDir).toBe("function");
+      expect(typeof firecrawlMod.getDockerPath).toBe("function");
+
+      // Verify getters respond to environment overrides
+      const origUrl = process.env.FIRECRAWL_URL;
+      const origDir = process.env.FIRECRAWL_COMPOSE_DIR;
+      const origTimeout = process.env.FIRECRAWL_IDLE_TIMEOUT_MS;
+      const origAct = process.env.FIRECRAWL_ACTIVITY_DIR;
+
+      try {
+        process.env.FIRECRAWL_URL = "http://127.0.0.1:3999";
+        expect(firecrawlMod.getFirecrawlUrl()).toBe("http://127.0.0.1:3999");
+
+        process.env.FIRECRAWL_COMPOSE_DIR = "/custom/compose/path";
+        expect(firecrawlMod.getFirecrawlComposeDir()).toBe("/custom/compose/path");
+
+        process.env.FIRECRAWL_IDLE_TIMEOUT_MS = "60000";
+        expect(firecrawlMod.getFirecrawlIdleTimeoutMs()).toBe(60000);
+
+        process.env.FIRECRAWL_ACTIVITY_DIR = "/custom/act/dir";
+        expect(firecrawlMod.getFirecrawlActivityDir()).toBe("/custom/act/dir");
+      } finally {
+        if (origUrl !== undefined) process.env.FIRECRAWL_URL = origUrl; else delete process.env.FIRECRAWL_URL;
+        if (origDir !== undefined) process.env.FIRECRAWL_COMPOSE_DIR = origDir; else delete process.env.FIRECRAWL_COMPOSE_DIR;
+        if (origTimeout !== undefined) process.env.FIRECRAWL_IDLE_TIMEOUT_MS = origTimeout; else delete process.env.FIRECRAWL_IDLE_TIMEOUT_MS;
+        if (origAct !== undefined) process.env.FIRECRAWL_ACTIVITY_DIR = origAct; else delete process.env.FIRECRAWL_ACTIVITY_DIR;
+      }
+    });
+
+    it("verifies manual and README status & firecrawl references", () => {
+      const readmePath = path.join(REPO_ROOT, "README.md");
+      const indexPath = path.join(REPO_ROOT, "uploader", "index.html");
+
+      const readme = fs.readFileSync(readmePath, "utf8");
+      const index = fs.readFileSync(indexPath, "utf8");
+
+      expect(readme).toContain("bin/lighthouse status");
+      expect(readme).toContain("bin/lighthouse firecrawl status");
+      expect(readme).toContain("bin/lighthouse backup-ssd status");
+      expect(readme).toContain("com.ospeto.reading-ssd-backup.plist");
+      expect(readme).toContain("FIRECRAWL_PORT");
+      expect(readme).toContain("FIRECRAWL_COMPOSE_DIR");
+
+      expect(index).toContain("bin/lighthouse status");
+      expect(index).toContain("bin/lighthouse firecrawl status");
+      expect(index).toContain("bin/lighthouse backup-ssd status");
+      expect(index).toContain("FIRECRAWL_PORT");
+      expect(index).toContain("Scheduler Status:");
+    });
+
+    it("executes bounded status command without mutating databases or configuration", () => {
+      const fixtureCalibre = path.join(tempTestDir, "meta.db");
+      const fixtureKosync = path.join(tempTestDir, "sync.db");
+      const fixtureCache = path.join(tempTestDir, "cache.db");
+
+      const cDb = new Database(fixtureCalibre);
+      cDb.run("CREATE TABLE books (id INTEGER PRIMARY KEY);");
+      cDb.run("INSERT INTO books VALUES (1), (2), (3);");
+      cDb.close();
+
+      const kDb = new Database(fixtureKosync);
+      kDb.run("CREATE TABLE progress (id INTEGER PRIMARY KEY);");
+      kDb.run("INSERT INTO progress VALUES (10);");
+      kDb.close();
+
+      const chDb = new Database(fixtureCache);
+      chDb.run("CREATE TABLE jobs (id INTEGER PRIMARY KEY);");
+      chDb.run("INSERT INTO jobs VALUES (100);");
+      chDb.close();
+
+      const statCalibreBefore = fs.statSync(fixtureCalibre).mtimeMs;
+      const statKosyncBefore = fs.statSync(fixtureKosync).mtimeMs;
+      const statCacheBefore = fs.statSync(fixtureCache).mtimeMs;
+
+      const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+        env: {
+          ...process.env,
+          CALIBRE_DB_PATH: fixtureCalibre,
+          KOSYNC_DB_PATH: fixtureKosync,
+          CACHE_DB_PATH: fixtureCache,
+          US_WAN_HQ_URL: "http://127.0.0.1:1",
+          SG_OPDS_80_URL: "http://127.0.0.1:1",
+        },
+      });
+
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain("3 books");
+      expect(res.stdout).toContain("1 progress records");
+      expect(res.stdout).toContain("1 jobs tracked");
+
+      expect(fs.statSync(fixtureCalibre).mtimeMs).toBe(statCalibreBefore);
+      expect(fs.statSync(fixtureKosync).mtimeMs).toBe(statKosyncBefore);
+      expect(fs.statSync(fixtureCache).mtimeMs).toBe(statCacheBefore);
     });
   });
 });

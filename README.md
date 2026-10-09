@@ -102,7 +102,7 @@ LightHouse includes a portable management CLI (`bin/lighthouse`) for service lif
 
 | Command | Description |
 | --- | --- |
-| `bin/lighthouse status` | Displays full one-screen dashboard of all ports (8086, 7200, 8088, 7890), tunnels, launchd daemons, and database record counts (books, progress, and jobs). |
+| `bin/lighthouse status` | Displays full one-screen dashboard of all ports (8086, 7200, 8088, 7890, 3002 Firecrawl), tunnels, launchd daemons (accurately distinguishing running, loaded-idle scheduled, disabled, and missing plists), and database record counts. |
 | `bin/lighthouse up` | Starts all services gracefully in strict dependency order (Calibre, KOSync, LightHouse UI, LAN proxy, reverse tunnels). |
 | `bin/lighthouse down` | Stops all services gracefully in reverse dependency order without leaving orphaned processes. |
 | `bin/lighthouse restart` | Performs safe sequential stop and restart of reading stack services (`down; sleep 1; up`). |
@@ -239,7 +239,7 @@ The reading stack supports three complementary backup workflows:
   - Mirrors entire Calibre library (EPUBs, covers, author directories, `metadata.db`) via `rsync -av --delete` to `<SSD>/Calibre_Library/` so subsequent backups take only seconds.
   - Takes hot atomic SQLite snapshots of all four databases (`metadata.db`, `cache.db`, `koreader-sync.db`, `manga.db`) into `<SSD>/Databases/` with SHA-256 integrity checksums.
   - Writes `<SSD>/backup_manifest.json` recording timestamp, book count, total size, database hashes, and duration.
-  - **Dynamic LaunchAgent Scheduling:** Managed via `com.ospeto.reading-ssd-backup.plist` with `StartCalendarInterval` matching configured schedule time (e.g. daily at `03:00`).
+  - **Dynamic LaunchAgent Scheduling:** Managed via `com.ospeto.reading-ssd-backup.plist` with `StartCalendarInterval` matching configured schedule time (e.g. daily at `03:00`). `bin/lighthouse status` reflects loaded/scheduled idle calendar agent, disabled, or missing plist states accurately without false dead-process reporting.
   - **Safe Mount Detection:** If the SSD is unmounted at scheduled run time, logs a clean notice and exits with code 0 without erroring or crashing.
   - **Web UI & REST APIs:** Configurable via Web UI Settings & Storage modal (`openStorageModal`), with endpoints `GET /api/backup/ssd/status`, `POST /api/backup/ssd/config`, and `POST /api/backup/ssd/run`.
 
@@ -627,6 +627,7 @@ Background tasks and asynchronous workflows run via a durable SQLite job queue (
 Search your library and retrieve books anywhere via Telegram (`@saroat_ospeto_bot`):
 - **Search & Retrieval (`/find`, `/search`, `/f`):** Fast multi-term search across titles, authors, and series. Delivers results with 1-tap interactive buttons: `[📥 Send File]` (or command `/get <id>`), `[📖 Read Online]`, and `[ℹ️ Details]`. Files over 20MB trigger an informative message with direct Web Uploader links.
 - **On-Demand Firecrawl Cluster & Web Article Ingestion:** Web article extraction (`/epub <url>` or pasted links) prioritizes the local on-demand Firecrawl cluster (`http://127.0.0.1:3002`). LightHouse wakes containers on demand (~2.5s) upon scrape requests and automatically shuts them down after 15 minutes of inactivity (`docker compose stop`) to release ~2.5 GB of RAM back to macOS, with fail-open fallback to direct fetch and Jina Reader (`https://r.jina.ai`).
+  - **Supported Configuration:** Configurable via `.env` options: `FIRECRAWL_ENABLED` (toggle on/off, default `true`), `FIRECRAWL_PORT` (default `3002`), `FIRECRAWL_URL` (default `http://127.0.0.1:3002`), `FIRECRAWL_COMPOSE_DIR` (compose path, default `${HOME}/Documents/Firecrawl/firecrawl`), `FIRECRAWL_IDLE_TIMEOUT_MS` (idle shutdown timer, default `900000`), `FIRECRAWL_ACTIVITY_DIR` (heartbeat lock dir, default `/tmp/lighthouse-firecrawl-activity`), and `FIRECRAWL_API_KEY` (optional authentication).
 - **Paywall & Cloudflare Bypass:** Web article extraction (`/epub <url>` or pasted links) transparently re-routes blocked pages through Jina Reader (`https://r.jina.ai`) via sing-box proxy with Kindle typography formatting.
 - **Formatting Resilience:** Automatic plain-text retry on Telegram HTTP 400 parsing errors prevents dropped notifications from unescaped characters.
 

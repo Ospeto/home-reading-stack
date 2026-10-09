@@ -2706,6 +2706,7 @@
             <div>Articles submitted via Web Uploader or Telegram Bot leverage the self-hosted Firecrawl cluster with an on-demand lifecycle to conserve host RAM:</div>
             <div>• <strong>Wake on Demand:</strong> LightHouse automatically wakes Firecrawl containers via <code class="text-zinc-200">docker compose start</code> in ~2.5s when an article ingestion request arrives.</div>
             <div>• <strong>Auto-Sleep Idle Timer:</strong> After 15 minutes of inactivity without new scrapes, containers automatically shut down (<code class="text-zinc-200">docker compose stop</code>), immediately releasing ~2.5 GB RAM back to macOS.</div>
+            <div>• <strong>Environment Configuration:</strong> Supported <code class="text-zinc-200">.env</code> options: <code class="text-zinc-200">FIRECRAWL_PORT</code> (3002), <code class="text-zinc-200">FIRECRAWL_URL</code>, <code class="text-zinc-200">FIRECRAWL_COMPOSE_DIR</code>, <code class="text-zinc-200">FIRECRAWL_IDLE_TIMEOUT_MS</code> (900000ms), <code class="text-zinc-200">FIRECRAWL_ENABLED</code> (true), <code class="text-zinc-200">FIRECRAWL_ACTIVITY_DIR</code>, and <code class="text-zinc-200">FIRECRAWL_API_KEY</code>.</div>
             <div>• <strong>Fail-Open Fallback:</strong> If Docker or Firecrawl is offline, article ingestion seamlessly falls back to direct browser fetch and Jina Reader.</div>
             <div>• <strong>CLI Control:</strong> Manage cluster state manually via <code class="text-zinc-200">bin/lighthouse firecrawl status|up|down</code>.</div>
           </div>
@@ -3187,6 +3188,7 @@
               <button onclick="copyToClipboard('bin/lighthouse backup-ssd set-time 03:00')" class="p-1 hover:text-white" title="Copy"><svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg></button>
             </div>
           </div>
+          <div class="text-[11px] text-zinc-400 pt-1.5">• <strong>Scheduler Status:</strong> <code class="text-zinc-200">bin/lighthouse status</code> reports LaunchAgent state accurately as Loaded (Idle), Disabled, or Missing plist without mistaking idle scheduled agents for dead processes.</div>
         </div>
       </div>
 
