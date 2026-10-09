@@ -90,7 +90,12 @@ export function generateOpdsFeed(
   const feedUrl = options.feedUrl || "/opds";
   const baseUrl = (options.publicBaseUrl || "").replace(/\/+$/, "");
   const updatedIso = options.updated || formatIsoDate();
-  const searchUrl = options.searchUrl || `${baseUrl}/api/books?search={searchTerms}`;
+  // Default search points to native OPDS endpoint (/api/opds) rather than Calibre proxy (/opds)
+  const rawFeedPath = (options.feedUrl || "/api/opds").split("?")[0];
+  const searchBasePath = rawFeedPath === "/opds" ? "/api/opds" : rawFeedPath;
+  const searchUrl =
+    options.searchUrl ||
+    `${baseUrl}${searchBasePath.startsWith("/") ? searchBasePath : "/" + searchBasePath}?search={searchTerms}`;
   const iconUrl = options.iconUrl || `${baseUrl}/favicon.png`;
 
   const lines: string[] = [

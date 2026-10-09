@@ -87,7 +87,7 @@ Singapore WAN endpoints are the **primary recommended routes** for low-latency p
 | **Telegram Bot & Mini App** | `@saroat_ospeto_bot` | Telegram API | Ingest books, search catalog (`/find`), view shelf (`/reading`), hot backups (`/backup`) |
 | **Local KOSync** | `http://192.168.31.15:7200` | HTTP / JSON | Direct LAN progress sync for KOReader |
 | **Local Calibre OPDS Feed** | `http://192.168.31.15:8088/opds` | Atom / XML | Direct home LAN book catalog |
-| **Native LightHouse OPDS Feed** | `http://192.168.31.15:8086/api/opds` | Atom / XML | Zero-downtime native OPDS 1.2 catalog feed generated directly from SQLite metadata |
+| **Native LightHouse OPDS Feed** | `http://192.168.31.15:8086/api/opds` | Atom / XML | Zero-downtime native OPDS 1.2 catalog feed with filtered title/author/series search generated directly from SQLite metadata |
 | **Local Calibre Web Reader** | `http://192.168.31.15:8088` | Web UI | In-browser reading and Calibre catalog manager |
 | **Local LAN Proxy Gateway** | `http://192.168.31.15:7890` | HTTP / SOCKS5 | sing-box proxy gateway for Kindle GFW bypass |
 | **Singapore Reverse Tunnel Daemon** | `com.ospeto.reading-sg-tunnel` | SSH | LaunchAgent binding Mac Mini `:8086` and `:7200` to `sg-vps` |
@@ -295,7 +295,7 @@ bin/lighthouse status
    http://opds.wavypremium.xyz/opds
    ```
    *(Encrypted TLS: `https://opds.wavypremium.xyz:8443/opds` | Local LAN: `http://192.168.31.15:8088/opds`)*
-5. Tap **Connect** (no credentials required). Books can now be browsed, searched, and downloaded directly over Wi-Fi.
+5. Tap **Connect** (no credentials required). Books can now be browsed, searched by title/author/series, and downloaded directly over Wi-Fi.
 
 ### 3. Joplin Highlight & Note Export (Wireless Obsidian Sync)
 

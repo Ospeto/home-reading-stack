@@ -3792,12 +3792,46 @@ async function handleRequestCore(
     url.pathname === "/api/opds/catalog"
   ) {
     if (req.method !== "GET" && req.method !== "HEAD") {
-      return new Response("Method Not Allowed", { status: 405 });
+      const notAllowedHeaders: Record<string, string> = {
+        Allow: "GET, HEAD",
+        "X-Content-Type-Options": "nosniff",
+      };
+      if (corsOrigin) {
+        notAllowedHeaders["Access-Control-Allow-Origin"] = corsOrigin;
+        notAllowedHeaders["Access-Control-Allow-Credentials"] = "true";
+        notAllowedHeaders["Vary"] = "Origin";
+      }
+      return new Response("Method Not Allowed", {
+        status: 405,
+        headers: notAllowedHeaders,
+      });
     }
     const books = getCalibreBooks();
-    const opdsXml = generateOpdsFeed(books, {
-      title: "LightHouse OPDS Catalog",
-      feedUrl: url.pathname,
+    const query = (
+      url.searchParams.get("search") ??
+      url.searchParams.get("q") ??
+      url.searchParams.get("query") ??
+      ""
+    ).trim();
+
+    const filteredBooks = query
+      ? books.filter((b) => {
+          const q = query.toLowerCase();
+          const matchTitle = Boolean(b.title && b.title.toLowerCase().includes(q));
+          const matchAuthor = Boolean(b.authors && b.authors.toLowerCase().includes(q));
+          const matchSeries = Boolean(b.series && b.series.toLowerCase().includes(q));
+          return matchTitle || matchAuthor || matchSeries;
+        })
+      : books;
+
+    const feedPathWithSearch = url.pathname + (url.search || "");
+    const feedTitle = query
+      ? `LightHouse OPDS Catalog - Search: ${query}`
+      : "LightHouse OPDS Catalog";
+
+    const opdsXml = generateOpdsFeed(filteredBooks, {
+      title: feedTitle,
+      feedUrl: feedPathWithSearch,
       publicBaseUrl: `${url.protocol}//${url.host}`,
     });
 
