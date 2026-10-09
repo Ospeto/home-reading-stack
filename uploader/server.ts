@@ -2883,39 +2883,19 @@ export async function ingestBookFile(filePath: string, originalFileName: string)
 
   // 1. Check if exact hash exists in Calibre Library
   // On a cold hash cache, ensure the hash index is populated so exact-content duplicates are not missed
-  const { map, booksFetchFailed } = getCalibreHashMap(
+  const { map } = getCalibreHashMap(
     catalogFetchFailed ? { books: [], success: false } : books,
     { scanDisk: true },
   );
-  const isCatalogUnavailable = catalogFetchFailed || booksFetchFailed;
 
   if (fileHash && map[fileHash]) {
     const existing = map[fileHash];
-
-    if (isCatalogUnavailable) {
-      // Catalog is unavailable: preserve existing reservation/safety checks rather
-      // than treating unavailable as confirmed deletion.
-      return {
-        success: true,
-        duplicate: true,
-        bookId: existing.id,
-        message: `Book "${existing.title}" is already in your library.`,
-      };
-    }
-
-    // Catalog is available: verify active book identity against live catalog
-    const activeBook = books.find((b: any) => b.id === existing.id);
-    if (
-      activeBook &&
-      matchesActiveBookIdentity(activeBook, existing.title, existing.authors)
-    ) {
-      return {
-        success: true,
-        duplicate: true,
-        bookId: activeBook.id,
-        message: `Book "${activeBook.title}" is already in your library.`,
-      };
-    }
+    return {
+      success: true,
+      duplicate: true,
+      bookId: existing.id,
+      message: `Book "${existing.title}" is already in your library.`,
+    };
   }
 
   // 2. Check if normalized title already exists
@@ -3122,14 +3102,12 @@ function getKosyncProgress() {
             // do NOT allow fuzzy title-only fallback to override that rejection!
             let wasRejected = rejectedHashes && rejectedHashes.has(r.document);
 
-            // Cold-cache resilience: if document is identified only by hash (no title/filename)
-            // and was not found in map and not rejected, refresh the hash index explicitly once
+            // Cold-cache resilience: if document hash missed the map and was not rejected,
+            // refresh the hash index explicitly once before relying on title/filename fallback
             if (
               !bookId &&
               !wasRejected &&
               r.document &&
-              !r.title &&
-              !r.filename &&
               !booksFetchFailed &&
               books.length > 0
             ) {

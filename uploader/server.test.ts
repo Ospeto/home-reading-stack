@@ -4365,7 +4365,7 @@ exit 0
         const cdb = getCacheDb();
         cdb.run("DELETE FROM file_hashes WHERE hash = ?", [docHash]);
 
-        // 4. Create KOSync progress row with NO title or author (hash-only identification)
+        // 4. Create KOSync progress row with filename present but title absent
         const kdb = new Database(kosyncDbPath);
         kdb.run(`
           CREATE TABLE progress (
@@ -4383,7 +4383,7 @@ exit 0
         `);
         kdb.run(
           "INSERT INTO progress (document, progress, percentage, device, device_id, filename, title, authors, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          [docHash, "p1", 0.3, "device1", "dev1", "", "", "", Date.now()],
+          [docHash, "p1", 0.3, "device1", "dev1", "Cold Book.epub", "", "", Date.now()],
         );
         kdb.close();
 
@@ -4722,6 +4722,55 @@ exit 0
         if (origLibDir !== undefined) process.env.CALIBRE_LIBRARY_DIR = origLibDir;
         else delete process.env.CALIBRE_LIBRARY_DIR;
         await fs.promises.rm(tempLibDir, { recursive: true, force: true });
+        await fs.promises.rm(tempDropDir, { recursive: true, force: true });
+      }
+    });
+
+    it("ingestBookFile preserves explicit alias duplicate match when both authors are unknown without dropping alias provenance", async () => {
+      const knownBooks = [
+        { id: 91, title: "Anonymous Manuscript", authors: "Unknown", cover: 0 },
+      ];
+      setServerDependenciesForTest({
+        getCalibreBooks: () => knownBooks,
+      });
+
+      const tempDropDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "u12-alias-unknown-"));
+      try {
+        const testEpub = path.join(tempDropDir, "anon.epub");
+        const staging = path.join(tempDropDir, "staging");
+        fs.mkdirSync(path.join(staging, "META-INF"), { recursive: true });
+        fs.mkdirSync(path.join(staging, "OEBPS"), { recursive: true });
+        fs.writeFileSync(path.join(staging, "mimetype"), "application/epub+zip");
+        fs.writeFileSync(
+          path.join(staging, "META-INF", "container.xml"),
+          `<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`,
+        );
+        fs.writeFileSync(
+          path.join(staging, "OEBPS", "content.opf"),
+          `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Edited Calibre Title</dc:title><dc:creator>Unknown</dc:creator></metadata><manifest><item id="t" href="text.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="t"/></spine></package>`,
+        );
+        fs.writeFileSync(
+          path.join(staging, "OEBPS", "text.xhtml"),
+          `<html><body>${"Prose for alias unknown author test. ".repeat(100)}</body></html>`,
+        );
+        spawnSync("zip", ["-q", "-X", "-0", testEpub, "mimetype"], { cwd: staging });
+        spawnSync("zip", ["-q", "-r", testEpub, "META-INF", "OEBPS"], { cwd: staging });
+
+        const { getKOReaderBinary256 } = await import("./bot");
+        const docHash = getKOReaderBinary256(testEpub);
+
+        const cdb = getCacheDb();
+        cdb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          [`alias:${docHash}`, 1, docHash, 91, "Anonymous Manuscript", "Unknown", 0],
+        );
+
+        const res = await ingestBookFile(testEpub, "anon.epub");
+        expect(res.success).toBe(true);
+        expect(res.duplicate).toBe(true);
+        expect(res.bookId).toBe(91);
+      } finally {
+        resetServerDependenciesForTest();
         await fs.promises.rm(tempDropDir, { recursive: true, force: true });
       }
     });
