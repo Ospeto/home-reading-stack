@@ -2559,10 +2559,117 @@ export function matchesActiveBookIdentity(
   return false;
 }
 
+/**
+ * Separate, explicit hash-index refresh path that scans the Calibre library
+ * on disk and updates file_hashes cache with binary/content hashes.
+ */
+export function refreshCalibreHashIndex(options: { forceFreshBooks?: boolean } = {}) {
+  const getBooksFn = serverDependencies.getCalibreBooks ?? getCalibreBooks;
+  const books = getBooksFn(options.forceFreshBooks ?? false);
+  const activeBookById = new Map<number, any>();
+  for (const b of books) {
+    if (b && typeof b.id === "number") {
+      activeBookById.set(b.id, b);
+    }
+  }
+
+  const selectStmt = cacheDb.prepare(
+    "SELECT hash FROM file_hashes WHERE filepath = ? AND mtime = ?",
+  );
+  const insertStmt = cacheDb.prepare(
+    "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  );
+
+  let indexedCount = 0;
+
+  function scanDir(dir: string) {
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          scanDir(full);
+        } else if (e.name.endsWith(".epub")) {
+          const stat = fs.statSync(full);
+          const mtime = Math.floor(stat.mtimeMs);
+
+          const cached = selectStmt.get(full + "#bin256", mtime) as any;
+          if (!cached) {
+            const parentDir = path.basename(path.dirname(full));
+            const idMatch = parentDir.match(/\((\d+)\)$/);
+            const matchedById = idMatch
+              ? books.find((b: any) => b.id === Number(idMatch[1]))
+              : null;
+
+            const bookMatch =
+              matchedById ||
+              books.find(
+                (b: any) =>
+                  b.title
+                    .toLowerCase()
+                    .includes(
+                      path.basename(e.name, path.extname(e.name)).toLowerCase(),
+                    ) ||
+                  e.name.toLowerCase().includes(b.title.toLowerCase()),
+              );
+            const bId = bookMatch ? bookMatch.id : null;
+            const bTitle = bookMatch
+              ? bookMatch.title
+              : path.basename(e.name, path.extname(e.name));
+            const bAuthors = bookMatch
+              ? bookMatch.authors || "Unknown"
+              : "Unknown";
+            const bCover = bookMatch ? (bookMatch.cover ? 1 : 0) : 0;
+
+            const h1 = getKOReaderBinary256(full);
+            const h2 = getKOReaderPartial512(full);
+            const h3 = getFilenameMD5(e.name);
+            const h4 = getFilenameMD5(bTitle + ".epub");
+
+            const hashSet = new Set(
+              [h1, h2, h3, h4].filter(Boolean) as string[],
+            );
+            for (const h of hashSet) {
+              insertStmt.run(
+                full + "#" + h,
+                mtime,
+                h,
+                bId,
+                bTitle,
+                bAuthors,
+                bCover,
+              );
+              indexedCount++;
+            }
+            insertStmt.run(
+              full + "#bin256",
+              mtime,
+              h1 || "sentinel",
+              bId,
+              bTitle,
+              bAuthors,
+              bCover,
+            );
+          }
+        }
+      }
+    } catch (_e) {
+      void _e;
+    }
+  }
+
+  scanDir(getCalibreLibraryDir());
+  return { indexedCount };
+}
+
 export function getCalibreHashMap(
   knownBooksInput?: any,
   options?: { scanDisk?: boolean },
 ) {
+  if (options?.scanDisk) {
+    refreshCalibreHashIndex();
+  }
+
   const map: Record<
     string,
     { id: number; title: string; authors: string; cover: boolean }
@@ -2666,109 +2773,6 @@ export function getCalibreHashMap(
     }
   } catch (_e) {
     void _e;
-  }
-
-  // Scan disk only if explicitly requested; default read path is 100% read-only
-  if (options?.scanDisk) {
-    const selectStmt = cacheDb.prepare(
-      "SELECT hash FROM file_hashes WHERE filepath = ? AND mtime = ?",
-    );
-    const insertStmt = cacheDb.prepare(
-      "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    );
-
-    function scanDir(dir: string) {
-      try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        for (const e of entries) {
-          const full = path.join(dir, e.name);
-          if (e.isDirectory()) {
-            scanDir(full);
-          } else if (e.name.endsWith(".epub")) {
-            const stat = fs.statSync(full);
-            const mtime = Math.floor(stat.mtimeMs);
-
-            const cached = selectStmt.get(full + "#bin256", mtime) as any;
-            if (!cached) {
-              const parentDir = path.basename(path.dirname(full));
-              const idMatch = parentDir.match(/\((\d+)\)$/);
-              const matchedById = idMatch
-                ? books.find((b: any) => b.id === Number(idMatch[1]))
-                : null;
-
-              const bookMatch =
-                matchedById ||
-                books.find(
-                  (b: any) =>
-                    b.title
-                      .toLowerCase()
-                      .includes(
-                        path.basename(e.name, path.extname(e.name)).toLowerCase(),
-                      ) ||
-                    e.name.toLowerCase().includes(b.title.toLowerCase()),
-                );
-              const bId = bookMatch ? bookMatch.id : null;
-              const bTitle = bookMatch
-                ? bookMatch.title
-                : path.basename(e.name, path.extname(e.name));
-              const bAuthors = bookMatch
-                ? bookMatch.authors || "Unknown"
-                : "Unknown";
-              const bCover = bookMatch ? (bookMatch.cover ? 1 : 0) : 0;
-
-              const h1 = getKOReaderBinary256(full);
-              const h2 = getKOReaderPartial512(full);
-              const h3 = getFilenameMD5(e.name);
-              const h4 = getFilenameMD5(bTitle + ".epub");
-
-              const hashSet = new Set(
-                [h1, h2, h3, h4].filter(Boolean) as string[],
-              );
-              for (const h of hashSet) {
-                insertStmt.run(
-                  full + "#" + h,
-                  mtime,
-                  h,
-                  bId,
-                  bTitle,
-                  bAuthors,
-                  bCover,
-                );
-                if (
-                  bId !== null &&
-                  typeof bId === "number" &&
-                  bookMatch &&
-                  activeBookById.has(bId)
-                ) {
-                  if (!map[h]) {
-                    map[h] = {
-                      id: bId,
-                      title: bTitle,
-                      authors: bAuthors,
-                      cover: !!bCover,
-                    };
-                  }
-                }
-              }
-              // Insert cache sentinel row so selectStmt hits cache on subsequent scans
-              insertStmt.run(
-                full + "#bin256",
-                mtime,
-                h1 || "sentinel",
-                bId,
-                bTitle,
-                bAuthors,
-                bCover,
-              );
-            }
-          }
-        }
-      } catch (_e) {
-        void _e;
-      }
-    }
-
-    scanDir(getCalibreLibraryDir());
   }
 
   return { map, books, booksFetchFailed, rejectedHashes };
@@ -3064,7 +3068,23 @@ function getKosyncProgress() {
             )
             .all() as any[];
 
-          const { map, books, rejectedHashes } = getCalibreHashMap();
+          let { map, books, booksFetchFailed, rejectedHashes } =
+            getCalibreHashMap();
+
+          // Cold-cache resilience: if progress has entries but file_hashes is cold/empty
+          // and catalog is available, refresh the hash index explicitly so document-hash-only
+          // entries can map to their Calibre books.
+          if (
+            rows.length > 0 &&
+            Object.keys(map).length === 0 &&
+            !booksFetchFailed &&
+            books.length > 0
+          ) {
+            refreshCalibreHashIndex();
+            const refreshed = getCalibreHashMap(books);
+            map = refreshed.map;
+            rejectedHashes = refreshed.rejectedHashes;
+          }
 
           return rows.map((r) => {
             let displayTitle = r.title || r.filename;
