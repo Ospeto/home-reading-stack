@@ -5,7 +5,7 @@ import process from "node:process";
 import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
-import { validateEpubContent, repairTruncatedEpub, safeFetchWithSsrf } from "./security";
+import { validateEpubContent, repairTruncatedEpub, safeFetchWithSsrf, sanitizeErrorMessage } from "./security";
 import {
   isCommentsEmpty,
   sanitizeSynopsis,
@@ -964,6 +964,118 @@ export async function fetchLnoriHtml(
   return await readResponseTextWithLimit(res, MAX_HTML_BYTES, "Lnori HTML");
 }
 
+export interface LnoriStorageErrorInfo {
+  status: number;
+  code: string;
+  isOriginDnsError: boolean;
+  userMessage: string;
+  technicalDetail: string;
+  suggestion: string;
+}
+
+export interface LnoriFailedVolume {
+  volumeIndex: number;
+  title: string;
+  epubFilename?: string;
+  error: string;
+  storageError?: LnoriStorageErrorInfo;
+}
+
+export function classifyLnoriStorageResponse(
+  status: number,
+  bodySnippet: string = "",
+  headers?: Headers | Record<string, string>,
+): LnoriStorageErrorInfo {
+  const bodyLower = String(bodySnippet || "").toLowerCase();
+  let serverHeader = "";
+  let hasCfRay = false;
+  if (headers) {
+    if (typeof (headers as Headers).get === "function") {
+      serverHeader = (headers as Headers).get("server")?.toLowerCase() || "";
+      hasCfRay = Boolean((headers as Headers).get("cf-ray"));
+    } else {
+      const hObj = headers as Record<string, string>;
+      for (const k of Object.keys(hObj)) {
+        if (k.toLowerCase() === "server") serverHeader = String(hObj[k]).toLowerCase();
+        if (k.toLowerCase() === "cf-ray") hasCfRay = true;
+      }
+    }
+  }
+
+  // Narrow, safe classification for Cloudflare Error 1016 (Origin DNS error)
+  // HTTP 530 alone must NOT be falsely labeled verified DNS1016 without verified evidence in body or headers
+  const isCfEdge = serverHeader.includes("cloudflare") || hasCfRay;
+  const has1016Evidence =
+    bodyLower.includes("error code: 1016") ||
+    bodyLower.includes("error 1016") ||
+    bodyLower.includes("origin dns error") ||
+    (isCfEdge && bodyLower.includes("1016"));
+
+  if (status === 530 && has1016Evidence) {
+    return {
+      status: 530,
+      code: "CLOUDFLARE_DNS_1016",
+      isOriginDnsError: true,
+      userMessage: "Lnori download server has an origin DNS error (Cloudflare Error 1016) and cannot deliver EPUB files.",
+      technicalDetail: "Cloudflare Error 1016 (HTTP 530: Origin DNS error)",
+      suggestion: "Wait for Lnori storage to recover, or upload EPUB files directly via Web Uploader.",
+    };
+  }
+
+  if (status === 530) {
+    return {
+      status: 530,
+      code: "HTTP_530_UNAVAILABLE",
+      isOriginDnsError: false,
+      userMessage: "Lnori download server is currently unavailable (HTTP 530).",
+      technicalDetail: "HTTP 530 (Storage service unavailable)",
+      suggestion: "Wait for Lnori storage to recover, or upload EPUB files directly via Web Uploader.",
+    };
+  }
+
+  if (status === 404) {
+    return {
+      status: 404,
+      code: "NOT_FOUND",
+      isOriginDnsError: false,
+      userMessage: "EPUB file was not found on Lnori storage (HTTP 404).",
+      technicalDetail: "HTTP 404",
+      suggestion: "The requested volume may have been removed or relocated on Lnori.",
+    };
+  }
+
+  if (status === 401 || status === 403) {
+    return {
+      status,
+      code: "FORBIDDEN",
+      isOriginDnsError: false,
+      userMessage: `Access to EPUB download was denied by Lnori storage (HTTP ${status}).`,
+      technicalDetail: `HTTP ${status}`,
+      suggestion: "The file may be restricted or require updated Lnori access permissions.",
+    };
+  }
+
+  if (status >= 500) {
+    return {
+      status,
+      code: `HTTP_${status}`,
+      isOriginDnsError: false,
+      userMessage: `Lnori storage returned a server error (HTTP ${status}).`,
+      technicalDetail: `HTTP ${status}`,
+      suggestion: "Wait for Lnori storage to recover, or upload EPUB files directly via Web Uploader.",
+    };
+  }
+
+  return {
+    status,
+    code: `HTTP_${status}`,
+    isOriginDnsError: false,
+    userMessage: `Failed to download from Lnori storage (HTTP ${status}).`,
+    technicalDetail: `HTTP ${status}`,
+    suggestion: "Wait for Lnori storage to recover, or upload EPUB files directly via Web Uploader.",
+  };
+}
+
 export async function downloadLnoriEpub(
   epubFilename: string,
   destPath: string,
@@ -1087,11 +1199,25 @@ export async function downloadLnoriEpub(
       }
 
       if (!res.ok) {
-        lastError = new Error(
-          `Failed to download EPUB from Lnori storage (${res.status}): ${downloadUrl}`,
-        );
-        if ((res.status >= 500 || res.status === 429) && attempt < MAX_RETRIES) {
+        let bodySnippet = "";
+        try {
+          bodySnippet = await readResponseTextWithLimit(res, 4096, "Lnori error response");
+        } catch {
           await cancelResponseBody(res);
+        }
+
+        const classified = classifyLnoriStorageResponse(res.status, bodySnippet, res.headers);
+        const errDetail = classified.isOriginDnsError
+          ? "Origin DNS error (Cloudflare Error 1016)"
+          : classified.technicalDetail;
+
+        const err = new Error(
+          `Failed to download EPUB from Lnori storage (${res.status}): ${errDetail}`,
+        );
+        (err as any).storageError = classified;
+        lastError = err;
+
+        if ((res.status >= 500 || res.status === 429) && attempt < MAX_RETRIES) {
           continue;
         }
         throw lastError;
@@ -1286,6 +1412,9 @@ export function formatLnoriProgress(event: LnoriProgressEvent): string {
   if (event.phase === "complete") {
     return `Completed: ${event.data?.importedCount || 0} imported, ${event.data?.skippedCount || 0} skipped`;
   }
+  if (event.phase === "error") {
+    return event.data?.error || "Lnori ingestion encountered an error.";
+  }
   return `[Lnori ${event.phase}]`;
 }
 
@@ -1313,6 +1442,15 @@ export interface IngestLnoriResult {
   totalCount: number;
   calibreBookIds: number[];
   error?: string;
+  errorDetails?: {
+    code?: string;
+    isOriginDnsError?: boolean;
+    userMessage?: string;
+    technicalDetail?: string;
+    suggestion?: string;
+    failedVolumes?: LnoriFailedVolume[];
+  };
+  failedVolumes?: LnoriFailedVolume[];
 }
 
 export async function ingestLnoriSeries(
@@ -1353,6 +1491,7 @@ export async function ingestLnoriSeries(
   let skippedMissing = 0;
   let skippedErrors = 0;
   const calibreBookIds: number[] = [];
+  const failedVolumeDetails: LnoriFailedVolume[] = [];
   const seriesCache = new Map<string, { description: string; coverUrl?: string; source?: string }>();
 
   await reportProgress(onProgress, {
@@ -1682,18 +1821,40 @@ export async function ingestLnoriSeries(
           `[Lnori] Volume ${assignedIndex} ("${title}") failed during ingestion:`,
           volErr?.message || volErr,
         );
+
+        const storageErr: LnoriStorageErrorInfo | undefined =
+          volErr?.storageError ||
+          (String(volErr?.message || "").includes("1016")
+            ? classifyLnoriStorageResponse(530, "error code: 1016")
+            : undefined);
+
+        const cleanVolErrMsg = storageErr
+          ? `${storageErr.userMessage} (${storageErr.technicalDetail})`
+          : sanitizeErrorMessage(volErr?.message || String(volErr));
+
+        failedVolumeDetails.push({
+          volumeIndex: assignedIndex,
+          title,
+          epubFilename: volMeta.epubFilename,
+          error: cleanVolErrMsg,
+          storageError: storageErr,
+        });
+
         await reportProgress(onProgress, {
           phase: "volume",
           index: volNum,
           total: totalCount,
           volumeTitle: title,
-          status: `_[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Skipped volume due to error, continuing with next volume..._\n*${escapeTelegramMarkdown(volMeta.epubFilename)}*`,
+          status: storageErr?.isOriginDnsError
+            ? `_[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Skipped volume due to origin DNS error (Cloudflare 1016)..._\n*${escapeTelegramMarkdown(volMeta.epubFilename)}*`
+            : `_[Volume ${escapeTelegramMarkdown(String(volNum))}/${escapeTelegramMarkdown(String(totalCount))}] Skipped volume due to error, continuing with next volume..._\n*${escapeTelegramMarkdown(volMeta.epubFilename)}*`,
           data: {
             action: "skipped",
             reason: "import_error",
             volumeIndex: assignedIndex,
             title,
-            error: volErr?.message || String(volErr),
+            error: cleanVolErrMsg,
+            ...(storageErr ? { storageError: storageErr } : {}),
           },
         });
         skippedErrors++;
@@ -1716,6 +1877,48 @@ export async function ingestLnoriSeries(
 
   const tagsFormatted = ["Light Novel", ...manifest.tags].join(", ");
   const totalSkipped = duplicateCount + skippedMissing + skippedErrors;
+  const isAllFailed = importedCount === 0 && duplicateCount === 0 && skippedErrors > 0;
+  const isPartialSuccess = (importedCount > 0 || duplicateCount > 0) && skippedErrors > 0;
+
+  const hasOriginDnsError = failedVolumeDetails.some((f) => f.storageError?.isOriginDnsError);
+  const primaryStorageError = failedVolumeDetails.find((f) => f.storageError)?.storageError;
+
+  let finalError: string | undefined;
+  let finalErrorDetails: IngestLnoriResult["errorDetails"] | undefined;
+
+  if (isAllFailed) {
+    if (hasOriginDnsError) {
+      finalError = "Lnori download server has an origin DNS error (Cloudflare Error 1016) and cannot deliver EPUB files. Wait for Lnori storage recovery or upload EPUB files directly.";
+    } else if (primaryStorageError) {
+      finalError = `${primaryStorageError.userMessage} ${primaryStorageError.suggestion}`;
+    } else {
+      finalError = `Failed to download ${skippedErrors} volume${skippedErrors === 1 ? "" : "s"} from Lnori storage.`;
+    }
+
+    finalErrorDetails = {
+      code: hasOriginDnsError ? "CLOUDFLARE_DNS_1016" : primaryStorageError?.code,
+      isOriginDnsError: hasOriginDnsError,
+      userMessage: hasOriginDnsError
+        ? "Lnori download server has an origin DNS error (Cloudflare Error 1016) and cannot deliver EPUB files."
+        : primaryStorageError?.userMessage || finalError,
+      technicalDetail: primaryStorageError?.technicalDetail,
+      suggestion: hasOriginDnsError
+        ? "Wait for Lnori storage recovery or upload EPUB files directly."
+        : primaryStorageError?.suggestion || "Wait for Lnori storage to recover or upload EPUB files directly.",
+      failedVolumes: failedVolumeDetails,
+    };
+  } else if (isPartialSuccess) {
+    finalErrorDetails = {
+      code: hasOriginDnsError ? "CLOUDFLARE_DNS_1016" : primaryStorageError?.code,
+      isOriginDnsError: hasOriginDnsError,
+      userMessage: hasOriginDnsError
+        ? `${skippedErrors} volume${skippedErrors === 1 ? "" : "s"} failed due to Lnori origin DNS error (Cloudflare Error 1016).`
+        : `${skippedErrors} volume${skippedErrors === 1 ? "" : "s"} failed during download.`,
+      technicalDetail: primaryStorageError?.technicalDetail,
+      suggestion: "You can upload missing volumes directly via Web Uploader.",
+      failedVolumes: failedVolumeDetails,
+    };
+  }
 
   const result: IngestLnoriResult = {
     success: importedCount > 0 || (duplicateCount > 0 && skippedErrors === 0) || (skippedMissing > 0 && skippedErrors === 0),
@@ -1728,12 +1931,19 @@ export async function ingestLnoriSeries(
     skippedErrors,
     totalCount,
     calibreBookIds,
+    ...(finalError ? { error: finalError } : {}),
+    ...(finalErrorDetails ? { errorDetails: finalErrorDetails } : {}),
+    ...(failedVolumeDetails.length > 0 ? { failedVolumes: failedVolumeDetails } : {}),
   };
 
-  const summaryStatus = `Finished: ${importedCount} new volumes added, ${duplicateCount} existing volumes preserved.`;
+  const summaryStatus = isAllFailed
+    ? finalError || `Failed to ingest series: all ${totalCount} volumes failed.`
+    : isPartialSuccess
+      ? `Finished: ${importedCount} new volumes added, ${duplicateCount} existing volumes preserved (${skippedErrors} volumes failed).`
+      : `Finished: ${importedCount} new volumes added, ${duplicateCount} existing volumes preserved.`;
 
   await reportProgress(onProgress, {
-    phase: "complete",
+    phase: isAllFailed ? "error" : "complete",
     index: totalCount,
     total: totalCount,
     volumeTitle: manifest.seriesTitle,
@@ -1741,6 +1951,7 @@ export async function ingestLnoriSeries(
     data: {
       ...result,
       summary: summaryStatus,
+      ...(isAllFailed ? { error: finalError, errorDetails: finalErrorDetails } : {}),
     },
   });
 
