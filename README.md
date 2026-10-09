@@ -53,7 +53,7 @@ LightHouse turns a home Mac mini or Linux host into an always-on personal readin
    - High-performance Bun/TypeScript server with in-process SQLite queries.
    - Minimalist, responsive Telegram Mini App (TMA) and desktop catalog interface (`uploader/index.html`).
    - Durable SQLite-backed ingestion job queue (`cache.db`) and EPUB-only canonical enforcement.
-   - Built-in OPDS feed reverse proxy forwarding `/opds` and `/get/*` directly to Calibre with range requests.
+   - Built-in OPDS feed reverse proxy forwarding `/opds` and `/get/*` directly to Calibre with range requests, client-facing URL rewriting, exact UTF-8 `Content-Length` accounting, and clean RFC 9110 validator hygiene.
 2. **KOSync Server (`kosync/`, port `7200`):**
    - Lightweight, self-hosted KOReader synchronization backend backed by SQLite (`koreader-sync.db`).
    - Syncs reading positions, progress percentage, and timestamps across devices instantly.
