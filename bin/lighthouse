@@ -1552,9 +1552,15 @@ restore_single_db() {
     primary_count="$dest_count"
   fi
 
+  local dump_stage_dir
+  dump_stage_dir="$(dirname "$src")"
+  if [ ! -d "$dump_stage_dir" ] || [ ! -w "$dump_stage_dir" ]; then
+    dump_stage_dir="${TMPDIR:-/tmp}"
+  fi
+
   local src_dump_tmp dest_dump_tmp
-  src_dump_tmp=$(mktemp "${TMPDIR:-/tmp}/lh-src-dump-XXXXXX")
-  dest_dump_tmp=$(mktemp "${TMPDIR:-/tmp}/lh-dest-dump-XXXXXX")
+  src_dump_tmp=$(mktemp "${dump_stage_dir}/lh-src-dump-XXXXXX")
+  dest_dump_tmp=$(mktemp "${dump_stage_dir}/lh-dest-dump-XXXXXX")
 
   local total_records=0
   if [ -n "$src_tables" ]; then
