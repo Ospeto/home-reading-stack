@@ -26,10 +26,14 @@ import {
   stripTrackingParams,
   validateArticleUrl,
   TRACKING_PARAMS,
+  FAST_FAIL_ARTICLE_DOMAINS,
+  isFastFailArticleDomain,
+  isFastFailDomain,
+  compute429BackoffMs,
 } from "./article";
 import { isElscioneUrl } from "./elscione";
 import { evaluateJunkGate } from "./jev-shelf";
-import { setFirecrawlEnabled } from "./firecrawl";
+import { setFirecrawlEnabled, scrapeArticleWithFirecrawl } from "./firecrawl";
 
 let originalFetch = globalThis.fetch;
 let mockArticleFetch: any = null;
@@ -777,7 +781,7 @@ describe("Article Extraction: Firecrawl Tier 1 & Fail-Open Fallback", () => {
   test("uses Firecrawl Tier 1 when available and content is valid", async () => {
     process.env.EBOOK_CONVERT_PATH = mockConvertScript!;
     const mockServer = Bun.serve({
-      port: 49992,
+      port: 0,
       fetch(req) {
         if (req.method === "GET" && new URL(req.url).pathname === "/") {
           return new Response("OK", { status: 200 });
@@ -804,7 +808,8 @@ describe("Article Extraction: Firecrawl Tier 1 & Fail-Open Fallback", () => {
       },
     });
 
-    process.env.FIRECRAWL_URL = "http://127.0.0.1:49992";
+    process.env.FIRECRAWL_PORT = String(mockServer.port);
+    process.env.FIRECRAWL_URL = `http://127.0.0.1:${mockServer.port}`;
     setFirecrawlEnabled(true);
 
     try {
@@ -1798,6 +1803,575 @@ exit 0
       } catch (_err) {
         void _err;
       }
+    }
+  });
+});
+
+describe("Fast-Fail Article Domains & Tier 2 Bypass Routing", () => {
+  const origEnv = { ...process.env };
+
+  afterEach(() => {
+    setFirecrawlEnabled(false);
+    for (const k of Object.keys(process.env)) {
+      if (!(k in origEnv)) delete process.env[k];
+    }
+    Object.assign(process.env, origEnv);
+    if (mockConvertScript) {
+      process.env.EBOOK_CONVERT_PATH = mockConvertScript;
+    }
+  });
+
+  test("FAST_FAIL_ARTICLE_DOMAINS contains the required 10 bot-protected / JS-rendered domains", () => {
+    const requiredDomains = [
+      "substack.com",
+      "medium.com",
+      "bloomberg.com",
+      "nytimes.com",
+      "ft.com",
+      "wsj.com",
+      "theinformation.com",
+      "x.com",
+      "twitter.com",
+      "wired.com",
+    ];
+
+    for (const d of requiredDomains) {
+      expect(FAST_FAIL_ARTICLE_DOMAINS.has(d)).toBe(true);
+    }
+    expect(FAST_FAIL_ARTICLE_DOMAINS.size).toBe(10);
+  });
+
+  test("isFastFailArticleDomain accurately matches exact domains, subdomains, and full URLs", () => {
+    // Exact domains
+    expect(isFastFailArticleDomain("substack.com")).toBe(true);
+    expect(isFastFailArticleDomain("medium.com")).toBe(true);
+    expect(isFastFailArticleDomain("bloomberg.com")).toBe(true);
+    expect(isFastFailArticleDomain("nytimes.com")).toBe(true);
+    expect(isFastFailArticleDomain("ft.com")).toBe(true);
+    expect(isFastFailArticleDomain("wsj.com")).toBe(true);
+    expect(isFastFailArticleDomain("theinformation.com")).toBe(true);
+    expect(isFastFailArticleDomain("x.com")).toBe(true);
+    expect(isFastFailArticleDomain("twitter.com")).toBe(true);
+    expect(isFastFailArticleDomain("wired.com")).toBe(true);
+
+    // Subdomains
+    expect(isFastFailArticleDomain("astralcodexten.substack.com")).toBe(true);
+    expect(isFastFailArticleDomain("author.newsletter.substack.com")).toBe(true);
+    expect(isFastFailArticleDomain("towardsdatascience.medium.com")).toBe(true);
+    expect(isFastFailArticleDomain("www.bloomberg.com")).toBe(true);
+    expect(isFastFailArticleDomain("asia.bloomberg.com")).toBe(true);
+    expect(isFastFailArticleDomain("www.nytimes.com")).toBe(true);
+    expect(isFastFailArticleDomain("m.ft.com")).toBe(true);
+    expect(isFastFailArticleDomain("markets.ft.com")).toBe(true);
+    expect(isFastFailArticleDomain("www.wsj.com")).toBe(true);
+    expect(isFastFailArticleDomain("www.theinformation.com")).toBe(true);
+    expect(isFastFailArticleDomain("mobile.x.com")).toBe(true);
+    expect(isFastFailArticleDomain("mobile.twitter.com")).toBe(true);
+    expect(isFastFailArticleDomain("www.wired.com")).toBe(true);
+
+    // Full URLs
+    expect(
+      isFastFailArticleDomain("https://astralcodexten.substack.com/p/my-post"),
+    ).toBe(true);
+    expect(isFastFailArticleDomain("https://medium.com/@user/story-slug")).toBe(
+      true,
+    );
+    expect(
+      isFastFailArticleDomain(
+        "https://www.nytimes.com/2026/10/article.html?utm_source=news",
+      ),
+    ).toBe(true);
+    expect(
+      isFastFailArticleDomain("https://x.com/tech_insider/status/123456789"),
+    ).toBe(true);
+
+    // Case-insensitivity
+    expect(isFastFailArticleDomain("SUBSTACK.COM")).toBe(true);
+    expect(isFastFailArticleDomain("Medium.Com")).toBe(true);
+    expect(isFastFailArticleDomain("https://WWW.WIRED.COM/story/test")).toBe(
+      true,
+    );
+
+    // Trailing dot FQDN
+    expect(isFastFailArticleDomain("substack.com.")).toBe(true);
+    expect(isFastFailArticleDomain("https://author.substack.com./post")).toBe(
+      true,
+    );
+
+    // isFastFailDomain alias equality
+    expect(isFastFailDomain("substack.com")).toBe(true);
+    expect(isFastFailDomain("example.com")).toBe(false);
+  });
+
+  test("isFastFailArticleDomain correctly rejects unrelated domains and spoof attempts", () => {
+    expect(isFastFailArticleDomain("paulgraham.com")).toBe(false);
+    expect(isFastFailArticleDomain("example.com")).toBe(false);
+    expect(isFastFailArticleDomain("github.com")).toBe(false);
+    expect(isFastFailArticleDomain("fake-substack.com")).toBe(false);
+    expect(isFastFailArticleDomain("notmedium.com")).toBe(false);
+    expect(isFastFailArticleDomain("substack.com.attacker.org")).toBe(false);
+    expect(isFastFailArticleDomain("medium.com.evil.com")).toBe(false);
+    expect(isFastFailArticleDomain("ft.com.fake.net")).toBe(false);
+    expect(isFastFailArticleDomain("x.com.hacker.io")).toBe(false);
+    expect(isFastFailArticleDomain("my-wired.com")).toBe(false);
+  });
+
+  test("isFastFailArticleDomain safely handles null, undefined, empty, or invalid inputs", () => {
+    expect(isFastFailArticleDomain("")).toBe(false);
+    expect(isFastFailArticleDomain("   ")).toBe(false);
+    expect(isFastFailArticleDomain(null as any)).toBe(false);
+    expect(isFastFailArticleDomain(undefined as any)).toBe(false);
+    expect(isFastFailArticleDomain("not a valid url at all :// ??")).toBe(false);
+  });
+
+  test("extractArticle bypasses Tier 2 direct fetch for fast-fail domains directly to Jina Reader", async () => {
+    let directFetchAttempted = false;
+    let jinaFetchAttempted = false;
+    const origFetch = globalThis.fetch;
+
+    const dummyProse =
+      "Distributed consensus protocols and leader election algorithms are essential for modern databases. ".repeat(
+        25,
+      );
+    const jinaArticleMd = `Title: The Future of Distributed Systems
+Author: Distributed Systems Lead
+URL Source: https://author.substack.com/p/future-distributed-systems
+Markdown Content:
+${dummyProse}`;
+
+    globalThis.fetch = (async (input: any) => {
+      const urlStr = typeof input === "string" ? input : input?.url || "";
+      if (urlStr.includes("r.jina.ai")) {
+        jinaFetchAttempted = true;
+        return new Response(jinaArticleMd, {
+          status: 200,
+          headers: { "Content-Type": "text/markdown; charset=utf-8" },
+        });
+      }
+
+      if (urlStr.includes("author.substack.com")) {
+        directFetchAttempted = true;
+        return new Response("Direct fetch should not be called", { status: 403 });
+      }
+
+      return origFetch(input);
+    }) as any;
+
+    try {
+      const article = await extractArticle(
+        "https://author.substack.com/p/future-distributed-systems",
+      );
+
+      expect(directFetchAttempted).toBe(false);
+      expect(jinaFetchAttempted).toBe(true);
+      expect(article.title).toBe("The Future of Distributed Systems");
+      expect(article.author).toBe("Distributed Systems Lead");
+      expect(article.wordCount).toBeGreaterThan(150);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  test("extractArticle still uses Firecrawl Tier 1 when Firecrawl is available for fast-fail domains", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        if (req.method === "GET") return new Response("OK", { status: 200 });
+        if (req.method === "POST" && new URL(req.url).pathname === "/v1/scrape") {
+          return new Response(
+            JSON.stringify({
+              success: true,
+              data: {
+                markdown: "# Substack via Firecrawl\n\n".concat(
+                  "Deep dive article extracted with Firecrawl headless browser rendering. ".repeat(25),
+                ),
+                metadata: {
+                  title: "Substack via Firecrawl",
+                  author: "Firecrawl Scraper",
+                  "og:site_name": "Tech Substack",
+                },
+              },
+            }),
+            { headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    process.env.FIRECRAWL_PORT = String(server.port);
+    process.env.FIRECRAWL_URL = `http://127.0.0.1:${server.port}`;
+    setFirecrawlEnabled(true);
+
+    let jinaCalled = false;
+    let directCalled = false;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const urlStr = typeof input === "string" ? input : input?.url || "";
+      if (urlStr.includes("r.jina.ai")) jinaCalled = true;
+      if (urlStr.includes("author.substack.com")) directCalled = true;
+      return origFetch(input, init);
+    }) as any;
+
+    try {
+      const article = await extractArticle(
+        "https://author.substack.com/p/firecrawl-test",
+      );
+      expect(article.title).toBe("Substack via Firecrawl");
+      expect(article.author).toBe("Firecrawl Scraper");
+      expect(jinaCalled).toBe(false);
+      expect(directCalled).toBe(false);
+    } finally {
+      server.stop(true);
+      setFirecrawlEnabled(false);
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  test("extractArticle continues to use Tier 2 direct fetch for standard non-fast-fail domains", async () => {
+    let directFetchCalled = false;
+    let jinaCalled = false;
+    const origFetch = globalThis.fetch;
+
+    const prose =
+      "Software architecture requires continuous refinement and balanced trade-offs across components. ".repeat(
+        25,
+      );
+    const html = `<!DOCTYPE html>
+<html>
+<head><title>Architecture Essay</title><meta name="author" content="Independent Engineer"></head>
+<body><article><h1>Architecture Essay</h1><p>${prose}</p></article></body>
+</html>`;
+
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const urlStr = typeof input === "string" ? input : input?.url || "";
+      if (urlStr.includes("example.com/standard-architecture-essay")) {
+        directFetchCalled = true;
+        return new Response(html, {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
+      if (urlStr.includes("r.jina.ai")) {
+        jinaCalled = true;
+      }
+      return origFetch(input, init);
+    }) as any;
+
+    try {
+      const article = await extractArticle(
+        "https://example.com/standard-architecture-essay",
+      );
+      expect(directFetchCalled).toBe(true);
+      expect(jinaCalled).toBe(false);
+      expect(article.title).toBe("Architecture Essay");
+      expect(article.author).toBe("Independent Engineer");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+describe("HTTP 429 Rate Limit Single-Retry Backoff", () => {
+  test("compute429BackoffMs parses Retry-After header and bounds to fallback range", () => {
+    // Integer seconds
+    expect(compute429BackoffMs("3")).toBe(3000);
+    expect(compute429BackoffMs("0")).toBe(0);
+    expect(compute429BackoffMs("10")).toBe(10000);
+
+    // Float seconds
+    expect(compute429BackoffMs("2.5")).toBe(2500);
+    expect(compute429BackoffMs("1.2")).toBe(1200);
+
+    // Capped at 60_000ms
+    expect(compute429BackoffMs("120")).toBe(60000);
+
+    // Fallback when header is missing / empty / null / undefined
+    for (const val of [null, undefined, "", "   "]) {
+      const ms = compute429BackoffMs(val as any);
+      expect(ms).toBeGreaterThanOrEqual(1500);
+      expect(ms).toBeLessThanOrEqual(3000);
+    }
+
+    // Fallback when header is invalid string or negative
+    for (const invalid of ["not-a-number", "-5", "invalid-date-string-xyz"]) {
+      const ms = compute429BackoffMs(invalid);
+      expect(ms).toBeGreaterThanOrEqual(1500);
+      expect(ms).toBeLessThanOrEqual(3000);
+    }
+
+    // HTTP Date parsing
+    const futureDate = new Date(Date.now() + 5000).toUTCString();
+    const dateMs = compute429BackoffMs(futureDate);
+    expect(dateMs).toBeGreaterThan(0);
+    expect(dateMs).toBeLessThanOrEqual(60000);
+  });
+
+  test("extractArticleViaJina backs off on HTTP 429 with Retry-After and succeeds on retry", async () => {
+    let callCount = 0;
+    let sleptDurationMs = 0;
+    const origFetch = globalThis.fetch;
+
+    const dummyProse =
+      "Testing resilient rate limit handling with automated retry backoffs ensures stability. ".repeat(
+        25,
+      );
+    const jinaMd = `Title: Rate Limit Handled
+Author: Resilient Agent
+URL Source: https://example.com/rate-limit-test
+Markdown Content:
+${dummyProse}`;
+
+    globalThis.fetch = (async (input: any) => {
+      const urlStr = typeof input === "string" ? input : input?.url || "";
+      if (urlStr.includes("r.jina.ai")) {
+        callCount++;
+        if (callCount === 1) {
+          return new Response("Too Many Requests", {
+            status: 429,
+            statusText: "Too Many Requests",
+            headers: {
+              "Retry-After": "2",
+              "Content-Type": "text/plain",
+            },
+          });
+        }
+        return new Response(jinaMd, {
+          status: 200,
+          headers: { "Content-Type": "text/markdown; charset=utf-8" },
+        });
+      }
+      return origFetch(input);
+    }) as any;
+
+    try {
+      const article = await extractArticleViaJina(
+        "https://example.com/rate-limit-test",
+        undefined,
+        {
+          sleepFn: async (ms) => {
+            sleptDurationMs = ms;
+          },
+        },
+      );
+
+      expect(callCount).toBe(2);
+      expect(sleptDurationMs).toBe(2000);
+      expect(article.title).toBe("Rate Limit Handled");
+      expect(article.author).toBe("Resilient Agent");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  test("extractArticleViaJina backs off on HTTP 429 without Retry-After and succeeds on retry", async () => {
+    let callCount = 0;
+    let sleptDurationMs = 0;
+    const origFetch = globalThis.fetch;
+
+    const dummyProse =
+      "Fallback jittered backoff without Retry-After header protects external endpoints. ".repeat(
+        25,
+      );
+    const jinaMd = `Title: Fallback Backoff Success
+Author: Rate Limit Specialist
+URL Source: https://example.com/fallback-backoff
+Markdown Content:
+${dummyProse}`;
+
+    globalThis.fetch = (async (input: any) => {
+      const urlStr = typeof input === "string" ? input : input?.url || "";
+      if (urlStr.includes("r.jina.ai")) {
+        callCount++;
+        if (callCount === 1) {
+          return new Response("Too Many Requests", {
+            status: 429,
+            statusText: "Too Many Requests",
+            headers: { "Content-Type": "text/plain" },
+          });
+        }
+        return new Response(jinaMd, {
+          status: 200,
+          headers: { "Content-Type": "text/markdown; charset=utf-8" },
+        });
+      }
+      return origFetch(input);
+    }) as any;
+
+    try {
+      const article = await extractArticleViaJina(
+        "https://example.com/fallback-backoff",
+        undefined,
+        {
+          sleepFn: async (ms) => {
+            sleptDurationMs = ms;
+          },
+        },
+      );
+
+      expect(callCount).toBe(2);
+      expect(sleptDurationMs).toBeGreaterThanOrEqual(1500);
+      expect(sleptDurationMs).toBeLessThanOrEqual(3000);
+      expect(article.title).toBe("Fallback Backoff Success");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  test("extractArticleViaJina stops after 1 retry and throws if HTTP 429 persists", async () => {
+    let callCount = 0;
+    let sleptDurationMs = 0;
+    const origFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (input: any) => {
+      const urlStr = typeof input === "string" ? input : input?.url || "";
+      if (urlStr.includes("r.jina.ai")) {
+        callCount++;
+        return new Response("Too Many Requests", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: {
+            "Retry-After": "1",
+            "Content-Type": "text/plain",
+          },
+        });
+      }
+      return origFetch(input);
+    }) as any;
+
+    try {
+      let threw = false;
+      try {
+        await extractArticleViaJina(
+          "https://example.com/persistent-429",
+          undefined,
+          {
+            sleepFn: async (ms) => {
+              sleptDurationMs = ms;
+            },
+          },
+        );
+      } catch (err: any) {
+        threw = true;
+        expect(err.message).toContain("Jina Reader fallback failed (HTTP 429");
+      }
+
+      expect(threw).toBe(true);
+      expect(callCount).toBe(2);
+      expect(sleptDurationMs).toBe(1000);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  test("scrapeArticleWithFirecrawl backs off on HTTP 429 and succeeds on single retry", async () => {
+    let scrapeAttempts = 0;
+    let sleptMs = 0;
+
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        if (req.method === "GET") return new Response("OK", { status: 200 });
+        if (req.method === "POST" && new URL(req.url).pathname === "/v1/scrape") {
+          scrapeAttempts++;
+          if (scrapeAttempts === 1) {
+            return new Response("Rate limit exceeded", {
+              status: 429,
+              statusText: "Too Many Requests",
+              headers: {
+                "Retry-After": "3",
+                "Content-Type": "text/plain",
+              },
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              success: true,
+              data: {
+                markdown: "# Firecrawl Retried Article\n\n".concat(
+                  "Article successfully scraped following HTTP 429 rate limit backoff. ".repeat(25),
+                ),
+                metadata: {
+                  title: "Firecrawl Retried Article",
+                  author: "Firecrawl Rate Tester",
+                  "og:site_name": "Test Cluster",
+                },
+              },
+            }),
+            { headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    process.env.FIRECRAWL_PORT = String(server.port);
+    process.env.FIRECRAWL_URL = `http://127.0.0.1:${server.port}`;
+    setFirecrawlEnabled(true);
+
+    try {
+      const article = await scrapeArticleWithFirecrawl(
+        "https://example.com/firecrawl-429-retry",
+        {
+          sleepFn: async (ms) => {
+            sleptMs = ms;
+          },
+        },
+      );
+
+      expect(scrapeAttempts).toBe(2);
+      expect(sleptMs).toBe(3000);
+      expect(article).not.toBeNull();
+      expect(article?.title).toBe("Firecrawl Retried Article");
+    } finally {
+      server.stop(true);
+      setFirecrawlEnabled(false);
+    }
+  });
+
+  test("scrapeArticleWithFirecrawl fails open (returns null) if HTTP 429 persists after 1 retry", async () => {
+    let scrapeAttempts = 0;
+    let sleptMs = 0;
+
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        if (req.method === "GET") return new Response("OK", { status: 200 });
+        if (req.method === "POST" && new URL(req.url).pathname === "/v1/scrape") {
+          scrapeAttempts++;
+          return new Response("Rate limit exceeded", {
+            status: 429,
+            statusText: "Too Many Requests",
+            headers: {
+              "Retry-After": "2",
+              "Content-Type": "text/plain",
+            },
+          });
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    process.env.FIRECRAWL_PORT = String(server.port);
+    process.env.FIRECRAWL_URL = `http://127.0.0.1:${server.port}`;
+    setFirecrawlEnabled(true);
+
+    try {
+      const article = await scrapeArticleWithFirecrawl(
+        "https://example.com/firecrawl-persistent-429",
+        {
+          sleepFn: async (ms) => {
+            sleptMs = ms;
+          },
+        },
+      );
+
+      expect(scrapeAttempts).toBe(2);
+      expect(sleptMs).toBe(2000);
+      expect(article).toBeNull();
+    } finally {
+      server.stop(true);
+      setFirecrawlEnabled(false);
     }
   });
 });

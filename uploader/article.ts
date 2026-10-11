@@ -5,8 +5,15 @@ import path from "node:path";
 import crypto from "node:crypto";
 import process from "node:process";
 import { Buffer } from "node:buffer";
-import { cleanString, isAllowedCoverUrl } from "./scraper";
+import {
+  cleanString,
+  isAllowedCoverUrl,
+  compute429BackoffMs,
+  resolveSleepFn,
+} from "./scraper";
 import { validateUrlForSSRF, safeFetchWithSsrf } from "./security";
+
+export { compute429BackoffMs };
 import {
   scrapeArticleWithFirecrawl,
   type ExtractedFirecrawlArticle,
@@ -126,6 +133,54 @@ export function isInternalTelegramUrl(urlStr: string): boolean {
     return /^(?:https?:\/\/)?(?:t|telegram)\.me\//i.test(urlStr);
   }
 }
+
+/**
+ * Curated set of domains that reliably block standard direct GET requests
+ * with Cloudflare, bot challenges, paywalls, or JavaScript walls.
+ */
+export const FAST_FAIL_ARTICLE_DOMAINS: ReadonlySet<string> = new Set([
+  "substack.com",
+  "medium.com",
+  "bloomberg.com",
+  "nytimes.com",
+  "ft.com",
+  "wsj.com",
+  "theinformation.com",
+  "x.com",
+  "twitter.com",
+  "wired.com",
+]);
+
+/**
+ * Checks if a hostname or URL belongs to the curated fast-fail domains set.
+ * Matches exact domain or subdomains (e.g. *.substack.com, *.medium.com).
+ */
+export function isFastFailArticleDomain(hostnameOrUrl: string): boolean {
+  if (!hostnameOrUrl || typeof hostnameOrUrl !== "string") return false;
+  let host = hostnameOrUrl.trim().toLowerCase();
+  try {
+    if (host.includes("://")) {
+      host = new URL(host).hostname.toLowerCase();
+    }
+  } catch {
+    // Treat as raw hostname
+  }
+  host = host.replace(/^www\./i, "").replace(/\.+$/, "");
+
+  if (FAST_FAIL_ARTICLE_DOMAINS.has(host)) {
+    return true;
+  }
+
+  for (const domain of FAST_FAIL_ARTICLE_DOMAINS) {
+    if (host.endsWith("." + domain)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export const isFastFailDomain = isFastFailArticleDomain;
 
 export const TRACKING_PARAMS: ReadonlySet<string> = new Set([
   "utm_source",
@@ -1386,6 +1441,9 @@ export async function downloadCoverImage(
 export async function extractArticleViaJina(
   url: string,
   fallbackHostname?: string,
+  options?: {
+    sleepFn?: (ms: number) => Promise<void>;
+  },
 ): Promise<ExtractedArticle> {
   const cleanUrl = stripTrackingParams(url);
   const jinaUrl = `https://r.jina.ai/${encodeURI(cleanUrl)}`;
@@ -1402,6 +1460,8 @@ export async function extractArticleViaJina(
     headers["Authorization"] = `Bearer ${apiKey}`;
   }
 
+  const doSleep = resolveSleepFn(options?.sleepFn);
+
   let res: Response;
   try {
     res = await safeFetchWithSsrf(jinaUrl, {
@@ -1411,6 +1471,29 @@ export async function extractArticleViaJina(
     } as any);
   } catch (err: any) {
     throw new Error(`Jina Reader connection failed: ${err.message}`);
+  }
+
+  if (res.status === 429) {
+    const retryAfter =
+      typeof res.headers?.get === "function"
+        ? res.headers.get("Retry-After") || res.headers.get("retry-after")
+        : (res.headers as any)?.["retry-after"] ||
+          (res.headers as any)?.["Retry-After"];
+    const backoffMs = compute429BackoffMs(retryAfter);
+    console.warn(
+      `[Article] Jina Reader rate limited (HTTP 429). Backing off for ${backoffMs}ms before retry...`,
+    );
+    await doSleep(backoffMs);
+
+    try {
+      res = await safeFetchWithSsrf(jinaUrl, {
+        headers,
+        proxy: PROXY_URL,
+        signal: AbortSignal.timeout(30000),
+      } as any);
+    } catch (retryErr: any) {
+      throw new Error(`Jina Reader retry failed: ${retryErr.message}`);
+    }
   }
 
   if (!res.ok) {
@@ -1788,6 +1871,9 @@ export async function buildArticleFromFirecrawl(
  */
 export async function extractArticle(
   rawUrlInput: string,
+  options?: {
+    sleepFn?: (ms: number) => Promise<void>;
+  },
 ): Promise<ExtractedArticle> {
   const validated = validateArticleUrl(rawUrlInput);
   const validatedHref = validated.href;
@@ -1805,7 +1891,7 @@ export async function extractArticle(
 
   // Tier 1: On-Demand Self-Hosted Firecrawl Cluster
   try {
-    const fcArticle = await scrapeArticleWithFirecrawl(validatedHref);
+    const fcArticle = await scrapeArticleWithFirecrawl(validatedHref, options);
     if (fcArticle) {
       const article = await buildArticleFromFirecrawl(
         fcArticle,
@@ -1825,6 +1911,15 @@ export async function extractArticle(
     );
   }
 
+  // Fast-fail check: For domains known to block direct fetches (Cloudflare / bot walls / JS renders),
+  // bypass Tier 2 (the 15-second direct HTTP fetch) and route directly to Tier 3 (Jina Reader).
+  if (isFastFailArticleDomain(hostname)) {
+    console.log(
+      `[Article] Fast-fail domain detected (${hostname}), bypassing Tier 2 direct fetch directly to Jina Reader...`,
+    );
+    return await extractArticleViaJina(validatedHref, hostname, options);
+  }
+
   // Tier 2: Direct fetch with standard browser headers and local proxy, falling back to Jina Reader
   let res: Response;
   try {
@@ -1834,19 +1929,19 @@ export async function extractArticle(
       console.log(
         `[Article] Direct fetch timed out, attempting Jina Reader fallback...`,
       );
-      return await extractArticleViaJina(validatedHref, hostname);
+      return await extractArticleViaJina(validatedHref, hostname, options);
     }
     console.log(
       `[Article] Direct fetch error (${err.message}), attempting Jina Reader fallback...`,
     );
-    return await extractArticleViaJina(validatedHref, hostname);
+    return await extractArticleViaJina(validatedHref, hostname, options);
   }
 
   if (res.status === 401 || res.status === 403) {
     console.log(
       `[Article] Direct fetch blocked (HTTP ${res.status}), attempting Jina Reader fallback...`,
     );
-    return await extractArticleViaJina(validatedHref, hostname);
+    return await extractArticleViaJina(validatedHref, hostname, options);
   }
   if (res.status === 404) {
     throw new Error(`Article page not found (HTTP 404)`);
@@ -1855,7 +1950,7 @@ export async function extractArticle(
     console.log(
       `[Article] Direct fetch blocked (HTTP ${res.status}), attempting Jina Reader fallback...`,
     );
-    return await extractArticleViaJina(validatedHref, hostname);
+    return await extractArticleViaJina(validatedHref, hostname, options);
   }
 
   const rawHtml = await res.text();
@@ -1863,14 +1958,14 @@ export async function extractArticle(
     console.log(
       `[Article] Direct fetch blocked (HTTP ${res.status} empty response), attempting Jina Reader fallback...`,
     );
-    return await extractArticleViaJina(validatedHref, hostname);
+    return await extractArticleViaJina(validatedHref, hostname, options);
   }
 
   if (isCloudflareChallenge(rawHtml)) {
     console.log(
       `[Article] Direct fetch blocked (HTTP ${res.status} Cloudflare challenge), attempting Jina Reader fallback...`,
     );
-    return await extractArticleViaJina(validatedHref, hostname);
+    return await extractArticleViaJina(validatedHref, hostname, options);
   }
 
   // 2. Extract Metadata (Title, Site Name, Author, Published Date)

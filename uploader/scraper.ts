@@ -1718,15 +1718,42 @@ export function resetAniListPacing(): void {
  * Resolves the sleep function to use. If not supplied, defaults to setTimeout,
  * resolving immediately in test environments unless explicitly injected.
  */
-function resolveSleepFn(
+export function resolveSleepFn(
   sleepFn?: (ms: number) => Promise<void>,
 ): (ms: number) => Promise<void> {
   if (sleepFn) return sleepFn;
   const isTestEnv =
     process.env.NODE_ENV === "test" ||
-    typeof (globalThis as any).it === "function";
+    typeof (globalThis as any).it === "function" ||
+    typeof (globalThis as any).describe === "function";
   return (ms: number) =>
     new Promise((resolve) => setTimeout(resolve, isTestEnv ? 0 : ms));
+}
+
+/**
+ * Compute retry backoff in ms for HTTP 429 rate limit responses.
+ * Respects Retry-After header if present, or falls back to 1.5s–3s (1500–3000ms).
+ */
+export function compute429BackoffMs(
+  retryAfterHeader?: string | null,
+  maxMs: number = MAX_RETRY_AFTER_MS,
+): number {
+  if (retryAfterHeader && retryAfterHeader.trim()) {
+    const trimmed = retryAfterHeader.trim();
+    const seconds = Number(trimmed);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(Math.round(seconds * 1000), maxMs);
+    }
+    const timestamp = Date.parse(trimmed);
+    if (Number.isFinite(timestamp)) {
+      const diff = timestamp - Date.now();
+      if (diff >= 0) {
+        return Math.min(diff, maxMs);
+      }
+    }
+  }
+  // Fallback backoff in 1.5s - 3s (1500ms - 3000ms) range
+  return 1500 + Math.floor(Math.random() * 1500);
 }
 
 /**
