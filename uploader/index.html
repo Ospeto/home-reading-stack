@@ -2095,7 +2095,7 @@
       
       <div class="flex items-center justify-between">
         <h3 class="tracking-optical-display text-sm font-bold text-white flex items-center gap-2 leading-tight">
-          <svg class="w-4 h-4 text-sky-400"><use href="#icon-globe"/></svg> Ingest Web Article (Read Later EPUB)
+          <svg class="w-4 h-4 text-sky-400"><use href="#icon-globe"/></svg> Ingest Web Articles (Read Later EPUB)
         </h3>
         <button onclick="closeUrlModal()" class="w-11 h-11 min-w-[44px] min-h-[44px] rounded-xl bg-[#18181f] text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer active:scale-[0.98] transition-transform duration-150" title="Close">
           <svg class="w-4 h-4"><use href="#icon-xmark"/></svg>
@@ -2103,26 +2103,55 @@
       </div>
 
       <p class="text-xs text-[#a1a1aa] leading-relaxed">
-        Paste any article, essay, or blog post URL. LightHouse will clean and extract the text, format it with comfortable Kindle typography, convert it to an EPUB, and sync to your library and KOReader.
+        Paste article, essay, or reading list URLs. LightHouse cleans and extracts the text, formats it with comfortable Kindle typography, converts it to an EPUB, and syncs to your library and KOReader.
       </p>
 
-      <form onsubmit="handleUrlIngest(event)" class="space-y-3">
-        <div>
+      <!-- Segmented Mode Control: Single Link vs Batch Links -->
+      <div class="grid grid-cols-2 gap-1 p-1 rounded-xl bg-zinc-950/80 border border-zinc-800/80">
+        <button type="button" id="urlModeSingleBtn" onclick="setUrlIngestMode('single')" class="py-1.5 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 bg-sky-400 text-zinc-950 shadow-sm cursor-pointer">
+          <svg class="w-3.5 h-3.5"><use href="#icon-link"/></svg>
+          <span>Single Link</span>
+        </button>
+        <button type="button" id="urlModeBatchBtn" onclick="setUrlIngestMode('batch')" class="py-1.5 px-3 rounded-lg text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-all flex items-center justify-center gap-1.5 cursor-pointer">
+          <svg class="w-3.5 h-3.5"><use href="#icon-list"/></svg>
+          <span>Batch Links</span>
+        </button>
+      </div>
+
+      <form id="urlIngestForm" novalidate onsubmit="handleUrlIngest(event)" class="space-y-3">
+        <!-- Single URL Input Container -->
+        <div id="urlSingleInputContainer">
           <label for="articleUrlInput" class="block text-[11px] font-semibold text-zinc-300 mb-1.5">Article Web URL</label>
           <div class="relative">
             <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500"><use href="#icon-link"/></svg>
-            <input type="url" id="articleUrlInput" required placeholder="https://example.com/article..."
+            <input type="text" inputmode="url" id="articleUrlInput" placeholder="https://example.com/article..."
               class="w-full h-11 min-h-[44px] pl-9 pr-3 py-2.5 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-sky-400 transition-colors">
           </div>
         </div>
 
-        <div id="urlIngestStatus" class="hidden text-xs p-3 rounded-xl border"></div>
+        <!-- Batch URLs Textarea Container -->
+        <div id="urlBatchInputContainer" class="hidden space-y-1.5">
+          <div class="flex items-center justify-between">
+            <label for="articleUrlsTextarea" class="block text-[11px] font-semibold text-zinc-300">Article Web URLs <span class="text-zinc-500 font-normal">(One per line)</span></label>
+            <span id="batchUrlCountBadge" class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400">0 links detected</span>
+          </div>
+          <div class="relative">
+            <textarea id="articleUrlsTextarea" rows="4" placeholder="https://example.com/article-1&#10;https://example.com/article-2&#10;https://example.com/article-3"
+              oninput="updateBatchUrlCountBadge()"
+              class="w-full p-3 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-sky-400 transition-colors resize-y min-h-[100px] font-mono text-[11px] leading-relaxed"></textarea>
+          </div>
+          <div class="text-[10px] text-zinc-500 flex items-center justify-between px-0.5">
+            <span>Empty lines and comment lines (<code class="text-zinc-400">#</code>) are ignored.</span>
+          </div>
+        </div>
+
+        <div id="urlIngestStatus" class="hidden text-xs p-3.5 rounded-xl border space-y-2"></div>
 
         <div class="flex items-center justify-end gap-2 pt-2">
-          <button type="button" onclick="closeUrlModal()" class="min-h-[44px] px-4 py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-300 text-xs font-semibold rounded-xl border border-[#23232a] cursor-pointer active:scale-[0.98] transition-all duration-150">Cancel</button>
+          <button type="button" id="urlCancelBtn" onclick="closeUrlModal()" class="min-h-[44px] px-4 py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-300 text-xs font-semibold rounded-xl border border-[#23232a] cursor-pointer active:scale-[0.98] transition-all duration-150">Cancel</button>
           <button type="submit" id="urlIngestBtn" class="min-h-[44px] px-4 py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl shadow-sm transition-all duration-150 flex items-center gap-2 cursor-pointer active:scale-[0.98] disabled:opacity-50">
             <svg class="w-4 h-4 text-zinc-950"><use href="#icon-file-arrow-down"/></svg>
-            <span>Convert & Ingest</span>
+            <span id="urlIngestBtnLabel">Convert &amp; Ingest</span>
           </button>
         </div>
       </form>
@@ -2715,6 +2744,7 @@
             <div>• <strong>Environment Configuration:</strong> Supported <code class="text-zinc-200">.env</code> options: <code class="text-zinc-200">FIRECRAWL_PORT</code> (3002), <code class="text-zinc-200">FIRECRAWL_URL</code>, <code class="text-zinc-200">FIRECRAWL_COMPOSE_DIR</code>, <code class="text-zinc-200">FIRECRAWL_IDLE_TIMEOUT_MS</code> (900000ms), <code class="text-zinc-200">FIRECRAWL_ENABLED</code> (true), <code class="text-zinc-200">FIRECRAWL_ACTIVITY_DIR</code>, and <code class="text-zinc-200">FIRECRAWL_API_KEY</code>.</div>
             <div>• <strong>Fail-Open Fallback:</strong> If Docker or Firecrawl is offline, article ingestion seamlessly falls back to direct browser fetch and Jina Reader.</div>
             <div>• <strong>Async Queue &amp; Polling:</strong> Web and API article ingestion supports asynchronous execution via <code class="text-zinc-200">POST /api/ingest-url</code> with <code class="text-zinc-200">{ "async": true }</code>, returning an immediate <code class="text-zinc-200">{ success: true, jobId, status: "queued" }</code> to eliminate reverse proxy gateway timeouts, polled in real time via <code class="text-zinc-200">GET /api/jobs/:id</code>.</div>
+            <div>• <strong>Batch Multi-Link Reading Lists:</strong> Ingest reading lists and multi-article queues via the Web Uploader (<code class="text-zinc-200">#urlModal</code>) or Telegram bot. Processes multiple URLs sequentially with real-time visual progress (<code class="text-zinc-200">Ingesting link X of Y</code>), individual job polling, and an itemized completion summary.</div>
             <div>• <strong>CLI Control:</strong> Manage cluster state manually via <code class="text-zinc-200">bin/lighthouse firecrawl status|up|down</code>.</div>
           </div>
         </div>
@@ -7197,18 +7227,37 @@
     }
 
     // URL INGESTION MODAL
+    let currentUrlIngestMode = 'single';
+    let isUrlIngesting = false;
+
     function openUrlModal(initialUrl = '') {
+      if (isUrlIngesting) {
+        openModalAnimated('urlModal', false);
+        return;
+      }
       tgHaptic.light();
       openModalAnimated('urlModal', false);
       const input = document.getElementById('articleUrlInput');
+      const textarea = document.getElementById('articleUrlsTextarea');
       const status = document.getElementById('urlIngestStatus');
+      const btn = document.getElementById('urlIngestBtn');
+      const cancelBtn = document.getElementById('urlCancelBtn');
+
       const urlToPrefill = (typeof initialUrl === 'string' && initialUrl.trim()) ? initialUrl.trim() : '';
-      if (input) {
-        input.value = urlToPrefill;
-      }
+      if (input) input.value = urlToPrefill;
+      if (textarea) textarea.value = '';
       if (status) {
-        status.classList.add('hidden');
+        status.className = 'hidden text-xs p-3.5 rounded-xl border space-y-2';
+        setHtml(status, '');
       }
+      if (btn) {
+        btn.disabled = false;
+        setHtml(btn, `${svgIcon('file-arrow-down', 'w-3.5 h-3.5 text-zinc-950')} <span id="urlIngestBtnLabel">Convert &amp; Ingest</span>`);
+      }
+      if (cancelBtn) {
+        cancelBtn.textContent = 'Cancel';
+      }
+      setUrlIngestMode(currentUrlIngestMode || 'single');
       setTimeout(() => {
         if (input) {
           input.focus();
@@ -7223,117 +7272,456 @@
       closeModalAnimated('urlModal', false);
     }
 
+    function setUrlIngestMode(mode) {
+      if (isUrlIngesting) return;
+      currentUrlIngestMode = mode;
+      const singleBtn = document.getElementById('urlModeSingleBtn');
+      const batchBtn = document.getElementById('urlModeBatchBtn');
+      const singleContainer = document.getElementById('urlSingleInputContainer');
+      const batchContainer = document.getElementById('urlBatchInputContainer');
+      const singleInput = document.getElementById('articleUrlInput');
+      const batchTextarea = document.getElementById('articleUrlsTextarea');
+
+      if (mode === 'batch') {
+        if (singleBtn) singleBtn.className = 'py-1.5 px-3 rounded-lg text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-all flex items-center justify-center gap-1.5 cursor-pointer';
+        if (batchBtn) batchBtn.className = 'py-1.5 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 bg-sky-400 text-zinc-950 shadow-sm cursor-pointer';
+        if (singleContainer) singleContainer.classList.add('hidden');
+        if (batchContainer) batchContainer.classList.remove('hidden');
+
+        if (singleInput && singleInput.value.trim() && batchTextarea && !batchTextarea.value.trim()) {
+          batchTextarea.value = singleInput.value.trim();
+        }
+        updateBatchUrlCountBadge();
+        setTimeout(() => batchTextarea?.focus(), 60);
+      } else {
+        if (singleBtn) singleBtn.className = 'py-1.5 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 bg-sky-400 text-zinc-950 shadow-sm cursor-pointer';
+        if (batchBtn) batchBtn.className = 'py-1.5 px-3 rounded-lg text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-all flex items-center justify-center gap-1.5 cursor-pointer';
+        if (singleContainer) singleContainer.classList.remove('hidden');
+        if (batchContainer) batchContainer.classList.add('hidden');
+
+        if (batchTextarea && batchTextarea.value.trim() && singleInput && !singleInput.value.trim()) {
+          const extracted = extractUrlsFromText(batchTextarea.value);
+          if (extracted.length > 0) {
+            singleInput.value = extracted[0];
+          }
+        }
+        setTimeout(() => singleInput?.focus(), 60);
+      }
+    }
+
+    function updateBatchUrlCountBadge() {
+      const badge = document.getElementById('batchUrlCountBadge');
+      const textarea = document.getElementById('articleUrlsTextarea');
+      if (!badge || !textarea) return;
+      const urls = extractUrlsFromText(textarea.value);
+      const count = urls.length;
+      badge.textContent = count === 1 ? '1 link detected' : `${count} links detected`;
+      if (count > 0) {
+        badge.className = 'text-[10px] font-mono px-2 py-0.5 rounded-full bg-sky-950/80 border border-sky-800 text-sky-300';
+      } else {
+        badge.className = 'text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400';
+      }
+    }
+
+    function extractUrlsFromText(text) {
+      if (!text || typeof text !== 'string') return [];
+      const lines = text.split(/[\r\n]+/);
+      const results = [];
+      const seen = new Set();
+
+      for (let rawLine of lines) {
+        let line = rawLine.trim();
+        if (!line || line.startsWith('#') || line.startsWith('//')) continue;
+
+        // Strip trailing inline comments (e.g. "https://example.com/1 # comment")
+        line = line.replace(/(?:^|\s)(?:#|\/\/).*$/, '').trim();
+        if (!line) continue;
+
+        // Clean markdown link syntax: [text](url) -> url
+        let processedLine = line.replace(/\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g, ' $2 ');
+
+        const tokens = processedLine.split(/\s+/);
+        for (let token of tokens) {
+          let cleaned = token.trim();
+          // Strip leading brackets, quotes, braces
+          cleaned = cleaned.replace(/^[<(\["'`\u201C\u2018]+/, '');
+          // Strip trailing punctuation, brackets, quotes
+          while (cleaned.length > 0) {
+            const stripped = cleaned.replace(/[.,;:!?>\]"'`\u201D\u2019]+$/, '');
+            if (stripped !== cleaned) {
+              cleaned = stripped;
+              continue;
+            }
+            if (cleaned.endsWith(')')) {
+              let openCount = (cleaned.match(/\(/g) || []).length;
+              let closeCount = (cleaned.match(/\)/g) || []).length;
+              if (closeCount > openCount) {
+                cleaned = cleaned.slice(0, -1);
+                continue;
+              }
+            }
+            break;
+          }
+          if (!cleaned) continue;
+
+          let candidate = cleaned;
+          if (!/^https?:\/\//i.test(candidate)) {
+            if (/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(\/.*)?$/.test(candidate)) {
+              candidate = 'https://' + candidate;
+            }
+          }
+
+          try {
+            const parsed = new URL(candidate);
+            if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+              const finalUrl = parsed.toString();
+              if (!seen.has(finalUrl)) {
+                seen.add(finalUrl);
+                results.push(finalUrl);
+              }
+            }
+          } catch {
+            // Ignore non-URL tokens
+          }
+        }
+      }
+      return results;
+    }
+
+    function isLightNovelUrl(targetUrl) {
+      try {
+        const u = new URL(targetUrl.includes('://') ? targetUrl : `https://${targetUrl}`);
+        const h = u.hostname.toLowerCase();
+        const isLn = (h === 'lnori.com' || h === 'www.lnori.com') && /^\/(series|book)\/[a-zA-Z0-9_-]+/i.test(u.pathname);
+        const isEl =
+          h === 'server.elscione.com' ||
+          h === 'elscione.com' ||
+          h.endsWith('.elscione.com') ||
+          h === 'server.elsci.one' ||
+          h === 'elsci.one' ||
+          h.endsWith('.elsci.one');
+        return isLn || isEl;
+      } catch {
+        return false;
+      }
+    }
+
+    async function ingestSingleArticleUrl(targetUrl, onSubstatus) {
+      const res = await fetch('/api/ingest-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: targetUrl, async: true })
+      });
+      const initialData = await res.json();
+      if (!res.ok || !initialData.success) {
+        throw new Error(initialData.error || 'Failed to ingest article');
+      }
+
+      let data = initialData;
+      if (initialData.jobId) {
+        // Poll for background job completion to prevent reverse proxy timeouts
+        const pollStart = Date.now();
+        const maxPollTimeMs = 180000;
+        let terminalError = null;
+        while (Date.now() - pollStart < maxPollTimeMs) {
+          await new Promise(r => setTimeout(r, 1500));
+          let pollData = null;
+          try {
+            const pollRes = await fetch(`/api/jobs/${encodeURIComponent(initialData.jobId)}`);
+            if (pollRes.ok) {
+              pollData = await pollRes.json();
+            }
+          } catch {
+            // Transient network glitch during polling, keep polling
+          }
+
+          if (pollData) {
+            if (pollData.status === 'completed') {
+              data = pollData.book || pollData.result || pollData.job?.result || pollData;
+              data.success = true;
+              break;
+            } else if (pollData.status === 'failed') {
+              terminalError = new Error(pollData.error || pollData.job?.error || 'Article ingestion failed');
+              break;
+            } else {
+              const stateLabel = pollData.status === 'running'
+                ? 'Extracting article & generating EPUB...'
+                : 'Queued in background job queue...';
+              if (onSubstatus) onSubstatus(stateLabel);
+            }
+          }
+        }
+
+        if (terminalError) throw terminalError;
+        if (!data.title && !data.bookId) {
+          throw new Error('Article ingestion timed out waiting for background queue');
+        }
+      }
+
+      if (!data.success && !data.title && !data.bookId) {
+        throw new Error(data.error || 'Failed to ingest article');
+      }
+
+      return data;
+    }
+
     async function handleUrlIngest(e) {
       e.preventDefault();
-      const input = document.getElementById('articleUrlInput');
-      const btn = document.getElementById('urlIngestBtn');
-      const status = document.getElementById('urlIngestStatus');
-      const targetUrl = input.value.trim();
-      if (!targetUrl) return;
+      if (isUrlIngesting) return;
 
-      const isNovelUrl = (() => {
-        try {
-          const u = new URL(targetUrl.includes('://') ? targetUrl : `https://${targetUrl}`);
-          const h = u.hostname.toLowerCase();
-          const isLn = (h === 'lnori.com' || h === 'www.lnori.com') && /^\/(series|book)\/[a-zA-Z0-9_-]+/i.test(u.pathname);
-          const isEl =
-            h === 'server.elscione.com' ||
-            h === 'elscione.com' ||
-            h.endsWith('.elscione.com') ||
-            h === 'server.elsci.one' ||
-            h === 'elsci.one' ||
-            h.endsWith('.elsci.one');
-          return isLn || isEl;
-        } catch {
-          return false;
+      const singleInput = document.getElementById('articleUrlInput');
+      const batchTextarea = document.getElementById('articleUrlsTextarea');
+      const btn = document.getElementById('urlIngestBtn');
+      const cancelBtn = document.getElementById('urlCancelBtn');
+      const status = document.getElementById('urlIngestStatus');
+
+      let rawText = '';
+      if (currentUrlIngestMode === 'batch') {
+        rawText = batchTextarea ? batchTextarea.value.trim() : '';
+      } else {
+        rawText = singleInput ? singleInput.value.trim() : '';
+        if (!rawText && batchTextarea && batchTextarea.value.trim()) {
+          rawText = batchTextarea.value.trim();
         }
-      })();
-      if (isNovelUrl) {
+      }
+
+      const urls = extractUrlsFromText(rawText);
+      if (urls.length === 0) {
+        status.className = 'text-xs p-3 rounded-xl border bg-rose-950/40 border-rose-800 text-rose-300';
+        setHtml(status, `<div class="flex items-center gap-2">${svgIcon('triangle-exclamation', 'w-4 h-4 text-rose-400')} <span>Please enter or paste at least one valid article URL.</span></div>`);
+        status.classList.remove('hidden');
+        return;
+      }
+
+      // Preserve existing Light Novel routing for single lnori.com / elscione.com URLs
+      if (urls.length === 1 && isLightNovelUrl(urls[0])) {
         closeUrlModal();
-        openLnoriModal(targetUrl);
+        openLnoriModal(urls[0]);
         showToast('Switched to Light Novel Ingestion');
         return;
       }
 
+      isUrlIngesting = true;
       btn.disabled = true;
-      setHtml(btn, `${svgIcon('spinner', 'w-3.5 h-3.5 animate-spin')} <span>Extracting...</span>`);
-      status.className = 'text-xs p-3 rounded-lg border bg-zinc-900 border-zinc-700 text-zinc-300';
-      setHtml(status, `<div class="flex items-center gap-2">${svgIcon('spinner', 'w-4 h-4 animate-spin text-sky-400')} <span>Extracting article text & generating Kindle EPUB...</span></div>`);
+      if (cancelBtn) cancelBtn.textContent = 'Close';
+      const total = urls.length;
+
+      status.className = 'text-xs p-3.5 rounded-xl border bg-zinc-900 border-zinc-700 text-zinc-300 space-y-3';
       status.classList.remove('hidden');
 
+      const results = [];
+      let successCount = 0;
+      let failCount = 0;
+
+      const renderBatchLiveProgress = (currentIndex, currentUrl, substatusText) => {
+        const step = currentIndex + 1;
+        const percent = Math.round(((currentIndex) / total) * 100);
+        const progressHtml = `
+          <div class="space-y-2">
+            <div class="flex items-center justify-between text-xs">
+              <span class="font-bold text-white flex items-center gap-1.5">
+                ${svgIcon('spinner', 'w-3.5 h-3.5 animate-spin text-sky-400')}
+                <span>Ingesting link ${step} of ${total}</span>
+              </span>
+              <span class="font-mono text-sky-400 font-semibold">${percent}%</span>
+            </div>
+            <div class="w-full h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+              <div class="h-full bg-sky-400 rounded-full transition-all duration-300" style="width: ${percent}%;"></div>
+            </div>
+            <div class="font-mono text-[11px] text-zinc-400 truncate" title="${escapeHtml(currentUrl)}">
+              ${escapeHtml(currentUrl)}
+            </div>
+            <div class="text-[11px] text-zinc-400 flex items-center gap-1.5">
+              ${svgIcon('rss', 'w-3 h-3 text-zinc-500')}
+              <span>${escapeHtml(substatusText || 'Extracting article text & generating EPUB...')}</span>
+            </div>
+          </div>
+          ${results.length > 0 ? `
+            <div class="pt-2 border-t border-zinc-800/80 space-y-1.5 max-h-36 overflow-y-auto pr-1">
+              <div class="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">Processed so far (${results.length}/${total})</div>
+              ${results.map(r => `
+                <div class="flex items-center justify-between gap-2 text-[11px] py-1 px-2 rounded-lg bg-zinc-950/60 border ${r.success ? 'border-emerald-900/40 text-emerald-300' : 'border-rose-900/40 text-rose-300'}">
+                  <div class="flex items-center gap-1.5 truncate">
+                    ${r.success ? svgIcon('check', 'w-3 h-3 text-emerald-400 shrink-0') : svgIcon('xmark', 'w-3 h-3 text-rose-400 shrink-0')}
+                    <span class="truncate">${escapeHtml(r.success ? r.title : r.url)}</span>
+                  </div>
+                  <span class="shrink-0 font-mono text-[10px] ${r.success ? 'text-emerald-400' : 'text-rose-400'}">${r.success ? 'Saved' : 'Failed'}</span>
+                </div>
+              `).join('')}
+            </div>
+          ` : ''}
+        `;
+        setHtml(status, progressHtml);
+      };
+
       try {
-        const res = await fetch('/api/ingest-url', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: targetUrl, async: true })
-        });
-        const initialData = await res.json();
-        if (!res.ok || !initialData.success) {
-          throw new Error(initialData.error || 'Failed to ingest article');
-        }
+        for (let i = 0; i < total; i++) {
+          const url = urls[i];
+          setHtml(btn, `${svgIcon('spinner', 'w-3.5 h-3.5 animate-spin text-zinc-950')} <span>Ingesting (${i + 1}/${total})...</span>`);
 
-        let data = initialData;
-        if (initialData.jobId) {
-          // Poll for background job completion to prevent reverse proxy timeouts
-          const pollStart = Date.now();
-          const maxPollTimeMs = 180000;
-          let terminalError = null;
-          while (Date.now() - pollStart < maxPollTimeMs) {
-            await new Promise(r => setTimeout(r, 1500));
-            let pollData = null;
-            try {
-              const pollRes = await fetch(`/api/jobs/${encodeURIComponent(initialData.jobId)}`);
-              if (pollRes.ok) {
-                pollData = await pollRes.json();
-              }
-            } catch {
-              // Transient network glitch during polling, keep polling
-            }
-
-            if (pollData) {
-              if (pollData.status === 'completed') {
-                data = pollData.book || pollData.result || pollData.job?.result || pollData;
-                data.success = true;
-                break;
-              } else if (pollData.status === 'failed') {
-                terminalError = new Error(pollData.error || pollData.job?.error || 'Article ingestion failed');
-                break;
-              } else {
-                const stateLabel = pollData.status === 'running'
-                  ? 'Extracting article & generating EPUB...'
-                  : 'Queued in background job queue...';
-                setHtml(status, `<div class="flex items-center gap-2">${svgIcon('spinner', 'w-4 h-4 animate-spin text-sky-400')} <span>${stateLabel}</span></div>`);
-              }
-            }
+          if (isLightNovelUrl(url)) {
+            results.push({
+              url,
+              success: false,
+              error: 'Light Novel URL — use "Add from Lnori" modal for series downloads'
+            });
+            failCount++;
+            continue;
           }
 
-          if (terminalError) {
-            throw terminalError;
-          }
-          if (!data.title && !data.bookId) {
-            throw new Error('Article ingestion timed out waiting for background queue');
+          renderBatchLiveProgress(i, url, 'Starting extraction...');
+
+          try {
+            const data = await ingestSingleArticleUrl(url, (substatus) => {
+              renderBatchLiveProgress(i, url, substatus);
+            });
+            results.push({
+              url,
+              success: true,
+              title: data.title || 'Untitled Article',
+              authors: data.authors || 'Unknown',
+              readTimeMinutes: data.readTimeMinutes || 0,
+              wordCount: data.wordCount || 0,
+              bookId: data.bookId
+            });
+            successCount++;
+          } catch (err) {
+            results.push({
+              url,
+              success: false,
+              error: formatCleanErrorMessage(err.message)
+            });
+            failCount++;
           }
         }
 
-        if (data.success) {
+        // Processing finished! Update catalog cache and init if any succeeded
+        if (successCount > 0) {
           tgHaptic.success();
           invalidateCatalogCache();
-          status.className = 'text-xs p-3 rounded-lg border bg-emerald-950/40 border-emerald-800 text-emerald-300';
-          const detailsLink = data.bookId ? `<a href="#book_id=${data.bookId}&panel=book_details" class="underline font-bold ml-1 text-emerald-200">View Book Details</a>` : '';
-          setHtml(status, `<div><strong>Article Ingested Successfully</strong><div class="mt-1 text-[11px] text-zinc-300">"${escapeHtml(data.title)}" by <em>${escapeHtml(data.authors || 'Unknown')}</em> (~${data.readTimeMinutes || 0} min read, ${data.wordCount || 0} words). ${detailsLink}</div></div>`);
-          showToast(`Ingested "${data.title}"!`);
-          input.value = '';
           await init();
+          showToast(total === 1 ? `Ingested "${results[0].title}"!` : `Ingested ${successCount} of ${total} articles!`);
         } else {
-          throw new Error(data.error || 'Failed to ingest article');
+          tgHaptic.error();
+        }
+
+        // Render completion card without dismissing modal
+        if (total === 1) {
+          const singleRes = results[0];
+          if (singleRes.success) {
+            status.className = 'text-xs p-3.5 rounded-xl border bg-emerald-950/40 border-emerald-800 text-emerald-300 space-y-2';
+            const detailsLink = singleRes.bookId ? `<a href="#book_id=${singleRes.bookId}&panel=book_details" onclick="closeUrlModal()" class="underline font-bold ml-1 text-emerald-200">View Book Details</a>` : '';
+            setHtml(status, `
+              <div class="flex items-start gap-2.5">
+                <div class="w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0 mt-0.5">
+                  ${svgIcon('check', 'w-3.5 h-3.5 text-emerald-400')}
+                </div>
+                <div>
+                  <strong class="text-emerald-200">Article Ingested Successfully</strong>
+                  <div class="mt-1 text-[11px] text-zinc-300">"${escapeHtml(singleRes.title)}" by <em>${escapeHtml(singleRes.authors || 'Unknown')}</em> (~${singleRes.readTimeMinutes || 0} min read, ${singleRes.wordCount || 0} words). ${detailsLink}</div>
+                </div>
+              </div>
+            `);
+            if (singleInput) singleInput.value = '';
+            if (batchTextarea) batchTextarea.value = '';
+            updateBatchUrlCountBadge();
+          } else {
+            status.className = 'text-xs p-3.5 rounded-xl border bg-rose-950/40 border-rose-800 text-rose-300 space-y-2';
+            setHtml(status, `
+              <div class="flex items-start gap-2.5">
+                <div class="w-6 h-6 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0 mt-0.5">
+                  ${svgIcon('xmark', 'w-3.5 h-3.5 text-rose-400')}
+                </div>
+                <div>
+                  <strong class="text-rose-200">Ingestion Failed</strong>
+                  <div class="mt-1 text-[11px] text-rose-300">${escapeHtml(singleRes.error)}</div>
+                </div>
+              </div>
+            `);
+          }
+        } else {
+          const isAllSuccess = failCount === 0;
+          const isAllFail = successCount === 0;
+          const bannerClass = isAllSuccess
+            ? 'bg-emerald-950/40 border-emerald-800 text-emerald-300'
+            : (isAllFail ? 'bg-rose-950/40 border-rose-800 text-rose-300' : 'bg-amber-950/40 border-amber-800 text-amber-300');
+
+          status.className = `text-xs p-3.5 rounded-xl border ${bannerClass} space-y-3`;
+          const summaryTitle = isAllSuccess
+            ? `Batch Complete: All ${successCount} articles saved to library`
+            : (isAllFail
+              ? `Batch Ingestion Failed: 0 of ${total} articles saved`
+              : `Batch Ingestion Finished: ${successCount} of ${total} articles saved (${failCount} failed)`);
+
+          const completionHtml = `
+            <div>
+              <div class="flex items-center gap-2 font-bold text-sm">
+                ${isAllSuccess ? svgIcon('check', 'w-4 h-4 text-emerald-400') : (isAllFail ? svgIcon('xmark', 'w-4 h-4 text-rose-400') : svgIcon('triangle-exclamation', 'w-4 h-4 text-amber-400'))}
+                <span>${summaryTitle}</span>
+              </div>
+              <div class="mt-1 text-[11px] text-zinc-300">
+                Processed ${total} URLs sequentially. EPUB files synced to your Calibre library.
+              </div>
+            </div>
+
+            <!-- Itemized Result List -->
+            <div class="space-y-1.5 max-h-52 overflow-y-auto pr-1">
+              ${results.map(r => `
+                <div class="p-2.5 rounded-xl bg-zinc-950/80 border ${r.success ? 'border-emerald-900/60' : 'border-rose-900/60'} flex items-start justify-between gap-2.5">
+                  <div class="flex items-start gap-2 min-w-0">
+                    <div class="w-5 h-5 rounded-full ${r.success ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'} flex items-center justify-center shrink-0 mt-0.5">
+                      ${r.success ? svgIcon('check', 'w-3 h-3') : svgIcon('xmark', 'w-3 h-3')}
+                    </div>
+                    <div class="min-w-0">
+                      ${r.success
+                        ? `<div class="font-bold text-zinc-100 text-xs truncate">"${escapeHtml(r.title)}"</div>
+                           <div class="text-[11px] text-zinc-400 truncate">${escapeHtml(r.authors || 'Unknown')} • ~${r.readTimeMinutes || 0}m read (${r.wordCount || 0}w)</div>`
+                        : `<div class="font-mono text-[11px] text-zinc-300 truncate" title="${escapeHtml(r.url)}">${escapeHtml(r.url)}</div>
+                           <div class="text-[11px] text-rose-400 mt-0.5">${escapeHtml(r.error)}</div>`
+                      }
+                    </div>
+                  </div>
+                  ${r.success && r.bookId ? `
+                    <a href="#book_id=${r.bookId}&panel=book_details" onclick="closeUrlModal()" class="shrink-0 px-2 py-1 bg-emerald-950/60 hover:bg-emerald-900 text-emerald-300 text-[10px] font-bold rounded-lg border border-emerald-800 transition-colors">
+                      View
+                    </a>
+                  ` : ''}
+                </div>
+              `).join('')}
+            </div>
+          `;
+          setHtml(status, completionHtml);
+
+          if (isAllSuccess) {
+            if (singleInput) singleInput.value = '';
+            if (batchTextarea) batchTextarea.value = '';
+            updateBatchUrlCountBadge();
+          } else {
+            const failedUrls = results.filter(r => !r.success).map(r => r.url);
+            if (batchTextarea && failedUrls.length > 0) {
+              batchTextarea.value = failedUrls.join('\n');
+              updateBatchUrlCountBadge();
+            }
+          }
         }
       } catch (err) {
         tgHaptic.error();
-        status.className = 'text-xs p-3 rounded-lg border bg-rose-950/40 border-rose-800 text-rose-300';
-        setHtml(status, `<div><strong>Ingestion Failed:</strong><div class="mt-1 text-[11px] text-rose-200">${escapeHtml(formatCleanErrorMessage(err.message))}</div></div>`);
+        status.className = 'text-xs p-3.5 rounded-xl border bg-rose-950/40 border-rose-800 text-rose-300 space-y-2';
+        setHtml(status, `
+          <div class="flex items-start gap-2.5">
+            <div class="w-6 h-6 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0 mt-0.5">
+              ${svgIcon('xmark', 'w-3.5 h-3.5 text-rose-400')}
+            </div>
+            <div>
+              <strong class="text-rose-200">Batch Ingestion Error</strong>
+              <div class="mt-1 text-[11px] text-rose-300">${escapeHtml(formatCleanErrorMessage(err.message))}</div>
+            </div>
+          </div>
+        `);
       } finally {
+        isUrlIngesting = false;
         btn.disabled = false;
-        setHtml(btn, `${svgIcon('file-arrow-down', 'w-3.5 h-3.5')} <span>Convert & Ingest</span>`);
+        setHtml(btn, `${svgIcon('file-arrow-down', 'w-3.5 h-3.5 text-zinc-950')} <span id="urlIngestBtnLabel">Convert &amp; Ingest</span>`);
       }
     }
 
