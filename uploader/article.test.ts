@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test";
+import { Buffer } from "node:buffer";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -35,6 +36,9 @@ import {
   extractAndSaveBase64Images,
   isTrackingOrSpacerPixel,
   isValidImageBuffer,
+  hasSips,
+  detectImageFormat,
+  downloadCoverImage,
 } from "./article";
 import { isElscioneUrl } from "./elscione";
 import { evaluateJunkGate } from "./jev-shelf";
@@ -45,6 +49,15 @@ let mockArticleFetch: any = null;
 let mockConvertScript: string | null = null;
 let origEbookConvertPath: string | undefined;
 let lastJinaRequest: { url: string; headers: any } | null = null;
+
+const SAMPLE_JPEG_B64 =
+  "/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAUKADAAQAAAABAAAAUAAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgAUABQAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMAAgICAgICAwICAwUDAwMFBgUFBQUGCAYGBgYGCAoICAgICAgKCgoKCgoKCgwMDAwMDA4ODg4ODw8PDw8PDw8PD//bAEMBAgICBAQEBwQEBxALCQsQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEP/dAAQABf/aAAwDAQACEQMRAD8A/Jeiiivyc/0ACiiigAooooAKKKKACiiigD//0PyXoor6A+D/AOz5qvxk8NeKvFGleK9D0K38GWzX2pRao18syWark3CC2tLhXXOV2qxkyPuYKk/lVOnKb5Y7n974vGU6EPaVXZf56LbzPn+ivtNf2IfGt2fC1to3jrwnqWo+OLH+0NCso7q+gn1CDGf3RurGGJX4PySOjZGMZrgdP/Ze8aWvhWbxx8StY0v4daGl9PpsM2uSXHnXV1au0dwltbWcFzNIInUq77AgP8Rwa2eDqrdHnQ4iwUlpUV9ra3e60VrvVPZdH2PmqivX/i58HdT+EUvh37Zrul+I7TxPpw1OzvNIllmtngM0sGN0sUTBw0R3KVBXocMCB5BWM4OLtI9PDYmFaCqU3dMKKKKg3CiiigD/0fyXr9E/2c/BPiLwJ+zZ8Yvir4pgjsfC/jPwrc6fpV208RFxeJd+QYNgYushcHarAFgCwyOa/Oyn+Y5QRFjsBJC54yepx68V+XYesqcua1z+7M3y+WKpKipcqum9L3Sd7LVWd0tdfQ/Xr40eMvG/7N3ww/Z98Zx/Dq2k8R6T4cW0h1fWYLxjpV24LeQIFligW4KEuBMjOMHA+U48/wDjbp/jD9rL4AfCjxx8MY5fGGueDbW7sPEul2a+dqMF7O8bm7NrHmR0uWRnLopGSPRgv5hVJFNNA4lgdo3HRlJB59xXXPMOa8WvdaWnpbXbyPn8NwgqPs6sJr2sJSfNZ2alze7bm0XvO1mtdbb3+4P2xfDPhXwXoPwq0LTfClj4V8R3egJfa5awPOZ7e8lcgwvFNNIYVyGcIQDuY5NfDdKSScnkmkrjxFVTm5JWPo8qwMsNQjRlPmavq79W31bel7LVhRRRWJ6IUUUUAf/S/Jeiiivyc/0ACiiigAooooAKKKKACiiigD//0/yXooor8nP9AAooooAKKKKACiiigAooooA//9k=";
+
+const SAMPLE_PNG_B64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAFAAAABQCAYAAACOEfKtAAAAAXNSR0IArs4c6QAAAERlWElmTU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAUKADAAQAAAABAAAAUAAAAAAx4ExPAAAE4ElEQVR4Ae2ba0iWZxjH/6+n0jczzXSvqSmNlIRR6SBjBUaHEZRNsAP7MDZo+FkIBu1DK+yDzFqMirIDgQVGxRgxqKSwAl2m2WA5aBaWMw+V5jwfu66bnmePLznevAye4rrg9blP/+fwe/73fd3PBz3YvXscGlMmEDRlpQoNAQUoNIICVIBCAkK5OlABCgkI5epABSgkIJSrAxWgkIBQrg5UgEICQrk6UAEKCQjl6kAFKCQglKsDFaCQgFCuDlSAQgJCuTpQAQoJCOXqQAUoJCCUqwMVoJCAUK4OFAIMEeqnVf6R14vQ4GB0DQzg36EhxEVEmPO39/VN63Wm82QBA/ynsBAJkZETrv2cHuy3Bw9woaEBM+jBT23ejIjQUIyOjeHzsjJUPHpkxocFBaF9505EzZxp6sOjo1h+/DjqWlsRGRaGH9etQ25aGuJnzbLP/+TlS4TTuX6qrkbRzZt2u9sKAU/h5AMHUNvSYu7/cE0NVpw4gf1VVdiSkYFftm3DwpgYLD50CJ39/QgmYOX5+VgYHW3GDxHQ2OJiXGlsRHN3N3wlJQbex9R/r6AA32Zmou7pU2QePQpvURGyjh1DY2cnYsmB/ELcHAEDHB0fx58dHeZZ2B1Vzc3Yd+sWSuvqTNs3S5eiidq7BwdNPSY8HL9u324cxg0jpL9DL6CBzvGcIHuo7WRuLlIJ4lUCu+HsWQO1b2QEtQRzw5kz+PvFiw8HIEMYJwj+0UNrlTOGaHqW1tZihFy3eN48lOXlGVg8hqfuMLVzfJacjJULFpjydxUV5uj8008g88+dw+n6emez68oBO9D/zkNpmq5JTUVBVpbpOn//vj2ksqkJhZcvm/omWtv25uTYfVbhk/h4U+SXYjnb6stOTMTGRYuQFBVlfpk+n9XlumPAScR557tWrcIPBCWMEsdfz57h5N27+P7aNecQ/Hz7NvjBv1qyBDz+j7a2Cf3zXycknvKD5ExnrEhKQmF2tp209lES4WntxpgSwIqHD3GEEglDae3tnfS5Ci5dQkZcHLISEkyGZp0VvL5xcGb2UqLoHR62ulBCyWmMnLl//XpzjV1+L8ce6ILClKbw75RArhCM/4PHzzZAzsorL0c7QeZsytPZinrawlixmpYC/+BszdHW0+Pf5ar6WwHkTS4Hb1MmixkhIQinnxVPCAQnA04gzmCA11/vE4vXrp2gcY5ze3lyEn53zpvhDMqqHMtobeNtiH+kzZ0LH22GeQ1znvjG48d2UrE0nIu/vHgRreSw9NhY1OzYgZyUFEQQfF4fnW61NG48egL9N4cW+hLxOb5Emrq6kHLwoP1MeenpuLB1q13nPd+npaV2nQunaN83h9a8L2haWxFDdU5IX1Oy8dJXSR+thTzdeepW01Kxp7LS7A+t8W47BgxwOm6cP/eiCdib1k52dOLs2Qj2eExC6XDx96+TxX+LlbP1HZV5u/ImeHw53qLzevm+hXOpet/u3RX3qwCFr0EBKkAhAaFcHagAhQSEcnWgAhQSEMrVgQpQSEAoVwcqQCEBoVwdqACFBIRydaACFBIQytWBClBIQChXBypAIQGhXB2oAIUEhHJ1oAIUEhDK1YEKUEhAKFcHKkAhAaFcHagAhQSEcnWgAhQSEMrVgQpQSEAoVwcqQCEBoVwdqACFBITyV+LRZz6kyfXiAAAAAElFTkSuQmCC";
+
+const SAMPLE_WEBP_B64 =
+  "UklGRgwEAABXRUJQVlA4IAAEAADQHgCdASrIAMgAPpFIokulpKOhpDI4KLASCWVu4XPxA1k/aBsSHYvxi/HbkWe6H4jdLsePqh/GfZ3vCP+W+x3hAfqz1M/0A/wHuAfrN1lfoAfq56U/6s/Br+vH66e0vFQjAOwIMCVA9yT4AQwJASAkBICQEgJASAkBICQEgJARh7VWLvCh+ZwlpOC2KSVdlFrua/LP4bwldbDpIsQWHRfygo4X5Z/aBWMza/UFYkFYrJ0fnoBvctI0Beze7Fj7WAHyAOdgItJVk4DqxnvGSFFXLNIsAUGP7z6SRidk6QYm2cXON3nqDqOAEiNpJ2T7SZWS4lxLiXEuJcS4lxLiWcAA/v7K8/U8hmUR1fzDFuiRZmL+AAFBpNuoM6SQ/+iR9MP4SZIS0AqMGQL5vUo4QL1ZHEpYDmdtwCkn+7mKdlePD05Y8HL+nzjO+zbxpBeZpEaLAStK09Usc+iwDWoOOaJxMc1+0LNtlkf+DXhUidfDcknbQtN2rNfAV5nQoXqvLoQI0h6FFVOcp0bNRrSYNAjjkxOLGOeaiJtmCj8CFJ/H8THMUmO8rXxs/2dPwwXX5VFxShNYF9o1zrR5EETXBsZIQI7AfIOBxpj2+mqjtuRrDrhH5BeQ7j3vTsUEuqC2Qgjz0ek8VTx3QFKXjsLYyUza74OX4JgqHxp//PC5DDW8vPshVF8WCbuSGKbHWspFaM2rz5XyqTNYKiTsTFtYRMFPJdvCg386yFIUQfxld5LqJZc023lHZTHDOMMlqu5Qd4rlpg6JyMvX91sfzGF047iV98hPceDvC5y8lgUbBYtFxEljupP4yxS/YUaltykQ861r6LTvTk2M227q4wTb9wekJUDwWo7//onGi2AodAtz5TntYQTo2vGX4HoI55wgUal9JgKss20EskBwX8cNiEZNPoSb/vbuWGzXxbeTykTYGZvwRzyUlEVq11HPE/+1J7pbnbVkXI4uljEcgwLxYVXhV+TvPk3jvXjPQSrai5XwTJ70NMJt3ChIf5w72WXIEeio4ua/Aar5+CNVn9Ji5iRV7oxuZLhhy+afSuRlrYeE+Wp7O3aMQXeE8z6tDPfDvBUycPDQUVpa5UJYJMN60OCHepdS+Rr43XkrWk/S8azO2WJM/OvChrgnzNaSC2AucBqaJmhjwgAJovIIdCutFJI2qGX39mt9ihg8dsLyaf6MDN84AjSqCjR6d887rDR0m3giSPl/TGou0+Z+xZ1BBd2obNWdg1u38TqmEqH8RS1SZlSTf+TvglDP/BTTvqkqiMoLTxbnS9S9J9Y7sq8BK/iwWcSft4TYcjufQbSMB1yd63+ALw6r1R/54R1xmtzng15IPVgfhnWO/8CYAAAAAAAA";
 
 function getHeaderValue(headers: any, name: string): string | null {
   if (!headers) return null;
@@ -136,6 +149,48 @@ ${dummyEssay}`;
         });
       }
       return new Response("Paywall Access Denied", { status: 403 });
+    }
+
+    // Intercept cover image test requests on allowed cover domains
+    if (urlStr.includes("covers.openlibrary.org")) {
+      if (urlStr.includes(".jpg")) {
+        return new Response(Buffer.from(SAMPLE_JPEG_B64, "base64"), {
+          status: 200,
+          headers: { "Content-Type": "image/jpeg" },
+        });
+      }
+      if (urlStr.includes(".png")) {
+        return new Response(Buffer.from(SAMPLE_PNG_B64, "base64"), {
+          status: 200,
+          headers: { "Content-Type": "image/png" },
+        });
+      }
+      if (urlStr.includes(".webp")) {
+        return new Response(Buffer.from(SAMPLE_WEBP_B64, "base64"), {
+          status: 200,
+          headers: { "Content-Type": "image/webp" },
+        });
+      }
+      if (urlStr.includes(".avif")) {
+        const avifHeader = Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66]);
+        const avifBuf = Buffer.concat([avifHeader, Buffer.alloc(1100, 0x5a)]);
+        return new Response(avifBuf, {
+          status: 200,
+          headers: { "Content-Type": "image/avif" },
+        });
+      }
+      if (urlStr.includes(".unknown")) {
+        return new Response(Buffer.alloc(1200, 0x42), {
+          status: 200,
+          headers: { "Content-Type": "application/octet-stream" },
+        });
+      }
+      if (urlStr.includes(".mislabeled")) {
+        return new Response(Buffer.from("<html><body>Error 404 page content</body></html>".repeat(30)), {
+          status: 200,
+          headers: { "Content-Type": "image/jpeg" },
+        });
+      }
     }
 
     return originalFetch(input, init);
@@ -406,6 +461,380 @@ describe("Automatic Cover Generation & Typography Pipeline", () => {
           void _err;
         }
       }
+    }
+  });
+
+  test("detectImageFormat correctly identifies formats from magic byte signatures", () => {
+    const jpgBuf = Buffer.from(SAMPLE_JPEG_B64, "base64");
+    const pngBuf = Buffer.from(SAMPLE_PNG_B64, "base64");
+    const webpBuf = Buffer.from(SAMPLE_WEBP_B64, "base64");
+    const gifBuf = Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64");
+    const avifBuf = Buffer.concat([
+      Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66]),
+      Buffer.alloc(50),
+    ]);
+    const svgBuf = Buffer.from("<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\" height=\"10\"/></svg>");
+    const randBuf = Buffer.from("this is a plain text file without image header");
+
+    expect(detectImageFormat(jpgBuf)).toBe("jpeg");
+    expect(detectImageFormat(pngBuf)).toBe("png");
+    expect(detectImageFormat(webpBuf)).toBe("webp");
+    expect(detectImageFormat(gifBuf)).toBe("gif");
+    expect(detectImageFormat(avifBuf)).toBe("avif");
+    expect(detectImageFormat(svgBuf)).toBe("svg");
+    expect(detectImageFormat(randBuf)).toBe("unknown");
+  });
+
+  test("hasSips respects SIPS_PATH override and reports availability", () => {
+    const origSips = process.env.SIPS_PATH;
+    try {
+      process.env.SIPS_PATH = "/nonexistent/sips/path";
+      expect(hasSips()).toBe(false);
+
+      process.env.SIPS_PATH = "";
+      expect(hasSips()).toBe(false);
+
+      delete process.env.SIPS_PATH;
+      // On macOS running these tests, sips is present
+      if (fs.existsSync("/usr/bin/sips")) {
+        expect(hasSips()).toBe(true);
+      }
+    } finally {
+      if (origSips !== undefined) process.env.SIPS_PATH = origSips;
+      else delete process.env.SIPS_PATH;
+    }
+  });
+
+  test("generateTypographicCover returns SVG directly when sips and external rasterizers are absent", () => {
+    const origSips = process.env.SIPS_PATH;
+    const origRsvg = process.env.RSVG_CONVERT_PATH;
+    const origMagick = process.env.MAGICK_PATH;
+
+    process.env.SIPS_PATH = "/nonexistent/sips";
+    process.env.RSVG_CONVERT_PATH = "/nonexistent/rsvg";
+    process.env.MAGICK_PATH = "/nonexistent/magick";
+
+    let coverPath: string | null = null;
+    try {
+      coverPath = generateTypographicCover(
+        "Autonomous Systems & Robust Infrastructure",
+        "Alan Kay",
+        "Smalltalk Digest",
+        8,
+      );
+
+      expect(coverPath.endsWith(".svg")).toBe(true);
+      expect(fs.existsSync(coverPath)).toBe(true);
+
+      const content = fs.readFileSync(coverPath, "utf8");
+      expect(content).toContain("<svg");
+      expect(content).toContain("Autonomous Systems");
+      expect(content).toContain("Alan Kay");
+      expect(content).toContain("SMALLTALK DIGEST");
+      expect(content).toContain("8 MIN READ");
+    } finally {
+      if (coverPath && fs.existsSync(coverPath)) {
+        try {
+          fs.unlinkSync(coverPath);
+        } catch (_err) {
+          void _err;
+        }
+      }
+      if (origSips !== undefined) process.env.SIPS_PATH = origSips;
+      else delete process.env.SIPS_PATH;
+      if (origRsvg !== undefined) process.env.RSVG_CONVERT_PATH = origRsvg;
+      else delete process.env.RSVG_CONVERT_PATH;
+      if (origMagick !== undefined) process.env.MAGICK_PATH = origMagick;
+      else delete process.env.MAGICK_PATH;
+    }
+  });
+
+  test("generateTypographicCover converts SVG via rsvg-convert or magick when sips is absent", () => {
+    const origSips = process.env.SIPS_PATH;
+    const origRsvg = process.env.RSVG_CONVERT_PATH;
+
+    process.env.SIPS_PATH = "/nonexistent/sips";
+
+    // Create a mock rsvg-convert script
+    const mockRsvgScript = path.join(
+      os.tmpdir(),
+      `mock_rsvg_${Date.now()}_${Math.random().toString(36).slice(2)}.sh`,
+    );
+    fs.writeFileSync(
+      mockRsvgScript,
+      `#!/bin/sh
+# Arguments: -f jpeg -o <outJpg> <inSvg>
+outJpg="$4"
+cat << 'EOF' | base64 -d > "$outJpg"
+${SAMPLE_JPEG_B64}
+EOF
+exit 0
+`,
+      { mode: 0o755 },
+    );
+    process.env.RSVG_CONVERT_PATH = mockRsvgScript;
+
+    let coverPath: string | null = null;
+    try {
+      coverPath = generateTypographicCover(
+        "Compilers and Virtual Machines",
+        "Niklaus Wirth",
+        "Oberon Systems",
+        15,
+      );
+
+      expect(coverPath.endsWith(".jpg")).toBe(true);
+      expect(fs.existsSync(coverPath)).toBe(true);
+      expect(fs.statSync(coverPath).size).toBe(1490);
+    } finally {
+      if (coverPath && fs.existsSync(coverPath)) {
+        try {
+          fs.unlinkSync(coverPath);
+        } catch (_err) {
+          void _err;
+        }
+      }
+      if (fs.existsSync(mockRsvgScript)) {
+        try {
+          fs.unlinkSync(mockRsvgScript);
+        } catch (_err) {
+          void _err;
+        }
+      }
+      if (origSips !== undefined) process.env.SIPS_PATH = origSips;
+      else delete process.env.SIPS_PATH;
+      if (origRsvg !== undefined) process.env.RSVG_CONVERT_PATH = origRsvg;
+      else delete process.env.RSVG_CONVERT_PATH;
+    }
+  });
+
+  test("downloadCoverImage passes through JPEG images cleanly without sips", async () => {
+    const origSips = process.env.SIPS_PATH;
+    process.env.SIPS_PATH = "/nonexistent/sips";
+
+    let downloadedPath: string | null = null;
+    try {
+      downloadedPath = await downloadCoverImage(
+        "https://covers.openlibrary.org/b/id/test-cover-jpeg.jpg",
+        "https://example.com/article",
+      );
+
+      expect(downloadedPath).toBeTruthy();
+      expect(downloadedPath?.endsWith(".jpg")).toBe(true);
+      expect(fs.existsSync(downloadedPath!)).toBe(true);
+      expect(fs.statSync(downloadedPath!).size).toBe(1490);
+    } finally {
+      if (downloadedPath && fs.existsSync(downloadedPath)) {
+        try {
+          fs.unlinkSync(downloadedPath);
+        } catch (_err) {
+          void _err;
+        }
+      }
+      if (origSips !== undefined) process.env.SIPS_PATH = origSips;
+      else delete process.env.SIPS_PATH;
+    }
+  });
+
+  test("downloadCoverImage passes through PNG images cleanly without sips", async () => {
+    const origSips = process.env.SIPS_PATH;
+    process.env.SIPS_PATH = "/nonexistent/sips";
+
+    let downloadedPath: string | null = null;
+    try {
+      downloadedPath = await downloadCoverImage(
+        "https://covers.openlibrary.org/b/id/test-cover-png.png",
+        "https://example.com/article",
+      );
+
+      expect(downloadedPath).toBeTruthy();
+      expect(downloadedPath?.endsWith(".png")).toBe(true);
+      expect(fs.existsSync(downloadedPath!)).toBe(true);
+      expect(fs.statSync(downloadedPath!).size).toBe(1398);
+    } finally {
+      if (downloadedPath && fs.existsSync(downloadedPath)) {
+        try {
+          fs.unlinkSync(downloadedPath);
+        } catch (_err) {
+          void _err;
+        }
+      }
+      if (origSips !== undefined) process.env.SIPS_PATH = origSips;
+      else delete process.env.SIPS_PATH;
+    }
+  });
+
+  test("downloadCoverImage converts WebP via dwebp or retains directly without sips", async () => {
+    const origSips = process.env.SIPS_PATH;
+    const origDwebp = process.env.DWEBP_PATH;
+    process.env.SIPS_PATH = "/nonexistent/sips";
+
+    // 1. Test direct WebP retention when dwebp is absent
+    process.env.DWEBP_PATH = "/nonexistent/dwebp";
+    let downloadedWebp: string | null = null;
+    try {
+      downloadedWebp = await downloadCoverImage(
+        "https://covers.openlibrary.org/b/id/test-cover-webp.webp",
+        "https://example.com/article",
+      );
+
+      expect(downloadedWebp).toBeTruthy();
+      expect(downloadedWebp?.endsWith(".webp")).toBe(true);
+      expect(fs.existsSync(downloadedWebp!)).toBe(true);
+      expect(fs.statSync(downloadedWebp!).size).toBe(1044);
+    } finally {
+      if (downloadedWebp && fs.existsSync(downloadedWebp)) {
+        try {
+          fs.unlinkSync(downloadedWebp);
+        } catch (_err) {
+          void _err;
+        }
+      }
+    }
+
+    // 2. Test dwebp conversion when dwebp is available
+    const mockDwebpScript = path.join(
+      os.tmpdir(),
+      `mock_dwebp_${Date.now()}_${Math.random().toString(36).slice(2)}.sh`,
+    );
+    fs.writeFileSync(
+      mockDwebpScript,
+      `#!/bin/sh
+# Arguments: inWebp -o outPng
+outPng="$3"
+cat << 'EOF' | base64 -d > "$outPng"
+${SAMPLE_PNG_B64}
+EOF
+exit 0
+`,
+      { mode: 0o755 },
+    );
+    process.env.DWEBP_PATH = mockDwebpScript;
+
+    let downloadedPng: string | null = null;
+    try {
+      downloadedPng = await downloadCoverImage(
+        "https://covers.openlibrary.org/b/id/test-cover-webp.webp",
+        "https://example.com/article",
+      );
+
+      expect(downloadedPng).toBeTruthy();
+      expect(downloadedPng?.endsWith(".png")).toBe(true);
+      expect(fs.existsSync(downloadedPng!)).toBe(true);
+      expect(fs.statSync(downloadedPng!).size).toBe(1398);
+    } finally {
+      if (downloadedPng && fs.existsSync(downloadedPng)) {
+        try {
+          fs.unlinkSync(downloadedPng);
+        } catch (_err) {
+          void _err;
+        }
+      }
+      if (fs.existsSync(mockDwebpScript)) {
+        try {
+          fs.unlinkSync(mockDwebpScript);
+        } catch (_err) {
+          void _err;
+        }
+      }
+      if (origSips !== undefined) process.env.SIPS_PATH = origSips;
+      else delete process.env.SIPS_PATH;
+      if (origDwebp !== undefined) process.env.DWEBP_PATH = origDwebp;
+      else delete process.env.DWEBP_PATH;
+    }
+  });
+
+  test("downloadCoverImage returns null on unsupported or unrecognized image formats without sips", async () => {
+    const origSips = process.env.SIPS_PATH;
+    const origMagick = process.env.MAGICK_PATH;
+    process.env.SIPS_PATH = "/nonexistent/sips";
+    process.env.MAGICK_PATH = "/nonexistent/magick";
+
+    try {
+      // 1. Unknown arbitrary payload should return null so typographic cover fallback runs
+      const resUnknown = await downloadCoverImage(
+        "https://covers.openlibrary.org/b/id/test-cover-unknown.unknown",
+        "https://example.com/article",
+      );
+      expect(resUnknown).toBeNull();
+
+      // 2. AVIF without a rasterizer should return null so typographic cover fallback runs
+      const resAvif = await downloadCoverImage(
+        "https://covers.openlibrary.org/b/id/test-cover-avif.avif",
+        "https://example.com/article",
+      );
+      expect(resAvif).toBeNull();
+
+      // 3. Mislabeled non-image payload claiming image/jpeg content-type should be rejected
+      const resMislabeled = await downloadCoverImage(
+        "https://covers.openlibrary.org/b/id/test-cover-mislabeled.mislabeled",
+        "https://example.com/article",
+      );
+      expect(resMislabeled).toBeNull();
+    } finally {
+      if (origSips !== undefined) process.env.SIPS_PATH = origSips;
+      else delete process.env.SIPS_PATH;
+      if (origMagick !== undefined) process.env.MAGICK_PATH = origMagick;
+      else delete process.env.MAGICK_PATH;
+    }
+  });
+
+  test("downloadCoverImage cleans up failed dwebp output and does not leak partial files", async () => {
+    const origSips = process.env.SIPS_PATH;
+    const origDwebp = process.env.DWEBP_PATH;
+    process.env.SIPS_PATH = "/nonexistent/sips";
+
+    // Create a mock dwebp script that creates a partial PNG and exits non-zero (fails)
+    const mockFailingDwebpScript = path.join(
+      os.tmpdir(),
+      `mock_fail_dwebp_${Date.now()}_${Math.random().toString(36).slice(2)}.sh`,
+    );
+    fs.writeFileSync(
+      mockFailingDwebpScript,
+      `#!/bin/sh
+outPng="$3"
+echo "partial corrupted png bytes" > "$outPng"
+exit 1
+`,
+      { mode: 0o755 },
+    );
+    process.env.DWEBP_PATH = mockFailingDwebpScript;
+
+    let res: string | null = null;
+    try {
+      res = await downloadCoverImage(
+        "https://covers.openlibrary.org/b/id/test-cover-webp.webp",
+        "https://example.com/article",
+      );
+
+      // Should fall back to returning WebP directly
+      expect(res).toBeTruthy();
+      expect(res?.endsWith(".webp")).toBe(true);
+      expect(fs.existsSync(res!)).toBe(true);
+
+      // Verify that no lingering failed partial PNG with matching prefix exists
+      const basePrefix = res!.replace(/\.webp$/, "");
+      const possibleLeakedPng = `${basePrefix}.png`;
+      expect(fs.existsSync(possibleLeakedPng)).toBe(false);
+    } finally {
+      if (res && fs.existsSync(res)) {
+        try {
+          fs.unlinkSync(res);
+        } catch (_err) {
+          void _err;
+        }
+      }
+      if (fs.existsSync(mockFailingDwebpScript)) {
+        try {
+          fs.unlinkSync(mockFailingDwebpScript);
+        } catch (_err) {
+          void _err;
+        }
+      }
+      if (origSips !== undefined) process.env.SIPS_PATH = origSips;
+      else delete process.env.SIPS_PATH;
+      if (origDwebp !== undefined) process.env.DWEBP_PATH = origDwebp;
+      else delete process.env.DWEBP_PATH;
     }
   });
 
@@ -843,7 +1272,7 @@ describe("Article Extraction: Firecrawl Tier 1 & Fail-Open Fallback", () => {
   test("falls open to Tier 2 when Firecrawl content fails paywall check", async () => {
     process.env.EBOOK_CONVERT_PATH = mockConvertScript!;
     const mockServer = Bun.serve({
-      port: 49990,
+      port: 0,
       fetch(req) {
         if (req.method === "GET" && new URL(req.url).pathname === "/") {
           return new Response("OK", { status: 200 });
@@ -864,7 +1293,7 @@ describe("Article Extraction: Firecrawl Tier 1 & Fail-Open Fallback", () => {
       },
     });
 
-    process.env.FIRECRAWL_URL = "http://127.0.0.1:49990";
+    process.env.FIRECRAWL_URL = `http://127.0.0.1:${mockServer.port}`;
     setFirecrawlEnabled(true);
 
     try {
