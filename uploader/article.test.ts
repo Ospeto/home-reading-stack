@@ -21,6 +21,9 @@ import {
   extractAllUrlsFromText,
   isBotChallengeTitle,
   isCloudflareChallenge,
+  stripTrackingParams,
+  validateArticleUrl,
+  TRACKING_PARAMS,
 } from "./article";
 import { isElscioneUrl } from "./elscione";
 import { evaluateJunkGate } from "./jev-shelf";
@@ -1246,7 +1249,7 @@ exit 0
     const testDropDir = path.join(testTempDir, "drop");
     fs.mkdirSync(testDropDir, { recursive: true });
 
-    // Mock calibredb runner script: add succeeds with ID 99; if list was called, it would return ID 1
+    // Mock calibredb runner script: add succeeds with ID 99; if list was called by title, it would return ID 1
     const mockCalibreScript = path.join(testTempDir, "mock_calibredb.sh");
     fs.writeFileSync(
       mockCalibreScript,
@@ -1255,7 +1258,13 @@ if [ "$1" = "add" ]; then
   echo "Added book ids: 99"
   exit 0
 elif [ "$1" = "list" ]; then
-  echo '[{"id": 1, "title": "Added Book Test", "authors": "Author"}]'
+  for arg in "$@"; do
+    if [[ "$arg" =~ ^title: ]]; then
+      echo '[{"id": 1, "title": "Added Book Test", "authors": "Author"}]'
+      exit 0
+    fi
+  done
+  echo "[]"
   exit 0
 elif [ "$1" = "set_metadata" ]; then
   exit 0
@@ -1292,6 +1301,345 @@ exit 0
       else delete process.env.BOOKS_DROP_DIR;
       if (prevCalibrePath !== undefined) process.env.CALIBREDB_PATH = prevCalibrePath;
       else delete process.env.CALIBREDB_PATH;
+      try {
+        fs.rmSync(testTempDir, { recursive: true, force: true });
+      } catch (_err) {
+        void _err;
+      }
+    }
+  });
+});
+
+describe("Article URL Sanitization & Tracking Parameter Stripping (stripTrackingParams)", () => {
+  test("TRACKING_PARAMS set contains all specified marketing and analytics parameters", () => {
+    const requiredKeys = [
+      "utm_source",
+      "utm_medium",
+      "utm_campaign",
+      "utm_term",
+      "utm_content",
+      "utm_id",
+      "utm_source_platform",
+      "fbclid",
+      "gclid",
+      "gclsrc",
+      "dclid",
+      "wbraid",
+      "gbraid",
+      "mc_eid",
+      "mc_cid",
+      "igshid",
+      "_hsenc",
+      "_hsmi",
+      "ref",
+      "ref_src",
+      "source",
+      "feature",
+      "twclid",
+      "si",
+      "spm",
+      "mkt_tok",
+      "trk",
+    ];
+    for (const key of requiredKeys) {
+      expect(TRACKING_PARAMS.has(key)).toBe(true);
+    }
+  });
+
+  test("strips standard Google Analytics UTM parameters", () => {
+    const input =
+      "https://example.com/article?utm_source=twitter&utm_medium=social&utm_campaign=launch&utm_term=reading&utm_content=button&utm_id=456&utm_source_platform=ios";
+    expect(stripTrackingParams(input)).toBe("https://example.com/article");
+  });
+
+  test("strips major ad click identifiers (fbclid, gclid, dclid, twclid, etc.)", () => {
+    const input =
+      "https://news.ycombinator.com/item?id=12345&fbclid=fb_123&gclid=g_456&gclsrc=aw.ds&dclid=d_789&wbraid=w_012&gbraid=g_345&twclid=tw_678";
+    expect(stripTrackingParams(input)).toBe(
+      "https://news.ycombinator.com/item?id=12345",
+    );
+  });
+
+  test("strips newsletter and platform tracking tokens (mc_eid, igshid, hsenc, si, spm, trk, mkt_tok)", () => {
+    const input =
+      "https://newsletter.example.org/digest?mc_eid=abc1234&mc_cid=def5678&igshid=ig_xyz&_hsenc=hs_enc1&_hsmi=hs_mi2&mkt_tok=token123&trk=track_code&spm=100.200&si=spotify_si";
+    expect(stripTrackingParams(input)).toBe(
+      "https://newsletter.example.org/digest",
+    );
+  });
+
+  test("strips referral and navigational tracking (ref, ref_src, source, feature)", () => {
+    const input =
+      "https://youtube.com/watch?v=dQw4w9WgXcQ&feature=share&ref=producthunt&ref_src=twsrc&source=feed_card";
+    expect(stripTrackingParams(input)).toBe(
+      "https://youtube.com/watch?v=dQw4w9WgXcQ",
+    );
+  });
+
+  test("strips tracking parameters case-insensitively", () => {
+    const input =
+      "https://example.com/post?UTM_SOURCE=promo&FbClId=abc&GCLID=def&ID=999";
+    expect(stripTrackingParams(input)).toBe("https://example.com/post?ID=999");
+  });
+
+  test("strips arbitrary custom parameters starting with utm_", () => {
+    const input =
+      "https://example.com/page?utm_custom_tag=test&utm_creative=banner_v2&article=tech-news";
+    expect(stripTrackingParams(input)).toBe(
+      "https://example.com/page?article=tech-news",
+    );
+  });
+
+  test("preserves all legitimate functional query parameters", () => {
+    const input =
+      "https://example.com/search?q=distributed+systems&page=2&sort=recent&category=tech&filter=open-access&tab=all&lang=en";
+    expect(stripTrackingParams(input)).toBe(input);
+  });
+
+  test("preserves functional parameters while stripping interspersed tracking parameters", () => {
+    const input =
+      "https://example.com/read?book=10&utm_source=mastodon&chapter=3&fbclid=xyz&offset=150#section-2";
+    expect(stripTrackingParams(input)).toBe(
+      "https://example.com/read?book=10&chapter=3&offset=150#section-2",
+    );
+  });
+
+  test("preserves URL hash/fragment identifiers without tracking parameters", () => {
+    const input =
+      "https://example.com/essay.html?utm_campaign=newsletter#conclusion";
+    expect(stripTrackingParams(input)).toBe(
+      "https://example.com/essay.html#conclusion",
+    );
+  });
+
+  test("returns unchanged string for clean URLs without query parameters", () => {
+    const input = "https://paulgraham.com/foundermode.html";
+    expect(stripTrackingParams(input)).toBe(input);
+  });
+
+  test("safely handles invalid, malformed, or empty inputs without throwing", () => {
+    expect(stripTrackingParams("")).toBe("");
+    expect(stripTrackingParams("not a valid url")).toBe("not a valid url");
+    expect(stripTrackingParams("http://")).toBe("http://");
+    expect(stripTrackingParams(null as any)).toBe("");
+    expect(stripTrackingParams(undefined as any)).toBe("");
+  });
+
+  test("extractUrlFromText cleans tracking parameters from extracted text URLs", () => {
+    const text =
+      "Check this article: https://example.com/great-post?id=42&utm_source=twitter&utm_medium=feed and let me know!";
+    expect(extractUrlFromText(text)).toBe("https://example.com/great-post?id=42");
+  });
+
+  test("validateArticleUrl strips tracking parameters on returned URL href", () => {
+    const validated = validateArticleUrl(
+      "https://example.com/clean-test?utm_campaign=fall&id=77",
+    );
+    expect(validated.href).toBe("https://example.com/clean-test?id=77");
+    expect(validated.searchParams.get("utm_campaign")).toBeNull();
+    expect(validated.searchParams.get("id")).toBe("77");
+  });
+});
+
+describe("Upfront Calibre URL Duplicate Detection in ingestArticleFromUrl", () => {
+  test("returns existing record early without network extraction when article URL is found in Calibre comments", async () => {
+    const testTempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "article-dup-early-test-"),
+    );
+    const mockCalibreScript = path.join(testTempDir, "mock_calibredb.sh");
+
+    fs.writeFileSync(
+      mockCalibreScript,
+      `#!/bin/bash
+if [ "$1" = "list" ]; then
+  # Echo matching record if comments search matches target clean URL
+  for arg in "$@"; do
+    if [[ "$arg" =~ comments:.*https://example.com/already-ingested ]]; then
+      echo '[{"id": 42, "title": "Previously Ingested Architecture Guide", "authors": "Martin Fowler"}]'
+      exit 0
+    fi
+  done
+  echo "[]"
+  exit 0
+fi
+echo "[]"
+exit 0
+`,
+      { mode: 0o755 },
+    );
+
+    const prevCalibrePath = process.env.CALIBREDB_PATH;
+    process.env.CALIBREDB_PATH = mockCalibreScript;
+
+    let networkFetchCalled = false;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      networkFetchCalled = true;
+      throw new Error("Network fetch should not be called for duplicate articles");
+    }) as any;
+
+    try {
+      const urlWithTracking =
+        "https://example.com/already-ingested?utm_source=twitter&utm_medium=social&utm_campaign=summer#intro";
+
+      const res = await ingestArticleFromUrl(urlWithTracking);
+
+      expect(res.success).toBe(true);
+      expect(res.duplicate).toBe(true);
+      expect(res.bookId).toBe(42);
+      expect(res.title).toBe("Previously Ingested Architecture Guide");
+      expect(res.authors).toBe("Martin Fowler");
+      expect(res.siteName).toBe("example.com");
+      expect(res.wordCount).toBe(0);
+      expect(res.readTimeMinutes).toBe(0);
+      expect(res.format).toBe("EPUB");
+      expect(res.message).toBe("Article already exists in Calibre (ID: 42)");
+      expect(networkFetchCalled).toBe(false);
+    } finally {
+      globalThis.fetch = origFetch;
+      if (prevCalibrePath !== undefined) {
+        process.env.CALIBREDB_PATH = prevCalibrePath;
+      } else {
+        delete process.env.CALIBREDB_PATH;
+      }
+      try {
+        fs.rmSync(testTempDir, { recursive: true, force: true });
+      } catch (_err) {
+        void _err;
+      }
+    }
+  });
+
+  test("handles array authors returned by calibredb list in duplicate detection", async () => {
+    const testTempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "article-dup-authors-array-"),
+    );
+    const mockCalibreScript = path.join(testTempDir, "mock_calibredb.sh");
+
+    fs.writeFileSync(
+      mockCalibreScript,
+      `#!/bin/bash
+if [ "$1" = "list" ]; then
+  for arg in "$@"; do
+    if [[ "$arg" =~ comments:.*https://example.com/multi-author ]]; then
+      echo '[{"id": 88, "title": "Collaborative Design Patterns", "authors": ["Alice Smith", "Bob Jones"]}]'
+      exit 0
+    fi
+  done
+fi
+echo "[]"
+exit 0
+`,
+      { mode: 0o755 },
+    );
+
+    const prevCalibrePath = process.env.CALIBREDB_PATH;
+    process.env.CALIBREDB_PATH = mockCalibreScript;
+
+    let networkFetchCalled = false;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      networkFetchCalled = true;
+      throw new Error("Network fetch should not be called for duplicate articles");
+    }) as any;
+
+    try {
+      const res = await ingestArticleFromUrl(
+        "https://example.com/multi-author?fbclid=track123",
+      );
+
+      expect(res.success).toBe(true);
+      expect(res.duplicate).toBe(true);
+      expect(res.bookId).toBe(88);
+      expect(res.title).toBe("Collaborative Design Patterns");
+      expect(res.authors).toBe("Alice Smith, Bob Jones");
+      expect(res.siteName).toBe("example.com");
+      expect(res.message).toBe("Article already exists in Calibre (ID: 88)");
+      expect(networkFetchCalled).toBe(false);
+    } finally {
+      globalThis.fetch = origFetch;
+      if (prevCalibrePath !== undefined) {
+        process.env.CALIBREDB_PATH = prevCalibrePath;
+      } else {
+        delete process.env.CALIBREDB_PATH;
+      }
+      try {
+        fs.rmSync(testTempDir, { recursive: true, force: true });
+      } catch (_err) {
+        void _err;
+      }
+    }
+  });
+
+  test("falls through to extraction when calibredb list finds no duplicate", async () => {
+    const testTempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "article-dup-none-test-"),
+    );
+    const mockCalibreScript = path.join(testTempDir, "mock_calibredb.sh");
+
+    fs.writeFileSync(
+      mockCalibreScript,
+      `#!/bin/bash
+if [ "$1" = "list" ]; then
+  echo "[]"
+  exit 0
+elif [ "$1" = "add" ]; then
+  echo "Added book ids: 101"
+  exit 0
+elif [ "$1" = "set_metadata" ]; then
+  exit 0
+fi
+echo "[]"
+exit 0
+`,
+      { mode: 0o755 },
+    );
+
+    const testDropDir = path.join(testTempDir, "drop");
+    fs.mkdirSync(testDropDir, { recursive: true });
+
+    const prevDropEnv = process.env.BOOKS_DROP_DIR;
+    const prevCalibrePath = process.env.CALIBREDB_PATH;
+    process.env.BOOKS_DROP_DIR = testDropDir;
+    process.env.CALIBREDB_PATH = mockCalibreScript;
+
+    const prose =
+      "Modern backend architectures require continuous monitoring and robust duplicate checking. ".repeat(
+        25,
+      );
+    const origFetch = globalThis.fetch;
+
+    try {
+      globalThis.fetch = (async () => {
+        return new Response(
+          `<html><head><title>Fresh Ingest Article</title></head><body><article><p>${prose}</p></article></body></html>`,
+          {
+            status: 200,
+            headers: { "Content-Type": "text/html; charset=utf-8" },
+          },
+        );
+      }) as any;
+
+      const res = await ingestArticleFromUrl(
+        "https://example.com/fresh-article?utm_source=hackernews",
+      );
+
+      expect(res.success).toBe(true);
+      expect(res.duplicate).toBe(false);
+      expect(res.bookId).toBe(101);
+      expect(res.title).toBe("Fresh Ingest Article");
+    } finally {
+      globalThis.fetch = origFetch;
+      if (prevDropEnv !== undefined) {
+        process.env.BOOKS_DROP_DIR = prevDropEnv;
+      } else {
+        delete process.env.BOOKS_DROP_DIR;
+      }
+      if (prevCalibrePath !== undefined) {
+        process.env.CALIBREDB_PATH = prevCalibrePath;
+      } else {
+        delete process.env.CALIBREDB_PATH;
+      }
       try {
         fs.rmSync(testTempDir, { recursive: true, force: true });
       } catch (_err) {
