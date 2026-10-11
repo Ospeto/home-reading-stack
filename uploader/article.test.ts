@@ -28,6 +28,7 @@ import {
   markdownToHtml,
   buildStyledHtmlDocument,
   ingestArticleFromUrl,
+  ingestRawText,
   extractUrlFromText,
   extractAllUrlsFromText,
   isBotChallengeTitle,
@@ -3722,6 +3723,153 @@ exit 0
       expect(fs.existsSync(expectedPath)).toBe(false);
     } finally {
       globalThis.fetch = origFetch;
+      if (prevDropEnv !== undefined) {
+        process.env.BOOKS_DROP_DIR = prevDropEnv;
+      } else {
+        delete process.env.BOOKS_DROP_DIR;
+      }
+      if (prevCalibrePath !== undefined) {
+        process.env.CALIBREDB_PATH = prevCalibrePath;
+      } else {
+        delete process.env.CALIBREDB_PATH;
+      }
+      try {
+        fs.rmSync(testTempDir, { recursive: true, force: true });
+      } catch (_err) {
+        void _err;
+      }
+    }
+  });
+});
+
+describe("Raw Text and Markdown Ingestion (ingestRawText)", () => {
+  test("ingestRawText rejects missing or invalid title parameter", async () => {
+    const res = await ingestRawText({
+      title: "",
+      content: "Valid content",
+    });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("title");
+  });
+
+  test("ingestRawText rejects missing or invalid content parameter", async () => {
+    const res = await ingestRawText({
+      title: "Valid Title",
+      content: "   ",
+    });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("content");
+  });
+
+  test("ingestRawText converts markdown to EPUB and attaches typographic cover", async () => {
+    process.env.EBOOK_CONVERT_PATH = mockConvertScript!;
+    const testTempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "text-ingest-test-"),
+    );
+    const testDropDir = path.join(testTempDir, "drop");
+    fs.mkdirSync(testDropDir, { recursive: true });
+
+    const mockCalibreScript = path.join(testTempDir, "mock_calibredb.sh");
+    fs.writeFileSync(
+      mockCalibreScript,
+      `#!/bin/bash
+if [ "$1" = "add" ]; then
+  echo "Added book ids: 4242"
+  exit 0
+fi
+echo "[]"
+exit 0
+`,
+      { mode: 0o755 },
+    );
+
+    const prevDropEnv = process.env.BOOKS_DROP_DIR;
+    const prevCalibrePath = process.env.CALIBREDB_PATH;
+    process.env.BOOKS_DROP_DIR = testDropDir;
+    process.env.CALIBREDB_PATH = mockCalibreScript;
+
+    try {
+      const markdown = `# Architecture Overview
+Here is a deep dive into distributed event streaming systems.
+
+## Key Principles
+- Idempotency
+- Fault tolerance
+- High throughput
+
+> "Simplicity is prerequisite for reliability."
+`;
+
+      const res = await ingestRawText({
+        title: "Streaming Architecture Guide",
+        author: "Lead Architect",
+        siteName: "Engineering Blog",
+        content: markdown,
+      });
+
+      expect(res.success).toBe(true);
+      expect(res.bookId).toBe(4242);
+      expect(res.title).toBe("Streaming Architecture Guide");
+      expect(res.authors).toBe("Lead Architect");
+      expect(res.format).toBe("EPUB");
+      expect(res.wordCount).toBeGreaterThan(15);
+      expect(res.readTimeMinutes).toBeGreaterThanOrEqual(1);
+      expect(res.epubPath).toBeDefined();
+      expect(fs.existsSync(res.epubPath!)).toBe(true);
+    } finally {
+      if (prevDropEnv !== undefined) {
+        process.env.BOOKS_DROP_DIR = prevDropEnv;
+      } else {
+        delete process.env.BOOKS_DROP_DIR;
+      }
+      if (prevCalibrePath !== undefined) {
+        process.env.CALIBREDB_PATH = prevCalibrePath;
+      } else {
+        delete process.env.CALIBREDB_PATH;
+      }
+      try {
+        fs.rmSync(testTempDir, { recursive: true, force: true });
+      } catch (_err) {
+        void _err;
+      }
+    }
+  });
+
+  test("ingestRawText returns success: false when calibredb add fails", async () => {
+    process.env.EBOOK_CONVERT_PATH = mockConvertScript!;
+    const testTempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "text-fail-test-"),
+    );
+    const testDropDir = path.join(testTempDir, "drop");
+    fs.mkdirSync(testDropDir, { recursive: true });
+
+    const mockCalibreScript = path.join(testTempDir, "mock_calibredb.sh");
+    fs.writeFileSync(
+      mockCalibreScript,
+      `#!/bin/bash
+if [ "$1" = "add" ]; then
+  echo "calibredb error: database disk image is malformed" >&2
+  exit 1
+fi
+exit 0
+`,
+      { mode: 0o755 },
+    );
+
+    const prevDropEnv = process.env.BOOKS_DROP_DIR;
+    const prevCalibrePath = process.env.CALIBREDB_PATH;
+    process.env.BOOKS_DROP_DIR = testDropDir;
+    process.env.CALIBREDB_PATH = mockCalibreScript;
+
+    try {
+      const res = await ingestRawText({
+        title: "Failing Calibre Add",
+        content: "Prose content to convert.",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.error).toContain("malformed");
+    } finally {
       if (prevDropEnv !== undefined) {
         process.env.BOOKS_DROP_DIR = prevDropEnv;
       } else {

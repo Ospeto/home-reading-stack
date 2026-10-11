@@ -1597,7 +1597,7 @@ export interface StyledDocumentOptions {
   title: string;
   author: string;
   siteName: string;
-  url: string;
+  url?: string;
   publishedDate?: string;
   readTimeMinutes: number;
   wordCount: number;
@@ -1608,13 +1608,22 @@ export interface StyledDocumentOptions {
  * Build a complete Kindle-optimized serif HTML document.
  */
 export function buildStyledHtmlDocument(opts: StyledDocumentOptions): string {
+  const cleanUrl = opts.url ? stripTrackingParams(opts.url) : "";
+  const isWebUrl = Boolean(cleanUrl && /^https?:\/\//i.test(cleanUrl));
+  const description = isWebUrl
+    ? `Saved from ${escapeHtml(cleanUrl)}`
+    : `Pasted text: ${escapeHtml(opts.title)}`;
+  const linkRow = isWebUrl
+    ? `<p><a href="${escapeHtml(cleanUrl)}">Original Web Article</a></p>`
+    : "";
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>${escapeHtml(opts.title)}</title>
   <meta name="author" content="${escapeHtml(opts.author)}">
-  <meta name="description" content="Saved from ${escapeHtml(stripTrackingParams(opts.url))}">
+  <meta name="description" content="${description}">
   <style>
     body {
       font-family: "Charter", "Georgia", "Iowan Old Style", "Palatino", serif;
@@ -1683,7 +1692,7 @@ export function buildStyledHtmlDocument(opts: StyledDocumentOptions): string {
       <p><strong>Author:</strong> ${escapeHtml(opts.author)} | <strong>Source:</strong> ${escapeHtml(opts.siteName)}</p>
       ${opts.publishedDate ? `<p><strong>Published:</strong> ${escapeHtml(opts.publishedDate)}</p>` : ""}
       <p><strong>Reading Time:</strong> ~${opts.readTimeMinutes} min (${opts.wordCount} words)</p>
-      <p><a href="${escapeHtml(stripTrackingParams(opts.url))}">Original Web Article</a></p>
+      ${linkRow}
     </div>
   </header>
   <div class="article-content">
@@ -3723,6 +3732,277 @@ export async function ingestArticleFromUrl(
             void _err;
           }
         }
+      }
+    }
+  }
+}
+
+export interface IngestRawTextOptions {
+  title: string;
+  author?: string;
+  authors?: string;
+  content: string;
+  siteName?: string;
+}
+
+export interface IngestRawTextResult {
+  success: boolean;
+  bookId?: number | null;
+  title: string;
+  authors: string;
+  format: string;
+  siteName?: string;
+  wordCount?: number;
+  readTimeMinutes?: number;
+  duplicate?: boolean;
+  epubPath?: string;
+  error?: string;
+  message?: string;
+}
+
+/**
+ * Ingest raw text or markdown directly into Calibre as a Kindle-optimized EPUB.
+ */
+export async function ingestRawText(
+  options: IngestRawTextOptions,
+): Promise<IngestRawTextResult> {
+  const cleanTitle = cleanString(options.title || "");
+  const rawAuthor = options.author || options.authors || "";
+  const cleanAuthor = cleanString(rawAuthor) || "Unknown";
+  const cleanSiteName = cleanString(options.siteName || "") || "Raw Text";
+  const rawContent = options.content || "";
+
+  if (!cleanTitle) {
+    return {
+      success: false,
+      title: "",
+      authors: cleanAuthor,
+      format: "EPUB",
+      error: "Missing or invalid 'title' parameter",
+    };
+  }
+
+  if (!rawContent.trim()) {
+    return {
+      success: false,
+      title: cleanTitle,
+      authors: cleanAuthor,
+      format: "EPUB",
+      error: "Missing or invalid 'content' parameter",
+    };
+  }
+
+  // 1. Markdown to HTML conversion
+  const contentHtml = markdownToHtml(rawContent.trim());
+  const textOnly = rawContent
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/<[^>]+>/g, " ");
+  const wordCount = Math.max(1, textOnly.split(/\s+/).filter(Boolean).length);
+  const readTimeMinutes = Math.max(1, Math.ceil(wordCount / 200));
+
+  // 2. Build Kindle-optimized styled HTML document
+  const styledDocument = buildStyledHtmlDocument({
+    title: cleanTitle,
+    author: cleanAuthor,
+    siteName: cleanSiteName,
+    url: "",
+    publishedDate: new Date().toISOString().split("T")[0],
+    readTimeMinutes,
+    wordCount,
+    contentHtml,
+  });
+
+  // 3. Typographic cover generation
+  let coverImagePath: string | undefined;
+  try {
+    coverImagePath = generateTypographicCover(
+      cleanTitle,
+      cleanAuthor,
+      cleanSiteName,
+      readTimeMinutes,
+    );
+  } catch (_coverErr) {
+    void _coverErr;
+  }
+
+  try {
+    // 4. EPUB Conversion
+    const tempEpub = convertHtmlToEpub(
+      styledDocument,
+      cleanTitle,
+      cleanAuthor,
+      cleanSiteName,
+      undefined,
+      coverImagePath,
+    );
+
+    // 5. Save to Books_Drop with sanitized filename
+    const safeFilenameBase =
+      cleanString(cleanTitle)
+        .replace(/[^a-zA-Z0-9_\u00A0-\uFFFF -]/g, "")
+        .replace(/\s+/g, "_")
+        .slice(0, 60)
+        .trim() || "Raw_Text";
+
+    const junkCheck = await evaluateJunkGate(
+      cleanTitle,
+      "",
+      cleanAuthor,
+    );
+    if (junkCheck.quarantined) {
+      moveToQuarantine(tempEpub, `${safeFilenameBase}.epub`);
+      return {
+        success: false,
+        title: cleanTitle,
+        authors: cleanAuthor,
+        siteName: cleanSiteName,
+        wordCount,
+        readTimeMinutes,
+        format: "EPUB",
+        error: `Quarantined by junk ingest gate: ${junkCheck.reason || "Artifact quarantined"}`,
+      };
+    }
+
+    const dropFileName = `${safeFilenameBase}_${Date.now()}.epub`;
+    const dropFilePath = path.join(getDropDir(), dropFileName);
+
+    fs.copyFileSync(tempEpub, dropFilePath);
+    try {
+      fs.unlinkSync(tempEpub);
+    } catch (_err) {
+      void _err;
+    }
+
+    // 6. Ingest into Calibre via calibredb with pre-add language & category detection
+    const classification = await resolveBookLanguageAndTags({
+      title: cleanTitle,
+      author: cleanAuthor,
+      comments: styledDocument,
+      tags: ["Web Article", "Read Later", cleanSiteName].filter(Boolean),
+    });
+    const tagsStr = classification.tags.join(",");
+    const addArgs = [
+      "add",
+      dropFilePath,
+      "--with-library",
+      SERVER_URL,
+      "--title",
+      cleanTitle,
+      "--authors",
+      cleanAuthor,
+      "--tags",
+      tagsStr,
+      "--automerge",
+      "ignore",
+    ];
+    if (classification.language && classification.language !== "other") {
+      addArgs.push("--languages", classification.language);
+    }
+    if (coverImagePath && fs.existsSync(coverImagePath)) {
+      addArgs.push("--cover", coverImagePath);
+    }
+
+    const addRes = runCalibredb(addArgs);
+
+    if (addRes.status !== 0) {
+      return {
+        success: false,
+        title: cleanTitle,
+        authors: cleanAuthor,
+        siteName: cleanSiteName,
+        wordCount,
+        readTimeMinutes,
+        format: "EPUB",
+        error: addRes.stderr || addRes.stdout || "Failed to add text article to Calibre",
+      };
+    }
+
+    let bookId: number | null = null;
+    let isDuplicate = false;
+
+    const match = addRes.stdout?.match(/Added book ids?:?\s*([0-9]+)/i);
+    if (match) {
+      bookId = parseInt(match[1], 10);
+    }
+
+    // If bookId not returned directly, search by title to link book record
+    if (!bookId) {
+      const listRes = runCalibredb([
+        "list",
+        "--with-library",
+        SERVER_URL,
+        "--search",
+        `title:"=${cleanTitle}"`,
+        "--fields",
+        "id,title,authors",
+        "--for-machine",
+      ]);
+
+      if (listRes.status === 0 && listRes.stdout) {
+        try {
+          const parsed = JSON.parse(listRes.stdout.trim());
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            bookId = parsed[0].id;
+            isDuplicate = true;
+          }
+        } catch (_err) {
+          void _err;
+        }
+      }
+    }
+
+    // Ensure comments and cover are attached in Calibre
+    if (bookId) {
+      const setArgs = [
+        "set_metadata",
+        String(bookId),
+        "--with-library",
+        SERVER_URL,
+        "--field",
+        `comments:Pasted text from ${cleanSiteName}`,
+      ];
+      if (
+        coverImagePath &&
+        fs.existsSync(coverImagePath)
+      ) {
+        setArgs.push("--field", `cover:${coverImagePath}`);
+      }
+      runCalibredb(setArgs);
+      if (
+        coverImagePath &&
+        fs.existsSync(coverImagePath)
+      ) {
+        try {
+          const { purgeCoverCache } = await import("./server.ts");
+          purgeCoverCache(bookId);
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    return {
+      success: true,
+      duplicate: isDuplicate,
+      bookId,
+      title: cleanTitle,
+      authors: cleanAuthor,
+      siteName: cleanSiteName,
+      wordCount,
+      readTimeMinutes,
+      epubPath: dropFilePath,
+      format: "EPUB",
+      message: isDuplicate
+        ? `Article already exists in Calibre (ID: ${bookId})`
+        : `Successfully ingested "${cleanTitle}" into library`,
+    };
+  } finally {
+    // Clean up temporary cover image
+    if (coverImagePath && fs.existsSync(coverImagePath)) {
+      try {
+        fs.unlinkSync(coverImagePath);
+      } catch (_err) {
+        void _err;
       }
     }
   }

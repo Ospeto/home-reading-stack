@@ -27,7 +27,14 @@ import {
   unpackArchive,
   MAX_ARCHIVE_SIZE_BYTES,
 } from "./archive";
-import { ingestArticleFromUrl, generateTypographicCover } from "./article";
+import {
+  ingestArticleFromUrl,
+  ingestRawText,
+  generateTypographicCover,
+  markdownToHtml,
+  buildStyledHtmlDocument,
+  convertHtmlToEpub,
+} from "./article";
 import { generateOpdsFeed, rewriteOpdsXml } from "./opds";
 import {
   isWanRequest,
@@ -126,6 +133,7 @@ declare const Bun: any;
 
 export interface ServerDependencies {
   ingestArticleFromUrl?: typeof ingestArticleFromUrl;
+  ingestRawText?: typeof ingestRawText;
   ingestLnoriSeries?: (
     url: string,
     onProgress?: (event: LnoriProgressEvent) => Promise<void> | void,
@@ -1882,6 +1890,41 @@ export function registerJobHandlers(q: DurableJobQueue) {
     getBooks(true);
     return structuredResult;
   });
+
+  q.registerHandler(
+    "text_article_ingest",
+    async (payload: {
+      title: string;
+      author?: string;
+      authors?: string;
+      content: string;
+      siteName?: string;
+    }) => {
+      const ingestFn = serverDependencies.ingestRawText ?? ingestRawText;
+      const result = await ingestFn(payload);
+      const structuredResult = {
+        bookId: result.bookId ?? null,
+        title: result.title || "Raw Text",
+        authors: result.authors || "Unknown",
+        readTimeMinutes: result.readTimeMinutes || 0,
+        error: result.error || null,
+        siteName: result.siteName,
+        wordCount: result.wordCount,
+        format: result.format || "EPUB",
+        duplicate: result.duplicate,
+        epubPath: result.epubPath,
+        message: result.message,
+      };
+      if (!result.success) {
+        const err: any = new Error(result.error || "Text ingestion failed");
+        err.result = structuredResult;
+        throw err;
+      }
+      const getBooks = serverDependencies.getCalibreBooks ?? getCalibreBooks;
+      getBooks(true);
+      return structuredResult;
+    },
+  );
 
   q.registerHandler(
     "cover_backfill",
@@ -6008,6 +6051,88 @@ async function handleRequestCore(
           success: false,
           error:
             sanitizeErrorMessage(err) || "Failed to ingest article from URL",
+        },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  // API: Ingest Raw Text / Markdown into Reading HQ
+  if (url.pathname === "/api/ingest-text" && req.method === "POST") {
+    try {
+      const parsedBody = await parseJsonBody<{
+        title?: string;
+        author?: string;
+        authors?: string;
+        content?: string;
+        siteName?: string;
+        async?: boolean | string;
+      }>(req);
+      if (parsedBody.error || !parsedBody.data) {
+        return jsonResponse(
+          { success: false, error: parsedBody.error || "Missing or invalid body" },
+          400,
+          corsOrigin,
+        );
+      }
+      const body = parsedBody.data;
+      if (!body.title || typeof body.title !== "string" || !body.title.trim()) {
+        return jsonResponse(
+          { success: false, error: "Missing or invalid 'title' parameter" },
+          400,
+          corsOrigin,
+        );
+      }
+      if (!body.content || typeof body.content !== "string" || !body.content.trim()) {
+        return jsonResponse(
+          { success: false, error: "Missing or invalid 'content' parameter" },
+          400,
+          corsOrigin,
+        );
+      }
+
+      const isAsync =
+        body.async === true ||
+        body.async === "true" ||
+        url.searchParams.get("async") === "true";
+
+      const ingestPayload = {
+        title: body.title.trim(),
+        author: (body.author || body.authors || "").trim(),
+        content: body.content,
+        siteName: (body.siteName || "").trim(),
+      };
+
+      if (isAsync) {
+        const job = jobQueue.enqueue("text_article_ingest", ingestPayload);
+        return jsonResponse(
+          {
+            success: true,
+            jobId: job.id,
+            status: "queued",
+          },
+          200,
+          corsOrigin,
+        );
+      }
+
+      const ingestFn =
+        serverDependencies.ingestRawText ?? ingestRawText;
+      const result = await ingestFn(ingestPayload);
+      if (!result.success) {
+        return jsonResponse(result, 500, corsOrigin);
+      }
+
+      const getBooks = serverDependencies.getCalibreBooks ?? getCalibreBooks;
+      getBooks(true);
+      return jsonResponse(result, 200, corsOrigin);
+    } catch (err: any) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            sanitizeErrorMessage(err) || "Failed to ingest raw text",
         },
         500,
         corsOrigin,
