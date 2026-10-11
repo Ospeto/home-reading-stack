@@ -2288,6 +2288,12 @@ export function convertHtmlToEpub(
       "--comments",
       comments,
       "--dont-split-on-page-breaks",
+      "--chapter",
+      "//*[re:test(local-name(), '^h[12]$', 'i')]",
+      "--level1-toc",
+      "//h2",
+      "--toc-threshold",
+      "2",
     ];
 
     if (coverPath && fs.existsSync(coverPath)) {

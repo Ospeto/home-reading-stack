@@ -16,6 +16,8 @@ import {
   generateTypographicCover,
   parseJinaMarkdown,
   convertHtmlToEpub,
+  markdownToHtml,
+  buildStyledHtmlDocument,
   ingestArticleFromUrl,
   extractUrlFromText,
   extractAllUrlsFromText,
@@ -137,6 +139,9 @@ ${dummyEssay}`;
     mockConvertScript,
     `#!/bin/sh
 OUT="$2"
+if [ -n "$MOCK_EBOOK_CONVERT_LOG" ]; then
+  printf "%s\n" "$@" > "$MOCK_EBOOK_CONVERT_LOG"
+fi
 printf "PK\\003\\004mock_hermetic_epub_archive" > "$OUT"
 head -c 3000 /dev/zero >> "$OUT"
 exit 0
@@ -455,6 +460,154 @@ More body text.`;
         }
       }
     }
+  });
+});
+
+describe("Table of Contents (TOC) & Chapter Navigation in Article EPUBs", () => {
+  test("convertHtmlToEpub passes --chapter, --level1-toc, and --toc-threshold arguments to ebook-convert", () => {
+    const logPath = path.join(
+      os.tmpdir(),
+      `mock_convert_args_${Date.now()}_${Math.random().toString(36).slice(2)}.log`,
+    );
+    process.env.MOCK_EBOOK_CONVERT_LOG = logPath;
+
+    try {
+      const epubPath = convertHtmlToEpub(
+        "<h2>Section 1</h2><p>Content 1</p><h2>Section 2</h2><p>Content 2</p>",
+        "Navigable Essay",
+        "Essayist",
+        "Example Site",
+        "https://example.com/essay",
+      );
+
+      expect(fs.existsSync(epubPath)).toBe(true);
+      expect(fs.existsSync(logPath)).toBe(true);
+
+      const capturedArgs = fs
+        .readFileSync(logPath, "utf8")
+        .split("\n")
+        .filter(Boolean);
+
+      // Verify Calibre ebook-convert navigation arguments
+      expect(capturedArgs).toContain("--chapter");
+      const chapterIdx = capturedArgs.indexOf("--chapter");
+      expect(capturedArgs[chapterIdx + 1]).toBe(
+        "//*[re:test(local-name(), '^h[12]$', 'i')]",
+      );
+
+      expect(capturedArgs).toContain("--level1-toc");
+      const tocIdx = capturedArgs.indexOf("--level1-toc");
+      expect(capturedArgs[tocIdx + 1]).toBe("//h2");
+
+      expect(capturedArgs).toContain("--toc-threshold");
+      const thresholdIdx = capturedArgs.indexOf("--toc-threshold");
+      expect(capturedArgs[thresholdIdx + 1]).toBe("2");
+
+      expect(capturedArgs).toContain("--dont-split-on-page-breaks");
+
+      try {
+        fs.unlinkSync(epubPath);
+      } catch (_err) {
+        void _err;
+      }
+    } finally {
+      delete process.env.MOCK_EBOOK_CONVERT_LOG;
+      if (fs.existsSync(logPath)) {
+        try {
+          fs.unlinkSync(logPath);
+        } catch (_err) {
+          void _err;
+        }
+      }
+    }
+  });
+
+  test("markdownToHtml and cleanDirectHtml preserve section headings (h2, h3)", () => {
+    const markdownInput = `
+# Article Heading
+Introduction prose.
+
+## Section 1: Foundations
+Detailed discussion on foundations.
+
+### 1.1 First Principle
+Deep dive into first principle.
+
+## Section 2: Implementation
+Technical implementation details.
+
+### 2.1 Code Patterns
+Pattern analysis and examples.
+`;
+
+    const htmlFromMd = markdownToHtml(markdownInput);
+    expect(htmlFromMd).toContain("<h1>Article Heading</h1>");
+    expect(htmlFromMd).toContain("<h2>Section 1: Foundations</h2>");
+    expect(htmlFromMd).toContain("<h3>1.1 First Principle</h3>");
+    expect(htmlFromMd).toContain("<h2>Section 2: Implementation</h2>");
+    expect(htmlFromMd).toContain("<h3>2.1 Code Patterns</h3>");
+
+    const directHtmlInput = `
+<article>
+  <header class="post-header">
+    <nav class="breadcrumb"><a href="/">Home</a> &gt; Articles</nav>
+    <h1>Web Article Title</h1>
+  </header>
+  <h2>Background & Context</h2>
+  <p>Context prose for testing direct HTML cleaning with sufficient length.</p>
+  <h3>Early Experiments</h3>
+  <p>Subsection text about early experiments.</p>
+  <h2>Architecture Decisions</h2>
+  <p>Architecture description with robust prose.</p>
+  <div class="share-buttons">Share on Social</div>
+  <footer class="post-footer">Comments and copyright</footer>
+</article>
+`;
+
+    const cleaned = cleanDirectHtml(directHtmlInput);
+    expect(cleaned).toContain("<h2>Background & Context</h2>");
+    expect(cleaned).toContain("<h3>Early Experiments</h3>");
+    expect(cleaned).toContain("<h2>Architecture Decisions</h2>");
+    expect(cleaned).not.toContain("breadcrumb");
+    expect(cleaned).not.toContain("share-buttons");
+    expect(cleaned).not.toContain("post-footer");
+  });
+
+  test("buildStyledHtmlDocument maintains semantic heading hierarchy and isolates title in header", () => {
+    const styledDoc = buildStyledHtmlDocument({
+      title: "Deep Architecture Guide",
+      author: "System Architect",
+      siteName: "Tech Journal",
+      url: "https://example.com/guide",
+      readTimeMinutes: 10,
+      wordCount: 2000,
+      contentHtml:
+        "<h2>Chapter 1: Overview</h2><p>Text</p><h3>1.1 Details</h3><p>More</p><h2>Chapter 2: Deep Dive</h2><p>Text</p>",
+    });
+
+    // Verify title header uses h1.article-title inside <header>
+    expect(styledDoc).toContain(
+      '<h1 class="article-title">Deep Architecture Guide</h1>',
+    );
+    expect(styledDoc).not.toContain(
+      '<h2 class="article-title">Deep Architecture Guide</h2>',
+    );
+
+    // Verify body content retains semantic section headings for XPath //h2
+    expect(styledDoc).toContain('<div class="article-content">');
+    expect(styledDoc).toContain("<h2>Chapter 1: Overview</h2>");
+    expect(styledDoc).toContain("<h3>1.1 Details</h3>");
+    expect(styledDoc).toContain("<h2>Chapter 2: Deep Dive</h2>");
+
+    // Verify that the title in the metadata banner does not match //h2 (avoiding duplicate chapter marker)
+    const h2Matches = Array.from(
+      styledDoc.matchAll(/<h2\b[^>]*>(.*?)<\/h2>/gi),
+    ).map((m) => m[1]);
+    expect(h2Matches).toEqual([
+      "Chapter 1: Overview",
+      "Chapter 2: Deep Dive",
+    ]);
+    expect(h2Matches).not.toContain("Deep Architecture Guide");
   });
 });
 
