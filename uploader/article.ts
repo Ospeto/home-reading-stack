@@ -162,140 +162,143 @@ function cleanExtractedUrl(urlStr: string): string {
 }
 
 /**
- * Detects and extracts an Elscione light novel URL from text, properly bounding
- * space-containing path names at .epub, trailing slash before whitespace/prose, or delimiter/EOS.
- * Supports both domain spellings: elscione.com and elsci.one (e.g. server.elsci.one, server.elscione.com).
- * Enforces left boundary (start of string, whitespace, or opening delimiter) so domains cannot match mid-label or mid-path.
+ * Detect and extract all valid external HTTP/HTTPS URLs from user input,
+ * correctly handling Elscione space-containing URLs, standard web URLs,
+ * and command wrappers, while excluding internal Telegram links (t.me)
+ * and deduplicating identical URLs while preserving first-seen order.
  */
-function extractElscioneUrlCandidate(text: string): string | null {
-  const elscioneRegex =
-    /(?:^|[\s<>"'(\[\u201C\u2018:=])((?:https?:\/\/|\/\/)?(?:[a-zA-Z0-9-]+\.)*(?:server\.)?(?:elscione\.com|elsci\.one)\/[^\r\n<>"\[\]{}|\\^`\u201C\u201D\u2018\u2019]+)/gi;
-  const matches: string[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = elscioneRegex.exec(text)) !== null) {
-    if (m[1]) matches.push(m[1]);
-  }
-  if (matches.length === 0) return null;
+export function extractAllUrlsFromText(text: string): string[] {
+  if (!text || typeof text !== "string") return [];
+  let trimmed = text.trim();
+  if (!trimmed) return [];
 
-  for (const raw of matches) {
-    // 1. Direct .epub URL: terminate immediately after .epub (drop trailing prose/punctuation like '!', but not extensions like .backup)
+  // Handle explicit commands: /epub <url>, /article <url>, /read <url>, /url <url>
+  const commandMatch = trimmed.match(
+    /^\/(?:epub|read|article|url)(?:@\w+)?\s+(.+)$/is,
+  );
+  if (commandMatch) {
+    trimmed = commandMatch[1].trim();
+  }
+
+  const matches: { url: string; start: number; end: number }[] = [];
+
+  // 1. Extract Elscione URLs (supporting spaces in path and optional missing protocol)
+  // Ensure we don't greedily eat into subsequent URLs
+  const elscioneRegex =
+    /(?:^|[\s<>"'(\[\u201C\u2018:=])((?:https?:\/\/|\/\/)?(?:[a-zA-Z0-9-]+\.)*(?:server\.)?(?:elscione\.com|elsci\.one)\/(?:(?!\s+(?:https?:\/\/|server\.(?:elscione\.com|elsci\.one)|[a-zA-Z0-9-]+\.(?:elscione\.com|elsci\.one)))[^\r\n<>"\[\]{}|\\^`\u201C\u201D\u2018\u2019])+)/gi;
+
+  let m: RegExpExecArray | null;
+  while ((m = elscioneRegex.exec(trimmed)) !== null) {
+    if (!m[1]) continue;
+    const raw = m[1];
+    const fullMatch = m[0];
+    const prefixLen = fullMatch.indexOf(raw);
+    const startIndex = m.index + prefixLen;
+
+    let candidateRaw: string | null = null;
+
+    // Boundary rule 1: Direct .epub URL (terminate immediately after .epub)
     const epubMatch = raw.match(
       /^(.*\.epub)(?=$|[?#\s,;:!?)>\]"'\`\u201D\u2019\u2013\u2014]|(?:\.[^A-Za-z0-9])|\.$)/i,
     );
     if (epubMatch) {
-      return epubMatch[1].trim();
+      candidateRaw = epubMatch[1].trim();
+    } else {
+      // Boundary rule 2: Folder with trailing slash followed by delimiter, punctuation, dash, or whitespace
+      const slashBoundaryMatch = raw.match(
+        /^(.*\/)(?=[\s.,;:!?)>\]"'\`\u201D\u2019\u2013\u2014]|$)/,
+      );
+      if (slashBoundaryMatch) {
+        candidateRaw = slashBoundaryMatch[1];
+      } else {
+        // Boundary rule 3: Spaced URL without trailing slash followed by dash commentary
+        const dashCommentaryMatch = raw.match(/^(.*?)(?=\s+[-—–]\s+)/);
+        if (dashCommentaryMatch) {
+          const t = cleanExtractedUrl(dashCommentaryMatch[1].trim());
+          if (t) candidateRaw = t;
+        } else {
+          // Boundary rule 4: Fallback cleaning trailing punctuation
+          const t = cleanExtractedUrl(raw.trim());
+          if (t) candidateRaw = t;
+        }
+      }
     }
 
-    // 2. Folder URL with trailing slash followed by delimiter, punctuation, dash, or whitespace
-    // e.g. ".../Grimgar/ - great series", ".../Grimgar/—great", "...Need/ thanks!", "...Need/,"
-    const slashBoundaryMatch = raw.match(
-      /^(.*\/)(?=[\s.,;:!?)>\]"'\`\u201D\u2019\u2013\u2014]|$)/,
-    );
-    if (slashBoundaryMatch) {
-      return slashBoundaryMatch[1];
-    }
-
-    // 3. Spaced URL without trailing slash followed by dash commentary: "URL - commentary" or "URL — commentary"
-    const dashCommentaryMatch = raw.match(/^(.*?)(?=\s+[-—–]\s+)/);
-    if (dashCommentaryMatch) {
-      const trimmed = cleanExtractedUrl(dashCommentaryMatch[1].trim());
-      if (trimmed) return trimmed;
-    }
-
-    // 4. Fallback: clean trailing punctuation
-    const trimmed = cleanExtractedUrl(raw.trim());
-    if (trimmed) {
-      return trimmed;
+    if (candidateRaw) {
+      const candidate = cleanAndNormalizeNovelUrl(candidateRaw);
+      if (candidate && !isInternalTelegramUrl(candidate)) {
+        try {
+          const u = new URL(candidate);
+          if (u.protocol === "http:" || u.protocol === "https:") {
+            matches.push({
+              url: candidate,
+              start: startIndex,
+              end: startIndex + candidateRaw.length,
+            });
+          }
+        } catch (_err) {
+          void _err;
+        }
+      }
     }
   }
 
-  return null;
+  // 2. Extract standard HTTP/HTTPS URLs
+  const stdRegex = /https?:\/\/[^\s<>"“”]+/gi;
+  while ((m = stdRegex.exec(trimmed)) !== null) {
+    const raw = m[0];
+    const startIndex = m.index;
+    const cleaned = cleanExtractedUrl(raw);
+    const candidate = cleanAndNormalizeNovelUrl(cleaned);
+    if (candidate && !isInternalTelegramUrl(candidate)) {
+      try {
+        const u = new URL(candidate);
+        if (u.protocol === "http:" || u.protocol === "https:") {
+          const endIndex = startIndex + cleaned.length;
+          // Check if this overlaps with an already captured Elscione match
+          const overlaps = matches.some(
+            (em) =>
+              (startIndex >= em.start && startIndex < em.end) ||
+              (endIndex > em.start && endIndex <= em.end) ||
+              (startIndex <= em.start && endIndex >= em.end),
+          );
+          if (!overlaps) {
+            matches.push({
+              url: candidate,
+              start: startIndex,
+              end: endIndex,
+            });
+          }
+        }
+      } catch (_err) {
+        void _err;
+      }
+    }
+  }
+
+  // Sort matches by appearance in text (start index)
+  matches.sort((a, b) => a.start - b.start);
+
+  // Deduplicate while preserving first-seen order
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const match of matches) {
+    if (!seen.has(match.url)) {
+      seen.add(match.url);
+      result.push(match.url);
+    }
+  }
+
+  return result;
 }
 
 /**
  * Detect and extract a valid external HTTP/HTTPS URL from user input,
  * while ignoring internal Telegram links like t.me.
+ * Retained for complete backward compatibility.
  */
 export function extractUrlFromText(text: string): string | null {
-  if (!text) return null;
-  const trimmed = text.trim();
-
-  // Handle explicit commands: /epub <url>, /article <url>, /read <url>, /url <url>
-  const commandMatch = trimmed.match(
-    /^\/(?:epub|read|article|url)\s+(.+)$/i,
-  );
-  if (commandMatch) {
-    const cmdRemainder = commandMatch[1].trim();
-
-    // 1. If command remainder contains an Elscione URL (supporting spaces in path), extract it
-    const elscioneCandidate = extractElscioneUrlCandidate(cmdRemainder);
-    if (elscioneCandidate) {
-      const candidate = cleanAndNormalizeNovelUrl(elscioneCandidate);
-      if (candidate && !isInternalTelegramUrl(candidate)) {
-        try {
-          const u = new URL(candidate);
-          if (u.protocol === "http:" || u.protocol === "https:") {
-            return candidate;
-          }
-        } catch (_err) {
-          void _err;
-        }
-      }
-    }
-
-    // 2. Standard URL matching for commands (stops at whitespace to prevent absorbing trailing words)
-    const stdCmdMatch = cmdRemainder.match(/^https?:\/\/\S+/i);
-    if (stdCmdMatch) {
-      const candidate = cleanExtractedUrl(stdCmdMatch[0]);
-      if (candidate && !isInternalTelegramUrl(candidate)) {
-        try {
-          const u = new URL(candidate);
-          if (u.protocol === "http:" || u.protocol === "https:") {
-            return candidate;
-          }
-        } catch (_err) {
-          void _err;
-        }
-      }
-    }
-  }
-
-  // Recognize server.elscione.com/ or server.elsci.one/ URLs in conversational text with spaces in the path
-  const elscioneMatch = extractElscioneUrlCandidate(trimmed);
-  if (elscioneMatch) {
-    const candidate = cleanAndNormalizeNovelUrl(elscioneMatch);
-    if (candidate && !isInternalTelegramUrl(candidate)) {
-      try {
-        const u = new URL(candidate);
-        if (u.protocol === "http:" || u.protocol === "https:") {
-          return candidate;
-        }
-      } catch (_err) {
-        void _err;
-      }
-    }
-  }
-
-  // Find any http:// or https:// URL in message
-  const urlMatches = trimmed.match(/https?:\/\/[^\s<>"“”]+/gi);
-  if (!urlMatches) return null;
-
-  for (const raw of urlMatches) {
-    const candidate = cleanAndNormalizeNovelUrl(cleanExtractedUrl(raw));
-    if (candidate && !isInternalTelegramUrl(candidate)) {
-      try {
-        const u = new URL(candidate);
-        if (u.protocol === "http:" || u.protocol === "https:") {
-          return candidate;
-        }
-      } catch (_err) {
-        // Continue to next match
-        void _err;
-      }
-    }
-  }
-
-  return null;
+  return extractAllUrlsFromText(text)[0] || null;
 }
 
 export const PAYWALL_ERROR_MESSAGE =
