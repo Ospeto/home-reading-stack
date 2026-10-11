@@ -22,7 +22,6 @@ import {
 } from "./scraper";
 import { isArchiveFile, unpackArchive, isCanonicalEpub } from "./archive";
 import {
-  extractUrlFromText,
   extractAllUrlsFromText,
   ingestArticleFromUrl,
   generateTypographicCover,
@@ -3958,6 +3957,7 @@ export function resetLocalLnoriQueueForTest(): void {
   _localUploaderUrl = null;
   _ingestLnoriSeriesRunner = ingestLnoriSeries;
   _ingestElscioneSeriesRunner = ingestElscioneSeries;
+  _ingestArticleRunner = ingestArticleFromUrl;
   _lnoriPollIntervalMs = 1500;
 }
 
