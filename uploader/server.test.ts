@@ -6487,4 +6487,290 @@ exit 0
       expect(data.book.epubPath).not.toContain("/Users/");
     });
   });
+
+  describe("Raw Text and Markdown Ingestion (POST /api/ingest-text)", () => {
+    const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+    let testDb: Database;
+    let testQueue: DurableJobQueue;
+
+    beforeEach(() => {
+      testDb = new Database(":memory:");
+      testQueue = new DurableJobQueue(testDb);
+      setServerJobQueueForTest(testQueue);
+    });
+
+    afterEach(() => {
+      testQueue.close();
+      setServerJobQueueForTest(null);
+      resetServerDependenciesForTest();
+    });
+
+    it("rejects missing or invalid title parameter with 400", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/ingest-text", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          content: "# Valid Content\nSome text.",
+        }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(400);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("title");
+    });
+
+    it("rejects empty or whitespace-only title with 400", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/ingest-text", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title: "   ",
+          content: "Valid content here.",
+        }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(400);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("title");
+    });
+
+    it("rejects missing or invalid content parameter with 400", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/ingest-text", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title: "My Article Title",
+        }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(400);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("content");
+    });
+
+    it("rejects empty or whitespace-only content with 400", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/ingest-text", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title: "My Article Title",
+          content: "   ",
+        }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(400);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("content");
+    });
+
+    it("rejects malformed or invalid JSON body with 400", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/ingest-text", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: "invalid-json{not-closed",
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(400);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("JSON");
+    });
+
+    it("returns 200 with bookId, title, authors, format: EPUB on successful synchronous ingest", async () => {
+      let ingestCalled = false;
+      let calibreRefreshed = false;
+      setServerDependenciesForTest({
+        ingestRawText: async (payload: any) => {
+          ingestCalled = true;
+          expect(payload.title).toBe("Paywalled Deep Dive");
+          expect(payload.author).toBe("Tech Journalist");
+          expect(payload.content).toContain("# Exclusive Report");
+          return {
+            success: true,
+            bookId: 999,
+            title: payload.title,
+            authors: payload.author,
+            siteName: "Raw Text",
+            wordCount: 800,
+            readTimeMinutes: 4,
+            format: "EPUB",
+          };
+        },
+        getCalibreBooks: (fresh?: boolean) => {
+          if (fresh) calibreRefreshed = true;
+          return [];
+        },
+      });
+
+      const req = new Request("http://127.0.0.1:8086/api/ingest-text", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title: "Paywalled Deep Dive",
+          author: "Tech Journalist",
+          content: "# Exclusive Report\n\nFull newsletter body text goes here.",
+        }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(ingestCalled).toBe(true);
+      expect(calibreRefreshed).toBe(true);
+      expect(data.success).toBe(true);
+      expect(data.bookId).toBe(999);
+      expect(data.title).toBe("Paywalled Deep Dive");
+      expect(data.authors).toBe("Tech Journalist");
+      expect(data.format).toBe("EPUB");
+    });
+
+    it("returns 500 when ingestRawText returns success: false", async () => {
+      setServerDependenciesForTest({
+        ingestRawText: async () => ({
+          success: false,
+          title: "Failing Title",
+          authors: "Author",
+          format: "EPUB",
+          error: "Failed to add text article to Calibre",
+        }),
+      });
+
+      const req = new Request("http://127.0.0.1:8086/api/ingest-text", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title: "Failing Title",
+          content: "Some content",
+        }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(500);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("Calibre");
+    });
+
+    it("supports async: true enqueuing job and processing via job queue", async () => {
+      setServerDependenciesForTest({
+        ingestRawText: async (payload: any) => ({
+          success: true,
+          bookId: 1001,
+          title: payload.title,
+          authors: payload.author || "Unknown",
+          format: "EPUB",
+          wordCount: 500,
+          readTimeMinutes: 3,
+        }),
+      });
+
+      const req = new Request("http://127.0.0.1:8086/api/ingest-text", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title: "Queued Article",
+          author: "Async Author",
+          content: "Body text for asynchronous processing.",
+          async: true,
+        }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(true);
+      expect(data.status).toBe("queued");
+      expect(data.jobId).toBeDefined();
+
+      // Verify processing in testQueue
+      const processed = await testQueue.processNextJob();
+      expect(processed).toBe(true);
+
+      const pollReq = new Request(`http://127.0.0.1:8086/api/jobs/${data.jobId}`, {
+        headers: { host: "127.0.0.1:8086" },
+      });
+      const pollRes = await handleRequest(pollReq, localServer);
+      const pollData = (await pollRes.json()) as any;
+      expect(pollData.status).toBe("completed");
+      expect(pollData.book.bookId).toBe(1001);
+      expect(pollData.book.title).toBe("Queued Article");
+    });
+
+    it("blocks unauthenticated WAN requests with 401 when apiKey is configured", async () => {
+      const prevKey = process.env.READING_API_KEY;
+      process.env.READING_API_KEY = "test-secret-key-12345";
+      try {
+        const req = new Request("http://127.0.0.1:8086/api/ingest-text", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            origin: "https://reading-sg.wavypremium.xyz:8443",
+          },
+          body: JSON.stringify({
+            title: "WAN Blocked Article",
+            content: "Should be blocked without auth.",
+          }),
+        });
+
+        const wanServer = {
+          requestIP: () => ({ address: "198.46.146.17" }),
+        };
+        const res = await handleRequest(req, wanServer);
+        expect(res.status).toBe(401);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(false);
+      } finally {
+        if (prevKey !== undefined) process.env.READING_API_KEY = prevKey;
+        else delete process.env.READING_API_KEY;
+      }
+    });
+
+    it("Web UI in uploader/index.html defines Paste Text / Markdown tab, inputs, and handler", () => {
+      const htmlPath = path.resolve(__dirname, "index.html");
+      const html = fs.readFileSync(htmlPath, "utf8");
+
+      expect(html).toContain('id="urlModalTabUrl"');
+      expect(html).toContain('id="urlModalTabText"');
+      expect(html).toContain("switchUrlModalTab");
+      expect(html).toContain('id="textIngestPane"');
+      expect(html).toContain('id="textIngestTitleInput"');
+      expect(html).toContain('id="textIngestAuthorInput"');
+      expect(html).toContain('id="textIngestContentInput"');
+      expect(html).toContain("handleTextIngest");
+      expect(html).toContain("/api/ingest-text");
+    });
+  });
 });

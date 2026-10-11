@@ -2102,59 +2102,112 @@
         </button>
       </div>
 
-      <p class="text-xs text-[#a1a1aa] leading-relaxed">
-        Paste article, essay, or reading list URLs. LightHouse cleans and extracts the text, formats it with comfortable Kindle typography, converts it to an EPUB, and syncs to your library and KOReader.
-      </p>
-
-      <!-- Segmented Mode Control: Single Link vs Batch Links -->
-      <div class="grid grid-cols-2 gap-1 p-1 rounded-xl bg-zinc-950/80 border border-zinc-800/80">
-        <button type="button" id="urlModeSingleBtn" onclick="setUrlIngestMode('single')" class="py-1.5 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 bg-sky-400 text-zinc-950 shadow-sm cursor-pointer">
-          <svg class="w-3.5 h-3.5"><use href="#icon-link"/></svg>
-          <span>Single Link</span>
+      <!-- Tab Switcher: Web URL vs Paste Text / Markdown -->
+      <div class="flex items-center gap-1 p-1 bg-white/5 rounded-xl border border-white/5">
+        <button type="button" id="urlModalTabUrl" onclick="switchUrlModalTab('url')" class="flex-1 min-h-[36px] py-1.5 px-3 rounded-lg text-xs font-semibold transition-all duration-150 cursor-pointer bg-white/10 text-white shadow-sm flex items-center justify-center gap-1.5 active:scale-[0.98]">
+          <svg class="w-3.5 h-3.5 text-sky-400"><use href="#icon-globe"/></svg>
+          <span>Web URL</span>
         </button>
-        <button type="button" id="urlModeBatchBtn" onclick="setUrlIngestMode('batch')" class="py-1.5 px-3 rounded-lg text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-all flex items-center justify-center gap-1.5 cursor-pointer">
-          <svg class="w-3.5 h-3.5"><use href="#icon-list"/></svg>
-          <span>Batch Links</span>
+        <button type="button" id="urlModalTabText" onclick="switchUrlModalTab('text')" class="flex-1 min-h-[36px] py-1.5 px-3 rounded-lg text-xs font-semibold transition-all duration-150 cursor-pointer text-zinc-400 hover:text-zinc-200 flex items-center justify-center gap-1.5 active:scale-[0.98]">
+          <svg class="w-3.5 h-3.5 text-amber-400"><use href="#icon-file-pen"/></svg>
+          <span>Paste Text / Markdown</span>
         </button>
       </div>
 
-      <form id="urlIngestForm" novalidate onsubmit="handleUrlIngest(event)" class="space-y-3">
-        <!-- Single URL Input Container -->
-        <div id="urlSingleInputContainer">
-          <label for="articleUrlInput" class="block text-[11px] font-semibold text-zinc-300 mb-1.5">Article Web URL</label>
-          <div class="relative">
-            <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500"><use href="#icon-link"/></svg>
-            <input type="text" inputmode="url" id="articleUrlInput" placeholder="https://example.com/article..."
-              class="w-full h-11 min-h-[44px] pl-9 pr-3 py-2.5 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-sky-400 transition-colors">
-          </div>
-        </div>
+      <!-- PANE 1: URL INGESTION -->
+      <div id="urlIngestPane" class="space-y-4">
+        <p class="text-xs text-[#a1a1aa] leading-relaxed">
+          Paste article, essay, or reading list URLs. LightHouse cleans and extracts the text, formats it with comfortable Kindle typography, converts it to an EPUB, and syncs to your library and KOReader.
+        </p>
 
-        <!-- Batch URLs Textarea Container -->
-        <div id="urlBatchInputContainer" class="hidden space-y-1.5">
-          <div class="flex items-center justify-between">
-            <label for="articleUrlsTextarea" class="block text-[11px] font-semibold text-zinc-300">Article Web URLs <span class="text-zinc-500 font-normal">(One per line)</span></label>
-            <span id="batchUrlCountBadge" class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400">0 links detected</span>
-          </div>
-          <div class="relative">
-            <textarea id="articleUrlsTextarea" rows="4" placeholder="https://example.com/article-1&#10;https://example.com/article-2&#10;https://example.com/article-3"
-              oninput="updateBatchUrlCountBadge()"
-              class="w-full p-3 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-sky-400 transition-colors resize-y min-h-[100px] font-mono text-[11px] leading-relaxed"></textarea>
-          </div>
-          <div class="text-[10px] text-zinc-500 flex items-center justify-between px-0.5">
-            <span>Empty lines and comment lines (<code class="text-zinc-400">#</code>) are ignored.</span>
-          </div>
-        </div>
-
-        <div id="urlIngestStatus" class="hidden text-xs p-3.5 rounded-xl border space-y-2"></div>
-
-        <div class="flex items-center justify-end gap-2 pt-2">
-          <button type="button" id="urlCancelBtn" onclick="closeUrlModal()" class="min-h-[44px] px-4 py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-300 text-xs font-semibold rounded-xl border border-[#23232a] cursor-pointer active:scale-[0.98] transition-all duration-150">Cancel</button>
-          <button type="submit" id="urlIngestBtn" class="min-h-[44px] px-4 py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl shadow-sm transition-all duration-150 flex items-center gap-2 cursor-pointer active:scale-[0.98] disabled:opacity-50">
-            <svg class="w-4 h-4 text-zinc-950"><use href="#icon-file-arrow-down"/></svg>
-            <span id="urlIngestBtnLabel">Convert &amp; Ingest</span>
+        <!-- Segmented Mode Control: Single Link vs Batch Links -->
+        <div class="grid grid-cols-2 gap-1 p-1 rounded-xl bg-zinc-950/80 border border-zinc-800/80">
+          <button type="button" id="urlModeSingleBtn" onclick="setUrlIngestMode('single')" class="py-1.5 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 bg-sky-400 text-zinc-950 shadow-sm cursor-pointer">
+            <svg class="w-3.5 h-3.5"><use href="#icon-link"/></svg>
+            <span>Single Link</span>
+          </button>
+          <button type="button" id="urlModeBatchBtn" onclick="setUrlIngestMode('batch')" class="py-1.5 px-3 rounded-lg text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-all flex items-center justify-center gap-1.5 cursor-pointer">
+            <svg class="w-3.5 h-3.5"><use href="#icon-list"/></svg>
+            <span>Batch Links</span>
           </button>
         </div>
-      </form>
+
+        <form id="urlIngestForm" novalidate onsubmit="handleUrlIngest(event)" class="space-y-3">
+          <!-- Single URL Input Container -->
+          <div id="urlSingleInputContainer">
+            <label for="articleUrlInput" class="block text-[11px] font-semibold text-zinc-300 mb-1.5">Article Web URL</label>
+            <div class="relative">
+              <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500"><use href="#icon-link"/></svg>
+              <input type="text" inputmode="url" id="articleUrlInput" placeholder="https://example.com/article..."
+                class="w-full h-11 min-h-[44px] pl-9 pr-3 py-2.5 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-sky-400 transition-colors">
+            </div>
+          </div>
+
+          <!-- Batch URLs Textarea Container -->
+          <div id="urlBatchInputContainer" class="hidden space-y-1.5">
+            <div class="flex items-center justify-between">
+              <label for="articleUrlsTextarea" class="block text-[11px] font-semibold text-zinc-300">Article Web URLs <span class="text-zinc-500 font-normal">(One per line)</span></label>
+              <span id="batchUrlCountBadge" class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400">0 links detected</span>
+            </div>
+            <div class="relative">
+              <textarea id="articleUrlsTextarea" rows="4" placeholder="https://example.com/article-1&#10;https://example.com/article-2&#10;https://example.com/article-3"
+                oninput="updateBatchUrlCountBadge()"
+                class="w-full p-3 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-sky-400 transition-colors resize-y min-h-[100px] font-mono text-[11px] leading-relaxed"></textarea>
+            </div>
+            <div class="text-[10px] text-zinc-500 flex items-center justify-between px-0.5">
+              <span>Empty lines and comment lines (<code class="text-zinc-400">#</code>) are ignored.</span>
+            </div>
+          </div>
+
+          <div id="urlIngestStatus" class="hidden text-xs p-3.5 rounded-xl border space-y-2"></div>
+
+          <div class="flex items-center justify-end gap-2 pt-2">
+            <button type="button" id="urlCancelBtn" onclick="closeUrlModal()" class="min-h-[44px] px-4 py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-300 text-xs font-semibold rounded-xl border border-[#23232a] cursor-pointer active:scale-[0.98] transition-all duration-150">Cancel</button>
+            <button type="submit" id="urlIngestBtn" class="min-h-[44px] px-4 py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl shadow-sm transition-all duration-150 flex items-center gap-2 cursor-pointer active:scale-[0.98] disabled:opacity-50">
+              <svg class="w-4 h-4 text-zinc-950"><use href="#icon-file-arrow-down"/></svg>
+              <span id="urlIngestBtnLabel">Convert &amp; Ingest</span>
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <!-- PANE 2: PASTE TEXT / MARKDOWN INGESTION -->
+      <div id="textIngestPane" class="hidden space-y-4">
+        <p class="text-xs text-[#a1a1aa] leading-relaxed">
+          Paste article content or markdown directly for paywalled newsletters, gated posts, or offline notes. LightHouse formats it into a clean serif Kindle EPUB with typographic cover.
+        </p>
+
+        <form id="textIngestForm" onsubmit="handleTextIngest(event)" class="space-y-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label for="textIngestTitleInput" class="block text-[11px] font-semibold text-zinc-300 mb-1.5">Title <span class="text-rose-400">*</span></label>
+              <input type="text" id="textIngestTitleInput" required placeholder="Article Title"
+                class="w-full h-11 min-h-[44px] px-3 py-2.5 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-amber-400 transition-colors">
+            </div>
+            <div>
+              <label for="textIngestAuthorInput" class="block text-[11px] font-semibold text-zinc-300 mb-1.5">Author (Optional)</label>
+              <input type="text" id="textIngestAuthorInput" placeholder="Author name"
+                class="w-full h-11 min-h-[44px] px-3 py-2.5 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-amber-400 transition-colors">
+            </div>
+          </div>
+
+          <div>
+            <label for="textIngestContentInput" class="block text-[11px] font-semibold text-zinc-300 mb-1.5">Content (Text or Markdown) <span class="text-rose-400">*</span></label>
+            <textarea id="textIngestContentInput" required rows="6" placeholder="Paste article text or markdown here..."
+              class="w-full p-3 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-amber-400 transition-colors font-mono leading-relaxed resize-y min-h-[120px] max-h-[360px]"></textarea>
+          </div>
+
+          <div id="textIngestStatus" class="hidden text-xs p-3.5 rounded-xl border space-y-2"></div>
+
+          <div class="flex items-center justify-end gap-2 pt-2">
+            <button type="button" onclick="closeUrlModal()" class="min-h-[44px] px-4 py-2.5 bg-[#18181f] hover:bg-zinc-800 text-zinc-300 text-xs font-semibold rounded-xl border border-[#23232a] cursor-pointer active:scale-[0.98] transition-all duration-150">Cancel</button>
+            <button type="submit" id="textIngestBtn" class="min-h-[44px] px-4 py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl shadow-sm transition-all duration-150 flex items-center gap-2 cursor-pointer active:scale-[0.98] disabled:opacity-50">
+              <svg class="w-4 h-4 text-zinc-950"><use href="#icon-file-arrow-down"/></svg>
+              <span>Ingest Text</span>
+            </button>
+          </div>
+        </form>
+      </div>
 
     </div>
   </div>
@@ -7227,6 +7280,28 @@
     }
 
     // URL INGESTION MODAL
+    let currentUrlModalTab = 'url';
+    function switchUrlModalTab(tab) {
+      currentUrlModalTab = tab;
+      const tabUrl = document.getElementById('urlModalTabUrl');
+      const tabText = document.getElementById('urlModalTabText');
+      const paneUrl = document.getElementById('urlIngestPane');
+      const paneText = document.getElementById('textIngestPane');
+      if (tab === 'text') {
+        if (tabUrl) tabUrl.className = 'flex-1 min-h-[36px] py-1.5 px-3 rounded-lg text-xs font-semibold transition-all duration-150 cursor-pointer text-zinc-400 hover:text-zinc-200 flex items-center justify-center gap-1.5 active:scale-[0.98]';
+        if (tabText) tabText.className = 'flex-1 min-h-[36px] py-1.5 px-3 rounded-lg text-xs font-semibold transition-all duration-150 cursor-pointer bg-white/10 text-white shadow-sm flex items-center justify-center gap-1.5 active:scale-[0.98]';
+        paneUrl?.classList.add('hidden');
+        paneText?.classList.remove('hidden');
+        setTimeout(() => document.getElementById('textIngestTitleInput')?.focus(), 60);
+      } else {
+        if (tabUrl) tabUrl.className = 'flex-1 min-h-[36px] py-1.5 px-3 rounded-lg text-xs font-semibold transition-all duration-150 cursor-pointer bg-white/10 text-white shadow-sm flex items-center justify-center gap-1.5 active:scale-[0.98]';
+        if (tabText) tabText.className = 'flex-1 min-h-[36px] py-1.5 px-3 rounded-lg text-xs font-semibold transition-all duration-150 cursor-pointer text-zinc-400 hover:text-zinc-200 flex items-center justify-center gap-1.5 active:scale-[0.98]';
+        paneUrl?.classList.remove('hidden');
+        paneText?.classList.add('hidden');
+        setTimeout(() => document.getElementById('articleUrlInput')?.focus(), 60);
+      }
+    }
+
     let currentUrlIngestMode = 'single';
     let isUrlIngesting = false;
 
@@ -7240,6 +7315,7 @@
       const input = document.getElementById('articleUrlInput');
       const textarea = document.getElementById('articleUrlsTextarea');
       const status = document.getElementById('urlIngestStatus');
+      const textStatus = document.getElementById('textIngestStatus');
       const btn = document.getElementById('urlIngestBtn');
       const cancelBtn = document.getElementById('urlCancelBtn');
 
@@ -7250,6 +7326,10 @@
         status.className = 'hidden text-xs p-3.5 rounded-xl border space-y-2';
         setHtml(status, '');
       }
+      if (textStatus) {
+        textStatus.className = 'hidden text-xs p-3.5 rounded-xl border space-y-2';
+        setHtml(textStatus, '');
+      }
       if (btn) {
         btn.disabled = false;
         setHtml(btn, `${svgIcon('file-arrow-down', 'w-3.5 h-3.5 text-zinc-950')} <span id="urlIngestBtnLabel">Convert &amp; Ingest</span>`);
@@ -7257,6 +7337,7 @@
       if (cancelBtn) {
         cancelBtn.textContent = 'Cancel';
       }
+      switchUrlModalTab('url');
       setUrlIngestMode(currentUrlIngestMode || 'single');
       setTimeout(() => {
         if (input) {
@@ -7722,6 +7803,57 @@
         isUrlIngesting = false;
         btn.disabled = false;
         setHtml(btn, `${svgIcon('file-arrow-down', 'w-3.5 h-3.5 text-zinc-950')} <span id="urlIngestBtnLabel">Convert &amp; Ingest</span>`);
+      }
+    }
+
+    async function handleTextIngest(e) {
+      e.preventDefault();
+      const titleInput = document.getElementById('textIngestTitleInput');
+      const authorInput = document.getElementById('textIngestAuthorInput');
+      const contentInput = document.getElementById('textIngestContentInput');
+      const btn = document.getElementById('textIngestBtn');
+      const status = document.getElementById('textIngestStatus');
+
+      const title = titleInput.value.trim();
+      const author = authorInput.value.trim();
+      const content = contentInput.value.trim();
+
+      if (!title || !content) return;
+
+      btn.disabled = true;
+      setHtml(btn, `${svgIcon('spinner', 'w-3.5 h-3.5 animate-spin')} <span>Ingesting...</span>`);
+      status.className = 'text-xs p-3.5 rounded-xl border bg-zinc-900 border-zinc-700 text-zinc-300';
+      setHtml(status, `<div class="flex items-center gap-2">${svgIcon('spinner', 'w-4 h-4 animate-spin text-amber-400')} <span>Converting text &amp; generating Kindle EPUB...</span></div>`);
+      status.classList.remove('hidden');
+
+      try {
+        const res = await fetch('/api/ingest-text', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title, author, content }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || 'Failed to ingest raw text');
+        }
+
+        tgHaptic.success();
+        invalidateCatalogCache();
+        status.className = 'text-xs p-3.5 rounded-xl border bg-emerald-950/40 border-emerald-800 text-emerald-300';
+        const detailsLink = data.bookId ? `<a href="#book_id=${data.bookId}&panel=book_details" onclick="closeUrlModal()" class="underline font-bold ml-1 text-emerald-200">View Book Details</a>` : '';
+        setHtml(status, `<div><strong>Text Ingested Successfully</strong><div class="mt-1 text-[11px] text-zinc-300">"${escapeHtml(data.title)}" by <em>${escapeHtml(data.authors || 'Unknown')}</em> (~${data.readTimeMinutes || 0} min read, ${data.wordCount || 0} words). ${detailsLink}</div></div>`);
+        showToast(`Ingested "${data.title}"!`);
+        titleInput.value = '';
+        authorInput.value = '';
+        contentInput.value = '';
+        await init();
+      } catch (err) {
+        tgHaptic.error();
+        status.className = 'text-xs p-3.5 rounded-xl border bg-rose-950/40 border-rose-800 text-rose-300';
+        setHtml(status, `<div><strong>Ingestion Failed:</strong><div class="mt-1 text-[11px] text-rose-200">${escapeHtml(formatCleanErrorMessage(err.message))}</div></div>`);
+      } finally {
+        btn.disabled = false;
+        setHtml(btn, `${svgIcon('file-arrow-down', 'w-3.5 h-3.5')} <span>Ingest Text</span>`);
       }
     }
 

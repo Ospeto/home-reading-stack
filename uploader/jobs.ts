@@ -14,6 +14,7 @@ export type JobType =
   | "file_ingest"
   | "archive_extract"
   | "url_article_ingest"
+  | "text_article_ingest"
   | "metadata_enrich"
   | "cover_backfill";
 

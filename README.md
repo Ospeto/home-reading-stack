@@ -608,6 +608,7 @@ Background tasks and asynchronous workflows run via a durable SQLite job queue (
    - `file_ingest`: Single book file ingestion into Calibre with format validation and deduplication.
    - `archive_extract`: Safe extraction of archive packages, importing canonical EPUB files.
    - `url_article_ingest`: Web article extraction, conversion to EPUB, and Calibre ingestion.
+   - `text_article_ingest`: Raw text and markdown paste ingestion with typographic cover and Calibre EPUB generation.
    - `metadata_enrich`: Background metadata and cover art scraping for newly imported books with volume conflict guards and title/cover overwrite protection.
    - `cover_backfill`: Batch generation of typographic covers for web articles lacking covers.
 2. **Resilience & Crash Recovery:**
@@ -618,6 +619,7 @@ Background tasks and asynchronous workflows run via a durable SQLite job queue (
 3. **Observability & Ingestion API:**
    - `POST /api/ingest-url`: Ingest web article into Calibre EPUB. Supports `{ "async": true }` for immediate job ID queueing (`{ success: true, jobId, status: "queued" }`) and progress polling via `/api/jobs/:id`, preventing reverse proxy timeouts on long extractions. Synchronous fallback preserved when `async` is false or omitted.
    - **Batch Multi-Link Ingestion:** Web Uploader modal (`#urlModal`) and Telegram bot support multi-link reading lists (one URL per line). URLs are extracted, sanitized, and ingested sequentially with real-time visual progress (`Ingesting link X of Y`), background job polling, and an itemized completion summary.
+   - `POST /api/ingest-text`: Ingest raw text or markdown directly into Calibre as a Kindle-optimized EPUB with typographic cover (`{ title, author?, content, siteName? }`). Supports immediate synchronous ingestion or background job queueing (`{ "async": true }`).
    - `GET /api/jobs/recent`: List recent jobs with optional `?limit=`, `?status=`, `?type=` filters.
    - `GET /api/jobs/:id`: Retrieve single job status (`pending`, `running`, `completed`, `failed`), resulting book payload, and sanitized error.
    - `POST /api/jobs/:id/retry`: Manually re-queue a failed job for immediate retry.
