@@ -615,9 +615,10 @@ Background tasks and asynchronous workflows run via a durable SQLite job queue (
    - Interrupted jobs left in `processing` state across process restarts are recovered back to `pending`.
    - Handler-aware claim filtering: Workers only claim job types matching registered handlers via atomic conditional transitions; unsupported jobs remain untouched with zero retries.
    - Single-worker sequential execution prevents Calibre SQLite locking collisions.
-3. **Observability API:**
+3. **Observability & Ingestion API:**
+   - `POST /api/ingest-url`: Ingest web article into Calibre EPUB. Supports `{ "async": true }` for immediate job ID queueing (`{ success: true, jobId, status: "queued" }`) and progress polling via `/api/jobs/:id`, preventing reverse proxy timeouts on long extractions. Synchronous fallback preserved when `async` is false or omitted.
    - `GET /api/jobs/recent`: List recent jobs with optional `?limit=`, `?status=`, `?type=` filters.
-   - `GET /api/jobs/:id`: Retrieve single job status, payload, result, and sanitized error.
+   - `GET /api/jobs/:id`: Retrieve single job status (`pending`, `running`, `completed`, `failed`), resulting book payload, and sanitized error.
    - `POST /api/jobs/:id/retry`: Manually re-queue a failed job for immediate retry.
 
 ---

@@ -125,6 +125,7 @@ import {
 declare const Bun: any;
 
 export interface ServerDependencies {
+  ingestArticleFromUrl?: typeof ingestArticleFromUrl;
   ingestLnoriSeries?: (
     url: string,
     onProgress?: (event: LnoriProgressEvent) => Promise<void> | void,
@@ -1420,16 +1421,43 @@ const MAX_UPLOAD_SIZE = MAX_ARCHIVE_SIZE_BYTES; // 100MB
 
 const FILE_EXT_PATH_REGEX =
   /\.(?:epub|pdf|mobi|azw\d*|cbz|cbr|zip|rar|7z|tar|gz|bz2|html|jpg|jpeg|png|svg|db)$/i;
-const SENSITIVE_KEY_REGEX = /(?:token|secret|password|key|auth)/i;
+const SENSITIVE_KEY_REGEX = /(?:token|secret|password|key|auth(?!or))/i;
 const PATH_KEY_REGEX = /(?:path|file|dir)$/i;
 const ERROR_KEY_REGEX = /(?:error|message|stderr|stdout|reason|note)$/i;
+
+export function sanitizeUrlString(val: string): string {
+  try {
+    const u = new URL(val);
+    if (u.username) u.username = "[REDACTED]";
+    if (u.password) u.password = "[REDACTED]";
+    for (const k of Array.from(u.searchParams.keys())) {
+      if (
+        /(token|key|secret|auth|password|pwd|api_?key|credential|session|sig(?:nature)?|mac|nonce|x-amz-|x-goog-|x-ms-)/i.test(
+          k,
+        )
+      ) {
+        u.searchParams.set(k, "[REDACTED]");
+      }
+    }
+    return u.toString();
+  } catch {
+    return val;
+  }
+}
 
 export function recursivelySanitize(val: any, keyName = ""): any {
   if (val === null || val === undefined) return val;
 
   if (typeof val === "string") {
-    if (SENSITIVE_KEY_REGEX.test(keyName)) {
+    if (
+      keyName !== "author" &&
+      keyName !== "authors" &&
+      SENSITIVE_KEY_REGEX.test(keyName)
+    ) {
       return "[REDACTED]";
+    }
+    if (keyName === "url" || /^https?:\/\//i.test(val)) {
+      return sanitizeUrlString(val);
     }
     if (
       PATH_KEY_REGEX.test(keyName) ||
@@ -1468,7 +1496,13 @@ export function recursivelySanitize(val: any, keyName = ""): any {
 
 export function sanitizeJobForResponse(job: any): any {
   if (!job) return null;
-  return recursivelySanitize(job);
+  const sanitized = recursivelySanitize(job);
+  if (sanitized && typeof sanitized === "object" && "status" in sanitized) {
+    if (sanitized.status === "processing") {
+      sanitized.status = "running";
+    }
+  }
+  return sanitized;
 }
 
 function resolveHtmlPath(): string {
@@ -1823,12 +1857,30 @@ export function registerJobHandlers(q: DurableJobQueue) {
   );
 
   q.registerHandler("url_article_ingest", async (payload: { url: string }) => {
-    const result = await ingestArticleFromUrl(payload.url);
+    const ingestFn =
+      serverDependencies.ingestArticleFromUrl ?? ingestArticleFromUrl;
+    const result = await ingestFn(payload.url);
+    const structuredResult = {
+      bookId: result.bookId ?? null,
+      title: result.title || "Web Article",
+      authors: result.authors || "Unknown",
+      readTimeMinutes: result.readTimeMinutes || 0,
+      error: result.error || null,
+      siteName: result.siteName,
+      wordCount: result.wordCount,
+      format: result.format || "EPUB",
+      duplicate: result.duplicate,
+      epubPath: result.epubPath,
+      message: result.message,
+    };
     if (!result.success) {
-      throw new Error(result.error || "Article ingestion failed");
+      const err: any = new Error(result.error || "Article ingestion failed");
+      err.result = structuredResult;
+      throw err;
     }
-    getCalibreBooks(true);
-    return result;
+    const getBooks = serverDependencies.getCalibreBooks ?? getCalibreBooks;
+    getBooks(true);
+    return structuredResult;
   });
 
   q.registerHandler(
@@ -1915,6 +1967,13 @@ export function getJobQueueInstance(): DurableJobQueue {
   return _serverJobQueue;
 }
 
+export function setServerJobQueueForTest(queue: DurableJobQueue | null) {
+  _serverJobQueue = queue;
+  if (_serverJobQueue) {
+    registerJobHandlers(_serverJobQueue);
+  }
+}
+
 // Lazy singleton jobQueue proxy
 // SAFETY: Proxy delegates JobQueue operations to dynamically initialized DurableJobQueue instance
 export const jobQueue = {
@@ -1936,10 +1995,21 @@ export const jobQueue = {
   startWorker(...args: any[]) {
     return (getJobQueueInstance().startWorker as any)(...args);
   },
+  stopWorker(...args: any[]) {
+    return (getJobQueueInstance().stopWorker as any)(...args);
+  },
+  processNextJob(...args: any[]) {
+    return (getJobQueueInstance().processNextJob as any)(...args);
+  },
   recoverInterruptedJobs(...args: any[]) {
     return (getJobQueueInstance().recoverInterruptedJobs as any)(...args);
   },
+  close(...args: any[]) {
+    return (getJobQueueInstance().close as any)(...args);
+  },
 } as unknown as DurableJobQueue;
+
+export const JobQueue = jobQueue;
 
 const KOREADER_HASH_ALGO = "md5";
 
@@ -4513,8 +4583,35 @@ async function handleRequestCore(
           corsOrigin,
         );
 
+      const statusMap: Record<string, string> = { processing: "running" };
+      const cleanStatus = statusMap[job.status] || job.status;
+
+      const sanitizedJob = sanitizeJobForResponse(job);
+      const cleanJob = {
+        ...sanitizedJob,
+        status: cleanStatus,
+      };
+
+      const bookPayload =
+        sanitizedJob.result && typeof sanitizedJob.result === "object"
+          ? (sanitizedJob.result.book ||
+              (sanitizedJob.result.bookId !== undefined ||
+              sanitizedJob.result.title !== undefined
+                ? sanitizedJob.result
+                : null))
+          : null;
+
       return jsonResponse(
-        { success: true, job: sanitizeJobForResponse(job) },
+        {
+          success: true,
+          jobId: job.id,
+          id: job.id,
+          status: cleanStatus,
+          book: bookPayload,
+          result: sanitizedJob.result,
+          error: sanitizedJob.error,
+          job: cleanJob,
+        },
         200,
         corsOrigin,
       );
@@ -5841,7 +5938,10 @@ async function handleRequestCore(
   // API: Ingest Web Article from URL (Read Later EPUB with SSRF Protection)
   if (url.pathname === "/api/ingest-url" && req.method === "POST") {
     try {
-      const parsedBody = await parseJsonBody<{ url?: string }>(req);
+      const parsedBody = await parseJsonBody<{
+        url?: string;
+        async?: boolean | string;
+      }>(req);
       if (parsedBody.error || !parsedBody.data) {
         return jsonResponse(
           { success: false, error: parsedBody.error || "Missing or invalid body" },
@@ -5874,12 +5974,33 @@ async function handleRequestCore(
         );
       }
 
-      const result = await ingestArticleFromUrl(targetUrl);
+      const isAsync =
+        body.async === true ||
+        body.async === "true" ||
+        url.searchParams.get("async") === "true";
+
+      if (isAsync) {
+        const job = jobQueue.enqueue("url_article_ingest", { url: targetUrl });
+        return jsonResponse(
+          {
+            success: true,
+            jobId: job.id,
+            status: "queued",
+          },
+          200,
+          corsOrigin,
+        );
+      }
+
+      const ingestFn =
+        serverDependencies.ingestArticleFromUrl ?? ingestArticleFromUrl;
+      const result = await ingestFn(targetUrl);
       if (!result.success) {
         return jsonResponse(result, 500, corsOrigin);
       }
 
-      getCalibreBooks(true);
+      const getBooks = serverDependencies.getCalibreBooks ?? getCalibreBooks;
+      getBooks(true);
       return jsonResponse(result, 200, corsOrigin);
     } catch (err: any) {
       return jsonResponse(

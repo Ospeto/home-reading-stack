@@ -17,7 +17,7 @@ export type JobType =
   | "metadata_enrich"
   | "cover_backfill";
 
-export type JobStatus = "pending" | "processing" | "completed" | "failed";
+export type JobStatus = "pending" | "processing" | "running" | "completed" | "failed";
 
 export interface JobRecord<T = any, R = any> {
   id: string;
@@ -192,8 +192,12 @@ export class DurableJobQueue {
     const params: any[] = [];
 
     if (options.status) {
-      conditions.push("status = ?");
-      params.push(options.status);
+      if (options.status === "running") {
+        conditions.push("(status = 'processing' OR status = 'running')");
+      } else {
+        conditions.push("status = ?");
+        params.push(options.status);
+      }
     }
     if (options.type) {
       conditions.push("type = ?");
@@ -304,6 +308,10 @@ export class DurableJobQueue {
       const failedAt = Date.now();
       const nextRetry = job.retries + 1;
       const sanitizedErr = sanitizeErrorMessage(err);
+      const failResult =
+        err && typeof err === "object" && "result" in err ? (err as any).result : null;
+      const failResultStr =
+        failResult !== undefined && failResult !== null ? JSON.stringify(failResult) : null;
 
       if (nextRetry < job.max_retries) {
         // Bounded exponential backoff: 2s, 4s, 8s, 16s... capped at 60s
@@ -317,10 +325,11 @@ export class DurableJobQueue {
                  retries = ?,
                  next_run_at = ?,
                  updated_at = ?,
-                 error = ?
+                 error = ?,
+                 result = COALESCE(?, result)
              WHERE id = ? AND status = 'processing'`
           )
-          .run(nextRetry, nextRunAt, failedAt, sanitizedErr, job.id);
+          .run(nextRetry, nextRunAt, failedAt, sanitizedErr, failResultStr, job.id);
       } else {
         // Max retries exhausted
         this.db
@@ -329,10 +338,11 @@ export class DurableJobQueue {
              SET status = 'failed',
                  retries = ?,
                  updated_at = ?,
-                 error = ?
+                 error = ?,
+                 result = COALESCE(?, result)
              WHERE id = ? AND status = 'processing'`
           )
-          .run(nextRetry, failedAt, sanitizedErr, job.id);
+          .run(nextRetry, failedAt, sanitizedErr, failResultStr, job.id);
       }
 
       return true;
