@@ -654,23 +654,279 @@ export function isPaywallOrGarbage(
 }
 
 /**
+ * Targeted regex patterns for GDPR cookie consent notices, newsletter popovers,
+ * and promo social follow lines.
+ */
+export const COOKIE_BANNER_PATTERNS = [
+  /we use cookies to/i,
+  /accept all cookies/i,
+  /manage (?:cookie )?preferences/i,
+  /cookie policy/i,
+];
+
+export const NEWSLETTER_PATTERNS = [
+  /sign up for (?:our )?newsletter/i,
+  /delivered to your inbox/i,
+  /subscribe for daily updates/i,
+  /subscribe to (?:our )?newsletter/i,
+];
+
+export const PROMO_SOCIAL_PATTERNS = [
+  /follow (?:us|me) on (?:twitter|x|linkedin)/i,
+];
+
+/**
+ * Indicators that strongly identify cookie consent notices or banners.
+ */
+const COOKIE_CONSENT_INDICATORS = [
+  /accept (?:all |essential )?cookies/i,
+  /agree to (?:our )?(?:use of )?cookies/i,
+  /agree to our cookie policy/i,
+  /consent to (?:our )?(?:use of )?cookies/i,
+  /manage (?:cookie )?preferences/i,
+  /cookie (?:preferences|settings|notice|consent)/i,
+  /enhance (?:your )?experience/i,
+  /best experience on our (?:site|website)/i,
+  /by continuing to (?:use|visit|browse)/i,
+  /personalize content and (?:ads|advertisements)/i,
+  /analyze (?:our )?traffic/i,
+  /third-party (?:cookies|partners|advertising)/i,
+  /decline (?:all |optional )?cookies/i,
+  /reject (?:all |optional )?cookies/i,
+  /privacy (?:and|&) cookie policy/i,
+  /see (?:our )?cookie policy/i,
+  /read (?:our )?cookie policy/i,
+  /view (?:our )?cookie policy/i,
+  /\[cookie policy\]/i,
+];
+
+/**
+ * Technical indicators identifying explanatory prose in articles discussing
+ * HTTP cookies, web browsers, security flags, or privacy regulations.
+ */
+const TECHNICAL_COOKIE_INDICATORS = [
+  /\bhttp\b/i,
+  /\bhttps\b/i,
+  /\bheaders?\b/i,
+  /\bset-cookie\b/i,
+  /\brequests?\b/i,
+  /\bresponses?\b/i,
+  /\bservers?\b/i,
+  /\bclients?\b/i,
+  /\bbrowsers?\b/i,
+  /\bsessions?\b/i,
+  /\btokens?\b/i,
+  /\bstateless\b/i,
+  /\bstateful\b/i,
+  /\bstate management\b/i,
+  /\bauthentication\b/i,
+  /\bauth\b/i,
+  /\bsamesite\b/i,
+  /\bhttponly\b/i,
+  /\bsecure flag\b/i,
+  /\bcross-site\b/i,
+  /\bsame-origin\b/i,
+  /\bcsrf\b/i,
+  /\bxss\b/i,
+  /\bpayload\b/i,
+  /\bendpoint\b/i,
+  /\bapi\b/i,
+  /\bdatabase\b/i,
+  /\bmicroservices?\b/i,
+  /\barchitecture\b/i,
+  /\bdistributed\b/i,
+  /\bprotocol\b/i,
+  /\bdomain attribute\b/i,
+  /\bpath attribute\b/i,
+  /\bmax-age\b/i,
+  /\bexpires\b/i,
+  /\brfc\s*\d+\b/i,
+  /\bcookie jar\b/i,
+  /\bweb storage\b/i,
+  /\blocalstorage\b/i,
+  /\bmitm\b/i,
+  /\bencryption\b/i,
+  /\bencrypted\b/i,
+  /\bclear-site-data\b/i,
+  /\bgdpr\b/i,
+  /\beu\b/i,
+  /\blegal\b/i,
+  /\blaws?\b/i,
+  /\bregulations?\b/i,
+  /\bcompliance\b/i,
+  /\brequirements?\b/i,
+  /\baudits?\b/i,
+  /\bgovernance\b/i,
+  /\bdata protection\b/i,
+  /\bprivacy policy\b/i,
+];
+
+/**
+ * Strips markdown markup to evaluate raw text content.
+ */
+export function stripMarkdownFormatting(mdText: string): string {
+  return mdText
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, "") // images
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // link text
+    .replace(/^>+\s*/gm, "") // blockquote markers
+    .replace(/^[-*+]\s+/gm, "") // list bullets
+    .replace(/^\d+\.\s+/gm, "") // numbered lists
+    .replace(/^#{1,6}\s+/gm, "") // headings
+    .replace(/[*_~`]/g, "") // formatting characters
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Check if a text block represents a cookie consent banner.
+ */
+export function isCookieBannerBlock(
+  rawText: string,
+  isBoundedOrHeaderFooter: boolean = false,
+): boolean {
+  const text = rawText.trim();
+  if (!text) return false;
+
+  const matchesCookieBanner = COOKIE_BANNER_PATTERNS.some((pattern) =>
+    pattern.test(text),
+  );
+  if (!matchesCookieBanner) return false;
+
+  // Action button phrases that uniquely identify cookie consent controls
+  if (
+    /accept all cookies/i.test(text) ||
+    /manage (?:cookie )?preferences/i.test(text)
+  ) {
+    return true;
+  }
+
+  const hasConsentIndicator = COOKIE_CONSENT_INDICATORS.some((re) =>
+    re.test(text),
+  );
+  const hasTechnicalIndicator = TECHNICAL_COOKIE_INDICATORS.some((re) =>
+    re.test(text),
+  );
+
+  // When /cookie policy/i matches without action button phrases, require banner context.
+  // Banner context includes hasConsentIndicator, [cookie policy] link, or standalone button/link text.
+  // Do not strip general sentences discussing cookie policy requirements.
+  if (/cookie policy/i.test(text) && !/we use cookies to/i.test(text)) {
+    const isStandalone = /^[*_#\s-]*cookie policy[*_#\s.:-]*$/i.test(text);
+    const hasLinkContext = /\[cookie policy\]/i.test(rawText);
+    const hasBannerContext =
+      hasConsentIndicator || isStandalone || hasLinkContext;
+    if (!hasBannerContext) {
+      return false;
+    }
+  }
+
+  // Guard: preserve legitimate technical prose explaining cookies
+  if (hasTechnicalIndicator && !hasConsentIndicator) {
+    return false;
+  }
+
+  // Guard: preserve longer explanatory paragraphs unless in a bounded container or header/footer
+  if (text.length >= 150 && !isBoundedOrHeaderFooter && !hasConsentIndicator) {
+    return false;
+  }
+
+  if (hasConsentIndicator || isBoundedOrHeaderFooter || text.length < 150) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Check if a text block represents a newsletter subscription callout.
+ */
+export function isNewsletterBlock(
+  rawText: string,
+  isBoundedOrHeaderFooter: boolean = false,
+): boolean {
+  const text = rawText.trim();
+  if (!text) return false;
+
+  const matchesNewsletter = NEWSLETTER_PATTERNS.some((pattern) =>
+    pattern.test(text),
+  );
+  if (!matchesNewsletter) return false;
+
+  // Preserve long explanatory paragraphs unless bounded/header/footer or pure CTA
+  if (text.length >= 150 && !isBoundedOrHeaderFooter) {
+    return /^(?:(?:to |for )?(?:sign up|subscribe|get (?:the|our)? (?:latest )?(?:news|updates))\b|join \d+[\d,]* readers)/i.test(
+      text,
+    );
+  }
+
+  return true;
+}
+
+/**
+ * Check if a text block represents promo social follow lines.
+ */
+export function isPromoSocialBlock(
+  rawText: string,
+  isBoundedOrHeaderFooter: boolean = false,
+): boolean {
+  const text = rawText.trim();
+  if (!text) return false;
+
+  const matchesSocial = PROMO_SOCIAL_PATTERNS.some((pattern) =>
+    pattern.test(text),
+  );
+  if (!matchesSocial) return false;
+
+  if (text.length >= 150 && !isBoundedOrHeaderFooter) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Determine whether a text block is article noise (cookie banner, newsletter popover, or promo social follow).
+ */
+export function isArticleNoise(
+  rawText: string,
+  isBoundedOrHeaderFooter: boolean = false,
+): boolean {
+  return (
+    isCookieBannerBlock(rawText, isBoundedOrHeaderFooter) ||
+    isNewsletterBlock(rawText, isBoundedOrHeaderFooter) ||
+    isPromoSocialBlock(rawText, isBoundedOrHeaderFooter)
+  );
+}
+
+/**
  * Strip aggressive navigation noise and boilerplate from markdown content (e.g. from Jina Reader).
  */
 export function cleanMarkdownNoise(md: string): string {
   if (!md) return "";
   let text = md.replace(/\r\n/g, "\n");
 
-  // 1. Strip boilerplate sections ('Most Read', 'Popular Searches', 'Explore more offers', 'Related Stories', 'Share this article')
+  // If text starts with Jina Reader metadata header ("Title: ... URL Source: ... Markdown Content:")
+  const mdMarkerIdx = text.indexOf("Markdown Content:\n");
+  if (mdMarkerIdx !== -1) {
+    const headerPrefix = text.slice(
+      0,
+      mdMarkerIdx + "Markdown Content:\n".length,
+    );
+    const rest = text.slice(mdMarkerIdx + "Markdown Content:\n".length);
+    return headerPrefix + cleanMarkdownNoise(rest);
+  }
+
+  // 1. Strip boilerplate sections ('Most Read', 'Popular Searches', 'Explore more offers', 'Related Stories', 'Share this article', etc.)
   const boilerplatePattern =
-    /(?:^|\n)#{1,6}\s*(?:Most Read|Popular Searches|Explore more offers|Related Stories|Related Articles|Related Posts|Share this article|Share this story|Trending Stories|More from|Recommended Stories|FT recommends|Top sections|Useful links|Explore our full range of subscriptions|Try unlimited access)[\s\S]*?(?=(?:\n#{1,6}\s+)|$)/gi;
+    /(?:^|\n)(?:#{1,6}\s*(?:Most Read|Popular Searches|Explore more offers|Related Stories|Related Articles|Related Posts|Share this article|Share this story|Trending Stories|More from|Recommended Stories|FT recommends|Top sections|Useful links|Explore our full range of subscriptions|Try unlimited access)|#{1,6}\s*(?:Subscribe to (?:our )?newsletter|Sign up for (?:our )?newsletter)\s*(?:\n|$)|#{1,6}\s*Cookie (?:Preferences|Settings|Notice)\s*(?:\n|$))[\s\S]*?(?=(?:\n#{1,6}\s+)|$)/gi;
   text = text.replace(boilerplatePattern, "\n");
 
   text = text.replace(
-    /^(?:Most Read|Popular Searches|Explore more offers|Related Stories|Sections|Search the FT[^\n]*)\s*$/gim,
+    /^(?:Most Read|Popular Searches|Explore more offers|Related Stories|Sections|Search the FT[^\n]*|Newsletter|Subscribe to (?:our )?newsletter|Sign up for (?:our )?newsletter|Cookie Preferences|Cookie Settings)\s*$/gim,
     "",
   );
 
-  // 2. Strip leading and trailing navigation lists
+  // 2. Strip leading and trailing navigation lists & header/footer noise
   const navKeywords = [
     "home",
     "world",
@@ -694,12 +950,20 @@ export function cleanMarkdownNoise(md: string): string {
     "top sections",
     "useful links",
     "edition",
+    "accept all cookies",
+    "manage cookie preferences",
+    "cookie policy",
+    "sign up for our newsletter",
+    "delivered to your inbox",
+    "subscribe for daily updates",
   ];
 
   const isNavLine = (line: string): boolean => {
     const trimmed = line.trim();
     if (!trimmed) return true; // whitespace between nav lines
     if (/^\[\s*\]\([^)]+\)$/.test(trimmed)) return true;
+    const plain = stripMarkdownFormatting(trimmed);
+    if (isArticleNoise(plain, true)) return true;
     const lower = trimmed.toLowerCase();
     const hasKeyword = navKeywords.some((k) => lower.includes(k));
 
@@ -720,17 +984,6 @@ export function cleanMarkdownNoise(md: string): string {
 
   const lines = text.split("\n");
   let startIdx = 0;
-  // If text starts with Jina Reader metadata header ("Title: ... URL Source: ... Markdown Content:")
-  const mdMarkerIdx = text.indexOf("Markdown Content:\n");
-  if (mdMarkerIdx !== -1) {
-    const headerPrefix = text.slice(
-      0,
-      mdMarkerIdx + "Markdown Content:\n".length,
-    );
-    const rest = text.slice(mdMarkerIdx + "Markdown Content:\n".length);
-    return headerPrefix + cleanMarkdownNoise(rest);
-  }
-
   while (startIdx < lines.length && isNavLine(lines[startIdx])) {
     startIdx++;
   }
@@ -746,6 +999,91 @@ export function cleanMarkdownNoise(md: string): string {
     text = "";
   }
 
+  // 3. Protect fenced code blocks from paragraph/block filtering
+  // Ensure fenced code blocks are isolated into their own blocks so an intro sentence doesn't group with a fenced code block into one block
+  text = text.replace(/([^\n])\n(```[\s\S]*?```)/g, "$1\n\n$2");
+  text = text.replace(/(```[\s\S]*?```)\n([^\n])/g, "$1\n\n$2");
+
+  const codeBlocks: string[] = [];
+  text = text.replace(/```[\s\S]*?```/g, (match) => {
+    codeBlocks.push(match);
+    return `__CODE_BLOCK_${codeBlocks.length - 1}__`;
+  });
+
+  // 4. Clean noise blocks and paragraphs (cookie banners, newsletters, social promos)
+  const rawBlocks = text.split(/\n{2,}/);
+  const cleanedBlocks: string[] = [];
+
+  for (const block of rawBlocks) {
+    const trimmed = block.trim();
+    if (!trimmed) continue;
+
+    // Never drop a block containing a code block placeholder
+    if (trimmed.includes("__CODE_BLOCK_")) {
+      cleanedBlocks.push(trimmed);
+      continue;
+    }
+
+    // For markdown lists, do NOT drop the entire list block even if length < 150.
+    // Instead, split the list block by newlines and filter individual lines matching isArticleNoise(linePlain, true).
+    const isList = /^[-*+]\s+/m.test(trimmed) || /^\d+\.\s+/m.test(trimmed);
+    if (isList) {
+      const listLines = trimmed.split("\n");
+      const filteredListLines = listLines.filter((line) => {
+        const lineTrimmed = line.trim();
+        if (!lineTrimmed) return false;
+        const linePlain = stripMarkdownFormatting(lineTrimmed);
+        if (isArticleNoise(linePlain, true)) {
+          return false;
+        }
+        if (
+          linePlain.length < 150 &&
+          PROMO_SOCIAL_PATTERNS.some((p) => p.test(linePlain))
+        ) {
+          return false;
+        }
+        return true;
+      });
+
+      if (filteredListLines.length > 0) {
+        cleanedBlocks.push(filteredListLines.join("\n"));
+      }
+      continue;
+    }
+
+    // Do NOT treat blockquotes as isBoundedOrHeaderFooter: true.
+    // Set isBoundedOrHeaderFooter = false so length checks are enforced and long quotations are never dropped.
+    const plain = stripMarkdownFormatting(trimmed);
+    if (isArticleNoise(plain, false)) {
+      continue;
+    }
+
+    // Filter out standalone promo social follow lines within paragraphs
+    const blockLines = trimmed.split("\n");
+    const filteredLines = blockLines.filter((line) => {
+      const linePlain = stripMarkdownFormatting(line);
+      if (
+        linePlain.length < 150 &&
+        PROMO_SOCIAL_PATTERNS.some((p) => p.test(linePlain))
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    if (filteredLines.length > 0) {
+      cleanedBlocks.push(filteredLines.join("\n"));
+    }
+  }
+
+  text = cleanedBlocks.join("\n\n");
+
+  // 5. Restore code blocks
+  text = text.replace(
+    /__CODE_BLOCK_(\d+)__/g,
+    (_, idx) => codeBlocks[Number(idx)] || "",
+  );
+
   return text.trim();
 }
 
@@ -758,6 +1096,16 @@ export function cleanDirectHtml(rawHtml: string): string {
 
   // 1. Comments
   workHtml = workHtml.replace(/<!--[\s\S]*?-->/g, "");
+
+  // Protect pre and code blocks
+  const preCodeBlocks: string[] = [];
+  workHtml = workHtml.replace(
+    /<(pre|code)\b[^>]*>[\s\S]*?<\/\1>/gi,
+    (match) => {
+      preCodeBlocks.push(match);
+      return `__PRE_CODE_BLOCK_${preCodeBlocks.length - 1}__`;
+    },
+  );
 
   // 2. Intrusive & non-content tags entirely:
   // <nav>, <header>, <footer>, <aside>, <form>, <map>, <area>, <noscript>, <style>, <script>, <iframe>, <svg>
@@ -798,14 +1146,58 @@ export function cleanDirectHtml(rawHtml: string): string {
   workHtml = workHtml.replace(/<map\b[^<]*(?:(?!<\/map>)<[^<]*)*<\/map>/gi, "");
   workHtml = workHtml.replace(/<area\b[^>]*\/?>/gi, "");
 
-  // 3. Strip elements with classes/ids matching: nav, menu, sidebar, breadcrumb, footer, share-buttons, social-share, related-posts, ad, banner
+  // 3. Strip elements with classes/ids/roles matching noise signatures
   const noiseClassIdRegex =
-    /<(div|section|aside|ul|ol|p|span|table|td|nav|header|footer)\b[^>]*(?:class|id)=["'][^"']*(?:nav|menu|sidebar|breadcrumb|footer|share-buttons|social-share|related-posts|ad|banner|cookie|popup|newsletter|subscribe)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi;
+    /<(div|section|aside|ul|ol|p|span|table|td|nav|header|footer)\b[^>]*(?:class|id|role|aria-label)=["'][^"']*(?:nav|menu|sidebar|breadcrumb|footer|share-buttons|social-share|related-posts|ad|banner|cookie[-_\s]?(?:banner|notice|consent|popup|modal|dialog)|consent[-_\s]?(?:banner|notice|modal|dialog|overlay|popup)|newsletter[-_\s]?(?:popup|popover|modal|dialog|subscribe|signup)|gdpr[-_\s]?(?:banner|consent|notice|modal))[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi;
   for (let i = 0; i < 3; i++) {
-    workHtml = workHtml.replace(noiseClassIdRegex, "");
+    workHtml = workHtml.replace(noiseClassIdRegex, (match) => {
+      if (match.includes("__PRE_CODE_BLOCK_")) return match;
+      return "";
+    });
   }
 
-  // 4. Remove image map references and tracking/spacer pixels
+  // 4. Targeted filtering for GDPR/cookie consent notices, newsletter popovers, and promo social lines
+  // Filter leaf container blocks (div, section, blockquote, aside)
+  for (let i = 0; i < 2; i++) {
+    workHtml = workHtml.replace(
+      /<(blockquote|div|section|aside)\b[^>]*>([\s\S]*?)<\/\1>/gi,
+      (match, tag, inner) => {
+        if (inner.includes("__PRE_CODE_BLOCK_")) return match;
+        if (/<(div|section|article|main)\b/i.test(inner)) return match;
+        const plainText = decodeHtmlEntities(
+          inner.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "),
+        ).trim();
+        const isBounded = /^aside$/i.test(tag);
+        if (isArticleNoise(plainText, isBounded)) {
+          return "";
+        }
+        return match;
+      },
+    );
+  }
+
+  // Filter <p> elements matching noise
+  workHtml = workHtml.replace(
+    /<p\b[^>]*>([\s\S]*?)<\/p>/gi,
+    (match, inner) => {
+      if (inner.includes("__PRE_CODE_BLOCK_")) return match;
+      const plainText = decodeHtmlEntities(
+        inner.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "),
+      ).trim();
+      if (isArticleNoise(plainText, false)) {
+        return "";
+      }
+      return match;
+    },
+  );
+
+  // Strip standalone promo social follow lines embedded in paragraphs/lists
+  workHtml = workHtml.replace(
+    /(?:<br\s*\/?>|\n)?\s*(?:<a\b[^>]*>)?\s*Follow\s+(?:us|me)\s+on\s+(?:<a\b[^>]*>)?\s*(?:Twitter|X|LinkedIn)[^<]*(?:<\/a>)?(?:<\/a>)?(?:<br\s*\/?>|\n)?/gi,
+    "",
+  );
+
+  // 5. Remove image map references and tracking/spacer pixels
   workHtml = workHtml.replace(/<img\b[^>]*\b(?:usemap|ismap)[^>]*>/gi, "");
   workHtml = workHtml.replace(
     /<img\b(?=[^>]*\bwidth=["']1["'])(?=[^>]*\bheight=["']1["'])[^>]*>/gi,
@@ -816,7 +1208,7 @@ export function cleanDirectHtml(rawHtml: string): string {
     "",
   );
 
-  // 5. Clean empty table cells and layout rows
+  // 6. Clean empty table cells and layout rows
   for (let i = 0; i < 3; i++) {
     workHtml = workHtml.replace(
       /<td\b[^>]*>\s*(?:&nbsp;|<br\s*\/?>|\s)*<\/td>/gi,
@@ -836,6 +1228,16 @@ export function cleanDirectHtml(rawHtml: string): string {
       },
     );
   }
+
+  // Clean empty paragraphs and divs left by noise removal
+  workHtml = workHtml.replace(/<p\s*>\s*(&nbsp;|\s)*<\/p>/gi, "");
+  workHtml = workHtml.replace(/<div\s*>\s*<\/div>/gi, "");
+
+  // Restore pre and code blocks
+  workHtml = workHtml.replace(
+    /__PRE_CODE_BLOCK_(\d+)__/g,
+    (_, idx) => preCodeBlocks[Number(idx)] || "",
+  );
 
   return workHtml;
 }
