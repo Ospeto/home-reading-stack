@@ -127,6 +127,72 @@ export function isInternalTelegramUrl(urlStr: string): boolean {
   }
 }
 
+export const TRACKING_PARAMS: ReadonlySet<string> = new Set([
+  "utm_source",
+  "utm_medium",
+  "utm_campaign",
+  "utm_term",
+  "utm_content",
+  "utm_id",
+  "utm_source_platform",
+  "fbclid",
+  "gclid",
+  "gclsrc",
+  "dclid",
+  "wbraid",
+  "gbraid",
+  "mc_eid",
+  "mc_cid",
+  "igshid",
+  "_hsenc",
+  "_hsmi",
+  "ref",
+  "ref_src",
+  "source",
+  "feature",
+  "twclid",
+  "si",
+  "spm",
+  "mkt_tok",
+  "trk",
+]);
+
+/**
+ * Strip marketing, analytics, and tracking query parameters from web URLs
+ * while preserving legitimate functional query parameters (id, v, p, page, article, etc.).
+ * Handles invalid or malformed URL strings safely without throwing.
+ */
+export function stripTrackingParams(url: string): string {
+  if (!url || typeof url !== "string") {
+    return url || "";
+  }
+
+  try {
+    const parsed = new URL(url);
+    const keysToDelete = new Set<string>();
+
+    for (const key of parsed.searchParams.keys()) {
+      const lower = key.toLowerCase();
+      if (lower.startsWith("utm_") || TRACKING_PARAMS.has(lower)) {
+        keysToDelete.add(key);
+      }
+    }
+
+    if (keysToDelete.size === 0) {
+      return url;
+    }
+
+    for (const key of keysToDelete) {
+      parsed.searchParams.delete(key);
+    }
+
+    return parsed.href;
+  } catch (_err) {
+    void _err;
+    return url;
+  }
+}
+
 /**
  * Strip trailing punctuation commonly appended to URLs in conversational text.
  * Includes ASCII punctuation plus Unicode curly quotes (” ’) and angle quotes.
@@ -158,7 +224,7 @@ function cleanExtractedUrl(urlStr: string): string {
 
     break;
   }
-  return cleaned;
+  return stripTrackingParams(cleaned);
 }
 
 /**
@@ -691,9 +757,10 @@ function resolveUrl(relativeUrl: string, baseUrl: string): string {
  * Validate outbound article URL against SSRF and unsupported protocols.
  */
 export function validateArticleUrl(rawUrl: string): URL {
+  const sanitized = stripTrackingParams(rawUrl);
   let parsed: URL;
   try {
-    parsed = new URL(rawUrl);
+    parsed = new URL(sanitized);
   } catch (_err) {
     void _err;
     throw new Error("Invalid URL format");
@@ -985,7 +1052,7 @@ export function buildStyledHtmlDocument(opts: StyledDocumentOptions): string {
   <meta charset="UTF-8">
   <title>${escapeHtml(opts.title)}</title>
   <meta name="author" content="${escapeHtml(opts.author)}">
-  <meta name="description" content="Saved from ${escapeHtml(opts.url)}">
+  <meta name="description" content="Saved from ${escapeHtml(stripTrackingParams(opts.url))}">
   <style>
     body {
       font-family: "Charter", "Georgia", "Iowan Old Style", "Palatino", serif;
@@ -1054,7 +1121,7 @@ export function buildStyledHtmlDocument(opts: StyledDocumentOptions): string {
       <p><strong>Author:</strong> ${escapeHtml(opts.author)} | <strong>Source:</strong> ${escapeHtml(opts.siteName)}</p>
       ${opts.publishedDate ? `<p><strong>Published:</strong> ${escapeHtml(opts.publishedDate)}</p>` : ""}
       <p><strong>Reading Time:</strong> ~${opts.readTimeMinutes} min (${opts.wordCount} words)</p>
-      <p><a href="${escapeHtml(opts.url)}">Original Web Article</a></p>
+      <p><a href="${escapeHtml(stripTrackingParams(opts.url))}">Original Web Article</a></p>
     </div>
   </header>
   <div class="article-content">
@@ -1317,7 +1384,8 @@ export async function extractArticleViaJina(
   url: string,
   fallbackHostname?: string,
 ): Promise<ExtractedArticle> {
-  const jinaUrl = `https://r.jina.ai/${encodeURI(url)}`;
+  const cleanUrl = stripTrackingParams(url);
+  const jinaUrl = `https://r.jina.ai/${encodeURI(cleanUrl)}`;
   console.log(`[Article] Fetching via Jina Reader: ${jinaUrl}`);
 
   const headers: Record<string, string> = {
@@ -2198,8 +2266,9 @@ export function convertHtmlToEpub(
     const tags = ["Web Article", "Read Later", siteName]
       .filter(Boolean)
       .join(",");
-    const comments = sourceUrl
-      ? `Saved from ${sourceUrl}`
+    const cleanSourceUrl = sourceUrl ? stripTrackingParams(sourceUrl) : undefined;
+    const comments = cleanSourceUrl
+      ? `Saved from ${cleanSourceUrl}`
       : `Web article from ${siteName}`;
 
     const convertArgs = [
@@ -2263,8 +2332,10 @@ export function convertHtmlToEpub(
 export async function ingestArticleFromUrl(
   targetUrl: string,
 ): Promise<IngestArticleResult> {
+  const cleanUrl = stripTrackingParams(targetUrl);
+
   // SSRF guard
-  const ssrfCheck = await validateUrlForSSRF(targetUrl, {
+  const ssrfCheck = await validateUrlForSSRF(cleanUrl, {
     allowProxyBypass: true,
   });
   if (!ssrfCheck.safe) {
@@ -2280,8 +2351,58 @@ export async function ingestArticleFromUrl(
     };
   }
 
+  // Upfront duplicate check in Calibre comments before expensive scraping cascades
+  try {
+    const listRes = runCalibredb([
+      "list",
+      "--with-library",
+      SERVER_URL,
+      "--search",
+      `comments:"${cleanUrl}"`,
+      "--fields",
+      "id,title,authors",
+      "--for-machine",
+    ]);
+
+    if (listRes.status === 0 && listRes.stdout) {
+      const parsed = JSON.parse(listRes.stdout.trim());
+      if (
+        Array.isArray(parsed) &&
+        parsed.length > 0 &&
+        parsed[0]?.id !== undefined &&
+        parsed[0]?.id !== null
+      ) {
+        const existing = parsed[0];
+        let siteName = "Web Article";
+        try {
+          siteName = new URL(cleanUrl).hostname.replace(/^www\./i, "");
+        } catch {
+          // fallback
+        }
+        const authors = Array.isArray(existing.authors)
+          ? existing.authors.join(", ")
+          : existing.authors || "Unknown";
+
+        return {
+          success: true,
+          duplicate: true,
+          bookId: existing.id,
+          title: existing.title || "Web Article",
+          authors,
+          siteName,
+          wordCount: 0,
+          readTimeMinutes: 0,
+          format: "EPUB",
+          message: `Article already exists in Calibre (ID: ${existing.id})`,
+        };
+      }
+    }
+  } catch (_err) {
+    void _err;
+  }
+
   // 1. Extraction
-  const article = await extractArticle(targetUrl);
+  const article = await extractArticle(cleanUrl);
 
   try {
     // 2. EPUB Conversion
@@ -2410,25 +2531,33 @@ export async function ingestArticleFromUrl(
       }
     }
 
-    // Ensure cover is attached in Calibre (handles duplicates or add quirks)
-    if (
-      bookId &&
-      article.coverImagePath &&
-      fs.existsSync(article.coverImagePath)
-    ) {
-      runCalibredb([
+    // Ensure comments and cover are attached in Calibre (handles duplicates or add quirks)
+    if (bookId) {
+      const setArgs = [
         "set_metadata",
         String(bookId),
         "--with-library",
         SERVER_URL,
         "--field",
-        `cover:${article.coverImagePath}`,
-      ]);
-      try {
-        const { purgeCoverCache } = await import("./server.ts");
-        purgeCoverCache(bookId);
-      } catch {
-        // ignore
+        `comments:Saved from ${cleanUrl}`,
+      ];
+      if (
+        article.coverImagePath &&
+        fs.existsSync(article.coverImagePath)
+      ) {
+        setArgs.push("--field", `cover:${article.coverImagePath}`);
+      }
+      runCalibredb(setArgs);
+      if (
+        article.coverImagePath &&
+        fs.existsSync(article.coverImagePath)
+      ) {
+        try {
+          const { purgeCoverCache } = await import("./server.ts");
+          purgeCoverCache(bookId);
+        } catch {
+          // ignore
+        }
       }
     }
 
