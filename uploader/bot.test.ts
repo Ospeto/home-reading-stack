@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, beforeEach, afterEach } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -41,6 +41,7 @@ import {
   resetLocalLnoriQueueForTest,
   getLocalLnoriQueue,
   setIngestElscioneSeriesRunnerForTest,
+  setIngestArticleRunnerForTest,
   sendLnoriErrorCard,
   sendLnoriIncompleteCard,
   runDirectLnoriFallback,
@@ -3819,6 +3820,293 @@ describe("Lnori Queue & Telegram Bot Integration", () => {
         setApplyMetadataToCalibreRunnerForTest(null);
         testDb.close();
       }
+    });
+  });
+
+  describe("Multi-URL Article Ingestion in Telegram Message Handler", () => {
+    let origFetch: typeof globalThis.fetch;
+
+    beforeEach(() => {
+      origFetch = globalThis.fetch;
+    });
+
+    afterEach(() => {
+      globalThis.fetch = origFetch;
+      setIngestArticleRunnerForTest(null);
+    });
+
+    it("ingests multiple article URLs sequentially with progress tracking and delivery", async () => {
+      const sentTelegramBodies: any[] = [];
+      let msgIdCounter = 5000;
+
+      globalThis.fetch = (async (input: any, init: any) => {
+        const url = typeof input === "string" ? input : input?.url || "";
+        if (
+          url.includes("sendMessage") ||
+          url.includes("editMessageText") ||
+          url.includes("sendDocument")
+        ) {
+          const body = JSON.parse(init?.body || "{}");
+          sentTelegramBodies.push({ endpoint: url.split("/").pop(), body });
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              result: { message_id: ++msgIdCounter },
+            }),
+            { status: 200 },
+          );
+        }
+        return origFetch(input, init);
+      }) as typeof fetch;
+
+      const ingestCalls: string[] = [];
+      setIngestArticleRunnerForTest(async (url: string) => {
+        ingestCalls.push(url);
+        return {
+          success: true,
+          bookId: 100 + ingestCalls.length,
+          title: `Article ${ingestCalls.length}`,
+          authors: "Author Name",
+          siteName: "Test Site",
+          readTimeMinutes: 5,
+          wordCount: 1200,
+          format: "EPUB",
+        } as any;
+      });
+
+      const multiUrlText = [
+        "https://example.com/first-article",
+        "https://example.com/second-article",
+        "https://example.com/third-article",
+      ].join("\n");
+
+      await handleTextMessage(112233, multiUrlText, "tester");
+
+      // Verify all 3 URLs were ingested sequentially in exact order
+      expect(ingestCalls).toEqual([
+        "https://example.com/first-article",
+        "https://example.com/second-article",
+        "https://example.com/third-article",
+      ]);
+
+      // Check progress messages for all 3 articles
+      const progressMessages = sentTelegramBodies.filter(
+        (m) =>
+          m.body.text &&
+          m.body.text.includes("Extracting article") &&
+          m.endpoint === "sendMessage",
+      );
+      expect(progressMessages.length).toBe(3);
+      expect(progressMessages[0].body.text).toContain("Extracting article 1 of 3");
+      expect(progressMessages[0].body.text).toContain("https://example.com/first-article");
+      expect(progressMessages[1].body.text).toContain("Extracting article 2 of 3");
+      expect(progressMessages[1].body.text).toContain("https://example.com/second-article");
+      expect(progressMessages[2].body.text).toContain("Extracting article 3 of 3");
+      expect(progressMessages[2].body.text).toContain("https://example.com/third-article");
+
+      // Check completion cards
+      const completionCards = sentTelegramBodies.filter(
+        (m) =>
+          m.body.text &&
+          m.body.text.includes("Article Ingested Successfully"),
+      );
+      expect(completionCards.length).toBe(3);
+    });
+
+    it("continues processing remaining URLs when an individual URL fails or hits paywall", async () => {
+      const sentTelegramBodies: any[] = [];
+      let msgIdCounter = 6000;
+
+      globalThis.fetch = (async (input: any, init: any) => {
+        const url = typeof input === "string" ? input : input?.url || "";
+        if (
+          url.includes("sendMessage") ||
+          url.includes("editMessageText") ||
+          url.includes("sendDocument")
+        ) {
+          const body = JSON.parse(init?.body || "{}");
+          sentTelegramBodies.push({ endpoint: url.split("/").pop(), body });
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              result: { message_id: ++msgIdCounter },
+            }),
+            { status: 200 },
+          );
+        }
+        return origFetch(input, init);
+      }) as typeof fetch;
+
+      const ingestCalls: string[] = [];
+      setIngestArticleRunnerForTest(async (url: string) => {
+        ingestCalls.push(url);
+        if (url === "https://example.com/failing-paywall") {
+          throw new Error("paid subscription paywall detected");
+        }
+        if (url === "https://example.com/failed-result") {
+          return {
+            success: false,
+            error: "Unable to extract content",
+          } as any;
+        }
+        return {
+          success: true,
+          bookId: 50,
+          title: "Good Article",
+          authors: "Great Author",
+          siteName: "Good Site",
+          readTimeMinutes: 3,
+          wordCount: 800,
+          format: "EPUB",
+        } as any;
+      });
+
+      const multiUrlText = [
+        "https://example.com/good-article-1",
+        "https://example.com/failing-paywall",
+        "https://example.com/good-article-2",
+      ].join("\n");
+
+      await handleTextMessage(445566, multiUrlText, "reader");
+
+      // Verify all 3 URLs were attempted despite the middle one throwing an error
+      expect(ingestCalls).toEqual([
+        "https://example.com/good-article-1",
+        "https://example.com/failing-paywall",
+        "https://example.com/good-article-2",
+      ]);
+
+      // Check error card was sent for the failing URL with paywall advice
+      const errorCards = sentTelegramBodies.filter(
+        (m) =>
+          m.body.text &&
+          m.body.text.includes("Article Ingestion Failed"),
+      );
+      expect(errorCards.length).toBe(1);
+      expect(errorCards[0].body.text).toContain("https://example.com/failing-paywall");
+      expect(errorCards[0].body.text).toContain("subscription paywall");
+      expect(errorCards[0].body.text).toContain("Please paste the article text directly");
+
+      // Check completion cards for the 2 successful articles
+      const completionCards = sentTelegramBodies.filter(
+        (m) =>
+          m.body.text &&
+          m.body.text.includes("Article Ingested Successfully"),
+      );
+      expect(completionCards.length).toBe(2);
+    });
+
+    it("deduplicates identical URLs within the same message while preserving order", async () => {
+      const sentTelegramBodies: any[] = [];
+      let msgIdCounter = 7000;
+
+      globalThis.fetch = (async (input: any, init: any) => {
+        const url = typeof input === "string" ? input : input?.url || "";
+        if (
+          url.includes("sendMessage") ||
+          url.includes("editMessageText")
+        ) {
+          const body = JSON.parse(init?.body || "{}");
+          sentTelegramBodies.push({ endpoint: url.split("/").pop(), body });
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              result: { message_id: ++msgIdCounter },
+            }),
+            { status: 200 },
+          );
+        }
+        return origFetch(input, init);
+      }) as typeof fetch;
+
+      const ingestCalls: string[] = [];
+      setIngestArticleRunnerForTest(async (url: string) => {
+        ingestCalls.push(url);
+        return {
+          success: true,
+          bookId: 80,
+          title: "Sample",
+          authors: "Author",
+          siteName: "Site",
+          readTimeMinutes: 2,
+          wordCount: 500,
+          format: "EPUB",
+        } as any;
+      });
+
+      const messageWithDups =
+        "Read https://example.com/dup-1 and also https://example.com/dup-2 then again https://example.com/dup-1";
+
+      await handleTextMessage(778899, messageWithDups, "tester");
+
+      // Ingest should only be called twice, duplicate skipped
+      expect(ingestCalls).toEqual([
+        "https://example.com/dup-1",
+        "https://example.com/dup-2",
+      ]);
+
+      const progressMessages = sentTelegramBodies.filter(
+        (m) =>
+          m.body.text &&
+          m.body.text.includes("Extracting article") &&
+          m.endpoint === "sendMessage",
+      );
+      expect(progressMessages.length).toBe(2);
+      expect(progressMessages[0].body.text).toContain("Extracting article 1 of 2");
+      expect(progressMessages[1].body.text).toContain("Extracting article 2 of 2");
+    });
+
+    it("preserves single-URL progress message formatting for single-article messages", async () => {
+      const sentTelegramBodies: any[] = [];
+      let msgIdCounter = 8000;
+
+      globalThis.fetch = (async (input: any, init: any) => {
+        const url = typeof input === "string" ? input : input?.url || "";
+        if (
+          url.includes("sendMessage") ||
+          url.includes("editMessageText")
+        ) {
+          const body = JSON.parse(init?.body || "{}");
+          sentTelegramBodies.push({ endpoint: url.split("/").pop(), body });
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              result: { message_id: ++msgIdCounter },
+            }),
+            { status: 200 },
+          );
+        }
+        return origFetch(input, init);
+      }) as typeof fetch;
+
+      setIngestArticleRunnerForTest(async (url: string) => {
+        return {
+          success: true,
+          bookId: 90,
+          title: "Single Article",
+          authors: "Author",
+          siteName: "Site",
+          readTimeMinutes: 4,
+          wordCount: 950,
+          format: "EPUB",
+        } as any;
+      });
+
+      await handleTextMessage(
+        990011,
+        "https://example.com/single-article",
+        "tester",
+      );
+
+      const progressMessage = sentTelegramBodies.find(
+        (m) =>
+          m.body.text &&
+          m.body.text.includes("Extracting article") &&
+          m.endpoint === "sendMessage",
+      );
+      expect(progressMessage).toBeDefined();
+      expect(progressMessage.body.text).toContain("Extracting article from URL...");
+      expect(progressMessage.body.text).not.toContain("Extracting article 1 of 1");
     });
   });
 });

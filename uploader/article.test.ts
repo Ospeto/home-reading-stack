@@ -18,6 +18,7 @@ import {
   convertHtmlToEpub,
   ingestArticleFromUrl,
   extractUrlFromText,
+  extractAllUrlsFromText,
   isBotChallengeTitle,
   isCloudflareChallenge,
 } from "./article";
@@ -1023,6 +1024,88 @@ describe("URL Extraction from Conversational Text (extractUrlFromText)", () => {
     expect(extractUrlFromText(`Check ${evilElsci}`)).toBe(evilElsci);
     expect(extractUrlFromText(`Check ${notElscione}`)).toBe(notElscione);
     expect(extractUrlFromText(`Check ${whyLeft}`)).toBe(whyLeft);
+  });
+});
+
+describe("Multi-URL Extraction (extractAllUrlsFromText)", () => {
+  test("extracts multiple URLs across separate lines preserving order", () => {
+    const text = [
+      "https://paulgraham.com/foundermode.html",
+      "https://danluu.com/sounds-easy/",
+      "https://blog.samaltman.com/what-i-wish-i-knew",
+    ].join("\n");
+
+    const urls = extractAllUrlsFromText(text);
+    expect(urls).toEqual([
+      "https://paulgraham.com/foundermode.html",
+      "https://danluu.com/sounds-easy/",
+      "https://blog.samaltman.com/what-i-wish-i-knew",
+    ]);
+  });
+
+  test("extracts URLs mixed with conversational prose", () => {
+    const text =
+      "Take a look at https://paulgraham.com/foundermode.html for startup thoughts, and also read https://danluu.com/sounds-easy/ when you have time!";
+    const urls = extractAllUrlsFromText(text);
+    expect(urls).toEqual([
+      "https://paulgraham.com/foundermode.html",
+      "https://danluu.com/sounds-easy/",
+    ]);
+  });
+
+  test("filters duplicate URLs within the same message while preserving first-seen order", () => {
+    const text =
+      "Check https://paulgraham.com/foundermode.html and https://danluu.com/sounds-easy/ or again https://paulgraham.com/foundermode.html then https://example.com/third";
+    const urls = extractAllUrlsFromText(text);
+    expect(urls).toEqual([
+      "https://paulgraham.com/foundermode.html",
+      "https://danluu.com/sounds-easy/",
+      "https://example.com/third",
+    ]);
+  });
+
+  test("extracts multiple URLs with command syntax (/read, /article, /epub, /url)", () => {
+    const readCmd =
+      "/read https://paulgraham.com/foundermode.html https://danluu.com/sounds-easy/";
+    expect(extractAllUrlsFromText(readCmd)).toEqual([
+      "https://paulgraham.com/foundermode.html",
+      "https://danluu.com/sounds-easy/",
+    ]);
+
+    const articleCmd =
+      "/article https://paulgraham.com/foundermode.html\nhttps://danluu.com/sounds-easy/";
+    expect(extractAllUrlsFromText(articleCmd)).toEqual([
+      "https://paulgraham.com/foundermode.html",
+      "https://danluu.com/sounds-easy/",
+    ]);
+
+    expect(extractAllUrlsFromText("/epub not-a-url")).toEqual([]);
+    expect(extractAllUrlsFromText("/read")).toEqual([]);
+  });
+
+  test("excludes internal Telegram URLs while extracting regular URLs", () => {
+    const text =
+      "Join https://t.me/reading_stack and read https://paulgraham.com/foundermode.html and also https://telegram.me/updates";
+    const urls = extractAllUrlsFromText(text);
+    expect(urls).toEqual(["https://paulgraham.com/foundermode.html"]);
+  });
+
+  test("extracts mixed standard URLs and Elscione space-containing URLs in document order", () => {
+    const text =
+      "Read https://paulgraham.com/foundermode.html first, then https://server.elscione.com/Officially Translated Light Novels/A Sister's All You Need/ and finally https://danluu.com/sounds-easy/";
+    const urls = extractAllUrlsFromText(text);
+    expect(urls).toEqual([
+      "https://paulgraham.com/foundermode.html",
+      "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Sister's%20All%20You%20Need/",
+      "https://danluu.com/sounds-easy/",
+    ]);
+  });
+
+  test("handles empty string, whitespace, and nullish inputs gracefully", () => {
+    expect(extractAllUrlsFromText("")).toEqual([]);
+    expect(extractAllUrlsFromText("   ")).toEqual([]);
+    expect(extractAllUrlsFromText(null as any)).toEqual([]);
+    expect(extractAllUrlsFromText(undefined as any)).toEqual([]);
   });
 });
 

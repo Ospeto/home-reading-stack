@@ -21,7 +21,11 @@ import {
   purgeBookCoverCache,
 } from "./scraper";
 import { isArchiveFile, unpackArchive, isCanonicalEpub } from "./archive";
-import { extractUrlFromText, ingestArticleFromUrl, generateTypographicCover } from "./article";
+import {
+  extractAllUrlsFromText,
+  ingestArticleFromUrl,
+  generateTypographicCover,
+} from "./article";
 import {
   isLnoriUrl,
   ingestLnoriSeries,
@@ -3922,6 +3926,13 @@ export function setIngestElscioneSeriesRunnerForTest(
   _ingestElscioneSeriesRunner = runner || ingestElscioneSeries;
 }
 
+let _ingestArticleRunner: typeof ingestArticleFromUrl = ingestArticleFromUrl;
+export function setIngestArticleRunnerForTest(
+  runner: typeof ingestArticleFromUrl | null,
+): void {
+  _ingestArticleRunner = runner || ingestArticleFromUrl;
+}
+
 let _lnoriPollIntervalMs = 1500;
 export function setLnoriPollIntervalForTest(ms: number): void {
   _lnoriPollIntervalMs = ms;
@@ -3946,6 +3957,7 @@ export function resetLocalLnoriQueueForTest(): void {
   _localUploaderUrl = null;
   _ingestLnoriSeriesRunner = ingestLnoriSeries;
   _ingestElscioneSeriesRunner = ingestElscioneSeries;
+  _ingestArticleRunner = ingestArticleFromUrl;
   _lnoriPollIntervalMs = 1500;
 }
 
@@ -4962,109 +4974,131 @@ export async function handleTextMessage(
               return;
             }
 
-            const articleUrl = extractUrlFromText(text);
+            const extractedUrls = extractAllUrlsFromText(text);
 
-            if (articleUrl) {
-              if (isLnoriUrl(articleUrl) || isElscioneUrl(articleUrl)) {
-                await handleLnoriUrlMessage(chatId, articleUrl, sender);
-                return;
+            if (extractedUrls.length > 0) {
+              const lnoriUrls: string[] = [];
+              const articleUrls: string[] = [];
+
+              for (const url of extractedUrls) {
+                if (isLnoriUrl(url) || isElscioneUrl(url)) {
+                  lnoriUrls.push(url);
+                } else {
+                  articleUrls.push(url);
+                }
               }
 
-              log(
-                `Detected article URL in message: "${articleUrl}" from ${sender}`,
-              );
-              const statusMsgId = await sendMessage(
-                chatId,
-                `⏳ *Extracting article from URL...*\n\`${articleUrl}\``,
-                "Markdown",
-              );
+              // Process light novel URLs
+              for (const lnUrl of lnoriUrls) {
+                await handleLnoriUrlMessage(chatId, lnUrl, sender);
+              }
 
-              try {
-                const result = await ingestArticleFromUrl(articleUrl);
-                if (result.success) {
-                  const detailsLink = result.bookId
-                    ? `[Book Details](${CALIBRE_WEB_URL}/#book_id=${result.bookId}&panel=book_details)`
-                    : "";
-                  const readerLink = result.bookId
-                    ? `[Read Online](${CALIBRE_WEB_URL}/read/${result.bookId}/epub)`
-                    : "";
-                  const links = [detailsLink, readerLink]
-                    .filter(Boolean)
-                    .join(" • ");
+              // Process article URLs sequentially
+              const totalArticles = articleUrls.length;
+              for (let i = 0; i < totalArticles; i++) {
+                const articleUrl = articleUrls[i];
+                log(
+                  `Detected article URL ${i + 1}/${totalArticles} in message: "${articleUrl}" from ${sender}`,
+                );
 
-                  const confirmation =
-                    `✅ *Article Ingested Successfully*\n\n` +
-                    `\uD83D\uDCD6 *Title:* ${result.title}\n` +
-                    `\uD83D\uDC64 *Author:* ${result.authors || "Unknown"}\n` +
-                    `\uD83C\uDF10 *Source:* ${result.siteName}\n` +
-                    `⏱️ *Read Time:* ~${result.readTimeMinutes} min (${result.wordCount} words)\n` +
-                    `\uD83D\uDCE6 *Format:* \`EPUB\`\n` +
-                    `ℹ️ ${result.message || "Added to library"}\n\n` +
-                    (links ? `\uD83D\uDD17 ${links}\n\n` : "") +
-                    `_Ready on your Kindle OPDS feed. Sending EPUB copy below..._`;
+                const progressText =
+                  totalArticles > 1
+                    ? `⏳ *Extracting article ${i + 1} of ${totalArticles}:*\n\`${articleUrl}\``
+                    : `⏳ *Extracting article from URL...*\n\`${articleUrl}\``;
 
-                  const postIngestKeyboard = result.bookId
-                    ? getPostIngestionKeyboard(result.bookId)
-                    : undefined;
-                  await editOrSendMessage(
-                    chatId,
-                    statusMsgId,
-                    confirmation,
-                    "Markdown",
-                    postIngestKeyboard,
-                  );
+                const statusMsgId = await sendMessage(
+                  chatId,
+                  progressText,
+                  "Markdown",
+                );
 
-                  if (result.epubPath && fs.existsSync(result.epubPath)) {
-                    log(
-                      `Sending generated EPUB to chat ${chatId}: ${result.epubPath}`,
-                    );
-                    const caption = `\uD83D\uDCD6 *${result.title}*\n\uD83D\uDC64 ${result.authors || "Unknown"}`;
-                    const customName = generateMetadataFilename({
-                      title: result.title,
-                      authors: result.authors,
-                      format: "epub",
-                    });
-                    await sendDocument(
+                try {
+                  const result = await _ingestArticleRunner(articleUrl);
+                  if (result.success) {
+                    const detailsLink = result.bookId
+                      ? `[Book Details](${CALIBRE_WEB_URL}/#book_id=${result.bookId}&panel=book_details)`
+                      : "";
+                    const readerLink = result.bookId
+                      ? `[Read Online](${CALIBRE_WEB_URL}/read/${result.bookId}/epub)`
+                      : "";
+                    const links = [detailsLink, readerLink]
+                      .filter(Boolean)
+                      .join(" • ");
+
+                    const confirmation =
+                      `✅ *Article Ingested Successfully*\n\n` +
+                      `\uD83D\uDCD6 *Title:* ${result.title}\n` +
+                      `\uD83D\uDC64 *Author:* ${result.authors || "Unknown"}\n` +
+                      `\uD83C\uDF10 *Source:* ${result.siteName}\n` +
+                      `⏱️ *Read Time:* ~${result.readTimeMinutes} min (${result.wordCount} words)\n` +
+                      `\uD83D\uDCE6 *Format:* \`EPUB\`\n` +
+                      `ℹ️ ${result.message || "Added to library"}\n\n` +
+                      (links ? `\uD83D\uDD17 ${links}\n\n` : "") +
+                      `_Ready on your Kindle OPDS feed. Sending EPUB copy below..._`;
+
+                    const postIngestKeyboard = result.bookId
+                      ? getPostIngestionKeyboard(result.bookId)
+                      : undefined;
+                    await editOrSendMessage(
                       chatId,
-                      result.epubPath,
-                      caption,
+                      statusMsgId,
+                      confirmation,
                       "Markdown",
-                      "application/epub+zip",
-                      customName,
+                      postIngestKeyboard,
+                    );
+
+                    if (result.epubPath && fs.existsSync(result.epubPath)) {
+                      log(
+                        `Sending generated EPUB to chat ${chatId}: ${result.epubPath}`,
+                      );
+                      const caption = `\uD83D\uDCD6 *${result.title}*\n\uD83D\uDC64 ${result.authors || "Unknown"}`;
+                      const customName = generateMetadataFilename({
+                        title: result.title,
+                        authors: result.authors,
+                        format: "epub",
+                      });
+                      await sendDocument(
+                        chatId,
+                        result.epubPath,
+                        caption,
+                        "Markdown",
+                        "application/epub+zip",
+                        customName,
+                      );
+                    }
+                  } else {
+                    await editOrSendMessage(
+                      chatId,
+                      statusMsgId,
+                      `⚠️ *Article Ingestion Failed*\n\n` +
+                        `\uD83D\uDD17 *URL:* \`${articleUrl}\`\n` +
+                        `❌ *Error:* ${result.error || "Failed to process article"}\n\n` +
+                        `_Please verify the link is publicly accessible and try again._`,
+                      "Markdown",
                     );
                   }
-                } else {
+                } catch (err: any) {
+                  logError(
+                    `Article ingestion exception for ${articleUrl}: ${err.message}`,
+                  );
+                  const isPaywall =
+                    /paid subscription paywall|subscription offer/i.test(
+                      err.message,
+                    );
+                  const advice = isPaywall
+                    ? `_Please paste the article text directly into Reading HQ or provide an unlocked link._`
+                    : `_Please check the URL or paywall access and try again._`;
+
                   await editOrSendMessage(
                     chatId,
                     statusMsgId,
                     `⚠️ *Article Ingestion Failed*\n\n` +
                       `\uD83D\uDD17 *URL:* \`${articleUrl}\`\n` +
-                      `❌ *Error:* ${result.error || "Failed to process article"}\n\n` +
-                      `_Please verify the link is publicly accessible and try again._`,
+                      `❌ *Error:* ${err.message || "Unknown error"}\n\n` +
+                      advice,
                     "Markdown",
                   );
                 }
-              } catch (err: any) {
-                logError(
-                  `Article ingestion exception for ${articleUrl}: ${err.message}`,
-                );
-                const isPaywall =
-                  /paid subscription paywall|subscription offer/i.test(
-                    err.message,
-                  );
-                const advice = isPaywall
-                  ? `_Please paste the article text directly into Reading HQ or provide an unlocked link._`
-                  : `_Please check the URL or paywall access and try again._`;
-
-                await editOrSendMessage(
-                  chatId,
-                  statusMsgId,
-                  `⚠️ *Article Ingestion Failed*\n\n` +
-                    `\uD83D\uDD17 *URL:* \`${articleUrl}\`\n` +
-                    `❌ *Error:* ${err.message || "Unknown error"}\n\n` +
-                    advice,
-                  "Markdown",
-                );
               }
             } else if (
               text === "/start" ||
