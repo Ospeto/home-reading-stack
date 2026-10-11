@@ -2,6 +2,7 @@ import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import {
@@ -30,6 +31,10 @@ import {
   isFastFailArticleDomain,
   isFastFailDomain,
   compute429BackoffMs,
+  decodeAndSaveBase64Image,
+  extractAndSaveBase64Images,
+  isTrackingOrSpacerPixel,
+  isValidImageBuffer,
 } from "./article";
 import { isElscioneUrl } from "./elscione";
 import { evaluateJunkGate } from "./jev-shelf";
@@ -2376,4 +2381,407 @@ ${dummyProse}`;
   });
 });
 
+describe("Inline & Base64-Encoded Images in Article Extraction & EPUB Generation", () => {
+  // Valid sample image payloads (2x2 pixels)
+  const VALID_PNG_2X2_BASE64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR42mNk+M9QzwAEjDAGACUcAfs80K0AAAAASUVORK5CYII=";
+  const VALID_PNG_DATA_URI = `data:image/png;base64,${VALID_PNG_2X2_BASE64}`;
+
+  const VALID_GIF_2X2_BASE64 =
+    "R0lGODlhAgACAIABAAAAAP///yH5BAEAAAEALAAAAAACAAIAAAICRF4AOw==";
+  const VALID_GIF_DATA_URI = `data:image/gif;base64,${VALID_GIF_2X2_BASE64}`;
+
+  // 1x1 spacer / tracking pixel payloads
+  const TRACKING_GIF_1X1_DATA_URI =
+    "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+  const TRACKING_PNG_1X1_DATA_URI =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+  const TRACKING_WEBP_1X1_DATA_URI =
+    "data:image/webp;base64,UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==";
+
+  test("decodeAndSaveBase64Image decodes valid PNG and GIF images and creates temporary files", () => {
+    const pngResult = decodeAndSaveBase64Image(VALID_PNG_DATA_URI);
+    expect(pngResult).not.toBeNull();
+    expect(pngResult!.ext).toBe("png");
+    expect(pngResult!.filePath).toMatch(/^\/tmp\/article_img_[a-f0-9]+\.png$/);
+    expect(fs.existsSync(pngResult!.filePath)).toBe(true);
+    expect(fs.statSync(pngResult!.filePath).size).toBeGreaterThan(0);
+
+    const gifResult = decodeAndSaveBase64Image(VALID_GIF_DATA_URI);
+    expect(gifResult).not.toBeNull();
+    expect(gifResult!.ext).toBe("gif");
+    expect(gifResult!.filePath).toMatch(/^\/tmp\/article_img_[a-f0-9]+\.gif$/);
+    expect(fs.existsSync(gifResult!.filePath)).toBe(true);
+
+    // Clean up
+    try {
+      if (fs.existsSync(pngResult!.filePath)) fs.unlinkSync(pngResult!.filePath);
+      if (fs.existsSync(gifResult!.filePath)) fs.unlinkSync(gifResult!.filePath);
+    } catch (_err) {
+      void _err;
+    }
+  });
+
+  test("decodeAndSaveBase64Image rejects 1x1 tracking and spacer pixels gracefully", () => {
+    const gif1x1 = decodeAndSaveBase64Image(TRACKING_GIF_1X1_DATA_URI);
+    expect(gif1x1).toBeNull();
+
+    const png1x1 = decodeAndSaveBase64Image(TRACKING_PNG_1X1_DATA_URI);
+    expect(png1x1).toBeNull();
+
+    const webp1x1 = decodeAndSaveBase64Image(TRACKING_WEBP_1X1_DATA_URI);
+    expect(webp1x1).toBeNull();
+  });
+
+  test("decodeAndSaveBase64Image rejects corrupt or malformed data URIs safely", () => {
+    // Direct image buffer validation checks
+    expect(isValidImageBuffer(Buffer.from(VALID_PNG_2X2_BASE64, "base64"), "png")).toBe(true);
+    expect(isValidImageBuffer(Buffer.from(VALID_GIF_2X2_BASE64, "base64"), "gif")).toBe(true);
+    expect(isValidImageBuffer(Buffer.from("invalid-header", "utf8"), "png")).toBe(false);
+
+    // Spacer pixel check
+    expect(isTrackingOrSpacerPixel(Buffer.from(VALID_PNG_2X2_BASE64, "base64"), "png")).toBe(false);
+    expect(isTrackingOrSpacerPixel(Buffer.from(VALID_GIF_2X2_BASE64, "base64"), "gif")).toBe(false);
+
+    // Corrupt base64 (not valid image magic bytes)
+    expect(decodeAndSaveBase64Image("data:image/png;base64,corrupt_not_an_image")).toBeNull();
+
+    // Empty payload
+    expect(decodeAndSaveBase64Image("data:image/jpeg;base64,")).toBeNull();
+
+    // Unsupported mime types (e.g. svg, text)
+    expect(decodeAndSaveBase64Image("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=")).toBeNull();
+    expect(decodeAndSaveBase64Image("data:text/html;base64,PGgxPkhlbGxvPC9oMT4=")).toBeNull();
+
+    // Malformed strings
+    expect(decodeAndSaveBase64Image("")).toBeNull();
+    expect(decodeAndSaveBase64Image(undefined as any)).toBeNull();
+    expect(decodeAndSaveBase64Image("not-a-data-uri")).toBeNull();
+  });
+
+  test("extractAndSaveBase64Images decodes inline images and replaces src attributes", () => {
+    const inputHtml = `
+      <article>
+        <h1>Diagram Article</h1>
+        <p>Here is an inline architecture diagram:</p>
+        <img src="${VALID_PNG_DATA_URI}" alt="System Architecture" />
+        <p>And here is a spacer pixel that should be stripped:</p>
+        <img src="${TRACKING_GIF_1X1_DATA_URI}" alt="Spacer" />
+        <p>And a corrupt data URI that should fail open safely:</p>
+        <img src="data:image/png;base64,corrupt_garbage" alt="Corrupt" />
+      </article>
+    `;
+
+    const { html, tempImagePaths } = extractAndSaveBase64Images(inputHtml);
+
+    expect(tempImagePaths.length).toBe(1);
+    const savedPath = tempImagePaths[0];
+    expect(savedPath).toMatch(/^\/tmp\/article_img_[a-f0-9]+\.png$/);
+    expect(fs.existsSync(savedPath)).toBe(true);
+
+    // HTML contains replaced path and preserves alt text
+    expect(html).toContain(`<img src="${savedPath}" alt="System Architecture" />`);
+
+    // Tracking and corrupt images are stripped
+    expect(html).not.toContain(TRACKING_GIF_1X1_DATA_URI);
+    expect(html).not.toContain("corrupt_garbage");
+    expect(html).not.toContain('alt="Spacer"');
+    expect(html).not.toContain('alt="Corrupt"');
+
+    // Clean up
+    try {
+      if (fs.existsSync(savedPath)) fs.unlinkSync(savedPath);
+    } catch (_err) {
+      void _err;
+    }
+  });
+
+  test("cleanDirectHtml preserves base64 images whose payload contains 1x1 while stripping actual tracking pixels", () => {
+    // Construct base64 payload containing "1x1" substring
+    const base64With1x1 = `data:image/png;base64,iVBORw0KGgoAAA1x1AAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR42mNk+M9QzwAEjDAGACUcAfs80K0AAAAASUVORK5CYII=`;
+    const htmlWithImages = `
+      <article>
+        <img src="${base64With1x1}" alt="Valid Diagram With 1x1 substring" />
+        <img src="https://example.com/spacer.gif" alt="spacer" />
+        <img src="https://example.com/1x1.png" alt="tracking" />
+        <img src="data:image/gif;base64,R0lGODlh" width="1" height="1" />
+      </article>
+    `;
+
+    const cleaned = cleanDirectHtml(htmlWithImages);
+
+    // Preserves base64 image tag
+    expect(cleaned).toContain(`src="${base64With1x1}"`);
+    expect(cleaned).toContain('alt="Valid Diagram With 1x1 substring"');
+
+    // Strips tracking images
+    expect(cleaned).not.toContain("spacer.gif");
+    expect(cleaned).not.toContain("1x1.png");
+    expect(cleaned).not.toContain('width="1" height="1"');
+  });
+
+  test("extractArticle preserves inline base64 images and embeds temporary file paths in output", async () => {
+    const dummyProse =
+      "Distributed consensus algorithms like Paxos and Raft ensure state machine replication across unreliable networks. ".repeat(
+        25,
+      );
+
+    const articleHtml = `<!DOCTYPE html>
+<html>
+<head><title>Consensus Protocols</title></head>
+<body>
+  <article>
+    <h1>Consensus Protocols</h1>
+    <p>${dummyProse}</p>
+    <figure>
+      <img src="${VALID_PNG_DATA_URI}" alt="Raft Architecture Diagram" />
+      <figcaption>Raft Cluster States</figcaption>
+    </figure>
+    <p>Trailing discussion on leader election and log compaction.</p>
+  </article>
+</body>
+</html>`;
+
+    const origFetch = globalThis.fetch;
+    let extractedArticle: any = null;
+
+    try {
+      globalThis.fetch = (async (input: any) => {
+        const urlStr = typeof input === "string" ? input : input?.url || "";
+        if (urlStr.includes("consensus-protocols")) {
+          return new Response(articleHtml, {
+            status: 200,
+            headers: { "Content-Type": "text/html; charset=utf-8" },
+          });
+        }
+        return origFetch(input);
+      }) as any;
+
+      extractedArticle = await extractArticle("https://example.com/consensus-protocols");
+
+      expect(extractedArticle).not.toBeNull();
+      expect(extractedArticle.title).toBe("Consensus Protocols");
+      expect(extractedArticle.cleanedHtml).toContain("/tmp/article_img_");
+      expect(extractedArticle.cleanedHtml).toContain('alt="Raft Architecture Diagram"');
+      expect(extractedArticle.styledDocument).toContain("/tmp/article_img_");
+
+      expect(extractedArticle.tempImagePaths).toBeDefined();
+      expect(extractedArticle.tempImagePaths.length).toBeGreaterThanOrEqual(1);
+
+      const imgPath = extractedArticle.tempImagePaths[0];
+      expect(fs.existsSync(imgPath)).toBe(true);
+      expect(fs.statSync(imgPath).size).toBeGreaterThan(0);
+    } finally {
+      globalThis.fetch = origFetch;
+      if (extractedArticle?.tempImagePaths) {
+        for (const p of extractedArticle.tempImagePaths) {
+          if (fs.existsSync(p)) {
+            try {
+              fs.unlinkSync(p);
+            } catch (_err) {
+              void _err;
+            }
+          }
+        }
+      }
+      if (extractedArticle?.coverImagePath && fs.existsSync(extractedArticle.coverImagePath)) {
+        try {
+          fs.unlinkSync(extractedArticle.coverImagePath);
+        } catch (_err) {
+          void _err;
+        }
+      }
+    }
+  });
+
+  test("extractArticle fails open safely on malformed and 1x1 data URIs without crashing", async () => {
+    const dummyProse =
+      "Event-driven architectures decouple microservices through durable message logs and event sourcing streams. ".repeat(
+        25,
+      );
+
+    const articleHtml = `<!DOCTYPE html>
+<html>
+<head><title>Event Sourcing Patterns</title></head>
+<body>
+  <article>
+    <h1>Event Sourcing Patterns</h1>
+    <p>${dummyProse}</p>
+    <img src="data:image/png;base64,corrupt_junk_data" alt="Broken Diagram" />
+    <img src="${TRACKING_GIF_1X1_DATA_URI}" alt="Tracking Beacon" />
+    <p>Final considerations regarding snapshots and schema evolution.</p>
+  </article>
+</body>
+</html>`;
+
+    const origFetch = globalThis.fetch;
+    let extractedArticle: any = null;
+
+    try {
+      globalThis.fetch = (async (input: any) => {
+        const urlStr = typeof input === "string" ? input : input?.url || "";
+        if (urlStr.includes("event-sourcing")) {
+          return new Response(articleHtml, {
+            status: 200,
+            headers: { "Content-Type": "text/html; charset=utf-8" },
+          });
+        }
+        return origFetch(input);
+      }) as any;
+
+      // Must succeed without throwing
+      extractedArticle = await extractArticle("https://example.com/event-sourcing");
+
+      expect(extractedArticle).not.toBeNull();
+      expect(extractedArticle.title).toBe("Event Sourcing Patterns");
+      expect(extractedArticle.wordCount).toBeGreaterThan(150);
+
+      // Broken and tracking images are omitted
+      expect(extractedArticle.cleanedHtml).not.toContain("corrupt_junk_data");
+      expect(extractedArticle.cleanedHtml).not.toContain("Tracking Beacon");
+      expect(extractedArticle.cleanedHtml).not.toContain(TRACKING_GIF_1X1_DATA_URI);
+    } finally {
+      globalThis.fetch = origFetch;
+      if (extractedArticle?.coverImagePath && fs.existsSync(extractedArticle.coverImagePath)) {
+        try {
+          fs.unlinkSync(extractedArticle.coverImagePath);
+        } catch (_err) {
+          void _err;
+        }
+      }
+    }
+  });
+
+  test("convertHtmlToEpub extracts base64 images, bundles into EPUB, and cleans up temp files in finally block", () => {
+    const htmlWithBase64 = `
+      <h1>Substack Tech Post</h1>
+      <p>Here is an embedded diagram that should be decoded and bundled into the EPUB:</p>
+      <img src="${VALID_PNG_DATA_URI}" alt="Database Sharding Topology" />
+      <p>Discussion on partition keys and consistent hashing.</p>
+    `;
+
+    // Track which /tmp/article_img_ files were created
+    let generatedImagePath: string | null = null;
+    const { tempImagePaths } = extractAndSaveBase64Images(htmlWithBase64);
+    if (tempImagePaths.length > 0) {
+      generatedImagePath = tempImagePaths[0];
+    }
+
+    // Run convertHtmlToEpub with the raw HTML containing base64 data URI
+    const epubPath = convertHtmlToEpub(
+      htmlWithBase64,
+      "Substack Tech Post",
+      "Tech Author",
+      "Substack",
+      "https://example.substack.com/p/sharding",
+    );
+
+    try {
+      expect(fs.existsSync(epubPath)).toBe(true);
+      expect(fs.statSync(epubPath).size).toBeGreaterThan(1024);
+
+      // In finally block, convertHtmlToEpub unlinked temporary image files
+      if (generatedImagePath) {
+        expect(fs.existsSync(generatedImagePath)).toBe(false);
+      }
+    } finally {
+      if (fs.existsSync(epubPath)) {
+        try {
+          fs.unlinkSync(epubPath);
+        } catch (_err) {
+          void _err;
+        }
+      }
+      if (generatedImagePath && fs.existsSync(generatedImagePath)) {
+        try {
+          fs.unlinkSync(generatedImagePath);
+        } catch (_err) {
+          void _err;
+        }
+      }
+    }
+  });
+
+  test("ingestArticleFromUrl cleans up temporary images in finally block", async () => {
+    const testTempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "article-base64-ingest-test-"),
+    );
+    const mockCalibreScript = path.join(testTempDir, "mock_calibredb.sh");
+
+    fs.writeFileSync(
+      mockCalibreScript,
+      `#!/bin/bash
+if [ "$1" = "list" ]; then
+  echo "[]"
+  exit 0
+elif [ "$1" = "add" ]; then
+  echo "Added book ids: 202"
+  exit 0
+elif [ "$1" = "set_metadata" ]; then
+  exit 0
+fi
+echo "[]"
+exit 0
+`,
+      { mode: 0o755 },
+    );
+
+    const testDropDir = path.join(testTempDir, "drop");
+    fs.mkdirSync(testDropDir, { recursive: true });
+
+    const prevDropEnv = process.env.BOOKS_DROP_DIR;
+    const prevCalibrePath = process.env.CALIBREDB_PATH;
+    process.env.BOOKS_DROP_DIR = testDropDir;
+    process.env.CALIBREDB_PATH = mockCalibreScript;
+
+    const prose =
+      "Modern cloud infrastructure scales horizontally through container orchestration and ingress controllers. ".repeat(
+        25,
+      );
+
+    const articleHtml = `<html><head><title>Cloud Scaling</title></head><body><article><p>${prose}</p><img src="${VALID_PNG_DATA_URI}" alt="Cloud Architecture" /></article></body></html>`;
+
+    const origFetch = globalThis.fetch;
+
+    try {
+      globalThis.fetch = (async () => {
+        return new Response(articleHtml, {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }) as any;
+
+      const res = await ingestArticleFromUrl("https://example.com/cloud-scaling");
+
+      expect(res.success).toBe(true);
+      expect(res.bookId).toBe(202);
+
+      // Verify that any temporary image files were cleaned up
+      const hash = crypto
+        .createHash("sha256")
+        .update(Buffer.from(VALID_PNG_2X2_BASE64, "base64"))
+        .digest("hex")
+        .slice(0, 16);
+      const expectedPath = `/tmp/article_img_${hash}.png`;
+      expect(fs.existsSync(expectedPath)).toBe(false);
+    } finally {
+      globalThis.fetch = origFetch;
+      if (prevDropEnv !== undefined) {
+        process.env.BOOKS_DROP_DIR = prevDropEnv;
+      } else {
+        delete process.env.BOOKS_DROP_DIR;
+      }
+      if (prevCalibrePath !== undefined) {
+        process.env.CALIBREDB_PATH = prevCalibrePath;
+      } else {
+        delete process.env.CALIBREDB_PATH;
+      }
+      try {
+        fs.rmSync(testTempDir, { recursive: true, force: true });
+      } catch (_err) {
+        void _err;
+      }
+    }
+  });
+});
 

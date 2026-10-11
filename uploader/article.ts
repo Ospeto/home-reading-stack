@@ -98,6 +98,7 @@ export interface ExtractedArticle {
   styledDocument: string;
   coverImagePath?: string;
   coverImageUrl?: string;
+  tempImagePaths?: string[];
 }
 
 export interface IngestArticleResult {
@@ -712,7 +713,14 @@ export function cleanDirectHtml(rawHtml: string): string {
 
   // 4. Remove image map references and tracking/spacer pixels
   workHtml = workHtml.replace(/<img\b[^>]*\b(?:usemap|ismap)[^>]*>/gi, "");
-  workHtml = workHtml.replace(/<img\b[^>]*(?:1x1|trans_|spacer)[^>]*>/gi, "");
+  workHtml = workHtml.replace(
+    /<img\b(?=[^>]*\bwidth=["']1["'])(?=[^>]*\bheight=["']1["'])[^>]*>/gi,
+    "",
+  );
+  workHtml = workHtml.replace(
+    /<img\b(?![^>]*\b(?:src|data-src)=["']data:image\/)[^>]*(?:1x1|trans_|spacer)[^>]*>/gi,
+    "",
+  );
 
   // 5. Clean empty table cells and layout rows
   for (let i = 0; i < 3; i++) {
@@ -1435,6 +1443,271 @@ export async function downloadCoverImage(
 }
 
 /**
+ * Detect if an image buffer represents a 1x1 spacer/tracking pixel.
+ */
+export function isTrackingOrSpacerPixel(
+  buffer: Buffer,
+  mime: string,
+): boolean {
+  if (!buffer || buffer.length === 0) return true;
+  const m = mime.toLowerCase();
+
+  // 1x1 GIF
+  if (m === "gif" && buffer.length >= 10) {
+    if (buffer.subarray(0, 3).toString("ascii") === "GIF") {
+      const width = buffer.readUInt16LE(6);
+      const height = buffer.readUInt16LE(8);
+      if (width <= 1 && height <= 1) return true;
+    }
+  }
+
+  // 1x1 PNG
+  if (m === "png" && buffer.length >= 24) {
+    if (
+      buffer[0] === 0x89 &&
+      buffer[1] === 0x50 &&
+      buffer[2] === 0x4e &&
+      buffer[3] === 0x47
+    ) {
+      const width = buffer.readUInt32BE(16);
+      const height = buffer.readUInt32BE(20);
+      if (width <= 1 && height <= 1) return true;
+    }
+  }
+
+  // 1x1 WebP
+  if (m === "webp" && buffer.length >= 30) {
+    if (
+      buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+      buffer.subarray(8, 12).toString("ascii") === "WEBP"
+    ) {
+      const chunk = buffer.subarray(12, 16).toString("ascii");
+      if (chunk === "VP8L" && buffer.length >= 25 && buffer[20] === 0x2f) {
+        const b1 = buffer[21],
+          b2 = buffer[22],
+          b3 = buffer[23],
+          b4 = buffer[24];
+        const width = 1 + (((b2 & 0x3f) << 8) | b1);
+        const height =
+          1 + (((b4 & 0x0f) << 10) | (b3 << 2) | ((b2 & 0xc0) >> 6));
+        if (width <= 1 && height <= 1) return true;
+      } else if (chunk === "VP8 " && buffer.length >= 30) {
+        if (
+          buffer[23] === 0x9d &&
+          buffer[24] === 0x01 &&
+          buffer[25] === 0x2a
+        ) {
+          const width = buffer.readUInt16LE(26) & 0x3fff;
+          const height = buffer.readUInt16LE(28) & 0x3fff;
+          if (width <= 1 && height <= 1) return true;
+        }
+      }
+    }
+  }
+
+  // 1x1 JPEG
+  if ((m === "jpeg" || m === "jpg") && buffer.length >= 4) {
+    if (buffer[0] === 0xff && buffer[1] === 0xd8) {
+      let offset = 2;
+      while (offset < buffer.length - 1) {
+        if (buffer[offset] !== 0xff) {
+          offset++;
+          continue;
+        }
+        // Skip padding 0xFF bytes
+        while (offset < buffer.length - 1 && buffer[offset + 1] === 0xff) {
+          offset++;
+        }
+        if (offset >= buffer.length - 1) break;
+        const marker = buffer[offset + 1];
+        offset += 2;
+
+        // Standalone markers with no length payload
+        if (
+          marker === 0xd8 ||
+          marker === 0xd9 ||
+          (marker >= 0xd0 && marker <= 0xd7) ||
+          marker === 0x00
+        ) {
+          continue;
+        }
+        // Stop at Start of Scan (entropy-coded image data follows)
+        if (marker === 0xda) break;
+
+        if (offset + 2 > buffer.length) break;
+        const len = buffer.readUInt16BE(offset);
+        if (len < 2 || offset + len > buffer.length) break;
+
+        // Check SOF markers (SOF0..SOF3, SOF5..SOF7, SOF9..SOF11, SOF13..SOF15)
+        const isSof =
+          (marker >= 0xc0 && marker <= 0xc3) ||
+          (marker >= 0xc5 && marker <= 0xc7) ||
+          (marker >= 0xc9 && marker <= 0xcb) ||
+          (marker >= 0xcd && marker <= 0xcf);
+
+        if (isSof && len >= 7 && offset + 7 <= buffer.length) {
+          const height = buffer.readUInt16BE(offset + 3);
+          const width = buffer.readUInt16BE(offset + 5);
+          return width <= 1 && height <= 1;
+        }
+
+        offset += len;
+      }
+    }
+  }
+
+  // Catch-all: ultra-tiny buffers (under 60 bytes) that can only be 1x1 spacers or corrupt stubs
+  return false;
+}
+
+/**
+ * Validate that an image buffer starts with the expected magic bytes for its mime type.
+ */
+export function isValidImageBuffer(buffer: Buffer, mime: string): boolean {
+  if (!buffer || buffer.length < 8) return false;
+  const m = mime.toLowerCase();
+
+  switch (m) {
+    case "png":
+      return (
+        buffer.length >= 24 &&
+        buffer[0] === 0x89 &&
+        buffer[1] === 0x50 &&
+        buffer[2] === 0x4e &&
+        buffer[3] === 0x47
+      );
+    case "gif":
+      return (
+        buffer.length >= 10 &&
+        buffer.subarray(0, 3).toString("ascii") === "GIF"
+      );
+    case "jpeg":
+    case "jpg":
+      return buffer.length >= 4 && buffer[0] === 0xff && buffer[1] === 0xd8;
+    case "webp":
+      return (
+        buffer.length >= 20 &&
+        buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+        buffer.subarray(8, 12).toString("ascii") === "WEBP"
+      );
+    default:
+      return false;
+  }
+}
+
+/**
+ * Decode an inline base64 image data URI, validate it, reject 1x1 tracking pixels,
+ * save to /tmp/article_img_${hash}.${ext}, and return the file path and extension.
+ * Fails open safely returning null if malformed, corrupt, or a tracking pixel.
+ */
+export function decodeAndSaveBase64Image(
+  dataUri: string,
+): { filePath: string; ext: string } | null {
+  if (!dataUri || typeof dataUri !== "string") return null;
+
+  const match = dataUri.match(
+    /^data:image\/(png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=\s]+)$/i,
+  );
+  if (!match) return null;
+
+  const rawMime = match[1].toLowerCase();
+  const rawBase64 = match[2].replace(/\s+/g, "");
+  if (!rawBase64) return null;
+
+  let buffer: Buffer;
+  try {
+    buffer = Buffer.from(rawBase64, "base64");
+  } catch {
+    return null;
+  }
+
+  if (!isValidImageBuffer(buffer, rawMime)) {
+    return null;
+  }
+
+  if (isTrackingOrSpacerPixel(buffer, rawMime)) {
+    return null;
+  }
+
+  const ext = rawMime === "jpeg" ? "jpg" : rawMime;
+  const hash = crypto
+    .createHash("sha256")
+    .update(buffer)
+    .digest("hex")
+    .slice(0, 16);
+  const filePath = `/tmp/article_img_${hash}.${ext}`;
+
+  try {
+    if (!fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, buffer);
+    }
+    return { filePath, ext };
+  } catch (err: any) {
+    console.warn(
+      `[Article] Failed to write decoded base64 image: ${err?.message || err}`,
+    );
+    return null;
+  }
+}
+
+export interface ProcessBase64ImagesResult {
+  html: string;
+  tempImagePaths: string[];
+}
+
+/**
+ * Scan HTML for inline base64 images (in <img> src/data-src or standalone data URIs),
+ * decode valid images to temporary files, and replace data URIs with local file paths.
+ */
+export function extractAndSaveBase64Images(
+  htmlContent: string,
+): ProcessBase64ImagesResult {
+  if (!htmlContent) return { html: "", tempImagePaths: [] };
+
+  const tempImagePaths = new Set<string>();
+
+  // 1. Process <img> tags containing data URIs
+  let processed = htmlContent.replace(/<img\b([^>]*)>/gi, (imgTag, attrs) => {
+    const srcMatch = attrs.match(/\bsrc=["'](data:[^"']+)["']/i);
+    const dataSrcMatch = attrs.match(
+      /\b(?:data-src|data-original|data-lazy-src)=["'](data:[^"']+)["']/i,
+    );
+
+    const targetDataUri = dataSrcMatch?.[1] || srcMatch?.[1];
+    if (!targetDataUri) return imgTag;
+
+    const decoded = decodeAndSaveBase64Image(targetDataUri);
+    if (!decoded) {
+      // Corrupt or tracking/spacer pixel: omit the image tag gracefully
+      return "";
+    }
+
+    tempImagePaths.add(decoded.filePath);
+
+    if (srcMatch) {
+      return imgTag.replace(srcMatch[1], decoded.filePath);
+    } else {
+      return `<img src="${escapeHtml(decoded.filePath)}" ${attrs.trim()}>`;
+    }
+  });
+
+  // 2. Also replace any remaining standalone data URIs matching the pattern
+  const dataUriRegex =
+    /data:image\/(png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=]+)/gi;
+  processed = processed.replace(dataUriRegex, (match) => {
+    const decoded = decodeAndSaveBase64Image(match);
+    if (!decoded) return match;
+    tempImagePaths.add(decoded.filePath);
+    return decoded.filePath;
+  });
+
+  return {
+    html: processed,
+    tempImagePaths: Array.from(tempImagePaths),
+  };
+}
+
+/**
  * Fetch and extract article content using Jina Reader (r.jina.ai) as a fallback
  * for paywalls, Cloudflare bot-walls, or restricted content.
  */
@@ -1550,7 +1823,9 @@ export async function extractArticleViaJina(
     }
   }
 
-  const cleanedHtml = markdownToHtml(cleanedBodyMarkdown);
+  const rawHtml = markdownToHtml(cleanedBodyMarkdown);
+  const { html: cleanedHtml, tempImagePaths } =
+    extractAndSaveBase64Images(rawHtml);
 
   if (isBotChallengeTitle(parsed.title || "") || isBotChallengeTitle(title)) {
     throw new Error(
@@ -1626,6 +1901,7 @@ export async function extractArticleViaJina(
     styledDocument,
     coverImagePath,
     coverImageUrl,
+    tempImagePaths,
   };
 }
 
@@ -1796,7 +2072,9 @@ export async function buildArticleFromFirecrawl(
     }
   }
 
-  const cleanedHtml = markdownToHtml(cleanedBodyMarkdown);
+  const rawHtml = markdownToHtml(cleanedBodyMarkdown);
+  const { html: cleanedHtml, tempImagePaths } =
+    extractAndSaveBase64Images(rawHtml);
   const textOnly = decodeHtmlEntities(
     cleanedHtml
       .replace(/<[^>]+>/g, " ")
@@ -1863,6 +2141,7 @@ export async function buildArticleFromFirecrawl(
     styledDocument,
     coverImagePath,
     coverImageUrl,
+    tempImagePaths,
   };
 }
 
@@ -2153,6 +2432,7 @@ export async function extractArticle(
 
   // Sanitize candidate tags & resolve URLs
   // Resolve relative URLs on images and links, support lazy-load data-src
+  const tempImagePaths: string[] = [];
   let cleaned = candidateHtml.replace(/<img\b([^>]*)>/gi, (_, attrs) => {
     let src = "";
     const srcMatch = attrs.match(/\bsrc=["']([^"']+)["']/i);
@@ -2161,21 +2441,52 @@ export async function extractArticle(
     );
     const altMatch = attrs.match(/\balt=["']([^"']*)["']/i);
 
-    if (
-      dataSrcMatch &&
-      dataSrcMatch[1] &&
-      (!srcMatch || srcMatch[1].startsWith("data:") || srcMatch[1].length < 10)
-    ) {
-      src = dataSrcMatch[1];
+    if (dataSrcMatch && dataSrcMatch[1]) {
+      const dataSrcVal = dataSrcMatch[1].trim();
+      const srcVal = srcMatch ? srcMatch[1].trim() : "";
+      if (!srcVal) {
+        src = dataSrcVal;
+      } else if (!dataSrcVal.startsWith("data:") && srcVal.startsWith("data:")) {
+        // data-src has real remote URL, src has data URI placeholder
+        src = dataSrcVal;
+      } else if (dataSrcVal.startsWith("data:") && !srcVal.startsWith("data:")) {
+        // src has real remote URL, data-src has data URI
+        src = srcVal;
+      } else if (dataSrcVal.startsWith("data:") && srcVal.startsWith("data:")) {
+        // Both are data URIs: pick longer one (full image over placeholder)
+        src = dataSrcVal.length > srcVal.length ? dataSrcVal : srcVal;
+      } else {
+        // Both are remote URLs: prefer data-src (lazy-load real URL)
+        src = dataSrcVal;
+      }
     } else if (srcMatch) {
-      src = srcMatch[1];
+      src = srcMatch[1].trim();
     }
 
-    if (!src || src.startsWith("data:")) return "";
-    const fullSrc = resolveUrl(src, validatedHref);
+    if (!src) return "";
     const alt = altMatch ? altMatch[1] : "";
+
+    // Handle base64 / data URIs
+    if (src.startsWith("data:")) {
+      const decoded = decodeAndSaveBase64Image(src);
+      if (!decoded) return "";
+      if (!tempImagePaths.includes(decoded.filePath)) {
+        tempImagePaths.push(decoded.filePath);
+      }
+      return `<img src="${escapeHtml(decoded.filePath)}" alt="${escapeHtml(alt)}" />`;
+    }
+
+    const fullSrc = resolveUrl(src, validatedHref);
     return `<img src="${escapeHtml(fullSrc)}" alt="${escapeHtml(alt)}" />`;
   });
+
+  const base64Pass = extractAndSaveBase64Images(cleaned);
+  cleaned = base64Pass.html;
+  for (const p of base64Pass.tempImagePaths) {
+    if (!tempImagePaths.includes(p)) {
+      tempImagePaths.push(p);
+    }
+  }
 
   cleaned = cleaned.replace(/<a\b([^>]*)>/gi, (_, attrs) => {
     const hrefMatch = attrs.match(/\bhref=["']([^"']+)["']/i);
@@ -2297,6 +2608,7 @@ export async function extractArticle(
     styledDocument,
     coverImagePath,
     coverImageUrl,
+    tempImagePaths,
   };
 }
 
@@ -2354,12 +2666,15 @@ export function convertHtmlToEpub(
   sourceUrl?: string,
   coverPath?: string,
 ): string {
+  const { html: processedHtml, tempImagePaths: inlineImagePaths } =
+    extractAndSaveBase64Images(htmlContent);
+
   const randomSuffix = `${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
   const tempHtml = `/tmp/article_${randomSuffix}.html`;
   const tempEpub = `/tmp/article_${randomSuffix}.epub`;
 
   try {
-    fs.writeFileSync(tempHtml, htmlContent, "utf8");
+    fs.writeFileSync(tempHtml, processedHtml, "utf8");
 
     const tags = ["Web Article", "Read Later", siteName]
       .filter(Boolean)
@@ -2421,6 +2736,16 @@ export function convertHtmlToEpub(
         fs.unlinkSync(tempHtml);
       } catch (_err) {
         void _err;
+      }
+    }
+    // Clean up temporary images generated specifically for this EPUB conversion
+    for (const imgPath of inlineImagePaths) {
+      if (fs.existsSync(imgPath)) {
+        try {
+          fs.unlinkSync(imgPath);
+        } catch (_err) {
+          void _err;
+        }
       }
     }
   }
@@ -2687,6 +3012,18 @@ export async function ingestArticleFromUrl(
         fs.unlinkSync(article.coverImagePath);
       } catch (_err) {
         void _err;
+      }
+    }
+    // Clean up temporary article images
+    if (article?.tempImagePaths && Array.isArray(article.tempImagePaths)) {
+      for (const imgPath of article.tempImagePaths) {
+        if (fs.existsSync(imgPath)) {
+          try {
+            fs.unlinkSync(imgPath);
+          } catch (_err) {
+            void _err;
+          }
+        }
       }
     }
   }
