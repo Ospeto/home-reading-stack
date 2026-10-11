@@ -75,12 +75,106 @@ export function getCalibredbPath(): string {
   }
   return "calibredb";
 }
+export function isCommandAvailable(cmd: string): boolean {
+  if (!cmd || !cmd.trim()) return false;
+  if (path.isAbsolute(cmd) || cmd.includes(path.sep)) {
+    return fs.existsSync(cmd);
+  }
+  const probe = spawnSync("which", [cmd], { encoding: "utf8" });
+  return probe.status === 0 && Boolean(probe.stdout?.trim());
+}
+
+export function getCommandPath(
+  cmd: string,
+  envOverride?: string,
+): string | null {
+  if (envOverride !== undefined) {
+    if (!envOverride.trim()) return null;
+    if (isCommandAvailable(envOverride.trim())) {
+      return envOverride.trim();
+    }
+    return null;
+  }
+  if (!cmd || !cmd.trim()) return null;
+  if (isCommandAvailable(cmd)) {
+    if (path.isAbsolute(cmd) || cmd.includes(path.sep)) {
+      return cmd;
+    }
+    const probe = spawnSync("which", [cmd], { encoding: "utf8" });
+    if (probe.status === 0 && probe.stdout?.trim()) {
+      return probe.stdout.trim();
+    }
+    return cmd;
+  }
+  return null;
+}
+
 export function getSipsPath(): string {
-  if (process.env.SIPS_PATH) return process.env.SIPS_PATH;
+  if (process.env.SIPS_PATH !== undefined) return process.env.SIPS_PATH;
   const probe = spawnSync("which", ["sips"], { encoding: "utf8" });
   if (probe.status === 0 && probe.stdout?.trim()) return probe.stdout.trim();
   if (fs.existsSync("/usr/bin/sips")) return "/usr/bin/sips";
   return "sips";
+}
+
+export function hasSips(): boolean {
+  return isCommandAvailable(getSipsPath());
+}
+
+export function detectImageFormat(
+  buf: Buffer,
+): "jpeg" | "png" | "webp" | "gif" | "svg" | "avif" | "unknown" {
+  if (
+    buf.length >= 3 &&
+    buf[0] === 0xff &&
+    buf[1] === 0xd8 &&
+    buf[2] === 0xff
+  ) {
+    return "jpeg";
+  }
+  if (
+    buf.length >= 8 &&
+    buf[0] === 0x89 &&
+    buf[1] === 0x50 &&
+    buf[2] === 0x4e &&
+    buf[3] === 0x47 &&
+    buf[4] === 0x0d &&
+    buf[5] === 0x0a &&
+    buf[6] === 0x1a &&
+    buf[7] === 0x0a
+  ) {
+    return "png";
+  }
+  if (
+    buf.length >= 12 &&
+    buf.toString("ascii", 0, 4) === "RIFF" &&
+    buf.toString("ascii", 8, 12) === "WEBP"
+  ) {
+    return "webp";
+  }
+  if (
+    buf.length >= 6 &&
+    (buf.toString("ascii", 0, 6) === "GIF87a" ||
+      buf.toString("ascii", 0, 6) === "GIF89a")
+  ) {
+    return "gif";
+  }
+  if (
+    buf.length >= 12 &&
+    buf.toString("ascii", 4, 8) === "ftyp" &&
+    (buf.toString("ascii", 8, 12) === "avif" ||
+      buf.toString("ascii", 8, 12) === "avis")
+  ) {
+    return "avif";
+  }
+  const head = buf.subarray(0, 100).toString("utf8").trim().toLowerCase();
+  if (
+    head.startsWith("<svg") ||
+    (head.startsWith("<?xml") && head.includes("<svg"))
+  ) {
+    return "svg";
+  }
+  return "unknown";
 }
 const FETCH_TIMEOUT_MS = 15000;
 const BROWSER_USER_AGENT =
@@ -1250,8 +1344,9 @@ export function generateTypographicCover(
   readTimeMinutes?: number,
 ): string {
   const randomSuffix = `${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
-  const tempSvg = `/tmp/typo_cover_${randomSuffix}.svg`;
-  const tempJpg = `/tmp/typo_cover_${randomSuffix}.jpg`;
+  const tempSvg = path.join(os.tmpdir(), `typo_cover_${randomSuffix}.svg`);
+  const tempJpg = path.join(os.tmpdir(), `typo_cover_${randomSuffix}.jpg`);
+  const tempPng = path.join(os.tmpdir(), `typo_cover_${randomSuffix}.png`);
 
   const safeTitle = cleanString(title) || "Web Article";
   const safeAuthor = cleanString(author) || "Unknown Author";
@@ -1320,8 +1415,8 @@ export function generateTypographicCover(
 
   fs.writeFileSync(tempSvg, svgContent, "utf8");
 
-  const sipsBin = getSipsPath();
-  if (fs.existsSync(sipsBin)) {
+  if (hasSips()) {
+    const sipsBin = getSipsPath();
     const sipsRes = spawnSync(
       sipsBin,
       ["-s", "format", "jpeg", tempSvg, "--out", tempJpg],
@@ -1331,7 +1426,11 @@ export function generateTypographicCover(
       },
     );
 
-    if (sipsRes.status === 0 && fs.existsSync(tempJpg)) {
+    if (
+      sipsRes.status === 0 &&
+      fs.existsSync(tempJpg) &&
+      fs.statSync(tempJpg).size > 0
+    ) {
       try {
         fs.unlinkSync(tempSvg);
       } catch (_err) {
@@ -1339,9 +1438,100 @@ export function generateTypographicCover(
       }
       return tempJpg;
     }
+    if (fs.existsSync(tempJpg)) {
+      try {
+        fs.unlinkSync(tempJpg);
+      } catch (_err) {
+        void _err;
+      }
+    }
   }
 
-  // Pure SVG fallback when sips is absent or fails (portable across Linux/macOS/CI)
+  // Cross-platform rasterizer fallbacks when sips is absent or fails
+  const rsvgBin = getCommandPath("rsvg-convert", process.env.RSVG_CONVERT_PATH);
+  if (rsvgBin) {
+    const rsvgJpg = spawnSync(
+      rsvgBin,
+      ["-f", "jpeg", "-o", tempJpg, tempSvg],
+      { encoding: "utf8", timeout: 15000 },
+    );
+    if (
+      rsvgJpg.status === 0 &&
+      fs.existsSync(tempJpg) &&
+      fs.statSync(tempJpg).size > 0
+    ) {
+      try {
+        fs.unlinkSync(tempSvg);
+      } catch (_err) {
+        void _err;
+      }
+      return tempJpg;
+    }
+    if (fs.existsSync(tempJpg)) {
+      try {
+        fs.unlinkSync(tempJpg);
+      } catch (_err) {
+        void _err;
+      }
+    }
+
+    const rsvgPng = spawnSync(
+      rsvgBin,
+      ["-f", "png", "-o", tempPng, tempSvg],
+      { encoding: "utf8", timeout: 15000 },
+    );
+    if (
+      rsvgPng.status === 0 &&
+      fs.existsSync(tempPng) &&
+      fs.statSync(tempPng).size > 0
+    ) {
+      try {
+        fs.unlinkSync(tempSvg);
+      } catch (_err) {
+        void _err;
+      }
+      return tempPng;
+    }
+    if (fs.existsSync(tempPng)) {
+      try {
+        fs.unlinkSync(tempPng);
+      } catch (_err) {
+        void _err;
+      }
+    }
+  }
+
+  const magickBin =
+    getCommandPath("magick", process.env.MAGICK_PATH) ||
+    getCommandPath("convert");
+  if (magickBin) {
+    const magickRes = spawnSync(
+      magickBin,
+      [tempSvg, tempJpg],
+      { encoding: "utf8", timeout: 15000 },
+    );
+    if (
+      magickRes.status === 0 &&
+      fs.existsSync(tempJpg) &&
+      fs.statSync(tempJpg).size > 0
+    ) {
+      try {
+        fs.unlinkSync(tempSvg);
+      } catch (_err) {
+        void _err;
+      }
+      return tempJpg;
+    }
+    if (fs.existsSync(tempJpg)) {
+      try {
+        fs.unlinkSync(tempJpg);
+      } catch (_err) {
+        void _err;
+      }
+    }
+  }
+
+  // Pure SVG fallback when rasterizers are absent or fail (portable across Linux/macOS/CI)
   return tempSvg;
 }
 
@@ -1366,6 +1556,10 @@ export async function downloadCoverImage(
   const randomSuffix = `${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
   const tempRaw = path.join(os.tmpdir(), `raw_cover_${randomSuffix}`);
   const tempJpg = path.join(os.tmpdir(), `article_cover_${randomSuffix}.jpg`);
+  const tempPng = path.join(os.tmpdir(), `article_cover_${randomSuffix}.png`);
+  const tempWebp = path.join(os.tmpdir(), `article_cover_${randomSuffix}.webp`);
+
+  let destinationPath: string | null = null;
 
   try {
     const res = await safeFetchWithSsrf(resolvedUrl, {
@@ -1380,7 +1574,7 @@ export async function downloadCoverImage(
 
     if (!res.ok) return null;
 
-    const contentType = res.headers.get("content-type") || "";
+    const contentType = (res.headers.get("content-type") || "").toLowerCase();
     if (
       contentType &&
       !contentType.includes("image") &&
@@ -1394,8 +1588,8 @@ export async function downloadCoverImage(
 
     fs.writeFileSync(tempRaw, buf);
 
-    const sipsBin = getSipsPath();
-    if (fs.existsSync(sipsBin)) {
+    if (hasSips()) {
+      const sipsBin = getSipsPath();
       const sipsRes = spawnSync(
         sipsBin,
         ["-s", "format", "jpeg", tempRaw, "--out", tempJpg],
@@ -1410,22 +1604,125 @@ export async function downloadCoverImage(
         fs.existsSync(tempJpg) &&
         fs.statSync(tempJpg).size > 1024
       ) {
-        return tempJpg;
+        destinationPath = tempJpg;
+        return destinationPath;
+      }
+      if (fs.existsSync(tempJpg)) {
+        try {
+          fs.unlinkSync(tempJpg);
+        } catch (_unlinkErr) {
+          void _unlinkErr;
+        }
       }
     }
-    if (fs.existsSync(tempJpg)) {
-      try {
-        fs.unlinkSync(tempJpg);
-      } catch (_unlinkErr) {
-        void _unlinkErr;
-      }
+
+    // Cross-platform fallback when sips is absent or fails
+    const format = detectImageFormat(buf);
+
+    if (format === "jpeg") {
+      destinationPath = tempJpg;
+      fs.writeFileSync(tempJpg, buf);
+      return destinationPath;
     }
+
+    if (format === "png") {
+      destinationPath = tempPng;
+      fs.writeFileSync(tempPng, buf);
+      return destinationPath;
+    }
+
+    if (format === "webp") {
+      const dwebpBin = getCommandPath("dwebp", process.env.DWEBP_PATH);
+      if (dwebpBin) {
+        const dwebpRes = spawnSync(
+          dwebpBin,
+          [tempRaw, "-o", tempPng],
+          {
+            encoding: "utf8",
+            timeout: 15000,
+          },
+        );
+        if (
+          dwebpRes.status === 0 &&
+          fs.existsSync(tempPng) &&
+          fs.statSync(tempPng).size > 0
+        ) {
+          destinationPath = tempPng;
+          return destinationPath;
+        }
+        if (fs.existsSync(tempPng)) {
+          try {
+            fs.unlinkSync(tempPng);
+          } catch (_unlinkErr) {
+            void _unlinkErr;
+          }
+        }
+      }
+
+      // If dwebp is absent or fails, retain WebP directly
+      destinationPath = tempWebp;
+      fs.writeFileSync(tempWebp, buf);
+      return destinationPath;
+    }
+
+    if (format === "avif") {
+      const magickBin =
+        getCommandPath("magick", process.env.MAGICK_PATH) ||
+        getCommandPath("convert");
+      if (magickBin) {
+        const magickRes = spawnSync(
+          magickBin,
+          [tempRaw, tempJpg],
+          { encoding: "utf8", timeout: 15000 },
+        );
+        if (
+          magickRes.status === 0 &&
+          fs.existsSync(tempJpg) &&
+          fs.statSync(tempJpg).size > 0
+        ) {
+          destinationPath = tempJpg;
+          return destinationPath;
+        }
+        if (fs.existsSync(tempJpg)) {
+          try {
+            fs.unlinkSync(tempJpg);
+          } catch (_unlinkErr) {
+            void _unlinkErr;
+          }
+        }
+      }
+      // If magick is absent or fails, AVIF cannot be used directly by EPUB/Calibre
+      return null;
+    }
+
+    if (format === "gif") {
+      const tempGif = path.join(
+        os.tmpdir(),
+        `article_cover_${randomSuffix}.gif`,
+      );
+      destinationPath = tempGif;
+      fs.writeFileSync(tempGif, buf);
+      return destinationPath;
+    }
+
+    if (format === "svg") {
+      const tempSvg = path.join(
+        os.tmpdir(),
+        `article_cover_${randomSuffix}.svg`,
+      );
+      destinationPath = tempSvg;
+      fs.writeFileSync(tempSvg, buf);
+      return destinationPath;
+    }
+
+    // Unrecognized format or non-image bytes: return null
+    // so caller cleanly falls back to generateTypographicCover
     return null;
   } catch (_err) {
     void _err;
-    if (fs.existsSync(tempJpg)) {
+    if (destinationPath && fs.existsSync(destinationPath)) {
       try {
-        fs.unlinkSync(tempJpg);
+        fs.unlinkSync(destinationPath);
       } catch (_unlinkErr) {
         void _unlinkErr;
       }
