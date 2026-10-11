@@ -4,6 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { safeFetchWithSsrf, validateUrlForSSRF } from "./security";
+import { resolveSleepFn, compute429BackoffMs } from "./scraper";
+
+export { compute429BackoffMs };
 
 export interface ExtractedFirecrawlArticle {
   url: string;
@@ -479,6 +482,9 @@ export async function stopFirecrawl(
  */
 export async function scrapeArticleWithFirecrawl(
   targetUrl: string,
+  options?: {
+    sleepFn?: (ms: number) => Promise<void>;
+  },
 ): Promise<ExtractedFirecrawlArticle | null> {
   if (!isFirecrawlEnabled()) {
     return null;
@@ -523,6 +529,8 @@ export async function scrapeArticleWithFirecrawl(
       onlyMainContent: true,
     };
 
+    const doSleep = resolveSleepFn(options?.sleepFn);
+
     let res: Response;
     try {
       res = await safeFetchWithSsrf(
@@ -539,6 +547,38 @@ export async function scrapeArticleWithFirecrawl(
     } catch (err: any) {
       console.warn(`[Firecrawl] Scrape request connection error: ${err.message}`);
       return null;
+    }
+
+    if (res.status === 429) {
+      const retryAfter =
+        typeof res.headers?.get === "function"
+          ? res.headers.get("Retry-After") || res.headers.get("retry-after")
+          : (res.headers as any)?.["retry-after"] ||
+            (res.headers as any)?.["Retry-After"];
+      const backoffMs = compute429BackoffMs(retryAfter);
+      console.warn(
+        `[Firecrawl] Rate limited (HTTP 429). Backing off for ${backoffMs}ms before retry...`,
+      );
+      await doSleep(backoffMs);
+
+      try {
+        res = await safeFetchWithSsrf(
+          endpoint,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(35000),
+          },
+          5,
+          { allowFirecrawlServer: true },
+        );
+      } catch (retryErr: any) {
+        console.warn(
+          `[Firecrawl] Scrape retry connection error: ${retryErr.message}`,
+        );
+        return null;
+      }
     }
 
     if (!res.ok) {
