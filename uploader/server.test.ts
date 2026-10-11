@@ -20,10 +20,13 @@ import {
   getCacheDb,
   getCalibreBooks,
   jobQueue,
+  JobQueue,
   registerJobHandlers,
+  setServerJobQueueForTest,
   getActiveDiscoverJobs,
   registerDiscoverJob,
 } from "./server";
+import { DurableJobQueue } from "./jobs";
 import { validateUrlForSSRF, getBsdtarPath } from "./security";
 import { autoEnrichBookSynopsis } from "./scraper";
 import {
@@ -6135,6 +6138,353 @@ exit 0
       expect(res.status).toBe(200);
       const disp = res.headers.get("Content-Disposition")!;
       expect(disp).toContain('filename="Book - 999.epub"');
+    });
+  });
+
+  describe("Article URL Ingestion Job Queue & Polling Lifecycle", () => {
+    const localServer = { requestIP: () => ({ address: "127.0.0.1" }) };
+    let testDb: Database;
+    let testQueue: DurableJobQueue;
+
+    beforeEach(() => {
+      testDb = new Database(":memory:");
+      testQueue = new DurableJobQueue(testDb);
+      setServerJobQueueForTest(testQueue);
+    });
+
+    afterEach(() => {
+      testQueue.close();
+      setServerJobQueueForTest(null);
+      resetServerDependenciesForTest();
+    });
+
+    it("POST /api/ingest-url with async: true enqueues job and returns queued status with jobId immediately", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/ingest-url", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: "https://example.com/article-async-test",
+          async: true,
+        }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(true);
+      expect(data.status).toBe("queued");
+      expect(typeof data.jobId).toBe("string");
+      expect(data.jobId.startsWith("job_")).toBe(true);
+
+      // Verify job was persisted in database
+      const enqueued = testQueue.getJob(data.jobId);
+      expect(enqueued).not.toBeNull();
+      expect(enqueued?.type).toBe("url_article_ingest");
+      expect(enqueued?.payload.url).toBe("https://example.com/article-async-test");
+      expect(enqueued?.status).toBe("pending");
+    });
+
+    it("POST /api/ingest-url with ?async=true query parameter enqueues job asynchronously", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/ingest-url?async=true", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: "https://example.com/article-query-async-test",
+        }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(true);
+      expect(data.status).toBe("queued");
+      expect(data.jobId).toBeDefined();
+    });
+
+    it("POST /api/ingest-url preserves synchronous fallback when async is false or omitted", async () => {
+      let syncCalled = false;
+      setServerDependenciesForTest({
+        ingestArticleFromUrl: async (url: string) => {
+          syncCalled = true;
+          return {
+            success: true,
+            bookId: 501,
+            title: "Synchronous Ingested Article",
+            authors: "Sync Author",
+            siteName: "Sync News",
+            wordCount: 1500,
+            readTimeMinutes: 7,
+            format: "EPUB",
+          };
+        },
+      });
+
+      const req = new Request("http://127.0.0.1:8086/api/ingest-url", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: "https://example.com/article-sync-test",
+        }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(syncCalled).toBe(true);
+      expect(data.success).toBe(true);
+      expect(data.bookId).toBe(501);
+      expect(data.title).toBe("Synchronous Ingested Article");
+      expect(data.jobId).toBeUndefined();
+    });
+
+    it("POST /api/ingest-url rejects missing or invalid url parameter with 400", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/ingest-url", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ async: true }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(400);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("url");
+    });
+
+    it("POST /api/ingest-url rejects SSRF targets before queueing even when async: true", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/ingest-url", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: "http://169.254.169.254/latest/meta-data/",
+          async: true,
+        }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(400);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("SSRF");
+      // Queue must remain empty
+      expect(testQueue.getRecentJobs().length).toBe(0);
+    });
+
+    it("GET /api/jobs/:id returns 404 for unknown job ID", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/jobs/job_nonexistent_999", {
+        headers: { host: "127.0.0.1:8086" },
+      });
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(404);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("Job not found");
+    });
+
+    it("GET /api/jobs/:id returns clean status 'pending' while job is queued and book is null", async () => {
+      const job = testQueue.enqueue("url_article_ingest", {
+        url: "https://example.com/pending-article",
+      });
+
+      const req = new Request(`http://127.0.0.1:8086/api/jobs/${job.id}`, {
+        headers: { host: "127.0.0.1:8086" },
+      });
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(true);
+      expect(data.status).toBe("pending");
+      expect(data.job.status).toBe("pending");
+      expect(data.book).toBeNull();
+    });
+
+    it("GET /api/jobs/:id maps internal 'processing' status to clean status 'running'", async () => {
+      const job = testQueue.enqueue("url_article_ingest", {
+        url: "https://example.com/running-article",
+      });
+      testDb.prepare("UPDATE jobs SET status = 'processing' WHERE id = ?").run(job.id);
+
+      const req = new Request(`http://127.0.0.1:8086/api/jobs/${job.id}`, {
+        headers: { host: "127.0.0.1:8086" },
+      });
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(true);
+      expect(data.status).toBe("running");
+      expect(data.job.status).toBe("running");
+      expect(data.book).toBeNull();
+    });
+
+    it("end-to-end: executes url_article_ingest, writes completion payload, and polls completed status with book", async () => {
+      let calibreRefreshed = false;
+      setServerDependenciesForTest({
+        ingestArticleFromUrl: async (url: string) => ({
+          success: true,
+          bookId: 888,
+          title: "The Architecture of Tomorrow",
+          authors: "Ada Lovelace",
+          siteName: "Wired Future",
+          wordCount: 2200,
+          readTimeMinutes: 10,
+          format: "EPUB",
+        }),
+        getCalibreBooks: (fresh?: boolean) => {
+          if (fresh) calibreRefreshed = true;
+          return [];
+        },
+      });
+
+      // 1. Enqueue job
+      const enqueueReq = new Request("http://127.0.0.1:8086/api/ingest-url", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: "https://example.com/architecture-tomorrow",
+          async: true,
+        }),
+      });
+      const enqueueRes = await handleRequest(enqueueReq, localServer);
+      expect(enqueueRes.status).toBe(200);
+      const enqueueData = (await enqueueRes.json()) as any;
+      const jobId = enqueueData.jobId;
+
+      // 2. Poll initial pending status
+      const pollReq1 = new Request(`http://127.0.0.1:8086/api/jobs/${jobId}`, {
+        headers: { host: "127.0.0.1:8086" },
+      });
+      const pollRes1 = await handleRequest(pollReq1, localServer);
+      const pollData1 = (await pollRes1.json()) as any;
+      expect(pollData1.status).toBe("pending");
+      expect(pollData1.book).toBeNull();
+
+      // 3. Process job via worker
+      const processed = await testQueue.processNextJob();
+      expect(processed).toBe(true);
+      expect(calibreRefreshed).toBe(true);
+
+      // 4. Poll completed status
+      const pollReq2 = new Request(`http://127.0.0.1:8086/api/jobs/${jobId}`, {
+        headers: { host: "127.0.0.1:8086" },
+      });
+      const pollRes2 = await handleRequest(pollReq2, localServer);
+      expect(pollRes2.status).toBe(200);
+      const pollData2 = (await pollRes2.json()) as any;
+      expect(pollData2.success).toBe(true);
+      expect(pollData2.status).toBe("completed");
+      expect(pollData2.job.status).toBe("completed");
+
+      // Verify structured book payload
+      expect(pollData2.book).toBeDefined();
+      expect(pollData2.book.bookId).toBe(888);
+      expect(pollData2.book.title).toBe("The Architecture of Tomorrow");
+      expect(pollData2.book.authors).toBe("Ada Lovelace");
+      expect(pollData2.book.readTimeMinutes).toBe(10);
+      expect(pollData2.book.error).toBeNull();
+      expect(pollData2.result.bookId).toBe(888);
+    });
+
+    it("handles url_article_ingest failure, records clean failed status and error message", async () => {
+      setServerDependenciesForTest({
+        ingestArticleFromUrl: async (url: string) => ({
+          success: false,
+          title: "Paywalled Story",
+          authors: "Unknown",
+          siteName: "Paywall Times",
+          wordCount: 0,
+          readTimeMinutes: 0,
+          format: "EPUB",
+          error: "Subscription barrier detected",
+        }),
+      });
+
+      const job = testQueue.enqueue(
+        "url_article_ingest",
+        { url: "https://example.com/paywalled" },
+        { maxRetries: 1 },
+      );
+
+      // Process job -> fails
+      await testQueue.processNextJob();
+
+      const pollReq = new Request(`http://127.0.0.1:8086/api/jobs/${job.id}`, {
+        headers: { host: "127.0.0.1:8086" },
+      });
+      const pollRes = await handleRequest(pollReq, localServer);
+      expect(pollRes.status).toBe(200);
+      const pollData = (await pollRes.json()) as any;
+      expect(pollData.success).toBe(true);
+      expect(pollData.status).toBe("failed");
+      expect(pollData.job.status).toBe("failed");
+      expect(pollData.error).toContain("Subscription barrier detected");
+    });
+
+    it("redacts sensitive query tokens and basic auth in job payload URLs in public job responses", async () => {
+      const job = testQueue.enqueue("url_article_ingest", {
+        url: "https://admin:supersecret@example.com/protected/doc?token=privatetoken123&auth=secretkey&X-Amz-Signature=sig456&sig=789&signature=sig999&page=2",
+      });
+
+      const pollReq = new Request(`http://127.0.0.1:8086/api/jobs/${job.id}`, {
+        headers: { host: "127.0.0.1:8086" },
+      });
+      const pollRes = await handleRequest(pollReq, localServer);
+      expect(pollRes.status).toBe(200);
+      const data = (await pollRes.json()) as any;
+      const sanitizedUrl = data.job.payload.url;
+      expect(sanitizedUrl).not.toContain("supersecret");
+      expect(sanitizedUrl).not.toContain("privatetoken123");
+      expect(sanitizedUrl).not.toContain("secretkey");
+      expect(sanitizedUrl).not.toContain("sig456");
+      expect(sanitizedUrl).not.toContain("sig999");
+      expect(sanitizedUrl).toContain("%5BREDACTED%5D");
+      expect(sanitizedUrl).toContain("page=2");
+    });
+
+    it("sanitizes server absolute paths from book payload in GET /api/jobs/:id", async () => {
+      setServerDependenciesForTest({
+        ingestArticleFromUrl: async (_url: string) => ({
+          success: true,
+          bookId: 777,
+          title: "Path Security Test",
+          authors: "Author",
+          readTimeMinutes: 3,
+          epubPath: "/Users/secretadmin/library/drop/book_123.epub",
+          format: "EPUB",
+        }),
+      });
+
+      const job = testQueue.enqueue("url_article_ingest", {
+        url: "https://example.com/safe-article",
+      });
+      await testQueue.processNextJob();
+
+      const pollReq = new Request(`http://127.0.0.1:8086/api/jobs/${job.id}`, {
+        headers: { host: "127.0.0.1:8086" },
+      });
+      const pollRes = await handleRequest(pollReq, localServer);
+      expect(pollRes.status).toBe(200);
+      const data = (await pollRes.json()) as any;
+      expect(data.book).toBeDefined();
+      expect(data.book.epubPath).toBe("book_123.epub");
+      expect(data.book.epubPath).not.toContain("/Users/");
     });
   });
 });
