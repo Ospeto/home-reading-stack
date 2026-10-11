@@ -1540,6 +1540,12 @@
             <span class="hidden md:inline text-xs font-medium">Guide</span>
           </button>
 
+          <!-- Quick Link Ingest Button: Apple frosted glass pill -->
+          <button id="quickLinkBtn" onclick="openUrlModal()" class="h-9 px-3 sm:px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white/10 hover:bg-white/15 border border-white/15 text-white transition-all duration-150 flex items-center gap-1.5 cursor-pointer active:scale-[0.96] shadow-sm backdrop-blur-md" title="Ingest Web Article or Link (+ Link)">
+            <svg class="w-3.5 h-3.5 text-sky-400 shrink-0"><use href="#icon-link"/></svg>
+            <span>+ Link</span>
+          </button>
+
           <!-- Add Button: Apple frosted glass pill -->
           <button onclick="openUploadModal()" class="h-9 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white/15 hover:bg-white/20 border border-white/20 text-white transition-all duration-150 flex items-center gap-1.5 cursor-pointer active:scale-[0.96] shadow-sm backdrop-blur-md">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
@@ -2842,7 +2848,7 @@
               <span>visionOS Floating Island Capsule (WWDC Fluid Interface)</span>
             </div>
             <p class="text-[11px] text-zinc-400 leading-relaxed">
-              Suspended centered glass capsule replacing flat rails with iOS 18 fluid interface materials and Proposal 1 muted pastel accent palettes (warm amber for All Volumes, mint/sage for Reading, lavender for Light Novels, rose/coral for Burmese, and ice blue for Series). Features structured tabs (<code class="text-zinc-200">All Volumes</code> with formatted total count badge, <code class="text-zinc-200">Series</code>, <code class="text-zinc-200">Reading</code> with pulsing emerald indicator and active read count, subtle divider, <code class="text-zinc-200">Light Novels</code>, and <code class="text-zinc-200">Burmese</code> literature), harmonized frosted glass pills (<code class="text-zinc-200">+ Add</code>, <code class="text-zinc-200">Kindle</code>, <code class="text-zinc-200">Guide</code>), organic rounded search pill, integrated 1-tap <code class="text-zinc-200">Filters</code> button with active badge indicator, and tactile active press feedback (<code class="text-zinc-200">scale(0.96)</code>).
+              Suspended centered glass capsule replacing flat rails with iOS 18 fluid interface materials and Proposal 1 muted pastel accent palettes (warm amber for All Volumes, mint/sage for Reading, lavender for Light Novels, rose/coral for Burmese, and ice blue for Series). Features structured tabs (<code class="text-zinc-200">All Volumes</code> with formatted total count badge, <code class="text-zinc-200">Series</code>, <code class="text-zinc-200">Reading</code> with pulsing emerald indicator and active read count, subtle divider, <code class="text-zinc-200">Light Novels</code>, and <code class="text-zinc-200">Burmese</code> literature), harmonized frosted glass pills (<code class="text-zinc-200">+ Add</code>, <code class="text-zinc-200">+ Link</code>, <code class="text-zinc-200">Kindle</code>, <code class="text-zinc-200">Guide</code>), organic rounded search pill, integrated 1-tap <code class="text-zinc-200">Filters</code> button with active badge indicator, and tactile active press feedback (<code class="text-zinc-200">scale(0.96)</code>).
             </p>
           </div>
           <div class="space-y-1 pt-1 border-t border-zinc-800/80">
@@ -2869,7 +2875,7 @@
               <span>Apple WWDC Fluid Interface &amp; Keyboard Control</span>
             </div>
             <p class="text-[11px] text-zinc-400 leading-relaxed">
-              Engineered with dark translucent materials (<code class="text-zinc-200">blur(20px) saturate(180%)</code>), optical typography, tactile active press feedback (<code class="text-zinc-200">scale(0.97)</code>), 3D spine curvature simulation, and keyboard navigation (<kbd class="px-1 py-0.5 bg-zinc-950 border border-zinc-700 rounded text-[10px] font-mono text-zinc-200">Cmd/Ctrl+K</kbd> to search, <kbd class="px-1 py-0.5 bg-zinc-950 border border-zinc-700 rounded text-[10px] font-mono text-zinc-200">Esc</kbd> to close).
+              Engineered with dark translucent materials (<code class="text-zinc-200">blur(20px) saturate(180%)</code>), optical typography, tactile active press feedback (<code class="text-zinc-200">scale(0.97)</code>), 3D spine curvature simulation, and keyboard navigation (<kbd class="px-1 py-0.5 bg-zinc-950 border border-zinc-700 rounded text-[10px] font-mono text-zinc-200">Cmd/Ctrl+K</kbd> to search, global URL paste <kbd class="px-1 py-0.5 bg-zinc-950 border border-zinc-700 rounded text-[10px] font-mono text-zinc-200">Cmd/Ctrl+V</kbd> to ingest links, <kbd class="px-1 py-0.5 bg-zinc-950 border border-zinc-700 rounded text-[10px] font-mono text-zinc-200">Esc</kbd> to close).
             </p>
           </div>
           <div class="space-y-1 pt-1 border-t border-zinc-800/80">
@@ -3835,6 +3841,88 @@
         } else {
           clearSearch();
         }
+      }
+    });
+
+    function extractHttpUrl(text) {
+      if (!text || typeof text !== 'string') return null;
+      const trimmed = text.trim();
+      if (!trimmed) return null;
+
+      const cleanTrailing = (s) => {
+        let res = s;
+        while (res.length > 0) {
+          const stripped = res.replace(/[.,;:!?>\]"'\`\u201D\u2019\u00BB]+$/, '');
+          if (stripped !== res) {
+            res = stripped;
+            continue;
+          }
+          if (res.endsWith(')')) {
+            let openCount = 0;
+            let closeCount = 0;
+            for (let i = 0; i < res.length; i++) {
+              if (res[i] === '(') openCount++;
+              else if (res[i] === ')') closeCount++;
+            }
+            if (closeCount > openCount) {
+              res = res.slice(0, -1);
+              continue;
+            }
+          }
+          break;
+        }
+        return res;
+      };
+
+      try {
+        const directUrl = new URL(cleanTrailing(trimmed));
+        if (directUrl.protocol === 'http:' || directUrl.protocol === 'https:') {
+          return cleanTrailing(trimmed);
+        }
+      } catch {}
+
+      try {
+        const directUrl = new URL(trimmed);
+        if (directUrl.protocol === 'http:' || directUrl.protocol === 'https:') {
+          return trimmed;
+        }
+      } catch {}
+
+      const match = trimmed.match(/https?:\/\/[^\s<>"'{}|\\^`\[\]]+/i);
+      if (match) {
+        let candidate = cleanTrailing(match[0]);
+        try {
+          const parsed = new URL(candidate);
+          if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+            return candidate;
+          }
+        } catch {}
+      }
+      return null;
+    }
+
+    window.addEventListener('paste', (e) => {
+      const active = document.activeElement;
+      const target = e.target;
+      const isEditable = (el) => {
+        if (!el) return false;
+        const tag = el.tagName ? el.tagName.toUpperCase() : '';
+        return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!el.isContentEditable;
+      };
+
+      if (isEditable(target) || isEditable(active)) {
+        return;
+      }
+
+      const text = (e.clipboardData || window.clipboardData)?.getData('text');
+      const url = extractHttpUrl(text);
+      if (url) {
+        e.preventDefault();
+        const uploadModal = document.getElementById('uploadModal');
+        if (uploadModal && !uploadModal.classList.contains('hidden') && typeof closeUploadModal === 'function') {
+          closeUploadModal();
+        }
+        openUrlModal(url);
       }
     });
 
@@ -7109,14 +7197,26 @@
     }
 
     // URL INGESTION MODAL
-    function openUrlModal() {
+    function openUrlModal(initialUrl = '') {
       tgHaptic.light();
       openModalAnimated('urlModal', false);
       const input = document.getElementById('articleUrlInput');
       const status = document.getElementById('urlIngestStatus');
-      input.value = '';
-      status.classList.add('hidden');
-      setTimeout(() => input.focus(), 60);
+      const urlToPrefill = (typeof initialUrl === 'string' && initialUrl.trim()) ? initialUrl.trim() : '';
+      if (input) {
+        input.value = urlToPrefill;
+      }
+      if (status) {
+        status.classList.add('hidden');
+      }
+      setTimeout(() => {
+        if (input) {
+          input.focus();
+          if (input.value) {
+            input.select();
+          }
+        }
+      }, 60);
     }
 
     function closeUrlModal() {
