@@ -10,6 +10,13 @@ import {
   isPaywallOrGarbage,
   cleanMarkdownNoise,
   cleanDirectHtml,
+  COOKIE_BANNER_PATTERNS,
+  NEWSLETTER_PATTERNS,
+  PROMO_SOCIAL_PATTERNS,
+  isCookieBannerBlock,
+  isNewsletterBlock,
+  isPromoSocialBlock,
+  isArticleNoise,
   PAYWALL_ERROR_MESSAGE,
   extractArticle,
   extractArticleViaJina,
@@ -381,6 +388,526 @@ Subscribe today for $1.
     expect(cleaned).not.toContain("related-posts");
     expect(cleaned).toContain("Real Article Title");
     expect(cleaned).toContain("This is the real article body");
+  });
+});
+
+describe("GDPR Cookie Banner, Newsletter & Promo Social Noise Cleanup", () => {
+  test("Markdown cleaner strips cookie consent notices, newsletter callouts, and promo social lines", () => {
+    const mdInput = `
+Title: Modern Systems Architecture
+URL Source: https://example.com/arch
+
+Markdown Content:
+We use cookies to improve your experience. By continuing to visit this site you agree to our use of cookies. [Accept All Cookies](https://example.com/accept) [Cookie Policy](https://example.com/cookies)
+
+[Accept all cookies](https://example.com/accept) | [Manage cookie preferences](https://example.com/cookies)
+
+# Modern Systems Architecture
+
+Modern software architecture increasingly favors decoupled services with explicit domain boundaries. Each component exposes clearly defined APIs while maintaining isolated data persistence layers.
+
+High-throughput systems require careful attention to tail latencies, event-driven backpressure mechanisms, and graceful degradation during network partitions.
+
+Sign up for our newsletter to get weekly architecture insights delivered to your inbox every Monday!
+
+Subscribe for daily updates from our engineering editors.
+
+Observability remains a critical pillar of production readiness, encompassing distributed tracing, metrics aggregation, and actionable alerting thresholds.
+
+Follow us on Twitter: @systemsarch or LinkedIn: in/systemsarch for daily diagrams.
+
+If you enjoyed this breakdown, follow me on X (@devarchitect) for more engineering essays!
+`;
+
+    const cleaned = cleanMarkdownNoise(mdInput);
+
+    // Cookie banner removal
+    expect(cleaned).not.toContain("We use cookies to improve your experience");
+    expect(cleaned).not.toContain("Accept All Cookies");
+    expect(cleaned).not.toContain("Manage cookie preferences");
+
+    // Newsletter callouts removal
+    expect(cleaned).not.toContain("Sign up for our newsletter");
+    expect(cleaned).not.toContain("delivered to your inbox");
+    expect(cleaned).not.toContain("Subscribe for daily updates");
+
+    // Promo social follow lines removal
+    expect(cleaned).not.toContain("Follow us on Twitter");
+    expect(cleaned).not.toContain("follow me on X");
+    expect(cleaned).not.toContain("in/systemsarch");
+
+    // Main article prose retention
+    expect(cleaned).toContain("# Modern Systems Architecture");
+    expect(cleaned).toContain(
+      "Modern software architecture increasingly favors decoupled services",
+    );
+    expect(cleaned).toContain(
+      "Observability remains a critical pillar of production readiness",
+    );
+  });
+
+  test("HTML cleaner strips cookie banners, newsletter popovers, and promo social lines", () => {
+    const htmlInput = `
+<html>
+<head><title>Architecture Review</title></head>
+<body>
+  <div class="cookie-banner">
+    <p>We use cookies to enhance your browsing experience. <button>Accept all cookies</button> <a href="/cookies">Cookie Policy</a></p>
+  </div>
+  <div role="dialog" aria-label="cookie consent">
+    <p>Please review and manage cookie preferences before continuing.</p>
+  </div>
+  <p>We use cookies to optimize site functionality and deliver the best experience on our website. <a href="#">Manage preferences</a></p>
+  <main>
+    <article>
+      <h1>Distributed Cache Topologies</h1>
+      <p>Distributed caching strategies play a vital role in reducing database load and improving response times across high-traffic microservices.</p>
+      <div class="newsletter-popover">
+        <h3>Stay Connected</h3>
+        <p>Sign up for our newsletter to get the latest tech insights delivered to your inbox.</p>
+      </div>
+      <p>Cache invalidation protocols such as lease-based expiration and write-through caching ensure consistency across geographically distributed nodes.</p>
+      <p>Subscribe for daily updates on cloud infrastructure and performance tuning.</p>
+      <p>Follow us on Twitter: @cachetech or LinkedIn: /in/cachetech</p>
+    </article>
+  </main>
+</body>
+</html>
+`;
+
+    const cleaned = cleanDirectHtml(htmlInput);
+
+    // Verify cookie banners removed
+    expect(cleaned).not.toContain("cookie-banner");
+    expect(cleaned).not.toContain("Accept all cookies");
+    expect(cleaned).not.toContain("manage cookie preferences");
+    expect(cleaned).not.toContain("We use cookies to optimize site functionality");
+
+    // Verify newsletter callouts removed
+    expect(cleaned).not.toContain("newsletter-popover");
+    expect(cleaned).not.toContain("Sign up for our newsletter");
+    expect(cleaned).not.toContain("delivered to your inbox");
+    expect(cleaned).not.toContain("Subscribe for daily updates");
+
+    // Verify promo social follow lines removed
+    expect(cleaned).not.toContain("Follow us on Twitter");
+    expect(cleaned).not.toContain("@cachetech");
+
+    // Verify article content retained
+    expect(cleaned).toContain("Distributed Cache Topologies");
+    expect(cleaned).toContain(
+      "Distributed caching strategies play a vital role",
+    );
+    expect(cleaned).toContain(
+      "Cache invalidation protocols such as lease-based expiration",
+    );
+  });
+
+  test("Technical articles discussing HTTP cookies, web browsers, and privacy regulations are preserved without false-positive removal", () => {
+    const techMdInput = `
+Title: Web Security: Deep Dive into Cookie Authentication
+URL Source: https://example.com/security/cookies
+
+Markdown Content:
+# Web Security: Deep Dive into Cookie Authentication
+
+HTTP cookies remain the foundational mechanism for maintaining user identity across stateless web protocols. When an HTTP server authenticates credentials, it issues a Set-Cookie response header containing an opaque session token.
+
+In modern web development, we use cookies to maintain user session state across distributed services and authenticate incoming API requests. However, security considerations such as HttpOnly and SameSite flags are critical to prevent cross-site scripting (XSS) and cross-site request forgery (CSRF).
+
+A robust cookie policy ensures that sensitive authentication tokens are never exposed to client-side scripts. Organizations operating under GDPR and privacy regulations must design their systems to comply with data protection standards while preserving application performance.
+
+In this architecture, we use cookies to store session tokens across stateless HTTP requests.
+
+A strict cookie policy prevents unauthorized cross-origin requests by enforcing SameSite=Strict on all mutating API endpoints.
+
+Compliance with GDPR and privacy regulations requires engineering teams to document session lifecycles and ensure consent boundaries are respected.
+
+\`\`\`javascript
+// Configure secure cookie policy in Express
+app.use(session({
+  cookie: {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'strict',
+    maxAge: 86400000,
+  }
+}));
+\`\`\`
+`;
+
+    const cleaned = cleanMarkdownNoise(techMdInput);
+
+    // Confirm all technical discussions mentioning cookies are intact
+    expect(cleaned).toContain("Web Security: Deep Dive into Cookie Authentication");
+    expect(cleaned).toContain("HTTP cookies remain the foundational mechanism");
+    expect(cleaned).toContain(
+      "we use cookies to maintain user session state across distributed services",
+    );
+    expect(cleaned).toContain(
+      "A robust cookie policy ensures that sensitive authentication tokens are never exposed",
+    );
+    expect(cleaned).toContain(
+      "Organizations operating under GDPR and privacy regulations must design their systems",
+    );
+    expect(cleaned).toContain(
+      "we use cookies to store session tokens across stateless HTTP requests",
+    );
+    expect(cleaned).toContain(
+      "A strict cookie policy prevents unauthorized cross-origin requests",
+    );
+    expect(cleaned).toContain(
+      "Compliance with GDPR and privacy regulations requires engineering teams",
+    );
+    expect(cleaned).toContain("sameSite: 'strict'");
+  });
+
+  test("Technical HTML articles discussing browser cookies and cookie policy are preserved intact", () => {
+    const techHtmlInput = `
+<article>
+  <h1>HTTP Cookies and Web Architecture</h1>
+  <p>In modern web applications, we use cookies to persist session tokens between stateless HTTP requests across backend services.</p>
+  <p>A strict cookie policy prevents unauthorized cross-origin requests by enforcing SameSite=Strict on all mutating API endpoints.</p>
+  <p>Under GDPR and privacy regulations, web browsers restrict third-party tracking while permitting essential functional cookies.</p>
+  <pre><code>Set-Cookie: session=xyz; HttpOnly; Secure; SameSite=Strict</code></pre>
+</article>
+`;
+
+    const cleaned = cleanDirectHtml(techHtmlInput);
+
+    expect(cleaned).toContain("HTTP Cookies and Web Architecture");
+    expect(cleaned).toContain(
+      "we use cookies to persist session tokens between stateless HTTP requests",
+    );
+    expect(cleaned).toContain(
+      "A strict cookie policy prevents unauthorized cross-origin requests",
+    );
+    expect(cleaned).toContain(
+      "Under GDPR and privacy regulations, web browsers restrict third-party tracking",
+    );
+    expect(cleaned).toContain(
+      "Set-Cookie: session=xyz; HttpOnly; Secure; SameSite=Strict",
+    );
+  });
+
+  test("Targeted noise regex patterns and helper functions correctly identify noise and preserve technical context", () => {
+    // Cookie banner patterns
+    expect(
+      COOKIE_BANNER_PATTERNS.some((p) =>
+        p.test("We use cookies to improve your experience"),
+      ),
+    ).toBe(true);
+    expect(
+      COOKIE_BANNER_PATTERNS.some((p) => p.test("Accept all cookies")),
+    ).toBe(true);
+    expect(
+      COOKIE_BANNER_PATTERNS.some((p) =>
+        p.test("Manage cookie preferences"),
+      ),
+    ).toBe(true);
+    expect(
+      COOKIE_BANNER_PATTERNS.some((p) => p.test("Manage preferences")),
+    ).toBe(true);
+    expect(
+      COOKIE_BANNER_PATTERNS.some((p) => p.test("Review our Cookie Policy")),
+    ).toBe(true);
+
+    // Newsletter patterns
+    expect(
+      NEWSLETTER_PATTERNS.some((p) => p.test("Sign up for our newsletter")),
+    ).toBe(true);
+    expect(
+      NEWSLETTER_PATTERNS.some((p) =>
+        p.test("Delivered to your inbox every morning"),
+      ),
+    ).toBe(true);
+    expect(
+      NEWSLETTER_PATTERNS.some((p) => p.test("Subscribe for daily updates")),
+    ).toBe(true);
+
+    // Social promo patterns
+    expect(
+      PROMO_SOCIAL_PATTERNS.some((p) =>
+        p.test("Follow us on Twitter: @user"),
+      ),
+    ).toBe(true);
+    expect(
+      PROMO_SOCIAL_PATTERNS.some((p) =>
+        p.test("Follow me on X (@developer)"),
+      ),
+    ).toBe(true);
+    expect(
+      PROMO_SOCIAL_PATTERNS.some((p) => p.test("Follow us on LinkedIn")),
+    ).toBe(true);
+
+    // Helper functions: cookie banners vs technical prose
+    expect(
+      isCookieBannerBlock(
+        "We use cookies to improve your experience. [Accept All Cookies]",
+      ),
+    ).toBe(true);
+    expect(isCookieBannerBlock("Accept all cookies")).toBe(true);
+    expect(isCookieBannerBlock("Manage cookie preferences")).toBe(true);
+    expect(
+      isCookieBannerBlock(
+        "We use cookies to store session tokens across stateless HTTP requests.",
+      ),
+    ).toBe(false);
+    expect(
+      isCookieBannerBlock(
+        "A strict cookie policy prevents unauthorized cross-origin requests with SameSite.",
+      ),
+    ).toBe(false);
+
+    // Helper functions: newsletters
+    expect(
+      isNewsletterBlock(
+        "Sign up for our newsletter to get weekly updates delivered to your inbox.",
+      ),
+    ).toBe(true);
+    expect(
+      isNewsletterBlock("Subscribe for daily updates on machine learning."),
+    ).toBe(true);
+
+    // Helper functions: promo social
+    expect(isPromoSocialBlock("Follow us on Twitter: @team")).toBe(true);
+    expect(isPromoSocialBlock("Follow me on LinkedIn: in/dev")).toBe(true);
+
+    // Article noise unified check
+    expect(isArticleNoise("Sign up for our newsletter today!")).toBe(true);
+    expect(isArticleNoise("Follow us on Twitter: @hello")).toBe(true);
+    expect(isArticleNoise("Accept all cookies")).toBe(true);
+    expect(
+      isArticleNoise(
+        "This is genuine article prose explaining distributed systems algorithms.",
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("Adversarial Noise Regression: Lelouch Review Findings", () => {
+  test("preserves inline code and fenced code blocks in cookie discussions with single newline intro", () => {
+    const mdInput = `
+# Session Authentication Architecture
+
+We use cookies to set \`token\` authentication.
+Here is the client request configuration:
+\`\`\`javascript
+const sessionToken = getCookie("token");
+api.setAuthHeader(sessionToken);
+\`\`\`
+
+The server inspects the cookie token on every incoming request.
+`;
+
+    const cleaned = cleanMarkdownNoise(mdInput);
+
+    expect(cleaned).toContain("We use cookies to set `token` authentication.");
+    expect(cleaned).toContain("Here is the client request configuration:");
+    expect(cleaned).toContain("```javascript");
+    expect(cleaned).toContain('const sessionToken = getCookie("token");');
+    expect(cleaned).toContain("api.setAuthHeader(sessionToken);");
+    expect(cleaned).toContain("```");
+    expect(cleaned).toContain("The server inspects the cookie token on every incoming request.");
+  });
+
+  test("preserves headings discussing newsletter architecture, network walkthroughs, and protocol updates", () => {
+    const mdInput = `
+# Engineering Deep Dives
+
+## Newsletter Service Architecture
+Designing high-throughput asynchronous email dispatch pipelines using Redis streams and worker pools.
+
+## Follow me through the kernel network stack
+Tracing packet traversal from the physical NIC through driver rings, netfilter hooks, and socket receive queues.
+
+## Stay updated on RFC 9114
+The HTTP/3 specification defines transport over QUIC to eliminate head-of-line blocking in modern browsers.
+`;
+
+    const cleaned = cleanMarkdownNoise(mdInput);
+
+    expect(cleaned).toContain("## Newsletter Service Architecture");
+    expect(cleaned).toContain(
+      "Designing high-throughput asynchronous email dispatch pipelines using Redis streams and worker pools.",
+    );
+    expect(cleaned).toContain("## Follow me through the kernel network stack");
+    expect(cleaned).toContain(
+      "Tracing packet traversal from the physical NIC through driver rings, netfilter hooks, and socket receive queues.",
+    );
+    expect(cleaned).toContain("## Stay updated on RFC 9114");
+    expect(cleaned).toContain(
+      "The HTTP/3 specification defines transport over QUIC to eliminate head-of-line blocking in modern browsers.",
+    );
+  });
+
+  test("preserves HTML sections and divs with semantic IDs and classes like gdpr-compliance, cookie-security, subscriber-handler", () => {
+    const htmlInput = `
+<article>
+  <h1>Privacy and Messaging Infrastructure</h1>
+  <section id="gdpr-compliance">
+    <h2>GDPR Compliance Framework</h2>
+    <p>Articles 6 and 7 govern lawful processing requirements and user data subject rights across European jurisdictions.</p>
+  </section>
+  <div class="cookie-security">
+    <h2>Cookie Security Architecture</h2>
+    <p>Enforcing SameSite=Strict and HttpOnly attributes prevents token theft via cross-site scripting and forgery vectors.</p>
+  </div>
+  <div class="subscriber-handler">
+    <h2>Subscriber Handler Implementation</h2>
+    <p>The event dispatcher consumes Kafka topics and pushes notifications to registered subscriber worker processes.</p>
+  </div>
+</article>
+`;
+
+    const cleaned = cleanDirectHtml(htmlInput);
+
+    expect(cleaned).toContain('id="gdpr-compliance"');
+    expect(cleaned).toContain("GDPR Compliance Framework");
+    expect(cleaned).toContain(
+      "Articles 6 and 7 govern lawful processing requirements and user data subject rights across European jurisdictions.",
+    );
+    expect(cleaned).toContain('class="cookie-security"');
+    expect(cleaned).toContain("Cookie Security Architecture");
+    expect(cleaned).toContain(
+      "Enforcing SameSite=Strict and HttpOnly attributes prevents token theft via cross-site scripting and forgery vectors.",
+    );
+    expect(cleaned).toContain('class="subscriber-handler"');
+    expect(cleaned).toContain("Subscriber Handler Implementation");
+    expect(cleaned).toContain(
+      "The event dispatcher consumes Kafka topics and pushes notifications to registered subscriber worker processes.",
+    );
+  });
+
+  test("drops only noise items in mixed bullet lists while preserving valid content items", () => {
+    const mdInput = `
+# Operational Runbook
+
+Perform the following steps during initial deployment:
+
+- Read docs
+- Sign up for our newsletter
+- Deploy app
+
+Ensure database migrations finish before opening public traffic.
+`;
+
+    const cleaned = cleanMarkdownNoise(mdInput);
+
+    expect(cleaned).toContain("- Read docs");
+    expect(cleaned).toContain("- Deploy app");
+    expect(cleaned).not.toContain("Sign up for our newsletter");
+    expect(cleaned).toContain("Ensure database migrations finish before opening public traffic.");
+  });
+
+  test("preserves multi-paragraph blockquotes discussing newsletters or cookies", () => {
+    const mdInput = `
+# Architecture Retrospective
+
+> When designing scalable notification systems, newsletter service distribution requires durable partition queues.
+>
+> In stateful authentication workflows, we use cookies to persist session tokens between client requests across distributed edge nodes.
+>
+> Both patterns highlight decoupled processing boundaries in distributed cloud software.
+
+These architectural considerations informed our overall platform redesign.
+`;
+
+    const cleaned = cleanMarkdownNoise(mdInput);
+
+    expect(cleaned).toContain(
+      "newsletter service distribution requires durable partition queues",
+    );
+    expect(cleaned).toContain(
+      "we use cookies to persist session tokens between client requests across distributed edge nodes",
+    );
+    expect(cleaned).toContain(
+      "Both patterns highlight decoupled processing boundaries in distributed cloud software",
+    );
+    expect(cleaned).toContain(
+      "These architectural considerations informed our overall platform redesign.",
+    );
+  });
+
+  test("preserves legal and regulatory sentences discussing cookie policy", () => {
+    const mdInput = `
+# Privacy Regulatory Overview
+
+The EU requires every site to maintain an updated cookie policy.
+
+What should be included in a GDPR cookie policy?
+
+Organizations must clearly document all functional, analytical, and third-party tracking mechanisms.
+`;
+
+    const cleanedMd = cleanMarkdownNoise(mdInput);
+
+    expect(cleanedMd).toContain(
+      "The EU requires every site to maintain an updated cookie policy.",
+    );
+    expect(cleanedMd).toContain(
+      "What should be included in a GDPR cookie policy?",
+    );
+    expect(cleanedMd).toContain(
+      "Organizations must clearly document all functional, analytical, and third-party tracking mechanisms.",
+    );
+
+    const htmlInput = `
+<article>
+  <p>The EU requires every site to maintain an updated cookie policy.</p>
+  <p>What should be included in a GDPR cookie policy?</p>
+  <p>Organizations must clearly document all functional, analytical, and third-party tracking mechanisms.</p>
+</article>
+`;
+
+    const cleanedHtml = cleanDirectHtml(htmlInput);
+
+    expect(cleanedHtml).toContain(
+      "The EU requires every site to maintain an updated cookie policy.",
+    );
+    expect(cleanedHtml).toContain(
+      "What should be included in a GDPR cookie policy?",
+    );
+    expect(cleanedHtml).toContain(
+      "Organizations must clearly document all functional, analytical, and third-party tracking mechanisms.",
+    );
+
+    expect(
+      isCookieBannerBlock(
+        "The EU requires every site to maintain an updated cookie policy.",
+      ),
+    ).toBe(false);
+    expect(
+      isCookieBannerBlock("What should be included in a GDPR cookie policy?"),
+    ).toBe(false);
+  });
+
+  test("cleanly strips HTML social promo containing anchor tags", () => {
+    const htmlInput = `
+<article>
+  <h1>High-Performance Key-Value Stores</h1>
+  <p>LSM-trees optimize write throughput by appending incoming mutations to an in-memory memtable.</p>
+  <p>Follow us on <a href="https://twitter.com/systems_eng">Twitter</a></p>
+  <p>Follow me on <a href="https://x.com/lead_architect">X</a> for daily distributed systems diagrams.</p>
+  <p>Follow us on <a href="https://linkedin.com/company/systems">LinkedIn</a></p>
+  <p>Compaction routines asynchronously merge SSTables into sorted immutable runs on disk.</p>
+</article>
+`;
+
+    const cleaned = cleanDirectHtml(htmlInput);
+
+    expect(cleaned).not.toContain("Follow us on");
+    expect(cleaned).not.toContain("Follow me on");
+    expect(cleaned).not.toContain("https://twitter.com/systems_eng");
+    expect(cleaned).not.toContain("https://x.com/lead_architect");
+    expect(cleaned).not.toContain("https://linkedin.com/company/systems");
+    expect(cleaned).toContain("High-Performance Key-Value Stores");
+    expect(cleaned).toContain(
+      "LSM-trees optimize write throughput by appending incoming mutations to an in-memory memtable.",
+    );
+    expect(cleaned).toContain(
+      "Compaction routines asynchronously merge SSTables into sorted immutable runs on disk.",
+    );
   });
 });
 
