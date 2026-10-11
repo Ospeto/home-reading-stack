@@ -695,6 +695,46 @@ describe("Telegram Mini App (TMA) Integration", () => {
     expect(html).toContain(".border-sky-400\\/40 { border-color: rgba(56, 189, 248, 0.40); }");
   });
 
+  it("implements + Link quick action pill in navigation header and global URL paste listener for quick link entry", () => {
+    const htmlPath = path.join((import.meta as any).dir, "index.html");
+    const html = fs.readFileSync(htmlPath, "utf8");
+
+    // 1. Dedicated + Link frosted glass action pill in header
+    expect(html).toContain('id="quickLinkBtn"');
+    expect(html).toContain('onclick="openUrlModal()"');
+    expect(html).toContain("+ Link");
+    expect(html).toContain("#icon-link");
+    expect(html).toContain("rounded-full text-xs font-semibold bg-white/10 hover:bg-white/15 border border-white/15 text-white");
+
+    // 2. Open URL modal function signature supports optional prefill URL
+    expect(html).toContain("function openUrlModal(initialUrl = '')");
+    expect(html).toContain("input.value = urlToPrefill");
+
+    // 3. Global window paste event listener & URL extraction
+    expect(html).toContain("function extractHttpUrl(text)");
+    expect(html).toContain("window.addEventListener('paste', (e) => {");
+    expect(html).toContain("isEditable");
+    expect(html).toContain("openUrlModal(url)");
+
+    // 4. Verify URL extraction algorithm behavior
+    const extractUrlMatch = html.match(/function extractHttpUrl\(text\) \{([\s\S]*?)\n    \}/);
+    expect(extractUrlMatch).toBeTruthy();
+
+    const extractHttpUrl = new Function("text", `${extractUrlMatch![1]}`);
+
+    expect(extractHttpUrl("https://example.com/article/123")).toBe("https://example.com/article/123");
+    expect(extractHttpUrl("http://techblog.org/post?id=42")).toBe("http://techblog.org/post?id=42");
+    expect(extractHttpUrl("Check out this article: https://news.site.com/story.html")).toBe("https://news.site.com/story.html");
+    expect(extractHttpUrl("https://site.org/post.)")).toBe("https://site.org/post");
+    expect(extractHttpUrl("https://en.wikipedia.org/wiki/Rust_(programming_language)")).toBe("https://en.wikipedia.org/wiki/Rust_(programming_language)");
+    expect(extractHttpUrl("Check (https://en.wikipedia.org/wiki/Rust_(programming_language)) here")).toBe("https://en.wikipedia.org/wiki/Rust_(programming_language)");
+    expect(extractHttpUrl("just normal text without link")).toBeNull();
+    expect(extractHttpUrl("123456")).toBeNull();
+    expect(extractHttpUrl("ftp://files.example.com")).toBeNull();
+    expect(extractHttpUrl("")).toBeNull();
+    expect(extractHttpUrl(null)).toBeNull();
+  });
+
   it("visionOS Floating Island Capsule state machine and filtering invariants execute correctly", () => {
     // Helper simulating the single-active invariant and drawer facet logic from index.html
     function evaluateCapsuleState(type: string, value: any) {
@@ -4079,7 +4119,7 @@ describe("Lnori Queue & Telegram Bot Integration", () => {
         return origFetch(input, init);
       }) as typeof fetch;
 
-      setIngestArticleRunnerForTest(async (url: string) => {
+      setIngestArticleRunnerForTest(async (_url: string) => {
         return {
           success: true,
           bookId: 90,
