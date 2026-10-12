@@ -729,6 +729,7 @@ describe("Calibre Ingestion Engine (ingestObsidianNote)", () => {
   let vaultMap: Map<string, string>;
   let mockConvertScript: string;
   let prevEbookConvertPath: string | undefined;
+  let prevBooksDropDir: string | undefined;
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "obsidian-ingest-test-"));
@@ -740,6 +741,7 @@ describe("Calibre Ingestion Engine (ingestObsidianNote)", () => {
     vaultMap = new Map();
     vaultMap.set("TestVault", vaultDir);
 
+    prevBooksDropDir = process.env.BOOKS_DROP_DIR;
     process.env.BOOKS_DROP_DIR = dropDir;
 
     prevEbookConvertPath = process.env.EBOOK_CONVERT_PATH;
@@ -756,6 +758,11 @@ exit 0
   });
 
   afterEach(() => {
+    if (prevBooksDropDir !== undefined) {
+      process.env.BOOKS_DROP_DIR = prevBooksDropDir;
+    } else {
+      delete process.env.BOOKS_DROP_DIR;
+    }
     if (prevEbookConvertPath !== undefined) {
       process.env.EBOOK_CONVERT_PATH = prevEbookConvertPath;
     } else {
