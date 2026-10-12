@@ -380,6 +380,52 @@ describe("Path Safety & Containment (resolveObsidianNotePath)", () => {
       "Obsidian note not found",
     );
   });
+
+  it("resolves note via cross-vault fallback when vault name differs from local directory name", () => {
+    // Local directory is named "MAS", registered as MAS in vaultMap
+    const masVaultDir = path.join(tempDir, "MAS");
+    fs.mkdirSync(path.join(masVaultDir, "03-Resources", "Books"), { recursive: true });
+    const noteFile = path.join(masVaultDir, "03-Resources", "Books", "Refactoring.md");
+    fs.writeFileSync(noteFile, "# Refactoring Notes", "utf8");
+
+    const customVaultMap = new Map<string, string>();
+    customVaultMap.set("MAS", masVaultDir);
+    customVaultMap.set("mas", masVaultDir);
+
+    // Incoming link specifies vault=Obsidian (common when Obsidian mobile/desktop vault profile is named "Obsidian")
+    const parsed = parseObsidianUri(
+      "obsidian://open?vault=Obsidian&file=03-Resources%2FBooks%2FRefactoring",
+    );
+
+    const res = resolveObsidianNotePath(parsed, { vaultMap: customVaultMap });
+    expect(res.filePath).toBe(noteFile);
+    expect(res.vaultPath).toBe(masVaultDir);
+    expect(res.vaultName).toBe("MAS");
+  });
+
+  it("throws clear error when vault is unknown and note does not exist in any registered vault", () => {
+    const customVaultMap = new Map<string, string>();
+    customVaultMap.set("MAS", path.join(tempDir, "MAS"));
+
+    const parsed = parseObsidianUri(
+      "obsidian://open?vault=UnknownVault&file=NonExistentNote",
+    );
+    expect(() => resolveObsidianNotePath(parsed, { vaultMap: customVaultMap })).toThrow(
+      'Obsidian vault "UnknownVault" not found in known vaults',
+    );
+  });
+
+  it("auto-parses string URI input in resolveObsidianNotePath", () => {
+    const noteFile = path.join(vaultPath, "AutoParseNote.md");
+    fs.writeFileSync(noteFile, "# Auto Parse Content", "utf8");
+
+    const res = resolveObsidianNotePath(
+      "obsidian://open?vault=MainVault&file=AutoParseNote",
+      { vaultMap },
+    );
+    expect(res.filePath).toBe(noteFile);
+    expect(res.vaultPath).toBe(vaultPath);
+  });
 });
 
 describe("YAML Frontmatter Parsing (parseObsidianFrontmatter)", () => {
@@ -707,6 +753,18 @@ author:
       { vaultMap },
     );
     expect(data.authors).toBe("Martin Fowler, Kent Beck");
+  });
+
+  it("loads note via cross-vault fallback when raw URI vault parameter differs from registered vault name", () => {
+    const noteFile = path.join(tempVault, "CrossVaultNote.md");
+    fs.writeFileSync(noteFile, "# Cross Vault Note Content", "utf8");
+
+    const data = loadObsidianNote(
+      "obsidian://open?vault=ObsidianApp&file=CrossVaultNote",
+      { vaultMap },
+    );
+    expect(data.title).toBe("CrossVaultNote");
+    expect(data.vaultName).toBe(path.basename(tempVault));
   });
 
   it("falls back to note filename when frontmatter title is missing", () => {

@@ -13,6 +13,7 @@ describe("Web Uploader Batch Multi-Link Ingestion (#urlModal)", () => {
     expect(html).toContain('id="urlSingleInputContainer"');
     expect(html).toContain('id="urlBatchInputContainer"');
     expect(html).toContain('id="articleUrlInput"');
+    expect(html).toContain('placeholder="https://example.com/article... or obsidian://open?..."');
     expect(html).toContain('inputmode="url"');
     expect(html).toContain('id="urlIngestForm" novalidate');
     expect(html).toContain('id="articleUrlsTextarea"');
@@ -110,5 +111,62 @@ describe("Web Uploader Batch Multi-Link Ingestion (#urlModal)", () => {
     expect(isNovelFn("https://paulgraham.com/lesson.html")).toBe(false);
     expect(isNovelFn("https://medium.com/@author/tech-post")).toBe(false);
     expect(isNovelFn("https://news.ycombinator.com")).toBe(false);
+  });
+
+  it("extractHttpUrl in index.html recognizes obsidian:// URIs and standard HTTP URLs", () => {
+    const fnMatch = html.match(/function extractHttpUrl\(text\) \{([\s\S]*?)\n {4}\}/);
+    expect(fnMatch).not.toBeNull();
+    const extractHttpUrlFn = new Function("text", fnMatch![1]) as (text: string) => string | null;
+
+    expect(extractHttpUrlFn("obsidian://open?vault=Obsidian&file=Notes%2FTest")).toBe(
+      "obsidian://open?vault=Obsidian&file=Notes%2FTest"
+    );
+    expect(extractHttpUrlFn("Check this out: obsidian://open?vault=MAS&file=Doc.md!")).toBe(
+      "obsidian://open?vault=MAS&file=Doc.md"
+    );
+    expect(extractHttpUrlFn("<obsidian://open?vault=Obsidian&file=DeepLearning>")).toBe(
+      "obsidian://open?vault=Obsidian&file=DeepLearning"
+    );
+    expect(extractHttpUrlFn("https://example.com/article")).toBe("https://example.com/article");
+  });
+
+  it("extractUrlsFromText parses obsidian:// URIs in single, batch, and mixed markdown text", () => {
+    const fnMatch = html.match(/function extractUrlsFromText\(text\) \{([\s\S]*?)\n {4}\}/);
+    expect(fnMatch).not.toBeNull();
+    const extractFn = new Function("text", fnMatch![1]) as (text: string) => string[];
+
+    // Single obsidian:// URI
+    expect(extractFn("obsidian://open?vault=Obsidian&file=Articles%2FDeepLearning")).toEqual([
+      "obsidian://open?vault=Obsidian&file=Articles%2FDeepLearning"
+    ]);
+
+    // Batch list with obsidian links, comments, angle brackets, and duplicates
+    const batchObsidian = `
+      # Obsidian Reading List
+      obsidian://open?vault=Obsidian&file=Reading%2FArticle1
+      <obsidian://open?vault=MAS&file=Books%2FBook2>
+      [Research Note](obsidian://open?vault=Obsidian&file=Research%2FPaper)
+      obsidian://open?vault=Obsidian&file=Reading%2FArticle1 # Duplicate link
+      obsidian://open?path=%2FUsers%2Fospeto%2FNote.md
+    `;
+    expect(extractFn(batchObsidian)).toEqual([
+      "obsidian://open?vault=Obsidian&file=Reading%2FArticle1",
+      "obsidian://open?vault=MAS&file=Books%2FBook2",
+      "obsidian://open?vault=Obsidian&file=Research%2FPaper",
+      "obsidian://open?path=%2FUsers%2Fospeto%2FNote.md"
+    ]);
+
+    // Mixed HTTP and obsidian URLs in markdown text
+    const mixedMarkdown = `
+      Check out [Web Article](https://example.com/post) alongside [Obsidian Note](obsidian://open?vault=Obsidian&file=Notes%2FPostSummary)
+      And this reference: https://news.ycombinator.com/item?id=123
+      obsidian://vault/Work/Daily/2026-10-12
+    `;
+    expect(extractFn(mixedMarkdown)).toEqual([
+      "https://example.com/post",
+      "obsidian://open?vault=Obsidian&file=Notes%2FPostSummary",
+      "https://news.ycombinator.com/item?id=123",
+      "obsidian://vault/Work/Daily/2026-10-12"
+    ]);
   });
 });
