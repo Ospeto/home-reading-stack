@@ -6285,6 +6285,57 @@ exit 0
       expect(testQueue.getRecentJobs().length).toBe(0);
     });
 
+    it("POST /api/ingest-url allows obsidian:// URIs and enqueues asynchronously without SSRF rejection", async () => {
+      const req = new Request("http://127.0.0.1:8086/api/ingest-url", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: "obsidian://open?vault=Notes&file=DistributedSystems.md",
+          async: true,
+        }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(true);
+      expect(data.status).toBe("queued");
+      expect(data.jobId).toBeDefined();
+
+      const queuedJobs = testQueue.getRecentJobs();
+      expect(queuedJobs.length).toBe(1);
+      expect(queuedJobs[0].type).toBe("url_article_ingest");
+      expect(queuedJobs[0].payload.url).toBe(
+        "obsidian://open?vault=Notes&file=DistributedSystems.md",
+      );
+    });
+
+    it("POST /api/ingest-url rejects malformed obsidian:// URIs upfront with 400 Bad Request", async () => {
+      const initialJobs = testQueue.getRecentJobs().length;
+      const req = new Request("http://127.0.0.1:8086/api/ingest-url", {
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:8086",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: "obsidian://open?vault=OnlyVault",
+          async: true,
+        }),
+      });
+
+      const res = await handleRequest(req, localServer);
+      expect(res.status).toBe(400);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("Obsidian URI missing required 'file' or 'path' parameter");
+      // Queue must remain unchanged
+      expect(testQueue.getRecentJobs().length).toBe(initialJobs);
+    });
+
     it("GET /api/jobs/:id returns 404 for unknown job ID", async () => {
       const req = new Request("http://127.0.0.1:8086/api/jobs/job_nonexistent_999", {
         headers: { host: "127.0.0.1:8086" },
@@ -6334,7 +6385,7 @@ exit 0
     it("end-to-end: executes url_article_ingest, writes completion payload, and polls completed status with book", async () => {
       let calibreRefreshed = false;
       setServerDependenciesForTest({
-        ingestArticleFromUrl: async (url: string) => ({
+        ingestArticleFromUrl: async (_url: string) => ({
           success: true,
           bookId: 888,
           title: "The Architecture of Tomorrow",
@@ -6404,7 +6455,7 @@ exit 0
 
     it("handles url_article_ingest failure, records clean failed status and error message", async () => {
       setServerDependenciesForTest({
-        ingestArticleFromUrl: async (url: string) => ({
+        ingestArticleFromUrl: async (_url: string) => ({
           success: false,
           title: "Paywalled Story",
           authors: "Unknown",

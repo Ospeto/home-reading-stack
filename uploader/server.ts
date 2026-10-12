@@ -34,7 +34,9 @@ import {
   markdownToHtml,
   buildStyledHtmlDocument,
   convertHtmlToEpub,
+  validateArticleUrl,
 } from "./article";
+import { parseObsidianUri } from "./obsidian";
 import { generateOpdsFeed, rewriteOpdsXml } from "./opds";
 import {
   isWanRequest,
@@ -6002,19 +6004,35 @@ async function handleRequestCore(
       }
       const targetUrl = body.url.trim();
 
-      // Validate URL against SSRF vulnerabilities
-      const ssrfCheck = await validateUrlForSSRF(targetUrl, {
-        allowProxyBypass: true,
-      });
-      if (!ssrfCheck.safe) {
-        return jsonResponse(
-          {
-            success: false,
-            error: `SSRF protection: ${ssrfCheck.error || "Unsafe target URL rejected by SSRF guard"}`,
-          },
-          400,
-          corsOrigin,
-        );
+      // Validate URL against SSRF vulnerabilities (obsidian:// URIs validate format without network SSRF)
+      if (targetUrl.toLowerCase().startsWith("obsidian://")) {
+        try {
+          validateArticleUrl(targetUrl);
+          parseObsidianUri(targetUrl);
+        } catch (err: any) {
+          return jsonResponse(
+            {
+              success: false,
+              error: err.message || "Invalid Obsidian URL format",
+            },
+            400,
+            corsOrigin,
+          );
+        }
+      } else {
+        const ssrfCheck = await validateUrlForSSRF(targetUrl, {
+          allowProxyBypass: true,
+        });
+        if (!ssrfCheck.safe) {
+          return jsonResponse(
+            {
+              success: false,
+              error: `SSRF protection: ${ssrfCheck.error || "Unsafe target URL rejected by SSRF guard"}`,
+            },
+            400,
+            corsOrigin,
+          );
+        }
       }
 
       const isAsync =

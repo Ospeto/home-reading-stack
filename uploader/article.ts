@@ -492,6 +492,22 @@ export function extractAllUrlsFromText(text: string): string[] {
     }
   }
 
+  // 3. Extract Obsidian URIs (obsidian://...)
+  const obsidianRegex = /obsidian:\/\/[^\s<>"“”'`]+/gi;
+  while ((m = obsidianRegex.exec(trimmed)) !== null) {
+    const raw = m[0];
+    const startIndex = m.index;
+    const cleaned = cleanExtractedUrl(raw);
+    if (cleaned && cleaned.toLowerCase().startsWith("obsidian://")) {
+      const endIndex = startIndex + cleaned.length;
+      matches.push({
+        url: cleaned,
+        start: startIndex,
+        end: endIndex,
+      });
+    }
+  }
+
   // Sort matches by appearance in text (start index)
   matches.sort((a, b) => a.start - b.start);
 
@@ -1326,6 +1342,10 @@ export function validateArticleUrl(rawUrl: string): URL {
   } catch (_err) {
     void _err;
     throw new Error("Invalid URL format");
+  }
+
+  if (parsed.protocol === "obsidian:") {
+    return parsed;
   }
 
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
@@ -3470,6 +3490,11 @@ export async function ingestArticleFromUrl(
   targetUrl: string,
 ): Promise<IngestArticleResult> {
   const cleanUrl = stripTrackingParams(targetUrl);
+
+  if (cleanUrl.toLowerCase().startsWith("obsidian://")) {
+    const { ingestObsidianNote } = await import("./obsidian");
+    return ingestObsidianNote(cleanUrl);
+  }
 
   // SSRF guard
   const ssrfCheck = await validateUrlForSSRF(cleanUrl, {
