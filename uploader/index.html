@@ -2138,7 +2138,7 @@
             <label for="articleUrlInput" class="block text-[11px] font-semibold text-zinc-300 mb-1.5">Article Web URL</label>
             <div class="relative">
               <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500"><use href="#icon-link"/></svg>
-              <input type="text" inputmode="url" id="articleUrlInput" placeholder="https://example.com/article..."
+              <input type="text" inputmode="url" id="articleUrlInput" placeholder="https://example.com/article... or obsidian://open?..."
                 class="w-full h-11 min-h-[44px] pl-9 pr-3 py-2.5 bg-[#18181f] border border-[#23232a] rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-sky-400 transition-colors">
             </div>
           </div>
@@ -3959,24 +3959,24 @@
 
       try {
         const directUrl = new URL(cleanTrailing(trimmed));
-        if (directUrl.protocol === 'http:' || directUrl.protocol === 'https:') {
+        if (directUrl.protocol === 'http:' || directUrl.protocol === 'https:' || directUrl.protocol === 'obsidian:') {
           return cleanTrailing(trimmed);
         }
       } catch {}
 
       try {
         const directUrl = new URL(trimmed);
-        if (directUrl.protocol === 'http:' || directUrl.protocol === 'https:') {
+        if (directUrl.protocol === 'http:' || directUrl.protocol === 'https:' || directUrl.protocol === 'obsidian:') {
           return trimmed;
         }
       } catch {}
 
-      const match = trimmed.match(/https?:\/\/[^\s<>"'{}|\\^`\[\]]+/i);
+      const match = trimmed.match(/(?:https?|obsidian):\/\/[^\s<>"'{}|\\^`\[\]]+/i);
       if (match) {
         let candidate = cleanTrailing(match[0]);
         try {
           const parsed = new URL(candidate);
-          if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+          if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'obsidian:') {
             return candidate;
           }
         } catch {}
@@ -7419,7 +7419,7 @@
         if (!line) continue;
 
         // Clean markdown link syntax: [text](url) -> url
-        let processedLine = line.replace(/\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g, ' $2 ');
+        let processedLine = line.replace(/\[([^\]]*)\]\(((?:https?|obsidian):\/\/[^\s)]+)\)/g, ' $2 ');
 
         const tokens = processedLine.split(/\s+/);
         for (let token of tokens) {
@@ -7446,7 +7446,7 @@
           if (!cleaned) continue;
 
           let candidate = cleaned;
-          if (!/^https?:\/\//i.test(candidate)) {
+          if (!/^(?:https?|obsidian):\/\//i.test(candidate)) {
             if (/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(\/.*)?$/.test(candidate)) {
               candidate = 'https://' + candidate;
             }
@@ -7454,7 +7454,7 @@
 
           try {
             const parsed = new URL(candidate);
-            if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+            if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'obsidian:') {
               const finalUrl = parsed.toString();
               if (!seen.has(finalUrl)) {
                 seen.add(finalUrl);

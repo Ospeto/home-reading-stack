@@ -378,11 +378,17 @@ export interface ResolveNoteOptions {
 /**
  * Resolve an Obsidian URI to a verified local note file path.
  * Enforces path containment within authorized vaults and rejects path traversal.
+ * Accepts either a parsed Obsidian URI object or a raw string URI.
  */
 export function resolveObsidianNotePath(
-  parsed: ObsidianParsedUri,
+  parsedOrUri: ObsidianParsedUri | string,
   options: ResolveNoteOptions = {},
 ): { filePath: string; vaultPath: string; vaultName: string } {
+  const parsed =
+    typeof parsedOrUri === "string"
+      ? parseObsidianUri(parsedOrUri)
+      : parsedOrUri;
+
   const vaultMap = options.vaultMap ?? getObsidianVaultMap(options.configPaths);
   const defaultVault =
     options.defaultVaultPath ?? getDefaultVaultPath(vaultMap, options.configPaths);
@@ -472,16 +478,51 @@ export function resolveObsidianNotePath(
       }
     })();
 
-    const vaultPath =
+    let vaultPath =
       vaultMap.get(vaultIdentifier) ||
       vaultMap.get(vaultIdentifier.toLowerCase()) ||
       vaultMap.get(decodedVault) ||
       vaultMap.get(decodedVault.toLowerCase());
 
     if (!vaultPath) {
-      throw new Error(
-        `Obsidian vault "${vaultIdentifier}" not found in known vaults`,
-      );
+      // Cross-vault fallback: When vaultIdentifier is provided but not found directly in vaultMap,
+      // iterate through all registered unique vault paths in vaultMap.values() (and defaultVault).
+      // If targetFile exists in any registered vault, resolve that vault and note path instead of throwing "vault not found".
+      const targetFile = parsed.file!;
+      const candidateVaults = new Set<string>();
+      if (defaultVault) {
+        candidateVaults.add(path.resolve(defaultVault));
+      }
+      for (const v of vaultMap.values()) {
+        candidateVaults.add(path.resolve(v));
+      }
+      if (options.allowedVaultPaths) {
+        for (const av of options.allowedVaultPaths) {
+          candidateVaults.add(path.resolve(av));
+        }
+      }
+
+      for (const candVault of candidateVaults) {
+        const candidateFilePath = path.resolve(candVault, targetFile);
+        if (!isContained(candidateFilePath, candVault)) {
+          continue;
+        }
+        try {
+          const verified = verifyFileExists(candidateFilePath);
+          if (isContained(verified, candVault)) {
+            vaultPath = candVault;
+            break;
+          }
+        } catch {
+          // Note not found in this candidate vault, try next
+        }
+      }
+
+      if (!vaultPath) {
+        throw new Error(
+          `Obsidian vault "${vaultIdentifier}" not found in known vaults`,
+        );
+      }
     }
 
     const resolvedVault = path.resolve(vaultPath);
