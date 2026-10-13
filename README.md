@@ -110,6 +110,7 @@ LightHouse includes a portable management CLI (`bin/lighthouse`) for service lif
 | `bin/lighthouse categorize` | Classifies book languages (`mya`, `eng`, `other`), assigns standardized category tags, and prunes promotional tags. |
 | `bin/lighthouse enrich-synopsis` | Populates descriptions for Calibre books prioritizing per-volume lookups (EPUB metadata, online volume queries) with AniList series fallback and duplicate series overview re-enrichment. |
 | `bin/lighthouse heal-covers` | Audits and heals Calibre on-disk volume covers from EPUBs and purges stale/duplicate downscaled thumbnail caches. |
+| `bin/lighthouse ingest-novel <url>` | Ingests web serials and fanfiction (RoyalRoad, AO3, ScribbleHub, FanFiction.net) via FanFicFare with cover extraction, tags, and chapter updates. |
 | `bin/lighthouse sync-kindle` | Two-way USB-C sync: pushes active/unread books from Calibre to Kindle (/Volumes/Kindle/books) and pulls clippings & KOReader highlights to Obsidian. |
 | `bin/lighthouse sync-obsidian` | Syncs highlights, notes, and progress from KOReader/Kindle to Obsidian with idempotent markers. |
 | `bin/lighthouse firecrawl <cmd>` | Control self-hosted Firecrawl on-demand cluster (`status`, `up`, `down`) to conserve host RAM (~2.5 GB). |
@@ -151,6 +152,15 @@ bin/lighthouse heal-covers
 
 # Apply cover healing: restore missing covers from EPUBs and purge stale thumbnail caches
 bin/lighthouse heal-covers --apply
+
+# Preview web novel metadata without downloading (safe dry-run)
+bin/lighthouse ingest-novel https://www.royalroad.com/fiction/12345/sample --dry-run
+
+# Ingest web novel into Calibre with custom tags (default includes 'webnovel')
+bin/lighthouse ingest-novel https://archiveofourown.org/works/123456 --tags "LitRPG,Fantasy"
+
+# Update existing downloaded novel with newly released chapters
+bin/lighthouse ingest-novel https://www.royalroad.com/fiction/12345/sample --update
 
 # Preview Type-C USB Kindle two-way sync (safe dry-run)
 bin/lighthouse sync-kindle
@@ -465,6 +475,23 @@ LightHouse features end-to-end automated light novel series and volume ingestion
    - Converts covers to standard formats using macOS `sips` for seamless Calibre and e-reader compatibility.
 7. **Automatic Calibre & Catalog Refresh:**
    - Ingests into Calibre with standardized series indexing (`<Series>: Volume <N>`), applies metadata tags, and flushes cache to immediately reflect new books in KOReader OPDS and the web catalog.
+
+---
+
+## 📖 FanFicFare Web Novel Ingestion Pipeline
+
+LightHouse integrates FanFicFare for downloading and updating web serials and fanfiction directly into Calibre:
+
+1. **Supported Story Sources:**
+   - RoyalRoad, Archive of Our Own (AO3), ScribbleHub, FanFiction.net, FictionPress, Wattpad, SpaceBattles, Sufficient Velocity, Questionable Questing, and all platforms supported by FanFicFare.
+2. **Single-Command CLI (`bin/lighthouse ingest-novel`):**
+   - Syntax: `bin/lighthouse ingest-novel <url> [options]` (or alias `bin/lighthouse webnovel <url> [options]`).
+   - `--update`: Detects existing novel in Calibre, fetches newly released chapters via FanFicFare, and updates the EPUB format and metadata in Calibre.
+   - `--tags <tags>`: Attaches custom tags while always preserving `webnovel`.
+   - `--dry-run`: Probes story metadata via `fanficfare --meta-only --json-meta --no-output` without downloading or modifying Calibre.
+3. **Fail-Closed Verification & Staging Isolation:**
+   - Verifies `fanficfare` presence and fails closed with clear diagnostic instructions if missing.
+   - Runs downloads in temporary isolated staging directories, validating EPUB containers and extracting cover art via `sips` before adding to Calibre with `--automerge ignore`.
 
 ---
 
