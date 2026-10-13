@@ -411,6 +411,45 @@ Status: In Progress
       expect(existing?.title).toBe("Fanfic Masterpiece");
       expect(existing?.authors).toBe("Great Writer");
     });
+
+    it("resolves and queries metadata.db from libraryDir when calibreDbPath is omitted", async () => {
+      delete process.env.CALIBRE_DB_PATH;
+      delete process.env.CALIBRE_LIBRARY_DIR;
+
+      const customLibDir = path.join(tempDir, "custom-lib");
+      fs.mkdirSync(customLibDir, { recursive: true });
+      const dbFile = path.join(customLibDir, "metadata.db");
+      const db = new Database(dbFile);
+
+      db.run(`
+        CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, author_sort TEXT, path TEXT);
+        CREATE TABLE comments (id INTEGER PRIMARY KEY, book INTEGER, text TEXT);
+        CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT);
+        CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, name TEXT);
+      `);
+
+      const storyUrl = "https://www.royalroad.com/fiction/99887/wandering-inn";
+      db.run(
+        "INSERT INTO books VALUES (303, 'The Wandering Inn', 'pirateaba', 'pirateaba/The Wandering Inn (303)')",
+      );
+      db.run(
+        "INSERT INTO comments VALUES (1, 303, 'Saved from https://www.royalroad.com/fiction/99887/wandering-inn with fantasy tags.')",
+      );
+      db.run(
+        "INSERT INTO identifiers VALUES (1, 303, 'url', 'https://www.royalroad.com/fiction/99887/wandering-inn')",
+      );
+      db.run("INSERT INTO data VALUES (1, 303, 'EPUB', 'The Wandering Inn - pirateaba')");
+      db.close();
+
+      const existing = await findExistingNovelInCalibre(storyUrl, {
+        libraryDir: customLibDir,
+      });
+
+      expect(existing).not.toBeNull();
+      expect(existing?.id).toBe(303);
+      expect(existing?.title).toBe("The Wandering Inn");
+      expect(existing?.authors).toBe("pirateaba");
+    });
   });
 
   describe("6. Ingest Novel: End-to-End Orchestration & Options", () => {

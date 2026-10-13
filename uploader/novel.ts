@@ -366,7 +366,9 @@ export async function findExistingNovelInCalibre(
 ): Promise<{ id: number; title: string; authors: string; epubPath?: string } | null> {
   const dbPath =
     options.calibreDbPath ||
+    (options.libraryDir ? path.join(options.libraryDir, "metadata.db") : undefined) ||
     process.env.CALIBRE_DB_PATH ||
+    (process.env.CALIBRE_LIBRARY_DIR ? path.join(process.env.CALIBRE_LIBRARY_DIR, "metadata.db") : undefined) ||
     path.join(process.env.HOME || "", "Calibre_Library/metadata.db");
 
   const libraryDir =
@@ -490,7 +492,7 @@ export async function findExistingNovelInCalibre(
         "--search",
         `comments:"${cleanUrlNoSlash}"`,
         "--fields",
-        "id,title,authors,formats,comments",
+        "id,title,authors,formats,comments,identifiers",
         "--for-machine",
       ],
       {
