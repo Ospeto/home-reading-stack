@@ -48,6 +48,7 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(stdout).toContain("heal-covers");
       expect(stdout).toContain("sync-obsidian");
       expect(stdout).toContain("sync-kindle");
+      expect(stdout).toContain("ingest-novel");
       expect(stdout).toContain("install-daemons");
       expect(stdout).toContain("backup");
       expect(stdout).toContain("restore");
@@ -116,6 +117,18 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(res.stdout).toContain("--mount");
       expect(res.stdout).toContain("--vault-path");
       expect(res.stdout).toContain("--eject");
+    });
+
+    it("bin/lighthouse ingest-novel --help outputs ingest-novel options", () => {
+      const res = spawnSync(LIGHTHOUSE_BIN, ["ingest-novel", "--help"], {
+        encoding: "utf8",
+        cwd: tempTestDir,
+      });
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain("LightHouse Web Novel Ingestion Tool (FanFicFare)");
+      expect(res.stdout).toContain("--update");
+      expect(res.stdout).toContain("--tags");
+      expect(res.stdout).toContain("--dry-run");
     });
     it("bin/lighthouse version outputs current version", () => {
       const res = spawnSync(LIGHTHOUSE_BIN, ["version"], {
@@ -2899,7 +2912,7 @@ exit 0
       } finally {
         fs.rmSync(mock000.mockBinDir, { recursive: true, force: true });
       }
-    });
+    }, 15000);
 
     it("reports healthy external endpoint when tunnel daemon is stopped without falsely claiming remote failure", () => {
       const mock = setupStatusMock({

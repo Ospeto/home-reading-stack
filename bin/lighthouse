@@ -2049,6 +2049,15 @@ cmd_firecrawl() {
   exec bun run "$script_path" "$@"
 }
 
+cmd_ingest_novel() {
+  local script_path="${LIGHTHOUSE_ROOT}/scripts/ingest-novel.ts"
+  if [ ! -f "$script_path" ]; then
+    echo "Error: ${script_path} not found" >&2
+    exit 1
+  fi
+  exec bun run "$script_path" "$@"
+}
+
 cmd_backup_ssd() {
   local script_path="${LIGHTHOUSE_ROOT}/scripts/backup-ssd.sh"
   if [ ! -f "$script_path" ]; then
@@ -2166,6 +2175,7 @@ Commands:
   sync-obsidian [options]  Sync highlights and reading notes from KOReader/Kindle to Obsidian
   sync-kindle [options]    Two-way sync: push books & pull highlights from USB-C Kindle/e-Reader
   heal-covers [options]    Audit & heal Calibre volume covers, purge stale thumbnail caches
+  ingest-novel <url> [options] Ingest web novel via FanFicFare (RoyalRoad, AO3, ScribbleHub, etc.)
   firecrawl <cmd> [options] Control self-hosted Firecrawl on-demand cluster (status|up|down)
   backup-ssd [options]     Incremental whole-library backup to external SSD (rsync + hot SQLite DBs)
   install-daemons          Dynamically generate and register macOS LaunchAgents for current user
@@ -2211,6 +2221,15 @@ Heal-Covers Options:
   --series <name>          Filter healing to a specific series title
   --book-id <id>           Filter healing to a specific book ID
   --verbose                Enable verbose logging of cover and cache inspection
+
+Ingest-Novel Options:
+  --update, -u             Update existing downloaded EPUB with newly released chapters
+  --tags <tags>, -t <tags> Comma-separated tags to attach in Calibre (default includes 'webnovel')
+  --dry-run, -n            Preview novel metadata and URL validity without downloading
+  --calibre-server-url <url> Calibre server URL (default: http://127.0.0.1:8088)
+  --library-path <path>    Explicit path to Calibre library folder
+  --verbose, -v            Enable detailed diagnostic logging
+  --json                   Output report in JSON format
 
 Firecrawl Commands:
   status                   Inspect cluster running state, endpoint URL, and auto-sleep timer (default)
@@ -2266,6 +2285,7 @@ case "$ACTION" in
   categorize) cmd_categorize "$@" ;;
   enrich-synopsis) cmd_enrich_synopsis "$@" ;;
   heal-covers) cmd_heal_covers "$@" ;;
+  ingest-novel|webnovel) cmd_ingest_novel "$@" ;;
   sync-obsidian) cmd_sync_obsidian "$@" ;;
   sync-kindle) cmd_sync_kindle "$@" ;;
   firecrawl) cmd_firecrawl "$@" ;;

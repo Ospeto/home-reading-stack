@@ -3008,6 +3008,15 @@
           </div>
           <div class="space-y-1 pt-1 border-t border-zinc-800/80">
             <div class="font-bold text-white flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-teal-400"></span>
+              <span>FanFicFare Web Novel Ingestion &amp; Updates</span>
+            </div>
+            <p class="text-[11px] text-zinc-400 leading-relaxed">
+              Download and update web serials and fanfiction from supported platforms (RoyalRoad, Archive of Our Own / AO3, ScribbleHub, FanFiction.net, Wattpad, SpaceBattles, Sufficient Velocity, etc.) directly into Calibre using <code class="text-zinc-200">bin/lighthouse ingest-novel &lt;url&gt;</code>. Features clean staging lifecycle, automatic chapter and cover preservation, tag assignment (default <code class="text-zinc-200">webnovel</code>), safe preview mode (<code class="text-zinc-200">--dry-run</code>), and chapter update synchronization (<code class="text-zinc-200">--update</code>).
+            </p>
+          </div>
+          <div class="space-y-1 pt-1 border-t border-zinc-800/80">
+            <div class="font-bold text-white flex items-center gap-1.5">
               <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
               <span>Canonical Metadata Filenames &amp; Download Parity</span>
             </div>
@@ -3200,6 +3209,27 @@
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
+            <!-- Web Novel & Fanfiction Ingestion (FanFicFare) -->
+            <div class="text-[11px] font-semibold text-zinc-400 pt-1">Web Novel &amp; Fanfiction Ingestion (FanFicFare):</div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse ingest-novel &lt;url&gt; --dry-run</code>
+              <button onclick="copyToClipboard('bin/lighthouse ingest-novel <url> --dry-run')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse ingest-novel &lt;url&gt; --tags "LitRPG,Fantasy"</code>
+              <button onclick="copyToClipboard('bin/lighthouse ingest-novel <url> --tags &quot;LitRPG,Fantasy&quot;')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">bin/lighthouse ingest-novel &lt;url&gt; --update</code>
+              <button onclick="copyToClipboard('bin/lighthouse ingest-novel <url> --update')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+            <div class="text-[11px] text-zinc-400">• <strong>Supported Sites:</strong> RoyalRoad, Archive of Our Own (AO3), ScribbleHub, FanFiction.net, Wattpad, SpaceBattles, Sufficient Velocity, etc. (Default tag: <code class="text-zinc-200">webnovel</code>)</div>
           </div>
         </div>
       </div>
