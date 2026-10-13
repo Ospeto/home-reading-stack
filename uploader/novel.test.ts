@@ -125,6 +125,16 @@ describe("LightHouse Web Novel Ingestion Engine (uploader/novel.ts)", () => {
       expect(res.valid).toBe(true);
       expect(res.normalizedUrl).toBe("http://127.0.0.1:8080/test-story");
     });
+
+    it("strips tracking parameters from novel URLs", async () => {
+      const rawUrl =
+        "https://www.royalroad.com/fiction/12345/story-title?utm_source=twitter&utm_medium=social&ref=share";
+      const res = await validateNovelUrl(rawUrl);
+      expect(res.valid).toBe(true);
+      expect(res.normalizedUrl).toBe(
+        "https://www.royalroad.com/fiction/12345/story-title",
+      );
+    });
   });
 
   describe("2. FanFicFare Presence & Fail-Closed Detection", () => {
@@ -299,6 +309,73 @@ Status: In Progress
       expect(existing?.id).toBe(101);
       expect(existing?.title).toBe("Dungeon Crawler Carl");
       expect(existing?.authors).toBe("Matt Dinniman");
+    });
+
+    it("enforces exact URL boundary matching in SQLite to avoid prefix false positives", async () => {
+      const dbFile = path.join(tempDir, "boundary-test.db");
+      const db = new Database(dbFile);
+
+      db.run(`
+        CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, author_sort TEXT, path TEXT);
+        CREATE TABLE comments (id INTEGER PRIMARY KEY, book INTEGER, text TEXT);
+        CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT);
+        CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, name TEXT);
+      `);
+
+      // Existing book with a longer URL prefixing the search query
+      db.run("INSERT INTO books VALUES (10, 'Other Story', 'Author A', 'Author A/Other Story (10)')");
+      db.run(
+        "INSERT INTO comments VALUES (1, 10, 'Saved from https://www.royalroad.com/fiction/12345/other-story with tags.')",
+      );
+      db.run(
+        "INSERT INTO identifiers VALUES (1, 10, 'url', 'https://www.royalroad.com/fiction/12345/other-story')",
+      );
+      db.close();
+
+      // Searching for fiction/123 must NOT match fiction/12345/other-story
+      const noMatch = await findExistingNovelInCalibre(
+        "https://www.royalroad.com/fiction/123",
+        {
+          calibreDbPath: dbFile,
+          libraryDir: tempDir,
+        },
+      );
+      expect(noMatch).toBeNull();
+
+      // Insert exact match book for fiction/123
+      const db2 = new Database(dbFile);
+      db2.run("INSERT INTO books VALUES (20, 'Exact Target', 'Author B', 'Author B/Exact Target (20)')");
+      db2.run(
+        "INSERT INTO comments VALUES (2, 20, 'Saved from https://www.royalroad.com/fiction/123 with tags.')",
+      );
+      db2.run(
+        "INSERT INTO identifiers VALUES (2, 20, 'url', 'https://www.royalroad.com/fiction/123')",
+      );
+      db2.close();
+
+      // Exact match succeeds for https://www.royalroad.com/fiction/123
+      const exactMatch = await findExistingNovelInCalibre(
+        "https://www.royalroad.com/fiction/123",
+        {
+          calibreDbPath: dbFile,
+          libraryDir: tempDir,
+        },
+      );
+      expect(exactMatch).not.toBeNull();
+      expect(exactMatch?.id).toBe(20);
+      expect(exactMatch?.title).toBe("Exact Target");
+
+      // Exact match succeeds with trailing slash https://www.royalroad.com/fiction/123/
+      const trailingSlashMatch = await findExistingNovelInCalibre(
+        "https://www.royalroad.com/fiction/123/",
+        {
+          calibreDbPath: dbFile,
+          libraryDir: tempDir,
+        },
+      );
+      expect(trailingSlashMatch).not.toBeNull();
+      expect(trailingSlashMatch?.id).toBe(20);
+      expect(trailingSlashMatch?.title).toBe("Exact Target");
     });
 
     it("falls back to calibredb list search when SQLite DB is not available", async () => {
@@ -580,6 +657,108 @@ Status: In Progress
       const addFormatCall = calibredbCalls.find((c) => c[0] === "add_format");
       expect(addFormatCall).toBeDefined();
       expect(addFormatCall).toContain("789");
+    });
+
+    it("passes --with-library with libraryDir when calibreServerUrl is not provided", async () => {
+      const calibredbCalls: string[][] = [];
+
+      const mockDeps: NovelDependencies = {
+        fanficfareBin: "/fake/fanficfare",
+        validateUrl: async (u) => ({ valid: true, normalizedUrl: u }),
+        fanficfareRunner: () => ({
+          status: 0,
+          stdout: JSON.stringify({
+            title: "Custom Library Novel",
+            author: "Author",
+          }),
+        }),
+        calibredbRunner: (args) => {
+          calibredbCalls.push(args);
+          return { status: 0 };
+        },
+      };
+
+      await ingestNovel({
+        url: "https://www.royalroad.com/fiction/123",
+        libraryDir: "/custom/calibre/path",
+        dryRun: true,
+        dependencies: mockDeps,
+      });
+
+      expect(calibredbCalls.length).toBeGreaterThan(0);
+      const listCall = calibredbCalls.find((c) => c[0] === "list");
+      expect(listCall).toBeDefined();
+      const withLibIdx = listCall!.indexOf("--with-library");
+      expect(withLibIdx).toBeGreaterThan(-1);
+      expect(listCall![withLibIdx + 1]).toBe("/custom/calibre/path");
+      expect(listCall).not.toContain("http://127.0.0.1:8088");
+    });
+
+    it("applies --tags to calibredb set_metadata in --update mode", async () => {
+      const stagingDir = path.join(tempDir, "update-tags-staging");
+      fs.mkdirSync(stagingDir, { recursive: true });
+
+      const calibredbCalls: string[][] = [];
+      const existingEpub = path.join(tempDir, "existing-tags.epub");
+      fs.writeFileSync(existingEpub, "PK\x03\x04existing epub content");
+
+      const mockDeps: NovelDependencies = {
+        fanficfareBin: "/fake/fanficfare",
+        validateUrl: async (u) => ({ valid: true, normalizedUrl: u }),
+        calibredbRunner: (args) => {
+          calibredbCalls.push(args);
+          if (args[0] === "list") {
+            return {
+              status: 0,
+              stdout: JSON.stringify([
+                {
+                  id: 555,
+                  title: "Tagged Story",
+                  authors: ["Some Author"],
+                  formats: [existingEpub],
+                },
+              ]),
+            };
+          }
+          if (args[0] === "add_format") {
+            return { status: 0, stdout: "Format added" };
+          }
+          if (args[0] === "set_metadata") {
+            return { status: 0, stdout: "" };
+          }
+          return { status: 0 };
+        },
+        fanficfareRunner: (_args, opts) => {
+          const updatedFile = path.join(opts.cwd || tempDir, "existing-tags.epub");
+          fs.writeFileSync(updatedFile, "PK\x03\x04updated epub with new chapters");
+          return {
+            status: 0,
+            stdout: JSON.stringify({
+              title: "Tagged Story",
+              author: "Some Author",
+              numChapters: 50,
+            }),
+          };
+        },
+      };
+
+      const res = await ingestNovel({
+        url: "https://www.royalroad.com/fiction/12345/story",
+        update: true,
+        tags: "UpdatedTag,WebSerial",
+        stagingDir,
+        keepStaging: true,
+        dependencies: mockDeps,
+      });
+
+      expect(res.success).toBe(true);
+      expect(res.action).toBe("updated");
+      expect(res.bookId).toBe(555);
+
+      const setCall = calibredbCalls.find((c) => c[0] === "set_metadata");
+      expect(setCall).toBeDefined();
+      expect(setCall).toContain("--field");
+      expect(setCall).toContain("tags:webnovel,UpdatedTag,WebSerial");
     });
 
     it("cleans up staging directory on exit", async () => {
