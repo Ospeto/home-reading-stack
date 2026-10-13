@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import process from "node:process";
 import {
   parseCliArgs,
   formatNovelIngestReport,
@@ -216,6 +217,7 @@ describe("LightHouse Web Novel CLI (scripts/ingest-novel.ts & bin/lighthouse)", 
     });
 
     it("bin/lighthouse ingest-novel fails closed with clear diagnostic when fanficfare is missing", () => {
+      const bunDir = path.dirname(process.execPath);
       const res = spawnSync(
         LIGHTHOUSE_BIN,
         ["ingest-novel", "https://www.royalroad.com/fiction/12345/sample"],
@@ -223,7 +225,7 @@ describe("LightHouse Web Novel CLI (scripts/ingest-novel.ts & bin/lighthouse)", 
           encoding: "utf8",
           env: {
             ...process.env,
-            PATH: "/usr/bin:/bin",
+            PATH: `${bunDir}:/usr/bin:/bin`,
             FANFICFARE_PATH: "",
           },
         },
@@ -234,6 +236,7 @@ describe("LightHouse Web Novel CLI (scripts/ingest-novel.ts & bin/lighthouse)", 
     });
 
     it("bin/lighthouse ingest-novel --dry-run also fails closed when fanficfare is missing", () => {
+      const bunDir = path.dirname(process.execPath);
       const res = spawnSync(
         LIGHTHOUSE_BIN,
         ["ingest-novel", "https://www.royalroad.com/fiction/12345/sample", "--dry-run"],
@@ -241,7 +244,7 @@ describe("LightHouse Web Novel CLI (scripts/ingest-novel.ts & bin/lighthouse)", 
           encoding: "utf8",
           env: {
             ...process.env,
-            PATH: "/usr/bin:/bin",
+            PATH: `${bunDir}:/usr/bin:/bin`,
             FANFICFARE_PATH: "",
           },
         },
