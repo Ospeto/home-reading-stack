@@ -16,6 +16,15 @@ export interface OpdsFeedOptions {
   iconUrl?: string;
   publicBaseUrl?: string;
   updated?: string;
+  /**
+   * Relative href of the next page of this result set, emitted as
+   * `<link rel="next">` per the OPDS paging convention.
+   */
+  nextHref?: string;
+  /** Total number of results the current query matches, when known. */
+  totalResults?: number;
+  /** Zero-based offset of the first entry in this page. */
+  startIndex?: number;
   subfeeds?: Array<{
     title: string;
     href: string;
@@ -35,6 +44,11 @@ export interface OpdsBookEntry {
   tags?: string[];
   cover?: number | null;
   formats?: string[];
+  /**
+   * Calibre star rating on its native 0–10 scale (0 or null when unrated).
+   * Exposed to clients as `<lighthouse:rating>` in the LightHouse namespace.
+   */
+  rating?: number | null;
 }
 
 /**
@@ -100,7 +114,7 @@ export function generateOpdsFeed(
 
   const lines: string[] = [
     `<?xml version="1.0" encoding="utf-8"?>`,
-    `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/terms/" xmlns:opds="http://opds-spec.org/2010/catalog">`,
+    `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/terms/" xmlns:opds="http://opds-spec.org/2010/catalog" xmlns:lighthouse="https://github.com/Ospeto/home-reading-stack/ns/lighthouse">`,
     `  <id>urn:lighthouse:catalog:${escapeXml(feedUrl)}</id>`,
     `  <title>${escapeXml(feedTitle)}</title>`,
     `  <updated>${updatedIso}</updated>`,
@@ -113,6 +127,25 @@ export function generateOpdsFeed(
     `  <link rel="start" href="${escapeXml(baseUrl)}/opds" type="application/atom+xml;profile=opds-catalog;kind=navigation"/>`,
     `  <link rel="search" href="${escapeXml(searchUrl)}" type="application/atom+xml;profile=opds-catalog"/>`,
   ];
+
+  // OPDS paging: advertise the next page so paged clients (including the
+  // generated KOReader plugin) can walk a large catalog without one huge feed.
+  if (options.nextHref) {
+    lines.push(
+      `  <link rel="next" href="${escapeXml(baseUrl + options.nextHref)}" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>`,
+    );
+  }
+
+  // Expose the paging window to clients that want to show "x of y".
+  if (typeof options.startIndex === "number" || typeof options.totalResults === "number") {
+    lines.push(`  <lighthouse:paging>`);
+    lines.push(`    <lighthouse:start>${options.startIndex ?? 0}</lighthouse:start>`);
+    lines.push(`    <lighthouse:count>${books.length}</lighthouse:count>`);
+    if (typeof options.totalResults === "number") {
+      lines.push(`    <lighthouse:total>${options.totalResults}</lighthouse:total>`);
+    }
+    lines.push(`  </lighthouse:paging>`);
+  }
 
   // Optional navigation subfeeds (e.g. Recent, Series, Burmese)
   if (options.subfeeds && options.subfeeds.length > 0) {
@@ -155,6 +188,13 @@ export function generateOpdsFeed(
     if (book.series) {
       const idxAttr = book.series_index !== null && book.series_index !== undefined ? ` label="Volume ${book.series_index}"` : "";
       lines.push(`    <category term="${escapeXml(book.series)}"${idxAttr}/>`);
+    }
+
+    // Rating travels in the LightHouse namespace: OPDS 1.2 has no rating
+    // element, and compliant Atom consumers ignore unknown elements.
+    const numericRating = Number(book.rating);
+    if (Number.isFinite(numericRating) && numericRating > 0) {
+      lines.push(`    <lighthouse:rating>${Math.min(10, Math.round(numericRating))}</lighthouse:rating>`);
     }
 
     if (book.tags && Array.isArray(book.tags)) {

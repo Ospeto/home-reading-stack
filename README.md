@@ -87,7 +87,8 @@ Singapore WAN endpoints are the **primary recommended routes** for low-latency p
 | **Telegram Bot & Mini App** | `@saroat_ospeto_bot` | Telegram API | Ingest books, search catalog (`/find`), view shelf (`/reading`), hot backups (`/backup`) |
 | **Local KOSync** | `http://192.168.31.15:7200` | HTTP / JSON | Direct LAN progress sync for KOReader |
 | **Local Calibre OPDS Feed** | `http://192.168.31.15:8088/opds` | Atom / XML | Direct home LAN book catalog |
-| **Native LightHouse OPDS Feed** | `http://192.168.31.15:8086/api/opds` | Atom / XML | Zero-downtime native OPDS 1.2 catalog feed with filtered title/author/series search generated directly from SQLite metadata |
+| **Native LightHouse OPDS Feed** | `http://192.168.31.15:8086/api/opds` | Atom / XML | Zero-downtime native OPDS 1.2 catalog feed with filtered title/author/series search generated directly from SQLite metadata. Supports OPDS paging (`?start=N&count=M` → `rel="next"`) and exposes Calibre ratings as `<lighthouse:rating>` |
+| **KOReader Plugin Generator** | `http://192.168.31.15:8086/api/koplugin/download` | ZIP (`.koplugin`) | Generates a pre-configured KOReader plugin archive per request from the current server settings. Requires the same authentication as the web app; the API key is baked into the generated `lighthouse_config.lua` and never logged or placed in a query string |
 | **Local Calibre Web Reader** | `http://192.168.31.15:8088` | Web UI | In-browser reading and Calibre catalog manager |
 | **Local LAN Proxy Gateway** | `http://192.168.31.15:7890` | HTTP / SOCKS5 | sing-box proxy gateway for Kindle GFW bypass |
 | **Singapore Reverse Tunnel Daemon** | `com.ospeto.reading-sg-tunnel` | SSH | LaunchAgent binding Mac Mini `:8086` and `:7200` to `sg-vps` |
@@ -283,7 +284,36 @@ bin/lighthouse status
 
 ## 📖 KOReader Device Setup Guide
 
-### 1. Progress Synchronization (KOSync)
+The primary path is the **generated LightHouse plugin**: the server builds it on demand and it arrives already pointed at the right server and already authenticated, so nothing has to be typed on the device. Manual setup (sections 2 and 3) stays fully supported as the fallback for any device that cannot load an external plugin.
+
+### 1. Generated LightHouse Plugin (Primary)
+
+1. Open the LightHouse web app → **Guide** (book icon in the header, or the footer link) → **KOReader Plugin** tab.
+2. Tap **Download lighthouse.koplugin**. The archive is generated per request from the server you are browsing (`GET /api/koplugin/download`) and contains:
+   - `lighthouse.koplugin/main.lua` and `_meta.lua` — the plugin itself,
+   - `lighthouse.koplugin/lighthouse_config.lua` — the server origin you downloaded from plus the current server API key.
+
+   Download from the LAN address to bake in the LAN origin, or from the WAN address to bake in the WAN origin.
+3. Unpack it so the folder itself ends in `.koplugin` inside KOReader's plugins directory:
+   ```bash
+   # Kindle (USB mass storage)
+   unzip lighthouse.koplugin -d /mnt/us/koreader/plugins/
+   # Kobo
+   unzip lighthouse.koplugin -d /mnt/onboard/.kobo/koreader/plugins/
+   ```
+   You must end up with `koreader/plugins/lighthouse.koplugin/main.lua`. Unzipping without `-d` (or extracting in Finder and copying the outer folder) nests the folder one level deeper and KOReader will not load it.
+4. Restart KOReader, then open the **Search icon (magnifying glass)** → **LightHouse library** (also available under **Tools** → **LightHouse library**):
+   - **Browse library** — paged catalog, 40 books per page (`GET /api/opds?start=N&count=40`).
+   - **Search library…** — title / author / series search (`GET /api/opds?search=…`).
+   - **Currently reading** — every active KOSync session (`GET /api/kosync/active`).
+   - Book detail — author, series, Calibre rating, per-book reading progress, synopsis, and **Download EPUB** (`GET /api/books/<id>/download/epub`).
+5. **Regenerating:** after changing the server address or `READING_API_KEY`, download again and replace `koreader/plugins/lighthouse.koplugin`. An already-installed older plugin keeps working, because it only uses endpoints that already existed and never a bespoke API.
+
+Notes:
+- The API key is rendered into `lighthouse_config.lua` inside the archive only. It is never written to a repository file, a log line, or a URL query string, and the download route requires the same authentication as the rest of the web app (LAN requests pass, WAN requests need the Bearer key, a session cookie, or Telegram WebApp `initData`).
+- The plugin speaks the existing OPDS catalog, cover, EPUB download, and KOSync progress endpoints, so server upgrades never require reinstalling it.
+
+### 2. Progress Synchronization (KOSync)
 
 1. Open any book in KOReader → tap top of screen for menu bar.
 2. Tap the **Tools (wrench icon)** tab → select **Progress sync**.
@@ -296,7 +326,9 @@ bin/lighthouse status
 5. Enable **"Automatically keep documents in sync"**.
 6. Tap **"Pull progress to this device now"** to verify connection.
 
-### 2. OPDS Wireless Book Catalog
+### 3. OPDS Wireless Book Catalog (Manual Fallback)
+
+Use this when your device cannot load an external plugin. The generated plugin above gives the same catalog with paging, ratings and reading progress already configured.
 
 1. In KOReader, tap top menu → **Search icon (magnifying glass)** → **OPDS catalog**.
 2. Tap **Add new catalog**.

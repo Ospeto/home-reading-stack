@@ -2554,9 +2554,12 @@
         </button>
       </div>
 
-      <!-- Tab Pills for Quick Switching (KOSync, Obsidian Sync, OPDS Catalog, Features Guide, CLI Reference, Kindle Proxy, All Endpoints) -->
+      <!-- Tab Pills for Quick Switching (KOReader Plugin, KOSync, Obsidian Sync, OPDS Catalog, Features Guide, CLI Reference, Kindle Proxy, All Endpoints) -->
       <div class="flex items-center gap-2 overflow-x-auto no-scrollbar py-1">
-        <button id="guide-tab-kosync" onclick="setGuideTab('kosync')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-white text-zinc-950 shadow-sm cursor-pointer transition-all shrink-0">
+        <button id="guide-tab-plugin" onclick="setGuideTab('plugin')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-white text-zinc-950 shadow-sm cursor-pointer transition-all shrink-0">
+          KOReader Plugin
+        </button>
+        <button id="guide-tab-kosync" onclick="setGuideTab('kosync')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
           KOSync
         </button>
         <button id="guide-tab-obsidian" onclick="setGuideTab('obsidian')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
@@ -2580,6 +2583,59 @@
         <button id="guide-tab-all" onclick="setGuideTab('all')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
           All Endpoints
         </button>
+      </div>
+
+      <!-- SECTION 0: GENERATED KOREADER PLUGIN (PRIMARY SETUP PATH) -->
+      <div id="guide-plugin" class="space-y-3 pt-1">
+        <div class="flex items-center justify-between">
+          <h4 class="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5"><use href="#icon-lighthouse"/></svg>
+            <span>LightHouse KOReader Plugin (Recommended)</span>
+          </h4>
+          <span class="text-[10px] px-2 py-0.5 rounded font-mono bg-amber-950/60 text-amber-300 border border-amber-800/50">Pre-configured</span>
+        </div>
+        <p class="text-xs text-zinc-300 leading-relaxed">
+          Generate a <code class="text-zinc-200">.koplugin</code> archive from this LightHouse server. It arrives already pointed at the server origin you are using right now and already authenticated, so nothing is typed on the device. The plugin adds an on-device library browser with paging, search, one-tap EPUB download, reading status and Calibre ratings.
+        </p>
+        <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2.5 text-xs text-zinc-300">
+          <div class="flex items-start gap-2.5">
+            <span class="w-5 h-5 rounded-full bg-zinc-800 text-zinc-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">1</span>
+            <div class="flex-1 min-w-0 space-y-2">
+              <div>Download the archive for this server:</div>
+              <div class="flex items-center justify-between gap-2 bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
+                <span class="text-[10px] text-zinc-500 uppercase font-semibold mr-2 shrink-0">Baked-in server</span>
+                <code id="kopluginOrigin" class="text-[11px] font-mono text-emerald-400 select-all truncate">—</code>
+              </div>
+              <button id="kopluginDownloadBtn" onclick="downloadKoplugin(this)" class="w-full sm:w-auto px-4 py-2.5 bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-zinc-950 text-xs font-bold rounded-xl border border-amber-400/60 transition-colors flex items-center justify-center gap-1.5 cursor-pointer active:scale-[0.97]">
+                <svg class="w-3.5 h-3.5"><use href="#icon-arrow-down-tray"/></svg>
+                <span>Download lighthouse.koplugin</span>
+              </button>
+            </div>
+          </div>
+          <div class="flex items-start gap-2.5">
+            <span class="w-5 h-5 rounded-full bg-zinc-800 text-zinc-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">2</span>
+            <div class="w-full space-y-1.5">
+              <div>Unpack it so the folder ends in <code class="text-zinc-200">.koplugin</code> inside your KOReader <code class="text-zinc-200">plugins</code> directory:</div>
+              <div class="bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800 font-mono text-[11px] text-zinc-100 overflow-x-auto">
+                <div class="text-zinc-500"># Roadmap / Kindle</div>
+                <div>unzip lighthouse.koplugin -d /mnt/us/koreader/plugins/</div>
+                <div class="text-zinc-500 pt-1"># Kobo</div>
+                <div>unzip lighthouse.koplugin -d /mnt/onboard/.kobo/koreader/plugins/</div>
+              </div>
+              <div class="text-[11px] text-zinc-400">You should end up with <code class="text-zinc-300">koreader/plugins/lighthouse.koplugin/main.lua</code>. A plain unzip into the plugins folder (without <code class="text-zinc-300">-d</code>) creates a nested folder and KOReader will not load it.</div>
+            </div>
+          </div>
+          <div class="flex items-start gap-2.5">
+            <span class="w-5 h-5 rounded-full bg-zinc-800 text-zinc-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">3</span>
+            <div>Restart KOReader, then open <strong>Search icon (magnifying glass)</strong> → <strong>LightHouse library</strong> (or Tools → LightHouse library): <strong>Browse library</strong>, <strong>Search library…</strong>, <strong>Currently reading</strong>, and a per-book detail view with <strong>Download EPUB</strong>.</div>
+          </div>
+        </div>
+        <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5 text-[11px] text-zinc-400 leading-relaxed">
+          <div><strong class="text-zinc-200">Regenerating:</strong> download again and replace <code class="text-zinc-300">koreader/plugins/lighthouse.koplugin</code>. Do this after changing the server address or the API key.</div>
+          <div><strong class="text-zinc-200">Which server URL:</strong> the archive always targets the origin this page is served from. Download from the LAN address to get a LAN plugin, or from the WAN address to get a WAN plugin.</div>
+          <div><strong class="text-zinc-200">Devices that cannot take a plugin:</strong> the manual OPDS + KOSync setup in the other tabs still works and is unchanged.</div>
+          <div><strong class="text-zinc-200">Scope:</strong> the plugin uses only the existing OPDS catalog and KOSync progress endpoints, so it keeps working when the server is updated.</div>
+        </div>
       </div>
 
       <!-- SECTION 1: KOSYNC PROGRESS SYNC -->
@@ -2836,10 +2892,13 @@
 
       <!-- SECTION 2: OPDS BOOK CATALOG -->
       <div id="guide-opds" class="space-y-3 pt-1">
+        <div class="p-2.5 rounded-xl bg-amber-950/20 border border-amber-800/40 text-[11px] text-amber-200/90 leading-relaxed">
+          <strong>Manual fallback.</strong> Use the <button onclick="setGuideTab('plugin')" class="underline decoration-dotted hover:text-amber-100 cursor-pointer">KOReader Plugin</button> tab instead if your device can load external plugins — it is pre-configured and needs no catalog URL or credential entry. The steps below remain fully supported for devices that cannot.
+        </div>
         <div class="flex items-center justify-between">
           <h4 class="text-xs font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
             <svg class="w-3.5 h-3.5"><use href="#icon-rss"/></svg>
-            <span>KOReader OPDS Catalog (Direct Download)</span>
+            <span>KOReader OPDS Catalog (Manual Setup)</span>
           </h4>
           <span class="text-[10px] px-2 py-0.5 rounded font-mono bg-zinc-800 text-sky-400 border border-zinc-700">Calibre Feed</span>
         </div>
@@ -8915,7 +8974,9 @@
     function openGuideModal() {
       tgHaptic.light();
       openModalAnimated('guideModal', false);
-      setGuideTab('kosync');
+      // The generated plugin is the primary device setup path; the manual
+      // OPDS/KOSync steps remain available in their own tabs as fallback.
+      setGuideTab('plugin');
     }
 
     function closeGuideModal() {
@@ -8923,103 +8984,81 @@
     }
 
     // GUIDE MODAL TABS
+    const GUIDE_TAB_IDS = ['plugin', 'kosync', 'obsidian', 'opds', 'features', 'cli', 'backup', 'proxy', 'all'];
+    const GUIDE_SECTION_IDS = {
+      plugin: 'guide-plugin',
+      kosync: 'guide-kosync',
+      obsidian: 'guide-obsidian',
+      opds: 'guide-opds',
+      features: 'guide-features',
+      cli: 'guide-cli',
+      backup: 'guide-backup',
+      proxy: 'guide-proxy',
+      all: 'guide-endpoints',
+    };
+
     function setGuideTab(tab) {
       try { tgHaptic.light(); } catch {}
       const modalScroll = document.querySelector('#guideModal .overflow-y-auto');
       if (modalScroll) modalScroll.scrollTop = 0;
-      const tabs = ['kosync', 'obsidian', 'opds', 'features', 'cli', 'proxy', 'all'];
-      if (!tabs.includes('backup')) tabs.push('backup');
-      tabs.forEach(t => {
-        const btn = document.getElementById(`guide-tab-${t}`);
-        if (btn) {
-          if (t === tab) {
-            btn.className = 'px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-white text-zinc-950 shadow-sm cursor-pointer transition-all shrink-0';
-          } else {
-            btn.className = 'px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0';
-          }
-        }
-      });
-      const secKosync = document.getElementById('guide-kosync');
-      const secObsidian = document.getElementById('guide-obsidian');
-      const secOpds = document.getElementById('guide-opds');
-      const secFeatures = document.getElementById('guide-features');
-      const secCli = document.getElementById('guide-cli');
-      const secBackup = document.getElementById('guide-backup');
-      const secProxy = document.getElementById('guide-proxy');
-      const secEndpoints = document.getElementById('guide-endpoints');
 
-      if (tab === 'kosync') {
-        secKosync?.classList.remove('hidden');
-        secObsidian?.classList.add('hidden');
-        secOpds?.classList.add('hidden');
-        secFeatures?.classList.add('hidden');
-        secCli?.classList.add('hidden');
-        secBackup?.classList.add('hidden');
-        secProxy?.classList.add('hidden');
-        secEndpoints?.classList.add('hidden');
-      } else if (tab === 'obsidian') {
-        secKosync?.classList.add('hidden');
-        secObsidian?.classList.remove('hidden');
-        secOpds?.classList.add('hidden');
-        secFeatures?.classList.add('hidden');
-        secCli?.classList.add('hidden');
-        secBackup?.classList.add('hidden');
-        secProxy?.classList.add('hidden');
-        secEndpoints?.classList.add('hidden');
-      } else if (tab === 'opds') {
-        secKosync?.classList.add('hidden');
-        secObsidian?.classList.add('hidden');
-        secOpds?.classList.remove('hidden');
-        secFeatures?.classList.add('hidden');
-        secCli?.classList.add('hidden');
-        secBackup?.classList.add('hidden');
-        secProxy?.classList.add('hidden');
-        secEndpoints?.classList.add('hidden');
-      } else if (tab === 'features') {
-        secKosync?.classList.add('hidden');
-        secObsidian?.classList.add('hidden');
-        secOpds?.classList.add('hidden');
-        secFeatures?.classList.remove('hidden');
-        secCli?.classList.add('hidden');
-        secBackup?.classList.add('hidden');
-        secProxy?.classList.add('hidden');
-        secEndpoints?.classList.add('hidden');
-      } else if (tab === 'cli') {
-        secKosync?.classList.add('hidden');
-        secObsidian?.classList.add('hidden');
-        secOpds?.classList.add('hidden');
-        secFeatures?.classList.add('hidden');
-        secCli?.classList.remove('hidden');
-        secBackup?.classList.add('hidden');
-        secProxy?.classList.add('hidden');
-        secEndpoints?.classList.add('hidden');
-      } else if (tab === 'backup') {
-        secKosync?.classList.add('hidden');
-        secObsidian?.classList.add('hidden');
-        secOpds?.classList.add('hidden');
-        secFeatures?.classList.add('hidden');
-        secCli?.classList.add('hidden');
-        secBackup?.classList.remove('hidden');
-        secProxy?.classList.add('hidden');
-        secEndpoints?.classList.add('hidden');
-      } else if (tab === 'proxy') {
-        secKosync?.classList.add('hidden');
-        secObsidian?.classList.add('hidden');
-        secOpds?.classList.add('hidden');
-        secFeatures?.classList.add('hidden');
-        secCli?.classList.add('hidden');
-        secBackup?.classList.add('hidden');
-        secProxy?.classList.remove('hidden');
-        secEndpoints?.classList.add('hidden');
-      } else {
-        secKosync?.classList.remove('hidden');
-        secObsidian?.classList.remove('hidden');
-        secOpds?.classList.remove('hidden');
-        secFeatures?.classList.remove('hidden');
-        secCli?.classList.remove('hidden');
-        secBackup?.classList.remove('hidden');
-        secProxy?.classList.remove('hidden');
-        secEndpoints?.classList.remove('hidden');
+      GUIDE_TAB_IDS.forEach(t => {
+        const btn = document.getElementById(`guide-tab-${t}`);
+        if (!btn) return;
+        btn.className = t === tab
+          ? 'px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-white text-zinc-950 shadow-sm cursor-pointer transition-all shrink-0'
+          : 'px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0';
+      });
+
+      Object.entries(GUIDE_SECTION_IDS).forEach(([t, sectionId]) => {
+        const section = document.getElementById(sectionId);
+        if (!section) return;
+        section.classList.toggle('hidden', !(tab === 'all' || tab === t));
+      });
+
+      if (tab === 'plugin') updateKopluginOrigin();
+    }
+
+    // Shown so the reader can confirm which origin the generated plugin will
+    // target before downloading it (LAN vs WAN download gives different files).
+    function updateKopluginOrigin() {
+      const el = document.getElementById('kopluginOrigin');
+      if (el) el.textContent = window.location.origin;
+    }
+
+    // Downloads the pre-configured KOReader plugin. Goes through the patched
+    // fetch() below so Telegram WebApp initData and the session API key are
+    // attached as headers (never as query parameters).
+    async function downloadKoplugin(btn) {
+      try { tgHaptic.light(); } catch {}
+      const label = btn ? btn.innerHTML : '';
+      if (btn) setHtml(btn, `${svgIcon('spinner', 'w-3.5 h-3.5 animate-spin')} Generating…`);
+      try {
+        const res = await fetch('/api/koplugin/download', { method: 'GET' });
+        if (!res.ok) {
+          let message = `HTTP ${res.status}`;
+          try {
+            const payload = await res.json();
+            if (payload && payload.error) message = payload.error;
+          } catch {}
+          throw new Error(message);
+        }
+        const blob = await res.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = 'lighthouse.koplugin';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 5000);
+        try { tgHaptic.success(); } catch {}
+        showToast('lighthouse.koplugin downloaded — unpack it into koreader/plugins/', 'success');
+      } catch (err) {
+        try { tgHaptic.error(); } catch {}
+        showToast(`Plugin download failed: ${err.message}`, 'error');
+      } finally {
+        if (btn) setHtml(btn, label);
       }
     }
 
