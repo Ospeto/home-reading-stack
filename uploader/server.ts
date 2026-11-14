@@ -122,6 +122,12 @@ import {
   exportAnnotations,
   isAnnotationExportFormat,
 } from "./annotation-export";
+import {
+  buildReadingStatsPayload,
+  getReadingGoal,
+  queryKosyncRecords,
+  setReadingGoal,
+} from "./reading-stats";
 
 export { invalidateHighlightCountsCache };
 import {
@@ -5329,17 +5335,71 @@ async function handleRequestCore(
       }
     }
 
+    const yearParam = url.searchParams.get("year");
+    const targetYear = yearParam ? parseInt(yearParam, 10) : new Date().getFullYear();
+    const kosyncData = withKosyncDb(
+      (db) => queryKosyncRecords(db, { calibreHashMap: getCalibreHashMap().map }),
+      { readonly: true },
+    );
+    const rawRecords = kosyncData?.rawRecords || [];
+    const latestBooks = uniqueBooks.length > 0 ? uniqueBooks : (kosyncData?.latestByBook || []);
+    let calibreBooks: any[] = [];
+    try {
+      calibreBooks = getCalibreBooks(false) || [];
+    } catch (_e) {
+      void _e;
+    }
+
+    const extended = buildReadingStatsPayload({
+      rawRecords,
+      latestBooks,
+      calibreBooks,
+      year: targetYear,
+    });
+
     return jsonResponse(
       {
         totalSessions: progress.length,
-        readingDaysCount: days.size,
+        readingDaysCount: Math.max(days.size, extended.readingDaysCount),
         finishedCount: finishedBooks.length,
         finishedBooks,
         activeBooks,
+        streaks: extended.streaks,
+        dailyReadingTime: extended.dailyReadingTime,
+        heatmap: extended.heatmap,
+        libraryHealth: extended.libraryHealth,
+        goal: extended.goal,
+        recentSessions: extended.recentSessions,
+        summary: extended.summary,
       },
       200,
       corsOrigin,
     );
+  }
+
+  // API: Yearly Reading Goal (GET / POST)
+  if (url.pathname === "/api/kosync/goal" && req.method === "GET") {
+    const yearParam = url.searchParams.get("year");
+    const year = yearParam ? parseInt(yearParam, 10) : new Date().getFullYear();
+    const goal = getReadingGoal(year);
+    return jsonResponse(goal, 200, corsOrigin);
+  }
+
+  if (url.pathname === "/api/kosync/goal" && req.method === "POST") {
+    const { data: body, error: parseErr } = await parseJsonBody<any>(req);
+    if (parseErr || !body) {
+      return jsonResponse(
+        { success: false, error: parseErr || "Invalid JSON payload" },
+        400,
+        corsOrigin,
+      );
+    }
+    const year = typeof body.year === "number" ? body.year : new Date().getFullYear();
+    const targetBooks = typeof body.targetBooks === "number" ? body.targetBooks : (body.targetBooks === null ? null : undefined);
+    const targetHours = typeof body.targetHours === "number" ? body.targetHours : (body.targetHours === null ? null : undefined);
+
+    const updated = setReadingGoal(year, { targetBooks, targetHours });
+    return jsonResponse({ success: true, goal: updated }, 200, corsOrigin);
   }
 
   // API: Bulk Clean Metadata
