@@ -35,6 +35,16 @@ export interface HighlightRecord {
   note: string | null;
   timestamp: string | null;
   created_at?: string;
+  /** Normalized highlight color token (see uploader/annotation-store.ts). */
+  color?: string | null;
+  /** Normalized highlight style token (see uploader/annotation-store.ts). */
+  style?: string | null;
+  /**
+   * Comma-separated set of sources that reported this highlight.
+   * Owned and interpreted by uploader/annotation-store.ts; NULL/empty means the
+   * row predates source tracking and is treated as the `legacy` source.
+   */
+  sources?: string | null;
 }
 
 export interface HighlightCountsResult {
@@ -67,14 +77,52 @@ CREATE TABLE IF NOT EXISTS book_highlights (
   quote TEXT NOT NULL,
   note TEXT,
   timestamp TEXT,
+  color TEXT,
+  style TEXT,
+  sources TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   UNIQUE(book_title, quote) ON CONFLICT REPLACE
 );
 CREATE INDEX IF NOT EXISTS idx_book_highlights_book_id ON book_highlights(book_id);
 CREATE INDEX IF NOT EXISTS idx_book_highlights_title ON book_highlights(book_title);
+CREATE INDEX IF NOT EXISTS idx_book_highlights_color ON book_highlights(color);
+CREATE INDEX IF NOT EXISTS idx_book_highlights_style ON book_highlights(style);
+CREATE INDEX IF NOT EXISTS idx_book_highlights_sources ON book_highlights(sources);
 `;
 
 const _initializedDbs = new WeakSet<Database>();
+
+/**
+ * Columns added after the original table shipped.
+ * The table above is created with them; existing databases get them via ALTER TABLE
+ * so a live cache.db keeps its rows and its UNIQUE(book_title, quote) identity.
+ *
+ * Each statement is a literal so no identifier is ever interpolated into SQL.
+ */
+const HIGHLIGHT_ADDED_COLUMNS: Array<{ name: string; ddl: string }> = [
+  { name: "color", ddl: "ALTER TABLE book_highlights ADD COLUMN color TEXT;" },
+  { name: "style", ddl: "ALTER TABLE book_highlights ADD COLUMN style TEXT;" },
+  { name: "sources", ddl: "ALTER TABLE book_highlights ADD COLUMN sources TEXT;" },
+];
+
+function addMissingHighlightColumns(db: Database): void {
+  const existing = new Set(
+    (db.query("PRAGMA table_info(book_highlights);").all() as Array<{ name: string }>).map(
+      (c) => c.name,
+    ),
+  );
+  for (const column of HIGHLIGHT_ADDED_COLUMNS) {
+    if (!existing.has(column.name)) {
+      db.run(column.ddl);
+    }
+  }
+  // Rows written before source tracking have no owner. Mark them explicitly so
+  // the reconciliation pass in uploader/annotation-store.ts can retire them
+  // instead of leaving them as permanent orphans.
+  db.run(
+    "UPDATE book_highlights SET sources = 'legacy' WHERE sources IS NULL;",
+  );
+}
 
 export function initHighlightsTable(db: Database, force = false): void {
   if (!force && _initializedDbs.has(db)) {
@@ -91,15 +139,28 @@ export function initHighlightsTable(db: Database, force = false): void {
       quote TEXT NOT NULL,
       note TEXT,
       timestamp TEXT,
+      color TEXT,
+      style TEXT,
+      sources TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       UNIQUE(book_title, quote) ON CONFLICT REPLACE
     );
   `);
+  addMissingHighlightColumns(db);
   db.run(
     "CREATE INDEX IF NOT EXISTS idx_book_highlights_book_id ON book_highlights(book_id);",
   );
   db.run(
     "CREATE INDEX IF NOT EXISTS idx_book_highlights_title ON book_highlights(book_title);",
+  );
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_book_highlights_color ON book_highlights(color);",
+  );
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_book_highlights_style ON book_highlights(style);",
+  );
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_book_highlights_sources ON book_highlights(sources);",
   );
   _initializedDbs.add(db);
 }
@@ -651,23 +712,68 @@ export function parseHighlightsFromMarkdown(
 // Database CRUD Operations
 // ----------------------------------------------------------------------------
 
-export function insertOrUpdateHighlight(
-  db: Database,
-  highlight: Omit<HighlightRecord, "id" | "created_at">,
-): number {
-  initHighlightsTable(db);
-  const stmt = db.prepare(`
-    INSERT INTO book_highlights (book_id, book_title, chapter, page, quote, note, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(book_title, quote) DO UPDATE SET
-      book_id = COALESCE(excluded.book_id, book_highlights.book_id),
-      chapter = COALESCE(excluded.chapter, book_highlights.chapter),
-      page = COALESCE(excluded.page, book_highlights.page),
-      note = excluded.note,
-      timestamp = COALESCE(excluded.timestamp, book_highlights.timestamp),
-      created_at = datetime('now');
-  `);
+/**
+ * Marker for a row written without a named ingestion path.
+ * uploader/annotation-store.ts treats this as "unattributed": it is dropped the
+ * moment a real source claims the row, so a retired highlight cannot survive
+ * behind it.
+ */
+export const UNATTRIBUTED_SOURCE = "legacy";
 
+/**
+ * Single owner of the highlight upsert statement.
+ *
+ * `sources` is a comma-separated set: an incoming single-source write joins the
+ * set rather than replacing it, so one row can be claimed by several ingestion
+ * paths at once. An unattributed write never joins a set that a real source
+ * already owns, so it cannot resurrect an unowned claim. uploader/annotation-store.ts
+ * owns what the set means and when a row is retired; this statement only keeps
+ * it well-formed.
+ */
+const UPSERT_HIGHLIGHT_SQL = `
+  INSERT INTO book_highlights
+    (book_id, book_title, chapter, page, quote, note, timestamp, color, style, sources)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(book_title, quote) DO UPDATE SET
+    book_id = COALESCE(excluded.book_id, book_highlights.book_id),
+    chapter = COALESCE(excluded.chapter, book_highlights.chapter),
+    page = COALESCE(excluded.page, book_highlights.page),
+    note = excluded.note,
+    timestamp = COALESCE(excluded.timestamp, book_highlights.timestamp),
+    color = COALESCE(excluded.color, book_highlights.color),
+    style = COALESCE(excluded.style, book_highlights.style),
+    sources = CASE
+      WHEN excluded.sources IS NULL
+        OR trim(excluded.sources) = ''
+        OR trim(excluded.sources) = '${UNATTRIBUTED_SOURCE}'
+        THEN book_highlights.sources
+      WHEN book_highlights.sources IS NULL OR trim(book_highlights.sources) = ''
+        THEN excluded.sources
+      WHEN instr(
+        ',' || book_highlights.sources || ',',
+        ',' || trim(excluded.sources) || ','
+      ) > 0
+        THEN book_highlights.sources
+      ELSE book_highlights.sources || ',' || trim(excluded.sources)
+    END,
+    created_at = datetime('now');
+`;
+
+/**
+ * Variant used by snapshot reconciliation: an annotation the note already holds
+ * survives a re-export that omits it (KOReader's exporter frequently drops
+ * annotations). The direct-edit path keeps the clearing behaviour, which callers
+ * rely on to erase an annotation deliberately.
+ */
+const UPSERT_HIGHLIGHT_PRESERVE_NOTE_SQL = UPSERT_HIGHLIGHT_SQL.replace(
+  "    note = excluded.note,",
+  "    note = COALESCE(excluded.note, book_highlights.note),",
+);
+
+function upsertHighlightRow(
+  stmt: ReturnType<Database["prepare"]>,
+  highlight: Omit<HighlightRecord, "id" | "created_at">,
+): void {
   stmt.run(
     highlight.book_id ?? null,
     highlight.book_title.trim(),
@@ -676,8 +782,18 @@ export function insertOrUpdateHighlight(
     highlight.quote.trim(),
     highlight.note ?? null,
     highlight.timestamp ?? null,
+    highlight.color ?? null,
+    highlight.style ?? null,
+    highlight.sources?.trim() || UNATTRIBUTED_SOURCE,
   );
+}
 
+export function insertOrUpdateHighlight(
+  db: Database,
+  highlight: Omit<HighlightRecord, "id" | "created_at">,
+): number {
+  initHighlightsTable(db);
+  upsertHighlightRow(db.prepare(UPSERT_HIGHLIGHT_SQL), highlight);
   invalidateHighlightCountsCache(db);
   return 1;
 }
@@ -685,35 +801,22 @@ export function insertOrUpdateHighlight(
 export function batchUpsertHighlights(
   db: Database,
   highlights: Omit<HighlightRecord, "id" | "created_at">[],
+  options: { preserveNotes?: boolean } = {},
 ): number {
   if (!highlights || highlights.length === 0) return 0;
   initHighlightsTable(db);
 
   let insertedCount = 0;
-  const insertStmt = db.prepare(`
-    INSERT INTO book_highlights (book_id, book_title, chapter, page, quote, note, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(book_title, quote) DO UPDATE SET
-      book_id = COALESCE(excluded.book_id, book_highlights.book_id),
-      chapter = COALESCE(excluded.chapter, book_highlights.chapter),
-      page = COALESCE(excluded.page, book_highlights.page),
-      note = excluded.note,
-      timestamp = COALESCE(excluded.timestamp, book_highlights.timestamp),
-      created_at = datetime('now');
-  `);
+  const insertStmt = db.prepare(
+    options.preserveNotes
+      ? UPSERT_HIGHLIGHT_PRESERVE_NOTE_SQL
+      : UPSERT_HIGHLIGHT_SQL,
+  );
 
   db.transaction(() => {
     for (const h of highlights) {
       if (h.quote && h.quote.trim()) {
-        insertStmt.run(
-          h.book_id ?? null,
-          h.book_title.trim(),
-          h.chapter ?? null,
-          h.page ?? null,
-          h.quote.trim(),
-          h.note ?? null,
-          h.timestamp ?? null,
-        );
+        upsertHighlightRow(insertStmt, h);
         insertedCount++;
       }
     }
@@ -766,6 +869,48 @@ export function isTitleUniqueForBook(
 }
 
 /**
+ * Static query text for the store's read paths.
+ *
+ * One literal per scope so the SQL text is provably constant: the shared-title
+ * rule only ever changes which of these statements runs, never the text of a
+ * statement, so nothing about a caller's book title reaches SQL as syntax.
+ */
+const HIGHLIGHT_PROJECTION =
+  "id, book_id, book_title, chapter, page, quote, note, timestamp, color, style, sources, created_at";
+
+const HIGHLIGHT_PAGE_ORDER =
+  "ORDER BY CASE WHEN page IS NULL THEN 999999 ELSE page END ASC, id ASC";
+
+const SQL_SELECT_BY_UNIQUE_TITLE =
+  `SELECT ${HIGHLIGHT_PROJECTION} FROM book_highlights WHERE (book_id = ? OR (book_id IS NULL AND lower(trim(book_title)) = lower(trim(?)))) ${HIGHLIGHT_PAGE_ORDER} LIMIT ?;`;
+
+const SQL_SELECT_BY_ID =
+  `SELECT ${HIGHLIGHT_PROJECTION} FROM book_highlights WHERE book_id = ? ${HIGHLIGHT_PAGE_ORDER} LIMIT ?;`;
+
+const SQL_SELECT_BY_TITLE =
+  `SELECT ${HIGHLIGHT_PROJECTION} FROM book_highlights WHERE lower(trim(book_title)) = lower(trim(?)) ${HIGHLIGHT_PAGE_ORDER} LIMIT ?;`;
+
+const SQL_SELECT_BY_ROW_ID =
+  "SELECT id, book_id, book_title, chapter, page, quote, note, timestamp, color, style, sources, created_at FROM book_highlights WHERE id = ?;";
+
+const SQL_SELECT_ALL =
+  `SELECT ${HIGHLIGHT_PROJECTION} FROM book_highlights ${HIGHLIGHT_PAGE_ORDER} LIMIT ?;`;
+
+/**
+ * Reports whether a book's title is safe to widen to unlinked rows.
+ * Single owner of the shared-title rule that the store's read paths share.
+ */
+export function isBookTitleScoped(
+  db: Database,
+  bookId: number,
+  title?: string,
+  calibreDbPath?: string,
+): boolean {
+  if (!title || !title.trim()) return false;
+  return isTitleUniqueForBook(db, bookId, title.trim(), calibreDbPath);
+}
+
+/**
  * Retrieves all highlights for a book by book_id, falling back to title match only if title is unique.
  * If title match finds unlinked highlights (book_id IS NULL) and title is unique, auto-links them to book_id.
  */
@@ -778,53 +923,24 @@ export function getHighlightsForBook(
 ): HighlightRecord[] {
   initHighlightsTable(db);
 
-  let rows: HighlightRecord[] = [];
-
-  if (title && title.trim()) {
-    const cleanTitle = title.trim();
-    const isUnique = isTitleUniqueForBook(db, bookId, cleanTitle, calibreDbPath);
-
-    if (isUnique) {
-      // Auto-link unlinked highlights with matching title only if unique
-      const updateRes = db.run(
-        "UPDATE book_highlights SET book_id = ? WHERE book_id IS NULL AND lower(trim(book_title)) = lower(trim(?));",
-        [bookId, cleanTitle],
-      );
-      if (updateRes && (updateRes as any).changes > 0) {
-        invalidateHighlightCountsCache(db);
-      }
-
-      rows = db
-        .query(
-          `SELECT id, book_id, book_title, chapter, page, quote, note, timestamp, created_at
-           FROM book_highlights
-           WHERE book_id = ? OR (book_id IS NULL AND lower(trim(book_title)) = lower(trim(?)))
-           ORDER BY CASE WHEN page IS NULL THEN 999999 ELSE page END ASC, id ASC
-           LIMIT ?;`,
-        )
-        .all(bookId, cleanTitle, limit) as HighlightRecord[];
-    } else {
-      // Shared title: strictly query by book_id to never leak other books' quotes
-      rows = db
-        .query(
-          `SELECT id, book_id, book_title, chapter, page, quote, note, timestamp, created_at
-           FROM book_highlights
-           WHERE book_id = ?
-           ORDER BY CASE WHEN page IS NULL THEN 999999 ELSE page END ASC, id ASC
-           LIMIT ?;`,
-        )
-        .all(bookId, limit) as HighlightRecord[];
+  let rows: HighlightRecord[];
+  if (isBookTitleScoped(db, bookId, title, calibreDbPath)) {
+    const cleanTitle = (title as string).trim();
+    // Auto-link unlinked highlights with matching title only if unique
+    const updateRes = db.run(
+      "UPDATE book_highlights SET book_id = ? WHERE book_id IS NULL AND lower(trim(book_title)) = lower(trim(?));",
+      [bookId, cleanTitle],
+    );
+    if (updateRes && (updateRes as any).changes > 0) {
+      invalidateHighlightCountsCache(db);
     }
-  } else {
     rows = db
-      .query(
-        `SELECT id, book_id, book_title, chapter, page, quote, note, timestamp, created_at
-         FROM book_highlights
-         WHERE book_id = ?
-         ORDER BY CASE WHEN page IS NULL THEN 999999 ELSE page END ASC, id ASC
-         LIMIT ?;`,
-      )
-      .all(bookId, limit) as HighlightRecord[];
+      .query(SQL_SELECT_BY_UNIQUE_TITLE)
+      .all(bookId, cleanTitle, limit) as HighlightRecord[];
+  } else {
+    // No title, or a title shared with another book: strictly by book_id so no
+    // other book's quotes can leak in.
+    rows = db.query(SQL_SELECT_BY_ID).all(bookId, limit) as HighlightRecord[];
   }
 
   return rows;
@@ -841,15 +957,31 @@ export function getHighlightsByTitle(
   if (!title || !title.trim()) return [];
   initHighlightsTable(db);
 
-  return db
-    .query(
-      `SELECT id, book_id, book_title, chapter, page, quote, note, timestamp, created_at
-       FROM book_highlights
-       WHERE lower(trim(book_title)) = lower(trim(?))
-       ORDER BY CASE WHEN page IS NULL THEN 999999 ELSE page END ASC, id ASC
-       LIMIT ?;`,
-    )
-    .all(title.trim(), limit) as HighlightRecord[];
+  return db.query(SQL_SELECT_BY_TITLE).all(title.trim(), limit) as HighlightRecord[];
+}
+
+/**
+ * Retrieves store rows across every book, newest row first.
+ * Bounded by `limit`; the annotation store filters this in memory so a filter
+ * can never silently truncate a result set.
+ */
+export function selectAllHighlights(
+  db: Database,
+  limit = 50_000,
+): HighlightRecord[] {
+  initHighlightsTable(db);
+  return db.query(SQL_SELECT_ALL).all(limit) as HighlightRecord[];
+}
+
+/** Reads one store row by primary key. */
+export function getHighlightById(
+  db: Database,
+  id: number,
+): HighlightRecord | null {
+  initHighlightsTable(db);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const row = db.query(SQL_SELECT_BY_ROW_ID).get(id) as HighlightRecord | null;
+  return row ?? null;
 }
 
 export const HIGHLIGHT_COUNTS_CACHE_TTL_MS = 30_000; // 30 seconds

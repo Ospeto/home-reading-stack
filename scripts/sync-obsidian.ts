@@ -21,10 +21,17 @@ import process from "node:process";
 import { Database } from "bun:sqlite";
 import {
   getHighlightsCacheDb,
-  batchUpsertHighlights,
   cleanQuoteText,
   parseHighlightsFromMarkdown,
 } from "../uploader/highlights";
+import {
+  ingestBookIntoStore,
+  normalizeColor,
+  normalizeStyle,
+  readStoreNoteEntries,
+  type AnnotationInput,
+  type AnnotationSource,
+} from "../uploader/annotation-store";
 
 // ----------------------------------------------------------------------------
 // Interfaces & Types
@@ -41,6 +48,12 @@ export interface HighlightEntry {
   page?: number | string;
   datetime?: string;
   timestamp?: number;
+  /** Normalized color token produced by uploader/annotation-store.ts. */
+  color?: string;
+  /** Normalized style token produced by uploader/annotation-store.ts. */
+  style?: string;
+  /** Ingestion paths reporting this highlight, when read back from the store. */
+  sources?: string[];
 }
 
 export interface BookSyncData {
@@ -55,6 +68,44 @@ export interface BookSyncData {
   highlights: HighlightEntry[];
   sourceFile?: string;
   bookId?: number;
+  /** Ingestion path that produced `highlights`; defaults to koreader. */
+  source?: AnnotationSource;
+  /**
+   * Per-source snapshots gathered for one book before the note is written.
+   * Each list is that source's complete view, which is what makes deletion
+   * propagation possible.
+   */
+  highlightsBySource?: Partial<Record<AnnotationSource, HighlightEntry[]>>;
+  /**
+   * Retire unattributed pre-upgrade rows.
+   * Set this only when the gathered snapshots cover every device source for the
+   * book; a single-source run (a KOReader export, say) must leave rows another
+   * device may still own alone.
+   */
+  adoptLegacy?: boolean;
+}
+
+/**
+ * Converts per-source discovered entries into the store's input shape.
+ * Discovery keeps page as number-or-string (Kindle writes "45"), so the store
+ * normalizes it rather than two call sites each doing it differently.
+ */
+export function mapSnapshotsToAnnotationInputs(
+  snapshots: Partial<Record<AnnotationSource, HighlightEntry[]>>,
+): Partial<Record<AnnotationSource, AnnotationInput[]>> {
+  const mapped: Partial<Record<AnnotationSource, AnnotationInput[]>> = {};
+  for (const [source, entries] of Object.entries(snapshots)) {
+    mapped[source as AnnotationSource] = (entries ?? []).map((entry) => ({
+      quote: entry.text ?? "",
+      note: entry.notes ?? null,
+      chapter: entry.chapter ?? null,
+      page: typeof entry.page === "number" ? entry.page : null,
+      timestamp: entry.datetime ?? null,
+      color: entry.color ?? null,
+      style: entry.style ?? null,
+    }));
+  }
+  return mapped;
 }
 
 export interface SyncObsidianOptions {
@@ -422,12 +473,28 @@ function parseHighlightEntry(item: any): HighlightEntry | null {
 
   if (!text && !notes) return null;
 
+  // KOReader packs paint style and pen color into one `drawer` token, e.g.
+  // "lighten#ffc000". A drawer with no '#' carries no color at all, so it must
+  // not be mistaken for one.
+  const drawer = typeof item.drawer === "string" ? item.drawer : "";
+  const drawerColor = drawer.includes("#")
+    ? drawer.slice(drawer.indexOf("#"))
+    : "";
+  const rawColor =
+    drawerColor || (typeof item.color === "string" ? item.color : "");
+  const rawStyle =
+    drawer ||
+    (typeof item.kind === "string" ? item.kind : "") ||
+    (typeof item.type === "string" ? item.type : "");
+
   return {
     text: (text || "").trim(),
     notes: (notes || "").trim() || undefined,
     chapter: (chapter || "").trim() || undefined,
     page,
     datetime: datetime ? String(datetime).trim() : undefined,
+    color: normalizeColor(rawColor) || undefined,
+    style: normalizeStyle(rawStyle) || undefined,
   };
 }
 
@@ -507,6 +574,7 @@ export function extractKindleClippings(
           notes: bodyLines,
           page,
           datetime,
+          style: "note",
         });
       }
     } else {
@@ -514,6 +582,7 @@ export function extractKindleClippings(
         text: bodyLines,
         page,
         datetime,
+        style: "highlight",
       });
     }
   }
@@ -653,6 +722,12 @@ export function generateHighlightsSection(
       if (h.page !== undefined && h.page !== null && h.page !== "") {
         metaParts.push(`Page ${h.page}`);
       }
+      // Color and style come from the device's own marking pen, so they are real
+      // new information on the note. The ingestion `source` is internal
+      // bookkeeping and is deliberately not written into the note, which keeps
+      // attribution lines on notes already on disk unchanged.
+      if (h.color) metaParts.push(`color: ${h.color}`);
+      if (h.style) metaParts.push(`style: ${h.style}`);
       if (h.datetime) metaParts.push(h.datetime);
 
       if (metaParts.length > 0) {
@@ -743,7 +818,9 @@ export function generateBookMarkdown(data: BookSyncData): string {
 export function mergeNoteContent(
   existingContent: string,
   data: BookSyncData,
+  options: { authoritative?: boolean } = {},
 ): string {
+  const authoritative = options.authoritative === true;
   if (!existingContent || !existingContent.trim()) {
     return generateBookMarkdown(data);
   }
@@ -871,9 +948,16 @@ export function mergeNoteContent(
   const endIdx = content.indexOf(HIGHLIGHTS_END_MARKER);
 
   if (startIdx !== -1 && endIdx !== -1 && endIdx >= startIdx) {
-    // If incoming highlights are empty, preserve the block untouched!
-    if (data.highlights.length === 0) {
+    // Non-authoritative callers preserve an existing block when they have no
+    // highlights to contribute. An authoritative caller renders the store, so an
+    // empty list is a real answer: every highlight was deleted at its source.
+    if (!authoritative && data.highlights.length === 0) {
       // Keep existing highlights block untouched, only frontmatter and progress were refreshed
+    } else if (authoritative) {
+      const renderedBlock = generateHighlightsSection(data.highlights);
+      const before = content.slice(0, startIdx);
+      const after = content.slice(endIdx + HIGHLIGHTS_END_MARKER.length);
+      content = before + renderedBlock + after;
     } else {
       let existingRecords: any[] = [];
       try {
@@ -944,7 +1028,80 @@ export function mergeNoteContent(
 }
 
 // ----------------------------------------------------------------------------
-// 5. Vault Path & Database Resolution
+// 5. Annotation store bridging (source snapshots and note rendering)
+// ----------------------------------------------------------------------------
+
+export interface StoreNoteExportResult {
+  notePath: string;
+  noteFilename: string;
+  highlightCount: number;
+  content: string;
+}
+
+/**
+ * Renders one book's note from the store and writes it.
+ * The Obsidian note is one exporter of the store: frontmatter, the
+ * `## Highlights & Notes` heading, and the idempotent marker pair are preserved
+ * for notes already on disk, and everything between the markers is the store.
+ */
+export function exportBookNoteFromStore(options: {
+  db: Database;
+  booksDir: string;
+  title: string;
+  author?: string;
+  bookId?: number | null;
+  series?: string;
+  seriesIndex?: number | string;
+  synopsis?: string;
+  progress?: number;
+  status?: "reading" | "finished" | "unread";
+  lastReadDate?: string;
+  noteFilename?: string;
+  dryRun?: boolean;
+}): StoreNoteExportResult {
+  const author = options.author || "Unknown";
+  const sanitized = sanitizeTitle(options.title);
+  const noteFilename =
+    options.noteFilename ||
+    (author !== "Unknown"
+      ? `${sanitized} - ${sanitizeTitle(author)}.md`
+      : `${sanitized}.md`);
+  const notePath = path.join(options.booksDir, noteFilename);
+
+  const highlights = readStoreNoteEntries(options.db, options.bookId, options.title);
+  const payload: BookSyncData = {
+    title: options.title,
+    author,
+    series: options.series,
+    seriesIndex: options.seriesIndex,
+    synopsis: options.synopsis,
+    progress: options.progress,
+    status: options.status,
+    lastReadDate: options.lastReadDate,
+    highlights,
+    bookId: options.bookId ?? undefined,
+    source: "obsidian",
+  };
+
+  let existing = "";
+  if (fs.existsSync(notePath)) {
+    existing = fs.readFileSync(notePath, "utf8");
+  }
+  const content = existing
+    ? mergeNoteContent(existing, payload, { authoritative: true })
+    : generateBookMarkdown(payload);
+
+  if (!options.dryRun) {
+    const dir = path.dirname(notePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(notePath, content, "utf8");
+  }
+
+  return { notePath, noteFilename, highlightCount: highlights.length, content };
+}
+
+// ----------------------------------------------------------------------------
+// 6. Vault Path & Database Resolution
 // ----------------------------------------------------------------------------
 
 export function resolveVaultPath(cliVaultPath?: string): string {
@@ -1290,9 +1447,31 @@ export async function syncObsidian(
     const key = `${incoming.title.toLowerCase().trim()}___${(incoming.author || "unknown").toLowerCase().trim()}`;
     const existing = booksMap.get(key);
     if (!existing) {
-      booksMap.set(key, { ...incoming, highlights: [...incoming.highlights] });
+      booksMap.set(key, {
+        ...incoming,
+        highlights: [...(incoming.highlights ?? [])],
+        // Copy the per-source buckets so merging never mutates the caller's data.
+        highlightsBySource: Object.fromEntries(
+          Object.entries(incoming.highlightsBySource ?? {}).map(([k, v]) => [
+            k,
+            [...(v ?? [])],
+          ]),
+        ) as Partial<Record<AnnotationSource, HighlightEntry[]>>,
+      });
       return;
     }
+
+    // Merge the per-source snapshots, which is what per-source reconciliation
+    // reads. Dropping them here would collapse every device into one list and
+    // make a source's own deletion invisible.
+    const mergedBySource = existing.highlightsBySource ?? {};
+    for (const [src, entries] of Object.entries(incoming.highlightsBySource ?? {})) {
+      const bucket = mergedBySource[src as AnnotationSource] ?? [];
+      bucket.push(...(entries ?? []));
+      mergedBySource[src as AnnotationSource] = bucket;
+    }
+    existing.highlightsBySource = mergedBySource;
+    if (incoming.adoptLegacy) existing.adoptLegacy = true;
 
     // Merge highlights with deduplication based on normalized quote text
     const seen = new Map<string, HighlightEntry>();
@@ -1311,7 +1490,7 @@ export async function syncObsidian(
         seen.set(hKey, h);
       }
     }
-    for (const h of incoming.highlights) {
+    for (const h of incoming.highlights ?? []) {
       const hKey = cleanKey(h.text || "");
       if (hKey) {
         const ex = seen.get(hKey);
@@ -1393,7 +1572,13 @@ export async function syncObsidian(
                 synopsis: parsed.description,
                 progress,
                 highlights: parsed.highlights,
+                source:
+                  "koreader" as AnnotationSource,
+                highlightsBySource: { koreader: parsed.highlights },
                 sourceFile: luaPath,
+                // Sidecars are a device's complete note state, so this pass may
+                // retire pre-upgrade unattributed rows it no longer reports.
+                adoptLegacy: true,
               });
             }
           }
@@ -1415,7 +1600,11 @@ export async function syncObsidian(
               title: bData.title,
               author: bData.author,
               highlights: bData.highlights,
+              source: "kindle" as AnnotationSource,
+              highlightsBySource: { kindle: bData.highlights },
               sourceFile: clipFile,
+              // My Clippings.txt is the device's full clipping log.
+              adoptLegacy: true,
             });
           }
         }
@@ -1557,8 +1746,6 @@ export async function syncObsidian(
         sourceFile: book.sourceFile,
       };
 
-      result.totalHighlightsFound += book.highlights.length;
-
       const isSharedTitle =
         booksToSync.filter((b) => b.title.toLowerCase().trim() === normTitle).length > 1 ||
         calibreMap.has(`__shared__${normTitle}`);
@@ -1576,70 +1763,78 @@ export async function syncObsidian(
         throw new Error(`Security: note path escapes books directory: ${noteFilename}`);
       }
 
-      let action: "created" | "updated" | "skipped" = "created";
+      const storeTitle =
+        isSharedTitle && finalAuthor && finalAuthor !== "Unknown"
+          ? `${finalTitle.trim()} - ${finalAuthor.trim()}`
+          : finalTitle.trim();
 
-      if (fs.existsSync(notePath)) {
-        action = "updated";
-        const existingContent = fs.readFileSync(notePath, "utf8");
-        const mergedContent = mergeNoteContent(existingContent, mergedData);
+      const action: "created" | "updated" | "skipped" = fs.existsSync(notePath)
+        ? "updated"
+        : "created";
+      const existingContent = action === "updated"
+        ? fs.readFileSync(notePath, "utf8")
+        : "";
 
-        if (!dryRun) {
-          fs.writeFileSync(notePath, mergedContent, "utf8");
+      let highlightCount = book.highlights.length;
+
+      if (dryRun) {
+        // A dry run must not touch the store, so it previews the discovered
+        // entries rather than the reconciled result.
+        if (action === "updated") {
+          mergeNoteContent(existingContent, mergedData);
+          result.notesUpdated++;
+        } else {
+          generateBookMarkdown(mergedData);
+          result.notesCreated++;
         }
-        result.notesUpdated++;
       } else {
-        const newContent = generateBookMarkdown(mergedData);
-        if (!dryRun) {
-          fs.writeFileSync(notePath, newContent, "utf8");
-        }
-        result.notesCreated++;
+        const db = getHighlightsCacheDb();
+        // An empty bucket map is not the same as "no per-source data": fall back
+        // to the merged list so a caller that supplies only `highlights` still
+        // reconciles that source's snapshot.
+        const bySource = book.highlightsBySource;
+        const snapshots =
+          bySource && Object.keys(bySource).length > 0
+            ? bySource
+            : { [book.source ?? "koreader"]: book.highlights };
+
+        ingestBookIntoStore({
+          db,
+          bookId: mergedData.bookId ?? null,
+          title: storeTitle,
+          snapshots: mapSnapshotsToAnnotationInputs(snapshots),
+          noteContent: existingContent,
+          adoptLegacy: book.adoptLegacy === true,
+        });
+
+        const exported = exportBookNoteFromStore({
+          db,
+          booksDir,
+          title: storeTitle,
+          author: finalAuthor,
+          bookId: mergedData.bookId ?? null,
+          series: finalSeries,
+          seriesIndex: finalSeriesIndex,
+          synopsis: finalSynopsis,
+          progress: finalProgress,
+          status: finalStatus,
+          lastReadDate,
+          noteFilename,
+        });
+
+        highlightCount = exported.highlightCount;
+        if (action === "updated") result.notesUpdated++;
+        else result.notesCreated++;
       }
 
-      // Index highlights into cache.db for LightHouse Web Highlights Viewer
-      if (!dryRun && mergedData.highlights && mergedData.highlights.length > 0) {
-        try {
-          const dbTitle = isSharedTitle && finalAuthor && finalAuthor !== "Unknown"
-            ? `${finalTitle.trim()} - ${finalAuthor.trim()}`
-            : finalTitle.trim();
-
-          const records = mergedData.highlights
-            .map((h) => {
-              let pageNum: number | null = null;
-              if (typeof h.page === "number") pageNum = h.page;
-              else if (h.page) {
-                const parsed = parseInt(String(h.page), 10);
-                if (!Number.isNaN(parsed)) pageNum = parsed;
-              }
-              const quote = cleanQuoteText(h.text);
-              if (!quote) return null;
-              return {
-                book_id: mergedData.bookId ?? null,
-                book_title: dbTitle,
-                chapter: h.chapter || null,
-                page: pageNum,
-                quote,
-                note: h.notes || null,
-                timestamp: h.datetime || null,
-              };
-            })
-            .filter((r): r is NonNullable<typeof r> => r !== null);
-
-          if (records.length > 0) {
-            const hDb = getHighlightsCacheDb();
-            batchUpsertHighlights(hDb, records);
-          }
-        } catch (_indexErr) {
-          void _indexErr;
-          // Fail-open
-        }
-      }
+      result.totalHighlightsFound += highlightCount;
 
       result.items.push({
         title: finalTitle,
         author: finalAuthor,
         filename: noteFilename,
         outputPath: notePath,
-        highlightCount: book.highlights.length,
+        highlightCount,
         progress: finalProgress,
         status: finalStatus,
         action,

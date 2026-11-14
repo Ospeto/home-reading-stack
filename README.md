@@ -447,6 +447,18 @@ LightHouse bridges your reading devices (KOReader on Kobo/Kindle/Android, native
      - `GET /api/highlights?title=...`: Query highlights by title or retrieve aggregate counts.
      - `GET /api/books`: Book list payload includes `highlightCount` and `highlightPreview` for instant UI rendering.
 
+6. **Unified Annotation Store (single queryable owner for every highlight):**
+   - `book_highlights` in `cache.db` is the one store KOReader, Kindle, the LightHouse web reader, and Obsidian note sync all write into (`uploader/annotation-store.ts`). Markdown parsing stays in the existing parsers (`uploader/highlights.ts`, `uploader/joplin.ts`); the store owns only storage, filtering, and reconciliation.
+   - **Sources:** each row records the set of ingestion paths that currently report it (`koreader`, `kindle`, `web`, `obsidian`, and `legacy` for rows written before source tracking). A highlight reported by two paths is one row claimed by both.
+   - **Color and style:** `color` is normalized to a name (`red`, `orange`, `yellow`, `green`, `cyan`, `blue`, `purple`, `pink`, `grey`) from KOReader's drawer token (`lighten#ffc000`) or a named color; `style` is `highlight`, `underline`, `strikethrough`, `invert`, `note`, or `bookmark`. Kindles' `Note`/`Highlight` clipping kinds map onto `style`.
+   - **Filterable:** `GET /api/annotations?color=yellow&style=underline&source=koreader&q=spice&book_id=1&limit=250` returns matching annotations plus a `summary` of counts per color, style, and source.
+   - **Exportable:** `GET /api/highlights/export?format=markdown|csv|json` (same filter parameters, optional `book_id`/`title`) returns a downloadable document and an `x-annotation-count` header. Markdown groups quotes by book; CSV is RFC 4180 with a spreadsheet formula-injection guard; JSON carries a `sources` array. Configured credentials (including `JOPLIN_TOKEN`) and `token=`/`api_key=`/`Bearer` shapes are redacted as `[redacted]` in every format.
+   - **Web reader writes:** `POST /api/annotations` adds a highlight (defaults to the `web` source; an unknown source is rejected rather than invented), and `DELETE /api/annotations/:id` removes one from the store and therefore from every export.
+   - **Deletion propagates by evidence, not assumption:** ingestion is snapshot-based. Writing a source's complete highlight list for a book retires every row that source no longer reports, and a row left with no owner at all is deleted. Because the Obsidian note, Markdown, CSV, and JSON all render the store rather than the last snapshot written, a highlight deleted at its source disappears from all of them. The Obsidian note keeps its path, frontmatter, `## Highlights & Notes` heading, and idempotent marker pair; only the managed region is regenerated.
+   - **Where snapshots come from:** the KOReader `.sdr` sync (`bin/lighthouse sync-obsidian`) and the Kindle pull (`bin/lighthouse sync-kindle`) read a device's complete state and are therefore authoritative, retiring what the device dropped. Both opt into retiring pre-upgrade unattributed (`legacy`) rows. The Joplin clipper and the OTA `POST /api/highlights/sync` path ingest into the store additively, because a single push payload is not proof that a quote was deleted; their rows are retired by the next authoritative device sync.
+   - **Manual note entries:** a quote added by hand inside the markers is claimed by the `obsidian` source so it survives, and removing it from the note removes it from the store. A note copy of a device quote is never adopted, so it cannot resurrect a deletion.
+   - **Orphan cleanup:** `pruneLegacyAnnotations()` (exposed for maintenance) deletes rows no ingestion path claims.
+
 ---
 
 ## 🧠 Jev System-1 Ingestion Intelligence

@@ -35,6 +35,10 @@ import {
   resolveBookIdFromTitle,
   isTitleUniqueForBook,
 } from "./highlights";
+import {
+  ingestBookIntoStore,
+  type AnnotationNoteEntry,
+} from "./annotation-store";
 
 // ----------------------------------------------------------------------------
 // Constants & Markers
@@ -629,6 +633,8 @@ export function isGeneratedAttributionLine(line: string): boolean {
     if (/^(?:Page|Location|Pos|Position)\s+\d+(?:\s*[@·,]\s*[^\n]+)?$/i.test(p)) return true;
     if (/^@\s*\S+/.test(p)) return true;
     if (/^\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}(?::\d{2})?)?$/.test(p)) return true;
+    // Store metadata the annotation store writes onto a quote's attribution line.
+    if (/^(?:color|style|source)\s*:\s*\S+$/i.test(p)) return true;
     return false;
   };
 
@@ -1047,6 +1053,34 @@ function rebuildInvertedHighlightSection(restOfContent: string): string {
   return `${beforeHn}\n${HIGHLIGHTS_START_MARKER}\n${managed}\n${HIGHLIGHTS_END_MARKER}\n${tail}`;
 }
 
+/**
+ * Builds one note block (quote, attribution line, note) from a store annotation.
+ * The shape matches what the Obsidian exporter renders and what
+ * splitHighlightEntries reads back, so a store-rendered note round-trips.
+ */
+export function renderAnnotationBlock(entry: AnnotationNoteEntry): string {
+  const quote = (entry.text || "").trim();
+  if (!quote) return "";
+
+  const lines = quote.split("\n").map((line) => `> ${line.trim()}`);
+
+  const meta: string[] = [];
+  if (entry.chapter) meta.push(`*${entry.chapter}*`);
+  if (entry.page !== undefined && entry.page !== null) {
+    meta.push(`Page ${entry.page}`);
+  }
+  if (entry.color) meta.push(`color: ${entry.color}`);
+  if (entry.style) meta.push(`style: ${entry.style}`);
+  if (entry.sources && entry.sources.length > 0) {
+    meta.push(`source: ${entry.sources.join("+")}`);
+  }
+  if (entry.datetime) meta.push(entry.datetime);
+
+  if (meta.length > 0) lines.push("", `\u2014 ${meta.join(", ")}`);  if (entry.notes) lines.push(`**Note:** ${entry.notes}`);
+
+  return lines.join("\n");
+}
+
 export function renderHighlightEntries(entries: ParsedHighlightEntry[]): string {
   const parts: string[] = [];
   let lastChapter: string | undefined;
@@ -1379,6 +1413,13 @@ export function mergeJoplinHighlights(
     updated?: string;
     booksDir?: string;
     calibreDbPath?: string;
+    /**
+     * Authoritative highlight list read back from the annotation store.
+     * When present, the managed marker region is rendered from these entries
+     * instead of being unioned with whatever the note already held, which is how
+     * a highlight deleted at its source stops appearing in the note.
+     */
+    storeEntries?: ParsedHighlightEntry[];
   },
 ): string {
   const updatedIso = options?.updated || new Date().toISOString();
@@ -1410,10 +1451,15 @@ export function mergeJoplinHighlights(
   const headingTitle = sanitizeNoteHeading(title);
   const cleanedBody = cleanIncomingHighlightBody(newBody, title);
   const incomingEntries = splitHighlightEntries(cleanedBody);
+  const authoritativeEntries = options?.storeEntries;
+  const isAuthoritative = Array.isArray(authoritativeEntries);
+  const effectiveEntries = isAuthoritative ? authoritativeEntries : incomingEntries;
   const renderedIncoming =
-    incomingEntries.length > 0
-      ? renderHighlightEntries(incomingEntries)
-      : cleanedBody || "*No highlights recorded yet.*";
+    effectiveEntries.length > 0
+      ? renderHighlightEntries(effectiveEntries)
+      : isAuthoritative
+        ? "*No highlights recorded yet.*"
+        : cleanedBody || "*No highlights recorded yet.*";
 
   // 1. If no existing content: generate complete new note
   if (!existingContent || !existingContent.trim()) {
@@ -1546,7 +1592,10 @@ export function mergeJoplinHighlights(
 
     let finalHighlights: string;
 
-    if (isExistingEmpty) {
+    if (isAuthoritative) {
+      // The store is the truth for this region; nothing is unioned in.
+      finalHighlights = renderedIncoming;
+    } else if (isExistingEmpty) {
       finalHighlights = renderedIncoming;
     } else {
       finalHighlights =
@@ -1574,10 +1623,11 @@ export function mergeJoplinHighlights(
       const before = restOfContent.slice(0, headerEnd);
       const after = restOfContent.slice(headerEnd);
       const { managed, remainder } = splitUnclosedHighlightRegion(after);
-      const mergedBlock =
-        renderHighlightEntries(
-          mergeHighlightEntries(managed, incomingEntries),
-        ) || renderedIncoming;
+      const mergedBlock = isAuthoritative
+        ? renderedIncoming
+        : renderHighlightEntries(
+            mergeHighlightEntries(managed, incomingEntries),
+          ) || renderedIncoming;
       const tail = remainder.replace(/^\n*/, "");
       restOfContent = `${before}\n${HIGHLIGHTS_START_MARKER}\n${mergedBlock}\n${HIGHLIGHTS_END_MARKER}\n${tail}`;
     } else {
@@ -1743,6 +1793,10 @@ export async function processJoplinNote(
   let fileExisted = false;
   let existingContent = "";
   let merged = "";
+  // Set once this export has been ingested into the annotation store. The note is
+  // rendered from the store when it is true; when it is false the legacy
+  // post-write indexer remains as a fail-open fallback.
+  let storeIngested = false;
 
   // Serialize note writes per target note path to prevent race conditions during rapid concurrent sync
   const lockKey = notePath;
@@ -1785,6 +1839,46 @@ export async function processJoplinNote(
       if (err?.code !== "ENOENT") throw err;
     }
 
+    // Ingest this export into the annotation store so the quotes are queryable,
+    // filterable, and exportable alongside every other source.
+    //
+    // The note itself keeps its additive merge: the clipper is a per-export push
+    // whose payloads are not guaranteed to be the document's complete list, so a
+    // payload that omits a quote must not be read as a deletion. Authoritative
+    // deletion propagation runs where a device's complete state is read (the
+    // KOReader `.sdr` sync and the Kindle pull), which is where a real deletion
+    // is observable.
+    let storeIngestedHere = false;
+    try {
+      // Reuse the existing highlight parser rather than hand-splitting the block:
+      // `parseHighlightsFromMarkdown` already separates the quote from its
+      // attribution line, and the store must receive the quote, not the block.
+      const incomingRecords = parseHighlightsFromMarkdown(
+        cleanIncomingHighlightBody(rawBody, title),
+        title,
+        resolvedBookId,
+      );
+      ingestBookIntoStore({
+        db: hDb,
+        bookId: resolvedBookId,
+        title: fileTitle,
+        snapshots: {
+          koreader: incomingRecords.map((record) => ({
+            quote: record.quote,
+            note: record.note,
+            chapter: record.chapter,
+            page: record.page,
+            timestamp: record.timestamp,
+          })),
+        },
+      });
+      storeIngestedHere = true;
+    } catch (_storeErr) {
+      void _storeErr;
+      // Fail-open: a store problem must never stop the note being written.
+    }
+    storeIngested = storeIngestedHere;
+
     merged = mergeJoplinHighlights(existingContent, rawBody, title, {
       booksDir: realDir,
       calibreDbPath: options.calibreDbPath,
@@ -1798,23 +1892,26 @@ export async function processJoplinNote(
     }
   }
 
-  // Index highlights into SQLite cache database for LightHouse Web Viewer
-  try {
-    const bookId = resolvedBookId;
-    const highlights = parseHighlightsFromMarkdown(merged, title, bookId);
-    if (highlights.length > 0) {
-      // Check if title is shared across books; if so, disambiguate title to prevent cross-book highlight overwriting
-      if (isShared && author && author !== "Unknown") {
-        const disambiguatedTitle = `${title.trim()} - ${author.trim()}`;
-        for (const h of highlights) {
-          h.book_title = disambiguatedTitle;
+  // Fallback indexing for the LightHouse Web Viewer.
+  // The store ingest above already owns these rows; this only runs when the
+  // store path failed, so a transient store error cannot lose the note's quotes.
+  if (!storeIngested) {
+    try {
+      const highlights = parseHighlightsFromMarkdown(merged, title, resolvedBookId);
+      if (highlights.length > 0) {
+        // Check if title is shared across books; if so, disambiguate title to prevent cross-book highlight overwriting
+        if (isShared && author && author !== "Unknown") {
+          const disambiguatedTitle = `${title.trim()} - ${author.trim()}`;
+          for (const h of highlights) {
+            h.book_title = disambiguatedTitle;
+          }
         }
+        batchUpsertHighlights(hDb, highlights);
       }
-      batchUpsertHighlights(hDb, highlights);
+    } catch (_indexErr) {
+      void _indexErr;
+      // Fail-open: indexing errors should never block note persistence
     }
-  } catch (_indexErr) {
-    void _indexErr;
-    // Fail-open: indexing errors should never block note persistence
   }
 
   const parsedEntries = splitHighlightEntries(
