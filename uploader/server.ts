@@ -39,6 +39,12 @@ import {
 import { parseObsidianUri } from "./obsidian";
 import { generateOpdsFeed, rewriteOpdsXml } from "./opds";
 import {
+  generateKoplugin,
+  kopluginDownloadHeaders,
+  resolveApiKeyFromEnv,
+  resolvePluginBaseUrl,
+} from "./koplugin";
+import {
   isWanRequest,
   authenticateRequest,
   AuthenticateRequestOptions,
@@ -2289,9 +2295,20 @@ export function getCalibreBooksResult(forceFresh = false): {
         const hasCommentsTable = Boolean(
           db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='comments' LIMIT 1").get()
         );
+        // Calibre keeps star ratings in a many-to-many join; guard both tables so
+        // older or pruned schemas still produce a feed (rating simply stays null).
+        const hasRatingsTable = Boolean(
+          db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='books_ratings_link' LIMIT 1").get()
+        ) && Boolean(
+          db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ratings' LIMIT 1").get()
+        );
 
         const commentsSelect = hasCommentsTable ? "c.text as comments" : "NULL as comments";
         const commentsJoin = hasCommentsTable ? "LEFT JOIN comments c ON b.id = c.book" : "";
+        const ratingSelect = hasRatingsTable ? "MAX(r.rating) as rating" : "NULL as rating";
+        const ratingJoin = hasRatingsTable
+          ? "LEFT JOIN books_ratings_link brl ON b.id = brl.book LEFT JOIN ratings r ON brl.rating = r.id"
+          : "";
 
         const sqlQuery = hasLangTable
           ? `
@@ -2301,6 +2318,7 @@ export function getCalibreBooksResult(forceFresh = false): {
                    GROUP_CONCAT(DISTINCT t.name) as tags,
                    pub.name as publisher,
                    GROUP_CONCAT(DISTINCT l.lang_code) as languages,
+                   ${ratingSelect},
                    ${commentsSelect}
             FROM books b
             JOIN data d ON b.id = d.book AND UPPER(d.format) = 'EPUB'
@@ -2314,6 +2332,7 @@ export function getCalibreBooksResult(forceFresh = false): {
             LEFT JOIN publishers pub ON bpl.publisher = pub.id
             LEFT JOIN books_languages_link bll ON b.id = bll.book
             LEFT JOIN languages l ON bll.lang_code = l.id
+            ${ratingJoin}
             ${commentsJoin}
             GROUP BY b.id
             ORDER BY b.id DESC;
@@ -2325,6 +2344,7 @@ export function getCalibreBooksResult(forceFresh = false): {
                    GROUP_CONCAT(DISTINCT t.name) as tags,
                    pub.name as publisher,
                    NULL as languages,
+                   ${ratingSelect},
                    ${commentsSelect}
             FROM books b
             JOIN data d ON b.id = d.book AND UPPER(d.format) = 'EPUB'
@@ -2336,6 +2356,7 @@ export function getCalibreBooksResult(forceFresh = false): {
             LEFT JOIN tags t ON btl.tag = t.id
             LEFT JOIN books_publishers_link bpl ON b.id = bpl.book
             LEFT JOIN publishers pub ON bpl.publisher = pub.id
+            ${ratingJoin}
             ${commentsJoin}
             GROUP BY b.id
             ORDER BY b.id DESC;
@@ -2359,6 +2380,7 @@ export function getCalibreBooksResult(forceFresh = false): {
                 .filter(Boolean)
             : [],
           publisher: row.publisher || null,
+          rating: Number.isFinite(Number(row.rating)) && Number(row.rating) > 0 ? Number(row.rating) : null,
           comments: row.comments || null,
           languages: row.languages
             ? row.languages
@@ -4339,15 +4361,38 @@ async function handleRequestCore(
         })
       : books;
 
+    // OPDS paging (standard `start`/`count` parameters). Without them the feed
+    // keeps returning the whole catalog, so existing OPDS clients and the
+    // manual setup path are unaffected; with them a low-memory e-reader can
+    // walk the library a page at a time instead of downloading it all at once.
+    const rawStart = Number.parseInt(url.searchParams.get("start") ?? "", 10);
+    const startIndex = Number.isFinite(rawStart) && rawStart > 0 ? rawStart : 0;
+    const rawCount = Number.parseInt(url.searchParams.get("count") ?? "", 10);
+    const pageCount = Number.isFinite(rawCount) && rawCount > 0 ? Math.min(rawCount, 200) : 0;
+    const pageBooks = pageCount > 0
+      ? filteredBooks.slice(startIndex, startIndex + pageCount)
+      : filteredBooks.slice(startIndex);
+
     const feedPathWithSearch = url.pathname + (url.search || "");
     const feedTitle = query
       ? `LightHouse OPDS Catalog - Search: ${query}`
       : "LightHouse OPDS Catalog";
 
-    const opdsXml = generateOpdsFeed(filteredBooks, {
+    let nextHref: string | undefined;
+    if (pageCount > 0 && startIndex + pageBooks.length < filteredBooks.length) {
+      const nextParams = new URLSearchParams(url.searchParams);
+      nextParams.set("start", String(startIndex + pageBooks.length));
+      nextParams.set("count", String(pageCount));
+      nextHref = `${url.pathname}?${nextParams.toString()}`;
+    }
+
+    const opdsXml = generateOpdsFeed(pageBooks, {
       title: feedTitle,
       feedUrl: feedPathWithSearch,
       publicBaseUrl: `${url.protocol}//${url.host}`,
+      nextHref,
+      startIndex,
+      totalResults: filteredBooks.length,
     });
 
     const opdsHeaders: Record<string, string> = {
@@ -4365,6 +4410,85 @@ async function handleRequestCore(
       return new Response(null, { status: 200, headers: opdsHeaders });
     }
     return new Response(opdsXml, { status: 200, headers: opdsHeaders });
+  }
+
+  // API: KOReader plugin (.koplugin) download
+  //
+  // Generates a per-request archive from the repo template plus the current
+  // server settings. Unlike the other read-only GET routes this one is always
+  // authenticated, including over the LAN path: the artifact contains a
+  // credential, and the server has no way to tell a reader's browser from an
+  // arbitrary LAN host. The credential itself is never echoed in the response,
+  // never written to disk, and never accepted from a query string.
+  if (
+    (url.pathname === "/api/koplugin/download" ||
+      url.pathname === "/api/koreader/plugin/download") &&
+    (req.method === "GET" || req.method === "HEAD")
+  ) {
+    const pluginSocketIp = server?.requestIP?.(req)?.address;
+    const pluginIsWan = isWanRequest(req, {
+      server,
+      remoteAddress: pluginSocketIp,
+    });
+    const pluginAuth = authenticateRequest(req, {
+      server,
+      remoteAddress: pluginSocketIp,
+      isWan: pluginIsWan,
+    });
+    if (!pluginAuth.authenticated) {
+      return jsonResponse(
+        {
+          success: false,
+          error: pluginAuth.error || "Authentication required",
+        },
+        401,
+        corsOrigin,
+      );
+    }
+
+    try {
+      const trustForwarded = Boolean(
+        pluginSocketIp &&
+          ["127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"].includes(
+            pluginSocketIp.replace(/^::ffff:/, "").trim(),
+          ),
+      );
+      const pluginBaseUrl = resolvePluginBaseUrl(req, url, { trustForwarded });
+      const generated = generateKoplugin({
+        baseUrl: pluginBaseUrl,
+        apiKey: resolveApiKeyFromEnv(),
+      });
+
+      const pluginHeaders: Record<string, string> = kopluginDownloadHeaders();
+      if (corsOrigin && isAllowedOrigin(corsOrigin)) {
+        pluginHeaders["Access-Control-Allow-Origin"] = corsOrigin;
+        pluginHeaders["Access-Control-Allow-Credentials"] = "true";
+        pluginHeaders["Vary"] = "Origin";
+      }
+
+      if (req.method === "HEAD") {
+        return new Response(null, { status: 200, headers: pluginHeaders });
+      }
+
+      return new Response(generated.zip, {
+        status: 200,
+        headers: {
+          ...pluginHeaders,
+          "Content-Length": String(generated.zip.length),
+        },
+      });
+    } catch (pluginErr) {
+      // Never surface the key or the rendered config; only the failure reason.
+      console.error(
+        "[Koplugin] generation failed:",
+        pluginErr instanceof Error ? pluginErr.message : "unknown error",
+      );
+      return jsonResponse(
+        { success: false, error: "Plugin generation failed" },
+        500,
+        corsOrigin,
+      );
+    }
   }
 
   const isMutating = ["POST", "PUT", "DELETE", "PATCH"].includes(

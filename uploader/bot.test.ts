@@ -1454,7 +1454,16 @@ describe("Webpage Manual & KOReader Connection Section (index.html)", () => {
     expect(html).toContain("moe");
     expect(html).toContain("Automatically keep documents in sync");
 
-    expect(html).toContain("KOReader OPDS Catalog (Direct Download)");
+    // Generated plugin is the primary path; manual OPDS remains documented as
+    // the fallback for devices that cannot load external plugins.
+    expect(html).toContain("LightHouse KOReader Plugin (Recommended)");
+    expect(html).toContain('id="guide-tab-plugin"');
+    expect(html).toContain('id="guide-plugin"');
+    expect(html).toContain("downloadKoplugin(this)");
+    expect(html).toContain("/api/koplugin/download");
+    expect(html).toContain("lighthouse.koplugin");
+    expect(html).toContain("KOReader OPDS Catalog (Manual Setup)");
+    expect(html).toContain("Manual fallback.");
     expect(html).toContain("Search icon (magnifying glass)");
     expect(html).toContain("OPDS catalog");
     expect(html).toContain("Add new catalog");
@@ -2757,9 +2766,12 @@ describe("Documentation, Manual Sync & Standing Invariant Verification", () => {
     expect(html).toContain("Apple WWDC Fluid Interface &amp; Keyboard Control");
     expect(html).toContain("Full-Width Grid &amp; Fluid Filter Sheet");
 
-    // Tab wiring in setGuideTab
-    expect(html).toContain("const tabs = ['kosync', 'obsidian', 'opds', 'features', 'cli', 'proxy', 'all'];");
-    expect(html).toContain("secFeatures?.classList.remove('hidden');");
+    // Tab wiring in setGuideTab (data-driven since the plugin tab was added)
+    expect(html).toContain(
+      "const GUIDE_TAB_IDS = ['plugin', 'kosync', 'obsidian', 'opds', 'features', 'cli', 'backup', 'proxy', 'all'];",
+    );
+    expect(html).toContain("features: 'guide-features',");
+    expect(html).toContain("section.classList.toggle('hidden', !(tab === 'all' || tab === t));");
     expect(html).toContain("modalScroll.scrollTop = 0;");
 
     // Book card hover synopsis preview integration & CSS
