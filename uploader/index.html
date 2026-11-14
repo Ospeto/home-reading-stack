@@ -1497,6 +1497,13 @@
       <symbol id="icon-triangle-exclamation" viewBox="0 0 24 24" fill="none" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
       </symbol>
+      <symbol id="icon-chart-bar" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+      </symbol>
+      <symbol id="icon-fire" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 18.657A8 8 0 016.343 7.343S7 9 9 10c0-2 .5-5 2.986-7C14 5 16.09 5.777 17.656 7.343A7.975 7.975 0 0120 13a7.975 7.975 0 01-2.343 5.657z"/>
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.879 16.121A3 3 0 1012.015 11L11 14H9c0 .768.293 1.536.879 2.121z"/>
+      </symbol>
     </defs>
   </svg>
 
@@ -1532,6 +1539,12 @@
           <button id="storageBtn" onclick="openStorageModal()" class="h-9 w-9 sm:w-auto sm:px-3.5 rounded-full text-zinc-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-[0.96] backdrop-blur-md shadow-sm" title="Storage & SSD Backup">
             <svg class="w-4 h-4 text-zinc-300"><use href="#icon-hard-drive"/></svg>
             <span class="hidden md:inline text-xs font-medium">Backup</span>
+          </button>
+
+          <!-- Reading Statistics & Telemetry Button -->
+          <button id="readingStatsBtn" onclick="openReadingStatsModal()" class="h-9 w-9 sm:w-auto sm:px-3.5 rounded-full text-zinc-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-[0.96] backdrop-blur-md shadow-sm" title="Reading Statistics, Heatmap & Library Health">
+            <svg class="w-4 h-4 text-amber-400"><use href="#icon-chart-bar"/></svg>
+            <span class="hidden md:inline text-xs font-medium">Stats</span>
           </button>
 
           <!-- Guide Button: Neutral frosted glass pill -->
@@ -3083,6 +3096,15 @@
               Web EPUB downloads (<code class="text-zinc-200">GET /api/books/:id/download/epub</code>) and Telegram deliveries share one canonical metadata naming standard (<code class="text-zinc-200">Series 01 - Title - Author.epub</code> or <code class="text-zinc-200">Title - Author.epub</code>) with Unicode-safe RFC 5987 / RFC 6266 headers, never altering internal Calibre storage paths.
             </p>
           </div>
+          <div class="space-y-1 pt-1 border-t border-zinc-800/80">
+            <div class="font-bold text-white flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-amber-400"></span>
+              <span>Reading Telemetry, Heatmap &amp; Library Health</span>
+            </div>
+            <p class="text-[11px] text-zinc-400 leading-relaxed">
+              Derives discrete reading sessions from KOSync progress telemetry in <code class="text-zinc-200">koreader-sync.db</code>. Visualizes daily reading time, consecutive reading streaks (current and longest), 365-day activity heatmap, library health distribution (unread, currently reading, finished), stale read detection (neglected books inactive &gt; 30 days), and strictly additive yearly reading goals. Accessible via the top header <code class="text-zinc-200">Stats</code> button.
+            </p>
+          </div>
         </div>
       </div>
 
@@ -3953,6 +3975,197 @@
     </div>
   </div>
 
+  <!-- READING STATISTICS, HEATMAP & LIBRARY HEALTH MODAL -->
+  <div id="readingStatsModal" class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-end sm:items-center justify-center p-0 sm:p-4" onclick="if(event.target === this) closeReadingStatsModal()">
+    <div class="ui-card apple-material-modal w-full sm:max-w-2xl max-h-[90vh] overflow-y-auto no-scrollbar rounded-t-2xl sm:rounded-2xl p-5 border border-zinc-800 space-y-4 shadow-2xl">
+      <!-- Modal Header -->
+      <div class="flex items-center justify-between pb-3 border-b border-zinc-800/80">
+        <div class="flex items-center gap-2.5">
+          <div class="w-9 h-9 rounded-xl bg-amber-400/10 text-amber-300 flex items-center justify-center border border-amber-400/25 shadow-sm shrink-0">
+            <svg class="w-5 h-5"><use href="#icon-chart-bar"/></svg>
+          </div>
+          <div>
+            <h3 class="tracking-optical-display text-sm font-bold text-zinc-100 flex items-center gap-2 leading-tight">
+              Reading Statistics &amp; Library Health
+            </h3>
+            <p class="text-[11px] text-zinc-400">KOSync progress telemetry, reading streaks, heatmap &amp; library metrics</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-1.5">
+          <button onclick="loadReadingStats(true)" class="w-9 h-9 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white border border-zinc-800 flex items-center justify-center cursor-pointer active:scale-[0.98] transition-all" title="Refresh Statistics">
+            <svg class="w-4 h-4"><use href="#icon-arrows-rotate"/></svg>
+          </button>
+          <button onclick="closeReadingStatsModal()" class="w-9 h-9 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white border border-zinc-800 flex items-center justify-center cursor-pointer active:scale-[0.98] transition-all" title="Close">
+            <svg class="w-4 h-4"><use href="#icon-xmark"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Top 3 Metrics Cards -->
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <!-- Card 1: Streaks -->
+        <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="text-[10px] font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1">
+              <svg class="w-3.5 h-3.5"><use href="#icon-fire"/></svg>
+              <span>Streaks</span>
+            </span>
+            <span id="statActiveTodayBadge" class="hidden text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">Read Today</span>
+          </div>
+          <div>
+            <div class="text-2xl font-bold font-mono text-zinc-100 leading-tight">
+              <span id="statCurrentStreak">0</span> <span class="text-xs font-normal text-zinc-400">Days</span>
+            </div>
+            <div class="text-[11px] text-zinc-400 pt-1 flex items-center justify-between">
+              <span>Best: <strong id="statLongestStreak" class="text-zinc-200 font-mono">0</strong> days</span>
+              <span>Total: <strong id="statTotalDays" class="text-zinc-200 font-mono">0</strong> days</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 2: Reading Time -->
+        <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="text-[10px] font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1">
+              <svg class="w-3.5 h-3.5"><use href="#icon-book-open"/></svg>
+              <span>Reading Time</span>
+            </span>
+            <span class="text-[10px] font-mono text-zinc-500">KOSync</span>
+          </div>
+          <div>
+            <div class="text-2xl font-bold font-mono text-zinc-100 leading-tight">
+              <span id="statTodayTime">0m</span> <span class="text-xs font-normal text-zinc-400">today</span>
+            </div>
+            <div class="text-[11px] text-zinc-400 pt-1 flex items-center justify-between">
+              <span>Week: <strong id="statWeekTime" class="text-zinc-200 font-mono">0h</strong></span>
+              <span>Total: <strong id="statTotalHours" class="text-zinc-200 font-mono">0h</strong></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 3: Library Health Distribution -->
+        <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="text-[10px] font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1">
+              <svg class="w-3.5 h-3.5"><use href="#icon-layer-group"/></svg>
+              <span>Library Health</span>
+            </span>
+            <span id="statStaleBadge" class="hidden text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">0 Stale</span>
+          </div>
+          <div>
+            <div class="text-2xl font-bold font-mono text-zinc-100 leading-tight">
+              <span id="statFinishedCount">0</span> <span class="text-xs font-normal text-zinc-400">finished</span>
+            </div>
+            <div class="text-[11px] text-zinc-400 pt-1 flex items-center justify-between">
+              <span>Reading: <strong id="statReadingCount" class="text-zinc-200 font-mono">0</strong></span>
+              <span>Unread: <strong id="statUnreadCount" class="text-zinc-200 font-mono">0</strong></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Additive Yearly Goal Card -->
+      <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2.5">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <span id="statGoalTitle" class="text-xs font-semibold text-zinc-200">2026 Reading Goal</span>
+            <span id="statGoalStatusTag" class="text-[10px] font-mono px-2 py-0.5 rounded border border-zinc-700 bg-zinc-800 text-zinc-400">Optional</span>
+          </div>
+          <button onclick="toggleGoalEditForm()" class="text-xs text-sky-400 hover:text-sky-300 font-medium transition-colors cursor-pointer flex items-center gap-1">
+            <svg class="w-3 h-3"><use href="#icon-pen"/></svg>
+            <span id="toggleGoalBtnText">Set Goal</span>
+          </button>
+        </div>
+
+        <!-- Goal Progress Bars -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+          <!-- Books Target -->
+          <div class="space-y-1">
+            <div class="flex items-center justify-between text-xs">
+              <span class="text-zinc-400 text-[11px]">Books Completed</span>
+              <span id="statGoalBooksText" class="font-mono text-[11px] text-zinc-200">0 / —</span>
+            </div>
+            <div class="w-full h-2 rounded-full bg-zinc-800 overflow-hidden">
+              <div id="statGoalBooksBar" class="h-full rounded-full bg-gradient-to-r from-amber-500 to-amber-400 transition-all duration-300" style="width: 0%"></div>
+            </div>
+          </div>
+
+          <!-- Hours Target -->
+          <div class="space-y-1">
+            <div class="flex items-center justify-between text-xs">
+              <span class="text-zinc-400 text-[11px]">Reading Hours</span>
+              <span id="statGoalHoursText" class="font-mono text-[11px] text-zinc-200">0h / —</span>
+            </div>
+            <div class="w-full h-2 rounded-full bg-zinc-800 overflow-hidden">
+              <div id="statGoalHoursBar" class="h-full rounded-full bg-gradient-to-r from-sky-500 to-sky-400 transition-all duration-300" style="width: 0%"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Inline Goal Edit Form (Hidden by default) -->
+        <div id="readingGoalFormContainer" class="hidden pt-3 border-t border-zinc-800/80 space-y-2">
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <div>
+              <label class="text-[10px] uppercase font-bold text-zinc-500 block pb-1">Target Books</label>
+              <input type="number" id="goalInputBooks" min="1" max="500" placeholder="e.g. 25" class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 font-mono focus:outline-none focus:border-amber-400 transition-colors">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-bold text-zinc-500 block pb-1">Target Hours</label>
+              <input type="number" id="goalInputHours" min="1" max="2000" placeholder="e.g. 100" class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 font-mono focus:outline-none focus:border-sky-400 transition-colors">
+            </div>
+          </div>
+          <div class="flex items-center justify-end gap-2 pt-1">
+            <button onclick="toggleGoalEditForm(false)" class="px-3 py-1 text-xs text-zinc-400 hover:text-white transition-colors cursor-pointer">Cancel</button>
+            <button onclick="saveReadingGoalAction()" class="px-3 py-1 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold text-xs rounded-lg transition-colors cursor-pointer active:scale-[0.98]">Save Goal</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Activity Heatmap Section -->
+      <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2">
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-zinc-200 font-semibold">Activity Heatmap (Past 365 Days)</span>
+          <div class="flex items-center gap-1.5 text-[10px] text-zinc-500 font-mono">
+            <span>Less</span>
+            <span class="w-2.5 h-2.5 rounded-[2px] bg-zinc-800/60 border border-zinc-700/40 inline-block"></span>
+            <span class="w-2.5 h-2.5 rounded-[2px] bg-amber-950/70 border border-amber-800/50 inline-block"></span>
+            <span class="w-2.5 h-2.5 rounded-[2px] bg-amber-700/70 border border-amber-600/50 inline-block"></span>
+            <span class="w-2.5 h-2.5 rounded-[2px] bg-amber-500 inline-block"></span>
+            <span class="w-2.5 h-2.5 rounded-[2px] bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.6)] inline-block"></span>
+            <span>More</span>
+          </div>
+        </div>
+        
+        <!-- Heatmap Grid Container -->
+        <div id="heatmapGridContainer" class="w-full overflow-x-auto no-scrollbar py-1">
+          <div id="heatmapGrid" class="inline-grid grid-flow-col grid-rows-7 gap-1"></div>
+        </div>
+        <div id="heatmapTooltip" class="text-[11px] text-zinc-400 font-mono text-center min-h-[18px]">Hover or tap a day to see reading activity</div>
+      </div>
+
+      <!-- Stale Reads Section (Shown conditionally) -->
+      <div id="staleReadsSection" class="hidden p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2.5">
+        <div class="flex items-center justify-between text-xs">
+          <div class="flex items-center gap-1.5 text-amber-400 font-semibold">
+            <svg class="w-4 h-4"><use href="#icon-triangle-exclamation"/></svg>
+            <span>Stale Reads (Inactive &gt; 30 Days)</span>
+          </div>
+          <span id="staleCountTag" class="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20">0 Books</span>
+        </div>
+        <div id="staleReadsList" class="space-y-2 max-h-48 overflow-y-auto no-scrollbar divide-y divide-zinc-800/60"></div>
+      </div>
+
+      <!-- Recent Sessions Section -->
+      <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2.5">
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-zinc-200 font-semibold">Recent Reading Sessions</span>
+          <span id="recentSessionsCountLabel" class="text-[10px] font-mono text-zinc-500">0 sessions</span>
+        </div>
+        <div id="recentSessionsList" class="space-y-1.5 max-h-48 overflow-y-auto no-scrollbar divide-y divide-zinc-800/40"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- TOAST FEEDBACK NOTIFICATION -->
   <div id="toastNotification" class="hidden fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-zinc-100 text-zinc-950 px-4 py-2 rounded-xl text-xs font-bold shadow-2xl flex items-center gap-2 border border-white/20 transition-all duration-300">
     <span id="toastIcon"><svg class="w-3.5 h-3.5 text-emerald-600"><use href="#icon-check"/></svg></span>
@@ -4341,7 +4554,7 @@
     }
 
     function hasActiveModal() {
-      const modalIds = ['filterDrawer', 'bookDetailModal', 'urlModal', 'uploadModal', 'editModal', 'guideModal', 'lnoriModal', 'discoverModal'];
+      const modalIds = ['filterDrawer', 'bookDetailModal', 'urlModal', 'uploadModal', 'editModal', 'guideModal', 'lnoriModal', 'discoverModal', 'kindleModal', 'storageModal', 'readingStatsModal'];
       return modalIds.some(id => {
         const el = document.getElementById(id);
         return el && !el.classList.contains('hidden');
@@ -4367,6 +4580,8 @@
       closeGuideModal();
       closeLnoriModal();
       closeDiscoverModal();
+      closeStorageModal();
+      closeReadingStatsModal();
       updateBackButton();
     }
 
@@ -10339,6 +10554,294 @@
         if (btnIcon) btnIcon.classList.remove('hidden');
         if (spinner) spinner.classList.add('hidden');
         if (btnText) btnText.textContent = 'Backup to SSD Now';
+      }
+    }
+
+    let readingStatsData = null;
+
+    function openReadingStatsModal() {
+      if (window.tgHaptic) tgHaptic.light();
+      openModalAnimated('readingStatsModal', false);
+      loadReadingStats();
+    }
+
+    function closeReadingStatsModal() {
+      closeModalAnimated('readingStatsModal', false);
+    }
+
+    async function loadReadingStats(forceFresh = false) {
+      try {
+        const res = await fetch('/api/kosync/stats', { cache: forceFresh ? 'no-cache' : 'default' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        readingStatsData = data;
+        renderReadingStats(data);
+      } catch (err) {
+        console.warn('Failed to load reading stats:', err);
+      }
+    }
+
+    function renderReadingStats(data) {
+      if (!data) return;
+
+      // Streaks
+      const streaks = data.streaks || { currentStreak: 0, longestStreak: 0, readingDaysCount: 0, isActiveToday: false };
+      const curStreakEl = document.getElementById('statCurrentStreak');
+      if (curStreakEl) curStreakEl.textContent = streaks.currentStreak;
+
+      const longStreakEl = document.getElementById('statLongestStreak');
+      if (longStreakEl) longStreakEl.textContent = streaks.longestStreak;
+
+      const totalDaysEl = document.getElementById('statTotalDays');
+      if (totalDaysEl) totalDaysEl.textContent = streaks.readingDaysCount || data.readingDaysCount || 0;
+
+      const activeBadge = document.getElementById('statActiveTodayBadge');
+      if (activeBadge) {
+        if (streaks.isActiveToday) {
+          activeBadge.classList.remove('hidden');
+        } else {
+          activeBadge.classList.add('hidden');
+        }
+      }
+
+      // Reading Time
+      const time = data.dailyReadingTime || {};
+      const todayTimeEl = document.getElementById('statTodayTime');
+      if (todayTimeEl) {
+        const mins = time.todayMinutes || 0;
+        todayTimeEl.textContent = mins >= 60 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${mins}m`;
+      }
+
+      const weekTimeEl = document.getElementById('statWeekTime');
+      if (weekTimeEl) {
+        const hrs = Math.round(((time.thisWeekSeconds || 0) / 3600) * 10) / 10;
+        weekTimeEl.textContent = `${hrs}h`;
+      }
+
+      const totalHoursEl = document.getElementById('statTotalHours');
+      if (totalHoursEl) {
+        totalHoursEl.textContent = `${time.totalHours || 0}h`;
+      }
+
+      // Library Health
+      const health = data.libraryHealth || {};
+      const finishedEl = document.getElementById('statFinishedCount');
+      if (finishedEl) finishedEl.textContent = (health.finishedCount ?? data.finishedCount ?? 0).toLocaleString();
+
+      const readingEl = document.getElementById('statReadingCount');
+      if (readingEl) readingEl.textContent = (health.inProgressCount ?? (data.activeBooks?.length || 0)).toLocaleString();
+
+      const unreadEl = document.getElementById('statUnreadCount');
+      if (unreadEl) unreadEl.textContent = (health.unreadCount ?? 0).toLocaleString();
+
+      const staleBadge = document.getElementById('statStaleBadge');
+      if (staleBadge) {
+        if (health.staleCount > 0) {
+          staleBadge.textContent = `${health.staleCount} Stale`;
+          staleBadge.classList.remove('hidden');
+        } else {
+          staleBadge.classList.add('hidden');
+        }
+      }
+
+      // Yearly Goal
+      const goal = data.goal || {};
+      const goalYear = goal.year || new Date().getFullYear();
+      const goalTitleEl = document.getElementById('statGoalTitle');
+      if (goalTitleEl) goalTitleEl.textContent = `${goalYear} Reading Goal`;
+
+      const goalBooksText = document.getElementById('statGoalBooksText');
+      const goalBooksBar = document.getElementById('statGoalBooksBar');
+      if (goalBooksText && goalBooksBar) {
+        if (goal.targetBooks && goal.targetBooks > 0) {
+          goalBooksText.textContent = `${goal.currentBooks || 0} / ${goal.targetBooks} (${goal.booksPercent || 0}%)`;
+          goalBooksBar.style.width = `${Math.min(100, goal.booksPercent || 0)}%`;
+        } else {
+          goalBooksText.textContent = `${goal.currentBooks || 0} completed (no target set)`;
+          goalBooksBar.style.width = '0%';
+        }
+      }
+
+      const goalHoursText = document.getElementById('statGoalHoursText');
+      const goalHoursBar = document.getElementById('statGoalHoursBar');
+      if (goalHoursText && goalHoursBar) {
+        if (goal.targetHours && goal.targetHours > 0) {
+          goalHoursText.textContent = `${goal.currentHours || 0}h / ${goal.targetHours}h (${goal.hoursPercent || 0}%)`;
+          goalHoursBar.style.width = `${Math.min(100, goal.hoursPercent || 0)}%`;
+        } else {
+          goalHoursText.textContent = `${goal.currentHours || 0}h read (no target set)`;
+          goalHoursBar.style.width = '0%';
+        }
+      }
+
+      const goalTag = document.getElementById('statGoalStatusTag');
+      if (goalTag) {
+        goalTag.textContent = goal.isConfigured ? 'Active Target' : 'Optional';
+        goalTag.className = goal.isConfigured
+          ? 'text-[10px] font-mono px-2 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-300'
+          : 'text-[10px] font-mono px-2 py-0.5 rounded border border-zinc-700 bg-zinc-800 text-zinc-400';
+      }
+
+      const toggleGoalBtn = document.getElementById('toggleGoalBtnText');
+      if (toggleGoalBtn) {
+        toggleGoalBtn.textContent = goal.isConfigured ? 'Edit Goal' : 'Set Goal';
+      }
+
+      // Heatmap
+      renderHeatmapGrid(data.heatmap || []);
+
+      // Stale Reads
+      renderStaleReads(health.staleReads || []);
+
+      // Recent Sessions
+      renderRecentSessions(data.recentSessions || []);
+    }
+
+    function renderHeatmapGrid(heatmap) {
+      const grid = document.getElementById('heatmapGrid');
+      const tooltip = document.getElementById('heatmapTooltip');
+      if (!grid) return;
+      grid.innerHTML = '';
+
+      const levelClasses = [
+        'bg-zinc-800/50 border border-zinc-700/30',
+        'bg-amber-950/70 border border-amber-800/50',
+        'bg-amber-700/70 border border-amber-600/50',
+        'bg-amber-500 border border-amber-400',
+        'bg-amber-400 border border-amber-300 shadow-[0_0_6px_rgba(251,191,36,0.6)]',
+      ];
+
+      for (const d of heatmap) {
+        const cell = document.createElement('div');
+        const lvl = d.level || 0;
+        cell.className = `w-2.5 h-2.5 rounded-[2px] transition-transform duration-75 cursor-pointer hover:scale-125 ${levelClasses[lvl]}`;
+        const info = `${d.date}: ${d.minutes || 0}m read (${d.count || 0} sessions)${d.books?.length ? ' - ' + d.books.slice(0, 2).join(', ') : ''}`;
+        cell.title = info;
+        cell.addEventListener('mouseenter', () => {
+          if (tooltip) tooltip.textContent = info;
+        });
+        cell.addEventListener('click', () => {
+          if (tooltip) tooltip.textContent = info;
+        });
+        grid.appendChild(cell);
+      }
+    }
+
+    function renderStaleReads(staleReads) {
+      const section = document.getElementById('staleReadsSection');
+      const list = document.getElementById('staleReadsList');
+      const tag = document.getElementById('staleCountTag');
+      if (!section || !list) return;
+
+      if (!staleReads || staleReads.length === 0) {
+        section.classList.add('hidden');
+        return;
+      }
+
+      section.classList.remove('hidden');
+      if (tag) tag.textContent = `${staleReads.length} Books`;
+      list.innerHTML = '';
+
+      for (const s of staleReads) {
+        const item = document.createElement('div');
+        item.className = 'pt-2 first:pt-0 flex items-center justify-between text-xs gap-3';
+        item.innerHTML = `
+          <div class="min-w-0 flex-1">
+            <div class="font-medium text-zinc-200 truncate">${escapeHtml(s.title)}</div>
+            <div class="text-[11px] text-zinc-400 truncate">${escapeHtml(s.authors || 'Unknown')}</div>
+          </div>
+          <div class="text-right shrink-0">
+            <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20">${s.daysInactive} days inactive</span>
+            <div class="text-[11px] font-mono text-zinc-400 pt-0.5">${Math.round(s.percentage * 100)}% complete</div>
+          </div>
+        `;
+        list.appendChild(item);
+      }
+    }
+
+    function renderRecentSessions(sessions) {
+      const list = document.getElementById('recentSessionsList');
+      const countLabel = document.getElementById('recentSessionsCountLabel');
+      if (!list) return;
+      list.innerHTML = '';
+
+      if (countLabel) countLabel.textContent = `${sessions ? sessions.length : 0} sessions`;
+      if (!sessions || sessions.length === 0) {
+        list.innerHTML = '<div class="text-zinc-500 text-xs py-2 text-center">No recent reading sessions recorded yet.</div>';
+        return;
+      }
+
+      for (const s of sessions) {
+        const mins = Math.round(s.durationSeconds / 60);
+        const durStr = mins >= 60 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${Math.max(1, mins)}m`;
+        const startPct = Math.round(s.startPercentage * 100);
+        const endPct = Math.round(s.endPercentage * 100);
+        const delta = Math.round(s.progressDelta * 100);
+
+        const item = document.createElement('div');
+        item.className = 'pt-1.5 first:pt-0 flex items-center justify-between text-xs gap-3';
+        item.innerHTML = `
+          <div class="min-w-0 flex-1">
+            <div class="font-medium text-zinc-200 truncate">${escapeHtml(s.title)}</div>
+            <div class="text-[11px] text-zinc-400 flex items-center gap-2">
+              <span>${escapeHtml(s.device || 'KOReader')}</span>
+              <span>•</span>
+              <span class="font-mono">${s.date}</span>
+            </div>
+          </div>
+          <div class="text-right shrink-0">
+            <span class="text-xs font-mono font-semibold text-amber-300">${durStr}</span>
+            <div class="text-[10px] font-mono text-zinc-400">${startPct}% → ${endPct}% ${delta > 0 ? '(+' + delta + '%)' : ''}</div>
+          </div>
+        `;
+        list.appendChild(item);
+      }
+    }
+
+    function toggleGoalEditForm(forceState) {
+      const form = document.getElementById('readingGoalFormContainer');
+      if (!form) return;
+      if (typeof forceState === 'boolean') {
+        if (forceState) form.classList.remove('hidden');
+        else form.classList.add('hidden');
+      } else {
+        form.classList.toggle('hidden');
+      }
+
+      if (!form.classList.contains('hidden') && readingStatsData?.goal) {
+        const g = readingStatsData.goal;
+        const bInput = document.getElementById('goalInputBooks');
+        const hInput = document.getElementById('goalInputHours');
+        if (bInput && g.targetBooks) bInput.value = g.targetBooks;
+        if (hInput && g.targetHours) hInput.value = g.targetHours;
+      }
+    }
+
+    async function saveReadingGoalAction() {
+      try {
+        const bInput = document.getElementById('goalInputBooks');
+        const hInput = document.getElementById('goalInputHours');
+        const books = bInput?.value ? parseInt(bInput.value, 10) : null;
+        const hours = hInput?.value ? parseInt(hInput.value, 10) : null;
+
+        const currentYear = new Date().getFullYear();
+        const res = await fetch('/api/kosync/goal', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            year: currentYear,
+            targetBooks: books,
+            targetHours: hours,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+        toggleGoalEditForm(false);
+        showToast('Reading goal saved successfully!');
+        await loadReadingStats(true);
+      } catch (err) {
+        console.error('Failed to save reading goal:', err);
+        showToast('Failed to save goal', 'error');
       }
     }
 

@@ -326,6 +326,13 @@ Notes:
 5. Enable **"Automatically keep documents in sync"**.
 6. Tap **"Pull progress to this device now"** to verify connection.
 
+Reading progress synchronized from KOReader automatically fuels the **Reading Statistics & Telemetry** engine:
+- **Daily Reading Time & Telemetry** (`GET /api/kosync/stats`): derives discrete reading sessions from sequential progress updates with idle gap detection, calculating today, week, month, and all-time reading hours.
+- **Reading Streaks**: tracks current active streaks (counting today or yesterday) and longest historical reading streaks.
+- **365-Day Activity Heatmap**: renders daily activity levels (0–4), minutes read, and books covered per day.
+- **Library Health**: computes real-time distribution across unread, currently reading, and finished volumes, flagging stale reads inactive for &gt; 30 days.
+- **Yearly Reading Goals** (`GET /api/kosync/goal`, `POST /api/kosync/goal`): optional, strictly additive target books and hours configuration without acting as a blocker or gate. Accessible in the dashboard via the top **Stats** button.
+
 ### 3. OPDS Wireless Book Catalog (Manual Fallback)
 
 Use this when your device cannot load an external plugin. The generated plugin above gives the same catalog with paging, ratings and reading progress already configured.
