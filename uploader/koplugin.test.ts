@@ -34,6 +34,7 @@ import {
   type KopluginSettings,
 } from "./koplugin";
 import { generateOpdsFeed } from "./opds";
+import { resetScopedKeyCacheForTest } from "./security";
 import {
   handleRequest,
   setServerDependenciesForTest,
@@ -637,6 +638,35 @@ describe("GET /api/koplugin/download", () => {
     const payload = (await res.json()) as any;
     expect(payload.success).toBe(false);
     expect(payload.error).toContain("Authentication required");
+  });
+
+  it("refuses a scoped API key, which would otherwise leak the global key", async () => {
+    // The generated archive embeds READING_API_KEY, so a limited credential must
+    // never be able to trade itself for the master key.
+    process.env.READING_API_KEY = "unit-test-master-key";
+    process.env.READING_SCOPED_KEYS = "ro-reader=unit-test-ro-key:read";
+    resetScopedKeyCacheForTest();
+    try {
+      const req = new Request("http://127.0.0.1:8086/api/koplugin/download", {
+        headers: {
+          host: "127.0.0.1:8086",
+          "x-forwarded-host": "reading-sg.wavypremium.xyz:8443",
+          "x-forwarded-proto": "https",
+          authorization: "Bearer unit-test-ro-key",
+        },
+      });
+      const res = await handleRequest(req, tunnelServer());
+      expect(res.status).toBe(403);
+      const payload = (await res.json()) as any;
+      expect(payload.success).toBe(false);
+      expect(payload.code).toBe("insufficient_scope");
+      expect(payload.keyName).toBe("ro-reader");
+      // The master key must never appear in the refusal.
+      expect(JSON.stringify(payload)).not.toContain("unit-test-master-key");
+    } finally {
+      delete process.env.READING_SCOPED_KEYS;
+      resetScopedKeyCacheForTest();
+    }
   });
 
   it("accepts an authenticated WAN request and bakes in the tunnel origin", async () => {

@@ -20,14 +20,17 @@ import {
   getCacheDb,
   getCalibreBooks,
   jobQueue,
-  JobQueue,
   registerJobHandlers,
   setServerJobQueueForTest,
   getActiveDiscoverJobs,
   registerDiscoverJob,
 } from "./server";
 import { DurableJobQueue } from "./jobs";
-import { validateUrlForSSRF, getBsdtarPath } from "./security";
+import {
+  validateUrlForSSRF,
+  getBsdtarPath,
+  resetScopedKeyCacheForTest,
+} from "./security";
 import { autoEnrichBookSynopsis } from "./scraper";
 import {
   isKindleSyncActive,
@@ -6210,7 +6213,7 @@ exit 0
     it("POST /api/ingest-url preserves synchronous fallback when async is false or omitted", async () => {
       let syncCalled = false;
       setServerDependenciesForTest({
-        ingestArticleFromUrl: async (url: string) => {
+        ingestArticleFromUrl: async (_url: string) => {
           syncCalled = true;
           return {
             success: true,
@@ -6823,5 +6826,276 @@ exit 0
       expect(html).toContain("handleTextIngest");
       expect(html).toContain("/api/ingest-text");
     });
+  });
+});
+
+describe("Scoped API Keys — WAN authorization edge", () => {
+  // Public socket address => isWanRequest classifies every request as WAN.
+  // (Must be a real public IP: documentation ranges like 203.0.113.0/24 are
+  // treated as internal by isPrivateOrInternalIp and would classify as LAN.)
+  const wanServer = {
+    requestIP: () => ({ address: "93.184.216.34", family: "IPv4" }),
+  };
+
+  const LEGACY_KEY = "legacy-global-secret";
+  const READ_ONLY_KEY = "ro-automation-secret";
+  const WRITE_KEY = "rw-automation-secret";
+  const SCOPED_KEYS =
+    "koreader-read=" + READ_ONLY_KEY + ":read;ci-writer=" + WRITE_KEY + ":write";
+
+  const savedEnv: Record<string, string | undefined> = {};
+
+  function setAuthEnv(): void {
+    savedEnv.READING_API_KEY = process.env.READING_API_KEY;
+    savedEnv.READING_SCOPED_KEYS = process.env.READING_SCOPED_KEYS;
+    process.env.READING_API_KEY = LEGACY_KEY;
+    process.env.READING_SCOPED_KEYS = SCOPED_KEYS;
+    resetScopedKeyCacheForTest();
+  }
+
+  function restoreAuthEnv(): void {
+    for (const name of ["READING_API_KEY", "READING_SCOPED_KEYS"] as const) {
+      const value = savedEnv[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    resetScopedKeyCacheForTest();
+    resetServerDependenciesForTest();
+  }
+
+  function wanCall(
+    path: string,
+    init: RequestInit & { headers?: Record<string, string> } = {},
+  ): Promise<Response> {
+    const req = new Request(`http://127.0.0.1:8086${path}`, {
+      ...init,
+      headers: { host: "reading.wavypremium.xyz", ...(init.headers || {}) },
+    });
+    return handleRequest(req, wanServer);
+  }
+
+  it("refuses a read-only key on uploads, ingests, and deletes with 403", async () => {
+    setAuthEnv();
+    try {
+      const cases: Array<[string, string, string]> = [
+        ["POST", "/api/upload", "upload:write"],
+        ["POST", "/api/lnori/ingest", "lnori:write"],
+        ["DELETE", "/api/books/12", "books:write"],
+        ["DELETE", "/api/annotations/5", "annotations:write"],
+      ];
+      for (const [method, path, requiredScope] of cases) {
+        const res = await wanCall(path, {
+          method,
+          headers: {
+            authorization: `Bearer ${READ_ONLY_KEY}`,
+            "content-type": "application/json",
+          },
+          ...(method === "POST" ? { body: JSON.stringify({}) } : {}),
+        } as any);
+        expect(res.status).toBe(403);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(false);
+        expect(data.code).toBe("insufficient_scope");
+        expect(data.requiredScope).toBe(requiredScope);
+        expect(data.error).toContain("lacks the required scope");
+      }
+    } finally {
+      restoreAuthEnv();
+    }
+  });
+
+  it("refuses a write-scoped key on admin routes with 403", async () => {
+    setAuthEnv();
+    try {
+      const res = await wanCall("/api/backup/ssd/run", {
+        method: "POST",
+        headers: { "x-api-key": WRITE_KEY, "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(403);
+      const data = (await res.json()) as any;
+      expect(data.code).toBe("insufficient_scope");
+      expect(data.requiredScope).toBe("backup:admin");
+    } finally {
+      restoreAuthEnv();
+    }
+  });
+
+  it("allows a write-scoped key on mutating routes", async () => {
+    setServerDependenciesForTest({
+      ingestLnoriSeries: async () => ({
+        success: true,
+        seriesTitle: "Scoped Writer Series",
+        author: "Author",
+        importedCount: 1,
+        skippedCount: 0,
+        duplicateCount: 0,
+        totalCount: 1,
+        tags: "Light Novel",
+        calibreBookIds: [4242],
+      }),
+      getCalibreBooks: () => [],
+    } as any);
+    setAuthEnv();
+    try {
+      const res = await wanCall("/api/lnori/ingest", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${WRITE_KEY}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ url: "https://lnori.com/series/9001/scoped" }),
+      });
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.success).toBe(true);
+      expect(data.seriesTitle).toBe("Scoped Writer Series");
+    } finally {
+      restoreAuthEnv();
+    }
+  });
+
+  it("keeps the legacy READING_API_KEY working on mutating WAN routes", async () => {
+    setServerDependenciesForTest({
+      ingestLnoriSeries: async () => ({
+        success: true,
+        seriesTitle: "Legacy Key Series",
+        author: "Author",
+        importedCount: 1,
+        skippedCount: 0,
+        duplicateCount: 0,
+        totalCount: 1,
+        tags: "Light Novel",
+        calibreBookIds: [4243],
+      }),
+      getCalibreBooks: () => [],
+    } as any);
+    setAuthEnv();
+    try {
+      for (const headers of [
+        { authorization: `Bearer ${LEGACY_KEY}` },
+        { "x-api-key": LEGACY_KEY },
+      ]) {
+        const res = await wanCall("/api/lnori/ingest", {
+          method: "POST",
+          headers: { ...headers, "content-type": "application/json" },
+          body: JSON.stringify({ url: "https://lnori.com/series/9002/legacy" }),
+        });
+        expect(res.status).toBe(200);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(true);
+      }
+    } finally {
+      restoreAuthEnv();
+    }
+  });
+
+  it("lets a read-only key read GET routes over WAN", async () => {
+    setServerDependenciesForTest({
+      getCalibreBooks: () => [
+        { id: 1, title: "Dune", author: "Frank Herbert" },
+        { id: 2, title: "Overlord", author: "Kugane Maruyama" },
+      ],
+    } as any);
+    setAuthEnv();
+    try {
+      const res = await wanCall("/api/books", {
+        headers: { authorization: `Bearer ${READ_ONLY_KEY}` },
+      });
+      expect(res.status).toBe(200);
+      const books = (await res.json()) as any[];
+      expect(books).toHaveLength(2);
+    } finally {
+      restoreAuthEnv();
+    }
+  });
+
+  it("returns 401 for unknown or missing credentials, never 403", async () => {
+    setAuthEnv();
+    try {
+      const unknown = await wanCall("/api/upload", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer not-a-configured-key",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+      expect(unknown.status).toBe(401);
+      const unknownData = (await unknown.json()) as any;
+      expect(unknownData.code).toBe("missing_credentials");
+
+      const missing = await wanCall("/api/upload", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(missing.status).toBe(401);
+      const missingData = (await missing.json()) as any;
+      expect(missingData.success).toBe(false);
+      expect(missingData.error).toContain("Authentication required");
+    } finally {
+      restoreAuthEnv();
+    }
+  });
+
+  it("still rejects query-string credentials for scoped and legacy keys", async () => {
+    setAuthEnv();
+    try {
+      for (const query of [
+        `?api_key=${READ_ONLY_KEY}`,
+        `?token=${LEGACY_KEY}`,
+        `?x-api-key=${WRITE_KEY}`,
+      ]) {
+        const res = await wanCall(`/api/upload${query}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        expect(res.status).toBe(401);
+        const data = (await res.json()) as any;
+        expect(data.code).toBe("missing_credentials");
+      }
+    } finally {
+      restoreAuthEnv();
+    }
+  });
+
+  it("never mints a global-key session cookie for a scoped key", async () => {
+    setAuthEnv();
+    try {
+      const scopedSession = await wanCall("/api/auth/session", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${READ_ONLY_KEY}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+      expect(scopedSession.status).toBe(200);
+      expect(scopedSession.headers.get("set-cookie")).toBeNull();
+      const scopedData = (await scopedSession.json()) as any;
+      expect(scopedData.success).toBe(true);
+      expect(scopedData.keyName).toBe("koreader-read");
+      expect(scopedData.scopes).toEqual(["read"]);
+
+      const legacySession = await wanCall("/api/auth/session", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${LEGACY_KEY}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+      expect(legacySession.status).toBe(200);
+      const cookie = legacySession.headers.get("set-cookie") || "";
+      expect(cookie).toContain("reading_session=");
+      expect(decodeURIComponent(cookie)).toContain(LEGACY_KEY);
+      const legacyData = (await legacySession.json()) as any;
+      expect(legacyData.keyName).toBeNull();
+      expect(legacyData.scopes).toEqual(["*"]);
+    } finally {
+      restoreAuthEnv();
+    }
   });
 });

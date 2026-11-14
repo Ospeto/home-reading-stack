@@ -680,6 +680,13 @@ The LightHouse WAN edge (`https://reading.wavypremium.xyz`) is hardened against 
 1. **WAN vs LAN Authentication:**
    - **Local LAN Requests:** Home network requests (`192.168.x.x`, `127.0.0.1`, `10.x.x.x`) pass with zero friction.
    - **WAN Reverse-Tunnel Requests:** Mutating endpoints (`POST`, `PUT`, `DELETE`) require either a Bearer token or `X-API-Key` matching `READING_API_KEY`, cryptographically verified Telegram WebApp `initData` HMAC-SHA256 credentials, or session cookies (`reading_token`).
+   - **Scoped API Keys (least privilege):** `READING_SCOPED_KEYS` configures additional named keys with limited scopes, so a monitoring or sync credential can read without being able to mutate:
+     - Format (compact): `name=secret:scopes` entries separated by `;` or newlines, e.g. `koreader-sync=ro-secret:read;ci-writer=rw-secret:write`. JSON is also accepted: `{"ci":{"key":"ro-secret","scopes":["read"]}}`.
+     - Scopes: `read` < `write` < `admin`. `write` implies `read`; `admin` is only needed for host-wide routes (`/api/backup`, `/api/ssd`, `/api/system`, `/api/daemon`, `/api/admin`). Resource-qualified scopes such as `books:read` or `kosync:write` confine a key to one API resource.
+     - Enforcement: a read-only key is accepted on read endpoints (`GET /api/books`, `/api/annotations`, `/api/kosync/*`, OPDS) and refused with **HTTP 403** (`code: "insufficient_scope"`, plus `requiredScope`) on uploads, ingestions, updates, and deletes. An unknown or revoked key gets **HTTP 401**.
+     - Backward compatibility: `READING_API_KEY` still grants full access (`*`), so existing WAN clients, KOReader plugins, and integrations keep working unchanged. Never reuse the global key as a scoped key — the global key always wins and grants full access.
+     - Transports: `Authorization: Bearer <key>`, `X-API-Key: <key>`, or a session cookie. `/api/auth/session` is treated as a read-level probe, and it never mints a session cookie carrying the global key for a scoped key holder.
+     - Scope enforcement applies to the WAN edge; local LAN requests stay friction-free.
    - **Query-String Credential Rejection:** Query-string `token`/`auth` parameters are strictly rejected to prevent secret leakage via browser history, server access logs, and `Referer` headers.
    - **Public Read Access:** Read-only library views (`GET /api/books`), book covers, and OPDS feeds remain accessible on WAN for authorized reader devices without credentials.
 2. **SSRF (Server-Side Request Forgery) Protection:**

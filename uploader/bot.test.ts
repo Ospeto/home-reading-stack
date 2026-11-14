@@ -2768,9 +2768,15 @@ describe("Documentation, Manual Sync & Standing Invariant Verification", () => {
 
     // Tab wiring in setGuideTab (data-driven since the plugin tab was added)
     expect(html).toContain(
-      "const GUIDE_TAB_IDS = ['plugin', 'kosync', 'obsidian', 'opds', 'features', 'cli', 'backup', 'providers', 'proxy', 'all'];",
+      "const GUIDE_TAB_IDS = ['plugin', 'kosync', 'obsidian', 'opds', 'features', 'cli', 'backup', 'providers', 'proxy', 'apikeys', 'all'];",
     );
     expect(html).toContain("features: 'guide-features',");
+    // Scoped API keys tab is wired the same way
+    expect(html).toContain('id="guide-tab-apikeys"');
+    expect(html).toContain('id="guide-apikeys"');
+    expect(html).toContain("apikeys: 'guide-apikeys',");
+    expect(html).toContain("Scoped API Keys (Least Privilege)");
+    expect(html).toContain("READING_SCOPED_KEYS");
     // Metadata provider / sidecar protocol tab is wired the same way
     expect(html).toContain('id="guide-tab-providers"');
     expect(html).toContain('id="guide-providers"');
