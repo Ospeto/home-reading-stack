@@ -1069,6 +1069,12 @@ describe("LightHouse Batch Synopsis Enrichment Tool", () => {
           path.join(REPO_ROOT, "uploader", "scraper.ts"),
           path.join(flattenedDir, "scraper.ts"),
         );
+        // scraper.ts delegates provider routing to this module, so the flattened
+        // production layout must ship it alongside the scrapers.
+        fs.copyFileSync(
+          path.join(REPO_ROOT, "uploader", "metadata-providers.ts"),
+          path.join(flattenedDir, "metadata-providers.ts"),
+        );
         fs.copyFileSync(
           path.join(REPO_ROOT, "uploader", "security.ts"),
           path.join(flattenedDir, "security.ts"),
@@ -1101,6 +1107,12 @@ describe("LightHouse Batch Synopsis Enrichment Tool", () => {
         fs.copyFileSync(
           path.join(REPO_ROOT, "uploader", "scraper.ts"),
           path.join(flattenedDir, "scraper.ts"),
+        );
+        // scraper.ts delegates provider routing to this module, so the flattened
+        // production layout must ship it alongside the scrapers.
+        fs.copyFileSync(
+          path.join(REPO_ROOT, "uploader", "metadata-providers.ts"),
+          path.join(flattenedDir, "metadata-providers.ts"),
         );
         fs.copyFileSync(
           path.join(REPO_ROOT, "uploader", "security.ts"),

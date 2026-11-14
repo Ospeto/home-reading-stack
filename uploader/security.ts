@@ -274,6 +274,14 @@ export interface ValidateUrlOptions {
   allowCalibreServer?: boolean;
   allowFirecrawlServer?: boolean;
   allowInternalServices?: boolean;
+  /**
+   * Exact `host:port` entries for operator-configured metadata sidecar
+   * endpoints (see `uploader/metadata-providers.ts`). Matching is exact — no
+   * wildcards, suffixes, or credentials — and the target must still resolve
+   * exclusively to loopback/private addresses. This is how a sidecar that runs
+   * beside the server is reachable without weakening the global SSRF posture.
+   */
+  allowedSidecarEndpoints?: string[];
   bindIp?: boolean;
   allowedProxyUrls?: string[];
   /** Test-only resolver seam; every returned address is still validated. */
@@ -540,6 +548,42 @@ export async function validateUrlForSSRF(
             resolvedAddresses: targetAddresses,
           };
         }
+      }
+    }
+
+    // Operator-configured metadata sidecar endpoints: an exact host:port match
+    // against the caller's allowlist, restricted to internal addresses. Checked
+    // before the generic internal-host rejection so a sidecar on loopback or the
+    // LAN is reachable, while user-controlled URLs still cannot get here.
+    const allowedSidecarEndpoints = options.allowedSidecarEndpoints ?? [];
+    if (allowedSidecarEndpoints.length > 0) {
+      const requestedEndpoint = `${host}:${port}`.toLowerCase();
+      const isAllowlistedSidecar = allowedSidecarEndpoints.some(
+        (entry) =>
+          typeof entry === "string" &&
+          entry.trim().toLowerCase().replace(/\/+$/, "") === requestedEndpoint,
+      );
+      if (isAllowlistedSidecar) {
+        const addresses = isIpLiteral
+          ? [{ address: normalizedHost, family: net.isIP(normalizedHost) }]
+          : await resolveAll(host, options);
+        if (
+          addresses.length > 0 &&
+          addresses.every(
+            (addr) =>
+              isLoopbackIp(addr.address) || isPrivateOrInternalIp(addr.address),
+          )
+        ) {
+          return {
+            safe: true,
+            resolvedIp: addresses[0].address,
+            resolvedAddresses: addresses,
+          };
+        }
+        return {
+          safe: false,
+          error: `Sidecar endpoint ${requestedEndpoint} did not resolve to an internal address`,
+        };
       }
     }
 

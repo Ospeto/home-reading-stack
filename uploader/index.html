@@ -2590,6 +2590,9 @@
         <button id="guide-tab-backup" onclick="setGuideTab('backup')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
           SSD Backup
         </button>
+        <button id="guide-tab-providers" onclick="setGuideTab('providers')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
+          Metadata Providers
+        </button>
         <button id="guide-tab-proxy" onclick="setGuideTab('proxy')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
           Kindle Proxy
         </button>
@@ -3316,6 +3319,82 @@
       </div>
 
       <!-- SECTION 4: HOME LAN PROXY FOR KINDLE -->
+      <!-- SECTION: METADATA PROVIDERS & SIDECAR PROTOCOL -->
+      <div id="guide-providers" class="hidden space-y-3 pt-1">
+        <div class="flex items-center justify-between">
+          <h4 class="text-xs font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
+            <span>Metadata Providers &amp; Sidecar Protocol</span>
+          </h4>
+          <span class="text-[10px] px-2 py-0.5 rounded font-mono bg-sky-950/60 text-sky-300 border border-sky-800/50">Pluggable</span>
+        </div>
+        <p class="text-xs text-zinc-300 leading-relaxed">
+          Enrichment sources are registered providers, not hard-coded scrapers. The built-ins
+          (RanobeDB, AniList, Bangumi, Google Books, OpenLibrary, MangaDex) are the first entries in
+          the registry; any other source — Douban, a private catalog, a RanobeDB mirror — can be added
+          as <strong>configuration only</strong> by running a small HTTP sidecar beside the server.
+        </p>
+
+        <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2.5 text-xs text-zinc-300">
+          <div class="font-bold text-white text-[11px]">1. Inspect what is registered</div>
+          <div class="bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800 font-mono text-[11px] text-emerald-300 overflow-x-auto whitespace-nowrap"><span id="guideProvidersEndpoint">/api/metadata/providers</span></div>
+          <div class="text-[11px] text-zinc-400 leading-relaxed">
+            Returns every provider with its <code class="text-zinc-300">id</code>, <code class="text-zinc-300">kind</code>
+            (<code class="text-zinc-300">builtin</code> or <code class="text-zinc-300">sidecar</code>),
+            <code class="text-zinc-300">fields</code>, <code class="text-zinc-300">categories</code>,
+            <code class="text-zinc-300">priority</code>, and the capability flags, plus the category routing table.
+          </div>
+        </div>
+
+        <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2.5 text-xs text-zinc-300">
+          <div class="font-bold text-white text-[11px]">2. Point LightHouse at a sidecar</div>
+          <div class="text-[11px] text-zinc-400 leading-relaxed">
+            Create <code class="text-zinc-200">data/metadata-providers.json</code> (or set
+            <code class="text-zinc-200">LIGHTHOUSE_METADATA_PROVIDERS</code> to the same JSON inline), then restart the uploader.
+          </div>
+          <pre class="bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800 font-mono text-[10.5px] text-zinc-300 overflow-x-auto leading-relaxed">{
+  "providers": [
+    {
+      "id": "douban",
+      "label": "Douban",
+      "endpoint": "http://127.0.0.1:8099",
+      "priority": 60,
+      "categories": ["general_book", "other"],
+      "fields": ["title", "authors", "synopsis", "cover", "tags"]
+    }
+  ]
+}</pre>
+          <div class="text-[11px] text-zinc-400 leading-relaxed">
+            <code class="text-zinc-300">LIGHTHOUSE_METADATA_PROVIDERS_OFF=1</code> disables all sidecars without
+            removing the config. Sidecar endpoints are exact <code class="text-zinc-300">host:port</code> allowlist entries for the
+            SSRF guard, so loopback and LAN sidecars work while user-supplied URLs stay blocked.
+          </div>
+        </div>
+
+        <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2.5 text-xs text-zinc-300">
+          <div class="font-bold text-white text-[11px]">3. The sidecar speaks three JSON routes</div>
+          <div class="space-y-1.5 font-mono text-[10.5px] text-zinc-300">
+            <div class="bg-zinc-950 px-3 py-1.5 rounded-lg border border-zinc-800 overflow-x-auto whitespace-nowrap"><span class="text-sky-300">GET</span> /manifest &rarr; { id, label, fields, categories, priority, protocol }</div>
+            <div class="bg-zinc-950 px-3 py-1.5 rounded-lg border border-zinc-800 overflow-x-auto whitespace-nowrap"><span class="text-sky-300">GET</span> /search?q=&amp;category=&amp;volume=&amp;author= &rarr; { results: [...] }</div>
+            <div class="bg-zinc-950 px-3 py-1.5 rounded-lg border border-zinc-800 overflow-x-auto whitespace-nowrap"><span class="text-sky-300">GET</span> /book/{id} &rarr; { book: {...} }</div>
+          </div>
+          <div class="text-[11px] text-zinc-400 leading-relaxed">
+            Each result carries <code class="text-zinc-300">title</code> (required),
+            <code class="text-zinc-300">authors</code>, <code class="text-zinc-300">synopsis</code>,
+            <code class="text-zinc-300">coverUrl</code>, <code class="text-zinc-300">tags</code>,
+            <code class="text-zinc-300">series</code>, <code class="text-zinc-300">volume</code>, and an optional
+            <code class="text-zinc-300">confidence</code> (0&ndash;1, defaults to 0.78). A failing or offline sidecar is
+            ignored — built-ins keep working.
+          </div>
+        </div>
+
+        <div class="p-3.5 rounded-xl bg-amber-950/25 border border-amber-800/50 space-y-1.5 text-[11px] text-amber-200/90 leading-relaxed">
+          <div class="font-bold text-amber-300">Overwrite protection is unchanged for every provider</div>
+          <div>Volume conflicts still demote a candidate to confidence 0, a numbered volume still keeps its title when the
+            candidate volume differs or is missing, and an existing cover is still never replaced across a volume mismatch.
+            A sidecar cannot widen what gets written over your library.</div>
+        </div>
+      </div>
+
       <div id="guide-proxy" class="space-y-3 pt-1">
         <div class="flex items-center justify-between">
           <h4 class="text-xs font-bold uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
@@ -9199,7 +9278,7 @@
     }
 
     // GUIDE MODAL TABS
-    const GUIDE_TAB_IDS = ['plugin', 'kosync', 'obsidian', 'opds', 'features', 'cli', 'backup', 'proxy', 'all'];
+    const GUIDE_TAB_IDS = ['plugin', 'kosync', 'obsidian', 'opds', 'features', 'cli', 'backup', 'providers', 'proxy', 'all'];
     const GUIDE_SECTION_IDS = {
       plugin: 'guide-plugin',
       kosync: 'guide-kosync',
@@ -9208,6 +9287,7 @@
       features: 'guide-features',
       cli: 'guide-cli',
       backup: 'guide-backup',
+      providers: 'guide-providers',
       proxy: 'guide-proxy',
       all: 'guide-endpoints',
     };

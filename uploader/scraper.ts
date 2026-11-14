@@ -21,6 +21,23 @@ export {
   type BookSourceCategory,
 };
 
+// Pluggable metadata provider interface, registry, and sidecar protocol.
+// The provider contract and routing table live in `metadata-providers.ts`; this
+// module keeps the scrapers themselves and the Calibre write path (volume
+// conflict guards + title/cover overwrite protection).
+import {
+  MetadataProviderRegistry,
+  createBuiltinProviders,
+  discoverSidecarProviders,
+  registerSidecarProviders,
+  describeResultProvider,
+  type MetadataSearchContext,
+  type ProviderRoutingTable,
+  type ScrapedMetadata,
+} from "./metadata-providers";
+
+export type { ScrapedMetadata } from "./metadata-providers";
+
 export function getCalibredbPath(): string {
   if (process.env.CALIBREDB_PATH) return process.env.CALIBREDB_PATH;
   const probe = spawnSync("which", ["calibredb"], { encoding: "utf8" });
@@ -108,19 +125,6 @@ const SERVER_URL = "http://127.0.0.1:8088";
 const PROXY = "http://127.0.0.1:7890";
 const SCRAPER_TIMEOUT_MS = 8000;
 const COVER_TIMEOUT_MS = 12000;
-
-export interface ScrapedMetadata {
-  title: string;
-  authors: string;
-  publisher?: string;
-  publishedDate?: string;
-  description?: string;
-  coverUrl?: string;
-  tags: string[];
-  source: string;
-  confidence: number; // 0.0 - 1.0
-  isManga?: boolean;
-}
 
 // ---------------------------------------------------------------------------
 // Shared Sanitization Regex Patterns & Helpers
@@ -2016,6 +2020,192 @@ export async function searchAniList(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Metadata Provider Registry (built-ins + operator-configured sidecars)
+// ---------------------------------------------------------------------------
+
+/**
+ * The default registry: the existing scrapers, registered as the first
+ * providers. Sidecars are discovered lazily from operator config (env or
+ * `data/metadata-providers.json`) so adding a source like Douban or a private
+ * catalog is a data change, not a code change.
+ */
+export const defaultMetadataProviderRegistry = new MetadataProviderRegistry().registerAll(
+  createBuiltinProviders({
+    ranobedb: (query, options) =>
+      searchRanobeDB(query, { preserveVolume: options?.preserveVolume }),
+    anilist: (query) => searchAniList(query),
+    bangumi: (query, options) =>
+      searchBangumi(query, { preserveVolume: options?.preserveVolume }),
+    googleBooks: (query, options) =>
+      searchGoogleBooks(query, { preserveVolume: options?.preserveVolume }),
+    openLibrary: (query, options) =>
+      searchOpenLibrary(query, { preserveVolume: options?.preserveVolume }),
+    mangaDex: (query, options) =>
+      searchMangaDex(query, { preserveVolume: options?.preserveVolume }),
+  }),
+);
+
+let sidecarProvidersLoaded = false;
+let sidecarProviderWarnings: string[] = [];
+
+export function getMetadataProviderRegistry(): MetadataProviderRegistry {
+  return defaultMetadataProviderRegistry;
+}
+
+/**
+ * Register operator-configured sidecar providers once per process. Failures are
+ * collected (never thrown) so a broken sidecar cannot take enrichment down: the
+ * built-ins keep serving.
+ */
+export function ensureSidecarProvidersRegistered(
+  registry: MetadataProviderRegistry = defaultMetadataProviderRegistry,
+): { loaded: boolean; warnings: string[] } {
+  if (sidecarProvidersLoaded) {
+    return { loaded: true, warnings: sidecarProviderWarnings };
+  }
+  sidecarProvidersLoaded = true;
+  const discovery = discoverSidecarProviders();
+  sidecarProviderWarnings = [...discovery.warnings];
+  if (discovery.configs.length > 0) {
+    const { registered, rejected } = registerSidecarProviders(
+      registry,
+      discovery.configs,
+    );
+    for (const rej of rejected) {
+      sidecarProviderWarnings.push(
+        `Sidecar provider "${rej.id}" rejected: ${rej.error}`,
+      );
+    }
+    if (registered.length > 0) {
+      console.log(
+        `[MetadataProviders] Registered sidecar provider(s) from ${discovery.source}${discovery.path ? ` (${discovery.path})` : ""}: ${registered.join(", ")}`,
+      );
+    }
+  }
+  for (const warning of sidecarProviderWarnings) {
+    console.warn(`[MetadataProviders] ${warning}`);
+  }
+  return { loaded: true, warnings: sidecarProviderWarnings };
+}
+
+/** Test hook: forget sidecar bootstrap state so discovery runs again. */
+export function resetSidecarProvidersForTest(
+  registry: MetadataProviderRegistry = defaultMetadataProviderRegistry,
+): void {
+  sidecarProvidersLoaded = false;
+  sidecarProviderWarnings = [];
+  for (const provider of registry.list()) {
+    if (provider.kind === "sidecar") registry.unregister(provider.id);
+  }
+}
+
+/** Provider ids/priorities advertised by the running registry (diagnostics). */
+export function listMetadataProviders() {
+  ensureSidecarProvidersRegistered();
+  return defaultMetadataProviderRegistry.describe();
+}
+
+export function getMetadataProviderRoutingTable(): ProviderRoutingTable {
+  return defaultMetadataProviderRegistry.getRoutingTable();
+}
+
+/**
+ * Resolve the volume a candidate record actually carries. Providers that emit a
+ * structured `volume` are honoured directly; everything else keeps the exact
+ * legacy behaviour of parsing a volume marker out of the title.
+ */
+export function resolveCandidateVolume(
+  candidate: { title?: string; volume?: number | null },
+): number | null {
+  if (
+    candidate &&
+    candidate.volume !== undefined &&
+    candidate.volume !== null &&
+    !isNaN(Number(candidate.volume))
+  ) {
+    return Number(candidate.volume);
+  }
+  return candidate?.title ? extractVolumeNumber(candidate.title) : null;
+}
+
+/**
+ * Volume conflict guard across candidate search results (unchanged behaviour):
+ *  - a candidate whose volume disagrees with the target is demoted to 0 so it
+ *    can never pass the auto-apply confidence threshold;
+ *  - a candidate with no volume while targeting volume > 1 is capped at 0.7, so
+ *    generic series entries never overwrite a numbered volume.
+ */
+export function applyVolumeConflictGuard(
+  results: ScrapedMetadata[],
+  targetVol: number | null,
+): ScrapedMetadata[] {
+  if (targetVol === null) return results;
+  for (const r of results) {
+    const candidateVol = resolveCandidateVolume(r);
+    if (candidateVol !== null && candidateVol !== targetVol) {
+      r.confidence = 0;
+    } else if (candidateVol === null && targetVol > 1) {
+      r.confidence = Math.min(r.confidence, 0.7);
+    }
+  }
+  return results;
+}
+
+/**
+ * Rank candidates: light-novel preference, RanobeDB preference, confidence, then
+ * provider priority (which only separates sidecars from built-ins, because every
+ * built-in shares one priority — keeping today's insertion-order tie-breaking).
+ */
+export function rankMetadataCandidates(
+  results: ScrapedMetadata[],
+  options: { isLnTarget?: boolean } = {},
+): ScrapedMetadata[] {
+  const isLnTarget = Boolean(options.isLnTarget);
+  results.sort((a, b) => {
+    if (isLnTarget) {
+      if (
+        a.source === "RanobeDB" &&
+        b.source !== "RanobeDB" &&
+        a.confidence >= 0.7
+      )
+        return -1;
+      if (
+        b.source === "RanobeDB" &&
+        a.source !== "RanobeDB" &&
+        b.confidence >= 0.7
+      )
+        return 1;
+    }
+    // High similarity RanobeDB priority
+    if (
+      a.source === "RanobeDB" &&
+      b.source !== "RanobeDB" &&
+      a.confidence >= 0.85 &&
+      b.confidence <= a.confidence + 0.05
+    ) {
+      return -1;
+    }
+    if (
+      b.source === "RanobeDB" &&
+      a.source !== "RanobeDB" &&
+      b.confidence >= 0.85 &&
+      a.confidence <= b.confidence + 0.05
+    ) {
+      return 1;
+    }
+    const confidenceDelta = b.confidence - a.confidence;
+    if (confidenceDelta !== 0) return confidenceDelta;
+    const provA = describeResultProvider(a);
+    const provB = describeResultProvider(b);
+    if (provA && provB && provA.priority !== provB.priority) {
+      return provB.priority - provA.priority;
+    }
+    return 0;
+  });
+  return results;
+}
+
 // Unified Search with Multi-Source Fallback & Jev-Powered Smart Routing
 export async function searchUniversalMetadata(
   query: string,
@@ -2109,154 +2299,44 @@ export async function searchUniversalMetadata(
 
   const isLnTarget = category === "light_novel";
 
-  // Category-specific source routing:
-  // 1. 'light_novel': Query RanobeDB + Bangumi (and AniList for series queries), fallback to Google Books
-  if (category === "light_novel") {
-    const lnSettled = await Promise.allSettled([
-      searchRanobeDB(query, { preserveVolume: hintPreserveVolume }),
-      ...(hintPreserveVolume ? [] : [searchAniList(query)]),
-      searchBangumi(query, { preserveVolume: hintPreserveVolume }),
-    ]);
-    for (const res of lnSettled) {
-      if (res.status === "fulfilled") {
-        results.push(...res.value);
-      }
-    }
-    // If primary light novel sources returned 0 results (or no usable description when searching volume synopsis)
-    const hasUsableLn = hintPreserveVolume
-      ? results.some((r) => r.confidence >= 0.85 && r.description && r.description.trim().length > 15)
-      : results.length > 0;
-    if (!hasUsableLn) {
-      try {
-        const gbResults = await searchGoogleBooks(query, { preserveVolume: hintPreserveVolume });
-        results.push(...gbResults);
-      } catch (err) {
-        console.debug(`[Scraper] Google Books secondary search error:`, err);
-      }
-    }
-  }
-  // 2. 'manga': Query MangaDex + Bangumi (and AniList for series queries)
-  else if (category === "manga") {
-    const mangaSettled = await Promise.allSettled([
-      searchMangaDex(query),
-      ...(hintPreserveVolume ? [] : [searchAniList(query)]),
-      searchBangumi(query, { preserveVolume: hintPreserveVolume }),
-    ]);
-    for (const res of mangaSettled) {
-      if (res.status === "fulfilled") {
-        results.push(...res.value);
-      }
-    }
-  }
-  // 3. 'general_book' or 'other': Query Google Books + OpenLibrary first
-  else if (category === "general_book" || category === "other") {
-    const generalSettled = await Promise.allSettled([
-      searchGoogleBooks(query, { preserveVolume: hintPreserveVolume }),
-      searchOpenLibrary(query, { preserveVolume: hintPreserveVolume }),
-    ]);
-    for (const res of generalSettled) {
-      if (res.status === "fulfilled") {
-        results.push(...res.value);
-      }
-    }
-  }
-  // 4. 'burmese': Skip overseas metadata searches that will 404
-  else if (category === "burmese") {
-    // Burmese literature skips overseas search to avoid unnecessary 404s/waterfalls.
-    // Calibre local metadata & typographic cover are used.
+  // Provider routing is data, not code: the registry owns the ordered tiers per
+  // source category (DEFAULT_ROUTING_TABLE in metadata-providers.ts), the
+  // series-vs-volume rule for series-level sources (AniList), tier
+  // short-circuiting, per-provider failure isolation, and any sidecar providers
+  // an operator has configured.
+  ensureSidecarProvidersRegistered();
+  const searchContext: MetadataSearchContext = {
+    query,
+    author: hintAuthor || undefined,
+    filename: hintFilename || undefined,
+    tags: hintTags,
+    category,
+    preserveVolume: hintPreserveVolume,
+    volume: targetVol,
+  };
+
+  const plan = defaultMetadataProviderRegistry.plan(category, searchContext);
+  if (plan.tiers.length === 0 && plan.alwaysRun.length === 0) {
+    // 4. 'burmese' (and any category without providers): skip overseas metadata
+    // searches that will 404. Calibre local metadata & typographic covers are
+    // used instead.
     return results;
   }
 
-  // 5. Fallback: run secondary search if primary returned 0 results (or if searching volume synopsis and no usable description found)
-  const hasUsableFallback = hintPreserveVolume
-    ? results.some((r) => r.confidence >= 0.85 && r.description && r.description.trim().length > 15)
-    : results.length > 0;
-  if (!hasUsableFallback) {
-    if (category === "light_novel") {
-      // Light novel secondary already tried Google Books; try OpenLibrary + MangaDex
-      const fallbackSettled = await Promise.allSettled([
-        searchOpenLibrary(query, { preserveVolume: hintPreserveVolume }),
-        searchMangaDex(query, { preserveVolume: hintPreserveVolume }),
-      ]);
-      for (const res of fallbackSettled) {
-        if (res.status === "fulfilled") {
-          results.push(...res.value);
-        }
-      }
-    } else if (category === "manga") {
-      // Manga fallback: try Google Books + OpenLibrary
-      const fallbackSettled = await Promise.allSettled([
-        searchGoogleBooks(query, { preserveVolume: hintPreserveVolume }),
-        searchOpenLibrary(query, { preserveVolume: hintPreserveVolume }),
-      ]);
-      for (const res of fallbackSettled) {
-        if (res.status === "fulfilled") {
-          results.push(...res.value);
-        }
-      }
-    } else if (category === "general_book" || category === "other") {
-      // General book fallback: try RanobeDB + AniList + Bangumi + MangaDex
-      const fallbackSettled = await Promise.allSettled([
-        searchRanobeDB(query, { preserveVolume: hintPreserveVolume }),
-        ...(hintPreserveVolume ? [] : [searchAniList(query)]),
-        searchBangumi(query, { preserveVolume: hintPreserveVolume }),
-        searchMangaDex(query, { preserveVolume: hintPreserveVolume }),
-      ]);
-      for (const res of fallbackSettled) {
-        if (res.status === "fulfilled") {
-          results.push(...res.value);
-        }
-      }
-    }
+  const searchOutcome = await defaultMetadataProviderRegistry.searchAll(searchContext);
+  results.push(...searchOutcome.results);
+  for (const failure of searchOutcome.failures) {
+    console.debug(
+      `[Scraper] Metadata provider "${failure.providerId}" failed: ${failure.error}`,
+    );
   }
 
-  // Volume conflict guard across all candidate results
-  if (targetVol !== null) {
-    for (const r of results) {
-      const candidateVol = r.title ? extractVolumeNumber(r.title) : null;
-      if (candidateVol !== null && candidateVol !== targetVol) {
-        r.confidence = 0;
-      } else if (candidateVol === null && targetVol > 1) {
-        r.confidence = Math.min(r.confidence, 0.7);
-      }
-    }
-  }
+  // Volume conflict guard across all candidate results (unchanged behaviour).
+  applyVolumeConflictGuard(results, targetVol);
 
-  // Sort results: prioritize RanobeDB when query matches light novel patterns or has high title similarity
-  results.sort((a, b) => {
-    if (isLnTarget) {
-      if (
-        a.source === "RanobeDB" &&
-        b.source !== "RanobeDB" &&
-        a.confidence >= 0.7
-      )
-        return -1;
-      if (
-        b.source === "RanobeDB" &&
-        a.source !== "RanobeDB" &&
-        b.confidence >= 0.7
-      )
-        return 1;
-    }
-    // High similarity RanobeDB priority
-    if (
-      a.source === "RanobeDB" &&
-      b.source !== "RanobeDB" &&
-      a.confidence >= 0.85 &&
-      b.confidence <= a.confidence + 0.05
-    ) {
-      return -1;
-    }
-    if (
-      b.source === "RanobeDB" &&
-      a.source !== "RanobeDB" &&
-      b.confidence >= 0.85 &&
-      a.confidence <= b.confidence + 0.05
-    ) {
-      return 1;
-    }
-    return b.confidence - a.confidence;
-  });
+  // Sort results: prefer RanobeDB for light novels / high title similarity, then
+  // confidence, then provider priority (sidecars only).
+  rankMetadataCandidates(results, { isLnTarget });
 
   return results;
 }
@@ -2319,6 +2399,118 @@ export function isAllowedCoverUrl(rawUrl: string): boolean {
 }
 
 // Auto-Enrich Calibre Book Metadata & Cover
+export interface ExistingCalibreMetadata {
+  title?: string;
+  series_index?: number | string | null;
+  has_cover?: boolean | number;
+  series?: string;
+}
+
+export interface OverwriteGuardDecision {
+  /** Volume parsed from the existing book's title, or its series_index. */
+  existingVolume: number | null;
+  existingSeriesIndex: number | null;
+  existingHasCover: boolean;
+  /** Volume carried by the candidate (structured `volume`, else title marker). */
+  candidateVolume: number | null;
+  hasVolumeOrMultiVolumeSeries: boolean;
+  isDifferentVolume: boolean;
+  volumeMismatchForCover: boolean;
+  /** Guard 1: never overwrite the title of a numbered volume with other data. */
+  skipTitleOverwrite: boolean;
+  /** Guard 2: never overwrite a cover across a volume mismatch. */
+  skipCover: boolean;
+}
+
+/**
+ * Resolve the volume an existing Calibre book represents: a marker in its title,
+ * else its series_index when the book belongs to a series.
+ */
+export function resolveExistingBookVolume(existing: ExistingCalibreMetadata | null | undefined): {
+  volume: number | null;
+  seriesIndex: number | null;
+  hasCover: boolean;
+} {
+  let volume: number | null = null;
+  let seriesIndex: number | null = null;
+  if (!existing) return { volume, seriesIndex, hasCover: false };
+
+  if (existing.title) volume = extractVolumeNumber(existing.title);
+  if (
+    existing.series &&
+    existing.series_index !== undefined &&
+    existing.series_index !== null &&
+    !isNaN(Number(existing.series_index))
+  ) {
+    seriesIndex = Number(existing.series_index);
+    if (volume === null && seriesIndex > 0) volume = seriesIndex;
+  }
+  return { volume, seriesIndex, hasCover: Boolean(existing.has_cover) };
+}
+
+/**
+ * THE overwrite-protection policy for Calibre enrichment. Single source of truth
+ * for both guards; `applyMetadataToCalibre` and every metadata provider flow
+ * through it, so no provider — built-in or sidecar — can widen what gets
+ * written over an existing library record.
+ *
+ * Guard 1 (title): if the existing book carries a volume number or a series
+ * index > 1, a candidate whose volume differs — or that has no volume at all —
+ * must not replace the title.
+ *
+ * Guard 2 (cover): if the existing book's volume disagrees with the candidate's
+ * volume (or the book is a numbered volume and the candidate has none), the
+ * existing cover is preserved.
+ */
+export function resolveOverwriteGuards(
+  existing: ExistingCalibreMetadata | null | undefined,
+  candidate: { title?: string; coverUrl?: string; volume?: number | null },
+): OverwriteGuardDecision {
+  const {
+    volume: existingVolume,
+    seriesIndex: existingSeriesIndex,
+    hasCover: existingHasCover,
+  } = resolveExistingBookVolume(existing);
+  const candidateVolume = resolveCandidateVolume(candidate);
+
+  // Guard 1: a numbered volume (or a series book past volume 1) must keep its
+  // title unless the candidate names the very same volume.
+  const hasVolumeOrMultiVolumeSeries =
+    (existingVolume !== null && existingVolume > 1) ||
+    (Boolean(existing?.series) &&
+      existingSeriesIndex !== null &&
+      existingSeriesIndex > 1);
+  const isDifferentVolume =
+    existingVolume !== null &&
+    candidateVolume !== null &&
+    candidateVolume !== existingVolume;
+  const isMissingVolumeWhenBookHasVolume =
+    hasVolumeOrMultiVolumeSeries && candidateVolume === null;
+  const skipTitleOverwrite = Boolean(
+    candidate.title && (isDifferentVolume || isMissingVolumeWhenBookHasVolume),
+  );
+
+  // Guard 2: never replace a cover across a volume mismatch, and never replace
+  // the cover of a numbered volume with a volume-less candidate.
+  const volumeMismatchForCover =
+    existingVolume !== null &&
+    ((candidateVolume !== null && candidateVolume !== existingVolume) ||
+      (existingVolume > 1 && candidateVolume === null));
+  const skipCover = !candidate.coverUrl || volumeMismatchForCover;
+
+  return {
+    existingVolume,
+    existingSeriesIndex,
+    existingHasCover,
+    candidateVolume,
+    hasVolumeOrMultiVolumeSeries,
+    isDifferentVolume,
+    volumeMismatchForCover,
+    skipTitleOverwrite,
+    skipCover,
+  };
+}
+
 export async function applyMetadataToCalibre(
   bookId: number,
   meta: ScrapedMetadata,
@@ -2342,46 +2534,20 @@ export async function applyMetadataToCalibre(
 
     // Check the book's existing metadata (title, series_index, has_cover) in Calibre
     const existing = getMeta(bookId);
-    let existingVol: number | null = null;
-    let existingSeriesIndex: number | null = null;
-    let existingHasCover = false;
 
-    if (existing) {
-      if (existing.title) existingVol = extractVolumeNumber(existing.title);
-      if (
-        existing.series &&
-        existing.series_index !== undefined &&
-        existing.series_index !== null &&
-        !isNaN(Number(existing.series_index))
-      ) {
-        existingSeriesIndex = Number(existing.series_index);
-        if (existingVol === null && existingSeriesIndex > 0) {
-          existingVol = existingSeriesIndex;
-        }
-      }
-      existingHasCover = Boolean(existing.has_cover);
-    }
-
-    const candidateVol = meta.title ? extractVolumeNumber(meta.title) : null;
-
-    // Volume guards:
-    // 1. Never overwrite title if the book already has a volume number or series index > 1
-    //    and meta.title has a different volume or no volume.
-    const hasVolumeOrMultiVolSeries =
-      (existingVol !== null && existingVol > 1) ||
-      (Boolean(existing?.series) && existingSeriesIndex !== null && existingSeriesIndex > 1);
-
-    const isDifferentVolume =
-      existingVol !== null &&
-      candidateVol !== null &&
-      candidateVol !== existingVol;
-
-    const isMissingVolumeWhenBookHasVolume =
-      hasVolumeOrMultiVolSeries && candidateVol === null;
-
-    const skipTitleOverwrite = Boolean(
-      meta.title && (isDifferentVolume || isMissingVolumeWhenBookHasVolume),
-    );
+    // Both overwrite guards come from one shared policy function so every
+    // provider path is protected identically.
+    const guards = resolveOverwriteGuards(existing, meta);
+    const {
+      existingVolume: existingVol,
+      existingSeriesIndex,
+      existingHasCover,
+      candidateVolume: candidateVol,
+      isDifferentVolume,
+      volumeMismatchForCover,
+      skipTitleOverwrite,
+      skipCover,
+    } = guards;
 
     if (skipTitleOverwrite) {
       console.warn(
@@ -2390,14 +2556,6 @@ export async function applyMetadataToCalibre(
           `candidate has volume ${candidateVol ?? "none"} ("${meta.title}").`,
       );
     }
-
-    // 2. Never overwrite an existing cover if the candidate metadata volume mismatches the book's volume.
-    const volumeMismatchForCover =
-      existingVol !== null &&
-      ((candidateVol !== null && candidateVol !== existingVol) ||
-        (existingVol > 1 && candidateVol === null));
-
-    const skipCover = !meta.coverUrl || volumeMismatchForCover;
 
     if (meta.coverUrl && volumeMismatchForCover) {
       console.warn(

@@ -21,6 +21,8 @@ import {
   isAllowedCoverUrl,
   normalizeAuthorForDedup,
   isJunkAuthor,
+  listMetadataProviders,
+  getMetadataProviderRegistry,
 } from "./scraper";
 import {
   isArchiveFile,
@@ -4741,6 +4743,41 @@ async function handleRequestCore(
 
   // API: Durable Job Queue Inspection. Read-only library and reading-data
   // endpoints remain public on WAN; only mutation routes use the auth gate above.
+  if (url.pathname === "/api/metadata/providers" && req.method === "GET") {
+    // Discovery surface for the pluggable metadata provider registry: which
+    // sources are registered, what they can supply, and how they rank. Sidecar
+    // providers configured under data/metadata-providers.json (or env) appear
+    // here with kind "sidecar".
+    let providers: ReturnType<typeof listMetadataProviders> = [];
+    let routing: Record<string, string[][]> = {};
+    let error: string | null = null;
+    try {
+      providers = listMetadataProviders();
+      routing = getMetadataProviderRegistry().getRoutingTable();
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    }
+    return jsonResponse(
+      {
+        success: error === null,
+        error: error ?? undefined,
+        count: providers.length,
+        providers,
+        routing,
+        protocol: {
+          version: 1,
+          sidecar: {
+            manifest: "GET {endpoint}/manifest",
+            search: "GET {endpoint}/search?q=&category=&volume=&author=",
+            book: "GET {endpoint}/book/{id}",
+          },
+        },
+      },
+      200,
+      corsOrigin,
+    );
+  }
+
   if (url.pathname === "/api/jobs/recent" && req.method === "GET") {
     const limitParam = parseInt(url.searchParams.get("limit") || "50", 10);
     const statusParam = url.searchParams.get("status") as any;
