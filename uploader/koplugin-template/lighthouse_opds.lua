@@ -108,14 +108,56 @@ function OPDS.collapse(str)
 end
 
 --- Parses the attribute set of a single tag into a key/value table.
+-- XML allows both double- and single-quoted attribute values (Lua patterns
+-- have no backreferences, so the two shapes are matched in separate passes).
 -- @string attrs raw attribute text (everything between the tag name and ">")
 -- @treturn table
 local function parseAttrs(attrs)
     local parsed = {}
+    if type(attrs) ~= "string" or attrs == "" then return parsed end
     for name, value in attrs:gmatch("([%w:_%-%.]+)%s*=%s*\"([^\"]*)\"") do
         parsed[name] = OPDS.unescape(value)
     end
+    for name, value in attrs:gmatch("([%w:_%-%.]+)%s*=%s*'([^']*)'") do
+        if parsed[name] == nil then
+            parsed[name] = OPDS.unescape(value)
+        end
+    end
     return parsed
+end
+
+--- Collects every author name in one entry, in document order.
+-- Real OPDS feeds carry one <author> element per contributor, and some carry a
+-- single <name> at entry level; both shapes are handled without losing names.
+-- @string block entry XML
+-- @treturn string authors joined with ", " (empty string when absent)
+local function parseAuthors(block)
+    local names, seen = {}, {}
+
+    local function add(raw)
+        if type(raw) ~= "string" then return end
+        local name = OPDS.collapse(OPDS.unescape(raw))
+        if name == "" or seen[name] then return end
+        seen[name] = true
+        names[#names + 1] = name
+    end
+
+    for author_block in block:gmatch("<author[^>]*>(.-)</author>") do
+        add(author_block:match("<name[^>]*>(.-)</name>"))
+        -- dc:creator is the other common shape when <author> is self-closing.
+        if #names == 0 then
+            add(author_block:match("<dc:creator[^>]*>(.-)</dc:creator>"))
+        end
+    end
+    if #names == 0 then
+        add(block:match("<dc:creator[^>]*>(.-)</dc:creator>"))
+    end
+    if #names == 0 then
+        -- Last resort: a bare <name> directly inside the entry.
+        add(block:match("<name[^>]*>(.-)</name>"))
+    end
+
+    return table.concat(names, ", ")
 end
 
 --- Extracts the Calibre book id from a LightHouse/Calibre Atom entry id.
@@ -140,7 +182,7 @@ local function parseEntry(block)
 
     entry.id = OPDS.collapse(OPDS.unescape(block:match("<id[^>]*>(.-)</id>") or ""))
     entry.title = OPDS.collapse(OPDS.unescape(block:match("<title[^>]*>(.-)</title>") or ""))
-    entry.authors = OPDS.collapse(OPDS.unescape(block:match("<name[^>]*>(.-)</name>") or ""))
+    entry.authors = parseAuthors(block)
     entry.summary = OPDS.collapse(OPDS.unescape(block:match("<summary[^>]*>(.-)</summary>") or ""))
     entry.published = OPDS.collapse(OPDS.unescape(block:match("<published[^>]*>(.-)</published>") or ""))
 
@@ -229,6 +271,16 @@ function OPDS.parse(xml)
     body = (body:gsub("<entry%s+[^>]->", "<entry>"))
     for block in body:gmatch("<entry>(.-)</entry>") do
         feed.entries[#feed.entries + 1] = parseEntry(block)
+    end
+
+    -- A feed cut off mid-transfer (dropped Wi-Fi, truncated response) still
+    -- carries usable entries; keep the ones that closed and salvage a trailing
+    -- open entry instead of showing an empty catalog.
+    if #feed.entries == 0 then
+        local trailing = body:match("<entry>(.+)$")
+        if trailing then
+            feed.entries[1] = parseEntry(trailing)
+        end
     end
 
     return feed

@@ -72,19 +72,35 @@ local function notice(text, timeout)
 end
 
 --- Maps a client error code to a message the reader can act on.
+-- Codes arrive from `lighthouse_client` as plain strings, optionally suffixed
+-- with diagnostic detail (`network_error: timeout`); the prefix decides which
+-- actionable message the reader sees.
 -- @string err
 -- @treturn string
 local function describeError(err)
-    if err == "not_configured" then
+    local code = type(err) == "string" and err or tostring(err or "")
+    if code == "not_configured" then
         return _("This plugin is not configured. Download it again from the LightHouse server (Guide → KOReader plugin).")
-    elseif err == "network_error" then
+    elseif code:match("^network_error") then
         return _("Could not reach the LightHouse server. Check Wi-Fi and the server address in the Connection screen.")
-    elseif err == "empty_response" then
+    elseif code == "https_unavailable" then
+        return _("This KOReader build has no TLS support, so it cannot reach an https:// server. Use the LAN http:// address instead.")
+    elseif code == "empty_response" then
         return _("The server returned an empty file.")
-    elseif type(err) == "string" and err:match("^http_401") then
+    elseif code == "html_response" then
+        return _("The server returned a web page instead of the file. Check the server address, or open the web app and sign in again.")
+    elseif code:match("^file_error") then
+        return T(_("Could not write the file: %1"), code:gsub("^file_error:%s*", ""))
+    elseif code == "too_many_redirects" then
+        return _("The server redirected the request too many times. Download the plugin again from the LightHouse web app.")
+    elseif code == "invalid_redirect" then
+        return _("The server sent a redirect the plugin could not follow. Download the plugin again from the LightHouse web app.")
+    elseif code:match("^exception:") then
+        return T(_("The request failed: %1"), code:gsub("^exception:%s*", ""))
+    elseif code:match("^http_401") or code:match("^http_403") then
         return _("The server rejected this device's key. Download the plugin again from the LightHouse web app.")
-    elseif type(err) == "string" and err:match("^http_") then
-        return T(_("The server returned an error (%1)."), err:gsub("^http_", ""))
+    elseif code:match("^http_") then
+        return T(_("The server returned an error (%1)."), code:gsub("^http_", ""))
     end
     return _("Something went wrong.")
 end
@@ -106,16 +122,58 @@ local function makeDirs(path)
     return lfs.attributes(path, "mode") == "directory"
 end
 
+--- Truncates a string to at most `max_bytes` bytes without splitting a UTF-8
+-- sequence, so Burmese titles never produce invalid bytes on disk.
+-- @string text
+-- @number max_bytes
+-- @treturn string
+local function truncateUtf8(text, max_bytes)
+    if #text <= max_bytes then return text end
+    local cut = max_bytes
+    while cut > 0 do
+        local byte = text:byte(cut + 1)
+        -- Stop when the byte after the cut is not a continuation byte.
+        if not byte or byte < 0x80 or byte >= 0xC0 then break end
+        cut = cut - 1
+    end
+    if cut < 1 then cut = max_bytes end
+    return text:sub(1, cut)
+end
+
+--- Formats a Calibre series index for a filename.
+-- Calibre allows fractional indices (a novella at 1.5) and the OPDS feed can
+-- carry a string or a float; formatting a non-integer with `%02d` raises in
+-- some Lua builds, so the integer part is formatted and the fraction kept.
+-- @param index number or numeric string
+-- @treturn string|nil e.g. "01", "01.5" (nil when the index is unusable)
+local function formatSeriesIndex(index)
+    local value = tonumber(index)
+    if not value or value ~= value then return nil end -- nil or NaN
+    if value < 0 then value = 0 end
+    if value > 9999 then value = 9999 end
+
+    local whole = math.floor(value)
+    local fraction = value - whole
+    if fraction < 0.005 then
+        return string.format("%02d", whole)
+    end
+    local decimals = string.format("%.2f", value)
+        :gsub("^%d+", "")
+        :gsub("0+$", "")
+        :gsub("%.$", "")
+    return string.format("%02d", whole) .. decimals
+end
+
 --- Builds a filesystem-safe EPUB filename from catalog metadata.
 -- Mirrors the server's own download naming ("Title - Author.epub") without
 -- ever touching the Calibre storage path.
 -- @tparam table entry OPDS entry
 -- @treturn string
 local function buildFilename(entry)
-    local title = entry.title or ""
-    local authors = entry.authors or ""
+    entry = entry or {}
 
     local function sanitize(value)
+        value = tostring(value or "")
         value = value:gsub("[/\\:*?\"<>|]", "_")
         value = value:gsub("%s+", " ")
         value = value:gsub("^%s+", "")
@@ -123,31 +181,33 @@ local function buildFilename(entry)
         return value
     end
 
-    title = sanitize(title)
-    authors = sanitize(authors)
+    local title = sanitize(entry.title)
+    local authors = sanitize(entry.authors)
 
-    if entry.series and entry.series ~= "" then
-        local index = entry.series_index
-        local prefix = sanitize(entry.series)
-        if index then
-            prefix = string.format("%s %02d", prefix, index)
-        end
-        if prefix ~= "" then
+    local series = sanitize(entry.series)
+    if series ~= "" then
+        local index = formatSeriesIndex(entry.series_index)
+        local prefix = index and (series .. " " .. index) or series
+        if title == "" then
+            title = prefix
+        else
             title = prefix .. " - " .. title
         end
     end
 
     local name
     if title == "" then
-        name = string.format("lighthouse-%s", tostring(entry.book_id or "book"))
+        name = string.format("lighthouse-%s", sanitize(tostring(entry.book_id or "book")))
     elseif authors == "" then
         name = title
     else
         name = title .. " - " .. authors
     end
 
-    if #name > MAX_FILENAME_LENGTH then
-        name = name:sub(1, MAX_FILENAME_LENGTH):gsub("[%s%.]+$", "")
+    name = truncateUtf8(name, MAX_FILENAME_LENGTH):gsub("^%s+", "")
+    name = name:gsub("[%s%.]+$", "")
+    if name == "" then
+        name = string.format("lighthouse-%s", sanitize(tostring(entry.book_id or "book")))
     end
 
     return name .. ".epub"
@@ -231,6 +291,8 @@ function LightHouse:showConnection(configured)
         _("Download folder:") .. " " .. self:getDownloadDir(),
         _("Plugin version:") .. " " .. tostring(config.plugin_version or "unknown"),
         _("Generated:") .. " " .. (config.generated_at ~= "" and config.generated_at or _("manual copy")),
+        _("Request timeout:") .. " " .. tostring(config.request_total_timeout or 90) .. "s",
+        _("Download timeout:") .. " " .. tostring(config.download_total_timeout or 300) .. "s",
     }
     if not configured then
         table.insert(lines, 1, _("This copy is not configured. Download the plugin from the LightHouse web app to get a pre-configured one."))
@@ -256,8 +318,20 @@ function LightHouse:withSpinner(text, func)
     local ok, body, err = pcall(func)
     UIManager:close(info)
     if not ok then
-        logger.warn("LightHouse: request failed:", body)
-        return nil, "exception"
+        -- `body` holds the raised error value: either a message string or a
+        -- table carrying message + traceback, depending on how it was thrown.
+        local message
+        if type(body) == "table" then
+            message = tostring(body.message or body.traceback or body)
+            logger.warn("LightHouse: request raised:", message, body.traceback)
+        else
+            message = tostring(body)
+            logger.warn("LightHouse: request raised:", message)
+        end
+        return nil, "exception: " .. message
+    end
+    if body == nil and err ~= nil then
+        logger.warn("LightHouse: request failed:", tostring(err))
     end
     return body, err
 end
@@ -612,5 +686,11 @@ function LightHouse:showMenu(title, items)
     }
     UIManager:show(self.menu)
 end
+
+-- Pure helpers exposed for the repository's Lua test harness. They stay plain
+-- function fields on the plugin table, so KOReader's PluginLoader is unaffected.
+LightHouse.buildFilename = buildFilename
+LightHouse.describeError = describeError
+LightHouse.formatSeriesIndex = formatSeriesIndex
 
 return LightHouse
