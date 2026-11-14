@@ -109,6 +109,19 @@ import {
   invalidateHighlightCountsCache,
   type HighlightRecord,
 } from "./highlights";
+import {
+  annotationSummary,
+  deleteAnnotation,
+  getAnnotationById,
+  normalizePage,
+  queryAnnotations,
+  resolveSource,
+  upsertAnnotation,
+} from "./annotation-store";
+import {
+  exportAnnotations,
+  isAnnotationExportFormat,
+} from "./annotation-export";
 
 export { invalidateHighlightCountsCache };
 import {
@@ -4352,7 +4365,7 @@ async function handleRequestCore(
     ).trim();
 
     const filteredBooks = query
-      ? books.filter((b) => {
+      ? books.filter((b: any) => {
           const q = query.toLowerCase();
           const matchTitle = Boolean(b.title && b.title.toLowerCase().includes(q));
           const matchAuthor = Boolean(b.authors && b.authors.toLowerCase().includes(q));
@@ -5501,6 +5514,224 @@ async function handleRequestCore(
     }
   }
 
+  // API: Annotation store (unified highlights) — filterable list, summary, create,
+  // delete, and Markdown/CSV/JSON export. Every route reads the same store, so a
+  // deleted annotation disappears from the list and from every export.
+  function annotationFilterFromRequest(source: URL): {
+    bookId: number | null;
+    title: string | null;
+    color: string | null;
+    style: string | null;
+    source: string | null;
+    query: string | null;
+    limit: number;
+  } {
+    const bookIdRaw =
+      source.searchParams.get("book_id") || source.searchParams.get("bookId");
+    const limitRaw = source.searchParams.get("limit");
+    const parsedLimit = limitRaw ? parseInt(limitRaw, 10) : NaN;
+    return {
+      bookId: bookIdRaw ? validateIntegerId(bookIdRaw) : null,
+      title: source.searchParams.get("title"),
+      color: source.searchParams.get("color"),
+      style: source.searchParams.get("style"),
+      source: source.searchParams.get("source"),
+      query: source.searchParams.get("q") || source.searchParams.get("query"),
+      limit: Number.isNaN(parsedLimit)
+        ? 500
+        : Math.min(Math.max(parsedLimit, 1), 5000),
+    };
+  }
+
+  if (url.pathname === "/api/annotations" && req.method === "GET") {
+    try {
+      const db = getCacheDb();
+      const rows = queryAnnotations(db, annotationFilterFromRequest(url));
+      return jsonResponse(
+        {
+          success: true,
+          count: rows.length,
+          summary: annotationSummary(db),
+          annotations: rows,
+        },
+        200,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  if (url.pathname === "/api/annotations" && req.method === "POST") {
+    try {
+      const parsed = await parseJsonBody<{
+        title?: string;
+        bookTitle?: string;
+        bookId?: number | string;
+        quote?: string;
+        text?: string;
+        note?: string;
+        chapter?: string;
+        page?: number | string;
+        color?: string;
+        style?: string;
+        source?: string;
+      }>(req);
+      if (parsed.error || !parsed.data) {
+        return jsonResponse(
+          { success: false, error: parsed.error || "Missing body" },
+          400,
+          corsOrigin,
+        );
+      }
+
+      const body = parsed.data;
+      const quote = cleanQuoteText(body.quote || body.text || "");
+      if (!quote) {
+        return jsonResponse(
+          { success: false, error: "A non-empty quote is required" },
+          400,
+          corsOrigin,
+        );
+      }
+
+      const bookId = body.bookId === undefined ? null : validateIntegerId(body.bookId);
+      let title = (body.title || body.bookTitle || "").trim();
+      if (!title && bookId) {
+        const book = getCalibreBooks().find((b: any) => b.id === bookId);
+        title = book?.title || "";
+      }
+      if (!title) {
+        return jsonResponse(
+          { success: false, error: "A book title or bookId is required" },
+          400,
+          corsOrigin,
+        );
+      }
+
+      // A highlight added in the reader belongs to the `web` source unless the
+      // caller names a real one; an unknown source is rejected, not invented.
+      const requestedSource = body.source ? resolveSource(body.source) : "web";
+      if (!requestedSource) {
+        return jsonResponse(
+          { success: false, error: `Unknown source: ${body.source}` },
+          400,
+          corsOrigin,
+        );
+      }
+
+      const db = getCacheDb();
+      upsertAnnotation({
+        db,
+        bookId,
+        bookTitle: title,
+        source: requestedSource,
+        quote,
+        note: body.note ?? null,
+        chapter: body.chapter ?? null,
+        page: normalizePage(body.page),
+        color: body.color ?? null,
+        style: body.style ?? null,
+      });
+
+      return jsonResponse(
+        { success: true, count: 1 },
+        201,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  const annotationDeleteMatch = url.pathname.match(/^\/api\/annotations\/(\d+)$/);
+  if (annotationDeleteMatch && req.method === "DELETE") {
+    try {
+      const id = validateIntegerId(annotationDeleteMatch[1]);
+      if (!id) {
+        return jsonResponse(
+          { success: false, error: "Invalid annotation id" },
+          400,
+          corsOrigin,
+        );
+      }
+      const db = getCacheDb();
+      const existing = getAnnotationById(db, id);
+      if (!existing) {
+        return jsonResponse(
+          { success: false, error: "Annotation not found" },
+          404,
+          corsOrigin,
+        );
+      }
+      const removed = deleteAnnotation(db, id);
+      return jsonResponse(
+        {
+          success: removed,
+          id,
+          book_title: existing.book_title,
+          message: removed
+            ? "Annotation deleted from the store and every export"
+            : "Annotation not found",
+        },
+        200,
+        corsOrigin,
+      );
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
+  if (url.pathname === "/api/highlights/export" && req.method === "GET") {
+    try {
+      const formatRaw = (url.searchParams.get("format") || "markdown").toLowerCase();
+      if (!isAnnotationExportFormat(formatRaw)) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "format must be one of: markdown, csv, json",
+          },
+          400,
+          corsOrigin,
+        );
+      }
+
+      const result = exportAnnotations(getCacheDb(), {
+        format: formatRaw,
+        filter: annotationFilterFromRequest(url),
+      });
+
+      return new Response(result.content, {
+        status: 200,
+        headers: {
+          "content-type": result.contentType,
+          "content-disposition": `attachment; filename="${result.filename}"`,
+          "x-annotation-count": String(result.count),
+          "cache-control": "no-store",
+          ...(corsOrigin ? { "access-control-allow-origin": corsOrigin } : {}),
+        },
+      });
+    } catch (err: any) {
+      return jsonResponse(
+        { success: false, error: sanitizeErrorMessage(err) },
+        500,
+        corsOrigin,
+      );
+    }
+  }
+
   // API: Highlights lookup and library-wide counts
   if (url.pathname === "/api/highlights" && req.method === "GET") {
     try {
@@ -5875,7 +6106,7 @@ async function handleRequestCore(
               book_id: bookId ?? null,
               book_title: syncTitle,
               chapter: h.chapter || null,
-              page: h.page ?? null,
+              page: normalizePage(h.page),
               quote: cleanQuoteText(h.text || ""),
               note: h.notes || null,
               timestamp: h.datetime || null,
