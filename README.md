@@ -499,6 +499,26 @@ LightHouse integrates [TypeSafe Jev System-1](https://api.typesafe.ai/v1/systemo
 
 ---
 
+## 🔌 Pluggable Metadata Providers & Sidecar Protocol
+
+Enrichment sources are **registered providers**, not hard-coded scraping. The registry (`uploader/metadata-providers.ts`) owns the provider contract, category routing, priority tie-breaking, and an HTTP sidecar protocol, so adding Douban, a RanobeDB mirror, or a private catalog is a **config change** rather than a code change.
+
+1. **The first providers are the existing scrapers.** RanobeDB, AniList, Bangumi, Google Books, OpenLibrary, and MangaDex are registered as `builtin` providers, each declaring its `id`, `label`, `fields` (`title`, `authors`, `synopsis`, `cover`, `tags`, `series`, `volume`), served `categories`, and `priority`.
+2. **Routing is data.** `DEFAULT_ROUTING_TABLE` maps each category (`light_novel`, `manga`, `general_book`, `other`, `burmese`) to ordered tiers of provider ids. Tiers run in order with per-provider failure isolation, and a tier short-circuits when its results are usable (any result for series queries; confidence `>= 0.85` **with a real synopsis** when resolving one volume). AniList is `seriesQueryOnly`, so it never answers a single-volume lookup.
+3. **Priority breaks ties, not confidence.** Every built-in shares one priority (preserving historical insertion-order tie-breaking); a sidecar configured at `priority: 60` outranks a built-in on an equal-confidence tie, one at `40` defers to it. Providers absent from the routing table are still consulted as always-run sources, so registration alone plugs one in.
+4. **Sidecars run beside the server.** A sidecar is any small HTTP service answering `GET /manifest` (optional), `GET /search?q=&category=&volume=&author=` and `GET /book/{id}` with JSON. Register it in `data/metadata-providers.json` (gitignored) or inline via `LIGHTHOUSE_METADATA_PROVIDERS`; `LIGHTHOUSE_METADATA_PROVIDERS_OFF=1` disables them. Timeouts, connection refusals, non-2xx responses, and malformed payloads degrade to an empty result for that provider only.
+5. **Security.** Sidecar endpoints are operator config, never user input, and are passed to the SSRF guard as an exact `host:port` allowlist (`allowedSidecarEndpoints`) that must still resolve to loopback/private addresses. All sidecar traffic flows through `safeFetchWithSsrf`, the single outbound fetch entry point.
+6. **Overwrite protection is unchanged for every provider.** Volume conflicts still demote candidates to confidence `0`, a numbered volume still keeps its title when the candidate volume differs or is missing, and an existing cover is never replaced across a volume mismatch (`resolveOverwriteGuards` is the single source of truth, shared by all provider paths).
+
+```bash
+# Inspect the live registry, capability flags, and routing table
+curl -s http://192.168.31.15:8086/api/metadata/providers | jq '.providers[] | {id, kind, priority}'
+```
+
+Full interface reference, sidecar protocol details, and configuration precedence: [`docs/metadata-providers.md`](docs/metadata-providers.md). A copyable starting point lives in [`docs/metadata-providers.example.json`](docs/metadata-providers.example.json).
+
+---
+
 ## 📚 Lnori & Elscione Light Novel Ingestion Pipeline
 
 LightHouse features end-to-end automated light novel series and volume ingestion from [Lnori](https://lnori.com) and [Elscione](https://server.elscione.com) across both the **Web UI** and the **Telegram Bot**:

@@ -1,0 +1,24 @@
+{
+  "$schema-note": "Copy to data/metadata-providers.json (gitignored) or pass inline via LIGHTHOUSE_METADATA_PROVIDERS. See docs/metadata-providers.md.",
+  "providers": [
+    {
+      "id": "douban",
+      "label": "Douban",
+      "endpoint": "http://127.0.0.1:8099",
+      "priority": 60,
+      "categories": ["general_book", "other"],
+      "fields": ["title", "authors", "synopsis", "cover", "tags"],
+      "timeoutMs": 6000,
+      "enabled": true
+    },
+    {
+      "id": "ranobedb_mirror",
+      "label": "RanobeDB Mirror",
+      "endpoint": "http://127.0.0.1:8098",
+      "priority": 70,
+      "categories": ["light_novel", "manga"],
+      "fields": ["title", "authors", "synopsis", "cover", "tags", "series", "volume"],
+      "enabled": false
+    }
+  ]
+}

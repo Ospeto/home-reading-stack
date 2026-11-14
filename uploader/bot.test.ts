@@ -2768,9 +2768,16 @@ describe("Documentation, Manual Sync & Standing Invariant Verification", () => {
 
     // Tab wiring in setGuideTab (data-driven since the plugin tab was added)
     expect(html).toContain(
-      "const GUIDE_TAB_IDS = ['plugin', 'kosync', 'obsidian', 'opds', 'features', 'cli', 'backup', 'proxy', 'all'];",
+      "const GUIDE_TAB_IDS = ['plugin', 'kosync', 'obsidian', 'opds', 'features', 'cli', 'backup', 'providers', 'proxy', 'all'];",
     );
     expect(html).toContain("features: 'guide-features',");
+    // Metadata provider / sidecar protocol tab is wired the same way
+    expect(html).toContain('id="guide-tab-providers"');
+    expect(html).toContain('id="guide-providers"');
+    expect(html).toContain("providers: 'guide-providers',");
+    expect(html).toContain("Metadata Providers &amp; Sidecar Protocol");
+    expect(html).toContain("/api/metadata/providers");
+    expect(html).toContain("LIGHTHOUSE_METADATA_PROVIDERS_OFF=1");
     expect(html).toContain("section.classList.toggle('hidden', !(tab === 'all' || tab === t));");
     expect(html).toContain("modalScroll.scrollTop = 0;");
 
