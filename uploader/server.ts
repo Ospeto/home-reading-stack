@@ -50,6 +50,7 @@ import {
   isWanRequest,
   authenticateRequest,
   AuthenticateRequestOptions,
+  requiredScopeForRequest,
   isAllowedOrigin,
   validateOriginAndCsrf,
   validateUrlForSSRF,
@@ -4467,6 +4468,23 @@ async function handleRequestCore(
       );
     }
 
+    // The generated plugin embeds the global READING_API_KEY. A scoped key must
+    // never be able to trade its limited credential for the master key, so this
+    // artifact stays restricted to the legacy global key (and LAN/TMA callers).
+    if (pluginAuth.keyName) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Plugin download requires the global READING_API_KEY, not a scoped key",
+          code: "insufficient_scope",
+          keyName: pluginAuth.keyName,
+        },
+        403,
+        corsOrigin,
+      );
+    }
+
     try {
       const trustForwarded = Boolean(
         pluginSocketIp &&
@@ -4551,14 +4569,23 @@ async function handleRequestCore(
   }
 
   if (isMutating && isWan) {
-    const auth = authenticateRequest(req, authOpts);
+    const auth = authenticateRequest(req, {
+      ...authOpts,
+      requiredScope: requiredScopeForRequest(req.method, url.pathname),
+    });
     if (!auth.authenticated) {
+      // 403 means the credential is valid but its scopes do not allow this
+      // route (read-only key attempting a mutation); 401 means no credential.
+      const status = auth.forbidden ? 403 : 401;
       return jsonResponse(
         {
           success: false,
           error: auth.error || "Authentication required for public WAN access",
+          ...(auth.code ? { code: auth.code } : {}),
+          ...(auth.requiredScope ? { requiredScope: auth.requiredScope } : {}),
+          ...(auth.keyName ? { keyName: auth.keyName } : {}),
         },
-        401,
+        status,
         corsOrigin,
       );
     }
@@ -4593,6 +4620,11 @@ async function handleRequestCore(
         method: auth.method,
         user: auth.user || null,
         isWan,
+        // Non-secret identity of the presented credential, so clients can see
+        // which scoped key authenticated and what it may do.
+        keyName: auth.keyName || null,
+        scopes: auth.scopes || null,
+        ...(auth.code ? { code: auth.code } : {}),
       },
       auth.authenticated ? 200 : 401,
       corsOrigin,
@@ -4607,8 +4639,12 @@ async function handleRequestCore(
         ? authHeader.substring(7).trim()
         : xApiKey || apiKey;
 
+      // Only the legacy global key may be handed back as a session cookie.
+      // A scoped key authenticates its own request but must never be upgraded
+      // to a cookie carrying the global full-access key.
       if (
         apiKey &&
+        !auth.keyName &&
         (providedKey === apiKey ||
           auth.method === "bearer" ||
           auth.method === "api_key" ||
@@ -4846,15 +4882,22 @@ async function handleRequestCore(
   const jobRetryMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/retry$/);
   if (jobRetryMatch && req.method === "POST") {
     if (isWan) {
-      const auth = authenticateRequest(req, authOpts);
+      const auth = authenticateRequest(req, {
+        ...authOpts,
+        requiredScope: requiredScopeForRequest(req.method, url.pathname),
+      });
       if (!auth.authenticated) {
         return jsonResponse(
           {
             success: false,
             error:
               auth.error || "Authentication required for public WAN job retry",
+            ...(auth.code ? { code: auth.code } : {}),
+            ...(auth.requiredScope
+              ? { requiredScope: auth.requiredScope }
+              : {}),
           },
-          401,
+          auth.forbidden ? 403 : 401,
           corsOrigin,
         );
       }

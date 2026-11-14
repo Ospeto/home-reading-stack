@@ -2596,6 +2596,9 @@
         <button id="guide-tab-proxy" onclick="setGuideTab('proxy')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
           Kindle Proxy
         </button>
+        <button id="guide-tab-apikeys" onclick="setGuideTab('apikeys')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
+          API Keys
+        </button>
         <button id="guide-tab-all" onclick="setGuideTab('all')" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-zinc-800/80 cursor-pointer transition-all shrink-0">
           All Endpoints
         </button>
@@ -3436,6 +3439,47 @@
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SECTION: SCOPED API KEYS -->
+      <div id="guide-apikeys" class="hidden space-y-3 pt-1">
+        <div class="flex items-center justify-between">
+          <h4 class="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5"><use href="#icon-server"/></svg>
+            <span>Scoped API Keys (Least Privilege)</span>
+          </h4>
+          <span class="text-[10px] px-2 py-0.5 rounded font-mono bg-zinc-800 text-amber-400 border border-zinc-700">READING_SCOPED_KEYS</span>
+        </div>
+        <p class="text-xs text-zinc-300 leading-relaxed">
+          <code class="text-amber-300">READING_API_KEY</code> is the master key: it always grants full access and keeps every existing WAN client, KOReader plugin, and integration working. Add read-only or limited automation keys on top of it without ever handing out the master key.
+        </p>
+        <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2 text-xs text-zinc-300">
+          <div class="font-bold text-zinc-200">Configuration (compact, in .env):</div>
+          <div class="font-mono text-[11px] bg-zinc-950 rounded-lg p-2.5 border border-zinc-800 select-all break-all">READING_SCOPED_KEYS="koreader-sync=ro-secret:read;ci-writer=rw-secret:write"</div>
+          <div class="text-[11px] text-zinc-400">JSON is also accepted: <code class="text-amber-300">{"ci":{"key":"ro-secret","scopes":["read"]}}</code></div>
+        </div>
+        <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2 text-xs text-zinc-300">
+          <div class="flex items-start gap-2.5">
+            <span class="w-5 h-5 rounded-full bg-zinc-800 text-zinc-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">1</span>
+            <div><strong>Scopes:</strong> <code class="text-emerald-300">read</code> &lt; <code class="text-sky-300">write</code> &lt; <code class="text-amber-300">admin</code>. <code>write</code> implies <code>read</code>. <code>admin</code> is only needed for host-wide routes (<code>/api/backup</code>, <code>/api/ssd</code>, <code>/api/system</code>).</div>
+          </div>
+          <div class="flex items-start gap-2.5">
+            <span class="w-5 h-5 rounded-full bg-zinc-800 text-zinc-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">2</span>
+            <div><strong>Per-resource limits:</strong> qualify a scope to one API area, e.g. <code class="text-amber-300">books:read</code> or <code class="text-amber-300">kosync:write</code>, so a key cannot touch anything else.</div>
+          </div>
+          <div class="flex items-start gap-2.5">
+            <span class="w-5 h-5 rounded-full bg-zinc-800 text-zinc-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">3</span>
+            <div><strong>Read-only behaviour:</strong> allowed on reads (<code>/api/books</code>, <code>/api/annotations</code>, <code>/api/kosync/*</code>, OPDS) and refused with <strong>HTTP 403</strong> on uploads, ingestions, updates, and deletes. Unknown or revoked keys get <strong>HTTP 401</strong>.</div>
+          </div>
+          <div class="flex items-start gap-2.5">
+            <span class="w-5 h-5 rounded-full bg-zinc-800 text-zinc-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">4</span>
+            <div><strong>Transports:</strong> <code class="text-zinc-100">Authorization: Bearer &lt;key&gt;</code>, <code class="text-zinc-100">X-API-Key: &lt;key&gt;</code>, or a session cookie. Query-string credentials are always rejected. Never reuse the master key as a scoped key.</div>
+          </div>
+          <div class="flex items-start gap-2.5">
+            <span class="w-5 h-5 rounded-full bg-zinc-800 text-zinc-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">5</span>
+            <div><strong>Verify a key:</strong> <code class="text-zinc-100">curl -H "Authorization: Bearer &lt;key&gt;" -X POST https://reading-sg.wavypremium.xyz:8443/api/auth/session</code> reports the key name and its scopes without ever echoing the secret.</div>
           </div>
         </div>
       </div>
@@ -9278,7 +9322,7 @@
     }
 
     // GUIDE MODAL TABS
-    const GUIDE_TAB_IDS = ['plugin', 'kosync', 'obsidian', 'opds', 'features', 'cli', 'backup', 'providers', 'proxy', 'all'];
+    const GUIDE_TAB_IDS = ['plugin', 'kosync', 'obsidian', 'opds', 'features', 'cli', 'backup', 'providers', 'proxy', 'apikeys', 'all'];
     const GUIDE_SECTION_IDS = {
       plugin: 'guide-plugin',
       kosync: 'guide-kosync',
@@ -9289,6 +9333,7 @@
       backup: 'guide-backup',
       providers: 'guide-providers',
       proxy: 'guide-proxy',
+      apikeys: 'guide-apikeys',
       all: 'guide-endpoints',
     };
 

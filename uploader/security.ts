@@ -851,11 +851,305 @@ export function validateTelegramWebAppData(
 // 4. Authentication for WAN Requests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 4a. Scoped API Keys
+// ---------------------------------------------------------------------------
+
+/** Coarse action a route requires. `admin` implies `write`, which implies `read`. */
+export type ApiScopeAction = "read" | "write" | "admin";
+
+/** A named, non-global API key with an explicit scope list. */
+export interface ScopedApiKey {
+  /** Non-secret label, safe to log and return to clients. */
+  name: string;
+  /** Secret credential value. Never logged. */
+  key: string;
+  /** Granted scopes, e.g. ["read"], ["books:read"], ["*"]. */
+  scopes: string[];
+}
+
+/** What an incoming request needs from the presented credential. */
+export interface RequiredScope {
+  action: ApiScopeAction;
+  /** Optional resource qualifier, e.g. "books" for /api/books/*. */
+  resource?: string;
+}
+
+/**
+ * Scopes granted to legacy credentials: READING_API_KEY, Telegram WebApp HMAC
+ * initData, session cookies, and verified production WAN origins. These keep the
+ * unrestricted behaviour they had before scoped keys existed.
+ */
+export const FULL_ACCESS_SCOPES: string[] = ["*"];
+
+/**
+ * Mutating routes whose blast radius is library- or host-wide, so a scoped key
+ * needs the `admin` scope rather than plain `write`.
+ */
+export const ADMIN_ROUTE_PREFIXES: string[] = [
+  "/api/backup",
+  "/api/ssd",
+  "/api/daemon",
+  "/api/system",
+  "/api/admin",
+];
+
+/**
+ * Mutating-shaped routes that only reflect the caller's own credential and never
+ * change stored data, so `read` is enough. The session cookie handoff lives here;
+ * it never mints a cookie carrying the global key for a scoped key holder.
+ */
+export const READ_SCOPE_MUTATING_PATHS: string[] = ["/api/auth/session"];
+
+/**
+ * Normalizes a scope token. Returns "" for anything unrecognized so callers can
+ * drop it (fail closed) instead of silently widening access.
+ */
+export function normalizeScope(raw: string): string {
+  const trimmed = String(raw ?? "")
+    .trim()
+    .toLowerCase();
+  if (!trimmed) return "";
+  if (trimmed === "*" || trimmed === "all" || trimmed === "admin:*") return "*";
+  if (trimmed === "read" || trimmed === "write" || trimmed === "admin") {
+    return trimmed;
+  }
+  const qualified = trimmed.match(/^([a-z0-9_-]+):(read|write|admin)$/);
+  if (qualified) return `${qualified[1]}:${qualified[2]}`;
+  return "";
+}
+
+function normalizeScopeList(raw: string[] | string | undefined): string[] {
+  if (raw === undefined || raw === null) return [];
+  const parts = Array.isArray(raw) ? raw : String(raw).split(/[,\s]+/);
+  const scopes = parts.map(normalizeScope).filter(Boolean);
+  return [...new Set(scopes)];
+}
+
+function pushScopedKey(
+  target: ScopedApiKey[],
+  seen: Set<string>,
+  name: unknown,
+  key: unknown,
+  scopesRaw: string[] | string | undefined,
+): void {
+  const secret = typeof key === "string" ? key.trim() : "";
+  if (!secret) return;
+  if (seen.has(secret)) return; // first definition of a secret wins
+  const scopes = normalizeScopeList(scopesRaw);
+  const label =
+    typeof name === "string" && name.trim()
+      ? name.trim()
+      : `scoped-${target.length + 1}`;
+  if (scopes.length === 0) {
+    console.warn(
+      `[Security] Ignoring scoped API key "${label}": no valid scopes configured`,
+    );
+    return;
+  }
+  seen.add(secret);
+  target.push({ name: label, key: secret, scopes });
+}
+
+/**
+ * Parses a scoped-key configuration string into a registry.
+ *
+ * Two forms are accepted:
+ *   - JSON: `{"ci-read":{"key":"s3cr3t","scopes":["read"]}}` or an array of
+ *     `{"name":"ci-read","key":"s3cr3t","scopes":"read,kosync:write"}`.
+ *   - Compact: `ci-read=s3cr3t:read;kosync=s3cr3t2:kosync:read` — entries
+ *     separated by `;` or newlines, an optional `name=`, then the secret, then
+ *     `:` and a comma-separated scope list. In this form the secret must not
+ *     contain `:` (use the JSON form for secrets containing `:`).
+ *
+ * Invalid entries are skipped, never widened.
+ */
+export function parseScopedKeys(raw: string | undefined | null): ScopedApiKey[] {
+  const text = typeof raw === "string" ? raw.trim() : "";
+  if (!text) return [];
+
+  const keys: ScopedApiKey[] = [];
+  const seen = new Set<string>();
+
+  if (text.startsWith("{") || text.startsWith("[")) {
+    let parsed: any;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err: any) {
+      console.warn(
+        `[Security] READING_SCOPED_KEYS is not valid JSON, ignoring: ${err?.message || err}`,
+      );
+      return [];
+    }
+    const records: Array<{ name?: unknown; value: any }> = Array.isArray(parsed)
+      ? parsed.map((value: any) => ({ name: value?.name, value }))
+      : Object.entries(parsed || {}).map(([name, value]) => ({ name, value }));
+    for (const record of records) {
+      const value = record.value;
+      if (typeof value === "string") {
+        // {"name":"s3cr3t:read"} shorthand
+        const sep = value.indexOf(":");
+        if (sep < 0) continue;
+        pushScopedKey(
+          keys,
+          seen,
+          record.name,
+          value.slice(0, sep),
+          value.slice(sep + 1),
+        );
+        continue;
+      }
+      if (!value || typeof value !== "object") continue;
+      pushScopedKey(keys, seen, record.name, value.key, value.scopes);
+    }
+    return keys;
+  }
+
+  for (const entry of text.split(/[;\n]/)) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const sep = trimmed.indexOf(":");
+    if (sep <= 0) {
+      console.warn(
+        `[Security] Ignoring malformed READING_SCOPED_KEYS entry (expected "<name>=<secret>:<scopes>")`,
+      );
+      continue;
+    }
+    const left = trimmed.slice(0, sep);
+    const scopes = trimmed.slice(sep + 1);
+    const eq = left.indexOf("=");
+    const name = eq >= 0 ? left.slice(0, eq) : undefined;
+    const secret = eq >= 0 ? left.slice(eq + 1) : left;
+    pushScopedKey(keys, seen, name, secret, scopes);
+  }
+  return keys;
+}
+
+let scopedKeyCache: { raw: string; keys: ScopedApiKey[] } | null = null;
+
+/** Resolves the scoped-key registry, either from an explicit value or the env. */
+export function resolveScopedKeys(
+  rawOrList?: string | ScopedApiKey[] | null,
+  env: Record<string, string | undefined> = process.env,
+): ScopedApiKey[] {
+  if (Array.isArray(rawOrList)) return rawOrList;
+  const raw =
+    typeof rawOrList === "string" ? rawOrList : (env.READING_SCOPED_KEYS ?? "");
+  if (scopedKeyCache && scopedKeyCache.raw === raw) return scopedKeyCache.keys;
+  const keys = parseScopedKeys(raw);
+  scopedKeyCache = { raw, keys };
+  return keys;
+}
+
+/** Test helper: drops the parsed registry cache. */
+export function resetScopedKeyCacheForTest(): void {
+  scopedKeyCache = null;
+}
+
+/** Constant-time secret comparison. Never throws on length mismatch. */
+export function secretsMatch(provided: string, expected: string): boolean {
+  if (!provided || !expected) return false;
+  const a = Buffer.from(provided, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+/** Returns the registry entry whose secret matches `provided`, if any. */
+export function matchScopedKey(
+  registry: ScopedApiKey[],
+  provided: string,
+): ScopedApiKey | undefined {
+  if (!provided || !registry?.length) return undefined;
+  let found: ScopedApiKey | undefined;
+  for (const entry of registry) {
+    if (secretsMatch(provided, entry.key)) found = entry;
+  }
+  return found;
+}
+
+/** Resource a route belongs to, e.g. "books" for /api/books/:id. */
+export function apiResourceForPath(pathname: string): string | undefined {
+  const clean = String(pathname || "").split("?")[0] || "";
+  const match = clean.match(/^\/api\/([a-z0-9_-]+)/i);
+  return match?.[1]?.toLowerCase();
+}
+
+/** True when `pathname` targets a host-wide administrative route. */
+export function isAdminRoute(pathname: string): boolean {
+  const clean = String(pathname || "").toLowerCase().split("?")[0] || "";
+  return ADMIN_ROUTE_PREFIXES.some(
+    (prefix) => clean === prefix || clean.startsWith(`${prefix}/`),
+  );
+}
+
+/** Human-readable scope label, e.g. "write" or "books:read". */
+export function describeScope(required: RequiredScope): string {
+  return required.resource
+    ? `${required.resource}:${required.action}`
+    : required.action;
+}
+
+/** Derives the scope a route needs from its method and path. */
+export function requiredScopeForRequest(
+  method: string,
+  pathname: string,
+): RequiredScope {
+  const verb = String(method || "GET").toUpperCase();
+  const cleanPath = (String(pathname || "").split("?")[0] || "").toLowerCase();
+  const isReadShapedMutation = READ_SCOPE_MUTATING_PATHS.some(
+    (allowed) => cleanPath === allowed || cleanPath.startsWith(`${allowed}/`),
+  );
+  const action: ApiScopeAction =
+    verb === "GET" || verb === "HEAD" || verb === "OPTIONS" || isReadShapedMutation
+      ? "read"
+      : isAdminRoute(pathname)
+        ? "admin"
+        : "write";
+  const resource = apiResourceForPath(pathname);
+  return resource ? { action, resource } : { action };
+}
+
+/**
+ * True when `granted` allows `required`. `*` and `admin` grant everything,
+ * `write` implies `read`, and a resource-qualified scope only counts for that
+ * resource.
+ */
+export function scopeSatisfies(
+  granted: string[] | undefined,
+  required: RequiredScope,
+): boolean {
+  const scopes = normalizeScopeList(granted);
+  if (scopes.includes("*") || scopes.includes("admin")) return true;
+  if (required.action === "admin") return false;
+  const acceptedActions: ApiScopeAction[] =
+    required.action === "read" ? ["read", "write"] : ["write"];
+  for (const scope of scopes) {
+    const separator = scope.indexOf(":");
+    const resource = separator >= 0 ? scope.slice(0, separator) : undefined;
+    const action = (separator >= 0 ? scope.slice(separator + 1) : scope) as ApiScopeAction;
+    if (!acceptedActions.includes(action)) continue;
+    if (resource === undefined) return true;
+    if (required.resource && resource === required.resource) return true;
+  }
+  return false;
+}
+
 export interface AuthResult {
   authenticated: boolean;
   method?: "lan" | "bearer" | "api_key" | "tma" | "cookie" | "origin";
   user?: any;
   error?: string;
+  /** Machine-readable failure reason, mapped to 401 vs 403 by callers. */
+  code?: "missing_credentials" | "insufficient_scope";
+  /** True when a valid credential lacks the scope the route required (403). */
+  forbidden?: boolean;
+  /** Non-secret label of the scoped key used; absent for legacy credentials. */
+  keyName?: string;
+  /** Scopes granted to the presented credential. */
+  scopes?: string[];
+  /** Scope the route required, when a scope check ran. */
+  requiredScope?: string;
 }
 
 export interface AuthenticateRequestOptions {
@@ -866,16 +1160,26 @@ export interface AuthenticateRequestOptions {
   remoteAddress?: string;
   isWan?: boolean;
   server?: { requestIP?: (req: Request) => { address: string } | null };
+  /** Scoped-key registry or raw READING_SCOPED_KEYS value. */
+  scopedKeys?: string | ScopedApiKey[];
+  /** Scope the route requires; omit to authenticate without scope enforcement. */
+  requiredScope?: RequiredScope;
 }
 
 /**
  * Authenticates an incoming request.
  * Local LAN requests pass automatically. WAN requests must present:
- * - Bearer token matching READING_API_KEY
- * - X-API-Key matching READING_API_KEY
+ * - Bearer token matching READING_API_KEY (full access)
+ * - X-API-Key matching READING_API_KEY (full access)
+ * - Bearer / X-API-Key / session cookie matching a READING_SCOPED_KEYS entry,
+ *   whose scopes are then checked against `options.requiredScope`
  * - Valid Telegram WebApp initData (via X-Telegram-Init-Data or Authorization: Bearer tma_...)
  * - Valid session cookie
  * - Or when READING_API_KEY is unset, a verified production WAN origin (Origin or Referer)
+ *
+ * A credential that authenticates but lacks the required scope returns
+ * `{ authenticated: false, forbidden: true, code: "insufficient_scope" }` so
+ * callers can answer 403 instead of 401.
  */
 export function authenticateRequest(
   req: Request,
@@ -890,27 +1194,88 @@ export function authenticateRequest(
 
   const apiKey = options.apiKey || process.env.READING_API_KEY || "";
   const botToken = options.botToken || process.env.TELEGRAM_BOT_TOKEN || "";
+  const scopedKeys = resolveScopedKeys(options.scopedKeys);
+  const requiredScope = options.requiredScope;
+  const requiredLabel = requiredScope ? describeScope(requiredScope) : undefined;
+
+  // Single decision point: a credential is valid, but the route's required
+  // scope decides whether it is authorized.
+  const accept = (granted: {
+    method: NonNullable<AuthResult["method"]>;
+    scopes: string[];
+    keyName?: string;
+    user?: any;
+  }): AuthResult => {
+    // Fail closed: an empty scope list denies everything rather than falling
+    // back to full access. Only an absent list means "legacy full access".
+    const effectiveScopes = Array.isArray(granted.scopes)
+      ? granted.scopes
+      : FULL_ACCESS_SCOPES;
+    if (requiredScope && !scopeSatisfies(effectiveScopes, requiredScope)) {
+      return {
+        authenticated: false,
+        forbidden: true,
+        code: "insufficient_scope",
+        method: granted.method,
+        keyName: granted.keyName,
+        user: granted.user,
+        scopes: effectiveScopes,
+        requiredScope: requiredLabel,
+        error: `API key ${
+          granted.keyName ? `"${granted.keyName}" ` : ""
+        }lacks the required scope "${requiredLabel}"`,
+      };
+    }
+    return {
+      authenticated: true,
+      method: granted.method,
+      keyName: granted.keyName,
+      user: granted.user,
+      scopes: effectiveScopes,
+      ...(requiredLabel ? { requiredScope: requiredLabel } : {}),
+    };
+  };
 
   // 1. Check Bearer token or TMA Bearer
   const authHeader = req.headers.get("authorization") || "";
   if (authHeader.startsWith("Bearer ")) {
     const token = authHeader.substring(7).trim();
-    if (apiKey && token === apiKey) {
-      return { authenticated: true, method: "bearer" };
+    if (apiKey && secretsMatch(token, apiKey)) {
+      return accept({ method: "bearer", scopes: FULL_ACCESS_SCOPES });
+    }
+    const scoped = matchScopedKey(scopedKeys, token);
+    if (scoped) {
+      return accept({
+        method: "bearer",
+        keyName: scoped.name,
+        scopes: scoped.scopes,
+      });
     }
     if (token.startsWith("tma_") && botToken) {
       const initData = token.substring(4);
       const tmaRes = validateTelegramWebAppData(initData, botToken);
       if (tmaRes.valid) {
-        return { authenticated: true, method: "tma", user: tmaRes.user };
+        return accept({
+          method: "tma",
+          user: tmaRes.user,
+          scopes: FULL_ACCESS_SCOPES,
+        });
       }
     }
   }
 
   // 2. Check X-API-Key header
   const xApiKey = req.headers.get("x-api-key") || "";
-  if (apiKey && xApiKey && xApiKey === apiKey) {
-    return { authenticated: true, method: "api_key" };
+  if (apiKey && xApiKey && secretsMatch(xApiKey, apiKey)) {
+    return accept({ method: "api_key", scopes: FULL_ACCESS_SCOPES });
+  }
+  const scopedHeader = matchScopedKey(scopedKeys, xApiKey);
+  if (scopedHeader) {
+    return accept({
+      method: "api_key",
+      keyName: scopedHeader.name,
+      scopes: scopedHeader.scopes,
+    });
   }
 
   // 3. Check X-Telegram-Init-Data header
@@ -918,7 +1283,11 @@ export function authenticateRequest(
   if (tmaHeader && botToken) {
     const tmaRes = validateTelegramWebAppData(tmaHeader, botToken);
     if (tmaRes.valid) {
-      return { authenticated: true, method: "tma", user: tmaRes.user };
+      return accept({
+        method: "tma",
+        user: tmaRes.user,
+        scopes: FULL_ACCESS_SCOPES,
+      });
     }
   }
 
@@ -928,14 +1297,29 @@ export function authenticateRequest(
     const cookies = parseCookies(cookieHeader);
     if (
       apiKey &&
-      (cookies.reading_token === apiKey || cookies.reading_session === apiKey)
+      (secretsMatch(cookies.reading_token, apiKey) ||
+        secretsMatch(cookies.reading_session, apiKey))
     ) {
-      return { authenticated: true, method: "cookie" };
+      return accept({ method: "cookie", scopes: FULL_ACCESS_SCOPES });
+    }
+    const scopedCookie =
+      matchScopedKey(scopedKeys, cookies.reading_token) ||
+      matchScopedKey(scopedKeys, cookies.reading_session);
+    if (scopedCookie) {
+      return accept({
+        method: "cookie",
+        keyName: scopedCookie.name,
+        scopes: scopedCookie.scopes,
+      });
     }
     if (cookies.reading_tma && botToken) {
       const tmaRes = validateTelegramWebAppData(cookies.reading_tma, botToken);
       if (tmaRes.valid) {
-        return { authenticated: true, method: "cookie", user: tmaRes.user };
+        return accept({
+          method: "cookie",
+          user: tmaRes.user,
+          scopes: FULL_ACCESS_SCOPES,
+        });
       }
     }
   }
@@ -947,7 +1331,7 @@ export function authenticateRequest(
   if (!apiKey) {
     const origin = req.headers.get("origin");
     if (origin && isAllowedProductionWanOrigin(origin)) {
-      return { authenticated: true, method: "origin" };
+      return accept({ method: "origin", scopes: FULL_ACCESS_SCOPES });
     }
     const referer = req.headers.get("referer");
     if (referer) {
@@ -955,7 +1339,7 @@ export function authenticateRequest(
         const refUrl = new URL(referer);
         const refOrigin = `${refUrl.protocol}//${refUrl.host}`;
         if (isAllowedProductionWanOrigin(refOrigin)) {
-          return { authenticated: true, method: "origin" };
+          return accept({ method: "origin", scopes: FULL_ACCESS_SCOPES });
         }
       } catch {
         // Malformed referer ignored
@@ -968,6 +1352,7 @@ export function authenticateRequest(
   // the intended secure cookie channel instead.
   return {
     authenticated: false,
+    code: "missing_credentials",
     error: "Authentication required for public WAN access",
   };
 }
