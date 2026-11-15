@@ -993,7 +993,7 @@ function LightHouse:buildCatalogItem(entry, layout)
         callback = function() self:downloadEntry(entry) end,
     }
     details[#details + 1] = {
-        text = T(_("Author: %1"), Ui.authorLine(authors, nil, _("Unknown"))),
+        text = T(_("Author: %1"), authors ~= "" and authors or _("Unknown")),
         callback = function() end,
     }
     if series ~= "" then

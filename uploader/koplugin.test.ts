@@ -3674,6 +3674,9 @@ print("str_table=" .. bracket(Status.str({ 1, 2 })))
 print("str_function=" .. bracket(Status.str(null)))
 print("str_boolean=" .. bracket(Status.str(true)))
 print("str_nan=" .. bracket(Status.str(0 / 0)))
+print("str_infinity=" .. bracket(Status.str(math.huge)))
+print("str_negative_infinity=" .. bracket(Status.str(-math.huge)))
+print("str_infinity_fallback=" .. bracket(Status.str(math.huge, "Unknown")))
 print("str_fallback=" .. bracket(Status.str(null, "Unknown")))
 print("str_fallback_keeps_string=" .. bracket(Status.str("real", "Unknown")))
 print("num_number=" .. tostring(Status.num(7)))
@@ -3774,6 +3777,22 @@ if tagged_ok then
     labels[#labels + 1] = tostring(tagged_row.sub_item_table[detail_index].text)
   end
   print("catalog_tags_details=" .. table.concat(labels, "|"))
+end
+-- The detail view is where the reader goes to see WHO wrote the book, so it
+-- keeps every name the feed carries; only the row's metadata column truncates.
+local coauthored_entry = {
+  book_id = 104, title = "Coauthored",
+  authors = "Ann One, Bob Two, Cyd Three",
+}
+local coauthored_ok, coauthored_row = pcall(LightHouse.buildCatalogItem, LightHouse, coauthored_entry, layout)
+print("catalog_coauthored_ok=" .. tostring(coauthored_ok))
+if coauthored_ok then
+  local labels = {}
+  for detail_index = 1, #(coauthored_row.sub_item_table or {}) do
+    labels[#labels + 1] = tostring(coauthored_row.sub_item_table[detail_index].text)
+  end
+  print("catalog_coauthored_details=" .. table.concat(labels, "|"))
+  print("catalog_coauthored_mandatory=" .. bracket(coauthored_row.mandatory))
 end
 
 -- 6. The pcall fallback: one bad row renders a safe row, never the process --
@@ -3902,6 +3921,11 @@ describe("plugin row safety against JSON nulls and malformed fields", () => {
     expect(out.str_function).toBe("[]");
     expect(out.str_boolean).toBe("[]");
     expect(out.str_nan).toBe("[]");
+    // An infinite number has no reader-facing spelling either: the documented
+    // contract says it takes the fallback, so it must never render "inf".
+    expect(out.str_infinity).toBe("[]");
+    expect(out.str_negative_infinity).toBe("[]");
+    expect(out.str_infinity_fallback).toBe("[Unknown]");
     expect(out.str_fallback).toBe("[Unknown]");
     expect(out.str_fallback_keeps_string).toBe("[real]");
 
@@ -3983,6 +4007,15 @@ describe("plugin row safety against JSON nulls and malformed fields", () => {
     // A tag list with a table and a sentinel in it degrades to the real names.
     expect(out.catalog_tags_ok).toBe("true");
     expect(out.catalog_tags_details).toContain("Tags: Fantasy, 7");
+
+    // The detail view keeps every co-author; the row column still truncates.
+    expect(out.catalog_coauthored_ok).toBe("true");
+    expect(out.catalog_coauthored_details).toContain(
+      "Author: Ann One, Bob Two, Cyd Three",
+    );
+    expect(out.catalog_coauthored_mandatory).toContain(
+      "Ann One, Bob Two +1 more",
+    );
   });
 
   it("renders a safe fallback row when a row builder raises", () => {

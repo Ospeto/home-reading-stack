@@ -58,8 +58,11 @@ local Status = {}
 function Status.str(value, fallback)
     if type(value) == "string" then return value end
     if type(value) == "number" then
-        -- NaN has no reader-facing spelling, so it takes the fallback.
-        if value ~= value then return fallback or "" end
+        -- NaN and the infinities have no reader-facing spelling, so they take
+        -- the fallback.
+        if value ~= value or value == math.huge or value == -math.huge then
+            return fallback or ""
+        end
         return tostring(value)
     end
     return fallback or ""
