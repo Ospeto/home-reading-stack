@@ -596,17 +596,10 @@ function LightHouse:showReading()
             }
         end
 
-        -- Read the fallbacks through explicit emptiness checks: a session with
-        -- a nil (not "") title/author must still render, and concatenating a
-        -- nil here would raise the same way the `_` shadowing did.
-        local title = session.title
-        if type(title) ~= "string" or title == "" then title = _("Untitled") end
-        local authors = session.authors
-        if type(authors) ~= "string" or authors == "" then authors = _("Unknown") end
-
+        local mandatory = session.authors ~= "" and session.authors or _("Unknown")
         items[#items + 1] = {
-            text = title,
-            mandatory = authors .. "  " .. Status.progressBar(session.percentage),
+            text = (session.title ~= "" and session.title) or _("Untitled"),
+            mandatory = mandatory .. "  " .. Status.progressBar(session.percentage),
             sub_item_table = details,
         }
     end
