@@ -351,9 +351,11 @@ end
 -- @tparam table config generated config table
 -- @string url absolute URL (a path relative to base_url also works)
 -- @string filepath destination path
+-- @number[opt] max_seconds ceiling for both timeouts, for a caller with a
+--   smaller budget of its own than a whole EPUB download (cover thumbnails)
 -- @treturn boolean|nil success
 -- @treturn string|nil error description
-function Client.download(config, url, filepath)
+function Client.download(config, url, filepath, max_seconds)
     if not Client.isConfigured(config) then
         return nil, "not_configured"
     end
@@ -368,10 +370,17 @@ function Client.download(config, url, filepath)
     local redirects = 0
     local code, response_headers, err
 
-    socketutil:set_timeout(
-        numberOr(config.download_block_timeout, DEFAULT_DOWNLOAD_BLOCK_TIMEOUT),
-        numberOr(config.download_total_timeout, DEFAULT_DOWNLOAD_TOTAL_TIMEOUT)
-    )
+    local block_timeout = numberOr(config.download_block_timeout, DEFAULT_DOWNLOAD_BLOCK_TIMEOUT)
+    local total_timeout = numberOr(config.download_total_timeout, DEFAULT_DOWNLOAD_TOTAL_TIMEOUT)
+    -- One number caps both, so a caller cannot accidentally leave a stalled
+    -- socket operation with more time than its whole budget.
+    local ceiling = tonumber(max_seconds)
+    if ceiling and ceiling > 0 then
+        if block_timeout > ceiling then block_timeout = ceiling end
+        if total_timeout > ceiling then total_timeout = ceiling end
+    end
+
+    socketutil:set_timeout(block_timeout, total_timeout)
     while true do
         code, response_headers, err = requestOnce(current, fileSink(handle), headers)
         if not code or not REDIRECT_CODES[code] then

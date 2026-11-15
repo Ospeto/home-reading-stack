@@ -130,6 +130,58 @@ print("glance_skips=" .. Ui.glanceLine({ nil, "", stars_3, " " }))
 print("glance_empty=" .. "[" .. Ui.glanceLine({}) .. "]")
 print("join_sep=" .. Ui.join({ "a", "b" }))
 
+-- The font contract: every glyph must be a code point KOReader's bundled text
+-- fonts (Noto Sans, DejaVu fallback) actually carry. Anything above Dingbats is
+-- an emoji or symbol with no coverage on the device and draws as a box.
+local function code_points(text)
+  local points = {}
+  local index = 1
+  while index <= #text do
+    local byte = text:byte(index)
+    local length, point
+    if byte < 0x80 then
+      length, point = 1, byte
+    elseif byte < 0xE0 then
+      length, point = 2, byte - 0xC0
+    elseif byte < 0xF0 then
+      length, point = 3, byte - 0xE0
+    else
+      length, point = 4, byte - 0xF0
+    end
+    for offset = 1, length - 1 do
+      point = point * 64 + ((text:byte(index + offset) or 0x80) - 0x80)
+    end
+    points[#points + 1] = point
+    index = index + length
+  end
+  return points
+end
+
+-- Latin-1, General Punctuation, Block Elements/Box Drawing/Geometric Shapes,
+-- Miscellaneous Symbols, Dingbats: the blocks those fonts cover.
+local font_coverage = {
+  { 0x20, 0xFF },
+  { 0x2000, 0x206F },
+  { 0x2500, 0x25FF },
+  { 0x2600, 0x26FF },
+  { 0x2700, 0x27BF },
+}
+local uncovered = {}
+for name, glyph in pairs(Ui.GLYPH) do
+  if type(glyph) == "string" then
+    for _, point in ipairs(code_points(glyph)) do
+      local found = false
+      for range_index = 1, #font_coverage do
+        if point >= font_coverage[range_index][1] and point <= font_coverage[range_index][2] then
+          found = true
+        end
+      end
+      if not found then uncovered[#uncovered + 1] = name end
+    end
+  end
+end
+print("glyph_uncovered=" .. table.concat(uncovered, ","))
+
 local bar = Ui.glanceProgress(Status, 0.45)
 print("glance_bar=" .. bar)
 print("glance_slots=" .. tostring(Ui.tokens.glance_bar_slots))
@@ -354,6 +406,16 @@ describe("plugin UI primitives: row language", () => {
     expect(out.glance_skips).toBe("★★★☆☆");
     expect(out.glance_empty).toBe("[]");
     expect(out.join_sep).toBe("a · b");
+  });
+
+  it("draws only code points the device's bundled fonts carry", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // Oracle: the coverage of KOReader's bundled text fonts (Noto Sans with a
+    // DejaVu fallback), read off the Unicode blocks those fonts contain. An
+    // emoji such as a magnifier sits outside every one of them and would render
+    // as a missing-glyph box in the Browse screen's left gutter.
+    expect(out.glyph_uncovered).toBe("");
   });
 
   it("draws the glance bar with the token slot count, clamped", () => {

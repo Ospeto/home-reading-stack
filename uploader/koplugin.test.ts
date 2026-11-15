@@ -1901,7 +1901,9 @@ local entry = {
 -- The row language: line 1 is the title, line 2 the metadata, and the right
 -- column carries progress and rating so neither needs a tap.
 local layout = LightHouse:layoutFor(true)
-print("layout=" .. require("lighthouse_ui").describeLayout(layout))
+print("layout_rows=" .. tostring(layout.rows))
+print("layout_cover=" .. tostring(layout.cover_width) .. "x" .. tostring(layout.cover_height))
+print("layout_gutter=" .. tostring(layout.gutter))
 local row = LightHouse:buildCatalogItem(entry, layout)
 local row_primary, row_secondary = tostring(row.text):match("^(.-)\n(.*)$")
 print("row_primary=" .. tostring(row_primary))
@@ -2008,8 +2010,15 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
 
     // Covers: one geometry rule drives the page, and a row whose cover is not on
     // disk yet draws the neutral placeholder rather than a blank hole.
-    expect(out.layout).toContain("rows=");
-    expect(out.layout).toContain("cover=");
+    const layoutRows = Number(out.layout_rows);
+    const [layoutCoverW, layoutCoverH] = out.layout_cover.split("x").map(Number);
+    expect(layoutRows).toBeGreaterThanOrEqual(4);
+    expect(layoutRows).toBeLessThanOrEqual(9);
+    expect(layoutCoverW).toBeGreaterThan(0);
+    // Calibre cover art is portrait: a cover box wider than it is tall would
+    // squash every thumbnail on the page.
+    expect(layoutCoverH).toBeGreaterThan(layoutCoverW);
+    expect(Number(out.layout_gutter)).toBeGreaterThan(layoutCoverW);
     expect(out.row_state).toBe("framecontainer");
     // Without a layout (a caller that does not draw covers) the row is still
     // the same two-line row.
@@ -3090,14 +3099,14 @@ describe("plugin reading stats view", () => {
  *
  * Covers are the one part of the catalog that costs network and disk, so the
  * rules that keep a slow link usable are worth proving rather than trusting:
- * the per-page fetch cap, the on-disk cache that makes a second open free, and
- * the negative cache that stops a coverless book from costing a request on
- * every page. The harness runs the shipped template against a real temporary
- * directory, with a stub transport that counts requests and can answer 404.
+ * the per-page fetch cap, the on-disk cache that makes a second open free, the
+ * negative cache that remembers a book the server has no cover for (and only
+ * that), and the per-fetch timeout ceiling the page budget imposes.
  */
 const COVER_PREFETCH_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
 local data_dir = assert(arg[2], "data dir argument required")
 local requests = {}
+local timeouts = {}
 
 package.preload["datastorage"] = function()
   return {
@@ -3125,14 +3134,31 @@ package.preload["libs/libkoreader-lfs"] = function()
     mkdir = function() return true end,
   }
 end
+package.preload["socketutil"] = function()
+  return {
+    set_timeout = function(_, block, total)
+      timeouts[#timeouts + 1] = { block = tonumber(block), total = tonumber(total) }
+    end,
+    reset_timeout = function() end,
+  }
+end
+
 package.preload["socket.http"] = function()
   return {
     request = function(request)
       local url = tostring(request and request.url or "")
       requests[#requests + 1] = url
-      -- Book 999 has no cover on the server.
+      -- Book 999 has no cover on the server: a definitive answer.
       if url:find("999", 1, true) then
-        return nil, "404"
+        return 1, 404, {}
+      end
+      -- Book 998 loses the link mid-request.
+      if url:find("998", 1, true) then
+        return nil, "timeout"
+      end
+      -- Book 997 fails for a reason that says nothing about its cover.
+      if url:find("997", 1, true) then
+        return 1, 500, {}
       end
       if request and request.sink then
         request.sink(string.rep("coverbytes", 40))
@@ -3167,17 +3193,33 @@ local function count_files(ids, suffix)
   return count
 end
 
--- 1. A page of three books: two covers cached, one recorded as missing -------
-local page = { entry(101, href(101)), entry(102, href(102)), entry(999, href(999)) }
+-- 1. A page of two books is fetched once and then served from disk --------
+local page = { entry(101, href(101)), entry(102, href(102)) }
 LightHouse:prefetchCovers(page)
 print("first_requests=" .. tostring(#requests))
 print("cached_covers=" .. tostring(count_files({ 101, 102 })))
-print("miss_markers=" .. tostring(count_files({ 999 }, ".miss")))
 
--- 2. The same page again: nothing is fetched, because everything is fresh ----
 requests = {}
 LightHouse:prefetchCovers(page)
 print("second_requests=" .. tostring(#requests))
+
+-- 2. Only a definitive 404 is remembered; every other failure is retried -----
+requests = {}
+local mixed = {
+  entry(999, href(999)), -- no cover on the server (HTTP 404)
+  entry(998, href(998)), -- link dropped mid-request
+  entry(997, href(997)), -- server error, nothing to do with the cover
+}
+LightHouse:prefetchCovers(mixed)
+print("mixed_requests=" .. tostring(#requests))
+print("miss_markers=" .. tostring(count_files({ 999 }, ".miss")))
+print("transient_markers=" .. tostring(count_files({ 997, 998 }, ".miss")))
+
+-- The transient failures stay retryable on the next open; the coverless book
+-- and the definitive answer do not cost another request.
+requests = {}
+LightHouse:prefetchCovers(mixed)
+print("mixed_retry_requests=" .. tostring(#requests))
 
 -- 3. The per-page cap holds when a page is larger than the budget ------------
 requests = {}
@@ -3191,6 +3233,16 @@ print("cap=" .. tostring(Ui.tokens.cover_fetch_max))
 requests = {}
 LightHouse:prefetchCovers({ { book_id = 301 }, { thumbnail_href = href(302) }, {} })
 print("noop_requests=" .. tostring(#requests))
+
+-- 5. No cover request may outlive the per-page budget ----------------------
+local max_block, max_total = 0, 0
+for timeout_index = 1, #timeouts do
+  if timeouts[timeout_index].block > max_block then max_block = timeouts[timeout_index].block end
+  if timeouts[timeout_index].total > max_total then max_total = timeouts[timeout_index].total end
+end
+print("max_cover_block=" .. tostring(max_block))
+print("max_cover_total=" .. tostring(max_total))
+print("budget_seconds=" .. tostring(Ui.tokens.cover_fetch_seconds))
 
 print("OK")
 `;
@@ -3238,19 +3290,125 @@ describe("plugin cover prefetch", () => {
 
     // One request per book, and the coverless book is remembered rather than
     // retried forever.
-    expect(out.first_requests).toBe("3");
+    expect(out.first_requests).toBe("2");
     expect(out.cached_covers).toBe("2");
-    expect(out.miss_markers).toBe("1");
 
     // Re-opening the page costs no network at all: this is what keeps scrolling
     // smooth on a 40-book page.
     expect(out.second_requests).toBe("0");
+
+    // A definitive 404 is the only failure that earns a negative-cache marker;
+    // a dropped link or a server error stays retryable, because a marker would
+    // make that book look coverless for the whole cover TTL.
+    expect(out.mixed_requests).toBe("3");
+    expect(out.miss_markers).toBe("1");
+    expect(out.transient_markers).toBe("0");
+    expect(out.mixed_retry_requests).toBe("2");
 
     // A page bigger than the per-page budget stops at the budget.
     expect(out.capped_requests).toBe(out.cap);
 
     // Rows with no cover link or no book id never reach the network.
     expect(out.noop_requests).toBe("0");
+
+    // One stalled cover cannot outlive the page's cover budget: every request
+    // is issued under the cover budget, not the 300s EPUB download budget.
+    expect(Number(out.max_cover_block)).toBeLessThanOrEqual(Number(out.budget_seconds));
+    expect(Number(out.max_cover_total)).toBeLessThanOrEqual(Number(out.budget_seconds));
+
+    expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
+  });
+});
+
+/**
+ * Unconfigured plugin behaviour.
+ *
+ * The committed template carries no server URL, which is exactly the state a
+ * reader lands in after copying the folder by hand or losing the baked key.
+ * Every view has to say what is wrong and offer the one screen that can fix it,
+ * so the first-run dead end is not a screen with no way forward.
+ */
+const NOT_CONFIGURED_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local config = require("lighthouse_config")
+assert(config.base_url == "", "this harness needs the unconfigured template")
+
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+
+-- The plugin reuses one Menu widget and switches it, so the visible rows come
+-- from either the shown widget or the table it was switched to.
+local function current_items()
+  local switched = LightHouse.menu and LightHouse.menu.switched
+  if switched and switched[#switched] then return switched[#switched].items end
+  local widget = shown[#shown]
+  if widget and widget.item_table then return widget.item_table end
+  return {}
+end
+
+local function dump_screen(prefix, open)
+  local ok, raised = pcall(open)
+  print(prefix .. "_ok=" .. tostring(ok) .. " " .. tostring(raised))
+  local items = current_items()
+  local texts = {}
+  local connection
+  for item_index = 1, #items do
+    texts[#texts + 1] = tostring(items[item_index].text)
+    if items[item_index].text == "Connection" then connection = items[item_index] end
+  end
+  print(prefix .. "_rows=" .. table.concat(texts, " | "))
+  print(prefix .. "_has_connection=" .. tostring(connection ~= nil))
+  if not connection then return end
+  local tapped, tap_raised = pcall(connection.callback)
+  local widget = shown[#shown]
+  local kind = type(widget) == "table" and tostring(widget.__kind) or "none"
+  local text = type(widget) == "table" and tostring(widget.text) or ""
+  print(prefix .. "_tap_ok=" .. tostring(tapped) .. " " .. tostring(tap_raised))
+  print(prefix .. "_view=" .. kind)
+  print(prefix .. "_shows_not_set=" .. tostring(text:find("(not set)", 1, true) ~= nil))
+end
+
+dump_screen("browse", function() LightHouse:openCatalog("", 0, 1) end)
+dump_screen("reading", function() LightHouse:showReading() end)
+dump_screen("stats", function() LightHouse:showStats() end)
+
+print("OK")
+`;
+
+describe("unconfigured plugin failures", () => {
+  it("offers the Connection screen on every not-configured failure", () => {
+    if (!LUA_BINARY) return;
+
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-unconfigured-"));
+    const harnessPath = path.join(workdir, "not_configured_harness.lua");
+    fs.writeFileSync(harnessPath, NOT_CONFIGURED_HARNESS);
+
+    const res = spawnSync(LUA_BINARY, [harnessPath, KOPLUGIN_TEMPLATE_DIR], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line) => line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+
+    for (const screen of ["browse", "reading", "stats"]) {
+      // Compute from the token so the assertion cannot drift from the scale.
+      expect(out[`${screen}_ok`]).toBe("true nil");
+      expect(out[`${screen}_rows`]).toContain("This plugin is not configured");
+      // The only screen that can fix a missing key has to be one tap away.
+      expect(out[`${screen}_has_connection`]).toBe("true");
+      expect(out[`${screen}_tap_ok`]).toBe("true nil");
+      expect(out[`${screen}_view`]).toBe("textviewer");
+      expect(out[`${screen}_shows_not_set`]).toBe("true");
+    }
 
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });

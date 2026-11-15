@@ -452,17 +452,27 @@ function LightHouse:prefetchCovers(entries)
     local fetched = 0
     for entry_index = 1, #(entries or {}) do
         local entry = entries[entry_index]
-        if coverNeedsFetch(entry, os.time()) then
-            if not Ui.coverBudgetLeft(fetched, started, os.time()) then
+        local now = os.time()
+        if coverNeedsFetch(entry, now) then
+            if not Ui.coverBudgetLeft(fetched, started, now) then
                 logger.info("LightHouse: cover fetch budget reached for this page")
                 break
             end
             local path = coverPath(entry)
             if path then
                 makeDirs(coverDir())
-                local ok_file = Client.download(config, entry.thumbnail_href, path)
+                -- The fetch may not outlive the page budget: a cover request
+                -- that connects and then stalls is cut off at the budget
+                -- instead of running on the EPUB download timeouts.
+                local remaining = math.max(Ui.tokens.cover_fetch_seconds - (now - started), 1)
+                local ok_file, download_err = Client.download(
+                    config, entry.thumbnail_href, path, remaining
+                )
                 fetched = fetched + 1
-                if not ok_file then
+                -- Only a definitive "this book has no cover" answer is worth
+                -- remembering; a dropped link, a timeout or a rejected key
+                -- must stay retryable on the next open.
+                if not ok_file and download_err == "http_404" then
                     local miss = coverMissPath(entry)
                     if miss then
                         local handle = io.open(miss, "wb")
@@ -576,6 +586,16 @@ local function retryAction(label, callback)
     return { text = label or _("Try again"), bold = true, callback = callback }
 end
 
+--- Connection action for a screen the reader has to fix by configuring the
+-- plugin, reused so every such screen offers the same way out.
+-- @tparam table light_house plugin instance
+-- @treturn table action
+local function connectionAction(light_house)
+    return {
+        text = _("Connection"),
+        callback = function() light_house:showConnection(Client.isConfigured(config)) end,
+    }
+end
 
 function LightHouse:init()
     self.ui.menu:registerToMainMenu(self)
@@ -733,6 +753,7 @@ function LightHouse:openCatalog(query, start_index, page_number)
             title = paged_title,
             headline = errorHeadline("not_configured"),
             detail = describeError("not_configured"),
+            actions = { connectionAction(self) },
         }
         return
     end
@@ -779,7 +800,7 @@ function LightHouse:openCatalog(query, start_index, page_number)
                 detail = _("Add EPUBs from the LightHouse web app, then browse again."),
                 actions = {
                     retryAction(_("Refresh"), retry),
-                    { text = _("Connection"), callback = function() self:showConnection(Client.isConfigured(config)) end },
+                    connectionAction(self),
                 },
             }
         end
@@ -812,7 +833,7 @@ function LightHouse:openCatalog(query, start_index, page_number)
     local items = {}
     items[#items + 1] = self:buildRow{
         layout = layout,
-        cover_glyph = Ui.GLYPH.search,
+        cover_glyph = Ui.GLYPH.chevron,
         primary = _("Search library…"),
         callback = function() self:showSearchDialog() end,
     }
@@ -966,6 +987,7 @@ function LightHouse:showReading()
             title = _("Currently reading"),
             headline = errorHeadline("not_configured"),
             detail = describeError("not_configured"),
+            actions = { connectionAction(self) },
         }
         return
     end
@@ -1251,6 +1273,7 @@ function LightHouse:showStats()
             title = _("Reading stats"),
             headline = errorHeadline("not_configured"),
             detail = describeError("not_configured"),
+            actions = { connectionAction(self) },
         }
         return
     end

@@ -94,8 +94,6 @@ Ui.tokens = {
 Ui.GLYPH = {
     --: Marks an actionable row that opens a detail view.
     chevron = "▸",
-    --: Search row.
-    search = "🔍",
     --: Left bar that marks a section heading (the web app's accent border).
     section = "▍",
     --: Filled / empty progress slots.
@@ -418,21 +416,6 @@ function Ui.coverBudgetLeft(fetched, started, now)
     local current = tonumber(now)
     if not begin_at or not current then return true end
     return (current - begin_at) < Ui.tokens.cover_fetch_seconds
-end
-
---- Formats a cover box as `widthxheight` for a log line or a test.
--- @tparam table layout result of `Ui.layout`
--- @treturn string
-function Ui.describeLayout(layout)
-    if type(layout) ~= "table" then return "" end
-    return string.format(
-        "rows=%d row_h=%d cover=%dx%d gutter=%d",
-        tonumber(layout.rows) or 0,
-        tonumber(layout.row_height) or 0,
-        tonumber(layout.cover_width) or 0,
-        tonumber(layout.cover_height) or 0,
-        tonumber(layout.gutter) or 0
-    )
 end
 
 return Ui
