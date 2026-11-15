@@ -1717,6 +1717,35 @@ package.preload["datastorage"] = function()
     getSettingsDir = function() return "/tmp/lighthouse-settings" end,
   }
 end
+-- The plugin asks the device for the screen height and scale so one layout
+-- rule serves every e-ink size; the stub reports a plain 600x800 screen.
+package.preload["device"] = function()
+  return {
+    screen = {
+      getWidth = function() return 600 end,
+      getHeight = function() return 800 end,
+      scaleBySize = function(_, size) return size end,
+    },
+  }
+end
+-- Cover slots are widgets; the plugin builds them only when covers are on and
+-- a catalog row is drawn, so the stubs only need to accept the options table.
+package.preload["ui/widget/imagewidget"] = function() return stub_widget("imagewidget") end
+package.preload["ui/widget/container/framecontainer"] = function() return stub_widget("framecontainer") end
+package.preload["ui/widget/container/centercontainer"] = function() return stub_widget("centercontainer") end
+package.preload["ui/widget/textwidget"] = function() return stub_widget("textwidget") end
+package.preload["ui/font"] = function()
+  return { getFace = function(_, name) return "face:" .. tostring(name) end }
+end
+package.preload["ui/geometry"] = function()
+  local geom = {}
+  function geom:new(options)
+    options = options or {}
+    options.__kind = "geom"
+    return options
+  end
+  return geom
+end
 package.preload["ui/downloadmgr"] = function()
   local manager = {}
   function manager:new(options)
@@ -1857,7 +1886,7 @@ for _, item in ipairs(entry.sub_item_table) do labels[#labels + 1] = item.text e
 print("submenu=" .. table.concat(labels, "|"))
 
 -- Catalog row rendering, including rating + progress from a merged session.
-local row = LightHouse:buildCatalogItem({
+local entry = {
   book_id = 101,
   title = "Spice and Wolf, Vol. 1",
   authors = "Isuna Hasekura",
@@ -1868,11 +1897,22 @@ local row = LightHouse:buildCatalogItem({
   download_href = "http://host/api/books/101/download/epub",
   rating = 8,
   status = { percentage = 0.45, device = "Paperwhite", timestamp = 1 },
-})
-print("row_text=" .. row.text)
-print("row_mandatory=" .. row.mandatory)
+}
+-- The row language: line 1 is the title, line 2 the metadata, and the right
+-- column carries progress and rating so neither needs a tap.
+local layout = LightHouse:layoutFor(true)
+print("layout=" .. require("lighthouse_ui").describeLayout(layout))
+local row = LightHouse:buildCatalogItem(entry, layout)
+local row_primary, row_secondary = tostring(row.text):match("^(.-)\n(.*)$")
+print("row_primary=" .. tostring(row_primary))
+print("row_secondary=" .. tostring(row_secondary))
+print("row_mandatory=" .. tostring(row.mandatory))
+print("row_state=" .. tostring(type(row.state) == "table" and row.state.__kind or "none"))
+print("row_nocover_text=" .. tostring(LightHouse:buildCatalogItem(entry).text:gsub("\n", "\\n")))
 local detail_labels = {}
-for _, item in ipairs(row.sub_item_table) do detail_labels[#detail_labels + 1] = item.text end
+for detail_index = 1, #row.sub_item_table do
+  detail_labels[#detail_labels + 1] = row.sub_item_table[detail_index].text
+end
 print("detail=" .. table.concat(detail_labels, "|"))
 
 -- Connection screen must expose the baked-in origin and endpoint paths.
@@ -1882,6 +1922,7 @@ assert(connection and connection.__kind == "textviewer", "connection view must b
 print("connection_has_origin=" .. tostring(connection.text:find(expected_base_url, 1, true) ~= nil))
 print("connection_has_opds=" .. tostring(connection.text:find("/api/opds", 1, true) ~= nil))
 print("connection_has_progress=" .. tostring(connection.text:find("/api/kosync/active", 1, true) ~= nil))
+print("connection_has_covers=" .. tostring(connection.text:find("Cover thumbnails:", 1, true) ~= nil))
 
 print("OK")
 `;
@@ -1952,12 +1993,27 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
     expect(submenu).toContain("Browse library");
     expect(submenu).toContain("Search library…");
     expect(submenu).toContain("Currently reading");
+    expect(submenu).toContain("Show cover thumbnails");
     expect(submenu).toContain("Choose download folder…");
     expect(submenu).toContain("Connection");
 
-    expect(out.row_text).toBe("★★★★☆ Spice and Wolf, Vol. 1");
-    expect(out.row_mandatory).toContain("Isuna Hasekura");
+    // Row anatomy: the title leads, the metadata follows in the smaller line,
+    // and progress + rating share one right-hand value the reader can read at a
+    // glance. The rating is no longer prefixed onto the title.
+    expect(out.row_primary).toBe("Spice and Wolf, Vol. 1");
+    expect(out.row_secondary).toBe("Isuna Hasekura · Spice and Wolf 01");
     expect(out.row_mandatory).toContain("45%");
+    expect(out.row_mandatory).toContain("★★★★☆");
+    expect(out.row_mandatory).not.toContain("Isuna Hasekura");
+
+    // Covers: one geometry rule drives the page, and a row whose cover is not on
+    // disk yet draws the neutral placeholder rather than a blank hole.
+    expect(out.layout).toContain("rows=");
+    expect(out.layout).toContain("cover=");
+    expect(out.row_state).toBe("framecontainer");
+    // Without a layout (a caller that does not draw covers) the row is still
+    // the same two-line row.
+    expect(out.row_nocover_text).toBe("Spice and Wolf, Vol. 1\\nIsuna Hasekura · Spice and Wolf 01");
 
     const detail = out.detail.split("|");
     expect(detail[0]).toBe("Download EPUB");
@@ -1971,6 +2027,7 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
     expect(out.connection_has_origin).toBe("true");
     expect(out.connection_has_opds).toBe("true");
     expect(out.connection_has_progress).toBe("true");
+    expect(out.connection_has_covers).toBe("true");
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
 });
@@ -2131,12 +2188,28 @@ local menu = shown[#shown]
 assert(menu and menu.__kind == "menu", "tapping 'Currently reading' must open a menu")
 print("title=" .. tostring(menu.title))
 print("items=" .. tostring(#menu.item_table))
-for index, item in ipairs(menu.item_table) do
-  local labels = {}
-  for _detail_index, detail in ipairs(item.sub_item_table or {}) do
-    labels[#labels + 1] = tostring(detail.text)
+-- The plugin reuses one Menu widget and switches its item table, so a later
+-- view (the empty shelf) must be read from either place.
+local function current_menu()
+  local widget = shown[#shown]
+  if widget and widget.item_table and widget.__kind == "menu" then return widget end
+  local reused = LightHouse.menu and LightHouse.menu.switched
+  if reused and reused[#reused] then
+    return { title = reused[#reused].title, item_table = reused[#reused].items }
   end
-  print(string.format("item%d=%s\t%s\t%s", index, tostring(item.text), tostring(item.mandatory), table.concat(labels, "|")))
+  return widget
+end
+-- Rows carry the plugin's shared two-line anatomy, so each row is printed as
+-- primary / secondary / glance column / detail labels.
+for item_index = 1, #menu.item_table do
+  local item = menu.item_table[item_index]
+  local labels = {}
+  for detail_index = 1, #(item.sub_item_table or {}) do
+    labels[#labels + 1] = tostring(item.sub_item_table[detail_index].text)
+  end
+  local primary, secondary = tostring(item.text):match("^(.-)\n(.*)$")
+  if not primary then primary, secondary = tostring(item.text), "" end
+  print(string.format("item%d=%s\t%s\t%s\t%s", item_index, primary, secondary, tostring(item.mandatory), table.concat(labels, "|")))
 end
 
 -- Book-id downloads must still be wired to the tapped session.
@@ -2144,14 +2217,20 @@ menu.item_table[1].sub_item_table[1].callback()
 print("tapped_book_id=" .. tostring(tapped and tapped.book_id))
 print("tapped_title=" .. tostring(tapped and tapped.title))
 
--- An empty shelf must show its notice rather than raise.
+-- An empty shelf must show a designed empty view rather than raise.
 payload = {}
 local empty_ok, empty_raised = pcall(tap)
 print("empty_ok=" .. tostring(empty_ok))
 print("empty_raised=" .. tostring(empty_raised))
-local last = shown[#shown]
-print("empty_notice=" .. tostring(last and last.__kind == "infomessage"))
-print("empty_notice_text=" .. tostring(last and last.text))
+local empty = current_menu()
+print("empty_view=" .. tostring(empty and empty.title))
+local headline = tostring(empty and empty.item_table and empty.item_table[1] and empty.item_table[1].text)
+print("empty_headline=" .. (headline:gsub("\n", "\\n")))
+local actions = {}
+for action_index = 2, #(empty and empty.item_table or {}) do
+  actions[#actions + 1] = tostring(empty.item_table[action_index].text)
+end
+print("empty_actions=" .. table.concat(actions, "|"))
 
 print("OK")
 `)
@@ -2215,12 +2294,13 @@ describe("plugin currently-reading shelf", () => {
     expect(out.title).toBe("Currently reading");
     expect(out.items).toBe("4");
 
-    // Row 1: linked session, newest first, with every detail row.
+    // Row 1: linked session, newest first. Title leads, author and device are
+    // the secondary line, and progress is the glance column - no tap needed.
     const first = out.item1.split("\t");
     expect(first[0]).toBe("Spice and Wolf, Vol. 1");
-    expect(first[1]).toContain("Isuna Hasekura");
-    expect(first[1]).toContain("████░░░░ 45%");
-    const firstDetails = first[2].split("|");
+    expect(first[1]).toBe("Isuna Hasekura · Paperwhite");
+    expect(first[2]).toContain("45%");
+    const firstDetails = first[3].split("|");
     expect(firstDetails[0]).toBe("Download EPUB");
     expect(firstDetails).toContain("Progress: ████░░░░ 45%");
     expect(firstDetails).toContain("Device: Paperwhite");
@@ -2229,7 +2309,9 @@ describe("plugin currently-reading shelf", () => {
     // Row 2: no Calibre match, so the download row is replaced, not dropped.
     const second = out.item2.split("\t");
     expect(second[0]).toBe("Dune & Sons <Deluxe>");
-    const secondDetails = second[2].split("|");
+    expect(second[1]).toBe("Frank Herbert · Kindle");
+    expect(second[2]).toContain("20%");
+    const secondDetails = second[3].split("|");
     expect(secondDetails[0]).toBe("No matching book in the library");
     expect(secondDetails).toContain("Progress: ██░░░░░░ 20%");
     expect(secondDetails).toContain("Device: Kindle");
@@ -2238,32 +2320,35 @@ describe("plugin currently-reading shelf", () => {
     // Row 3: every fallback fires (no title, no authors, no device, no file).
     const third = out.item3.split("\t");
     expect(third[0]).toBe("Untitled");
-    expect(third[1]).toContain("Unknown");
-    expect(third[1]).toContain("░░░░░░░░ 0%");
-    const thirdDetails = third[2].split("|");
+    expect(third[1]).toBe("Unknown");
+    expect(third[2]).toContain("0%");
+    const thirdDetails = third[3].split("|");
     expect(thirdDetails).toEqual([
       "No matching book in the library",
       "Progress: ░░░░░░░░ 0%",
     ]);
 
-    // Row 4: authored fallback only, Burmese title preserved byte for byte.
+    // Row 4: authored fallback only, Burmese title preserved byte for byte,
+    // and a finished book is marked with a check glyph, not a colour.
     const fourth = out.item4.split("\t");
     expect(fourth[0]).toBe(BURMESE_PROBE);
-    expect(fourth[1]).toContain("Unknown");
-    expect(fourth[1]).toContain("████████ 100%");
-    expect(fourth[2].split("|")[0]).toBe("Download EPUB");
+    expect(fourth[1]).toBe("Unknown · Kobo");
+    expect(fourth[2]).toContain("100%");
+    expect(fourth[2]).toContain("✓");
+    expect(fourth[3].split("|")[0]).toBe("Download EPUB");
 
     // Tapping "Download EPUB" still resolves the session's Calibre id.
     expect(out.tapped_book_id).toBe("101");
     expect(out.tapped_title).toBe("Spice and Wolf, Vol. 1");
 
-    // Empty shelf: a notice, never a raised error.
+    // Empty shelf: a designed empty view with a next step, never a bare notice
+    // and never a raised error.
     expect(out.empty_ok).toBe("true");
     expect(out.empty_raised).toBe("nil");
-    expect(out.empty_notice).toBe("true");
-    expect(out.empty_notice_text).toBe(
-      "No reading progress has been synced yet.",
-    );
+    expect(out.empty_view).toBe("Currently reading");
+    expect(out.empty_headline).toBe("Nothing in progress yet");
+    expect(out.empty_actions).toContain("Refresh");
+    expect(out.empty_actions).toContain("Browse library");
 
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
@@ -2792,19 +2877,29 @@ local bad_ok, bad_raised = pcall(tap)
 print("bad_ok=" .. tostring(bad_ok))
 print("bad_raised=" .. tostring(bad_raised))
 local bad = shown[#shown]
-print("bad_notice=" .. tostring(bad and bad.__kind == "infomessage"))
-print("bad_text=" .. tostring(bad and bad.text))
+-- A failure is a designed screen: what failed, then what to do, then actions.
+local function dump_problem(prefix)
+  local view = current_menu()
+  print(prefix .. "_view=" .. tostring(view and view.title))
+  local items = (view and view.item_table) or {}
+  print(prefix .. "_headline=" .. tostring(items[1] and items[1].text))
+  print(prefix .. "_detail=" .. tostring(items[2] and items[2].text))
+  local actions = {}
+  for action_index = 3, #items do
+    actions[#actions + 1] = tostring(items[action_index].text)
+  end
+  print(prefix .. "_actions=" .. table.concat(actions, "|"))
+end
+dump_problem("bad")
 
--- 4b. A 200 with a zero-length body: the actionable notice, not a raise -----
+-- 4b. A 200 with a zero-length body: the same screen, not a raise -----------
 local http = require("socket.http")
 local working_request = http.request
 http.request = function() return 1, 200, {} end
 local empty_ok, empty_raised = pcall(tap)
 print("empty_ok=" .. tostring(empty_ok))
 print("empty_raised=" .. tostring(empty_raised))
-local empty = shown[#shown]
-print("empty_notice=" .. tostring(empty and empty.__kind == "infomessage"))
-print("empty_text=" .. tostring(empty and empty.text))
+dump_problem("empty")
 http.request = working_request
 
 -- 5. Transport failure maps through the plugin's existing error style --------
@@ -2815,9 +2910,7 @@ http.request = function() return nil, "timeout" end
 local fail_ok, fail_raised = pcall(tap)
 print("fail_ok=" .. tostring(fail_ok))
 print("fail_raised=" .. tostring(fail_raised))
-local fail = shown[#shown]
-print("fail_notice=" .. tostring(fail and fail.__kind == "infomessage"))
-print("fail_text=" .. tostring(fail and fail.text))
+dump_problem("fail")
 http.request = working_request
 
 print("OK")
@@ -2866,7 +2959,7 @@ describe("plugin reading stats view", () => {
     );
   }
 
-  it("renders streak, time, finished books, health, goal and heatmap in order", () => {
+  it("leads with the headline numbers, then activity, then supporting detail", () => {
     if (!LUA_BINARY || !UNZIP_BINARY) return;
     const out = runHarness(READING_STATS_HARNESS);
 
@@ -2876,30 +2969,34 @@ describe("plugin reading stats view", () => {
     expect(out.title).toBe("Reading stats");
     expect(out.rows).toBe("15");
 
+    // 1. Headline numbers, first thing the reader sees, with no heading row
+    //    above them: the answer before the supporting detail.
     expect(out.row1).toBe("Current streak\t5 days · best 12 days");
     expect(out.row2).toBe("Read today\t45m");
     expect(out.row3).toBe("Read this week\t4h 10m");
     expect(out.row4).toBe("Total reading time\t132.5h");
     expect(out.row5).toBe("Books finished this year\t12");
 
-    expect(out.row6).toBe("Library health\tnil");
-    expect(out.row7).toBe("Unread\t120");
-    expect(out.row8).toBe("Reading\t8");
-    expect(out.row9).toBe("Finished\t34");
+    // 2. The yearly goal keeps both targets, with the bars drawn by the
+    //    plugin's single bar renderer.
+    expect(out.row6).toBe("▍ Yearly goal 2026\tnil");
+    expect(out.row7).toBe("Books\t███░░░ 48% · 12/25");
+    expect(out.row8).toBe("Hours\t██░░░░ 34% · 34h/100h");
 
-    // Goal progress bars reuse Status.progressBar, the plugin's own renderer.
-    expect(out.row10).toBe("Yearly goal 2026\tnil");
-    expect(out.row11).toBe("Books\t████░░░░ 48% · 12/25");
-    expect(out.row12).toBe("Hours\t███░░░░░ 34% · 34h/100h");
-
-    // Heatmap: one row per week of up to seven days, newest week last.
-    expect(out.row13).toBe("Activity (newest week last)\tnil");
-    expect(out.row14).toBe("·▒▓\tNov 15");
+    // 3. The activity picture, then its key, before the supporting detail.
+    expect(out.row9).toBe("▍ Activity (newest week last)\tnil");
+    expect(out.row10).toBe("·▒▓\tNov 15");
     // The key is computed from the level thresholds, so pin the whole string:
     // the ramp it must mirror is the server's (>=1m, >=15m, >=30m, >=60m).
-    expect(out.row15).toBe(
-      "Shade key: · none · ░ under 15m · ▒ under 30m · ▓ under 1h · █ 1h or more\tnil",
+    expect(out.row11).toBe(
+      "▍ Shade key: · none · ░ under 15m · ▒ under 30m · ▓ under 1h · █ 1h or more\tnil",
     );
+
+    // 4. Supporting detail last: library health as three counts.
+    expect(out.row12).toBe("▍ Library health\tnil");
+    expect(out.row13).toBe("Unread\t120");
+    expect(out.row14).toBe("Reading\t8");
+    expect(out.row15).toBe("Finished\t34");
 
     expect(out.week_days).toBe("3");
     expect(out.week_day1).toBe("Nov 13 · 0m");
@@ -2923,13 +3020,15 @@ describe("plugin reading stats view", () => {
     expect(out.deg_row3).toBe("Read this week\tunavailable");
     expect(out.deg_row4).toBe("Total reading time\tunavailable");
     expect(out.deg_row5).toBe("Books finished this year\tunavailable");
-    expect(out.deg_row7).toBe("Unread\tunavailable");
-    expect(out.deg_row11).toBe("Heatmap\tunavailable");
+    expect(out.deg_row6).toBe("▍ Activity (newest week last)\tnil");
+    expect(out.deg_row7).toBe("Heatmap\tunavailable");
     // A missing heatmap still renders the same key row rather than an empty
     // picture, and the key does not depend on the payload.
-    expect(out.deg_row12).toBe(
-      "Shade key: · none · ░ under 15m · ▒ under 30m · ▓ under 1h · █ 1h or more\tnil",
+    expect(out.deg_row8).toBe(
+      "▍ Shade key: · none · ░ under 15m · ▒ under 30m · ▓ under 1h · █ 1h or more\tnil",
     );
+    expect(out.deg_row9).toBe("▍ Library health\tnil");
+    expect(out.deg_row10).toBe("Unread\tunavailable");
   });
 
   it("shows the untargeted metric of a single-target goal as its count", () => {
@@ -2940,8 +3039,8 @@ describe("plugin reading stats view", () => {
     expect(out.one_raised).toBe("nil");
     expect(out.one_rows).toBe("15");
     // The configured target keeps its bar; the other metric keeps its number.
-    expect(out.one_row11).toBe("Books\t████░░░░ 48% · 12/25");
-    expect(out.one_row12).toBe("Hours\t34h read");
+    expect(out.one_row7).toBe("Books\t███░░░ 48% · 12/25");
+    expect(out.one_row8).toBe("Hours\t34h read");
   });
 
   it("labels the untargeted books metric without repeating the row label", () => {
@@ -2952,34 +3051,207 @@ describe("plugin reading stats view", () => {
     expect(out.hours_only_raised).toBe("nil");
     expect(out.hours_only_rows).toBe("15");
     // The row label is already "Books", so the value must not say it again.
-    expect(out.hours_only_row11).toBe("Books\t12 read");
-    expect(out.hours_only_row12).toBe("Hours\t███░░░░░ 34% · 34h/100h");
+    expect(out.hours_only_row7).toBe("Books\t12 read");
+    expect(out.hours_only_row8).toBe("Hours\t██░░░░ 34% · 34h/100h");
   });
 
-  it("reports an unreadable payload and a network failure in the plugin's own style", () => {
+  it("reports an unreadable payload and a network failure on a designed failure screen", () => {
     if (!LUA_BINARY || !UNZIP_BINARY) return;
     const out = runHarness(READING_STATS_HARNESS);
 
+    // A failed request opens a real screen: a one-line headline saying what
+    // failed, the actionable detail, and a retry - not a vanishing notice.
     expect(out.bad_ok).toBe("true");
     expect(out.bad_raised).toBe("nil");
-    expect(out.bad_notice).toBe("true");
-    expect(out.bad_text).toBe(
+    expect(out.bad_view).toBe("Reading stats");
+    expect(out.bad_headline).toBe("The server response could not be read");
+    expect(out.bad_detail).toBe(
       "The server sent reading statistics this plugin could not read. Download the plugin again from the LightHouse web app (Guide → KOReader plugin).",
     );
+    expect(out.bad_actions).toContain("Try again");
 
-    // A proxy answering before the app sends 200 with no body: same notice.
+    // A proxy answering before the app sends 200 with no body: same screen.
     expect(out.empty_ok).toBe("true");
     expect(out.empty_raised).toBe("nil");
-    expect(out.empty_notice).toBe("true");
-    expect(out.empty_text).toBe(
-      "The server sent reading statistics this plugin could not read. Download the plugin again from the LightHouse web app (Guide → KOReader plugin).",
-    );
+    expect(out.empty_headline).toBe("The server response could not be read");
 
     expect(out.fail_ok).toBe("true");
     expect(out.fail_raised).toBe("nil");
-    expect(out.fail_notice).toBe("true");
-    expect(out.fail_text).toBe(
+    expect(out.fail_headline).toBe("Can't reach the LightHouse server");
+    expect(out.fail_detail).toBe(
       "Could not reach the LightHouse server. Check Wi-Fi and the server address in the Connection screen.",
     );
+    expect(out.fail_actions).toContain("Try again");
+  });
+});
+
+/**
+ * Cover prefetch behaviour.
+ *
+ * Covers are the one part of the catalog that costs network and disk, so the
+ * rules that keep a slow link usable are worth proving rather than trusting:
+ * the per-page fetch cap, the on-disk cache that makes a second open free, and
+ * the negative cache that stops a coverless book from costing a request on
+ * every page. The harness runs the shipped template against a real temporary
+ * directory, with a stub transport that counts requests and can answer 404.
+ */
+const COVER_PREFETCH_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
+local data_dir = assert(arg[2], "data dir argument required")
+local requests = {}
+
+package.preload["datastorage"] = function()
+  return {
+    getDataDir = function() return data_dir end,
+    getSettingsDir = function() return data_dir end,
+  }
+end
+-- A real existence check plus a real (current) mtime, so the on-disk cache and
+-- the negative cache are exercised rather than the stub's "no such file".
+package.preload["libs/libkoreader-lfs"] = function()
+  return {
+    attributes = function(path, field)
+      local handle = io.open(path, "rb")
+      if not handle then return nil end
+      if field == "size" then
+        local size = handle:seek("end")
+        handle:close()
+        return size
+      end
+      handle:close()
+      if field == "mode" then return "file" end
+      if field == "modification" then return os.time() end
+      return nil
+    end,
+    mkdir = function() return true end,
+  }
+end
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      local url = tostring(request and request.url or "")
+      requests[#requests + 1] = url
+      -- Book 999 has no cover on the server.
+      if url:find("999", 1, true) then
+        return nil, "404"
+      end
+      if request and request.sink then
+        request.sink(string.rep("coverbytes", 40))
+        request.sink(nil)
+      end
+      return 1, 200, {}
+    end,
+  }
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local Ui = require("lighthouse_ui")
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+
+local function entry(book_id, href)
+  return { book_id = book_id, thumbnail_href = href }
+end
+
+local base = "http://192.168.31.15:8086/api/books/%d/cover?w=360"
+local function href(book_id) return string.format(base, book_id) end
+
+local function count_files(ids, suffix)
+  local count = 0
+  local directory = data_dir .. "/cache/lighthouse-covers"
+  -- No directory listing outside KOReader's lfs, so probe the names we expect.
+  for id_index = 1, #ids do
+    local name = Ui.coverCacheName(ids[id_index]) .. (suffix or "")
+    local handle = io.open(directory .. "/" .. name, "rb")
+    if handle then handle:close() count = count + 1 end
+  end
+  return count
+end
+
+-- 1. A page of three books: two covers cached, one recorded as missing -------
+local page = { entry(101, href(101)), entry(102, href(102)), entry(999, href(999)) }
+LightHouse:prefetchCovers(page)
+print("first_requests=" .. tostring(#requests))
+print("cached_covers=" .. tostring(count_files({ 101, 102 })))
+print("miss_markers=" .. tostring(count_files({ 999 }, ".miss")))
+
+-- 2. The same page again: nothing is fetched, because everything is fresh ----
+requests = {}
+LightHouse:prefetchCovers(page)
+print("second_requests=" .. tostring(#requests))
+
+-- 3. The per-page cap holds when a page is larger than the budget ------------
+requests = {}
+local big_page = {}
+for book_id = 201, 230 do big_page[#big_page + 1] = entry(book_id, href(book_id)) end
+LightHouse:prefetchCovers(big_page)
+print("capped_requests=" .. tostring(#requests))
+print("cap=" .. tostring(Ui.tokens.cover_fetch_max))
+
+-- 4. An entry with no cover link and no id never costs a request ------------
+requests = {}
+LightHouse:prefetchCovers({ { book_id = 301 }, { thumbnail_href = href(302) }, {} })
+print("noop_requests=" .. tostring(#requests))
+
+print("OK")
+`;
+
+describe("plugin cover prefetch", () => {
+  it("caps fetches per page, caches on disk, and remembers a missing cover", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "harness-api-key",
+      generatedAt: "2026-11-14T00:00:00.000Z",
+    });
+
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-covers-"));
+    const dataDir = path.join(workdir, "data");
+    fs.mkdirSync(path.join(dataDir, "cache", "lighthouse-covers"), { recursive: true });
+
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
+      encoding: "utf8",
+    });
+    expect(extract.status).toBe(0);
+
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "cover_harness.lua");
+    fs.writeFileSync(harnessPath, COVER_PREFETCH_HARNESS);
+
+    const res = spawnSync(LUA_BINARY, [harnessPath, pluginRoot, dataDir], { encoding: "utf8" });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line) => line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+
+    // One request per book, and the coverless book is remembered rather than
+    // retried forever.
+    expect(out.first_requests).toBe("3");
+    expect(out.cached_covers).toBe("2");
+    expect(out.miss_markers).toBe("1");
+
+    // Re-opening the page costs no network at all: this is what keeps scrolling
+    // smooth on a 40-book page.
+    expect(out.second_requests).toBe("0");
+
+    // A page bigger than the per-page budget stops at the budget.
+    expect(out.capped_requests).toBe(out.cap);
+
+    // Rows with no cover link or no book id never reach the network.
+    expect(out.noop_requests).toBe("0");
+
+    expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
 });

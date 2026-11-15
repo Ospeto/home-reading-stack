@@ -11,14 +11,22 @@ What it gives you, on top of the built-in OPDS browser:
   * Browse the whole library page by page (the built-in OPDS browser has no
     paging, so large catalogs load in one very large request).
   * Search title / author / series from the device keyboard.
+  * Cover thumbnails on every library row, cached on disk so scrolling does not
+    refetch them, with a neutral placeholder instead of a blank hole.
+  * One row language across every screen: title on line one, author and series
+    under it, and one compact right-hand column (progress, rating) the reader
+    never has to tap for. The scale lives in `lighthouse_ui.lua`.
   * Book detail with one-tap EPUB download straight into your download folder.
   * Reading status per book, merged from the server's KOSync progress
     (`GET /api/kosync/active`), matched on Calibre id, filename or title.
   * Calibre rating per book (0–10 → five stars), served by the OPDS feed.
   * A "Currently reading" shelf of every active device session.
-  * A "Reading stats" view mirroring the web Reading Statistics modal: streak,
-    reading time, books finished this year, library health, the yearly goal and
-    a monochrome 26-week activity heatmap (`GET /api/kosync/stats`).
+  * A "Reading stats" view mirroring the web Reading Statistics modal, headline
+    numbers first and then the activity picture: streak, reading time, books
+    finished this year, the yearly goal, a monochrome 26-week activity heatmap
+    and library health (`GET /api/kosync/stats`).
+  * Designed empty, loading and error screens: a failed request says what failed
+    in one line and offers a retry, and an empty library does not look broken.
 
 It deliberately uses only endpoints that already existed before this plugin:
 `/api/opds`, `/api/books/<id>/download/epub`, `/api/books/<id>/cover`,
@@ -31,6 +39,7 @@ plugin to be rewritten.
 ]]
 
 local DataStorage = require("datastorage")
+local Device = require("device")
 local DownloadMgr = require("ui/downloadmgr")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
@@ -56,6 +65,7 @@ local Client = require("lighthouse_client")
 local OPDS = require("lighthouse_opds")
 local Stats = require("lighthouse_stats")
 local Status = require("lighthouse_status")
+local Ui = require("lighthouse_ui")
 
 local LightHouse = WidgetContainer:extend{
     name = "lighthouse",
@@ -236,6 +246,337 @@ local function buildQuery(params)
     return table.concat(parts, "&")
 end
 
+-- ---------------------------------------------------------------- visuals --
+-- Everything below builds the plugin's single row language. The numbers and
+-- strings come from `lighthouse_ui.lua`; this file only turns them into
+-- widgets, so the type scale, the gutter and the glyph set cannot drift between
+-- Browse, Search, Currently reading and Reading stats.
+
+--- Device scale factor, safe when the screen object is unavailable.
+-- @treturn number
+local function screenScale()
+    local screen = Device and Device.screen
+    if type(screen) ~= "table" or type(screen.scaleBySize) ~= "function" then
+        return 1
+    end
+    local ok, value = pcall(screen.scaleBySize, screen, 1)
+    if not ok then return 1 end
+    local scale = tonumber(value)
+    if not scale or scale <= 0 then return 1 end
+    return scale
+end
+
+--- Screen height in pixels, safe when the screen object is unavailable.
+-- @treturn number
+local function screenHeight()
+    local screen = Device and Device.screen
+    if type(screen) ~= "table" or type(screen.getHeight) ~= "function" then
+        return 800
+    end
+    local ok, value = pcall(screen.getHeight, screen)
+    if not ok then return 800 end
+    local height = tonumber(value)
+    if not height or height < 200 then return 800 end
+    return height
+end
+
+--- Directory holding cached cover thumbnails.
+-- @treturn string
+local function coverDir()
+    return DataStorage:getDataDir() .. "/cache/lighthouse-covers"
+end
+
+--- Cached cover path for an entry, or nil when the book has no usable id.
+-- @tparam table entry
+-- @treturn string|nil
+local function coverPath(entry)
+    if type(entry) ~= "table" or not entry.book_id then return nil end
+    local name = Ui.coverCacheName(entry.book_id)
+    if not name then return nil end
+    return coverDir() .. "/" .. name
+end
+
+--- Negative-cache marker for a book the server has no cover for.
+-- @tparam table entry
+-- @treturn string|nil
+local function coverMissPath(entry)
+    if type(entry) ~= "table" or not entry.book_id then return nil end
+    local name = Ui.coverMissName(entry.book_id)
+    if not name then return nil end
+    return coverDir() .. "/" .. name
+end
+
+--- True when this row's cover is neither cached nor known to be missing.
+-- @tparam table entry
+-- @number now unix seconds
+-- @treturn boolean
+local function coverNeedsFetch(entry, now)
+    local path = coverPath(entry)
+    if not path then return false end
+    if type(entry.thumbnail_href) ~= "string" or entry.thumbnail_href == "" then
+        return false
+    end
+    if Ui.isFresh(lfs.attributes(path, "modification"), now) then return false end
+    local miss = coverMissPath(entry)
+    if miss and Ui.isFresh(lfs.attributes(miss, "modification"), now) then
+        return false
+    end
+    return true
+end
+
+--- KOReader widgets a cover slot needs, loaded once and only if used.
+-- Lazy and pcall-guarded: a build that lacks one of these must still open the
+-- catalog, just without images, instead of failing at load time.
+local coverWidgets
+local function loadCoverWidgets()
+    if coverWidgets ~= nil then return coverWidgets or nil end
+    local ok, loaded = pcall(function()
+        return {
+            image = require("ui/widget/imagewidget"),
+            frame = require("ui/widget/container/framecontainer"),
+            center = require("ui/widget/container/centercontainer"),
+            text = require("ui/widget/textwidget"),
+            font = require("ui/font"),
+            geom = require("ui/geometry"),
+        }
+    end)
+    coverWidgets = ok and loaded or false
+    if coverWidgets == false then return nil end
+    return coverWidgets
+end
+
+--- Neutral cover slot: a framed box with a book glyph, never a blank hole.
+-- The same slot is used while a cover loads and for a book the server has no
+-- cover for, so a coverless book keeps the row's shape instead of breaking the
+-- page or drawing an error.
+-- @tparam table layout result of `Ui.layout`
+-- @treturn table|nil widget
+local function coverPlaceholder(layout)
+    local widgets = loadCoverWidgets()
+    if not widgets then return nil end
+    local border = math.max(math.floor(screenScale()), 1)
+    local inner = widgets.geom:new{
+        w = math.max(layout.cover_width - 2 * border, 1),
+        h = math.max(layout.cover_height - 2 * border, 1),
+    }
+    return widgets.frame:new{
+        bordersize = border,
+        padding = 0,
+        widgets.center:new{
+            dimen = inner,
+            widgets.text:new{
+                text = Ui.GLYPH.cover,
+                face = widgets.font:getFace("smallinfofont"),
+            },
+        },
+    }
+end
+
+--- Left-gutter marker for a row that is not a book (search, next page).
+-- Keeps the gutter aligned instead of leaving an empty notch on those rows.
+-- @tparam table layout result of `Ui.layout`
+-- @string glyph one of `Ui.GLYPH`
+-- @treturn table|nil widget
+local function markerSlot(layout, glyph)
+    local widgets = loadCoverWidgets()
+    if not widgets then return nil end
+    return widgets.center:new{
+        dimen = widgets.geom:new{ w = layout.cover_width, h = layout.cover_height },
+        widgets.text:new{
+            text = glyph,
+            face = widgets.font:getFace("infofont"),
+        },
+    }
+end
+
+--- Short, human headline for a failed request.
+-- Deliberately separate from `describeError`: the headline states what failed in
+-- one short line, the detail line says what to do about it. A failure screen
+-- shows both instead of a bare "something went wrong".
+-- @string err
+-- @treturn string
+local function errorHeadline(err)
+    local code = type(err) == "string" and err or tostring(err or "")
+    if code == "not_configured" then
+        return _("This plugin is not configured")
+    elseif code == "https_unavailable" then
+        return _("No HTTPS support in this KOReader build")
+    elseif code:match("^network_error") then
+        return _("Can't reach the LightHouse server")
+    elseif code == "empty_response" then
+        return _("The server sent an empty response")
+    elseif code == "invalid_response" then
+        return _("The server response could not be read")
+    elseif code == "html_response" then
+        return _("The server sent a web page")
+    elseif code:match("^file_error") then
+        return _("Can't write the download file")
+    elseif code:match("^http_401") or code:match("^http_403") then
+        return _("The server rejected this device's key")
+    elseif code == "too_many_redirects" or code == "invalid_redirect" then
+        return _("The server sent a bad redirect")
+    elseif code:match("^http_") then
+        return T(_("Server error %1"), code:gsub("^http_", ""))
+    end
+    return _("The request failed")
+end
+
+--- Geometry for one view.
+-- @boolean with_covers
+-- @treturn table result of `Ui.layout`
+function LightHouse:layoutFor(with_covers)
+    return Ui.layout(screenHeight(), screenScale(), with_covers == true)
+end
+
+--- The reader's preference for cover thumbnails, on by default.
+-- @treturn boolean
+function LightHouse:coversEnabled()
+    local stored = G_reader_settings:readSetting("lighthouse_covers")
+    if stored == nil then return true end
+    return stored == true
+end
+
+--- Flips the cover preference (takes effect on the next view open).
+function LightHouse:toggleCovers()
+    G_reader_settings:saveSetting("lighthouse_covers", not self:coversEnabled())
+end
+
+--- Fetches the covers a page is missing, inside the caller's spinner.
+-- Bounded twice over - a fetch count and a wall-clock budget - so a slow link
+-- degrades to placeholders instead of hanging the catalog. A book the server
+-- has no cover for gets a negative-cache marker, so it costs one request ever
+-- rather than one per page.
+-- @tparam table entries catalog entries (or synthetic cover-only entries)
+function LightHouse:prefetchCovers(entries)
+    local started = os.time()
+    local fetched = 0
+    for entry_index = 1, #(entries or {}) do
+        local entry = entries[entry_index]
+        if coverNeedsFetch(entry, os.time()) then
+            if not Ui.coverBudgetLeft(fetched, started, os.time()) then
+                logger.info("LightHouse: cover fetch budget reached for this page")
+                break
+            end
+            local path = coverPath(entry)
+            if path then
+                makeDirs(coverDir())
+                local ok_file = Client.download(config, entry.thumbnail_href, path)
+                fetched = fetched + 1
+                if not ok_file then
+                    local miss = coverMissPath(entry)
+                    if miss then
+                        local handle = io.open(miss, "wb")
+                        if handle then
+                            handle:write("no cover")
+                            handle:close()
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+--- Builds the left cover slot for one row.
+-- @tparam table entry catalog entry with a `.book_id`
+-- @tparam table layout result of `Ui.layout`
+-- @treturn table|nil widget
+function LightHouse:coverSlot(entry, layout)
+    local path = coverPath(entry)
+    if path and lfs.attributes(path, "mode") == "file" then
+        local widgets = loadCoverWidgets()
+        if widgets then
+            return widgets.image:new{
+                file = path,
+                -- 0 = scale to fit the box, keeping the cover's own aspect.
+                scale_factor = 0,
+                width = layout.cover_width,
+                height = layout.cover_height,
+            }
+        end
+    end
+    return coverPlaceholder(layout)
+end
+
+--- One-line progress for the glance column.
+-- Shape, not colour, carries the finished state: a check glyph after the bar.
+-- @param session table|nil normalized KOSync session
+-- @treturn string
+function LightHouse:progressGlance(session)
+    if type(session) ~= "table" then return _("Unread") end
+    local label = Ui.glanceProgress(Status, session.percentage)
+    if session.percentage >= 0.99 then
+        label = label .. " " .. Ui.GLYPH.done
+    elseif session.percentage <= 0 then
+        label = label .. " " .. _("opened")
+    end
+    return label
+end
+
+--- Builds one row in the plugin's shared row language.
+-- @tparam table spec { layout, cover_entry, cover_glyph, primary, secondary,
+--                      glance, details, callback, bold }
+-- @treturn table Menu item
+function LightHouse:buildRow(spec)
+    spec = spec or {}
+    local layout = spec.layout
+    local item = {
+        text = Ui.rowText(spec.primary, spec.secondary),
+        bold = spec.bold == true,
+    }
+    if spec.glance and spec.glance ~= "" then item.mandatory = spec.glance end
+    if spec.details then
+        item.sub_item_table = spec.details
+        item.callback = spec.callback
+    elseif spec.callback then
+        item.callback = spec.callback
+    else
+        -- Informational row: it must not look like a control that did nothing.
+        item.select_enabled = false
+        item.callback = function() end
+    end
+    if layout and layout.gutter > 0 then
+        if spec.cover_entry then
+            item.state = self:coverSlot(spec.cover_entry, layout)
+        elseif spec.cover_glyph then
+            item.state = markerSlot(layout, spec.cover_glyph)
+        end
+    end
+    return item
+end
+
+--- Shows a designed failure or empty screen.
+-- Same title, margins and row language as the view it replaces, plus an action
+-- the reader can take: a failure is never a bare notice that vanishes.
+-- @tparam table spec { title, headline, detail, actions = { {text, callback, bold} } }
+function LightHouse:showProblem(spec)
+    spec = spec or {}
+    local items = {}
+    items[#items + 1] = self:buildRow{ primary = spec.headline, bold = true }
+    if spec.detail and spec.detail ~= "" then
+        items[#items + 1] = self:buildRow{ primary = spec.detail }
+    end
+    local actions = spec.actions or {}
+    for action_index = 1, #actions do
+        local action = actions[action_index]
+        items[#items + 1] = self:buildRow{
+            primary = action.text,
+            bold = action.bold == true,
+            callback = action.callback,
+        }
+    end
+    self:showMenu(spec.title or _("LightHouse library"), items, { covers = false })
+end
+
+--- Retry action for a failed view, reused by every failure screen.
+-- @string label retry label
+-- @function callback what to re-run
+-- @treturn table action
+local function retryAction(label, callback)
+    return { text = label or _("Try again"), bold = true, callback = callback }
+end
+
+
 function LightHouse:init()
     self.ui.menu:registerToMainMenu(self)
 end
@@ -261,6 +602,12 @@ function LightHouse:addToMainMenu(menu_items)
             {
                 text = _("Reading stats"),
                 callback = function() self:showStats() end,
+            },
+            {
+                text = _("Show cover thumbnails"),
+                checked_func = function() return self:coversEnabled() end,
+                callback = function() self:toggleCovers() end,
+                help_text = _("Draw a cover image on each library row. Turn this off for the fastest browsing on a slow connection."),
             },
             {
                 text = _("Choose download folder…"),
@@ -305,6 +652,8 @@ function LightHouse:showConnection(configured)
         _("Progress endpoint:") .. " /api/kosync/active",
         _("Statistics endpoint:") .. " /api/kosync/stats",
         _("Download folder:") .. " " .. self:getDownloadDir(),
+        _("Cover thumbnails:") .. " " .. (self:coversEnabled() and _("shown") or _("hidden (fastest)")),
+        _("Cover cache:") .. " " .. coverDir(),
         _("Plugin version:") .. " " .. tostring(config.plugin_version or "unknown"),
         _("Generated:") .. " " .. (config.generated_at ~= "" and config.generated_at or _("manual copy")),
         _("Request timeout:") .. " " .. tostring(config.request_total_timeout or 90) .. "s",
@@ -368,14 +717,27 @@ end
 -- @int start_index zero-based offset into the result set
 -- @int page_number 1-based page number for the title bar
 function LightHouse:openCatalog(query, start_index, page_number)
+    local paged_title
+    if (query or "") ~= "" then
+        paged_title = T(_("Search: %1 (page %2)"), query, page_number or 1)
+    else
+        paged_title = T(_("LightHouse library (page %1)"), page_number or 1)
+    end
+
+    local retry = function()
+        self:openCatalog(query, start_index, page_number)
+    end
+
     if not Client.isConfigured(config) then
-        notice(describeError("not_configured"))
+        self:showProblem{
+            title = paged_title,
+            headline = errorHeadline("not_configured"),
+            detail = describeError("not_configured"),
+        }
         return
     end
     if not NetworkMgr:isOnline() then
-        NetworkMgr:willRerunWhenOnline(function()
-            self:openCatalog(query, start_index, page_number)
-        end)
+        NetworkMgr:willRerunWhenOnline(retry)
         return
     end
 
@@ -389,13 +751,38 @@ function LightHouse:openCatalog(query, start_index, page_number)
         return Client.get(config, path)
     end)
     if not body then
-        notice(describeError(err))
+        self:showProblem{
+            title = paged_title,
+            headline = errorHeadline(err),
+            detail = describeError(err),
+            actions = { retryAction(_("Try again"), retry) },
+        }
         return
     end
 
     local feed = OPDS.parse(body)
-    if #feed.entries == 0 and (query or "") ~= "" then
-        notice(T(_("No books match “%1”."), query))
+    if #feed.entries == 0 then
+        if (query or "") ~= "" then
+            self:showProblem{
+                title = paged_title,
+                headline = T(_("No books match “%1”"), query),
+                detail = _("Check the spelling, or search by author or series."),
+                actions = {
+                    retryAction(_("Search again"), function() self:showSearchDialog() end),
+                    { text = _("Browse all books"), callback = function() self:openCatalog("", 0, 1) end },
+                },
+            }
+        else
+            self:showProblem{
+                title = paged_title,
+                headline = _("This library is empty"),
+                detail = _("Add EPUBs from the LightHouse web app, then browse again."),
+                actions = {
+                    retryAction(_("Refresh"), retry),
+                    { text = _("Connection"), callback = function() self:showConnection(Client.isConfigured(config)) end },
+                },
+            }
+        end
         return
     end
 
@@ -404,25 +791,40 @@ function LightHouse:openCatalog(query, start_index, page_number)
     end) or {}
     Status.merge(feed.entries, sessions)
 
-    local title
-    if (query or "") ~= "" then
-        title = T(_("Search: %1 (page %2)"), query, page_number or 1)
-    else
-        title = T(_("LightHouse library (page %1)"), page_number or 1)
+    local with_covers = self:coversEnabled()
+    if with_covers then
+        local now = os.time()
+        local pending = 0
+        for entry_index = 1, #feed.entries do
+            if coverNeedsFetch(feed.entries[entry_index], now) then
+                pending = pending + 1
+            end
+        end
+        if pending > 0 then
+            self:withSpinner(_("Loading covers…"), function()
+                self:prefetchCovers(feed.entries)
+                return true
+            end)
+        end
     end
 
+    local layout = self:layoutFor(with_covers)
     local items = {}
-    items[#items + 1] = {
-        text = _("🔍 Search library…"),
+    items[#items + 1] = self:buildRow{
+        layout = layout,
+        cover_glyph = Ui.GLYPH.search,
+        primary = _("Search library…"),
         callback = function() self:showSearchDialog() end,
     }
     for entry_index = 1, #feed.entries do
-        items[#items + 1] = self:buildCatalogItem(feed.entries[entry_index])
+        items[#items + 1] = self:buildCatalogItem(feed.entries[entry_index], layout)
     end
 
     if feed.next_href and #feed.entries > 0 then
-        items[#items + 1] = {
-            text = _("Next page ▸"),
+        items[#items + 1] = self:buildRow{
+            layout = layout,
+            cover_glyph = Ui.GLYPH.chevron,
+            primary = _("Next page"),
             bold = true,
             callback = function()
                 self:openCatalog(query, (start_index or 0) + #feed.entries, (page_number or 1) + 1)
@@ -430,18 +832,17 @@ function LightHouse:openCatalog(query, start_index, page_number)
         }
     end
 
-    self:showMenu(title, items)
+    self:showMenu(paged_title, items, { covers = with_covers, layout = layout })
 end
 
 --- Builds one catalog row, including rating, progress and the detail submenu.
+-- Row anatomy is the plugin's shared one: title, then author and series, with
+-- progress and rating together in the right-hand column so the reader never has
+-- to open the row to judge a book.
 -- @tparam table entry OPDS entry with optional .status
+-- @tparam table[opt] layout result of `Ui.layout`
 -- @treturn table Menu item
-function LightHouse:buildCatalogItem(entry)
-    local stars = ""
-    if entry.rating and entry.rating > 0 then
-        stars = Status.ratingStars(entry.rating) .. " "
-    end
-
+function LightHouse:buildCatalogItem(entry, layout)
     local details = {}
     details[#details + 1] = {
         text = _("Download EPUB"),
@@ -488,13 +889,23 @@ function LightHouse:buildCatalogItem(entry)
         }
     end
 
-    local mandatory = entry.authors ~= "" and entry.authors or _("Unknown")
-    mandatory = mandatory .. "  " .. Status.statusLabel(entry)
+    local glance = Ui.glanceLine{
+        self:progressGlance(entry.status),
+        (entry.rating and entry.rating > 0) and Status.ratingStars(entry.rating) or nil,
+    }
 
-    return {
-        text = stars .. (entry.title ~= "" and entry.title or _("Untitled")),
-        mandatory = mandatory,
-        sub_item_table = details,
+    return self:buildRow{
+        layout = layout,
+        cover_entry = entry,
+        primary = entry.title ~= "" and entry.title or _("Untitled"),
+        secondary = Ui.secondaryLine{
+            authors = entry.authors,
+            series = entry.series,
+            series_index = entry.series_index and formatSeriesIndex(entry.series_index) or nil,
+            fallback = _("Unknown"),
+        },
+        glance = glance,
+        details = details,
     }
 end
 
@@ -551,7 +962,11 @@ end
 --- Shows every active KOSync session, newest first.
 function LightHouse:showReading()
     if not Client.isConfigured(config) then
-        notice(describeError("not_configured"))
+        self:showProblem{
+            title = _("Currently reading"),
+            headline = errorHeadline("not_configured"),
+            detail = describeError("not_configured"),
+        }
         return
     end
     if not NetworkMgr:isOnline() then
@@ -563,14 +978,61 @@ function LightHouse:showReading()
         return self:fetchSessions()
     end)
     if not sessions then
-        notice(describeError(err))
+        self:showProblem{
+            title = _("Currently reading"),
+            headline = errorHeadline(err),
+            detail = describeError(err),
+            actions = { retryAction(_("Try again"), function() self:showReading() end) },
+        }
         return
     end
     if #sessions == 0 then
-        notice(_("No reading progress has been synced yet."))
+        self:showProblem{
+            title = _("Currently reading"),
+            headline = _("Nothing in progress yet"),
+            detail = _("Open a book in KOReader with progress sync on, then come back."),
+            actions = {
+                retryAction(_("Refresh"), function() self:showReading() end),
+                { text = _("Browse library"), callback = function() self:openCatalog("", 0, 1) end },
+            },
+        }
         return
     end
 
+    local with_covers = self:coversEnabled()
+    if with_covers then
+        -- The progress endpoint carries the Calibre id, so the shelf can show
+        -- covers without asking the server for anything else.
+        local cover_entries = {}
+        for session_index = 1, #sessions do
+            local session = sessions[session_index]
+            if session.book_id then
+                cover_entries[#cover_entries + 1] = {
+                    book_id = session.book_id,
+                    thumbnail_href = Client.buildUrl(config, string.format(
+                        "/api/books/%d/cover?w=%d",
+                        session.book_id,
+                        Ui.tokens.cover_width_px
+                    )),
+                }
+            end
+        end
+        local now = os.time()
+        local pending = 0
+        for entry_index = 1, #cover_entries do
+            if coverNeedsFetch(cover_entries[entry_index], now) then
+                pending = pending + 1
+            end
+        end
+        if pending > 0 then
+            self:withSpinner(_("Loading covers…"), function()
+                self:prefetchCovers(cover_entries)
+                return true
+            end)
+        end
+    end
+
+    local layout = self:layoutFor(with_covers)
     local items = {}
     -- `session_index`, not `_`: `_` is gettext in this file (see the note by
     -- its require), so using it as a throwaway aborted the whole process on
@@ -608,15 +1070,21 @@ function LightHouse:showReading()
             }
         end
 
-        local mandatory = session.authors ~= "" and session.authors or _("Unknown")
-        items[#items + 1] = {
-            text = (session.title ~= "" and session.title) or _("Untitled"),
-            mandatory = mandatory .. "  " .. Status.progressBar(session.percentage),
-            sub_item_table = details,
+        items[#items + 1] = self:buildRow{
+            layout = layout,
+            cover_entry = session.book_id and { book_id = session.book_id } or nil,
+            primary = (session.title ~= "" and session.title) or _("Untitled"),
+            secondary = Ui.secondaryLine{
+                authors = session.authors,
+                extra = (session.device and session.device ~= "") and session.device or nil,
+                fallback = _("Unknown"),
+            },
+            glance = self:progressGlance(session),
+            details = details,
         }
     end
 
-    self:showMenu(_("Currently reading"), items)
+    self:showMenu(_("Currently reading"), items, { covers = with_covers, layout = layout })
 end
 
 --- Fetches and normalizes `GET /api/kosync/stats`.
@@ -637,21 +1105,31 @@ function LightHouse:fetchStats()
 end
 
 --- Non-tappable section heading for the stats view.
+-- Uses the shared left block bar so a heading reads as a heading on e-ink,
+-- where the web app would use a coloured accent border.
 -- @string text
 -- @treturn table Menu item
 local function statsSection(text)
-    return { text = text, enabled = false, callback = function() end }
+    return {
+        text = Ui.sectionText(text),
+        bold = true,
+        select_enabled = false,
+        callback = function() end,
+    }
 end
 
 --- Read-only stats row: label on the left, value on the right.
 -- A value the server did not send renders "unavailable"; zero stays zero.
 -- @string label
 -- @string|nil value
+-- @boolean[opt] bold headline emphasis
 -- @treturn table Menu item
-local function statsRow(label, value)
+local function statsRow(label, value, bold)
     return {
         text = label,
-        mandatory = value or _("unavailable"),
+        mandatory = value or Ui.UNAVAILABLE,
+        bold = bold == true,
+        select_enabled = false,
         callback = function() end,
     }
 end
@@ -676,49 +1154,47 @@ local function heatmapKeyLabel()
         end
         parts[#parts + 1] = Stats.heatmapGlyph(level) .. " " .. text
     end
-    return T(_("Shade key: %1"), table.concat(parts, " · "))
+    return T(_("Shade key: %1"), table.concat(parts, Ui.GLYPH.separator))
 end
 
 --- Builds the rows of the Reading stats view.
--- Order is deliberate: the numbers a reader checks daily come first, then
--- library health, then the yearly goal (only when one is set), then the
--- 26-week activity picture, which is the tallest section and scrolls.
+--
+-- Order mirrors how the web Reading Statistics modal is read, one screen at a
+-- time: the headline numbers a reader checks daily come first (streak, today,
+-- this week, all time, books finished this year), then the yearly goal, then
+-- the 26-week activity picture, and only then the supporting detail (library
+-- health). Nothing from the earlier layout is dropped - only reordered, so the
+-- answer is above the fold and the detail is below it.
 -- @tparam table stats normalized stats from `fetchStats`
 -- @treturn table array of Menu items
 function LightHouse:buildStatsItems(stats)
     local items = {}
 
-    -- 1. Streak, current with best.
-    items[#items + 1] = statsRow(_("Current streak"), Stats.streakLabel(stats.streaks))
-
-    -- 2. Reading time: today, this week, all time.
+    -- 1. Headline numbers. Bold, and with no heading row above them: this is
+    --    the answer, and the sections below are the supporting detail.
     local time = stats.time or {}
-    local time_rows = {
+    local headline_rows = {
+        { label = _("Current streak"), value = Stats.streakLabel(stats.streaks) },
         { label = _("Read today"), value = Stats.formatDuration(time.todaySeconds) },
         { label = _("Read this week"), value = Stats.formatDuration(time.thisWeekSeconds) },
         { label = _("Total reading time"), value = Stats.formatHours(time.totalHours) },
+        { label = _("Books finished this year"), value = Stats.formatCount(stats.finishedThisYear) },
     }
-    for row_index = 1, #time_rows do
-        items[#items + 1] = statsRow(time_rows[row_index].label, time_rows[row_index].value)
+    for row_index = 1, #headline_rows do
+        items[#items + 1] = statsRow(
+            headline_rows[row_index].label,
+            headline_rows[row_index].value,
+            true
+        )
     end
 
-    -- 3. Books finished this year (the server counts finished timestamps).
-    items[#items + 1] = statsRow(_("Books finished this year"), Stats.formatCount(stats.finishedThisYear))
-
-    -- 4. Library health as three counts.
-    items[#items + 1] = statsSection(_("Library health"))
-    local health = stats.health or {}
-    items[#items + 1] = statsRow(_("Unread"), Stats.formatCount(health.unread))
-    items[#items + 1] = statsRow(_("Reading"), Stats.formatCount(health.reading))
-    items[#items + 1] = statsRow(_("Finished"), Stats.formatCount(health.finished))
-
-    -- 5. Yearly goal, only when a target is configured.
+    -- 2. Yearly goal, only when a target is configured.
     local goal = stats.goal
     if goal then
         local heading = goal.year and T(_("Yearly goal %1"), Stats.formatCount(goal.year)) or _("Yearly goal")
         items[#items + 1] = statsSection(heading)
 
-        -- Bars reuse Status.progressBar, the plugin's existing renderer, so a
+        -- Bars go in the same right-hand column as every other row value, so a
         -- goal row looks like every other progress row on the device.
         local goal_rows = {
             { label = _("Books"), ratio = goal.booksRatio, value = Stats.goalBooksLabel(goal) },
@@ -728,13 +1204,13 @@ function LightHouse:buildStatsItems(stats)
             local goal_row = goal_rows[row_index]
             local value = goal_row.value
             if value and goal_row.ratio then
-                value = Status.progressBar(goal_row.ratio) .. " · " .. value
+                value = Ui.glanceProgress(Status, goal_row.ratio) .. Ui.GLYPH.separator .. value
             end
             items[#items + 1] = statsRow(goal_row.label, value)
         end
     end
 
-    -- 6. Activity heatmap: one menu row per week of up to seven days.
+    -- 3. Activity heatmap: one menu row per week of up to seven days.
     items[#items + 1] = statsSection(_("Activity (newest week last)"))
     local weeks = Stats.heatmapRows(stats.heatmap)
     if #weeks == 0 then
@@ -746,7 +1222,7 @@ function LightHouse:buildStatsItems(stats)
         for day_index = 1, #week do
             local day = week[day_index]
             days[#days + 1] = {
-                text = T(_("%1 · %2"), Stats.shortDate(day.date) or day.date, Stats.dayDurationLabel(day) or _("unavailable")),
+                text = T(_("%1 · %2"), Stats.shortDate(day.date) or day.date, Stats.dayDurationLabel(day) or Ui.UNAVAILABLE),
                 callback = function() self:showDayStats(day) end,
             }
         end
@@ -758,13 +1234,24 @@ function LightHouse:buildStatsItems(stats)
     end
     items[#items + 1] = statsSection(heatmapKeyLabel())
 
+    -- 4. Supporting detail: library health as three counts.
+    items[#items + 1] = statsSection(_("Library health"))
+    local health = stats.health or {}
+    items[#items + 1] = statsRow(_("Unread"), Stats.formatCount(health.unread))
+    items[#items + 1] = statsRow(_("Reading"), Stats.formatCount(health.reading))
+    items[#items + 1] = statsRow(_("Finished"), Stats.formatCount(health.finished))
+
     return items
 end
 
 --- Opens the Reading stats view.
 function LightHouse:showStats()
     if not Client.isConfigured(config) then
-        notice(describeError("not_configured"))
+        self:showProblem{
+            title = _("Reading stats"),
+            headline = errorHeadline("not_configured"),
+            detail = describeError("not_configured"),
+        }
         return
     end
     if not NetworkMgr:isOnline() then
@@ -776,11 +1263,16 @@ function LightHouse:showStats()
         return self:fetchStats()
     end)
     if not stats then
-        notice(describeError(err))
+        self:showProblem{
+            title = _("Reading stats"),
+            headline = errorHeadline(err),
+            detail = describeError(err),
+            actions = { retryAction(_("Try again"), function() self:showStats() end) },
+        }
         return
     end
 
-    self:showMenu(_("Reading stats"), self:buildStatsItems(stats))
+    self:showMenu(_("Reading stats"), self:buildStatsItems(stats), { covers = false })
 end
 
 --- Shows the reading time recorded on one heatmap day.
@@ -851,7 +1343,10 @@ function LightHouse:startDownload(entry, filepath)
     end)
 
     if not ok then
-        notice(describeError(err))
+        -- An InfoMessage, not a failure screen: this runs after the reader chose
+        -- a book, so replacing the catalog behind them would lose their place.
+        -- The message still leads with what failed and then what to do.
+        notice(errorHeadline(err) .. "\n" .. describeError(err), 6)
         return
     end
 
@@ -871,12 +1366,21 @@ function LightHouse:startDownload(entry, filepath)
 end
 
 --- Shows (or re-uses) the results menu.
+-- The page geometry comes from `Ui.layout`, so every view shares one row
+-- rhythm: the same margins, the same two-line rows, and a left gutter exactly
+-- as wide as the cover slot on views that draw covers.
 -- @string title menu title
 -- @tparam table items item_table
-function LightHouse:showMenu(title, items)
+-- @tparam[opt] table options { covers = boolean, layout = table }
+function LightHouse:showMenu(title, items, options)
+    options = options or {}
+    local layout = options.layout or self:layoutFor(options.covers == true)
+    local gutter = options.covers == true and layout.gutter or 0
     if self.menu then
         -- A new top-level view must not inherit the previous submenu back-stack.
         self.menu.item_table_stack = {}
+        self.menu.items_per_page = layout.rows
+        self.menu.state_w = gutter
         self.menu:switchItemTable(title, items)
         return
     end
@@ -884,6 +1388,12 @@ function LightHouse:showMenu(title, items)
         title = title,
         item_table = items,
         title_multilines = true,
+        items_per_page = layout.rows,
+        state_w = gutter,
+        -- Rows are drawn as a title line plus a metadata line everywhere, even
+        -- where the metadata is absent, so the type scale never changes shape
+        -- between screens.
+        multilines_forced = true,
         close_callback = function() self.menu = nil end,
     }
     UIManager:show(self.menu)
@@ -893,6 +1403,7 @@ end
 -- function fields on the plugin table, so KOReader's PluginLoader is unaffected.
 LightHouse.buildFilename = buildFilename
 LightHouse.describeError = describeError
+LightHouse.errorHeadline = errorHeadline
 LightHouse.formatSeriesIndex = formatSeriesIndex
 
 return LightHouse
