@@ -43,7 +43,7 @@ can print "unavailable" instead of a confident zero.
 
 local Stats = {}
 
---- Heatmap cells used when the caller does not ask for a window.
+--- Days shown in the heatmap window.
 -- 26 weeks is the most that stays readable without horizontal scrolling on a
 -- 600px e-ink menu row (one character per day).
 Stats.DEFAULT_HEATMAP_DAYS = 182
@@ -166,33 +166,20 @@ function Stats.shortDate(date)
     return string.format("%s %d", name, tonumber(day) or 0)
 end
 
---- Maps one heatmap day to a monochrome level 0..4.
+--- Reads the monochrome level 0..4 the server shipped for one heatmap day.
 --
--- The server already ships a `level`; that value wins so the device and the web
--- app never disagree. When it is missing (an older server), the level is
--- derived with the server's own thresholds so the picture still renders.
+-- The device never derives a level from minutes: the server owns that ramp, and
+-- a second definition here would drift from the picture the web app draws. A
+-- day without a usable level is simply not shaded.
 -- @tparam table day heatmap entry
--- @treturn number|nil 0..4, or nil when the entry is unusable
+-- @treturn number|nil 0..4, or nil when the entry carries no usable level
 function Stats.heatmapLevel(day)
     if type(day) ~= "table" then return nil end
 
     local level = numberOf(day.level)
-    if level and level >= 0 and level <= 4 and level == math.floor(level) then
-        return level
-    end
-
-    local minutes = numberOf(day.minutes)
-    if not minutes then
-        local seconds = numberOf(day.seconds)
-        if not seconds then return nil end
-        minutes = seconds / 60
-    end
-
-    local derived = 0
-    for candidate = 1, #Stats.LEVEL_MIN_MINUTES do
-        if minutes >= Stats.LEVEL_MIN_MINUTES[candidate] then derived = candidate end
-    end
-    return derived
+    if not level then return nil end
+    if level < 0 or level > 4 or level ~= math.floor(level) then return nil end
+    return level
 end
 
 --- Glyph for one heatmap level.
@@ -399,19 +386,17 @@ end
 
 --- Packs heatmap days into rows of at most seven, newest row last.
 --
--- The newest day always ends the final row, so "today" sits at the right edge
--- of the picture instead of drifting with the calendar. Older days beyond
--- `max_days` (and beyond the row boundary) are dropped rather than shrunk.
+-- The picture is a fixed 26-week window: the newest day always ends the final
+-- row, so "today" sits at the right edge instead of drifting with the calendar,
+-- and older days beyond the window (and beyond the row boundary) are dropped
+-- rather than shrunk.
 -- @tparam table days normalized heatmap days, oldest first
--- @number[opt] max_days window size, defaults to Stats.DEFAULT_HEATMAP_DAYS
 -- @treturn table array of rows, each an array of days
-function Stats.heatmapRows(days, max_days)
+function Stats.heatmapRows(days)
     local rows = {}
     if type(days) ~= "table" or #days == 0 then return rows end
 
-    local window = numberOf(max_days) or Stats.DEFAULT_HEATMAP_DAYS
-    if window < 1 then window = 1 end
-    local first = #days - math.floor(window) + 1
+    local first = #days - Stats.DEFAULT_HEATMAP_DAYS + 1
     if first < 1 then first = 1 end
 
     local last = #days

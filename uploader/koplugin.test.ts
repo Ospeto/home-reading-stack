@@ -2306,16 +2306,10 @@ for level = 0, 4 do glyphs[#glyphs + 1] = Stats.heatmapGlyph(level) end
 print("glyphs=" .. table.concat(glyphs, ""))
 print("glyph_unknown=" .. tostring(Stats.heatmapGlyph(nil)) .. tostring(Stats.heatmapGlyph(9)))
 
--- Level mapping: the server's own level wins, thresholds mirror the server ---
+-- Level mapping: a validated read of the server's own level, never derived --
 print("level_server=" .. tostring(Stats.heatmapLevel({ level = 4, minutes = 1 })))
 print("level_string=" .. tostring(Stats.heatmapLevel({ level = "2", minutes = 60 })))
-print("level_out_of_range=" .. tostring(Stats.heatmapLevel({ level = 7, minutes = 20 })))
-print("level_none=" .. tostring(Stats.heatmapLevel({ minutes = 0 })))
-print("level_one_min=" .. tostring(Stats.heatmapLevel({ minutes = 1 })))
-print("level_fifteen=" .. tostring(Stats.heatmapLevel({ minutes = 15 })))
-print("level_thirty=" .. tostring(Stats.heatmapLevel({ minutes = 30 })))
-print("level_hour=" .. tostring(Stats.heatmapLevel({ minutes = 60 })))
-print("level_from_seconds=" .. tostring(Stats.heatmapLevel({ seconds = 2700 })))print("level_empty=" .. tostring(Stats.heatmapLevel({})))
+print("level_no_level=" .. tostring(Stats.heatmapLevel({ minutes = 60 })))
 print("level_nontable=" .. tostring(Stats.heatmapLevel(nil)))
 
 -- Normalization --------------------------------------------------------------
@@ -2356,7 +2350,7 @@ print("norm_goal_ratio=" .. tostring(stats.goal.booksRatio))
 print("norm_hours_ratio=" .. tostring(stats.goal.hoursRatio))
 print("norm_heatmap_len=" .. tostring(#stats.heatmap))
 print("norm_heatmap_level3=" .. tostring(stats.heatmap[3].level))
-print("norm_heatmap_derived=" .. tostring(stats.heatmap[2].level))
+print("norm_heatmap_no_level=" .. tostring(stats.heatmap[2].level))
 
 -- Missing sections stay nil, never zero.
 local bare = assert(Stats.normalize({}))
@@ -2426,7 +2420,6 @@ print("rows_count=" .. tostring(#week_rows))
 print("rows_first=" .. tostring(#week_rows[1]))
 print("rows_last=" .. tostring(#week_rows[#week_rows]))
 print("rows_newest=" .. tostring(week_rows[#week_rows][#week_rows[#week_rows]].date))
-print("rows_window=" .. tostring(#Stats.heatmapRows(week, 5)))
 print("rows_empty=" .. tostring(#Stats.heatmapRows({})))
 print("rows_nil=" .. tostring(#Stats.heatmapRows(nil)))
 
@@ -2436,8 +2429,6 @@ for day_index = 1, 365 do
 end
 local year_rows = Stats.heatmapRows(year)
 print("year_rows_count=" .. tostring(#year_rows))
-print("year_rows_capped=" .. tostring(#Stats.heatmapRows(year, Stats.DEFAULT_HEATMAP_DAYS)))
-print("year_rows_explicit=" .. tostring(#Stats.heatmapRows(year, 365)))
 print("year_rows_first_cells=" .. tostring(#year_rows[1]))
 print("year_rows_text_bytes=" .. tostring(#Stats.heatmapRowText(year_rows[1])))
 print("row_text=" .. tostring(Stats.heatmapRowText({
@@ -2506,21 +2497,14 @@ describe("plugin reading-stats formatting", () => {
     expect(out.row_text_nil).toBe("");
   });
 
-  it("maps a day to a level from the server value or its own thresholds", () => {
+  it("reads the server's heatmap level and never derives one", () => {
     if (!LUA_BINARY) return;
     const out = runStatsHarness();
-    // The server's level always wins so device and web never disagree.
     expect(out.level_server).toBe("4");
     expect(out.level_string).toBe("2");
-    expect(out.level_out_of_range).toBe("2");
-    expect(out.level_none).toBe("0");
-    expect(out.level_one_min).toBe("1");
-    expect(out.level_fifteen).toBe("2");
-    expect(out.level_thirty).toBe("3");
-    expect(out.level_hour).toBe("4");
-    expect(out.level_from_seconds).toBe("3");
-    // Nothing usable in the entry: unavailable, not level 0.
-    expect(out.level_empty).toBe("nil");
+    // A day the server did not shade is not shaded here either, however many
+    // minutes it carries: the ramp belongs to the server.
+    expect(out.level_no_level).toBe("nil");
     expect(out.level_nontable).toBe("nil");
   });
 
@@ -2539,10 +2523,10 @@ describe("plugin reading-stats formatting", () => {
     expect(out.norm_finished).toBe("34");
     expect(out.norm_goal_ratio).toBe("0.48");
     expect(out.norm_hours_ratio).toBe("0.34");
-    // The malformed date is dropped; a missing level is derived, not guessed.
+    // The malformed date is dropped; a day the server did not shade stays unshaded.
     expect(out.norm_heatmap_len).toBe("3");
     expect(out.norm_heatmap_level3).toBe("3");
-    expect(out.norm_heatmap_derived).toBe("2");
+    expect(out.norm_heatmap_no_level).toBe("nil");
 
     // Sections the server did not send stay unavailable.
     expect(out.bare_streaks).toBe("nil");
@@ -2599,17 +2583,14 @@ describe("plugin reading-stats formatting", () => {
     expect(out.rows_first).toBe("3");
     expect(out.rows_last).toBe("7");
     expect(out.rows_newest).toBe("2026-01-10");
-    expect(out.rows_window).toBe("1");
     expect(out.rows_empty).toBe("0");
     expect(out.rows_nil).toBe("0");
     // A year of days packs into rows of seven and never exercises a scroll.
     expect(out.year_rows_first_cells).toBe("7");
     // Byte length: block glyphs are 3 bytes each in UTF-8.
     expect(Number(out.year_rows_text_bytes)).toBeLessThanOrEqual(21);
-    // The default window is the most recent 26 weeks.
+    // The window is a fixed 26 weeks, whatever the payload length.
     expect(out.year_rows_count).toBe("26");
-    expect(out.year_rows_capped).toBe("26");
-    expect(out.year_rows_explicit).toBe("53");
   });
 });
 
