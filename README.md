@@ -329,12 +329,13 @@ Notes:
 5. Enable **"Automatically keep documents in sync"**.
 6. Tap **"Pull progress to this device now"** to verify connection.
 
-Reading progress synchronized from KOReader automatically fuels the **Reading Statistics & Telemetry** engine:
+Reading progress synchronized from KOReader automatically fuels the **Reading Statistics & Telemetry** engine, rendered in the **Stats** modal (top header button):
+- **Layout**: the activity heatmap opens directly under the sticky modal header, followed by a compact 2x2 metric-chip grid and a single-line goal row; library health, recent sessions, and stale reads sit in a balanced two-column grid on tablet/desktop, so the whole summary fits one screen without scrolling.
 - **Daily Reading Time & Telemetry** (`GET /api/kosync/stats`): derives discrete reading sessions from sequential progress updates with idle gap detection, calculating today, week, month, and all-time reading hours.
 - **Reading Streaks**: tracks current active streaks (counting today or yesterday) and longest historical reading streaks.
-- **365-Day Activity Heatmap**: renders daily activity levels (0–4), minutes read, and books covered per day.
-- **Library Health**: computes real-time distribution across unread, currently reading, and finished volumes, flagging stale reads inactive for &gt; 30 days.
-- **Yearly Reading Goals** (`GET /api/kosync/goal`, `POST /api/kosync/goal`): optional, strictly additive target books and hours configuration without acting as a blocker or gate. Accessible in the dashboard via the top **Stats** button.
+- **365-Day Activity Heatmap**: renders daily activity levels (0–4), minutes read, and books covered per day in a fluid grid that scales to the viewport width (month labels, no horizontal scroll), showing the last 180 days on phones so each day stays a usable tap target and the full 365 days from the 640px breakpoint up.
+- **Library Health**: computes real-time distribution across unread, currently reading, and finished volumes with a proportional distribution bar, flagging stale reads inactive for &gt; 30 days.
+- **Yearly Reading Goals** (`GET /api/kosync/goal`, `POST /api/kosync/goal`): optional, strictly additive target books and hours configuration without acting as a blocker or gate. Rendered as one compact row (e.g. `12/24 books (50%) · 47h/120h (39%)`) with progress bars; **Edit Goal** expands an inline drawer to change targets.
 
 ### 3. OPDS Wireless Book Catalog (Manual Fallback)
 

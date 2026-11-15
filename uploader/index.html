@@ -220,6 +220,331 @@
     }
     .no-scrollbar::-webkit-scrollbar { display: none; }
     .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+    /* ===== Reading Statistics modal: self-contained styles (index.html ships a pre-built utility sheet) ===== */
+    #readingStatsModal { --hm-gap: 2px; }
+    @media (min-width: 640px) { #readingStatsModal { --hm-gap: 3px; } }
+    #readingStatsModal .stats-panel {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      max-height: 92vh;
+      overflow-y: auto;
+      border: 1px solid #27272a;
+      border-radius: 1rem 1rem 0 0;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.65);
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+    #readingStatsModal .stats-panel::-webkit-scrollbar { display: none; }
+    @media (min-width: 640px) {
+      #readingStatsModal .stats-panel { max-width: 56rem; max-height: 88vh; border-radius: 1rem; }
+    }
+    #readingStatsModal .stats-header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.65rem 0.9rem;
+      background: rgba(9, 9, 11, 0.92);
+      -webkit-backdrop-filter: blur(24px) saturate(180%);
+      backdrop-filter: blur(24px) saturate(180%);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+    }
+    @media (min-width: 640px) { #readingStatsModal .stats-header { padding: 0.75rem 1.25rem; } }
+    #readingStatsModal .stats-head-main { display: flex; align-items: center; gap: 0.6rem; min-width: 0; }
+    #readingStatsModal .stats-head-text { min-width: 0; }
+    #readingStatsModal .stats-header-badge {
+      display: flex; align-items: center; justify-content: center;
+      width: 2rem; height: 2rem; flex: 0 0 auto;
+      border-radius: 0.75rem;
+      color: #fcd34d;
+      background: rgba(251, 191, 36, 0.10);
+      border: 1px solid rgba(251, 191, 36, 0.25);
+    }
+    #readingStatsModal .stats-title {
+      margin: 0;
+      font-size: 0.875rem;
+      font-weight: 700;
+      line-height: 1.2;
+      letter-spacing: -0.02em;
+      color: #f4f4f5;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    #readingStatsModal .stats-subtitle {
+      margin: 0;
+      padding-top: 1px;
+      font-size: 0.625rem;
+      color: #a1a1aa;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    #readingStatsModal .stats-actions { display: flex; align-items: center; gap: 0.35rem; flex: 0 0 auto; }
+    #readingStatsModal .stats-icon-btn {
+      display: flex; align-items: center; justify-content: center;
+      width: 2rem; height: 2rem; flex: 0 0 auto;
+      border-radius: 0.75rem;
+      color: #a1a1aa;
+      background: rgba(24, 24, 27, 0.8);
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      cursor: pointer;
+      transition: background-color 150ms ease, color 150ms ease, transform 150ms ease;
+    }
+    #readingStatsModal .stats-icon-btn:hover { background: #27272a; color: #ffffff; }
+    #readingStatsModal .stats-icon-btn:active { transform: scale(0.96); }
+    #readingStatsModal .stats-body {
+      display: flex; flex-direction: column; gap: 0.7rem;
+      padding: 0.8rem 0.8rem 1.2rem;
+    }
+    @media (min-width: 640px) { #readingStatsModal .stats-body { padding: 0.9rem 1.25rem 1.35rem; } }
+
+    #readingStatsModal .stats-card {
+      border-radius: 0.9rem;
+      background: rgba(24, 24, 27, 0.60);
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      padding: 0.6rem 0.75rem;
+    }
+    #readingStatsModal .stats-card-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+    #readingStatsModal .stats-card-title {
+      display: flex; align-items: center; gap: 0.35rem; min-width: 0;
+      font-size: 0.688rem; font-weight: 600; color: #e4e4e7;
+    }
+    #readingStatsModal .stats-heatmap-title { flex: 0 0 auto; }
+    #readingStatsModal .stats-muted { font-size: 0.625rem; font-weight: 400; color: #71717a; white-space: nowrap; }
+    #readingStatsModal .stats-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    #readingStatsModal .stats-icon-xs { width: 0.75rem; height: 0.75rem; flex: 0 0 auto; }
+    #readingStatsModal .stats-icon-sm { width: 1rem; height: 1rem; }
+    #readingStatsModal .stats-icon-md { width: 0.85rem; height: 0.85rem; flex: 0 0 auto; }
+    #readingStatsModal .tone-amber-icon { color: #fcd34d; }
+    #readingStatsModal .tone-emerald-icon { color: #6ee7b7; }
+    #readingStatsModal .tone-sky-icon { color: #7dd3fc; }
+
+    #readingStatsModal .stats-legend {
+      display: flex; align-items: center; gap: 3px; flex: 0 0 auto;
+      font-size: 0.5625rem; color: #71717a;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: nowrap;
+    }
+    #readingStatsModal .stats-legend-swatch { display: inline-block; width: 0.5rem; height: 0.5rem; border-radius: 2px; }
+    #readingStatsModal .stats-legend-swatch.l0 { background: rgba(39, 39, 42, 0.6); border: 1px solid rgba(63, 63, 70, 0.4); }
+    #readingStatsModal .stats-legend-swatch.l1 { background: rgba(69, 26, 3, 0.7); border: 1px solid rgba(146, 64, 14, 0.5); }
+    #readingStatsModal .stats-legend-swatch.l2 { background: rgba(180, 83, 9, 0.7); border: 1px solid rgba(217, 119, 6, 0.5); }
+    #readingStatsModal .stats-legend-swatch.l3 { background: #f59e0b; }
+    #readingStatsModal .stats-legend-swatch.l4 { background: #fbbf24; box-shadow: 0 0 6px rgba(251, 191, 36, 0.6); }
+
+    #readingStatsModal .stats-heatmap-wrap { padding-top: 0.4rem; }
+    #heatmapGrid {
+      display: grid;
+      grid-auto-flow: column;
+      grid-template-rows: repeat(7, auto);
+      gap: var(--hm-gap);
+      width: 100%;
+    }
+    #heatmapGrid .heatmap-cell { width: 100%; aspect-ratio: 1 / 1; border-radius: 2px; transition: transform 75ms ease-out; }
+    #heatmapGrid .heatmap-cell:hover { transform: scale(1.35); }
+    #heatmapGrid .heatmap-cell.hm-l0 { background: rgba(39, 39, 42, 0.55); }
+    #heatmapGrid .heatmap-cell.hm-l1 { background: rgba(120, 53, 15, 0.85); }
+    #heatmapGrid .heatmap-cell.hm-l2 { background: rgba(180, 83, 9, 0.92); }
+    #heatmapGrid .heatmap-cell.hm-l3 { background: #f59e0b; }
+    #heatmapGrid .heatmap-cell.hm-l4 { background: #fbbf24; box-shadow: 0 0 6px rgba(251, 191, 36, 0.55); }
+    #heatmapMonthLabels {
+      display: grid;
+      gap: var(--hm-gap);
+      width: 100%;
+      padding-bottom: 3px;
+      font-size: 9px;
+      line-height: 1.1;
+      color: #71717a;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    @media (min-width: 640px) { #heatmapMonthLabels { font-size: 10px; } }
+    #heatmapMonthLabels > span { overflow: hidden; white-space: nowrap; text-overflow: clip; }
+    #readingStatsModal .stats-tooltip {
+      padding-top: 0.25rem;
+      font-size: 0.5625rem;
+      color: #71717a;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      text-align: center;
+      min-height: 0.9rem;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    #readingStatsModal .stats-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.7rem; }
+    @media (min-width: 768px) {
+      #readingStatsModal .stats-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+    }
+    #readingStatsModal .stats-col { display: flex; flex-direction: column; gap: 0.7rem; min-width: 0; }
+
+    #readingStatsModal .stats-chips { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; }
+    #readingStatsModal .stats-chip {
+      display: flex; align-items: center; gap: 0.5rem; min-width: 0;
+      padding: 0.45rem 0.55rem;
+      border-radius: 0.75rem;
+      background: rgba(24, 24, 27, 0.60);
+      border: 1px solid rgba(255, 255, 255, 0.10);
+    }
+    #readingStatsModal .stats-chip-icon {
+      display: flex; align-items: center; justify-content: center;
+      width: 1.5rem; height: 1.5rem; flex: 0 0 auto;
+      border-radius: 0.5rem;
+    }
+    #readingStatsModal .stats-chip-icon.tone-amber { color: #fcd34d; background: rgba(251, 191, 36, 0.10); border: 1px solid rgba(251, 191, 36, 0.20); }
+    #readingStatsModal .stats-chip-icon.tone-emerald { color: #6ee7b7; background: rgba(52, 211, 153, 0.10); border: 1px solid rgba(52, 211, 153, 0.20); }
+    #readingStatsModal .stats-chip-icon.tone-sky { color: #7dd3fc; background: rgba(56, 189, 248, 0.10); border: 1px solid rgba(56, 189, 248, 0.20); }
+    #readingStatsModal .stats-chip-icon.tone-violet { color: #c4b5fd; background: rgba(167, 139, 250, 0.10); border: 1px solid rgba(167, 139, 250, 0.20); }
+    #readingStatsModal .stats-chip-body { min-width: 0; }
+    #readingStatsModal .stats-chip-label {
+      display: flex; align-items: center; gap: 0.25rem;
+      font-size: 0.5625rem; font-weight: 700; line-height: 1;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      color: #71717a; white-space: nowrap;
+    }
+    #readingStatsModal .stats-chip-row { display: flex; align-items: baseline; gap: 0.25rem; min-width: 0; padding-top: 0.25rem; line-height: 1; }
+    #readingStatsModal .stats-chip-value {
+      font-size: 1rem; font-weight: 700; color: #f4f4f5;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    #readingStatsModal .stats-chip-sub {
+      font-size: 0.5625rem; color: #71717a;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    #readingStatsModal .stats-chip-sub-strong { color: #d4d4d8; }
+    #readingStatsModal .stats-badge-today {
+      font-size: 0.5rem; line-height: 1; padding: 1px 4px;
+      border-radius: 0.3rem;
+      color: #6ee7b7;
+      background: rgba(16, 185, 129, 0.18);
+      border: 1px solid rgba(16, 185, 129, 0.30);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      text-transform: none; letter-spacing: 0;
+    }
+
+    #readingStatsModal .stats-goal {
+      border-radius: 0.9rem;
+      background: rgba(24, 24, 27, 0.60);
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      overflow: hidden;
+    }
+    #readingStatsModal .stats-goal-row { padding: 0.55rem 0.75rem 0.5rem; }
+    #readingStatsModal .stats-goal-main { min-width: 0; }
+    #readingStatsModal .stats-goal-title-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+    #readingStatsModal .stats-goal-title-group { display: flex; align-items: center; gap: 0.35rem; min-width: 0; }
+    #readingStatsModal .stats-goal-title { font-size: 0.688rem; font-weight: 600; color: #e4e4e7; }
+    #readingStatsModal .stats-goal-tag {
+      font-size: 0.5625rem; line-height: 1.2;
+      padding: 1px 5px; border-radius: 0.3rem;
+      border: 1px solid #3f3f46; background: #27272a; color: #a1a1aa;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    #readingStatsModal .stats-goal-tag.is-active { border-color: rgba(245, 158, 11, 0.30); background: rgba(245, 158, 11, 0.10); color: #fcd34d; }
+    #readingStatsModal .stats-goal-values {
+      display: flex; align-items: center; gap: 0.35rem; min-width: 0;
+      padding-top: 0.2rem;
+      font-size: 0.688rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    #readingStatsModal .stats-goal-books { color: #fcd34d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #readingStatsModal .stats-goal-hours { color: #7dd3fc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #readingStatsModal .stats-goal-dot { color: #52525b; }
+    #readingStatsModal .stats-goal-edit {
+      display: inline-flex; align-items: center; gap: 0.25rem; flex: 0 0 auto;
+      padding: 0.15rem 0.35rem;
+      font-size: 0.688rem; font-weight: 500;
+      color: #38bdf8;
+      background: none; border: 0;
+      cursor: pointer;
+      transition: color 150ms ease, transform 150ms ease;
+    }
+    #readingStatsModal .stats-goal-edit:hover { color: #7dd3fc; }
+    #readingStatsModal .stats-goal-edit:active { transform: scale(0.98); }
+    #readingStatsModal .stats-goal-chevron { transition: transform 200ms ease; }
+    #readingStatsModal .stats-goal-chevron.rotated { transform: rotate(180deg); }
+    #readingStatsModal .stats-goal-bars { display: flex; flex-direction: column; gap: 0.3rem; padding: 0 0.75rem 0.6rem; }
+    #readingStatsModal .stats-bar { height: 0.375rem; border-radius: 999px; background: #27272a; overflow: hidden; }
+    #readingStatsModal .stats-bar-fill { height: 100%; border-radius: 999px; transition: width 300ms ease; }
+    #readingStatsModal .fill-amber { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+    #readingStatsModal .fill-sky { background: linear-gradient(90deg, #0ea5e9, #38bdf8); }
+    #readingStatsModal .stats-drawer.hidden { display: none; }
+    #readingStatsModal .stats-drawer {
+      display: flex; flex-direction: column; gap: 0.5rem;
+      padding: 0.6rem 0.75rem;
+      border-top: 1px solid rgba(255, 255, 255, 0.10);
+    }
+    #readingStatsModal .stats-drawer-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; }
+    #readingStatsModal .stats-field { display: flex; flex-direction: column; gap: 0.25rem; }
+    #readingStatsModal .stats-field label {
+      font-size: 0.5625rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      color: #71717a;
+    }
+    #readingStatsModal .stats-input {
+      width: 100%;
+      padding: 0.3rem 0.5rem;
+      font-size: 0.75rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #e4e4e7;
+      background: #09090b;
+      border: 1px solid #27272a;
+      border-radius: 0.5rem;
+      outline: none;
+      transition: border-color 150ms ease;
+    }
+    #readingStatsModal .stats-input:focus { border-color: #fbbf24; }
+    #readingStatsModal .stats-drawer-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem; }
+    #readingStatsModal .stats-btn { font-size: 0.75rem; padding: 0.2rem 0.6rem; border-radius: 0.5rem; border: 0; cursor: pointer; transition: background-color 150ms ease, color 150ms ease, transform 150ms ease; }
+    #readingStatsModal .stats-btn:active { transform: scale(0.98); }
+    #readingStatsModal .stats-btn-ghost { background: none; color: #a1a1aa; }
+    #readingStatsModal .stats-btn-ghost:hover { color: #ffffff; }
+    #readingStatsModal .stats-btn-primary { background: #fbbf24; color: #09090b; font-weight: 700; }
+    #readingStatsModal .stats-btn-primary:hover { background: #fcd34d; }
+
+    #readingStatsModal .stats-health-bar {
+      display: flex; height: 0.375rem; margin-top: 0.45rem;
+      border-radius: 999px; overflow: hidden;
+      background: #27272a;
+    }
+    #readingStatsModal .stats-health-seg { height: 100%; transition: width 300ms ease; }
+    #readingStatsModal .seg-finished { background: rgba(52, 211, 153, 0.85); }
+    #readingStatsModal .seg-reading { background: rgba(251, 191, 36, 0.85); }
+    #readingStatsModal .seg-unread { background: rgba(82, 82, 91, 0.80); }
+    #readingStatsModal .stats-health-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.25rem; padding-top: 0.5rem; text-align: center; }
+    #readingStatsModal .stats-health-value { font-size: 0.875rem; font-weight: 700; line-height: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    #readingStatsModal .stats-health-value.v-finished { color: #6ee7b7; }
+    #readingStatsModal .stats-health-value.v-reading { color: #fcd34d; }
+    #readingStatsModal .stats-health-value.v-unread { color: #d4d4d8; }
+    #readingStatsModal .stats-health-key { padding-top: 0.25rem; font-size: 0.5625rem; text-transform: uppercase; letter-spacing: 0.06em; color: #71717a; }
+    #readingStatsModal .stats-stale-tag {
+      font-size: 0.5625rem; line-height: 1.2;
+      padding: 1px 5px; border-radius: 0.3rem;
+      color: #fcd34d;
+      background: rgba(245, 158, 11, 0.16);
+      border: 1px solid rgba(245, 158, 11, 0.28);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: nowrap;
+    }
+
+    #readingStatsModal .stats-list { display: flex; flex-direction: column; max-height: 11rem; overflow-y: auto; margin-top: 0.35rem; }
+    #readingStatsModal .stats-list::-webkit-scrollbar { width: 4px; }
+    #readingStatsModal .stats-list::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 999px; }
+    #readingStatsModal .stats-list-item { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.35rem 0; border-top: 1px solid rgba(255, 255, 255, 0.05); }
+    #readingStatsModal .stats-list-item:first-child { border-top: 0; padding-top: 0.1rem; }
+    #readingStatsModal .stats-list-main { min-width: 0; flex: 1 1 auto; }
+    #readingStatsModal .stats-list-title { font-size: 0.75rem; font-weight: 500; color: #e4e4e7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #readingStatsModal .stats-list-meta { display: flex; align-items: center; gap: 0.35rem; font-size: 0.625rem; color: #a1a1aa; overflow: hidden; white-space: nowrap; }
+    #readingStatsModal .stats-list-side { flex: 0 0 auto; text-align: right; }
+    #readingStatsModal .stats-duration { font-size: 0.688rem; font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #fcd34d; }
+    #readingStatsModal .stats-progress { padding-top: 1px; font-size: 0.5625rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #a1a1aa; }
+    #readingStatsModal .stats-empty { padding: 0.5rem 0; font-size: 0.688rem; color: #71717a; text-align: center; }
+    #readingStatsModal .stats-inactive-tag {
+      font-size: 0.5625rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: 1px 5px; border-radius: 0.3rem;
+      color: #fcd34d; background: rgba(245, 158, 11, 0.10);
+      border: 1px solid rgba(245, 158, 11, 0.20);
+      white-space: nowrap;
+    }
     ::-webkit-scrollbar { width: 5px; height: 5px; }
     ::-webkit-scrollbar-track { background: #09090b; }
     ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 2px; }
@@ -1172,6 +1497,7 @@
       #editModal,
       #guideModal,
       #lnoriModal,
+      #readingStatsModal,
       #bulkToolbar,
       .card-popup {
         -webkit-backdrop-filter: none !important;
@@ -1503,6 +1829,17 @@
       <symbol id="icon-fire" viewBox="0 0 24 24" fill="none" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 18.657A8 8 0 016.343 7.343S7 9 9 10c0-2 .5-5 2.986-7C14 5 16.09 5.777 17.656 7.343A7.975 7.975 0 0120 13a7.975 7.975 0 01-2.343 5.657z"/>
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.879 16.121A3 3 0 1012.015 11L11 14H9c0 .768.293 1.536.879 2.121z"/>
+      </symbol>
+      <symbol id="icon-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/>
+      </symbol>
+      <symbol id="icon-target" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <circle cx="12" cy="12" r="9" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/>
+        <circle cx="12" cy="12" r="5" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/>
+        <circle cx="12" cy="12" r="1" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/>
+      </symbol>
+      <symbol id="icon-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
       </symbol>
     </defs>
   </svg>
@@ -3109,7 +3446,7 @@
               <span>Reading Telemetry, Heatmap &amp; Library Health</span>
             </div>
             <p class="text-[11px] text-zinc-400 leading-relaxed">
-              Derives discrete reading sessions from KOSync progress telemetry in <code class="text-zinc-200">koreader-sync.db</code>. Visualizes daily reading time, consecutive reading streaks (current and longest), 365-day activity heatmap, library health distribution (unread, currently reading, finished), stale read detection (neglected books inactive &gt; 30 days), and strictly additive yearly reading goals. Accessible via the top header <code class="text-zinc-200">Stats</code> button.
+              Derives discrete reading sessions from KOSync progress telemetry in <code class="text-zinc-200">koreader-sync.db</code>. Visualizes daily reading time, consecutive reading streaks (current and longest), 365-day activity heatmap, library health distribution (unread, currently reading, finished), stale read detection (neglected books inactive &gt; 30 days), and strictly additive yearly reading goals. Accessible via the top header <code class="text-zinc-200">Stats</code> button: the heatmap opens first under a sticky header (full 365 days on tablet and desktop, the last 180 days on phones so each day stays a usable tap target), metrics collapse into four compact chips, and yearly targets render as one row whose <em>Edit Goal</em> control expands an inline drawer for target books and hours.
             </p>
           </div>
         </div>
@@ -4101,191 +4438,231 @@
 
   <!-- READING STATISTICS, HEATMAP & LIBRARY HEALTH MODAL -->
   <div id="readingStatsModal" class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-end sm:items-center justify-center p-0 sm:p-4" onclick="if(event.target === this) closeReadingStatsModal()">
-    <div class="ui-card apple-material-modal w-full sm:max-w-2xl max-h-[90vh] overflow-y-auto no-scrollbar rounded-t-2xl sm:rounded-2xl p-5 border border-zinc-800 space-y-4 shadow-2xl">
-      <!-- Modal Header -->
-      <div class="flex items-center justify-between pb-3 border-b border-zinc-800/80">
-        <div class="flex items-center gap-2.5">
-          <div class="w-9 h-9 rounded-xl bg-amber-400/10 text-amber-300 flex items-center justify-center border border-amber-400/25 shadow-sm shrink-0">
-            <svg class="w-5 h-5"><use href="#icon-chart-bar"/></svg>
+    <div class="ui-card apple-material-modal stats-panel">
+
+      <!-- Sticky header -->
+      <div class="stats-header">
+        <div class="stats-head-main">
+          <div class="stats-header-badge">
+            <svg class="stats-icon-sm"><use href="#icon-chart-bar"/></svg>
           </div>
-          <div>
-            <h3 class="tracking-optical-display text-sm font-bold text-zinc-100 flex items-center gap-2 leading-tight">
-              Reading Statistics &amp; Library Health
-            </h3>
-            <p class="text-[11px] text-zinc-400">KOSync progress telemetry, reading streaks, heatmap &amp; library metrics</p>
+          <div class="stats-head-text">
+            <h3 class="stats-title">Reading Statistics</h3>
+            <p class="stats-subtitle">Streaks, activity heatmap, library health &amp; recent sessions</p>
           </div>
         </div>
-        <div class="flex items-center gap-1.5">
-          <button onclick="loadReadingStats(true)" class="w-9 h-9 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white border border-zinc-800 flex items-center justify-center cursor-pointer active:scale-[0.98] transition-all" title="Refresh Statistics">
-            <svg class="w-4 h-4"><use href="#icon-arrows-rotate"/></svg>
+        <div class="stats-actions">
+          <button type="button" onclick="loadReadingStats(true)" class="stats-icon-btn" title="Refresh Statistics" aria-label="Refresh Statistics">
+            <svg class="stats-icon-sm"><use href="#icon-arrows-rotate"/></svg>
           </button>
-          <button onclick="closeReadingStatsModal()" class="w-9 h-9 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white border border-zinc-800 flex items-center justify-center cursor-pointer active:scale-[0.98] transition-all" title="Close">
-            <svg class="w-4 h-4"><use href="#icon-xmark"/></svg>
-          </button>
-        </div>
-      </div>
-
-      <!-- Top 3 Metrics Cards -->
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        <!-- Card 1: Streaks -->
-        <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2">
-          <div class="flex items-center justify-between">
-            <span class="text-[10px] font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1">
-              <svg class="w-3.5 h-3.5"><use href="#icon-fire"/></svg>
-              <span>Streaks</span>
-            </span>
-            <span id="statActiveTodayBadge" class="hidden text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">Read Today</span>
-          </div>
-          <div>
-            <div class="text-2xl font-bold font-mono text-zinc-100 leading-tight">
-              <span id="statCurrentStreak">0</span> <span class="text-xs font-normal text-zinc-400">Days</span>
-            </div>
-            <div class="text-[11px] text-zinc-400 pt-1 flex items-center justify-between">
-              <span>Best: <strong id="statLongestStreak" class="text-zinc-200 font-mono">0</strong> days</span>
-              <span>Total: <strong id="statTotalDays" class="text-zinc-200 font-mono">0</strong> days</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Card 2: Reading Time -->
-        <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2">
-          <div class="flex items-center justify-between">
-            <span class="text-[10px] font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1">
-              <svg class="w-3.5 h-3.5"><use href="#icon-book-open"/></svg>
-              <span>Reading Time</span>
-            </span>
-            <span class="text-[10px] font-mono text-zinc-500">KOSync</span>
-          </div>
-          <div>
-            <div class="text-2xl font-bold font-mono text-zinc-100 leading-tight">
-              <span id="statTodayTime">0m</span> <span class="text-xs font-normal text-zinc-400">today</span>
-            </div>
-            <div class="text-[11px] text-zinc-400 pt-1 flex items-center justify-between">
-              <span>Week: <strong id="statWeekTime" class="text-zinc-200 font-mono">0h</strong></span>
-              <span>Total: <strong id="statTotalHours" class="text-zinc-200 font-mono">0h</strong></span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Card 3: Library Health Distribution -->
-        <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2">
-          <div class="flex items-center justify-between">
-            <span class="text-[10px] font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1">
-              <svg class="w-3.5 h-3.5"><use href="#icon-layer-group"/></svg>
-              <span>Library Health</span>
-            </span>
-            <span id="statStaleBadge" class="hidden text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">0 Stale</span>
-          </div>
-          <div>
-            <div class="text-2xl font-bold font-mono text-zinc-100 leading-tight">
-              <span id="statFinishedCount">0</span> <span class="text-xs font-normal text-zinc-400">finished</span>
-            </div>
-            <div class="text-[11px] text-zinc-400 pt-1 flex items-center justify-between">
-              <span>Reading: <strong id="statReadingCount" class="text-zinc-200 font-mono">0</strong></span>
-              <span>Unread: <strong id="statUnreadCount" class="text-zinc-200 font-mono">0</strong></span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Additive Yearly Goal Card -->
-      <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2.5">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-2">
-            <span id="statGoalTitle" class="text-xs font-semibold text-zinc-200">2026 Reading Goal</span>
-            <span id="statGoalStatusTag" class="text-[10px] font-mono px-2 py-0.5 rounded border border-zinc-700 bg-zinc-800 text-zinc-400">Optional</span>
-          </div>
-          <button onclick="toggleGoalEditForm()" class="text-xs text-sky-400 hover:text-sky-300 font-medium transition-colors cursor-pointer flex items-center gap-1">
-            <svg class="w-3 h-3"><use href="#icon-pen"/></svg>
-            <span id="toggleGoalBtnText">Set Goal</span>
+          <button type="button" onclick="closeReadingStatsModal()" class="stats-icon-btn" title="Close" aria-label="Close reading statistics">
+            <svg class="stats-icon-sm"><use href="#icon-xmark"/></svg>
           </button>
         </div>
-
-        <!-- Goal Progress Bars -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-          <!-- Books Target -->
-          <div class="space-y-1">
-            <div class="flex items-center justify-between text-xs">
-              <span class="text-zinc-400 text-[11px]">Books Completed</span>
-              <span id="statGoalBooksText" class="font-mono text-[11px] text-zinc-200">0 / —</span>
-            </div>
-            <div class="w-full h-2 rounded-full bg-zinc-800 overflow-hidden">
-              <div id="statGoalBooksBar" class="h-full rounded-full bg-gradient-to-r from-amber-500 to-amber-400 transition-all duration-300" style="width: 0%"></div>
-            </div>
-          </div>
-
-          <!-- Hours Target -->
-          <div class="space-y-1">
-            <div class="flex items-center justify-between text-xs">
-              <span class="text-zinc-400 text-[11px]">Reading Hours</span>
-              <span id="statGoalHoursText" class="font-mono text-[11px] text-zinc-200">0h / —</span>
-            </div>
-            <div class="w-full h-2 rounded-full bg-zinc-800 overflow-hidden">
-              <div id="statGoalHoursBar" class="h-full rounded-full bg-gradient-to-r from-sky-500 to-sky-400 transition-all duration-300" style="width: 0%"></div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Inline Goal Edit Form (Hidden by default) -->
-        <div id="readingGoalFormContainer" class="hidden pt-3 border-t border-zinc-800/80 space-y-2">
-          <div class="grid grid-cols-2 gap-2 text-xs">
-            <div>
-              <label class="text-[10px] uppercase font-bold text-zinc-500 block pb-1">Target Books</label>
-              <input type="number" id="goalInputBooks" min="1" max="500" placeholder="e.g. 25" class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 font-mono focus:outline-none focus:border-amber-400 transition-colors">
-            </div>
-            <div>
-              <label class="text-[10px] uppercase font-bold text-zinc-500 block pb-1">Target Hours</label>
-              <input type="number" id="goalInputHours" min="1" max="2000" placeholder="e.g. 100" class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 font-mono focus:outline-none focus:border-sky-400 transition-colors">
-            </div>
-          </div>
-          <div class="flex items-center justify-end gap-2 pt-1">
-            <button onclick="toggleGoalEditForm(false)" class="px-3 py-1 text-xs text-zinc-400 hover:text-white transition-colors cursor-pointer">Cancel</button>
-            <button onclick="saveReadingGoalAction()" class="px-3 py-1 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold text-xs rounded-lg transition-colors cursor-pointer active:scale-[0.98]">Save Goal</button>
-          </div>
-        </div>
       </div>
 
-      <!-- Activity Heatmap Section -->
-      <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2">
-        <div class="flex items-center justify-between text-xs">
-          <span class="text-zinc-200 font-semibold">Activity Heatmap (Past 365 Days)</span>
-          <div class="flex items-center gap-1.5 text-[10px] text-zinc-500 font-mono">
-            <span>Less</span>
-            <span class="w-2.5 h-2.5 rounded-[2px] bg-zinc-800/60 border border-zinc-700/40 inline-block"></span>
-            <span class="w-2.5 h-2.5 rounded-[2px] bg-amber-950/70 border border-amber-800/50 inline-block"></span>
-            <span class="w-2.5 h-2.5 rounded-[2px] bg-amber-700/70 border border-amber-600/50 inline-block"></span>
-            <span class="w-2.5 h-2.5 rounded-[2px] bg-amber-500 inline-block"></span>
-            <span class="w-2.5 h-2.5 rounded-[2px] bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.6)] inline-block"></span>
-            <span>More</span>
+      <div class="stats-body">
+
+        <!-- 1. ACTIVITY HEATMAP - first thing the reader sees -->
+        <section class="stats-card stats-heatmap">
+          <div class="stats-card-head">
+            <span class="stats-card-title">
+              <svg class="stats-icon-md tone-amber-icon"><use href="#icon-chart-bar"/></svg>
+              <span class="stats-heatmap-title">Activity</span>
+              <span id="heatmapWindowLabel" class="stats-muted"></span>
+            </span>
+            <div class="stats-legend">
+              <span>Less</span>
+              <span class="stats-legend-swatch l0"></span>
+              <span class="stats-legend-swatch l1"></span>
+              <span class="stats-legend-swatch l2"></span>
+              <span class="stats-legend-swatch l3"></span>
+              <span class="stats-legend-swatch l4"></span>
+              <span>More</span>
+            </div>
+          </div>
+
+          <div class="stats-heatmap-wrap">
+            <div id="heatmapMonthLabels" aria-hidden="true"></div>
+            <div id="heatmapGridContainer">
+              <div id="heatmapGrid" role="img" aria-label="Reading activity per day"></div>
+            </div>
+          </div>
+          <div id="heatmapTooltip" class="stats-tooltip">Tap a day to see reading activity</div>
+        </section>
+
+        <!-- 2. COMPACT INSIGHT GRID -->
+        <div class="stats-grid">
+
+          <!-- LEFT COLUMN -->
+          <div class="stats-col">
+
+            <!-- Metric chips (2x2, minimal height) -->
+            <div class="stats-chips">
+              <div class="stats-chip">
+                <span class="stats-chip-icon tone-amber">
+                  <svg class="stats-icon-xs"><use href="#icon-fire"/></svg>
+                </span>
+                <div class="stats-chip-body">
+                  <div class="stats-chip-label">
+                    <span>Streak</span>
+                    <span id="statActiveTodayBadge" class="stats-badge-today hidden">Today</span>
+                  </div>
+                  <div class="stats-chip-row">
+                    <span class="stats-chip-value"><span id="statCurrentStreak">0</span>d</span>
+                    <span class="stats-chip-sub">best <span id="statLongestStreak" class="stats-chip-sub-strong">0</span></span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="stats-chip">
+                <span class="stats-chip-icon tone-emerald">
+                  <svg class="stats-icon-xs"><use href="#icon-bookmark"/></svg>
+                </span>
+                <div class="stats-chip-body">
+                  <div class="stats-chip-label"><span>Reading Days</span></div>
+                  <div class="stats-chip-row">
+                    <span class="stats-chip-value" id="statTotalDays">0</span>
+                    <span class="stats-chip-sub">all time</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="stats-chip">
+                <span class="stats-chip-icon tone-sky">
+                  <svg class="stats-icon-xs"><use href="#icon-clock"/></svg>
+                </span>
+                <div class="stats-chip-body">
+                  <div class="stats-chip-label"><span>Today</span></div>
+                  <div class="stats-chip-row">
+                    <span class="stats-chip-value" id="statTodayTime">0m</span>
+                    <span class="stats-chip-sub">wk <span id="statWeekTime" class="stats-chip-sub-strong">0h</span></span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="stats-chip">
+                <span class="stats-chip-icon tone-violet">
+                  <svg class="stats-icon-xs"><use href="#icon-book-open"/></svg>
+                </span>
+                <div class="stats-chip-body">
+                  <div class="stats-chip-label"><span>Hours Read</span></div>
+                  <div class="stats-chip-row">
+                    <span class="stats-chip-value" id="statTotalHours">0h</span>
+                    <span class="stats-chip-sub">all time</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Collapsed yearly goal row + collapsible edit drawer -->
+            <section class="stats-goal">
+              <div class="stats-goal-row">
+                <div class="stats-goal-main">
+                  <div class="stats-goal-title-row">
+                    <span class="stats-goal-title-group">
+                      <svg class="stats-icon-md tone-amber-icon"><use href="#icon-target"/></svg>
+                      <span id="statGoalTitle" class="stats-goal-title">2026 Reading Goal</span>
+                      <span id="statGoalStatusTag" class="stats-goal-tag">Optional</span>
+                    </span>
+                    <button type="button" id="toggleGoalBtn" class="stats-goal-edit" onclick="toggleGoalEditForm()" title="Edit reading goal" aria-expanded="false" aria-controls="readingGoalFormContainer">
+                      <svg class="stats-icon-xs"><use href="#icon-pen"/></svg>
+                      <span id="toggleGoalBtnText">Set Goal</span>
+                      <svg id="statGoalChevron" class="stats-icon-xs stats-goal-chevron"><use href="#icon-chevron-down"/></svg>
+                    </button>
+                  </div>
+                  <div class="stats-goal-values">
+                    <span id="statGoalBooksText" class="stats-goal-books">0 books read</span>
+                    <span class="stats-goal-dot">·</span>
+                    <span id="statGoalHoursText" class="stats-goal-hours">0h read</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="stats-goal-bars">
+                <div class="stats-bar">
+                  <div id="statGoalBooksBar" class="stats-bar-fill fill-amber" style="width: 0%"></div>
+                </div>
+                <div class="stats-bar">
+                  <div id="statGoalHoursBar" class="stats-bar-fill fill-sky" style="width: 0%"></div>
+                </div>
+              </div>
+
+              <div id="readingGoalFormContainer" class="stats-drawer hidden">
+                <div class="stats-drawer-fields">
+                  <div class="stats-field">
+                    <label for="goalInputBooks">Target Books</label>
+                    <input type="number" id="goalInputBooks" min="1" max="500" placeholder="e.g. 25" class="stats-input">
+                  </div>
+                  <div class="stats-field">
+                    <label for="goalInputHours">Target Hours</label>
+                    <input type="number" id="goalInputHours" min="1" max="2000" placeholder="e.g. 100" class="stats-input">
+                  </div>
+                </div>
+                <div class="stats-drawer-actions">
+                  <button type="button" onclick="toggleGoalEditForm(false)" class="stats-btn stats-btn-ghost">Cancel</button>
+                  <button type="button" onclick="saveReadingGoalAction()" class="stats-btn stats-btn-primary">Save Goal</button>
+                </div>
+              </div>
+            </section>
+
+            <!-- Library health distribution -->
+            <section class="stats-card">
+              <div class="stats-card-head">
+                <span class="stats-card-title">
+                  <svg class="stats-icon-md tone-emerald-icon"><use href="#icon-layer-group"/></svg>
+                  <span>Library Health</span>
+                </span>
+                <span id="statStaleBadge" class="stats-stale-tag hidden">0 Stale</span>
+              </div>
+              <div class="stats-health-bar">
+                <div id="statHealthBarFinished" class="stats-health-seg seg-finished" style="width: 0%"></div>
+                <div id="statHealthBarReading" class="stats-health-seg seg-reading" style="width: 0%"></div>
+                <div id="statHealthBarUnread" class="stats-health-seg seg-unread" style="width: 0%"></div>
+              </div>
+              <div class="stats-health-grid">
+                <div>
+                  <div class="stats-health-value v-finished" id="statFinishedCount">0</div>
+                  <div class="stats-health-key">Finished</div>
+                </div>
+                <div>
+                  <div class="stats-health-value v-reading" id="statReadingCount">0</div>
+                  <div class="stats-health-key">Reading</div>
+                </div>
+                <div>
+                  <div class="stats-health-value v-unread" id="statUnreadCount">0</div>
+                  <div class="stats-health-key">Unread</div>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <!-- RIGHT COLUMN -->
+          <div class="stats-col">
+            <section class="stats-card">
+              <div class="stats-card-head">
+                <span class="stats-card-title">
+                  <svg class="stats-icon-md tone-sky-icon"><use href="#icon-clock"/></svg>
+                  <span>Recent Reading Sessions</span>
+                </span>
+                <span id="recentSessionsCountLabel" class="stats-muted stats-mono">0 sessions</span>
+              </div>
+              <div id="recentSessionsList" class="stats-list"></div>
+            </section>
+
+            <section id="staleReadsSection" class="stats-card hidden">
+              <div class="stats-card-head">
+                <span class="stats-card-title">
+                  <svg class="stats-icon-md tone-amber-icon"><use href="#icon-triangle-exclamation"/></svg>
+                  <span>Stale Reads</span>
+                  <span class="stats-muted">inactive &gt; 30d</span>
+                </span>
+                <span id="staleCountTag" class="stats-stale-tag">0 Books</span>
+              </div>
+              <div id="staleReadsList" class="stats-list"></div>
+            </section>
           </div>
         </div>
-        
-        <!-- Heatmap Grid Container -->
-        <div id="heatmapGridContainer" class="w-full overflow-x-auto no-scrollbar py-1">
-          <div id="heatmapGrid" class="inline-grid grid-flow-col grid-rows-7 gap-1"></div>
-        </div>
-        <div id="heatmapTooltip" class="text-[11px] text-zinc-400 font-mono text-center min-h-[18px]">Hover or tap a day to see reading activity</div>
-      </div>
-
-      <!-- Stale Reads Section (Shown conditionally) -->
-      <div id="staleReadsSection" class="hidden p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2.5">
-        <div class="flex items-center justify-between text-xs">
-          <div class="flex items-center gap-1.5 text-amber-400 font-semibold">
-            <svg class="w-4 h-4"><use href="#icon-triangle-exclamation"/></svg>
-            <span>Stale Reads (Inactive &gt; 30 Days)</span>
-          </div>
-          <span id="staleCountTag" class="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20">0 Books</span>
-        </div>
-        <div id="staleReadsList" class="space-y-2 max-h-48 overflow-y-auto no-scrollbar divide-y divide-zinc-800/60"></div>
-      </div>
-
-      <!-- Recent Sessions Section -->
-      <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-2.5">
-        <div class="flex items-center justify-between text-xs">
-          <span class="text-zinc-200 font-semibold">Recent Reading Sessions</span>
-          <span id="recentSessionsCountLabel" class="text-[10px] font-mono text-zinc-500">0 sessions</span>
-        </div>
-        <div id="recentSessionsList" class="space-y-1.5 max-h-48 overflow-y-auto no-scrollbar divide-y divide-zinc-800/40"></div>
       </div>
     </div>
   </div>
@@ -10685,6 +11062,28 @@
 
     let readingStatsData = null;
 
+    const HEATMAP_MOBILE_DAYS = 180;
+    const HEATMAP_DESKTOP_DAYS = 365;
+    const heatmapWideViewport = window.matchMedia ? window.matchMedia('(min-width: 640px)') : null;
+    let heatmapBreakpointBound = false;
+
+    function heatmapWindowDays() {
+      return heatmapWideViewport && heatmapWideViewport.matches ? HEATMAP_DESKTOP_DAYS : HEATMAP_MOBILE_DAYS;
+    }
+
+    function bindHeatmapBreakpoint() {
+      if (heatmapBreakpointBound || !heatmapWideViewport) return;
+      heatmapBreakpointBound = true;
+      const rerender = () => {
+        if (readingStatsData) renderHeatmapGrid(readingStatsData.heatmap || []);
+      };
+      if (typeof heatmapWideViewport.addEventListener === 'function') {
+        heatmapWideViewport.addEventListener('change', rerender);
+      } else if (typeof heatmapWideViewport.addListener === 'function') {
+        heatmapWideViewport.addListener(rerender);
+      }
+    }
+
     function openReadingStatsModal() {
       if (window.tgHaptic) tgHaptic.light();
       openModalAnimated('readingStatsModal', false);
@@ -10770,6 +11169,14 @@
         }
       }
 
+      // Library Health distribution bar (finished / reading / unread)
+      const barFinished = document.getElementById('statHealthBarFinished');
+      const barReading = document.getElementById('statHealthBarReading');
+      const barUnread = document.getElementById('statHealthBarUnread');
+      if (barFinished) barFinished.style.width = `${health.finishedPercentage ?? 0}%`;
+      if (barReading) barReading.style.width = `${health.inProgressPercentage ?? 0}%`;
+      if (barUnread) barUnread.style.width = `${health.unreadPercentage ?? 0}%`;
+
       // Yearly Goal
       const goal = data.goal || {};
       const goalYear = goal.year || new Date().getFullYear();
@@ -10780,10 +11187,10 @@
       const goalBooksBar = document.getElementById('statGoalBooksBar');
       if (goalBooksText && goalBooksBar) {
         if (goal.targetBooks && goal.targetBooks > 0) {
-          goalBooksText.textContent = `${goal.currentBooks || 0} / ${goal.targetBooks} (${goal.booksPercent || 0}%)`;
+          goalBooksText.textContent = `${goal.currentBooks || 0}/${goal.targetBooks} books (${goal.booksPercent || 0}%)`;
           goalBooksBar.style.width = `${Math.min(100, goal.booksPercent || 0)}%`;
         } else {
-          goalBooksText.textContent = `${goal.currentBooks || 0} completed (no target set)`;
+          goalBooksText.textContent = `${goal.currentBooks || 0} books read`;
           goalBooksBar.style.width = '0%';
         }
       }
@@ -10792,10 +11199,10 @@
       const goalHoursBar = document.getElementById('statGoalHoursBar');
       if (goalHoursText && goalHoursBar) {
         if (goal.targetHours && goal.targetHours > 0) {
-          goalHoursText.textContent = `${goal.currentHours || 0}h / ${goal.targetHours}h (${goal.hoursPercent || 0}%)`;
+          goalHoursText.textContent = `${goal.currentHours || 0}h/${goal.targetHours}h (${goal.hoursPercent || 0}%)`;
           goalHoursBar.style.width = `${Math.min(100, goal.hoursPercent || 0)}%`;
         } else {
-          goalHoursText.textContent = `${goal.currentHours || 0}h read (no target set)`;
+          goalHoursText.textContent = `${goal.currentHours || 0}h read`;
           goalHoursBar.style.width = '0%';
         }
       }
@@ -10803,9 +11210,7 @@
       const goalTag = document.getElementById('statGoalStatusTag');
       if (goalTag) {
         goalTag.textContent = goal.isConfigured ? 'Active Target' : 'Optional';
-        goalTag.className = goal.isConfigured
-          ? 'text-[10px] font-mono px-2 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-300'
-          : 'text-[10px] font-mono px-2 py-0.5 rounded border border-zinc-700 bg-zinc-800 text-zinc-400';
+        goalTag.className = goal.isConfigured ? 'stats-goal-tag is-active' : 'stats-goal-tag';
       }
 
       const toggleGoalBtn = document.getElementById('toggleGoalBtnText');
@@ -10826,23 +11231,69 @@
     function renderHeatmapGrid(heatmap) {
       const grid = document.getElementById('heatmapGrid');
       const tooltip = document.getElementById('heatmapTooltip');
+      const monthRow = document.getElementById('heatmapMonthLabels');
+      const windowLabel = document.getElementById('heatmapWindowLabel');
       if (!grid) return;
       grid.innerHTML = '';
 
-      const levelClasses = [
-        'bg-zinc-800/50 border border-zinc-700/30',
-        'bg-amber-950/70 border border-amber-800/50',
-        'bg-amber-700/70 border border-amber-600/50',
-        'bg-amber-500 border border-amber-400',
-        'bg-amber-400 border border-amber-300 shadow-[0_0_6px_rgba(251,191,36,0.6)]',
-      ];
+      const maxLevel = 4;
+      const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-      for (const d of heatmap) {
+      const days = (Array.isArray(heatmap) ? heatmap : []).slice(-heatmapWindowDays());
+
+      bindHeatmapBreakpoint();
+      if (windowLabel) windowLabel.textContent = days.length > 0 ? `past ${days.length} days` : '';
+      grid.setAttribute(
+        'aria-label',
+        days.length > 0 ? `Reading activity per day for the past ${days.length} days` : 'Reading activity per day',
+      );
+      if (tooltip) {
+        if (!tooltip.dataset.defaultText) tooltip.dataset.defaultText = tooltip.textContent;
+        tooltip.textContent = tooltip.dataset.defaultText;
+      }
+
+      const columns = Math.max(1, Math.ceil(days.length / 7));
+      const columnTemplate = `repeat(${columns}, minmax(0, 1fr))`;
+      grid.style.gridTemplateColumns = columnTemplate;
+
+      // Month labels tile the same column rhythm as the cells so they never overlap.
+      const monthStarts = [];
+      days.forEach((d, index) => {
+        const parts = typeof d.date === 'string' ? d.date.split('-') : [];
+        const y = Number(parts[0]);
+        const m = Number(parts[1]);
+        if (!y || !m) return;
+        const key = y * 12 + m;
+        const col = Math.floor(index / 7) + 1;
+        const last = monthStarts[monthStarts.length - 1];
+        if (!last || last.key !== key) {
+          if (last && last.col === col) return;
+          monthStarts.push({ key, col, label: MONTH_LABELS[m - 1] || '' });
+        }
+      });
+
+      if (monthRow) {
+        monthRow.innerHTML = '';
+        monthRow.style.gridTemplateColumns = columnTemplate;
+        monthStarts.forEach((m, i) => {
+          const next = monthStarts[i + 1];
+          const span = (next ? next.col : columns + 1) - m.col;
+          // Skip the leading partial month when it is too narrow to label legibly.
+          if (span < (i === 0 ? 3 : 2)) return;
+          const label = document.createElement('span');
+          label.textContent = m.label;
+          label.style.gridColumn = `${m.col} / span ${span}`;
+          monthRow.appendChild(label);
+        });
+      }
+
+      for (const d of days) {
         const cell = document.createElement('div');
-        const lvl = d.level || 0;
-        cell.className = `w-2.5 h-2.5 rounded-[2px] transition-transform duration-75 cursor-pointer hover:scale-125 ${levelClasses[lvl]}`;
+        const lvl = Math.min(maxLevel, Math.max(0, d.level || 0));
+        cell.className = `heatmap-cell cursor-pointer hm-l${lvl}`;
         const info = `${d.date}: ${d.minutes || 0}m read (${d.count || 0} sessions)${d.books?.length ? ' - ' + d.books.slice(0, 2).join(', ') : ''}`;
         cell.title = info;
+        cell.setAttribute('aria-label', info);
         cell.addEventListener('mouseenter', () => {
           if (tooltip) tooltip.textContent = info;
         });
@@ -10870,15 +11321,15 @@
 
       for (const s of staleReads) {
         const item = document.createElement('div');
-        item.className = 'pt-2 first:pt-0 flex items-center justify-between text-xs gap-3';
+        item.className = 'stats-list-item';
         item.innerHTML = `
-          <div class="min-w-0 flex-1">
-            <div class="font-medium text-zinc-200 truncate">${escapeHtml(s.title)}</div>
-            <div class="text-[11px] text-zinc-400 truncate">${escapeHtml(s.authors || 'Unknown')}</div>
+          <div class="stats-list-main">
+            <div class="stats-list-title">${escapeHtml(s.title)}</div>
+            <div class="stats-list-meta">${escapeHtml(s.authors || 'Unknown')}</div>
           </div>
-          <div class="text-right shrink-0">
-            <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20">${s.daysInactive} days inactive</span>
-            <div class="text-[11px] font-mono text-zinc-400 pt-0.5">${Math.round(s.percentage * 100)}% complete</div>
+          <div class="stats-list-side">
+            <span class="stats-inactive-tag">${s.daysInactive}d inactive</span>
+            <div class="stats-progress">${Math.round(s.percentage * 10) / 10}% complete</div>
           </div>
         `;
         list.appendChild(item);
@@ -10893,7 +11344,7 @@
 
       if (countLabel) countLabel.textContent = `${sessions ? sessions.length : 0} sessions`;
       if (!sessions || sessions.length === 0) {
-        list.innerHTML = '<div class="text-zinc-500 text-xs py-2 text-center">No recent reading sessions recorded yet.</div>';
+        list.innerHTML = '<div class="stats-empty">No recent reading sessions recorded yet.</div>';
         return;
       }
 
@@ -10905,19 +11356,19 @@
         const delta = Math.round(s.progressDelta * 100);
 
         const item = document.createElement('div');
-        item.className = 'pt-1.5 first:pt-0 flex items-center justify-between text-xs gap-3';
+        item.className = 'stats-list-item';
         item.innerHTML = `
-          <div class="min-w-0 flex-1">
-            <div class="font-medium text-zinc-200 truncate">${escapeHtml(s.title)}</div>
-            <div class="text-[11px] text-zinc-400 flex items-center gap-2">
+          <div class="stats-list-main">
+            <div class="stats-list-title">${escapeHtml(s.title)}</div>
+            <div class="stats-list-meta">
               <span>${escapeHtml(s.device || 'KOReader')}</span>
               <span>•</span>
-              <span class="font-mono">${s.date}</span>
+              <span class="stats-mono">${s.date}</span>
             </div>
           </div>
-          <div class="text-right shrink-0">
-            <span class="text-xs font-mono font-semibold text-amber-300">${durStr}</span>
-            <div class="text-[10px] font-mono text-zinc-400">${startPct}% → ${endPct}% ${delta > 0 ? '(+' + delta + '%)' : ''}</div>
+          <div class="stats-list-side">
+            <div class="stats-duration">${durStr}</div>
+            <div class="stats-progress">${startPct}% → ${endPct}%${delta > 0 ? ' (+' + delta + '%)' : ''}</div>
           </div>
         `;
         list.appendChild(item);
@@ -10926,6 +11377,8 @@
 
     function toggleGoalEditForm(forceState) {
       const form = document.getElementById('readingGoalFormContainer');
+      const chevron = document.getElementById('statGoalChevron');
+      const toggleBtn = document.getElementById('toggleGoalBtn');
       if (!form) return;
       if (typeof forceState === 'boolean') {
         if (forceState) form.classList.remove('hidden');
@@ -10933,6 +11386,9 @@
       } else {
         form.classList.toggle('hidden');
       }
+      const isOpen = !form.classList.contains('hidden');
+      if (chevron) chevron.classList.toggle('rotated', isOpen);
+      if (toggleBtn) toggleBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
 
       if (!form.classList.contains('hidden') && readingStatsData?.goal) {
         const g = readingStatsData.goal;
