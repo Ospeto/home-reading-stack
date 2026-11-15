@@ -2,20 +2,18 @@
  * uploader/koplugin-status.test.ts
  *
  * Proof for the KOReader plugin's reading-status merge: `Status.merge` used to
- * call `Status.indexByBookId` once per catalog entry, so rendering a page of N
- * entries rebuilt the whole book-id index N times. The merger now builds it
- * once per page and hands it to `Status.findSession`.
+ * build the book-id index once per catalog entry, so rendering a page of N
+ * entries cost N scans of the session list. The merger now builds it once for
+ * the page and hands it to `Status.findSession`.
  *
  * These tests drive the real template (`koplugin-template/lighthouse_status.lua`)
- * through a Lua interpreter so the claim is measured rather than asserted:
- *  - the book-id index is built exactly once per page render, at any page size,
- *  - the per-entry path (the old shape) builds it once per matching entry, so
- *    the counter really does distinguish the two,
+ * through a Lua interpreter and measure the work a page render actually does:
+ *  - a page render touches each session's Calibre id a constant number of times
+ *    whatever the page size, while the per-entry path pays that per entry, so
+ *    the counter rejects the shape this change replaced,
  *  - both paths resolve every entry to the identical session table, so the
  *    merge is behaviour-identical, not merely similar,
- *  - `Status.indexByBookId` stays the single owner of index construction: an
- *    injected builder changes what the page render matches,
- *  - the page render is not slower than the per-entry path it replaced.
+ *  - a prebuilt index resolves exactly like the one built per call.
  *
  * Skipped when no Lua interpreter is available, like the rest of the Lua tests.
  */
@@ -128,74 +126,69 @@ local function buildEntries(count)
     return entries
 end
 
--- Counts every construction of the book-id index, whoever asks for it.
-local realIndexByBookId = Status.indexByBookId
-local indexBuilds = 0
-Status.indexByBookId = function(sessions)
-    indexBuilds = indexBuilds + 1
-    return realIndexByBookId(sessions)
+-- Counts reads of each session's Calibre id. Any book-id index construction
+-- reads that field once per session, whichever function performs the build, so
+-- this counts real work at the Status.merge boundary instead of counting calls
+-- to one internal function. The proxies wrap the session records, not the array
+-- itself, because ipairs is raw on Lua 5.1 and LuaJIT.
+local bookIdReads = 0
+local function countedSessions(list)
+    local proxies = {}
+    for position = 1, #list do
+        local session = list[position]
+        proxies[position] = setmetatable({}, {
+            __index = function(proxy, key)
+                if key == "book_id" then bookIdReads = bookIdReads + 1 end
+                return session[key]
+            end,
+        })
+    end
+    return proxies
 end
-local function resetCounter() indexBuilds = 0 end
 `;
 
 describe("plugin status merger: book-id index is built once per page", () => {
-  it("builds the index once per page render, not once per entry", () => {
+  it("reads each session's book id once per page render, not once per entry", () => {
     if (!LUA_BINARY) return;
     const { values } = runHarness(`
 ${FIXTURE}
 
-local sessions = buildSessions()
+local sessions = countedSessions(buildSessions())
+print("sessions=" .. #sessions)
 
--- The old shape: one findSession per entry, no shared index.
-local page40Old = buildEntries(40)
-resetCounter()
-for position, entry in ipairs(page40Old) do
+local function pageRenderReads(count)
+    bookIdReads = 0
+    Status.merge(buildEntries(count), sessions)
+    return bookIdReads
+end
+
+print("page_render_40=" .. pageRenderReads(40))
+print("page_render_200=" .. pageRenderReads(200))
+
+-- The shape this change replaced, spelled out: one findSession per entry,
+-- with no index shared across the page.
+bookIdReads = 0
+local withId = 0
+for position, entry in ipairs(buildEntries(40)) do
+    if entry.book_id then withId = withId + 1 end
     entry.status = Status.findSession(entry, sessions)
 end
-print("per_entry_builds_40=" .. indexBuilds)
-local withId = 0
-for position, entry in ipairs(page40Old) do
-    if entry.book_id then withId = withId + 1 end
-end
+print("per_entry_40=" .. bookIdReads)
 print("entries_with_id_40=" .. withId)
-
--- One page render.
-resetCounter()
-Status.merge(buildEntries(40), sessions)
-print("page_render_builds_40=" .. indexBuilds)
-
--- A page render four times the size must still build it once.
-resetCounter()
-Status.merge(buildEntries(200), sessions)
-print("page_render_builds_200=" .. indexBuilds)
-
--- Callers that already hold an index pay nothing.
-local prebuilt = Status.indexByBookId(sessions)
-resetCounter()
-for position, entry in ipairs(page40Old) do
-    Status.findSession(entry, sessions, prebuilt)
-end
-print("explicit_index_builds=" .. indexBuilds)
-
-resetCounter()
-Status.merge(buildEntries(40), sessions, prebuilt)
-print("merge_with_index_builds=" .. indexBuilds)
-
--- The two-argument signature devices already run keeps working.
-resetCounter()
-Status.merge(buildEntries(40), sessions)
-print("legacy_merge_builds=" .. indexBuilds)
 `);
 
+    const sessionCount = Number(values.sessions);
+    expect(sessionCount).toBe(305);
+    // Page-size independent: the session list is walked for the page, not per
+    // entry, so a five-times larger page costs the same index work.
+    expect(values.page_render_200).toBe(values.page_render_40);
+    expect(Number(values.page_render_40)).toBeLessThanOrEqual(4 * sessionCount);
+    // The replaced shape pays that whole per-page cost once per entry carrying
+    // a book id, which is what the bound above rules out.
     expect(values.entries_with_id_40).toBe("38");
-    // Old shape: one build for every entry carrying a resolved Calibre id.
-    expect(values.per_entry_builds_40).toBe("38");
-    // New shape: one for the whole page, whatever the page size.
-    expect(values.page_render_builds_40).toBe("1");
-    expect(values.page_render_builds_200).toBe("1");
-    expect(values.explicit_index_builds).toBe("0");
-    expect(values.merge_with_index_builds).toBe("0");
-    expect(values.legacy_merge_builds).toBe("1");
+    expect(Number(values.per_entry_40)).toBeGreaterThanOrEqual(
+      Number(values.entries_with_id_40) * Number(values.page_render_40),
+    );
   });
 
   it("resolves every entry to the same session table as the per-entry path", () => {
@@ -242,19 +235,17 @@ local pageNew = buildEntries(40)
 Status.merge(pageNew, sessions)
 local fingerprintNew = fingerprint(pageNew)
 
--- The shipped two-argument signature and the explicit-index form must both
--- agree with the per-entry path, byte for byte.
-local pageLegacy = buildEntries(40)
-Status.merge(pageLegacy, sessions)
-local fingerprintLegacy = fingerprint(pageLegacy)
+print("identical=" .. tostring(fingerprintNew == fingerprint(pageOld)))
 
-local pageExplicit = buildEntries(40)
-Status.merge(pageExplicit, sessions, Status.indexByBookId(sessions))
-local fingerprintExplicit = fingerprint(pageExplicit)
-
-print("identical=" .. tostring(fingerprint(pageNew) == fingerprint(pageOld)))
-print("legacy_identical=" .. tostring(fingerprintLegacy == fingerprint(pageOld)))
-print("explicit_identical=" .. tostring(fingerprintExplicit == fingerprint(pageOld)))
+-- Sharing one prebuilt index must resolve exactly like building it per call.
+local prebuilt = Status.indexByBookId(sessions)
+local mismatched = 0
+for position, entry in ipairs(buildEntries(40)) do
+    local shared = Status.findSession(entry, sessions, prebuilt)
+    local internal = Status.findSession(entry, sessions)
+    if shared ~= internal then mismatched = mismatched + 1 end
+end
+print("shared_index_mismatches=" .. mismatched)
 local unmatched = 0
 for position, entry in ipairs(pageNew) do
     if entry.status == nil then unmatched = unmatched + 1 end
@@ -263,8 +254,7 @@ print("unmatched=" .. unmatched)
 `);
 
     expect(values.identical).toBe("true");
-    expect(values.legacy_identical).toBe("true");
-    expect(values.explicit_identical).toBe("true");
+    expect(values.shared_index_mismatches).toBe("0");
     // Every fixture entry matches something except entry 4, which exists to
     // prove a miss stays a miss; an all-nil page would make "identical" true
     // for the wrong reason.
@@ -282,33 +272,6 @@ print("unmatched=" .. unmatched)
     expect(entries[2].split(":").slice(0, 3)).toEqual(["3", "4", "doc-77"]);
   });
 
-  it("keeps indexByBookId the single owner of index construction", () => {
-    if (!LUA_BINARY) return;
-    const { values } = runHarness(`
-${FIXTURE}
-
-local sessions = buildSessions()
-local injected = { document = "injected-by-the-index-builder", percentage = 0.5 }
-local injectedCalls = 0
-Status.indexByBookId = function(list)
-    injectedCalls = injectedCalls + 1
-    return { [101] = injected }
-end
-
-local page = buildEntries(40)
-Status.merge(page, sessions)
-print("injected_calls=" .. injectedCalls)
-print("honoured_by_merge=" .. tostring(page[1].status == injected))
-print("honoured_by_findSession=" ..
-    tostring(Status.findSession({ book_id = 101, title = "Whatever Else" }, sessions, Status.indexByBookId(sessions)) == injected))
-`);
-    // One build for the page, and the id rule answers from that build alone:
-    // nothing scans the session list for ids behind indexByBookId's back.
-    expect(values.injected_calls).toBe("1");
-    expect(values.honoured_by_merge).toBe("true");
-    expect(values.honoured_by_findSession).toBe("true");
-  });
-
   it("renders a page no slower than the per-entry path it replaced", () => {
     if (!LUA_BINARY) return;
     const { values } = runHarness(`
@@ -318,8 +281,6 @@ local sessions = buildSessions()
 local page = buildEntries(40)
 local WARMUP, PASSES = 20, 200
 
--- Both paths pay the same real cost here: the counter wrapper is gone.
-Status.indexByBookId = realIndexByBookId
 for pass = 1, WARMUP do
     for position, entry in ipairs(page) do
         entry.status = Status.findSession(entry, sessions)

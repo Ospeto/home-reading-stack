@@ -118,9 +118,8 @@ end
 --- Builds a lookup index keyed by Calibre book id.
 -- When several devices have synced the same book, the newest session wins.
 -- This is the only place the book-id index is built. Scanning the session list
--- costs O(sessions), so a caller annotating a whole catalog page must build it
--- once and hand it to `Status.findSession` / `Status.merge` rather than let
--- every entry rebuild it.
+-- costs O(sessions), so `Status.merge` builds it once for the whole page and
+-- passes it to `Status.findSession` instead of letting every entry rebuild it.
 -- @tparam table sessions normalized sessions
 -- @treturn table map book_id -> session
 function Status.indexByBookId(sessions)
@@ -191,10 +190,9 @@ end
 -- every entry: a page of N entries costs one session scan instead of N.
 -- @tparam table entries OPDS entries
 -- @tparam table sessions normalized sessions
--- @tparam[opt] table index result of `Status.indexByBookId(sessions)`
 -- @treturn table the same entries, each with an optional `.status` session
-function Status.merge(entries, sessions, index)
-    local by_id = index or Status.indexByBookId(sessions)
+function Status.merge(entries, sessions)
+    local by_id = Status.indexByBookId(sessions)
     for entryIndex, entry in ipairs(entries or {}) do
         entry.status = Status.findSession(entry, sessions, by_id)
     end
