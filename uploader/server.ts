@@ -112,6 +112,7 @@ import {
   invalidateHighlightCountsCache,
   type HighlightRecord,
 } from "./highlights";
+import { openSqliteForStartup } from "./sqlite-open";
 import {
   annotationSummary,
   deleteAnnotation,
@@ -1418,15 +1419,12 @@ export function withKosyncDb<T>(
   try {
     db = options?.readonly
       ? new Database(dbPath, { readonly: true })
-      : new Database(dbPath);
-    if (!options?.readonly) {
-      try {
-        db.run("PRAGMA journal_mode = WAL;");
-      } catch (_e) {
-        void _e;
-      }
+      : openSqliteForStartup(dbPath);
+    if (options?.readonly) {
+      // A read-only handle cannot switch journal modes, but it still needs a
+      // busy handler so concurrent writers cannot fail it instantly.
+      db.run("PRAGMA busy_timeout = 5000;");
     }
-    db.run("PRAGMA busy_timeout = 5000;");
     return action(db);
   } catch (err) {
     console.error("[KOSync DB] Database operation error:", err);
@@ -1625,10 +1623,11 @@ let _cachedDbPath: string | null = null;
 export function getCacheDb(): Database {
   const dbPath = getCacheDbPath();
   if (!_serverCacheDbInstance || _cachedDbPath !== dbPath) {
-    _serverCacheDbInstance = new Database(dbPath);
+    // busy_timeout is installed before the WAL switch, and both the open and
+    // the switch retry through transient SQLITE_BUSY / SQLITE_BUSY_RECOVERY so
+    // that the Telegram bot and this server can start in any order.
+    _serverCacheDbInstance = openSqliteForStartup(dbPath);
     _cachedDbPath = dbPath;
-    _serverCacheDbInstance.run("PRAGMA journal_mode = WAL;");
-    _serverCacheDbInstance.run("PRAGMA busy_timeout = 5000;");
     _serverCacheDbInstance.run(`
       CREATE TABLE IF NOT EXISTS file_hashes (
         filepath TEXT PRIMARY KEY,
@@ -8818,12 +8817,32 @@ if ((import.meta as any).main) {
     process.env.UPLOADER_PORT || process.env.PORT || "8086",
     10,
   );
-  jobQueue.startWorker(1000);
-  (globalThis as any).Bun.serve({
-    port: listenPort,
-    hostname: "0.0.0.0",
-    fetch: handleRequest,
-  });
+  // Open and prepare cache.db BEFORE binding the socket. A process that is not
+  // ready must never hold the port: it used to bind first and then serve
+  // nothing (or die in a KeepAlive respawn loop) when another process held the
+  // database. Failing here exits non-zero with the real error instead.
+  try {
+    getCacheDb();
+    jobQueue.startWorker(1000);
+  } catch (err) {
+    console.error(
+      "[Server] Fatal: could not open cache.db; refusing to bind port " +
+        `${listenPort}.`,
+    );
+    console.error(err);
+    process.exit(1);
+  }
+  try {
+    (globalThis as any).Bun.serve({
+      port: listenPort,
+      hostname: "0.0.0.0",
+      fetch: handleRequest,
+    });
+  } catch (err) {
+    console.error(`[Server] Fatal: could not bind port ${listenPort}.`);
+    console.error(err);
+    process.exit(1);
+  }
   console.log(
     `[Server] Reading HQ Web Uploader listening on http://0.0.0.0:${listenPort}`,
   );

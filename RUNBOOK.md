@@ -261,6 +261,12 @@ ssh mac-mini "bun -e '
 - Primary Local Storage: `/Users/ospeto/.backups/reading-stack/` (Always writable, immune to TCC / drive unmounts)
 - Secondary Mirror: `/Volumes/Ospeto_SSD/backups/reading-stack/` (Automated sync when SSD is mounted)
 - SQLite Database Resiliency: All databases (`koreader-sync.db`, `cache.db`, `manga.db`, `metadata.db`) run in `WAL` mode (`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`) for zero-corruption power loss safety.
+- Writable Startup Contract (`uploader/sqlite-open.ts`): every writable startup open of `cache.db` (Reading HQ server, Telegram bot, durable job queue) goes through one shared helper with these guarantees:
+  - `PRAGMA busy_timeout = 5000` is installed **before** the `journal_mode = WAL` switch. The switch takes a lock, so arming the busy handler afterwards leaves the statement that needs it unprotected.
+  - The open and the WAL switch retry a bounded number of times (~8 attempts, 150 ms doubling to a 1.5 s cap per statement) on `SQLITE_BUSY` / `SQLITE_BUSY_RECOVERY` / `SQLITE_LOCKED`, so the server and the bot can start in either order.
+  - A silently refused switch (SQLite returns the previous journal mode rather than raising) is retried the same way before it counts as a failure.
+  - In-memory databases (`:memory:`, empty path, `file::memory:`) skip the WAL switch entirely; `journal_mode=memory` is correct there, not an error.
+  - Fail-fast: when `cache.db` cannot be prepared, the Reading HQ server refuses to bind `:8086` and exits non-zero, and the Telegram bot exits non-zero, instead of leaving a half-started process in a launchd `KeepAlive` respawn loop.
 - Retention: 7 days rolling retention
 - Log Hygiene: Auto-truncates logs in `~/Library/Logs/` if exceeding 10 MB.
 
