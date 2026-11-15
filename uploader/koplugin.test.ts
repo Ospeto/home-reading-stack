@@ -54,7 +54,7 @@ const SAMPLE_SETTINGS: KopluginSettings = {
   apiKey: "test-api-key-not-a-real-secret",
   pageSize: 40,
   generatedAt: "2026-11-14T00:00:00.000Z",
-  pluginVersion: "1.1.0",
+  pluginVersion: "1.1.1",
   requestBlockTimeout: KOPLUGIN_REQUEST_BLOCK_TIMEOUT,
   requestTotalTimeout: KOPLUGIN_REQUEST_TOTAL_TIMEOUT,
   downloadBlockTimeout: KOPLUGIN_DOWNLOAD_BLOCK_TIMEOUT,
@@ -1954,5 +1954,337 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
     expect(out.connection_has_opds).toBe("true");
     expect(out.connection_has_progress).toBe("true");
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
+  });
+});
+
+/**
+ * The device crash this guards against (KOReader `crash.log`, 11/15/26):
+ *
+ *   main.lua:569: attempt to call local '_' (a number value)
+ *   main.lua:569: in function 'showReading'
+ *   main.lua:248: in function 'callback'
+ *
+ * `showReading` used `for _, session in ipairs(sessions)`, which shadowed the
+ * module-level gettext `_` for the whole loop body, so every `_("…")` inside
+ * it indexed a number. The error escaped the menu callback and aborted the
+ * process instead of showing a notice — tapping "Currently reading" dropped the
+ * device back to the stock Kindle shell.
+ *
+ * A shadowed upvalue is invisible to `loadfile` compile checks, so the only
+ * honest guard is running the shipped `showReading` against a realistic
+ * `/api/kosync/active` payload and asserting it renders.
+ */
+const CURRENTLY_READING_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local expected_base_url = assert(arg[2], "expected base url argument required")
+
+-- Field-for-field shape of GET /api/kosync/active (koreader-sync.db rows joined
+-- against the Calibre library), newest first after normalization.
+local payload = {
+  {
+    id = 41,
+    document = "d6df0b1e0c6dec84dd52e6616fa669d8",
+    progress = "/body/DocFragment[3]/body/div/p[12]",
+    percentage = 0.45,
+    device = "Paperwhite",
+    device_id = "G000PP1234567890",
+    filename = "01 - Spice and Wolf, Vol. 1.epub",
+    title = "Spice and Wolf, Vol. 1",
+    authors = "Isuna Hasekura",
+    timestamp = 1794633720,
+    bookId = 101,
+    cover = "/api/books/101/cover",
+    displayTitle = "Spice and Wolf, Vol. 1",
+    displayAuthors = "Isuna Hasekura",
+  },
+  {
+    id = 42,
+    document = "aaaabbbbccccdddd0000111122223333",
+    progress = "/body/DocFragment[2]/body/div/p[4]",
+    percentage = 0.2,
+    device = "Kindle",
+    device_id = "G000K0987654321",
+    filename = "Dune & Sons.epub",
+    title = "dune and sons deluxe",
+    authors = "Frank Herbert",
+    timestamp = 1794633700,
+    bookId = nil,
+    cover = nil,
+    displayTitle = "Dune & Sons <Deluxe>",
+    displayAuthors = "Frank Herbert",
+  },
+  {
+    -- An untitled session with no authors, device or filename: every fallback
+    -- in the shelf has to render instead of concatenating nil.
+    id = 43,
+    document = "ffff0000ffff0000ffff0000ffff0000",
+    progress = "",
+    percentage = 0,
+    device = nil,
+    device_id = nil,
+    filename = "",
+    title = "",
+    authors = nil,
+    timestamp = 1794633600,
+    bookId = nil,
+    cover = nil,
+    displayTitle = nil,
+    displayAuthors = nil,
+  },
+  {
+    -- Titled but uncredited: only the author fallback fires.
+    id = 44,
+    document = "11112222333344445555666677778888",
+    progress = "",
+    percentage = 1,
+    device = "Kobo",
+    device_id = nil,
+    filename = "burmese-book.epub",
+    title = "__BURMESE_PROBE__",
+    authors = nil,
+    timestamp = 1794633500,
+    bookId = 202,
+    cover = nil,
+    displayTitle = "__BURMESE_PROBE__",
+    displayAuthors = nil,
+  },
+}
+
+-- Swap the transport stubs so the real
+-- Client.get -> JSON.decode -> Status.normalizeSessions path runs against
+-- the payload instead of the network. The payload stays an upvalue so an
+-- empty shelf can be exercised with the same plugin instance.
+package.preload["json"] = function()
+  return { decode = function() return payload end }
+end
+package.preload["ltn12"] = function()
+  return {
+    sink = {
+      table = function(target)
+        return function(chunk)
+          if chunk then target[#target + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function() end,
+    },
+  }
+end
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      if request and request.sink then
+        request.sink('{"active":[]}')
+        request.sink(nil)
+      end
+      return 1, 200, {}
+    end,
+  }
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local config = require("lighthouse_config")
+assert(config.base_url == expected_base_url,
+  "harness needs the generated config, got " .. tostring(config.base_url))
+
+local registered = 0
+LightHouse.ui = { menu = { registerToMainMenu = function() registered = registered + 1 end } }
+LightHouse:init()
+print("registered=" .. tostring(registered))
+
+-- Record what a "Download EPUB" tap would fetch, without touching the disk.
+local tapped
+LightHouse.downloadBookId = function(_, session) tapped = session end
+
+-- Tap the real menu entry, exactly as KOReader's menu callback does.
+local menu_items = {}
+LightHouse:addToMainMenu(menu_items)
+local entry = assert(menu_items.lighthouse, "plugin must add a 'lighthouse' entry")
+local tap
+for _index, item in ipairs(entry.sub_item_table) do
+  if item.text == "Currently reading" then tap = item.callback end
+end
+assert(type(tap) == "function", "'Currently reading' menu entry must have a callback")
+
+local ok, raised = pcall(tap)
+print("ok=" .. tostring(ok))
+print("raised=" .. tostring(raised))
+
+local menu = shown[#shown]
+assert(menu and menu.__kind == "menu", "tapping 'Currently reading' must open a menu")
+print("title=" .. tostring(menu.title))
+print("items=" .. tostring(#menu.item_table))
+for index, item in ipairs(menu.item_table) do
+  local labels = {}
+  for _detail_index, detail in ipairs(item.sub_item_table or {}) do
+    labels[#labels + 1] = tostring(detail.text)
+  end
+  print(string.format("item%d=%s\t%s\t%s", index, tostring(item.text), tostring(item.mandatory), table.concat(labels, "|")))
+end
+
+-- Book-id downloads must still be wired to the tapped session.
+menu.item_table[1].sub_item_table[1].callback()
+print("tapped_book_id=" .. tostring(tapped and tapped.book_id))
+print("tapped_title=" .. tostring(tapped and tapped.title))
+
+-- An empty shelf must show its notice rather than raise.
+payload = {}
+local empty_ok, empty_raised = pcall(tap)
+print("empty_ok=" .. tostring(empty_ok))
+print("empty_raised=" .. tostring(empty_raised))
+local last = shown[#shown]
+print("empty_notice=" .. tostring(last and last.__kind == "infomessage"))
+print("empty_notice_text=" .. tostring(last and last.text))
+
+print("OK")
+`)
+  // Non-ASCII inside a `String.raw` template is escaped to `\uXXXX` by the
+  // transpiler and then rejected by Lua, so the Burmese probe goes in as
+  // decimal byte escapes (same trick as LIGHTHOUSE_HELPERS_BODY above).
+  .split("__BURMESE_PROBE__")
+  .join(luaByteEscapes(BURMESE_PROBE));
+
+describe("plugin currently-reading shelf", () => {
+  it("renders /api/kosync/active instead of calling the gettext `_` as a number", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "harness-api-key",
+      generatedAt: "2026-11-14T00:00:00.000Z",
+    });
+
+    // Run the shipped artifact, unpacked the documented way, so the harness
+    // exercises exactly what a device downloads.
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-reading-"));
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(
+      UNZIP_BINARY as string,
+      ["-q", zipPath, "-d", pluginsDir],
+      { encoding: "utf8" },
+    );
+    expect(extract.status).toBe(0);
+
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "reading_harness.lua");
+    fs.writeFileSync(harnessPath, CURRENTLY_READING_HARNESS);
+
+    const res = spawnSync(
+      LUA_BINARY,
+      [harnessPath, pluginRoot, "http://192.168.31.15:8086"],
+      { encoding: "utf8" },
+    );
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line) => line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+
+    // The actual regression: no raised error from the tap.
+    expect(out.ok).toBe("true");
+    expect(out.raised).toBe("nil");
+    expect(out.registered).toBe("1");
+
+    expect(out.title).toBe("Currently reading");
+    expect(out.items).toBe("4");
+
+    // Row 1: linked session, newest first, with every detail row.
+    const first = out.item1.split("\t");
+    expect(first[0]).toBe("Spice and Wolf, Vol. 1");
+    expect(first[1]).toContain("Isuna Hasekura");
+    expect(first[1]).toContain("████░░░░ 45%");
+    const firstDetails = first[2].split("|");
+    expect(firstDetails[0]).toBe("Download EPUB");
+    expect(firstDetails).toContain("Progress: ████░░░░ 45%");
+    expect(firstDetails).toContain("Device: Paperwhite");
+    expect(firstDetails).toContain("File: 01 - Spice and Wolf, Vol. 1.epub");
+
+    // Row 2: no Calibre match, so the download row is replaced, not dropped.
+    const second = out.item2.split("\t");
+    expect(second[0]).toBe("Dune & Sons <Deluxe>");
+    const secondDetails = second[2].split("|");
+    expect(secondDetails[0]).toBe("No matching book in the library");
+    expect(secondDetails).toContain("Progress: ██░░░░░░ 20%");
+    expect(secondDetails).toContain("Device: Kindle");
+    expect(secondDetails).toContain("File: Dune & Sons.epub");
+
+    // Row 3: every fallback fires (no title, no authors, no device, no file).
+    const third = out.item3.split("\t");
+    expect(third[0]).toBe("Untitled");
+    expect(third[1]).toContain("Unknown");
+    expect(third[1]).toContain("░░░░░░░░ 0%");
+    const thirdDetails = third[2].split("|");
+    expect(thirdDetails).toEqual([
+      "No matching book in the library",
+      "Progress: ░░░░░░░░ 0%",
+    ]);
+
+    // Row 4: authored fallback only, Burmese title preserved byte for byte.
+    const fourth = out.item4.split("\t");
+    expect(fourth[0]).toBe(BURMESE_PROBE);
+    expect(fourth[1]).toContain("Unknown");
+    expect(fourth[1]).toContain("████████ 100%");
+    expect(fourth[2].split("|")[0]).toBe("Download EPUB");
+
+    // Tapping "Download EPUB" still resolves the session's Calibre id.
+    expect(out.tapped_book_id).toBe("101");
+    expect(out.tapped_title).toBe("Spice and Wolf, Vol. 1");
+
+    // Empty shelf: a notice, never a raised error.
+    expect(out.empty_ok).toBe("true");
+    expect(out.empty_raised).toBe("nil");
+    expect(out.empty_notice).toBe("true");
+    expect(out.empty_notice_text).toBe(
+      "No reading progress has been synced yet.",
+    );
+
+    expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
+  });
+});
+
+describe("plugin gettext shadowing", () => {
+  /**
+   * The crash class: a `for _` / `local _` inside a module that binds
+   * `_ = require("gettext")` silently turns every `_("…")` in that scope into
+   * "attempt to call a number value", which KOReader cannot recover from.
+   */
+  it("never rebinds `_` in a template module that calls the gettext `_`", () => {
+    const offenders: string[] = [];
+
+    for (const name of fs.readdirSync(KOPLUGIN_TEMPLATE_DIR)) {
+      if (!name.endsWith(".lua")) continue;
+      const source = fs.readFileSync(
+        path.join(KOPLUGIN_TEMPLATE_DIR, name),
+        "utf8",
+      );
+      if (!/\b_\(\s*["[]/.test(source)) continue; // module never calls gettext
+
+      source.split("\n").forEach((line, index) => {
+        const code = line.replace(/--.*$/, "").trim();
+        if (code === "") return;
+        // The single legitimate binding of the gettext function.
+        if (/^local\s+_\s*=\s*require\("gettext"\)$/.test(code)) return;
+        if (
+          /^for\s+_\s*,/.test(code) ||
+          /^for\s+_\s+in\s/.test(code) ||
+          /^local\s+_(?:\s*[,=]|$)/.test(code) ||
+          /^function\s*\(\s*_(?:\s*[,)])/.test(code) ||
+          /^[a-zA-Z_][\w.]*\s*=\s*function\s*\(\s*_(?:\s*[,)])/.test(code)
+        ) {
+          offenders.push(`${name}:${index + 1}: ${line.trim()}`);
+        }
+      });
+    }
+
+    expect(offenders).toEqual([]);
   });
 });
