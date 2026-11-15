@@ -226,6 +226,12 @@ local function requestOnce(url, sink, headers)
         method = "GET",
         headers = headers,
         sink = sink,
+        -- LuaSocket follows redirects internally when unset, forwarding the
+        -- full header set (including X-API-Key) to every hop and returning
+        -- only the final response — which would bypass stripApiKeyCrossHost.
+        -- Disable it so Client.get/Client.download's own redirect loop is
+        -- authoritative.
+        redirect = false,
     })
     if not ok then
         return nil, nil, string.format("network_error: %s", tostring(leading))

@@ -886,17 +886,79 @@ local http_urls, https_urls, timeouts = {}, {}, {}
 -- Per-hop record of whether the request carried X-API-Key ("Y"/"N"), so the
 -- cross-host stripping behavior can be asserted without guessing at headers.
 local http_keys, https_keys = {}, {}
+-- Per-request record of whether the caller disabled LuaSocket's internal
+-- redirect following ("false" or "nil"), so the transport contract can be
+-- asserted directly.
+local http_redirect, https_redirect = {}, {}
 
 local function report(label, value)
   print(label .. "=" .. tostring(value))
 end
 
-local function make_transport(calls, key_log, handler)
+-- Resolves a Location header the way an HTTP client would, for the internal
+-- redirect emulation below (absolute, root-relative, directory-relative, and
+-- query-only targets).
+local function resolve_url(base, loc)
+  if loc:match("^%a[%w+%-%.]*://") then return loc end
+  local authority = base:match("^(%a[%w+%-%.]+://[^/#?]*)")
+  if not authority then return loc end
+  if loc:sub(1, 1) == "?" then
+    return base:match("^([^#?]*)") .. loc
+  end
+  if loc:sub(1, 1) == "/" then return authority .. loc end
+  return (base:match("^(.*/)") or authority .. "/") .. loc
+end
+
+-- Emulates real LuaSocket's internal redirect following (verified live with
+-- LuaSocket 3.1.0, the line KOReader bundles): a 3xx response with a Location
+-- header is re-requested with the SAME header table -- leaking any auth
+-- header across hosts -- and the caller's sink only receives the final
+-- response's body. Without this emulation the stub silently disagrees with
+-- the real transport and cannot catch the header-forwarding regression.
+local function internal_follow(handler, request)
+  local current = request
+  for _ = 1, 10 do
+    local buffered = {}
+    local first, code, rheaders = handler({
+      url = current.url,
+      method = "GET",
+      headers = current.headers,
+      sink = function(chunk)
+        if chunk then buffered[#buffered + 1] = chunk end
+        return 1
+      end,
+    })
+    local location = type(rheaders) == "table" and rheaders.location
+    if first == nil or type(code) ~= "number" or code < 300 or code >= 400
+        or not location then
+      -- Final response (or transport failure): deliver the buffered body now.
+      for _, chunk in ipairs(buffered) do
+        local ok, err = request.sink(chunk)
+        if not ok then return nil, err end
+      end
+      return first, code, rheaders
+    end
+    current = {
+      url = resolve_url(current.url, location),
+      method = "GET",
+      headers = current.headers, -- same header table: the real-leak shape
+      sink = request.sink,
+    }
+  end
+  return nil, "too many internal redirects"
+end
+
+local function make_transport(calls, key_log, redirect_log, handler)
   return {
     request = function(request)
+      redirect_log[#redirect_log + 1] = tostring(request.redirect)
       calls[#calls + 1] = request.url
       key_log[#key_log + 1] = (request.headers or {})["X-API-Key"] and "Y" or "N"
-      return handler(request)
+      if request.redirect == false then
+        -- Disabled: hand the raw response to the caller, which owns hops.
+        return handler(request)
+      end
+      return internal_follow(handler, request)
     end,
   }
 end
@@ -980,8 +1042,8 @@ elseif scenario == "sink_write_failure" then
   end
 end
 
-package.preload["socket.http"] = function() return make_transport(http_urls, http_keys, handler) end
-package.preload["socket.https"] = function() return make_transport(https_urls, https_keys, handler) end
+package.preload["socket.http"] = function() return make_transport(http_urls, http_keys, http_redirect, handler) end
+package.preload["socket.https"] = function() return make_transport(https_urls, https_keys, https_redirect, handler) end
 package.preload["socketutil"] = function()
   return {
     set_timeout = function(_, block, total)
@@ -1072,6 +1134,8 @@ if scenario == "schemes" or scenario == "https_missing" then
   report("https_keys", table.concat(https_keys, ""))
   report("http_url", http_urls[1])
   report("https_url", https_urls[1])
+  report("http_redirect", table.concat(http_redirect, ""))
+  report("https_redirect", table.concat(https_redirect, ""))
   report("timeouts", table.concat(timeouts, "|"))
 elseif scenario == "download" or scenario == "html" or scenario == "small_file"
     or scenario == "plain_download" or scenario == "sink_write_failure" then
@@ -1096,6 +1160,8 @@ elseif scenario == "download" or scenario == "html" or scenario == "small_file"
   report("https_calls", #https_urls)
   report("http_keys", table.concat(http_keys, ""))
   report("https_keys", table.concat(https_keys, ""))
+  report("http_redirect", table.concat(http_redirect, ""))
+  report("https_redirect", table.concat(https_redirect, ""))
   report("timeouts", table.concat(timeouts, "|"))
 else
   local body, err = Client.get(config_http, "/api/opds")
@@ -1107,6 +1173,8 @@ else
   report("https_keys", table.concat(https_keys, ""))
   report("http_last", http_urls[#http_urls])
   report("https_last", https_urls[#https_urls])
+  report("http_redirect", table.concat(http_redirect, ""))
+  report("https_redirect", table.concat(https_redirect, ""))
 end
 `;
 
@@ -1151,6 +1219,13 @@ describe("plugin HTTP client transport selection", () => {
     expect(out.https_calls).toBe("1");
     expect(out.http_url).toBe("http://lan.test/api/opds");
     expect(out.https_url).toBe("https://wan.test/api/opds");
+    // Transport contract (LuaSocket's request table): the plugin must disable
+    // LuaSocket's internal redirect following on every request. Real LuaSocket
+    // otherwise follows 3xx hops itself, forwarding the same header table —
+    // including X-API-Key — to every host, which defeats the plugin's own
+    // cross-host stripping loop (verified live with LuaSocket 3.1.0).
+    expect(out.http_redirect).toBe("false");
+    expect(out.https_redirect).toBe("false");
   });
 
   it("passes the configured timeouts to socketutil", () => {
@@ -1192,6 +1267,12 @@ describe("plugin HTTP client redirect handling", () => {
     // Hop 2 crosses to wan.test (captive-portal style) and hop 3 stays there:
     // the key must be dropped at the cross-host boundary and never restored.
     expect(out.https_keys).toBe("NN");
+    // The plugin's redirect loop can only enforce that boundary if the real
+    // transport is not following hops (and re-sending the key) itself.
+    // One entry per hop: 1 http hop, then 2 https hops, all with redirect
+    // following disabled.
+    expect(out.http_redirect).toBe("false");
+    expect(out.https_redirect).toBe("falsefalse");
   });
 
   it("keeps X-API-Key when a download redirect stays on the same host", () => {
@@ -1199,6 +1280,9 @@ describe("plugin HTTP client redirect handling", () => {
     const out = runClientScenario("download");
     // Both https hops resolve under https://wan.test, so the key survives.
     expect(out.https_keys).toBe("YY");
+    // Same transport contract as GETs: internal following disabled on both
+    // hops (one entry per hop).
+    expect(out.https_redirect).toBe("falsefalse");
   });
 
   it("resolves a relative Location against the request directory", () => {
