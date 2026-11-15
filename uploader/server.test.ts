@@ -5428,8 +5428,9 @@ exit 0
       expect(await fetchEntryIds("?sort=author")).toEqual([204, 202, 203, 205, 206, 201]);
       // Series first, ordered by series name then volume, then series-less by title.
       expect(await fetchEntryIds("?sort=series")).toEqual([202, 204, 206, 201, 205, 203]);
-      // `added` is library insertion order, oldest first.
-      expect(await fetchEntryIds("?sort=added")).toEqual([201, 202, 203, 204, 205, 206]);
+      // `added` is newest first: ids increase per ingest, so this matches the
+      // default browse end of the catalog.
+      expect(await fetchEntryIds("?sort=added")).toEqual([206, 205, 204, 203, 202, 201]);
     });
 
     it("sorts ACROSS page boundaries: pages 1..n concatenate into one global order", async () => {

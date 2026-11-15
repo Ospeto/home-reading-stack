@@ -2550,9 +2550,9 @@ function createOpdsComparator(sort: OpdsSortKey): (a: any, b: any) => number {
       }
       if (!diff) diff = opdsCompareText(a?.title, b?.title);
     } else {
-      // "added" is library insertion order (Calibre ids increase per ingest),
-      // oldest first - the opposite end of the default newest-first browse.
-      diff = (Number(a?.id) || 0) - (Number(b?.id) || 0);
+      // "added" is newest first, matching the default browse: Calibre ids
+      // increase per ingest, so the newest volume carries the highest id.
+      diff = (Number(b?.id) || 0) - (Number(a?.id) || 0);
     }
     if (diff) return diff;
     return (Number(a?.id) || 0) - (Number(b?.id) || 0);
