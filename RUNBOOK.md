@@ -95,9 +95,9 @@ A live PID in `launchctl list` plus a listening port is **not** proof the upload
 launchctl list | grep com.ospeto.book-uploader
 curl -s -m 5 -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8086/api/books   # 000 = bound but not serving
 
-# 2. Read the preflight verdict from the agent's logs
+# 2. Read the preflight verdict from the agent's log
 #    "Fatal:" means it refused to bind: missing | permission-denied | unresponsive | error
-tail -20 ~/Library/Logs/uploader-error.log
+tail -20 ~/Library/Logs/uploader.log
 
 # 3. Check whether the library volume answers at all - stat works from cache even
 #    when real reads are wedged, so read a directory and a file, not a stat.
@@ -151,7 +151,7 @@ ssh mac-mini "tail -f ~/Library/Logs/kosync.log"
 ssh mac-mini "tail -f ~/Library/Logs/calibre-server.log"
 
 # Uploader logs
-ssh mac-mini "tail -f ~/Library/Logs/uploader.log ~/Library/Logs/uploader-error.log"
+ssh mac-mini "tail -f ~/Library/Logs/uploader.log"
 
 # Sing-box Proxy logs
 ssh mac-mini "tail -f ~/Library/Logs/sing-box/stderr.log"

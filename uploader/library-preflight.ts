@@ -320,13 +320,13 @@ export function describeLibraryAccessFailure(report: LibraryAccessReport): strin
   } else if (report.status === "missing") {
     lines.push(
       "[Server] Fatal: the Calibre library is not present, so this process " +
-        "would serve no catalog.",
+        "cannot serve a catalog.",
     );
     lines.push(
       "  Nothing is mounted at the library path, or an external volume mounted " +
-        "after this agent started and left the path dangling; the gate runs once " +
-        "at startup, so the process would come up HTTP-alive with no catalog and " +
-        "never retry.",
+        "after this agent started and left the path dangling. The gate runs once " +
+        "at startup and never retries, so the process exits here rather than " +
+        "binding :8086 with no catalog.",
     );
   }
 

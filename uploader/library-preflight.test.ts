@@ -167,7 +167,8 @@ describe("real probe against local storage", () => {
       dbPath: path.join(dir, "metadata.db"),
     });
     expect(gate.exitCode).toBe(0);
-    // A healthy start is silent: nothing reaches uploader-error.log.
+    // A healthy start is silent: the gate renders no message, so nothing is
+    // written to the agent's log (~/Library/Logs/uploader.log).
     expect(gate.lines).toEqual([]);
     expect(formatStartupGateMessage(gate)).toBeNull();
   });
