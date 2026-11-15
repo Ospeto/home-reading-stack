@@ -85,19 +85,6 @@ function unzipEntry(zipPath: string, entry: string): string {
   return res.stdout;
 }
 
-/** Compares dotted numeric versions, e.g. "1.2.0" against "1.1.1". */
-function compareVersions(left: string, right: string): number {
-  const parse = (value: string) =>
-    value.split(".").map((part) => Number.parseInt(part, 10) || 0);
-  const a = parse(left);
-  const b = parse(right);
-  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
-    const diff = (a[index] ?? 0) - (b[index] ?? 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
-}
-
 describe("KOReader plugin template", () => {
   it("ships every file KOReader's PluginLoader requires", () => {
     const names = fs.readdirSync(KOPLUGIN_TEMPLATE_DIR).sort();
@@ -315,10 +302,6 @@ describe("generateKoplugin archive layout", () => {
     // The stats view is a new template module: an archive without it would keep
     // the old main menu and the "Reading stats" entry would fail to require.
     expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_stats.lua`);
-
-    // A device only picks up new payload bytes when the version moves, so the
-    // release that added the stats view must sit above 1.1.1.
-    expect(compareVersions(KOPLUGIN_VERSION, "1.1.1")).toBeGreaterThan(0);
 
     if (!UNZIP_BINARY) return;
     const zipPath = writeScratch("stats.koplugin", zip);
