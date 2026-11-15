@@ -2940,6 +2940,11 @@ local menu = current_menu()
 assert(menu and menu.item_table, "tapping 'Reading stats' must open a menu")
 print("title=" .. tostring(menu.title))
 print("rows=" .. tostring(#menu.item_table))
+-- The view must fill the screen it is drawn on: a text page follows the height
+-- left after the title bar, so a 15-row stats list is one page, not two.
+local per_page = tonumber(LightHouse.menu and LightHouse.menu.items_per_page) or #menu.item_table
+print("per_page=" .. tostring(per_page))
+print("pages=" .. tostring(math.ceil(#menu.item_table / per_page)))
 dump_rows(menu, "row")
 
 -- 2. Heatmap weeks are tappable down to a single day --------------------------
@@ -3095,6 +3100,12 @@ describe("plugin reading stats view", () => {
     expect(out.ok).toBe("true");
     expect(out.raised).toBe("nil");
     expect(out.title).toBe("Reading stats");
+    expect(Number(out.rows)).toBeGreaterThan(9);
+    // A text page is fitted to the screen, so the whole stats view fits on one
+    // page instead of paging twice through a half-empty screen.
+    expect(Number(out.per_page)).toBeGreaterThan(9);
+    expect(Number(out.per_page)).toBeGreaterThanOrEqual(Number(out.rows));
+    expect(out.pages).toBe("1");
     expect(out.rows).toBe("15");
 
     // 1. Headline numbers, first thing the reader sees, with no heading row

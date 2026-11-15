@@ -62,7 +62,8 @@ Ui.tokens = {
     --: Height one row aims for, with and without a cover.
     row_units_covers = 122,
     row_units_plain = 46,
-    --: Rows per page is clamped to this window so no screen is absurd.
+    --: Rows per page a cover view is clamped to, so a cover page cannot spill.
+    --: Text views follow the screen height instead.
     rows_min = 4,
     rows_max = 9,
     --: Cover box height is clamped to this window, title-units.
@@ -329,7 +330,8 @@ end
 -- The layout is derived, never hand-tuned per screen: the row count follows
 -- from the height left after the title bar, and the cover box follows from the
 -- row height, so a Kindle, a Kobo and a desktop-sized KOReader window all get
--- a coherent page instead of a fixed guess.
+-- a coherent page instead of a fixed guess. Only a cover page is clamped: a
+-- cover cell is genuinely tall, while a text page follows the screen.
 -- @number screen_h screen height in pixels
 -- @number scale Screen:scaleBySize(1) for the current device
 -- @boolean with_covers whether this view draws cover thumbnails
@@ -339,15 +341,19 @@ function Ui.layout(screen_h, scale, with_covers)
     local screen_scale = numberIn(scale, 1, 0.5, 4)
     local height = numberIn(screen_h, 800, 200, 8000)
 
-    local chrome = math.floor(tokens.chrome_units * screen_scale)
-    local available = height - chrome
-    if available < tokens.rows_min then available = tokens.rows_min end
-
     local target_units = with_covers and tokens.row_units_covers or tokens.row_units_plain
     local target = math.max(math.floor(target_units * screen_scale), 1)
+
+    local chrome = math.floor(tokens.chrome_units * screen_scale)
+    local available = height - chrome
+    -- Pixels against pixels: the page must keep room for the smallest row
+    -- count the token allows, however short the screen reports itself.
+    local smallest_page = tokens.rows_min * target
+    if available < smallest_page then available = smallest_page end
+
     local rows = math.floor(available / target)
     if rows < tokens.rows_min then rows = tokens.rows_min end
-    if rows > tokens.rows_max then rows = tokens.rows_max end
+    if with_covers and rows > tokens.rows_max then rows = tokens.rows_max end
 
     local layout = {
         rows = rows,

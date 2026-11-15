@@ -207,6 +207,10 @@ print("glance_bar_full=" .. Ui.glanceProgress(Status, 1))
 local phone = Ui.layout(800, 1, true)
 local phone_text = Ui.layout(800, 1, false)
 local large = Ui.layout(1448, 1.875, true)
+local large_text = Ui.layout(1448, 1.875, false)
+local short_text = Ui.layout(300, 1, false)
+local tiny_text = Ui.layout(200, 1, false)
+local jumbo_text = Ui.layout(8000, 4, false)
 local tiny = Ui.layout(200, 1, true)
 local degenerate = Ui.layout(nil, nil, true)
 local jumbo = Ui.layout(8000, 4, true)
@@ -221,9 +225,15 @@ end
 dump("phone", phone)
 dump("phone_text", phone_text)
 dump("large", large)
+dump("large_text", large_text)
+dump("short_text", short_text)
+dump("tiny_text", tiny_text)
+dump("jumbo_text", jumbo_text)
 dump("tiny", tiny)
 dump("degenerate", degenerate)
 dump("jumbo", jumbo)
+print("rows_min=" .. tostring(Ui.tokens.rows_min))
+print("rows_max=" .. tostring(Ui.tokens.rows_max))
 
 -- Invariants that must hold for every screen size ---------------------------
 local screens = {
@@ -243,6 +253,10 @@ for screen_index = 1, #screens do
   if with_covers.rows < Ui.tokens.rows_min or with_covers.rows > Ui.tokens.rows_max then
     invariants_ok = false
   end
+  -- A text page follows the screen: it may carry more rows than the cover cap
+  -- allows, but never fewer than the floor.
+  if without.rows < Ui.tokens.rows_min then invariants_ok = false end
+  if without.row_height < 1 then invariants_ok = false end
   -- The cover box must stay portrait, near the token aspect.
   local aspect = with_covers.cover_width / with_covers.cover_height
   if math.abs(aspect - Ui.tokens.cover_aspect) > 0.01 then invariants_ok = false end
@@ -497,6 +511,31 @@ describe("plugin UI primitives: page layout", () => {
     ]) {
       expect(Number(out[key])).toBeGreaterThan(0);
     }
+  });
+
+  it("fits a text page to the screen and caps only a cover page", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    const rowsMax = Number(out.rows_max);
+    const rowsMin = Number(out.rows_min);
+
+    // Oracle: the module contract - the row count follows from the height left
+    // after the title bar. Clamping text views to the cover cap pins every text
+    // screen to nine rows and makes the derivation above it dead code.
+    expect(Number(out.large_text_rows)).toBeGreaterThan(rowsMax);
+    expect(Number(out.phone_text_rows)).toBeGreaterThan(rowsMax);
+    expect(Number(out.jumbo_text_rows)).toBeGreaterThan(rowsMax);
+
+    // The cover cap still holds, on the same screens.
+    expect(Number(out.large_rows)).toBeLessThanOrEqual(rowsMax);
+    expect(Number(out.phone_rows)).toBeLessThanOrEqual(rowsMax);
+    expect(Number(out.jumbo_rows)).toBe(rowsMax);
+
+    // A screen too short for the floor still gets the floor, not a divided-by-
+    // zero page or a single clipped row.
+    expect(Number(out.tiny_text_rows)).toBe(rowsMin);
+    expect(Number(out.short_text_rows)).toBeGreaterThanOrEqual(rowsMin);
+    expect(Number(out.tiny_text_row_h)).toBeGreaterThan(0);
   });
 });
 
