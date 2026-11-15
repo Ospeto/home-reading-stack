@@ -88,7 +88,7 @@ launchctl list | grep -E "com.ospeto.reading-(vless|sg)-tunnel"
 
 ### 9. Startup Library Preflight (Running But Not Answering — INC-11)
 
-A live PID in `launchctl list` plus a listening port is **not** proof the uploader is healthy. On start the server probes the Calibre library out of process (5s deadline, `LIGHTHOUSE_LIBRARY_PROBE_TIMEOUT_MS` to override) and refuses to bind unless the library root and `metadata.db` are readable — because a library on an unanswering removable volume made `bun` block inside `openat`, which produced a silent wedge instead of an error.
+A live PID in `launchctl list` plus a listening port is **not** proof the uploader is healthy. On start the server probes the Calibre library out of process (5s deadline, `LIGHTHOUSE_LIBRARY_PROBE_TIMEOUT_MS` to override) and refuses to bind unless the library root and `metadata.db` are readable — because a library on an unanswering removable volume made `bun` block inside `openat`, which produced a silent wedge instead of an error. `ok` is the only verdict that starts (and it prints nothing); `missing`, `permission-denied`, `unresponsive` and `error` all exit 1 with the cause and both remedies, so an absent or late-mounting volume can never leave a live PID serving no catalog.
 
 ```bash
 # 1. Is the process serving, or only listening?
@@ -96,7 +96,8 @@ launchctl list | grep com.ospeto.book-uploader
 curl -s -m 5 -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8086/api/books   # 000 = bound but not serving
 
 # 2. Read the preflight verdict from the agent's logs
-tail -20 ~/Library/Logs/uploader-error.log   # "Fatal: macOS refused access" / "did not answer"
+#    "Fatal:" means it refused to bind: missing | permission-denied | unresponsive | error
+tail -20 ~/Library/Logs/uploader-error.log
 
 # 3. Check whether the library volume answers at all - stat works from cache even
 #    when real reads are wedged, so read a directory and a file, not a stat.

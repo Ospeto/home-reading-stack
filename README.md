@@ -762,10 +762,13 @@ The server now refuses to bind its port until it can actually read the Calibre l
 
 | Verdict | Meaning | Behaviour |
 | --- | --- | --- |
-| `ok` | library root and `metadata.db` are readable | start |
-| `missing` | nothing is mounted at the library path | warn, start with an empty catalog |
-| `permission-denied` | TCC denied removable-volume access (`Operation not permitted`) | exit 1 |
-| `unresponsive` | the volume never answered `open`/`readdir`; the probe child was killed | exit 1 |
+| `ok` | library root and `metadata.db` are readable | start; the gate prints nothing |
+| `missing` | nothing is mounted at the library path, or `metadata.db` is absent | exit 1 with cause and both remedies |
+| `permission-denied` | TCC denied removable-volume access (`Operation not permitted`) | exit 1 with cause and both remedies |
+| `unresponsive` | the volume never answered `open`/`readdir`; the probe child was killed | exit 1 with cause and both remedies |
+| `error` | the probe failed some other way (e.g. `ls` reporting `Input/output error` from a flaky enclosure) | exit 1 with cause and both remedies |
+
+`ok` is the only verdict that binds the port. An absent library is fatal too, deliberately: a volume that mounts *after* the agent starts leaves the symlink dangling, and the one-shot gate would otherwise come up HTTP-alive with no catalog and never re-probe.
 
 - **Deadline:** 5000 ms per probe, override with `LIGHTHOUSE_LIBRARY_PROBE_TIMEOUT_MS`.
 - **Why a child process:** when a removable volume stops answering, `bun` blocks *inside* the `openat` syscall, so an in-process check would hang exactly like the bug it is checking for. The probe runs as a killable `/bin/sh -c 'exec /bin/ls …'` and is SIGKILLed at the deadline.

@@ -3499,7 +3499,7 @@
               <span class="text-[10px] font-mono text-zinc-400">exit 1 if unreadable</span>
             </div>
             <p class="text-[11px] text-zinc-400 leading-relaxed">
-              Before binding :8086 the server probes the Calibre library out of process. If the library lives on a removable volume that macOS refuses (<span class="font-mono">Operation not permitted</span>), or on one that never answers, it exits with the cause and both remedies instead of listening forever with nothing to serve.
+              Before binding :8086 the server probes the Calibre library out of process. If the library is absent (including a volume that mounted after startup and left the path dangling), lives on a removable volume that macOS refuses (<span class="font-mono">Operation not permitted</span>), or sits on one that never answers, it exits with the cause and both remedies instead of listening forever with nothing to serve. Only a readable library starts, and a healthy start logs nothing.
             </p>
             <div class="flex items-center gap-2">
               <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">LIGHTHOUSE_LIBRARY_PROBE_TIMEOUT_MS=5000</code>

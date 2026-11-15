@@ -5,13 +5,13 @@ import path from "node:path";
 import {
   DEFAULT_LIBRARY_PROBE_TIMEOUT_MS,
   LIBRARY_PROBE_TIMEOUT_ENV,
-  catalogDbPathFor,
   checkLibraryAccess,
   classifyProbeRun,
   describeLibraryAccessFailure,
   directoryProbeArgv,
   evaluateLibraryStartupGate,
   fileProbeArgv,
+  formatStartupGateMessage,
   isFatalLibraryStatus,
   probePath,
   resolveProbeTimeoutMs,
@@ -159,17 +159,60 @@ describe("real probe against local storage", () => {
     expect(report.probes.map((p) => p.status)).toEqual(["ok", "ok"]);
   });
 
-  it("reports an unmounted library path as missing and does not become fatal", async () => {
+  it("reports a readable library as ok and says nothing about it", async () => {
+    const dir = scratchDir();
+    fs.writeFileSync(path.join(dir, "metadata.db"), "SQLite format 3\u0000");
+    const gate = await evaluateLibraryStartupGate({
+      libraryDir: dir,
+      dbPath: path.join(dir, "metadata.db"),
+    });
+    expect(gate.exitCode).toBe(0);
+    // A healthy start is silent: nothing reaches uploader-error.log.
+    expect(gate.lines).toEqual([]);
+    expect(formatStartupGateMessage(gate)).toBeNull();
+  });
+
+  it("reports an unmounted library path as missing and refuses to start", async () => {
     const dir = path.join(scratchDir(), "not-mounted");
     const report = await checkLibraryAccess({ libraryDir: dir, dbPath: path.join(dir, "metadata.db") });
     expect(report.status).toBe("missing");
-    expect(isFatalLibraryStatus(report.status)).toBe(false);
+    expect(isFatalLibraryStatus(report.status)).toBe(true);
     // The database probe is skipped: a second child could not succeed either.
     expect(report.probes).toHaveLength(1);
 
     const gate = await evaluateLibraryStartupGate({ libraryDir: dir });
-    expect(gate.exitCode).toBe(0);
-    expect(gate.lines.join("\n")).toContain("not present");
+    expect(gate.exitCode).toBe(1);
+    const message = formatStartupGateMessage(gate);
+    expect(message).toContain(`missing: ${dir}`);
+    expect(message).toContain("Fatal");
+    expect(message).toContain("Move the live library onto local storage");
+    expect(message).toContain("Full Disk Access");
+  });
+
+  it("refuses to start when the root is readable but metadata.db is gone", async () => {
+    const dir = scratchDir();
+    const missingDb = path.join(dir, "metadata.db");
+    const gate = await evaluateLibraryStartupGate({ libraryDir: dir, dbPath: missingDb });
+    expect(gate.exitCode).toBe(1);
+    expect(formatStartupGateMessage(gate)).toContain(`missing: ${missingDb}`);
+  });
+
+  it("refuses to start when the probe fails for an unclassified reason", async () => {
+    const dir = scratchDir();
+    const gate = await evaluateLibraryStartupGate(
+      { libraryDir: dir },
+      {
+        runner: runnerReturning({
+          timedOut: false,
+          code: 2,
+          stderr: `ls: ${dir}: Input/output error`,
+        }),
+      },
+    );
+    expect(gate.exitCode).toBe(1);
+    const message = formatStartupGateMessage(gate);
+    expect(message).toContain("Fatal");
+    expect(message).toContain("Input/output error");
   });
 
   /**
@@ -262,14 +305,19 @@ describe("operator-facing failure message", () => {
     expect(text).toContain("hung");
     expect(text).not.toContain("macOS refused access");
   });
-});
 
-describe("catalog database path", () => {
-  it("prefers the configured database path", () => {
-    expect(catalogDbPathFor("/lib", "/other/metadata.db")).toBe("/other/metadata.db");
-  });
-
-  it("derives the default from the library root", () => {
-    expect(catalogDbPathFor("/lib")).toBe(path.join("/lib", "metadata.db"));
+  it("keeps each verdict, path and remedy on its own line", () => {
+    const text = formatStartupGateMessage({
+      exitCode: 1,
+      lines: describeLibraryAccessFailure(deniedReport),
+    });
+    expect(text).not.toBeNull();
+    const lines = text!.split("\n");
+    expect(lines[0]).toContain("Fatal");
+    expect(lines).toContain(
+      "  permission-denied: /Volumes/Ospeto_SSD/Lighthouse_Agent_Library (Operation not permitted)",
+    );
+    expect(lines.some((line) => line.startsWith("   1. "))).toBe(true);
+    expect(lines.some((line) => line.startsWith("  Probe deadline: "))).toBe(true);
   });
 });

@@ -22,13 +22,10 @@
  * bound. A process that cannot read its library is a process that must not
  * pretend to be up.
  *
- * Exit-code contract: fatal outcomes (denied / unresponsive) exit non-zero so
- * launchd reports a real failure; a missing library still starts, because a
- * fresh install with no catalog yet is not an error.
+ * Exit-code contract: `ok` is the only non-fatal verdict. Denied, unresponsive,
+ * unreadable and absent all exit non-zero so launchd reports a real failure
+ * instead of a live PID serving no catalog.
  */
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 /** Default hard deadline for one probe child, in milliseconds. */
 export const DEFAULT_LIBRARY_PROBE_TIMEOUT_MS = 5000;
@@ -281,15 +278,18 @@ export async function checkLibraryAccess(
 
 /** True when the report means "stop instead of serving nothing". */
 export function isFatalLibraryStatus(status: LibraryAccessReport["status"]): boolean {
-  return status === "permission-denied" || status === "unresponsive";
+  return status !== "ok";
 }
 
 /**
- * Build the operator-facing explanation. It names the cause that was actually
- * observed, then both remedies in the order they are worth trying: move the
- * library onto local storage (robust) or grant the TCC entitlement (fragile).
+ * Build the operator-facing explanation. Only a readable library has nothing to
+ * report; every other verdict names the cause that was actually observed, then
+ * both remedies in the order they are worth trying: move the library onto local
+ * storage (robust) or grant the TCC entitlement (fragile).
  */
 export function describeLibraryAccessFailure(report: LibraryAccessReport): string[] {
+  if (report.status === "ok") return [];
+
   const failing = report.probes.filter((probe) => probe.status !== "ok");
   const lines: string[] = [];
 
@@ -317,9 +317,16 @@ export function describeLibraryAccessFailure(report: LibraryAccessReport): strin
     );
   } else if (report.status === "error") {
     lines.push("[Server] Fatal: the Calibre library could not be read.");
-  } else {
+  } else if (report.status === "missing") {
     lines.push(
-      "[Server] Warning: the Calibre library is not present; starting without a catalog.",
+      "[Server] Fatal: the Calibre library is not present, so this process " +
+        "would serve no catalog.",
+    );
+    lines.push(
+      "  Nothing is mounted at the library path, or an external volume mounted " +
+        "after this agent started and left the path dangling; the gate runs once " +
+        "at startup, so the process would come up HTTP-alive with no catalog and " +
+        "never retry.",
     );
   }
 
@@ -327,24 +334,22 @@ export function describeLibraryAccessFailure(report: LibraryAccessReport): strin
     lines.push(`  ${probe.status}: ${probe.target} (${probe.detail})`);
   }
 
-  if (isFatalLibraryStatus(report.status)) {
-    lines.push("  Remedies, in order of durability:");
-    lines.push(
-      "   1. Move the live library onto local storage and keep the external " +
-        "volume as a backup target only (recommended: no TCC dependency, and it " +
-        "survives reboots and runtime upgrades).",
-    );
-    lines.push(
-      "   2. Grant the runtime Full Disk Access in System Settings -> Privacy & " +
-        "Security -> Full Disk Access (fragile: the grant is keyed to the " +
-        "binary's hash and is lost on every upgrade), and confirm the volume is " +
-        "actually answering I/O.",
-    );
-    lines.push(
-      `  Probe deadline: ${resolveProbeTimeoutMs()}ms ` +
-        `(override with ${LIBRARY_PROBE_TIMEOUT_ENV}).`,
-    );
-  }
+  lines.push("  Remedies, in order of durability:");
+  lines.push(
+    "   1. Move the live library onto local storage and keep the external " +
+      "volume as a backup target only (recommended: no TCC dependency, and it " +
+      "survives reboots and runtime upgrades).",
+  );
+  lines.push(
+    "   2. Grant the runtime Full Disk Access in System Settings -> Privacy & " +
+      "Security -> Full Disk Access (fragile: the grant is keyed to the " +
+      "binary's hash and is lost on every upgrade), and confirm the volume is " +
+      "mounted and actually answering I/O.",
+  );
+  lines.push(
+    `  Probe deadline: ${resolveProbeTimeoutMs()}ms ` +
+      `(override with ${LIBRARY_PROBE_TIMEOUT_ENV}).`,
+  );
 
   return lines;
 }
@@ -363,18 +368,11 @@ export async function evaluateLibraryStartupGate(
 }
 
 /**
- * Convenience for callers that already hold a library directory path and want
- * the catalog database path derived from it.
+ * Render the gate for the operator log, one verdict/detail/remedy per line. A
+ * readable library renders nothing at all: the gate only has something to say
+ * when something failed.
  */
-export function catalogDbPathFor(libraryDir: string, explicitDbPath?: string | null): string {
-  if (explicitDbPath) return explicitDbPath;
-  return path.join(libraryDir, "metadata.db");
-}
-
-/**
- * Temp-directory helper shared with the tests: a place that is guaranteed to be
- * local, so a probe of it exercises the success path rather than a volume.
- */
-export function localScratchDir(prefix = "lighthouse-library-preflight-"): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+export function formatStartupGateMessage(gate: LibraryStartupGate): string | null {
+  if (gate.lines.length === 0) return null;
+  return gate.lines.join("\n");
 }

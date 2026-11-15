@@ -110,7 +110,7 @@ import {
   type HighlightRecord,
 } from "./highlights";
 import { openSqliteForStartup } from "./sqlite-open";
-import { evaluateLibraryStartupGate } from "./library-preflight";
+import { evaluateLibraryStartupGate, formatStartupGateMessage } from "./library-preflight";
 import {
   annotationSummary,
   deleteAnnotation,
@@ -8999,10 +8999,8 @@ if ((import.meta as any).main) {
     libraryDir: getCalibreLibraryDir(),
     dbPath: getCalibreDbPath(),
   });
-  const emitGate = libraryGate.exitCode === 0
-    ? (...lines: string[]) => console.warn(...lines)
-    : (...lines: string[]) => console.error(...lines);
-  emitGate(...libraryGate.lines);
+  const gateMessage = formatStartupGateMessage(libraryGate);
+  if (gateMessage) console.error(gateMessage);
   if (libraryGate.exitCode !== 0) process.exit(libraryGate.exitCode);
 
   // Open and prepare cache.db BEFORE binding the socket. A process that is not
