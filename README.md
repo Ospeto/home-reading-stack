@@ -291,6 +291,7 @@ The primary path is the **generated LightHouse plugin**: the server builds it on
 1. Open the LightHouse web app → **Guide** (book icon in the header, or the footer link) → **KOReader Plugin** tab.
 2. Tap **Download lighthouse.koplugin**. The archive is generated per request from the server you are browsing (`GET /api/koplugin/download`) and contains:
    - `lighthouse.koplugin/main.lua` and `_meta.lua` — the plugin itself,
+   - `lighthouse.koplugin/lighthouse_opds.lua`, `lighthouse_client.lua`, and `lighthouse_status.lua` — the pure-Lua OPDS parser, HTTP/HTTPS transport, and reading-progress merge,
    - `lighthouse.koplugin/lighthouse_stats.lua` — pure reading-statistics parsing and formatting,
    - `lighthouse.koplugin/lighthouse_config.lua` — the server origin you downloaded from plus the current server API key.
 
