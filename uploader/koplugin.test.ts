@@ -2363,24 +2363,17 @@ print("bare_finished=" .. tostring(bare.finishedThisYear))
 print("normalize_nontable=" .. tostring(Stats.normalize("nope")))
 print("normalize_nil=" .. tostring(Stats.normalize(nil)))
 
--- Summary fallback when the extended section is absent.
-local fallback = assert(Stats.normalize({
-  summary = { todayReadingSeconds = 60, thisWeekReadingSeconds = 120, totalReadingHours = 3 },
-}))
-print("fallback_today=" .. tostring(fallback.time.todaySeconds))
-print("fallback_hours=" .. tostring(fallback.time.totalHours))
-
--- A goal with no targets is not a goal; a target without percentages still is.
+-- A goal with no target is not a goal; a target is, even with no percentage.
 print("goal_untargeted=" .. tostring(Stats.normalize({
   goal = { year = 2026, targetBooks = 0, targetHours = nil, currentBooks = 4 },
 }).goal))
-local derived = assert(Stats.normalize({
+local targeted = assert(Stats.normalize({
   goal = { year = 2026, targetBooks = 20, currentBooks = 5 },
 }).goal)
-print("goal_derived_ratio=" .. tostring(derived.booksRatio))
-print("goal_books_label=" .. tostring(Stats.goalBooksLabel(derived)))
-print("ratio_clamped=" .. tostring(Stats.goalRatio(150, 0, 0)))
-print("ratio_missing=" .. tostring(Stats.goalRatio(nil, nil, nil)))
+print("goal_unpercented_ratio=" .. tostring(targeted.booksRatio))
+print("goal_books_label=" .. tostring(Stats.goalBooksLabel(targeted)))
+print("ratio_clamped=" .. tostring(Stats.goalRatio(150)))
+print("ratio_missing=" .. tostring(Stats.goalRatio(nil)))
 
 -- Labels ---------------------------------------------------------------------
 print("streak_label=" .. tostring(Stats.streakLabel(stats.streaks)))
@@ -2406,6 +2399,9 @@ print("goal_hours_only_books_ratio=" .. tostring(hours_only.booksRatio))
 -- "unavailable" is reserved for a count the server did not send at all.
 print("goal_missing_count_books=" .. tostring(Stats.goalBooksLabel({ targetHours = 10 })))
 print("goal_missing_count_hours=" .. tostring(Stats.goalHoursLabel({ targetBooks = 10 })))
+-- A target with no count is unavailable too, never a fabricated zero.
+print("goal_missing_count_targeted_books=" .. tostring(Stats.goalBooksLabel({ targetBooks = 25 })))
+print("goal_missing_count_targeted_hours=" .. tostring(Stats.goalHoursLabel({ targetHours = 100 })))
 print("day_duration=" .. tostring(Stats.dayDurationLabel(stats.heatmap[3])))
 print("day_duration_seconds=" .. tostring(Stats.dayDurationLabel({ seconds = 2700 })))
 print("day_duration_missing=" .. tostring(Stats.dayDurationLabel({})))
@@ -2538,12 +2534,8 @@ describe("plugin reading-stats formatting", () => {
     expect(out.normalize_nontable).toBe("nil");
     expect(out.normalize_nil).toBe("nil");
 
-    // A payload without the extended section still formats its summary.
-    expect(out.fallback_today).toBe("60");
-    expect(out.fallback_hours).toBe("3");
-
     expect(out.goal_untargeted).toBe("nil");
-    expect(out.goal_derived_ratio).toBe("0.25");
+    expect(out.goal_unpercented_ratio).toBe("nil");
     expect(out.goal_books_label).toBe("5/20");
     expect(out.ratio_clamped).toBe("1");
     expect(out.ratio_missing).toBe("nil");
@@ -2568,6 +2560,8 @@ describe("plugin reading-stats formatting", () => {
     // Absent count: no number to show, so the view says unavailable.
     expect(out.goal_missing_count_books).toBe("nil");
     expect(out.goal_missing_count_hours).toBe("nil");
+    expect(out.goal_missing_count_targeted_books).toBe("nil");
+    expect(out.goal_missing_count_targeted_hours).toBe("nil");
     expect(out.day_duration).toBe("45m");
     expect(out.day_duration_seconds).toBe("45m");
     expect(out.day_duration_missing).toBe("nil");

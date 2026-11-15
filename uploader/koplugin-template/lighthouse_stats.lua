@@ -17,8 +17,7 @@ Field shape of `GET /api/kosync/stats` (only the parts used here):
     {
         streaks = { currentStreak = 5, longestStreak = 12 },
         dailyReadingTime = {
-            todaySeconds = 2700, thisWeekSeconds = 15000,
-            totalSeconds = 477000, totalHours = 132.5, ...
+            todaySeconds = 2700, thisWeekSeconds = 15000, totalHours = 132.5, ...
         },
         heatmap = {
             { date = "2026-11-15", minutes = 45, seconds = 2700, level = 2,
@@ -32,8 +31,6 @@ Field shape of `GET /api/kosync/stats` (only the parts used here):
             currentBooks = 12, currentHours = 34,
             booksPercent = 48, hoursPercent = 34, isConfigured = true,
         },
-        summary = { todayReadingSeconds = 2700, totalReadingHours = 132.5,
-                    currentStreak = 5, longestStreak = 12, ... },
         finishedCount = 55,   -- all time, not this year
     }
 
@@ -210,16 +207,11 @@ function Stats.normalize(payload)
     end
 
     local daily = type(payload.dailyReadingTime) == "table" and payload.dailyReadingTime or nil
-    local summary = type(payload.summary) == "table" and payload.summary or nil
     local time = {
-        todaySeconds = numberOf(daily and daily.todaySeconds) or numberOf(summary and summary.todayReadingSeconds),
-        thisWeekSeconds = numberOf(daily and daily.thisWeekSeconds) or numberOf(summary and summary.thisWeekReadingSeconds),
-        totalSeconds = numberOf(daily and daily.totalSeconds) or numberOf(summary and summary.totalReadingSeconds),
-        totalHours = numberOf(daily and daily.totalHours) or numberOf(summary and summary.totalReadingHours),
+        todaySeconds = numberOf(daily and daily.todaySeconds),
+        thisWeekSeconds = numberOf(daily and daily.thisWeekSeconds),
+        totalHours = numberOf(daily and daily.totalHours),
     }
-    if not time.totalHours and time.totalSeconds then
-        time.totalHours = round(time.totalSeconds / 360) / 10
-    end
     if time.todaySeconds or time.thisWeekSeconds or time.totalHours then
         stats.time = time
     end
@@ -260,8 +252,8 @@ function Stats.normalize(payload)
                 currentHours = currentHours,
                 -- Ratios feed Status.progressBar, the plugin's existing bar
                 -- renderer, so the goal looks like every other progress row.
-                booksRatio = Stats.goalRatio(booksPercent, currentBooks, targetBooks),
-                hoursRatio = Stats.goalRatio(hoursPercent, currentHours, targetHours),
+                booksRatio = Stats.goalRatio(booksPercent),
+                hoursRatio = Stats.goalRatio(hoursPercent),
             }
         end
     end
@@ -292,24 +284,13 @@ function Stats.normalize(payload)
     return stats
 end
 
---- Clamps a goal percentage into a 0..1 ratio for the progress-bar renderer.
--- Prefers the server's own percentage so device and web agree, and falls back
--- to current/target when only the raw counts arrived.
+--- Clamps the server's goal percentage into a 0..1 ratio for the progress bar.
 -- @number percent server percentage, 0..100
--- @number current books or hours read
--- @number target goal target
--- @treturn number|nil
-function Stats.goalRatio(percent, current, target)
-    local ratio
+-- @treturn number|nil nil when the server sent no percentage
+function Stats.goalRatio(percent)
     local value = numberOf(percent)
-    if value then
-        ratio = value / 100
-    else
-        local read = numberOf(current)
-        local goal = numberOf(target)
-        if not read or not goal or goal <= 0 then return nil end
-        ratio = read / goal
-    end
+    if not value then return nil end
+    local ratio = value / 100
     if ratio < 0 then return 0 end
     if ratio > 1 then return 1 end
     return ratio
@@ -342,35 +323,31 @@ function Stats.streakLabel(streaks)
 end
 
 --- "12/25" against a book target, or the bare "12 read" when the goal has
--- only an hours target but the server still sent the book count. The view's row
--- already carries the "Books" label, so the value does not repeat it.
+-- only an hours target. The view's row already carries the "Books" label, so
+-- the value does not repeat it.
 -- @tparam table goal normalized goal section
--- @treturn string|nil nil only when the server did not send the count either
+-- @treturn string|nil nil when the server did not send the count
 function Stats.goalBooksLabel(goal)
     if type(goal) ~= "table" then return nil end
     local current = goal.currentBooks
-    if goal.targetBooks then
-        return string.format("%d/%d", round(current or 0), round(goal.targetBooks))
-    end
     if not current then return nil end
+    if goal.targetBooks then
+        return string.format("%d/%d", round(current), round(goal.targetBooks))
+    end
     return string.format("%d read", round(current))
 end
 
 --- "34h/100h" against an hours target, or "34h read" when the goal has only
--- a book target but the server still sent the hours count.
+-- a book target.
 -- @tparam table goal normalized goal section
--- @treturn string|nil nil only when the server did not send the count either
+-- @treturn string|nil nil when the server did not send the count
 function Stats.goalHoursLabel(goal)
     if type(goal) ~= "table" then return nil end
-    local current = goal.currentHours
-    if goal.targetHours then
-        local current_text = Stats.formatHours(current or 0)
-        local target = Stats.formatHours(goal.targetHours)
-        if not current_text or not target then return nil end
-        return string.format("%s/%s", current_text, target)
-    end
-    local current_text = Stats.formatHours(current)
+    local current_text = Stats.formatHours(goal.currentHours)
     if not current_text then return nil end
+    if goal.targetHours then
+        return string.format("%s/%s", current_text, Stats.formatHours(goal.targetHours))
+    end
     return string.format("%s read", current_text)
 end
 
