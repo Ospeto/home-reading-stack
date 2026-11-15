@@ -125,6 +125,7 @@ import {
 import {
   buildReadingStatsPayload,
   getReadingGoal,
+  normalizePercentage,
   queryKosyncRecords,
   setReadingGoal,
 } from "./reading-stats";
@@ -2608,9 +2609,7 @@ function getOpdsProgressByBookId(books: any[]): Map<number, number> | null {
     for (const row of rows) {
       const bookId = hashToBookId.get(String(row?.document ?? ""));
       if (bookId === undefined) continue;
-      const pct = Number(row?.percentage);
-      if (!Number.isFinite(pct)) continue;
-      const ratio = Math.max(0, Math.min(1, pct));
+      const ratio = normalizePercentage(row?.percentage);
       const previous = byBook.get(bookId);
       if (previous === undefined || ratio > previous) byBook.set(bookId, ratio);
     }

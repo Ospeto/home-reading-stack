@@ -5542,7 +5542,9 @@ exit 0
       process.env.CACHE_DB_PATH = cacheDbPath;
 
       try {
-        // 202 is finished, 204 is only half read, 203/205/206/201 have no record.
+        // 202 is finished, 204 is only half read, 203/206/201 have no record.
+        // 205 reports 100 (integer percent) and 203 reports 45, so both encodings
+        // of `percentage` are present in the same table.
         const kdb = new Database(kosyncDbPath);
         kdb.run(`
           CREATE TABLE progress (
@@ -5559,7 +5561,7 @@ exit 0
           );
         `);
         kdb.run(
-          "INSERT INTO progress (document, percentage, timestamp) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)",
+          "INSERT INTO progress (document, percentage, timestamp) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)",
           [
             "hash-202",
             1.0,
@@ -5572,6 +5574,12 @@ exit 0
             Date.now(),
             "hash-stale-206",
             1.0,
+            Date.now(),
+            "hash-203",
+            45,
+            Date.now(),
+            "hash-205",
+            100,
             Date.now(),
           ],
         );
@@ -5586,6 +5594,14 @@ exit 0
           "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
           ["/tmp/Banana Boat.epub", 1, "hash-204", 204, "Banana Boat", "Alice Adams", 0],
         );
+        cdb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          ["/tmp/Mango Rain.epub", 1, "hash-203", 203, "Mango Rain", "Carl Cook", 0],
+        );
+        cdb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          ["/tmp/Cherry Bomb.epub", 1, "hash-205", 205, "Cherry Bomb", "Dave Dunn", 0],
+        );
         // Superseded row from before a metadata edit: the same id no longer owns
         // this title, so its 100% progress must not hide book 206.
         cdb.run(
@@ -5593,13 +5609,14 @@ exit 0
           ["/tmp/Date Night.epub", 1, "hash-stale-206", 206, "Date Night (old)", "Eve Evans", 0],
         );
 
-        // Finished book 202 drops out; the in-progress book 204 stays, and the
+        // Finished 202 (fraction) and 205 (integer percent) drop out; 203 stays
+        // because 45 means 45%, the in-progress book 204 stays, and the
         // stale-identity row leaves 206 in the unread shelf.
-        expect(await fetchEntryIds("?filter=unread")).toEqual([206, 205, 204, 203, 201]);
+        expect(await fetchEntryIds("?filter=unread")).toEqual([206, 204, 203, 201]);
       } finally {
         const cdb = getCacheDb();
         cdb.run(
-          "DELETE FROM file_hashes WHERE hash IN ('hash-202', 'hash-204', 'hash-stale-206')",
+          "DELETE FROM file_hashes WHERE hash IN ('hash-202', 'hash-203', 'hash-204', 'hash-205', 'hash-stale-206')",
         );
         if (origKosyncDb !== undefined) process.env.KOSYNC_DB_PATH = origKosyncDb;
         else delete process.env.KOSYNC_DB_PATH;
