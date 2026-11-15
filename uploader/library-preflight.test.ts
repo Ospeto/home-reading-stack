@@ -209,7 +209,12 @@ describe("real probe against local storage", () => {
     const missingDb = path.join(dir, "metadata.db");
     const gate = await evaluateLibraryStartupGate({ libraryDir: dir, dbPath: missingDb });
     expect(gate.exitCode).toBe(1);
-    expect(formatStartupGateMessage(gate)).toContain(`missing: ${missingDb}`);
+    const message = formatStartupGateMessage(gate);
+    expect(message).toContain(`missing: ${missingDb}`);
+    // The readable root rules out the unmounted-volume explanation.
+    expect(message).toContain("no catalog database");
+    expect(message).toContain("library directory itself is readable");
+    expect(message).not.toContain("Nothing is mounted at the library path");
   });
 
   it("refuses to start when the probe fails for an unclassified reason", async () => {

@@ -132,7 +132,7 @@ export function resolveProbeTimeoutMs(
  * react to SIGTERM, so the kill is unconditional and the wait afterwards is
  * bounded too.
  */
-export const spawnProbe: ProbeRunner = async (argv, timeoutMs) => {
+const spawnProbe: ProbeRunner = async (argv, timeoutMs) => {
   let child: ReturnType<typeof Bun.spawn>;
   try {
     child = Bun.spawn(argv, {
@@ -318,15 +318,26 @@ export function describeLibraryAccessFailure(report: LibraryAccessReport): strin
   } else if (report.status === "error") {
     lines.push("[Server] Fatal: the Calibre library could not be read.");
   } else if (report.status === "missing") {
-    lines.push(
-      "[Server] Fatal: the Calibre library is not present, so this process " +
-        "cannot serve a catalog.",
+    const rootMissing = report.probes.some(
+      (probe) => probe.target === report.libraryDir && probe.status !== "ok",
     );
     lines.push(
-      "  Nothing is mounted at the library path, or an external volume mounted " +
-        "after this agent started and left the path dangling. The gate runs once " +
-        "at startup and never retries, so the process exits here instead of " +
-        "binding its port with no catalog.",
+      rootMissing
+        ? "[Server] Fatal: the Calibre library is not present, so this process " +
+            "cannot serve a catalog."
+        : "[Server] Fatal: the Calibre library has no catalog database, so this " +
+            "process cannot serve a catalog.",
+    );
+    lines.push(
+      rootMissing
+        ? "  Nothing is mounted at the library path, or an external volume " +
+            "mounted after this agent started and left the path dangling."
+        : "  The library directory itself is readable, so the volume answered; " +
+            "the catalog database inside it is absent or was moved.",
+    );
+    lines.push(
+      "  The gate runs once at startup and never retries, so the process exits " +
+        "here instead of binding its port with no catalog.",
     );
   }
 

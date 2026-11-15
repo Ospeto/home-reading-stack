@@ -93,7 +93,7 @@ A live PID in `launchctl list` plus a listening port is **not** proof the upload
 ```bash
 # 1. Is the process serving, or only listening?
 launchctl list | grep com.ospeto.book-uploader
-curl -s -m 5 -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8086/api/books   # 000 = bound but not serving
+curl -s -m 5 -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8086/api/books   # 000 = nothing listening (gate refused) or bound but wedged
 
 # 2. Read the preflight verdict from the agent's log
 #    "Fatal:" means it refused to bind: missing | permission-denied | unresponsive | error
@@ -108,7 +108,7 @@ cat /Volumes/Ospeto_SSD/Lighthouse_Agent_Library/metadata.db >/dev/null && echo 
 #    onto local storage and keep the SSD as a backup target. See INC-11 in INCIDENTS.md.
 ```
 
-**Expected steady state while the library is unreadable.** The generated `com.ospeto.book-uploader` plist sets `KeepAlive` with no `SuccessfulExit` predicate, so a persisting fatal verdict is a launchd respawn loop (roughly every 10 s), not one failure: `launchctl list` shows a changing PID and `~/Library/Logs/uploader.log` accumulates the same `Fatal:` block once per attempt. That repetition is the intended loud signal — not a second bug, not a start-order race, and not evidence of a crash loop to be chased. Nothing rotates that log, so it keeps growing until the host action in INC-11 lands. Stop the loop deliberately while you work on the cause:
+**Expected steady state while the library is unreadable.** The generated `com.ospeto.book-uploader` plist sets `KeepAlive` with no `SuccessfulExit` predicate, so a persisting fatal verdict is a launchd respawn loop (roughly every 10 s), not one failure: `launchctl list` shows a changing PID and `~/Library/Logs/uploader.log` accumulates the same `Fatal:` block once per attempt. That repetition is the intended loud signal — not a second bug, not a start-order race, and not evidence of a crash loop to be chased. It continues until the host action in INC-11 lands, and the log stays bounded while it does: `reading-stack-backup` runs `scripts/backup-daily.sh` log hygiene daily, which caps `uploader.log` at 10 MB (the Calibre step there is a `[ -f ]` guard that skips when the database is absent, so the rotation is still reached in this state). Stop the loop deliberately while you work on the cause:
 
 ```bash
 bin/lighthouse down            # or: launchctl bootout gui/$(id -u)/com.ospeto.book-uploader
