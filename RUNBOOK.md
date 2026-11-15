@@ -18,7 +18,8 @@ What this means:
 
 - **Do not trust any credential read from this repository's history.** Anyone who cloned or forked this repository before the scrub should treat the values in their copy as public and already compromised.
 - **Two exposures are accepted, not fixed.** The salt history discloses is the salt production still hashes with, and the `moe` `X-Auth-Key` keeps working until that password changes. Any `koreader-sync.db` copy outside this repository (a backup on other storage, a device restore, a later leak) is therefore crackable offline against a known salt. Only the bot token has been revoked.
-- **The rule this repository enforces is not what production does.** `KOSYNC_PASSWORD_SALT` must be set explicitly, with no default, and production reads its salt from the launchd plist rather than from `docker-compose.yml` or this runbook. If you deploy from a clone, generate your own random salt (for example `openssl rand -hex 24`) and never reuse any value that appears in this repository's history - production itself currently reuses exactly such a value. **One exception: restoring an existing `koreader-sync.db` requires the salt that database was hashed with.** A fresh salt leaves every stored hash unverifiable, and users are locked out with HTTP `401` on `/users/auth` with no startup error (see the next bullet).
+- **Fail-closed is enforced by this repository's compose file, not by the launchd server.** `docker-compose.yml` refuses to start unless `KOSYNC_PASSWORD_SALT` is non-empty, and production reads its salt from the launchd plist rather than from `docker-compose.yml` or this runbook. The server on the launchd path (`/Users/ospeto/kosync-server`) has no such guard: with `PASSWORD_SALT` unset or empty it falls back to the published placeholder `default_salt_change_in_production` and silently hashes passwords with that guessable string, so an unset salt there is a misconfiguration, not a safe default. Removing that fallback belongs in that server's source, outside this repository.
+- **Generate your own salt, with one restore exception.** If you deploy from a clone, generate your own random salt (for example `openssl rand -hex 24`) and never reuse any value that appears in this repository's history - production itself currently reuses exactly such a value. **The exception: restoring an existing `koreader-sync.db` requires the salt that database was hashed with.** A fresh salt leaves every stored hash unverifiable, and users are locked out with HTTP `401` on `/users/auth` with no startup error (see the next bullet).
 - **Changing the salt invalidates every existing password hash** in `koreader-sync.db`; every user must reset their password afterwards using the recovery runbooks below. That one-way effect is exactly why the salt is a deliberate, operator-supplied secret rather than a checked-in default.
 - **This is not a history rewrite.** Git history stays intact instead of being force-pushed away across every branch and fork, so every value ever committed stays readable to anyone who clones this repository. See the Exposed Credentials Policy at the end of this runbook.
 
@@ -167,7 +168,7 @@ KOSync client authentication in KOReader and Readest adheres to the following sp
    - The client sends this 32-character lowercase hex string as `password` (on registration/login) or in the `X-Auth-Key` HTTP header (on synced reads/updates) alongside `X-Auth-User: <username>`.
 
 2. **Server-Side Salted Hash (`Bun.password.hash`)**:
-   - The KOSync server (running Bun) reads `PASSWORD_SALT` from the environment. There is no built-in default: the salt must be set explicitly, because it is a secret and a wrong value silently produces unusable password hashes.
+   - The KOSync server (running Bun) reads `PASSWORD_SALT` from the environment. The server source this runbook deploys (`/Users/ospeto/kosync-server`) is **not** fail-closed: with the variable unset or empty it falls back to the published placeholder `default_salt_change_in_production`, silently hashing passwords with a guessable string, so an unset salt there is a misconfiguration to fix rather than a safe default. Only the docker-compose path in this repository refuses to start without an explicit salt; dropping the server-side fallback belongs in that server's source, outside this repository.
    - Changing `PASSWORD_SALT` invalidates every existing password hash in `koreader-sync.db`. Every user must then reset their password with the recovery runbook below, using the new salt.
    - The server concatenates the client userkey and salt:
      $$\text{saltedPassword} = \text{userkey} + \text{PASSWORD\_SALT}$$
@@ -612,7 +613,7 @@ Both KOReader and Readest use client-side MD5 password hashing:
    ```
 
 3. **Server Verification**:
-   - The Bun server reads `PASSWORD_SALT` from the environment. It has no built-in default and must be set explicitly; changing it invalidates every existing password hash.
+   - The Bun server reads `PASSWORD_SALT` from the environment. It has no fail-closed guard: an unset or empty value falls back to the published placeholder `default_salt_change_in_production`, which must be treated as a misconfiguration rather than a working default. Changing the salt invalidates every existing password hash.
    - It concatenates `userkey + salt` and checks against the stored argon2id hash using `await Bun.password.verify(userkey + salt, user.password)`.
 
 #### 5. Password Recovery / Reset Runbook in SQLite

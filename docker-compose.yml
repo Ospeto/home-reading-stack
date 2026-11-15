@@ -5,8 +5,11 @@
 # and disaster recovery. Synchronized with native macOS LaunchAgent architecture.
 #
 # Usage:
-#   cp .env.example .env
-#   docker compose up -d
+#   1. cp .env.example .env
+#   2. set KOSYNC_PASSWORD_SALT in .env to your own value
+#      (e.g. openssl rand -hex 24). It ships empty and has no default,
+#      so `docker compose up -d` refuses to start until it is set.
+#   3. docker compose up -d
 # ==============================================================================
 
 services:
