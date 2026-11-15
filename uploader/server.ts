@@ -2561,8 +2561,7 @@ function createOpdsComparator(sort: OpdsSortKey): (a: any, b: any) => number {
 /**
  * Resolves the OPDS `filter` parameter against data the catalog actually has.
  *
- * `unread` and a tag value are the documented filters (`tag:<value>` is
- * accepted as an explicit spelling of the same thing). Anything else - other
+ * `unread` and a tag value are the documented filters. Anything else - other
  * words, or a tag no book carries - resolves to null so the caller serves the
  * unfiltered catalog. An e-reader asking for a filter this server does not
  * understand must not be handed an empty shelf.
@@ -2575,11 +2574,7 @@ function resolveOpdsFilter(
   if (!value) return null;
   if (value.toLowerCase() === "unread") return { kind: "unread" };
 
-  const tagValue = value.toLowerCase().startsWith("tag:")
-    ? value.slice(4).trim()
-    : value;
-  if (!tagValue) return null;
-  const wanted = tagValue.toLowerCase();
+  const wanted = value.toLowerCase();
   const known = books.some(
     (b: any) =>
       Array.isArray(b?.tags) &&
@@ -2599,23 +2594,12 @@ function resolveOpdsFilter(
  * so `filter=unread` degrades to no filtering instead of silently declaring the
  * whole library unread.
  */
-function getOpdsProgressByBookId(): Map<number, number> | null {
+function getOpdsProgressByBookId(books: any[]): Map<number, number> | null {
   if (!fs.existsSync(getKosyncDbPath())) return null;
 
   const hashToBookId = new Map<string, number>();
-  try {
-    const rows = getCacheDb()
-      .query(
-        "SELECT hash, book_id FROM file_hashes WHERE hash IS NOT NULL AND book_id IS NOT NULL",
-      )
-      .all() as any[];
-    for (const row of rows) {
-      if (typeof row.hash === "string" && row.hash && typeof row.book_id === "number") {
-        hashToBookId.set(row.hash, row.book_id);
-      }
-    }
-  } catch (_e) {
-    void _e;
+  for (const [hash, entry] of Object.entries(getCalibreHashMap(books).map)) {
+    if (hash && typeof entry?.id === "number") hashToBookId.set(hash, entry.id);
   }
 
   return withKosyncDb((db) => {
@@ -4534,7 +4518,7 @@ async function handleRequestCore(
       : null;
 
     const rawFilter = url.searchParams.get("filter") ?? "";
-    const opdsFilter = resolveOpdsFilter(rawFilter, filteredBooks);
+    const opdsFilter = resolveOpdsFilter(rawFilter, books);
 
     let matchedBooks = filteredBooks;
     if (opdsFilter?.kind === "tag") {
@@ -4548,7 +4532,7 @@ async function handleRequestCore(
           ),
       );
     } else if (opdsFilter?.kind === "unread") {
-      const progressByBookId = getOpdsProgressByBookId();
+      const progressByBookId = getOpdsProgressByBookId(books);
       if (progressByBookId) {
         matchedBooks = matchedBooks.filter((b: any) => {
           const pct = progressByBookId.get(b?.id);

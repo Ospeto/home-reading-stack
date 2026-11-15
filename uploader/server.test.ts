@@ -5487,7 +5487,6 @@ exit 0
       // Exact tag membership, case-insensitively, in the default browse order.
       expect(await fetchEntryIds("?filter=Fiction")).toEqual([204, 202, 201]);
       expect(await fetchEntryIds("?filter=fiction")).toEqual([204, 202, 201]);
-      expect(await fetchEntryIds("?filter=tag:Fiction")).toEqual([204, 202, 201]);
       // Tags match as whole values, never as substrings of another tag.
       expect(await fetchEntryIds("?filter=Science+Fiction")).toEqual([205]);
       expect(await fetchEntryIds("?filter=Light+Novel")).toEqual([202]);
@@ -5496,6 +5495,18 @@ exit 0
       expect(await fetchEntryIds("?filter=nonexistent-tag")).toEqual([206, 205, 204, 203, 202, 201]);
       expect(await fetchEntryIds("?filter=unreadish")).toEqual([206, 205, 204, 203, 202, 201]);
       expect(await fetchEntryIds("?filter=")).toEqual([206, 205, 204, 203, 202, 201]);
+    });
+
+    it("resolves a filter against the catalog, not the search-matched subset", async () => {
+      setupFakeCalibreDatabase(SORT_FILTER_BOOKS);
+
+      // "Alphabet Series" matches 202/204/206/201, none tagged Burmese Literature,
+      // so the intersection is empty instead of the whole search result.
+      expect(await fetchEntryIds("?q=Alphabet+Series&filter=Burmese+Literature")).toEqual([]);
+      // The same filter value still narrows searches whose matches carry the tag.
+      expect(await fetchEntryIds("?q=Alphabet+Series&filter=Fiction")).toEqual([204, 202, 201]);
+      // And an unrelated search must not change how the filter itself resolves.
+      expect(await fetchEntryIds("?q=Zebra&filter=Burmese+Literature")).toEqual([]);
     });
 
     it("combines filter and sort before paging, carrying both into the next link", async () => {
@@ -5548,8 +5559,21 @@ exit 0
           );
         `);
         kdb.run(
-          "INSERT INTO progress (document, percentage, timestamp) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)",
-          ["hash-202", 1.0, Date.now(), "hash-204", 0.42, Date.now(), "hash-unmapped", 0.99, Date.now()],
+          "INSERT INTO progress (document, percentage, timestamp) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)",
+          [
+            "hash-202",
+            1.0,
+            Date.now(),
+            "hash-204",
+            0.42,
+            Date.now(),
+            "hash-unmapped",
+            0.99,
+            Date.now(),
+            "hash-stale-206",
+            1.0,
+            Date.now(),
+          ],
         );
         kdb.close();
 
@@ -5562,12 +5586,21 @@ exit 0
           "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
           ["/tmp/Banana Boat.epub", 1, "hash-204", 204, "Banana Boat", "Alice Adams", 0],
         );
+        // Superseded row from before a metadata edit: the same id no longer owns
+        // this title, so its 100% progress must not hide book 206.
+        cdb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          ["/tmp/Date Night.epub", 1, "hash-stale-206", 206, "Date Night (old)", "Eve Evans", 0],
+        );
 
-        // Finished book 202 drops out; the in-progress book 204 stays.
+        // Finished book 202 drops out; the in-progress book 204 stays, and the
+        // stale-identity row leaves 206 in the unread shelf.
         expect(await fetchEntryIds("?filter=unread")).toEqual([206, 205, 204, 203, 201]);
       } finally {
         const cdb = getCacheDb();
-        cdb.run("DELETE FROM file_hashes WHERE hash IN ('hash-202', 'hash-204')");
+        cdb.run(
+          "DELETE FROM file_hashes WHERE hash IN ('hash-202', 'hash-204', 'hash-stale-206')",
+        );
         if (origKosyncDb !== undefined) process.env.KOSYNC_DB_PATH = origKosyncDb;
         else delete process.env.KOSYNC_DB_PATH;
         if (origCacheDb !== undefined) process.env.CACHE_DB_PATH = origCacheDb;
