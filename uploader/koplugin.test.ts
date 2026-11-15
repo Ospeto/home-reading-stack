@@ -883,15 +883,19 @@ local scenario = assert(arg[2], "scenario required")
 local workdir = assert(arg[3], "workdir required")
 
 local http_urls, https_urls, timeouts = {}, {}, {}
+-- Per-hop record of whether the request carried X-API-Key ("Y"/"N"), so the
+-- cross-host stripping behavior can be asserted without guessing at headers.
+local http_keys, https_keys = {}, {}
 
 local function report(label, value)
   print(label .. "=" .. tostring(value))
 end
 
-local function make_transport(calls, handler)
+local function make_transport(calls, key_log, handler)
   return {
     request = function(request)
       calls[#calls + 1] = request.url
+      key_log[#key_log + 1] = (request.headers or {})["X-API-Key"] and "Y" or "N"
       return handler(request)
     end,
   }
@@ -961,10 +965,23 @@ elseif scenario == "download" then
   end
 elseif scenario == "plain_download" then
   handler = function(request) return emit(request, string.rep("E", 900)) end
+elseif scenario == "sink_write_failure" then
+  -- Two chunks per hop: the first write lands, the second hits a full disk.
+  -- Mirrors real LuaSocket, which reports a failing sink as (nil, errmsg).
+  handler = function(request)
+    if request.url == "https://wan.test/api/books/7/download/epub" then
+      local ok1, err1 = request.sink(string.rep("E", 400))
+      if not ok1 then return nil, err1 end
+      local ok2, err2 = request.sink(string.rep("E", 400))
+      if not ok2 then return nil, err2 end
+      return 1, 200, {}
+    end
+    return 1, 404, {}
+  end
 end
 
-package.preload["socket.http"] = function() return make_transport(http_urls, handler) end
-package.preload["socket.https"] = function() return make_transport(https_urls, handler) end
+package.preload["socket.http"] = function() return make_transport(http_urls, http_keys, handler) end
+package.preload["socket.https"] = function() return make_transport(https_urls, https_keys, handler) end
 package.preload["socketutil"] = function()
   return {
     set_timeout = function(_, block, total)
@@ -1005,6 +1022,30 @@ if scenario == "https_missing" then
   package.preload["socket.https"] = function() error("no TLS in this build") end
 end
 
+if scenario == "sink_write_failure" then
+  -- Replace the wb file with a handle whose write fails after one chunk, so
+  -- the client's own fileSink sees a mid-stream write failure (disk full).
+  local real_io = io
+  local writes_left = 1
+  _G.io = {
+    open = function(target, mode)
+      if mode == "wb" then
+        return {
+          write = function(_, chunk)
+            if writes_left > 0 then
+              writes_left = writes_left - 1
+              return #chunk
+            end
+            return nil, "No space left on device"
+          end,
+          close = function() return true end,
+        }
+      end
+      return real_io.open(target, mode)
+    end,
+  }
+end
+
 local Client = assert(loadfile(client_path))()
 
 local config_http = { base_url = "http://lan.test", api_key = "test-key", plugin_version = "test" }
@@ -1027,10 +1068,13 @@ if scenario == "schemes" or scenario == "https_missing" then
   report("https_err", https_err)
   report("http_calls", #http_urls)
   report("https_calls", #https_urls)
+  report("http_keys", table.concat(http_keys, ""))
+  report("https_keys", table.concat(https_keys, ""))
   report("http_url", http_urls[1])
   report("https_url", https_urls[1])
   report("timeouts", table.concat(timeouts, "|"))
-elseif scenario == "download" or scenario == "html" or scenario == "small_file" or scenario == "plain_download" then
+elseif scenario == "download" or scenario == "html" or scenario == "small_file"
+    or scenario == "plain_download" or scenario == "sink_write_failure" then
   local target = workdir .. "/book.epub"
   local config_used = config_http
   if scenario ~= "plain_download" then
@@ -1050,6 +1094,8 @@ elseif scenario == "download" or scenario == "html" or scenario == "small_file" 
   report("file_only_final", content ~= "" and content:match("^E+$") ~= nil)
   report("http_calls", #http_urls)
   report("https_calls", #https_urls)
+  report("http_keys", table.concat(http_keys, ""))
+  report("https_keys", table.concat(https_keys, ""))
   report("timeouts", table.concat(timeouts, "|"))
 else
   local body, err = Client.get(config_http, "/api/opds")
@@ -1057,6 +1103,8 @@ else
   report("err", err)
   report("http_calls", #http_urls)
   report("https_calls", #https_urls)
+  report("http_keys", table.concat(http_keys, ""))
+  report("https_keys", table.concat(https_keys, ""))
   report("http_last", http_urls[#http_urls])
   report("https_last", https_urls[#https_urls])
 end
@@ -1134,6 +1182,23 @@ describe("plugin HTTP client redirect handling", () => {
     // Hop 2 is https://wan.test/api/opds, hop 3 is the relative /v2/opds.
     expect(out.https_calls).toBe("2");
     expect(out.https_last).toBe("https://wan.test/v2/opds");
+  });
+
+  it("strips X-API-Key on a cross-host hop but keeps it on the first request", () => {
+    if (!LUA_BINARY) return;
+    const out = runClientScenario("redirect");
+    // Hop 1 (same origin as the config) carries the server API key.
+    expect(out.http_keys).toBe("Y");
+    // Hop 2 crosses to wan.test (captive-portal style) and hop 3 stays there:
+    // the key must be dropped at the cross-host boundary and never restored.
+    expect(out.https_keys).toBe("NN");
+  });
+
+  it("keeps X-API-Key when a download redirect stays on the same host", () => {
+    if (!LUA_BINARY) return;
+    const out = runClientScenario("download");
+    // Both https hops resolve under https://wan.test, so the key survives.
+    expect(out.https_keys).toBe("YY");
   });
 
   it("resolves a relative Location against the request directory", () => {
@@ -1218,6 +1283,18 @@ describe("plugin EPUB download", () => {
     expect(out.https_calls).toBe("0");
     expect(out.file_size).toBe("900");
     expect(out.timeouts).toBe("15/300");
+  });
+
+  it("labels a mid-stream sink write failure as file_error, not a network error", () => {
+    if (!LUA_BINARY) return;
+    const out = runClientScenario("sink_write_failure");
+    expect(out.ok).toBe("nil");
+    // A full disk is a storage failure: the client must keep the sink's own
+    // file_error code instead of relabeling it network_error (wrong advice).
+    expect((out.err ?? "").startsWith("file_error:")).toBe(true);
+    expect(out.err).toContain("No space left on device");
+    // The partial download must not survive as a broken book.
+    expect(out.file_exists).toBe("false");
   });
 });
 

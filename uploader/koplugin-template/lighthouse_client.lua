@@ -236,7 +236,9 @@ local function requestOnce(url, sink, headers)
         -- Sink write failures already carry their own code; do not relabel a
         -- full disk as a network outage.
         local detail = tostring(code or "unknown")
-        if detail:find("^file_error:", 1, true) then
+        -- Plain-string prefix check: string.find with plain=true treats "^"
+        -- as a literal caret, so an anchored find would never match here.
+        if detail:sub(1, 11) == "file_error:" then
             return nil, nil, detail
         end
         return nil, nil, string.format("network_error: %s", detail)
