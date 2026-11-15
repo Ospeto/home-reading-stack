@@ -16,12 +16,16 @@ What it gives you, on top of the built-in OPDS browser:
     (`GET /api/kosync/active`), matched on Calibre id, filename or title.
   * Calibre rating per book (0–10 → five stars), served by the OPDS feed.
   * A "Currently reading" shelf of every active device session.
+  * A "Reading stats" view mirroring the web Reading Statistics modal: streak,
+    reading time, books finished this year, library health, the yearly goal and
+    a monochrome 26-week activity heatmap (`GET /api/kosync/stats`).
 
 It deliberately uses only endpoints that already existed before this plugin:
 `/api/opds`, `/api/books/<id>/download/epub`, `/api/books/<id>/cover`,
-`/api/kosync/active`. Authentication reuses the server's existing scheme
-(`X-API-Key`, or an allowed WAN origin when no key is configured), so a later
-server-side change to scoped keys does not need this plugin to be rewritten.
+`/api/kosync/active`, `/api/kosync/stats`. Authentication reuses the server's
+existing scheme (`X-API-Key`, or an allowed WAN origin when no key is
+configured), so a later server-side change to scoped keys does not need this
+plugin to be rewritten.
 
 @module koplugin.lighthouse
 ]]
@@ -50,6 +54,7 @@ local T = ffiUtil.template
 local config = require("lighthouse_config")
 local Client = require("lighthouse_client")
 local OPDS = require("lighthouse_opds")
+local Stats = require("lighthouse_stats")
 local Status = require("lighthouse_status")
 
 local LightHouse = WidgetContainer:extend{
@@ -91,6 +96,8 @@ local function describeError(err)
         return _("This KOReader build has no TLS support, so it cannot reach an https:// server. Use the LAN http:// address instead.")
     elseif code == "empty_response" then
         return _("The server returned an empty file.")
+    elseif code == "invalid_response" then
+        return _("The server sent reading statistics this plugin could not read. Download the plugin again from the LightHouse web app (Guide → KOReader plugin).")
     elseif code == "html_response" then
         return _("The server returned a web page instead of the file. Check the server address, or open the web app and sign in again.")
     elseif code:match("^file_error") then
@@ -252,6 +259,10 @@ function LightHouse:addToMainMenu(menu_items)
                 callback = function() self:showReading() end,
             },
             {
+                text = _("Reading stats"),
+                callback = function() self:showStats() end,
+            },
+            {
                 text = _("Choose download folder…"),
                 callback = function() self:chooseDownloadDir() end,
             },
@@ -292,6 +303,7 @@ function LightHouse:showConnection(configured)
         _("API key:") .. " " .. ((config.api_key and config.api_key ~= "") and _("configured") or _("none (LAN / trusted origin)")),
         _("Catalog endpoint:") .. " /api/opds",
         _("Progress endpoint:") .. " /api/kosync/active",
+        _("Statistics endpoint:") .. " /api/kosync/stats",
         _("Download folder:") .. " " .. self:getDownloadDir(),
         _("Plugin version:") .. " " .. tostring(config.plugin_version or "unknown"),
         _("Generated:") .. " " .. (config.generated_at ~= "" and config.generated_at or _("manual copy")),
@@ -605,6 +617,187 @@ function LightHouse:showReading()
     end
 
     self:showMenu(_("Currently reading"), items)
+end
+
+--- Fetches and normalizes `GET /api/kosync/stats`.
+-- Exactly one request per view open: the payload already carries every derived
+-- number (sessions, streaks, daily time, heatmap, health, goal), so the device
+-- recomputes nothing and never polls. `JSON.decode` runs inside this function
+-- so `withSpinner` turns a malformed body into a notice instead of a raise.
+-- @treturn table|nil normalized stats
+-- @treturn string|nil error code
+function LightHouse:fetchStats()
+    local body, err = Client.get(config, "/api/kosync/stats")
+    if type(body) ~= "string" or body == "" then
+        return nil, err or "invalid_response"
+    end
+    local stats = Stats.normalize(JSON.decode(body))
+    if not stats then return nil, "invalid_response" end
+    return stats
+end
+
+--- Non-tappable section heading for the stats view.
+-- @string text
+-- @treturn table Menu item
+local function statsSection(text)
+    return { text = text, enabled = false, callback = function() end }
+end
+
+--- Read-only stats row: label on the left, value on the right.
+-- A value the server did not send renders "unavailable"; zero stays zero.
+-- @string label
+-- @string|nil value
+-- @treturn table Menu item
+local function statsRow(label, value)
+    return {
+        text = label,
+        mandatory = value or _("unavailable"),
+        callback = function() end,
+    }
+end
+
+--- Shade key for the heatmap, built from the module's own level thresholds so
+-- the printed key and the picture above it can never disagree.
+-- @treturn string
+local function heatmapKeyLabel()
+    local thresholds = Stats.LEVEL_MIN_MINUTES
+    local top_level = 0
+    for level in pairs(thresholds) do
+        if level > top_level then top_level = level end
+    end
+
+    local parts = { Stats.heatmapGlyph(0) .. " " .. _("none") }
+    for level = 1, top_level do
+        local text
+        if level == top_level then
+            text = T(_("%1 or more"), Stats.formatMinutes(thresholds[level]))
+        else
+            text = T(_("under %1"), Stats.formatMinutes(thresholds[level + 1]))
+        end
+        parts[#parts + 1] = Stats.heatmapGlyph(level) .. " " .. text
+    end
+    return T(_("Shade key: %1"), table.concat(parts, " · "))
+end
+
+--- Builds the rows of the Reading stats view.
+-- Order is deliberate: the numbers a reader checks daily come first, then
+-- library health, then the yearly goal (only when one is set), then the
+-- 26-week activity picture, which is the tallest section and scrolls.
+-- @tparam table stats normalized stats from `fetchStats`
+-- @treturn table array of Menu items
+function LightHouse:buildStatsItems(stats)
+    local items = {}
+
+    -- 1. Streak, current with best.
+    items[#items + 1] = statsRow(_("Current streak"), Stats.streakLabel(stats.streaks))
+
+    -- 2. Reading time: today, this week, all time.
+    local time = stats.time or {}
+    local time_rows = {
+        { label = _("Read today"), value = Stats.formatDuration(time.todaySeconds) },
+        { label = _("Read this week"), value = Stats.formatDuration(time.thisWeekSeconds) },
+        { label = _("Total reading time"), value = Stats.formatHours(time.totalHours) },
+    }
+    for row_index = 1, #time_rows do
+        items[#items + 1] = statsRow(time_rows[row_index].label, time_rows[row_index].value)
+    end
+
+    -- 3. Books finished this year (the server counts finished timestamps).
+    items[#items + 1] = statsRow(_("Books finished this year"), Stats.formatCount(stats.finishedThisYear))
+
+    -- 4. Library health as three counts.
+    items[#items + 1] = statsSection(_("Library health"))
+    local health = stats.health or {}
+    items[#items + 1] = statsRow(_("Unread"), Stats.formatCount(health.unread))
+    items[#items + 1] = statsRow(_("Reading"), Stats.formatCount(health.reading))
+    items[#items + 1] = statsRow(_("Finished"), Stats.formatCount(health.finished))
+
+    -- 5. Yearly goal, only when a target is configured.
+    local goal = stats.goal
+    if goal then
+        local heading = goal.year and T(_("Yearly goal %1"), Stats.formatCount(goal.year)) or _("Yearly goal")
+        items[#items + 1] = statsSection(heading)
+
+        -- Bars reuse Status.progressBar, the plugin's existing renderer, so a
+        -- goal row looks like every other progress row on the device.
+        local goal_rows = {
+            { label = _("Books"), ratio = goal.booksRatio, value = Stats.goalBooksLabel(goal) },
+            { label = _("Hours"), ratio = goal.hoursRatio, value = Stats.goalHoursLabel(goal) },
+        }
+        for row_index = 1, #goal_rows do
+            local goal_row = goal_rows[row_index]
+            local value = goal_row.value
+            if value and goal_row.ratio then
+                value = Status.progressBar(goal_row.ratio) .. " · " .. value
+            end
+            items[#items + 1] = statsRow(goal_row.label, value)
+        end
+    end
+
+    -- 6. Activity heatmap: one menu row per week of up to seven days.
+    items[#items + 1] = statsSection(_("Activity (newest week last)"))
+    local weeks = Stats.heatmapRows(stats.heatmap)
+    if #weeks == 0 then
+        items[#items + 1] = statsRow(_("Heatmap"), nil)
+    end
+    for week_index = 1, #weeks do
+        local week = weeks[week_index]
+        local days = {}
+        for day_index = 1, #week do
+            local day = week[day_index]
+            days[#days + 1] = {
+                text = T(_("%1 · %2"), Stats.shortDate(day.date) or day.date, Stats.dayDurationLabel(day) or _("unavailable")),
+                callback = function() self:showDayStats(day) end,
+            }
+        end
+        items[#items + 1] = {
+            text = Stats.heatmapRowText(week),
+            mandatory = Stats.shortDate(week[#week].date),
+            sub_item_table = days,
+        }
+    end
+    items[#items + 1] = statsSection(heatmapKeyLabel())
+
+    return items
+end
+
+--- Opens the Reading stats view.
+function LightHouse:showStats()
+    if not Client.isConfigured(config) then
+        notice(describeError("not_configured"))
+        return
+    end
+    if not NetworkMgr:isOnline() then
+        NetworkMgr:willRerunWhenOnline(function() self:showStats() end)
+        return
+    end
+
+    local stats, err = self:withSpinner(_("Loading reading statistics…"), function()
+        return self:fetchStats()
+    end)
+    if not stats then
+        notice(describeError(err))
+        return
+    end
+
+    self:showMenu(_("Reading stats"), self:buildStatsItems(stats))
+end
+
+--- Shows the reading time recorded on one heatmap day.
+-- @tparam table day normalized heatmap day
+function LightHouse:showDayStats(day)
+    local lines = { day.date }
+    lines[#lines + 1] = T(_("Reading time: %1"), Stats.dayDurationLabel(day) or _("unavailable"))
+    if day.count then
+        lines[#lines + 1] = T(_("Sessions: %1"), Stats.formatCount(day.count))
+    end
+    if day.bookCount then
+        lines[#lines + 1] = T(_("Books: %1"), Stats.formatCount(day.bookCount))
+    end
+    UIManager:show(TextViewer:new{
+        title = _("Reading on this day"),
+        text = table.concat(lines, "\n"),
+    })
 end
 
 --- Downloads a book by its resolved Calibre id (used by the reading shelf).

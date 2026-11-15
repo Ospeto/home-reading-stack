@@ -94,6 +94,7 @@ describe("KOReader plugin template", () => {
     expect(names).toContain("lighthouse_client.lua");
     expect(names).toContain("lighthouse_opds.lua");
     expect(names).toContain("lighthouse_status.lua");
+    expect(names).toContain("lighthouse_stats.lua");
   });
 
   it("carries no credentials in any committed template file", () => {
@@ -291,6 +292,23 @@ describe("buildStoredZip", () => {
 });
 
 describe("generateKoplugin archive layout", () => {
+  it("ships the reading-stats module and a bumped version so devices re-download", () => {
+    const { entryNames, zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "secret-key",
+      generatedAt: SAMPLE_SETTINGS.generatedAt,
+    });
+
+    // The stats view is a new template module: an archive without it would keep
+    // the old main menu and the "Reading stats" entry would fail to require.
+    expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_stats.lua`);
+
+    if (!UNZIP_BINARY) return;
+    const zipPath = writeScratch("stats.koplugin", zip);
+    const config = unzipEntry(zipPath, `${KOPLUGIN_DIR_NAME}/${KOPLUGIN_CONFIG_FILE}`);
+    expect(config).toContain(`plugin_version = "${KOPLUGIN_VERSION}"`);
+  });
+
   it("roots everything at lighthouse.koplugin/ as KOReader requires", () => {
     const { zip, entryNames } = generateKoplugin({
       baseUrl: "http://192.168.31.15:8086",
@@ -2248,5 +2266,720 @@ describe("plugin currently-reading shelf", () => {
     );
 
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
+  });
+});
+
+/**
+ * `lighthouse_stats.lua` is pure formatting/parsing, so it is exercised on its
+ * own with a bare Lua interpreter — no KOReader stubs, no sockets. Every value
+ * the payload does not carry must come back as nil so the view can print
+ * "unavailable" instead of a confident zero.
+ */
+const STATS_HELPER_HARNESS = String.raw`
+local Stats = assert(loadfile(assert(arg[1], "stats module path required"))())
+
+-- Durations -------------------------------------------------------------------
+print("dur_zero=" .. tostring(Stats.formatDuration(0)))
+print("dur_sub_minute=" .. tostring(Stats.formatDuration(30)))
+print("dur_minutes=" .. tostring(Stats.formatDuration(2700)))
+print("dur_week=" .. tostring(Stats.formatDuration(15000)))
+print("dur_exact_hour=" .. tostring(Stats.formatDuration(7200)))
+print("dur_total=" .. tostring(Stats.formatDuration(477000)))
+print("dur_nil=" .. tostring(Stats.formatDuration(nil)))
+print("dur_junk=" .. tostring(Stats.formatDuration("abc")))
+print("dur_nan=" .. tostring(Stats.formatDuration(0/0)))
+print("mins=" .. tostring(Stats.formatMinutes(45)))
+print("hours_frac=" .. tostring(Stats.formatHours(132.5)))
+print("hours_whole=" .. tostring(Stats.formatHours(100)))
+print("days_one=" .. tostring(Stats.formatDays(1)))
+print("days_many=" .. tostring(Stats.formatDays(5)))
+print("count_float=" .. tostring(Stats.formatCount(12.0)))
+print("count_zero=" .. tostring(Stats.formatCount(0)))
+print("count_nil=" .. tostring(Stats.formatCount(nil)))
+
+-- Dates and glyphs ------------------------------------------------------------
+print("date_short=" .. tostring(Stats.shortDate("2026-11-15")))
+print("date_passthrough=" .. tostring(Stats.shortDate("whenever")))
+print("date_nil=" .. tostring(Stats.shortDate(nil)))
+local glyphs = {}
+for level = 0, 4 do glyphs[#glyphs + 1] = Stats.heatmapGlyph(level) end
+print("glyphs=" .. table.concat(glyphs, ""))
+print("glyph_unknown=" .. tostring(Stats.heatmapGlyph(nil)) .. tostring(Stats.heatmapGlyph(9)))
+
+-- Level mapping: a validated read of the server's own level, never derived --
+print("level_server=" .. tostring(Stats.heatmapLevel({ level = 4, minutes = 1 })))
+print("level_string=" .. tostring(Stats.heatmapLevel({ level = "2", minutes = 60 })))
+print("level_no_level=" .. tostring(Stats.heatmapLevel({ minutes = 60 })))
+print("level_nontable=" .. tostring(Stats.heatmapLevel(nil)))
+
+-- Normalization --------------------------------------------------------------
+local payload = {
+  streaks = {
+    currentStreak = 5, longestStreak = 12, readingDaysCount = 63,
+    lastReadingDate = "2026-11-15", isActiveToday = true,
+  },
+  dailyReadingTime = {
+    todaySeconds = 2700, thisWeekSeconds = 15000,
+    totalSeconds = 477000, totalHours = 132.5,
+  },
+  libraryHealth = { unreadCount = 120, inProgressCount = 0, finishedCount = 34 },
+  goal = {
+    year = 2026, targetBooks = 25, targetHours = 100,
+    currentBooks = 12, currentHours = 34,
+    booksPercent = 48, hoursPercent = 34, isConfigured = true,
+  },
+  heatmap = {
+    { date = "2026-11-13", minutes = 0, level = 0 },
+    { date = "2026-11-14", minutes = 20 },
+    { date = "not-a-date" },
+    { date = "2026-11-15", minutes = 45, level = "3", count = 2, bookCount = 1 },
+  },
+  finishedCount = 55,
+}
+local stats = assert(Stats.normalize(payload))
+print("norm_streak_current=" .. tostring(stats.streaks.current))
+print("norm_streak_best=" .. tostring(stats.streaks.best))
+print("norm_today=" .. tostring(stats.time.todaySeconds))
+print("norm_week=" .. tostring(stats.time.thisWeekSeconds))
+print("norm_total_hours=" .. tostring(stats.time.totalHours))
+print("norm_finished_year=" .. tostring(stats.finishedThisYear))
+print("norm_unread=" .. tostring(stats.health.unread))
+print("norm_reading_zero=" .. tostring(stats.health.reading))
+print("norm_finished=" .. tostring(stats.health.finished))
+print("norm_goal_ratio=" .. tostring(stats.goal.booksRatio))
+print("norm_hours_ratio=" .. tostring(stats.goal.hoursRatio))
+print("norm_heatmap_len=" .. tostring(#stats.heatmap))
+print("norm_heatmap_level3=" .. tostring(stats.heatmap[3].level))
+print("norm_heatmap_no_level=" .. tostring(stats.heatmap[2].level))
+
+-- Missing sections stay nil, never zero.
+local bare = assert(Stats.normalize({}))
+print("bare_streaks=" .. tostring(bare.streaks))
+print("bare_time=" .. tostring(bare.time))
+print("bare_health=" .. tostring(bare.health))
+print("bare_goal=" .. tostring(bare.goal))
+print("bare_heatmap=" .. tostring(bare.heatmap))
+print("bare_finished=" .. tostring(bare.finishedThisYear))
+print("normalize_nontable=" .. tostring(Stats.normalize("nope")))
+print("normalize_nil=" .. tostring(Stats.normalize(nil)))
+
+-- A goal with no target is not a goal; a target is, even with no percentage.
+print("goal_untargeted=" .. tostring(Stats.normalize({
+  goal = { year = 2026, targetBooks = 0, targetHours = nil, currentBooks = 4 },
+}).goal))
+local targeted = assert(Stats.normalize({
+  goal = { year = 2026, targetBooks = 20, currentBooks = 5 },
+}).goal)
+print("goal_unpercented_ratio=" .. tostring(targeted.booksRatio))
+print("goal_books_label=" .. tostring(Stats.goalBooksLabel(targeted)))
+print("ratio_clamped=" .. tostring(Stats.goalRatio(150)))
+print("ratio_missing=" .. tostring(Stats.goalRatio(nil)))
+
+-- Labels ---------------------------------------------------------------------
+print("streak_label=" .. tostring(Stats.streakLabel(stats.streaks)))
+print("streak_none=" .. tostring(Stats.streakLabel({ current = 0, best = 12 })))
+print("streak_missing=" .. tostring(Stats.streakLabel(nil)))
+print("goal_books=" .. tostring(Stats.goalBooksLabel(stats.goal)))
+print("goal_hours=" .. tostring(Stats.goalHoursLabel(stats.goal)))
+
+-- A single-target goal still shows both metrics: the untargeted one is the
+-- plain count the server sent, never "unavailable".
+local books_only = assert(Stats.normalize({
+  goal = { year = 2026, targetBooks = 20, currentBooks = 5, currentHours = 12.5, booksPercent = 25 },
+}).goal)
+print("goal_books_only_books=" .. tostring(Stats.goalBooksLabel(books_only)))
+print("goal_books_only_hours=" .. tostring(Stats.goalHoursLabel(books_only)))
+print("goal_books_only_hours_ratio=" .. tostring(books_only.hoursRatio))
+local hours_only = assert(Stats.normalize({
+  goal = { year = 2026, targetHours = 100, currentBooks = 7, currentHours = 34, hoursPercent = 34 },
+}).goal)
+print("goal_hours_only_books=" .. tostring(Stats.goalBooksLabel(hours_only)))
+print("goal_hours_only_hours=" .. tostring(Stats.goalHoursLabel(hours_only)))
+print("goal_hours_only_books_ratio=" .. tostring(hours_only.booksRatio))
+-- "unavailable" is reserved for a count the server did not send at all.
+print("goal_missing_count_books=" .. tostring(Stats.goalBooksLabel({ targetHours = 10 })))
+print("goal_missing_count_hours=" .. tostring(Stats.goalHoursLabel({ targetBooks = 10 })))
+-- A target with no count is unavailable too, never a fabricated zero.
+print("goal_missing_count_targeted_books=" .. tostring(Stats.goalBooksLabel({ targetBooks = 25 })))
+print("goal_missing_count_targeted_hours=" .. tostring(Stats.goalHoursLabel({ targetHours = 100 })))
+print("day_duration=" .. tostring(Stats.dayDurationLabel(stats.heatmap[3])))
+print("day_duration_seconds=" .. tostring(Stats.dayDurationLabel({ seconds = 2700 })))
+print("day_duration_missing=" .. tostring(Stats.dayDurationLabel({})))
+
+-- Heatmap rows: seven days per row, newest row last, no horizontal scroll.
+local week = {}
+for day_index = 1, 10 do
+  week[#week + 1] = { date = string.format("2026-01-%02d", day_index), level = 1, minutes = 20 }
+end
+local week_rows = Stats.heatmapRows(week)
+print("rows_count=" .. tostring(#week_rows))
+print("rows_first=" .. tostring(#week_rows[1]))
+print("rows_last=" .. tostring(#week_rows[#week_rows]))
+print("rows_newest=" .. tostring(week_rows[#week_rows][#week_rows[#week_rows]].date))
+print("rows_empty=" .. tostring(#Stats.heatmapRows({})))
+print("rows_nil=" .. tostring(#Stats.heatmapRows(nil)))
+
+local year = {}
+for day_index = 1, 365 do
+  year[#year + 1] = { date = "2026-01-01", level = day_index % 5, minutes = day_index }
+end
+local year_rows = Stats.heatmapRows(year)
+print("year_rows_count=" .. tostring(#year_rows))
+print("year_rows_first_cells=" .. tostring(#year_rows[1]))
+print("year_rows_text_bytes=" .. tostring(#Stats.heatmapRowText(year_rows[1])))
+print("row_text=" .. tostring(Stats.heatmapRowText({
+  { level = 0 }, { level = 1 }, { level = 2 }, { level = 3 }, { level = 4 },
+})))
+print("row_text_nil=" .. tostring(Stats.heatmapRowText(nil)))
+
+print("OK")
+`;
+
+/** Runs the stats-helper harness against the committed template module. */
+function runStatsHarness(): Record<string, string> {
+  const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-stats-"));
+  const harnessPath = path.join(workdir, "stats_harness.lua");
+  fs.writeFileSync(harnessPath, STATS_HELPER_HARNESS);
+  const res = spawnSync(
+    LUA_BINARY as string,
+    [harnessPath, path.join(KOPLUGIN_TEMPLATE_DIR, "lighthouse_stats.lua")],
+    { encoding: "utf8" },
+  );
+  expect(res.stderr).toBe("");
+  expect(res.status).toBe(0);
+  expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
+  return Object.fromEntries(
+    res.stdout
+      .split("\n")
+      .filter((line: string) => line.includes("="))
+      .map((line: string) => {
+        const index = line.indexOf("=");
+        return [line.slice(0, index), line.slice(index + 1)];
+      }),
+  );
+}
+
+describe("plugin reading-stats formatting", () => {
+  it("formats reading time compactly and honestly", () => {
+    if (!LUA_BINARY) return;
+    const out = runStatsHarness();
+    expect(out.dur_zero).toBe("0m");
+    // A real but tiny session must not read as zero.
+    expect(out.dur_sub_minute).toBe("1m");
+    expect(out.dur_minutes).toBe("45m");
+    expect(out.dur_week).toBe("4h 10m");
+    expect(out.dur_exact_hour).toBe("2h");
+    expect(out.dur_total).toBe("132h 30m");
+    expect(out.dur_nil).toBe("nil");
+    expect(out.dur_junk).toBe("nil");
+    expect(out.dur_nan).toBe("nil");
+    expect(out.mins).toBe("45m");
+    expect(out.hours_frac).toBe("132.5h");
+    expect(out.hours_whole).toBe("100h");
+    expect(out.days_one).toBe("1 day");
+    expect(out.days_many).toBe("5 days");
+    expect(out.count_float).toBe("12");
+    expect(out.count_zero).toBe("0");
+    expect(out.count_nil).toBe("nil");
+  });
+
+  it("renders monochrome heatmap levels instead of a colour ramp", () => {
+    if (!LUA_BINARY) return;
+    const out = runStatsHarness();
+    // Five visually distinct, density-ordered glyphs: no colour, no rainbow.
+    expect(out.glyphs).toBe("\u00b7\u2591\u2592\u2593\u2588");
+    expect(out.glyph_unknown).toBe("??");
+    expect(out.row_text).toBe("\u00b7\u2591\u2592\u2593\u2588");
+    expect(out.row_text_nil).toBe("");
+  });
+
+  it("reads the server's heatmap level and never derives one", () => {
+    if (!LUA_BINARY) return;
+    const out = runStatsHarness();
+    expect(out.level_server).toBe("4");
+    expect(out.level_string).toBe("2");
+    // A day the server did not shade is not shaded here either, however many
+    // minutes it carries: the ramp belongs to the server.
+    expect(out.level_no_level).toBe("nil");
+    expect(out.level_nontable).toBe("nil");
+  });
+
+  it("normalizes the stats payload without inventing numbers", () => {
+    if (!LUA_BINARY) return;
+    const out = runStatsHarness();
+    expect(out.norm_streak_current).toBe("5");
+    expect(out.norm_streak_best).toBe("12");
+    expect(out.norm_today).toBe("2700");
+    expect(out.norm_week).toBe("15000");
+    expect(out.norm_total_hours).toBe("132.5");
+    expect(out.norm_finished_year).toBe("12");
+    expect(out.norm_unread).toBe("120");
+    // Zero is a real value when the server sends it.
+    expect(out.norm_reading_zero).toBe("0");
+    expect(out.norm_finished).toBe("34");
+    expect(out.norm_goal_ratio).toBe("0.48");
+    expect(out.norm_hours_ratio).toBe("0.34");
+    // The malformed date is dropped; a day the server did not shade stays unshaded.
+    expect(out.norm_heatmap_len).toBe("3");
+    expect(out.norm_heatmap_level3).toBe("3");
+    expect(out.norm_heatmap_no_level).toBe("nil");
+
+    // Sections the server did not send stay unavailable.
+    expect(out.bare_streaks).toBe("nil");
+    expect(out.bare_time).toBe("nil");
+    expect(out.bare_health).toBe("nil");
+    expect(out.bare_goal).toBe("nil");
+    expect(out.bare_heatmap).toBe("nil");
+    expect(out.bare_finished).toBe("nil");
+    expect(out.normalize_nontable).toBe("nil");
+    expect(out.normalize_nil).toBe("nil");
+
+    expect(out.goal_untargeted).toBe("nil");
+    expect(out.goal_unpercented_ratio).toBe("nil");
+    expect(out.goal_books_label).toBe("5/20");
+    expect(out.ratio_clamped).toBe("1");
+    expect(out.ratio_missing).toBe("nil");
+  });
+
+  it("builds streak and goal labels the view can print directly", () => {
+    if (!LUA_BINARY) return;
+    const out = runStatsHarness();
+    expect(out.streak_label).toBe("5 days \u00b7 best 12 days");
+    expect(out.streak_none).toBe("No streak yet \u00b7 best 12 days");
+    expect(out.streak_missing).toBe("nil");
+    expect(out.goal_books).toBe("12/25");
+    expect(out.goal_hours).toBe("34h/100h");
+    // `computeYearlyGoalProgress` always sends currentBooks and currentHours,
+    // so a single-target goal must print the other metric as a plain count.
+    expect(out.goal_books_only_books).toBe("5/20");
+    expect(out.goal_books_only_hours).toBe("12.5h read");
+    expect(out.goal_books_only_hours_ratio).toBe("nil");
+    expect(out.goal_hours_only_books).toBe("7 read");
+    expect(out.goal_hours_only_hours).toBe("34h/100h");
+    expect(out.goal_hours_only_books_ratio).toBe("nil");
+    // Absent count: no number to show, so the view says unavailable.
+    expect(out.goal_missing_count_books).toBe("nil");
+    expect(out.goal_missing_count_hours).toBe("nil");
+    expect(out.goal_missing_count_targeted_books).toBe("nil");
+    expect(out.goal_missing_count_targeted_hours).toBe("nil");
+    expect(out.day_duration).toBe("45m");
+    expect(out.day_duration_seconds).toBe("45m");
+    expect(out.day_duration_missing).toBe("nil");
+    expect(out.date_short).toBe("Nov 15");
+    expect(out.date_passthrough).toBe("whenever");
+    expect(out.date_nil).toBe("nil");
+  });
+
+  it("packs the heatmap into bounded rows that end on the newest day", () => {
+    if (!LUA_BINARY) return;
+    const out = runStatsHarness();
+    expect(out.rows_count).toBe("2");
+    expect(out.rows_first).toBe("3");
+    expect(out.rows_last).toBe("7");
+    expect(out.rows_newest).toBe("2026-01-10");
+    expect(out.rows_empty).toBe("0");
+    expect(out.rows_nil).toBe("0");
+    // A year of days packs into rows of seven and never exercises a scroll.
+    expect(out.year_rows_first_cells).toBe("7");
+    // Byte length: block glyphs are 3 bytes each in UTF-8.
+    expect(Number(out.year_rows_text_bytes)).toBeLessThanOrEqual(21);
+    // The window is a fixed 26 weeks, whatever the payload length.
+    expect(out.year_rows_count).toBe("26");
+  });
+});
+
+/**
+ * Full-view harness: taps the real "Reading stats" menu entry on the shipped
+ * artifact with KOReader's widgets stubbed, and prints every row so the test
+ * can assert order, values and degradation.
+ *
+ * The device crash this guards against is the same trap the currently-reading
+ * shelf hit: `_` is gettext in main.lua, so a `for _, x in ipairs(...)` in the
+ * view would shadow it and abort the whole KOReader process on tap.
+ */
+const READING_STATS_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local expected_base_url = assert(arg[2], "expected base url argument required")
+
+-- Field-for-field shape of GET /api/kosync/stats.
+local stats_payload = {
+  totalSessions = 412,
+  readingDaysCount = 63,
+  finishedCount = 55,
+  finishedBooks = {},
+  activeBooks = {},
+  streaks = {
+    currentStreak = 5, longestStreak = 12, readingDaysCount = 63,
+    lastReadingDate = "2026-11-15", isActiveToday = true,
+  },
+  dailyReadingTime = {
+    todaySeconds = 2700, todayMinutes = 45,
+    thisWeekSeconds = 15000, thisWeekMinutes = 250,
+    thisMonthSeconds = 30000, thisMonthMinutes = 500,
+    totalSeconds = 477000, totalHours = 132.5, dailyAverageMinutes = 32,
+    days = {},
+  },
+  heatmap = {
+    { date = "2026-11-13", count = 0, seconds = 0, minutes = 0, level = 0, bookCount = 0 },
+    { date = "2026-11-14", count = 1, seconds = 1200, minutes = 20, level = 2, bookCount = 1 },
+    { date = "2026-11-15", count = 2, seconds = 2700, minutes = 45, level = 3, bookCount = 1 },
+  },
+  libraryHealth = {
+    totalBooks = 162, unreadCount = 120, inProgressCount = 8,
+    finishedCount = 34, staleCount = 3,
+  },
+  goal = {
+    year = 2026, targetBooks = 25, targetHours = 100,
+    currentBooks = 12, currentHours = 34,
+    booksPercent = 48, hoursPercent = 34, isConfigured = true,
+  },
+  recentSessions = {},
+  summary = {
+    totalSessionsCount = 412, totalReadingSeconds = 477000,
+    totalReadingHours = 132.5, todayReadingSeconds = 2700,
+    thisWeekReadingSeconds = 15000, averageDailyMinutes = 32,
+    currentStreak = 5, longestStreak = 12,
+  },
+}
+
+-- The transport returns a JSON body; the decode stub hands back the payload
+-- above, so the real Stats.normalize path runs. The stats_payload upvalue
+-- lets the degraded and broken cases reuse the same plugin instance. It raises
+-- on an empty body like KOReader's own json.decode, so the zero-length-200 case
+-- exercises the real guard instead of silently decoding nothing.
+package.preload["json"] = function()
+  return {
+    decode = function(body)
+      if type(body) ~= "string" or body == "" then
+        error("json.decode: unexpected end of input", 0)
+      end
+      return stats_payload
+    end,
+  }
+end
+package.preload["ltn12"] = function()
+  return {
+    sink = {
+      table = function(target)
+        return function(chunk)
+          if chunk then target[#target + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function() end,
+    },
+  }
+end
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      if request and request.sink then
+        request.sink('{"streaks":{}}')
+        request.sink(nil)
+      end
+      return 1, 200, {}
+    end,
+  }
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local config = require("lighthouse_config")
+assert(config.base_url == expected_base_url,
+  "harness needs the generated config, got " .. tostring(config.base_url))
+
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+
+local menu_items = {}
+LightHouse:addToMainMenu(menu_items)
+local entry = assert(menu_items.lighthouse, "plugin must add a 'lighthouse' entry")
+local tap
+for entry_index = 1, #entry.sub_item_table do
+  local item = entry.sub_item_table[entry_index]
+  if item.text == "Reading stats" then tap = item.callback end
+end
+assert(type(tap) == "function", "'Reading stats' menu entry must have a callback")
+
+local function dump_rows(menu, prefix)
+  for row_index = 1, #menu.item_table do
+    local item = menu.item_table[row_index]
+    print(string.format("%s%d=%s\t%s", prefix, row_index, tostring(item.text), tostring(item.mandatory)))
+  end
+end
+
+-- The plugin reuses one Menu widget across opens and calls switchItemTable
+-- instead of showing a new one, so the visible rows come from either place.
+local function current_menu()
+  local widget = shown[#shown]
+  if widget and widget.item_table then return widget end
+  local reused = LightHouse.menu and LightHouse.menu.switched
+  if reused and reused[#reused] then
+    return { title = reused[#reused].title, item_table = reused[#reused].items }
+  end
+  return widget
+end
+
+-- 1. Full payload -------------------------------------------------------------
+local ok, raised = pcall(tap)
+print("ok=" .. tostring(ok))
+print("raised=" .. tostring(raised))
+
+local menu = current_menu()
+assert(menu and menu.item_table, "tapping 'Reading stats' must open a menu")
+print("title=" .. tostring(menu.title))
+print("rows=" .. tostring(#menu.item_table))
+dump_rows(menu, "row")
+
+-- 2. Heatmap weeks are tappable down to a single day --------------------------
+local week, week_index
+for row_index = 1, #menu.item_table do
+  if menu.item_table[row_index].sub_item_table then
+    week = menu.item_table[row_index]
+    week_index = row_index
+    break
+  end
+end
+assert(week, "the heatmap must expose tappable week rows")
+print("week_text=" .. tostring(week.text))
+print("week_mandatory=" .. tostring(week.mandatory))
+print("week_days=" .. tostring(#week.sub_item_table))
+print("week_day1=" .. tostring(week.sub_item_table[1].text))
+print("week_day3=" .. tostring(week.sub_item_table[3].text))
+week.sub_item_table[3].callback()
+local day_view = shown[#shown]
+print("day_view=" .. tostring(day_view and day_view.__kind))
+print("day_text=" .. tostring(day_view and day_view.text:gsub("\n", " / ")))
+
+-- 3. Degraded payload: absent sections read "unavailable", never zero --------
+stats_payload = {}
+local deg_ok, deg_raised = pcall(tap)
+print("deg_ok=" .. tostring(deg_ok))
+print("deg_raised=" .. tostring(deg_raised))
+local deg = current_menu()
+print("deg_rows=" .. tostring(deg and deg.item_table and #deg.item_table))
+if deg then dump_rows(deg, "deg_row") end
+
+-- 3b. Single-target goal: the untargeted row is the count, not "unavailable"
+stats_payload = {
+  goal = {
+    year = 2026, targetBooks = 25, currentBooks = 12,
+    currentHours = 34, booksPercent = 48,
+  },
+}
+local one_ok, one_raised = pcall(tap)
+print("one_ok=" .. tostring(one_ok))
+print("one_raised=" .. tostring(one_raised))
+local one = current_menu()
+print("one_rows=" .. tostring(one and one.item_table and #one.item_table))
+if one then dump_rows(one, "one_row") end
+
+-- 3c. Single-target goal the other way: an hours target, books untargeted ----
+stats_payload = {
+  goal = {
+    year = 2026, targetHours = 100, currentBooks = 12,
+    currentHours = 34, hoursPercent = 34,
+  },
+}
+local hours_ok, hours_raised = pcall(tap)
+print("hours_only_ok=" .. tostring(hours_ok))
+print("hours_only_raised=" .. tostring(hours_raised))
+local hours_menu = current_menu()
+print("hours_only_rows=" .. tostring(hours_menu and hours_menu.item_table and #hours_menu.item_table))
+if hours_menu then dump_rows(hours_menu, "hours_only_row") end
+
+-- 4. Unreadable body ---------------------------------------------------------
+stats_payload = "not a stats payload"
+local bad_ok, bad_raised = pcall(tap)
+print("bad_ok=" .. tostring(bad_ok))
+print("bad_raised=" .. tostring(bad_raised))
+local bad = shown[#shown]
+print("bad_notice=" .. tostring(bad and bad.__kind == "infomessage"))
+print("bad_text=" .. tostring(bad and bad.text))
+
+-- 4b. A 200 with a zero-length body: the actionable notice, not a raise -----
+local http = require("socket.http")
+local working_request = http.request
+http.request = function() return 1, 200, {} end
+local empty_ok, empty_raised = pcall(tap)
+print("empty_ok=" .. tostring(empty_ok))
+print("empty_raised=" .. tostring(empty_raised))
+local empty = shown[#shown]
+print("empty_notice=" .. tostring(empty and empty.__kind == "infomessage"))
+print("empty_text=" .. tostring(empty and empty.text))
+http.request = working_request
+
+-- 5. Transport failure maps through the plugin's existing error style --------
+stats_payload = {
+  streaks = { currentStreak = 5, longestStreak = 12 },
+}
+http.request = function() return nil, "timeout" end
+local fail_ok, fail_raised = pcall(tap)
+print("fail_ok=" .. tostring(fail_ok))
+print("fail_raised=" .. tostring(fail_raised))
+local fail = shown[#shown]
+print("fail_notice=" .. tostring(fail and fail.__kind == "infomessage"))
+print("fail_text=" .. tostring(fail and fail.text))
+http.request = working_request
+
+print("OK")
+`);
+
+describe("plugin reading stats view", () => {
+  /** Extracts the generated archive the documented way and runs a harness on it. */
+  function runHarness(harness: string): Record<string, string> {
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "harness-api-key",
+      generatedAt: "2026-11-14T00:00:00.000Z",
+    });
+
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-stats-view-"));
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(
+      UNZIP_BINARY as string,
+      ["-q", zipPath, "-d", pluginsDir],
+      { encoding: "utf8" },
+    );
+    expect(extract.status).toBe(0);
+
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "stats_view_harness.lua");
+    fs.writeFileSync(harnessPath, harness);
+
+    const res = spawnSync(
+      LUA_BINARY,
+      [harnessPath, pluginRoot, "http://192.168.31.15:8086"],
+      { encoding: "utf8" },
+    );
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    return Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+  }
+
+  it("renders streak, time, finished books, health, goal and heatmap in order", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runHarness(READING_STATS_HARNESS);
+
+    // The tap must render, not raise: a shadowed gettext `_` would crash here.
+    expect(out.ok).toBe("true");
+    expect(out.raised).toBe("nil");
+    expect(out.title).toBe("Reading stats");
+    expect(out.rows).toBe("15");
+
+    expect(out.row1).toBe("Current streak\t5 days · best 12 days");
+    expect(out.row2).toBe("Read today\t45m");
+    expect(out.row3).toBe("Read this week\t4h 10m");
+    expect(out.row4).toBe("Total reading time\t132.5h");
+    expect(out.row5).toBe("Books finished this year\t12");
+
+    expect(out.row6).toBe("Library health\tnil");
+    expect(out.row7).toBe("Unread\t120");
+    expect(out.row8).toBe("Reading\t8");
+    expect(out.row9).toBe("Finished\t34");
+
+    // Goal progress bars reuse Status.progressBar, the plugin's own renderer.
+    expect(out.row10).toBe("Yearly goal 2026\tnil");
+    expect(out.row11).toBe("Books\t████░░░░ 48% · 12/25");
+    expect(out.row12).toBe("Hours\t███░░░░░ 34% · 34h/100h");
+
+    // Heatmap: one row per week of up to seven days, newest week last.
+    expect(out.row13).toBe("Activity (newest week last)\tnil");
+    expect(out.row14).toBe("·▒▓\tNov 15");
+    // The key is computed from the level thresholds, so pin the whole string:
+    // the ramp it must mirror is the server's (>=1m, >=15m, >=30m, >=60m).
+    expect(out.row15).toBe(
+      "Shade key: · none · ░ under 15m · ▒ under 30m · ▓ under 1h · █ 1h or more\tnil",
+    );
+
+    expect(out.week_days).toBe("3");
+    expect(out.week_day1).toBe("Nov 13 · 0m");
+    expect(out.week_day3).toBe("Nov 15 · 45m");
+
+    // Tapping a day shows that day's reading time.
+    expect(out.day_view).toBe("textviewer");
+    expect(out.day_text).toBe("2026-11-15 / Reading time: 45m / Sessions: 2 / Books: 1");
+  });
+
+  it("degrades to 'unavailable' instead of zero when fields are missing", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runHarness(READING_STATS_HARNESS);
+
+    expect(out.deg_ok).toBe("true");
+    expect(out.deg_raised).toBe("nil");
+    // The goal section disappears entirely; nothing else does.
+    expect(out.deg_rows).toBe("12");
+    expect(out.deg_row1).toBe("Current streak\tunavailable");
+    expect(out.deg_row2).toBe("Read today\tunavailable");
+    expect(out.deg_row3).toBe("Read this week\tunavailable");
+    expect(out.deg_row4).toBe("Total reading time\tunavailable");
+    expect(out.deg_row5).toBe("Books finished this year\tunavailable");
+    expect(out.deg_row7).toBe("Unread\tunavailable");
+    expect(out.deg_row11).toBe("Heatmap\tunavailable");
+    // A missing heatmap still renders the same key row rather than an empty
+    // picture, and the key does not depend on the payload.
+    expect(out.deg_row12).toBe(
+      "Shade key: · none · ░ under 15m · ▒ under 30m · ▓ under 1h · █ 1h or more\tnil",
+    );
+  });
+
+  it("shows the untargeted metric of a single-target goal as its count", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runHarness(READING_STATS_HARNESS);
+
+    expect(out.one_ok).toBe("true");
+    expect(out.one_raised).toBe("nil");
+    expect(out.one_rows).toBe("15");
+    // The configured target keeps its bar; the other metric keeps its number.
+    expect(out.one_row11).toBe("Books\t████░░░░ 48% · 12/25");
+    expect(out.one_row12).toBe("Hours\t34h read");
+  });
+
+  it("labels the untargeted books metric without repeating the row label", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runHarness(READING_STATS_HARNESS);
+
+    expect(out.hours_only_ok).toBe("true");
+    expect(out.hours_only_raised).toBe("nil");
+    expect(out.hours_only_rows).toBe("15");
+    // The row label is already "Books", so the value must not say it again.
+    expect(out.hours_only_row11).toBe("Books\t12 read");
+    expect(out.hours_only_row12).toBe("Hours\t███░░░░░ 34% · 34h/100h");
+  });
+
+  it("reports an unreadable payload and a network failure in the plugin's own style", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runHarness(READING_STATS_HARNESS);
+
+    expect(out.bad_ok).toBe("true");
+    expect(out.bad_raised).toBe("nil");
+    expect(out.bad_notice).toBe("true");
+    expect(out.bad_text).toBe(
+      "The server sent reading statistics this plugin could not read. Download the plugin again from the LightHouse web app (Guide → KOReader plugin).",
+    );
+
+    // A proxy answering before the app sends 200 with no body: same notice.
+    expect(out.empty_ok).toBe("true");
+    expect(out.empty_raised).toBe("nil");
+    expect(out.empty_notice).toBe("true");
+    expect(out.empty_text).toBe(
+      "The server sent reading statistics this plugin could not read. Download the plugin again from the LightHouse web app (Guide → KOReader plugin).",
+    );
+
+    expect(out.fail_ok).toBe("true");
+    expect(out.fail_raised).toBe("nil");
+    expect(out.fail_notice).toBe("true");
+    expect(out.fail_text).toBe(
+      "Could not reach the LightHouse server. Check Wi-Fi and the server address in the Connection screen.",
+    );
   });
 });
