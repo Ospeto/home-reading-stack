@@ -42,6 +42,34 @@ function cleanup(dbPath: string) {
   }
 }
 
+async function waitForFile(filePath: string, timeoutMs = 15000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(filePath)) return true;
+    await Bun.sleep(5);
+  }
+  return false;
+}
+
+/**
+ * Child process that holds a real write lock on a rollback-journal database
+ * for `holdMs` and then commits and disconnects - the state whichever process
+ * arrives second at startup used to die on.
+ */
+const LOCK_HOLDER_SCRIPT = `
+import fs from "node:fs";
+import { Database } from "bun:sqlite";
+const [, , dbPath, readyFlag, holdMs] = process.argv;
+const db = new Database(dbPath);
+db.run("CREATE TABLE IF NOT EXISTS holder (id INTEGER PRIMARY KEY, v TEXT);");
+db.run("BEGIN IMMEDIATE;");
+db.run("INSERT INTO holder (v) VALUES ('held');");
+fs.writeFileSync(readyFlag, "ready");
+await Bun.sleep(Number(holdMs));
+db.run("COMMIT;");
+db.close();
+`;
+
 describe("sqlite-open: startup pragma ordering", () => {
   it("installs busy_timeout before switching to WAL", () => {
     const dbPath = tmpDbPath();
@@ -54,6 +82,32 @@ describe("sqlite-open: startup pragma ordering", () => {
       expect((db.query("PRAGMA busy_timeout;").get() as any)?.timeout).toBe(
         DEFAULT_BUSY_TIMEOUT_MS,
       );
+    } finally {
+      db?.close();
+      cleanup(dbPath);
+    }
+  });
+
+  it("has the busy handler armed at the moment the WAL switch is attempted", () => {
+    const dbPath = tmpDbPath();
+    let db: Database | null = null;
+    try {
+      db = new Database(dbPath);
+      const realRun = db.run.bind(db);
+      const timeoutAtSwitch: number[] = [];
+      (db as any).run = (sql: string, ...rest: any[]) => {
+        if (/journal_mode\s*=\s*WAL/i.test(sql)) {
+          // Observe what SQLite reports for the installed busy handler at the
+          // exact moment the switch statement runs.
+          const row = db!.query("PRAGMA busy_timeout;").get() as { timeout?: number } | null;
+          timeoutAtSwitch.push(Number(row?.timeout ?? -1));
+        }
+        return realRun(sql, ...rest);
+      };
+
+      applyWritableStartupPragmas(db);
+
+      expect(timeoutAtSwitch).toEqual([DEFAULT_BUSY_TIMEOUT_MS]);
     } finally {
       db?.close();
       cleanup(dbPath);
@@ -123,7 +177,7 @@ describe("sqlite-open: second opener survives a WAL-holding connection", () => {
     }
   });
 
-  it("survives many simultaneous openers against one hot WAL database", () => {
+  it("opens many handles against one hot WAL database", () => {
     const dbPath = tmpDbPath();
     const dbs: Database[] = [];
     try {
@@ -136,7 +190,7 @@ describe("sqlite-open: second opener survives a WAL-holding connection", () => {
         writer.run("INSERT INTO t (v) VALUES (?)", [`row-${i}`.padEnd(200, "x")]);
       }
 
-      // Eight concurrent startup openers: none may fail.
+      // Eight successive startup openers against the same hot file: none may fail.
       for (let i = 0; i < 8; i++) {
         dbs.push(openSqliteForStartup(dbPath));
       }
@@ -153,6 +207,45 @@ describe("sqlite-open: second opener survives a WAL-holding connection", () => {
           /* ignore */
         }
       }
+      cleanup(dbPath);
+    }
+  });
+});
+
+describe("sqlite-open: second opener survives a cold lock held by another process", () => {
+  it("waits out a real cross-process write lock on a rollback-mode file and still reaches WAL", async () => {
+    const dbPath = tmpDbPath();
+    const dir = path.dirname(dbPath);
+    const holderScript = path.join(dir, "lock-holder.ts");
+    const readyFlag = path.join(dir, "lock-holder.ready");
+    fs.writeFileSync(holderScript, LOCK_HOLDER_SCRIPT);
+
+    const child = Bun.spawn(["bun", holderScript, dbPath, readyFlag, "300"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+
+    let second: Database | null = null;
+    try {
+      // The flag is written only after BEGIN IMMEDIATE, so the lock is held
+      // before this process starts opening the file.
+      expect(await waitForFile(readyFlag)).toBe(true);
+
+      const startedAt = Date.now();
+      second = openSqliteForStartup(dbPath);
+      const elapsedMs = Date.now() - startedAt;
+
+      const exitCode = await child.exited;
+      expect(exitCode).toBe(0);
+
+      expect((second.query("PRAGMA journal_mode;").get() as any)?.journal_mode).toBe("wal");
+      expect(second.query("SELECT v FROM holder;").all()).toEqual([{ v: "held" }]);
+      // Proves this process really waited for the other one to release instead
+      // of opening a database nobody was holding.
+      expect(elapsedMs).toBeGreaterThanOrEqual(100);
+    } finally {
+      if (child.exitCode === null) child.kill();
+      second?.close();
       cleanup(dbPath);
     }
   });
