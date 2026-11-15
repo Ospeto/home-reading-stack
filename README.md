@@ -53,6 +53,7 @@ LightHouse turns a home Mac mini or Linux host into an always-on personal readin
    - High-performance Bun/TypeScript server with in-process SQLite queries.
    - Minimalist, responsive Telegram Mini App (TMA) and desktop catalog interface (`uploader/index.html`).
    - Durable SQLite-backed ingestion job queue (`cache.db`) and EPUB-only canonical enforcement.
+   - **Race-free SQLite startup contract** (`uploader/sqlite-open.ts`): `PRAGMA busy_timeout = 5000` is armed *before* the `journal_mode = WAL` switch, and both the open and the switch retry a bounded ~8 attempts (150 ms doubling to a 1.5 s cap per statement) on `SQLITE_BUSY` / `SQLITE_BUSY_RECOVERY` / `SQLITE_LOCKED`, so the Reading HQ server and the Telegram bot can start in either order. In-memory databases (`:memory:`, empty path, `file::memory:`) skip WAL entirely, and if `cache.db` genuinely cannot be prepared the server refuses to bind `:8086` and exits non-zero instead of serving nothing.
    - Built-in OPDS feed reverse proxy forwarding `/opds` and `/get/*` directly to Calibre with range requests, client-facing URL rewriting, exact UTF-8 `Content-Length` accounting, and clean RFC 9110 validator hygiene.
 2. **KOSync Server (`kosync/`, port `7200`):**
    - Lightweight, self-hosted KOReader synchronization backend backed by SQLite (`koreader-sync.db`).

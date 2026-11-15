@@ -7,7 +7,6 @@ import {
   DEFAULT_BUSY_TIMEOUT_MS,
   applyWritableStartupPragmas,
   isInMemoryDatabase,
-  isInMemoryDbPath,
   isSqliteBusyError,
   openSqliteForStartup,
   retryWhileSqliteBusy,
@@ -163,7 +162,7 @@ describe("sqlite-open: in-memory databases are first-class, not failures", () =>
   // WAL is impossible for an in-memory database, so the startup helper must
   // never treat `journal_mode=memory` as a reason to throw. Test harnesses and
   // the job-queue tests rely on this.
-  it("detects in-memory databases by handle and by path string", () => {
+  it("detects in-memory databases by handle", () => {
     const mem = new Database(":memory:");
     const empty = new Database("");
     const dbPath = tmpDbPath();
@@ -173,11 +172,6 @@ describe("sqlite-open: in-memory databases are first-class, not failures", () =>
       expect(isInMemoryDatabase(mem)).toBe(true);
       expect(isInMemoryDatabase(empty)).toBe(true);
       expect(isInMemoryDatabase(file)).toBe(false);
-
-      expect(isInMemoryDbPath(":memory:")).toBe(true);
-      expect(isInMemoryDbPath("")).toBe(true);
-      expect(isInMemoryDbPath("file::memory:?cache=shared")).toBe(true);
-      expect(isInMemoryDbPath("/tmp/cache.db")).toBe(false);
     } finally {
       mem.close();
       empty.close();
@@ -220,6 +214,19 @@ describe("sqlite-open: in-memory databases are first-class, not failures", () =>
     }
   });
 
+  it("also opens an empty-path (temp) database without throwing", () => {
+    const db = openSqliteForStartup("");
+    try {
+      expect((db.query("PRAGMA busy_timeout;").get() as any)?.timeout).toBe(
+        DEFAULT_BUSY_TIMEOUT_MS,
+      );
+      db.run("CREATE TABLE t (id INTEGER);");
+      expect(db.query("SELECT name FROM sqlite_master;").all()).toEqual([{ name: "t" }]);
+    } finally {
+      db.close();
+    }
+  });
+
   it("opens a :memory: path without throwing", () => {
     const db = openSqliteForStartup(":memory:");
     try {
@@ -236,6 +243,7 @@ describe("sqlite-open: in-memory databases are first-class, not failures", () =>
   it("STILL fails loudly for a file-backed database that cannot reach WAL", () => {
     const dbPath = tmpDbPath();
     let db: Database | null = null;
+    const retries: number[] = [];
     try {
       db = new Database(dbPath);
       // Simulate a file-backed database that refuses to enter WAL mode.
@@ -248,9 +256,23 @@ describe("sqlite-open: in-memory databases are first-class, not failures", () =>
         return realRun(sql, ...rest);
       };
 
-      expect(() =>
-        applyWritableStartupPragmas(db!, { sleep: () => {}, retryAttempts: 2 }),
-      ).toThrow(/refused to switch to WAL mode/);
+      const err = (() => {
+        try {
+          applyWritableStartupPragmas(db!, {
+            sleep: () => {},
+            retryAttempts: 3,
+            onRetry: (info) => retries.push(info.attempt),
+          });
+          return null;
+        } catch (e) {
+          return e as Error;
+        }
+      })();
+
+      expect(err?.message).toMatch(/refused to switch to WAL mode/);
+      // A silently refused switch is transient like SQLITE_BUSY, so it must be
+      // retried up to the attempt bound instead of failing on the first try.
+      expect(retries).toEqual([1, 2]);
     } finally {
       db?.close();
       cleanup(dbPath);

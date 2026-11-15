@@ -158,16 +158,6 @@ export function retryWhileSqliteBusy<T>(
 }
 
 /**
- * True when a database path string denotes an in-memory database.
- * WAL is impossible for these by definition.
- */
-export function isInMemoryDbPath(dbPath: string): boolean {
-  if (dbPath === "" || dbPath === ":memory:") return true;
-  if (dbPath.startsWith("file::memory:")) return true;
-  return /[?&;]mode=memory\b/.test(dbPath);
-}
-
-/**
  * True for an already-open handle that lives entirely in memory.
  *
  * SQLite reports an empty `main` file in `PRAGMA database_list` for in-memory
@@ -218,9 +208,23 @@ export function applyWritableStartupPragmas(
   }
 
   let retries = 0;
+  let journalMode = "";
   retryWhileSqliteBusy(
     () => {
       db.run("PRAGMA journal_mode = WAL;");
+      // A refused switch is signalled by the previous mode coming back, not by
+      // a thrown error, so the mode must be read inside the retried action.
+      const row = db.query("PRAGMA journal_mode;").get() as { journal_mode?: string } | null;
+      journalMode = String(row?.journal_mode ?? "").toLowerCase();
+      if (journalMode !== "wal") {
+        // A real file-backed database that cannot reach WAL is a genuine
+        // startup failure: the process must not come up half-ready.
+        throw new Error(
+          "SQLITE_BUSY: SQLite refused to switch to WAL mode " +
+            `(journal_mode=${journalMode || "unknown"}). ` +
+            "Writable startup requires a WAL-capable database file.",
+        );
+      }
     },
     {
       ...options,
@@ -231,16 +235,6 @@ export function applyWritableStartupPragmas(
     },
   );
 
-  const row = db.query("PRAGMA journal_mode;").get() as { journal_mode?: string } | null;
-  const journalMode = String(row?.journal_mode ?? "").toLowerCase();
-  if (journalMode !== "wal") {
-    // A real file-backed database that cannot reach WAL is a genuine startup
-    // failure: the process must not come up half-ready.
-    throw new Error(
-      `SQLite refused to switch to WAL mode (journal_mode=${journalMode || "unknown"}). ` +
-        "Writable startup requires a WAL-capable database file.",
-    );
-  }
   return { journalMode, retries, inMemory: false };
 }
 
@@ -258,11 +252,6 @@ export function openSqliteForStartup(
   let db: Database | null = null;
   try {
     db = retryWhileSqliteBusy(() => new Database(dbPath), options);
-    // An in-memory path is unambiguous even before the pragma probe runs.
-    if (isInMemoryDbPath(dbPath)) {
-      db.run(`PRAGMA busy_timeout = ${resolveOptions(options).busyTimeoutMs};`);
-      return db;
-    }
     applyWritableStartupPragmas(db, options);
     return db;
   } catch (err) {
