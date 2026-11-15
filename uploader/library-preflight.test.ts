@@ -201,7 +201,15 @@ describe("real probe against local storage", () => {
       dbPath: path.join(link, "metadata.db"),
     });
     expect(gate.exitCode).toBe(1);
-    expect(formatStartupGateMessage(gate)).toContain(`missing: ${link}`);
+    const message = formatStartupGateMessage(gate) ?? "";
+    // The root probe must fail here: if it reported `ok`, the gate would fall
+    // through to the database probe and blame the catalog file instead of the
+    // absent volume (macOS `ls` exits 0 on a dangling symlink).
+    expect(message).toContain("the Calibre library is not present");
+    expect(message).toContain("Nothing is mounted at the library path");
+    expect(message).not.toContain("no catalog database");
+    expect(message).not.toContain("the volume answered");
+    expect(message).toContain(`missing: ${link}`);
   });
 
   it("refuses to start when the root is readable but metadata.db is gone", async () => {

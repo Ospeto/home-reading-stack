@@ -99,9 +99,14 @@ const PROBE_ARGV0 = "lighthouse-library-probe";
  * One bounded directory read. `exec` keeps the child a single process: there is
  * never a grandchild that could outlive the SIGKILL, so the deadline always
  * takes effect.
+ *
+ * The path is probed through `"/."` on purpose: macOS `ls` exits 0 on a symlink
+ * whose target is gone (it just prints the link name), so probing the bare path
+ * would report an unmounted volume as readable. A trailing `/.` must resolve
+ * through the link, which fails exactly when the volume behind it is absent.
  */
 export function directoryProbeArgv(dir: string): string[] {
-  return ["/bin/sh", "-c", 'exec /bin/ls -1 "$1"', PROBE_ARGV0, dir];
+  return ["/bin/sh", "-c", 'exec /bin/ls -1 "$1/."', PROBE_ARGV0, dir];
 }
 
 /**
