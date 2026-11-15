@@ -43,8 +43,8 @@ local Ui = {}
 -- are multiplied by the device scale, so read them as "at 160 dpi".
 Ui.tokens = {
     -- Row anatomy -------------------------------------------------------
-    --: Characters kept in the metadata column, so a runaway author list can
-    --: never push the title out of the row.
+    --: Total width of the metadata column. The glance is budgeted inside it
+    --: first, so a runaway author list can never push progress or rating out.
     meta_max_chars = 64,
     --: Characters kept in the secondary metadata before it is ellipsized, so a
     --: long author list can never dominate the metadata column.
@@ -291,6 +291,24 @@ end
 -- @treturn string
 function Ui.glanceLine(values)
     return Ui.join(values)
+end
+
+--- Builds a row's metadata column: the secondary text, then the glance values.
+--
+-- The glance is budgeted first. Progress and rating are the whole point of the
+-- column, so the secondary text is capped to whatever the glance leaves room
+-- for and the complete glance is always drawn last - a long author list may be
+-- ellipsized, a half-drawn star row may not.
+-- @string[opt] secondary
+-- @string[opt] glance
+-- @number[opt] max_chars total width, defaults to the token
+-- @treturn string
+function Ui.metaColumn(secondary, glance, max_chars)
+    local limit = math.floor(numberIn(max_chars, Ui.tokens.meta_max_chars, 0))
+    local tail = oneLine(glance)
+    if tail == "" then return Ui.ellipsize(oneLine(secondary), limit) end
+    local reserved = graphemeCount(tail) + graphemeCount(SEPARATOR)
+    return Ui.join({ Ui.ellipsize(oneLine(secondary), limit - reserved), tail })
 end
 
 --- Renders a progress bar sized for the glance column.

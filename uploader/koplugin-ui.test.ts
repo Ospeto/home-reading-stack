@@ -129,6 +129,19 @@ print("glance_skips=" .. Ui.glanceLine({ nil, "", stars_3, " " }))
 print("glance_empty=" .. "[" .. Ui.glanceLine({}) .. "]")
 print("join_sep=" .. Ui.join({ "a", "b" }))
 
+-- The metadata column budgets the glance first, so progress and rating are
+-- always drawn in full.
+local meta_bar = Ui.GLYPH.bar_full:rep(6) .. " 100% " .. Ui.GLYPH.done
+local meta_stars = Ui.GLYPH.star_full:rep(4) .. Ui.GLYPH.star_empty
+local meta_glance = meta_bar .. Ui.GLYPH.separator .. meta_stars
+local meta_short_secondary = "Isuna Hasekura" .. Ui.GLYPH.separator .. "Spice and Wolf 01"
+local meta_long_secondary = "Brandon Sanderson" .. Ui.GLYPH.separator .. "The Stormlight Archive 01"
+print("meta_short=" .. Ui.metaColumn(meta_short_secondary, meta_glance))
+print("meta_long=" .. Ui.metaColumn(meta_long_secondary, meta_glance))
+print("meta_glance_only=" .. Ui.metaColumn(nil, meta_glance))
+print("meta_no_glance=" .. Ui.metaColumn(meta_long_secondary, nil))
+print("meta_limit=" .. tostring(Ui.tokens.meta_max_chars))
+
 -- The font contract: every glyph must be a code point KOReader's bundled text
 -- fonts (Noto Sans, DejaVu fallback) actually carry. Anything above Dingbats is
 -- an emoji or symbol with no coverage on the device and draws as a box.
@@ -404,6 +417,26 @@ describe("plugin UI primitives: row language", () => {
     expect(out.glance_skips).toBe("★★★☆☆");
     expect(out.glance_empty).toBe("[]");
     expect(out.join_sep).toBe("a · b");
+  });
+
+  it("reserves the glance width so progress and rating are never cut", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    const glance = `██████ 100% ✓ · ★★★★☆`;
+    // Oracle: the row contract in lighthouse_ui.lua - the metadata column ends
+    // with the complete glance and stays inside meta_max_chars. Capping the
+    // composed string instead of the secondary text would leave the long row
+    // showing three of five stars.
+    expect(out.meta_long.endsWith(glance)).toBe(true);
+    expect(out.meta_long).toContain("Brandon Sanderson");
+    expect(codePoints(out.meta_long)).toBeLessThanOrEqual(Number(out.meta_limit));
+    // The short row is unaffected: nothing is dropped when it already fits.
+    expect(out.meta_short).toBe(`Isuna Hasekura · Spice and Wolf 01 · ${glance}`);
+    // With no secondary text the glance still leads the column.
+    expect(out.meta_glance_only).toBe(glance);
+    // With no glance it is the plain secondary line, kept whole while it fits.
+    expect(out.meta_no_glance).toBe("Brandon Sanderson · The Stormlight Archive 01");
+    expect(codePoints(out.meta_no_glance)).toBeLessThanOrEqual(Number(out.meta_limit));
   });
 
   it("draws only code points the device's bundled fonts carry", () => {

@@ -1918,6 +1918,21 @@ for detail_index = 1, #row.sub_item_table do
 end
 print("detail=" .. table.concat(detail_labels, "|"))
 
+-- A long author and series run must never push the progress bar, the finished
+-- check or the stars out of the metadata column.
+local long_row = LightHouse:buildCatalogItem({
+  book_id = 102,
+  title = "The Way of Kings",
+  authors = "Brandon Sanderson",
+  series = "The Stormlight Archive",
+  series_index = 1,
+  rating = 8,
+  status = { percentage = 1, device = "Kobo", timestamp = 1 },
+}, layout)
+print("long_text=" .. tostring(long_row.text))
+print("long_mandatory=" .. tostring(long_row.mandatory))
+print("long_limit=" .. tostring(require("lighthouse_ui").tokens.meta_max_chars))
+
 -- Connection screen must expose the baked-in origin and endpoint paths.
 LightHouse:showConnection(true)
 local connection = shown[#shown]
@@ -2011,6 +2026,18 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
     expect(out.row_mandatory).toContain("45%");
     expect(out.row_mandatory).toContain("★★★★☆");
     expect(out.row_mandatory).not.toContain("\n");
+
+    // A long author and series run must keep the whole glance: the bar, the
+    // finished check and all five stars. Capping the composed metadata string
+    // would leave this row showing three stars.
+    expect(out.long_text).toBe("The Way of Kings");
+    expect(out.long_mandatory).toContain("Brandon Sanderson");
+    expect(out.long_mandatory).toContain("100%");
+    expect(out.long_mandatory).toContain("✓");
+    expect(out.long_mandatory.endsWith("★★★★☆")).toBe(true);
+    expect(Array.from(out.long_mandatory).length).toBeLessThanOrEqual(
+      Number(out.long_limit),
+    );
 
     // Covers: one geometry rule drives the page, and a row whose cover is not on
     // disk yet draws the neutral placeholder rather than a blank hole.
@@ -2270,6 +2297,43 @@ for action_index = 2, #(failed and failed.item_table or {}) do
 end
 print("fail_actions=" .. table.concat(fail_actions, "|"))
 
+-- A 200 whose body cannot be read must name no other resource: the shelf asks
+-- /api/kosync/active, not the statistics endpoint.
+failure = false
+payload = "not a session list"
+local bad_ok, bad_raised = pcall(tap)
+print("bad_body_ok=" .. tostring(bad_ok) .. " " .. tostring(bad_raised))
+local bad = current_menu()
+print("bad_body_headline=" .. tostring(bad and bad.item_table and bad.item_table[1] and bad.item_table[1].text))
+print("bad_body_detail=" .. tostring(bad and bad.item_table and bad.item_table[2] and bad.item_table[2].text))
+
+-- A long device name must not cost the reader the progress bar, the finished
+-- check or the "opened" marker in the shelf's metadata column.
+payload = {
+  {
+    id = 45,
+    document = "2222333344445555666677778888aaaa",
+    progress = "",
+    percentage = 1,
+    device = "Kindle Paperwhite Signature Edition",
+    device_id = nil,
+    filename = "the-way-of-kings.epub",
+    title = "The Way of Kings",
+    authors = "Brandon Sanderson",
+    timestamp = 1794633400,
+    bookId = 303,
+    cover = nil,
+    displayTitle = "The Way of Kings",
+    displayAuthors = "Brandon Sanderson",
+  },
+}
+local long_ok = pcall(tap)
+local long_menu = current_menu()
+local long_row = long_menu and long_menu.item_table and long_menu.item_table[1]
+print("shelf_long_ok=" .. tostring(long_ok))
+print("shelf_long_mandatory=" .. tostring(long_row and long_row.mandatory))
+print("shelf_long_limit=" .. tostring(require("lighthouse_ui").tokens.meta_max_chars))
+
 print("OK")
 `)
   // Non-ASCII inside a `String.raw` template is escaped to `\uXXXX` by the
@@ -2397,6 +2461,22 @@ describe("plugin currently-reading shelf", () => {
     expect(out.fail_view).toBe("Currently reading");
     expect(out.fail_headline).toBe("Can't reach the LightHouse server");
     expect(out.fail_actions).toContain("Try again");
+
+    // An unreadable body on the shelf's own endpoint must not be described as
+    // reading statistics, and the detail must not repeat the headline.
+    expect(out.bad_body_ok).toBe("true nil");
+    expect(out.bad_body_headline).toBe("The server response could not be read");
+    expect(out.bad_body_detail).not.toContain("statistics");
+    expect(out.bad_body_detail).toContain("Try again");
+
+    // A long device name still renders the whole glance: the full bar, the
+    // percent and the finished check.
+    expect(out.shelf_long_ok).toBe("true");
+    expect(out.shelf_long_mandatory).toContain("100%");
+    expect(out.shelf_long_mandatory).toContain("✓");
+    expect(
+      Array.from(out.shelf_long_mandatory).length,
+    ).toBeLessThanOrEqual(Number(out.shelf_long_limit));
 
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
@@ -3113,9 +3193,12 @@ describe("plugin reading stats view", () => {
     expect(out.bad_raised).toBe("nil");
     expect(out.bad_view).toBe("Reading stats");
     expect(out.bad_headline).toBe("The server response could not be read");
+    // The detail says what to do without naming a resource: the same copy is
+    // shown for the catalog, the shelf and the download notice.
     expect(out.bad_detail).toBe(
-      "The server sent reading statistics this plugin could not read. Download the plugin again from the LightHouse web app (Guide → KOReader plugin).",
+      "Try again. If it keeps happening, download the plugin again from the LightHouse web app (Guide → KOReader plugin).",
     );
+    expect(out.bad_detail).not.toContain("statistics");
     expect(out.bad_actions).toContain("Try again");
 
     // A proxy answering before the app sends 200 with no body: same screen.
@@ -3396,6 +3479,7 @@ local function dump_screen(prefix, open)
     if items[item_index].text == "Connection" then connection = items[item_index] end
   end
   print(prefix .. "_rows=" .. table.concat(texts, " | "))
+  print(prefix .. "_detail=" .. tostring(items[2] and items[2].text))
   print(prefix .. "_has_connection=" .. tostring(connection ~= nil))
   if not connection then return end
   local tapped, tap_raised = pcall(connection.callback)
@@ -3442,6 +3526,10 @@ describe("unconfigured plugin failures", () => {
       // Compute from the token so the assertion cannot drift from the scale.
       expect(out[`${screen}_ok`]).toBe("true nil");
       expect(out[`${screen}_rows`]).toContain("This plugin is not configured");
+      // The detail says what to do and does not repeat the headline it sits
+      // under.
+      expect(out[`${screen}_detail`]).not.toContain("This plugin is not configured");
+      expect(out[`${screen}_detail`]).toContain("Download the plugin again");
       // The only screen that can fix a missing key has to be one tap away.
       expect(out[`${screen}_has_connection`]).toBe("true");
       expect(out[`${screen}_tap_ok`]).toBe("true nil");

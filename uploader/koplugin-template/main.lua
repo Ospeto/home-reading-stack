@@ -99,7 +99,7 @@ end
 local function describeError(err)
     local code = type(err) == "string" and err or tostring(err or "")
     if code == "not_configured" then
-        return _("This plugin is not configured. Download it again from the LightHouse server (Guide → KOReader plugin).")
+        return _("Download the plugin again from the LightHouse server (Guide → KOReader plugin).")
     elseif code:match("^network_error") then
         return _("Could not reach the LightHouse server. Check Wi-Fi and the server address in the Connection screen.")
     elseif code == "https_unavailable" then
@@ -107,7 +107,7 @@ local function describeError(err)
     elseif code == "empty_response" then
         return _("The server returned an empty file.")
     elseif code == "invalid_response" then
-        return _("The server sent reading statistics this plugin could not read. Download the plugin again from the LightHouse web app (Guide → KOReader plugin).")
+        return _("Try again. If it keeps happening, download the plugin again from the LightHouse web app (Guide → KOReader plugin).")
     elseif code == "html_response" then
         return _("The server returned a web page instead of the file. Check the server address, or open the web app and sign in again.")
     elseif code:match("^file_error") then
@@ -537,10 +537,7 @@ function LightHouse:buildRow(spec)
         text = Ui.rowTitle(spec.primary),
         bold = spec.bold == true,
     }
-    local meta = Ui.ellipsize(
-        Ui.join({ spec.secondary, spec.glance }),
-        Ui.tokens.meta_max_chars
-    )
+    local meta = Ui.metaColumn(spec.secondary, spec.glance)
     if meta ~= "" then item.mandatory = meta end
     if spec.details then
         item.sub_item_table = spec.details
