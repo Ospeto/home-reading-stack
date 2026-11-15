@@ -819,19 +819,41 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(content).toContain("container_name: reading-calibre-web");
       expect(content).toContain("container_name: reading-bot");
 
-      // Verify compose syntax with docker compose config if docker is available.
-      // The salt has no default, so a throwaway value is required for compose to interpolate.
-      const dockerCheck = spawnSync("docker", ["compose", "config"], {
-        cwd: REPO_ROOT,
-        encoding: "utf8",
-        env: { ...process.env, KOSYNC_PASSWORD_SALT: "test-only-salt" },
-      });
-      if (!dockerCheck.error) {
+      // The salt must be interpolated with the required-error form and no default, so an
+      // unset or empty KOSYNC_PASSWORD_SALT stops the stack instead of hashing with a
+      // published value. Checked on the parsed model, so it holds without docker present.
+      const composeModel = Bun.YAML.parse(content) as {
+        services?: Record<string, { environment?: unknown }>;
+      };
+      const kosyncEnvironment = composeModel.services?.kosync?.environment;
+      expect(Array.isArray(kosyncEnvironment)).toBe(true);
+      const saltInterpolations = (kosyncEnvironment as unknown[])
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => /^PASSWORD_SALT=(.*)$/.exec(entry)?.[1])
+        .filter((value): value is string => value !== undefined);
+      expect(saltInterpolations).toHaveLength(1);
+      expect(/^\$\{KOSYNC_PASSWORD_SALT(:?\?)[^}]*\}$/.exec(saltInterpolations[0])?.[1]).toBe(":?");
+
+      const composeAvailable =
+        spawnSync("docker", ["compose", "version"], { encoding: "utf8" }).status === 0;
+      if (composeAvailable) {
+        const dockerCheck = spawnSync("docker", ["compose", "config"], {
+          cwd: REPO_ROOT,
+          encoding: "utf8",
+          env: { ...process.env, KOSYNC_PASSWORD_SALT: "test-only-salt" },
+        });
         expect(dockerCheck.status).toBe(0);
         expect(dockerCheck.stdout).toContain("reading-hq");
 
         const envWithoutSalt: NodeJS.ProcessEnv = { ...process.env };
         delete envWithoutSalt.KOSYNC_PASSWORD_SALT;
+
+        const emptySalt = spawnSync("docker", ["compose", "-f", composePath, "config"], {
+          cwd: REPO_ROOT,
+          encoding: "utf8",
+          env: { ...process.env, KOSYNC_PASSWORD_SALT: "" },
+        });
+        expect(emptySalt.status).not.toBe(0);
 
         const quickstartDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-compose-"));
         try {
