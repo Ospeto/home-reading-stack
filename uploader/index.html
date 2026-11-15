@@ -3446,7 +3446,7 @@
               <span>Reading Telemetry, Heatmap &amp; Library Health</span>
             </div>
             <p class="text-[11px] text-zinc-400 leading-relaxed">
-              Derives discrete reading sessions from KOSync progress telemetry in <code class="text-zinc-200">koreader-sync.db</code>. Visualizes daily reading time, consecutive reading streaks (current and longest), 365-day activity heatmap, library health distribution (unread, currently reading, finished), stale read detection (neglected books inactive &gt; 30 days), and strictly additive yearly reading goals. Accessible via the top header <code class="text-zinc-200">Stats</code> button: the heatmap opens first under a sticky header, metrics collapse into five compact chips, and yearly targets render as one row whose <em>Edit Goal</em> control expands an inline drawer for target books and hours.
+              Derives discrete reading sessions from KOSync progress telemetry in <code class="text-zinc-200">koreader-sync.db</code>. Visualizes daily reading time, consecutive reading streaks (current and longest), 365-day activity heatmap, library health distribution (unread, currently reading, finished), stale read detection (neglected books inactive &gt; 30 days), and strictly additive yearly reading goals. Accessible via the top header <code class="text-zinc-200">Stats</code> button: the heatmap opens first under a sticky header (full 365 days on tablet and desktop, the last 180 days on phones so each day stays a usable tap target), metrics collapse into four compact chips, and yearly targets render as one row whose <em>Edit Goal</em> control expands an inline drawer for target books and hours.
             </p>
           </div>
         </div>
@@ -4469,7 +4469,7 @@
             <span class="stats-card-title">
               <svg class="stats-icon-md tone-amber-icon"><use href="#icon-chart-bar"/></svg>
               <span class="stats-heatmap-title">Activity</span>
-              <span class="stats-muted">past 365 days</span>
+              <span id="heatmapWindowLabel" class="stats-muted"></span>
             </span>
             <div class="stats-legend">
               <span>Less</span>
@@ -4485,7 +4485,7 @@
           <div class="stats-heatmap-wrap">
             <div id="heatmapMonthLabels" aria-hidden="true"></div>
             <div id="heatmapGridContainer">
-              <div id="heatmapGrid" role="img" aria-label="Reading activity per day for the past 365 days"></div>
+              <div id="heatmapGrid" role="img" aria-label="Reading activity per day"></div>
             </div>
           </div>
           <div id="heatmapTooltip" class="stats-tooltip">Tap a day to see reading activity</div>
@@ -4523,7 +4523,7 @@
                   <div class="stats-chip-label"><span>Reading Days</span></div>
                   <div class="stats-chip-row">
                     <span class="stats-chip-value" id="statTotalDays">0</span>
-                    <span class="stats-chip-sub">of 365</span>
+                    <span class="stats-chip-sub">all time</span>
                   </div>
                 </div>
               </div>
@@ -11062,6 +11062,28 @@
 
     let readingStatsData = null;
 
+    const HEATMAP_MOBILE_DAYS = 180;
+    const HEATMAP_DESKTOP_DAYS = 365;
+    const heatmapWideViewport = window.matchMedia ? window.matchMedia('(min-width: 640px)') : null;
+    let heatmapBreakpointBound = false;
+
+    function heatmapWindowDays() {
+      return heatmapWideViewport && heatmapWideViewport.matches ? HEATMAP_DESKTOP_DAYS : HEATMAP_MOBILE_DAYS;
+    }
+
+    function bindHeatmapBreakpoint() {
+      if (heatmapBreakpointBound || !heatmapWideViewport) return;
+      heatmapBreakpointBound = true;
+      const rerender = () => {
+        if (readingStatsData) renderHeatmapGrid(readingStatsData.heatmap || []);
+      };
+      if (typeof heatmapWideViewport.addEventListener === 'function') {
+        heatmapWideViewport.addEventListener('change', rerender);
+      } else if (typeof heatmapWideViewport.addListener === 'function') {
+        heatmapWideViewport.addListener(rerender);
+      }
+    }
+
     function openReadingStatsModal() {
       if (window.tgHaptic) tgHaptic.light();
       openModalAnimated('readingStatsModal', false);
@@ -11215,13 +11237,26 @@
       const grid = document.getElementById('heatmapGrid');
       const tooltip = document.getElementById('heatmapTooltip');
       const monthRow = document.getElementById('heatmapMonthLabels');
+      const windowLabel = document.getElementById('heatmapWindowLabel');
       if (!grid) return;
       grid.innerHTML = '';
 
       const maxLevel = 4;
       const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-      const days = Array.isArray(heatmap) ? heatmap : [];
+      const days = (Array.isArray(heatmap) ? heatmap : []).slice(-heatmapWindowDays());
+
+      bindHeatmapBreakpoint();
+      if (windowLabel) windowLabel.textContent = days.length > 0 ? `past ${days.length} days` : '';
+      grid.setAttribute(
+        'aria-label',
+        days.length > 0 ? `Reading activity per day for the past ${days.length} days` : 'Reading activity per day',
+      );
+      if (tooltip) {
+        if (!tooltip.dataset.defaultText) tooltip.dataset.defaultText = tooltip.textContent;
+        tooltip.textContent = tooltip.dataset.defaultText;
+      }
+
       const columns = Math.max(1, Math.ceil(days.length / 7));
       const columnTemplate = `repeat(${columns}, minmax(0, 1fr))`;
       grid.style.gridTemplateColumns = columnTemplate;
