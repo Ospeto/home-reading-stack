@@ -354,8 +354,9 @@ function Stats.streakLabel(streaks)
     return label
 end
 
---- "12/25" against a book target, or "12 books read" when the goal has only
--- an hours target but the server still sent the book count.
+--- "12/25" against a book target, or the bare "12 read" when the goal has
+-- only an hours target but the server still sent the book count. The view's row
+-- already carries the "Books" label, so the value does not repeat it.
 -- @tparam table goal normalized goal section
 -- @treturn string|nil nil only when the server did not send the count either
 function Stats.goalBooksLabel(goal)
@@ -365,7 +366,7 @@ function Stats.goalBooksLabel(goal)
         return string.format("%d/%d", round(current or 0), round(goal.targetBooks))
     end
     if not current then return nil end
-    return string.format("%d books read", round(current))
+    return string.format("%d read", round(current))
 end
 
 --- "34h/100h" against an hours target, or "34h read" when the goal has only

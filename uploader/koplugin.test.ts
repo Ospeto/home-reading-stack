@@ -2595,7 +2595,7 @@ describe("plugin reading-stats formatting", () => {
     expect(out.goal_books_only_books).toBe("5/20");
     expect(out.goal_books_only_hours).toBe("12.5h read");
     expect(out.goal_books_only_hours_ratio).toBe("nil");
-    expect(out.goal_hours_only_books).toBe("7 books read");
+    expect(out.goal_hours_only_books).toBe("7 read");
     expect(out.goal_hours_only_hours).toBe("34h/100h");
     expect(out.goal_hours_only_books_ratio).toBe("nil");
     // Absent count: no number to show, so the view says unavailable.
@@ -2814,6 +2814,20 @@ local one = current_menu()
 print("one_rows=" .. tostring(one and one.item_table and #one.item_table))
 if one then dump_rows(one, "one_row") end
 
+-- 3c. Single-target goal the other way: an hours target, books untargeted ----
+stats_payload = {
+  goal = {
+    year = 2026, targetHours = 100, currentBooks = 12,
+    currentHours = 34, hoursPercent = 34,
+  },
+}
+local hours_ok, hours_raised = pcall(tap)
+print("hours_only_ok=" .. tostring(hours_ok))
+print("hours_only_raised=" .. tostring(hours_raised))
+local hours_menu = current_menu()
+print("hours_only_rows=" .. tostring(hours_menu and hours_menu.item_table and #hours_menu.item_table))
+if hours_menu then dump_rows(hours_menu, "hours_only_row") end
+
 -- 4. Unreadable body ---------------------------------------------------------
 stats_payload = "not a stats payload"
 local bad_ok, bad_raised = pcall(tap)
@@ -2923,7 +2937,11 @@ describe("plugin reading stats view", () => {
     // Heatmap: one row per week of up to seven days, newest week last.
     expect(out.row13).toBe("Activity (newest week last)\tnil");
     expect(out.row14).toBe("·▒▓\tNov 15");
-    expect(String(out.row15)).toContain("Shade key");
+    // The key is computed from the level thresholds, so pin the whole string:
+    // the ramp it must mirror is the server's (>=1m, >=15m, >=30m, >=60m).
+    expect(out.row15).toBe(
+      "Shade key: · none · ░ under 15m · ▒ under 30m · ▓ under 1h · █ 1h or more\tnil",
+    );
 
     expect(out.week_days).toBe("3");
     expect(out.week_day1).toBe("Nov 13 · 0m");
@@ -2949,8 +2967,11 @@ describe("plugin reading stats view", () => {
     expect(out.deg_row5).toBe("Books finished this year\tunavailable");
     expect(out.deg_row7).toBe("Unread\tunavailable");
     expect(out.deg_row11).toBe("Heatmap\tunavailable");
-    // A missing heatmap still renders a key row rather than an empty picture.
-    expect(String(out.deg_row12)).toContain("Shade key");
+    // A missing heatmap still renders the same key row rather than an empty
+    // picture, and the key does not depend on the payload.
+    expect(out.deg_row12).toBe(
+      "Shade key: · none · ░ under 15m · ▒ under 30m · ▓ under 1h · █ 1h or more\tnil",
+    );
   });
 
   it("shows the untargeted metric of a single-target goal as its count", () => {
@@ -2963,6 +2984,18 @@ describe("plugin reading stats view", () => {
     // The configured target keeps its bar; the other metric keeps its number.
     expect(out.one_row11).toBe("Books\t████░░░░ 48% · 12/25");
     expect(out.one_row12).toBe("Hours\t34h read");
+  });
+
+  it("labels the untargeted books metric without repeating the row label", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runHarness(READING_STATS_HARNESS);
+
+    expect(out.hours_only_ok).toBe("true");
+    expect(out.hours_only_raised).toBe("nil");
+    expect(out.hours_only_rows).toBe("15");
+    // The row label is already "Books", so the value must not say it again.
+    expect(out.hours_only_row11).toBe("Books\t12 read");
+    expect(out.hours_only_row12).toBe("Hours\t███░░░░░ 34% · 34h/100h");
   });
 
   it("reports an unreadable payload and a network failure in the plugin's own style", () => {
