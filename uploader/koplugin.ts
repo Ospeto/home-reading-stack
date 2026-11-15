@@ -32,7 +32,25 @@ export const KOPLUGIN_DIR_NAME = "lighthouse.koplugin";
 export const KOPLUGIN_DOWNLOAD_FILENAME = "lighthouse.koplugin";
 
 /** Version stamped into the generated configuration. */
-export const KOPLUGIN_VERSION = "1.0.0";
+export const KOPLUGIN_VERSION = "1.1.0";
+
+/** Per-socket-operation timeout for JSON/OPDS requests, in seconds. */
+export const KOPLUGIN_REQUEST_BLOCK_TIMEOUT = 10;
+
+/**
+ * Whole-request budget for JSON/OPDS requests, in seconds.
+ *
+ * 90s rather than the old 40s: the first catalog page over the WAN tunnel on
+ * slow Wi-Fi can legitimately take much longer than an API call, and a request
+ * budget that expires mid-transfer turns a slow connection into a failed browse.
+ */
+export const KOPLUGIN_REQUEST_TOTAL_TIMEOUT = 90;
+
+/** Per-socket-operation timeout for EPUB downloads, in seconds. */
+export const KOPLUGIN_DOWNLOAD_BLOCK_TIMEOUT = 15;
+
+/** Whole-request budget for EPUB downloads, in seconds. */
+export const KOPLUGIN_DOWNLOAD_TOTAL_TIMEOUT = 300;
 
 /** Committed template sources. Contains no credentials. */
 export const KOPLUGIN_TEMPLATE_DIR = path.join(
@@ -63,6 +81,10 @@ export interface KopluginSettings {
   pageSize: number;
   generatedAt: string;
   pluginVersion: string;
+  requestBlockTimeout: number;
+  requestTotalTimeout: number;
+  downloadBlockTimeout: number;
+  downloadTotalTimeout: number;
 }
 
 export interface KopluginZipEntry {
@@ -132,11 +154,20 @@ export function luaStringLiteral(value: string): string {
   return `"${escaped}"`;
 }
 
+/** Renders a positive timeout, falling back when the value is unusable. */
+function timeoutOr(raw: number | undefined, fallback: number): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return fallback;
+  return Math.trunc(value);
+}
+
 /**
  * Renders the per-download `lighthouse_config.lua`.
  *
  * The output is a pure data module: no logic, no environment lookups, so the
- * device cannot accidentally fall back to a different server.
+ * device cannot accidentally fall back to a different server. The timeout
+ * fields are the ones `lighthouse_client.lua` reads; omitting them would leave
+ * the client on its own defaults with no way to tune a slow link.
  */
 export function renderConfigLua(settings: KopluginSettings): string {
   const lines = [
@@ -155,6 +186,10 @@ export function renderConfigLua(settings: KopluginSettings): string {
     `    page_size = ${Math.trunc(settings.pageSize)},`,
     `    plugin_version = ${luaStringLiteral(settings.pluginVersion)},`,
     `    generated_at = ${luaStringLiteral(settings.generatedAt)},`,
+    `    request_block_timeout = ${timeoutOr(settings.requestBlockTimeout, KOPLUGIN_REQUEST_BLOCK_TIMEOUT)},`,
+    `    request_total_timeout = ${timeoutOr(settings.requestTotalTimeout, KOPLUGIN_REQUEST_TOTAL_TIMEOUT)},`,
+    `    download_block_timeout = ${timeoutOr(settings.downloadBlockTimeout, KOPLUGIN_DOWNLOAD_BLOCK_TIMEOUT)},`,
+    `    download_total_timeout = ${timeoutOr(settings.downloadTotalTimeout, KOPLUGIN_DOWNLOAD_TOTAL_TIMEOUT)},`,
     "}",
     "",
   ];
@@ -311,6 +346,10 @@ export function generateKoplugin(options: KopluginConfigOptions): {
     pageSize: options.pageSize ?? KOPLUGIN_DEFAULT_PAGE_SIZE,
     generatedAt: options.generatedAt ?? new Date().toISOString(),
     pluginVersion: KOPLUGIN_VERSION,
+    requestBlockTimeout: KOPLUGIN_REQUEST_BLOCK_TIMEOUT,
+    requestTotalTimeout: KOPLUGIN_REQUEST_TOTAL_TIMEOUT,
+    downloadBlockTimeout: KOPLUGIN_DOWNLOAD_BLOCK_TIMEOUT,
+    downloadTotalTimeout: KOPLUGIN_DOWNLOAD_TOTAL_TIMEOUT,
   };
 
   const template = readTemplateEntries();
@@ -359,7 +398,24 @@ export function kopluginDownloadHeaders(): Record<string, string> {
   };
 }
 
-/** Reads the current server API key, if any. Never logged by callers. */
+/**
+ * Reads the current server API key, if any. Never logged by callers.
+ *
+ * Scoped-key trade-off (deliberate, and why this stays on the global key):
+ * the generated archive must embed a working credential because a device cannot
+ * be taught the key without a QR/typing flow. A `READING_SCOPED_KEYS` entry
+ * with `read` scope would be the least-privilege option, but a *new* key cannot
+ * be minted per download: the scoped registry is operator configuration read at
+ * startup, so writing a fresh key into it would be a security-state mutation on
+ * a read-only route (and would have to be revoked by hand afterwards). Embedding
+ * an operator-provided `read` key would work, yet it would silently turn a
+ * one-key install into a two-key install and still hand every device the same
+ * long-lived secret. So the route keeps refusing scoped keys
+ * (`code: "insufficient_scope"`) rather than letting a limited credential trade
+ * itself for the master key, and the plugin keeps using the global
+ * `READING_API_KEY` exactly as the web app does. Scope is left intact - no
+ * permission is widened for the plugin.
+ */
 export function resolveApiKeyFromEnv(
   env: Record<string, string | undefined> = process.env,
 ): string {

@@ -2,8 +2,17 @@
 HTTP client for the LightHouse plugin.
 
 Wraps LuaSocket the same way KOReader's own plugins do
-(`socket.http` + `ltn12` + `socketutil` timeouts) so HTTPS, redirects and the
+(`socket.http` / `socket.https` + `ltn12` + `socketutil` timeouts) so the
 device's proxy settings keep working without adding a dependency.
+
+The transport is chosen from the configured URL scheme: `https://` goes through
+`socket.https` (LuaSocket's TLS wrapper) and `http://` stays on plain
+`socket.http`. A device build without TLS support gets a clear
+`https_unavailable` error instead of a connection that silently goes nowhere.
+
+Redirects (`301/302/303/307/308`) are followed up to `MAX_REDIRECTS` hops, with
+relative `Location` headers resolved against the request URL, so a server or
+reverse proxy that moves a route does not break downloads on the device.
 
 Authentication reuses the server's existing scheme: the plugin sends the
 API key as `X-API-Key` (one of the methods `authenticateRequest()` already
@@ -14,16 +23,46 @@ URL query string, and is never written to the KOReader log.
 local http = require("socket.http")
 local lfs = require("libs/libkoreader-lfs")
 local ltn12 = require("ltn12")
-local socket = require("socket")
 local socketutil = require("socketutil")
 
 local Client = {}
+
+--- Redirects followed before giving up, matching a browser's budget.
+local MAX_REDIRECTS = 5
+
+--- Smallest plausible EPUB payload, in bytes.
+local MIN_DOWNLOAD_BYTES = 256
+
+--- Status codes that mean "read the Location header instead of the body".
+local REDIRECT_CODES = {
+    [301] = true,
+    [302] = true,
+    [303] = true,
+    [307] = true,
+    [308] = true,
+}
+
+-- Kept in sync with the values the generator writes into lighthouse_config.lua.
+local DEFAULT_REQUEST_BLOCK_TIMEOUT = 10
+local DEFAULT_REQUEST_TOTAL_TIMEOUT = 90
+local DEFAULT_DOWNLOAD_BLOCK_TIMEOUT = 15
+local DEFAULT_DOWNLOAD_TOTAL_TIMEOUT = 300
 
 --- Strips a trailing slash so paths can be appended safely.
 -- @string url
 -- @treturn string
 local function trimTrailingSlash(url)
     return (tostring(url or ""):gsub("/+$", ""))
+end
+
+--- Returns a positive timeout, or the fallback when the value is unusable.
+-- @param value configured timeout (number or numeric string)
+-- @number fallback
+-- @treturn number
+local function numberOr(value, fallback)
+    local parsed = tonumber(value)
+    if not parsed or parsed ~= parsed or parsed <= 0 then return fallback end
+    return parsed
 end
 
 --- Returns true when the plugin has a usable server URL baked in.
@@ -67,6 +106,196 @@ function Client.buildHeaders(config)
     return headers
 end
 
+--- Returns the LuaSocket transport that speaks the URL's scheme.
+-- LuaSocket's TLS wrapper is loaded lazily so a device build without it can
+-- still reach a LAN server over plain HTTP.
+-- @string url
+-- @treturn table|nil transport module (`socket.http` or `socket.https`)
+-- @treturn string|nil error description
+local https_transport
+local function pickTransport(url)
+    if type(url) == "string" and url:lower():match("^https://") then
+        if https_transport == nil then
+            local ok, loaded = pcall(require, "socket.https")
+            if not ok or type(loaded) ~= "table" or type(loaded.request) ~= "function" then
+                return nil, "https_unavailable"
+            end
+            https_transport = loaded
+        end
+        return https_transport
+    end
+    return http
+end
+
+--- Case-insensitive response-header lookup.
+-- @tparam table headers
+-- @string name
+-- @treturn string|nil
+local function headerValue(headers, name)
+    if type(headers) ~= "table" or type(name) ~= "string" then return nil end
+    local wanted = name:lower()
+    for key, value in pairs(headers) do
+        if type(key) == "string" and key:lower() == wanted then
+            return tostring(value)
+        end
+    end
+    return nil
+end
+
+--- Resolves a (possibly relative) Location header against the request URL.
+-- @string base URL the request was made against
+-- @string location raw Location header
+-- @treturn string|nil absolute URL
+function Client.resolveRedirect(base, location)
+    if type(location) ~= "string" then return nil end
+    location = location:gsub("^%s+", ""):gsub("%s+$", "")
+    if location == "" then return nil end
+    if location:match("^%a[%w+%-%.]*://") then return location end
+
+    local scheme, authority = tostring(base):match("^(%a[%w+%-%.]*)://([^/]*)")
+    if not scheme or authority == "" then return nil end
+
+    if location:sub(1, 2) == "//" then
+        return scheme .. ":" .. location
+    end
+    if location:sub(1, 1) == "/" then
+        return scheme .. "://" .. authority .. location
+    end
+
+    -- A query-only reference (`?start=40`) keeps the current path.
+    if location:sub(1, 1) == "?" then
+        local query_path = tostring(base):gsub("^%a[%w+%-%.]*://[^/]*", ""):gsub("[?#].*$", "")
+        if query_path == "" then query_path = "/" end
+        return scheme .. "://" .. authority .. query_path .. location
+    end
+
+    -- Relative path: resolve against the directory of the request URL, ignoring
+    -- any query string or fragment it carries.
+    local path = tostring(base):gsub("^%a[%w+%-%.]*://[^/]*", ""):gsub("[?#].*$", "")
+    path = path:gsub("/[^/]*$", "/")
+    if path == "" or path:sub(1, 1) ~= "/" then path = "/" end
+    return scheme .. "://" .. authority .. path .. location
+end
+
+--- Returns true when the payload is a web page rather than a feed or a book.
+-- A captive portal or a login page answered with HTTP 200 otherwise ends up
+-- saved as a broken `.epub` on the device.
+-- @string text beginning of the payload
+-- @treturn boolean
+local function looksLikeHtmlDocument(text)
+    if type(text) ~= "string" or text == "" then return false end
+    local head = text:sub(1, 512):gsub("^\239\187\191", ""):lower()
+    head = head:gsub("^%s+", "")
+    return head:match("^<!doctype%s+html") ~= nil
+        or head:match("^<html") ~= nil
+        or head:match("^<head") ~= nil
+end
+
+--- Builds an ltn12 sink that streams into an already-open file handle.
+-- `ltn12.sink.file` closes the handle at end of stream, which would make
+-- redirect handling impossible, so the caller keeps ownership of the file.
+-- @param handle writable file handle
+-- @treturn function sink
+local function fileSink(handle)
+    return function(chunk, err)
+        if chunk then
+            local written, write_err = handle:write(chunk)
+            if not written then
+                return nil, string.format("file_error: %s", tostring(write_err or err or "write_error"))
+            end
+        end
+        return 1
+    end
+end
+
+--- Performs exactly one HTTP GET.
+-- @string url absolute URL
+-- @param sink ltn12 sink
+-- @tparam table headers request headers
+-- @treturn number|nil status code
+-- @treturn table|nil response headers
+-- @treturn string|nil error description
+local function requestOnce(url, sink, headers)
+    local transport, transport_err = pickTransport(url)
+    if not transport then
+        return nil, nil, transport_err
+    end
+
+    local ok, leading, code, response_headers = pcall(transport.request, {
+        url = url,
+        method = "GET",
+        headers = headers,
+        sink = sink,
+        -- LuaSocket follows redirects internally when unset, forwarding the
+        -- full header set (including X-API-Key) to every hop and returning
+        -- only the final response — which would bypass stripApiKeyCrossHost.
+        -- Disable it so Client.get/Client.download's own redirect loop is
+        -- authoritative.
+        redirect = false,
+    })
+    if not ok then
+        return nil, nil, string.format("network_error: %s", tostring(leading))
+    end
+    -- LuaSocket reports its own failures as (nil, errmsg), even though a
+    -- successful request returns (1, code, headers).
+    if leading == nil then
+        -- Sink write failures already carry their own code; do not relabel a
+        -- full disk as a network outage.
+        local detail = tostring(code or "unknown")
+        -- Plain-string prefix check: string.find with plain=true treats "^"
+        -- as a literal caret, so an anchored find would never match here.
+        if detail:sub(1, 11) == "file_error:" then
+            return nil, nil, detail
+        end
+        return nil, nil, string.format("network_error: %s", detail)
+    end
+
+    local status = tonumber(code)
+    if not status then
+        return nil, nil, string.format("network_error: unexpected status %s", tostring(code))
+    end
+    return status, type(response_headers) == "table" and response_headers or {}, nil
+end
+
+--- Follows one redirect hop, or reports why it cannot.
+-- @string current URL just requested
+-- @tparam table response_headers headers of the redirect response
+-- @number redirects hops already taken
+-- @treturn string|nil absolute URL of the next hop
+-- @treturn string|nil error description
+local function nextHop(current, response_headers, redirects)
+    if redirects >= MAX_REDIRECTS then
+        return nil, "too_many_redirects"
+    end
+    local next_url = Client.resolveRedirect(current, headerValue(response_headers, "location"))
+    if not next_url then
+        return nil, "invalid_redirect"
+    end
+    return next_url
+end
+
+--- Extracts the authority (scheme-host-port) of an absolute URL.
+-- @string url
+-- @treturn string|nil
+local function urlAuthority(url)
+    if type(url) ~= "string" then return nil end
+    return url:lower():match("^%a[%w+%-%.]+://([^/#?]*)")
+end
+
+--- Drops the API key when a redirect crosses to a different host.
+-- Browsers never forward auth headers to another origin while following a
+-- redirect; a captive portal or login host must not receive the server key.
+-- @tparam table headers request headers (mutated)
+-- @string current URL just requested
+-- @string next_url redirect target
+local function stripApiKeyCrossHost(headers, current, next_url)
+    local current_authority = urlAuthority(current)
+    local next_authority = urlAuthority(next_url)
+    if current_authority and next_authority and current_authority ~= next_authority then
+        headers["X-API-Key"] = nil
+    end
+end
+
 --- GETs a URL and returns the response body.
 -- @tparam table config generated config table
 -- @string path absolute URL or path relative to base_url
@@ -77,37 +306,50 @@ function Client.get(config, path)
         return nil, "not_configured"
     end
 
+    local headers = Client.buildHeaders(config)
+    local current = Client.buildUrl(config, path)
+    local redirects = 0
     local chunks = {}
+    local code, response_headers, err
+
     socketutil:set_timeout(
-        config.request_block_timeout or 10,
-        config.request_total_timeout or 40
+        numberOr(config.request_block_timeout, DEFAULT_REQUEST_BLOCK_TIMEOUT),
+        numberOr(config.request_total_timeout, DEFAULT_REQUEST_TOTAL_TIMEOUT)
     )
-    local ok, code = pcall(function()
-        return socket.skip(1, http.request({
-            url = Client.buildUrl(config, path),
-            method = "GET",
-            headers = Client.buildHeaders(config),
-            sink = ltn12.sink.table(chunks),
-        }))
-    end)
+    while true do
+        chunks = {}
+        code, response_headers, err = requestOnce(current, ltn12.sink.table(chunks), headers)
+        if not code or not REDIRECT_CODES[code] then
+            break
+        end
+        local next_url, redirect_err = nextHop(current, response_headers, redirects)
+        if not next_url then
+            code, err = nil, redirect_err
+            break
+        end
+        redirects = redirects + 1
+        stripApiKeyCrossHost(headers, current, next_url)
+        current = next_url
+    end
     socketutil:reset_timeout()
 
-    if not ok then
-        return nil, tostring(code)
-    end
-    -- LuaSocket returns (nil, errmsg) when the transport itself failed.
-    if type(code) ~= "number" then
-        return nil, "network_error"
+    if not code then
+        return nil, err or "network_error"
     end
     if code ~= 200 then
         return nil, string.format("http_%d", code)
     end
-    return table.concat(chunks), nil
+
+    local body = table.concat(chunks)
+    if looksLikeHtmlDocument(body) then
+        return nil, "html_response"
+    end
+    return body, nil
 end
 
 --- Downloads a URL into a local file.
 -- @tparam table config generated config table
--- @string url absolute URL
+-- @string url absolute URL (a path relative to base_url also works)
 -- @string filepath destination path
 -- @treturn boolean|nil success
 -- @treturn string|nil error description
@@ -116,46 +358,73 @@ function Client.download(config, url, filepath)
         return nil, "not_configured"
     end
 
-    local handle, open_err = io.open(filepath, "wb")
+    local handle = io.open(filepath, "wb")
     if not handle then
-        return nil, tostring(open_err or "cannot_open_file")
+        return nil, string.format("file_error: cannot write %s", tostring(filepath))
     end
 
+    local headers = Client.buildHeaders(config)
+    local current = Client.buildUrl(config, url)
+    local redirects = 0
+    local code, response_headers, err
+
     socketutil:set_timeout(
-        config.download_block_timeout or 10,
-        config.download_total_timeout or 300
+        numberOr(config.download_block_timeout, DEFAULT_DOWNLOAD_BLOCK_TIMEOUT),
+        numberOr(config.download_total_timeout, DEFAULT_DOWNLOAD_TOTAL_TIMEOUT)
     )
-    local ok, code = pcall(function()
-        return socket.skip(1, http.request({
-            url = url,
-            method = "GET",
-            headers = Client.buildHeaders(config),
-            sink = ltn12.sink.file(handle),
-        }))
-    end)
+    while true do
+        code, response_headers, err = requestOnce(current, fileSink(handle), headers)
+        if not code or not REDIRECT_CODES[code] then
+            break
+        end
+        local next_url, redirect_err = nextHop(current, response_headers, redirects)
+        if not next_url then
+            code, err = nil, redirect_err
+            break
+        end
+        redirects = redirects + 1
+        stripApiKeyCrossHost(headers, current, next_url)
+        current = next_url
+        -- The redirect body is already in the file; restart the next hop from
+        -- an empty file so an interstitial page is never mixed into the EPUB.
+        pcall(function() handle:close() end)
+        handle = io.open(filepath, "wb")
+        if not handle then
+            socketutil:reset_timeout()
+            os.remove(filepath)
+            return nil, string.format("file_error: cannot rewrite %s", tostring(filepath))
+        end
+    end
     socketutil:reset_timeout()
     pcall(function() handle:close() end)
 
-    if not ok then
+    if not code then
         os.remove(filepath)
-        return nil, tostring(code)
-    end
-    if type(code) ~= "number" then
-        os.remove(filepath)
-        return nil, "network_error"
+        return nil, err or "network_error"
     end
     if code ~= 200 then
         os.remove(filepath)
         return nil, string.format("http_%d", code)
     end
 
-    -- Guard against a zero-byte or HTML error page masquerading as an EPUB.
+    -- Guard against a zero-byte file or a web page masquerading as an EPUB.
     local size = lfs.attributes(filepath, "size") or 0
-    if size < 256 then
+    if size < MIN_DOWNLOAD_BYTES then
         os.remove(filepath)
         return nil, "empty_response"
     end
-    return true
+
+    local probe = io.open(filepath, "rb")
+    if probe then
+        local head = probe:read(512)
+        probe:close()
+        if looksLikeHtmlDocument(head) then
+            os.remove(filepath)
+            return nil, "html_response"
+        end
+    end
+
+    return true, nil
 end
 
 return Client
