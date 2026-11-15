@@ -86,6 +86,29 @@ curl -i -k https://kosync-sg.wavypremium.xyz:8443/health
 launchctl list | grep -E "com.ospeto.reading-(vless|sg)-tunnel"
 ```
 
+### 9. Startup Library Preflight (Running But Not Answering — INC-11)
+
+A live PID in `launchctl list` plus a listening port is **not** proof the uploader is healthy. On start the server probes the Calibre library out of process (5s deadline, `LIGHTHOUSE_LIBRARY_PROBE_TIMEOUT_MS` to override) and refuses to bind unless the library root and `metadata.db` are readable — because a library on an unanswering removable volume made `bun` block inside `openat`, which produced a silent wedge instead of an error.
+
+```bash
+# 1. Is the process serving, or only listening?
+launchctl list | grep com.ospeto.book-uploader
+curl -s -m 5 -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8086/api/books   # 000 = bound but not serving
+
+# 2. Read the preflight verdict from the agent's logs
+tail -20 ~/Library/Logs/uploader-error.log   # "Fatal: macOS refused access" / "did not answer"
+
+# 3. Check whether the library volume answers at all - stat works from cache even
+#    when real reads are wedged, so read a directory and a file, not a stat.
+ls /Volumes/Ospeto_SSD >/dev/null && echo "volume answers" || echo "volume refuses or hangs"
+cat /Volumes/Ospeto_SSD/Lighthouse_Agent_Library/metadata.db >/dev/null && echo "library readable"
+
+# 4. If it is wedged: remount the volume (stops calibre-server) or move the library
+#    onto local storage and keep the SSD as a backup target. See INC-11 in INCIDENTS.md.
+```
+
+A successful manual start is not evidence of supervision: an interactive shell inherits its TCC entitlement, a launchd agent does not.
+
 ---
 
 ## 🕹️ Service Control & Lifecycle

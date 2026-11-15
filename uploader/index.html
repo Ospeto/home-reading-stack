@@ -3495,6 +3495,22 @@
 
           <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
+              <span class="font-bold text-zinc-200">Startup Library Preflight</span>
+              <span class="text-[10px] font-mono text-zinc-400">exit 1 if unreadable</span>
+            </div>
+            <p class="text-[11px] text-zinc-400 leading-relaxed">
+              Before binding :8086 the server probes the Calibre library out of process. If the library lives on a removable volume that macOS refuses (<span class="font-mono">Operation not permitted</span>), or on one that never answers, it exits with the cause and both remedies instead of listening forever with nothing to serve.
+            </p>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">LIGHTHOUSE_LIBRARY_PROBE_TIMEOUT_MS=5000</code>
+              <button onclick="copyToClipboard('LIGHTHOUSE_LIBRARY_PROBE_TIMEOUT_MS=5000')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+            <div class="flex items-center justify-between">
               <span class="font-bold text-zinc-200">Service Lifecycle</span>
               <span class="text-[10px] font-mono text-zinc-400">up / down / restart</span>
             </div>

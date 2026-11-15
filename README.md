@@ -756,6 +756,24 @@ Search your library and retrieve books anywhere via Telegram (`@saroat_ospeto_bo
 
 ---
 
+## ⏱️ Startup Library Preflight (Non-Hanging)
+
+The server now refuses to bind its port until it can actually read the Calibre library. A bounded, **out-of-process** probe runs first, because both ways that read can fail on macOS used to produce the same silent symptom: a live PID in `launchctl list`, a listening socket, and no HTTP.
+
+| Verdict | Meaning | Behaviour |
+| --- | --- | --- |
+| `ok` | library root and `metadata.db` are readable | start |
+| `missing` | nothing is mounted at the library path | warn, start with an empty catalog |
+| `permission-denied` | TCC denied removable-volume access (`Operation not permitted`) | exit 1 |
+| `unresponsive` | the volume never answered `open`/`readdir`; the probe child was killed | exit 1 |
+
+- **Deadline:** 5000 ms per probe, override with `LIGHTHOUSE_LIBRARY_PROBE_TIMEOUT_MS`.
+- **Why a child process:** when a removable volume stops answering, `bun` blocks *inside* the `openat` syscall, so an in-process check would hang exactly like the bug it is checking for. The probe runs as a killable `/bin/sh -c 'exec /bin/ls …'` and is SIGKILLed at the deadline.
+- **Failure output** names every failing path, the cause it actually observed, and both remedies: move the live library onto local storage (recommended — no TCC dependency, survives reboots and runtime upgrades), or grant the runtime Full Disk Access (fragile — the grant is keyed to the binary hash and is lost on every upgrade).
+- Background: [INC-11](INCIDENTS.md) — the launchd supervision investigation this came from.
+
+---
+
 ## 📋 Operational Runbooks & Documentation
 
 - [RUNBOOK.md](RUNBOOK.md) — Comprehensive operations manual, health troubleshooting, system migration, and daemon lifecycle.

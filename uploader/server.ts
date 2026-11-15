@@ -110,6 +110,7 @@ import {
   type HighlightRecord,
 } from "./highlights";
 import { openSqliteForStartup } from "./sqlite-open";
+import { evaluateLibraryStartupGate } from "./library-preflight";
 import {
   annotationSummary,
   deleteAnnotation,
@@ -8984,6 +8985,26 @@ if ((import.meta as any).main) {
     process.env.UPLOADER_PORT || process.env.PORT || "8086",
     10,
   );
+  // Probe the Calibre library BEFORE binding anything. The library can live on
+  // a removable volume (this deployment symlinks `~/Calibre Libraries/Agent
+  // Library` onto an external disk). Under launchd there is no TCC
+  // removable-volume entitlement, so the read comes back `Operation not
+  // permitted`; and when such a volume stops answering, `open`/`readdir` never
+  // return at all, so bun blocks inside the syscall. Either way this process
+  // used to bind the port, log "listening" and serve nothing - a live PID that
+  // looked exactly like a lost startup race. The probe runs out of process with
+  // a hard deadline, so a blocked filesystem call cannot take this process with
+  // it. See INC-11 in INCIDENTS.md.
+  const libraryGate = await evaluateLibraryStartupGate({
+    libraryDir: getCalibreLibraryDir(),
+    dbPath: getCalibreDbPath(),
+  });
+  const emitGate = libraryGate.exitCode === 0
+    ? (...lines: string[]) => console.warn(...lines)
+    : (...lines: string[]) => console.error(...lines);
+  emitGate(...libraryGate.lines);
+  if (libraryGate.exitCode !== 0) process.exit(libraryGate.exitCode);
+
   // Open and prepare cache.db BEFORE binding the socket. A process that is not
   // ready must never hold the port: it used to bind first and then serve
   // nothing (or die in a KeepAlive respawn loop) when another process held the
