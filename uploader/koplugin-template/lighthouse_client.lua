@@ -201,7 +201,7 @@ local function fileSink(handle)
         if chunk then
             local written, write_err = handle:write(chunk)
             if not written then
-                return nil, tostring(write_err or err or "write_error")
+                return nil, string.format("file_error: %s", tostring(write_err or err or "write_error"))
             end
         end
         return 1
@@ -233,7 +233,13 @@ local function requestOnce(url, sink, headers)
     -- LuaSocket reports its own failures as (nil, errmsg), even though a
     -- successful request returns (1, code, headers).
     if leading == nil then
-        return nil, nil, string.format("network_error: %s", tostring(code or "unknown"))
+        -- Sink write failures already carry their own code; do not relabel a
+        -- full disk as a network outage.
+        local detail = tostring(code or "unknown")
+        if detail:find("^file_error:", 1, true) then
+            return nil, nil, detail
+        end
+        return nil, nil, string.format("network_error: %s", detail)
     end
 
     local status = tonumber(code)
@@ -258,6 +264,28 @@ local function nextHop(current, response_headers, redirects)
         return nil, "invalid_redirect"
     end
     return next_url
+end
+
+--- Extracts the authority (scheme-host-port) of an absolute URL.
+-- @string url
+-- @treturn string|nil
+local function urlAuthority(url)
+    if type(url) ~= "string" then return nil end
+    return url:lower():match("^%a[%w+%-%.]+://([^/#?]*)")
+end
+
+--- Drops the API key when a redirect crosses to a different host.
+-- Browsers never forward auth headers to another origin while following a
+-- redirect; a captive portal or login host must not receive the server key.
+-- @tparam table headers request headers (mutated)
+-- @string current URL just requested
+-- @string next_url redirect target
+local function stripApiKeyCrossHost(headers, current, next_url)
+    local current_authority = urlAuthority(current)
+    local next_authority = urlAuthority(next_url)
+    if current_authority and next_authority and current_authority ~= next_authority then
+        headers["X-API-Key"] = nil
+    end
 end
 
 --- GETs a URL and returns the response body.
@@ -292,6 +320,7 @@ function Client.get(config, path)
             break
         end
         redirects = redirects + 1
+        stripApiKeyCrossHost(headers, current, next_url)
         current = next_url
     end
     socketutil:reset_timeout()
@@ -346,6 +375,7 @@ function Client.download(config, url, filepath)
             break
         end
         redirects = redirects + 1
+        stripApiKeyCrossHost(headers, current, next_url)
         current = next_url
         -- The redirect body is already in the file; restart the next hop from
         -- an empty file so an interstitial page is never mixed into the EPUB.

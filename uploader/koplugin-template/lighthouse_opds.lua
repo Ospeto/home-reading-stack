@@ -143,18 +143,23 @@ local function parseAuthors(block)
     end
 
     for author_block in block:gmatch("<author[^>]*>(.-)</author>") do
-        add(author_block:match("<name[^>]*>(.-)</name>"))
+        for name in author_block:gmatch("<name[^>]*>(.-)</name>") do
+            add(name)
+        end
         -- dc:creator is the other common shape when <author> is self-closing.
-        if #names == 0 then
-            add(author_block:match("<dc:creator[^>]*>(.-)</dc:creator>"))
+        for creator in author_block:gmatch("<dc:creator[^>]*>(.-)</dc:creator>") do
+            add(creator)
         end
     end
-    if #names == 0 then
-        add(block:match("<dc:creator[^>]*>(.-)</dc:creator>"))
+    -- Entry-level contributors, in case the feed skips <author> entirely.
+    for creator in block:gmatch("<dc:creator[^>]*>(.-)</dc:creator>") do
+        add(creator)
     end
     if #names == 0 then
-        -- Last resort: a bare <name> directly inside the entry.
-        add(block:match("<name[^>]*>(.-)</name>"))
+        -- Last resort: bare <name> elements directly inside the entry.
+        for name in block:gmatch("<name[^>]*>(.-)</name>") do
+            add(name)
+        end
     end
 
     return table.concat(names, ", ")

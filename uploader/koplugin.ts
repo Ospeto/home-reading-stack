@@ -73,14 +73,6 @@ export interface KopluginConfigOptions {
   pageSize?: number;
   /** ISO timestamp of generation, for the on-device Connection screen. */
   generatedAt?: string;
-  /** Override the per-operation request timeout (seconds). */
-  requestBlockTimeout?: number;
-  /** Override the whole-request budget (seconds). */
-  requestTotalTimeout?: number;
-  /** Override the per-operation download timeout (seconds). */
-  downloadBlockTimeout?: number;
-  /** Override the whole-download budget (seconds). */
-  downloadTotalTimeout?: number;
 }
 
 export interface KopluginSettings {
@@ -354,10 +346,10 @@ export function generateKoplugin(options: KopluginConfigOptions): {
     pageSize: options.pageSize ?? KOPLUGIN_DEFAULT_PAGE_SIZE,
     generatedAt: options.generatedAt ?? new Date().toISOString(),
     pluginVersion: KOPLUGIN_VERSION,
-    requestBlockTimeout: timeoutOr(options.requestBlockTimeout, KOPLUGIN_REQUEST_BLOCK_TIMEOUT),
-    requestTotalTimeout: timeoutOr(options.requestTotalTimeout, KOPLUGIN_REQUEST_TOTAL_TIMEOUT),
-    downloadBlockTimeout: timeoutOr(options.downloadBlockTimeout, KOPLUGIN_DOWNLOAD_BLOCK_TIMEOUT),
-    downloadTotalTimeout: timeoutOr(options.downloadTotalTimeout, KOPLUGIN_DOWNLOAD_TOTAL_TIMEOUT),
+    requestBlockTimeout: KOPLUGIN_REQUEST_BLOCK_TIMEOUT,
+    requestTotalTimeout: KOPLUGIN_REQUEST_TOTAL_TIMEOUT,
+    downloadBlockTimeout: KOPLUGIN_DOWNLOAD_BLOCK_TIMEOUT,
+    downloadTotalTimeout: KOPLUGIN_DOWNLOAD_TOTAL_TIMEOUT,
   };
 
   const template = readTemplateEntries();

@@ -322,7 +322,8 @@ function LightHouse:withSpinner(text, func)
         -- table carrying message + traceback, depending on how it was thrown.
         local message
         if type(body) == "table" then
-            message = tostring(body.message or body.traceback or body)
+            local detail = body.message or body.traceback
+            message = detail ~= nil and tostring(detail) or ("unknown " .. type(body) .. " error")
             logger.warn("LightHouse: request raised:", message, body.traceback)
         else
             message = tostring(body)
