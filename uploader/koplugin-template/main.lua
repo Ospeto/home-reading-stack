@@ -58,7 +58,6 @@ local util = require("util")
 -- body, and every `_("...")` inside would then index a number and raise.
 -- Iterate with an index (`for index = 1, #list do`) or a real name instead.
 local _ = require("gettext")
-local T = ffiUtil.template
 
 local config = require("lighthouse_config")
 local Client = require("lighthouse_client")
@@ -66,6 +65,35 @@ local OPDS = require("lighthouse_opds")
 local Stats = require("lighthouse_stats")
 local Status = require("lighthouse_status")
 local Ui = require("lighthouse_ui")
+
+--- The only way this plugin builds a translated string with substitutions.
+--
+-- KOReader's `T()` (ffi/util `template`) passes its arguments straight to
+-- `string.gsub` as the replacement value. Anything that is not a string either
+-- raises inside gsub and kills the process - on the device this read
+-- `./luajit: ./ffi/util.lua:779: invalid replacement value (a function)` - or
+-- is spliced into the reader's text as `function: 0x…`. A missing JSON field is
+-- no safer than a malformed one: the decoder maps `null` to a truthy callable
+-- sentinel, so `if value and value ~= ""` guards do not stop it.
+--
+-- This wrapper is why the class is impossible rather than fixed site by site:
+-- the module-level `T` IS the guard, so every existing call site and every call
+-- site added later routes through it. Each substitution goes through
+-- `Status.str`, whose contract is "always a string, never nil", so `template`
+-- can only ever receive strings.
+-- @string text_template already-translated format string
+-- @return string rendered message; substitutions are always strings
+local function T(text_template, ...)
+    local count = select("#", ...)
+    if count == 0 then return Status.str(text_template) end
+    local values = {}
+    for value_index = 1, count do
+        values[value_index] = Status.str((select(value_index, ...)))
+    end
+    -- `unpack` is the LuaJIT (Lua 5.1) vararg expander and the only one
+    -- KOReader has; `table.unpack` is a 5.2+ addition and not the target.
+    return (ffiUtil.template(Status.str(text_template), unpack(values, 1, count)))
+end
 
 local LightHouse = WidgetContainer:extend{
     name = "lighthouse",
@@ -447,6 +475,41 @@ end
 -- has no cover for gets a negative-cache marker, so it costs one request ever
 -- rather than one per page.
 -- @tparam table entries catalog entries (or synthetic cover-only entries)
+--- Fetches one page-cover, keeping every failure inside this call.
+-- Split out of `prefetchCovers` so the caller can `pcall` it: a cover is an
+-- enhancement, so a raise inside a cover request (or inside writing the
+-- negative-cache marker) may cost that cover and nothing else - never the rest
+-- of the page's covers, the row build, or the process.
+-- @tparam table entry catalog entry with a `.book_id`
+-- @number started os.time() when the page's fetch loop began
+-- @treturn boolean true when a request was issued
+function LightHouse:fetchOneCover(entry, started)
+    local path = coverPath(entry)
+    if not path then return false end
+    makeDirs(coverDir())
+    local now = os.time()
+    -- The fetch may not outlive the page budget: a cover request that connects
+    -- and then stalls is cut off at the budget instead of running on the EPUB
+    -- download timeouts.
+    local remaining = math.max(Ui.tokens.cover_fetch_seconds - (now - started), 1)
+    local ok_file, download_err = Client.download(
+        config, entry.thumbnail_href, path, remaining
+    )
+    -- Only a definitive "this book has no cover" answer is worth remembering; a
+    -- dropped link, a timeout or a rejected key must stay retryable next open.
+    if not ok_file and download_err == "http_404" then
+        local miss = coverMissPath(entry)
+        if miss then
+            local handle = io.open(miss, "wb")
+            if handle then
+                handle:write("no cover")
+                handle:close()
+            end
+        end
+    end
+    return true
+end
+
 function LightHouse:prefetchCovers(entries)
     local started = os.time()
     local fetched = 0
@@ -458,31 +521,11 @@ function LightHouse:prefetchCovers(entries)
                 logger.info("LightHouse: cover fetch budget reached for this page")
                 break
             end
-            local path = coverPath(entry)
-            if path then
-                makeDirs(coverDir())
-                -- The fetch may not outlive the page budget: a cover request
-                -- that connects and then stalls is cut off at the budget
-                -- instead of running on the EPUB download timeouts.
-                local remaining = math.max(Ui.tokens.cover_fetch_seconds - (now - started), 1)
-                local ok_file, download_err = Client.download(
-                    config, entry.thumbnail_href, path, remaining
-                )
-                fetched = fetched + 1
-                -- Only a definitive "this book has no cover" answer is worth
-                -- remembering; a dropped link, a timeout or a rejected key
-                -- must stay retryable on the next open.
-                if not ok_file and download_err == "http_404" then
-                    local miss = coverMissPath(entry)
-                    if miss then
-                        local handle = io.open(miss, "wb")
-                        if handle then
-                            handle:write("no cover")
-                            handle:close()
-                        end
-                    end
-                end
+            local ok_cover, cover_err = pcall(self.fetchOneCover, self, entry, started)
+            if not ok_cover then
+                logger.warn("LightHouse: cover fetch raised:", tostring(cover_err))
             end
+            fetched = fetched + 1
         end
     end
 end
@@ -514,13 +557,37 @@ end
 -- @treturn string
 function LightHouse:progressGlance(session)
     if type(session) ~= "table" then return _("Unread") end
-    local label = Ui.glanceProgress(Status, session.percentage)
-    if session.percentage >= 0.99 then
+    -- `>=` against a table or a callable sentinel raises just like gsub does,
+    -- so the ratio is coerced before it is compared.
+    local percentage = Status.num(session.percentage) or 0
+    local label = Ui.glanceProgress(Status, percentage)
+    if percentage >= 0.99 then
         label = label .. " " .. Ui.GLYPH.done
-    elseif session.percentage <= 0 then
+    elseif percentage <= 0 then
         label = label .. " " .. _("opened")
     end
     return label
+end
+
+--- Widget for a row's left gutter, or nil.
+-- A cover that cannot be drawn must cost the picture, never the row: the whole
+-- slot is built inside `pcall`, and a failure falls back to the neutral
+-- placeholder, which draws no untrusted image at all. This is the row-build
+-- half of the cover guarantee - a failing `GET /api/books/<id>/cover` (or a
+-- widget that raises on a half-written file) can no longer propagate out of
+-- the row and take the screen with it.
+-- @tparam table spec row spec (see `buildRow`)
+-- @tparam table layout result of `Ui.layout`
+-- @treturn table|nil widget
+function LightHouse:rowGutterState(spec, layout)
+    local ok, widget = pcall(function()
+        if spec.cover_entry then return self:coverSlot(spec.cover_entry, layout) end
+        return markerSlot(layout, spec.cover_glyph)
+    end)
+    if ok then return widget end
+    logger.warn("LightHouse: cover slot failed:", tostring(widget))
+    local placeholder_ok, placeholder = pcall(coverPlaceholder, layout)
+    return placeholder_ok and placeholder or nil
 end
 
 --- Builds one row in the plugin's shared row language.
@@ -549,14 +616,35 @@ function LightHouse:buildRow(spec)
         item.select_enabled = false
         item.callback = function() end
     end
-    if layout and layout.gutter > 0 then
-        if spec.cover_entry then
-            item.state = self:coverSlot(spec.cover_entry, layout)
-        elseif spec.cover_glyph then
-            item.state = markerSlot(layout, spec.cover_glyph)
-        end
+    if layout and layout.gutter > 0 and (spec.cover_entry or spec.cover_glyph) then
+        item.state = self:rowGutterState(spec, layout)
     end
     return item
+end
+
+--- Builds ONE row without letting it take the screen or the process down.
+--
+-- Every row on a network-driven list (the catalog, the currently-reading
+-- shelf) is built through here. A malformed entry - a field the server sent as
+-- a table, a callable JSON sentinel, a cover widget that raises - costs that
+-- one row: the builder runs inside `pcall`, a failure renders the neutral
+-- fallback row instead, and the rest of the list still shows. That is the
+-- difference between one unreadable row and a device dropped to the shell.
+-- @function builder returns a Menu item (see `buildRow`)
+-- @string[opt] fallback_label row text for the fallback
+-- @treturn table Menu item, always
+function LightHouse:buildSafeRow(builder, fallback_label)
+    local label = Status.str(fallback_label, _("Row unavailable"))
+    local ok, item = pcall(builder)
+    if ok and type(item) == "table" then return item end
+    logger.warn("LightHouse: row build failed:", tostring(item))
+    -- The fallback itself is guarded: it is still a widget build, and the
+    -- last-resort literal below touches no untrusted value and no widget.
+    local fallback_ok, fallback = pcall(function()
+        return self:buildRow{ primary = label }
+    end)
+    if fallback_ok and type(fallback) == "table" then return fallback end
+    return { text = label, select_enabled = false, callback = function() end }
 end
 
 --- Shows a designed failure or empty screen.
@@ -850,7 +938,11 @@ function LightHouse:openCatalog(query, start_index, page_number)
         callback = function() self:showSearchDialog() end,
     }
     for entry_index = 1, #feed.entries do
-        items[#items + 1] = self:buildCatalogItem(feed.entries[entry_index], layout)
+        local entry = feed.entries[entry_index]
+        -- One bad entry costs one row, never the page or the process.
+        items[#items + 1] = self:buildSafeRow(function()
+            return self:buildCatalogItem(entry, layout)
+        end)
     end
 
     if feed.next_href and #feed.entries > 0 then
@@ -876,6 +968,23 @@ end
 -- @tparam table[opt] layout result of `Ui.layout`
 -- @treturn table Menu item
 function LightHouse:buildCatalogItem(entry, layout)
+    if type(entry) ~= "table" then entry = {} end
+    -- Untrusted: an OPDS field may be missing, a table, or a callable sentinel
+    -- from a decoder. Each one is coerced ONCE here, before it is used as a
+    -- guard, a concatenation or a `T()` substitution.
+    local authors = Status.str(entry.authors)
+    local series = Status.str(entry.series)
+    local title = Ui.rowTitle(entry.title)
+    if title == "" then title = _("Untitled") end
+    local status = type(entry.status) == "table" and entry.status or nil
+    local tags = {}
+    if type(entry.tags) == "table" then
+        for tag_index = 1, #entry.tags do
+            local tag_name = Status.str(entry.tags[tag_index])
+            if tag_name ~= "" then tags[#tags + 1] = tag_name end
+        end
+    end
+
     local details = {}
     details[#details + 1] = {
         text = _("Download EPUB"),
@@ -884,14 +993,14 @@ function LightHouse:buildCatalogItem(entry, layout)
         callback = function() self:downloadEntry(entry) end,
     }
     details[#details + 1] = {
-        text = T(_("Author: %1"), entry.authors ~= "" and entry.authors or _("Unknown")),
+        text = T(_("Author: %1"), Ui.authorLine(authors, nil, _("Unknown"))),
         callback = function() end,
     }
-    if entry.series and entry.series ~= "" then
+    if series ~= "" then
         details[#details + 1] = {
             text = entry.series_index
-                and T(_("Series: %1 #%2"), entry.series, entry.series_index)
-                or T(_("Series: %1"), entry.series),
+                and T(_("Series: %1 #%2"), series, entry.series_index)
+                or T(_("Series: %1"), series),
             callback = function() end,
         }
     end
@@ -903,9 +1012,10 @@ function LightHouse:buildCatalogItem(entry, layout)
         text = T(_("Progress: %1"), Status.statusLabel(entry)),
         callback = function() end,
     }
-    if entry.status and entry.status.device and entry.status.device ~= "" then
+    local device = status and Status.str(status.device) or ""
+    if device ~= "" then
         details[#details + 1] = {
-            text = T(_("Last device: %1"), entry.status.device),
+            text = T(_("Last device: %1"), device),
             callback = function() end,
         }
     end
@@ -915,25 +1025,29 @@ function LightHouse:buildCatalogItem(entry, layout)
             callback = function() self:showSynopsis(entry) end,
         }
     end
-    if entry.tags and #entry.tags > 0 then
+    if #tags > 0 then
         details[#details + 1] = {
-            text = T(_("Tags: %1"), table.concat(entry.tags, ", ")),
+            text = T(_("Tags: %1"), table.concat(tags, ", ")),
             callback = function() end,
         }
     end
 
+    -- A Calibre rating is a number or nothing: `entry.rating > 0` on a
+    -- callable sentinel raises "attempt to compare number with function",
+    -- which is the same class of browse-page crash the device saw.
+    local rating = Status.num(entry.rating)
     local glance = Ui.glanceLine{
-        self:progressGlance(entry.status),
-        (entry.rating and entry.rating > 0) and Status.ratingStars(entry.rating) or nil,
+        self:progressGlance(status),
+        (rating and rating > 0) and Status.ratingStars(rating) or nil,
     }
 
     return self:buildRow{
         layout = layout,
         cover_entry = entry,
-        primary = entry.title ~= "" and entry.title or _("Untitled"),
+        primary = title,
         secondary = Ui.secondaryLine{
-            authors = entry.authors,
-            series = entry.series,
+            authors = authors,
+            series = series,
             series_index = entry.series_index and formatSeriesIndex(entry.series_index) or nil,
             fallback = _("Unknown"),
         },
@@ -977,7 +1091,10 @@ function LightHouse:showSearchDialog()
                     callback = function()
                         local query = dialog:getInputText()
                         UIManager:close(dialog)
-                        query = query and query:gsub("^%s+", ""):gsub("%s+$", "") or ""
+                        -- `getInputText` is a widget API, and a widget that
+                        -- returned something other than a string would make
+                        -- `:gsub` raise instead of searching.
+                        query = Status.str(query):gsub("^%s+", ""):gsub("%s+$", "")
                         if query == "" then
                             self:openCatalog("", 0, 1)
                         else
@@ -990,6 +1107,70 @@ function LightHouse:showSearchDialog()
     }
     UIManager:show(dialog)
     dialog:onShowKeyboard()
+end
+
+--- Builds one row of the currently-reading shelf.
+-- The per-session half of `showReading`, named so this crash class is testable.
+-- This is where `T(_("File: %1"), session.filename)` lives - the line the device
+-- died on - and where a field the server sent as `null` used to reach `gsub`.
+-- Every session field is read through `Status.str` first, so the guard clauses
+-- below test real strings and `T()` only ever sees strings.
+-- @tparam table session normalized KOSync session
+-- @tparam table[opt] layout result of `Ui.layout`
+-- @treturn table Menu item
+function LightHouse:buildReadingItem(session, layout)
+    if type(session) ~= "table" then session = {} end
+    local title = Status.str(session.title)
+    if title == "" then title = _("Untitled") end
+    local device = Status.str(session.device)
+    local filename = Status.str(session.filename)
+    local book_id = Status.num(session.book_id)
+    if book_id then book_id = math.floor(book_id) end
+
+    local details = {}
+    if book_id then
+        local session_for_download = session
+        details[#details + 1] = {
+            text = _("Download EPUB"),
+            bold = true,
+            callback = function() self:downloadBookId(session_for_download) end,
+        }
+    else
+        details[#details + 1] = {
+            text = _("No matching book in the library"),
+            enabled = false,
+            callback = function() end,
+        }
+    end
+    details[#details + 1] = {
+        text = T(_("Progress: %1"), Status.progressBar(Status.num(session.percentage))),
+        callback = function() end,
+    }
+    if device ~= "" then
+        details[#details + 1] = {
+            text = T(_("Device: %1"), device),
+            callback = function() end,
+        }
+    end
+    if filename ~= "" then
+        details[#details + 1] = {
+            text = T(_("File: %1"), filename),
+            callback = function() end,
+        }
+    end
+
+    return self:buildRow{
+        layout = layout,
+        cover_entry = book_id and { book_id = book_id } or nil,
+        primary = title,
+        secondary = Ui.secondaryLine{
+            authors = Status.str(session.authors),
+            extra = device ~= "" and device or nil,
+            fallback = _("Unknown"),
+        },
+        glance = self:progressGlance(session),
+        details = details,
+    }
 end
 
 --- Shows every active KOSync session, newest first.
@@ -1040,12 +1221,14 @@ function LightHouse:showReading()
         local cover_entries = {}
         for session_index = 1, #sessions do
             local session = sessions[session_index]
-            if session.book_id then
+            local book_id = Status.num(session.book_id)
+            if book_id then
+                book_id = math.floor(book_id)
                 cover_entries[#cover_entries + 1] = {
-                    book_id = session.book_id,
+                    book_id = book_id,
                     thumbnail_href = Client.buildUrl(config, string.format(
                         "/api/books/%d/cover?w=%d",
-                        session.book_id,
+                        book_id,
                         Ui.tokens.cover_width_px
                     )),
                 }
@@ -1071,51 +1254,13 @@ function LightHouse:showReading()
     -- `session_index`, not `_`: `_` is gettext in this file (see the note by
     -- its require), so using it as a throwaway aborted the whole process on
     -- the device the moment a row called `_("…")`.
+    -- Every row is built through `buildSafeRow`: a session this shelf cannot
+    -- render costs its own row, not the remaining rows and not the process.
     for session_index = 1, #sessions do
         local session = sessions[session_index]
-        local details = {}
-        if session.book_id then
-            details[#details + 1] = {
-                text = _("Download EPUB"),
-                bold = true,
-                callback = function() self:downloadBookId(session) end,
-            }
-        else
-            details[#details + 1] = {
-                text = _("No matching book in the library"),
-                enabled = false,
-                callback = function() end,
-            }
-        end
-        details[#details + 1] = {
-            text = T(_("Progress: %1"), Status.progressBar(session.percentage)),
-            callback = function() end,
-        }
-        if session.device and session.device ~= "" then
-            details[#details + 1] = {
-                text = T(_("Device: %1"), session.device),
-                callback = function() end,
-            }
-        end
-        if session.filename and session.filename ~= "" then
-            details[#details + 1] = {
-                text = T(_("File: %1"), session.filename),
-                callback = function() end,
-            }
-        end
-
-        items[#items + 1] = self:buildRow{
-            layout = layout,
-            cover_entry = session.book_id and { book_id = session.book_id } or nil,
-            primary = (session.title ~= "" and session.title) or _("Untitled"),
-            secondary = Ui.secondaryLine{
-                authors = session.authors,
-                extra = (session.device and session.device ~= "") and session.device or nil,
-                fallback = _("Unknown"),
-            },
-            glance = self:progressGlance(session),
-            details = details,
-        }
+        items[#items + 1] = self:buildSafeRow(function()
+            return self:buildReadingItem(session, layout)
+        end)
     end
 
     self:showMenu(_("Currently reading"), items, { covers = with_covers, layout = layout })
@@ -1161,7 +1306,9 @@ end
 local function statsRow(label, value, bold)
     return {
         text = label,
-        mandatory = value or Ui.UNAVAILABLE,
+        -- Values here are `Stats.*` output (a string or nil), but the row is
+        -- also where an untrusted number could land, so it takes the guard.
+        mandatory = Status.str(value, Ui.UNAVAILABLE),
         bold = bold == true,
         select_enabled = false,
         callback = function() end,
@@ -1330,11 +1477,14 @@ end
 --- Downloads a book by its resolved Calibre id (used by the reading shelf).
 -- @tparam table session normalized KOSync session
 function LightHouse:downloadBookId(session)
+    local book_id = Status.num(session and session.book_id)
+    if not book_id then return end
+    book_id = math.floor(book_id)
     local entry = {
-        book_id = session.book_id,
-        title = session.title,
-        authors = session.authors,
-        download_href = Client.buildUrl(config, string.format("/api/books/%d/download/epub", session.book_id)),
+        book_id = book_id,
+        title = Status.str(session.title),
+        authors = Status.str(session.authors),
+        download_href = Client.buildUrl(config, string.format("/api/books/%d/download/epub", book_id)),
     }
     self:downloadEntry(entry)
 end
@@ -1432,9 +1582,12 @@ end
 
 -- Pure helpers exposed for the repository's Lua test harness. They stay plain
 -- function fields on the plugin table, so KOReader's PluginLoader is unaffected.
+-- `formatMessage` is the guarded `T()` itself: the tests drive it directly to
+-- prove that no substitution type can reach `string.gsub`.
 LightHouse.buildFilename = buildFilename
 LightHouse.describeError = describeError
 LightHouse.errorHeadline = errorHeadline
 LightHouse.formatSeriesIndex = formatSeriesIndex
+LightHouse.formatMessage = T
 
 return LightHouse

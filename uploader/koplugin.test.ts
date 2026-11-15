@@ -1804,10 +1804,23 @@ package.preload["ui/widget/container/widgetcontainer"] = function()
 end
 package.preload["ffi/util"] = function()
   return {
+    -- Faithful to KOReader's 'T' (frontend/ffi/util.lua template): the
+    -- substitutions go to string.gsub as the replacement value, exactly as
+    -- they do on the device. That is what raised
+    --   ./luajit: ./ffi/util.lua:779: invalid replacement value (a function)
+    -- and killed the process, so the harness has to reproduce it. A stub that
+    -- formats its arguments would report this crash class as fixed while the
+    -- device still dies.
     template = function(text, ...)
       local values = { ... }
-      return (text:gsub("%%(%d)", function(index)
-        return tostring(values[tonumber(index)] or "")
+      -- KOReader also accepts a single table of substitutions.
+      if type(values[1]) == "table" then values = values[1] end
+      -- The callback returns the value it was given, so a function, a table or
+      -- a userdata substitution makes gsub itself raise
+      -- "invalid replacement value (a function)" - the device crash. Numbers
+      -- are converted by gsub, which is why a series index still prints.
+      return (text:gsub("%%(%d+)", function(index)
+        return values[tonumber(index)]
       end))
     end,
   }
@@ -3549,5 +3562,465 @@ describe("unconfigured plugin failures", () => {
     }
 
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
+  });
+});
+
+/**
+ * The device crash this guards against (KOReader `crash.log`, both Kindles,
+ * plugin 1.3.0):
+ *
+ *   ./luajit: ./ffi/util.lua:779: invalid replacement value (a function)
+ *   ./ffi/util.lua:779: in function 'T'
+ *   main.lua:1102: in function 'showReading'
+ *   main.lua:624: in function 'callback'
+ *   Source line: text = T(_("File: %1"), session.filename)
+ *
+ * `T()` hands its substitutions to `string.gsub` through a callback, so a
+ * substitution that is not a string - here the truthy callable sentinel
+ * KOReader's JSON decoder substitutes for a `null` field - makes gsub raise and
+ * the process die. The same shape crashed "Browse library" one line earlier, at
+ * `T(_("Last device: %1"), entry.status.device)`.
+ *
+ * The stub `template` above is faithful on purpose (`gsub` over a callback, not
+ * a formatter), so these cases fail against the shipped 1.3.0 template and pass
+ * only once every substitution is coerced to a string.
+ */
+const NULL_FIELD_SAFETY_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local expected_base_url = assert(arg[2], "expected base url argument required")
+
+-- KOReader's JSON decoder maps a nested null to a truthy callable sentinel
+-- rather than nil, which is why "if value and value ~= ''" let it through.
+local null = function() end
+
+-- Field-for-field a /api/kosync/active record whose columns were all NULL
+-- (firstmate pulled the live payload: 8 of 30 rows carry a null filename,
+-- 7 a null title, 11 a null bookId).
+local null_session = {
+  id = 51,
+  document = null, progress = null, percentage = null, device = null,
+  device_id = null, filename = null, title = null, authors = null,
+  timestamp = null, bookId = null, cover = null,
+  displayTitle = null, displayAuthors = null,
+}
+local string_session = {
+  id = 52,
+  document = "d6df0b1e0c6dec84dd52e6616fa669d8",
+  percentage = 0.45,
+  device = "Paperwhite",
+  filename = "dune.epub",
+  title = "Dune",
+  authors = "Frank Herbert",
+  timestamp = 1794633720,
+  bookId = 101,
+  displayTitle = "Dune",
+  displayAuthors = "Frank Herbert",
+}
+local payload = { null_session, string_session }
+
+-- A real OPDS entry pair, so the catalogue path runs end to end.
+local opds_body = '<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title>LightHouse</title><entry><id>urn:calibre:book:101</id><title>Spice and Wolf</title><author><name>Isuna Hasekura</name></author></entry><entry><id>urn:calibre:book:102</id><title>Dune</title><author><name>Frank Herbert</name></author></entry></feed>'
+
+-- The transport stubs run the REAL Client.get -> JSON.decode ->
+-- Status.normalizeSessions -> row-build path against the payload.
+package.preload["json"] = function()
+  return { decode = function() return payload end }
+end
+package.preload["ltn12"] = function()
+  return {
+    sink = {
+      table = function(target)
+        return function(chunk)
+          if chunk then target[#target + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function() end,
+    },
+  }
+end
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      local url = tostring(request and request.url or "")
+      local body = url:find("/api/opds", 1, true) and opds_body or "[]"
+      if request and request.sink then
+        request.sink(body)
+        request.sink(nil)
+      end
+      return 1, 200, {}
+    end,
+  }
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local config = require("lighthouse_config")
+assert(config.base_url == expected_base_url,
+  "harness needs the generated config, got " .. tostring(config.base_url))
+local Status = require("lighthouse_status")
+
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+-- These assertions are about text, not images; the cover path has its own
+-- cases below.
+LightHouse.coversEnabled = function() return false end
+
+local function bracket(value) return "[" .. tostring(value) .. "]" end
+
+-- 1. The guard's contract ---------------------------------------------------
+print("str_nil=" .. bracket(Status.str(nil)))
+print("str_string=" .. bracket(Status.str("dune.epub")))
+print("str_number=" .. bracket(Status.str(42)))
+print("str_table=" .. bracket(Status.str({ 1, 2 })))
+print("str_function=" .. bracket(Status.str(null)))
+print("str_boolean=" .. bracket(Status.str(true)))
+print("str_nan=" .. bracket(Status.str(0 / 0)))
+print("str_fallback=" .. bracket(Status.str(null, "Unknown")))
+print("str_fallback_keeps_string=" .. bracket(Status.str("real", "Unknown")))
+print("num_number=" .. tostring(Status.num(7)))
+print("num_numeric_string=" .. tostring(Status.num("12")))
+print("num_function=" .. tostring(Status.num(null)))
+print("num_table=" .. tostring(Status.num({ 1 })))
+print("num_nan=" .. tostring(Status.num(0 / 0)))
+print("num_infinity=" .. tostring(Status.num(math.huge)))
+
+-- 2. A row whose fields are nil, a table, a function and a number -----------
+local cases = {
+  { name = "nil", value = nil },
+  { name = "table", value = { 1, 2 } },
+  { name = "function", value = null },
+  { name = "number", value = 42 },
+  { name = "string", value = "dune.epub" },
+}
+for case_index = 1, #cases do
+  local case = cases[case_index]
+  local ok, message = pcall(LightHouse.formatMessage, "File: %1", case.value)
+  print("message_" .. case.name .. "=" .. tostring(ok) .. " " .. bracket(message))
+end
+local multi_ok, multi_text = pcall(LightHouse.formatMessage, "Page %1 of %2", 2, null)
+print("message_multi=" .. tostring(multi_ok) .. " " .. bracket(multi_text))
+
+-- 3. Normalization at the boundary -----------------------------------------
+local sessions = Status.normalizeSessions(payload)
+print("sessions=" .. tostring(#sessions))
+local newest = sessions[1]
+local nulls = sessions[2]
+print("newest_filename=" .. bracket(newest.filename))
+print("newest_book_id=" .. tostring(newest.book_id))
+print("newest_percentage=" .. tostring(newest.percentage))
+print("nulls_filename_type=" .. type(nulls.filename))
+print("nulls_filename=" .. bracket(nulls.filename))
+print("nulls_title_type=" .. type(nulls.title))
+print("nulls_title=" .. bracket(nulls.title))
+print("nulls_authors_type=" .. type(nulls.authors))
+print("nulls_device_type=" .. type(nulls.device))
+print("nulls_document_type=" .. type(nulls.document))
+print("nulls_book_id=" .. tostring(nulls.book_id))
+print("nulls_timestamp=" .. tostring(nulls.timestamp))
+print("nulls_percentage=" .. tostring(nulls.percentage))
+
+-- 4. The exact device traceback: the shelf row for a null-bearing session ----
+local layout = LightHouse:layoutFor(false)
+local reading_ok, reading_row = pcall(LightHouse.buildReadingItem, LightHouse, nulls, layout)
+print("reading_row_ok=" .. tostring(reading_ok))
+if reading_ok then
+  print("reading_row_text=" .. bracket(reading_row.text))
+  local labels = {}
+  for detail_index = 1, #(reading_row.sub_item_table or {}) do
+    labels[#labels + 1] = tostring(reading_row.sub_item_table[detail_index].text)
+  end
+  print("reading_row_details=" .. table.concat(labels, "|"))
+else
+  print("reading_row_error=" .. bracket(reading_row))
+end
+local good_ok, good_row = pcall(LightHouse.buildReadingItem, LightHouse, newest, layout)
+print("reading_good_ok=" .. tostring(good_ok))
+if good_ok then
+  local labels = {}
+  for detail_index = 1, #(good_row.sub_item_table or {}) do
+    labels[#labels + 1] = tostring(good_row.sub_item_table[detail_index].text)
+  end
+  print("reading_good_details=" .. table.concat(labels, "|"))
+end
+
+-- 5. The catalogue row for an entry whose fields are all unusable ------------
+local hostile_entry = {
+  book_id = null, title = null, authors = null, series = null,
+  series_index = null, rating = null, tags = null, summary = null,
+  status = { device = null, percentage = null, timestamp = null },
+  download_href = nil,
+}
+local catalog_ok, catalog_row = pcall(LightHouse.buildCatalogItem, LightHouse, hostile_entry, layout)
+print("catalog_null_ok=" .. tostring(catalog_ok))
+if catalog_ok then
+  print("catalog_null_text=" .. bracket(catalog_row.text))
+  local labels = {}
+  for detail_index = 1, #(catalog_row.sub_item_table or {}) do
+    labels[#labels + 1] = tostring(catalog_row.sub_item_table[detail_index].text)
+  end
+  print("catalog_null_details=" .. table.concat(labels, "|"))
+else
+  print("catalog_null_error=" .. bracket(catalog_row))
+end
+-- A tag list carrying a table and a sentinel must not reach table.concat raw.
+local tagged_entry = {
+  book_id = 103, title = "Tagged", authors = "An Author",
+  tags = { "Fantasy", { nested = true }, null, 7 },
+}
+local tagged_ok, tagged_row = pcall(LightHouse.buildCatalogItem, LightHouse, tagged_entry, layout)
+print("catalog_tags_ok=" .. tostring(tagged_ok))
+if tagged_ok then
+  local labels = {}
+  for detail_index = 1, #(tagged_row.sub_item_table or {}) do
+    labels[#labels + 1] = tostring(tagged_row.sub_item_table[detail_index].text)
+  end
+  print("catalog_tags_details=" .. table.concat(labels, "|"))
+end
+
+-- 6. The pcall fallback: one bad row renders a safe row, never the process --
+local fallback = LightHouse:buildSafeRow(function() error("row builder exploded") end)
+print("fallback_type=" .. type(fallback))
+print("fallback_text=" .. bracket(fallback.text))
+print("fallback_select_enabled=" .. tostring(fallback.select_enabled))
+print("fallback_callback=" .. type(fallback.callback))
+local odd = LightHouse:buildSafeRow(function() return "not a row" end)
+print("fallback_from_string=" .. bracket(odd.text))
+
+-- 7. A cover failure never propagates out of the row build ------------------
+local real_cover = LightHouse.coverSlot
+LightHouse.coverSlot = function() error("cover widget exploded") end
+local cover_ok, cover_row = pcall(LightHouse.buildRow, LightHouse, {
+  cover_entry = { book_id = 101 },
+  primary = "Covered row",
+  layout = LightHouse:layoutFor(true),
+})
+print("cover_row_ok=" .. tostring(cover_ok))
+if cover_ok then
+  print("cover_row_text=" .. bracket(cover_row.text))
+else
+  print("cover_row_error=" .. bracket(cover_row))
+end
+local real_fetch = LightHouse.fetchOneCover
+LightHouse.fetchOneCover = function() error("cover fetch exploded") end
+local prefetch_ok = pcall(LightHouse.prefetchCovers, LightHouse, {
+  { book_id = 101, thumbnail_href = "http://host/api/books/101/cover?w=360" },
+  { book_id = 102, thumbnail_href = "http://host/api/books/102/cover?w=360" },
+})
+print("prefetch_ok=" .. tostring(prefetch_ok))
+LightHouse.fetchOneCover = real_fetch
+LightHouse.coverSlot = real_cover
+
+-- 8. The whole shelf and the whole catalogue, through the real views ---------
+local function current_menu()
+  local widget = shown[#shown]
+  if widget and widget.item_table and widget.__kind == "menu" then return widget end
+  local reused = LightHouse.menu and LightHouse.menu.switched
+  if reused and reused[#reused] then
+    return { title = reused[#reused].title, item_table = reused[#reused].items }
+  end
+  return widget
+end
+
+local shelf_ok, shelf_err = pcall(function() LightHouse:showReading() end)
+print("shelf_ok=" .. tostring(shelf_ok) .. " " .. tostring(shelf_err))
+local shelf = current_menu()
+print("shelf_title=" .. tostring(shelf and shelf.title))
+print("shelf_rows=" .. tostring(shelf and #(shelf.item_table or {})))
+local shelf_types = {}
+for row_index = 1, #(shelf and shelf.item_table or {}) do
+  shelf_types[#shelf_types + 1] = type(shelf.item_table[row_index].text)
+end
+print("shelf_row_text_types=" .. table.concat(shelf_types, ","))
+
+local browse_ok, browse_err = pcall(function() LightHouse:openCatalog("", 0, 1) end)
+print("browse_ok=" .. tostring(browse_ok) .. " " .. tostring(browse_err))
+local browse = current_menu()
+print("browse_rows=" .. tostring(browse and #(browse.item_table or {})))
+local browse_types = {}
+local browse_texts = {}
+for row_index = 1, #(browse and browse.item_table or {}) do
+  browse_types[#browse_types + 1] = type(browse.item_table[row_index].text)
+  browse_texts[#browse_texts + 1] = tostring(browse.item_table[row_index].text)
+end
+print("browse_row_text_types=" .. table.concat(browse_types, ","))
+print("browse_texts=" .. table.concat(browse_texts, "|"))
+
+print("OK")
+`);
+
+describe("plugin row safety against JSON nulls and malformed fields", () => {
+  function runNullHarness(): Record<string, string> {
+    if (!LUA_BINARY || !UNZIP_BINARY) return {};
+
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "harness-api-key",
+      generatedAt: "2026-11-14T00:00:00.000Z",
+    });
+
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-nulls-"));
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(
+      UNZIP_BINARY as string,
+      ["-q", zipPath, "-d", pluginsDir],
+      { encoding: "utf8" },
+    );
+    expect(extract.status).toBe(0);
+
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "null_safety_harness.lua");
+    fs.writeFileSync(harnessPath, NULL_FIELD_SAFETY_HARNESS);
+
+    const res = spawnSync(
+      LUA_BINARY,
+      [harnessPath, pluginRoot, "http://192.168.31.15:8086"],
+      { encoding: "utf8" },
+    );
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    return Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+  }
+
+  it("coerces every untrusted value to a string and never to nil", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNullHarness();
+
+    expect(out.str_nil).toBe("[]");
+    expect(out.str_string).toBe("[dune.epub]");
+    expect(out.str_number).toBe("[42]");
+    expect(out.str_table).toBe("[]");
+    expect(out.str_function).toBe("[]");
+    expect(out.str_boolean).toBe("[]");
+    expect(out.str_nan).toBe("[]");
+    expect(out.str_fallback).toBe("[Unknown]");
+    expect(out.str_fallback_keeps_string).toBe("[real]");
+
+    expect(out.num_number).toBe("7");
+    expect(out.num_numeric_string).toBe("12");
+    expect(out.num_function).toBe("nil");
+    expect(out.num_table).toBe("nil");
+    expect(out.num_nan).toBe("nil");
+    expect(out.num_infinity).toBe("nil");
+  });
+
+  it("renders a row whose substituted field is nil, a table, a function or a number", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNullHarness();
+
+    // Every case must format instead of raising inside gsub.
+    expect(out.message_nil).toBe("true [File: ]");
+    expect(out.message_table).toBe("true [File: ]");
+    expect(out.message_function).toBe("true [File: ]");
+    expect(out.message_number).toBe("true [File: 42]");
+    expect(out.message_string).toBe("true [File: dune.epub]");
+    expect(out.message_multi).toBe("true [Page 2 of ]");
+  });
+
+  it("normalizes a null-bearing session instead of passing the sentinel on", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNullHarness();
+
+    expect(out.sessions).toBe("2");
+    // The readable session is untouched; it is only sorted newest first.
+    expect(out.newest_filename).toBe("[dune.epub]");
+    expect(out.newest_book_id).toBe("101");
+    expect(out.newest_percentage).toBe("0.45");
+    // The null-bearing session holds strings and numbers, never sentinels.
+    expect(out.nulls_filename_type).toBe("string");
+    expect(out.nulls_filename).toBe("[]");
+    expect(out.nulls_title_type).toBe("string");
+    expect(out.nulls_title).toBe("[]");
+    expect(out.nulls_authors_type).toBe("string");
+    expect(out.nulls_device_type).toBe("string");
+    expect(out.nulls_document_type).toBe("string");
+    expect(out.nulls_book_id).toBe("nil");
+    expect(out.nulls_timestamp).toBe("0");
+    expect(out.nulls_percentage).toBe("0");
+  });
+
+  it("builds the shelf row that killed the device (File: %1 with a null filename)", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNullHarness();
+
+    expect(out.reading_row_ok).toBe("true");
+    expect(out.reading_row_text).toBe("[Untitled]");
+    // No "File:" and no "Device:" row for values the server sent as null, but
+    // the progress row and the book-less notice still render.
+    expect(out.reading_row_details).toContain("No matching book in the library");
+    expect(out.reading_row_details).toContain("Progress:");
+    expect(out.reading_row_details).not.toContain("File:");
+    expect(out.reading_row_details).not.toContain("Device:");
+
+    // A complete session still shows its own detail rows.
+    expect(out.reading_good_ok).toBe("true");
+    expect(out.reading_good_details).toContain("Device: Paperwhite");
+    expect(out.reading_good_details).toContain("File: dune.epub");
+  });
+
+  it("hardens the browse row for an entry whose fields are all unusable", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNullHarness();
+
+    // Browse is hardened by construction: no device traceback was captured for
+    // it (both Kindles are off SSH), so this asserts the construction, not the
+    // device.
+    expect(out.catalog_null_ok).toBe("true");
+    expect(out.catalog_null_text).toBe("[Untitled]");
+    expect(out.catalog_null_details).toContain("Author: Unknown");
+    expect(out.catalog_null_details).toContain("Rating: Not rated");
+    expect(out.catalog_null_details).toContain("Progress:");
+
+    // A tag list with a table and a sentinel in it degrades to the real names.
+    expect(out.catalog_tags_ok).toBe("true");
+    expect(out.catalog_tags_details).toContain("Tags: Fantasy, 7");
+  });
+
+  it("renders a safe fallback row when a row builder raises", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNullHarness();
+
+    expect(out.fallback_type).toBe("table");
+    expect(out.fallback_text).toBe("[Row unavailable]");
+    expect(out.fallback_select_enabled).toBe("false");
+    expect(out.fallback_callback).toBe("function");
+    // A builder that returns a non-row is also a bad row, not a crash.
+    expect(out.fallback_from_string).toBe("[Row unavailable]");
+  });
+
+  it("keeps a cover failure inside the row build and inside the page prefetch", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNullHarness();
+
+    expect(out.cover_row_ok).toBe("true");
+    expect(out.cover_row_text).toBe("[Covered row]");
+    expect(out.prefetch_ok).toBe("true");
+  });
+
+  it("renders the whole shelf and the whole catalogue on a null-bearing payload", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNullHarness();
+
+    // Tapping "Currently reading" must render, not raise: this is the crash.
+    expect(out.shelf_ok).toBe("true nil");
+    expect(out.shelf_rows).toBe("2");
+    expect(out.shelf_row_text_types).toBe("string,string");
+
+    // And browsing must still show every entry, one row each plus the search
+    // row.
+    expect(out.browse_ok).toBe("true nil");
+    expect(out.browse_rows).toBe("3");
+    expect(out.browse_row_text_types).toBe("string,string,string");
+    expect(out.browse_texts).toContain("Spice and Wolf");
+    expect(out.browse_texts).toContain("Dune");
   });
 });
