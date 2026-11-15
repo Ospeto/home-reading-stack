@@ -4,6 +4,25 @@ This runbook documents operational commands, health checks, service management, 
 
 ---
 
+## 🚨 Security Notice: Previously Committed Credentials
+
+This repository used to be private and is being made public. Two real credentials were committed to it earlier in its history. Both are scrubbed from the current tree, but **git history stays readable once the repository is public**, so a clone made before this scrub still contains them.
+
+| Credential | Where it was committed | Status now |
+| --- | --- | --- |
+| Telegram bot token (`TELEGRAM_BOT_TOKEN`) | earlier history only; not present at `HEAD` | **Rotated.** The committed value no longer authenticates against the Bot API. |
+| KOSync password salt (`KOSYNC_PASSWORD_SALT`) | `docker-compose.yml`, `RUNBOOK.md`, `.env.example` in earlier history, and as a hardcoded fallback default at `HEAD` until this scrub | **Treated as compromised.** Removed from `HEAD`; no default value remains anywhere in the tree. |
+
+What this means:
+
+- **Do not trust any credential read from this repository's history.** Anyone who cloned or forked this repository before the scrub should treat the values in their copy as public and already compromised.
+- **The bot token has been rotated.** If you deploy from a pre-scrub clone, replace it with a token you obtained from BotFather yourself.
+- **`KOSYNC_PASSWORD_SALT` must be set explicitly, with no default.** Production reads its salt from the launchd plist `~/Library/LaunchAgents/com.ospeto.kosync.plist` (`EnvironmentVariables.PASSWORD_SALT`), never from `docker-compose.yml` or this runbook. If you deploy from a clone, generate your own random salt (for example `openssl rand -hex 24`) and never reuse any value that appears in this repository's history.
+- **Changing the salt invalidates every existing password hash** in `koreader-sync.db`; every user must reset their password afterwards using the recovery runbooks below. That one-way effect is exactly why the salt is a deliberate, operator-supplied secret rather than a checked-in default.
+- **This is not a history rewrite.** The decision is to leave git history intact instead of force-pushing a rewritten history across every branch and fork: with the bot token rotated and the salt no longer disclosed at `HEAD`, the residual history values no longer grant access to any live system. See the Exposed Credentials Policy at the end of this runbook.
+
+---
+
 ## 🏗️ Service Architecture on Mac Mini (`192.168.31.15`)
 
 All services on the Mac mini run as native macOS LaunchAgents under `/Users/ospeto/Library/LaunchAgents/`:
@@ -139,7 +158,8 @@ KOSync client authentication in KOReader and Readest adheres to the following sp
    - The client sends this 32-character lowercase hex string as `password` (on registration/login) or in the `X-Auth-Key` HTTP header (on synced reads/updates) alongside `X-Auth-User: <username>`.
 
 2. **Server-Side Salted Hash (`Bun.password.hash`)**:
-   - The KOSync server (running Bun) retrieves `PASSWORD_SALT` from the environment (defaulting to the configured secret salt).
+   - The KOSync server (running Bun) reads `PASSWORD_SALT` from the environment. There is no built-in default: the salt must be set explicitly, because it is a secret and a wrong value silently produces unusable password hashes.
+   - Changing `PASSWORD_SALT` invalidates every existing password hash in `koreader-sync.db`. Every user must then reset their password with the recovery runbook below, using the new salt.
    - The server concatenates the client userkey and salt:
      $$\text{saltedPassword} = \text{userkey} + \text{PASSWORD\_SALT}$$
    - The server stores and verifies this using Bun's native bcrypt implementation (`await Bun.password.hash(saltedPassword)` and `await Bun.password.verify(saltedPassword, user.password)`).
@@ -159,7 +179,8 @@ ssh mac-mini "bun -e '
   import crypto from \"node:crypto\";
 
   const dbPath = \"/Users/ospeto/kosync-server/data/koreader-sync.db\";
-  const salt = process.env.PASSWORD_SALT || \"747aa604e460376f174d9e73240f9d768b06b02dfa63a0b4\";
+  const salt = process.env.PASSWORD_SALT || \"change-me-replace-before-use\";
+  if (salt === \"change-me-replace-before-use\") throw new Error(\"PASSWORD_SALT is unset - export it before resetting a password\");
   const username = \"moe\";
   const newPlainPassword = \"YOUR_NEW_PASSWORD_HERE\";
 
@@ -577,11 +598,11 @@ Both KOReader and Readest use client-side MD5 password hashing:
    GET /users/auth HTTP/1.1
    Host: kosync-sg.wavypremium.xyz
    X-Auth-User: moe
-   X-Auth-Key: 8b03a82761fae0ee6cd5a23700361e74
+   X-Auth-Key: <md5-of-your-password>
    ```
 
 3. **Server Verification**:
-   - The Bun server retrieves `PASSWORD_SALT` from the environment.
+   - The Bun server reads `PASSWORD_SALT` from the environment. It has no built-in default and must be set explicitly; changing it invalidates every existing password hash.
    - It concatenates `userkey + salt` and checks against the stored bcrypt hash using `await Bun.password.verify(userkey + salt, user.password)`.
 
 #### 5. Password Recovery / Reset Runbook in SQLite
@@ -595,7 +616,8 @@ ssh mac-mini "bun -e '
   import crypto from \"node:crypto\";
 
   const dbPath = \"/Users/ospeto/kosync-server/data/koreader-sync.db\";
-  const salt = process.env.PASSWORD_SALT || \"747aa604e460376f174d9e73240f9d768b06b02dfa63a0b4\";
+  const salt = process.env.PASSWORD_SALT || \"change-me-replace-before-use\";
+  if (salt === \"change-me-replace-before-use\") throw new Error(\"PASSWORD_SALT is unset - export it before resetting a password\");
   const username = \"moe\";
   const newPlainPassword = \"YOUR_NEW_PASSWORD_HERE\";
 

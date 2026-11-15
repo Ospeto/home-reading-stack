@@ -20,7 +20,10 @@ services:
     environment:
       - PORT=3000
       - HOST=0.0.0.0
-      - PASSWORD_SALT=${KOSYNC_PASSWORD_SALT:-747aa604e460376f174d9e73240f9d768b06b02dfa63a0b4}
+      # No default: the salt is a secret and must come from the environment.
+      # Compose refuses to start when KOSYNC_PASSWORD_SALT is unset.
+      # Changing the salt invalidates every existing password hash.
+      - PASSWORD_SALT=${KOSYNC_PASSWORD_SALT:?required - see .env.example}
       - DISABLE_USER_REGISTRATION=false
       - LOG_LEVEL=info
       - NODE_ENV=production
