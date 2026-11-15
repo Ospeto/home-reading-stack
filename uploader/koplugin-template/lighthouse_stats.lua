@@ -15,11 +15,7 @@ off-device test suite can exercise every branch of it.
 Field shape of `GET /api/kosync/stats` (only the parts used here):
 
     {
-        streaks = {
-            currentStreak = 5, longestStreak = 12,
-            readingDaysCount = 63, lastReadingDate = "2026-11-15",
-            isActiveToday = true,
-        },
+        streaks = { currentStreak = 5, longestStreak = 12 },
         dailyReadingTime = {
             todaySeconds = 2700, thisWeekSeconds = 15000,
             totalSeconds = 477000, totalHours = 132.5, ...
@@ -57,6 +53,13 @@ Stats.DEFAULT_HEATMAP_DAYS = 182
 -- app's amber scale would read as five identical greys. Box-drawing/block
 -- glyphs are density-ordered and render in KOReader's default fonts.
 local LEVEL_GLYPHS = { [0] = "·", "░", "▒", "▓", "█" }
+
+--- Minutes a day must reach to be drawn at each level.
+-- The single definition of the ramp: `heatmapLevel` maps a day with it, and
+-- the view's shade key is built from it, so the printed key can never describe
+-- a different picture. Same thresholds as `computeReadingHeatmap` in
+-- uploader/reading-stats.ts.
+Stats.LEVEL_MIN_MINUTES = { [0] = 0, [1] = 1, [2] = 15, [3] = 30, [4] = 60 }
 
 --- Glyph used when a day's level cannot be determined at all.
 local UNKNOWN_GLYPH = "?"
@@ -185,12 +188,11 @@ function Stats.heatmapLevel(day)
         minutes = seconds / 60
     end
 
-    -- Same thresholds as `computeReadingHeatmap` in uploader/reading-stats.ts.
-    if minutes >= 60 then return 4 end
-    if minutes >= 30 then return 3 end
-    if minutes >= 15 then return 2 end
-    if minutes >= 1 then return 1 end
-    return 0
+    local derived = 0
+    for candidate = 1, #Stats.LEVEL_MIN_MINUTES do
+        if minutes >= Stats.LEVEL_MIN_MINUTES[candidate] then derived = candidate end
+    end
+    return derived
 end
 
 --- Glyph for one heatmap level.
@@ -199,16 +201,6 @@ end
 function Stats.heatmapGlyph(level)
     if level == nil then return UNKNOWN_GLYPH end
     return LEVEL_GLYPHS[level] or UNKNOWN_GLYPH
-end
-
---- Legend pairing every level with its glyph, for the on-screen key.
--- @treturn table array of { level = n, glyph = s }
-function Stats.heatmapLegend()
-    local legend = {}
-    for level = 0, 4 do
-        legend[#legend + 1] = { level = level, glyph = LEVEL_GLYPHS[level] }
-    end
-    return legend
 end
 
 --- Normalizes the `/api/kosync/stats` payload into what the view renders.
@@ -227,9 +219,6 @@ function Stats.normalize(payload)
         stats.streaks = {
             current = numberOf(streaks.currentStreak),
             best = numberOf(streaks.longestStreak),
-            readingDays = numberOf(streaks.readingDaysCount),
-            lastReadingDate = type(streaks.lastReadingDate) == "string" and streaks.lastReadingDate or nil,
-            isActiveToday = streaks.isActiveToday == true,
         }
     end
 
@@ -365,36 +354,36 @@ function Stats.streakLabel(streaks)
     return label
 end
 
---- "12/25" or nil when the goal carries no book target.
+--- "12/25" against a book target, or "12 books read" when the goal has only
+-- an hours target but the server still sent the book count.
 -- @tparam table goal normalized goal section
--- @treturn string|nil
+-- @treturn string|nil nil only when the server did not send the count either
 function Stats.goalBooksLabel(goal)
-    if type(goal) ~= "table" or not goal.targetBooks then return nil end
-    local current = goal.currentBooks or 0
-    return string.format("%d/%d", round(current), round(goal.targetBooks))
+    if type(goal) ~= "table" then return nil end
+    local current = goal.currentBooks
+    if goal.targetBooks then
+        return string.format("%d/%d", round(current or 0), round(goal.targetBooks))
+    end
+    if not current then return nil end
+    return string.format("%d books read", round(current))
 end
 
---- "34h/100h" or nil when the goal carries no hour target.
+--- "34h/100h" against an hours target, or "34h read" when the goal has only
+-- a book target but the server still sent the hours count.
 -- @tparam table goal normalized goal section
--- @treturn string|nil
+-- @treturn string|nil nil only when the server did not send the count either
 function Stats.goalHoursLabel(goal)
-    if type(goal) ~= "table" or not goal.targetHours then return nil end
-    local current = Stats.formatHours(goal.currentHours or 0)
-    local target = Stats.formatHours(goal.targetHours)
-    if not current or not target then return nil end
-    return string.format("%s/%s", current, target)
-end
-
---- One-line goal summary, e.g. "12/25 books · 34h/100h".
--- @tparam table goal normalized goal section
--- @treturn string|nil
-function Stats.goalLine(goal)
-    local books = Stats.goalBooksLabel(goal)
-    local hours = Stats.goalHoursLabel(goal)
-    if books and hours then return books .. " books · " .. hours end
-    if books then return books .. " books" end
-    if hours then return hours .. " read" end
-    return nil
+    if type(goal) ~= "table" then return nil end
+    local current = goal.currentHours
+    if goal.targetHours then
+        local current_text = Stats.formatHours(current or 0)
+        local target = Stats.formatHours(goal.targetHours)
+        if not current_text or not target then return nil end
+        return string.format("%s/%s", current_text, target)
+    end
+    local current_text = Stats.formatHours(current)
+    if not current_text then return nil end
+    return string.format("%s read", current_text)
 end
 
 --- Reading time for one heatmap day, e.g. "45m"; nil when unknown.

@@ -628,7 +628,9 @@ end
 -- @treturn string|nil error code
 function LightHouse:fetchStats()
     local body, err = Client.get(config, "/api/kosync/stats")
-    if not body then return nil, err end
+    if type(body) ~= "string" or body == "" then
+        return nil, err or "invalid_response"
+    end
     local stats = Stats.normalize(JSON.decode(body))
     if not stats then return nil, "invalid_response" end
     return stats
@@ -652,6 +654,29 @@ local function statsRow(label, value)
         mandatory = value or _("unavailable"),
         callback = function() end,
     }
+end
+
+--- Shade key for the heatmap, built from the module's own level thresholds so
+-- the printed key and the picture above it can never disagree.
+-- @treturn string
+local function heatmapKeyLabel()
+    local thresholds = Stats.LEVEL_MIN_MINUTES
+    local top_level = 0
+    for level in pairs(thresholds) do
+        if level > top_level then top_level = level end
+    end
+
+    local parts = { Stats.heatmapGlyph(0) .. " " .. _("none") }
+    for level = 1, top_level do
+        local text
+        if level == top_level then
+            text = T(_("%1 or more"), Stats.formatMinutes(thresholds[level]))
+        else
+            text = T(_("under %1"), Stats.formatMinutes(thresholds[level + 1]))
+        end
+        parts[#parts + 1] = Stats.heatmapGlyph(level) .. " " .. text
+    end
+    return T(_("Shade key: %1"), table.concat(parts, " · "))
 end
 
 --- Builds the rows of the Reading stats view.
@@ -731,7 +756,7 @@ function LightHouse:buildStatsItems(stats)
             sub_item_table = days,
         }
     end
-    items[#items + 1] = statsSection(_("Shade key: · none · ░ under 15m · ▒ under 30m · ▓ under 1h · █ 1h or more"))
+    items[#items + 1] = statsSection(heatmapKeyLabel())
 
     return items
 end
@@ -869,7 +894,5 @@ end
 LightHouse.buildFilename = buildFilename
 LightHouse.describeError = describeError
 LightHouse.formatSeriesIndex = formatSeriesIndex
-LightHouse.statsSection = statsSection
-LightHouse.statsRow = statsRow
 
 return LightHouse

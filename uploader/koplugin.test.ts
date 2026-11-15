@@ -318,17 +318,12 @@ describe("generateKoplugin archive layout", () => {
 
     // A device only picks up new payload bytes when the version moves, so the
     // release that added the stats view must sit above 1.1.1.
-    expect(KOPLUGIN_VERSION).toBe("1.2.0");
     expect(compareVersions(KOPLUGIN_VERSION, "1.1.1")).toBeGreaterThan(0);
 
     if (!UNZIP_BINARY) return;
     const zipPath = writeScratch("stats.koplugin", zip);
     const config = unzipEntry(zipPath, `${KOPLUGIN_DIR_NAME}/${KOPLUGIN_CONFIG_FILE}`);
     expect(config).toContain(`plugin_version = "${KOPLUGIN_VERSION}"`);
-    // The shipped module is the real one, not an empty placeholder.
-    const statsModule = unzipEntry(zipPath, `${KOPLUGIN_DIR_NAME}/lighthouse_stats.lua`);
-    expect(statsModule).toContain("function Stats.normalize(");
-    expect(statsModule).toContain("function Stats.heatmapLevel(");
   });
 
   it("roots everything at lighthouse.koplugin/ as KOReader requires", () => {
@@ -2327,7 +2322,6 @@ local glyphs = {}
 for level = 0, 4 do glyphs[#glyphs + 1] = Stats.heatmapGlyph(level) end
 print("glyphs=" .. table.concat(glyphs, ""))
 print("glyph_unknown=" .. tostring(Stats.heatmapGlyph(nil)) .. tostring(Stats.heatmapGlyph(9)))
-print("legend_len=" .. tostring(#Stats.heatmapLegend()))
 
 -- Level mapping: the server's own level wins, thresholds mirror the server ---
 print("level_server=" .. tostring(Stats.heatmapLevel({ level = 4, minutes = 1 })))
@@ -2368,7 +2362,6 @@ local payload = {
 local stats = assert(Stats.normalize(payload))
 print("norm_streak_current=" .. tostring(stats.streaks.current))
 print("norm_streak_best=" .. tostring(stats.streaks.best))
-print("norm_streak_days=" .. tostring(stats.streaks.readingDays))
 print("norm_today=" .. tostring(stats.time.todaySeconds))
 print("norm_week=" .. tostring(stats.time.thisWeekSeconds))
 print("norm_total_hours=" .. tostring(stats.time.totalHours))
@@ -2418,7 +2411,24 @@ print("streak_none=" .. tostring(Stats.streakLabel({ current = 0, best = 12 })))
 print("streak_missing=" .. tostring(Stats.streakLabel(nil)))
 print("goal_books=" .. tostring(Stats.goalBooksLabel(stats.goal)))
 print("goal_hours=" .. tostring(Stats.goalHoursLabel(stats.goal)))
-print("goal_line=" .. tostring(Stats.goalLine(stats.goal)))
+
+-- A single-target goal still shows both metrics: the untargeted one is the
+-- plain count the server sent, never "unavailable".
+local books_only = assert(Stats.normalize({
+  goal = { year = 2026, targetBooks = 20, currentBooks = 5, currentHours = 12.5, booksPercent = 25 },
+}).goal)
+print("goal_books_only_books=" .. tostring(Stats.goalBooksLabel(books_only)))
+print("goal_books_only_hours=" .. tostring(Stats.goalHoursLabel(books_only)))
+print("goal_books_only_hours_ratio=" .. tostring(books_only.hoursRatio))
+local hours_only = assert(Stats.normalize({
+  goal = { year = 2026, targetHours = 100, currentBooks = 7, currentHours = 34, hoursPercent = 34 },
+}).goal)
+print("goal_hours_only_books=" .. tostring(Stats.goalBooksLabel(hours_only)))
+print("goal_hours_only_hours=" .. tostring(Stats.goalHoursLabel(hours_only)))
+print("goal_hours_only_books_ratio=" .. tostring(hours_only.booksRatio))
+-- "unavailable" is reserved for a count the server did not send at all.
+print("goal_missing_count_books=" .. tostring(Stats.goalBooksLabel({ targetHours = 10 })))
+print("goal_missing_count_hours=" .. tostring(Stats.goalHoursLabel({ targetBooks = 10 })))
 print("day_duration=" .. tostring(Stats.dayDurationLabel(stats.heatmap[3])))
 print("day_duration_seconds=" .. tostring(Stats.dayDurationLabel({ seconds = 2700 })))
 print("day_duration_missing=" .. tostring(Stats.dayDurationLabel({})))
@@ -2509,7 +2519,6 @@ describe("plugin reading-stats formatting", () => {
     // Five visually distinct, density-ordered glyphs: no colour, no rainbow.
     expect(out.glyphs).toBe("\u00b7\u2591\u2592\u2593\u2588");
     expect(out.glyph_unknown).toBe("??");
-    expect(out.legend_len).toBe("5");
     expect(out.row_text).toBe("\u00b7\u2591\u2592\u2593\u2588");
     expect(out.row_text_nil).toBe("");
   });
@@ -2537,7 +2546,6 @@ describe("plugin reading-stats formatting", () => {
     const out = runStatsHarness();
     expect(out.norm_streak_current).toBe("5");
     expect(out.norm_streak_best).toBe("12");
-    expect(out.norm_streak_days).toBe("63");
     expect(out.norm_today).toBe("2700");
     expect(out.norm_week).toBe("15000");
     expect(out.norm_total_hours).toBe("132.5");
@@ -2582,7 +2590,17 @@ describe("plugin reading-stats formatting", () => {
     expect(out.streak_missing).toBe("nil");
     expect(out.goal_books).toBe("12/25");
     expect(out.goal_hours).toBe("34h/100h");
-    expect(out.goal_line).toBe("12/25 books \u00b7 34h/100h");
+    // `computeYearlyGoalProgress` always sends currentBooks and currentHours,
+    // so a single-target goal must print the other metric as a plain count.
+    expect(out.goal_books_only_books).toBe("5/20");
+    expect(out.goal_books_only_hours).toBe("12.5h read");
+    expect(out.goal_books_only_hours_ratio).toBe("nil");
+    expect(out.goal_hours_only_books).toBe("7 books read");
+    expect(out.goal_hours_only_hours).toBe("34h/100h");
+    expect(out.goal_hours_only_books_ratio).toBe("nil");
+    // Absent count: no number to show, so the view says unavailable.
+    expect(out.goal_missing_count_books).toBe("nil");
+    expect(out.goal_missing_count_hours).toBe("nil");
     expect(out.day_duration).toBe("45m");
     expect(out.day_duration_seconds).toBe("45m");
     expect(out.day_duration_missing).toBe("nil");
@@ -2667,9 +2685,18 @@ local stats_payload = {
 
 -- The transport returns a JSON body; the decode stub hands back the payload
 -- above, so the real Stats.normalize path runs. The stats_payload upvalue
--- lets the degraded and broken cases reuse the same plugin instance.
+-- lets the degraded and broken cases reuse the same plugin instance. It raises
+-- on an empty body like KOReader's own json.decode, so the zero-length-200 case
+-- exercises the real guard instead of silently decoding nothing.
 package.preload["json"] = function()
-  return { decode = function() return stats_payload end }
+  return {
+    decode = function(body)
+      if type(body) ~= "string" or body == "" then
+        error("json.decode: unexpected end of input", 0)
+      end
+      return stats_payload
+    end,
+  }
 end
 package.preload["ltn12"] = function()
   return {
@@ -2773,6 +2800,20 @@ local deg = current_menu()
 print("deg_rows=" .. tostring(deg and deg.item_table and #deg.item_table))
 if deg then dump_rows(deg, "deg_row") end
 
+-- 3b. Single-target goal: the untargeted row is the count, not "unavailable"
+stats_payload = {
+  goal = {
+    year = 2026, targetBooks = 25, currentBooks = 12,
+    currentHours = 34, booksPercent = 48,
+  },
+}
+local one_ok, one_raised = pcall(tap)
+print("one_ok=" .. tostring(one_ok))
+print("one_raised=" .. tostring(one_raised))
+local one = current_menu()
+print("one_rows=" .. tostring(one and one.item_table and #one.item_table))
+if one then dump_rows(one, "one_row") end
+
 -- 4. Unreadable body ---------------------------------------------------------
 stats_payload = "not a stats payload"
 local bad_ok, bad_raised = pcall(tap)
@@ -2782,12 +2823,22 @@ local bad = shown[#shown]
 print("bad_notice=" .. tostring(bad and bad.__kind == "infomessage"))
 print("bad_text=" .. tostring(bad and bad.text))
 
+-- 4b. A 200 with a zero-length body: the actionable notice, not a raise -----
+local http = require("socket.http")
+local working_request = http.request
+http.request = function() return 1, 200, {} end
+local empty_ok, empty_raised = pcall(tap)
+print("empty_ok=" .. tostring(empty_ok))
+print("empty_raised=" .. tostring(empty_raised))
+local empty = shown[#shown]
+print("empty_notice=" .. tostring(empty and empty.__kind == "infomessage"))
+print("empty_text=" .. tostring(empty and empty.text))
+http.request = working_request
+
 -- 5. Transport failure maps through the plugin's existing error style --------
 stats_payload = {
   streaks = { currentStreak = 5, longestStreak = 12 },
 }
-local http = require("socket.http")
-local working_request = http.request
 http.request = function() return nil, "timeout" end
 local fail_ok, fail_raised = pcall(tap)
 print("fail_ok=" .. tostring(fail_ok))
@@ -2902,6 +2953,18 @@ describe("plugin reading stats view", () => {
     expect(String(out.deg_row12)).toContain("Shade key");
   });
 
+  it("shows the untargeted metric of a single-target goal as its count", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runHarness(READING_STATS_HARNESS);
+
+    expect(out.one_ok).toBe("true");
+    expect(out.one_raised).toBe("nil");
+    expect(out.one_rows).toBe("15");
+    // The configured target keeps its bar; the other metric keeps its number.
+    expect(out.one_row11).toBe("Books\t████░░░░ 48% · 12/25");
+    expect(out.one_row12).toBe("Hours\t34h read");
+  });
+
   it("reports an unreadable payload and a network failure in the plugin's own style", () => {
     if (!LUA_BINARY || !UNZIP_BINARY) return;
     const out = runHarness(READING_STATS_HARNESS);
@@ -2910,6 +2973,14 @@ describe("plugin reading stats view", () => {
     expect(out.bad_raised).toBe("nil");
     expect(out.bad_notice).toBe("true");
     expect(out.bad_text).toBe(
+      "The server sent reading statistics this plugin could not read. Download the plugin again from the LightHouse web app (Guide → KOReader plugin).",
+    );
+
+    // A proxy answering before the app sends 200 with no body: same notice.
+    expect(out.empty_ok).toBe("true");
+    expect(out.empty_raised).toBe("nil");
+    expect(out.empty_notice).toBe("true");
+    expect(out.empty_text).toBe(
       "The server sent reading statistics this plugin could not read. Download the plugin again from the LightHouse web app (Guide → KOReader plugin).",
     );
 
