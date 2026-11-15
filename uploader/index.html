@@ -3326,6 +3326,12 @@
             <div>Tap <strong>Connect</strong> (no username or password needed on your home LAN).</div>
           </div>
         </div>
+        <div class="p-2.5 rounded-xl bg-zinc-950/70 border border-zinc-800 space-y-1.5 text-[11px] text-zinc-400 leading-relaxed">
+          <div class="font-bold text-white">Native feed options (<code class="text-zinc-200">/api/opds</code>)</div>
+          <div><code class="text-zinc-200">?start=N&amp;count=M</code> pages the catalog; each page links forward with <code class="text-zinc-200">rel="next"</code>.</div>
+          <div><code class="text-zinc-200">?sort=title|author|series|added</code> orders the whole catalog before the page window is taken.</div>
+          <div><code class="text-zinc-200">?filter=unread</code> or <code class="text-zinc-200">?filter=&lt;tag&gt;</code> narrows to unfinished books or a Calibre tag. Sort and filter are applied to the full result set and carried into <code class="text-zinc-200">rel="next"</code>, so paging stays coherent.</div>
+        </div>
       </div>
 
       <!-- SECTION 2.5: FEATURES GUIDE (LANGUAGE SHELVES & HOVER SYNOPSIS PREVIEWS) -->
