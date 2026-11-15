@@ -17,7 +17,7 @@ This document chronicles the technical challenges encountered during the Kindle 
 | **INC-07** | Calibre Ingestion Crash from Subprocess Proxy Leak | `HTTP_PROXY` in LaunchAgent env caused Python `calibredb` to append debug text to JSON output | Sanitized subprocess environment and implemented boundary-bracket `safeParseJson` | Resolved |
 | **INC-08** | Sing-Box Outbound Drop via macOS Empty Resolv.conf | macOS lacks DNS in `/etc/resolv.conf`; Sing-box failed to resolve domain-based VLESS endpoints | Added explicit UDP DNS servers (`8.8.8.8`, `1.1.1.1`) and `default_domain_resolver` in `config.json` | Resolved |
 | **INC-09** | Daily Backup Failure via macOS TCC Volume Restriction | Non-interactive LaunchAgent blocked from writing to `/Volumes/Ospeto_SSD` by macOS sandbox | Implemented dual-tier backup (local fallback + SSD mirror) and converted databases to SQLite WAL mode | Resolved |
-| **INC-10** | Credentials Committed Before Public Publication | Bot token and KOSync salt were hardcoded in tracked files, and history stays readable after a repo goes public | Rotated the bot token, scrubbed every real value from `HEAD`, and documented the disclosure | Resolved |
+| **INC-10** | Credentials Committed Before Public Publication | Bot token, KOSync salt, and a KOSync `X-Auth-Key` were hardcoded in tracked files, and history stays readable after a repo goes public | Scrubbed every real value from `HEAD` and documented the residual exposure; revocation is still an operator decision | Mitigated at `HEAD`; history exposure open |
 
 ---
 
@@ -82,11 +82,11 @@ This document chronicles the technical challenges encountered during the Kindle 
   4. Deployed automated 15-minute watchdog (`watchdog.sh`) to self-heal any failed service across the stack.
 ---
 ### INC-10: Credentials Committed Before Public Publication
-- **Symptom:** Preparing the repository for public publication revealed a real Telegram bot token in earlier history and a real KOSync password salt (`KOSYNC_PASSWORD_SALT`) still exposed as a hardcoded fallback default at `HEAD`, in `docker-compose.yml` and twice in `RUNBOOK.md`.
-- **Root Cause:** Convenience defaults. A secret that has a working fallback in tracked files is a published secret the moment the repository becomes readable, and git history keeps both values readable after publication even if `HEAD` is cleaned.
+- **Symptom:** Preparing the repository for public publication revealed a real Telegram bot token in earlier history, a real KOSync password salt (`KOSYNC_PASSWORD_SALT`) still exposed as a hardcoded fallback default at `HEAD` in `docker-compose.yml` and twice in `RUNBOOK.md`, and a real-looking KOSync `X-Auth-Key` in a sample request in `RUNBOOK.md`.
+- **Root Cause:** Convenience defaults. A secret that has a working fallback in tracked files is a published secret the moment the repository becomes readable, and git history keeps every value readable after publication even if `HEAD` is cleaned.
 - **Solution:**
-  1. Rotated the bot token; the committed value no longer authenticates.
-  2. Removed the salt default from `docker-compose.yml` (`${KOSYNC_PASSWORD_SALT:?...}` now refuses to start when it is unset) and from both `RUNBOOK.md` recovery snippets, which fail loudly instead of hashing with a wrong salt.
+  1. Left revocation to the operator: the bot token was reported rotated in BotFather, and the production salt was deliberately not rotated, so the salt in history is still the value production hashes with. Both states are recorded in the RUNBOOK Security Notice rather than assumed.
+  2. Removed the salt default from `docker-compose.yml` (`${KOSYNC_PASSWORD_SALT:?...}` now refuses to start when it is unset or empty) and from both `RUNBOOK.md` recovery snippets, which read the salt from the launchd plist on the Mac mini and otherwise fail loudly instead of hashing with a wrong salt.
   3. Replaced a further MD5-shaped KOSync `X-Auth-Key` example in `RUNBOOK.md` with a placeholder, and hardened `.gitignore` against key material.
-  4. Documented the disclosure in the RUNBOOK Security Notice and the README Credential Hygiene section, including that changing the salt invalidates every existing password hash.
-  5. Left git history intact rather than force-pushing a rewrite across branches: with the token rotated and no value disclosed at `HEAD`, residual history grants no live access. See the Exposed Credentials Policy in `RUNBOOK.md`.
+  4. Documented the disclosure in the RUNBOOK Security Notice and the README Credential Hygiene section, including that changing the salt invalidates every existing password hash and that a salt change does not revoke an `X-Auth-Key`.
+  5. Left git history intact rather than force-pushing a rewrite across branches, so every committed value stays readable in history; the remaining decisions (rotate the salt, change the `moe` password, confirm the BotFather rotation) are listed in the RUNBOOK Security Notice. See the Exposed Credentials Policy in `RUNBOOK.md`.

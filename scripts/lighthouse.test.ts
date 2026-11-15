@@ -819,13 +819,25 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(content).toContain("container_name: reading-calibre-web");
       expect(content).toContain("container_name: reading-bot");
 
-      // Verify compose syntax with docker compose config if docker is available
+      // Verify compose syntax with docker compose config if docker is available.
+      // The salt has no default, so a throwaway value is required for compose to interpolate.
       const dockerCheck = spawnSync("docker", ["compose", "config"], {
         cwd: REPO_ROOT,
         encoding: "utf8",
+        env: { ...process.env, KOSYNC_PASSWORD_SALT: "test-only-salt" },
       });
-      if (dockerCheck.status === 0) {
+      if (!dockerCheck.error) {
+        expect(dockerCheck.status).toBe(0);
         expect(dockerCheck.stdout).toContain("reading-hq");
+
+        const envWithoutSalt: NodeJS.ProcessEnv = { ...process.env };
+        delete envWithoutSalt.KOSYNC_PASSWORD_SALT;
+        const missingSalt = spawnSync(
+          "docker",
+          ["compose", "--env-file", "/dev/null", "-f", composePath, "config"],
+          { cwd: REPO_ROOT, encoding: "utf8", env: envWithoutSalt },
+        );
+        expect(missingSalt.status).not.toBe(0);
       }
     });
   });

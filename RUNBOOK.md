@@ -6,20 +6,29 @@ This runbook documents operational commands, health checks, service management, 
 
 ## 🚨 Security Notice: Previously Committed Credentials
 
-This repository used to be private and is being made public. Two real credentials were committed to it earlier in its history. Both are scrubbed from the current tree, but **git history stays readable once the repository is public**, so a clone made before this scrub still contains them.
+This repository used to be private and is being made public. Three real-looking credentials were committed to it earlier in its history. All three are scrubbed from the current tree, but **git history stays readable once the repository is public**, so a clone made before this scrub still contains them.
 
 | Credential | Where it was committed | Status now |
 | --- | --- | --- |
-| Telegram bot token (`TELEGRAM_BOT_TOKEN`) | earlier history only; not present at `HEAD` | **Rotated.** The committed value no longer authenticates against the Bot API. |
-| KOSync password salt (`KOSYNC_PASSWORD_SALT`) | `docker-compose.yml`, `RUNBOOK.md`, `.env.example` in earlier history, and as a hardcoded fallback default at `HEAD` until this scrub | **Treated as compromised.** Removed from `HEAD`; no default value remains anywhere in the tree. |
+| Telegram bot token (`TELEGRAM_BOT_TOKEN`) | earlier history only; not present at `HEAD` | **Reported rotated by the operator**, which this repository cannot verify. Treat the committed value as live until BotFather confirms it is revoked. |
+| KOSync password salt (`KOSYNC_PASSWORD_SALT`) | `docker-compose.yml`, `RUNBOOK.md`, `.env.example` in earlier history, and as a hardcoded fallback default at `HEAD` until this scrub | **Not rotated. The value in history is the live production salt.** Production reads that same value from `~/Library/LaunchAgents/com.ospeto.kosync.plist` (`EnvironmentVariables.PASSWORD_SALT`). Scrubbed from `HEAD`, still in use. |
+| KOSync `X-Auth-Key` for user `moe` | `RUNBOOK.md` in earlier history, as a sample authenticated request; not present at `HEAD` | **Validity: operator to confirm.** If that value was a real capture rather than an invented example, it authenticates against production as a password-equivalent credential, and changing the salt does **not** revoke it - only changing user `moe`'s password does. |
 
 What this means:
 
 - **Do not trust any credential read from this repository's history.** Anyone who cloned or forked this repository before the scrub should treat the values in their copy as public and already compromised.
-- **The bot token has been rotated.** If you deploy from a pre-scrub clone, replace it with a token you obtained from BotFather yourself.
-- **`KOSYNC_PASSWORD_SALT` must be set explicitly, with no default.** Production reads its salt from the launchd plist `~/Library/LaunchAgents/com.ospeto.kosync.plist` (`EnvironmentVariables.PASSWORD_SALT`), never from `docker-compose.yml` or this runbook. If you deploy from a clone, generate your own random salt (for example `openssl rand -hex 24`) and never reuse any value that appears in this repository's history.
+- **The residual history is not neutralised.** The salt that history discloses is the salt production still hashes with, so any `koreader-sync.db` copy that lives outside this repository (a backup on other storage, a device restore, a later leak) becomes offline-crackable with `bcrypt(userkey + known_salt)`. The bot token and the `X-Auth-Key` stop working only when the operator revokes them.
+- **The rule this repository enforces is not what production does.** `KOSYNC_PASSWORD_SALT` must be set explicitly, with no default, and production reads its salt from the launchd plist rather than from `docker-compose.yml` or this runbook. If you deploy from a clone, generate your own random salt (for example `openssl rand -hex 24`) and never reuse any value that appears in this repository's history - production itself currently reuses exactly such a value.
 - **Changing the salt invalidates every existing password hash** in `koreader-sync.db`; every user must reset their password afterwards using the recovery runbooks below. That one-way effect is exactly why the salt is a deliberate, operator-supplied secret rather than a checked-in default.
-- **This is not a history rewrite.** The decision is to leave git history intact instead of force-pushing a rewritten history across every branch and fork: with the bot token rotated and the salt no longer disclosed at `HEAD`, the residual history values no longer grant access to any live system. See the Exposed Credentials Policy at the end of this runbook.
+- **This is not a history rewrite.** Git history stays intact instead of being force-pushed away across every branch and fork, so every value ever committed stays readable to anyone who clones this repository. See the Exposed Credentials Policy at the end of this runbook.
+
+### Before this repository is published
+
+Three decisions belong to the captain, and this repository cannot make them:
+
+1. **Rotate the production `KOSYNC_PASSWORD_SALT`**, or explicitly accept it as disclosed. Rotating revokes access to any database copy that history makes crackable, and forces every user to reset their password.
+2. **Change user `moe`'s password** if the `X-Auth-Key` in history was ever a real capture. A salt change alone leaves that key working.
+3. **Confirm in BotFather that the committed bot token is revoked.**
 
 ---
 
@@ -174,13 +183,14 @@ If a user forgets their password or cannot log in, reset the password directly i
 
 ```bash
 # 1. Reset user password in SQLite directly on Mac mini
-ssh mac-mini "bun -e '
+# ssh does not forward PASSWORD_SALT, so read it from the launchd plist on Mac mini
+ssh mac-mini "PASSWORD_SALT=\"\$(plutil -extract EnvironmentVariables.PASSWORD_SALT raw ~/Library/LaunchAgents/com.ospeto.kosync.plist)\" bun -e '
   import { Database } from \"bun:sqlite\";
   import crypto from \"node:crypto\";
 
   const dbPath = \"/Users/ospeto/kosync-server/data/koreader-sync.db\";
-  const salt = process.env.PASSWORD_SALT || \"change-me-replace-before-use\";
-  if (salt === \"change-me-replace-before-use\") throw new Error(\"PASSWORD_SALT is unset - export it before resetting a password\");
+  const salt = process.env.PASSWORD_SALT;
+  if (!salt) throw new Error(\"PASSWORD_SALT is empty - set EnvironmentVariables.PASSWORD_SALT in ~/Library/LaunchAgents/com.ospeto.kosync.plist\");
   const username = \"moe\";
   const newPlainPassword = \"YOUR_NEW_PASSWORD_HERE\";
 
@@ -611,13 +621,14 @@ If you forget your password or need an emergency reset, update the hash directly
 
 ```bash
 # Reset password directly on Mac mini
-ssh mac-mini "bun -e '
+# ssh does not forward PASSWORD_SALT, so read it from the launchd plist on Mac mini
+ssh mac-mini "PASSWORD_SALT=\"\$(plutil -extract EnvironmentVariables.PASSWORD_SALT raw ~/Library/LaunchAgents/com.ospeto.kosync.plist)\" bun -e '
   import { Database } from \"bun:sqlite\";
   import crypto from \"node:crypto\";
 
   const dbPath = \"/Users/ospeto/kosync-server/data/koreader-sync.db\";
-  const salt = process.env.PASSWORD_SALT || \"change-me-replace-before-use\";
-  if (salt === \"change-me-replace-before-use\") throw new Error(\"PASSWORD_SALT is unset - export it before resetting a password\");
+  const salt = process.env.PASSWORD_SALT;
+  if (!salt) throw new Error(\"PASSWORD_SALT is empty - set EnvironmentVariables.PASSWORD_SALT in ~/Library/LaunchAgents/com.ospeto.kosync.plist\");
   const username = \"moe\";
   const newPlainPassword = \"YOUR_NEW_PASSWORD_HERE\";
 

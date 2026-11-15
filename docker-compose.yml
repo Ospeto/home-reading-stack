@@ -21,7 +21,7 @@ services:
       - PORT=3000
       - HOST=0.0.0.0
       # No default: the salt is a secret and must come from the environment.
-      # Compose refuses to start when KOSYNC_PASSWORD_SALT is unset.
+      # Compose refuses to start when KOSYNC_PASSWORD_SALT is unset or empty.
       # Changing the salt invalidates every existing password hash.
       - PASSWORD_SALT=${KOSYNC_PASSWORD_SALT:?required - see .env.example}
       - DISABLE_USER_REGISTRATION=false
