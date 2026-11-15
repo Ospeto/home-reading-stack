@@ -5035,9 +5035,11 @@ exit 0
         series_index?: number | null;
         format?: string;
         fileContent?: string;
+        tags?: string[];
       }>,
     ) => {
       const db = new Database(fakeCalibreDbPath);
+      let nextTagId = 1;
       db.run("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, path TEXT, has_cover INTEGER, pubdate TEXT, series_index REAL);");
       db.run("CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);");
       db.run("CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);");
@@ -5073,6 +5075,21 @@ exit 0
         if (b.series) {
           db.run("INSERT OR IGNORE INTO series (id, name) VALUES (?, ?);", [b.id, b.series]);
           db.run("INSERT INTO books_series_link (id, book, series) VALUES (?, ?, ?);", [b.id, b.id, b.id]);
+        }
+
+        for (const tag of b.tags ?? []) {
+          const existing = db
+            .query("SELECT id FROM tags WHERE name = ? LIMIT 1")
+            .get(tag) as { id: number } | null;
+          const tagId = existing ? existing.id : nextTagId++;
+          if (!existing) {
+            db.run("INSERT INTO tags (id, name) VALUES (?, ?);", [tagId, tag]);
+          }
+          db.run("INSERT INTO books_tags_link (id, book, tag) VALUES (?, ?, ?);", [
+            b.id * 100 + tagId,
+            b.id,
+            tagId,
+          ]);
         }
       }
       db.close();
@@ -5368,6 +5385,259 @@ exit 0
       expect(abortRes.status).toBe(200);
       // Reader disconnects without consuming full body
       expect(fs.existsSync(fakeCalibreDbPath)).toBe(true);
+    });
+
+    // ---- OPDS sort & filter -------------------------------------------------
+    //
+    // The catalog below is deliberately built so that no derived order matches
+    // the default `id DESC` browse, and `added` is the exact reverse of it.
+    // Any assertion of a specific ordered id list therefore fails against a
+    // server that ignores sort entirely.
+    const SORT_FILTER_BOOKS = [
+      { id: 201, title: "Zebra Tales", author: "Yara Zed", series: "Alphabet Series", series_index: 6, tags: ["Fiction"] },
+      { id: 202, title: "Apple Pie", author: "Bob Brown", series: "Alphabet Series", series_index: 1, tags: ["Fiction", "Light Novel"] },
+      { id: 203, title: "Mango Rain", author: "Carl Cook", tags: ["Burmese Literature"] },
+      { id: 204, title: "Banana Boat", author: "Alice Adams", series: "Alphabet Series", series_index: 2, tags: ["Fiction"] },
+      { id: 205, title: "Cherry Bomb", author: "Dave Dunn", tags: ["Science Fiction"] },
+      { id: 206, title: "Date Night", author: "Eve Evans", series: "Alphabet Series", series_index: 3, tags: [] as string[] },
+    ];
+
+    const feedEntryIds = (xml: string): number[] =>
+      Array.from(xml.matchAll(/<id>urn:calibre:book:(\d+)<\/id>/g)).map((m) => Number(m[1]));
+
+    const fetchEntryIds = async (search: string): Promise<number[]> => {
+      const res = await handleRequest(new Request(`http://127.0.0.1:8086/api/opds${search}`));
+      expect(res.status).toBe(200);
+      return feedEntryIds(await res.text());
+    };
+
+    it("keeps today's order when no sort is requested, including for unknown sort values", async () => {
+      setupFakeCalibreDatabase(SORT_FILTER_BOOKS);
+
+      // Default browse is Calibre `id DESC`; sorting must be opt-in only.
+      expect(await fetchEntryIds("")).toEqual([206, 205, 204, 203, 202, 201]);
+      // Unrecognised sort keys are ignored rather than rejected or applied.
+      expect(await fetchEntryIds("?sort=bogus")).toEqual([206, 205, 204, 203, 202, 201]);
+      expect(await fetchEntryIds("?sort=")).toEqual([206, 205, 204, 203, 202, 201]);
+    });
+
+    it("sorts the whole result set by title, author, series and added order", async () => {
+      setupFakeCalibreDatabase(SORT_FILTER_BOOKS);
+
+      expect(await fetchEntryIds("?sort=title")).toEqual([202, 204, 205, 206, 203, 201]);
+      expect(await fetchEntryIds("?sort=author")).toEqual([204, 202, 203, 205, 206, 201]);
+      // Series first, ordered by series name then volume, then series-less by title.
+      expect(await fetchEntryIds("?sort=series")).toEqual([202, 204, 206, 201, 205, 203]);
+      // `added` is newest first: ids increase per ingest, so this matches the
+      // default browse end of the catalog.
+      expect(await fetchEntryIds("?sort=added")).toEqual([206, 205, 204, 203, 202, 201]);
+    });
+
+    it("sorts ACROSS page boundaries: pages 1..n concatenate into one global order", async () => {
+      setupFakeCalibreDatabase(SORT_FILTER_BOOKS);
+
+      const fullSorted = await fetchEntryIds("?sort=title");
+      expect(fullSorted).toEqual([202, 204, 205, 206, 203, 201]);
+
+      // Walk the paged feed exactly as an OPDS client would: follow `next`.
+      const paged: number[] = [];
+      const pagedHrefs: string[] = [];
+      let nextPath = "/api/opds?count=2&sort=title";
+      for (let guard = 0; guard < 10 && nextPath; guard++) {
+        pagedHrefs.push(nextPath);
+        const res = await handleRequest(new Request(`http://127.0.0.1:8086${nextPath}`));
+        expect(res.status).toBe(200);
+        const xml = await res.text();
+        const pageIds = feedEntryIds(xml);
+        expect(pageIds.length).toBeLessThanOrEqual(2);
+        paged.push(...pageIds);
+
+        const nextMatch = xml.match(/<link rel="next" href="([^"]+)"/);
+        if (!nextMatch) {
+          nextPath = "";
+          break;
+        }
+        const nextUrl = new URL(nextMatch[1].replace(/&amp;/g, "&"));
+        // The next link must keep paging the same sorted feed.
+        expect(nextUrl.searchParams.get("sort")).toBe("title");
+        expect(nextUrl.searchParams.get("count")).toBe("2");
+        nextPath = `${nextUrl.pathname}?${nextUrl.searchParams.toString()}`;
+      }
+
+      expect(paged.length).toBe(6);
+      expect(pagedHrefs.length).toBe(3);
+      // The decisive assertion: the pages, concatenated, are the single global order.
+      // A per-page-only sort would emit 204,205 / 201,202 / ... instead.
+      expect(paged).toEqual(fullSorted);
+      // No repeats and no omissions across the walk.
+      expect(new Set(paged).size).toBe(6);
+    });
+
+    it("sorts correctly when the first page is requested directly by offset", async () => {
+      setupFakeCalibreDatabase(SORT_FILTER_BOOKS);
+
+      // Paging without following `next` still uses the same global ordering.
+      expect(await fetchEntryIds("?sort=title&count=2&start=0")).toEqual([202, 204]);
+      expect(await fetchEntryIds("?sort=title&count=2&start=2")).toEqual([205, 206]);
+      expect(await fetchEntryIds("?sort=title&count=2&start=4")).toEqual([203, 201]);
+    });
+
+    it("filters by tag when such tags exist and ignores unknown filter values", async () => {
+      setupFakeCalibreDatabase(SORT_FILTER_BOOKS);
+
+      // Exact tag membership, case-insensitively, in the default browse order.
+      expect(await fetchEntryIds("?filter=Fiction")).toEqual([204, 202, 201]);
+      expect(await fetchEntryIds("?filter=fiction")).toEqual([204, 202, 201]);
+      // Tags match as whole values, never as substrings of another tag.
+      expect(await fetchEntryIds("?filter=Science+Fiction")).toEqual([205]);
+      expect(await fetchEntryIds("?filter=Light+Novel")).toEqual([202]);
+
+      // Unknown values are ignored: the client still gets the full catalog.
+      expect(await fetchEntryIds("?filter=nonexistent-tag")).toEqual([206, 205, 204, 203, 202, 201]);
+      expect(await fetchEntryIds("?filter=unreadish")).toEqual([206, 205, 204, 203, 202, 201]);
+      expect(await fetchEntryIds("?filter=")).toEqual([206, 205, 204, 203, 202, 201]);
+    });
+
+    it("resolves a filter against the catalog, not the search-matched subset", async () => {
+      setupFakeCalibreDatabase(SORT_FILTER_BOOKS);
+
+      // "Alphabet Series" matches 202/204/206/201, none tagged Burmese Literature,
+      // so the intersection is empty instead of the whole search result.
+      expect(await fetchEntryIds("?q=Alphabet+Series&filter=Burmese+Literature")).toEqual([]);
+      // The same filter value still narrows searches whose matches carry the tag.
+      expect(await fetchEntryIds("?q=Alphabet+Series&filter=Fiction")).toEqual([204, 202, 201]);
+      // And an unrelated search must not change how the filter itself resolves.
+      expect(await fetchEntryIds("?q=Zebra&filter=Burmese+Literature")).toEqual([]);
+    });
+
+    it("combines filter and sort before paging, carrying both into the next link", async () => {
+      setupFakeCalibreDatabase(SORT_FILTER_BOOKS);
+
+      expect(await fetchEntryIds("?filter=Fiction&sort=title")).toEqual([202, 204, 201]);
+
+      const res = await handleRequest(
+        new Request("http://127.0.0.1:8086/api/opds?filter=Fiction&sort=title&count=2"),
+      );
+      const xml = await res.text();
+      expect(feedEntryIds(xml)).toEqual([202, 204]);
+      const nextHref = xml.match(/<link rel="next" href="([^"]+)"/)?.[1] ?? "";
+      expect(nextHref).not.toBe("");
+      const nextUrl = new URL(nextHref.replace(/&amp;/g, "&"));
+      expect(nextUrl.searchParams.get("sort")).toBe("title");
+      expect(nextUrl.searchParams.get("filter")).toBe("Fiction");
+      expect(nextUrl.searchParams.get("count")).toBe("2");
+      expect(nextUrl.searchParams.get("start")).toBe("2");
+    });
+
+    it("filter=unread excludes finished books using live KOSync progress", async () => {
+      setupFakeCalibreDatabase(SORT_FILTER_BOOKS);
+
+      const kosyncDir = path.join(tempBaseDir, "kosync");
+      fs.mkdirSync(kosyncDir, { recursive: true });
+      const kosyncDbPath = path.join(kosyncDir, "koreader-sync.db");
+      const cacheDbPath = path.join(kosyncDir, "cache.db");
+
+      const origKosyncDb = process.env.KOSYNC_DB_PATH;
+      const origCacheDb = process.env.CACHE_DB_PATH;
+      process.env.KOSYNC_DB_PATH = kosyncDbPath;
+      process.env.CACHE_DB_PATH = cacheDbPath;
+
+      try {
+        // 202 is finished, 204 is only half read, 203/206/201 have no record.
+        // 205 reports 100 (integer percent) and 203 reports 45, so both encodings
+        // of `percentage` are present in the same table.
+        const kdb = new Database(kosyncDbPath);
+        kdb.run(`
+          CREATE TABLE progress (
+            id INTEGER PRIMARY KEY,
+            document TEXT,
+            progress TEXT,
+            percentage REAL,
+            device TEXT,
+            device_id TEXT,
+            filename TEXT,
+            title TEXT,
+            authors TEXT,
+            timestamp INTEGER
+          );
+        `);
+        kdb.run(
+          "INSERT INTO progress (document, percentage, timestamp) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)",
+          [
+            "hash-202",
+            1.0,
+            Date.now(),
+            "hash-204",
+            0.42,
+            Date.now(),
+            "hash-unmapped",
+            0.99,
+            Date.now(),
+            "hash-stale-206",
+            1.0,
+            Date.now(),
+            "hash-203",
+            45,
+            Date.now(),
+            "hash-205",
+            100,
+            Date.now(),
+          ],
+        );
+        kdb.close();
+
+        const cdb = getCacheDb();
+        cdb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          ["/tmp/Apple Pie.epub", 1, "hash-202", 202, "Apple Pie", "Bob Brown", 0],
+        );
+        cdb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          ["/tmp/Banana Boat.epub", 1, "hash-204", 204, "Banana Boat", "Alice Adams", 0],
+        );
+        cdb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          ["/tmp/Mango Rain.epub", 1, "hash-203", 203, "Mango Rain", "Carl Cook", 0],
+        );
+        cdb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          ["/tmp/Cherry Bomb.epub", 1, "hash-205", 205, "Cherry Bomb", "Dave Dunn", 0],
+        );
+        // Superseded row from before a metadata edit: the same id no longer owns
+        // this title, so its 100% progress must not hide book 206.
+        cdb.run(
+          "INSERT OR REPLACE INTO file_hashes (filepath, mtime, hash, book_id, title, authors, cover) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          ["/tmp/Date Night.epub", 1, "hash-stale-206", 206, "Date Night (old)", "Eve Evans", 0],
+        );
+
+        // Finished 202 (fraction) and 205 (integer percent) drop out; 203 stays
+        // because 45 means 45%, the in-progress book 204 stays, and the
+        // stale-identity row leaves 206 in the unread shelf.
+        expect(await fetchEntryIds("?filter=unread")).toEqual([206, 204, 203, 201]);
+      } finally {
+        const cdb = getCacheDb();
+        cdb.run(
+          "DELETE FROM file_hashes WHERE hash IN ('hash-202', 'hash-203', 'hash-204', 'hash-205', 'hash-stale-206')",
+        );
+        if (origKosyncDb !== undefined) process.env.KOSYNC_DB_PATH = origKosyncDb;
+        else delete process.env.KOSYNC_DB_PATH;
+        if (origCacheDb !== undefined) process.env.CACHE_DB_PATH = origCacheDb;
+        else delete process.env.CACHE_DB_PATH;
+      }
+    });
+
+    it("ignores filter=unread when no read-state source exists instead of emptying the shelf", async () => {
+      setupFakeCalibreDatabase(SORT_FILTER_BOOKS);
+
+      const origKosyncDb = process.env.KOSYNC_DB_PATH;
+      process.env.KOSYNC_DB_PATH = path.join(tempBaseDir, "absent-kosync.db");
+      try {
+        expect(fs.existsSync(process.env.KOSYNC_DB_PATH)).toBe(false);
+        expect(await fetchEntryIds("?filter=unread")).toEqual([206, 205, 204, 203, 202, 201]);
+      } finally {
+        if (origKosyncDb !== undefined) process.env.KOSYNC_DB_PATH = origKosyncDb;
+        else delete process.env.KOSYNC_DB_PATH;
+      }
     });
   });
 
