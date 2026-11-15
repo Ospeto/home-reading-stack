@@ -772,9 +772,8 @@ The server now refuses to bind its port until it can actually read the Calibre l
 
 - **Under launchd:** the generated `com.ospeto.book-uploader` plist sets `KeepAlive` (no `SuccessfulExit` predicate), so a persistently fatal verdict is not one failure but an exit-1 respawn loop every ~10 s, each attempt appending an identical `Fatal:` block to `~/Library/Logs/uploader.log`. That repetition is the intended loud signal, not a second bug and not a start-order race; pause it deliberately with `bin/lighthouse down` while the host cause is fixed.
 - **Reboot survival is still blocked:** this change converts a silent wedged PID into a loud, actionable refusal. The stack cannot survive a reboot until the library sits somewhere the host can actually read (see INC-11 for the pending host action) — nothing here relocates, remounts or retries.
-
 - **Deadline:** 5000 ms per probe, override with `LIGHTHOUSE_LIBRARY_PROBE_TIMEOUT_MS`.
-- **Why a child process:** when a removable volume stops answering, `bun` blocks *inside* the `openat` syscall, so an in-process check would hang exactly like the bug it is checking for. The probe runs as a killable `/bin/sh -c 'exec /bin/ls …'` and is SIGKILLed at the deadline.
+- **Why a child process:** when a removable volume stops answering, `bun` blocks *inside* the `openat` syscall, so an in-process check would hang exactly like the bug it is checking for. Each probe is a killable `/bin/sh -c 'exec …'` child — `/bin/ls -1` for the library root, `/usr/bin/head -c 16` for `metadata.db` — SIGKILLed at the deadline.
 - **Failure output** names every failing path, the cause it actually observed, and both remedies: move the live library onto local storage (recommended — no TCC dependency, survives reboots and runtime upgrades), or grant the runtime Full Disk Access (fragile — the grant is keyed to the binary hash and is lost on every upgrade).
 - Background: [INC-11](INCIDENTS.md) — the launchd supervision investigation this came from.
 

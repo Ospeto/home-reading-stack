@@ -114,6 +114,8 @@ cat /Volumes/Ospeto_SSD/Lighthouse_Agent_Library/metadata.db >/dev/null && echo 
 bin/lighthouse down            # or: launchctl bootout gui/$(id -u)/com.ospeto.book-uploader
 ```
 
+**The tunnel watchdog is affected too.** `scripts/tunnel-watchdog.sh` treats a non-200 from `:8086/api/books` as a local failure: it kickstarts the uploader and then exits before its remote WAN probes. While this gate refuses, that means one extra restart per 120 s run and **no US or Singapore tunnel checking or healing at all** — restoring library access is what restores tunnel monitoring.
+
 **Reboot survival is still blocked.** This preflight only makes the failure loud and actionable; the uploader cannot come up after a reboot until the library is readable at boot, which is a host action, not a code path. See INC-11 in `INCIDENTS.md` for the pending action and both remedies.
 
 A successful manual start is not evidence of supervision: an interactive shell inherits its TCC entitlement, a launchd agent does not.
