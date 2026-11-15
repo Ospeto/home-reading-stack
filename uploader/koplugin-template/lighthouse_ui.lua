@@ -11,14 +11,15 @@ and the arithmetic behind them.
 Design rules this file encodes (e-ink, judged at 1 bit):
 
   * Nothing is carried by colour alone. Emphasis comes from weight (bold),
-    position (first line, left gutter, right column), a glyph, or a bar. An
+    position (leading text, left gutter, right column), a glyph, or a bar. An
     e-ink panel would render the web dashboard's amber accents as one grey.
   * Only glyphs KOReader's bundled fonts carry are used: block and box
     drawing, stars, middot, ellipsis, check and chevron. See `Ui.GLYPH`.
-  * Rows share one shape everywhere: a primary line, an optional secondary
-    line, and one compact value column on the right that can be read without
-    tapping. Section headings are marked with a left block bar, the e-ink
-    equivalent of the web app's accent border.
+  * Rows share one shape everywhere: the title leads the row and one compact
+    right-hand metadata column carries the secondary values (author, series,
+    progress, rating) that can be read without tapping. Section headings are
+    marked with a left block bar, the e-ink equivalent of the web app's accent
+    border.
   * Every measure below is expressed in "units" that main.lua multiplies by
     `Screen:scaleBySize(1)`, so the same layout appears on a 600px and a
     1072px screen without a second table of magic numbers.
@@ -28,9 +29,11 @@ repository's off-device suite exercises every helper here directly.
 
 Row anatomy (the contract every screen follows):
 
-    | cover | Title (primary, item font)           | ███░░ 45% · ★★★★☆ |
-    | gutter| Author · Series (secondary, small)   |                    |
-    ^ left gutter, only when covers are on       ^ value column, right
+    | cover | Title                    | Isuna Hasekura · Spice and Wolf 01 · ███░░░ 45% |
+    ^ left gutter, covers on     ^ `item.mandatory`: author, series, progress, rating
+
+The row is one line, because that is the shape KOReader's `MenuItem` draws:
+`item.text` is the title, `item.mandatory` is the everything-else column.
 ]]
 local Ui = {}
 
@@ -40,10 +43,11 @@ local Ui = {}
 -- are multiplied by the device scale, so read them as "at 160 dpi".
 Ui.tokens = {
     -- Row anatomy -------------------------------------------------------
-    --: Line 1 is the title, line 2 the secondary metadata line.
-    row_lines = 2,
-    --: Characters kept in the secondary line before it is ellipsized, so a
-    --: long author list can never wrap a row into a third line.
+    --: Characters kept in the metadata column, so a runaway author list can
+    --: never push the title out of the row.
+    meta_max_chars = 64,
+    --: Characters kept in the secondary metadata before it is ellipsized, so a
+    --: long author list can never dominate the metadata column.
     secondary_max_chars = 44,
     --: Author names shown before "and N more" takes over.
     secondary_max_authors = 2,
@@ -75,7 +79,9 @@ Ui.tokens = {
     cover_width_px = 360,
     --: A cached cover older than this is fetched again on the next page.
     cover_ttl_seconds = 30 * 24 * 60 * 60,
-    --: Wall-clock budget for fetching missing covers on one page open.
+    --: Wall-clock budget for fetching missing covers on one page open. A
+    --: single request is issued under what is left of it, so one stalled
+    --: cover cannot outlive the page.
     cover_fetch_seconds = 6,
     --: Hard cap on fetches per page open, whatever the budget says.
     cover_fetch_max = 12,
@@ -258,20 +264,15 @@ function Ui.secondaryLine(options)
     )
 end
 
---- Builds a row's primary+secondary text block.
+--- Builds the text a row shows: the title, flattened to one line.
 --
--- KOReader's menu draws one text widget per row; the plugin uses its two-line
--- form (forced multiline in main.lua) so the title always leads and the
--- metadata sits directly under it in the smaller font.
--- @string primary
--- @string[opt] secondary
+-- KOReader's `MenuItem` replaces every newline in `text` with a space before
+-- layout, so a stacked title/metadata block is not expressible; the metadata
+-- lives in `item.mandatory` instead (see `buildRow` in main.lua).
+-- @string title
 -- @treturn string
-function Ui.rowText(primary, secondary)
-    local first = oneLine(primary)
-    local second = oneLine(secondary)
-    if second == "" then return first end
-    if first == "" then return second end
-    return first .. "\n" .. second
+function Ui.rowTitle(title)
+    return oneLine(title)
 end
 
 --- Builds a section heading: a left block bar plus the label.

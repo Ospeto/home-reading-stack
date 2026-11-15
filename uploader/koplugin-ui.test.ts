@@ -106,15 +106,14 @@ print("sec_max_chars=" .. Ui.secondaryLine({
 }))
 
 -- Row text ------------------------------------------------------------------
-print("row_two=" .. flat(Ui.rowText("Dune", "Frank Herbert")))
-print("row_primary_only=" .. flat(Ui.rowText("Dune", nil)))
-print("row_blank_secondary=" .. flat(Ui.rowText("Dune", "   ")))
-print("row_no_primary=" .. flat(Ui.rowText(nil, "Frank Herbert")))
+print("row_title=" .. flat(Ui.rowTitle("Dune")))
+print("row_title_nil=" .. "[" .. Ui.rowTitle(nil) .. "]")
+print("row_title_blank=" .. "[" .. Ui.rowTitle("   ") .. "]")
 -- Regression: newline stripping must not eat the letters r and n (Lua 5.1
 -- reads %r and %n in a pattern as the literal letters).
-print("row_keeps_letters=" .. flat(Ui.rowText("Corner of Nowhere", nil)))
-print("row_flattens_newline=" .. flat(Ui.rowText("Artist\nHouse", nil)))
-print("row_trims=" .. flat(Ui.rowText("  Dune  ", "  Frank Herbert  ")))
+print("row_keeps_letters=" .. flat(Ui.rowTitle("Corner of Nowhere")))
+print("row_flattens_newline=" .. flat(Ui.rowTitle("Artist\nHouse")))
+print("row_trims=" .. flat(Ui.rowTitle("  Dune  ")))
 
 -- Glyphs, headings, glance column -------------------------------------------
 print("section=" .. flat(Ui.sectionText("Library health")))
@@ -372,14 +371,13 @@ describe("plugin UI primitives: author and series metadata", () => {
 });
 
 describe("plugin UI primitives: row language", () => {
-  it("builds a two-line row with the title first", () => {
+  it("flattens a title into the one line a MenuItem can draw", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
-    expect(out.row_two).toBe("Dune\\nFrank Herbert");
-    expect(out.row_primary_only).toBe("Dune");
-    expect(out.row_blank_secondary).toBe("Dune");
-    expect(out.row_no_primary).toBe("Frank Herbert");
-    expect(out.row_trims).toBe("Dune\\nFrank Herbert");
+    expect(out.row_title).toBe("Dune");
+    expect(out.row_title_nil).toBe("[]");
+    expect(out.row_title_blank).toBe("[]");
+    expect(out.row_trims).toBe("Dune");
   });
 
   it("strips newlines without eating the letters r and n", () => {

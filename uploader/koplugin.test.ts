@@ -1898,19 +1898,20 @@ local entry = {
   rating = 8,
   status = { percentage = 0.45, device = "Paperwhite", timestamp = 1 },
 }
--- The row language: line 1 is the title, line 2 the metadata, and the right
--- column carries progress and rating so neither needs a tap.
+-- The row language: the title is the row text, and the metadata column
+-- carries author, series, progress and rating so none of them needs a tap.
 local layout = LightHouse:layoutFor(true)
 print("layout_rows=" .. tostring(layout.rows))
 print("layout_cover=" .. tostring(layout.cover_width) .. "x" .. tostring(layout.cover_height))
 print("layout_gutter=" .. tostring(layout.gutter))
 local row = LightHouse:buildCatalogItem(entry, layout)
-local row_primary, row_secondary = tostring(row.text):match("^(.-)\n(.*)$")
-print("row_primary=" .. tostring(row_primary))
-print("row_secondary=" .. tostring(row_secondary))
+print("row_text=" .. tostring(row.text))
+print("row_text_has_newline=" .. tostring(tostring(row.text):find("\n", 1, true) ~= nil))
 print("row_mandatory=" .. tostring(row.mandatory))
 print("row_state=" .. tostring(type(row.state) == "table" and row.state.__kind or "none"))
-print("row_nocover_text=" .. tostring(LightHouse:buildCatalogItem(entry).text:gsub("\n", "\\n")))
+local no_cover_row = LightHouse:buildCatalogItem(entry)
+print("row_nocover_text=" .. tostring(no_cover_row.text))
+print("row_nocover_mandatory=" .. tostring(no_cover_row.mandatory))
 local detail_labels = {}
 for detail_index = 1, #row.sub_item_table do
   detail_labels[#detail_labels + 1] = row.sub_item_table[detail_index].text
@@ -1999,14 +2000,17 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
     expect(submenu).toContain("Choose download folder…");
     expect(submenu).toContain("Connection");
 
-    // Row anatomy: the title leads, the metadata follows in the smaller line,
-    // and progress + rating share one right-hand value the reader can read at a
-    // glance. The rating is no longer prefixed onto the title.
-    expect(out.row_primary).toBe("Spice and Wolf, Vol. 1");
-    expect(out.row_secondary).toBe("Isuna Hasekura · Spice and Wolf 01");
+    // Row anatomy: the title is the row text, and the right-hand metadata
+    // column carries author, series, progress and rating together. KOReader's
+    // MenuItem flattens newlines out of the row text, so the metadata must not
+    // be a second line in `text`.
+    expect(out.row_text).toBe("Spice and Wolf, Vol. 1");
+    expect(out.row_text_has_newline).toBe("false");
+    expect(out.row_mandatory).toContain("Isuna Hasekura");
+    expect(out.row_mandatory).toContain("Spice and Wolf 01");
     expect(out.row_mandatory).toContain("45%");
     expect(out.row_mandatory).toContain("★★★★☆");
-    expect(out.row_mandatory).not.toContain("Isuna Hasekura");
+    expect(out.row_mandatory).not.toContain("\n");
 
     // Covers: one geometry rule drives the page, and a row whose cover is not on
     // disk yet draws the neutral placeholder rather than a blank hole.
@@ -2020,9 +2024,10 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
     expect(layoutCoverH).toBeGreaterThan(layoutCoverW);
     expect(Number(out.layout_gutter)).toBeGreaterThan(layoutCoverW);
     expect(out.row_state).toBe("framecontainer");
-    // Without a layout (a caller that does not draw covers) the row is still
-    // the same two-line row.
-    expect(out.row_nocover_text).toBe("Spice and Wolf, Vol. 1\\nIsuna Hasekura · Spice and Wolf 01");
+    // Without a layout (a caller that does not draw covers) the row keeps the
+    // same shape: title in the row text, metadata in the column.
+    expect(out.row_nocover_text).toBe("Spice and Wolf, Vol. 1");
+    expect(out.row_nocover_mandatory).toBe(out.row_mandatory);
 
     const detail = out.detail.split("|");
     expect(detail[0]).toBe("Download EPUB");
@@ -2060,6 +2065,9 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
  */
 const CURRENTLY_READING_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
 local expected_base_url = assert(arg[2], "expected base url argument required")
+
+-- Flips the transport into a link that answers nothing, for the failure case.
+local failure = false
 
 -- Field-for-field shape of GET /api/kosync/active (koreader-sync.db rows joined
 -- against the Calibre library), newest first after normalization.
@@ -2156,6 +2164,7 @@ end
 package.preload["socket.http"] = function()
   return {
     request = function(request)
+      if failure then return nil, "timeout" end
       if request and request.sink then
         request.sink('{"active":[]}')
         request.sink(nil)
@@ -2208,18 +2217,23 @@ local function current_menu()
   end
   return widget
 end
--- Rows carry the plugin's shared two-line anatomy, so each row is printed as
--- primary / secondary / glance column / detail labels.
+-- Rows carry the plugin's shared one-line anatomy, so each row is printed as
+-- row text / metadata column / detail labels.
 for item_index = 1, #menu.item_table do
   local item = menu.item_table[item_index]
   local labels = {}
   for detail_index = 1, #(item.sub_item_table or {}) do
     labels[#labels + 1] = tostring(item.sub_item_table[detail_index].text)
   end
-  local primary, secondary = tostring(item.text):match("^(.-)\n(.*)$")
-  if not primary then primary, secondary = tostring(item.text), "" end
-  print(string.format("item%d=%s\t%s\t%s\t%s", item_index, primary, secondary, tostring(item.mandatory), table.concat(labels, "|")))
+  print(string.format("item%d=%s\t%s\t%s", item_index, tostring(item.text), tostring(item.mandatory), table.concat(labels, "|")))
 end
+local rows_with_newlines = 0
+for item_index = 1, #menu.item_table do
+  if tostring(menu.item_table[item_index].text):find("\n", 1, true) then
+    rows_with_newlines = rows_with_newlines + 1
+  end
+end
+print("rows_with_newlines=" .. tostring(rows_with_newlines))
 
 -- Book-id downloads must still be wired to the tapped session.
 menu.item_table[1].sub_item_table[1].callback()
@@ -2240,6 +2254,21 @@ for action_index = 2, #(empty and empty.item_table or {}) do
   actions[#actions + 1] = tostring(empty.item_table[action_index].text)
 end
 print("empty_actions=" .. table.concat(actions, "|"))
+
+-- A failed request must open the designed failure screen instead of claiming
+-- there is nothing in progress.
+failure = true
+local fail_ok, fail_raised = pcall(tap)
+print("fail_ok=" .. tostring(fail_ok))
+print("fail_raised=" .. tostring(fail_raised))
+local failed = current_menu()
+print("fail_view=" .. tostring(failed and failed.title))
+print("fail_headline=" .. tostring(failed and failed.item_table and failed.item_table[1] and failed.item_table[1].text))
+local fail_actions = {}
+for action_index = 2, #(failed and failed.item_table or {}) do
+  fail_actions[#fail_actions + 1] = tostring(failed.item_table[action_index].text)
+end
+print("fail_actions=" .. table.concat(fail_actions, "|"))
 
 print("OK")
 `)
@@ -2303,13 +2332,14 @@ describe("plugin currently-reading shelf", () => {
     expect(out.title).toBe("Currently reading");
     expect(out.items).toBe("4");
 
-    // Row 1: linked session, newest first. Title leads, author and device are
-    // the secondary line, and progress is the glance column - no tap needed.
+    // Row 1: linked session, newest first. The title is the row text and the
+    // metadata column carries author, device and progress - no tap needed.
+    expect(out.rows_with_newlines).toBe("0");
     const first = out.item1.split("\t");
     expect(first[0]).toBe("Spice and Wolf, Vol. 1");
-    expect(first[1]).toBe("Isuna Hasekura · Paperwhite");
-    expect(first[2]).toContain("45%");
-    const firstDetails = first[3].split("|");
+    expect(first[1]).toContain("Isuna Hasekura · Paperwhite");
+    expect(first[1]).toContain("45%");
+    const firstDetails = first[2].split("|");
     expect(firstDetails[0]).toBe("Download EPUB");
     expect(firstDetails).toContain("Progress: ████░░░░ 45%");
     expect(firstDetails).toContain("Device: Paperwhite");
@@ -2318,9 +2348,9 @@ describe("plugin currently-reading shelf", () => {
     // Row 2: no Calibre match, so the download row is replaced, not dropped.
     const second = out.item2.split("\t");
     expect(second[0]).toBe("Dune & Sons <Deluxe>");
-    expect(second[1]).toBe("Frank Herbert · Kindle");
-    expect(second[2]).toContain("20%");
-    const secondDetails = second[3].split("|");
+    expect(second[1]).toContain("Frank Herbert · Kindle");
+    expect(second[1]).toContain("20%");
+    const secondDetails = second[2].split("|");
     expect(secondDetails[0]).toBe("No matching book in the library");
     expect(secondDetails).toContain("Progress: ██░░░░░░ 20%");
     expect(secondDetails).toContain("Device: Kindle");
@@ -2329,9 +2359,9 @@ describe("plugin currently-reading shelf", () => {
     // Row 3: every fallback fires (no title, no authors, no device, no file).
     const third = out.item3.split("\t");
     expect(third[0]).toBe("Untitled");
-    expect(third[1]).toBe("Unknown");
-    expect(third[2]).toContain("0%");
-    const thirdDetails = third[3].split("|");
+    expect(third[1]).toContain("Unknown");
+    expect(third[1]).toContain("0%");
+    const thirdDetails = third[2].split("|");
     expect(thirdDetails).toEqual([
       "No matching book in the library",
       "Progress: ░░░░░░░░ 0%",
@@ -2341,10 +2371,10 @@ describe("plugin currently-reading shelf", () => {
     // and a finished book is marked with a check glyph, not a colour.
     const fourth = out.item4.split("\t");
     expect(fourth[0]).toBe(BURMESE_PROBE);
-    expect(fourth[1]).toBe("Unknown · Kobo");
-    expect(fourth[2]).toContain("100%");
-    expect(fourth[2]).toContain("✓");
-    expect(fourth[3].split("|")[0]).toBe("Download EPUB");
+    expect(fourth[1]).toContain("Unknown · Kobo");
+    expect(fourth[1]).toContain("100%");
+    expect(fourth[1]).toContain("✓");
+    expect(fourth[2].split("|")[0]).toBe("Download EPUB");
 
     // Tapping "Download EPUB" still resolves the session's Calibre id.
     expect(out.tapped_book_id).toBe("101");
@@ -2358,6 +2388,15 @@ describe("plugin currently-reading shelf", () => {
     expect(out.empty_headline).toBe("Nothing in progress yet");
     expect(out.empty_actions).toContain("Refresh");
     expect(out.empty_actions).toContain("Browse library");
+
+    // A failed request is not an empty shelf: it opens the failure screen with
+    // the reason and a retry, instead of telling the reader nothing is in
+    // progress.
+    expect(out.fail_ok).toBe("true");
+    expect(out.fail_raised).toBe("nil");
+    expect(out.fail_view).toBe("Currently reading");
+    expect(out.fail_headline).toBe("Can't reach the LightHouse server");
+    expect(out.fail_actions).toContain("Try again");
 
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });

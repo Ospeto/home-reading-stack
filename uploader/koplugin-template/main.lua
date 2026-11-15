@@ -13,9 +13,9 @@ What it gives you, on top of the built-in OPDS browser:
   * Search title / author / series from the device keyboard.
   * Cover thumbnails on every library row, cached on disk so scrolling does not
     refetch them, with a neutral placeholder instead of a blank hole.
-  * One row language across every screen: title on line one, author and series
-    under it, and one compact right-hand column (progress, rating) the reader
-    never has to tap for. The scale lives in `lighthouse_ui.lua`.
+  * One row language across every screen: the title leads the row and one
+    right-hand metadata column (author, series, progress, rating) is readable
+    without a tap. The scale lives in `lighthouse_ui.lua`.
   * Book detail with one-tap EPUB download straight into your download folder.
   * Reading status per book, merged from the server's KOSync progress
     (`GET /api/kosync/active`), matched on Calibre id, filename or title.
@@ -524,6 +524,9 @@ function LightHouse:progressGlance(session)
 end
 
 --- Builds one row in the plugin's shared row language.
+-- The title is `item.text` and everything else is `item.mandatory`: KOReader's
+-- MenuItem flattens newlines out of `text`, so a row is one line by
+-- construction rather than by hoping a second line survives.
 -- @tparam table spec { layout, cover_entry, cover_glyph, primary, secondary,
 --                      glance, details, callback, bold }
 -- @treturn table Menu item
@@ -531,10 +534,14 @@ function LightHouse:buildRow(spec)
     spec = spec or {}
     local layout = spec.layout
     local item = {
-        text = Ui.rowText(spec.primary, spec.secondary),
+        text = Ui.rowTitle(spec.primary),
         bold = spec.bold == true,
     }
-    if spec.glance and spec.glance ~= "" then item.mandatory = spec.glance end
+    local meta = Ui.ellipsize(
+        Ui.join({ spec.secondary, spec.glance }),
+        Ui.tokens.meta_max_chars
+    )
+    if meta ~= "" then item.mandatory = meta end
     if spec.details then
         item.sub_item_table = spec.details
         item.callback = spec.callback
@@ -722,13 +729,21 @@ function LightHouse:withSpinner(text, func)
     return body, err
 end
 
---- Fetches normalized KOSync sessions; failures degrade to "no status".
--- @treturn table array of normalized sessions (possibly empty)
+--- Fetches normalized KOSync sessions.
+-- A transport failure or an unreadable body is reported instead of folded into
+-- "nothing is in progress", so the shelf can tell a failed request from an
+-- empty one; a valid payload with no active sessions stays an empty list.
+-- @treturn table|nil array of normalized sessions (empty when none are active)
+-- @treturn string|nil error code
 function LightHouse:fetchSessions()
-    local body = Client.get(config, "/api/kosync/active")
-    if type(body) ~= "string" or body == "" then return {} end
-    local decoded = JSON.decode(body)
-    if type(decoded) ~= "table" then return {} end
+    local body, err = Client.get(config, "/api/kosync/active")
+    if type(body) ~= "string" or body == "" then
+        return nil, err or "invalid_response"
+    end
+    local decoded_ok, decoded = pcall(JSON.decode, body)
+    if not decoded_ok or type(decoded) ~= "table" then
+        return nil, "invalid_response"
+    end
     return Status.normalizeSessions(decoded)
 end
 
@@ -857,9 +872,9 @@ function LightHouse:openCatalog(query, start_index, page_number)
 end
 
 --- Builds one catalog row, including rating, progress and the detail submenu.
--- Row anatomy is the plugin's shared one: title, then author and series, with
--- progress and rating together in the right-hand column so the reader never has
--- to open the row to judge a book.
+-- Row anatomy is the plugin's shared one: the title is the row text, and the
+-- metadata column carries author, series, progress and rating together so the
+-- reader never has to open the row to judge a book.
 -- @tparam table entry OPDS entry with optional .status
 -- @tparam table[opt] layout result of `Ui.layout`
 -- @treturn table Menu item
@@ -1390,7 +1405,7 @@ end
 
 --- Shows (or re-uses) the results menu.
 -- The page geometry comes from `Ui.layout`, so every view shares one row
--- rhythm: the same margins, the same two-line rows, and a left gutter exactly
+-- rhythm: the same margins, the same one-line rows, and a left gutter exactly
 -- as wide as the cover slot on views that draw covers.
 -- @string title menu title
 -- @tparam table items item_table
@@ -1413,10 +1428,6 @@ function LightHouse:showMenu(title, items, options)
         title_multilines = true,
         items_per_page = layout.rows,
         state_w = gutter,
-        -- Rows are drawn as a title line plus a metadata line everywhere, even
-        -- where the metadata is absent, so the type scale never changes shape
-        -- between screens.
-        multilines_forced = true,
         close_callback = function() self.menu = nil end,
     }
     UIManager:show(self.menu)
