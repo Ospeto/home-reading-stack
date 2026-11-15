@@ -80,7 +80,9 @@ This document chronicles the technical challenges encountered during the Kindle 
   2. Opportunistic mirror syncs to `/Volumes/Ospeto_SSD/backups/reading-stack/` when accessible.
   3. Switched all 4 SQLite databases (`koreader-sync.db`, `cache.db`, `manga.db`, `metadata.db`) to `WAL` mode (`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`) for zero-corruption power-loss resilience.
   4. Deployed automated 15-minute watchdog (`watchdog.sh`) to self-heal any failed service across the stack.
+
 ---
+
 ### INC-10: Credentials Committed Before Public Publication
 - **Symptom:** Preparing the repository for public publication revealed a real Telegram bot token in earlier history, a real KOSync password salt (`KOSYNC_PASSWORD_SALT`) still exposed as a hardcoded fallback default at `HEAD` in `docker-compose.yml` and twice in `RUNBOOK.md`, and a real-looking KOSync `X-Auth-Key` in a sample request in `RUNBOOK.md`.
 - **Root Cause:** Convenience defaults. A secret that has a working fallback in tracked files is a published secret the moment the repository becomes readable, and git history keeps every value readable after publication even if `HEAD` is cleaned.

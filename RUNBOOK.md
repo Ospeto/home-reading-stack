@@ -6,7 +6,7 @@ This runbook documents operational commands, health checks, service management, 
 
 ## 🚨 Security Notice: Previously Committed Credentials
 
-This repository used to be private and is being made public. Three real credentials were committed to it earlier in its history. All three literals were removed from the working tree at `HEAD`, **git history stays readable once the repository is public**, so a clone made before this scrub still contains them, and two of the three exposures were accepted by the captain rather than revoked.
+This repository used to be private and is being made public. Three credential values were committed to it earlier in its history: two of them are confirmed real, and the third is a KOSync `X-Auth-Key` example whose validity is recorded as operator-to-confirm. All three literals were removed from the working tree at `HEAD`, **git history stays readable once the repository is public**, so a clone made before this scrub still contains them, and two of the three exposures were accepted by the captain rather than revoked.
 
 | Credential | Where it was committed | Status now |
 | --- | --- | --- |
@@ -17,7 +17,7 @@ This repository used to be private and is being made public. Three real credenti
 What this means:
 
 - **Do not trust any credential read from this repository's history.** Anyone who cloned or forked this repository before the scrub should treat the values in their copy as public and already compromised.
-- **Two exposures are accepted, not fixed.** The salt history discloses is the salt production still hashes with, and the `moe` `X-Auth-Key` keeps working until that password changes. Any `koreader-sync.db` copy outside this repository (a backup on other storage, a device restore, a later leak) is therefore crackable offline against a known salt. Only the bot token has been revoked.
+- **Two exposures are accepted, not fixed.** The salt history discloses is the salt production still hashes with, and the `moe` `X-Auth-Key` may still authenticate until that password changes (operator to confirm whether that value was a real capture). Any `koreader-sync.db` copy outside this repository (a backup on other storage, a device restore, a later leak) is therefore crackable offline against a known salt. Only the bot token has been revoked.
 - **Fail-closed is enforced by this repository's compose file, not by the launchd server.** `docker-compose.yml` refuses to start unless `KOSYNC_PASSWORD_SALT` is non-empty, and production reads its salt from the launchd plist rather than from `docker-compose.yml` or this runbook. The server on the launchd path (`/Users/ospeto/kosync-server`) has no such guard: with `PASSWORD_SALT` unset or empty it falls back to the published placeholder `default_salt_change_in_production` and silently hashes passwords with that guessable string, so an unset salt there is a misconfiguration, not a safe default. Removing that fallback belongs in that server's source, outside this repository.
 - **Generate your own salt, with one restore exception.** If you deploy from a clone, generate your own random salt (for example `openssl rand -hex 24`) and never reuse any value that appears in this repository's history - production itself currently reuses exactly such a value. **The exception: restoring an existing `koreader-sync.db` requires the salt that database was hashed with.** A fresh salt leaves every stored hash unverifiable, and users are locked out with HTTP `401` on `/users/auth` with no startup error (see the next bullet).
 - **Changing the salt invalidates every existing password hash** in `koreader-sync.db`; every user must reset their password afterwards using the recovery runbooks below. That one-way effect is exactly why the salt is a deliberate, operator-supplied secret rather than a checked-in default.
@@ -962,7 +962,7 @@ Verify each reading stack integration point after import:
 
 ### 15. Security, Secret Hygiene & Credential Rotation Protocol
 
-- **Placeholders in Configuration Templates:** `.env.example` ships its secret variables empty (`TELEGRAM_BOT_TOKEN=`, `KOSYNC_PASSWORD_SALT=`) rather than carrying fake values: a non-empty dummy would satisfy the `:?` guards and start the stack on a published default. Real secrets, salts, and tokens must never be committed to source control.
+- **Secrets in Configuration Templates:** `.env.example` ships its secret variables empty (`TELEGRAM_BOT_TOKEN=`, `KOSYNC_PASSWORD_SALT=`) rather than carrying fake values: a non-empty dummy would satisfy the compose `:?` guard on `KOSYNC_PASSWORD_SALT` and start the stack on a published default. Real secrets, salts, and tokens must never be committed to source control.
 - **Exposed Credentials Policy:** If production credentials (such as `TELEGRAM_BOT_TOKEN`, `KOSYNC_PASSWORD_SALT`, or `READING_API_KEY`) are ever exposed or committed to repository history, they require an explicit captain decision, recorded in the Security Notice at the top of this runbook: either live credential rotation plus repository history remediation (e.g. via `git filter-repo` or BFG Repo-Cleaner), or a recorded acceptance of the exposure. Crewmate agents must not rewrite git history or perform live credential rotation autonomously without explicit captain authorization.
 
 ---
