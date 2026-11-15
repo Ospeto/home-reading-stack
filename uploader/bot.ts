@@ -47,6 +47,7 @@ import {
   getBsdtarPath,
   getUnzipPath,
 } from "./security";
+import { openSqliteForStartup } from "./sqlite-open";
 import {
   runDuplicateCleaner,
   type CleanDuplicatesOptions,
@@ -134,9 +135,10 @@ let _cacheDbInstance: Database | null = null;
 export function getCacheDb(): Database {
   if (!_cacheDbInstance) {
     const dbPath = getCacheDbPath();
-    _cacheDbInstance = new Database(dbPath);
-    _cacheDbInstance.run("PRAGMA journal_mode = WAL;");
-    _cacheDbInstance.run("PRAGMA busy_timeout = 5000;");
+    // busy_timeout first, then WAL with bounded retry: the bot and the Reading
+    // HQ server both open this file at start, and either may arrive second
+    // while the other is recovering a hot WAL (see ./sqlite-open.ts).
+    _cacheDbInstance = openSqliteForStartup(dbPath);
     _cacheDbInstance.run(`
       CREATE TABLE IF NOT EXISTS file_hashes (
         filepath TEXT PRIMARY KEY,
@@ -5267,5 +5269,11 @@ async function pollTelegram() {
 }
 
 if ((import.meta as any).main) {
-  pollTelegram();
+  // Fail loudly and non-zero if the database cannot be opened, instead of
+  // leaving a half-started process in a launchd KeepAlive respawn loop.
+  pollTelegram().catch((err) => {
+    console.error("[TelegramBot] Fatal startup error; exiting non-zero.");
+    console.error(err);
+    process.exit(1);
+  });
 }

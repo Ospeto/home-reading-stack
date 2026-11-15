@@ -4,6 +4,10 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { sanitizeErrorMessage } from "./security";
+import {
+  applyWritableStartupPragmas,
+  openSqliteForStartup,
+} from "./sqlite-open";
 
 export const DEFAULT_JOBS_DB_PATH =
   process.env.JOBS_DB_PATH ||
@@ -52,15 +56,17 @@ export class DurableJobQueue {
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
-      this.db = new Database(dbPath);
+      this.db = openSqliteForStartup(dbPath);
     }
 
     this.initSchema();
   }
 
   private initSchema() {
-    this.db.run("PRAGMA busy_timeout = 5000;");
-    this.db.run("PRAGMA journal_mode = WAL;");
+    // busy_timeout must precede the WAL switch: the switch takes an exclusive
+    // lock, and without a busy handler it fails instantly when another process
+    // already holds the database (see ./sqlite-open.ts).
+    applyWritableStartupPragmas(this.db);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS jobs (
         id TEXT PRIMARY KEY,
