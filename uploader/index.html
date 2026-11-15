@@ -2983,7 +2983,7 @@
           </div>
           <div class="flex items-start gap-2.5">
             <span class="w-5 h-5 rounded-full bg-zinc-800 text-zinc-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">3</span>
-            <div>Restart KOReader, then open <strong>Search icon (magnifying glass)</strong> → <strong>LightHouse library</strong> (or Tools → LightHouse library): <strong>Browse library</strong>, <strong>Search library…</strong>, <strong>Currently reading</strong>, and a per-book detail view with <strong>Download EPUB</strong>.</div>
+            <div>Restart KOReader, then open <strong>Search icon (magnifying glass)</strong> → <strong>LightHouse library</strong> (or Tools → LightHouse library): <strong>Browse library</strong>, <strong>Search library…</strong>, <strong>Currently reading</strong>, <strong>Reading stats</strong> (streak, reading time, books finished this year, library health, yearly goal and a greyscale 26-week heatmap — tap a week, then a day, for that day's reading time), and a per-book detail view with <strong>Download EPUB</strong>.</div>
           </div>
         </div>
         <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5 text-[11px] text-zinc-400 leading-relaxed">
@@ -2991,7 +2991,7 @@
           <div><strong class="text-zinc-200">Which server URL:</strong> the archive always targets the origin this page is served from. Download from the LAN address to get a LAN plugin, or from the WAN address to get a WAN plugin. An <code class="text-zinc-300">https://</code> origin uses KOReader's TLS transport; a build without TLS reports it plainly and the LAN <code class="text-zinc-300">http://</code> address still works.</div>
           <div><strong class="text-zinc-200">Slow connections:</strong> the plugin follows up to 5 redirects and reads its timeouts from <code class="text-zinc-300">lighthouse_config.lua</code> (90s catalog, 300s download by default), so a first catalog page over slow Wi-Fi still loads.</div>
           <div><strong class="text-zinc-200">Devices that cannot take a plugin:</strong> the manual OPDS + KOSync setup in the other tabs still works and is unchanged.</div>
-          <div><strong class="text-zinc-200">Scope:</strong> the plugin uses only the existing OPDS catalog and KOSync progress endpoints, so it keeps working when the server is updated.</div>
+          <div><strong class="text-zinc-200">Scope:</strong> the plugin uses only the existing OPDS catalog, KOSync progress and KOSync statistics endpoints, so it keeps working when the server is updated. <strong class="text-zinc-200">Reading stats</strong> reads <code class="text-zinc-300">/api/kosync/stats</code> once per open (no polling, no background work) and shows <em>unavailable</em> for any field the server does not return instead of a misleading zero.</div>
         </div>
       </div>
 

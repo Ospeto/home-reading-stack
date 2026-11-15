@@ -291,6 +291,7 @@ The primary path is the **generated LightHouse plugin**: the server builds it on
 1. Open the LightHouse web app → **Guide** (book icon in the header, or the footer link) → **KOReader Plugin** tab.
 2. Tap **Download lighthouse.koplugin**. The archive is generated per request from the server you are browsing (`GET /api/koplugin/download`) and contains:
    - `lighthouse.koplugin/main.lua` and `_meta.lua` — the plugin itself,
+   - `lighthouse.koplugin/lighthouse_stats.lua` — pure reading-statistics parsing and formatting,
    - `lighthouse.koplugin/lighthouse_config.lua` — the server origin you downloaded from plus the current server API key.
 
    Download from the LAN address to bake in the LAN origin, or from the WAN address to bake in the WAN origin.
@@ -306,6 +307,7 @@ The primary path is the **generated LightHouse plugin**: the server builds it on
    - **Browse library** — paged catalog, 40 books per page (`GET /api/opds?start=N&count=40`).
    - **Search library…** — title / author / series search (`GET /api/opds?search=…`).
    - **Currently reading** — every active KOSync session (`GET /api/kosync/active`).
+   - **Reading stats** — the on-device counterpart of the web Reading Statistics modal (`GET /api/kosync/stats`, one request per open, no polling): current streak with the best streak, reading time today / this week / all time, books finished this year, library health as unread / reading / finished counts, the yearly goal as two progress bars (only when a target is set), and a monochrome 26-week activity heatmap. The heatmap uses five distinct shades (`· ░ ▒ ▓ █`) rather than a colour ramp because e-ink has no colour; each row is one week of up to seven days and fits the menu width, and tapping a week lists its days so a tap on a day shows that day's reading time. A field the server does not return renders as *unavailable* instead of zero, and a failed request shows the plugin's normal network / server error message.
    - Book detail — author, series, Calibre rating, per-book reading progress, synopsis, and **Download EPUB** (`GET /api/books/<id>/download/epub`).
 5. **Regenerating:** after changing the server address or `READING_API_KEY`, download again and replace `koreader/plugins/lighthouse.koplugin`. An already-installed older plugin keeps working, because it only uses endpoints that already existed and never a bespoke API.
 
@@ -314,7 +316,7 @@ Notes:
 - **HTTPS and redirects:** the client picks its transport from the configured URL scheme — `socket.https` for an `https://` origin and plain `socket.http` for `http://` — and follows up to 5 redirects (`301/302/303/307/308`), resolving relative `Location` headers. A KOReader build without TLS support reports `https_unavailable` on screen instead of failing silently, and the LAN `http://` origin keeps working.
 - **Timeouts** are configuration, not constants: `lighthouse_config.lua` carries `request_block_timeout` / `request_total_timeout` (default 10s per operation, 90s per catalog or progress request — enough for a first page over slow Wi-Fi) and `download_block_timeout` / `download_total_timeout` (default 15s / 300s). The Connection screen shows the values in use.
 - **Failure reporting:** a failed request names what happened (missing TLS, Wi-Fi, an HTML page instead of a file, a rejected key, too many redirects, an unwritable download folder or a failed file write such as a full disk) and the raw error is written to the KOReader log for diagnosis.
-- The plugin speaks the existing OPDS catalog, cover, EPUB download, and KOSync progress endpoints, so server upgrades never require reinstalling it.
+- The plugin speaks the existing OPDS catalog, cover, EPUB download, KOSync progress, and KOSync statistics endpoints, so server upgrades never require reinstalling it. The stats view is a read-only consumer: it renders the payload `GET /api/kosync/stats` already returns and never recomputes sessions on the device.
 
 ### 2. Progress Synchronization (KOSync)
 
