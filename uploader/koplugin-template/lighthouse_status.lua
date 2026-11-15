@@ -59,9 +59,9 @@ end
 -- @tparam table right normalized author list
 -- @treturn boolean
 local function sharesAuthor(left, right)
-    for _, a in ipairs(left) do
-        for _, b in ipairs(right) do
-            if a == b then return true end
+    for leftIndex, leftAuthor in ipairs(left) do
+        for rightIndex, rightAuthor in ipairs(right) do
+            if leftAuthor == rightAuthor then return true end
         end
     end
     return false
@@ -107,7 +107,7 @@ end
 function Status.normalizeSessions(sessions)
     local list = {}
     if type(sessions) ~= "table" then return list end
-    for _, session in ipairs(sessions) do
+    for sessionIndex, session in ipairs(sessions) do
         local normalized = Status.normalizeSession(session)
         if normalized then list[#list + 1] = normalized end
     end
@@ -117,11 +117,15 @@ end
 
 --- Builds a lookup index keyed by Calibre book id.
 -- When several devices have synced the same book, the newest session wins.
+-- This is the only place the book-id index is built. Scanning the session list
+-- costs O(sessions), so a caller annotating a whole catalog page must build it
+-- once and hand it to `Status.findSession` / `Status.merge` rather than let
+-- every entry rebuild it.
 -- @tparam table sessions normalized sessions
 -- @treturn table map book_id -> session
 function Status.indexByBookId(sessions)
     local index = {}
-    for _, session in ipairs(sessions or {}) do
+    for sessionIndex, session in ipairs(sessions or {}) do
         if session.book_id then
             local current = index[session.book_id]
             if not current or session.timestamp > current.timestamp then
@@ -135,21 +139,25 @@ end
 --- Finds the best matching session for a catalog entry.
 -- Match precedence: resolved Calibre id, then filename, then title (+ author
 -- overlap when both sides expose authors).
+-- The book-id index is required for that first precedence rule only; pass a
+-- prebuilt one (from `Status.indexByBookId`) when matching several entries
+-- against the same session list, otherwise it is rebuilt for this call.
 -- @tparam table entry OPDS entry (needs title, authors, book_id, download_href)
 -- @tparam table sessions normalized sessions
+-- @tparam[opt] table index result of `Status.indexByBookId(sessions)`
 -- @treturn table|nil best session
-function Status.findSession(entry, sessions)
+function Status.findSession(entry, sessions, index)
     if type(entry) ~= "table" or type(sessions) ~= "table" then return nil end
 
     if entry.book_id then
-        local by_id = Status.indexByBookId(sessions)[entry.book_id]
+        local by_id = (index or Status.indexByBookId(sessions))[entry.book_id]
         if by_id then return by_id end
     end
 
     local entry_title = Status.normalize(entry.title)
     local entry_authors = Status.authorList(entry.authors)
     local best
-    for _, session in ipairs(sessions) do
+    for sessionIndex, session in ipairs(sessions) do
         local matched = false
         if entry_title ~= "" then
             if session.normalized_filename == entry_title
@@ -179,12 +187,16 @@ function Status.findSession(entry, sessions)
 end
 
 --- Annotates OPDS entries with their reading session.
+-- The book-id index is built once here, for the whole page, and shared by
+-- every entry: a page of N entries costs one session scan instead of N.
 -- @tparam table entries OPDS entries
 -- @tparam table sessions normalized sessions
+-- @tparam[opt] table index result of `Status.indexByBookId(sessions)`
 -- @treturn table the same entries, each with an optional `.status` session
-function Status.merge(entries, sessions)
-    for _, entry in ipairs(entries or {}) do
-        entry.status = Status.findSession(entry, sessions)
+function Status.merge(entries, sessions, index)
+    local by_id = index or Status.indexByBookId(sessions)
+    for entryIndex, entry in ipairs(entries or {}) do
+        entry.status = Status.findSession(entry, sessions, by_id)
     end
     return entries
 end
