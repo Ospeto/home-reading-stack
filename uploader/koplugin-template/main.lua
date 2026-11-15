@@ -40,6 +40,10 @@ local ffiUtil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local util = require("util")
+-- `_` is gettext in this module, so it must never be reused as a throwaway
+-- loop variable: `for _, x in ipairs(...)` would shadow it for the whole loop
+-- body, and every `_("...")` inside would then index a number and raise.
+-- Iterate with an index (`for index = 1, #list do`) or a real name instead.
 local _ = require("gettext")
 local T = ffiUtil.template
 
@@ -113,8 +117,8 @@ local function makeDirs(path)
     local parts = {}
     for part in path:gmatch("[^/]+") do parts[#parts + 1] = part end
     local current = path:sub(1, 1) == "/" and "" or "."
-    for _, part in ipairs(parts) do
-        current = current .. "/" .. part
+    for part_index = 1, #parts do
+        current = current .. "/" .. parts[part_index]
         if lfs.attributes(current, "mode") ~= "directory" then
             lfs.mkdir(current)
         end
@@ -400,8 +404,8 @@ function LightHouse:openCatalog(query, start_index, page_number)
         text = _("🔍 Search library…"),
         callback = function() self:showSearchDialog() end,
     }
-    for _, entry in ipairs(feed.entries) do
-        items[#items + 1] = self:buildCatalogItem(entry)
+    for entry_index = 1, #feed.entries do
+        items[#items + 1] = self:buildCatalogItem(feed.entries[entry_index])
     end
 
     if feed.next_href and #feed.entries > 0 then
@@ -556,7 +560,11 @@ function LightHouse:showReading()
     end
 
     local items = {}
-    for _, session in ipairs(sessions) do
+    -- `session_index`, not `_`: `_` is gettext in this file (see the note by
+    -- its require), so using it as a throwaway aborted the whole process on
+    -- the device the moment a row called `_("…")`.
+    for session_index = 1, #sessions do
+        local session = sessions[session_index]
         local details = {}
         if session.book_id then
             details[#details + 1] = {
