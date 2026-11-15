@@ -11170,17 +11170,12 @@
       }
 
       // Library Health distribution bar (finished / reading / unread)
-      const healthFinished = health.finishedCount ?? data.finishedCount ?? 0;
-      const healthReading = health.inProgressCount ?? (data.activeBooks?.length || 0);
-      const healthUnread = health.unreadCount ?? 0;
-      const healthTotal = healthFinished + healthReading + healthUnread;
-      const pctOfTotal = (n) => (healthTotal > 0 ? Math.round((n / healthTotal) * 1000) / 10 : 0);
       const barFinished = document.getElementById('statHealthBarFinished');
       const barReading = document.getElementById('statHealthBarReading');
       const barUnread = document.getElementById('statHealthBarUnread');
-      if (barFinished) barFinished.style.width = `${pctOfTotal(healthFinished)}%`;
-      if (barReading) barReading.style.width = `${pctOfTotal(healthReading)}%`;
-      if (barUnread) barUnread.style.width = `${pctOfTotal(healthUnread)}%`;
+      if (barFinished) barFinished.style.width = `${health.finishedPercentage ?? 0}%`;
+      if (barReading) barReading.style.width = `${health.inProgressPercentage ?? 0}%`;
+      if (barUnread) barUnread.style.width = `${health.unreadPercentage ?? 0}%`;
 
       // Yearly Goal
       const goal = data.goal || {};
@@ -11334,7 +11329,7 @@
           </div>
           <div class="stats-list-side">
             <span class="stats-inactive-tag">${s.daysInactive}d inactive</span>
-            <div class="stats-progress">${Math.round(s.percentage * 100)}% complete</div>
+            <div class="stats-progress">${Math.round(s.percentage * 10) / 10}% complete</div>
           </div>
         `;
         list.appendChild(item);
