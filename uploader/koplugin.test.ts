@@ -3253,6 +3253,10 @@ const COVER_PREFETCH_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
 local data_dir = assert(arg[2], "data dir argument required")
 local requests = {}
 local timeouts = {}
+-- Set by section 7: the final cache path a download is watched at, and whether
+-- that path was already visible to a reader while the bytes were streaming in.
+local watched_path
+local visible_mid_write = false
 
 package.preload["datastorage"] = function()
   return {
@@ -3307,7 +3311,15 @@ package.preload["socket.http"] = function()
         return 1, 500, {}
       end
       if request and request.sink then
+        -- A whole JPEG, as the server sends it (SOI ... EOI).
+        request.sink("\255\216")
+        if watched_path then
+          local probe = io.open(watched_path, "rb")
+          visible_mid_write = probe ~= nil
+          if probe then probe:close() end
+        end
         request.sink(string.rep("coverbytes", 40))
+        request.sink("\255\217")
         request.sink(nil)
       end
       return 1, 200, {}
@@ -3319,7 +3331,6 @@ local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
 local Ui = require("lighthouse_ui")
 LightHouse.ui = { menu = { registerToMainMenu = function() end } }
 LightHouse:init()
-
 local function entry(book_id, href)
   return { book_id = book_id, thumbnail_href = href }
 end
@@ -3389,6 +3400,42 @@ end
 print("max_cover_block=" .. tostring(max_block))
 print("max_cover_total=" .. tostring(max_total))
 print("budget_seconds=" .. tostring(Ui.tokens.cover_fetch_seconds))
+
+-- 6. A half-written cover left behind is never handed to the image widget ----
+-- A process that dies mid-download leaves a file with a valid JPEG header and
+-- a fresh mtime, so only a whole-file check keeps it out of the paint pass.
+local layout = Ui.layout(800, 1, true)
+local function cover_file(book_id, bytes)
+  local path = data_dir .. "/cache/lighthouse-covers/" .. Ui.coverCacheName(book_id)
+  local handle = assert(io.open(path, "wb"))
+  handle:write(bytes)
+  handle:close()
+  return path
+end
+local leftover = entry(401, href(401))
+cover_file(401, "\255\216" .. string.rep("coverbytes", 40))
+local leftover_slot = LightHouse:coverSlot(leftover, layout)
+print("truncated_slot=" .. tostring(leftover_slot and leftover_slot.__kind))
+requests = {}
+LightHouse:prefetchCovers({ leftover })
+print("truncated_refetched=" .. tostring(#requests))
+local repaired_slot = LightHouse:coverSlot(leftover, layout)
+print("repaired_slot=" .. tostring(repaired_slot and repaired_slot.__kind))
+requests = {}
+LightHouse:prefetchCovers({ leftover })
+print("repaired_requests=" .. tostring(#requests))
+
+-- 7. A cover only takes its final name once its bytes are complete ----------
+watched_path = data_dir .. "/cache/lighthouse-covers/" .. Ui.coverCacheName(402)
+LightHouse:prefetchCovers({ entry(402, href(402)) })
+print("visible_mid_write=" .. tostring(visible_mid_write))
+local final_handle = io.open(watched_path, "rb")
+print("final_exists=" .. tostring(final_handle ~= nil))
+if final_handle then
+  local content = final_handle:read("*a") or ""
+  final_handle:close()
+  print("final_whole=" .. tostring(content:sub(1, 2) == "\255\216" and content:sub(-2) == "\255\217"))
+end
 
 print("OK")
 `;
@@ -3461,6 +3508,22 @@ describe("plugin cover prefetch", () => {
     // is issued under the cover budget, not the 300s EPUB download budget.
     expect(Number(out.max_cover_block)).toBeLessThanOrEqual(Number(out.budget_seconds));
     expect(Number(out.max_cover_total)).toBeLessThanOrEqual(Number(out.budget_seconds));
+
+    // A cover file left half-written by a dead process is not a cache hit: it
+    // must not reach the image widget (which decodes at paint time, outside any
+    // pcall), and it must be refetched rather than trusted because its mtime is
+    // fresh.
+    expect(out.truncated_slot).toBe("framecontainer");
+    expect(out.truncated_refetched).toBe("1");
+    expect(out.repaired_slot).toBe("imagewidget");
+    expect(out.repaired_requests).toBe("0");
+
+    // A cover takes its final cache name only once every byte arrived, so a
+    // process death mid-download cannot leave a truncated file behind a valid
+    // cover name.
+    expect(out.visible_mid_write).toBe("false");
+    expect(out.final_exists).toBe("true");
+    expect(out.final_whole).toBe("true");
 
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });

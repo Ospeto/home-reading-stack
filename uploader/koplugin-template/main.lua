@@ -334,6 +334,28 @@ local function coverMissPath(entry)
     return coverDir() .. "/" .. name
 end
 
+--- True when a cache file holds a whole JPEG rather than a truncated one.
+-- A download cut off mid-flight leaves a file that starts with a valid JPEG
+-- header and has a fresh mtime, so the end-of-image marker is what separates a
+-- complete cover from a half-written one. A half-written cover must never
+-- reach `ImageWidget`: it would raise in the paint pass, where nothing can
+-- catch it.
+-- @string path
+-- @treturn boolean
+local function coverFileWhole(path)
+    if type(path) ~= "string" then return false end
+    local handle = io.open(path, "rb")
+    if not handle then return false end
+    local head = handle:read(2) or ""
+    local tail = ""
+    if (handle:seek("end") or 0) >= 2 then
+        handle:seek("end", -2)
+        tail = handle:read(2) or ""
+    end
+    handle:close()
+    return head == "\255\216" and tail == "\255\217"
+end
+
 --- True when this row's cover is neither cached nor known to be missing.
 -- @tparam table entry
 -- @number now unix seconds
@@ -344,7 +366,9 @@ local function coverNeedsFetch(entry, now)
     if type(entry.thumbnail_href) ~= "string" or entry.thumbnail_href == "" then
         return false
     end
-    if Ui.isFresh(lfs.attributes(path, "modification"), now) then return false end
+    if Ui.isFresh(lfs.attributes(path, "modification"), now) and coverFileWhole(path) then
+        return false
+    end
     local miss = coverMissPath(entry)
     if miss and Ui.isFresh(lfs.attributes(miss, "modification"), now) then
         return false
@@ -469,12 +493,6 @@ function LightHouse:toggleCovers()
     G_reader_settings:saveSetting("lighthouse_covers", not self:coversEnabled())
 end
 
---- Fetches the covers a page is missing, inside the caller's spinner.
--- Bounded twice over - a fetch count and a wall-clock budget - so a slow link
--- degrades to placeholders instead of hanging the catalog. A book the server
--- has no cover for gets a negative-cache marker, so it costs one request ever
--- rather than one per page.
--- @tparam table entries catalog entries (or synthetic cover-only entries)
 --- Fetches one page-cover, keeping every failure inside this call.
 -- Split out of `prefetchCovers` so the caller can `pcall` it: a cover is an
 -- enhancement, so a raise inside a cover request (or inside writing the
@@ -492,9 +510,14 @@ function LightHouse:fetchOneCover(entry, started)
     -- and then stalls is cut off at the budget instead of running on the EPUB
     -- download timeouts.
     local remaining = math.max(Ui.tokens.cover_fetch_seconds - (now - started), 1)
+    local pending = path .. ".part"
     local ok_file, download_err = Client.download(
-        config, entry.thumbnail_href, path, remaining
+        config, entry.thumbnail_href, pending, remaining
     )
+    if ok_file and not os.rename(pending, path) then
+        ok_file, download_err = nil, "file_error: cannot write cover"
+    end
+    if not ok_file then os.remove(pending) end
     -- Only a definitive "this book has no cover" answer is worth remembering; a
     -- dropped link, a timeout or a rejected key must stay retryable next open.
     if not ok_file and download_err == "http_404" then
@@ -510,6 +533,12 @@ function LightHouse:fetchOneCover(entry, started)
     return true
 end
 
+--- Fetches the covers a page is missing, inside the caller's spinner.
+-- Bounded twice over - a fetch count and a wall-clock budget - so a slow link
+-- degrades to placeholders instead of hanging the catalog. A book the server
+-- has no cover for gets a negative-cache marker, so it costs one request ever
+-- rather than one per page.
+-- @tparam table entries catalog entries (or synthetic cover-only entries)
 function LightHouse:prefetchCovers(entries)
     local started = os.time()
     local fetched = 0
@@ -536,7 +565,7 @@ end
 -- @treturn table|nil widget
 function LightHouse:coverSlot(entry, layout)
     local path = coverPath(entry)
-    if path and lfs.attributes(path, "mode") == "file" then
+    if path and coverFileWhole(path) then
         local widgets = loadCoverWidgets()
         if widgets then
             return widgets.image:new{
@@ -573,9 +602,9 @@ end
 -- A cover that cannot be drawn must cost the picture, never the row: the whole
 -- slot is built inside `pcall`, and a failure falls back to the neutral
 -- placeholder, which draws no untrusted image at all. This is the row-build
--- half of the cover guarantee - a failing `GET /api/books/<id>/cover` (or a
--- widget that raises on a half-written file) can no longer propagate out of
--- the row and take the screen with it.
+-- half of the cover guarantee - a failing `GET /api/books/<id>/cover` can no
+-- longer propagate out of the row and take the screen with it; the other half
+-- is the cache, which only ever hands over a complete cover.
 -- @tparam table spec row spec (see `buildRow`)
 -- @tparam table layout result of `Ui.layout`
 -- @treturn table|nil widget
