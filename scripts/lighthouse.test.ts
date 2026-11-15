@@ -832,12 +832,31 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
 
         const envWithoutSalt: NodeJS.ProcessEnv = { ...process.env };
         delete envWithoutSalt.KOSYNC_PASSWORD_SALT;
-        const missingSalt = spawnSync(
-          "docker",
-          ["compose", "--env-file", "/dev/null", "-f", composePath, "config"],
-          { cwd: REPO_ROOT, encoding: "utf8", env: envWithoutSalt },
-        );
-        expect(missingSalt.status).not.toBe(0);
+
+        const quickstartDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-compose-"));
+        try {
+          const quickstartCompose = path.join(quickstartDir, "docker-compose.yml");
+          const quickstartEnv = path.join(quickstartDir, ".env");
+          fs.copyFileSync(composePath, quickstartCompose);
+          fs.copyFileSync(path.join(REPO_ROOT, ".env.example"), quickstartEnv);
+
+          const shippedQuickstart = spawnSync("docker", ["compose", "-f", quickstartCompose, "config"], {
+            cwd: quickstartDir,
+            encoding: "utf8",
+            env: envWithoutSalt,
+          });
+          expect(shippedQuickstart.status).not.toBe(0);
+
+          fs.appendFileSync(quickstartEnv, "\nKOSYNC_PASSWORD_SALT=test-only-salt\n");
+          const afterOperatorSalt = spawnSync("docker", ["compose", "-f", quickstartCompose, "config"], {
+            cwd: quickstartDir,
+            encoding: "utf8",
+            env: envWithoutSalt,
+          });
+          expect(afterOperatorSalt.status).toBe(0);
+        } finally {
+          fs.rmSync(quickstartDir, { recursive: true, force: true });
+        }
       }
     });
   });
