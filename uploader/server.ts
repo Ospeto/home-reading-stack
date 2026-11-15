@@ -33,9 +33,6 @@ import {
   ingestArticleFromUrl,
   ingestRawText,
   generateTypographicCover,
-  markdownToHtml,
-  buildStyledHtmlDocument,
-  convertHtmlToEpub,
   validateArticleUrl,
 } from "./article";
 import { parseObsidianUri } from "./obsidian";
@@ -2495,6 +2492,148 @@ export function getCalibreBooks(forceFresh = false) {
   return getCalibreBooksResult(forceFresh).books;
 }
 
+/** Sort keys the native OPDS catalog understands. */
+const OPDS_SORT_KEYS = ["title", "author", "series", "added"] as const;
+type OpdsSortKey = (typeof OPDS_SORT_KEYS)[number];
+
+/** A book counts as read once its furthest KOSync percentage reaches this. */
+const OPDS_FINISHED_THRESHOLD = 0.99;
+
+/**
+ * Coerces untrusted catalogue text into a comparable string. OPDS clients pass
+ * human labels (titles, author strings, series names) that routinely differ
+ * only by surrounding whitespace, so the key is always trimmed.
+ */
+function opdsSortText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function opdsCompareText(a: unknown, b: unknown): number {
+  return opdsSortText(a).localeCompare(opdsSortText(b), undefined, {
+    sensitivity: "base",
+    numeric: true,
+  });
+}
+
+function opdsSeriesIndex(book: any): number {
+  const raw = Number(book?.series_index);
+  return Number.isFinite(raw) ? raw : 0;
+}
+
+/**
+ * Comparator for one of the documented OPDS sort keys.
+ *
+ * Every comparison ends on the Calibre book id, so two books can never swap
+ * places between two requests. A total order is exactly what makes paging over
+ * a sorted feed coherent: without it page 2 could repeat or skip an entry.
+ */
+function createOpdsComparator(sort: OpdsSortKey): (a: any, b: any) => number {
+  return (a, b) => {
+    let diff = 0;
+    if (sort === "title") {
+      diff = opdsCompareText(a?.title, b?.title);
+    } else if (sort === "author") {
+      diff =
+        opdsCompareText(a?.authors, b?.authors) ||
+        opdsCompareText(a?.title, b?.title);
+    } else if (sort === "series") {
+      // Series-less books sort after every series, then by title within a series.
+      const aSeries = opdsSortText(a?.series);
+      const bSeries = opdsSortText(b?.series);
+      if (!aSeries || !bSeries) {
+        diff = (aSeries ? 0 : 1) - (bSeries ? 0 : 1);
+      } else {
+        diff =
+          opdsCompareText(aSeries, bSeries) ||
+          opdsSeriesIndex(a) - opdsSeriesIndex(b);
+      }
+      if (!diff) diff = opdsCompareText(a?.title, b?.title);
+    } else {
+      // "added" is library insertion order (Calibre ids increase per ingest),
+      // oldest first - the opposite end of the default newest-first browse.
+      diff = (Number(a?.id) || 0) - (Number(b?.id) || 0);
+    }
+    if (diff) return diff;
+    return (Number(a?.id) || 0) - (Number(b?.id) || 0);
+  };
+}
+
+/**
+ * Resolves the OPDS `filter` parameter against data the catalog actually has.
+ *
+ * `unread` and a tag value are the documented filters (`tag:<value>` is
+ * accepted as an explicit spelling of the same thing). Anything else - other
+ * words, or a tag no book carries - resolves to null so the caller serves the
+ * unfiltered catalog. An e-reader asking for a filter this server does not
+ * understand must not be handed an empty shelf.
+ */
+function resolveOpdsFilter(
+  raw: string,
+  books: any[],
+): { kind: "unread" } | { kind: "tag"; tag: string } | null {
+  const value = raw.trim();
+  if (!value) return null;
+  if (value.toLowerCase() === "unread") return { kind: "unread" };
+
+  const tagValue = value.toLowerCase().startsWith("tag:")
+    ? value.slice(4).trim()
+    : value;
+  if (!tagValue) return null;
+  const wanted = tagValue.toLowerCase();
+  const known = books.some(
+    (b: any) =>
+      Array.isArray(b?.tags) &&
+      b.tags.some(
+        (t: unknown) => typeof t === "string" && t.trim().toLowerCase() === wanted,
+      ),
+  );
+  if (!known) return null;
+  return { kind: "tag", tag: wanted };
+}
+
+/**
+ * Maps Calibre book ids to their furthest reading percentage, from the KOSync
+ * progress table joined through the cached EPUB hash index.
+ *
+ * Returns null when there is no read-state source at all (no KOSync database),
+ * so `filter=unread` degrades to no filtering instead of silently declaring the
+ * whole library unread.
+ */
+function getOpdsProgressByBookId(): Map<number, number> | null {
+  if (!fs.existsSync(getKosyncDbPath())) return null;
+
+  const hashToBookId = new Map<string, number>();
+  try {
+    const rows = getCacheDb()
+      .query(
+        "SELECT hash, book_id FROM file_hashes WHERE hash IS NOT NULL AND book_id IS NOT NULL",
+      )
+      .all() as any[];
+    for (const row of rows) {
+      if (typeof row.hash === "string" && row.hash && typeof row.book_id === "number") {
+        hashToBookId.set(row.hash, row.book_id);
+      }
+    }
+  } catch (_e) {
+    void _e;
+  }
+
+  return withKosyncDb((db) => {
+    const rows = db.query("SELECT document, percentage FROM progress").all() as any[];
+    const byBook = new Map<number, number>();
+    for (const row of rows) {
+      const bookId = hashToBookId.get(String(row?.document ?? ""));
+      if (bookId === undefined) continue;
+      const pct = Number(row?.percentage);
+      if (!Number.isFinite(pct)) continue;
+      const ratio = Math.max(0, Math.min(1, pct));
+      const previous = byBook.get(bookId);
+      if (previous === undefined || ratio > previous) byBook.set(bookId, ratio);
+    }
+    return byBook;
+  }, { readonly: true });
+}
+
 export function getBookPath(bookId: number): string | null {
   const books = getCalibreBooks();
   const book = books.find((b: any) => b.id === bookId);
@@ -4383,6 +4522,45 @@ async function handleRequestCore(
         })
       : books;
 
+    // `sort` and `filter` are applied to the WHOLE matched result set here,
+    // before any page window is taken below. Otherwise a sort would only
+    // reorder whatever happened to be on the current page, and walking the
+    // feed would produce a globally unordered catalog.
+    // Unknown values are ignored rather than rejected, so a client asking for
+    // something this server does not understand still gets today's browse.
+    const rawSort = (url.searchParams.get("sort") ?? "").trim().toLowerCase();
+    const sortKey = (OPDS_SORT_KEYS as readonly string[]).includes(rawSort)
+      ? (rawSort as OpdsSortKey)
+      : null;
+
+    const rawFilter = url.searchParams.get("filter") ?? "";
+    const opdsFilter = resolveOpdsFilter(rawFilter, filteredBooks);
+
+    let matchedBooks = filteredBooks;
+    if (opdsFilter?.kind === "tag") {
+      const wantedTag = opdsFilter.tag;
+      matchedBooks = matchedBooks.filter(
+        (b: any) =>
+          Array.isArray(b?.tags) &&
+          b.tags.some(
+            (t: unknown) =>
+              typeof t === "string" && t.trim().toLowerCase() === wantedTag,
+          ),
+      );
+    } else if (opdsFilter?.kind === "unread") {
+      const progressByBookId = getOpdsProgressByBookId();
+      if (progressByBookId) {
+        matchedBooks = matchedBooks.filter((b: any) => {
+          const pct = progressByBookId.get(b?.id);
+          return pct === undefined || pct < OPDS_FINISHED_THRESHOLD;
+        });
+      }
+    }
+
+    if (sortKey) {
+      matchedBooks = [...matchedBooks].sort(createOpdsComparator(sortKey));
+    }
+
     // OPDS paging (standard `start`/`count` parameters). Without them the feed
     // keeps returning the whole catalog, so existing OPDS clients and the
     // manual setup path are unaffected; with them a low-memory e-reader can
@@ -4392,8 +4570,8 @@ async function handleRequestCore(
     const rawCount = Number.parseInt(url.searchParams.get("count") ?? "", 10);
     const pageCount = Number.isFinite(rawCount) && rawCount > 0 ? Math.min(rawCount, 200) : 0;
     const pageBooks = pageCount > 0
-      ? filteredBooks.slice(startIndex, startIndex + pageCount)
-      : filteredBooks.slice(startIndex);
+      ? matchedBooks.slice(startIndex, startIndex + pageCount)
+      : matchedBooks.slice(startIndex);
 
     const feedPathWithSearch = url.pathname + (url.search || "");
     const feedTitle = query
@@ -4401,10 +4579,16 @@ async function handleRequestCore(
       : "LightHouse OPDS Catalog";
 
     let nextHref: string | undefined;
-    if (pageCount > 0 && startIndex + pageBooks.length < filteredBooks.length) {
+    if (pageCount > 0 && startIndex + pageBooks.length < matchedBooks.length) {
       const nextParams = new URLSearchParams(url.searchParams);
       nextParams.set("start", String(startIndex + pageBooks.length));
       nextParams.set("count", String(pageCount));
+      // Carry the effective sort/filter forward so page N+1 pages the same
+      // ordered, filtered result set instead of silently reverting to default.
+      if (sortKey) nextParams.set("sort", sortKey);
+      else nextParams.delete("sort");
+      if (opdsFilter) nextParams.set("filter", rawFilter.trim());
+      else nextParams.delete("filter");
       nextHref = `${url.pathname}?${nextParams.toString()}`;
     }
 
@@ -4414,7 +4598,7 @@ async function handleRequestCore(
       publicBaseUrl: `${url.protocol}//${url.host}`,
       nextHref,
       startIndex,
-      totalResults: filteredBooks.length,
+      totalResults: matchedBooks.length,
     });
 
     const opdsHeaders: Record<string, string> = {
