@@ -325,8 +325,8 @@ export function describeLibraryAccessFailure(report: LibraryAccessReport): strin
     lines.push(
       "  Nothing is mounted at the library path, or an external volume mounted " +
         "after this agent started and left the path dangling. The gate runs once " +
-        "at startup and never retries, so the process exits here rather than " +
-        "binding :8086 with no catalog.",
+        "at startup and never retries, so the process exits here instead of " +
+        "binding its port with no catalog.",
     );
   }
 
@@ -347,7 +347,7 @@ export function describeLibraryAccessFailure(report: LibraryAccessReport): strin
       "mounted and actually answering I/O.",
   );
   lines.push(
-    `  Probe deadline: ${resolveProbeTimeoutMs()}ms ` +
+    `  Probe deadline: ${failing[0]?.timeoutMs ?? resolveProbeTimeoutMs()}ms ` +
       `(override with ${LIBRARY_PROBE_TIMEOUT_ENV}).`,
   );
 

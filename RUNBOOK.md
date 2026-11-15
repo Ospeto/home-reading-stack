@@ -108,6 +108,14 @@ cat /Volumes/Ospeto_SSD/Lighthouse_Agent_Library/metadata.db >/dev/null && echo 
 #    onto local storage and keep the SSD as a backup target. See INC-11 in INCIDENTS.md.
 ```
 
+**Expected steady state while the library is unreadable.** The generated `com.ospeto.book-uploader` plist sets `KeepAlive` with no `SuccessfulExit` predicate, so a persisting fatal verdict is a launchd respawn loop (roughly every 10 s), not one failure: `launchctl list` shows a changing PID and `~/Library/Logs/uploader.log` accumulates the same `Fatal:` block once per attempt. That repetition is the intended loud signal — not a second bug, not a start-order race, and not evidence of a crash loop to be chased. Nothing rotates that log, so it keeps growing until the host action in INC-11 lands. Stop the loop deliberately while you work on the cause:
+
+```bash
+bin/lighthouse down            # or: launchctl bootout gui/$(id -u)/com.ospeto.book-uploader
+```
+
+**Reboot survival is still blocked.** This preflight only makes the failure loud and actionable; the uploader cannot come up after a reboot until the library is readable at boot, which is a host action, not a code path. See INC-11 in `INCIDENTS.md` for the pending action and both remedies.
+
 A successful manual start is not evidence of supervision: an interactive shell inherits its TCC entitlement, a launchd agent does not.
 
 ---

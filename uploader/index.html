@@ -3496,10 +3496,10 @@
           <div class="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="font-bold text-zinc-200">Startup Library Preflight</span>
-              <span class="text-[10px] font-mono text-zinc-400">exit 1 if unreadable</span>
+              <span class="text-[10px] font-mono text-zinc-400">exit 1 unless readable</span>
             </div>
             <p class="text-[11px] text-zinc-400 leading-relaxed">
-              Before binding :8086 the server probes the Calibre library out of process. If the library is absent (including a volume that mounted after startup and left the path dangling), lives on a removable volume that macOS refuses (<span class="font-mono">Operation not permitted</span>), or sits on one that never answers, it exits with the cause and both remedies instead of listening forever with nothing to serve. Only a readable library starts, and a healthy start logs nothing.
+              Before binding its port the server probes the Calibre library out of process. If the library is absent (including a volume that mounted after startup and left the path dangling), lives on a removable volume that macOS refuses (<span class="font-mono">Operation not permitted</span>), or sits on one that never answers, it exits with the cause and both remedies instead of listening forever with nothing to serve. Only a readable library starts, and a healthy start logs nothing. Under launchd's <span class="font-mono">KeepAlive</span> a persisting fatal verdict repeats as an exit-1 respawn every ~10s with an identical Fatal block per attempt — the intended loud signal, not a second bug; pause it with <span class="font-mono">bin/lighthouse down</span> while the host cause is fixed. Reboot survival stays blocked until the library is readable at boot, which is a host action.
             </p>
             <div class="flex items-center gap-2">
               <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg font-mono text-[11px] text-zinc-200 truncate select-all">LIGHTHOUSE_LIBRARY_PROBE_TIMEOUT_MS=5000</code>

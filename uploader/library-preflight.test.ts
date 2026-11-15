@@ -190,6 +190,20 @@ describe("real probe against local storage", () => {
     expect(message).toContain("Full Disk Access");
   });
 
+  it("refuses a dangling library symlink pointing at an unmounted volume", async () => {
+    const dir = scratchDir();
+    const link = path.join(dir, "Agent Library");
+    fs.symlinkSync(path.join(dir, "unmounted-volume"), link);
+    expect(fs.existsSync(link)).toBe(false);
+
+    const gate = await evaluateLibraryStartupGate({
+      libraryDir: link,
+      dbPath: path.join(link, "metadata.db"),
+    });
+    expect(gate.exitCode).toBe(1);
+    expect(formatStartupGateMessage(gate)).toContain(`missing: ${link}`);
+  });
+
   it("refuses to start when the root is readable but metadata.db is gone", async () => {
     const dir = scratchDir();
     const missingDb = path.join(dir, "metadata.db");
