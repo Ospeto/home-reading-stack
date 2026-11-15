@@ -1717,6 +1717,35 @@ package.preload["datastorage"] = function()
     getSettingsDir = function() return "/tmp/lighthouse-settings" end,
   }
 end
+-- The plugin asks the device for the screen height and scale so one layout
+-- rule serves every e-ink size; the stub reports a plain 600x800 screen.
+package.preload["device"] = function()
+  return {
+    screen = {
+      getWidth = function() return 600 end,
+      getHeight = function() return 800 end,
+      scaleBySize = function(_, size) return size end,
+    },
+  }
+end
+-- Cover slots are widgets; the plugin builds them only when covers are on and
+-- a catalog row is drawn, so the stubs only need to accept the options table.
+package.preload["ui/widget/imagewidget"] = function() return stub_widget("imagewidget") end
+package.preload["ui/widget/container/framecontainer"] = function() return stub_widget("framecontainer") end
+package.preload["ui/widget/container/centercontainer"] = function() return stub_widget("centercontainer") end
+package.preload["ui/widget/textwidget"] = function() return stub_widget("textwidget") end
+package.preload["ui/font"] = function()
+  return { getFace = function(_, name) return "face:" .. tostring(name) end }
+end
+package.preload["ui/geometry"] = function()
+  local geom = {}
+  function geom:new(options)
+    options = options or {}
+    options.__kind = "geom"
+    return options
+  end
+  return geom
+end
 package.preload["ui/downloadmgr"] = function()
   local manager = {}
   function manager:new(options)
@@ -1857,7 +1886,7 @@ for _, item in ipairs(entry.sub_item_table) do labels[#labels + 1] = item.text e
 print("submenu=" .. table.concat(labels, "|"))
 
 -- Catalog row rendering, including rating + progress from a merged session.
-local row = LightHouse:buildCatalogItem({
+local entry = {
   book_id = 101,
   title = "Spice and Wolf, Vol. 1",
   authors = "Isuna Hasekura",
@@ -1868,12 +1897,41 @@ local row = LightHouse:buildCatalogItem({
   download_href = "http://host/api/books/101/download/epub",
   rating = 8,
   status = { percentage = 0.45, device = "Paperwhite", timestamp = 1 },
-})
-print("row_text=" .. row.text)
-print("row_mandatory=" .. row.mandatory)
+}
+-- The row language: the title is the row text, and the metadata column
+-- carries author, series, progress and rating so none of them needs a tap.
+local layout = LightHouse:layoutFor(true)
+print("layout_rows=" .. tostring(layout.rows))
+print("layout_cover=" .. tostring(layout.cover_width) .. "x" .. tostring(layout.cover_height))
+print("layout_gutter=" .. tostring(layout.gutter))
+local row = LightHouse:buildCatalogItem(entry, layout)
+print("row_text=" .. tostring(row.text))
+print("row_text_has_newline=" .. tostring(tostring(row.text):find("\n", 1, true) ~= nil))
+print("row_mandatory=" .. tostring(row.mandatory))
+print("row_state=" .. tostring(type(row.state) == "table" and row.state.__kind or "none"))
+local no_cover_row = LightHouse:buildCatalogItem(entry)
+print("row_nocover_text=" .. tostring(no_cover_row.text))
+print("row_nocover_mandatory=" .. tostring(no_cover_row.mandatory))
 local detail_labels = {}
-for _, item in ipairs(row.sub_item_table) do detail_labels[#detail_labels + 1] = item.text end
+for detail_index = 1, #row.sub_item_table do
+  detail_labels[#detail_labels + 1] = row.sub_item_table[detail_index].text
+end
 print("detail=" .. table.concat(detail_labels, "|"))
+
+-- A long author and series run must never push the progress bar, the finished
+-- check or the stars out of the metadata column.
+local long_row = LightHouse:buildCatalogItem({
+  book_id = 102,
+  title = "The Way of Kings",
+  authors = "Brandon Sanderson",
+  series = "The Stormlight Archive",
+  series_index = 1,
+  rating = 8,
+  status = { percentage = 1, device = "Kobo", timestamp = 1 },
+}, layout)
+print("long_text=" .. tostring(long_row.text))
+print("long_mandatory=" .. tostring(long_row.mandatory))
+print("long_limit=" .. tostring(require("lighthouse_ui").tokens.meta_max_chars))
 
 -- Connection screen must expose the baked-in origin and endpoint paths.
 LightHouse:showConnection(true)
@@ -1882,6 +1940,7 @@ assert(connection and connection.__kind == "textviewer", "connection view must b
 print("connection_has_origin=" .. tostring(connection.text:find(expected_base_url, 1, true) ~= nil))
 print("connection_has_opds=" .. tostring(connection.text:find("/api/opds", 1, true) ~= nil))
 print("connection_has_progress=" .. tostring(connection.text:find("/api/kosync/active", 1, true) ~= nil))
+print("connection_has_covers=" .. tostring(connection.text:find("Cover thumbnails:", 1, true) ~= nil))
 
 print("OK")
 `;
@@ -1952,12 +2011,50 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
     expect(submenu).toContain("Browse library");
     expect(submenu).toContain("Search library…");
     expect(submenu).toContain("Currently reading");
+    expect(submenu).toContain("Show cover thumbnails");
     expect(submenu).toContain("Choose download folder…");
     expect(submenu).toContain("Connection");
 
-    expect(out.row_text).toBe("★★★★☆ Spice and Wolf, Vol. 1");
+    // Row anatomy: the title is the row text, and the right-hand metadata
+    // column carries author, series, progress and rating together. KOReader's
+    // MenuItem flattens newlines out of the row text, so the metadata must not
+    // be a second line in `text`.
+    expect(out.row_text).toBe("Spice and Wolf, Vol. 1");
+    expect(out.row_text_has_newline).toBe("false");
     expect(out.row_mandatory).toContain("Isuna Hasekura");
+    expect(out.row_mandatory).toContain("Spice and Wolf 01");
     expect(out.row_mandatory).toContain("45%");
+    expect(out.row_mandatory).toContain("★★★★☆");
+    expect(out.row_mandatory).not.toContain("\n");
+
+    // A long author and series run must keep the whole glance: the bar, the
+    // finished check and all five stars. Capping the composed metadata string
+    // would leave this row showing three stars.
+    expect(out.long_text).toBe("The Way of Kings");
+    expect(out.long_mandatory).toContain("Brandon Sanderson");
+    expect(out.long_mandatory).toContain("100%");
+    expect(out.long_mandatory).toContain("✓");
+    expect(out.long_mandatory.endsWith("★★★★☆")).toBe(true);
+    expect(Array.from(out.long_mandatory).length).toBeLessThanOrEqual(
+      Number(out.long_limit),
+    );
+
+    // Covers: one geometry rule drives the page, and a row whose cover is not on
+    // disk yet draws the neutral placeholder rather than a blank hole.
+    const layoutRows = Number(out.layout_rows);
+    const [layoutCoverW, layoutCoverH] = out.layout_cover.split("x").map(Number);
+    expect(layoutRows).toBeGreaterThanOrEqual(4);
+    expect(layoutRows).toBeLessThanOrEqual(9);
+    expect(layoutCoverW).toBeGreaterThan(0);
+    // Calibre cover art is portrait: a cover box wider than it is tall would
+    // squash every thumbnail on the page.
+    expect(layoutCoverH).toBeGreaterThan(layoutCoverW);
+    expect(Number(out.layout_gutter)).toBeGreaterThan(layoutCoverW);
+    expect(out.row_state).toBe("framecontainer");
+    // Without a layout (a caller that does not draw covers) the row keeps the
+    // same shape: title in the row text, metadata in the column.
+    expect(out.row_nocover_text).toBe("Spice and Wolf, Vol. 1");
+    expect(out.row_nocover_mandatory).toBe(out.row_mandatory);
 
     const detail = out.detail.split("|");
     expect(detail[0]).toBe("Download EPUB");
@@ -1971,6 +2068,7 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
     expect(out.connection_has_origin).toBe("true");
     expect(out.connection_has_opds).toBe("true");
     expect(out.connection_has_progress).toBe("true");
+    expect(out.connection_has_covers).toBe("true");
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
 });
@@ -1994,6 +2092,9 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
  */
 const CURRENTLY_READING_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
 local expected_base_url = assert(arg[2], "expected base url argument required")
+
+-- Flips the transport into a link that answers nothing, for the failure case.
+local failure = false
 
 -- Field-for-field shape of GET /api/kosync/active (koreader-sync.db rows joined
 -- against the Calibre library), newest first after normalization.
@@ -2090,6 +2191,7 @@ end
 package.preload["socket.http"] = function()
   return {
     request = function(request)
+      if failure then return nil, "timeout" end
       if request and request.sink then
         request.sink('{"active":[]}')
         request.sink(nil)
@@ -2131,27 +2233,106 @@ local menu = shown[#shown]
 assert(menu and menu.__kind == "menu", "tapping 'Currently reading' must open a menu")
 print("title=" .. tostring(menu.title))
 print("items=" .. tostring(#menu.item_table))
-for index, item in ipairs(menu.item_table) do
-  local labels = {}
-  for _detail_index, detail in ipairs(item.sub_item_table or {}) do
-    labels[#labels + 1] = tostring(detail.text)
+-- The plugin reuses one Menu widget and switches its item table, so a later
+-- view (the empty shelf) must be read from either place.
+local function current_menu()
+  local widget = shown[#shown]
+  if widget and widget.item_table and widget.__kind == "menu" then return widget end
+  local reused = LightHouse.menu and LightHouse.menu.switched
+  if reused and reused[#reused] then
+    return { title = reused[#reused].title, item_table = reused[#reused].items }
   end
-  print(string.format("item%d=%s\t%s\t%s", index, tostring(item.text), tostring(item.mandatory), table.concat(labels, "|")))
+  return widget
 end
+-- Rows carry the plugin's shared one-line anatomy, so each row is printed as
+-- row text / metadata column / detail labels.
+for item_index = 1, #menu.item_table do
+  local item = menu.item_table[item_index]
+  local labels = {}
+  for detail_index = 1, #(item.sub_item_table or {}) do
+    labels[#labels + 1] = tostring(item.sub_item_table[detail_index].text)
+  end
+  print(string.format("item%d=%s\t%s\t%s", item_index, tostring(item.text), tostring(item.mandatory), table.concat(labels, "|")))
+end
+local rows_with_newlines = 0
+for item_index = 1, #menu.item_table do
+  if tostring(menu.item_table[item_index].text):find("\n", 1, true) then
+    rows_with_newlines = rows_with_newlines + 1
+  end
+end
+print("rows_with_newlines=" .. tostring(rows_with_newlines))
 
 -- Book-id downloads must still be wired to the tapped session.
 menu.item_table[1].sub_item_table[1].callback()
 print("tapped_book_id=" .. tostring(tapped and tapped.book_id))
 print("tapped_title=" .. tostring(tapped and tapped.title))
 
--- An empty shelf must show its notice rather than raise.
+-- An empty shelf must show a designed empty view rather than raise.
 payload = {}
 local empty_ok, empty_raised = pcall(tap)
 print("empty_ok=" .. tostring(empty_ok))
 print("empty_raised=" .. tostring(empty_raised))
-local last = shown[#shown]
-print("empty_notice=" .. tostring(last and last.__kind == "infomessage"))
-print("empty_notice_text=" .. tostring(last and last.text))
+local empty = current_menu()
+print("empty_view=" .. tostring(empty and empty.title))
+local headline = tostring(empty and empty.item_table and empty.item_table[1] and empty.item_table[1].text)
+print("empty_headline=" .. (headline:gsub("\n", "\\n")))
+local actions = {}
+for action_index = 2, #(empty and empty.item_table or {}) do
+  actions[#actions + 1] = tostring(empty.item_table[action_index].text)
+end
+print("empty_actions=" .. table.concat(actions, "|"))
+
+-- A failed request must open the designed failure screen instead of claiming
+-- there is nothing in progress.
+failure = true
+local fail_ok, fail_raised = pcall(tap)
+print("fail_ok=" .. tostring(fail_ok))
+print("fail_raised=" .. tostring(fail_raised))
+local failed = current_menu()
+print("fail_view=" .. tostring(failed and failed.title))
+print("fail_headline=" .. tostring(failed and failed.item_table and failed.item_table[1] and failed.item_table[1].text))
+local fail_actions = {}
+for action_index = 2, #(failed and failed.item_table or {}) do
+  fail_actions[#fail_actions + 1] = tostring(failed.item_table[action_index].text)
+end
+print("fail_actions=" .. table.concat(fail_actions, "|"))
+
+-- A 200 whose body cannot be read must name no other resource: the shelf asks
+-- /api/kosync/active, not the statistics endpoint.
+failure = false
+payload = "not a session list"
+local bad_ok, bad_raised = pcall(tap)
+print("bad_body_ok=" .. tostring(bad_ok) .. " " .. tostring(bad_raised))
+local bad = current_menu()
+print("bad_body_headline=" .. tostring(bad and bad.item_table and bad.item_table[1] and bad.item_table[1].text))
+print("bad_body_detail=" .. tostring(bad and bad.item_table and bad.item_table[2] and bad.item_table[2].text))
+
+-- A long device name must not cost the reader the progress bar, the finished
+-- check or the "opened" marker in the shelf's metadata column.
+payload = {
+  {
+    id = 45,
+    document = "2222333344445555666677778888aaaa",
+    progress = "",
+    percentage = 1,
+    device = "Kindle Paperwhite Signature Edition",
+    device_id = nil,
+    filename = "the-way-of-kings.epub",
+    title = "The Way of Kings",
+    authors = "Brandon Sanderson",
+    timestamp = 1794633400,
+    bookId = 303,
+    cover = nil,
+    displayTitle = "The Way of Kings",
+    displayAuthors = "Brandon Sanderson",
+  },
+}
+local long_ok = pcall(tap)
+local long_menu = current_menu()
+local long_row = long_menu and long_menu.item_table and long_menu.item_table[1]
+print("shelf_long_ok=" .. tostring(long_ok))
+print("shelf_long_mandatory=" .. tostring(long_row and long_row.mandatory))
+print("shelf_long_limit=" .. tostring(require("lighthouse_ui").tokens.meta_max_chars))
 
 print("OK")
 `)
@@ -2215,11 +2396,13 @@ describe("plugin currently-reading shelf", () => {
     expect(out.title).toBe("Currently reading");
     expect(out.items).toBe("4");
 
-    // Row 1: linked session, newest first, with every detail row.
+    // Row 1: linked session, newest first. The title is the row text and the
+    // metadata column carries author, device and progress - no tap needed.
+    expect(out.rows_with_newlines).toBe("0");
     const first = out.item1.split("\t");
     expect(first[0]).toBe("Spice and Wolf, Vol. 1");
-    expect(first[1]).toContain("Isuna Hasekura");
-    expect(first[1]).toContain("████░░░░ 45%");
+    expect(first[1]).toContain("Isuna Hasekura · Paperwhite");
+    expect(first[1]).toContain("45%");
     const firstDetails = first[2].split("|");
     expect(firstDetails[0]).toBe("Download EPUB");
     expect(firstDetails).toContain("Progress: ████░░░░ 45%");
@@ -2229,6 +2412,8 @@ describe("plugin currently-reading shelf", () => {
     // Row 2: no Calibre match, so the download row is replaced, not dropped.
     const second = out.item2.split("\t");
     expect(second[0]).toBe("Dune & Sons <Deluxe>");
+    expect(second[1]).toContain("Frank Herbert · Kindle");
+    expect(second[1]).toContain("20%");
     const secondDetails = second[2].split("|");
     expect(secondDetails[0]).toBe("No matching book in the library");
     expect(secondDetails).toContain("Progress: ██░░░░░░ 20%");
@@ -2239,31 +2424,59 @@ describe("plugin currently-reading shelf", () => {
     const third = out.item3.split("\t");
     expect(third[0]).toBe("Untitled");
     expect(third[1]).toContain("Unknown");
-    expect(third[1]).toContain("░░░░░░░░ 0%");
+    expect(third[1]).toContain("0%");
     const thirdDetails = third[2].split("|");
     expect(thirdDetails).toEqual([
       "No matching book in the library",
       "Progress: ░░░░░░░░ 0%",
     ]);
 
-    // Row 4: authored fallback only, Burmese title preserved byte for byte.
+    // Row 4: authored fallback only, Burmese title preserved byte for byte,
+    // and a finished book is marked with a check glyph, not a colour.
     const fourth = out.item4.split("\t");
     expect(fourth[0]).toBe(BURMESE_PROBE);
-    expect(fourth[1]).toContain("Unknown");
-    expect(fourth[1]).toContain("████████ 100%");
+    expect(fourth[1]).toContain("Unknown · Kobo");
+    expect(fourth[1]).toContain("100%");
+    expect(fourth[1]).toContain("✓");
     expect(fourth[2].split("|")[0]).toBe("Download EPUB");
 
     // Tapping "Download EPUB" still resolves the session's Calibre id.
     expect(out.tapped_book_id).toBe("101");
     expect(out.tapped_title).toBe("Spice and Wolf, Vol. 1");
 
-    // Empty shelf: a notice, never a raised error.
+    // Empty shelf: a designed empty view with a next step, never a bare notice
+    // and never a raised error.
     expect(out.empty_ok).toBe("true");
     expect(out.empty_raised).toBe("nil");
-    expect(out.empty_notice).toBe("true");
-    expect(out.empty_notice_text).toBe(
-      "No reading progress has been synced yet.",
-    );
+    expect(out.empty_view).toBe("Currently reading");
+    expect(out.empty_headline).toBe("Nothing in progress yet");
+    expect(out.empty_actions).toContain("Refresh");
+    expect(out.empty_actions).toContain("Browse library");
+
+    // A failed request is not an empty shelf: it opens the failure screen with
+    // the reason and a retry, instead of telling the reader nothing is in
+    // progress.
+    expect(out.fail_ok).toBe("true");
+    expect(out.fail_raised).toBe("nil");
+    expect(out.fail_view).toBe("Currently reading");
+    expect(out.fail_headline).toBe("Can't reach the LightHouse server");
+    expect(out.fail_actions).toContain("Try again");
+
+    // An unreadable body on the shelf's own endpoint must not be described as
+    // reading statistics, and the detail must not repeat the headline.
+    expect(out.bad_body_ok).toBe("true nil");
+    expect(out.bad_body_headline).toBe("The server response could not be read");
+    expect(out.bad_body_detail).not.toContain("statistics");
+    expect(out.bad_body_detail).toContain("Try again");
+
+    // A long device name still renders the whole glance: the full bar, the
+    // percent and the finished check.
+    expect(out.shelf_long_ok).toBe("true");
+    expect(out.shelf_long_mandatory).toContain("100%");
+    expect(out.shelf_long_mandatory).toContain("✓");
+    expect(
+      Array.from(out.shelf_long_mandatory).length,
+    ).toBeLessThanOrEqual(Number(out.shelf_long_limit));
 
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
@@ -2727,6 +2940,11 @@ local menu = current_menu()
 assert(menu and menu.item_table, "tapping 'Reading stats' must open a menu")
 print("title=" .. tostring(menu.title))
 print("rows=" .. tostring(#menu.item_table))
+-- The view must fill the screen it is drawn on: a text page follows the height
+-- left after the title bar, so a 15-row stats list is one page, not two.
+local per_page = tonumber(LightHouse.menu and LightHouse.menu.items_per_page) or #menu.item_table
+print("per_page=" .. tostring(per_page))
+print("pages=" .. tostring(math.ceil(#menu.item_table / per_page)))
 dump_rows(menu, "row")
 
 -- 2. Heatmap weeks are tappable down to a single day --------------------------
@@ -2792,19 +3010,29 @@ local bad_ok, bad_raised = pcall(tap)
 print("bad_ok=" .. tostring(bad_ok))
 print("bad_raised=" .. tostring(bad_raised))
 local bad = shown[#shown]
-print("bad_notice=" .. tostring(bad and bad.__kind == "infomessage"))
-print("bad_text=" .. tostring(bad and bad.text))
+-- A failure is a designed screen: what failed, then what to do, then actions.
+local function dump_problem(prefix)
+  local view = current_menu()
+  print(prefix .. "_view=" .. tostring(view and view.title))
+  local items = (view and view.item_table) or {}
+  print(prefix .. "_headline=" .. tostring(items[1] and items[1].text))
+  print(prefix .. "_detail=" .. tostring(items[2] and items[2].text))
+  local actions = {}
+  for action_index = 3, #items do
+    actions[#actions + 1] = tostring(items[action_index].text)
+  end
+  print(prefix .. "_actions=" .. table.concat(actions, "|"))
+end
+dump_problem("bad")
 
--- 4b. A 200 with a zero-length body: the actionable notice, not a raise -----
+-- 4b. A 200 with a zero-length body: the same screen, not a raise -----------
 local http = require("socket.http")
 local working_request = http.request
 http.request = function() return 1, 200, {} end
 local empty_ok, empty_raised = pcall(tap)
 print("empty_ok=" .. tostring(empty_ok))
 print("empty_raised=" .. tostring(empty_raised))
-local empty = shown[#shown]
-print("empty_notice=" .. tostring(empty and empty.__kind == "infomessage"))
-print("empty_text=" .. tostring(empty and empty.text))
+dump_problem("empty")
 http.request = working_request
 
 -- 5. Transport failure maps through the plugin's existing error style --------
@@ -2815,9 +3043,7 @@ http.request = function() return nil, "timeout" end
 local fail_ok, fail_raised = pcall(tap)
 print("fail_ok=" .. tostring(fail_ok))
 print("fail_raised=" .. tostring(fail_raised))
-local fail = shown[#shown]
-print("fail_notice=" .. tostring(fail and fail.__kind == "infomessage"))
-print("fail_text=" .. tostring(fail and fail.text))
+dump_problem("fail")
 http.request = working_request
 
 print("OK")
@@ -2866,7 +3092,7 @@ describe("plugin reading stats view", () => {
     );
   }
 
-  it("renders streak, time, finished books, health, goal and heatmap in order", () => {
+  it("leads with the headline numbers, then activity, then supporting detail", () => {
     if (!LUA_BINARY || !UNZIP_BINARY) return;
     const out = runHarness(READING_STATS_HARNESS);
 
@@ -2874,32 +3100,42 @@ describe("plugin reading stats view", () => {
     expect(out.ok).toBe("true");
     expect(out.raised).toBe("nil");
     expect(out.title).toBe("Reading stats");
+    expect(Number(out.rows)).toBeGreaterThan(9);
+    // A text page is fitted to the screen, so the whole stats view fits on one
+    // page instead of paging twice through a half-empty screen.
+    expect(Number(out.per_page)).toBeGreaterThan(9);
+    expect(Number(out.per_page)).toBeGreaterThanOrEqual(Number(out.rows));
+    expect(out.pages).toBe("1");
     expect(out.rows).toBe("15");
 
+    // 1. Headline numbers, first thing the reader sees, with no heading row
+    //    above them: the answer before the supporting detail.
     expect(out.row1).toBe("Current streak\t5 days · best 12 days");
     expect(out.row2).toBe("Read today\t45m");
     expect(out.row3).toBe("Read this week\t4h 10m");
     expect(out.row4).toBe("Total reading time\t132.5h");
     expect(out.row5).toBe("Books finished this year\t12");
 
-    expect(out.row6).toBe("Library health\tnil");
-    expect(out.row7).toBe("Unread\t120");
-    expect(out.row8).toBe("Reading\t8");
-    expect(out.row9).toBe("Finished\t34");
+    // 2. The yearly goal keeps both targets, with the bars drawn by the
+    //    plugin's single bar renderer.
+    expect(out.row6).toBe("▍ Yearly goal 2026\tnil");
+    expect(out.row7).toBe("Books\t███░░░ 48% · 12/25");
+    expect(out.row8).toBe("Hours\t██░░░░ 34% · 34h/100h");
 
-    // Goal progress bars reuse Status.progressBar, the plugin's own renderer.
-    expect(out.row10).toBe("Yearly goal 2026\tnil");
-    expect(out.row11).toBe("Books\t████░░░░ 48% · 12/25");
-    expect(out.row12).toBe("Hours\t███░░░░░ 34% · 34h/100h");
-
-    // Heatmap: one row per week of up to seven days, newest week last.
-    expect(out.row13).toBe("Activity (newest week last)\tnil");
-    expect(out.row14).toBe("·▒▓\tNov 15");
+    // 3. The activity picture, then its key, before the supporting detail.
+    expect(out.row9).toBe("▍ Activity (newest week last)\tnil");
+    expect(out.row10).toBe("·▒▓\tNov 15");
     // The key is computed from the level thresholds, so pin the whole string:
     // the ramp it must mirror is the server's (>=1m, >=15m, >=30m, >=60m).
-    expect(out.row15).toBe(
-      "Shade key: · none · ░ under 15m · ▒ under 30m · ▓ under 1h · █ 1h or more\tnil",
+    expect(out.row11).toBe(
+      "▍ Shade key: · none · ░ under 15m · ▒ under 30m · ▓ under 1h · █ 1h or more\tnil",
     );
+
+    // 4. Supporting detail last: library health as three counts.
+    expect(out.row12).toBe("▍ Library health\tnil");
+    expect(out.row13).toBe("Unread\t120");
+    expect(out.row14).toBe("Reading\t8");
+    expect(out.row15).toBe("Finished\t34");
 
     expect(out.week_days).toBe("3");
     expect(out.week_day1).toBe("Nov 13 · 0m");
@@ -2923,13 +3159,15 @@ describe("plugin reading stats view", () => {
     expect(out.deg_row3).toBe("Read this week\tunavailable");
     expect(out.deg_row4).toBe("Total reading time\tunavailable");
     expect(out.deg_row5).toBe("Books finished this year\tunavailable");
-    expect(out.deg_row7).toBe("Unread\tunavailable");
-    expect(out.deg_row11).toBe("Heatmap\tunavailable");
+    expect(out.deg_row6).toBe("▍ Activity (newest week last)\tnil");
+    expect(out.deg_row7).toBe("Heatmap\tunavailable");
     // A missing heatmap still renders the same key row rather than an empty
     // picture, and the key does not depend on the payload.
-    expect(out.deg_row12).toBe(
-      "Shade key: · none · ░ under 15m · ▒ under 30m · ▓ under 1h · █ 1h or more\tnil",
+    expect(out.deg_row8).toBe(
+      "▍ Shade key: · none · ░ under 15m · ▒ under 30m · ▓ under 1h · █ 1h or more\tnil",
     );
+    expect(out.deg_row9).toBe("▍ Library health\tnil");
+    expect(out.deg_row10).toBe("Unread\tunavailable");
   });
 
   it("shows the untargeted metric of a single-target goal as its count", () => {
@@ -2940,8 +3178,8 @@ describe("plugin reading stats view", () => {
     expect(out.one_raised).toBe("nil");
     expect(out.one_rows).toBe("15");
     // The configured target keeps its bar; the other metric keeps its number.
-    expect(out.one_row11).toBe("Books\t████░░░░ 48% · 12/25");
-    expect(out.one_row12).toBe("Hours\t34h read");
+    expect(out.one_row7).toBe("Books\t███░░░ 48% · 12/25");
+    expect(out.one_row8).toBe("Hours\t34h read");
   });
 
   it("labels the untargeted books metric without repeating the row label", () => {
@@ -2952,34 +3190,364 @@ describe("plugin reading stats view", () => {
     expect(out.hours_only_raised).toBe("nil");
     expect(out.hours_only_rows).toBe("15");
     // The row label is already "Books", so the value must not say it again.
-    expect(out.hours_only_row11).toBe("Books\t12 read");
-    expect(out.hours_only_row12).toBe("Hours\t███░░░░░ 34% · 34h/100h");
+    expect(out.hours_only_row7).toBe("Books\t12 read");
+    expect(out.hours_only_row8).toBe("Hours\t██░░░░ 34% · 34h/100h");
   });
 
-  it("reports an unreadable payload and a network failure in the plugin's own style", () => {
+  it("reports an unreadable payload and a network failure on a designed failure screen", () => {
     if (!LUA_BINARY || !UNZIP_BINARY) return;
     const out = runHarness(READING_STATS_HARNESS);
 
+    // A failed request opens a real screen: a one-line headline saying what
+    // failed, the actionable detail, and a retry - not a vanishing notice.
     expect(out.bad_ok).toBe("true");
     expect(out.bad_raised).toBe("nil");
-    expect(out.bad_notice).toBe("true");
-    expect(out.bad_text).toBe(
-      "The server sent reading statistics this plugin could not read. Download the plugin again from the LightHouse web app (Guide → KOReader plugin).",
+    expect(out.bad_view).toBe("Reading stats");
+    expect(out.bad_headline).toBe("The server response could not be read");
+    // The detail says what to do without naming a resource: the same copy is
+    // shown for the catalog, the shelf and the download notice.
+    expect(out.bad_detail).toBe(
+      "Try again. If it keeps happening, download the plugin again from the LightHouse web app (Guide → KOReader plugin).",
     );
+    expect(out.bad_detail).not.toContain("statistics");
+    expect(out.bad_actions).toContain("Try again");
 
-    // A proxy answering before the app sends 200 with no body: same notice.
+    // A proxy answering before the app sends 200 with no body: same screen.
     expect(out.empty_ok).toBe("true");
     expect(out.empty_raised).toBe("nil");
-    expect(out.empty_notice).toBe("true");
-    expect(out.empty_text).toBe(
-      "The server sent reading statistics this plugin could not read. Download the plugin again from the LightHouse web app (Guide → KOReader plugin).",
-    );
+    expect(out.empty_headline).toBe("The server response could not be read");
 
     expect(out.fail_ok).toBe("true");
     expect(out.fail_raised).toBe("nil");
-    expect(out.fail_notice).toBe("true");
-    expect(out.fail_text).toBe(
+    expect(out.fail_headline).toBe("Can't reach the LightHouse server");
+    expect(out.fail_detail).toBe(
       "Could not reach the LightHouse server. Check Wi-Fi and the server address in the Connection screen.",
     );
+    expect(out.fail_actions).toContain("Try again");
+  });
+});
+
+/**
+ * Cover prefetch behaviour.
+ *
+ * Covers are the one part of the catalog that costs network and disk, so the
+ * rules that keep a slow link usable are worth proving rather than trusting:
+ * the per-page fetch cap, the on-disk cache that makes a second open free, the
+ * negative cache that remembers a book the server has no cover for (and only
+ * that), and the per-fetch timeout ceiling the page budget imposes.
+ */
+const COVER_PREFETCH_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
+local data_dir = assert(arg[2], "data dir argument required")
+local requests = {}
+local timeouts = {}
+
+package.preload["datastorage"] = function()
+  return {
+    getDataDir = function() return data_dir end,
+    getSettingsDir = function() return data_dir end,
+  }
+end
+-- A real existence check plus a real (current) mtime, so the on-disk cache and
+-- the negative cache are exercised rather than the stub's "no such file".
+package.preload["libs/libkoreader-lfs"] = function()
+  return {
+    attributes = function(path, field)
+      local handle = io.open(path, "rb")
+      if not handle then return nil end
+      if field == "size" then
+        local size = handle:seek("end")
+        handle:close()
+        return size
+      end
+      handle:close()
+      if field == "mode" then return "file" end
+      if field == "modification" then return os.time() end
+      return nil
+    end,
+    mkdir = function() return true end,
+  }
+end
+package.preload["socketutil"] = function()
+  return {
+    set_timeout = function(_, block, total)
+      timeouts[#timeouts + 1] = { block = tonumber(block), total = tonumber(total) }
+    end,
+    reset_timeout = function() end,
+  }
+end
+
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      local url = tostring(request and request.url or "")
+      requests[#requests + 1] = url
+      -- Book 999 has no cover on the server: a definitive answer.
+      if url:find("999", 1, true) then
+        return 1, 404, {}
+      end
+      -- Book 998 loses the link mid-request.
+      if url:find("998", 1, true) then
+        return nil, "timeout"
+      end
+      -- Book 997 fails for a reason that says nothing about its cover.
+      if url:find("997", 1, true) then
+        return 1, 500, {}
+      end
+      if request and request.sink then
+        request.sink(string.rep("coverbytes", 40))
+        request.sink(nil)
+      end
+      return 1, 200, {}
+    end,
+  }
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local Ui = require("lighthouse_ui")
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+
+local function entry(book_id, href)
+  return { book_id = book_id, thumbnail_href = href }
+end
+
+local base = "http://192.168.31.15:8086/api/books/%d/cover?w=360"
+local function href(book_id) return string.format(base, book_id) end
+
+local function count_files(ids, suffix)
+  local count = 0
+  local directory = data_dir .. "/cache/lighthouse-covers"
+  -- No directory listing outside KOReader's lfs, so probe the names we expect.
+  for id_index = 1, #ids do
+    local name = Ui.coverCacheName(ids[id_index]) .. (suffix or "")
+    local handle = io.open(directory .. "/" .. name, "rb")
+    if handle then handle:close() count = count + 1 end
+  end
+  return count
+end
+
+-- 1. A page of two books is fetched once and then served from disk --------
+local page = { entry(101, href(101)), entry(102, href(102)) }
+LightHouse:prefetchCovers(page)
+print("first_requests=" .. tostring(#requests))
+print("cached_covers=" .. tostring(count_files({ 101, 102 })))
+
+requests = {}
+LightHouse:prefetchCovers(page)
+print("second_requests=" .. tostring(#requests))
+
+-- 2. Only a definitive 404 is remembered; every other failure is retried -----
+requests = {}
+local mixed = {
+  entry(999, href(999)), -- no cover on the server (HTTP 404)
+  entry(998, href(998)), -- link dropped mid-request
+  entry(997, href(997)), -- server error, nothing to do with the cover
+}
+LightHouse:prefetchCovers(mixed)
+print("mixed_requests=" .. tostring(#requests))
+print("miss_markers=" .. tostring(count_files({ 999 }, ".miss")))
+print("transient_markers=" .. tostring(count_files({ 997, 998 }, ".miss")))
+
+-- The transient failures stay retryable on the next open; the coverless book
+-- and the definitive answer do not cost another request.
+requests = {}
+LightHouse:prefetchCovers(mixed)
+print("mixed_retry_requests=" .. tostring(#requests))
+
+-- 3. The per-page cap holds when a page is larger than the budget ------------
+requests = {}
+local big_page = {}
+for book_id = 201, 230 do big_page[#big_page + 1] = entry(book_id, href(book_id)) end
+LightHouse:prefetchCovers(big_page)
+print("capped_requests=" .. tostring(#requests))
+print("cap=" .. tostring(Ui.tokens.cover_fetch_max))
+
+-- 4. An entry with no cover link and no id never costs a request ------------
+requests = {}
+LightHouse:prefetchCovers({ { book_id = 301 }, { thumbnail_href = href(302) }, {} })
+print("noop_requests=" .. tostring(#requests))
+
+-- 5. No cover request may outlive the per-page budget ----------------------
+local max_block, max_total = 0, 0
+for timeout_index = 1, #timeouts do
+  if timeouts[timeout_index].block > max_block then max_block = timeouts[timeout_index].block end
+  if timeouts[timeout_index].total > max_total then max_total = timeouts[timeout_index].total end
+end
+print("max_cover_block=" .. tostring(max_block))
+print("max_cover_total=" .. tostring(max_total))
+print("budget_seconds=" .. tostring(Ui.tokens.cover_fetch_seconds))
+
+print("OK")
+`;
+
+describe("plugin cover prefetch", () => {
+  it("caps fetches per page, caches on disk, and remembers a missing cover", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "harness-api-key",
+      generatedAt: "2026-11-14T00:00:00.000Z",
+    });
+
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-covers-"));
+    const dataDir = path.join(workdir, "data");
+    fs.mkdirSync(path.join(dataDir, "cache", "lighthouse-covers"), { recursive: true });
+
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
+      encoding: "utf8",
+    });
+    expect(extract.status).toBe(0);
+
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "cover_harness.lua");
+    fs.writeFileSync(harnessPath, COVER_PREFETCH_HARNESS);
+
+    const res = spawnSync(LUA_BINARY, [harnessPath, pluginRoot, dataDir], { encoding: "utf8" });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line) => line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+
+    // One request per book, and the coverless book is remembered rather than
+    // retried forever.
+    expect(out.first_requests).toBe("2");
+    expect(out.cached_covers).toBe("2");
+
+    // Re-opening the page costs no network at all: this is what keeps scrolling
+    // smooth on a 40-book page.
+    expect(out.second_requests).toBe("0");
+
+    // A definitive 404 is the only failure that earns a negative-cache marker;
+    // a dropped link or a server error stays retryable, because a marker would
+    // make that book look coverless for the whole cover TTL.
+    expect(out.mixed_requests).toBe("3");
+    expect(out.miss_markers).toBe("1");
+    expect(out.transient_markers).toBe("0");
+    expect(out.mixed_retry_requests).toBe("2");
+
+    // A page bigger than the per-page budget stops at the budget.
+    expect(out.capped_requests).toBe(out.cap);
+
+    // Rows with no cover link or no book id never reach the network.
+    expect(out.noop_requests).toBe("0");
+
+    // One stalled cover cannot outlive the page's cover budget: every request
+    // is issued under the cover budget, not the 300s EPUB download budget.
+    expect(Number(out.max_cover_block)).toBeLessThanOrEqual(Number(out.budget_seconds));
+    expect(Number(out.max_cover_total)).toBeLessThanOrEqual(Number(out.budget_seconds));
+
+    expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
+  });
+});
+
+/**
+ * Unconfigured plugin behaviour.
+ *
+ * The committed template carries no server URL, which is exactly the state a
+ * reader lands in after copying the folder by hand or losing the baked key.
+ * Every view has to say what is wrong and offer the one screen that can fix it,
+ * so the first-run dead end is not a screen with no way forward.
+ */
+const NOT_CONFIGURED_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local config = require("lighthouse_config")
+assert(config.base_url == "", "this harness needs the unconfigured template")
+
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+
+-- The plugin reuses one Menu widget and switches it, so the visible rows come
+-- from either the shown widget or the table it was switched to.
+local function current_items()
+  local switched = LightHouse.menu and LightHouse.menu.switched
+  if switched and switched[#switched] then return switched[#switched].items end
+  local widget = shown[#shown]
+  if widget and widget.item_table then return widget.item_table end
+  return {}
+end
+
+local function dump_screen(prefix, open)
+  local ok, raised = pcall(open)
+  print(prefix .. "_ok=" .. tostring(ok) .. " " .. tostring(raised))
+  local items = current_items()
+  local texts = {}
+  local connection
+  for item_index = 1, #items do
+    texts[#texts + 1] = tostring(items[item_index].text)
+    if items[item_index].text == "Connection" then connection = items[item_index] end
+  end
+  print(prefix .. "_rows=" .. table.concat(texts, " | "))
+  print(prefix .. "_detail=" .. tostring(items[2] and items[2].text))
+  print(prefix .. "_has_connection=" .. tostring(connection ~= nil))
+  if not connection then return end
+  local tapped, tap_raised = pcall(connection.callback)
+  local widget = shown[#shown]
+  local kind = type(widget) == "table" and tostring(widget.__kind) or "none"
+  local text = type(widget) == "table" and tostring(widget.text) or ""
+  print(prefix .. "_tap_ok=" .. tostring(tapped) .. " " .. tostring(tap_raised))
+  print(prefix .. "_view=" .. kind)
+  print(prefix .. "_shows_not_set=" .. tostring(text:find("(not set)", 1, true) ~= nil))
+end
+
+dump_screen("browse", function() LightHouse:openCatalog("", 0, 1) end)
+dump_screen("reading", function() LightHouse:showReading() end)
+dump_screen("stats", function() LightHouse:showStats() end)
+
+print("OK")
+`;
+
+describe("unconfigured plugin failures", () => {
+  it("offers the Connection screen on every not-configured failure", () => {
+    if (!LUA_BINARY) return;
+
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-unconfigured-"));
+    const harnessPath = path.join(workdir, "not_configured_harness.lua");
+    fs.writeFileSync(harnessPath, NOT_CONFIGURED_HARNESS);
+
+    const res = spawnSync(LUA_BINARY, [harnessPath, KOPLUGIN_TEMPLATE_DIR], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line) => line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+
+    for (const screen of ["browse", "reading", "stats"]) {
+      // Compute from the token so the assertion cannot drift from the scale.
+      expect(out[`${screen}_ok`]).toBe("true nil");
+      expect(out[`${screen}_rows`]).toContain("This plugin is not configured");
+      // The detail says what to do and does not repeat the headline it sits
+      // under.
+      expect(out[`${screen}_detail`]).not.toContain("This plugin is not configured");
+      expect(out[`${screen}_detail`]).toContain("Download the plugin again");
+      // The only screen that can fix a missing key has to be one tap away.
+      expect(out[`${screen}_has_connection`]).toBe("true");
+      expect(out[`${screen}_tap_ok`]).toBe("true nil");
+      expect(out[`${screen}_view`]).toBe("textviewer");
+      expect(out[`${screen}_shows_not_set`]).toBe("true");
+    }
+
+    expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
 });
