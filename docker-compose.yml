@@ -5,8 +5,11 @@
 # and disaster recovery. Synchronized with native macOS LaunchAgent architecture.
 #
 # Usage:
-#   cp .env.example .env
-#   docker compose up -d
+#   1. cp .env.example .env
+#   2. set KOSYNC_PASSWORD_SALT in .env to your own value
+#      (e.g. openssl rand -hex 24). It ships empty and has no default,
+#      so `docker compose up -d` refuses to start until it is set.
+#   3. docker compose up -d
 # ==============================================================================
 
 services:
@@ -20,7 +23,10 @@ services:
     environment:
       - PORT=3000
       - HOST=0.0.0.0
-      - PASSWORD_SALT=${KOSYNC_PASSWORD_SALT:-747aa604e460376f174d9e73240f9d768b06b02dfa63a0b4}
+      # No default: the salt is a secret and must come from the environment.
+      # Compose refuses to start when KOSYNC_PASSWORD_SALT is unset or empty.
+      # Changing the salt invalidates every existing password hash.
+      - PASSWORD_SALT=${KOSYNC_PASSWORD_SALT:?required - see .env.example}
       - DISABLE_USER_REGISTRATION=false
       - LOG_LEVEL=info
       - NODE_ENV=production

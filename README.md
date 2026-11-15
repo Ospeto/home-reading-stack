@@ -706,6 +706,10 @@ The LightHouse WAN edge (`https://reading.wavypremium.xyz`) is hardened against 
 4. **Decompression & Resource Protections:**
    - 100 MB maximum upload payload limit.
    - Archive extraction limits: max 500 entries, 150 MB single file, 500 MB total uncompressed, and 100:1 compression ratio limit to prevent zip/tar bombs. Path traversal `/..` guards reject archive escape sequences.
+5. **Credential Hygiene:**
+   - No secret ships as a hardcoded default. `KOSYNC_PASSWORD_SALT` has no fallback anywhere in this repository: `docker-compose.yml` refuses to start while it is unset or empty, and `.env.example` ships it empty so the compose recipe's documented steps fail closed. Generate your own (`openssl rand -hex 24`) - unless you are restoring an existing `koreader-sync.db`, which only works with the salt that database was hashed with.
+   - Changing `KOSYNC_PASSWORD_SALT` invalidates every existing password hash in `koreader-sync.db`, so rotate it deliberately and reset user passwords afterwards.
+   - A Telegram bot token, a KOSync password salt, and a KOSync `X-Auth-Key` were committed earlier in this repository's history. Git history stays readable once the repository is public, so treat all three as compromised: the bot token was rotated and verified revoked out-of-band, the salt is no longer disclosed at `HEAD` but is still the live production salt (exposure accepted, not rotated), and the `X-Auth-Key` may still be valid until user `moe`'s password changes (operator to confirm). See the Security Notice at the top of [`RUNBOOK.md`](RUNBOOK.md).
 
 ---
 
