@@ -681,6 +681,32 @@ function Sidecar.index(records)
     return index
 end
 
+--- True when `title` appears in `stem` as whole words rather than as a prefix.
+--
+-- A plain substring test is not good enough on a light-novel device: "spice and
+-- wolf vol 1" is a prefix of "spice and wolf vol 11 isuna hasekura", so Vol. 1
+-- would inherit Vol. 11's progress, its highlight count and its "Open book"
+-- target. The match therefore has to begin and end on a non-word boundary.
+-- @string stem normalized file stem
+-- @string title normalized title
+-- @treturn boolean
+local function containsWholeTitle(stem, title)
+    if stem == "" or title == "" then return false end
+    local from_index = 1
+    while true do
+        local found_start, found_end = stem:find(title, from_index, true)
+        if not found_start then return false end
+        local before = ""
+        if found_start > 1 then before = stem:sub(found_start - 1, found_start - 1) end
+        local after = ""
+        if found_end < #stem then after = stem:sub(found_end + 1, found_end + 1) end
+        local before_is_boundary = before == "" or before == " " or not before:match("%w")
+        local after_is_boundary = after == "" or after == " " or not after:match("%w")
+        if before_is_boundary and after_is_boundary then return true end
+        from_index = found_end + 1
+    end
+end
+
 --- Finds the local record for one catalog entry or server session.
 --
 -- Precedence mirrors `Status.findSession`: the exact file name this plugin
@@ -699,20 +725,28 @@ function Sidecar.find(index, keys)
     end
     local title = textOf(keys.title)
     if title == "" then return nil end
-    if type(index.by_title) == "table" and index.by_title[title] then
-        return index.by_title[title]
-    end
     local authors = type(keys.authors) == "table" and keys.authors or {}
+
+    -- A title match still has to agree on the author when both sides name one:
+    -- two different books can share a title entirely (a generic "Collected
+    -- Poems", a same-named translation), and inheriting another book's progress
+    -- is worse than showing none.
+    local function authorsAgree(record)
+        local record_authors = record.normalized_authors or {}
+        if #authors == 0 or #record_authors == 0 then return true end
+        return Sidecar.sharesAuthor(authors, record_authors)
+    end
+
+    local exact = type(index.by_title) == "table" and index.by_title[title] or nil
+    if exact and authorsAgree(exact) then return exact end
+
     local candidates = index.records or {}
     for record_index = 1, #candidates do
         local record = candidates[record_index]
-        local record_stem = textOf(record.normalized_stem)
-        if record_stem ~= "" and record_stem:find(title, 1, true) then
-            if #authors == 0
-                or Sidecar.sharesAuthor(authors, record.normalized_authors or {})
-            then
-                return record
-            end
+        if containsWholeTitle(textOf(record.normalized_stem), title)
+            and authorsAgree(record)
+        then
+            return record
         end
     end
     return nil

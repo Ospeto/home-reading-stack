@@ -1142,6 +1142,22 @@ function LightHouse:localIndex()
     return self.local_index or { by_stem = {}, by_title = {}, records = {} }
 end
 
+--- Runs the device walk behind a spinner the first time, plainly afterwards.
+--
+-- KOReader is single threaded, so the first scan of a session blocks the menu
+-- while it walks the book roots. It is cheap on the verified device (18
+-- sidecars, about a second) but `home_dir` can default to the whole user
+-- partition, so the first walk gets the same feedback as every server call
+-- instead of a frozen screen with nothing on it. Later calls are cached and
+-- return without any UI at all.
+-- @string text spinner label
+-- @function func returns the records
+-- @treturn table records, never nil
+function LightHouse:withLocalScan(text, func)
+    if self.local_scan then return func() end
+    return self:withSpinner(text, func) or {}
+end
+
 --- The local sidecar record for one book, when this device has it.
 --
 -- THE AUTHORITY RULE, in one place: when a book exists both on this device and
@@ -1367,7 +1383,11 @@ function LightHouse:openCatalog(query, start_index, page_number)
 
     -- Local sidecars beat the server for any book this device has opened (see
     -- `localRecordFor`), and a book only this device has read gets its progress
-    -- from the sidecar because the server sent no session for it at all.
+    -- from the sidecar because the server sent no session for it at all. The
+    -- walk happens ONCE, behind a spinner, before any row is matched.
+    self:withLocalScan(_("Reading books on this device…"), function()
+        return self:localRecords()
+    end)
     for entry_index = 1, #feed.entries do
         local entry = feed.entries[entry_index]
         local applied = pcall(function() self:applyLocalToEntry(entry) end)
@@ -1697,7 +1717,9 @@ end
 -- with no connection at all. The server's sessions are merged on top when they
 -- are reachable, and only the books this device has never seen depend on them.
 function LightHouse:showReading()
-    local local_records = self:localRecords()
+    local local_records = self:withLocalScan(_("Reading books on this device…"), function()
+        return self:localRecords()
+    end)
     local configured = Client.isConfigured(config)
     local online = NetworkMgr:isOnline()
 
@@ -1820,7 +1842,9 @@ end
 -- beside the books on this device, read once when the view opens (`localRecords`
 -- caches that scan for the session), with no network call and no polling.
 function LightHouse:showHighlights()
-    local groups = Sidecar.highlightGroups(self:localRecords())
+    local groups = Sidecar.highlightGroups(self:withLocalScan(_("Reading this device's highlights…"), function()
+        return self:localRecords()
+    end))
     if #groups == 0 then
         self:showProblem{
             title = _("Highlights"),

@@ -4943,6 +4943,48 @@ local no_match = Sidecar.find(index, {
 })
 show("find_none", tostring(no_match))
 
+-- The volume-boundary rule: a Vol. 11 file must never answer a Vol. 1 query,
+-- even though its stem contains "spice and wolf vol 1" as a prefix.
+local prefix_index = Sidecar.index({
+  {
+    book_path = "/mnt/us/books/Isuna Hasekura/Spice and Wolf, Vol. 11 - Isuna Hasekura.epub",
+    title = "Spice and Wolf, Vol. 11",
+    authors = "Isuna Hasekura",
+    percent_finished = 0.5,
+    annotations = {},
+    annotation_count = 0,
+  },
+})
+show("find_volume_prefix_guard", tostring(Sidecar.find(prefix_index, {
+  stem = "01 spice and wolf vol 1",
+  title = "spice and wolf vol 1",
+  authors = { "isuna hasekura" },
+})))
+
+-- ...while the volume that IS on disk still answers the same query.
+local volume_index = Sidecar.index({
+  {
+    book_path = "/mnt/us/books/Spice and Wolf, Vol. 1 - Isuna Hasekura.epub",
+    title = "Spice and Wolf, Vol. 1",
+    authors = "Isuna Hasekura",
+    percent_finished = 0.5,
+    annotations = {},
+    annotation_count = 0,
+  },
+})
+show("find_whole_word_match", tostring(Sidecar.find(volume_index, {
+  stem = "01 spice and wolf vol 1",
+  title = "spice and wolf vol 1",
+  authors = { "isuna hasekura" },
+}) ~= nil))
+
+-- An exact title shared by a different author is not the same book either.
+show("find_exact_title_other_author", tostring(Sidecar.find(volume_index, {
+  stem = "",
+  title = "spice and wolf vol 1",
+  authors = { "someone else" },
+})))
+
 -- ------------------------------------------------- 9. strictly read-only open
 local write_modes = 0
 for mode_index = 1, #open_modes do
@@ -5096,6 +5138,11 @@ describe("KOReader plugin local sidecar reader", () => {
     expect(out.find_partial).toBe("Spice and Wolf, Vol. 1");
     expect(out.find_wrong_author).toBe("nil");
     expect(out.find_none).toBe("nil");
+    // A Vol. 11 file is not Vol. 1 just because its name starts with it, and a
+    // shared title under a different author is not the same book.
+    expect(out.find_volume_prefix_guard).toBe("nil");
+    expect(out.find_whole_word_match).toBe("true");
+    expect(out.find_exact_title_other_author).toBe("nil");
     expect(out.normalize_text).toBe("01 dune epub");
   });
 
