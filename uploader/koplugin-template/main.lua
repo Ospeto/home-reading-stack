@@ -1364,6 +1364,9 @@ function LightHouse:pageLabels()
         next_unread = _("#%s next"),
         books_count = _("%s books"),
         read_count = _("%s read"),
+        read_of_books = _("%s / %s"),
+        average_day = _("%d min on an average day"),
+        detail_on_web = _("detail on web"),
         author_count = _("%s authors"),
         series_count = _("%s series"),
     }
@@ -1428,7 +1431,7 @@ end
 -- every widget construction here runs inside KOReader's paint path.
 -- @tparam table model page model (`lighthouse_views.lua`)
 -- @tparam table plan layout plan (`Ui.pagePlan` / `Ui.listPlan`)
--- @tparam table handlers { on_action, on_switch, on_overflow, on_back, kind }
+-- @tparam table handlers { on_action, on_switch, on_overflow }
 -- @treturn table|nil the page widget
 function LightHouse:showPage(model, plan, handlers)
     handlers = handlers or {}
@@ -1439,7 +1442,6 @@ function LightHouse:showPage(model, plan, handlers)
     local built_ok, page = pcall(Page.build, {
         model = model,
         plan = plan,
-        kind = handlers.kind or "stats",
         cover_widget = function(cover_id, width, height)
             return self:coverWidgetFor(cover_id, width, height)
         end,
@@ -1475,7 +1477,9 @@ function LightHouse:showPageOverflow()
     local items = {}
     local state = self.library_state
     if state then
-        items[#items + 1] = { text = _("Refresh"), bold = true, callback = function() self:openLibrary{ page = state.page } end }
+        items[#items + 1] = { text = _("Refresh"), bold = true, callback = function()
+            self:openLibrary{ page = state.page, refresh = true }
+        end }
         if state.page > 1 then
             items[#items + 1] = {
                 text = _("Previous page"),
@@ -1686,7 +1690,7 @@ function LightHouse:fetchGrouping(by)
 end
 
 --- Builds and shows the library page for one grouping.
--- @tparam table[opt] options { mode, page, query }
+-- @tparam table[opt] options { mode, page, query, refresh }
 function LightHouse:openLibrary(options)
     options = options or {}
     local previous = self.library_state or {}
@@ -1697,6 +1701,14 @@ function LightHouse:openLibrary(options)
     local query = options.query
     if query == nil then query = previous.query or "" end
     query = Status.str(query)
+
+    -- A grouping document is fetched once and then paged on the device, so the
+    -- cache is what makes paging local. It is not kept across an explicit
+    -- refresh or a grouping switch: finishing or downloading a book changes the
+    -- read counts, and a reader asking again must see the server's answer.
+    if options.refresh or (previous.mode ~= nil and previous.mode ~= mode) then
+        self._groupings = nil
+    end
 
     local state = { mode = mode, page = page, query = query }
     self.library_state = state
@@ -1867,7 +1879,6 @@ function LightHouse:openLibrary(options)
     end
 
     self:showPage(model, plan, {
-        kind = "list",
         on_action = dispatch,
         on_switch = function(key)
             self:openLibrary{ mode = key, page = 1 }
@@ -2451,7 +2462,6 @@ function LightHouse:showStats()
     -- and the library, not the grouping switch.
     self.library_state = nil
     self:showPage(model, plan, {
-        kind = "stats",
         on_action = function(action)
             if action.kind == "book" then self:openBookDetails(action.entry) end
         end,

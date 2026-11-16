@@ -210,6 +210,20 @@ for row_index = 1, #series_rows do
     .. "//" .. flat(row.cover_id))
 end
 
+-- A fractional Calibre index is a volume number, not a rounding error: the
+-- grouping document carries it as text (formatSeriesIndex returns "2.5") and
+-- the device must name that same volume.
+local normalized = Status.normalizeGroups({
+  { name = "Ballad of a Shinigami", author = "K-Ske Hasegawa", books = 3, read = 1, nextIndex = "2.5" },
+  { name = "Spice and Wolf", author = "Isuna Hasekura", books = 21, read = 9, nextIndex = 10 },
+  { name = "The Witcher", author = "Andrzej Sapkowski", books = 8, read = 1, nextIndex = "" },
+})
+print("group_fraction=" .. flat(normalized[1].nextIndex))
+print("group_integer=" .. flat(normalized[2].nextIndex))
+print("group_missing=" .. flat(normalized[3].nextIndex))
+local fraction_row = Views.seriesRow(normalized[1])
+print("group_fraction_secondary=" .. flat(fraction_row.secondary))
+
 -- Library: authors ---------------------------------------------------------
 local author_model = Views.libraryModel("authors", {
   groups = {
@@ -331,7 +345,7 @@ describe("plugin reading-stats page model", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
     expect(out.footer_left).toBe("LightHouse");
-    expect(out.footer_right).toBe("68 min on an average day");
+    expect(out.footer_right).toBe("68 min on an average day · detail on web");
     expect(out.stats_has_no_switch).toBe("true");
   });
 
@@ -391,12 +405,12 @@ describe("plugin library page model: Series", () => {
   it("shows volumes, read count, progress and the next unread volume", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
-    // name // author · books · read // percent // next unread // bar // cover
+    // name // author · books · read · next unread // percent // read / books
     expect(out.series_row_1).toBe(
-      "Ballad of a Shinigami//K-Ske Hasegawa · 3 books · 2 read//67%//#2 next//0.66666666666667//11",
+      "Ballad of a Shinigami//K-Ske Hasegawa · 3 books · 2 read · #2 next//67%//2 / 3//0.66666666666667//11",
     );
     expect(out.series_row_2).toBe(
-      "Spice and Wolf//Isuna Hasekura · 21 books · 9 read//43%//#10 next//0.42857142857143//12",
+      "Spice and Wolf//Isuna Hasekura · 21 books · 9 read · #10 next//43%//9 / 21//0.42857142857143//12",
     );
     // Not started: a dash and the words, and no bar.
     expect(out.series_row_3).toBe(
@@ -404,11 +418,23 @@ describe("plugin library page model: Series", () => {
     );
   });
 
-  it("reads a finished series as done, with a full bar and no next volume", () => {
-    if (!LUA_BINARY) return;
+  it("reads a finished series as done, with its read count and a full bar", () => {    if (!LUA_BINARY) return;
     const out = runHarness();
     expect(out.series_row_4).toBe(
-      "Monogatari//Nisio Isin · 14 books · 14 read//done//nil//1//14",
+      "Monogatari//Nisio Isin · 14 books · 14 read//done//14 / 14//1//14",
+    );
+  });
+
+  it("keeps a fractional series index as the volume it names", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // Calibre stores 2.5 for a volume between 2 and 3, and the grouping document
+    // carries it as text; rounding it down would name the wrong book.
+    expect(out.group_fraction).toBe("2.5");
+    expect(out.group_integer).toBe("10");
+    expect(out.group_missing).toBe("nil");
+    expect(out.group_fraction_secondary).toBe(
+      "K-Ske Hasegawa · 3 books · 1 read · #2.5 next",
     );
   });
 

@@ -377,14 +377,15 @@ function Status.normalizeGroups(groups)
             if name ~= "" then
                 -- The next unread volume arrives as a number from Calibre or as
                 -- text from a grouped series; it is drawn as given, so it is
-                -- coerced to a string here instead of being re-formatted.
-                local next_index = Status.num(group.nextIndex)
+                -- coerced to a string here instead of being re-formatted. A
+                -- fractional index (Calibre allows 2.5) is part of the label.
+                local next_index = Status.str(group.nextIndex)
                 list[#list + 1] = {
                     name = name,
                     author = Status.str(group.author),
                     books = Status.num(group.books),
                     read = Status.num(group.read),
-                    nextIndex = next_index and tostring(math.floor(next_index)) or nil,
+                    nextIndex = next_index ~= "" and next_index or nil,
                     coverId = Status.num(group.coverId),
                 }
             end

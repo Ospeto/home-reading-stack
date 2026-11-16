@@ -1760,9 +1760,12 @@ package.preload["ui/widget/container/framecontainer"] = function()
   function frame:new(options)
     options = options or {}
     options.__kind = "framecontainer"
+    -- A frame draws its border and padding outside its child, so the size it
+    -- reports - and the page height measured from it - has to include both.
     function options:getSize()
       local inner = self[1] and self[1]:getSize() or { w = 0, h = 0 }
-      return { w = inner.w or 0, h = inner.h or 0 }
+      local inset = 2 * (tonumber(self.padding) or 0) + 2 * (tonumber(self.bordersize) or 0)
+      return { w = (inner.w or 0) + inset, h = (inner.h or 0) + inset }
     end
     function options:paintTo() end
     function options:free() end
@@ -2008,8 +2011,10 @@ package.preload["ui/widget/container/inputcontainer"] = function()
   return InputContainer
 end
 -- Layout containers: children are appended to the container table itself, which
--- is what a group is in KOReader (group[#group + 1] = widget).
-local function layout_container(kind)
+-- is what a group is in KOReader (group[#group + 1] = widget). A horizontal
+-- group is as tall as its tallest child and as wide as all of them; a vertical
+-- group is as wide as its widest child and as tall as all of them.
+local function layout_container(kind, stacks)
   return function()
     local group = {}
     group.__kind = kind
@@ -2023,8 +2028,8 @@ local function layout_container(kind)
       local width, height = 0, 0
       for index = 1, #self do
         local size = self[index] and self[index]:getSize() or { w = 0, h = 0 }
-        width = width + (size.w or 0)
-        if (size.h or 0) > height then height = size.h end
+        width = stacks and math.max(width, size.w or 0) or (width + (size.w or 0))
+        height = stacks and (height + (size.h or 0)) or math.max(height, size.h or 0)
       end
       if self.dimen then return self.dimen end
       return { w = width, h = height }
@@ -2038,8 +2043,8 @@ local function layout_container(kind)
     return group
   end
 end
-package.preload["ui/widget/verticalgroup"] = layout_container("verticalgroup")
-package.preload["ui/widget/horizontalgroup"] = layout_container("horizontalgroup")
+package.preload["ui/widget/verticalgroup"] = layout_container("verticalgroup", true)
+package.preload["ui/widget/horizontalgroup"] = layout_container("horizontalgroup", false)
 package.preload["ui/widget/container/leftcontainer"] = layout_container("leftcontainer")
 package.preload["ui/widget/container/rightcontainer"] = layout_container("rightcontainer")
 -- A spacer is a fixed width with no children; the page uses it for gutters and
@@ -3351,6 +3356,91 @@ http.request = working_request
 print("OK")
 `);
 
+/**
+ * What the one-page statistics screen actually draws.
+ *
+ * `Ui.pagePlan`'s return value is a budget, and a budget checked against itself
+ * can be wrong: the renderer puts a focus line under every row and a gap between
+ * the heatmap's seven day rows, so a plan that counts only the band heights
+ * reports a page that fits while the footer falls off the bottom of the screen.
+ * This harness builds the real widget tree through `Page.build` and measures it,
+ * so the numbers come from the drawing and not from the plan.
+ */
+const PAGE_HEIGHT_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local Views = require("lighthouse_views")
+local Status = require("lighthouse_status")
+local Stats = require("lighthouse_stats")
+local Ui = require("lighthouse_ui")
+local Page = require("lighthouse_page")
+
+-- One full payload: four rows in each list, every band present, so each screen
+-- is measured with the most it can ever be asked to draw.
+local payload = {
+  totalSessions = 412,
+  finishedCount = 55,
+  activeBooks = {
+    { bookId = 11, displayTitle = "Ballad of a Shinigami vol. 2",
+      displayAuthors = "K-Ske Hasegawa", percentage = 0.62, timestamp = 1763290000, device = "Kindle" },
+    { bookId = 12, displayTitle = "Spice and Wolf, Vol. 9",
+      displayAuthors = "Isuna Hasekura", percentage = 0.41, timestamp = 1763200000, device = "Kindle" },
+    { bookId = 13, displayTitle = "Ascendance of a Bookworm",
+      displayAuthors = "Miya Kazuki", percentage = 0.15, timestamp = 1763100000, device = "Kindle" },
+    { bookId = 14, displayTitle = "Legend of the Galactic Heroes",
+      displayAuthors = "Yoshiki Tanaka", percentage = 0.10, timestamp = 1763000000, device = "Kindle" },
+  },
+  streaks = { currentStreak = 5, longestStreak = 12, readingDaysCount = 63 },
+  dailyReadingTime = {
+    todayMinutes = 45, thisWeekMinutes = 250, totalSeconds = 477000,
+    dailyAverageMinutes = 32, days = {},
+  },
+  heatmap = {
+    { date = "2026-11-14", level = 2 },
+    { date = "2026-11-15", level = 3 },
+  },
+  libraryHealth = { totalBooks = 162, unreadCount = 120, inProgressCount = 8, finishedCount = 34, staleCount = 3 },
+  goal = { year = 2026, currentBooks = 12, currentHours = 34 },
+  recentSessions = {
+    { title = "Ballad of a Shinigami vol. 2", startTime = 1763298000, durationSeconds = 337, device = "Kindle" },
+    { title = "Spice and Wolf, Vol. 9", startTime = 1763200000, durationSeconds = 2280, device = "Kindle" },
+    { title = "Ascendance of a Bookworm", startTime = 1763100000, durationSeconds = 4320, device = "Kindle" },
+    { title = "Legend of the Galactic Heroes", startTime = 1763000000, durationSeconds = 900, device = "Kindle" },
+  },
+}
+
+local numbers = assert(Stats.normalize(payload), "payload must normalize")
+local sessions = Status.normalizeSessions(payload.activeBooks)
+local now = 1763300000
+local today = { year = 2026, month = 11, day = 16, hour = 20, min = 0 }
+
+-- The panels the captain named (a 600x800 Basic and a 1072x1448 Paperwhite)
+-- plus two more sizes the same rule has to serve.
+local screens = {
+  { 600, 800, 1 },
+  { 1072, 1448, 1.79 },
+  { 1236, 1648, 2 },
+  { 758, 1024, 1.2 },
+}
+for screen_index = 1, #screens do
+  local width = screens[screen_index][1]
+  local height = screens[screen_index][2]
+  local scale = screens[screen_index][3]
+  local plan = Ui.pagePlan(width, height, scale)
+  local model = Views.statsModel(numbers, sessions, now, {
+    weeks = plan.heat_weeks,
+    year = 2026,
+    today = today,
+    average_daily_minutes = numbers.averageDailyMinutes,
+    reading_max = plan.reading_rows,
+    session_max = plan.session_rows,
+  })
+  local page = assert(Page.build{ model = model, plan = plan })
+  local drawn = page:getSize().h
+  print(string.format("page_%dx%d=%d,%d,%d,%s", width, height, drawn, plan.total, height,
+    tostring(drawn <= height)))
+end
+print("OK")
+`);
+
 describe("plugin reading stats view", () => {
   /** Extracts the generated archive the documented way and runs a harness on it. */
   function runHarness(harness: string): Record<string, string> {
@@ -3413,6 +3503,30 @@ describe("plugin reading stats view", () => {
     expect(out.plan_fits).toBe("true");
   });
 
+  it("measures the page it draws - not just its plan - inside every screen", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runHarness(PAGE_HEIGHT_HARNESS);
+
+    // drawn height, the plan's own total, the screen height, whether it fits.
+    // The oracle is the built widget tree: `Page.build` measures what the
+    // renderer draws (a focus line under every row, a gap between the heatmap's
+    // day rows, the frame's border and padding), so a plan that forgot any of
+    // them shows up here as a page taller than the screen it is drawn on.
+    for (const screen of ["page_600x800", "page_1072x1448", "page_1236x1648", "page_758x1024"]) {
+      const parts = (out[screen] ?? "").split(",");
+      expect(parts).toHaveLength(4);
+      const drawn = Number(parts[0]);
+      const planned = Number(parts[1]);
+      const height = Number(parts[2]);
+      expect(parts[3]).toBe("true");
+      expect(planned).toBeLessThanOrEqual(height);
+      expect(drawn).toBeLessThanOrEqual(height);
+      // A budget that cannot be drawn at all would be the other way to pass:
+      // the page still uses most of the screen instead of shrinking to chrome.
+      expect(drawn).toBeGreaterThan(height * 0.8);
+    }
+  });
+
   it("leads with the four headline numbers", () => {
     if (!LUA_BINARY || !UNZIP_BINARY) return;
     const out = runHarness(READING_STATS_HARNESS);
@@ -3440,7 +3554,7 @@ describe("plugin reading stats view", () => {
     // three rows the design allows even though the payload carries four.
     expect(out.sections).toBe("2");
     expect(out.section_rows).toBe("6");
-    expect(out.footer).toBe("LightHouse|32 min on an average day");
+    expect(out.footer).toBe("LightHouse|32 min on an average day · detail on web");
   });
 
   it("leaves out a section the payload did not carry instead of showing zeros", () => {
@@ -3795,6 +3909,157 @@ describe("plugin cover prefetch", () => {
     expect(out.final_exists).toBe("true");
     expect(out.final_whole).toBe("true");
 
+    expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
+  });
+});
+
+/**
+ * The Authors / Series groupings are one document fetched once and then paged on
+ * the device. That cache is a performance decision, not a truth: a reader who
+ * finished a book and asked again has to see the server's new read counts, so an
+ * explicit Refresh and a grouping switch must both go back to the network while a
+ * page turn must not. The harness counts the requests the plugin actually makes.
+ */
+const GROUPING_REFRESH_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local expected_base_url = assert(arg[2], "expected base url argument required")
+
+local fetched = { authors = 0, series = 0 }
+local current_url = ""
+
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      current_url = tostring(request and request.url or "")
+      local by = current_url:match("/api/library/groups%?by=(%a+)")
+      if by then fetched[by] = (fetched[by] or 0) + 1 end
+      if request.sink then
+        request.sink("{}")
+        request.sink(nil)
+      end
+      return 1, 200, {}
+    end,
+  }
+end
+package.preload["ltn12"] = function()
+  return {
+    sink = {
+      table = function(target)
+        return function(chunk)
+          if chunk then target[#target + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function() end,
+    },
+  }
+end
+package.preload["json"] = function()
+  return {
+    decode = function()
+      local by = current_url:match("/api/library/groups%?by=(%a+)")
+      if not by then return {} end
+      -- Six rows, so the second page has something to draw as well.
+      local groups = {}
+      for index = 1, 6 do
+        groups[index] = {
+          name = by .. " " .. tostring(index),
+          author = "A Writer",
+          books = 3,
+          read = 1,
+          nextIndex = "2",
+        }
+      end
+      return { groups = groups, books = 18, authors = 6, series = 6 }
+    end,
+  }
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local config = require("lighthouse_config")
+assert(config.base_url == expected_base_url, "harness needs the generated config")
+
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+
+local models = {}
+local function open(options)
+  local ok, raised = pcall(function() LightHouse:openLibrary(options) end)
+  assert(ok, tostring(raised))
+  models[#models + 1] = LightHouse.last_page_model
+end
+
+open{ mode = "series", page = 1 }
+print("series_first=" .. fetched.series)
+open{ mode = "series", page = 2 }
+print("series_page_turn=" .. fetched.series)
+open{ page = 2, refresh = true }
+print("series_refresh=" .. fetched.series)
+open{ mode = "authors", page = 1 }
+print("authors_first=" .. fetched.authors)
+open{ mode = "series", page = 1 }
+print("series_after_switch=" .. fetched.series)
+
+-- What the reader sees after the refresh: the counts the server just sent.
+local rows = models[3].blocks[1].rows
+print("refresh_row=" .. tostring(rows[1].title) .. "//" .. tostring(rows[1].secondary)
+  .. "//" .. tostring(rows[1].value) .. "//" .. tostring(rows[1].value_sub))
+print("OK")
+`);
+
+describe("plugin library groupings", () => {
+  it("refetches a grouping on Refresh and on a switch, not on a page turn", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "harness-api-key",
+      generatedAt: "2026-11-14T00:00:00.000Z",
+    });
+
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-groupings-"));
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
+      encoding: "utf8",
+    });
+    expect(extract.status).toBe(0);
+
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "grouping_harness.lua");
+    fs.writeFileSync(harnessPath, GROUPING_REFRESH_HARNESS);
+
+    const res = spawnSync(
+      LUA_BINARY,
+      [harnessPath, pluginRoot, "http://192.168.31.15:8086"],
+      { encoding: "utf8" },
+    );
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line) => line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+
+    expect(out.series_first).toBe("1");
+    // Paging a grouping is local: the whole document is already on the device.
+    expect(out.series_page_turn).toBe("1");
+    // Refresh is the reader asking again after finishing a book.
+    expect(out.series_refresh).toBe("2");
+    expect(out.authors_first).toBe("1");
+    // Switching back is a fresh open of that grouping, not the old document.
+    expect(out.series_after_switch).toBe("3");
+
+    // And the refreshed page draws what the server just sent: page 2's second
+    // row of the six-group document.
+    expect(out.refresh_row).toBe("series 5//A Writer · 3 books · 1 read · #2 next//33%//1 / 3");
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
 });

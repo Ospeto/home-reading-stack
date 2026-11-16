@@ -79,6 +79,9 @@ Views.LABELS = {
     next_unread = "#%s next",
     books_count = "%s books",
     read_count = "%s read",
+    read_of_books = "%s / %s",
+    average_day = "%d min on an average day",
+    detail_on_web = "detail on web",
     author_count = "%s authors",
     series_count = "%s series",
 }
@@ -345,12 +348,14 @@ function Views.statsModel(stats, sessions, now, options)
         }
     end
 
-    local footer = { left = "LightHouse" }
+    local footer = { left = "LightHouse", right = text.detail_on_web }
     local average = Status.num(options.average_daily_minutes)
     if average and average > 0 then
         -- Minutes, not "1h 8m": an average day is read as a minute figure, and
         -- that is how the accepted design prints it.
-        footer.right = string.format("%d min on an average day", math.floor(average + 0.5))
+        footer.right = string.format(text.average_day, math.floor(average + 0.5))
+            .. Ui.GLYPH.separator
+            .. text.detail_on_web
     end
 
     return {
@@ -379,11 +384,11 @@ function Views.seriesRow(group, text)
     if title == "" then title = Status.str(group.author) end
     if title == "" then title = "—" end
 
-    local secondary = Ui.join({
+    local parts = {
         Status.str(group.author),
         string.format(labels.books_count, Ui.formatThousands(books) or "0"),
         string.format(labels.read_count, Ui.formatThousands(read) or "0"),
-    })
+    }
 
     local value, ratio, value_sub
     if books > 0 and read >= books then
@@ -396,15 +401,22 @@ function Views.seriesRow(group, text)
         value = string.format("%d%%", math.floor(read / books * 100 + 0.5))
         ratio = read / books
     end
+    if value_sub == nil then
+        value_sub = string.format(labels.read_of_books,
+            Ui.formatThousands(read) or "0", Ui.formatThousands(books) or "0")
+    end
+    -- The next unread volume is the volume the row's cover already shows, so it
+    -- rides on the metadata line with the counts instead of taking the value
+    -- column the accepted layout gives to progress.
     local next_index = Status.str(group.nextIndex)
     if next_index ~= "" and read > 0 and read < books then
-        value_sub = string.format(labels.next_unread, next_index)
+        parts[#parts + 1] = string.format(labels.next_unread, next_index)
     end
 
     return {
         kind = "reading",
         title = title,
-        secondary = secondary,
+        secondary = Ui.join(parts),
         value = value,
         value_sub = value_sub,
         ratio = ratio,
@@ -425,15 +437,20 @@ function Views.authorRow(group, text)
     local title = Status.str(group.name)
     if title == "" then title = "—" end
 
-    local value, ratio
+    local value, ratio, value_sub
     if books > 0 and read >= books then
         value = labels.done
         ratio = 1
     elseif read <= 0 then
         value = "—"
+        value_sub = labels.not_started
     else
         value = string.format("%d%%", math.floor(read / books * 100 + 0.5))
         ratio = read / books
+    end
+    if value_sub == nil then
+        value_sub = string.format(labels.read_of_books,
+            Ui.formatThousands(read) or "0", Ui.formatThousands(books) or "0")
     end
 
     return {
@@ -444,6 +461,7 @@ function Views.authorRow(group, text)
             string.format(labels.read_count, Ui.formatThousands(read) or "0"),
         }),
         value = value,
+        value_sub = value_sub,
         ratio = ratio,
         cover_id = Status.num(group.coverId),
         action = { kind = "author", name = Status.str(group.name) },

@@ -81,7 +81,7 @@ export function splitAuthors(value: unknown): string[] {
 export function formatSeriesIndex(value: unknown): string | undefined {
   const raw = Number(value);
   if (!Number.isFinite(raw) || raw <= 0) return undefined;
-  return Number.isInteger(raw) ? String(raw) : String(raw);
+  return String(raw);
 }
 
 /** Reads the furthest percentage recorded for one book. */

@@ -236,9 +236,7 @@ end
 local PageWidget = InputContainer:extend{
     model = nil,
     plan = nil,
-    kind = "stats",
     faces = nil,
-    on_back = nil,
     on_action = nil,
     on_overflow = nil,
     on_switch = nil,
@@ -876,7 +874,7 @@ function PageWidget:onCloseWidget()
 end
 
 --- Builds one page widget from a model and its layout plan.
--- @tparam table options { model, plan, kind, cover_widget, on_back, on_action,
+-- @tparam table options { model, plan, cover_widget, on_action,
 --                         on_overflow, on_switch, close_callback }
 -- @treturn table page widget
 function Page.build(options)
@@ -884,10 +882,8 @@ function Page.build(options)
     local widget = PageWidget:new{
         model = options.model,
         plan = options.plan,
-        kind = options.kind or "stats",
         faces = options.faces,
         cover_widget = options.cover_widget,
-        on_back = options.on_back,
         on_action = options.on_action,
         on_overflow = options.on_overflow,
         on_switch = options.on_switch,

@@ -1027,8 +1027,17 @@ function Ui.pagePlan(screen_w, screen_h, scale)
     -- after the smallest scale still does not fit. The reading rows go first:
     -- the picture and the session list carry more of the answer than a fourth
     -- book does.
+    --
+    -- A drawn row is taller than its own band: the renderer puts a focus line
+    -- under every row, and the heatmap draws a gap between its seven day rows,
+    -- so both are budgeted here. A plan that counted only the bands would report
+    -- a page that fits while the footer is off the bottom of the screen.
+    local function bandHeight(count, cell) return count * (cell + hairline) end
+    local function heatHeight(cell) return 7 * cell + 6 * gap_x end
     local function fits(reading_count, session_count, reading_px, session_px, cell_px)
-        local needed = reading_count * reading_px + 7 * cell_px + session_count * session_px
+        local needed = bandHeight(reading_count, reading_px)
+            + heatHeight(cell_px)
+            + bandHeight(session_count, session_px)
         return needed <= available
     end
 
@@ -1068,7 +1077,10 @@ function Ui.pagePlan(screen_w, screen_h, scale)
     -- rather see, and the design's "no wide gaps" applies to the page, not only
     -- to the rows. Bounded by `page_heat_cell_max_units`, so a huge screen gets a
     -- readable grid rather than seven enormous blocks.
-    local used = fixed + reading_rows * reading_h + 7 * cell_h + session_rows * session_h
+    local used = fixed
+        + bandHeight(reading_rows, reading_h)
+        + heatHeight(cell_h)
+        + bandHeight(session_rows, session_h)
     while cell_h < cell_max and (height - used) >= 7 do
         cell_h = cell_h + 1
         used = used + 7
@@ -1086,7 +1098,10 @@ function Ui.pagePlan(screen_w, screen_h, scale)
     local cell_w = math.floor((content_w - (weeks - 1) * gap_x) / weeks)
     if cell_w < cell_min then cell_w = cell_min end
 
-    local total = fixed + reading_rows * reading_h + 7 * cell_h + session_rows * session_h
+    local total = fixed
+        + bandHeight(reading_rows, reading_h)
+        + heatHeight(cell_h)
+        + bandHeight(session_rows, session_h)
     local slack = height - total
     if slack < 0 then slack = 0 end
 
@@ -1189,18 +1204,25 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
     if available < 1 then available = 1 end
 
     local row_h = scaled(tokens.page_reading_units)
-    local rows = math.floor(available / row_h)
+    -- Every drawn row also carries its own focus line, so the band a row needs
+    -- is the row plus one hairline.
+    local step_h = row_h + hairline
+    local rows = math.floor(available / step_h)
     if rows < min_rows then
         -- Too few rows: shrink the rows instead of the list, down to the token's
         -- floor, and take the count that fits at that size.
-        row_h = math.max(math.floor(available / min_rows), row_min)
-        rows = math.floor(available / row_h)
+        row_h = math.max(math.floor(available / min_rows) - hairline, row_min)
+        step_h = row_h + hairline
+        rows = math.floor(available / step_h)
         if rows < 1 then rows = 1 end
-    elseif row_h < row_max and rows * row_h < available then
+    elseif row_h < row_max and rows * step_h < available then
         -- A screen with room to spare gets slightly taller rows rather than a
         -- gap under the last row.
-        local taller = math.floor(available / rows)
-        if taller > row_h and taller <= row_max then row_h = taller end
+        local taller = math.floor(available / rows) - hairline
+        if taller > row_h and taller <= row_max then
+            row_h = taller
+            step_h = row_h + hairline
+        end
     end
 
     local cover_h = row_h - gap
@@ -1212,7 +1234,7 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
         cover_h = math.max(math.floor(cover_w / tokens.cover_aspect + 0.5), 1)
     end
 
-    local total = fixed + rows * row_h
+    local total = fixed + rows * step_h
     local slack = height - total
     if slack < 0 then slack = 0 end
 
