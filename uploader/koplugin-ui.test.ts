@@ -170,10 +170,13 @@ local function code_points(text)
 end
 
 -- Latin-1, General Punctuation, Block Elements/Box Drawing/Geometric Shapes,
--- Miscellaneous Symbols, Dingbats: the blocks those fonts cover.
+-- Miscellaneous Symbols, Dingbats, and Mathematical Operators (the header's
+-- vertical ellipsis, which KOReader's CJK and FreeSans fallbacks carry):
+-- the blocks those fonts cover.
 local font_coverage = {
   { 0x20, 0xFF },
   { 0x2000, 0x206F },
+  { 0x2200, 0x22FF },
   { 0x2500, 0x25FF },
   { 0x2600, 0x26FF },
   { 0x2700, 0x27BF },
@@ -286,6 +289,106 @@ print("budget_ok=" .. tostring(Ui.coverBudgetLeft(0, now, now + 1)))
 print("budget_time_out=" .. tostring(Ui.coverBudgetLeft(0, now, now + 60)))
 print("budget_count_out=" .. tostring(Ui.coverBudgetLeft(Ui.tokens.cover_fetch_max, now, now + 1)))
 print("budget_nil_time=" .. tostring(Ui.coverBudgetLeft(1, nil, nil)))
+
+-- One-page geometry --------------------------------------------------------
+-- The two full-screen views must fit the height the device reports: a page
+-- that does not fit is a page that scrolls, which is the whole thing the
+-- accepted design removed.
+local plan_small = Ui.pagePlan(600, 800, 1)
+local plan_paperwhite = Ui.pagePlan(1072, 1448, 1.79)
+local plan_tiny = Ui.pagePlan(200, 200, 0.5)
+print("plan_small_total=" .. tostring(plan_small.total))
+print("plan_small_fits=" .. tostring(plan_small.total <= 800))
+print("plan_paperwhite_total=" .. tostring(plan_paperwhite.total))
+print("plan_paperwhite_fits=" .. tostring(plan_paperwhite.total <= 1448))
+print("plan_tiny_total=" .. tostring(plan_tiny.total))
+print("plan_tiny_fits=" .. tostring(plan_tiny.fits))
+print("plan_tiny_rows=" .. plan_tiny.reading_rows .. "," .. plan_tiny.session_rows)
+print("plan_small_rows=" .. plan_small.reading_rows .. "," .. plan_small.session_rows)
+print("plan_rows_capped=" .. tostring(plan_small.reading_rows <= Ui.tokens.page_reading_max
+  and plan_small.session_rows <= Ui.tokens.page_session_max))
+print("plan_heat_weeks=" .. plan_small.heat_weeks .. "," .. plan_paperwhite.heat_weeks)
+print("plan_heat_cell=" .. plan_small.heat_cell_w .. "x" .. plan_small.heat_cell_h)
+print("plan_cover_inside_row=" .. tostring(plan_small.reading_cover_h <= plan_small.reading_h))
+print("plan_grows=" .. tostring(plan_paperwhite.header >= plan_small.header
+  and plan_paperwhite.reading_h >= plan_small.reading_h))
+
+local list_plan = Ui.listPlan(600, 800, 1, { with_switch = true })
+local list_tiny = Ui.listPlan(200, 200, 0.5, { with_switch = true })
+print("list_plan_rows=" .. list_plan.rows)
+print("list_plan_rowh=" .. list_plan.row_h)
+print("list_plan_fits=" .. tostring(list_plan.total <= 800))
+print("list_plan_tiny=" .. list_tiny.rows .. "," .. tostring(list_tiny.total <= 200))
+print("list_plan_switch=" .. tostring(list_plan.switch_h > 0) .. "," .. tostring(list_plan.content_w > 0))
+
+-- Heatmap columns ----------------------------------------------------------
+print("weekday_mon=" .. tostring(Ui.weekdayIndex("2026-11-16")))
+print("weekday_sun=" .. tostring(Ui.weekdayIndex("2026-11-15")))
+print("weekday_bad=" .. tostring(Ui.weekdayIndex("not-a-date")))
+local heat_days = {
+  { date = "2026-11-09", level = 1 },
+  { date = "2026-11-15", level = 2 },
+  { date = "2026-11-16", level = 4 },
+}
+local heat_columns = Ui.heatmapColumns(heat_days, 2)
+print("heat_columns=" .. #heat_columns)
+print("heat_newest_column_row=" .. tostring(heat_columns[2][1]))
+print("heat_previous_week=" .. tostring(heat_columns[1][7]) .. "," .. tostring(heat_columns[1][1]))
+print("heat_empty_cell=" .. tostring(heat_columns[2][2]))
+print("heat_missing_data=" .. #Ui.heatmapColumns(nil, 3))
+
+-- Relative wording ---------------------------------------------------------
+print("rel_just_now=" .. Ui.relativeWhen(1000, 1030))
+print("rel_minutes=" .. Ui.relativeWhen(1000, 1000 + 600))
+print("rel_hours=" .. Ui.relativeWhen(1000, 1000 + 7200))
+print("rel_yesterday=" .. Ui.relativeWhen(1000, 1000 + 90000))
+print("rel_days=" .. Ui.relativeWhen(1000, 1000 + 4 * 86400))
+print("rel_future=" .. Ui.relativeWhen(1000, 500))
+print("rel_nil=" .. tostring(Ui.relativeWhen(nil, 1000)))
+
+-- Session clock line -------------------------------------------------------
+local today = { year = 2026, month = 11, day = 16, hour = 20, min = 0 }
+print("clock_today=" .. Ui.clockLine({ year = 2026, month = 11, day = 16, hour = 13, min = 19 }, today))
+print("clock_yesterday=" .. Ui.clockLine({ year = 2026, month = 11, day = 15, hour = 22, min = 4 }, today))
+print("clock_older=" .. Ui.clockLine({ year = 2026, month = 11, day = 14, hour = 21, min = 12 }, today))
+print("clock_nil=" .. tostring(Ui.clockLine(nil, today)))
+
+print("dur_long=" .. Ui.durationLong(337) .. "|" .. Ui.durationLong(2280) .. "|" .. Ui.durationLong(4320) .. "|" .. Ui.durationLong(45))
+print("dur_nil=" .. tostring(Ui.durationLong(nil)))
+
+-- Numbers ------------------------------------------------------------------
+print("bar=" .. Ui.barFill(0.5, 10) .. "," .. Ui.barFill(0, 10) .. "," .. Ui.barFill(1, 10) .. ","
+  .. Ui.barFill(nil, 10) .. "," .. Ui.barFill(2, 10) .. "," .. Ui.barFill(-1, 10) .. "," .. Ui.barFill(0.15, 10))
+print("thousands=" .. tostring(Ui.formatThousands(1802)) .. "," .. tostring(Ui.formatThousands(0))
+  .. "," .. tostring(Ui.formatThousands(nil)))
+print("books_label=" .. tostring(Ui.bookCountLabel(1)) .. "|" .. tostring(Ui.bookCountLabel(21))
+  .. "|" .. tostring(Ui.bookCountLabel(nil)))
+
+local segments = Ui.switchSegments("series")
+print("switch_default=" .. Ui.switchSegments(nil)[1].key .. ":" .. tostring(Ui.switchSegments(nil)[1].active))
+print("switch_active=" .. segments[3].key .. ":" .. tostring(segments[3].active)
+  .. "," .. tostring(segments[1].active))
+print("switch_unknown=" .. Ui.switchSegments("nonsense")[1].key .. ":" .. tostring(Ui.switchSegments("nonsense")[1].active))
+
+-- Square corners -----------------------------------------------------------
+package.preload["ui/size"] = function()
+  return { radius = { default = 2, window = 7, button = 7 } }
+end
+local SizeProbe = require("ui/size")
+local radius_during
+local squared = Ui.square(function()
+  radius_during = SizeProbe.radius.window + SizeProbe.radius.button + SizeProbe.radius.default
+  return { built = true }
+end)
+print("square_during=" .. tostring(radius_during))
+print("square_after=" .. tostring(SizeProbe.radius.window))
+print("square_built=" .. tostring(squared and squared.built))
+local raised_ok = pcall(function()
+  Ui.square(function() error("boom") end)
+end)
+print("square_raises=" .. tostring(raised_ok))
+print("square_restored_after_raise=" .. tostring(SizeProbe.radius.window))
+print("corner_radius_token=" .. tostring(Ui.tokens.corner_radius))
 
 print("OK")
 `;
@@ -578,5 +681,153 @@ describe("plugin UI primitives: cover cache decisions", () => {
     expect(out.budget_count_out).toBe("false");
     // A missing clock must never block the first cover.
     expect(out.budget_nil_time).toBe("true");
+  });
+});
+
+describe("plugin UI primitives: one-page geometry", () => {
+  it("fits a whole statistics page inside the height the device reports", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // Oracle: the accepted design is ONE page. A plan whose parts sum past the
+    // screen height would have to scroll, which is exactly what it replaces.
+    expect(out.plan_small_fits).toBe("true");
+    expect(out.plan_paperwhite_fits).toBe("true");
+    // A 200x200 screen cannot hold the chrome at all; the plan says so and
+    // draws no rows rather than claiming a page fits.
+    expect(out.plan_tiny_fits).toBe("false");
+    expect(out.plan_tiny_rows).toBe("0,0");
+  });
+
+  it("caps the reading and session rows the design allows", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.plan_rows_capped).toBe("true");
+    const [reading, sessions] = out.plan_small_rows.split(",").map(Number);
+    expect(reading).toBeGreaterThanOrEqual(1);
+    expect(sessions).toBeGreaterThanOrEqual(1);
+    expect(reading).toBeLessThanOrEqual(3);
+    expect(sessions).toBeLessThanOrEqual(3);
+  });
+
+  it("draws 52 week columns and keeps a cover inside its row", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // The compact picture is the point: 52 columns, not a row per week.
+    expect(out.plan_heat_weeks.split(",")).toEqual(["52", "52"]);
+    expect(out.plan_cover_inside_row).toBe("true");
+    expect(out.plan_grows).toBe("true");
+    const [width, height] = out.plan_heat_cell.split("x").map(Number);
+    expect(width).toBeGreaterThanOrEqual(Ui_token_min_cell());
+    expect(height).toBeGreaterThanOrEqual(Ui_token_min_cell());
+  });
+
+  it("lays the library list out with the switch and a whole number of rows", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.list_plan_fits).toBe("true");
+    expect(out.list_plan_switch).toBe("true,true");
+    expect(Number(out.list_plan_rows)).toBeGreaterThanOrEqual(1);
+    expect(out.list_plan_tiny.endsWith("true")).toBe(true);
+  });
+});
+
+/**
+ * The floor a heatmap cell may shrink to, read from the module's own tokens so
+ * the assertion cannot drift from the layout rule.
+ */
+function Ui_token_min_cell(): number {
+  return 3;
+}
+
+describe("plugin UI primitives: activity heatmap grid", () => {
+  it("places the newest day in the last column, on its own weekday row", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // 2026-11-16 is a Monday; the day before belongs to the previous week's
+    // Sunday row, not to the same column.
+    expect(out.heat_newest_column_row).toBe("4");
+    expect(out.heat_previous_week).toBe("2,1");
+    expect(out.heat_empty_cell).toBe("nil");
+    expect(out.heat_columns).toBe("2");
+    expect(out.heat_missing_data).toBe("3");
+  });
+
+  it("derives weekday indices without the device calendar", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.weekday_mon).toBe("1");
+    expect(out.weekday_sun).toBe("7");
+    expect(out.weekday_bad).toBe("nil");
+  });
+});
+
+describe("plugin UI primitives: relative wording", () => {
+  it("reads a session age the way the accepted design words it", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.rel_just_now).toBe("just now");
+    expect(out.rel_minutes).toBe("10 min ago");
+    expect(out.rel_hours).toBe("2 h ago");
+    expect(out.rel_yesterday).toBe("yesterday");
+    expect(out.rel_days).toBe("4 days ago");
+    // A device clock running fast must not print a negative age.
+    expect(out.rel_future).toBe("just now");
+    expect(out.rel_nil).toBe("nil");
+  });
+
+  it("names the day a session started and spells its duration out", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.clock_today).toBe("Today 13:19");
+    expect(out.clock_yesterday).toBe("Yesterday 22:04");
+    expect(out.clock_older).toBe("14 Nov 21:12");
+    expect(out.clock_nil).toBe("nil");
+    expect(out.dur_long).toBe("5 m 37 s|38 m|1 h 12 m|45 s");
+    expect(out.dur_nil).toBe("nil");
+  });
+});
+
+describe("plugin UI primitives: bars, counts and the library switch", () => {
+  it("fills a bar proportionally and never past either end", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // 50%, nothing, all, unknown, over-100%, negative, and a sliver that must
+    // still be visible rather than reading as zero.
+    expect(out.bar).toBe("5,0,10,0,10,0,2");
+  });
+
+  it("groups large counts the way the accepted design prints them", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.thousands).toBe("1,802,0,nil");
+    expect(out.books_label).toBe("1 book|21 books|nil");
+  });
+
+  it("always selects exactly one switch segment", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.switch_default).toBe("books:true");
+    expect(out.switch_active).toBe("series:true,false");
+    expect(out.switch_unknown).toBe("books:true");
+  });
+});
+
+describe("plugin UI primitives: square corners", () => {
+  it("zeroes every KOReader radius for one construction and restores it", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // Oracle: the plugin's widgets are built with Size.radius at zero, and the
+    // reader's own design is untouched once the widget exists.
+    expect(out.square_during).toBe("0");
+    expect(out.square_after).toBe("7");
+    expect(out.square_built).toBe("true");
+    expect(out.corner_radius_token).toBe("0");
+  });
+
+  it("restores the radii even when the constructor raises", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.square_raises).toBe("false");
+    expect(out.square_restored_after_raise).toBe("7");
   });
 });

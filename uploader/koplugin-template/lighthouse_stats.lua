@@ -230,10 +230,58 @@ function Stats.normalize(payload)
             unread = numberOf(health.unreadCount),
             reading = numberOf(health.inProgressCount),
             finished = numberOf(health.finishedCount),
+            -- The one-page view names the shelf size in its heading and shows
+            -- how much of it has gone stale, so both are carried here instead
+            -- of being guessed from the three counts above.
+            total = numberOf(health.totalBooks),
+            stale = numberOf(health.staleCount),
         }
         if counts.unread or counts.reading or counts.finished then
             stats.health = counts
         end
+    end
+
+    -- How many books are in progress right now. The currently-reading rows
+    -- themselves are normalized from the same payload's `activeBooks` by the
+    -- caller (`Status.normalizeSessions`), the one place a KOSync row is
+    -- normalized for this plugin; this is only the count its heading shows.
+    if type(payload.activeBooks) == "table" then
+        stats.activeCount = #payload.activeBooks
+    end
+
+    -- Session totals come from `summary`, with the older top-level field as a
+    -- fallback, so either shape of the payload fills the same row.
+    local summary = payload.summary
+    if type(summary) == "table" then
+        stats.sessionCount = numberOf(summary.totalSessionsCount)
+        stats.averageDailyMinutes = numberOf(summary.averageDailyMinutes)
+    end
+    if not stats.sessionCount then
+        stats.sessionCount = numberOf(payload.totalSessions)
+    end
+
+    -- Recent sessions: the last few things read, with when, how long and on
+    -- what. An entry without a title or a duration is dropped rather than drawn
+    -- as a row of blanks.
+    if type(payload.recentSessions) == "table" then
+        local sessions = {}
+        for session_index = 1, #payload.recentSessions do
+            local session = payload.recentSessions[session_index]
+            if type(session) == "table" and type(session.title) == "string" then
+                local duration = numberOf(session.durationSeconds)
+                local started = numberOf(session.startTime)
+                if duration and duration > 0 and started then
+                    sessions[#sessions + 1] = {
+                        title = session.title,
+                        authors = type(session.authors) == "string" and session.authors or nil,
+                        device = type(session.device) == "string" and session.device or nil,
+                        startTime = started,
+                        durationSeconds = duration,
+                    }
+                end
+            end
+        end
+        if #sessions > 0 then stats.recentSessions = sessions end
     end
 
     if goal then

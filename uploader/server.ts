@@ -37,6 +37,7 @@ import {
 } from "./article";
 import { parseObsidianUri } from "./obsidian";
 import { generateOpdsFeed, rewriteOpdsXml } from "./opds";
+import { buildLibraryGroups } from "./library-groups";
 import {
   generateKoplugin,
   kopluginDownloadHeaders,
@@ -4939,6 +4940,26 @@ async function handleRequestCore(
           .map(([name, count]) => ({ name, count }))
           .sort((a, b) => b.count - a.count),
       },
+      200,
+      corsOrigin,
+    );
+  }
+
+  // API: Library groupings (Authors / Series).
+  //
+  // The KOReader plugin's library has a Books / Authors / Series switch, and a
+  // series row names its volume count, how many are read, and which volume comes
+  // next. That cannot be counted from the paged OPDS feed, so the whole grouping
+  // is folded here - with the same furthest-progress read rule the feed uses -
+  // and served as one small document the device pages locally.
+  if (url.pathname === "/api/library/groups" && req.method === "GET") {
+    const requested = (url.searchParams.get("by") ?? "series").trim().toLowerCase();
+    const by: "series" | "author" =
+      requested === "author" || requested === "authors" ? "author" : "series";
+    const groupedBooks = getCalibreBooks();
+    const progress = getOpdsProgressByBookId(groupedBooks) ?? new Map<number, number>();
+    return jsonResponse(
+      buildLibraryGroups(groupedBooks, progress, by, OPDS_FINISHED_THRESHOLD),
       200,
       corsOrigin,
     );

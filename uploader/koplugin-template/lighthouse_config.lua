@@ -33,7 +33,7 @@ return {
     base_url = "",
     api_key = "",
     page_size = 40,
-    plugin_version = "1.5.0",
+    plugin_version = "1.6.0",
     generated_at = "",
     request_block_timeout = 10,
     request_total_timeout = 90,
