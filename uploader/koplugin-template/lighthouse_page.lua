@@ -120,9 +120,9 @@ function Heatmap:paintTo(bb, x, y)
     end
 end
 
---- A tappable, focusable row: records its own absolute rectangle at paint time.
--- The page hit-tests these rectangles on touch, and moves a focus line between
--- them on a keyed device.
+--- A tappable row; content rows are also the ones the key cycle can land on.
+-- The page hit-tests these rectangles on touch, and the key cycle moves a focus
+-- line between the content rows only.
 local Panel = Widget:extend{
     child = nil,
     action = nil,
@@ -296,17 +296,16 @@ function PageWidget:buildHeader()
         dimen = Geom:new{ w = third, h = plan.header },
         label(Ui.GLYPH.overflow, self.faces.header, { width = third, align = "right" }),
     }
-    -- The two header affordances are rows too, so touch and keys reach them the
-    -- same way they reach any other tappable line.
+    -- The two header affordances are rows too, so touch reaches them the same
+    -- way it reaches any other tappable line. They carry no focus line: chrome
+    -- that cannot show focus stays out of the key cycle.
     local back_panel = Panel:new{
         child = back,
         action = { kind = "back" },
-        focus_line = LineWidget:new{ dimen = Geom:new{ w = 0, h = 0 }, background = COLOR_WHITE },
     }
     local overflow_panel = Panel:new{
         child = overflow,
         action = { kind = "overflow" },
-        focus_line = LineWidget:new{ dimen = Geom:new{ w = 0, h = 0 }, background = COLOR_WHITE },
     }
     self:register(back_panel)
     self:register(overflow_panel)
@@ -364,7 +363,6 @@ function PageWidget:buildSwitch()
         local panel = Panel:new{
             child = cell,
             action = { kind = "switch", key = segment.key },
-            focus_line = LineWidget:new{ dimen = Geom:new{ w = 0, h = 0 }, background = COLOR_WHITE },
         }
         self:register(panel)
         group[#group + 1] = panel
@@ -581,7 +579,7 @@ function PageWidget:buildRow(row, height)
         action = row.action,
         focus_line = focus_line,
     }
-    if row.action then self:register(panel) end
+    if row.action then self:registerFocusable(panel) end
     return panel
 end
 
@@ -619,7 +617,6 @@ function PageWidget:buildFooter()
     local left_panel = Panel:new{
         child = LeftContainer:new{ dimen = Geom:new{ w = half, h = plan.footer }, left_widget },
         action = { kind = "footer_left" },
-        focus_line = LineWidget:new{ dimen = Geom:new{ w = 0, h = 0 }, background = COLOR_WHITE },
     }
     local right_panel = Panel:new{
         child = RightContainer:new{
@@ -627,7 +624,6 @@ function PageWidget:buildFooter()
             right_widget,
         },
         action = { kind = "footer_right" },
-        focus_line = LineWidget:new{ dimen = Geom:new{ w = 0, h = 0 }, background = COLOR_WHITE },
     }
     if self.model.pager then
         self:register(left_panel)
@@ -640,7 +636,7 @@ function PageWidget:buildFooter()
     }
 end
 
---- Records a tappable/focusable panel and returns it.
+--- Records a tappable panel and returns it.
 -- @tparam table panel
 -- @treturn table panel
 function PageWidget:register(panel)
@@ -649,9 +645,21 @@ function PageWidget:register(panel)
     return panel
 end
 
+--- Records a content row the key cycle can land on and returns it.
+-- Only rows that draw a focus line join the cycle; chrome stays tappable.
+-- @tparam table panel
+-- @treturn table panel
+function PageWidget:registerFocusable(panel)
+    self:register(panel)
+    self.focus_panels = self.focus_panels or {}
+    self.focus_panels[#self.focus_panels + 1] = panel
+    return panel
+end
+
 --- Builds the whole page as one widget tree.
 function PageWidget:init()
     self.panels = {}
+    self.focus_panels = {}
     self.faces = self.faces or buildFaces(self.plan)
     local plan = self.plan
     local width = plan.content_w
@@ -822,20 +830,21 @@ function PageWidget:onSwipe(event_arg, ges)
     end
 end
 
---- Keys: move the focus line between the tappable rows.
+--- Keys: move the focus line between the content rows.
 -- @number step -1 for previous, 1 for next
 function PageWidget:moveFocus(step)
-    if not self.panels or #self.panels == 0 then return end
-    local count = #self.panels
+    local panels = self.focus_panels
+    if not panels or #panels == 0 then return end
+    local count = #panels
     local current = self.focus_index or 0
     local next_index = current + step
     if next_index < 1 then next_index = count end
     if next_index > count then next_index = 1 end
-    if self.focus_index and self.panels[self.focus_index] then
-        self.panels[self.focus_index]:setFocused(false)
+    if self.focus_index and panels[self.focus_index] then
+        panels[self.focus_index]:setFocused(false)
     end
     self.focus_index = next_index
-    self.panels[next_index]:setFocused(true)
+    panels[next_index]:setFocused(true)
 end
 
 function PageWidget:onNextItem()
@@ -849,11 +858,10 @@ function PageWidget:onPrevItem()
 end
 
 function PageWidget:onSelectItem()
-    if self.focus_index and self.panels[self.focus_index] then
-        self:run(self.panels[self.focus_index].action)
-        return true
+    local panels = self.focus_panels or {}
+    if self.focus_index and panels[self.focus_index] then
+        self:run(panels[self.focus_index].action)
     end
-    self:onBack()
     return true
 end
 

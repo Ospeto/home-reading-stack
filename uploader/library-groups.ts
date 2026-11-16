@@ -91,8 +91,8 @@ function compareNames(a: string, b: string): number {
  * Groups books by series and computes each series' progress.
  *
  * A series with no readable index still groups (books) - it simply has no
- * "next unread volume" to name, which is better than dropping real volumes from
- * the count.
+ * numbered unread volume to illustrate the row with, which is better than
+ * dropping real volumes from the count.
  */
 export function groupBySeries(
   books: GroupableBook[],
@@ -106,7 +106,6 @@ export function groupBySeries(
       author: string;
       books: number;
       read: number;
-      nextValue: number;
       /** Cover of the next unread volume: what the row is about. */
       nextCoverId?: number;
       nextCoverValue: number;
@@ -128,7 +127,6 @@ export function groupBySeries(
         author: "",
         books: 0,
         read: 0,
-        nextValue: Infinity,
         nextCoverValue: Infinity,
       };
       groups.set(series, group);
@@ -150,9 +148,6 @@ export function groupBySeries(
     // reader would start next.
     const index = Number(book.series_index);
     const value = Number.isFinite(index) && index > 0 ? index : Infinity;
-    if (value < group.nextValue) {
-      group.nextValue = value;
-    }
     if (book.cover && value < group.nextCoverValue) {
       group.nextCoverValue = value;
       group.nextCoverId = id;

@@ -28,16 +28,20 @@ What it gives you, on top of the built-in OPDS browser:
   * Calibre rating per book (0–10 → five stars), served by the OPDS feed.
   * A "Currently reading" shelf of every active device session, with local
     progress preferred and books only this device has read added to it.
-  * A "Reading stats" view mirroring the web Reading Statistics modal, headline
-    numbers first and then the activity picture: streak, reading time, books
-    finished this year, the yearly goal, a monochrome 26-week activity heatmap
-    and library health (`GET /api/kosync/stats`).
+  * A "Reading stats" view mirroring the web Reading Statistics modal as ONE
+    page: the headline strip, the library and year bands, the currently-reading
+    rows, a 52-week activity grid drawn as a pixel heatmap, the recent sessions
+    and one footer line - no scrolling, no paging and no goal section
+    (`GET /api/kosync/stats`).
   * Designed empty, loading and error screens: a failed request says what failed
     in one line and offers a retry, and an empty library does not look broken.
 
-It deliberately uses only endpoints that already existed before this plugin:
-`/api/opds`, `/api/books/<id>/download/epub`, `/api/books/<id>/cover`,
-`/api/kosync/active`, `/api/kosync/stats`. Local progress and highlights add no
+It speaks the server's own endpoints: `/api/opds`,
+`/api/books/<id>/download/epub`, `/api/books/<id>/cover`,
+`/api/kosync/active`, `/api/kosync/stats` and, for the library's Authors and
+Series groupings, `/api/library/groups`. A server without that last one still
+browses Books; the grouping switch reports the failure and offers a retry.
+Local progress and highlights add no
 endpoint at all: they are read from the sidecar files KOReader already writes
 beside the books (`<book>.sdr/metadata.<extension>.lua`, see
 `lighthouse_sidecar.lua`), and that surface is strictly read-only - the plugin

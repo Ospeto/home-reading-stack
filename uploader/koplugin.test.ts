@@ -1883,6 +1883,7 @@ package.preload["ui/uimanager"] = function()
     show = function(_, widget) shown[#shown + 1] = widget end,
     close = function() end,
     forceRePaint = function() end,
+    setDirty = function() end,
   }
 end
 package.preload["ui/widget/container/widgetcontainer"] = function()
@@ -2746,23 +2747,11 @@ print("dur_total=" .. tostring(Stats.formatDuration(477000)))
 print("dur_nil=" .. tostring(Stats.formatDuration(nil)))
 print("dur_junk=" .. tostring(Stats.formatDuration("abc")))
 print("dur_nan=" .. tostring(Stats.formatDuration(0/0)))
-print("mins=" .. tostring(Stats.formatMinutes(45)))
 print("hours_frac=" .. tostring(Stats.formatHours(132.5)))
 print("hours_whole=" .. tostring(Stats.formatHours(100)))
-print("days_one=" .. tostring(Stats.formatDays(1)))
-print("days_many=" .. tostring(Stats.formatDays(5)))
 print("count_float=" .. tostring(Stats.formatCount(12.0)))
 print("count_zero=" .. tostring(Stats.formatCount(0)))
 print("count_nil=" .. tostring(Stats.formatCount(nil)))
-
--- Dates and glyphs ------------------------------------------------------------
-print("date_short=" .. tostring(Stats.shortDate("2026-11-15")))
-print("date_passthrough=" .. tostring(Stats.shortDate("whenever")))
-print("date_nil=" .. tostring(Stats.shortDate(nil)))
-local glyphs = {}
-for level = 0, 4 do glyphs[#glyphs + 1] = Stats.heatmapGlyph(level) end
-print("glyphs=" .. table.concat(glyphs, ""))
-print("glyph_unknown=" .. tostring(Stats.heatmapGlyph(nil)) .. tostring(Stats.heatmapGlyph(9)))
 
 -- Level mapping: a validated read of the server's own level, never derived --
 print("level_server=" .. tostring(Stats.heatmapLevel({ level = 4, minutes = 1 })))
@@ -2804,11 +2793,17 @@ print("norm_finished_year=" .. tostring(stats.finishedThisYear))
 print("norm_unread=" .. tostring(stats.health.unread))
 print("norm_reading_zero=" .. tostring(stats.health.reading))
 print("norm_finished=" .. tostring(stats.health.finished))
-print("norm_goal_ratio=" .. tostring(stats.goal.booksRatio))
-print("norm_hours_ratio=" .. tostring(stats.goal.hoursRatio))
+-- The page has no goal section: the year names the YEAR band and the targets
+-- are not carried at all.
+print("norm_goal_year=" .. tostring(stats.goal and stats.goal.year))
+print("norm_goal_target=" .. tostring(stats.goal and stats.goal.targetBooks))
+print("norm_goal_ratio=" .. tostring(stats.goal and stats.goal.booksRatio))
 print("norm_heatmap_len=" .. tostring(#stats.heatmap))
 print("norm_heatmap_level3=" .. tostring(stats.heatmap[3].level))
 print("norm_heatmap_no_level=" .. tostring(stats.heatmap[2].level))
+
+-- A goal block with no year names nothing.
+print("goal_no_year=" .. tostring(Stats.normalize({ goal = { currentBooks = 4 } }).goal))
 
 -- Missing sections stay nil, never zero.
 local bare = assert(Stats.normalize({}))
@@ -2820,75 +2815,6 @@ print("bare_heatmap=" .. tostring(bare.heatmap))
 print("bare_finished=" .. tostring(bare.finishedThisYear))
 print("normalize_nontable=" .. tostring(Stats.normalize("nope")))
 print("normalize_nil=" .. tostring(Stats.normalize(nil)))
-
--- A goal with no target is not a goal; a target is, even with no percentage.
-print("goal_untargeted=" .. tostring(Stats.normalize({
-  goal = { year = 2026, targetBooks = 0, targetHours = nil, currentBooks = 4 },
-}).goal))
-local targeted = assert(Stats.normalize({
-  goal = { year = 2026, targetBooks = 20, currentBooks = 5 },
-}).goal)
-print("goal_unpercented_ratio=" .. tostring(targeted.booksRatio))
-print("goal_books_label=" .. tostring(Stats.goalBooksLabel(targeted)))
-print("ratio_clamped=" .. tostring(Stats.goalRatio(150)))
-print("ratio_missing=" .. tostring(Stats.goalRatio(nil)))
-
--- Labels ---------------------------------------------------------------------
-print("streak_label=" .. tostring(Stats.streakLabel(stats.streaks)))
-print("streak_none=" .. tostring(Stats.streakLabel({ current = 0, best = 12 })))
-print("streak_missing=" .. tostring(Stats.streakLabel(nil)))
-print("goal_books=" .. tostring(Stats.goalBooksLabel(stats.goal)))
-print("goal_hours=" .. tostring(Stats.goalHoursLabel(stats.goal)))
-
--- A single-target goal still shows both metrics: the untargeted one is the
--- plain count the server sent, never "unavailable".
-local books_only = assert(Stats.normalize({
-  goal = { year = 2026, targetBooks = 20, currentBooks = 5, currentHours = 12.5, booksPercent = 25 },
-}).goal)
-print("goal_books_only_books=" .. tostring(Stats.goalBooksLabel(books_only)))
-print("goal_books_only_hours=" .. tostring(Stats.goalHoursLabel(books_only)))
-print("goal_books_only_hours_ratio=" .. tostring(books_only.hoursRatio))
-local hours_only = assert(Stats.normalize({
-  goal = { year = 2026, targetHours = 100, currentBooks = 7, currentHours = 34, hoursPercent = 34 },
-}).goal)
-print("goal_hours_only_books=" .. tostring(Stats.goalBooksLabel(hours_only)))
-print("goal_hours_only_hours=" .. tostring(Stats.goalHoursLabel(hours_only)))
-print("goal_hours_only_books_ratio=" .. tostring(hours_only.booksRatio))
--- "unavailable" is reserved for a count the server did not send at all.
-print("goal_missing_count_books=" .. tostring(Stats.goalBooksLabel({ targetHours = 10 })))
-print("goal_missing_count_hours=" .. tostring(Stats.goalHoursLabel({ targetBooks = 10 })))
--- A target with no count is unavailable too, never a fabricated zero.
-print("goal_missing_count_targeted_books=" .. tostring(Stats.goalBooksLabel({ targetBooks = 25 })))
-print("goal_missing_count_targeted_hours=" .. tostring(Stats.goalHoursLabel({ targetHours = 100 })))
-print("day_duration=" .. tostring(Stats.dayDurationLabel(stats.heatmap[3])))
-print("day_duration_seconds=" .. tostring(Stats.dayDurationLabel({ seconds = 2700 })))
-print("day_duration_missing=" .. tostring(Stats.dayDurationLabel({})))
-
--- Heatmap rows: seven days per row, newest row last, no horizontal scroll.
-local week = {}
-for day_index = 1, 10 do
-  week[#week + 1] = { date = string.format("2026-01-%02d", day_index), level = 1, minutes = 20 }
-end
-local week_rows = Stats.heatmapRows(week)
-print("rows_count=" .. tostring(#week_rows))
-print("rows_first=" .. tostring(#week_rows[1]))
-print("rows_last=" .. tostring(#week_rows[#week_rows]))
-print("rows_newest=" .. tostring(week_rows[#week_rows][#week_rows[#week_rows]].date))
-print("rows_empty=" .. tostring(#Stats.heatmapRows({})))
-print("rows_nil=" .. tostring(#Stats.heatmapRows(nil)))
-
-local year = {}
-for day_index = 1, 365 do
-  year[#year + 1] = { date = "2026-01-01", level = day_index % 5, minutes = day_index }
-end
-local year_rows = Stats.heatmapRows(year)
-print("year_rows_count=" .. tostring(#year_rows))
-print("year_rows_first_cells=" .. tostring(#year_rows[1]))
-print("year_rows_text_bytes=" .. tostring(#Stats.heatmapRowText(year_rows[1])))
-print("row_text=" .. tostring(Stats.heatmapRowText({
-  { level = 0 }, { level = 1 }, { level = 2 }, { level = 3 }, { level = 4 },
-})))
-print("row_text_nil=" .. tostring(Stats.heatmapRowText(nil)))
 
 print("OK")
 `;
@@ -2931,24 +2857,11 @@ describe("plugin reading-stats formatting", () => {
     expect(out.dur_nil).toBe("nil");
     expect(out.dur_junk).toBe("nil");
     expect(out.dur_nan).toBe("nil");
-    expect(out.mins).toBe("45m");
     expect(out.hours_frac).toBe("132.5h");
     expect(out.hours_whole).toBe("100h");
-    expect(out.days_one).toBe("1 day");
-    expect(out.days_many).toBe("5 days");
     expect(out.count_float).toBe("12");
     expect(out.count_zero).toBe("0");
     expect(out.count_nil).toBe("nil");
-  });
-
-  it("renders monochrome heatmap levels instead of a colour ramp", () => {
-    if (!LUA_BINARY) return;
-    const out = runStatsHarness();
-    // Five visually distinct, density-ordered glyphs: no colour, no rainbow.
-    expect(out.glyphs).toBe("\u00b7\u2591\u2592\u2593\u2588");
-    expect(out.glyph_unknown).toBe("??");
-    expect(out.row_text).toBe("\u00b7\u2591\u2592\u2593\u2588");
-    expect(out.row_text_nil).toBe("");
   });
 
   it("reads the server's heatmap level and never derives one", () => {
@@ -2975,8 +2888,10 @@ describe("plugin reading-stats formatting", () => {
     // Zero is a real value when the server sends it.
     expect(out.norm_reading_zero).toBe("0");
     expect(out.norm_finished).toBe("34");
-    expect(out.norm_goal_ratio).toBe("0.48");
-    expect(out.norm_hours_ratio).toBe("0.34");
+    // The page has no goal section: only the year survives, to name YEAR.
+    expect(out.norm_goal_year).toBe("2026");
+    expect(out.norm_goal_target).toBe("nil");
+    expect(out.norm_goal_ratio).toBe("nil");
     // The malformed date is dropped; a day the server did not shade stays unshaded.
     expect(out.norm_heatmap_len).toBe("3");
     expect(out.norm_heatmap_level3).toBe("3");
@@ -2992,57 +2907,7 @@ describe("plugin reading-stats formatting", () => {
     expect(out.normalize_nontable).toBe("nil");
     expect(out.normalize_nil).toBe("nil");
 
-    expect(out.goal_untargeted).toBe("nil");
-    expect(out.goal_unpercented_ratio).toBe("nil");
-    expect(out.goal_books_label).toBe("5/20");
-    expect(out.ratio_clamped).toBe("1");
-    expect(out.ratio_missing).toBe("nil");
-  });
-
-  it("builds streak and goal labels the view can print directly", () => {
-    if (!LUA_BINARY) return;
-    const out = runStatsHarness();
-    expect(out.streak_label).toBe("5 days \u00b7 best 12 days");
-    expect(out.streak_none).toBe("No streak yet \u00b7 best 12 days");
-    expect(out.streak_missing).toBe("nil");
-    expect(out.goal_books).toBe("12/25");
-    expect(out.goal_hours).toBe("34h/100h");
-    // `computeYearlyGoalProgress` always sends currentBooks and currentHours,
-    // so a single-target goal must print the other metric as a plain count.
-    expect(out.goal_books_only_books).toBe("5/20");
-    expect(out.goal_books_only_hours).toBe("12.5h read");
-    expect(out.goal_books_only_hours_ratio).toBe("nil");
-    expect(out.goal_hours_only_books).toBe("7 read");
-    expect(out.goal_hours_only_hours).toBe("34h/100h");
-    expect(out.goal_hours_only_books_ratio).toBe("nil");
-    // Absent count: no number to show, so the view says unavailable.
-    expect(out.goal_missing_count_books).toBe("nil");
-    expect(out.goal_missing_count_hours).toBe("nil");
-    expect(out.goal_missing_count_targeted_books).toBe("nil");
-    expect(out.goal_missing_count_targeted_hours).toBe("nil");
-    expect(out.day_duration).toBe("45m");
-    expect(out.day_duration_seconds).toBe("45m");
-    expect(out.day_duration_missing).toBe("nil");
-    expect(out.date_short).toBe("Nov 15");
-    expect(out.date_passthrough).toBe("whenever");
-    expect(out.date_nil).toBe("nil");
-  });
-
-  it("packs the heatmap into bounded rows that end on the newest day", () => {
-    if (!LUA_BINARY) return;
-    const out = runStatsHarness();
-    expect(out.rows_count).toBe("2");
-    expect(out.rows_first).toBe("3");
-    expect(out.rows_last).toBe("7");
-    expect(out.rows_newest).toBe("2026-01-10");
-    expect(out.rows_empty).toBe("0");
-    expect(out.rows_nil).toBe("0");
-    // A year of days packs into rows of seven and never exercises a scroll.
-    expect(out.year_rows_first_cells).toBe("7");
-    // Byte length: block glyphs are 3 bytes each in UTF-8.
-    expect(Number(out.year_rows_text_bytes)).toBeLessThanOrEqual(21);
-    // The window is a fixed 26 weeks, whatever the payload length.
-    expect(out.year_rows_count).toBe("26");
+    expect(out.goal_no_year).toBe("nil");
   });
 });
 
@@ -4055,6 +3920,41 @@ LightHouse.page:run({ kind = "footer_right" })
 print("after_footer_right=" .. tostring(LightHouse.last_page_model.pager.page))
 LightHouse.page:run({ kind = "footer_right" })
 print("after_footer_right_at_last=" .. tostring(LightHouse.last_page_model.pager.page))
+
+-- Keys: the focus cycle holds the content rows and nothing else, the line it
+-- draws on them is visible, and Select with nothing focused is not a close.
+open{ mode = "series", page = 1 }
+local keyed = LightHouse.page
+local keyed_model = LightHouse.last_page_model
+local content_rows = 0
+for block_index = 1, #(keyed_model.blocks or {}) do
+  content_rows = content_rows + #(keyed_model.blocks[block_index].rows or {})
+end
+print("key_rows=" .. tostring(content_rows))
+print("key_panels=" .. tostring(#keyed.panels))
+print("key_focusable=" .. tostring(#keyed.focus_panels))
+local lines_visible = true
+local chrome_focusable = false
+for index = 1, #keyed.focus_panels do
+  local panel = keyed.focus_panels[index]
+  local line = panel.focus_line
+  if not line or not line.dimen or (line.dimen.w or 0) < 1 then lines_visible = false end
+  if not panel.action or (panel.action.kind ~= "book" and panel.action.kind ~= "series"
+      and panel.action.kind ~= "author" and panel.action.kind ~= "page"
+      and panel.action.kind ~= "search") then
+    chrome_focusable = true
+  end
+end
+print("key_lines_visible=" .. tostring(lines_visible))
+print("key_chrome_focusable=" .. tostring(chrome_focusable))
+keyed:onSelectItem()
+print("key_select_unfocused_closed=" .. tostring(LightHouse.page == nil))
+keyed:onNextItem()
+print("key_focus_index=" .. tostring(keyed.focus_index))
+local focused = keyed.focus_panels[keyed.focus_index]
+print("key_focus_black=" .. tostring(focused ~= nil and focused.focus_line ~= nil
+  and focused.focus_line.background == 0))
+print("key_focus_first_is_row=" .. tostring(focused == keyed.focus_panels[1]))
 print("OK")
 `);
 
@@ -4123,6 +4023,18 @@ describe("plugin library groupings", () => {
     expect(out.after_footer_left_at_first).toBe("1");
     expect(out.after_footer_right).toBe("2");
     expect(out.after_footer_right_at_last).toBe("2");
+
+    // On a keyed device the cycle holds the rows the page draws and none of the
+    // chrome that cannot show focus, every stop draws a visible focus line, and
+    // Select with nothing focused does not close the screen.
+    expect(out.key_focusable).toBe(out.key_rows);
+    expect(Number(out.key_panels)).toBeGreaterThan(Number(out.key_focusable));
+    expect(out.key_lines_visible).toBe("true");
+    expect(out.key_chrome_focusable).toBe("false");
+    expect(out.key_select_unfocused_closed).toBe("false");
+    expect(out.key_focus_index).toBe("1");
+    expect(out.key_focus_first_is_row).toBe("true");
+    expect(out.key_focus_black).toBe("true");
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
 });

@@ -24,7 +24,7 @@ Row shape (both models):
       title = "Spice and Wolf",
       secondary = "Isuna Hasekura · 21 books · 9 read",
       value = "43%",          -- right-hand column, bold
-      value_sub = "next #10", -- optional second line of the right column
+      value_sub = "9 / 21",   -- optional second line: the read fraction
       ratio = 0.43,           -- draws a pixel progress bar when non-nil
       action = { kind = "book", entry = entry },
       bold = true }
