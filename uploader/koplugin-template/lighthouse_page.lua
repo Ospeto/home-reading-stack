@@ -774,14 +774,14 @@ function PageWidget:run(action)
     elseif action.kind == "switch" then
         if type(self.on_switch) == "function" then self.on_switch(action.key) end
     elseif action.kind == "footer_left" or action.kind == "footer_right" then
-        -- The footer's halves turn the page, like the menu's own chevrons.
+        -- The footer's halves turn the page, like the menu's own chevrons: each
+        -- half is inert at the end it would step past.
         local pager = self.model.pager
-        if action.kind == "footer_right" then
-            if pager and pager.page < pager.pages and type(self.on_action) == "function" then
-                self.on_action({ kind = "page", page = pager.page + 1 })
-            end
-        elseif type(self.on_action) == "function" then
-            self.on_action({ kind = "mode_next" })
+        local step = action.kind == "footer_right" and 1 or -1
+        local target = pager and (pager.page + step) or nil
+        if target and target >= 1 and target <= pager.pages
+            and type(self.on_action) == "function" then
+            self.on_action({ kind = "page", page = target })
         end
     elseif type(self.on_action) == "function" then
         self.on_action(action)

@@ -1361,7 +1361,6 @@ function LightHouse:pageLabels()
         not_started = _("not started"),
         done = _("done"),
         unread_value = _("Unread"),
-        next_unread = _("#%s next"),
         books_count = _("%s books"),
         read_count = _("%s read"),
         read_of_books = _("%s / %s"),

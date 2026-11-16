@@ -4003,6 +4003,21 @@ print("series_after_switch=" .. fetched.series)
 local rows = models[3].blocks[1].rows
 print("refresh_row=" .. tostring(rows[1].title) .. "//" .. tostring(rows[1].secondary)
   .. "//" .. tostring(rows[1].value) .. "//" .. tostring(rows[1].value_sub))
+
+-- The footer's two halves turn the page, and each is inert at the end it would
+-- step past: the left half is a real page turn, not a dead tap.
+open{ mode = "series", page = 2 }
+local page = LightHouse.page
+print("pager_at_open=" .. tostring(LightHouse.last_page_model.pager.page)
+  .. "/" .. tostring(LightHouse.last_page_model.pager.pages))
+page:run({ kind = "footer_left" })
+print("after_footer_left=" .. tostring(LightHouse.last_page_model.pager.page))
+LightHouse.page:run({ kind = "footer_left" })
+print("after_footer_left_at_first=" .. tostring(LightHouse.last_page_model.pager.page))
+LightHouse.page:run({ kind = "footer_right" })
+print("after_footer_right=" .. tostring(LightHouse.last_page_model.pager.page))
+LightHouse.page:run({ kind = "footer_right" })
+print("after_footer_right_at_last=" .. tostring(LightHouse.last_page_model.pager.page))
 print("OK")
 `);
 
@@ -4058,8 +4073,15 @@ describe("plugin library groupings", () => {
     expect(out.series_after_switch).toBe("3");
 
     // And the refreshed page draws what the server just sent: page 2's second
-    // row of the six-group document.
-    expect(out.refresh_row).toBe("series 5//A Writer · 3 books · 1 read · #2 next//33%//1 / 3");
+    // row of the six-group document, with no next-volume marker of its own.
+    expect(out.refresh_row).toBe("series 5//A Writer · 3 books · 1 read//33%//1 / 3");
+
+    // Both footer halves turn the page, and neither is active past its end.
+    expect(out.pager_at_open).toBe("2/2");
+    expect(out.after_footer_left).toBe("1");
+    expect(out.after_footer_left_at_first).toBe("1");
+    expect(out.after_footer_right).toBe("2");
+    expect(out.after_footer_right_at_last).toBe("2");
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
 });

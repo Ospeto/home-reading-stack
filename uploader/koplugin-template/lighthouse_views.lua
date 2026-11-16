@@ -76,7 +76,6 @@ Views.LABELS = {
     not_started = "not started",
     done = "done",
     unread_value = "Unread",
-    next_unread = "#%s next",
     books_count = "%s books",
     read_count = "%s read",
     read_of_books = "%s / %s",
@@ -371,7 +370,7 @@ end
 -- Library - Books / Authors / Series
 -- ----------------------------------------------------------------------------
 
---- One series row: name, author and counts, progress, next unread volume.
+--- One series row: name, author and counts, progress over the read fraction.
 -- @tparam table group { name, author, books, read, nextIndex, percent }
 -- @tparam table text labels
 -- @treturn table row model
@@ -383,12 +382,6 @@ function Views.seriesRow(group, text)
     local title = Status.str(group.name)
     if title == "" then title = Status.str(group.author) end
     if title == "" then title = "—" end
-
-    local parts = {
-        Status.str(group.author),
-        string.format(labels.books_count, Ui.formatThousands(books) or "0"),
-        string.format(labels.read_count, Ui.formatThousands(read) or "0"),
-    }
 
     local value, ratio, value_sub
     if books > 0 and read >= books then
@@ -405,18 +398,15 @@ function Views.seriesRow(group, text)
         value_sub = string.format(labels.read_of_books,
             Ui.formatThousands(read) or "0", Ui.formatThousands(books) or "0")
     end
-    -- The next unread volume is the volume the row's cover already shows, so it
-    -- rides on the metadata line with the counts instead of taking the value
-    -- column the accepted layout gives to progress.
-    local next_index = Status.str(group.nextIndex)
-    if next_index ~= "" and read > 0 and read < books then
-        parts[#parts + 1] = string.format(labels.next_unread, next_index)
-    end
 
     return {
         kind = "reading",
         title = title,
-        secondary = Ui.join(parts),
+        secondary = Ui.join({
+            Status.str(group.author),
+            string.format(labels.books_count, Ui.formatThousands(books) or "0"),
+            string.format(labels.read_count, Ui.formatThousands(read) or "0"),
+        }),
         value = value,
         value_sub = value_sub,
         ratio = ratio,
