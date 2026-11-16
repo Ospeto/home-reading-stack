@@ -105,6 +105,7 @@ describe("KOReader plugin template", () => {
     expect(names).toContain("lighthouse_client.lua");
     expect(names).toContain("lighthouse_opds.lua");
     expect(names).toContain("lighthouse_status.lua");
+    expect(names).toContain("lighthouse_sidecar.lua");
     expect(names).toContain("lighthouse_stats.lua");
   });
 
@@ -313,6 +314,9 @@ describe("generateKoplugin archive layout", () => {
     // The stats view is a new template module: an archive without it would keep
     // the old main menu and the "Reading stats" entry would fail to require.
     expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_stats.lua`);
+    // The local reader ships with the archive, or a device would silently have
+    // no progress and no highlights however the rest of the plugin is built.
+    expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_sidecar.lua`);
 
     if (!UNZIP_BINARY) return;
     const zipPath = writeScratch("stats.koplugin", zip);
@@ -4545,5 +4549,1118 @@ describe("plugin row width", () => {
     expect(out.fit_too_tight).toBe("true");
 
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
+  });
+});
+
+/**
+ * Runs one Lua harness (with its own `arg`s) and parses the `key=value` output
+ * the plugin harnesses print. Declared before the harness bodies so both
+ * describes below can use it.
+ */
+function runLuaHarness(source: string, args: string[]): Record<string, string> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-lua-"));
+  const harnessPath = path.join(dir, "harness.lua");
+  fs.writeFileSync(harnessPath, source);
+  const res = spawnSync(LUA_BINARY as string, [harnessPath, ...args], {
+    encoding: "utf8",
+  });
+  expect(res.stderr).toBe("");
+  expect(res.status).toBe(0);
+  return Object.fromEntries(
+    res.stdout
+      .split("\n")
+      .filter((line) => line.includes("="))
+      .map((line) => {
+        const index = line.indexOf("=");
+        return [line.slice(0, index), line.slice(index + 1)];
+      }),
+  );
+}
+
+/** The origin every harness plugin is generated against. */
+const HARNESS_BASE_URL = "http://192.168.31.15:8086";
+
+/** Runs the sidecar-reader harness against the committed template. */
+function runSidecarHarness(): Record<string, string> {
+  return runLuaHarness(SIDECAR_READER_HARNESS, [KOPLUGIN_TEMPLATE_DIR]);
+}
+
+/**
+ * Generates, unpacks and runs the LOCAL_PROGRESS_HARNESS against the shipped
+ * plugin, so the test exercises exactly what a device downloads.
+ */
+function runLocalProgressHarness(): Record<string, string> {
+  const { zip } = generateKoplugin({
+    baseUrl: HARNESS_BASE_URL,
+    apiKey: "harness-api-key",
+    generatedAt: "2026-11-14T00:00:00.000Z",
+  });
+  const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-local-"));
+  const zipPath = path.join(workdir, "lighthouse.koplugin");
+  fs.writeFileSync(zipPath, zip);
+  const pluginsDir = path.join(workdir, "plugins");
+  fs.mkdirSync(pluginsDir, { recursive: true });
+  const extract = spawnSync(
+    UNZIP_BINARY as string,
+    ["-q", zipPath, "-d", pluginsDir],
+    { encoding: "utf8" },
+  );
+  expect(extract.status).toBe(0);
+  return runLuaHarness(LOCAL_PROGRESS_HARNESS, [
+    path.join(pluginsDir, KOPLUGIN_DIR_NAME),
+    HARNESS_BASE_URL,
+  ]);
+}
+
+/**
+ * The local sidecar reader, exercised off-device.
+ *
+ * `lighthouse_sidecar.lua` is the module that reads what KOReader already
+ * writes beside every book it has opened — `<book>.sdr/metadata.<ext>.lua` —
+ * for `percent_finished`, the `annotations` list and `stats`. The shape asserted
+ * here was verified on the live Kindle: `percent_finished` is a 0..1 float,
+ * annotations are integer-keyed with `chapter`/`datetime`/`page`/`pageno`/`text`,
+ * and that device book's annotations carried NO `color` and NO `drawer` at all,
+ * which is why an absent style is a passing case and not an error.
+ *
+ * The harness injects an in-memory filesystem through `Sidecar.io`, so the
+ * parser, the reader and the scanner run with no Kindle, no mount and no
+ * LuaFileSystem — and it records every open mode, so "read-only" is asserted
+ * rather than promised.
+ */
+const SIDECAR_READER_HARNESS = String.raw`
+local plugin_root = assert(arg[1], "plugin root argument required")
+local Sidecar = assert(loadfile(plugin_root .. "/lighthouse_sidecar.lua"))()
+-- The module's own directory lister, kept so one case can exercise the real
+-- default against a device-shaped LuaFileSystem instead of the fake below.
+local DEFAULT_LIST = Sidecar.io.list
+
+-- ------------------------------------------------------------ in-memory device
+local fake_files, fake_dirs, fake_modes, fake_mtime = {}, {}, {}, {}
+local open_modes = {}
+
+local function put_file(path, body)
+  fake_files[path] = body
+  fake_modes[path] = "file"
+end
+
+local function put_dir(path, names)
+  fake_dirs[path] = names
+  fake_modes[path] = "directory"
+end
+
+local function put_sidecar(book_path, body, modified)
+  local directory = book_path .. ".sdr"
+  local metadata = directory .. "/metadata.epub.lua"
+  put_file(metadata, body)
+  -- A real sidecar directory also holds settings and backup files; neither may
+  -- be mistaken for the metadata table.
+  put_dir(directory, { "metadata.epub.lua", "metadata.epub.lua.bak", "settings.epub.lua", ".hidden" })
+  fake_mtime[metadata] = modified or 1794633720
+end
+
+Sidecar.io = {
+  open = function(path, mode)
+    open_modes[#open_modes + 1] = tostring(mode)
+    if fake_files[path] == nil then return nil end
+    -- A handle with no write method: a write cannot even be attempted.
+    return { close = function() end }
+  end,
+  loadfile = function(path)
+    local body = fake_files[path]
+    if not body then return nil, "missing" end
+    return loadstring(body, "=" .. path)
+  end,
+  list = function(path) return fake_dirs[path] end,
+  attributes = function(path, field)
+    if field == "mode" then return fake_modes[path] end
+    if field == "modification" then return fake_mtime[path] end
+    return nil
+  end,
+}
+
+local function show(key, value)
+  print(key .. "=" .. tostring(value):gsub("\n", "\\n"))
+end
+
+-- ------------------------------------------------- 1. a complete, real sidecar
+-- Field-for-field the verified device shape. The NEWEST annotation (index 2)
+-- deliberately has neither a color nor a drawer key.
+local SPICE_BODY = [==[
+return {
+    ["annotations"] = {
+        {
+            ["chapter"] = "Chapter One",
+            ["datetime"] = "2025-11-01 09:00:00",
+            ["page"] = "/body/div[1]/p[3]",
+            ["pageno"] = 12,
+            ["text"] = "First quote",
+            ["color"] = "yellow",
+            ["drawer"] = "lighten",
+        },
+        {
+            ["chapter"] = "Chapter Two",
+            ["datetime"] = "2025-11-14 21:03:11",
+            ["page"] = "/body/div[2]/p[1]",
+            ["pageno"] = 48,
+            ["text"] = "Second quote, no colour",
+        },
+    },
+    ["doc_props"] = {
+        ["title"] = "Spice and Wolf, Vol. 1",
+        ["authors"] = "Isuna Hasekura",
+    },
+    ["percent_finished"] = 0.9801215864132,
+    ["stats"] = {
+        ["title"] = "Spice and Wolf, Vol. 1",
+        ["authors"] = "Isuna Hasekura",
+        ["language"] = "en",
+        ["pages"] = 320,
+    },
+}
+]==]
+
+local spice_book = "/mnt/us/books/Isuna Hasekura/Spice and Wolf, Vol. 1 - Isuna Hasekura.epub"
+put_file(spice_book, "EPUB")
+put_sidecar(spice_book, SPICE_BODY, 1794633720)
+
+local valid = Sidecar.read(spice_book)
+show("valid_found", valid ~= nil)
+show("valid_percent", valid and valid.percent_finished)
+show("valid_count", valid and valid.annotation_count)
+show("valid_title", valid and valid.title)
+show("valid_authors", valid and valid.authors)
+show("valid_stats_pages", valid and valid.stats and valid.stats.pages)
+show("valid_first_text", valid and valid.annotations[1].text)
+show("valid_first_chapter", valid and valid.annotations[1].chapter)
+show("valid_first_page", valid and Sidecar.annotationPage(valid.annotations[1]))
+show("valid_first_datetime", valid and valid.annotations[1].datetime)
+show("valid_first_style", valid and Sidecar.styleLabel(valid.annotations[1]))
+show("valid_second_text", valid and valid.annotations[2].text)
+show("valid_second_style", valid and Sidecar.styleLabel(valid.annotations[2]))
+show("valid_value_types", valid and table.concat({
+  type(valid.annotations[1].text),
+  type(valid.annotations[1].chapter),
+  type(valid.annotations[1].color),
+  type(valid.annotations[1].note),
+  type(valid.percent_finished),
+}, ","))
+
+-- ------------------------------- 2. malformed, raising and non-table sidecars
+-- A half-written file is the expected state when a save was interrupted: it is
+-- a syntax error at compile time, or a raise at run time, or a value that is
+-- not a table. None of them may escape.
+local broken_book = "/mnt/us/books/Broken.epub"
+put_sidecar(broken_book, 'return { ["percent_finished"] = 0.4, ["annotations"] = { { ["text"] = "half')
+local broken_ok, broken_record, broken_reason = pcall(Sidecar.read, broken_book)
+show("broken_raised", broken_ok)
+show("broken_record", tostring(broken_record))
+show("broken_reason", broken_reason)
+
+local raising_book = "/mnt/us/books/Raising.epub"
+put_sidecar(raising_book, 'error("sidecar exploded")')
+local raising_ok, raising_record, raising_reason = pcall(Sidecar.read, raising_book)
+show("raising_raised", raising_ok)
+show("raising_record", tostring(raising_record))
+show("raising_reason", raising_reason)
+
+local string_book = "/mnt/us/books/Stringy.epub"
+put_sidecar(string_book, 'return "not a table"')
+local string_ok, string_record, string_reason = pcall(Sidecar.read, string_book)
+show("string_raised", string_ok)
+show("string_record", tostring(string_record))
+show("string_reason", string_reason)
+
+-- A sidecar may not reach the filesystem or a shell even if it tries: the
+-- parse environment has no os/io/load* in it.
+local hostile_book = "/mnt/us/books/Hostile.epub"
+put_sidecar(hostile_book, 'return { ["title"] = tostring(os.time()) }')
+local hostile_ok, hostile_record, hostile_reason = pcall(Sidecar.read, hostile_book)
+show("hostile_raised", hostile_ok)
+show("hostile_reason", hostile_reason)
+
+-- ---------------------------------------------------- 3. a missing sidecar
+local missing_ok, missing_record, missing_reason = pcall(Sidecar.read, "/mnt/us/books/Not Here.epub")
+show("missing_raised", missing_ok)
+show("missing_record", tostring(missing_record))
+show("missing_reason", missing_reason)
+
+-- ------------------------------------------------------ 4. a non-ASCII path
+local burmese_book = "/mnt/us/documents/__BURMESE_PROBE__.epub"
+put_file(burmese_book, "EPUB")
+put_sidecar(burmese_book, [==[
+return {
+    ["annotations"] = {
+        {
+            ["datetime"] = "2025-11-09 10:00:00",
+            ["pageno"] = 7,
+            ["text"] = "__BURMESE_PROBE__ quote",
+        },
+    },
+    ["doc_props"] = {
+        ["title"] = "__BURMESE_PROBE__",
+        ["authors"] = "__BURMESE_PROBE__ author",
+    },
+    ["percent_finished"] = 0.3,
+}
+]==], 1794633700)
+local burmese = Sidecar.read(burmese_book)
+show("burmese_found", burmese ~= nil)
+show("burmese_title_bytes", burmese and #burmese.title)
+show("burmese_quote_bytes", burmese and #Sidecar.annotationText(burmese.annotations[1]))
+show("burmese_path_roundtrip", burmese and burmese.book_path == burmese_book)
+
+-- ------------------------------------------------ 5. an empty annotations table
+local empty_book = "/mnt/us/books/Empty.epub"
+put_sidecar(empty_book, 'return { ["annotations"] = {}, ["percent_finished"] = 0.5 }')
+local empty = Sidecar.read(empty_book)
+show("empty_found", empty ~= nil)
+show("empty_count", empty and empty.annotation_count)
+show("empty_percent", empty and empty.percent_finished)
+show("empty_groups", #Sidecar.highlightGroups({ empty }))
+
+-- ------------------------------------- 6. no directory lister available at all
+-- The exact-extension candidate needs no listing, so a build without
+-- LuaFileSystem still reads a book's own sidecar.
+local no_list_book = "/mnt/us/books/No List.epub"
+put_sidecar(no_list_book, 'return { ["percent_finished"] = 0.75 }')
+local saved_list = Sidecar.io.list
+Sidecar.io.list = function() return nil end
+local no_list = Sidecar.read(no_list_book)
+Sidecar.io.list = saved_list
+show("no_list_percent", no_list and no_list.percent_finished)
+
+-- ------------------------- 6b. the real default lister against device-shaped lfs
+-- The live Kindle LuaFileSystem returns (iterator, directory_object) and
+-- its iterator NEEDS that object as the generic-for state: iterating the
+-- function alone raised
+--   bad argument #1 to '(for generator)' (directory metatable expected, got nil)
+-- which the surrounding pcall turned into "no directories", so the shipped scan
+-- silently found 18 sidecars as 0. This case reproduces that lfs shape.
+local device_tree = {
+  ["/mnt/dev"] = { "Book.epub", "Book.epub.sdr" },
+  ["/mnt/dev/Book.epub.sdr"] = { "metadata.epub.lua" },
+}
+local device_modes = {
+  ["/mnt/dev"] = "directory",
+  ["/mnt/dev/Book.epub"] = "file",
+  ["/mnt/dev/Book.epub.sdr"] = "directory",
+}
+put_file("/mnt/dev/Book.epub.sdr/metadata.epub.lua", 'return { ["percent_finished"] = 0.42 }')
+package.preload["lfs"] = function()
+  return {
+    dir = function(directory_path)
+      local names = device_tree[directory_path]
+      if not names then error("cannot open " .. tostring(directory_path), 2) end
+      local directory = { index = 0 }
+      local iterator = function(state)
+        if type(state) ~= "table" then
+          error("bad argument #1 to '(for generator)' (directory metatable expected, got nil)", 2)
+        end
+        state.index = state.index + 1
+        return names[state.index]
+      end
+      return iterator, directory
+    end,
+    attributes = function(attribute_path, field)
+      if field == "mode" then return device_modes[attribute_path] end
+      if field == "modification" then return fake_mtime[attribute_path] end
+      return nil
+    end,
+  }
+end
+Sidecar.io.list = DEFAULT_LIST
+local device_records = Sidecar.scan({ dirs = { "/mnt/dev" } })
+show("lfs_dir_scan_count", #device_records)
+show("lfs_dir_percent", device_records[1] and device_records[1].percent_finished)
+Sidecar.io.list = saved_list
+package.loaded["lfs"] = nil
+package.preload["lfs"] = nil
+
+-- ------------------------------------------- 7. a whole-device scan, both roots
+put_dir("/mnt/us/books", { "Isuna Hasekura", "Deleted.epub", "Deleted.epub.sdr" })
+put_dir("/mnt/us/books/Isuna Hasekura", { "Spice and Wolf, Vol. 1 - Isuna Hasekura.epub", "Spice and Wolf, Vol. 1 - Isuna Hasekura.epub.sdr" })
+put_dir("/mnt/us/documents", { "__BURMESE_PROBE__.epub", "__BURMESE_PROBE__.epub.sdr" })
+
+-- A book whose file is gone but whose sidecar (and highlights) remain.
+local deleted_book = "/mnt/us/books/Deleted.epub"
+put_sidecar(deleted_book, [==[
+return {
+    ["annotations"] = {
+        {
+            ["datetime"] = "2025-11-05 18:00:00",
+            ["pageno"] = 3,
+            ["text"] = "Kept quote",
+            ["note"] = "Kept note",
+        },
+    },
+    ["doc_props"] = { ["title"] = "Deleted Book", ["authors"] = "Nobody" },
+    ["percent_finished"] = 1,
+}
+]==], 1794633600)
+fake_modes[deleted_book] = nil
+
+local records = Sidecar.scan({ dirs = { "/mnt/us/books", "/mnt/us/documents" } })
+local scanned_titles = {}
+for record_index = 1, #records do
+  scanned_titles[#scanned_titles + 1] = Sidecar.displayTitle(records[record_index])
+end
+show("scan_count", #records)
+show("scan_titles", table.concat(scanned_titles, " | "))
+show("scan_deleted_present", tostring(Sidecar.bookExists(deleted_book)))
+
+local groups = Sidecar.highlightGroups(records)
+show("group_count", #groups)
+for group_index = 1, #groups do
+  local group = groups[group_index]
+  show("group" .. group_index .. "_title", group.title)
+  show("group" .. group_index .. "_count", group.annotation_count)
+  show("group" .. group_index .. "_first", Sidecar.annotationText(group.annotations[1]))
+  show("group" .. group_index .. "_first_style", Sidecar.styleLabel(group.annotations[1]))
+end
+
+-- ------------------------------------------------- 8. catalog matching rules
+local index = Sidecar.index(records)
+local by_stem = Sidecar.find(index, {
+  stem = Sidecar.stemKey("/mnt/us/books/Isuna Hasekura/Spice and Wolf, Vol. 1 - Isuna Hasekura.epub"),
+  title = "", authors = {},
+})
+show("find_stem", by_stem and by_stem.title)
+local by_title = Sidecar.find(index, {
+  stem = "", title = Sidecar.normalize("Spice and Wolf, Vol. 1"), authors = {},
+})
+show("find_title", by_title and by_title.title)
+local by_partial = Sidecar.find(index, {
+  stem = "01 spice and wolf vol 1", title = "spice and wolf", authors = { "isuna hasekura" },
+})
+show("find_partial", by_partial and by_partial.title)
+local wrong_author = Sidecar.find(index, {
+  stem = "01 spice and wolf vol 1", title = "spice and wolf", authors = { "someone else" },
+})
+show("find_wrong_author", tostring(wrong_author))
+local no_match = Sidecar.find(index, {
+  stem = "nothing", title = "spice and wolf vol 9", authors = { "isuna hasekura" },
+})
+show("find_none", tostring(no_match))
+
+-- The volume-boundary rule: a Vol. 11 file must never answer a Vol. 1 query,
+-- even though its stem contains "spice and wolf vol 1" as a prefix.
+local prefix_index = Sidecar.index({
+  {
+    book_path = "/mnt/us/books/Isuna Hasekura/Spice and Wolf, Vol. 11 - Isuna Hasekura.epub",
+    title = "Spice and Wolf, Vol. 11",
+    authors = "Isuna Hasekura",
+    percent_finished = 0.5,
+    annotations = {},
+    annotation_count = 0,
+  },
+})
+show("find_volume_prefix_guard", tostring(Sidecar.find(prefix_index, {
+  stem = "01 spice and wolf vol 1",
+  title = "spice and wolf vol 1",
+  authors = { "isuna hasekura" },
+})))
+
+-- ...while the volume that IS on disk still answers the same query.
+local volume_index = Sidecar.index({
+  {
+    book_path = "/mnt/us/books/Spice and Wolf, Vol. 1 - Isuna Hasekura.epub",
+    title = "Spice and Wolf, Vol. 1",
+    authors = "Isuna Hasekura",
+    percent_finished = 0.5,
+    annotations = {},
+    annotation_count = 0,
+  },
+})
+show("find_whole_word_match", tostring(Sidecar.find(volume_index, {
+  stem = "01 spice and wolf vol 1",
+  title = "spice and wolf vol 1",
+  authors = { "isuna hasekura" },
+}) ~= nil))
+
+-- An exact title shared by a different author is not the same book either.
+show("find_exact_title_other_author", tostring(Sidecar.find(volume_index, {
+  stem = "",
+  title = "spice and wolf vol 1",
+  authors = { "someone else" },
+})))
+
+-- ------------------------------------------------- 9. strictly read-only open
+local write_modes = 0
+for mode_index = 1, #open_modes do
+  if open_modes[mode_index]:find("[wa+]") then write_modes = write_modes + 1 end
+end
+show("open_modes_count", #open_modes)
+show("open_modes_write", write_modes)
+show("open_modes_values", table.concat(open_modes, ","))
+show("normalize_text", Sidecar.normalize("01 - Dune.epub"))
+
+print("OK")
+`
+  .split("__BURMESE_PROBE__")
+  .join(luaByteEscapes(BURMESE_PROBE));
+
+describe("KOReader plugin local sidecar reader", () => {
+  it("reads progress, highlights and stats out of a real-shaped sidecar", () => {
+    if (!LUA_BINARY) return;
+    const out = runSidecarHarness();
+
+    expect(out.valid_found).toBe("true");
+    // The verified on-device value, unchanged: a 0..1 float.
+    expect(out.valid_percent).toBe("0.9801215864132");
+    expect(out.valid_count).toBe("2");
+    expect(out.valid_title).toBe("Spice and Wolf, Vol. 1");
+    expect(out.valid_authors).toBe("Isuna Hasekura");
+    expect(out.valid_stats_pages).toBe("320");
+
+    // Newest first, so the 2025-11-14 highlight leads the 2025-11-01 one.
+    expect(out.valid_first_text).toBe("Second quote, no colour");
+    expect(out.valid_first_chapter).toBe("Chapter Two");
+    expect(out.valid_first_page).toBe("48");
+    expect(out.valid_first_datetime).toBe("2025-11-14 21:03:11");
+    expect(out.valid_second_text).toBe("First quote");
+
+    // Colour/style are OPTIONAL: the newest annotation has neither, and that is
+    // a normal value (""), not a hole a formatter can fall into.
+    expect(out.valid_first_style).toBe("");
+    expect(out.valid_second_style).toBe("yellow");
+
+    // Every value that can reach a formatter is already the right type.
+    expect(out.valid_value_types).toBe("string,string,string,string,number");
+  });
+
+  it("treats a malformed, a raising, a non-table and a sandboxed sidecar as no local data", () => {
+    if (!LUA_BINARY) return;
+    const out = runSidecarHarness();
+
+    // A partially written sidecar: syntax error at compile time.
+    expect(out.broken_raised).toBe("true");
+    expect(out.broken_record).toBe("nil");
+    expect(out.broken_reason).toBe("malformed");
+
+    // A sidecar that raises while being evaluated.
+    expect(out.raising_raised).toBe("true");
+    expect(out.raising_record).toBe("nil");
+    expect(out.raising_reason).toBe("malformed");
+
+    // A sidecar that returns something other than a table.
+    expect(out.string_raised).toBe("true");
+    expect(out.string_record).toBe("nil");
+    expect(out.string_reason).toBe("malformed");
+
+    // A sidecar that reaches for `os` gets nothing: the parse environment has
+    // no os, io or load*, so it fails as malformed instead of running code.
+    expect(out.hostile_raised).toBe("true");
+    expect(out.hostile_reason).toBe("malformed");
+  });
+
+  it("reports a missing sidecar instead of raising", () => {
+    if (!LUA_BINARY) return;
+    const out = runSidecarHarness();
+
+    expect(out.missing_raised).toBe("true");
+    expect(out.missing_record).toBe("nil");
+    expect(out.missing_reason).toBe("missing");
+  });
+
+  it("resolves a sidecar whose book has a non-ASCII name", () => {
+    if (!LUA_BINARY) return;
+    const out = runSidecarHarness();
+
+    expect(out.burmese_found).toBe("true");
+    // Byte lengths, not character counts: the encoding has to survive intact.
+    expect(out.burmese_title_bytes).toBe(String(Buffer.byteLength(BURMESE_PROBE)));
+    expect(out.burmese_quote_bytes).toBe(
+      String(Buffer.byteLength(`${BURMESE_PROBE} quote`)),
+    );
+    expect(out.burmese_path_roundtrip).toBe("true");
+  });
+
+  it("handles an empty annotations table", () => {
+    if (!LUA_BINARY) return;
+    const out = runSidecarHarness();
+
+    expect(out.empty_found).toBe("true");
+    expect(out.empty_count).toBe("0");
+    expect(out.empty_percent).toBe("0.5");
+    // A book with no highlights must not produce an empty highlight group.
+    expect(out.empty_groups).toBe("0");
+  });
+
+  it("still reads a sidecar when no directory lister is available", () => {
+    if (!LUA_BINARY) return;
+    const out = runSidecarHarness();
+
+    expect(out.no_list_percent).toBe("0.75");
+  });
+
+  it("walks a device-shaped LuaFileSystem whose iterator needs its directory state", () => {
+    if (!LUA_BINARY) return;
+    const out = runSidecarHarness();
+
+    // The live Kindle: `lfs.dir` returns (iterator, directory_object) and the
+    // iterator raises without that state. The earlier one-value loop found 0
+    // sidecars on a device that has 18; this keeps the fix honest.
+    expect(out.lfs_dir_scan_count).toBe("1");
+    expect(out.lfs_dir_percent).toBe("0.42");
+  });
+
+  it("walks both device roots and groups highlights newest first", () => {
+    if (!LUA_BINARY) return;
+    const out = runSidecarHarness();
+
+    // /mnt/us/books (nested and loose) plus /mnt/us/documents, including a book
+    // whose file is gone but whose sidecar remains.
+    expect(out.scan_count).toBe("3");
+    expect(out.scan_titles).toContain("Spice and Wolf, Vol. 1");
+    expect(out.scan_titles).toContain(`${BURMESE_PROBE}`);
+    expect(out.scan_titles).toContain("Deleted Book");
+    expect(out.scan_deleted_present).toBe("false");
+
+    // Newest highlight first, across books: 2025-11-14, 2025-11-09, 2025-11-05.
+    expect(out.group_count).toBe("3");
+    expect(out.group1_title).toBe("Spice and Wolf, Vol. 1");
+    expect(out.group1_count).toBe("2");
+    expect(out.group1_first).toBe("Second quote, no colour");
+    expect(out.group1_first_style).toBe("");
+    expect(out.group2_title).toBe(BURMESE_PROBE);
+    expect(out.group3_title).toBe("Deleted Book");
+  });
+
+  it("matches a catalog entry on file name, title, or title plus author", () => {
+    if (!LUA_BINARY) return;
+    const out = runSidecarHarness();
+
+    expect(out.find_stem).toBe("Spice and Wolf, Vol. 1");
+    expect(out.find_title).toBe("Spice and Wolf, Vol. 1");
+    // A partial title only matches when the authors agree, so a different book
+    // with a similar name can never inherit this one's progress.
+    expect(out.find_partial).toBe("Spice and Wolf, Vol. 1");
+    expect(out.find_wrong_author).toBe("nil");
+    expect(out.find_none).toBe("nil");
+    // A Vol. 11 file is not Vol. 1 just because its name starts with it, and a
+    // shared title under a different author is not the same book.
+    expect(out.find_volume_prefix_guard).toBe("nil");
+    expect(out.find_whole_word_match).toBe("true");
+    expect(out.find_exact_title_other_author).toBe("nil");
+    expect(out.normalize_text).toBe("01 dune epub");
+  });
+
+  it("never opens a sidecar for writing", () => {
+    if (!LUA_BINARY) return;
+    const out = runSidecarHarness();
+
+    expect(Number(out.open_modes_count)).toBeGreaterThan(0);
+    expect(out.open_modes_write).toBe("0");
+    for (const mode of out.open_modes_values.split(",")) {
+      expect(mode).toBe("rb");
+    }
+  });
+
+  it("never runs a process or exits from the shipped module", () => {
+    const source = fs.readFileSync(
+      path.join(KOPLUGIN_TEMPLATE_DIR, "lighthouse_sidecar.lua"),
+      "utf8",
+    );
+    // A crash here kills KOReader, and a process call would be worse.
+    expect(source).not.toContain("os.exit");
+    expect(source).not.toContain("os.execute");
+    expect(source).not.toContain("io.popen");
+    // No write mode is ever requested.
+    expect(source).not.toMatch(/io\.open\([^)]*["'][wa]/);
+    // `_` is gettext in this plugin: it is never a loop variable or a throwaway.
+    expect(source).not.toMatch(/for\s+_\s*[,=]/);
+    expect(source).not.toMatch(/local\s+_\s*[,=]/);
+    expect(source).not.toMatch(/for\s+_[a-z]+\s*,/);
+  });
+});
+
+/**
+ * Local progress and highlights, driven through the shipped `main.lua`.
+ *
+ * Same shape as the other plugin harnesses: the generated archive is unpacked
+ * the documented way and the real plugin runs against KOReader stubs. What is
+ * new here is the device: `Sidecar.io` is replaced with an in-memory tree, so
+ * the plugin's own scan/read path runs without a Kindle, and the reader stubs
+ * make "opened the book at page 48" observable.
+ *
+ * The device data mirrors the Kindle: a book with two highlights (the newest
+ * carrying no colour at all), a Burmese-titled book in `/mnt/us/documents`, and
+ * a book whose file is gone but whose sidecar - and therefore its highlight -
+ * remains.
+ */
+const LOCAL_PROGRESS_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local expected_base_url = assert(arg[2], "expected base url argument required")
+
+-- --------------------------------------------------------------- transport
+-- One session on the server for a book that is ALSO on this device: the shelf
+-- must show the device's 98%, not the server's 45%.
+local payload = {
+  {
+    id = 61,
+    document = "d6df0b1e0c6dec84dd52e6616fa669d8",
+    progress = "/body/div[2]/p[1]",
+    percentage = 0.45,
+    device = "Paperwhite",
+    device_id = "G000PP1234567890",
+    filename = "01 - Spice and Wolf, Vol. 1.epub",
+    title = "Spice and Wolf, Vol. 1",
+    authors = "Isuna Hasekura",
+    timestamp = 1794633720,
+    bookId = 101,
+    displayTitle = "Spice and Wolf, Vol. 1",
+    displayAuthors = "Isuna Hasekura",
+  },
+}
+
+local opds_body = '<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title>LightHouse</title><entry><id>urn:calibre:book:101</id><title>Spice and Wolf, Vol. 1</title><author><name>Isuna Hasekura</name></author><link rel="http://opds-spec.org/acquisition" href="' .. expected_base_url .. '/api/books/101/download/epub" type="application/epub+zip"/></entry></feed>'
+
+local requests = 0
+
+-- Flips the transport into a link that answers nothing, for the case where the
+-- server is down but the device still has its own books.
+local failure = false
+
+package.preload["json"] = function()
+  return { decode = function() return payload end }
+end
+package.preload["ltn12"] = function()
+  return {
+    sink = {
+      table = function(target)
+        return function(chunk)
+          if chunk then target[#target + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function() end,
+    },
+  }
+end
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      requests = requests + 1
+      if failure then return nil, "timeout" end
+      local url = tostring(request and request.url or "")
+      local body = url:find("/api/opds", 1, true) and opds_body or "[]"
+      if request and request.sink then
+        request.sink(body)
+        request.sink(nil)
+      end
+      return 1, 200, {}
+    end,
+  }
+end
+
+-- ------------------------------------------------------------ in-memory device
+local Sidecar = require("lighthouse_sidecar")
+local fake_files, fake_dirs, fake_modes, fake_mtime = {}, {}, {}, {}
+local open_modes = {}
+
+local function put_file(file_path, body)
+  fake_files[file_path] = body
+  fake_modes[file_path] = "file"
+end
+
+local function put_dir(dir_path, names)
+  fake_dirs[dir_path] = names
+  fake_modes[dir_path] = "directory"
+end
+
+local function put_sidecar(book_path, body, modified)
+  local directory = book_path .. ".sdr"
+  local metadata = directory .. "/metadata.epub.lua"
+  put_file(metadata, body)
+  put_dir(directory, { "metadata.epub.lua", "settings.epub.lua" })
+  fake_mtime[metadata] = modified or 1794633720
+  return metadata
+end
+
+Sidecar.io = {
+  open = function(open_path, mode)
+    open_modes[#open_modes + 1] = tostring(mode)
+    if fake_files[open_path] == nil then return nil end
+    return { close = function() end }
+  end,
+  loadfile = function(load_path)
+    local body = fake_files[load_path]
+    if not body then return nil, "missing" end
+    return loadstring(body, "=" .. load_path)
+  end,
+  list = function(list_path) return fake_dirs[list_path] end,
+  attributes = function(attribute_path, field)
+    if field == "mode" then return fake_modes[attribute_path] end
+    if field == "modification" then return fake_mtime[attribute_path] end
+    return nil
+  end,
+}
+
+local spice_book = "/mnt/us/books/Isuna Hasekura/Spice and Wolf, Vol. 1 - Isuna Hasekura.epub"
+put_file(spice_book, "EPUB")
+local spice_metadata = put_sidecar(spice_book, [==[
+return {
+    ["annotations"] = {
+        {
+            ["chapter"] = "Chapter One",
+            ["datetime"] = "2025-11-01 09:00:00",
+            ["pageno"] = 12,
+            ["text"] = "First quote",
+            ["color"] = "yellow",
+        },
+        {
+            ["chapter"] = "Chapter Two",
+            ["datetime"] = "2025-11-14 21:03:11",
+            ["pageno"] = 48,
+            ["text"] = "Second quote, no colour",
+        },
+    },
+    ["doc_props"] = { ["title"] = "Spice and Wolf, Vol. 1", ["authors"] = "Isuna Hasekura" },
+    ["percent_finished"] = 0.9801215864132,
+}
+]==], 1794633720)
+put_dir("/mnt/us/books", { "Isuna Hasekura", "Deleted.epub", "Deleted.epub.sdr" })
+put_dir("/mnt/us/books/Isuna Hasekura", { "Spice and Wolf, Vol. 1 - Isuna Hasekura.epub", "Spice and Wolf, Vol. 1 - Isuna Hasekura.epub.sdr" })
+
+local burmese_book = "/mnt/us/documents/__BURMESE_PROBE__.epub"
+put_file(burmese_book, "EPUB")
+put_sidecar(burmese_book, [==[
+return {
+    ["annotations"] = {
+        {
+            ["datetime"] = "2025-11-09 10:00:00",
+            ["pageno"] = 7,
+            ["text"] = "__BURMESE_PROBE__ quote",
+        },
+    },
+    ["doc_props"] = { ["title"] = "__BURMESE_PROBE__", ["authors"] = "__BURMESE_PROBE__ author" },
+    ["percent_finished"] = 0.3,
+}
+]==], 1794633700)
+put_dir("/mnt/us/documents", { "__BURMESE_PROBE__.epub", "__BURMESE_PROBE__.epub.sdr" })
+
+-- A book deleted from the device whose sidecar survived: the highlight still
+-- has to be listed, and tapping it has to show the note instead of a book. It
+-- is mid-read, so it also belongs on the shelf.
+local deleted_book = "/mnt/us/books/Deleted.epub"
+put_sidecar(deleted_book, [==[
+return {
+    ["annotations"] = {
+        {
+            ["datetime"] = "2025-11-05 18:00:00",
+            ["pageno"] = 3,
+            ["text"] = "Kept quote",
+            ["note"] = "Kept note",
+        },
+    },
+    ["doc_props"] = { ["title"] = "Deleted Book", ["authors"] = "Nobody" },
+    ["percent_finished"] = 0.4,
+}
+]==], 1794633600)
+
+-- A book finished on this device: its highlight belongs in the Highlights view,
+-- but a finished book is not "currently reading" (the real Kindle has several
+-- sidecars sitting at exactly 1).
+local finished_book = "/mnt/us/books/Finished.epub"
+put_file(finished_book, "EPUB")
+put_sidecar(finished_book, [==[
+return {
+    ["annotations"] = {
+        {
+            ["datetime"] = "2025-11-07 12:00:00",
+            ["pageno"] = 400,
+            ["text"] = "Final page quote",
+        },
+    },
+    ["doc_props"] = { ["title"] = "Finished Book", ["authors"] = "Somebody" },
+    ["percent_finished"] = 1,
+}
+]==], 1794633500)
+put_dir("/mnt/us/books", { "Isuna Hasekura", "Deleted.epub", "Deleted.epub.sdr", "Finished.epub", "Finished.epub.sdr" })
+
+-- ------------------------------------------------------------- plugin boot
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local config = require("lighthouse_config")
+assert(config.base_url == expected_base_url,
+  "harness needs the generated config, got " .. tostring(config.base_url))
+
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+-- Never touch a real /mnt/us on this machine: the fake tree above is the device.
+LightHouse.localSearchDirs = function() return { "/mnt/us/books", "/mnt/us/documents" } end
+-- Covers would ask the server for thumbnails; this harness is about local data.
+LightHouse.coversEnabled = function() return false end
+
+-- Reader stubs: opening a book and jumping to a page become observable instead
+-- of opening a real document.
+local opened_path
+local jumped_page
+package.preload["apps/reader/readerui"] = function()
+  local ReaderUI = {}
+  ReaderUI.instance = {
+    rolling = { onGotoPage = function(_, page) jumped_page = page end },
+  }
+  function ReaderUI:showReader(document_path) opened_path = document_path end
+  return ReaderUI
+end
+-- UIManager:nextTick is the deferred call KOReader uses; running it inline
+-- assertion deterministic.
+require("ui/uimanager").nextTick = function(_, func) func() end
+
+local function current_menu()
+  local widget = shown[#shown]
+  if widget and widget.item_table and widget.__kind == "menu" then return widget end
+  local reused = LightHouse.menu and LightHouse.menu.switched
+  if reused and reused[#reused] then
+    return { title = reused[#reused].title, item_table = reused[#reused].items }
+  end
+  return widget
+end
+
+local taps = {}
+local menu_items = {}
+LightHouse:addToMainMenu(menu_items)
+for item_index = 1, #menu_items.lighthouse.sub_item_table do
+  local item = menu_items.lighthouse.sub_item_table[item_index]
+  taps[item.text] = item.callback
+end
+print("menu_has_highlights=" .. tostring(type(taps["Highlights"]) == "function"))
+
+-- ---------------------------------------------------------- the Highlights view
+local highlights_ok, highlights_raised = pcall(taps["Highlights"])
+print("highlights_ok=" .. tostring(highlights_ok) .. " " .. tostring(highlights_raised))
+local view = current_menu()
+print("highlights_title=" .. tostring(view and view.title))
+print("group_count=" .. tostring(#(view and view.item_table or {})))
+for group_index = 1, #(view and view.item_table or {}) do
+  local group = view.item_table[group_index]
+  print(string.format("group%d=%s\t%s\t%d", group_index, tostring(group.text),
+    tostring(group.mandatory), #(group.sub_item_table or {})))
+  for child_index = 1, #(group.sub_item_table or {}) do
+    local child = group.sub_item_table[child_index]
+    print(string.format("group%d_child%d=%s\t%s", group_index, child_index,
+      tostring(child.text), tostring(child.mandatory)))
+  end
+end
+
+-- Tap the newest highlight: it must open its book and jump to page 48.
+local first_group = view.item_table[1]
+local open_ok, open_raised = pcall(first_group.sub_item_table[1].callback)
+print("open_ok=" .. tostring(open_ok) .. " " .. tostring(open_raised))
+print("opened_is_spice=" .. tostring(opened_path == spice_book))
+print("jumped_page=" .. tostring(jumped_page))
+
+-- Tap the highlight of a book whose file is gone: show the note instead.
+local deleted_group
+for group_index = 1, #view.item_table do
+  if view.item_table[group_index].text == "Deleted Book" then
+    deleted_group = view.item_table[group_index]
+  end
+end
+print("deleted_group_found=" .. tostring(deleted_group ~= nil))
+local note_ok, note_raised = pcall(deleted_group.sub_item_table[1].callback)
+local note_view = shown[#shown]
+print("note_ok=" .. tostring(note_ok) .. " " .. tostring(note_raised))
+print("note_kind=" .. tostring(note_view and note_view.__kind))
+print("note_has_quote=" .. tostring(tostring(note_view and note_view.text):find("Kept quote", 1, true) ~= nil))
+print("note_has_note=" .. tostring(tostring(note_view and note_view.text):find("Kept note", 1, true) ~= nil))
+print("note_opened_nothing=" .. tostring(opened_path == spice_book))
+
+-- ------------------------------------------- Currently reading: local progress
+local reading_ok, reading_raised = pcall(taps["Currently reading"])
+print("reading_ok=" .. tostring(reading_ok) .. " " .. tostring(reading_raised))
+local shelf = current_menu()
+print("shelf_rows=" .. tostring(#(shelf and shelf.item_table or {})))
+for row_index = 1, #(shelf and shelf.item_table or {}) do
+  local row = shelf.item_table[row_index]
+  local labels = {}
+  for detail_index = 1, #(row.sub_item_table or {}) do
+    labels[#labels + 1] = tostring(row.sub_item_table[detail_index].text)
+  end
+  print(string.format("shelf%d=%s\t%s", row_index, tostring(row.text), tostring(row.mandatory)))
+  print(string.format("shelf%d_details=%s", row_index, table.concat(labels, "|")))
+end
+local shelf_titles = {}
+for row_index = 1, #(shelf and shelf.item_table or {}) do
+  shelf_titles[#shelf_titles + 1] = tostring(shelf.item_table[row_index].text)
+end
+print("shelf_titles=" .. table.concat(shelf_titles, " | "))
+
+-- ------------------------------------------------------- offline, no network
+require("ui/network/manager").isOnline = function() return false end
+local calls_before = requests
+local offline_ok, offline_raised = pcall(taps["Currently reading"])
+local offline_shelf = current_menu()
+print("offline_ok=" .. tostring(offline_ok) .. " " .. tostring(offline_raised))
+print("offline_rows=" .. tostring(#(offline_shelf and offline_shelf.item_table or {})))
+print("offline_network_calls=" .. tostring(requests - calls_before))
+local offline_highlights_ok = pcall(taps["Highlights"])
+print("offline_highlights_ok=" .. tostring(offline_highlights_ok))
+print("offline_highlights_groups=" .. tostring(#(current_menu() and current_menu().item_table or {})))
+
+-- ------------------------------------------------ the server is unreachable
+-- Local data must still show, and the shelf must say that is what it is.
+failure = true
+require("ui/network/manager").isOnline = function() return true end
+local degraded_ok, degraded_raised = pcall(taps["Currently reading"])
+local degraded = current_menu()
+print("degraded_ok=" .. tostring(degraded_ok) .. " " .. tostring(degraded_raised))
+print("degraded_rows=" .. tostring(#(degraded and degraded.item_table or {})))
+print("degraded_first=" .. tostring(degraded and degraded.item_table and degraded.item_table[1].text))
+print("degraded_first_selectable=" .. tostring(degraded and degraded.item_table and degraded.item_table[1].select_enabled))
+failure = false
+
+-- ------------------------------------------- the catalog prefers local progress
+require("ui/network/manager").isOnline = function() return true end
+local browse_ok, browse_raised = pcall(taps["Browse library"])
+print("browse_ok=" .. tostring(browse_ok) .. " " .. tostring(browse_raised))
+local browse = current_menu()
+local book_row = browse and browse.item_table and browse.item_table[2]
+print("browse_rows=" .. tostring(#(browse and browse.item_table or {})))
+print("browse_book=" .. tostring(book_row and book_row.text) .. "\t" .. tostring(book_row and book_row.mandatory))
+local browse_details = {}
+for detail_index = 1, #(book_row and book_row.sub_item_table or {}) do
+  browse_details[#browse_details + 1] = tostring(book_row.sub_item_table[detail_index].text)
+end
+print("browse_details=" .. table.concat(browse_details, "|"))
+
+-- ------------------------------------------------------ nothing was written
+local write_modes = 0
+for mode_index = 1, #open_modes do
+  if open_modes[mode_index]:find("[wa+]") then write_modes = write_modes + 1 end
+end
+print("open_modes_write=" .. tostring(write_modes))
+print("sidecar_unchanged=" .. tostring(fake_files[spice_metadata]:find("Second quote, no colour", 1, true) ~= nil))
+print("sidecar_percent_unchanged=" .. tostring(fake_files[spice_metadata]:find("0.9801215864132", 1, true) ~= nil))
+
+print("OK")
+`)
+  .split("__BURMESE_PROBE__")
+  .join(luaByteEscapes(BURMESE_PROBE));
+
+describe("KOReader plugin local progress and highlights", () => {
+  it("lists this device's highlights grouped by book, newest first", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runLocalProgressHarness();
+
+    expect(out.menu_has_highlights).toBe("true");
+    expect(out.highlights_ok).toBe("true nil");
+    expect(out.highlights_title).toBe("Highlights on this device");
+    expect(out.group_count).toBe("4");
+
+    // Newest highlight first across books: 2025-11-14, 2025-11-09, 2025-11-07,
+    // 2025-11-05, whichever root the book lives in.
+    expect(out.group1.split("\t")[0]).toBe("Spice and Wolf, Vol. 1");
+    expect(out.group1.split("\t")[1]).toContain("Highlights: 2");
+    expect(out.group1.split("\t")[2]).toBe("2");
+    expect(out.group2.split("\t")[0]).toBe(BURMESE_PROBE);
+    // A finished book keeps its highlights: they are real even when the book
+    // is no longer being read.
+    expect(out.group3.split("\t")[0]).toBe("Finished Book");
+    expect(out.group4.split("\t")[0]).toBe("Deleted Book");
+
+    // The row is the quote, its position and style the metadata column.
+    const newest = out.group1_child1.split("\t");
+    expect(newest[0]).toBe("Second quote, no colour");
+    expect(newest[1]).toContain("Chapter Two");
+    expect(newest[1]).toContain("p. 48");
+    // Colours are OPTIONAL and this highlight has none: nothing is invented.
+    expect(newest[1]).not.toContain("yellow");
+
+    const older = out.group1_child2.split("\t");
+    expect(older[0]).toBe("First quote");
+    expect(older[1]).toContain("p. 12");
+    expect(older[1]).toContain("yellow");
+  });
+
+  it("opens the highlight's book at its page", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runLocalProgressHarness();
+
+    expect(out.open_ok).toBe("true nil");
+    expect(out.opened_is_spice).toBe("true");
+    expect(out.jumped_page).toBe("48");
+  });
+
+  it("shows the note when the book file is gone", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runLocalProgressHarness();
+
+    expect(out.deleted_group_found).toBe("true");
+    expect(out.note_ok).toBe("true nil");
+    expect(out.note_kind).toBe("textviewer");
+    expect(out.note_has_quote).toBe("true");
+    expect(out.note_has_note).toBe("true");
+  });
+
+  it("prefers local progress over the server's on the shelf", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runLocalProgressHarness();
+
+    expect(out.reading_ok).toBe("true nil");
+    // The session server-side says 45%; the device's own sidecar says 98%, and
+    // the device is the authority for the book in the reader's hand.
+    expect(out.shelf1.split("\t")[1]).toContain("98%");
+    expect(out.shelf1.split("\t")[1]).not.toContain("45%");
+    const details = out.shelf1_details.split("|");
+    expect(details).toContain("Progress read from this device");
+    expect(details).toContain("Highlights: 2");
+    expect(details).toContain("Progress: ████████ 98%");
+
+    // Books only this device has read are on the shelf too, newest first.
+    expect(out.shelf_rows).toBe("3");
+    expect(out.shelf2.split("\t")[0]).toBe(BURMESE_PROBE);
+    expect(out.shelf2_details).toContain("Open book");
+    expect(out.shelf3.split("\t")[0]).toBe("Deleted Book");
+    expect(out.shelf3_details).toContain("Book file is missing from this device");
+    // ...but a FINISHED book is not "currently reading", so the shelf stays at
+    // three rows even though this device also holds one at 100%.
+    expect(out.shelf_titles).not.toContain("Finished Book");
+  });
+
+  it("opens both views with no network at all", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runLocalProgressHarness();
+
+    expect(out.offline_ok).toBe("true nil");
+    expect(out.offline_rows).toBe("3");
+    // No request was made: the shelf came from the device.
+    expect(out.offline_network_calls).toBe("0");
+    expect(out.offline_highlights_ok).toBe("true");
+    expect(out.offline_highlights_groups).toBe("4");
+  });
+
+  it("still shows the local shelf when the server is unreachable", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runLocalProgressHarness();
+
+    expect(out.degraded_ok).toBe("true nil");
+    // The note row plus the same three books: a failed server call must not
+    // throw away data the device already has, and must not hide the failure.
+    expect(out.degraded_rows).toBe("4");
+    expect(out.degraded_first).toContain("server could not be reached");
+    expect(out.degraded_first_selectable).toBe("false");
+  });
+
+  it("prefers local progress in the catalog as well", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runLocalProgressHarness();
+
+    expect(out.browse_ok).toBe("true nil");
+    const book = out.browse_book.split("\t");
+    expect(book[0]).toBe("Spice and Wolf, Vol. 1");
+    expect(book[1]).toContain("98%");
+    expect(book[1]).not.toContain("45%");
+    expect(out.browse_details).toContain("Progress read from this device");
+    expect(out.browse_details).toContain("Highlights: 2");
+  });
+
+  it("leaves every sidecar untouched", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runLocalProgressHarness();
+
+    expect(out.open_modes_write).toBe("0");
+    expect(out.sidecar_unchanged).toBe("true");
+    expect(out.sidecar_percent_unchanged).toBe("true");
   });
 });
