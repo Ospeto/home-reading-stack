@@ -756,6 +756,29 @@ Search your library and retrieve books anywhere via Telegram (`@saroat_ospeto_bo
 
 ---
 
+## ⏱️ Startup Library Preflight (Non-Hanging)
+
+The server now refuses to bind its port until it can actually read the Calibre library. A bounded, **out-of-process** probe runs first, because both ways that read can fail on macOS used to produce the same silent symptom: a live PID in `launchctl list`, a listening socket, and no HTTP.
+
+| Verdict | Meaning | Behaviour |
+| --- | --- | --- |
+| `ok` | library root and `metadata.db` are readable | start; the gate prints nothing |
+| `missing` | nothing is mounted at the library path, or `metadata.db` is absent | exit 1 with cause and both remedies |
+| `permission-denied` | TCC denied removable-volume access (`Operation not permitted`) | exit 1 with cause and both remedies |
+| `unresponsive` | the volume never answered `open`/`readdir`; the probe child was killed | exit 1 with cause and both remedies |
+| `error` | the probe failed some other way (e.g. `ls` reporting `Input/output error` from a flaky enclosure) | exit 1 with cause and both remedies |
+
+`ok` is the only verdict that binds the port. An absent library is fatal too, deliberately: a volume that mounts *after* the agent starts leaves the symlink dangling, and the one-shot gate would otherwise come up HTTP-alive with no catalog and never re-probe.
+
+- **Under launchd:** the generated `com.ospeto.book-uploader` plist sets `KeepAlive` (no `SuccessfulExit` predicate), so a persistently fatal verdict is not one failure but an exit-1 respawn loop every ~10 s, each attempt appending an identical `Fatal:` block to `~/Library/Logs/uploader.log`. That repetition is the intended loud signal, not a second bug and not a start-order race; pause it deliberately with `bin/lighthouse down` while the host cause is fixed.
+- **Reboot survival is still blocked:** this change converts a silent wedged PID into a loud, actionable refusal. The stack cannot survive a reboot until the library sits somewhere the host can actually read (see INC-11 for the pending host action) — nothing here relocates, remounts or retries.
+- **Deadline:** 5000 ms per probe, override with `LIGHTHOUSE_LIBRARY_PROBE_TIMEOUT_MS`.
+- **Why a child process:** when a removable volume stops answering, `bun` blocks *inside* the `openat` syscall, so an in-process check would hang exactly like the bug it is checking for. Each probe is a killable `/bin/sh -c 'exec …'` child — `/bin/ls -1` for the library root, `/usr/bin/head -c 16` for `metadata.db` — SIGKILLed at the deadline.
+- **Failure output** names every failing path, the cause it actually observed, and both remedies: move the live library onto local storage (recommended — no TCC dependency, survives reboots and runtime upgrades), or grant the runtime Full Disk Access (fragile — the grant is keyed to the binary hash and is lost on every upgrade).
+- Background: [INC-11](INCIDENTS.md) — the launchd supervision investigation this came from.
+
+---
+
 ## 📋 Operational Runbooks & Documentation
 
 - [RUNBOOK.md](RUNBOOK.md) — Comprehensive operations manual, health troubleshooting, system migration, and daemon lifecycle.

@@ -86,6 +86,40 @@ curl -i -k https://kosync-sg.wavypremium.xyz:8443/health
 launchctl list | grep -E "com.ospeto.reading-(vless|sg)-tunnel"
 ```
 
+### 9. Startup Library Preflight (Running But Not Answering — INC-11)
+
+A live PID in `launchctl list` plus a listening port is **not** proof the uploader is healthy. On start the server probes the Calibre library out of process (5s deadline, `LIGHTHOUSE_LIBRARY_PROBE_TIMEOUT_MS` to override) and refuses to bind unless the library root and `metadata.db` are readable — because a library on an unanswering removable volume made `bun` block inside `openat`, which produced a silent wedge instead of an error. `ok` is the only verdict that starts (and it prints nothing); `missing`, `permission-denied`, `unresponsive` and `error` all exit 1 with the cause and both remedies, so an absent or late-mounting volume can never leave a live PID serving no catalog.
+
+```bash
+# 1. Is the process serving, or only listening?
+launchctl list | grep com.ospeto.book-uploader
+curl -s -m 5 -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8086/api/books   # 000 = nothing listening (gate refused) or bound but wedged
+
+# 2. Read the preflight verdict from the agent's log
+#    "Fatal:" means it refused to bind: missing | permission-denied | unresponsive | error
+tail -20 ~/Library/Logs/uploader.log
+
+# 3. Check whether the library volume answers at all - stat works from cache even
+#    when real reads are wedged, so read a directory and a file, not a stat.
+ls /Volumes/Ospeto_SSD >/dev/null && echo "volume answers" || echo "volume refuses or hangs"
+cat /Volumes/Ospeto_SSD/Lighthouse_Agent_Library/metadata.db >/dev/null && echo "library readable"
+
+# 4. If it is wedged: remount the volume (stops calibre-server) or move the library
+#    onto local storage and keep the SSD as a backup target. See INC-11 in INCIDENTS.md.
+```
+
+**Expected steady state while the library is unreadable.** The generated `com.ospeto.book-uploader` plist sets `KeepAlive` with no `SuccessfulExit` predicate, so a persisting fatal verdict is a launchd respawn loop (roughly every 10 s), not one failure: `launchctl list` shows a changing PID and `~/Library/Logs/uploader.log` accumulates the same `Fatal:` block once per attempt. That repetition is the intended loud signal — not a second bug, not a start-order race, and not evidence of a crash loop to be chased. It continues until the host action in INC-11 lands, and the log stays bounded while it does: `reading-stack-backup` runs `scripts/backup-daily.sh` log hygiene daily, which caps `uploader.log` at 10 MB (the Calibre step there is a `[ -f ]` guard that skips when the database is absent, so the rotation is still reached in this state). Stop the loop deliberately while you work on the cause:
+
+```bash
+bin/lighthouse down            # or: launchctl bootout gui/$(id -u)/com.ospeto.book-uploader
+```
+
+**The tunnel watchdog is affected too.** `scripts/tunnel-watchdog.sh` treats a non-200 from `:8086/api/books` as a local failure: it kickstarts the uploader and then exits before its remote WAN probes. While this gate refuses, that means one extra restart per 120 s run and **no US or Singapore tunnel checking or healing at all** — restoring library access is what restores tunnel monitoring.
+
+**Reboot survival is still blocked.** This preflight only makes the failure loud and actionable; the uploader cannot come up after a reboot until the library is readable at boot, which is a host action, not a code path. See INC-11 in `INCIDENTS.md` for the pending action and both remedies.
+
+A successful manual start is not evidence of supervision: an interactive shell inherits its TCC entitlement, a launchd agent does not.
+
 ---
 
 ## 🕹️ Service Control & Lifecycle
@@ -127,7 +161,7 @@ ssh mac-mini "tail -f ~/Library/Logs/kosync.log"
 ssh mac-mini "tail -f ~/Library/Logs/calibre-server.log"
 
 # Uploader logs
-ssh mac-mini "tail -f ~/Library/Logs/uploader.log ~/Library/Logs/uploader-error.log"
+ssh mac-mini "tail -f ~/Library/Logs/uploader.log"
 
 # Sing-box Proxy logs
 ssh mac-mini "tail -f ~/Library/Logs/sing-box/stderr.log"
