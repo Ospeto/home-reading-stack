@@ -24,7 +24,7 @@ Row shape (both models):
       title = "Spice and Wolf",
       secondary = "Isuna Hasekura · 21 books · 9 read",
       value = "43%",          -- right-hand column, bold
-      value_sub = "next #10", -- optional second line of the right column
+      value_sub = "9 / 21",   -- optional second line: the read fraction
       ratio = 0.43,           -- draws a pixel progress bar when non-nil
       action = { kind = "book", entry = entry },
       bold = true }
@@ -76,14 +76,40 @@ Views.LABELS = {
     not_started = "not started",
     done = "done",
     unread_value = "Unread",
-    next_unread = "#%s next",
     books_count = "%s books",
     read_count = "%s read",
+    read_of_books = "%s / %s",
+    average_day = "%d min on an average day",
+    detail_on_web = "detail on web",
+    last_n = "LAST %d",
+    untitled = "Untitled",
+    az = "A–Z",
+    no_series = "No series in this library yet",
+    no_authors = "No authors in this library yet",
+    just_now = "just now",
+    one_minute_ago = "1 min ago",
+    minutes_ago = "%d min ago",
+    one_hour_ago = "1 h ago",
+    hours_ago = "%d h ago",
+    relative_yesterday = "yesterday",
+    days_ago = "%d days ago",
+    clock_today = "Today",
+    clock_yesterday = "Yesterday",
+    seconds_short = "%d s",
+    minutes_short = "%d m",
+    minutes_seconds = "%d m %d s",
+    hours_short = "%d h",
+    hours_minutes = "%d h %d m",
+    months = {
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    },
     author_count = "%s authors",
     series_count = "%s series",
 }
 
 --- Merges caller-supplied labels over the built-in English ones.
+-- A list value (the month names) is passed through as the caller gave it.
 -- @tparam table[opt] labels
 -- @treturn table
 function Views.labels(labels)
@@ -91,7 +117,11 @@ function Views.labels(labels)
     for key, value in pairs(Views.LABELS) do merged[key] = value end
     if type(labels) == "table" then
         for key, value in pairs(labels) do
-            if type(value) == "string" and value ~= "" then merged[key] = value end
+            if type(value) == "string" and value ~= "" then
+                merged[key] = value
+            elseif type(value) == "table" then
+                merged[key] = value
+            end
         end
     end
     return merged
@@ -228,14 +258,16 @@ end
 --- One "currently reading" row: cover, title, author + last read, percent.
 -- @tparam table session normalized KOSync session
 -- @param now current unix seconds
+-- @tparam table[opt] text labels
 -- @treturn table|nil row model
-function Views.readingRow(session, now)
+function Views.readingRow(session, now, text)
+    local labels = text or Views.LABELS
     if type(session) ~= "table" then return nil end
     local title = Status.str(session.title)
     if title == "" then title = Status.str(session.filename) end
     if title == "" then return nil end
     local authors = Status.str(session.authors)
-    local when = Ui.relativeWhen(Status.num(session.timestamp), now)
+    local when = Ui.relativeWhen(Status.num(session.timestamp), now, labels)
     local percentage = Status.num(session.percentage) or 0
     return {
         kind = "reading",
@@ -249,10 +281,14 @@ function Views.readingRow(session, now)
 end
 
 --- One recent-session row: title, when / duration / device, duration again.
+-- Informational only: a session is not a catalog row, so the row carries no
+-- action and tapping it opens nothing.
 -- @tparam table session a `recentSessions` entry from `/api/kosync/stats`
 -- @tparam table today broken-down local time of "now"
+-- @tparam table[opt] text labels
 -- @treturn table|nil row model
-function Views.sessionRow(session, today)
+function Views.sessionRow(session, today, text)
+    local labels = text or Views.LABELS
     if type(session) ~= "table" then return nil end
     local title = Status.str(session.title)
     if title == "" then return nil end
@@ -261,11 +297,11 @@ function Views.sessionRow(session, today)
     local start_time = Status.num(session.startTime)
     if start_time then
         local ok, parts = pcall(os.date, "*t", start_time)
-        if ok and type(parts) == "table" then when = Ui.clockLine(parts, today) end
+        if ok and type(parts) == "table" then when = Ui.clockLine(parts, today, labels) end
     end
     local secondary = Ui.join({
         when,
-        Ui.durationLong(duration),
+        Ui.durationLong(duration, labels),
         Status.str(session.device),
     })
     return {
@@ -274,7 +310,6 @@ function Views.sessionRow(session, today)
         secondary = secondary,
         value = duration and Stats.formatDuration(duration) or nil,
         bold = false,
-        action = { kind = "book", entry = session },
     }
 end
 
@@ -307,7 +342,7 @@ function Views.statsModel(stats, sessions, now, options)
     local limit = math.max(math.floor(tonumber(options.reading_max) or 3), 0)
     for session_index = 1, #active do
         if #reading_rows >= limit then break end
-        local row = Views.readingRow(active[session_index], now)
+        local row = Views.readingRow(active[session_index], now, text)
         if row then reading_rows[#reading_rows + 1] = row end
     end
     if #reading_rows > 0 then
@@ -333,24 +368,26 @@ function Views.statsModel(stats, sessions, now, options)
     local session_limit = math.max(math.floor(tonumber(options.session_max) or 3), 0)
     for session_index = 1, #recent do
         if #session_rows >= session_limit then break end
-        local row = Views.sessionRow(recent[session_index], today)
+        local row = Views.sessionRow(recent[session_index], today, text)
         if row then session_rows[#session_rows + 1] = row end
     end
     if #session_rows > 0 then
         blocks[#blocks + 1] = {
             kind = "section",
             row_kind = "session",
-            heading = { left = text.recent_sessions, right = string.format("LAST %d", #session_rows) },
+            heading = { left = text.recent_sessions, right = string.format(text.last_n, #session_rows) },
             rows = session_rows,
         }
     end
 
-    local footer = { left = "LightHouse" }
+    local footer = { left = "LightHouse", right = text.detail_on_web }
     local average = Status.num(options.average_daily_minutes)
     if average and average > 0 then
         -- Minutes, not "1h 8m": an average day is read as a minute figure, and
         -- that is how the accepted design prints it.
-        footer.right = string.format("%d min on an average day", math.floor(average + 0.5))
+        footer.right = string.format(text.average_day, math.floor(average + 0.5))
+            .. Ui.GLYPH.separator
+            .. text.detail_on_web
     end
 
     return {
@@ -366,8 +403,8 @@ end
 -- Library - Books / Authors / Series
 -- ----------------------------------------------------------------------------
 
---- One series row: name, author and counts, progress, next unread volume.
--- @tparam table group { name, author, books, read, nextIndex, percent }
+--- One series row: name, author and counts, progress over the read fraction.
+-- @tparam table group { name, author, books, read, coverId }
 -- @tparam table text labels
 -- @treturn table row model
 function Views.seriesRow(group, text)
@@ -378,12 +415,6 @@ function Views.seriesRow(group, text)
     local title = Status.str(group.name)
     if title == "" then title = Status.str(group.author) end
     if title == "" then title = "—" end
-
-    local secondary = Ui.join({
-        Status.str(group.author),
-        string.format(labels.books_count, Ui.formatThousands(books) or "0"),
-        string.format(labels.read_count, Ui.formatThousands(read) or "0"),
-    })
 
     local value, ratio, value_sub
     if books > 0 and read >= books then
@@ -396,15 +427,19 @@ function Views.seriesRow(group, text)
         value = string.format("%d%%", math.floor(read / books * 100 + 0.5))
         ratio = read / books
     end
-    local next_index = Status.str(group.nextIndex)
-    if next_index ~= "" and read > 0 and read < books then
-        value_sub = string.format(labels.next_unread, next_index)
+    if value_sub == nil then
+        value_sub = string.format(labels.read_of_books,
+            Ui.formatThousands(read) or "0", Ui.formatThousands(books) or "0")
     end
 
     return {
         kind = "reading",
         title = title,
-        secondary = secondary,
+        secondary = Ui.join({
+            Status.str(group.author),
+            string.format(labels.books_count, Ui.formatThousands(books) or "0"),
+            string.format(labels.read_count, Ui.formatThousands(read) or "0"),
+        }),
         value = value,
         value_sub = value_sub,
         ratio = ratio,
@@ -425,15 +460,20 @@ function Views.authorRow(group, text)
     local title = Status.str(group.name)
     if title == "" then title = "—" end
 
-    local value, ratio
+    local value, ratio, value_sub
     if books > 0 and read >= books then
         value = labels.done
         ratio = 1
     elseif read <= 0 then
         value = "—"
+        value_sub = labels.not_started
     else
         value = string.format("%d%%", math.floor(read / books * 100 + 0.5))
         ratio = read / books
+    end
+    if value_sub == nil then
+        value_sub = string.format(labels.read_of_books,
+            Ui.formatThousands(read) or "0", Ui.formatThousands(books) or "0")
     end
 
     return {
@@ -444,6 +484,7 @@ function Views.authorRow(group, text)
             string.format(labels.read_count, Ui.formatThousands(read) or "0"),
         }),
         value = value,
+        value_sub = value_sub,
         ratio = ratio,
         cover_id = Status.num(group.coverId),
         action = { kind = "author", name = Status.str(group.name) },
@@ -458,7 +499,7 @@ function Views.bookRow(entry, text)
     local labels = text or Views.LABELS
     entry = type(entry) == "table" and entry or {}
     local title = Ui.rowTitle(entry.title)
-    if title == "" then title = "Untitled" end
+    if title == "" then title = labels.untitled end
     local value, ratio = Views.progressValue(entry.status, labels)
     return {
         kind = "reading",
@@ -525,6 +566,9 @@ function Views.libraryModel(mode, context, options)
     else
         local groups = type(context.groups) == "table" and context.groups or {}
         pages = math.max(math.ceil(#groups / page_size), 1)
+        -- A refresh can leave the reader on a page that no longer exists; the
+        -- last page is what there is to draw, and the footer says so.
+        if page > pages then page = pages end
         local first = (page - 1) * page_size + 1
         for group_index = first, #groups do
             if #rows >= page_size then break end
@@ -534,6 +578,13 @@ function Views.libraryModel(mode, context, options)
                     and Views.seriesRow(group, text)
                     or Views.authorRow(group, text)
             end
+        end
+        if #groups == 0 then
+            rows[#rows + 1] = {
+                kind = "plain",
+                title = mode == "series" and text.no_series or text.no_authors,
+                bold = false,
+            }
         end
         if page < pages then
             rows[#rows + 1] = {
@@ -546,7 +597,7 @@ function Views.libraryModel(mode, context, options)
     end
 
     -- Sub-line: how big this grouping is, and the order it is in.
-    local subline = { right = "A–Z" }
+    local subline = { right = text.az }
     if mode == "series" then
         subline.left = Ui.join({
             string.format(text.series_count, Ui.formatThousands(totals.series) or "0"),

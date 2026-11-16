@@ -362,9 +362,9 @@ end
 
 --- Normalizes the library's author/series groupings.
 --
--- One grouping row is `{ name, author, books, read, nextIndex, coverId }`; the
--- device only ever formats these, so every field is coerced here once and a row
--- without a usable name is dropped rather than drawn as a blank line.
+-- One grouping row is `{ name, author, books, read, coverId }`; the device only
+-- ever formats these, so every field is coerced here once and a row without a
+-- usable name is dropped rather than drawn as a blank line.
 -- @tparam table groups array of raw grouping rows
 -- @treturn table array of normalized rows, order preserved
 function Status.normalizeGroups(groups)
@@ -375,16 +375,11 @@ function Status.normalizeGroups(groups)
         if type(group) == "table" then
             local name = Status.str(group.name)
             if name ~= "" then
-                -- The next unread volume arrives as a number from Calibre or as
-                -- text from a grouped series; it is drawn as given, so it is
-                -- coerced to a string here instead of being re-formatted.
-                local next_index = Status.num(group.nextIndex)
                 list[#list + 1] = {
                     name = name,
                     author = Status.str(group.author),
                     books = Status.num(group.books),
                     read = Status.num(group.read),
-                    nextIndex = next_index and tostring(math.floor(next_index)) or nil,
                     coverId = Status.num(group.coverId),
                 }
             end

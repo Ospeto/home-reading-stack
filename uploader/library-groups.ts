@@ -6,9 +6,11 @@
  * The plugin used to show one flat list. The captain's accepted design groups
  * the same library by Books, Authors or Series, and a series row has to say how
  * many volumes there are, how many are read, how far through the series the
- * reader is, and which volume comes next. None of that is in the OPDS feed: the
- * feed is paged and carries one book at a time, so counting a 400-volume series
- * from the device would mean walking the whole catalogue over the network.
+ * reader is, and which volume is next - as the cover it carries, since the
+ * accepted design does not name that volume in the row. None of that is in the
+ * OPDS feed: the feed is paged and carries one book at a time, so counting a
+ * 400-volume series from the device would mean walking the whole catalogue over
+ * the network.
  *
  * This module is therefore the one place that folds Calibre's book rows
  * together with KOSync's furthest-progress-per-book index. It is pure: books and
@@ -43,8 +45,6 @@ export interface LibraryGroup {
   books: number;
   /** How many of them reached the finished threshold. */
   read: number;
-  /** Lowest unread volume index, as text, when the group has one. */
-  nextIndex?: string;
   /** Book id whose cover illustrates the row. */
   coverId?: number;
 }
@@ -77,13 +77,6 @@ export function splitAuthors(value: unknown): string[] {
   return names;
 }
 
-/** Formats a Calibre series index for display: `3`, `2.5`, or undefined. */
-export function formatSeriesIndex(value: unknown): string | undefined {
-  const raw = Number(value);
-  if (!Number.isFinite(raw) || raw <= 0) return undefined;
-  return Number.isInteger(raw) ? String(raw) : String(raw);
-}
-
 /** Reads the furthest percentage recorded for one book. */
 function progressFor(progress: ProgressMap, bookId: number): number | undefined {
   if (progress instanceof Map) return progress.get(bookId);
@@ -100,8 +93,8 @@ function compareNames(a: string, b: string): number {
  * Groups books by series and computes each series' progress.
  *
  * A series with no readable index still groups (books) - it simply has no
- * "next unread volume" to name, which is better than dropping real volumes from
- * the count.
+ * numbered unread volume to illustrate the row with, which is better than
+ * dropping real volumes from the count.
  */
 export function groupBySeries(
   books: GroupableBook[],
@@ -115,8 +108,6 @@ export function groupBySeries(
       author: string;
       books: number;
       read: number;
-      nextIndex?: string;
-      nextValue: number;
       /** Cover of the next unread volume: what the row is about. */
       nextCoverId?: number;
       nextCoverValue: number;
@@ -138,7 +129,6 @@ export function groupBySeries(
         author: "",
         books: 0,
         read: 0,
-        nextValue: Infinity,
         nextCoverValue: Infinity,
       };
       groups.set(series, group);
@@ -160,10 +150,6 @@ export function groupBySeries(
     // reader would start next.
     const index = Number(book.series_index);
     const value = Number.isFinite(index) && index > 0 ? index : Infinity;
-    if (value < group.nextValue) {
-      group.nextValue = value;
-      group.nextIndex = formatSeriesIndex(index);
-    }
     if (book.cover && value < group.nextCoverValue) {
       group.nextCoverValue = value;
       group.nextCoverId = id;
@@ -177,7 +163,6 @@ export function groupBySeries(
       author: group.author || undefined,
       books: group.books,
       read: group.read,
-      nextIndex: group.read >= group.books ? undefined : group.nextIndex,
       coverId: group.nextCoverId ?? group.anyCoverId,
     });
   }

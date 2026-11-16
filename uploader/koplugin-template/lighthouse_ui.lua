@@ -5,8 +5,9 @@ Every screen the plugin draws - browse, search, the currently-reading shelf and
 reading statistics - is assembled from the tokens and helpers in this one file,
 so a later change cannot move the type scale, the row rhythm, the left gutter,
 the glyph vocabulary or the cover geometry on one screen while leaving the
-others behind. main.lua builds widgets; this file owns the numbers, the strings
-and the arithmetic behind them.
+others behind. `main.lua` builds the menu widgets and `lighthouse_page.lua` the
+two full-page views; this file owns the numbers, the strings and the arithmetic
+behind both.
 
 Design rules this file encodes (e-ink, judged at 1 bit):
 
@@ -15,11 +16,13 @@ Design rules this file encodes (e-ink, judged at 1 bit):
     e-ink panel would render the web dashboard's amber accents as one grey.
   * Only glyphs KOReader's bundled fonts carry are used: block and box
     drawing, stars, middot, ellipsis, check and chevron. See `Ui.GLYPH`.
-  * Rows share one shape everywhere: the title leads the row and one compact
-    right-hand metadata column carries the secondary values (author, series,
-    progress, rating) that can be read without tapping. Section headings are
-    marked with a left block bar, the e-ink equivalent of the web app's accent
-    border.
+  * Rows are drawn in two shapes and no more. The menu row is one line: the
+    title leads and one compact right-hand metadata column carries the secondary
+    values (author, series, progress, rating). The one-page row adds a cover
+    gutter, a secondary line and a right-hand value column with a pixel progress
+    bar under the row, and is drawn in pixels by `lighthouse_page.lua`. Both keep
+    the glanceable values readable without tapping. Section headings are marked
+    with a left block bar, the e-ink equivalent of the web app's accent border.
   * Every measure below is expressed in "units" that main.lua multiplies by
     `Screen:scaleBySize(1)`, so the same layout appears on a 600px and a
     1072px screen without a second table of magic numbers.
@@ -27,13 +30,16 @@ Design rules this file encodes (e-ink, judged at 1 bit):
 The module is pure Lua: no sockets, no widgets, no KOReader requires. The
 repository's off-device suite exercises every helper here directly.
 
-Row anatomy (the contract every screen follows):
+Row anatomy (the menu row: the currently-reading shelf, Highlights and the book
+detail menu):
 
     | cover | Title                    | Isuna Hasekura · Spice and Wolf 01 · ███░░░ 45% |
     ^ left gutter, covers on     ^ `item.mandatory`: author, series, progress, rating
 
-The row is one line, because that is the shape KOReader's `MenuItem` draws:
-`item.text` is the title, `item.mandatory` is the everything-else column.
+The menu row is one line, because that is the shape KOReader's `MenuItem` draws:
+`item.text` is the title, `item.mandatory` is the everything-else column. The two
+full-page views do not use it; their rows are laid out in pixels by
+`lighthouse_page.lua`.
 ]]
 local Ui = {}
 
@@ -188,9 +194,52 @@ Ui.GLYPH = {
     overflow = "⋮",
 }
 
---- The value a row shows when a number is genuinely unknown.
--- Deliberately a word, not a dash: a dash reads as zero on a statistics screen.
-Ui.UNAVAILABLE = "unavailable"
+--- English wording for the relative-time, clock and duration lines.
+-- The page models pass their translated labels in; a word they do not override
+-- falls back to this table, so the pure formatters still run off-device.
+Ui.TIME_LABELS = {
+    just_now = "just now",
+    one_minute_ago = "1 min ago",
+    minutes_ago = "%d min ago",
+    one_hour_ago = "1 h ago",
+    hours_ago = "%d h ago",
+    relative_yesterday = "yesterday",
+    days_ago = "%d days ago",
+    clock_today = "Today",
+    clock_yesterday = "Yesterday",
+    months = {
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    },
+    seconds_short = "%d s",
+    minutes_short = "%d m",
+    minutes_seconds = "%d m %d s",
+    hours_short = "%d h",
+    hours_minutes = "%d h %d m",
+}
+
+--- One translated time word, or the English default.
+-- @param text label table from the caller, may be nil
+-- @string key
+-- @string fallback
+-- @treturn string
+local function timeLabel(text, key, fallback)
+    if type(text) == "table" then
+        local value = text[key]
+        if type(value) == "string" and value ~= "" then return value end
+    end
+    return fallback
+end
+
+--- The month names the caller supplied, or the English ones.
+-- @param text label table from the caller, may be nil
+-- @treturn table
+local function monthNames(text)
+    if type(text) == "table" and type(text.months) == "table" and #text.months == 12 then
+        return text.months
+    end
+    return Ui.TIME_LABELS.months
+end
 
 local SEPARATOR = Ui.GLYPH.separator
 
@@ -831,33 +880,38 @@ end
 -- @number timestamp unix seconds
 -- @number now unix seconds
 -- @treturn string|nil
-function Ui.relativeWhen(timestamp, now)
+--- @number timestamp
+-- @number now
+-- @tparam table[opt] text time labels (see `Ui.TIME_LABELS`)
+-- @treturn string|nil
+function Ui.relativeWhen(timestamp, now, text)
     local stamp = tonumber(timestamp)
     local current = tonumber(now)
     if not stamp or not current or stamp <= 0 then return nil end
+    local defaults = Ui.TIME_LABELS
     local age = current - stamp
     if age < 0 then age = 0 end
-    if age < 60 then return "just now" end
+    if age < 60 then return timeLabel(text, "just_now", defaults.just_now) end
     if age < 3600 then
         local minutes = math.floor(age / 60)
-        if minutes < 2 then return "1 min ago" end
-        return string.format("%d min ago", minutes)
+        if minutes < 2 then return timeLabel(text, "one_minute_ago", defaults.one_minute_ago) end
+        return string.format(timeLabel(text, "minutes_ago", defaults.minutes_ago), minutes)
     end
     if age < 86400 then
         local hours = math.floor(age / 3600)
-        if hours < 2 then return "1 h ago" end
-        return string.format("%d h ago", hours)
+        if hours < 2 then return timeLabel(text, "one_hour_ago", defaults.one_hour_ago) end
+        return string.format(timeLabel(text, "hours_ago", defaults.hours_ago), hours)
     end
     local days = math.floor(age / 86400)
-    if days < 2 then return "yesterday" end
-    if days < 7 then return string.format("%d days ago", days) end
+    if days < 2 then return timeLabel(text, "relative_yesterday", defaults.relative_yesterday) end
+    if days < 7 then
+        return string.format(timeLabel(text, "days_ago", defaults.days_ago), days)
+    end
     -- Older than a week: a date reads better than "23 days ago", and it is
     -- derived from the timestamp alone so no locale table is needed.
     local ok, parts = pcall(os.date, "*t", stamp)
     if not ok or type(parts) ~= "table" then return nil end
-    local names = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug",
-        "Sep", "Oct", "Nov", "Dec" }
-    local name = names[tonumber(parts.month) or 0]
+    local name = monthNames(text)[tonumber(parts.month) or 0]
     if not name then return nil end
     return string.format("%d %s", tonumber(parts.day) or 0, name)
 end
@@ -869,9 +923,11 @@ end
 -- stays testable without the device clock.
 -- @tparam table when broken-down local time of the session
 -- @tparam table today broken-down local time of "now"
+-- @tparam table[opt] text time labels (see `Ui.TIME_LABELS`)
 -- @treturn string|nil
-function Ui.clockLine(when, today)
+function Ui.clockLine(when, today, text)
     if type(when) ~= "table" or type(today) ~= "table" then return nil end
+    local defaults = Ui.TIME_LABELS
     local hour = tonumber(when.hour)
     local minute = tonumber(when.min)
     if not hour or not minute then return nil end
@@ -893,12 +949,14 @@ function Ui.clockLine(when, today)
     local today_day = dayNumber(today)
     if when_day and today_day then
         local difference = today_day - when_day
-        if difference == 0 then return "Today " .. clock end
-        if difference == 1 then return "Yesterday " .. clock end
+        if difference == 0 then
+            return timeLabel(text, "clock_today", defaults.clock_today) .. " " .. clock
+        end
+        if difference == 1 then
+            return timeLabel(text, "clock_yesterday", defaults.clock_yesterday) .. " " .. clock
+        end
     end
-    local names = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug",
-        "Sep", "Oct", "Nov", "Dec" }
-    local name = names[tonumber(when.month) or 0]
+    local name = monthNames(text)[tonumber(when.month) or 0]
     if not name then return clock end
     return string.format("%d %s %s", tonumber(when.day) or 0, name, clock)
 end
@@ -907,22 +965,31 @@ end
 -- The short form on the row's right edge comes from `Stats.formatDuration`;
 -- this is the spelled-out half the session line carries.
 -- @number seconds
+-- @tparam table[opt] text time labels (see `Ui.TIME_LABELS`)
 -- @treturn string|nil
-function Ui.durationLong(seconds)
+function Ui.durationLong(seconds, text)
+    local defaults = Ui.TIME_LABELS
     local total = numberIn(seconds, nil, 0)
     if total == nil then return nil end
     local rounded = math.floor(total + 0.5)
-    if rounded < 60 then return string.format("%d s", rounded) end
+    if rounded < 60 then
+        return string.format(timeLabel(text, "seconds_short", defaults.seconds_short), rounded)
+    end
     local minutes = math.floor(rounded / 60)
     local rest = rounded - minutes * 60
     if minutes < 60 then
-        if rest == 0 then return string.format("%d m", minutes) end
-        return string.format("%d m %d s", minutes, rest)
+        if rest == 0 then
+            return string.format(timeLabel(text, "minutes_short", defaults.minutes_short), minutes)
+        end
+        return string.format(timeLabel(text, "minutes_seconds", defaults.minutes_seconds),
+            minutes, rest)
     end
     local hours = math.floor(minutes / 60)
     local leftover = minutes - hours * 60
-    if leftover == 0 then return string.format("%d h", hours) end
-    return string.format("%d h %d m", hours, leftover)
+    if leftover == 0 then
+        return string.format(timeLabel(text, "hours_short", defaults.hours_short), hours)
+    end
+    return string.format(timeLabel(text, "hours_minutes", defaults.hours_minutes), hours, leftover)
 end
 
 --- The three segments of the library's grouping switch.
@@ -1027,8 +1094,17 @@ function Ui.pagePlan(screen_w, screen_h, scale)
     -- after the smallest scale still does not fit. The reading rows go first:
     -- the picture and the session list carry more of the answer than a fourth
     -- book does.
+    --
+    -- A drawn row is taller than its own band: the renderer puts a focus line
+    -- under every row, and the heatmap draws a gap between its seven day rows,
+    -- so both are budgeted here. A plan that counted only the bands would report
+    -- a page that fits while the footer is off the bottom of the screen.
+    local function bandHeight(count, cell) return count * (cell + hairline) end
+    local function heatHeight(cell) return 7 * cell + 6 * gap_x end
     local function fits(reading_count, session_count, reading_px, session_px, cell_px)
-        local needed = reading_count * reading_px + 7 * cell_px + session_count * session_px
+        local needed = bandHeight(reading_count, reading_px)
+            + heatHeight(cell_px)
+            + bandHeight(session_count, session_px)
         return needed <= available
     end
 
@@ -1068,7 +1144,10 @@ function Ui.pagePlan(screen_w, screen_h, scale)
     -- rather see, and the design's "no wide gaps" applies to the page, not only
     -- to the rows. Bounded by `page_heat_cell_max_units`, so a huge screen gets a
     -- readable grid rather than seven enormous blocks.
-    local used = fixed + reading_rows * reading_h + 7 * cell_h + session_rows * session_h
+    local used = fixed
+        + bandHeight(reading_rows, reading_h)
+        + heatHeight(cell_h)
+        + bandHeight(session_rows, session_h)
     while cell_h < cell_max and (height - used) >= 7 do
         cell_h = cell_h + 1
         used = used + 7
@@ -1086,7 +1165,10 @@ function Ui.pagePlan(screen_w, screen_h, scale)
     local cell_w = math.floor((content_w - (weeks - 1) * gap_x) / weeks)
     if cell_w < cell_min then cell_w = cell_min end
 
-    local total = fixed + reading_rows * reading_h + 7 * cell_h + session_rows * session_h
+    local total = fixed
+        + bandHeight(reading_rows, reading_h)
+        + heatHeight(cell_h)
+        + bandHeight(session_rows, session_h)
     local slack = height - total
     if slack < 0 then slack = 0 end
 
@@ -1189,18 +1271,25 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
     if available < 1 then available = 1 end
 
     local row_h = scaled(tokens.page_reading_units)
-    local rows = math.floor(available / row_h)
+    -- Every drawn row also carries its own focus line, so the band a row needs
+    -- is the row plus one hairline.
+    local step_h = row_h + hairline
+    local rows = math.floor(available / step_h)
     if rows < min_rows then
         -- Too few rows: shrink the rows instead of the list, down to the token's
         -- floor, and take the count that fits at that size.
-        row_h = math.max(math.floor(available / min_rows), row_min)
-        rows = math.floor(available / row_h)
+        row_h = math.max(math.floor(available / min_rows) - hairline, row_min)
+        step_h = row_h + hairline
+        rows = math.floor(available / step_h)
         if rows < 1 then rows = 1 end
-    elseif row_h < row_max and rows * row_h < available then
+    elseif row_h < row_max and rows * step_h < available then
         -- A screen with room to spare gets slightly taller rows rather than a
         -- gap under the last row.
-        local taller = math.floor(available / rows)
-        if taller > row_h and taller <= row_max then row_h = taller end
+        local taller = math.floor(available / rows) - hairline
+        if taller > row_h and taller <= row_max then
+            row_h = taller
+            step_h = row_h + hairline
+        end
     end
 
     local cover_h = row_h - gap
@@ -1212,7 +1301,7 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
         cover_h = math.max(math.floor(cover_w / tokens.cover_aspect + 0.5), 1)
     end
 
-    local total = fixed + rows * row_h
+    local total = fixed + rows * step_h
     local slack = height - total
     if slack < 0 then slack = 0 end
 

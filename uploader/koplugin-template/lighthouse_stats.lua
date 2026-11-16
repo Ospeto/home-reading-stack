@@ -40,32 +40,12 @@ can print "unavailable" instead of a confident zero.
 
 local Stats = {}
 
---- Days shown in the heatmap window.
--- 26 weeks is the most that stays readable without horizontal scrolling on a
--- 600px e-ink menu row (one character per day).
-Stats.DEFAULT_HEATMAP_DAYS = 182
-
---- Distinct monochrome glyphs for heatmap levels 0..4.
--- Deliberately not a colour ramp: e-ink shows no colour, and a dup of the web
--- app's amber scale would read as five identical greys. Box-drawing/block
--- glyphs are density-ordered and render in KOReader's default fonts.
-local LEVEL_GLYPHS = { [0] = "·", "░", "▒", "▓", "█" }
-
 --- Minutes a day must reach to be drawn at each level.
--- The single definition of the ramp: `heatmapLevel` maps a day with it, and
--- the view's shade key is built from it, so the printed key can never describe
--- a different picture. Same thresholds as `computeReadingHeatmap` in
+-- The single definition of the ramp: `heatmapLevel` maps a day with it, so the
+-- shades on the device can never describe a different picture from the web
+-- app's. Same thresholds as `computeReadingHeatmap` in
 -- uploader/reading-stats.ts.
 Stats.LEVEL_MIN_MINUTES = { [0] = 0, [1] = 1, [2] = 15, [3] = 30, [4] = 60 }
-
---- Glyph used when a day's level cannot be determined at all.
-local UNKNOWN_GLYPH = "?"
-
---- Short month names for compact day labels (e-ink needs short rows).
-local MONTH_NAMES = {
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-}
 
 --- Returns a finite number, or nil for anything else (including NaN).
 -- Zero is a real value here: it means "the server said zero", which the view
@@ -107,16 +87,7 @@ function Stats.formatDuration(seconds)
     return string.format("%dh %dm", hours, rest)
 end
 
---- Formats a minute count as compact reading time.
--- @number minutes
--- @treturn string|nil
-function Stats.formatMinutes(minutes)
-    local value = numberOf(minutes)
-    if not value then return nil end
-    return Stats.formatDuration(value * 60)
-end
-
---- Formats an hour count for a goal target, e.g. "34h" or "34.5h".
+--- Formats an hour count for reading time, e.g. "34h" or "34.5h".
 -- @number hours
 -- @treturn string|nil
 function Stats.formatHours(hours)
@@ -128,17 +99,6 @@ function Stats.formatHours(hours)
     return string.format("%.1fh", value)
 end
 
---- Formats a day count as "1 day" / "5 days".
--- @number count
--- @treturn string|nil
-function Stats.formatDays(count)
-    local value = numberOf(count)
-    if not value then return nil end
-    local whole = round(value)
-    if whole == 1 then return "1 day" end
-    return string.format("%d days", whole)
-end
-
 --- Formats a whole count, e.g. "12" or "0".
 -- Kept here so the view never formats a number itself: a float from JSON
 -- (12.0) must not print as "12.0" on a stats row.
@@ -148,19 +108,6 @@ function Stats.formatCount(count)
     local value = numberOf(count)
     if not value then return nil end
     return string.format("%d", round(value))
-end
-
---- Turns a YYYY-MM-DD string into "Nov 15"; returns the input when it is not
--- in that shape, so an unexpected date never disappears from the view.
--- @string date
--- @treturn string|nil
-function Stats.shortDate(date)
-    if type(date) ~= "string" or date == "" then return nil end
-    local year, month, day = date:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)$")
-    if not year then return date end
-    local name = MONTH_NAMES[tonumber(month) or 0]
-    if not name then return date end
-    return string.format("%s %d", name, tonumber(day) or 0)
 end
 
 --- Reads the monochrome level 0..4 the server shipped for one heatmap day.
@@ -177,14 +124,6 @@ function Stats.heatmapLevel(day)
     if not level then return nil end
     if level < 0 or level > 4 or level ~= math.floor(level) then return nil end
     return level
-end
-
---- Glyph for one heatmap level.
--- @number level 0..4
--- @treturn string
-function Stats.heatmapGlyph(level)
-    if level == nil then return UNKNOWN_GLYPH end
-    return LEVEL_GLYPHS[level] or UNKNOWN_GLYPH
 end
 
 --- Normalizes the `/api/kosync/stats` payload into what the view renders.
@@ -222,6 +161,10 @@ function Stats.normalize(payload)
         -- (it walks finished timestamps), unlike `finishedCount` which is
         -- all-time. It is valid whether or not a goal target is configured.
         stats.finishedThisYear = numberOf(goal.currentBooks)
+        -- Only the year is drawn: the page has no goal section, and the year
+        -- names the YEAR band.
+        local year = numberOf(goal.year)
+        if year then stats.goal = { year = year } end
     end
 
     local health = payload.libraryHealth
@@ -284,28 +227,6 @@ function Stats.normalize(payload)
         if #sessions > 0 then stats.recentSessions = sessions end
     end
 
-    if goal then
-        local targetBooks = numberOf(goal.targetBooks)
-        local targetHours = numberOf(goal.targetHours)
-        if (targetBooks and targetBooks > 0) or (targetHours and targetHours > 0) then
-            local currentBooks = numberOf(goal.currentBooks)
-            local currentHours = numberOf(goal.currentHours)
-            local booksPercent = numberOf(goal.booksPercent)
-            local hoursPercent = numberOf(goal.hoursPercent)
-            stats.goal = {
-                year = numberOf(goal.year),
-                targetBooks = targetBooks,
-                targetHours = targetHours,
-                currentBooks = currentBooks,
-                currentHours = currentHours,
-                -- Ratios feed Status.progressBar, the plugin's existing bar
-                -- renderer, so the goal looks like every other progress row.
-                booksRatio = Stats.goalRatio(booksPercent),
-                hoursRatio = Stats.goalRatio(hoursPercent),
-            }
-        end
-    end
-
     if type(payload.heatmap) == "table" then
         local days = {}
         for day_index = 1, #payload.heatmap do
@@ -330,124 +251,6 @@ function Stats.normalize(payload)
     end
 
     return stats
-end
-
---- Clamps the server's goal percentage into a 0..1 ratio for the progress bar.
--- @number percent server percentage, 0..100
--- @treturn number|nil nil when the server sent no percentage
-function Stats.goalRatio(percent)
-    local value = numberOf(percent)
-    if not value then return nil end
-    local ratio = value / 100
-    if ratio < 0 then return 0 end
-    if ratio > 1 then return 1 end
-    return ratio
-end
-
---- Compact "5 days · best 12 days" streak summary.
--- The row's own label already says "Current streak", so this string is only
--- the value half of that row.
--- @tparam table streaks normalized streaks section
--- @treturn string|nil
-function Stats.streakLabel(streaks)
-    if type(streaks) ~= "table" then return nil end
-    local current = streaks.current
-    local best = streaks.best
-    if not current and not best then return nil end
-
-    local label
-    if current then
-        if current <= 0 then
-            label = "No streak yet"
-        else
-            label = Stats.formatDays(current)
-        end
-    end
-    if best and best > 0 then
-        local best_label = string.format("best %s", Stats.formatDays(best))
-        label = label and (label .. " · " .. best_label) or best_label
-    end
-    return label
-end
-
---- "12/25" against a book target, or the bare "12 read" when the goal has
--- only an hours target. The view's row already carries the "Books" label, so
--- the value does not repeat it.
--- @tparam table goal normalized goal section
--- @treturn string|nil nil when the server did not send the count
-function Stats.goalBooksLabel(goal)
-    if type(goal) ~= "table" then return nil end
-    local current = goal.currentBooks
-    if not current then return nil end
-    if goal.targetBooks then
-        return string.format("%d/%d", round(current), round(goal.targetBooks))
-    end
-    return string.format("%d read", round(current))
-end
-
---- "34h/100h" against an hours target, or "34h read" when the goal has only
--- a book target.
--- @tparam table goal normalized goal section
--- @treturn string|nil nil when the server did not send the count
-function Stats.goalHoursLabel(goal)
-    if type(goal) ~= "table" then return nil end
-    local current_text = Stats.formatHours(goal.currentHours)
-    if not current_text then return nil end
-    if goal.targetHours then
-        return string.format("%s/%s", current_text, Stats.formatHours(goal.targetHours))
-    end
-    return string.format("%s read", current_text)
-end
-
---- Reading time for one heatmap day, e.g. "45m"; nil when unknown.
--- @tparam table day normalized heatmap day
--- @treturn string|nil
-function Stats.dayDurationLabel(day)
-    if type(day) ~= "table" then return nil end
-    if day.minutes then return Stats.formatMinutes(day.minutes) end
-    if day.seconds then return Stats.formatDuration(day.seconds) end
-    return nil
-end
-
---- Packs heatmap days into rows of at most seven, newest row last.
---
--- The picture is a fixed 26-week window: the newest day always ends the final
--- row, so "today" sits at the right edge instead of drifting with the calendar,
--- and older days beyond the window (and beyond the row boundary) are dropped
--- rather than shrunk.
--- @tparam table days normalized heatmap days, oldest first
--- @treturn table array of rows, each an array of days
-function Stats.heatmapRows(days)
-    local rows = {}
-    if type(days) ~= "table" or #days == 0 then return rows end
-
-    local first = #days - Stats.DEFAULT_HEATMAP_DAYS + 1
-    if first < 1 then first = 1 end
-
-    local last = #days
-    while last >= first do
-        local start = last - 6
-        if start < first then start = first end
-        local row = {}
-        for day_index = start, last do
-            row[#row + 1] = days[day_index]
-        end
-        table.insert(rows, 1, row)
-        last = start - 1
-    end
-    return rows
-end
-
---- Glyph string for one heatmap row, e.g. "·░▒▓█░░".
--- @tparam table row array of normalized days
--- @treturn string
-function Stats.heatmapRowText(row)
-    if type(row) ~= "table" then return "" end
-    local cells = {}
-    for day_index = 1, #row do
-        cells[#cells + 1] = Stats.heatmapGlyph(row[day_index].level)
-    end
-    return table.concat(cells)
 end
 
 return Stats

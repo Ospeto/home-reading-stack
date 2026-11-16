@@ -4948,8 +4948,8 @@ async function handleRequestCore(
   // API: Library groupings (Authors / Series).
   //
   // The KOReader plugin's library has a Books / Authors / Series switch, and a
-  // series row names its volume count, how many are read, and which volume comes
-  // next. That cannot be counted from the paged OPDS feed, so the whole grouping
+  // series row names its volume count, how many are read, and the next volume's
+  // cover. That cannot be counted from the paged OPDS feed, so the whole grouping
   // is folded here - with the same furthest-progress read rule the feed uses -
   // and served as one small document the device pages locally.
   if (url.pathname === "/api/library/groups" && req.method === "GET") {

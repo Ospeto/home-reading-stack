@@ -8,14 +8,16 @@ has to be typed on the device.
 
 What it gives you, on top of the built-in OPDS browser:
 
-  * Browse the whole library page by page (the built-in OPDS browser has no
-    paging, so large catalogs load in one very large request).
+  * Browse the whole library page by page, with a Books / Authors / Series
+    switch across the top (the built-in OPDS browser has no paging, so large
+    catalogs load in one very large request; a grouping is one document the
+    device pages locally).
   * Search title / author / series from the device keyboard.
   * Cover thumbnails on every library row, cached on disk so scrolling does not
     refetch them, with a neutral placeholder instead of a blank hole.
-  * One row language across every screen: the title leads the row and one
-    right-hand metadata column (author, series, progress, rating) is readable
-    without a tap. The scale lives in `lighthouse_ui.lua`.
+  * Two row shapes and no more, both readable without a tap: the menu row and
+    the one-page row. `lighthouse_ui.lua` owns the row contract, the scale and
+    the page arithmetic; `lighthouse_page.lua` draws the full-page rows.
   * Book detail with one-tap EPUB download straight into your download folder.
   * Reading status per book, merged from the server's KOSync progress
     (`GET /api/kosync/active`), matched on Calibre id, filename or title.
@@ -28,16 +30,20 @@ What it gives you, on top of the built-in OPDS browser:
   * Calibre rating per book (0–10 → five stars), served by the OPDS feed.
   * A "Currently reading" shelf of every active device session, with local
     progress preferred and books only this device has read added to it.
-  * A "Reading stats" view mirroring the web Reading Statistics modal, headline
-    numbers first and then the activity picture: streak, reading time, books
-    finished this year, the yearly goal, a monochrome 26-week activity heatmap
-    and library health (`GET /api/kosync/stats`).
+  * A "Reading stats" view mirroring the web Reading Statistics modal as ONE
+    page: the headline strip, the library and year bands, the currently-reading
+    rows, a 52-week activity grid drawn as a pixel heatmap, the recent sessions
+    and one footer line - no scrolling, no paging and no goal section
+    (`GET /api/kosync/stats`).
   * Designed empty, loading and error screens: a failed request says what failed
     in one line and offers a retry, and an empty library does not look broken.
 
-It deliberately uses only endpoints that already existed before this plugin:
-`/api/opds`, `/api/books/<id>/download/epub`, `/api/books/<id>/cover`,
-`/api/kosync/active`, `/api/kosync/stats`. Local progress and highlights add no
+It speaks the server's own endpoints: `/api/opds`,
+`/api/books/<id>/download/epub`, `/api/books/<id>/cover`,
+`/api/kosync/active`, `/api/kosync/stats` and, for the library's Authors and
+Series groupings, `/api/library/groups`. A server without that last one still
+browses Books; the grouping switch reports the failure and offers a retry.
+Local progress and highlights add no
 endpoint at all: they are read from the sidecar files KOReader already writes
 beside the books (`<book>.sdr/metadata.<extension>.lua`, see
 `lighthouse_sidecar.lua`), and that surface is strictly read-only - the plugin
@@ -501,6 +507,7 @@ local function coverPlaceholder(layout)
         h = math.max(layout.cover_height - 2 * border, 1),
     }
     return widgets.frame:new{
+        radius = Ui.tokens.corner_radius,
         bordersize = border,
         padding = 0,
         widgets.center:new{
@@ -1352,6 +1359,7 @@ function LightHouse:pageLabels()
         activity = _("ACTIVITY"),
         recent_sessions = _("RECENT SESSIONS"),
         last_52_weeks = _("LAST 52 WEEKS"),
+        books_upper = _("BOOKS"),
         search = _("Search library…"),
         next_page = _("Next page"),
         page = _("Page %d of %d"),
@@ -1361,9 +1369,34 @@ function LightHouse:pageLabels()
         not_started = _("not started"),
         done = _("done"),
         unread_value = _("Unread"),
-        next_unread = _("#%s next"),
         books_count = _("%s books"),
         read_count = _("%s read"),
+        read_of_books = _("%s / %s"),
+        average_day = _("%d min on an average day"),
+        detail_on_web = _("detail on web"),
+        last_n = _("LAST %d"),
+        untitled = _("Untitled"),
+        az = _("A–Z"),
+        no_series = _("No series in this library yet"),
+        no_authors = _("No authors in this library yet"),
+        just_now = _("just now"),
+        one_minute_ago = _("1 min ago"),
+        minutes_ago = _("%d min ago"),
+        one_hour_ago = _("1 h ago"),
+        hours_ago = _("%d h ago"),
+        relative_yesterday = _("yesterday"),
+        days_ago = _("%d days ago"),
+        clock_today = _("Today"),
+        clock_yesterday = _("Yesterday"),
+        seconds_short = _("%d s"),
+        minutes_short = _("%d m"),
+        minutes_seconds = _("%d m %d s"),
+        hours_short = _("%d h"),
+        hours_minutes = _("%d h %d m"),
+        months = {
+            _("Jan"), _("Feb"), _("Mar"), _("Apr"), _("May"), _("Jun"),
+            _("Jul"), _("Aug"), _("Sep"), _("Oct"), _("Nov"), _("Dec"),
+        },
         author_count = _("%s authors"),
         series_count = _("%s series"),
     }
@@ -1428,7 +1461,7 @@ end
 -- every widget construction here runs inside KOReader's paint path.
 -- @tparam table model page model (`lighthouse_views.lua`)
 -- @tparam table plan layout plan (`Ui.pagePlan` / `Ui.listPlan`)
--- @tparam table handlers { on_action, on_switch, on_overflow, on_back, kind }
+-- @tparam table handlers { on_action, on_switch, on_overflow }
 -- @treturn table|nil the page widget
 function LightHouse:showPage(model, plan, handlers)
     handlers = handlers or {}
@@ -1439,7 +1472,6 @@ function LightHouse:showPage(model, plan, handlers)
     local built_ok, page = pcall(Page.build, {
         model = model,
         plan = plan,
-        kind = handlers.kind or "stats",
         cover_widget = function(cover_id, width, height)
             return self:coverWidgetFor(cover_id, width, height)
         end,
@@ -1475,7 +1507,9 @@ function LightHouse:showPageOverflow()
     local items = {}
     local state = self.library_state
     if state then
-        items[#items + 1] = { text = _("Refresh"), bold = true, callback = function() self:openLibrary{ page = state.page } end }
+        items[#items + 1] = { text = _("Refresh"), bold = true, callback = function()
+            self:openLibrary{ page = state.page, refresh = true }
+        end }
         if state.page > 1 then
             items[#items + 1] = {
                 text = _("Previous page"),
@@ -1566,8 +1600,24 @@ function LightHouse:buildBookDetails(entry)
         text = T(_("Rating: %1"), Status.ratingLabel(entry.rating)),
         callback = function() end,
     }
+    -- A row built from a reading session carries its percentage at the top
+    -- level rather than in a catalog `status` table, so the progress line reads
+    -- the number the row just showed instead of falling back to "Unread".
+    local progress_entry = entry
+    if status == nil then
+        local percentage = Status.num(entry.percentage)
+        if percentage then
+            progress_entry = {
+                status = {
+                    percentage = percentage,
+                    device = entry.device,
+                    timestamp = entry.timestamp,
+                },
+            }
+        end
+    end
     details[#details + 1] = {
-        text = T(_("Progress: %1"), Status.statusLabel(entry)),
+        text = T(_("Progress: %1"), Status.statusLabel(progress_entry)),
         callback = function() end,
     }
     -- Local sidecar data, when this device has this book: the progress above is
@@ -1686,7 +1736,7 @@ function LightHouse:fetchGrouping(by)
 end
 
 --- Builds and shows the library page for one grouping.
--- @tparam table[opt] options { mode, page, query }
+-- @tparam table[opt] options { mode, page, query, refresh }
 function LightHouse:openLibrary(options)
     options = options or {}
     local previous = self.library_state or {}
@@ -1697,6 +1747,14 @@ function LightHouse:openLibrary(options)
     local query = options.query
     if query == nil then query = previous.query or "" end
     query = Status.str(query)
+
+    -- A grouping document is fetched once and then paged on the device, so the
+    -- cache is what makes paging local. It is not kept across an explicit
+    -- refresh or a grouping switch: finishing or downloading a book changes the
+    -- read counts, and a reader asking again must see the server's answer.
+    if options.refresh or (previous.mode ~= nil and previous.mode ~= mode) then
+        self._groupings = nil
+    end
 
     local state = { mode = mode, page = page, query = query }
     self.library_state = state
@@ -1717,11 +1775,13 @@ function LightHouse:openLibrary(options)
     end
 
     local plan = self:libraryPlan()
-    -- Two rows of the page are navigation, not content: the search row on the
-    -- first page and the next-page row while the catalog has more. The
-    -- configured page size stays an upper bound, so a reader who tuned it keeps
-    -- their setting while the screen decides what actually fits.
-    local page_size = math.max(math.min(plan.rows - 2, pageSize()), 1)
+    -- Some rows of the page are navigation, not content: the catalog's first page
+    -- carries the search row and a page carries a next-page row while more
+    -- follows, while a grouping page draws its rows plus that one next-page row.
+    -- The configured page size stays an upper bound, so a reader who tuned it
+    -- keeps their setting while the screen decides what actually fits.
+    local navigation = mode == "books" and 2 or 1
+    local page_size = math.max(math.min(plan.rows - navigation, pageSize()), 1)
     local context = { page = page, page_size = page_size, query = query, totals = {} }
 
     if mode == "books" then
@@ -1837,6 +1897,15 @@ function LightHouse:openLibrary(options)
         end
         context.groups = grouping.groups
         context.totals = grouping.totals
+        -- A refresh after books were deleted from the web app can land on a page
+        -- that no longer exists: clamp to the last page the document has, so the
+        -- footer and the pager name a page that is actually drawn.
+        local available = math.max(math.ceil(#grouping.groups / page_size), 1)
+        if page > available then
+            page = available
+            state.page = page
+            context.page = page
+        end
         if self:coversEnabled() then
             local ids = {}
             local first = (page - 1) * page_size + 1
@@ -1867,7 +1936,6 @@ function LightHouse:openLibrary(options)
     end
 
     self:showPage(model, plan, {
-        kind = "list",
         on_action = dispatch,
         on_switch = function(key)
             self:openLibrary{ mode = key, page = 1 }
@@ -2451,7 +2519,6 @@ function LightHouse:showStats()
     -- and the library, not the grouping switch.
     self.library_state = nil
     self:showPage(model, plan, {
-        kind = "stats",
         on_action = function(action)
             if action.kind == "book" then self:openBookDetails(action.entry) end
         end,

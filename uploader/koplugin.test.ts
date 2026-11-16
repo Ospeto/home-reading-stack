@@ -1760,9 +1760,12 @@ package.preload["ui/widget/container/framecontainer"] = function()
   function frame:new(options)
     options = options or {}
     options.__kind = "framecontainer"
+    -- A frame draws its border and padding outside its child, so the size it
+    -- reports - and the page height measured from it - has to include both.
     function options:getSize()
       local inner = self[1] and self[1]:getSize() or { w = 0, h = 0 }
-      return { w = inner.w or 0, h = inner.h or 0 }
+      local inset = 2 * (tonumber(self.padding) or 0) + 2 * (tonumber(self.bordersize) or 0)
+      return { w = (inner.w or 0) + inset, h = (inner.h or 0) + inset }
     end
     function options:paintTo() end
     function options:free() end
@@ -1880,6 +1883,7 @@ package.preload["ui/uimanager"] = function()
     show = function(_, widget) shown[#shown + 1] = widget end,
     close = function() end,
     forceRePaint = function() end,
+    setDirty = function() end,
   }
 end
 package.preload["ui/widget/container/widgetcontainer"] = function()
@@ -2008,8 +2012,10 @@ package.preload["ui/widget/container/inputcontainer"] = function()
   return InputContainer
 end
 -- Layout containers: children are appended to the container table itself, which
--- is what a group is in KOReader (group[#group + 1] = widget).
-local function layout_container(kind)
+-- is what a group is in KOReader (group[#group + 1] = widget). A horizontal
+-- group is as tall as its tallest child and as wide as all of them; a vertical
+-- group is as wide as its widest child and as tall as all of them.
+local function layout_container(kind, stacks)
   return function()
     local group = {}
     group.__kind = kind
@@ -2023,8 +2029,8 @@ local function layout_container(kind)
       local width, height = 0, 0
       for index = 1, #self do
         local size = self[index] and self[index]:getSize() or { w = 0, h = 0 }
-        width = width + (size.w or 0)
-        if (size.h or 0) > height then height = size.h end
+        width = stacks and math.max(width, size.w or 0) or (width + (size.w or 0))
+        height = stacks and (height + (size.h or 0)) or math.max(height, size.h or 0)
       end
       if self.dimen then return self.dimen end
       return { w = width, h = height }
@@ -2038,8 +2044,8 @@ local function layout_container(kind)
     return group
   end
 end
-package.preload["ui/widget/verticalgroup"] = layout_container("verticalgroup")
-package.preload["ui/widget/horizontalgroup"] = layout_container("horizontalgroup")
+package.preload["ui/widget/verticalgroup"] = layout_container("verticalgroup", true)
+package.preload["ui/widget/horizontalgroup"] = layout_container("horizontalgroup", false)
 package.preload["ui/widget/container/leftcontainer"] = layout_container("leftcontainer")
 package.preload["ui/widget/container/rightcontainer"] = layout_container("rightcontainer")
 -- A spacer is a fixed width with no children; the page uses it for gutters and
@@ -2160,6 +2166,22 @@ for detail_index = 1, #details do
   detail_labels[#detail_labels + 1] = tostring(details[detail_index].text)
 end
 print("detail=" .. table.concat(detail_labels, "|"))
+
+-- A row built from a reading session carries its percentage at the top level;
+-- opening it must report that progress, not "Unread".
+local session_details = LightHouse:buildBookDetails({
+  book_id = 101,
+  title = "Spice and Wolf, Vol. 9",
+  authors = "Isuna Hasekura",
+  percentage = 0.62,
+  device = "Paperwhite",
+})
+local session_progress
+for detail_index = 1, #session_details do
+  local text = tostring(session_details[detail_index].text)
+  if text:find("Progress:", 1, true) then session_progress = text end
+end
+print("session_detail_progress=" .. tostring(session_progress))
 
 -- Page geometry: one rule for the whole library page, covers portrait.
 local layout = LightHouse:libraryPlan()
@@ -2300,6 +2322,12 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
     expect(detail).toContain("Progress: ████░░░░ 45% · Paperwhite");
     expect(detail).toContain("Synopsis");
     expect(detail).toContain("Tags: Fantasy");
+
+    // A reading session has no catalog status table; its own percentage is what
+    // the detail screen must report.
+    expect(out.session_detail_progress).toContain("62%");
+    expect(out.session_detail_progress).toContain("Paperwhite");
+    expect(out.session_detail_progress).not.toContain("Unread");
 
     expect(out.connection_has_origin).toBe("true");
     expect(out.connection_has_opds).toBe("true");
@@ -2741,23 +2769,11 @@ print("dur_total=" .. tostring(Stats.formatDuration(477000)))
 print("dur_nil=" .. tostring(Stats.formatDuration(nil)))
 print("dur_junk=" .. tostring(Stats.formatDuration("abc")))
 print("dur_nan=" .. tostring(Stats.formatDuration(0/0)))
-print("mins=" .. tostring(Stats.formatMinutes(45)))
 print("hours_frac=" .. tostring(Stats.formatHours(132.5)))
 print("hours_whole=" .. tostring(Stats.formatHours(100)))
-print("days_one=" .. tostring(Stats.formatDays(1)))
-print("days_many=" .. tostring(Stats.formatDays(5)))
 print("count_float=" .. tostring(Stats.formatCount(12.0)))
 print("count_zero=" .. tostring(Stats.formatCount(0)))
 print("count_nil=" .. tostring(Stats.formatCount(nil)))
-
--- Dates and glyphs ------------------------------------------------------------
-print("date_short=" .. tostring(Stats.shortDate("2026-11-15")))
-print("date_passthrough=" .. tostring(Stats.shortDate("whenever")))
-print("date_nil=" .. tostring(Stats.shortDate(nil)))
-local glyphs = {}
-for level = 0, 4 do glyphs[#glyphs + 1] = Stats.heatmapGlyph(level) end
-print("glyphs=" .. table.concat(glyphs, ""))
-print("glyph_unknown=" .. tostring(Stats.heatmapGlyph(nil)) .. tostring(Stats.heatmapGlyph(9)))
 
 -- Level mapping: a validated read of the server's own level, never derived --
 print("level_server=" .. tostring(Stats.heatmapLevel({ level = 4, minutes = 1 })))
@@ -2799,11 +2815,17 @@ print("norm_finished_year=" .. tostring(stats.finishedThisYear))
 print("norm_unread=" .. tostring(stats.health.unread))
 print("norm_reading_zero=" .. tostring(stats.health.reading))
 print("norm_finished=" .. tostring(stats.health.finished))
-print("norm_goal_ratio=" .. tostring(stats.goal.booksRatio))
-print("norm_hours_ratio=" .. tostring(stats.goal.hoursRatio))
+-- The page has no goal section: the year names the YEAR band and the targets
+-- are not carried at all.
+print("norm_goal_year=" .. tostring(stats.goal and stats.goal.year))
+print("norm_goal_target=" .. tostring(stats.goal and stats.goal.targetBooks))
+print("norm_goal_ratio=" .. tostring(stats.goal and stats.goal.booksRatio))
 print("norm_heatmap_len=" .. tostring(#stats.heatmap))
 print("norm_heatmap_level3=" .. tostring(stats.heatmap[3].level))
 print("norm_heatmap_no_level=" .. tostring(stats.heatmap[2].level))
+
+-- A goal block with no year names nothing.
+print("goal_no_year=" .. tostring(Stats.normalize({ goal = { currentBooks = 4 } }).goal))
 
 -- Missing sections stay nil, never zero.
 local bare = assert(Stats.normalize({}))
@@ -2815,75 +2837,6 @@ print("bare_heatmap=" .. tostring(bare.heatmap))
 print("bare_finished=" .. tostring(bare.finishedThisYear))
 print("normalize_nontable=" .. tostring(Stats.normalize("nope")))
 print("normalize_nil=" .. tostring(Stats.normalize(nil)))
-
--- A goal with no target is not a goal; a target is, even with no percentage.
-print("goal_untargeted=" .. tostring(Stats.normalize({
-  goal = { year = 2026, targetBooks = 0, targetHours = nil, currentBooks = 4 },
-}).goal))
-local targeted = assert(Stats.normalize({
-  goal = { year = 2026, targetBooks = 20, currentBooks = 5 },
-}).goal)
-print("goal_unpercented_ratio=" .. tostring(targeted.booksRatio))
-print("goal_books_label=" .. tostring(Stats.goalBooksLabel(targeted)))
-print("ratio_clamped=" .. tostring(Stats.goalRatio(150)))
-print("ratio_missing=" .. tostring(Stats.goalRatio(nil)))
-
--- Labels ---------------------------------------------------------------------
-print("streak_label=" .. tostring(Stats.streakLabel(stats.streaks)))
-print("streak_none=" .. tostring(Stats.streakLabel({ current = 0, best = 12 })))
-print("streak_missing=" .. tostring(Stats.streakLabel(nil)))
-print("goal_books=" .. tostring(Stats.goalBooksLabel(stats.goal)))
-print("goal_hours=" .. tostring(Stats.goalHoursLabel(stats.goal)))
-
--- A single-target goal still shows both metrics: the untargeted one is the
--- plain count the server sent, never "unavailable".
-local books_only = assert(Stats.normalize({
-  goal = { year = 2026, targetBooks = 20, currentBooks = 5, currentHours = 12.5, booksPercent = 25 },
-}).goal)
-print("goal_books_only_books=" .. tostring(Stats.goalBooksLabel(books_only)))
-print("goal_books_only_hours=" .. tostring(Stats.goalHoursLabel(books_only)))
-print("goal_books_only_hours_ratio=" .. tostring(books_only.hoursRatio))
-local hours_only = assert(Stats.normalize({
-  goal = { year = 2026, targetHours = 100, currentBooks = 7, currentHours = 34, hoursPercent = 34 },
-}).goal)
-print("goal_hours_only_books=" .. tostring(Stats.goalBooksLabel(hours_only)))
-print("goal_hours_only_hours=" .. tostring(Stats.goalHoursLabel(hours_only)))
-print("goal_hours_only_books_ratio=" .. tostring(hours_only.booksRatio))
--- "unavailable" is reserved for a count the server did not send at all.
-print("goal_missing_count_books=" .. tostring(Stats.goalBooksLabel({ targetHours = 10 })))
-print("goal_missing_count_hours=" .. tostring(Stats.goalHoursLabel({ targetBooks = 10 })))
--- A target with no count is unavailable too, never a fabricated zero.
-print("goal_missing_count_targeted_books=" .. tostring(Stats.goalBooksLabel({ targetBooks = 25 })))
-print("goal_missing_count_targeted_hours=" .. tostring(Stats.goalHoursLabel({ targetHours = 100 })))
-print("day_duration=" .. tostring(Stats.dayDurationLabel(stats.heatmap[3])))
-print("day_duration_seconds=" .. tostring(Stats.dayDurationLabel({ seconds = 2700 })))
-print("day_duration_missing=" .. tostring(Stats.dayDurationLabel({})))
-
--- Heatmap rows: seven days per row, newest row last, no horizontal scroll.
-local week = {}
-for day_index = 1, 10 do
-  week[#week + 1] = { date = string.format("2026-01-%02d", day_index), level = 1, minutes = 20 }
-end
-local week_rows = Stats.heatmapRows(week)
-print("rows_count=" .. tostring(#week_rows))
-print("rows_first=" .. tostring(#week_rows[1]))
-print("rows_last=" .. tostring(#week_rows[#week_rows]))
-print("rows_newest=" .. tostring(week_rows[#week_rows][#week_rows[#week_rows]].date))
-print("rows_empty=" .. tostring(#Stats.heatmapRows({})))
-print("rows_nil=" .. tostring(#Stats.heatmapRows(nil)))
-
-local year = {}
-for day_index = 1, 365 do
-  year[#year + 1] = { date = "2026-01-01", level = day_index % 5, minutes = day_index }
-end
-local year_rows = Stats.heatmapRows(year)
-print("year_rows_count=" .. tostring(#year_rows))
-print("year_rows_first_cells=" .. tostring(#year_rows[1]))
-print("year_rows_text_bytes=" .. tostring(#Stats.heatmapRowText(year_rows[1])))
-print("row_text=" .. tostring(Stats.heatmapRowText({
-  { level = 0 }, { level = 1 }, { level = 2 }, { level = 3 }, { level = 4 },
-})))
-print("row_text_nil=" .. tostring(Stats.heatmapRowText(nil)))
 
 print("OK")
 `;
@@ -2926,24 +2879,11 @@ describe("plugin reading-stats formatting", () => {
     expect(out.dur_nil).toBe("nil");
     expect(out.dur_junk).toBe("nil");
     expect(out.dur_nan).toBe("nil");
-    expect(out.mins).toBe("45m");
     expect(out.hours_frac).toBe("132.5h");
     expect(out.hours_whole).toBe("100h");
-    expect(out.days_one).toBe("1 day");
-    expect(out.days_many).toBe("5 days");
     expect(out.count_float).toBe("12");
     expect(out.count_zero).toBe("0");
     expect(out.count_nil).toBe("nil");
-  });
-
-  it("renders monochrome heatmap levels instead of a colour ramp", () => {
-    if (!LUA_BINARY) return;
-    const out = runStatsHarness();
-    // Five visually distinct, density-ordered glyphs: no colour, no rainbow.
-    expect(out.glyphs).toBe("\u00b7\u2591\u2592\u2593\u2588");
-    expect(out.glyph_unknown).toBe("??");
-    expect(out.row_text).toBe("\u00b7\u2591\u2592\u2593\u2588");
-    expect(out.row_text_nil).toBe("");
   });
 
   it("reads the server's heatmap level and never derives one", () => {
@@ -2970,8 +2910,10 @@ describe("plugin reading-stats formatting", () => {
     // Zero is a real value when the server sends it.
     expect(out.norm_reading_zero).toBe("0");
     expect(out.norm_finished).toBe("34");
-    expect(out.norm_goal_ratio).toBe("0.48");
-    expect(out.norm_hours_ratio).toBe("0.34");
+    // The page has no goal section: only the year survives, to name YEAR.
+    expect(out.norm_goal_year).toBe("2026");
+    expect(out.norm_goal_target).toBe("nil");
+    expect(out.norm_goal_ratio).toBe("nil");
     // The malformed date is dropped; a day the server did not shade stays unshaded.
     expect(out.norm_heatmap_len).toBe("3");
     expect(out.norm_heatmap_level3).toBe("3");
@@ -2987,57 +2929,7 @@ describe("plugin reading-stats formatting", () => {
     expect(out.normalize_nontable).toBe("nil");
     expect(out.normalize_nil).toBe("nil");
 
-    expect(out.goal_untargeted).toBe("nil");
-    expect(out.goal_unpercented_ratio).toBe("nil");
-    expect(out.goal_books_label).toBe("5/20");
-    expect(out.ratio_clamped).toBe("1");
-    expect(out.ratio_missing).toBe("nil");
-  });
-
-  it("builds streak and goal labels the view can print directly", () => {
-    if (!LUA_BINARY) return;
-    const out = runStatsHarness();
-    expect(out.streak_label).toBe("5 days \u00b7 best 12 days");
-    expect(out.streak_none).toBe("No streak yet \u00b7 best 12 days");
-    expect(out.streak_missing).toBe("nil");
-    expect(out.goal_books).toBe("12/25");
-    expect(out.goal_hours).toBe("34h/100h");
-    // `computeYearlyGoalProgress` always sends currentBooks and currentHours,
-    // so a single-target goal must print the other metric as a plain count.
-    expect(out.goal_books_only_books).toBe("5/20");
-    expect(out.goal_books_only_hours).toBe("12.5h read");
-    expect(out.goal_books_only_hours_ratio).toBe("nil");
-    expect(out.goal_hours_only_books).toBe("7 read");
-    expect(out.goal_hours_only_hours).toBe("34h/100h");
-    expect(out.goal_hours_only_books_ratio).toBe("nil");
-    // Absent count: no number to show, so the view says unavailable.
-    expect(out.goal_missing_count_books).toBe("nil");
-    expect(out.goal_missing_count_hours).toBe("nil");
-    expect(out.goal_missing_count_targeted_books).toBe("nil");
-    expect(out.goal_missing_count_targeted_hours).toBe("nil");
-    expect(out.day_duration).toBe("45m");
-    expect(out.day_duration_seconds).toBe("45m");
-    expect(out.day_duration_missing).toBe("nil");
-    expect(out.date_short).toBe("Nov 15");
-    expect(out.date_passthrough).toBe("whenever");
-    expect(out.date_nil).toBe("nil");
-  });
-
-  it("packs the heatmap into bounded rows that end on the newest day", () => {
-    if (!LUA_BINARY) return;
-    const out = runStatsHarness();
-    expect(out.rows_count).toBe("2");
-    expect(out.rows_first).toBe("3");
-    expect(out.rows_last).toBe("7");
-    expect(out.rows_newest).toBe("2026-01-10");
-    expect(out.rows_empty).toBe("0");
-    expect(out.rows_nil).toBe("0");
-    // A year of days packs into rows of seven and never exercises a scroll.
-    expect(out.year_rows_first_cells).toBe("7");
-    // Byte length: block glyphs are 3 bytes each in UTF-8.
-    expect(Number(out.year_rows_text_bytes)).toBeLessThanOrEqual(21);
-    // The window is a fixed 26 weeks, whatever the payload length.
-    expect(out.year_rows_count).toBe("26");
+    expect(out.goal_no_year).toBe("nil");
   });
 });
 
@@ -3348,6 +3240,105 @@ print("fail_raised=" .. tostring(fail_raised))
 dump_problem("fail")
 http.request = working_request
 
+-- 6. Every label the page models can print is supplied by the plugin ---------
+-- The models carry an English default for each label; the plugin overrides them
+-- all with gettext so a translated reader UI shows translated words. One key the
+-- plugin forgets stays English on the device, so the two vocabularies have to
+-- match exactly.
+local Views = require("lighthouse_views")
+local supplied = LightHouse:pageLabels()
+local missing = {}
+for key in pairs(Views.LABELS) do
+  if supplied[key] == nil then missing[#missing + 1] = key end
+end
+table.sort(missing)
+print("missing_labels=" .. table.concat(missing, ","))
+
+print("OK")
+`);
+
+/**
+ * What the one-page statistics screen actually draws.
+ *
+ * `Ui.pagePlan`'s return value is a budget, and a budget checked against itself
+ * can be wrong: the renderer puts a focus line under every row and a gap between
+ * the heatmap's seven day rows, so a plan that counts only the band heights
+ * reports a page that fits while the footer falls off the bottom of the screen.
+ * This harness builds the real widget tree through `Page.build` and measures it,
+ * so the numbers come from the drawing and not from the plan.
+ */
+const PAGE_HEIGHT_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local Views = require("lighthouse_views")
+local Status = require("lighthouse_status")
+local Stats = require("lighthouse_stats")
+local Ui = require("lighthouse_ui")
+local Page = require("lighthouse_page")
+
+-- One full payload: four rows in each list, every band present, so each screen
+-- is measured with the most it can ever be asked to draw.
+local payload = {
+  totalSessions = 412,
+  finishedCount = 55,
+  activeBooks = {
+    { bookId = 11, displayTitle = "Ballad of a Shinigami vol. 2",
+      displayAuthors = "K-Ske Hasegawa", percentage = 0.62, timestamp = 1763290000, device = "Kindle" },
+    { bookId = 12, displayTitle = "Spice and Wolf, Vol. 9",
+      displayAuthors = "Isuna Hasekura", percentage = 0.41, timestamp = 1763200000, device = "Kindle" },
+    { bookId = 13, displayTitle = "Ascendance of a Bookworm",
+      displayAuthors = "Miya Kazuki", percentage = 0.15, timestamp = 1763100000, device = "Kindle" },
+    { bookId = 14, displayTitle = "Legend of the Galactic Heroes",
+      displayAuthors = "Yoshiki Tanaka", percentage = 0.10, timestamp = 1763000000, device = "Kindle" },
+  },
+  streaks = { currentStreak = 5, longestStreak = 12, readingDaysCount = 63 },
+  dailyReadingTime = {
+    todayMinutes = 45, thisWeekMinutes = 250, totalSeconds = 477000,
+    dailyAverageMinutes = 32, days = {},
+  },
+  heatmap = {
+    { date = "2026-11-14", level = 2 },
+    { date = "2026-11-15", level = 3 },
+  },
+  libraryHealth = { totalBooks = 162, unreadCount = 120, inProgressCount = 8, finishedCount = 34, staleCount = 3 },
+  goal = { year = 2026, currentBooks = 12, currentHours = 34 },
+  recentSessions = {
+    { title = "Ballad of a Shinigami vol. 2", startTime = 1763298000, durationSeconds = 337, device = "Kindle" },
+    { title = "Spice and Wolf, Vol. 9", startTime = 1763200000, durationSeconds = 2280, device = "Kindle" },
+    { title = "Ascendance of a Bookworm", startTime = 1763100000, durationSeconds = 4320, device = "Kindle" },
+    { title = "Legend of the Galactic Heroes", startTime = 1763000000, durationSeconds = 900, device = "Kindle" },
+  },
+}
+
+local numbers = assert(Stats.normalize(payload), "payload must normalize")
+local sessions = Status.normalizeSessions(payload.activeBooks)
+local now = 1763300000
+local today = { year = 2026, month = 11, day = 16, hour = 20, min = 0 }
+
+-- The panels the captain named (a 600x800 Basic and a 1072x1448 Paperwhite)
+-- plus two more sizes the same rule has to serve.
+local screens = {
+  { 600, 800, 1 },
+  { 1072, 1448, 1.79 },
+  { 1236, 1648, 2 },
+  { 758, 1024, 1.2 },
+}
+for screen_index = 1, #screens do
+  local width = screens[screen_index][1]
+  local height = screens[screen_index][2]
+  local scale = screens[screen_index][3]
+  local plan = Ui.pagePlan(width, height, scale)
+  local model = Views.statsModel(numbers, sessions, now, {
+    weeks = plan.heat_weeks,
+    year = 2026,
+    today = today,
+    average_daily_minutes = numbers.averageDailyMinutes,
+    reading_max = plan.reading_rows,
+    session_max = plan.session_rows,
+  })
+  local page = assert(Page.build{ model = model, plan = plan })
+  local drawn = page:getSize().h
+  print(string.format("page_%dx%d=%d,%d,%d,%s", width, height, drawn, plan.total, height,
+    tostring(drawn <= height)))
+end
 print("OK")
 `);
 
@@ -3413,6 +3404,40 @@ describe("plugin reading stats view", () => {
     expect(out.plan_fits).toBe("true");
   });
 
+  it("translates every label the page models can print", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runHarness(READING_STATS_HARNESS);
+
+    // The models' label table and the plugin's gettext table are two
+    // vocabularies for the same words; a key missing from the second stays
+    // English on a translated device.
+    expect(out.missing_labels).toBe("");
+  });
+
+  it("measures the page it draws - not just its plan - inside every screen", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runHarness(PAGE_HEIGHT_HARNESS);
+
+    // drawn height, the plan's own total, the screen height, whether it fits.
+    // The oracle is the built widget tree: `Page.build` measures what the
+    // renderer draws (a focus line under every row, a gap between the heatmap's
+    // day rows, the frame's border and padding), so a plan that forgot any of
+    // them shows up here as a page taller than the screen it is drawn on.
+    for (const screen of ["page_600x800", "page_1072x1448", "page_1236x1648", "page_758x1024"]) {
+      const parts = (out[screen] ?? "").split(",");
+      expect(parts).toHaveLength(4);
+      const drawn = Number(parts[0]);
+      const planned = Number(parts[1]);
+      const height = Number(parts[2]);
+      expect(parts[3]).toBe("true");
+      expect(planned).toBeLessThanOrEqual(height);
+      expect(drawn).toBeLessThanOrEqual(height);
+      // A budget that cannot be drawn at all would be the other way to pass:
+      // the page still uses most of the screen instead of shrinking to chrome.
+      expect(drawn).toBeGreaterThan(height * 0.8);
+    }
+  });
+
   it("leads with the four headline numbers", () => {
     if (!LUA_BINARY || !UNZIP_BINARY) return;
     const out = runHarness(READING_STATS_HARNESS);
@@ -3440,7 +3465,7 @@ describe("plugin reading stats view", () => {
     // three rows the design allows even though the payload carries four.
     expect(out.sections).toBe("2");
     expect(out.section_rows).toBe("6");
-    expect(out.footer).toBe("LightHouse|32 min on an average day");
+    expect(out.footer).toBe("LightHouse|32 min on an average day · detail on web");
   });
 
   it("leaves out a section the payload did not carry instead of showing zeros", () => {
@@ -3686,6 +3711,11 @@ local leftover = entry(401, href(401))
 cover_file(401, "\255\216" .. string.rep("coverbytes", 40))
 local leftover_slot = LightHouse:coverSlot(leftover, layout)
 print("truncated_slot=" .. tostring(leftover_slot and leftover_slot.__kind))
+-- A coverless book draws the neutral placeholder, and that box is square like
+-- every other corner in the plugin: it must not inherit KOReader's radius.
+local placeholder = LightHouse:coverSlot(entry(499, href(499)), layout)
+print("placeholder_kind=" .. tostring(placeholder and placeholder.__kind))
+print("placeholder_radius=" .. tostring(placeholder and placeholder.radius))
 requests = {}
 LightHouse:prefetchCovers({ leftover })
 print("truncated_refetched=" .. tostring(#requests))
@@ -3785,6 +3815,11 @@ describe("plugin cover prefetch", () => {
     // fresh.
     expect(out.truncated_slot).toBe("framecontainer");
     expect(out.truncated_refetched).toBe("1");
+
+    // The coverless placeholder is a square box like every other corner in the
+    // plugin: it must not inherit KOReader's default radius.
+    expect(out.placeholder_kind).toBe("framecontainer");
+    expect(out.placeholder_radius).toBe("0");
     expect(out.repaired_slot).toBe("imagewidget");
     expect(out.repaired_requests).toBe("0");
 
@@ -3795,6 +3830,252 @@ describe("plugin cover prefetch", () => {
     expect(out.final_exists).toBe("true");
     expect(out.final_whole).toBe("true");
 
+    expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
+  });
+});
+
+/**
+ * The Authors / Series groupings are one document fetched once and then paged on
+ * the device. That cache is a performance decision, not a truth: a reader who
+ * finished a book and asked again has to see the server's new read counts, so an
+ * explicit Refresh and a grouping switch must both go back to the network while a
+ * page turn must not. The harness counts the requests the plugin actually makes.
+ */
+const GROUPING_REFRESH_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local expected_base_url = assert(arg[2], "expected base url argument required")
+
+local fetched = { authors = 0, series = 0 }
+local current_url = ""
+local group_count = 6
+
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      current_url = tostring(request and request.url or "")
+      local by = current_url:match("/api/library/groups%?by=(%a+)")
+      if by then fetched[by] = (fetched[by] or 0) + 1 end
+      if request.sink then
+        request.sink("{}")
+        request.sink(nil)
+      end
+      return 1, 200, {}
+    end,
+  }
+end
+package.preload["ltn12"] = function()
+  return {
+    sink = {
+      table = function(target)
+        return function(chunk)
+          if chunk then target[#target + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function() end,
+    },
+  }
+end
+package.preload["json"] = function()
+  return {
+    decode = function()
+      local by = current_url:match("/api/library/groups%?by=(%a+)")
+      if not by then return {} end
+      -- Six rows, so the second page has something to draw as well; the count
+      -- shrinks mid-harness to model books deleted on the server.
+      local groups = {}
+      for index = 1, group_count do
+        groups[index] = {
+          name = by .. " " .. tostring(index),
+          author = "A Writer",
+          books = 3,
+          read = 1,
+        }
+      end
+      return { groups = groups, books = 18, authors = 6, series = 6 }
+    end,
+  }
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local config = require("lighthouse_config")
+assert(config.base_url == expected_base_url, "harness needs the generated config")
+
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+
+local models = {}
+local function open(options)
+  local ok, raised = pcall(function() LightHouse:openLibrary(options) end)
+  assert(ok, tostring(raised))
+  models[#models + 1] = LightHouse.last_page_model
+end
+
+open{ mode = "series", page = 1 }
+print("series_first=" .. fetched.series)
+-- A grouping page fills the screen: its content rows plus the one next-page row
+-- are exactly the rows the layout fits.
+print("grouping_page_rows=" .. tostring(#models[1].blocks[1].rows))
+print("grouping_plan_rows=" .. tostring(LightHouse:libraryPlan().rows))
+open{ mode = "series", page = 2 }
+print("series_page_turn=" .. fetched.series)
+open{ page = 2, refresh = true }
+print("series_refresh=" .. fetched.series)
+open{ mode = "authors", page = 1 }
+print("authors_first=" .. fetched.authors)
+open{ mode = "series", page = 1 }
+print("series_after_switch=" .. fetched.series)
+
+-- What the reader sees after the refresh: the counts the server just sent.
+local rows = models[3].blocks[1].rows
+print("refresh_row=" .. tostring(rows[1].title) .. "//" .. tostring(rows[1].secondary)
+  .. "//" .. tostring(rows[1].value) .. "//" .. tostring(rows[1].value_sub))
+
+-- The footer's two halves turn the page, and each is inert at the end it would
+-- step past: the left half is a real page turn, not a dead tap.
+open{ mode = "series", page = 2 }
+local page = LightHouse.page
+print("pager_at_open=" .. tostring(LightHouse.last_page_model.pager.page)
+  .. "/" .. tostring(LightHouse.last_page_model.pager.pages))
+page:run({ kind = "footer_left" })
+print("after_footer_left=" .. tostring(LightHouse.last_page_model.pager.page))
+LightHouse.page:run({ kind = "footer_left" })
+print("after_footer_left_at_first=" .. tostring(LightHouse.last_page_model.pager.page))
+LightHouse.page:run({ kind = "footer_right" })
+print("after_footer_right=" .. tostring(LightHouse.last_page_model.pager.page))
+LightHouse.page:run({ kind = "footer_right" })
+print("after_footer_right_at_last=" .. tostring(LightHouse.last_page_model.pager.page))
+
+-- Keys: the focus cycle holds the content rows and nothing else, the line it
+-- draws on them is visible, and Select with nothing focused is not a close.
+-- A refresh after the server lost rows must not leave the reader on a page
+-- past the end: the pager, the footer and the body all move to the last page.
+group_count = 2
+open{ page = 2, refresh = true }
+print("clamp_pager=" .. tostring(LightHouse.last_page_model.pager.page)
+  .. "/" .. tostring(LightHouse.last_page_model.pager.pages))
+print("clamp_state_page=" .. tostring(LightHouse.library_state.page))
+print("clamp_rows=" .. tostring(#LightHouse.last_page_model.blocks[1].rows))
+print("clamp_footer=" .. tostring(LightHouse.last_page_model.footer.left))
+group_count = 6
+open{ mode = "series", page = 1, refresh = true }
+local keyed = LightHouse.page
+local keyed_model = LightHouse.last_page_model
+local content_rows = 0
+for block_index = 1, #(keyed_model.blocks or {}) do
+  content_rows = content_rows + #(keyed_model.blocks[block_index].rows or {})
+end
+print("key_rows=" .. tostring(content_rows))
+print("key_panels=" .. tostring(#keyed.panels))
+print("key_focusable=" .. tostring(#keyed.focus_panels))
+local lines_visible = true
+local chrome_focusable = false
+for index = 1, #keyed.focus_panels do
+  local panel = keyed.focus_panels[index]
+  local line = panel.focus_line
+  if not line or not line.dimen or (line.dimen.w or 0) < 1 then lines_visible = false end
+  if not panel.action or (panel.action.kind ~= "book" and panel.action.kind ~= "series"
+      and panel.action.kind ~= "author" and panel.action.kind ~= "page"
+      and panel.action.kind ~= "search") then
+    chrome_focusable = true
+  end
+end
+print("key_lines_visible=" .. tostring(lines_visible))
+print("key_chrome_focusable=" .. tostring(chrome_focusable))
+keyed:onSelectItem()
+print("key_select_unfocused_closed=" .. tostring(LightHouse.page == nil))
+keyed:onNextItem()
+print("key_focus_index=" .. tostring(keyed.focus_index))
+local focused = keyed.focus_panels[keyed.focus_index]
+print("key_focus_black=" .. tostring(focused ~= nil and focused.focus_line ~= nil
+  and focused.focus_line.background == 0))
+print("key_focus_first_is_row=" .. tostring(focused == keyed.focus_panels[1]))
+print("OK")
+`);
+
+describe("plugin library groupings", () => {
+  it("refetches a grouping on Refresh and on a switch, not on a page turn", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "harness-api-key",
+      generatedAt: "2026-11-14T00:00:00.000Z",
+    });
+
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-groupings-"));
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
+      encoding: "utf8",
+    });
+    expect(extract.status).toBe(0);
+
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "grouping_harness.lua");
+    fs.writeFileSync(harnessPath, GROUPING_REFRESH_HARNESS);
+
+    const res = spawnSync(
+      LUA_BINARY,
+      [harnessPath, pluginRoot, "http://192.168.31.15:8086"],
+      { encoding: "utf8" },
+    );
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line) => line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+
+    expect(out.series_first).toBe("1");
+    // Paging a grouping is local: the whole document is already on the device.
+    expect(out.series_page_turn).toBe("1");
+    // Refresh is the reader asking again after finishing a book.
+    expect(out.series_refresh).toBe("2");
+    expect(out.authors_first).toBe("1");
+    // Switching back is a fresh open of that grouping, not the old document.
+    expect(out.series_after_switch).toBe("3");
+
+    // And the refreshed page draws what the server just sent: page 2's single
+    // row of the six-group document, with no next-volume marker of its own.
+    expect(out.refresh_row).toBe("series 6//A Writer · 3 books · 1 read//33%//1 / 3");
+
+    // A grouping page is sized from the rows the model draws, so it fills the
+    // screen instead of leaving slack above the footer.
+    expect(out.grouping_page_rows).toBe(out.grouping_plan_rows);
+
+    // Both footer halves turn the page, and neither is active past its end.
+    expect(out.pager_at_open).toBe("2/2");
+    expect(out.after_footer_left).toBe("1");
+    expect(out.after_footer_left_at_first).toBe("1");
+    expect(out.after_footer_right).toBe("2");
+    expect(out.after_footer_right_at_last).toBe("2");
+
+    // A refresh after rows disappeared lands on the last page there is: the
+    // pager, the plugin's own page state and the footer all agree.
+    expect(out.clamp_pager).toBe("1/1");
+    expect(out.clamp_state_page).toBe("1");
+    expect(out.clamp_rows).toBe("2");
+    expect(out.clamp_footer).toBe("Page 1 of 1");
+
+    // On a keyed device the cycle holds the rows the page draws and none of the
+    // chrome that cannot show focus, every stop draws a visible focus line, and
+    // Select with nothing focused does not close the screen.
+    expect(out.key_focusable).toBe(out.key_rows);
+    expect(Number(out.key_panels)).toBeGreaterThan(Number(out.key_focusable));
+    expect(out.key_lines_visible).toBe("true");
+    expect(out.key_chrome_focusable).toBe("false");
+    expect(out.key_select_unfocused_closed).toBe("false");
+    expect(out.key_focus_index).toBe("1");
+    expect(out.key_focus_first_is_row).toBe("true");
+    expect(out.key_focus_black).toBe("true");
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
 });
