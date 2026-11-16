@@ -995,7 +995,10 @@ function Ui.pagePlan(screen_w, screen_h, scale)
     local cell_max = math.max(math.floor(tokens.page_heat_cell_max_units * s + 0.5), cell_min)
     local gap_x = math.max(scaled(tokens.page_heat_gap_units), 1)
 
-    local content_w = width - 2 * pad
+    -- The page frame draws its own border outside the padding, so both are
+    -- subtracted here: a plan that ignored the border would be a page slightly
+    -- wider and taller than the screen it is drawn on.
+    local content_w = width - 2 * pad - 2 * hairline
     if content_w < 1 then content_w = 1 end
 
     -- The band always budgets four rows: its row count follows the data, and a
@@ -1004,9 +1007,10 @@ function Ui.pagePlan(screen_w, screen_h, scale)
     local band_rows = 4
     local band_h = band_head + band_rows * band_row
 
-    -- Header + hero + band + three section headings + footer, with a hairline
-    -- under the header, the hero and the band and one above the footer.
-    local fixed = pad + header + hairline + hero + hairline + band_h + hairline
+    -- Frame border + padding + header + hero + band + three section headings +
+    -- footer, with a hairline under the header, the hero and the band and one
+    -- above the footer.
+    local fixed = 2 * hairline + pad + header + hairline + hero + hairline + band_h + hairline
         + 3 * section_head + footer + hairline + pad + gap * 2
     local available = height - fixed
     if available < 0 then available = 0 end
@@ -1174,12 +1178,12 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
     local row_max = math.max(math.floor(tokens.page_reading_units * s * 1.15 + 0.5), row_min)
     local min_rows = math.max(math.floor(tonumber(options.min_rows) or 3), 1)
 
-    local content_w = width - 2 * pad
+    local content_w = width - 2 * pad - 2 * hairline
     if content_w < 1 then content_w = 1 end
 
-    -- Header, the switch's own two rules, the sub-line, the footer rule and the
-    -- page padding are all fixed; only the row band flexes.
-    local fixed = pad + header + hairline + subline_h + footer + hairline + pad + gap
+    -- Header, the switch's own two rules, the sub-line, the footer rule, the
+    -- frame border and the page padding are all fixed; only the row band flexes.
+    local fixed = 2 * hairline + pad + header + hairline + subline_h + footer + hairline + pad + gap
     if switch_h > 0 then fixed = fixed + switch_h + 2 * hairline end
     local available = height - fixed
     if available < 1 then available = 1 end
