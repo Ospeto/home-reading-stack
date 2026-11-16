@@ -2167,6 +2167,22 @@ for detail_index = 1, #details do
 end
 print("detail=" .. table.concat(detail_labels, "|"))
 
+-- A row built from a reading session carries its percentage at the top level;
+-- opening it must report that progress, not "Unread".
+local session_details = LightHouse:buildBookDetails({
+  book_id = 101,
+  title = "Spice and Wolf, Vol. 9",
+  authors = "Isuna Hasekura",
+  percentage = 0.62,
+  device = "Paperwhite",
+})
+local session_progress
+for detail_index = 1, #session_details do
+  local text = tostring(session_details[detail_index].text)
+  if text:find("Progress:", 1, true) then session_progress = text end
+end
+print("session_detail_progress=" .. tostring(session_progress))
+
 -- Page geometry: one rule for the whole library page, covers portrait.
 local layout = LightHouse:libraryPlan()
 print("layout_rows=" .. tostring(layout.rows))
@@ -2306,6 +2322,12 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
     expect(detail).toContain("Progress: ████░░░░ 45% · Paperwhite");
     expect(detail).toContain("Synopsis");
     expect(detail).toContain("Tags: Fantasy");
+
+    // A reading session has no catalog status table; its own percentage is what
+    // the detail screen must report.
+    expect(out.session_detail_progress).toContain("62%");
+    expect(out.session_detail_progress).toContain("Paperwhite");
+    expect(out.session_detail_progress).not.toContain("Unread");
 
     expect(out.connection_has_origin).toBe("true");
     expect(out.connection_has_opds).toBe("true");
@@ -3824,6 +3846,7 @@ local expected_base_url = assert(arg[2], "expected base url argument required")
 
 local fetched = { authors = 0, series = 0 }
 local current_url = ""
+local group_count = 6
 
 package.preload["socket.http"] = function()
   return {
@@ -3857,9 +3880,10 @@ package.preload["json"] = function()
     decode = function()
       local by = current_url:match("/api/library/groups%?by=(%a+)")
       if not by then return {} end
-      -- Six rows, so the second page has something to draw as well.
+      -- Six rows, so the second page has something to draw as well; the count
+      -- shrinks mid-harness to model books deleted on the server.
       local groups = {}
-      for index = 1, 6 do
+      for index = 1, group_count do
         groups[index] = {
           name = by .. " " .. tostring(index),
           author = "A Writer",
@@ -3923,7 +3947,17 @@ print("after_footer_right_at_last=" .. tostring(LightHouse.last_page_model.pager
 
 -- Keys: the focus cycle holds the content rows and nothing else, the line it
 -- draws on them is visible, and Select with nothing focused is not a close.
-open{ mode = "series", page = 1 }
+-- A refresh after the server lost rows must not leave the reader on a page
+-- past the end: the pager, the footer and the body all move to the last page.
+group_count = 2
+open{ page = 2, refresh = true }
+print("clamp_pager=" .. tostring(LightHouse.last_page_model.pager.page)
+  .. "/" .. tostring(LightHouse.last_page_model.pager.pages))
+print("clamp_state_page=" .. tostring(LightHouse.library_state.page))
+print("clamp_rows=" .. tostring(#LightHouse.last_page_model.blocks[1].rows))
+print("clamp_footer=" .. tostring(LightHouse.last_page_model.footer.left))
+group_count = 6
+open{ mode = "series", page = 1, refresh = true }
 local keyed = LightHouse.page
 local keyed_model = LightHouse.last_page_model
 local content_rows = 0
@@ -4023,6 +4057,13 @@ describe("plugin library groupings", () => {
     expect(out.after_footer_left_at_first).toBe("1");
     expect(out.after_footer_right).toBe("2");
     expect(out.after_footer_right_at_last).toBe("2");
+
+    // A refresh after rows disappeared lands on the last page there is: the
+    // pager, the plugin's own page state and the footer all agree.
+    expect(out.clamp_pager).toBe("1/1");
+    expect(out.clamp_state_page).toBe("1");
+    expect(out.clamp_rows).toBe("2");
+    expect(out.clamp_footer).toBe("Page 1 of 1");
 
     // On a keyed device the cycle holds the rows the page draws and none of the
     // chrome that cannot show focus, every stop draws a visible focus line, and

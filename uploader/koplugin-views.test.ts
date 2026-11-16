@@ -136,6 +136,54 @@ print("recent_heading=" .. flat(recent.heading.left) .. "/" .. flat(recent.headi
 print("recent_rows=" .. #recent.rows)
 print("recent_first=" .. flat(recent.rows[1].title) .. "//" .. flat(recent.rows[1].value))
 print("recent_second_line=" .. flat(recent.rows[1].secondary))
+print("reading_action=" .. flat(reading.rows[1].action and reading.rows[1].action.kind))
+print("recent_action=" .. flat(recent.rows[1].action and recent.rows[1].action.kind))
+
+-- The time words a row prints come from the label table, so a translated
+-- reader gets a translated screen.
+local translated = Views.statsModel(
+  {
+    recentSessions = {
+      { title = "Spice and Wolf, Vol. 9", startTime = os.time{
+          year = 2026, month = 11, day = 16, hour = 13, min = 19 },
+        durationSeconds = 337, device = "Kindle" },
+    },
+    averageDailyMinutes = 68,
+  },
+  {
+    { title = "Ballad of a Shinigami vol. 2", authors = "K-Ske Hasegawa", percentage = 0.62,
+      timestamp = now - 30 },
+    { title = "Spice and Wolf, Vol. 9", authors = "Isuna Hasekura", percentage = 0.41,
+      timestamp = now - 10 * 86400 },
+  },
+  now,
+  {
+    labels = {
+      just_now = "a l'instant",
+      clock_today = "Aujourd'hui",
+      minutes_seconds = "%d mn %d s",
+      months = { "janv.", "fevr.", "mars", "avr.", "mai", "juin",
+        "juil.", "aout.", "sept.", "oct.", "nov.", "dec." },
+    },
+    today = { year = 2026, month = 11, day = 16, hour = 20, min = 0 },
+  }
+)
+local function section_rows(page_model, nth)
+  local seen = 0
+  for block_index = 1, #page_model.blocks do
+    local block = page_model.blocks[block_index]
+    if block.kind == "section" then
+      seen = seen + 1
+      if seen == nth then return block.rows end
+    end
+  end
+  return nil
+end
+local translated_reading = section_rows(translated, 1)
+local translated_recent = section_rows(translated, 2)
+print("translated_reading_line=" .. flat(translated_reading and translated_reading[1].secondary))
+print("translated_old_line=" .. flat(translated_reading and translated_reading[2].secondary))
+print("translated_recent_line=" .. flat(translated_recent and translated_recent[1].secondary))
 
 print("footer_left=" .. flat(model.footer.left))
 print("footer_right=" .. flat(model.footer.right))
@@ -223,6 +271,29 @@ print("author_subline=" .. flat(author_model.subline.left))
 print("author_footer=" .. flat(author_model.footer.right))
 print("author_first=" .. flat(author_model.blocks[1].rows[1].title) .. "//"
   .. flat(author_model.blocks[1].rows[1].secondary) .. "//" .. flat(author_model.blocks[1].rows[1].value))
+
+-- A grouping with no rows says so instead of drawing a blank body.
+local empty_series = Views.libraryModel("series", {
+  groups = {}, page = 1, page_size = 4,
+  totals = { books = 1802, series = 0, authors = 512 },
+})
+print("empty_series_rows=" .. #empty_series.blocks[1].rows)
+print("empty_series_kind=" .. flat(empty_series.blocks[1].rows[1].kind))
+print("empty_series_title=" .. flat(empty_series.blocks[1].rows[1].title))
+print("empty_series_action=" .. flat(empty_series.blocks[1].rows[1].action))
+local empty_authors = Views.libraryModel("authors", {
+  groups = {}, page = 1, page_size = 4, totals = { books = 0, authors = 0 },
+})
+print("empty_authors_title=" .. flat(empty_authors.blocks[1].rows[1].title))
+
+-- A page past the end draws the last page there is, and says so.
+local clamped = Views.libraryModel("series", {
+  groups = series_groups, page = 9, page_size = 2,
+  totals = { books = 1802, series = 418, authors = 512 },
+})
+print("clamped_pager=" .. flat(clamped.pager.page) .. "/" .. flat(clamped.pager.pages))
+print("clamped_rows=" .. #clamped.blocks[1].rows)
+print("clamped_footer=" .. flat(clamped.footer.left))
 
 -- Paging a grouping: the last page holds the remainder and still offers no
 -- next page.
@@ -327,6 +398,25 @@ describe("plugin reading-stats page model", () => {
     expect(out.stats_row_total).toBe("5");
   });
 
+  it("keeps recent sessions informational and currently-reading rows tappable", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // A currently-reading row opens its book; a session row is a record of
+    // something that already happened and must not open a book detail screen.
+    expect(out.reading_action).toBe("book");
+    expect(out.recent_action).toBe("nil");
+  });
+
+  it("takes the time words on every row from the label table", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // Same models, French labels: the relative line, the month name, the clock
+    // and the duration are all the caller's words, not hardcoded English.
+    expect(out.translated_reading_line).toBe("K-Ske Hasegawa · a l'instant");
+    expect(out.translated_old_line).toBe("Isuna Hasekura · 6 nov.");
+    expect(out.translated_recent_line).toBe("Aujourd'hui 13:19 · 5 mn 37 s · Kindle");
+  });
+
   it("keeps a one-line footer and no grouping switch", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
@@ -409,6 +499,29 @@ describe("plugin library page model: Series", () => {
     expect(out.series_row_4).toBe(
       "Monogatari//Nisio Isin · 14 books · 14 read//done//14 / 14//1//14",
     );
+  });
+
+  it("says a grouping is empty instead of drawing a blank body", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // A library whose books carry no series (or no author) still shows one row
+    // of the page's own language, so the screen is not an unexplained blank.
+    expect(out.empty_series_rows).toBe("1");
+    expect(out.empty_series_kind).toBe("plain");
+    expect(out.empty_series_title).toBe("No series in this library yet");
+    // Informational, like the sessions: there is nothing to open.
+    expect(out.empty_series_action).toBe("nil");
+    expect(out.empty_authors_title).toBe("No authors in this library yet");
+  });
+
+  it("clamps a page past the end onto the last page there is", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // A refresh after books were deleted must not print "Page 9 of 2" over an
+    // empty body: the footer, the pager and the rows all describe page 2.
+    expect(out.clamped_pager).toBe("2/2");
+    expect(out.clamped_rows).toBe("2");
+    expect(out.clamped_footer).toBe("Page 2 of 2");
   });
 
   it("pages a grouping on the device", () => {

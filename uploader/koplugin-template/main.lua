@@ -1372,6 +1372,29 @@ function LightHouse:pageLabels()
         read_of_books = _("%s / %s"),
         average_day = _("%d min on an average day"),
         detail_on_web = _("detail on web"),
+        last_n = _("LAST %d"),
+        untitled = _("Untitled"),
+        az = _("A–Z"),
+        no_series = _("No series in this library yet"),
+        no_authors = _("No authors in this library yet"),
+        just_now = _("just now"),
+        one_minute_ago = _("1 min ago"),
+        minutes_ago = _("%d min ago"),
+        one_hour_ago = _("1 h ago"),
+        hours_ago = _("%d h ago"),
+        relative_yesterday = _("yesterday"),
+        days_ago = _("%d days ago"),
+        clock_today = _("Today"),
+        clock_yesterday = _("Yesterday"),
+        seconds_short = _("%d s"),
+        minutes_short = _("%d m"),
+        minutes_seconds = _("%d m %d s"),
+        hours_short = _("%d h"),
+        hours_minutes = _("%d h %d m"),
+        months = {
+            _("Jan"), _("Feb"), _("Mar"), _("Apr"), _("May"), _("Jun"),
+            _("Jul"), _("Aug"), _("Sep"), _("Oct"), _("Nov"), _("Dec"),
+        },
         author_count = _("%s authors"),
         series_count = _("%s series"),
     }
@@ -1575,8 +1598,24 @@ function LightHouse:buildBookDetails(entry)
         text = T(_("Rating: %1"), Status.ratingLabel(entry.rating)),
         callback = function() end,
     }
+    -- A row built from a reading session carries its percentage at the top
+    -- level rather than in a catalog `status` table, so the progress line reads
+    -- the number the row just showed instead of falling back to "Unread".
+    local progress_entry = entry
+    if status == nil then
+        local percentage = Status.num(entry.percentage)
+        if percentage then
+            progress_entry = {
+                status = {
+                    percentage = percentage,
+                    device = entry.device,
+                    timestamp = entry.timestamp,
+                },
+            }
+        end
+    end
     details[#details + 1] = {
-        text = T(_("Progress: %1"), Status.statusLabel(entry)),
+        text = T(_("Progress: %1"), Status.statusLabel(progress_entry)),
         callback = function() end,
     }
     -- Local sidecar data, when this device has this book: the progress above is
@@ -1856,6 +1895,15 @@ function LightHouse:openLibrary(options)
         end
         context.groups = grouping.groups
         context.totals = grouping.totals
+        -- A refresh after books were deleted from the web app can land on a page
+        -- that no longer exists: clamp to the last page the document has, so the
+        -- footer and the pager name a page that is actually drawn.
+        local available = math.max(math.ceil(#grouping.groups / page_size), 1)
+        if page > available then
+            page = available
+            state.page = page
+            context.page = page
+        end
         if self:coversEnabled() then
             local ids = {}
             local first = (page - 1) * page_size + 1
