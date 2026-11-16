@@ -5,8 +5,9 @@ Every screen the plugin draws - browse, search, the currently-reading shelf and
 reading statistics - is assembled from the tokens and helpers in this one file,
 so a later change cannot move the type scale, the row rhythm, the left gutter,
 the glyph vocabulary or the cover geometry on one screen while leaving the
-others behind. main.lua builds widgets; this file owns the numbers, the strings
-and the arithmetic behind them.
+others behind. `main.lua` builds the menu widgets and `lighthouse_page.lua` the
+two full-page views; this file owns the numbers, the strings and the arithmetic
+behind both.
 
 Design rules this file encodes (e-ink, judged at 1 bit):
 
@@ -15,11 +16,13 @@ Design rules this file encodes (e-ink, judged at 1 bit):
     e-ink panel would render the web dashboard's amber accents as one grey.
   * Only glyphs KOReader's bundled fonts carry are used: block and box
     drawing, stars, middot, ellipsis, check and chevron. See `Ui.GLYPH`.
-  * Rows share one shape everywhere: the title leads the row and one compact
-    right-hand metadata column carries the secondary values (author, series,
-    progress, rating) that can be read without tapping. Section headings are
-    marked with a left block bar, the e-ink equivalent of the web app's accent
-    border.
+  * Rows are drawn in two shapes and no more. The menu row is one line: the
+    title leads and one compact right-hand metadata column carries the secondary
+    values (author, series, progress, rating). The one-page row adds a cover
+    gutter, a secondary line and a right-hand value column with a pixel progress
+    bar under the row, and is drawn in pixels by `lighthouse_page.lua`. Both keep
+    the glanceable values readable without tapping. Section headings are marked
+    with a left block bar, the e-ink equivalent of the web app's accent border.
   * Every measure below is expressed in "units" that main.lua multiplies by
     `Screen:scaleBySize(1)`, so the same layout appears on a 600px and a
     1072px screen without a second table of magic numbers.
@@ -27,13 +30,16 @@ Design rules this file encodes (e-ink, judged at 1 bit):
 The module is pure Lua: no sockets, no widgets, no KOReader requires. The
 repository's off-device suite exercises every helper here directly.
 
-Row anatomy (the contract every screen follows):
+Row anatomy (the menu row: the currently-reading shelf, Highlights and the book
+detail menu):
 
     | cover | Title                    | Isuna Hasekura · Spice and Wolf 01 · ███░░░ 45% |
     ^ left gutter, covers on     ^ `item.mandatory`: author, series, progress, rating
 
-The row is one line, because that is the shape KOReader's `MenuItem` draws:
-`item.text` is the title, `item.mandatory` is the everything-else column.
+The menu row is one line, because that is the shape KOReader's `MenuItem` draws:
+`item.text` is the title, `item.mandatory` is the everything-else column. The two
+full-page views do not use it; their rows are laid out in pixels by
+`lighthouse_page.lua`.
 ]]
 local Ui = {}
 

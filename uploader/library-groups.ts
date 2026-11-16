@@ -6,9 +6,11 @@
  * The plugin used to show one flat list. The captain's accepted design groups
  * the same library by Books, Authors or Series, and a series row has to say how
  * many volumes there are, how many are read, how far through the series the
- * reader is, and which volume comes next. None of that is in the OPDS feed: the
- * feed is paged and carries one book at a time, so counting a 400-volume series
- * from the device would mean walking the whole catalogue over the network.
+ * reader is, and which volume is next - as the cover it carries, since the
+ * accepted design does not name that volume in the row. None of that is in the
+ * OPDS feed: the feed is paged and carries one book at a time, so counting a
+ * 400-volume series from the device would mean walking the whole catalogue over
+ * the network.
  *
  * This module is therefore the one place that folds Calibre's book rows
  * together with KOSync's furthest-progress-per-book index. It is pure: books and

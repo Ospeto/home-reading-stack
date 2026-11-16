@@ -8,14 +8,16 @@ has to be typed on the device.
 
 What it gives you, on top of the built-in OPDS browser:
 
-  * Browse the whole library page by page (the built-in OPDS browser has no
-    paging, so large catalogs load in one very large request).
+  * Browse the whole library page by page, with a Books / Authors / Series
+    switch across the top (the built-in OPDS browser has no paging, so large
+    catalogs load in one very large request; a grouping is one document the
+    device pages locally).
   * Search title / author / series from the device keyboard.
   * Cover thumbnails on every library row, cached on disk so scrolling does not
     refetch them, with a neutral placeholder instead of a blank hole.
-  * One row language across every screen: the title leads the row and one
-    right-hand metadata column (author, series, progress, rating) is readable
-    without a tap. The scale lives in `lighthouse_ui.lua`.
+  * Two row shapes and no more, both readable without a tap: the menu row and
+    the one-page row. `lighthouse_ui.lua` owns the row contract, the scale and
+    the page arithmetic; `lighthouse_page.lua` draws the full-page rows.
   * Book detail with one-tap EPUB download straight into your download folder.
   * Reading status per book, merged from the server's KOSync progress
     (`GET /api/kosync/active`), matched on Calibre id, filename or title.
