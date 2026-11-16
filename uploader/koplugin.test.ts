@@ -60,6 +60,15 @@ const UNZIP_BINARY = Bun.which("unzip");
  */
 const UNMEASURED_COLUMN_CAP = 28;
 
+/**
+ * Cap on a row's secondary line in the one-page views.
+ *
+ * `lighthouse_ui.lua` bounds that line with `secondary_max_chars` so a runaway
+ * author list cannot dominate a row; the value column (progress, the finished
+ * check) is never the thing that gives way.
+ */
+const SECONDARY_LINE_CAP = 60;
+
 const SAMPLE_SETTINGS: KopluginSettings = {
   baseUrl: "http://192.168.31.15:8086",
   apiKey: "test-api-key-not-a-real-secret",
@@ -1746,9 +1755,59 @@ end
 -- Cover slots are widgets; the plugin builds them only when covers are on and
 -- a catalog row is drawn, so the stubs only need to accept the options table.
 package.preload["ui/widget/imagewidget"] = function() return stub_widget("imagewidget") end
-package.preload["ui/widget/container/framecontainer"] = function() return stub_widget("framecontainer") end
-package.preload["ui/widget/container/centercontainer"] = function() return stub_widget("centercontainer") end
-package.preload["ui/widget/textwidget"] = function() return stub_widget("textwidget") end
+package.preload["ui/widget/container/framecontainer"] = function()
+  local frame = {}
+  function frame:new(options)
+    options = options or {}
+    options.__kind = "framecontainer"
+    function options:getSize()
+      local inner = self[1] and self[1]:getSize() or { w = 0, h = 0 }
+      return { w = inner.w or 0, h = inner.h or 0 }
+    end
+    function options:paintTo() end
+    function options:free() end
+    return options
+  end
+  return frame
+end
+package.preload["ui/widget/container/centercontainer"] = function()
+  local center = {}
+  function center:new(options)
+    options = options or {}
+    options.__kind = "centercontainer"
+    function options:getSize()
+      if self.dimen then return self.dimen end
+      local inner = self[1] and self[1]:getSize() or { w = 0, h = 0 }
+      return { w = inner.w or 0, h = inner.h or 0 }
+    end
+    function options:paintTo() end
+    function options:free() end
+    return options
+  end
+  return center
+end
+-- A real TextWidget measures itself and paints; the page renderer asks every
+-- child for its size, so the stub answers with a size instead of raising.
+package.preload["ui/widget/textwidget"] = function()
+  local text = {}
+  function text:new(options)
+    options = options or {}
+    options.__kind = "textwidget"
+    function options:getSize()
+      local length = #tostring(self.text or "")
+      return { w = length, h = 1 }
+    end
+    -- Deliberately unmeasurable: this stub keeps the pre-pixel behaviour the
+    -- row-cap contract is written against. The harnesses that prove the
+    -- measured path replace this module with one that reports real widths.
+    function options:getWidth() return nil end
+    function options:paintTo() end
+    function options:free() end
+    return options
+  end
+  function text.getTextWidth(value) return #tostring(value or "") end
+  return text
+end
 package.preload["ui/font"] = function()
   return { getFace = function(_, name) return "face:" .. tostring(name) end }
 end
@@ -1891,6 +1950,129 @@ _G.G_reader_settings = {
   readSetting = function() return nil end,
   saveSetting = function() end,
 }
+
+-- ------------------------------------------------------- page renderer stubs
+-- lighthouse_page.lua composes KOReader's layout widgets into one screen. The
+-- stubs below reproduce the parts the renderer depends on - a widget is a table
+-- whose children are appended to it, getSize is a number pair, and painting
+-- records nothing - so the harness can build a whole page and inspect its shape
+-- without a framebuffer.
+package.preload["ffi/blitbuffer"] = function()
+  -- The e-ink palette the heatmap shades with. Values are the Color8 greys
+  -- KOReader defines; the renderer only passes them to paintRect.
+  return {
+    COLOR_WHITE = 0xFF,
+    COLOR_GRAY_E = 0xEE,
+    COLOR_LIGHT_GRAY = 0xCC,
+    COLOR_GRAY = 0xAA,
+    COLOR_DARK_GRAY = 0x88,
+    COLOR_BLACK = 0x00,
+  }
+end
+package.preload["ui/gesturerange"] = function()
+  local gestures = {}
+  function gestures:new(options)
+    options = options or {}
+    return options
+  end
+  return gestures
+end
+package.preload["ui/widget/widget"] = function()
+  local Widget = {}
+  Widget.__index = Widget
+  function Widget:extend(subclass)
+    subclass = subclass or {}
+    setmetatable(subclass, self)
+    self.__index = self
+    return subclass
+  end
+  function Widget:new(options)
+    options = options or {}
+    setmetatable(options, { __index = self })
+    if options.init then options:init() end
+    return options
+  end
+  function Widget:getSize() return { w = 0, h = 0 } end
+  function Widget:paintTo(bb, x, y) self.__painted = { x = x, y = y } end
+  function Widget:free() end
+  return Widget
+end
+package.preload["ui/widget/container/inputcontainer"] = function()
+  local Widget = require("ui/widget/widget")
+  local InputContainer = Widget:extend{}
+  function InputContainer:init()
+    self.key_events = self.key_events or {}
+    self.ges_events = self.ges_events or {}
+  end
+  function InputContainer:handleEvent() return true end
+  return InputContainer
+end
+-- Layout containers: children are appended to the container table itself, which
+-- is what a group is in KOReader (group[#group + 1] = widget).
+local function layout_container(kind)
+  return function()
+    local group = {}
+    group.__kind = kind
+    function group:new(options)
+      options = options or {}
+      setmetatable(options, { __index = group })
+      options.__kind = kind
+      return options
+    end
+    function group:getSize()
+      local width, height = 0, 0
+      for index = 1, #self do
+        local size = self[index] and self[index]:getSize() or { w = 0, h = 0 }
+        width = width + (size.w or 0)
+        if (size.h or 0) > height then height = size.h end
+      end
+      if self.dimen then return self.dimen end
+      return { w = width, h = height }
+    end
+    function group:paintTo(bb, x, y)
+      self.__painted = { x = x, y = y }
+      for index = 1, #self do
+        if self[index] and self[index].paintTo then self[index]:paintTo(bb, x, y) end
+      end
+    end
+    return group
+  end
+end
+package.preload["ui/widget/verticalgroup"] = layout_container("verticalgroup")
+package.preload["ui/widget/horizontalgroup"] = layout_container("horizontalgroup")
+package.preload["ui/widget/container/leftcontainer"] = layout_container("leftcontainer")
+package.preload["ui/widget/container/rightcontainer"] = layout_container("rightcontainer")
+-- A spacer is a fixed width with no children; the page uses it for gutters and
+-- for the blank space above the footer.
+local function span_stub(kind)
+  local span = { __kind = kind }
+  function span:new(options)
+    options = options or {}
+    options.__kind = kind
+    setmetatable(options, { __index = span })
+    return options
+  end
+  function span:getSize()
+    local width = tonumber(self.width) or 0
+    return { w = width, h = width }
+  end
+  function span:paintTo() end
+  return span
+end
+package.preload["ui/widget/verticalspan"] = function() return span_stub("verticalspan") end
+package.preload["ui/widget/horizontalspan"] = function() return span_stub("horizontalspan") end
+package.preload["ui/widget/linewidget"] = function()
+  local line = {}
+  function line:new(options)
+    options = options or {}
+    options.__kind = "linewidget"
+    setmetatable(options, { __index = line })
+    return options
+  end
+  function line:getSize() return self.dimen or { w = 0, h = 0 } end
+  function line:paintTo(bb, x, y) self.__painted = { x = x, y = y } end
+  return line
+end
 `;
 
 const KOREADER_STUB_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
@@ -1922,8 +2104,11 @@ local labels = {}
 for _, item in ipairs(entry.sub_item_table) do labels[#labels + 1] = item.text end
 print("submenu=" .. table.concat(labels, "|"))
 
--- Catalog row rendering, including rating + progress from a merged session.
-local entry = {
+-- Library row model. The row language the device draws now comes from
+-- lighthouse_views (the page renderer's model), so the harness asserts the row
+-- itself instead of a Menu item: title, secondary line, progress value and bar.
+local Views = require("lighthouse_views")
+local sample_entry = {
   book_id = 101,
   title = "Spice and Wolf, Vol. 1",
   authors = "Isuna Hasekura",
@@ -1935,29 +2120,18 @@ local entry = {
   rating = 8,
   status = { percentage = 0.45, device = "Paperwhite", timestamp = 1 },
 }
--- The row language: the title is the row text, and the metadata column
--- carries author, series, progress and rating so none of them needs a tap.
-local layout = LightHouse:layoutFor(true)
-print("layout_rows=" .. tostring(layout.rows))
-print("layout_cover=" .. tostring(layout.cover_width) .. "x" .. tostring(layout.cover_height))
-print("layout_gutter=" .. tostring(layout.gutter))
-local row = LightHouse:buildCatalogItem(entry, layout)
-print("row_text=" .. tostring(row.text))
-print("row_text_has_newline=" .. tostring(tostring(row.text):find("\n", 1, true) ~= nil))
-print("row_mandatory=" .. tostring(row.mandatory))
-print("row_state=" .. tostring(type(row.state) == "table" and row.state.__kind or "none"))
-local no_cover_row = LightHouse:buildCatalogItem(entry)
-print("row_nocover_text=" .. tostring(no_cover_row.text))
-print("row_nocover_mandatory=" .. tostring(no_cover_row.mandatory))
-local detail_labels = {}
-for detail_index = 1, #row.sub_item_table do
-  detail_labels[#detail_labels + 1] = row.sub_item_table[detail_index].text
-end
-print("detail=" .. table.concat(detail_labels, "|"))
+local row = Views.bookRow(sample_entry)
+print("row_title=" .. tostring(row.title))
+print("row_secondary=" .. tostring(row.secondary))
+print("row_value=" .. tostring(row.value))
+print("row_ratio=" .. tostring(row.ratio))
+print("row_cover_id=" .. tostring(row.cover_id))
+print("row_action=" .. tostring(row.action and row.action.kind))
+print("row_has_newline=" .. tostring(tostring(row.title .. row.secondary):find("\n", 1, true) ~= nil))
 
--- A long author and series run must never push the progress bar, the finished
--- check or the stars out of the metadata column.
-local long_row = LightHouse:buildCatalogItem({
+-- A finished book is a check and a full bar, whatever its author list length:
+-- the secondary line is truncated by the widget, never by the value column.
+local finished_row = Views.bookRow({
   book_id = 102,
   title = "The Way of Kings",
   authors = "Brandon Sanderson",
@@ -1965,9 +2139,36 @@ local long_row = LightHouse:buildCatalogItem({
   series_index = 1,
   rating = 8,
   status = { percentage = 1, device = "Kobo", timestamp = 1 },
-}, layout)
-print("long_text=" .. tostring(long_row.text))
-print("long_mandatory=" .. tostring(long_row.mandatory))
+})
+print("long_title=" .. tostring(finished_row.title))
+print("long_secondary=" .. tostring(finished_row.secondary))
+print("long_value=" .. tostring(finished_row.value))
+print("long_ratio=" .. tostring(finished_row.ratio))
+
+-- An entry whose fields are all unusable still yields a drawable row.
+local hostile_row = Views.bookRow({
+  title = 0 / 0, authors = {}, series = false, series_index = {}, rating = function() end,
+})
+print("hostile_title=" .. tostring(hostile_row.title))
+print("hostile_secondary=" .. tostring(hostile_row.secondary))
+print("hostile_value=" .. tostring(hostile_row.value))
+
+-- The detail menu is still where a rating, a synopsis and the download live.
+local detail_labels = {}
+local details = LightHouse:buildBookDetails(sample_entry)
+for detail_index = 1, #details do
+  detail_labels[#detail_labels + 1] = tostring(details[detail_index].text)
+end
+print("detail=" .. table.concat(detail_labels, "|"))
+
+-- Page geometry: one rule for the whole library page, covers portrait.
+local layout = LightHouse:libraryPlan()
+print("layout_rows=" .. tostring(layout.rows))
+print("layout_cover=" .. tostring(layout.reading_cover_w) .. "x" .. tostring(layout.reading_cover_h))
+print("layout_switch=" .. tostring(layout.switch_h))
+-- A cover is drawn only from a whole cached file; a missing one costs the
+-- picture and never the row.
+print("cover_missing=" .. tostring(LightHouse:coverWidgetFor(101, 60, 90) == nil))
 
 -- Connection screen must expose the baked-in origin and endpoint paths.
 LightHouse:showConnection(true)
@@ -2058,42 +2259,38 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
     // fixed cap instead of a measured fit: the glance is what has to survive,
     // and the author and series stay one tap away in the detail view (asserted
     // below).
-    expect(out.row_text).toBe("Spice and Wolf, Vol. 1");
-    expect(out.row_text_has_newline).toBe("false");
-    expect(out.row_mandatory).toContain("45%");
-    expect(out.row_mandatory).toContain("★★★★☆");
-    expect(out.row_mandatory).not.toContain("\n");
-    expect(Array.from(out.row_mandatory).length).toBeLessThanOrEqual(
-      UNMEASURED_COLUMN_CAP,
-    );
+    // Row model: the title leads, the secondary line carries author and series,
+    // and the right-hand column carries progress plus the bar's ratio. No field
+    // of a row may contain a newline: the renderer draws one line per slot.
+    expect(out.row_title).toBe("Spice and Wolf, Vol. 1");
+    expect(out.row_secondary).toBe("Isuna Hasekura · Spice and Wolf 01");
+    expect(out.row_value).toBe("45%");
+    expect(out.row_ratio).toBe("0.45");
+    expect(out.row_cover_id).toBe("101");
+    expect(out.row_action).toBe("book");
+    expect(out.row_has_newline).toBe("false");
 
-    // A long author and series run must keep the whole glance: the bar, the
-    // finished check and all five stars. Capping the composed metadata string
-    // would leave this row showing three stars.
-    expect(out.long_text).toBe("The Way of Kings");
-    expect(out.long_mandatory).toContain("100%");
-    expect(out.long_mandatory).toContain("✓");
-    expect(out.long_mandatory.endsWith("★★★★☆")).toBe(true);
-    expect(Array.from(out.long_mandatory).length).toBeLessThanOrEqual(
-      UNMEASURED_COLUMN_CAP,
-    );
+    // A finished book is a check and a full bar however long its author list
+    // is: the value column is never the thing that gives way.
+    expect(out.long_title).toBe("The Way of Kings");
+    expect(out.long_secondary).toBe("Brandon Sanderson · The Stormlight Archive 01");
+    expect(out.long_value).toBe("✓");
+    expect(out.long_ratio).toBe("1");
 
-    // Covers: one geometry rule drives the page, and a row whose cover is not on
-    // disk yet draws the neutral placeholder rather than a blank hole.
+    // A malformed entry still yields a drawable row instead of raising.
+    expect(out.hostile_title).toBe("Untitled");
+    expect(out.hostile_secondary).toBe("");
+    expect(out.hostile_value).toBe("Unread");
+
+    // Page geometry: one rule drives the library page, and covers stay portrait.
     const layoutRows = Number(out.layout_rows);
     const [layoutCoverW, layoutCoverH] = out.layout_cover.split("x").map(Number);
-    expect(layoutRows).toBeGreaterThanOrEqual(4);
-    expect(layoutRows).toBeLessThanOrEqual(9);
+    expect(layoutRows).toBeGreaterThanOrEqual(1);
     expect(layoutCoverW).toBeGreaterThan(0);
-    // Calibre cover art is portrait: a cover box wider than it is tall would
-    // squash every thumbnail on the page.
     expect(layoutCoverH).toBeGreaterThan(layoutCoverW);
-    expect(Number(out.layout_gutter)).toBeGreaterThan(layoutCoverW);
-    expect(out.row_state).toBe("framecontainer");
-    // Without a layout (a caller that does not draw covers) the row keeps the
-    // same shape: title in the row text, metadata in the column.
-    expect(out.row_nocover_text).toBe("Spice and Wolf, Vol. 1");
-    expect(out.row_nocover_mandatory).toBe(out.row_mandatory);
+    expect(Number(out.layout_switch)).toBeGreaterThan(0);
+    // A cover that is not on disk yet costs the picture, never the row.
+    expect(out.cover_missing).toBe("true");
 
     const detail = out.detail.split("|");
     expect(detail[0]).toBe("Download EPUB");
@@ -2862,7 +3059,22 @@ local stats_payload = {
   readingDaysCount = 63,
   finishedCount = 55,
   finishedBooks = {},
-  activeBooks = {},
+  -- Four in progress and four recent sessions: the page must draw at most three
+  -- of each, whatever the payload carries.
+  activeBooks = {
+    { bookId = 11, displayTitle = "Ballad of a Shinigami vol. 2",
+      displayAuthors = "K-Ske Hasegawa", percentage = 0.62,
+      timestamp = 1763290000, device = "Kindle" },
+    { bookId = 12, displayTitle = "Spice and Wolf, Vol. 9",
+      displayAuthors = "Isuna Hasekura", percentage = 0.41,
+      timestamp = 1763200000, device = "Kindle" },
+    { bookId = 13, displayTitle = "Ascendance of a Bookworm",
+      displayAuthors = "Miya Kazuki", percentage = 0.15,
+      timestamp = 1763100000, device = "Kindle" },
+    { bookId = 14, displayTitle = "Legend of the Galactic Heroes",
+      displayAuthors = "Yoshiki Tanaka", percentage = 0.10,
+      timestamp = 1763000000, device = "Kindle" },
+  },
   streaks = {
     currentStreak = 5, longestStreak = 12, readingDaysCount = 63,
     lastReadingDate = "2026-11-15", isActiveToday = true,
@@ -2888,7 +3100,12 @@ local stats_payload = {
     currentBooks = 12, currentHours = 34,
     booksPercent = 48, hoursPercent = 34, isConfigured = true,
   },
-  recentSessions = {},
+  recentSessions = {
+    { title = "Ballad of a Shinigami vol. 2", startTime = 1763298000, durationSeconds = 337, device = "Kindle" },
+    { title = "Spice and Wolf, Vol. 9", startTime = 1763200000, durationSeconds = 2280, device = "Kindle" },
+    { title = "Ascendance of a Bookworm", startTime = 1763100000, durationSeconds = 4320, device = "Kindle" },
+    { title = "Legend of the Galactic Heroes", startTime = 1763000000, durationSeconds = 900, device = "Kindle" },
+  },
   summary = {
     totalSessionsCount = 412, totalReadingSeconds = 477000,
     totalReadingHours = 132.5, todayReadingSeconds = 2700,
@@ -2974,52 +3191,107 @@ local function current_menu()
   return widget
 end
 
+-- The reading-stats screen is ONE page. The plugin keeps the model it just
+-- rendered, so the harness can read exactly what the device was asked to draw
+-- without a framebuffer.
+local function page_model()
+  return LightHouse.last_page_model
+end
+
+local function find_block(model, kind)
+  for block_index = 1, #(model and model.blocks or {}) do
+    if model.blocks[block_index].kind == kind then return model.blocks[block_index] end
+  end
+  return nil
+end
+
+local function pair_list(rows)
+  local parts = {}
+  for row_index = 1, #(rows or {}) do
+    parts[#parts + 1] = tostring(rows[row_index].label) .. "=" .. tostring(rows[row_index].value)
+  end
+  return table.concat(parts, "|")
+end
+
+local function block_kinds(model)
+  local kinds = {}
+  for block_index = 1, #(model and model.blocks or {}) do
+    kinds[#kinds + 1] = model.blocks[block_index].kind
+  end
+  return table.concat(kinds, "|")
+end
+
 -- 1. Full payload -------------------------------------------------------------
 local ok, raised = pcall(tap)
 print("ok=" .. tostring(ok))
 print("raised=" .. tostring(raised))
 
-local menu = current_menu()
-assert(menu and menu.item_table, "tapping 'Reading stats' must open a menu")
-print("title=" .. tostring(menu.title))
-print("rows=" .. tostring(#menu.item_table))
--- The view must fill the screen it is drawn on: a text page follows the height
--- left after the title bar, so a 15-row stats list is one page, not two.
-local per_page = tonumber(LightHouse.menu and LightHouse.menu.items_per_page) or #menu.item_table
-print("per_page=" .. tostring(per_page))
-print("pages=" .. tostring(math.ceil(#menu.item_table / per_page)))
-dump_rows(menu, "row")
+local model = page_model()
+assert(model, "tapping 'Reading stats' must render a page")
+print("title=" .. tostring(model.title))
+print("blocks=" .. block_kinds(model))
 
--- 2. Heatmap weeks are tappable down to a single day --------------------------
-local week, week_index
-for row_index = 1, #menu.item_table do
-  if menu.item_table[row_index].sub_item_table then
-    week = menu.item_table[row_index]
-    week_index = row_index
-    break
+local hero = find_block(model, "hero")
+local hero_cells = {}
+for cell_index = 1, #(hero and hero.cells or {}) do
+  hero_cells[#hero_cells + 1] = hero.cells[cell_index].label .. "=" .. hero.cells[cell_index].value
+end
+print("hero=" .. table.concat(hero_cells, "|"))
+
+local band = find_block(model, "band")
+print("band_headings=" .. tostring(band and band.columns[1].heading) .. "|"
+  .. tostring(band and band.columns[2].heading))
+print("library_rows=" .. pair_list(band and band.columns[1].rows))
+print("year_rows=" .. pair_list(band and band.columns[2].rows))
+
+local heat = find_block(model, "heatmap")
+print("heat_weeks=" .. tostring(heat and #heat.columns))
+local shaded = 0
+for column_index = 1, #(heat and heat.columns or {}) do
+  for day_index = 1, 7 do
+    if heat.columns[column_index][day_index] ~= nil then shaded = shaded + 1 end
   end
 end
-assert(week, "the heatmap must expose tappable week rows")
-print("week_text=" .. tostring(week.text))
-print("week_mandatory=" .. tostring(week.mandatory))
-print("week_days=" .. tostring(#week.sub_item_table))
-print("week_day1=" .. tostring(week.sub_item_table[1].text))
-print("week_day3=" .. tostring(week.sub_item_table[3].text))
-week.sub_item_table[3].callback()
-local day_view = shown[#shown]
-print("day_view=" .. tostring(day_view and day_view.__kind))
-print("day_text=" .. tostring(day_view and day_view.text:gsub("\n", " / ")))
+print("heat_shaded=" .. tostring(shaded))
 
--- 3. Degraded payload: absent sections read "unavailable", never zero --------
+-- No per-day rows: expanding a row per week is what made the old screen ten
+-- pages long, so no section may carry more rows than the design allows.
+local section_rows = 0
+local sections = 0
+for block_index = 1, #model.blocks do
+  local block = model.blocks[block_index]
+  if block.kind == "section" then
+    sections = sections + 1
+    section_rows = section_rows + #block.rows
+  end
+end
+print("sections=" .. tostring(sections))
+print("section_rows=" .. tostring(section_rows))
+print("footer=" .. tostring(model.footer.left) .. "|" .. tostring(model.footer.right))
+print("has_switch=" .. tostring(model.switch ~= nil))
+print("plan_fits=" .. tostring(LightHouse._stats_plan ~= nil
+  and LightHouse._stats_plan.total <= LightHouse._stats_plan.height))
+
+-- 2. Degraded payload: an absent section is ABSENT, never zero ----------------
 stats_payload = {}
 local deg_ok, deg_raised = pcall(tap)
 print("deg_ok=" .. tostring(deg_ok))
 print("deg_raised=" .. tostring(deg_raised))
-local deg = current_menu()
-print("deg_rows=" .. tostring(deg and deg.item_table and #deg.item_table))
-if deg then dump_rows(deg, "deg_row") end
+local deg = page_model()
+print("deg_blocks=" .. block_kinds(deg))
+local deg_values = {}
+for block_index = 1, #(deg and deg.blocks or {}) do
+  local block = deg.blocks[block_index]
+  for row_index = 1, #(block.rows or {}) do
+    deg_values[#deg_values + 1] = tostring(block.rows[row_index].value)
+  end
+  for cell_index = 1, #(block.cells or {}) do
+    deg_values[#deg_values + 1] = tostring(block.cells[cell_index].value)
+  end
+end
+print("deg_values=" .. table.concat(deg_values, "|"))
 
--- 3b. Single-target goal: the untargeted row is the count, not "unavailable"
+-- 2b. A goals-only payload: the year band still names the books finished ------
 stats_payload = {
   goal = {
     year = 2026, targetBooks = 25, currentBooks = 12,
@@ -3029,23 +3301,10 @@ stats_payload = {
 local one_ok, one_raised = pcall(tap)
 print("one_ok=" .. tostring(one_ok))
 print("one_raised=" .. tostring(one_raised))
-local one = current_menu()
-print("one_rows=" .. tostring(one and one.item_table and #one.item_table))
-if one then dump_rows(one, "one_row") end
-
--- 3c. Single-target goal the other way: an hours target, books untargeted ----
-stats_payload = {
-  goal = {
-    year = 2026, targetHours = 100, currentBooks = 12,
-    currentHours = 34, hoursPercent = 34,
-  },
-}
-local hours_ok, hours_raised = pcall(tap)
-print("hours_only_ok=" .. tostring(hours_ok))
-print("hours_only_raised=" .. tostring(hours_raised))
-local hours_menu = current_menu()
-print("hours_only_rows=" .. tostring(hours_menu and hours_menu.item_table and #hours_menu.item_table))
-if hours_menu then dump_rows(hours_menu, "hours_only_row") end
+local one = page_model()
+local one_band = find_block(one, "band")
+local one_columns = one_band and one_band.columns or {}
+print("one_year_rows=" .. pair_list(one_columns[#one_columns] and one_columns[#one_columns].rows))
 
 -- 4. Unreadable body ---------------------------------------------------------
 stats_payload = "not a stats payload"
@@ -3135,7 +3394,7 @@ describe("plugin reading stats view", () => {
     );
   }
 
-  it("leads with the headline numbers, then activity, then supporting detail", () => {
+  it("is ONE page of six bands in the accepted order", () => {
     if (!LUA_BINARY || !UNZIP_BINARY) return;
     const out = runHarness(READING_STATS_HARNESS);
 
@@ -3143,98 +3402,79 @@ describe("plugin reading stats view", () => {
     expect(out.ok).toBe("true");
     expect(out.raised).toBe("nil");
     expect(out.title).toBe("Reading stats");
-    expect(Number(out.rows)).toBeGreaterThan(9);
-    // A text page is fitted to the screen, so the whole stats view fits on one
-    // page instead of paging twice through a half-empty screen.
-    expect(Number(out.per_page)).toBeGreaterThan(9);
-    expect(Number(out.per_page)).toBeGreaterThanOrEqual(Number(out.rows));
-    expect(out.pages).toBe("1");
-    expect(out.rows).toBe("15");
+    // The accepted design, top to bottom: headline strip, library/year band,
+    // currently reading, activity, recent sessions.
+    expect(out.blocks).toBe("hero|band|section|heatmap|section");
+    expect(out.has_switch).toBe("false");
 
-    // 1. Headline numbers, first thing the reader sees, with no heading row
-    //    above them: the answer before the supporting detail.
-    expect(out.row1).toBe("Current streak\t5 days · best 12 days");
-    expect(out.row2).toBe("Read today\t45m");
-    expect(out.row3).toBe("Read this week\t4h 10m");
-    expect(out.row4).toBe("Total reading time\t132.5h");
-    expect(out.row5).toBe("Books finished this year\t12");
-
-    // 2. The yearly goal keeps both targets, with the bars drawn by the
-    //    plugin's single bar renderer.
-    expect(out.row6).toBe("▍ Yearly goal 2026\tnil");
-    expect(out.row7).toBe("Books\t███░░░ 48% · 12/25");
-    expect(out.row8).toBe("Hours\t██░░░░ 34% · 34h/100h");
-
-    // 3. The activity picture, then its key, before the supporting detail.
-    expect(out.row9).toBe("▍ Activity (newest week last)\tnil");
-    expect(out.row10).toBe("·▒▓\tNov 15");
-    // The key is computed from the level thresholds, so pin the whole string:
-    // the ramp it must mirror is the server's (>=1m, >=15m, >=30m, >=60m).
-    expect(out.row11).toBe(
-      "▍ Shade key: · none · ░ under 15m · ▒ under 30m · ▓ under 1h · █ 1h or more\tnil",
-    );
-
-    // 4. Supporting detail last: library health as three counts.
-    expect(out.row12).toBe("▍ Library health\tnil");
-    expect(out.row13).toBe("Unread\t120");
-    expect(out.row14).toBe("Reading\t8");
-    expect(out.row15).toBe("Finished\t34");
-
-    expect(out.week_days).toBe("3");
-    expect(out.week_day1).toBe("Nov 13 · 0m");
-    expect(out.week_day3).toBe("Nov 15 · 45m");
-
-    // Tapping a day shows that day's reading time.
-    expect(out.day_view).toBe("textviewer");
-    expect(out.day_text).toBe("2026-11-15 / Reading time: 45m / Sessions: 2 / Books: 1");
+    // The whole page is laid out inside the screen it is drawn on. This is the
+    // assertion that says "one page": a plan taller than the screen would have
+    // to scroll, which is what the old per-week rows did.
+    expect(out.plan_fits).toBe("true");
   });
 
-  it("degrades to 'unavailable' instead of zero when fields are missing", () => {
+  it("leads with the four headline numbers", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runHarness(READING_STATS_HARNESS);
+    expect(out.hero).toBe("TOTAL=132.5h|STREAK=5d|TODAY=45m|THIS WEEK=4h 10m");
+  });
+
+  it("bands the library counts beside the year figures", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runHarness(READING_STATS_HARNESS);
+    expect(out.band_headings).toBe("LIBRARY · 162|YEAR 2026");
+    expect(out.library_rows).toBe("Unread=120|Reading=8|Finished=34|Stale 30d+=3");
+    // Books done is the year's count, hours is the library's total reading
+    // time, sessions is the server's own total, and the streak is the longest.
+    expect(out.year_rows).toBe("Books done=12|Hours=132.5h|Sessions=412|Longest streak=12d");
+  });
+
+  it("draws the activity as a 52-week grid and no per-day rows at all", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runHarness(READING_STATS_HARNESS);
+    // 52 columns, and the three days the payload carries are the only shaded
+    // cells: the picture is a grid, not one row per week.
+    expect(out.heat_weeks).toBe("52");
+    expect(out.heat_shaded).toBe("3");
+    // Two row lists (currently reading, recent sessions), each capped at the
+    // three rows the design allows even though the payload carries four.
+    expect(out.sections).toBe("2");
+    expect(out.section_rows).toBe("6");
+    expect(out.footer).toBe("LightHouse|32 min on an average day");
+  });
+
+  it("leaves out a section the payload did not carry instead of showing zeros", () => {
     if (!LUA_BINARY || !UNZIP_BINARY) return;
     const out = runHarness(READING_STATS_HARNESS);
 
     expect(out.deg_ok).toBe("true");
     expect(out.deg_raised).toBe("nil");
-    // The goal section disappears entirely; nothing else does.
-    expect(out.deg_rows).toBe("12");
-    expect(out.deg_row1).toBe("Current streak\tunavailable");
-    expect(out.deg_row2).toBe("Read today\tunavailable");
-    expect(out.deg_row3).toBe("Read this week\tunavailable");
-    expect(out.deg_row4).toBe("Total reading time\tunavailable");
-    expect(out.deg_row5).toBe("Books finished this year\tunavailable");
-    expect(out.deg_row6).toBe("▍ Activity (newest week last)\tnil");
-    expect(out.deg_row7).toBe("Heatmap\tunavailable");
-    // A missing heatmap still renders the same key row rather than an empty
-    // picture, and the key does not depend on the payload.
-    expect(out.deg_row8).toBe(
-      "▍ Shade key: · none · ░ under 15m · ▒ under 30m · ▓ under 1h · █ 1h or more\tnil",
-    );
-    expect(out.deg_row9).toBe("▍ Library health\tnil");
-    expect(out.deg_row10).toBe("Unread\tunavailable");
+    // Nothing in this payload has a number, so no band is drawn: an empty page
+    // beats a page of confident zeros or a wall of placeholders.
+    expect(out.deg_blocks).toBe("");
+    expect(out.deg_values).toBe("");
   });
 
-  it("shows the untargeted metric of a single-target goal as its count", () => {
+  it("still names the books finished when only a goal payload is present", () => {
     if (!LUA_BINARY || !UNZIP_BINARY) return;
     const out = runHarness(READING_STATS_HARNESS);
 
     expect(out.one_ok).toBe("true");
     expect(out.one_raised).toBe("nil");
-    expect(out.one_rows).toBe("15");
-    // The configured target keeps its bar; the other metric keeps its number.
-    expect(out.one_row7).toBe("Books\t███░░░ 48% · 12/25");
-    expect(out.one_row8).toBe("Hours\t34h read");
+    // `goal.currentBooks` is the server's count of books finished this year and
+    // is valid whether or not a target is configured, so the row survives.
+    expect(out.one_year_rows).toBe("Books done=12");
   });
 
-  it("labels the untargeted books metric without repeating the row label", () => {
+  it("carries no yearly-goal section: the accepted design has none", () => {
     if (!LUA_BINARY || !UNZIP_BINARY) return;
     const out = runHarness(READING_STATS_HARNESS);
-
-    expect(out.hours_only_ok).toBe("true");
-    expect(out.hours_only_raised).toBe("nil");
-    expect(out.hours_only_rows).toBe("15");
-    // The row label is already "Books", so the value must not say it again.
-    expect(out.hours_only_row7).toBe("Books\t12 read");
-    expect(out.hours_only_row8).toBe("Hours\t██░░░░ 34% · 34h/100h");
+    // The goal target is a web-dashboard feature. The device page shows what
+    // the design shows, and the whole payload's goal block contributes exactly
+    // one number: books done this year.
+    expect(out.year_rows).not.toContain("12/25");
+    expect(out.year_rows).not.toContain("34h/100h");
+    expect(out.blocks).not.toContain("goal");
   });
 
   it("reports an unreadable payload and a network failure on a designed failure screen", () => {
@@ -3608,7 +3848,7 @@ local function dump_screen(prefix, open)
   print(prefix .. "_shows_not_set=" .. tostring(text:find("(not set)", 1, true) ~= nil))
 end
 
-dump_screen("browse", function() LightHouse:openCatalog("", 0, 1) end)
+dump_screen("browse", function() LightHouse:openLibrary{ mode = "books", page = 1 } end)
 dump_screen("reading", function() LightHouse:showReading() end)
 dump_screen("stats", function() LightHouse:showStats() end)
 
@@ -3838,22 +4078,32 @@ if good_ok then
   print("reading_good_details=" .. table.concat(labels, "|"))
 end
 
--- 5. The catalogue row for an entry whose fields are all unusable ------------
+-- 5. The library row for an entry whose fields are all unusable --------------
+-- The row is the page model's (lighthouse_views): the same coercion discipline
+-- applies there, because that is what the device now draws.
+local Views = require("lighthouse_views")
+local function detail_labels_for(entry)
+  local labels = {}
+  local details_ok, details = pcall(LightHouse.buildBookDetails, LightHouse, entry)
+  if details_ok then
+    for detail_index = 1, #(details or {}) do
+      labels[#labels + 1] = tostring(details[detail_index].text)
+    end
+  end
+  return table.concat(labels, "|")
+end
 local hostile_entry = {
   book_id = null, title = null, authors = null, series = null,
   series_index = null, rating = null, tags = null, summary = null,
   status = { device = null, percentage = null, timestamp = null },
   download_href = nil,
 }
-local catalog_ok, catalog_row = pcall(LightHouse.buildCatalogItem, LightHouse, hostile_entry, layout)
+local catalog_ok, catalog_row = pcall(Views.bookRow, hostile_entry)
 print("catalog_null_ok=" .. tostring(catalog_ok))
 if catalog_ok then
-  print("catalog_null_text=" .. bracket(catalog_row.text))
-  local labels = {}
-  for detail_index = 1, #(catalog_row.sub_item_table or {}) do
-    labels[#labels + 1] = tostring(catalog_row.sub_item_table[detail_index].text)
-  end
-  print("catalog_null_details=" .. table.concat(labels, "|"))
+  print("catalog_null_text=" .. bracket(catalog_row.title))
+  print("catalog_null_value=" .. bracket(catalog_row.value))
+  print("catalog_null_details=" .. detail_labels_for(hostile_entry))
 else
   print("catalog_null_error=" .. bracket(catalog_row))
 end
@@ -3862,31 +4112,21 @@ local tagged_entry = {
   book_id = 103, title = "Tagged", authors = "An Author",
   tags = { "Fantasy", { nested = true }, null, 7 },
 }
-local tagged_ok, tagged_row = pcall(LightHouse.buildCatalogItem, LightHouse, tagged_entry, layout)
+local tagged_ok = pcall(Views.bookRow, tagged_entry)
 print("catalog_tags_ok=" .. tostring(tagged_ok))
-if tagged_ok then
-  local labels = {}
-  for detail_index = 1, #(tagged_row.sub_item_table or {}) do
-    labels[#labels + 1] = tostring(tagged_row.sub_item_table[detail_index].text)
-  end
-  print("catalog_tags_details=" .. table.concat(labels, "|"))
-end
+print("catalog_tags_details=" .. detail_labels_for(tagged_entry))
 -- The detail view is where the reader goes to see WHO wrote the book, so it
--- keeps every name the feed carries; only the row's metadata column truncates.
+-- keeps every name the feed carries; only the row's secondary line is bounded.
 local coauthored_entry = {
   book_id = 104, title = "Coauthored",
   authors = "Ann One, Bob Two, Cyd Three",
 }
-local coauthored_ok, coauthored_row = pcall(LightHouse.buildCatalogItem, LightHouse, coauthored_entry, layout)
+local coauthored_ok, coauthored_row = pcall(Views.bookRow, coauthored_entry)
 print("catalog_coauthored_ok=" .. tostring(coauthored_ok))
 if coauthored_ok then
-  local labels = {}
-  for detail_index = 1, #(coauthored_row.sub_item_table or {}) do
-    labels[#labels + 1] = tostring(coauthored_row.sub_item_table[detail_index].text)
-  end
-  print("catalog_coauthored_details=" .. table.concat(labels, "|"))
-  print("catalog_coauthored_mandatory=" .. bracket(coauthored_row.mandatory))
-  print("catalog_coauthored_column=" .. tostring(coauthored_row.mandatory))
+  print("catalog_coauthored_details=" .. detail_labels_for(coauthored_entry))
+  print("catalog_coauthored_mandatory=" .. bracket(coauthored_row.secondary))
+  print("catalog_coauthored_column=" .. tostring(coauthored_row.secondary))
 end
 
 -- 6. The pcall fallback: one bad row renders a safe row, never the process --
@@ -3944,18 +4184,34 @@ for row_index = 1, #(shelf and shelf.item_table or {}) do
 end
 print("shelf_row_text_types=" .. table.concat(shelf_types, ","))
 
-local browse_ok, browse_err = pcall(function() LightHouse:openCatalog("", 0, 1) end)
+-- The library page: rows come from the page model now, so a null-bearing entry
+-- is proved at the model the device draws from.
+local browse_ok, browse_err = pcall(function()
+  LightHouse:openLibrary{ mode = "books", page = 1 }
+end)
 print("browse_ok=" .. tostring(browse_ok) .. " " .. tostring(browse_err))
-local browse = current_menu()
-print("browse_rows=" .. tostring(browse and #(browse.item_table or {})))
+local browse_model = LightHouse.last_page_model
+local browse_rows = {}
+for block_index = 1, #(browse_model and browse_model.blocks or {}) do
+  local block = browse_model.blocks[block_index]
+  for row_index = 1, #(block.rows or {}) do
+    local row = block.rows[row_index]
+    browse_rows[#browse_rows + 1] = tostring(row.title) .. "\t" .. tostring(row.value)
+  end
+end
+print("browse_rows=" .. tostring(browse_model and #browse_rows or -1))
+print("browse_texts=" .. table.concat(browse_rows, "|"))
+-- Every row the page draws carries a string title and a string value: a null
+-- book must not leave a nil in either slot.
 local browse_types = {}
-local browse_texts = {}
-for row_index = 1, #(browse and browse.item_table or {}) do
-  browse_types[#browse_types + 1] = type(browse.item_table[row_index].text)
-  browse_texts[#browse_texts + 1] = tostring(browse.item_table[row_index].text)
+for block_index = 1, #(browse_model and browse_model.blocks or {}) do
+  local block = browse_model.blocks[block_index]
+  for row_index = 1, #(block.rows or {}) do
+    local row = block.rows[row_index]
+    browse_types[#browse_types + 1] = type(row.title) .. "/" .. type(row.value)
+  end
 end
 print("browse_row_text_types=" .. table.concat(browse_types, ","))
-print("browse_texts=" .. table.concat(browse_texts, "|"))
 
 print("OK")
 `);
@@ -4108,10 +4364,12 @@ describe("plugin row safety against JSON nulls and malformed fields", () => {
     expect(out.catalog_coauthored_details).toContain(
       "Author: Ann One, Bob Two, Cyd Three",
     );
-    expect(out.catalog_coauthored_mandatory).toContain("Ann One, Bob T");
-    expect(
-      Array.from(out.catalog_coauthored_column).length,
-    ).toBeLessThanOrEqual(UNMEASURED_COLUMN_CAP);
+    // The row keeps the first two names and reports the rest as "+N more";
+    // the detail screen above still lists all three.
+    expect(out.catalog_coauthored_mandatory).toContain("Ann One, Bob Two +1 more");
+    expect(Array.from(out.catalog_coauthored_column).length).toBeLessThanOrEqual(
+      SECONDARY_LINE_CAP,
+    );
   });
 
   it("renders a safe fallback row when a row builder raises", () => {
@@ -4148,7 +4406,9 @@ describe("plugin row safety against JSON nulls and malformed fields", () => {
     // row.
     expect(out.browse_ok).toBe("true nil");
     expect(out.browse_rows).toBe("3");
-    expect(out.browse_row_text_types).toBe("string,string,string");
+    expect(out.browse_row_text_types).toBe(
+      "string/string,string/string,string/string",
+    );
     expect(out.browse_texts).toContain("Spice and Wolf");
     expect(out.browse_texts).toContain("Dune");
   });

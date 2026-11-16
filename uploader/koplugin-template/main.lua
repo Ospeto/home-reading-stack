@@ -80,10 +80,12 @@ local _ = require("gettext")
 local config = require("lighthouse_config")
 local Client = require("lighthouse_client")
 local OPDS = require("lighthouse_opds")
+local Page = require("lighthouse_page")
 local Sidecar = require("lighthouse_sidecar")
 local Stats = require("lighthouse_stats")
 local Status = require("lighthouse_status")
 local Ui = require("lighthouse_ui")
+local Views = require("lighthouse_views")
 
 --- The only way this plugin builds a translated string with substitutions.
 --
@@ -130,11 +132,26 @@ local function pageSize()
     return size
 end
 
+--- Constructs one KOReader widget with every corner square.
+--
+-- The Kindle screen is square and the accepted design has no rounded box on it,
+-- but KOReader reads its radii from the shared `Size.radius` table at
+-- construction time. `Ui.square` zeroes them for the length of ONE construction
+-- and restores them, so the plugin's notices, dialogs, confirmations, buttons
+-- and progress widgets come out square while the rest of the reader keeps its
+-- own design.
+-- @param class widget class (`InfoMessage`, `TextViewer`, ...)
+-- @tparam table options constructor options
+-- @treturn table the widget
+local function squareWidget(class, options)
+    return Ui.square(function() return class:new(options) end)
+end
+
 --- Shows a short information message.
 -- @string text
 -- @number[opt] timeout seconds
 local function notice(text, timeout)
-    UIManager:show(InfoMessage:new{ text = text, timeout = timeout })
+    UIManager:show(squareWidget(InfoMessage, { text = text, timeout = timeout }))
 end
 
 --- Maps a client error code to a message the reader can act on.
@@ -959,7 +976,7 @@ function LightHouse:addToMainMenu(menu_items)
         sub_item_table = {
             {
                 text = _("Browse library"),
-                callback = function() self:openCatalog("", 0, 1) end,
+                callback = function() self:openLibrary{ mode = "books", page = 1 } end,
             },
             {
                 text = _("Search library…"),
@@ -1008,13 +1025,13 @@ end
 
 --- Lets the reader pick a different download folder.
 function LightHouse:chooseDownloadDir()
-    DownloadMgr:new{
+    squareWidget(DownloadMgr, {
         title = _("Choose download folder"),
         onConfirm = function(path)
             G_reader_settings:saveSetting("download_dir", path)
             notice(T(_("Downloads will be saved in %1"), path), 3)
         end,
-    }:chooseDir(self:getDownloadDir())
+    }):chooseDir(self:getDownloadDir())
 end
 
 --- Shows the connection details baked into this copy of the plugin.
@@ -1039,10 +1056,10 @@ function LightHouse:showConnection(configured)
         table.insert(lines, 1, _("This copy is not configured. Download the plugin from the LightHouse web app to get a pre-configured one."))
         table.insert(lines, 2, "")
     end
-    UIManager:show(TextViewer:new{
+    UIManager:show(squareWidget(TextViewer, {
         title = _("LightHouse connection"),
         text = table.concat(lines, "\n"),
-    })
+    }))
 end
 
 --- Runs a blocking server call behind a spinner.
@@ -1053,7 +1070,7 @@ end
 -- @treturn string|nil body
 -- @treturn string|nil err
 function LightHouse:withSpinner(text, func)
-    local info = InfoMessage:new{ text = text, dismissable = false }
+    local info = squareWidget(InfoMessage, { text = text, dismissable = false })
     UIManager:show(info)
     UIManager:forceRePaint()
     local ok, body, err = pcall(func)
@@ -1301,165 +1318,222 @@ function LightHouse:mergeReadingShelf(sessions, local_records)
     return shelf
 end
 
---- Opens a catalog page.
--- @string query search terms ("" for the whole library)
--- @int start_index zero-based offset into the result set
--- @int page_number 1-based page number for the title bar
-function LightHouse:openCatalog(query, start_index, page_number)
-    local paged_title
-    if (query or "") ~= "" then
-        paged_title = T(_("Search: %1 (page %2)"), query, page_number or 1)
-    else
-        paged_title = T(_("LightHouse library (page %1)"), page_number or 1)
-    end
+-- ---------------------------------------------------------------------------
+-- Full-screen pages
+-- ---------------------------------------------------------------------------
 
-    local retry = function()
-        self:openCatalog(query, start_index, page_number)
-    end
-
-    if not Client.isConfigured(config) then
-        self:showProblem{
-            title = paged_title,
-            headline = errorHeadline("not_configured"),
-            detail = describeError("not_configured"),
-            actions = { connectionAction(self) },
-        }
-        return
-    end
-    if not NetworkMgr:isOnline() then
-        NetworkMgr:willRerunWhenOnline(retry)
-        return
-    end
-
-    local path = "/api/opds?" .. buildQuery({
-        search = query or "",
-        start = start_index or 0,
-        count = pageSize(),
-    })
-
-    local body, err = self:withSpinner(_("Loading LightHouse catalog…"), function()
-        return Client.get(config, path)
-    end)
-    if not body then
-        self:showProblem{
-            title = paged_title,
-            headline = errorHeadline(err),
-            detail = describeError(err),
-            actions = { retryAction(_("Try again"), retry) },
-        }
-        return
-    end
-
-    local feed = OPDS.parse(body)
-    if #feed.entries == 0 then
-        if (query or "") ~= "" then
-            self:showProblem{
-                title = paged_title,
-                headline = T(_("No books match “%1”"), query),
-                detail = _("Check the spelling, or search by author or series."),
-                actions = {
-                    retryAction(_("Search again"), function() self:showSearchDialog() end),
-                    { text = _("Browse all books"), callback = function() self:openCatalog("", 0, 1) end },
-                },
-            }
-        else
-            self:showProblem{
-                title = paged_title,
-                headline = _("This library is empty"),
-                detail = _("Add EPUBs from the LightHouse web app, then browse again."),
-                actions = {
-                    retryAction(_("Refresh"), retry),
-                    connectionAction(self),
-                },
-            }
-        end
-        return
-    end
-
-    local sessions = self:withSpinner(_("Checking reading progress…"), function()
-        return self:fetchSessions()
-    end) or {}
-    Status.merge(feed.entries, sessions)
-
-    -- Local sidecars beat the server for any book this device has opened (see
-    -- `localRecordFor`), and a book only this device has read gets its progress
-    -- from the sidecar because the server sent no session for it at all. The
-    -- walk happens ONCE, behind a spinner, before any row is matched.
-    self:withLocalScan(_("Reading books on this device…"), function()
-        return self:localRecords()
-    end)
-    for entry_index = 1, #feed.entries do
-        local entry = feed.entries[entry_index]
-        local applied = pcall(function() self:applyLocalToEntry(entry) end)
-        if not applied then
-            logger.warn("LightHouse: local progress match failed for", tostring(entry.title))
-        end
-    end
-
-    local with_covers = self:coversEnabled()
-    if with_covers then
-        local now = os.time()
-        local pending = 0
-        for entry_index = 1, #feed.entries do
-            if coverNeedsFetch(feed.entries[entry_index], now) then
-                pending = pending + 1
-            end
-        end
-        if pending > 0 then
-            self:withSpinner(_("Loading covers…"), function()
-                self:prefetchCovers(feed.entries)
-                return true
-            end)
-        end
-    end
-
-    local layout = self:layoutFor(with_covers)
-    local items = {}
-    items[#items + 1] = self:buildRow{
-        layout = layout,
-        cover_glyph = Ui.GLYPH.chevron,
-        primary = _("Search library…"),
-        callback = function() self:showSearchDialog() end,
+--- Translated labels handed to the pure view models.
+-- The models live outside KOReader (so the off-device suite can assert them),
+-- which means they cannot translate themselves: `main.lua` owns gettext and
+-- passes the strings down.
+-- @treturn table labels
+function LightHouse:pageLabels()
+    return {
+        books = _("BOOKS"),
+        authors = _("AUTHORS"),
+        series = _("SERIES"),
+        library = _("Library"),
+        reading_stats = _("Reading stats"),
+        total = _("TOTAL"),
+        streak = _("STREAK"),
+        today = _("TODAY"),
+        this_week = _("THIS WEEK"),
+        library_band = _("LIBRARY"),
+        year_band = _("YEAR"),
+        unread = _("Unread"),
+        reading = _("Reading"),
+        finished = _("Finished"),
+        stale = _("Stale 30d+"),
+        books_done = _("Books done"),
+        hours = _("Hours"),
+        sessions = _("Sessions"),
+        longest_streak = _("Longest streak"),
+        currently_reading = _("CURRENTLY READING"),
+        activity = _("ACTIVITY"),
+        recent_sessions = _("RECENT SESSIONS"),
+        last_52_weeks = _("LAST 52 WEEKS"),
+        search = _("Search library…"),
+        next_page = _("Next page"),
+        page = _("Page %d of %d"),
+        all_books = _("All books"),
+        grouped_by_series = _("Grouped by series"),
+        grouped_by_author = _("Grouped by author"),
+        not_started = _("not started"),
+        done = _("done"),
+        unread_value = _("Unread"),
+        next_unread = _("#%s next"),
+        books_count = _("%s books"),
+        read_count = _("%s read"),
+        author_count = _("%s authors"),
+        series_count = _("%s series"),
     }
-    for entry_index = 1, #feed.entries do
-        local entry = feed.entries[entry_index]
-        -- One bad entry costs one row, never the page or the process.
-        items[#items + 1] = self:buildSafeRow(function()
-            return self:buildCatalogItem(entry, layout)
-        end)
-    end
-
-    if feed.next_href and #feed.entries > 0 then
-        items[#items + 1] = self:buildRow{
-            layout = layout,
-            cover_glyph = Ui.GLYPH.chevron,
-            primary = _("Next page"),
-            bold = true,
-            callback = function()
-                self:openCatalog(query, (start_index or 0) + #feed.entries, (page_number or 1) + 1)
-            end,
-        }
-    end
-
-    self:showMenu(paged_title, items, { covers = with_covers, layout = layout })
 end
 
---- Builds one catalog row, including rating, progress and the detail submenu.
--- Row anatomy is the plugin's shared one: the title is the row text, and the
--- metadata column carries author, series, progress and rating together so the
--- reader never has to open the row to judge a book.
--- @tparam table entry OPDS entry with optional .status
--- @tparam table[opt] layout result of `Ui.layout`
--- @treturn table Menu item
-function LightHouse:buildCatalogItem(entry, layout)
+--- A cached cover for one book id, sized to the row, or nil.
+-- The row draws its own placeholder when this returns nil, so a missing or
+-- half-written cover costs the picture and never the row.
+-- @param cover_id number|string|nil
+-- @number width
+-- @number height
+-- @treturn table|nil widget
+function LightHouse:coverWidgetFor(cover_id, width, height)
+    local id = Status.num(cover_id)
+    if not id then return nil end
+    local path = coverPath({ book_id = id })
+    if not path or not coverFileWhole(path) then return nil end
+    local widgets = loadCoverWidgets()
+    if not widgets then return nil end
+    return widgets.image:new{
+        file = path,
+        -- 0 = scale to fit the box, keeping the cover's own aspect.
+        scale_factor = 0,
+        width = width,
+        height = height,
+    }
+end
+
+--- Fetches the covers of these books, inside the caller's spinner.
+-- A synthetic entry per id is enough: the cover endpoint is keyed by book id, so
+-- no OPDS row is needed. Bounded by the same count and wall-clock budget as the
+-- catalog prefetch, and every failure stays inside the prefetch.
+-- @tparam table ids array of book ids
+-- @string[opt] label spinner text
+function LightHouse:prefetchCoverIds(ids, label)
+    if not self:coversEnabled() then return end
+    local now = os.time()
+    local entries = {}
+    for id_index = 1, #ids do
+        local id = Status.num(ids[id_index])
+        if id then
+            local entry = {
+                book_id = id,
+                thumbnail_href = Client.buildUrl(
+                    config,
+                    string.format("/api/books/%d/cover?w=%d", math.floor(id), Ui.tokens.cover_width_px)
+                ),
+            }
+            if coverNeedsFetch(entry, now) then entries[#entries + 1] = entry end
+        end
+    end
+    if #entries == 0 then return end
+    self:withSpinner(label or _("Loading covers…"), function()
+        self:prefetchCovers(entries)
+        return true
+    end)
+end
+
+--- Shows one page model as a full-screen page.
+-- The page replaces any page already on screen. A build that raises is reported
+-- as a designed failure screen instead of taking the process with it, because
+-- every widget construction here runs inside KOReader's paint path.
+-- @tparam table model page model (`lighthouse_views.lua`)
+-- @tparam table plan layout plan (`Ui.pagePlan` / `Ui.listPlan`)
+-- @tparam table handlers { on_action, on_switch, on_overflow, on_back, kind }
+-- @treturn table|nil the page widget
+function LightHouse:showPage(model, plan, handlers)
+    handlers = handlers or {}
+    if self.page then
+        UIManager:close(self.page)
+        self.page = nil
+    end
+    local built_ok, page = pcall(Page.build, {
+        model = model,
+        plan = plan,
+        kind = handlers.kind or "stats",
+        cover_widget = function(cover_id, width, height)
+            return self:coverWidgetFor(cover_id, width, height)
+        end,
+        on_action = handlers.on_action,
+        on_switch = handlers.on_switch,
+        on_overflow = handlers.on_overflow or function() self:showPageOverflow() end,
+        close_callback = function() self.page = nil end,
+    })
+    if not built_ok or type(page) ~= "table" then
+        logger.warn("LightHouse: page build failed:", tostring(page))
+        self:showProblem{
+            title = _("LightHouse library"),
+            headline = _("This screen could not be drawn"),
+            detail = _("Open the library again, or download the plugin again from the LightHouse web app."),
+            actions = { retryAction(_("Browse library"), function() self:openLibrary{ page = 1 } end) },
+        }
+        return nil
+    end
+    self.page = page
+    -- The model is kept on the plugin, not only inside the widget: it is what
+    -- the screen was asked to draw, and the off-device suite asserts it (a
+    -- framebuffer is not available there, and a screenshot is the device's
+    -- job).
+    self.last_page_model = model
+    UIManager:show(page)
+    return page
+end
+
+--- The overflow menu behind the header's ⋮.
+-- Holds the actions that are not a row: refresh, the grouping switch's
+-- keyboard/touch alternative, paging, covers and the connection screen.
+function LightHouse:showPageOverflow()
+    local items = {}
+    local state = self.library_state
+    if state then
+        items[#items + 1] = { text = _("Refresh"), bold = true, callback = function() self:openLibrary{ page = state.page } end }
+        if state.page > 1 then
+            items[#items + 1] = {
+                text = _("Previous page"),
+                callback = function() self:openLibrary{ page = state.page - 1 } end,
+            }
+        end
+        for segment_index = 1, 3 do
+            local mode = ({ "books", "authors", "series" })[segment_index]
+            if mode ~= state.mode then
+                local switch_label = mode == "books" and _("Show books")
+                    or (mode == "authors" and _("Show authors") or _("Show series"))
+                items[#items + 1] = {
+                    text = switch_label,
+                    callback = function() self:openLibrary{ mode = mode, page = 1 } end,
+                }
+            end
+        end
+        items[#items + 1] = {
+            text = _("Search library…"),
+            callback = function() self:showSearchDialog() end,
+        }
+    else
+        items[#items + 1] = { text = _("Refresh"), bold = true, callback = function() self:showStats() end }
+        items[#items + 1] = { text = _("Library"), callback = function() self:openLibrary{ mode = "books", page = 1 } end }
+    end
+    items[#items + 1] = {
+        text = _("Show cover thumbnails"),
+        callback = function()
+            self:toggleCovers()
+            self._library_plan = nil
+            if state then
+                self:openLibrary{ page = state.page }
+            else
+                self:showStats()
+            end
+        end,
+        checked_func = function() return self:coversEnabled() end,
+    }
+    items[#items + 1] = {
+        text = _("Connection"),
+        callback = function() self:showConnection(Client.isConfigured(config)) end,
+    }
+    local menu = squareWidget(Menu, {
+        title = _("LightHouse library"),
+        item_table = items,
+        title_multilines = true,
+    })
+    self.overflow_menu = menu
+    UIManager:show(menu)
+end
+
+--- The detail actions for one book, shared by the library page and the shelf.
+-- @tparam table entry OPDS entry (or a synthetic session-shaped entry)
+-- @treturn table array of Menu items
+function LightHouse:buildBookDetails(entry)
     if type(entry) ~= "table" then entry = {} end
-    -- Untrusted: an OPDS field may be missing, a table, or a callable sentinel
-    -- from a decoder. Each one is coerced ONCE here, before it is used as a
-    -- guard, a concatenation or a `T()` substitution.
     local authors = Status.str(entry.authors)
     local series = Status.str(entry.series)
-    local title = Ui.rowTitle(entry.title)
-    if title == "" then title = _("Untitled") end
     local status = type(entry.status) == "table" and entry.status or nil
     local tags = {}
     if type(entry.tags) == "table" then
@@ -1532,29 +1606,273 @@ function LightHouse:buildCatalogItem(entry, layout)
             callback = function() end,
         }
     end
+    return details
+end
 
-    -- A Calibre rating is a number or nothing: `entry.rating > 0` on a
-    -- callable sentinel raises "attempt to compare number with function",
-    -- which is the same class of browse-page crash the device saw.
-    local rating = Status.num(entry.rating)
-    local glance = Ui.glanceLine{
-        self:progressGlance(status),
-        (rating and rating > 0) and Status.ratingStars(rating) or nil,
-    }
+--- Opens the detail screen of one row's book.
+-- A book the library knows by id but not by href (a row built from a reading
+-- session) still gets its download link, so the action is never a dead tap.
+-- @tparam table entry
+function LightHouse:openBookDetails(entry)
+    if type(entry) ~= "table" then return end
+    local target = entry
+    if not target.download_href then
+        local book_id = Status.num(target.book_id)
+        if book_id then
+            target = {}
+            for key, value in pairs(entry) do target[key] = value end
+            target.download_href = Client.buildUrl(
+                config,
+                string.format("/api/books/%d/download/epub", math.floor(book_id))
+            )
+        end
+    end
+    local title = Ui.rowTitle(target.title)
+    if title == "" then title = _("Untitled") end
+    self:showMenu(title, self:buildBookDetails(target), { covers = false })
+end
 
-    return self:buildRow{
-        layout = layout,
-        cover_entry = entry,
-        primary = title,
-        secondary = Ui.secondaryLine{
-            authors = authors,
-            series = series,
-            series_index = entry.series_index and formatSeriesIndex(entry.series_index) or nil,
-            fallback = _("Unknown"),
+-- ---------------------------------------------------------------------------
+-- Library: Books / Authors / Series
+-- ---------------------------------------------------------------------------
+
+--- Layout of the library page, cached per screen SIZE.
+-- Keyed on the screen, not just cached once: a reader who rotates the device
+-- gets a plan for the new geometry instead of the old one.
+-- @treturn table plan
+function LightHouse:libraryPlan()
+    local key = tostring(screenWidth()) .. "x" .. tostring(screenHeight())
+    if self._library_plan and self._library_plan_key == key then
+        return self._library_plan
+    end
+    local plan = Ui.listPlan(screenWidth(), screenHeight(), screenScale(), {
+        with_switch = true,
+        min_rows = 3,
+    })
+    self._library_plan = plan
+    self._library_plan_key = key
+    return plan
+end
+
+--- Fetches one grouping from the server, cached for this session.
+-- The whole grouping is one small JSON document (one row per author or series),
+-- so it is fetched once and paged on the device: paging a grouping through the
+-- network would cost one request per page turn.
+-- @string by "authors" | "series"
+-- @treturn table|nil { groups, totals }
+-- @treturn string|nil error code
+function LightHouse:fetchGrouping(by)
+    local cache = self._groupings or {}
+    self._groupings = cache
+    if cache[by] then return cache[by] end
+    local body, err = Client.get(config, "/api/library/groups?by=" .. by)
+    if type(body) ~= "string" or body == "" then
+        return nil, err or "invalid_response"
+    end
+    local decoded_ok, decoded = pcall(JSON.decode, body)
+    if not decoded_ok or type(decoded) ~= "table" or type(decoded.groups) ~= "table" then
+        return nil, "invalid_response"
+    end
+    local grouping = {
+        groups = Status.normalizeGroups(decoded.groups),
+        totals = {
+            books = Status.num(decoded.books),
+            authors = Status.num(decoded.authors),
+            series = Status.num(decoded.series),
         },
-        glance = glance,
-        details = details,
     }
+    cache[by] = grouping
+    return grouping
+end
+
+--- Builds and shows the library page for one grouping.
+-- @tparam table[opt] options { mode, page, query }
+function LightHouse:openLibrary(options)
+    options = options or {}
+    local previous = self.library_state or {}
+    local mode = options.mode or previous.mode or "books"
+    if mode ~= "authors" and mode ~= "series" then mode = "books" end
+    local page = math.floor(tonumber(options.page) or previous.page or 1)
+    if page < 1 then page = 1 end
+    local query = options.query
+    if query == nil then query = previous.query or "" end
+    query = Status.str(query)
+
+    local state = { mode = mode, page = page, query = query }
+    self.library_state = state
+
+    if not Client.isConfigured(config) then
+        self.library_state = nil
+        self:showProblem{
+            title = _("Library"),
+            headline = errorHeadline("not_configured"),
+            detail = describeError("not_configured"),
+            actions = { connectionAction(self) },
+        }
+        return
+    end
+    if not NetworkMgr:isOnline() then
+        NetworkMgr:willRerunWhenOnline(function() self:openLibrary{ mode = mode, page = page, query = query } end)
+        return
+    end
+
+    local plan = self:libraryPlan()
+    -- Two rows of the page are navigation, not content: the search row on the
+    -- first page and the next-page row while the catalog has more. The
+    -- configured page size stays an upper bound, so a reader who tuned it keeps
+    -- their setting while the screen decides what actually fits.
+    local page_size = math.max(math.min(plan.rows - 2, pageSize()), 1)
+    local context = { page = page, page_size = page_size, query = query, totals = {} }
+
+    if mode == "books" then
+        local path = "/api/opds?" .. buildQuery({
+            search = query,
+            start = (page - 1) * page_size,
+            count = page_size,
+            -- A–Z, the same order the two groupings are in: the server sorts the
+            -- whole matched set before the page window, so the order holds across
+            -- page turns instead of only within a page.
+            sort = "title",
+        })
+        local body, err = self:withSpinner(_("Loading LightHouse catalog…"), function()
+            return Client.get(config, path)
+        end)
+        if not body then
+            self.library_state = nil
+            self:showProblem{
+                title = _("Library"),
+                headline = errorHeadline(err),
+                detail = describeError(err),
+                actions = {
+                    retryAction(_("Try again"), function()
+                        self:openLibrary{ mode = mode, page = page, query = query }
+                    end),
+                },
+            }
+            return
+        end
+        local feed = OPDS.parse(body)
+        if #feed.entries == 0 then
+            self.library_state = nil
+            if query ~= "" then
+                self:showProblem{
+                    title = _("Library"),
+                    headline = T(_("No books match “%1”"), query),
+                    detail = _("Check the spelling, or search by author or series."),
+                    actions = {
+                        retryAction(_("Search again"), function() self:showSearchDialog() end),
+                        { text = _("Browse all books"), callback = function() self:openLibrary{ page = 1, query = "" } end },
+                    },
+                }
+            else
+                self:showProblem{
+                    title = _("Library"),
+                    headline = _("This library is empty"),
+                    detail = _("Add EPUBs from the LightHouse web app, then browse again."),
+                    actions = {
+                        retryAction(_("Refresh"), function() self:openLibrary{ page = 1 } end),
+                        connectionAction(self),
+                    },
+                }
+            end
+            return
+        end
+
+        local sessions = self:withSpinner(_("Checking reading progress…"), function()
+            return self:fetchSessions()
+        end) or {}
+        Status.merge(feed.entries, sessions)
+
+        -- Local sidecars beat the server for any book this device has opened (see
+        -- `localRecordFor`), and a book only this device has read gets its progress
+        -- from the sidecar because the server sent no session for it at all. The
+        -- walk happens ONCE, behind a spinner, before any row is drawn.
+        self:withLocalScan(_("Reading books on this device…"), function()
+            return self:localRecords()
+        end)
+        for entry_index = 1, #feed.entries do
+            local entry = feed.entries[entry_index]
+            local applied = pcall(function() self:applyLocalToEntry(entry) end)
+            if not applied then
+                logger.warn("LightHouse: local progress match failed for", tostring(entry.title))
+            end
+        end
+
+        if self:coversEnabled() then
+            local now = os.time()
+            local pending = 0
+            for entry_index = 1, #feed.entries do
+                if coverNeedsFetch(feed.entries[entry_index], now) then
+                    pending = pending + 1
+                end
+            end
+            if pending > 0 then
+                self:withSpinner(_("Loading covers…"), function()
+                    self:prefetchCovers(feed.entries)
+                    return true
+                end)
+            end
+        end
+
+        context.entries = feed.entries
+        context.has_next = feed.next_href ~= nil
+        context.totals = { books = feed.total }
+    else
+        local grouping, err = self:withSpinner(_("Loading the library…"), function()
+            return self:fetchGrouping(mode == "series" and "series" or "authors")
+        end)
+        if not grouping then
+            self.library_state = nil
+            self:showProblem{
+                title = _("Library"),
+                headline = errorHeadline(err),
+                detail = describeError(err),
+                actions = {
+                    retryAction(_("Try again"), function()
+                        self:openLibrary{ mode = mode, page = page }
+                    end),
+                },
+            }
+            return
+        end
+        context.groups = grouping.groups
+        context.totals = grouping.totals
+        if self:coversEnabled() then
+            local ids = {}
+            local first = (page - 1) * page_size + 1
+            for group_index = first, first + page_size - 1 do
+                local group = grouping.groups[group_index]
+                if group and group.coverId then ids[#ids + 1] = group.coverId end
+            end
+            self:prefetchCoverIds(ids)
+        end
+    end
+
+    local model = Views.libraryModel(mode, context, { labels = self:pageLabels() })
+
+    local function dispatch(action)
+        if type(action) ~= "table" then return end
+        if action.kind == "search" then
+            self:showSearchDialog()
+        elseif action.kind == "page" then
+            self:openLibrary{ page = action.page }
+        elseif action.kind == "book" then
+            self:openBookDetails(action.entry)
+        elseif action.kind == "series" or action.kind == "author" then
+            -- A grouping row opens the books in it: the OPDS feed already
+            -- matches series and author names, so the switch, the anchors and
+            -- the search box all resolve through the same feed.
+            self:openLibrary{ mode = "books", query = action.name, page = 1 }
+        end
+    end
+
+    self:showPage(model, plan, {
+        kind = "list",
+        on_action = dispatch,
+        on_switch = function(key)
+            self:openLibrary{ mode = key, page = 1 }
+        end,
+    })
 end
 
 --- Shows the synopsis/description of one book.
@@ -1565,17 +1883,17 @@ function LightHouse:showSynopsis(entry)
         notice(_("No synopsis available for this book."))
         return
     end
-    UIManager:show(TextViewer:new{
+    UIManager:show(squareWidget(TextViewer, {
         title = entry.title,
         text = text,
         justified = true,
-    })
+    }))
 end
 
 --- Opens the search dialog.
 function LightHouse:showSearchDialog()
     local dialog
-    dialog = InputDialog:new{
+    dialog = squareWidget(InputDialog, {
         title = _("Search the LightHouse library"),
         input = "",
         input_hint = _("Title, author or series"),
@@ -1597,15 +1915,15 @@ function LightHouse:showSearchDialog()
                         -- `:gsub` raise instead of searching.
                         query = Status.str(query):gsub("^%s+", ""):gsub("%s+$", "")
                         if query == "" then
-                            self:openCatalog("", 0, 1)
+                            self:openLibrary{ mode = "books", page = 1, query = "" }
                         else
-                            self:openCatalog(query, 0, 1)
+                            self:openLibrary{ mode = "books", page = 1, query = query }
                         end
                     end,
                 },
             },
         },
-    }
+    })
     UIManager:show(dialog)
     dialog:onShowKeyboard()
 end
@@ -1767,7 +2085,7 @@ function LightHouse:showReading()
                 detail = _("Open a book in KOReader with progress sync on, then come back."),
                 actions = {
                     retryAction(_("Refresh"), function() self:showReading() end),
-                    { text = _("Browse library"), callback = function() self:openCatalog("", 0, 1) end },
+                    { text = _("Browse library"), callback = function() self:openLibrary{ mode = "books", page = 1 } end },
                 },
             }
         end
@@ -1855,7 +2173,7 @@ function LightHouse:showHighlights()
                     self:localRecords(true)
                     self:showHighlights()
                 end),
-                { text = _("Browse library"), callback = function() self:openCatalog("", 0, 1) end },
+                { text = _("Browse library"), callback = function() self:openLibrary{ mode = "books", page = 1 } end },
             },
         }
         return
@@ -2020,10 +2338,10 @@ function LightHouse:showHighlightNote(group, annotation)
     local datetime = Status.str(annotation and annotation.datetime)
     if datetime ~= "" then lines[#lines + 1] = datetime end
     if #lines == 0 then lines[#lines + 1] = _("This highlight has no text.") end
-    UIManager:show(TextViewer:new{
+    UIManager:show(squareWidget(TextViewer, {
         title = _("Highlight"),
         text = table.concat(lines, "\n\n"),
-    })
+    }))
 end
 
 --- Fetches and normalizes `GET /api/kosync/stats`.
@@ -2033,164 +2351,52 @@ end
 -- so `withSpinner` turns a malformed body into a notice instead of a raise.
 -- @treturn table|nil normalized stats
 -- @treturn string|nil error code
+--- Fetches and normalizes the reading-statistics payload.
+-- One request for the whole screen: the numbers, the heatmap, the recent
+-- sessions and the currently-reading books all come from `/api/kosync/stats`,
+-- so the page cannot show a headline from one snapshot next to a bar from
+-- another.
+-- @treturn table|nil { numbers = normalized stats, sessions = normalized sessions }
+-- @treturn string|nil error code
 function LightHouse:fetchStats()
     local body, err = Client.get(config, "/api/kosync/stats")
     if type(body) ~= "string" or body == "" then
         return nil, err or "invalid_response"
     end
-    local stats = Stats.normalize(JSON.decode(body))
-    if not stats then return nil, "invalid_response" end
-    return stats
-end
-
---- Non-tappable section heading for the stats view.
--- Uses the shared left block bar so a heading reads as a heading on e-ink,
--- where the web app would use a coloured accent border.
--- @string text
--- @treturn table Menu item
-local function statsSection(text)
+    local decoded_ok, decoded = pcall(JSON.decode, body)
+    if not decoded_ok or type(decoded) ~= "table" then
+        return nil, "invalid_response"
+    end
+    local numbers = Stats.normalize(decoded)
+    if not numbers then return nil, "invalid_response" end
     return {
-        text = Ui.sectionText(text),
-        bold = true,
-        select_enabled = false,
-        callback = function() end,
+        numbers = numbers,
+        -- The currently-reading rows are normalized by the module that owns
+        -- KOSync rows (`Status.normalizeSessions`), not re-derived here: one
+        -- normalizer, one shape, and the same local-sidecar merge the shelf uses.
+        sessions = Status.normalizeSessions(decoded.activeBooks),
     }
 end
 
---- Read-only stats row: label on the left, value in the right-hand column.
--- A value the server did not send renders "unavailable"; zero stays zero.
--- The row goes through the shared row builder so its value column is budgeted
--- in pixels like every other row's instead of at a character count.
--- @string label
--- @string|nil value
--- @boolean[opt] bold headline emphasis
--- @tparam table[opt] layout result of `Ui.layout`
--- @treturn table Menu item
-function LightHouse:statsRow(label, value, bold, layout)
-    return self:buildRow{
-        layout = layout,
-        primary = label,
-        -- Values here are `Stats.*` output (a string or nil), but the row is
-        -- also where an untrusted number could land, so it takes the guard.
-        glance = Status.str(value, Ui.UNAVAILABLE),
-        bold = bold == true,
-    }
-end
-
---- Shade key for the heatmap, built from the module's own level thresholds so
--- the printed key and the picture above it can never disagree.
--- @treturn string
-local function heatmapKeyLabel()
-    local thresholds = Stats.LEVEL_MIN_MINUTES
-    local top_level = 0
-    for level in pairs(thresholds) do
-        if level > top_level then top_level = level end
+--- Layout of the statistics page, cached per screen size.
+-- @treturn table plan
+function LightHouse:statsPlan()
+    local key = tostring(screenWidth()) .. "x" .. tostring(screenHeight())
+    if self._stats_plan and self._stats_plan_key == key then
+        return self._stats_plan
     end
-
-    local parts = { Stats.heatmapGlyph(0) .. " " .. _("none") }
-    for level = 1, top_level do
-        local text
-        if level == top_level then
-            text = T(_("%1 or more"), Stats.formatMinutes(thresholds[level]))
-        else
-            text = T(_("under %1"), Stats.formatMinutes(thresholds[level + 1]))
-        end
-        parts[#parts + 1] = Stats.heatmapGlyph(level) .. " " .. text
-    end
-    return T(_("Shade key: %1"), table.concat(parts, Ui.GLYPH.separator))
-end
-
---- Builds the rows of the Reading stats view.
---
--- Order mirrors how the web Reading Statistics modal is read, one screen at a
--- time: the headline numbers a reader checks daily come first (streak, today,
--- this week, all time, books finished this year), then the yearly goal, then
--- the 26-week activity picture, and only then the supporting detail (library
--- health). Nothing from the earlier layout is dropped - only reordered, so the
--- answer is above the fold and the detail is below it.
--- @tparam table stats normalized stats from `fetchStats`
--- @tparam table[opt] layout result of `Ui.layout`
--- @treturn table array of Menu items
-function LightHouse:buildStatsItems(stats, layout)
-    local items = {}
-
-    -- 1. Headline numbers. Bold, and with no heading row above them: this is
-    --    the answer, and the sections below are the supporting detail.
-    local time = stats.time or {}
-    local headline_rows = {
-        { label = _("Current streak"), value = Stats.streakLabel(stats.streaks) },
-        { label = _("Read today"), value = Stats.formatDuration(time.todaySeconds) },
-        { label = _("Read this week"), value = Stats.formatDuration(time.thisWeekSeconds) },
-        { label = _("Total reading time"), value = Stats.formatHours(time.totalHours) },
-        { label = _("Books finished this year"), value = Stats.formatCount(stats.finishedThisYear) },
-    }
-    for row_index = 1, #headline_rows do
-        items[#items + 1] = self:statsRow(
-            headline_rows[row_index].label,
-            headline_rows[row_index].value,
-            true,
-            layout
-        )
-    end
-
-    -- 2. Yearly goal, only when a target is configured.
-    local goal = stats.goal
-    if goal then
-        local heading = goal.year and T(_("Yearly goal %1"), Stats.formatCount(goal.year)) or _("Yearly goal")
-        items[#items + 1] = statsSection(heading)
-
-        -- Bars go in the same right-hand column as every other row value, so a
-        -- goal row looks like every other progress row on the device.
-        local goal_rows = {
-            { label = _("Books"), ratio = goal.booksRatio, value = Stats.goalBooksLabel(goal) },
-            { label = _("Hours"), ratio = goal.hoursRatio, value = Stats.goalHoursLabel(goal) },
-        }
-        for row_index = 1, #goal_rows do
-            local goal_row = goal_rows[row_index]
-            local value = goal_row.value
-            if value and goal_row.ratio then
-                value = Ui.glanceProgress(Status, goal_row.ratio) .. Ui.GLYPH.separator .. value
-            end
-            items[#items + 1] = self:statsRow(goal_row.label, value, nil, layout)
-        end
-    end
-
-    -- 3. Activity heatmap: one menu row per week of up to seven days.
-    items[#items + 1] = statsSection(_("Activity (newest week last)"))
-    local weeks = Stats.heatmapRows(stats.heatmap)
-    if #weeks == 0 then
-        items[#items + 1] = self:statsRow(_("Heatmap"), nil, nil, layout)
-    end
-    for week_index = 1, #weeks do
-        local week = weeks[week_index]
-        local days = {}
-        for day_index = 1, #week do
-            local day = week[day_index]
-            days[#days + 1] = {
-                text = T(_("%1 · %2"), Stats.shortDate(day.date) or day.date, Stats.dayDurationLabel(day) or Ui.UNAVAILABLE),
-                callback = function() self:showDayStats(day) end,
-            }
-        end
-        items[#items + 1] = self:buildRow{
-            layout = layout,
-            primary = Stats.heatmapRowText(week),
-            glance = Stats.shortDate(week[#week].date),
-            details = days,
-        }
-    end
-    items[#items + 1] = statsSection(heatmapKeyLabel())
-
-    -- 4. Supporting detail: library health as three counts.
-    items[#items + 1] = statsSection(_("Library health"))
-    local health = stats.health or {}
-    items[#items + 1] = self:statsRow(_("Unread"), Stats.formatCount(health.unread), nil, layout)
-    items[#items + 1] = self:statsRow(_("Reading"), Stats.formatCount(health.reading), nil, layout)
-    items[#items + 1] = self:statsRow(_("Finished"), Stats.formatCount(health.finished), nil, layout)
-
-    return items
+    local plan = Ui.pagePlan(screenWidth(), screenHeight(), screenScale())
+    self._stats_plan = plan
+    self._stats_plan_key = key
+    return plan
 end
 
 --- Opens the Reading stats view.
+--
+-- ONE page. The old screen expanded a row per heatmap week, which is what made
+-- it ten pages long; the picture is now drawn as a 52-week grid of rects and the
+-- four bands around it are laid out to the height the screen reports, so nothing
+-- scrolls, nothing pages and every number still comes from the server.
 function LightHouse:showStats()
     if not Client.isConfigured(config) then
         self:showProblem{
@@ -2206,10 +2412,10 @@ function LightHouse:showStats()
         return
     end
 
-    local stats, err = self:withSpinner(_("Loading reading statistics…"), function()
+    local payload, err = self:withSpinner(_("Loading reading statistics…"), function()
         return self:fetchStats()
     end)
-    if not stats then
+    if not payload or type(payload.numbers) ~= "table" then
         self:showProblem{
             title = _("Reading stats"),
             headline = errorHeadline(err),
@@ -2219,27 +2425,36 @@ function LightHouse:showStats()
         return
     end
 
-    local layout = self:layoutFor(false)
-    self:showMenu(_("Reading stats"), self:buildStatsItems(stats, layout), {
-        covers = false,
-        layout = layout,
-    })
-end
+    local plan = self:statsPlan()
+    local sessions = payload.sessions or {}
 
---- Shows the reading time recorded on one heatmap day.
--- @tparam table day normalized heatmap day
-function LightHouse:showDayStats(day)
-    local lines = { day.date }
-    lines[#lines + 1] = T(_("Reading time: %1"), Stats.dayDurationLabel(day) or _("unavailable"))
-    if day.count then
-        lines[#lines + 1] = T(_("Sessions: %1"), Stats.formatCount(day.count))
+    -- Covers for the reading rows, bounded by what the plan can draw.
+    local cover_ids = {}
+    for session_index = 1, #sessions do
+        if #cover_ids >= plan.reading_rows then break end
+        local book_id = Status.num(sessions[session_index].book_id)
+        if book_id then cover_ids[#cover_ids + 1] = book_id end
     end
-    if day.bookCount then
-        lines[#lines + 1] = T(_("Books: %1"), Stats.formatCount(day.bookCount))
-    end
-    UIManager:show(TextViewer:new{
-        title = _("Reading on this day"),
-        text = table.concat(lines, "\n"),
+    self:prefetchCoverIds(cover_ids)
+
+    local model = Views.statsModel(payload.numbers, sessions, os.time(), {
+        labels = self:pageLabels(),
+        weeks = plan.heat_weeks,
+        year = os.date("*t").year,
+        today = os.date("*t"),
+        average_daily_minutes = payload.numbers.averageDailyMinutes,
+        reading_max = plan.reading_rows,
+        session_max = plan.session_rows,
+    })
+
+    -- The statistics page is not the library: the overflow menu offers refresh
+    -- and the library, not the grouping switch.
+    self.library_state = nil
+    self:showPage(model, plan, {
+        kind = "stats",
+        on_action = function(action)
+            if action.kind == "book" then self:openBookDetails(action.entry) end
+        end,
     })
 end
 
@@ -2273,11 +2488,11 @@ function LightHouse:downloadEntry(entry)
     local filepath = dir .. "/" .. buildFilename(entry)
 
     if lfs.attributes(filepath, "mode") == "file" then
-        UIManager:show(require("ui/widget/confirmbox"):new{
+        UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
             text = T(_("“%1” is already in the download folder. Download it again?"), buildFilename(entry)),
             ok_text = _("Download again"),
             ok_cb = function() self:startDownload(entry, filepath) end,
-        })
+        }))
         return
     end
     self:startDownload(entry, filepath)
@@ -2308,7 +2523,7 @@ function LightHouse:startDownload(entry, filepath)
         pcall(function() self.ui:onRefresh() end)
     end
 
-    UIManager:show(require("ui/widget/confirmbox"):new{
+    UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
         text = T(_("Saved to:\n%1"), filepath),
         cancel_text = _("Close"),
         ok_text = _("Open now"),
@@ -2316,7 +2531,7 @@ function LightHouse:startDownload(entry, filepath)
             local ReaderUI = require("apps/reader/readerui")
             ReaderUI:showReader(filepath)
         end,
-    })
+    }))
 end
 
 --- Shows (or re-uses) the results menu.
@@ -2338,14 +2553,14 @@ function LightHouse:showMenu(title, items, options)
         self.menu:switchItemTable(title, items)
         return
     end
-    self.menu = Menu:new{
+    self.menu = squareWidget(Menu, {
         title = title,
         item_table = items,
         title_multilines = true,
         items_per_page = layout.rows,
         state_w = gutter,
         close_callback = function() self.menu = nil end,
-    }
+    })
     UIManager:show(self.menu)
 end
 

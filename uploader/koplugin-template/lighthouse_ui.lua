@@ -55,8 +55,11 @@ Ui.tokens = {
     --: of the secondary line.
     meta_unmeasured_chars = 28,
     --: Characters kept in the secondary metadata before it is ellipsized, so a
-    --: long author list can never dominate the metadata column.
-    secondary_max_chars = 44,
+    --: long author list can never dominate the metadata column. It binds
+    --: pathological input, not the layout: the one-page rows truncate in pixels
+    --: through their own text widget, so this only has to be wide enough for an
+    --: author plus a series name before the ellipsis eats real information.
+    secondary_max_chars = 60,
     --: Author names shown before "and N more" takes over.
     secondary_max_authors = 2,
     --: Progress-bar slots in the right-hand value column (the detail view
@@ -109,6 +112,49 @@ Ui.tokens = {
     --: File-name stem for one cached cover / one negative-cache marker.
     cover_name_format = "cover_%s_%d",
     cover_miss_suffix = ".miss",
+
+    -- Square-corner rule -------------------------------------------------
+    --: Every corner this plugin draws is 90 degrees. The Kindle screen is
+    --: square and the accepted design has no rounded box anywhere, so the
+    --: number is a named token rather than a literal `0` sprinkled through the
+    --: view: a later change that wants a radius has to say so here first.
+    corner_radius = 0,
+    --: Hairline rules come from the screen's own minimum drawable width, so a
+    --: 1px line stays 1px on a 300dpi panel instead of turning into a smear.
+    hairline_units = 1,
+
+    -- Single-screen page geometry ----------------------------------------
+    --: Every measure of the one-page views, in title-units. `Ui.pagePlan`
+    --: scales them together and reports what actually fits, so not one screen
+    --: carries hand-tuned numbers.
+    page_pad_units = 14,
+    page_gap_units = 8,
+    page_header_units = 52,
+    page_hero_label_units = 15,
+    page_hero_value_units = 27,
+    page_hero_units = 74,
+    page_band_head_units = 20,
+    page_band_row_units = 26,
+    page_section_head_units = 25,
+    page_reading_units = 88,
+    page_reading_min_units = 58,
+    page_session_units = 56,
+    page_session_min_units = 40,
+    page_footer_units = 26,
+    page_bar_units = 6,
+    page_switch_units = 40,
+    page_subline_units = 30,
+    --: Heatmap: 52 weeks of seven days, drawn as a pixel grid rather than one
+    --: text row per week (the shape that made the old screen ten pages long).
+    page_heat_weeks = 52,
+    page_heat_min_weeks = 26,
+    page_heat_cell_units = 12,
+    page_heat_cell_min_units = 7,
+    page_heat_cell_max_units = 22,
+    page_heat_gap_units = 2,
+    --: Rows each list-like section is allowed to draw at most.
+    page_reading_max = 3,
+    page_session_max = 3,
 }
 
 --- The plugin's complete glyph vocabulary.
@@ -133,6 +179,13 @@ Ui.GLYPH = {
     --: Separator between metadata parts and between glanceable values.
     separator = " · ",
     ellipsis = "…",
+    --: Header affordances of the one-page views: back and the overflow menu.
+    --: The back mark stays in Geometric Shapes beside the existing chevron; the
+    --: overflow mark is the vertical ellipsis the accepted design draws, which
+    --: KOReader reaches through its CJK/FreeSans fallbacks (the reader's own
+    --: reading face is not required to carry it).
+    back = "◂",
+    overflow = "⋮",
 }
 
 --- The value a row shows when a number is genuinely unknown.
@@ -619,6 +672,567 @@ function Ui.coverBudgetLeft(fetched, started, now)
     local current = tonumber(now)
     if not begin_at or not current then return true end
     return (current - begin_at) < Ui.tokens.cover_fetch_seconds
+end
+
+-- ----------------------------------------------------------------------------
+-- Square corners
+-- ----------------------------------------------------------------------------
+
+--- Runs a widget construction with every KOReader corner radius at zero.
+--
+-- The Kindle screen is square and the accepted design has no rounded box on it,
+-- but the radii KOReader draws with are read from `Size.radius` at construction
+-- time and are shared by every widget in the reader. This helper therefore
+-- zeroes them for the duration of ONE widget build and restores them before
+-- returning, so the plugin's own dialogs, notices, buttons and progress bars
+-- come out square while the rest of KOReader keeps its own design. A build
+-- without `ui/size` (or a raised constructor) costs the styling, never the
+-- screen.
+-- @function build constructs and returns the widget
+-- @treturn table the widget `build` returned
+function Ui.square(build)
+    if type(build) ~= "function" then return nil end
+    local ok_size, Size = pcall(require, "ui/size")
+    local saved = nil
+    if ok_size and type(Size) == "table" and type(Size.radius) == "table" then
+        saved = {}
+        for corner, radius in pairs(Size.radius) do
+            saved[corner] = radius
+            Size.radius[corner] = 0
+        end
+    end
+    local ok, widget = pcall(build)
+    if saved then
+        for corner, radius in pairs(saved) do
+            Size.radius[corner] = radius
+        end
+    end
+    if not ok then error(widget, 0) end
+    return widget
+end
+
+-- ----------------------------------------------------------------------------
+-- Number and date formatting for the one-page views
+-- ----------------------------------------------------------------------------
+
+--- Formats a whole count with thousands separators, e.g. "1,802".
+-- @param count number|nil
+-- @treturn string|nil nil when the value is not a number
+function Ui.formatThousands(count)
+    local value = numberIn(count, nil)
+    if value == nil then return nil end
+    local whole = math.floor(value + 0.5)
+    local negative = whole < 0
+    local digits = tostring(negative and -whole or whole)
+    local grouped = digits:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+    if grouped:sub(1, 1) == "," then grouped = grouped:sub(2) end
+    if negative then return "-" .. grouped end
+    return grouped
+end
+
+--- "1 book" / "21 books"; nil when the count is unknown.
+-- @param count number|nil
+-- @treturn string|nil
+function Ui.bookCountLabel(count)
+    local label = Ui.formatThousands(count)
+    if not label then return nil end
+    if math.floor(numberIn(count, 0, 0) + 0.5) == 1 then return label .. " book" end
+    return label .. " books"
+end
+
+--- Filled pixels for a proportional bar of `width` pixels.
+-- A ratio outside 0..1 is clamped rather than drawn past the bar, and a ratio
+-- that is not a number fills nothing: a bar is a picture of a number the server
+-- sent, never a guess. Any non-zero ratio keeps at least one pixel, so "started"
+-- and "not started" stay distinguishable on a narrow bar.
+-- @param ratio number|nil 0..1
+-- @number width bar width in pixels
+-- @treturn number filled pixels, 0..width
+function Ui.barFill(ratio, width)
+    local total = math.floor(numberIn(width, 0, 0))
+    if total < 1 then return 0 end
+    local value = numberIn(ratio, nil, 0, 1)
+    if value == nil or value <= 0 then return 0 end
+    local filled = math.floor(value * total + 0.5)
+    if filled < 1 then filled = 1 end
+    if filled > total then filled = total end
+    return filled
+end
+
+--- Weekday of a YYYY-MM-DD date, Monday = 1 .. Sunday = 7.
+-- Sakamoto's algorithm, so the answer never depends on the device's own
+-- calendar settings: the heatmap's columns have to line up on every device.
+-- @string date
+-- @treturn number|nil
+function Ui.weekdayIndex(date)
+    if type(date) ~= "string" then return nil end
+    local year_text, month_text, day_text = date:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)$")
+    if not year_text then return nil end
+    local year = tonumber(year_text)
+    local month = tonumber(month_text)
+    local day = tonumber(day_text)
+    if not year or not month or not day then return nil end
+    if month < 1 or month > 12 or day < 1 or day > 31 then return nil end
+    -- Sakamoto: month offsets, then the leap-year correction applied to January
+    -- and February by shifting them into the previous year.
+    local offsets = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 }
+    local shifted = year
+    if month < 3 then shifted = shifted - 1 end
+    local sunday_zero = (shifted + math.floor(shifted / 4) - math.floor(shifted / 100)
+        + math.floor(shifted / 400) + offsets[month] + day) % 7
+    if sunday_zero == 0 then return 7 end
+    return sunday_zero
+end
+
+--- Packs normalized heatmap days into calendar-week columns.
+--
+-- One column is one week, one cell is one day: the newest day ends the last
+-- column, and a day later in that same week (a day in the future, or one the
+-- server did not send) stays empty rather than borrowing a neighbour's shade.
+-- Returning columns of levels instead of a text row per week is the whole
+-- difference between a compact 52-week picture and ten pages of rows.
+-- @tparam table days normalized heatmap days, oldest first
+-- @number[opt] weeks columns to draw, defaults to the token
+-- @treturn table array of columns, each an array of seven level-or-nil cells
+function Ui.heatmapColumns(days, weeks)
+    local columns = {}
+    local wanted = math.floor(numberIn(weeks, Ui.tokens.page_heat_weeks, 1))
+    for column_index = 1, wanted do columns[column_index] = {} end
+    if type(days) ~= "table" or #days == 0 then return columns end
+
+    local column = wanted
+    for day_index = #days, 1, -1 do
+        if column < 1 then break end
+        local day = days[day_index]
+        if type(day) == "table" then
+            local weekday = Ui.weekdayIndex(day.date)
+            if weekday then
+                local level = numberIn(day.level, 0, 0, 4)
+                -- The newest day wins: walking backwards, a cell already filled
+                -- belongs to a later day than the one being placed.
+                if columns[column][weekday] == nil then
+                    columns[column][weekday] = math.floor(level + 0.5)
+                end
+                -- Monday starts a week: every earlier day belongs one column
+                -- to the left.
+                if weekday == 1 then column = column - 1 end
+            end
+        end
+    end
+    return columns
+end
+
+--- "just now" / "2 h ago" / "yesterday" / "4 days ago" / "12 Nov".
+--
+-- Relative wording is what the accepted design shows under a reading row, and
+-- it is computed here rather than with `os.date`, so the same function can be
+-- tested off-device. A timestamp in the future (a device clock running fast)
+-- reads "just now" instead of a negative age.
+-- @number timestamp unix seconds
+-- @number now unix seconds
+-- @treturn string|nil
+function Ui.relativeWhen(timestamp, now)
+    local stamp = tonumber(timestamp)
+    local current = tonumber(now)
+    if not stamp or not current or stamp <= 0 then return nil end
+    local age = current - stamp
+    if age < 0 then age = 0 end
+    if age < 60 then return "just now" end
+    if age < 3600 then
+        local minutes = math.floor(age / 60)
+        if minutes < 2 then return "1 min ago" end
+        return string.format("%d min ago", minutes)
+    end
+    if age < 86400 then
+        local hours = math.floor(age / 3600)
+        if hours < 2 then return "1 h ago" end
+        return string.format("%d h ago", hours)
+    end
+    local days = math.floor(age / 86400)
+    if days < 2 then return "yesterday" end
+    if days < 7 then return string.format("%d days ago", days) end
+    -- Older than a week: a date reads better than "23 days ago", and it is
+    -- derived from the timestamp alone so no locale table is needed.
+    local ok, parts = pcall(os.date, "*t", stamp)
+    if not ok or type(parts) ~= "table" then return nil end
+    local names = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug",
+        "Sep", "Oct", "Nov", "Dec" }
+    local name = names[tonumber(parts.month) or 0]
+    if not name then return nil end
+    return string.format("%d %s", tonumber(parts.day) or 0, name)
+end
+
+--- "Today 13:19" / "Yesterday 22:04" / "14 Nov 21:12" for one session.
+--
+-- Takes broken-down local times (`os.date("*t")` tables) instead of raw epochs,
+-- so the day boundary that matters is the reader's own day and the formatter
+-- stays testable without the device clock.
+-- @tparam table when broken-down local time of the session
+-- @tparam table today broken-down local time of "now"
+-- @treturn string|nil
+function Ui.clockLine(when, today)
+    if type(when) ~= "table" or type(today) ~= "table" then return nil end
+    local hour = tonumber(when.hour)
+    local minute = tonumber(when.min)
+    if not hour or not minute then return nil end
+    local clock = string.format("%02d:%02d", hour, minute)
+    local function dayNumber(parts)
+        local year = tonumber(parts.year)
+        local month = tonumber(parts.month)
+        local day = tonumber(parts.day)
+        if not year or not month or not day then return nil end
+        -- A proleptic day number: consecutive calendar days differ by one, so
+        -- "today" and "yesterday" need no month-length table.
+        local shifted_year = month <= 2 and (year - 1) or year
+        local shifted_month = month <= 2 and (month + 12) or month
+        return 365 * shifted_year + math.floor(shifted_year / 4)
+            - math.floor(shifted_year / 100) + math.floor(shifted_year / 400)
+            + math.floor((153 * (shifted_month - 3) + 2) / 5) + day
+    end
+    local when_day = dayNumber(when)
+    local today_day = dayNumber(today)
+    if when_day and today_day then
+        local difference = today_day - when_day
+        if difference == 0 then return "Today " .. clock end
+        if difference == 1 then return "Yesterday " .. clock end
+    end
+    local names = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug",
+        "Sep", "Oct", "Nov", "Dec" }
+    local name = names[tonumber(when.month) or 0]
+    if not name then return clock end
+    return string.format("%d %s %s", tonumber(when.day) or 0, name, clock)
+end
+
+--- "5 m 37 s" / "38 m" / "1 h 12 m": the long duration of one session.
+-- The short form on the row's right edge comes from `Stats.formatDuration`;
+-- this is the spelled-out half the session line carries.
+-- @number seconds
+-- @treturn string|nil
+function Ui.durationLong(seconds)
+    local total = numberIn(seconds, nil, 0)
+    if total == nil then return nil end
+    local rounded = math.floor(total + 0.5)
+    if rounded < 60 then return string.format("%d s", rounded) end
+    local minutes = math.floor(rounded / 60)
+    local rest = rounded - minutes * 60
+    if minutes < 60 then
+        if rest == 0 then return string.format("%d m", minutes) end
+        return string.format("%d m %d s", minutes, rest)
+    end
+    local hours = math.floor(minutes / 60)
+    local leftover = minutes - hours * 60
+    if leftover == 0 then return string.format("%d h", hours) end
+    return string.format("%d h %d m", hours, leftover)
+end
+
+--- The three segments of the library's grouping switch.
+-- Order and labels are the accepted design's; `mode` selects the active one and
+-- an unknown mode falls back to the first, so the switch can never render with
+-- no segment selected.
+-- @string[opt] mode "books" | "authors" | "series"
+-- @treturn table array of { key, label, active }
+function Ui.switchSegments(mode)
+    local labels = {
+        { key = "books", label = "BOOKS" },
+        { key = "authors", label = "AUTHORS" },
+        { key = "series", label = "SERIES" },
+    }
+    local active = "books"
+    for index = 1, #labels do
+        if labels[index].key == mode then active = mode end
+    end
+    for index = 1, #labels do
+        labels[index].active = labels[index].key == active
+    end
+    return labels
+end
+
+-- ----------------------------------------------------------------------------
+-- Single-screen page geometry
+-- ----------------------------------------------------------------------------
+
+--- Lays out the one-page views inside the height the device actually has.
+--
+-- One page, no scrolling and no paging: the plan is computed top-down from the
+-- height the screen reports, so the same rule serves a 600x800 Basic and a
+-- 1072x1448 Paperwhite. Every band shrinks together until the whole page fits;
+-- only when even the smallest sizes cannot hold three reading rows and three
+-- session rows does a list drop a row. Nothing is ever laid out past the screen
+-- edge, because the sum of the parts is what is returned.
+-- @number screen_w screen width in pixels
+-- @number screen_h screen height in pixels
+-- @number scale Screen:scaleBySize(1)
+-- @treturn table plan { pad, content_w, header, hero, band_head, band_row,
+--                       section_head, footer, hairline, bar, reading_rows,
+--                       reading_h, reading_cover_w, reading_cover_h,
+--                       session_rows, session_h, heat_weeks, heat_gap,
+--                       heat_cell_w, heat_cell_h, total, slack }
+function Ui.pagePlan(screen_w, screen_h, scale)
+    local tokens = Ui.tokens
+    local s = numberIn(scale, 1, 0.5, 4)
+    local height = numberIn(screen_h, 800, 200, 8000)
+    local width = numberIn(screen_w, 600, 200, 8000)
+
+    local function scaled(units)
+        local value = math.floor(units * s + 0.5)
+        if value < 1 then value = 1 end
+        return value
+    end
+
+    local pad = scaled(tokens.page_pad_units)
+    local gap = scaled(tokens.page_gap_units)
+    local hairline = math.max(math.floor(tokens.hairline_units * s + 0.5), 1)
+    local header = scaled(tokens.page_header_units)
+    local hero = scaled(tokens.page_hero_units)
+    local band_head = scaled(tokens.page_band_head_units)
+    local band_row = scaled(tokens.page_band_row_units)
+    local section_head = scaled(tokens.page_section_head_units)
+    local footer = scaled(tokens.page_footer_units)
+    local bar = math.max(scaled(tokens.page_bar_units), 2)
+    local reading_min = math.max(math.floor(tokens.page_reading_min_units * s + 0.5), 24)
+    local session_min = math.max(math.floor(tokens.page_session_min_units * s + 0.5), 18)
+    local cell_min = math.max(math.floor(tokens.page_heat_cell_min_units * s + 0.5), 3)
+    local cell_max = math.max(math.floor(tokens.page_heat_cell_max_units * s + 0.5), cell_min)
+    local gap_x = math.max(scaled(tokens.page_heat_gap_units), 1)
+
+    local content_w = width - 2 * pad
+    if content_w < 1 then content_w = 1 end
+
+    -- The band always budgets four rows: its row count follows the data, and a
+    -- payload missing one of them must not move the whole page up and down
+    -- between refreshes.
+    local band_rows = 4
+    local band_h = band_head + band_rows * band_row
+
+    -- Header + hero + band + three section headings + footer, with a hairline
+    -- under the header, the hero and the band and one above the footer.
+    local fixed = pad + header + hairline + hero + hairline + band_h + hairline
+        + 3 * section_head + footer + hairline + pad + gap * 2
+    local available = height - fixed
+    if available < 0 then available = 0 end
+
+    local reading_rows = math.floor(tokens.page_reading_max)
+    local session_rows = math.floor(tokens.page_session_max)
+    if reading_rows < 1 then reading_rows = 1 end
+    if session_rows < 1 then session_rows = 1 end
+    local reading_h = math.max(math.floor(tokens.page_reading_units * s + 0.5), reading_min)
+    local session_h = math.max(math.floor(tokens.page_session_units * s + 0.5), session_min)
+    local cell_h = math.max(math.floor(tokens.page_heat_cell_units * s + 0.5), cell_min)
+
+    -- Shrink the three list bands together, 5% at a time, and drop a row only
+    -- after the smallest scale still does not fit. The reading rows go first:
+    -- the picture and the session list carry more of the answer than a fourth
+    -- book does.
+    local function fits(reading_count, session_count, reading_px, session_px, cell_px)
+        local needed = reading_count * reading_px + 7 * cell_px + session_count * session_px
+        return needed <= available
+    end
+
+    local chosen = false
+    while not chosen do
+        for percent = 100, 50, -5 do
+            local factor = percent / 100
+            local step_reading = math.max(math.floor(tokens.page_reading_units * s * factor + 0.5), reading_min)
+            local step_session = math.max(math.floor(tokens.page_session_units * s * factor + 0.5), session_min)
+            local step_cell = math.max(math.floor(tokens.page_heat_cell_units * s * factor + 0.5), cell_min)
+            if fits(reading_rows, session_rows, step_reading, step_session, step_cell) then
+                reading_h, session_h, cell_h = step_reading, step_session, step_cell
+                chosen = true
+                break
+            end
+        end
+        if chosen then break end
+        -- Nothing fit: give up a reading row, then a session row, then both.
+        if reading_rows > 1 then
+            reading_rows = reading_rows - 1
+        elseif session_rows > 1 then
+            session_rows = session_rows - 1
+        else
+            -- A screen with room for neither list: the heatmap is the only
+            -- flexible band left, so it takes what is there.
+            cell_h = cell_min
+            reading_rows = 0
+            session_rows = 0
+            chosen = true
+        end
+    end
+
+    if cell_h > cell_max then cell_h = cell_max end
+
+    -- Spend whatever height is left on the picture instead of leaving it as
+    -- blank paper above the footer: a taller heatmap cell is what a reader would
+    -- rather see, and the design's "no wide gaps" applies to the page, not only
+    -- to the rows. Bounded by `page_heat_cell_max_units`, so a huge screen gets a
+    -- readable grid rather than seven enormous blocks.
+    local used = fixed + reading_rows * reading_h + 7 * cell_h + session_rows * session_h
+    while cell_h < cell_max and (height - used) >= 7 do
+        cell_h = cell_h + 1
+        used = used + 7
+    end
+
+    -- The heatmap's week count follows the width: 52 columns while a cell and a
+    -- gap still fit, fewer only when the screen genuinely cannot carry them.
+    local weeks = math.floor(tokens.page_heat_weeks)
+    local min_weeks = math.floor(tokens.page_heat_min_weeks)
+    if weeks < 1 then weeks = 1 end
+    if min_weeks < 1 then min_weeks = 1 end
+    while weeks > min_weeks and math.floor((content_w - (weeks - 1) * gap_x) / weeks) < cell_min do
+        weeks = weeks - 7
+    end
+    local cell_w = math.floor((content_w - (weeks - 1) * gap_x) / weeks)
+    if cell_w < cell_min then cell_w = cell_min end
+
+    local total = fixed + reading_rows * reading_h + 7 * cell_h + session_rows * session_h
+    local slack = height - total
+    if slack < 0 then slack = 0 end
+
+    -- A reading row carries a cover on its left: the box is derived from the row
+    -- height so it can never be taller than the row it sits in.
+    local cover_h = reading_h - gap
+    if cover_h < 1 then cover_h = 1 end
+    local cover_w = math.max(math.floor(cover_h * tokens.cover_aspect + 0.5), 1)
+    local max_cover_w = math.floor(content_w / 4)
+    if cover_w > max_cover_w then
+        cover_w = max_cover_w
+        cover_h = math.max(math.floor(cover_w / tokens.cover_aspect + 0.5), 1)
+    end
+
+    return {
+        scale = s,
+        width = width,
+        height = height,
+        pad = pad,
+        gap = gap,
+        content_w = content_w,
+        header = header,
+        hero = hero,
+        hero_label = scaled(tokens.page_hero_label_units),
+        hero_value = scaled(tokens.page_hero_value_units),
+        band_head = band_head,
+        band_row = band_row,
+        section_head = section_head,
+        footer = footer,
+        hairline = hairline,
+        bar = bar,
+        reading_rows = reading_rows,
+        reading_h = reading_h,
+        reading_cover_w = cover_w,
+        reading_cover_h = cover_h,
+        session_rows = session_rows,
+        session_h = session_h,
+        heat_weeks = weeks,
+        heat_gap = gap_x,
+        heat_cell_w = cell_w,
+        heat_cell_h = cell_h,
+        total = total,
+        slack = slack,
+        -- Honest report of the edge case: a screen shorter than the header,
+        -- the bands and the footer cannot hold even the chrome, and the plan
+        -- says so instead of pretending a page fits. Every real e-ink screen
+        -- (600x800 and up) fits with three reading rows and three sessions.
+        fits = total <= height,
+    }
+end
+
+
+--- Lays out a paged list view (the library's three groupings) inside the screen.
+--
+-- Same idea as `Ui.pagePlan`, for a page whose body is uniform rows: the header,
+-- the grouping switch, the sub-line and the footer are fixed, and what is left
+-- is divided into rows of one height. The row height shrinks before the row
+-- count does, so a short screen still shows a usable list instead of two giant
+-- rows.
+-- @number screen_w screen width in pixels
+-- @number screen_h screen height in pixels
+-- @number scale Screen:scaleBySize(1)
+-- @tparam table[opt] options { with_switch = boolean, min_rows = number }
+-- @treturn table plan { pad, content_w, header, hairline, switch_h, subline_h,
+--                       footer, row_h, rows, bar, cover_w, cover_h, total,
+--                       slack }
+function Ui.listPlan(screen_w, screen_h, scale, options)
+    options = options or {}
+    local tokens = Ui.tokens
+    local s = numberIn(scale, 1, 0.5, 4)
+    local height = numberIn(screen_h, 800, 200, 8000)
+    local width = numberIn(screen_w, 600, 200, 8000)
+
+    local function scaled(units)
+        local value = math.floor(units * s + 0.5)
+        if value < 1 then value = 1 end
+        return value
+    end
+
+    local pad = scaled(tokens.page_pad_units)
+    local gap = scaled(tokens.page_gap_units)
+    local hairline = math.max(math.floor(tokens.hairline_units * s + 0.5), 1)
+    local header = scaled(tokens.page_header_units)
+    local footer = scaled(tokens.page_footer_units)
+    local bar = math.max(scaled(tokens.page_bar_units), 2)
+    local switch_h = options.with_switch and scaled(tokens.page_switch_units) or 0
+    local subline_h = scaled(tokens.page_subline_units)
+    local row_min = math.max(math.floor(tokens.page_reading_min_units * s + 0.5), 24)
+    local row_max = math.max(math.floor(tokens.page_reading_units * s * 1.15 + 0.5), row_min)
+    local min_rows = math.max(math.floor(tonumber(options.min_rows) or 3), 1)
+
+    local content_w = width - 2 * pad
+    if content_w < 1 then content_w = 1 end
+
+    -- Header, the switch's own two rules, the sub-line, the footer rule and the
+    -- page padding are all fixed; only the row band flexes.
+    local fixed = pad + header + hairline + subline_h + footer + hairline + pad + gap
+    if switch_h > 0 then fixed = fixed + switch_h + 2 * hairline end
+    local available = height - fixed
+    if available < 1 then available = 1 end
+
+    local row_h = scaled(tokens.page_reading_units)
+    local rows = math.floor(available / row_h)
+    if rows < min_rows then
+        -- Too few rows: shrink the rows instead of the list, down to the token's
+        -- floor, and take the count that fits at that size.
+        row_h = math.max(math.floor(available / min_rows), row_min)
+        rows = math.floor(available / row_h)
+        if rows < 1 then rows = 1 end
+    elseif row_h < row_max and rows * row_h < available then
+        -- A screen with room to spare gets slightly taller rows rather than a
+        -- gap under the last row.
+        local taller = math.floor(available / rows)
+        if taller > row_h and taller <= row_max then row_h = taller end
+    end
+
+    local cover_h = row_h - gap
+    if cover_h < 1 then cover_h = 1 end
+    local cover_w = math.max(math.floor(cover_h * tokens.cover_aspect + 0.5), 1)
+    local max_cover_w = math.floor(content_w / 4)
+    if cover_w > max_cover_w then
+        cover_w = max_cover_w
+        cover_h = math.max(math.floor(cover_w / tokens.cover_aspect + 0.5), 1)
+    end
+
+    local total = fixed + rows * row_h
+    local slack = height - total
+    if slack < 0 then slack = 0 end
+
+    return {
+        scale = s,
+        width = width,
+        height = height,
+        pad = pad,
+        gap = gap,
+        content_w = content_w,
+        header = header,
+        hairline = hairline,
+        switch_h = switch_h,
+        subline_h = subline_h,
+        section_head = scaled(tokens.page_section_head_units),
+        footer = footer,
+        bar = bar,
+        row_h = row_h,
+        rows = rows,
+        reading_cover_w = cover_w,
+        reading_cover_h = cover_h,
+        total = total,
+        slack = slack,
+    }
 end
 
 return Ui

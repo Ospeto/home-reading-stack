@@ -262,6 +262,15 @@ function OPDS.parse(xml)
     feed.title = OPDS.collapse(OPDS.unescape(head:match("<title[^>]*>(.-)</title>") or ""))
     feed.updated = OPDS.collapse(OPDS.unescape(head:match("<updated[^>]*>(.-)</updated>") or ""))
 
+    -- How many books the whole match holds, not just this page. The library's
+    -- sub-line names the shelf size, and the feed is the only place that knows
+    -- it without a second request.
+    local total_text = head:match("<lighthouse:total[^>]*>(%d+)</lighthouse:total>")
+    if total_text then
+        local total = tonumber(total_text)
+        if total and total >= 0 then feed.total = total end
+    end
+
     for attrs in head:gmatch("<link%s+([^>]-)/?>") do
         local link = parseAttrs(attrs)
         feed.links[#feed.links + 1] = link
