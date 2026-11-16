@@ -49,6 +49,17 @@ import {
 const LUA_BINARY = Bun.which("luajit") || Bun.which("lua5.1") || Bun.which("lua");
 const UNZIP_BINARY = Bun.which("unzip");
 
+/**
+ * Grapheme cap on a row's metadata column when the device cannot measure pixels.
+ *
+ * The oracle is the documented contract, not the plugin's own token:
+ * `README.md` and the in-app guide both promise "a small fixed 28-glyph cap" for
+ * a build that cannot measure, so restoring the pre-fix 64 (which produced the
+ * 1564px column and `available_width = -685` on the device) fails these
+ * assertions.
+ */
+const UNMEASURED_COLUMN_CAP = 28;
+
 const SAMPLE_SETTINGS: KopluginSettings = {
   baseUrl: "http://192.168.31.15:8086",
   apiKey: "test-api-key-not-a-real-secret",
@@ -1953,7 +1964,6 @@ local long_row = LightHouse:buildCatalogItem({
 }, layout)
 print("long_text=" .. tostring(long_row.text))
 print("long_mandatory=" .. tostring(long_row.mandatory))
-print("meta_cap=" .. tostring(require("lighthouse_ui").tokens.meta_unmeasured_chars))
 
 -- Connection screen must expose the baked-in origin and endpoint paths.
 LightHouse:showConnection(true)
@@ -2050,7 +2060,7 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
     expect(out.row_mandatory).toContain("★★★★☆");
     expect(out.row_mandatory).not.toContain("\n");
     expect(Array.from(out.row_mandatory).length).toBeLessThanOrEqual(
-      Number(out.meta_cap),
+      UNMEASURED_COLUMN_CAP,
     );
 
     // A long author and series run must keep the whole glance: the bar, the
@@ -2061,7 +2071,7 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
     expect(out.long_mandatory).toContain("✓");
     expect(out.long_mandatory.endsWith("★★★★☆")).toBe(true);
     expect(Array.from(out.long_mandatory).length).toBeLessThanOrEqual(
-      Number(out.meta_cap),
+      UNMEASURED_COLUMN_CAP,
     );
 
     // Covers: one geometry rule drives the page, and a row whose cover is not on
@@ -2357,7 +2367,6 @@ local long_menu = current_menu()
 local long_row = long_menu and long_menu.item_table and long_menu.item_table[1]
 print("shelf_long_ok=" .. tostring(long_ok))
 print("shelf_long_mandatory=" .. tostring(long_row and long_row.mandatory))
-print("meta_cap=" .. tostring(require("lighthouse_ui").tokens.meta_unmeasured_chars))
 
 print("OK")
 `)
@@ -2430,7 +2439,9 @@ describe("plugin currently-reading shelf", () => {
     expect(first[0]).toBe("Spice and Wolf, Vol. 1");
     expect(first[1]).toContain("Isuna Hase");
     expect(first[1]).toContain("45%");
-    expect(Array.from(first[1]).length).toBeLessThanOrEqual(Number(out.meta_cap));
+    expect(Array.from(first[1]).length).toBeLessThanOrEqual(
+      UNMEASURED_COLUMN_CAP,
+    );
     const firstDetails = first[2].split("|");
     expect(firstDetails[0]).toBe("Download EPUB");
     expect(firstDetails).toContain("Progress: ████░░░░ 45%");
@@ -2504,7 +2515,7 @@ describe("plugin currently-reading shelf", () => {
     expect(out.shelf_long_mandatory).toContain("✓");
     expect(
       Array.from(out.shelf_long_mandatory).length,
-    ).toBeLessThanOrEqual(Number(out.meta_cap));
+    ).toBeLessThanOrEqual(UNMEASURED_COLUMN_CAP);
 
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
@@ -3871,8 +3882,8 @@ if coauthored_ok then
   end
   print("catalog_coauthored_details=" .. table.concat(labels, "|"))
   print("catalog_coauthored_mandatory=" .. bracket(coauthored_row.mandatory))
+  print("catalog_coauthored_column=" .. tostring(coauthored_row.mandatory))
 end
-print("meta_cap=" .. tostring(require("lighthouse_ui").tokens.meta_unmeasured_chars))
 
 -- 6. The pcall fallback: one bad row renders a safe row, never the process --
 local fallback = LightHouse:buildSafeRow(function() error("row builder exploded") end)
@@ -4095,8 +4106,8 @@ describe("plugin row safety against JSON nulls and malformed fields", () => {
     );
     expect(out.catalog_coauthored_mandatory).toContain("Ann One, Bob T");
     expect(
-      Array.from(out.catalog_coauthored_mandatory).length,
-    ).toBeLessThanOrEqual(Number(out.meta_cap) + 2);
+      Array.from(out.catalog_coauthored_column).length,
+    ).toBeLessThanOrEqual(UNMEASURED_COLUMN_CAP);
   });
 
   it("renders a safe fallback row when a row builder raises", () => {
@@ -4329,6 +4340,33 @@ print(string.format("legacy_mandatory_w=%d", model_width(legacy_meta)))
 print(string.format("legacy_available=%d",
     DEVICE_CONTENT_W - DEVICE_GUTTER - DEVICE_PADDING - model_width(legacy_meta)))
 
+-- 4. A device that cannot measure pixels at all. The plugin falls back to its
+-- fixed grapheme cap, and that fallback still has to leave a title column on
+-- the recorded screen - this is the case the 64-character column failed.
+package.preload["ui/widget/textwidget"] = function()
+    local widget = {}
+    function widget:new(options)
+        options = options or {}
+        options.__kind = "textwidget"
+        function options:free() end
+        return options
+    end
+    return widget
+end
+package.loaded["ui/widget/textwidget"] = nil
+local unmeasured_layout = LightHouse:layoutFor(true)
+local unmeasured_row = LightHouse:buildRow{
+    layout = unmeasured_layout,
+    primary = burmese_title,
+    secondary = burmese_authors,
+    glance = Ui.glanceProgress(require("lighthouse_status"), 0.45),
+    cover_glyph = "#",
+    callback = function() end,
+}
+report("unmeasured", unmeasured_row, unmeasured_layout)
+print(string.format("unmeasured_in_device_gutter=%d",
+    DEVICE_CONTENT_W - DEVICE_GUTTER - DEVICE_PADDING - model_width(unmeasured_row.mandatory or "")))
+
 print("OK")
 `;
 
@@ -4422,9 +4460,10 @@ describe("plugin row width", () => {
     );
 
     // The fixture is a real overflow: the 1.4.0 character budget produced this
-    // exact row, and this exact width, on the device.
+    // exact row, and this exact width, on the device - the recorded metadata
+    // column there was 1564px, and the 266px gutter is the device's own.
     expect(Number(out.legacy_available)).toBeLessThan(0);
-    expect(Number(out.legacy_mandatory_w)).toBeGreaterThan(500 - 21);
+    expect(Number(out.legacy_mandatory_w)).toBeGreaterThanOrEqual(1564);
 
     // The page follows the screen the device reports. These row counts come from
     // the recorded 1648px screen; the plugin's 800px fallback lays a cover page
@@ -4456,6 +4495,14 @@ describe("plugin row width", () => {
     expect(out.empty_title_makeline_ok).toBe("true");
     expect(Number(out.empty_title_text_len)).toBeGreaterThan(0);
     expect(Number(out.empty_title_available)).toBeGreaterThan(0);
+
+    // A device that cannot measure pixels at all still draws: the fallback
+    // column fits the recorded content box, so restoring the 64-character budget
+    // that cost the device 685px fails here.
+    expect(out.unmeasured_makeline_ok).toBe("true");
+    expect(Number(out.unmeasured_mandatory_w)).toBeGreaterThan(0);
+    expect(Number(out.unmeasured_available)).toBeGreaterThan(0);
+    expect(Number(out.unmeasured_in_device_gutter)).toBeGreaterThan(0);
 
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
