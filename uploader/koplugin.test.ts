@@ -1953,7 +1953,7 @@ local long_row = LightHouse:buildCatalogItem({
 }, layout)
 print("long_text=" .. tostring(long_row.text))
 print("long_mandatory=" .. tostring(long_row.mandatory))
-print("long_limit=" .. tostring(require("lighthouse_ui").tokens.meta_max_chars))
+print("meta_cap=" .. tostring(require("lighthouse_ui").tokens.meta_unmeasured_chars))
 
 -- Connection screen must expose the baked-in origin and endpoint paths.
 LightHouse:showConnection(true)
@@ -2038,27 +2038,30 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
     expect(submenu).toContain("Connection");
 
     // Row anatomy: the title is the row text, and the right-hand metadata
-    // column carries author, series, progress and rating together. KOReader's
-    // MenuItem flattens newlines out of the row text, so the metadata must not
-    // be a second line in `text`.
+    // column carries progress and rating together. KOReader's MenuItem flattens
+    // newlines out of the row text, so the metadata must not be a second line in
+    // `text`. These stubs cannot measure pixels, so the column takes the small
+    // fixed cap instead of a measured fit: the glance is what has to survive,
+    // and the author and series stay one tap away in the detail view (asserted
+    // below).
     expect(out.row_text).toBe("Spice and Wolf, Vol. 1");
     expect(out.row_text_has_newline).toBe("false");
-    expect(out.row_mandatory).toContain("Isuna Hasekura");
-    expect(out.row_mandatory).toContain("Spice and Wolf 01");
     expect(out.row_mandatory).toContain("45%");
     expect(out.row_mandatory).toContain("★★★★☆");
     expect(out.row_mandatory).not.toContain("\n");
+    expect(Array.from(out.row_mandatory).length).toBeLessThanOrEqual(
+      Number(out.meta_cap),
+    );
 
     // A long author and series run must keep the whole glance: the bar, the
     // finished check and all five stars. Capping the composed metadata string
     // would leave this row showing three stars.
     expect(out.long_text).toBe("The Way of Kings");
-    expect(out.long_mandatory).toContain("Brandon Sanderson");
     expect(out.long_mandatory).toContain("100%");
     expect(out.long_mandatory).toContain("✓");
     expect(out.long_mandatory.endsWith("★★★★☆")).toBe(true);
     expect(Array.from(out.long_mandatory).length).toBeLessThanOrEqual(
-      Number(out.long_limit),
+      Number(out.meta_cap),
     );
 
     // Covers: one geometry rule drives the page, and a row whose cover is not on
@@ -2354,7 +2357,7 @@ local long_menu = current_menu()
 local long_row = long_menu and long_menu.item_table and long_menu.item_table[1]
 print("shelf_long_ok=" .. tostring(long_ok))
 print("shelf_long_mandatory=" .. tostring(long_row and long_row.mandatory))
-print("shelf_long_limit=" .. tostring(require("lighthouse_ui").tokens.meta_max_chars))
+print("meta_cap=" .. tostring(require("lighthouse_ui").tokens.meta_unmeasured_chars))
 
 print("OK")
 `)
@@ -2419,12 +2422,15 @@ describe("plugin currently-reading shelf", () => {
     expect(out.items).toBe("4");
 
     // Row 1: linked session, newest first. The title is the row text and the
-    // metadata column carries author, device and progress - no tap needed.
+    // metadata column carries the author and the progress - no tap needed. The
+    // stubs have no measurable faces, so the column is the pixel-free capped
+    // one: the author is shortened, the progress survives.
     expect(out.rows_with_newlines).toBe("0");
     const first = out.item1.split("\t");
     expect(first[0]).toBe("Spice and Wolf, Vol. 1");
-    expect(first[1]).toContain("Isuna Hasekura · Paperwhite");
+    expect(first[1]).toContain("Isuna Hase");
     expect(first[1]).toContain("45%");
+    expect(Array.from(first[1]).length).toBeLessThanOrEqual(Number(out.meta_cap));
     const firstDetails = first[2].split("|");
     expect(firstDetails[0]).toBe("Download EPUB");
     expect(firstDetails).toContain("Progress: ████░░░░ 45%");
@@ -2434,7 +2440,7 @@ describe("plugin currently-reading shelf", () => {
     // Row 2: no Calibre match, so the download row is replaced, not dropped.
     const second = out.item2.split("\t");
     expect(second[0]).toBe("Dune & Sons <Deluxe>");
-    expect(second[1]).toContain("Frank Herbert · Kindle");
+    expect(second[1]).toContain("Frank Herb");
     expect(second[1]).toContain("20%");
     const secondDetails = second[2].split("|");
     expect(secondDetails[0]).toBe("No matching book in the library");
@@ -2457,7 +2463,7 @@ describe("plugin currently-reading shelf", () => {
     // and a finished book is marked with a check glyph, not a colour.
     const fourth = out.item4.split("\t");
     expect(fourth[0]).toBe(BURMESE_PROBE);
-    expect(fourth[1]).toContain("Unknown · Kobo");
+    expect(fourth[1]).toContain("Unknown");
     expect(fourth[1]).toContain("100%");
     expect(fourth[1]).toContain("✓");
     expect(fourth[2].split("|")[0]).toBe("Download EPUB");
@@ -2498,7 +2504,7 @@ describe("plugin currently-reading shelf", () => {
     expect(out.shelf_long_mandatory).toContain("✓");
     expect(
       Array.from(out.shelf_long_mandatory).length,
-    ).toBeLessThanOrEqual(Number(out.shelf_long_limit));
+    ).toBeLessThanOrEqual(Number(out.meta_cap));
 
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
@@ -3866,6 +3872,7 @@ if coauthored_ok then
   print("catalog_coauthored_details=" .. table.concat(labels, "|"))
   print("catalog_coauthored_mandatory=" .. bracket(coauthored_row.mandatory))
 end
+print("meta_cap=" .. tostring(require("lighthouse_ui").tokens.meta_unmeasured_chars))
 
 -- 6. The pcall fallback: one bad row renders a safe row, never the process --
 local fallback = LightHouse:buildSafeRow(function() error("row builder exploded") end)
@@ -4080,14 +4087,16 @@ describe("plugin row safety against JSON nulls and malformed fields", () => {
     expect(out.catalog_tags_ok).toBe("true");
     expect(out.catalog_tags_details).toContain("Tags: Fantasy, 7");
 
-    // The detail view keeps every co-author; the row column still truncates.
+    // The detail view keeps every co-author; the row's own column is the
+    // bounded one, so the name list is what gives way there.
     expect(out.catalog_coauthored_ok).toBe("true");
     expect(out.catalog_coauthored_details).toContain(
       "Author: Ann One, Bob Two, Cyd Three",
     );
-    expect(out.catalog_coauthored_mandatory).toContain(
-      "Ann One, Bob Two +1 more",
-    );
+    expect(out.catalog_coauthored_mandatory).toContain("Ann One, Bob T");
+    expect(
+      Array.from(out.catalog_coauthored_mandatory).length,
+    ).toBeLessThanOrEqual(Number(out.meta_cap) + 2);
   });
 
   it("renders a safe fallback row when a row builder raises", () => {
@@ -4152,12 +4161,14 @@ describe("plugin row safety against JSON nulls and malformed fields", () => {
  * row's metadata column was 1564px, leaving available_width = -685.
  *
  * The width model below is deliberately hostile in the same direction as the
- * device, so a character budget cannot pass it by luck.
+ * device, and the row's container is the width firstmate recorded on that
+ * device rather than a number the plugin's own geometry model produces, so the
+ * check cannot pass by agreeing with the implementation it tests.
  */
 const ROW_WIDTH_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
 -- Distance the width model charges, in pixels: Latin per character, and per
 -- code point for everything else (Burmese, CJK, the block glyphs of the bar).
-local WIDTH_ASCII = 9
+local WIDTH_ASCII = 10
 local WIDTH_WIDE = 30
 
 local function model_width(text)
@@ -4173,6 +4184,39 @@ local function model_width(text)
         index = index + step
     end
     return total
+end
+
+-- What the device reported, not what the plugin believes: a Paperwhite-style
+-- Kindle is 1236x1648, two device pixels per 160-dpi unit, and a real row there
+-- had 1166px of content box (about 70px of horizontal chrome), a 266px cover
+-- gutter, 14px of mandatory padding and a 1564px metadata column - the -685 in
+-- the crash log. The plugin derives its own content width from the screen, so a
+-- plugin that stops reading the screen height lays every page out for its 800px
+-- fallback instead, which the row counts below catch.
+local DEVICE_SCREEN_W = 1236
+local DEVICE_SCREEN_H = 1648
+local DEVICE_CONTENT_W = 1166
+local DEVICE_PADDING = 14
+local DEVICE_GUTTER = 266
+local DEVICE_NAME_MIN = 80
+
+package.preload["device"] = function()
+    return {
+        screen = {
+            getWidth = function() return DEVICE_SCREEN_W end,
+            getHeight = function() return DEVICE_SCREEN_H end,
+            scaleBySize = function(_, size) return math.floor(size * 2 + 0.5) end,
+        },
+    }
+end
+-- The prelude's size tokens are the 160-dpi values; the device reports them
+-- already scaled, so a 2x screen sees 20px of padding and a 14px separator.
+package.preload["ui/size"] = function()
+    return {
+        padding = { fullscreen = 20 },
+        border = { window = 4 },
+        span = { horizontal_default = 14, horizontal_small = 8 },
+    }
 end
 
 -- The prelude's TextWidget stub cannot measure; replace it before main.lua
@@ -4200,16 +4244,14 @@ local function makeLine(width)
     return width
 end
 
--- The device arithmetic from menu.lua: the stub reports a 600x800 screen with
--- Size.padding.fullscreen = 10 and Size.border.window = 2, so a row's content
--- box is 600 - 2*2 - 2*10 = 576px, and 7px of mandatory padding.
-local CONTENT_WIDTH = 600 - 2 * 2 - 2 * 10
-local MANDATORY_PADDING = 7
-
+-- The device arithmetic from menu.lua, against the content box firstmate
+-- measured: the row is 1166px wide, 14px of that is the mandatory padding,
+-- state_w is the gutter the plugin itself puts there, and the rest has to hold
+-- the title.
 local function report(label, item, layout)
     local state_width = layout.gutter or 0
     local mandatory_w = model_width(item.mandatory or "")
-    local available = CONTENT_WIDTH - state_width - MANDATORY_PADDING - mandatory_w
+    local available = DEVICE_CONTENT_W - state_width - DEVICE_PADDING - mandatory_w
     local ok, err = pcall(makeLine, available)
     print(string.format("%s_text=%s", label, tostring(item.text)))
     print(string.format("%s_text_len=%d", label, #tostring(item.text)))
@@ -4228,6 +4270,8 @@ local burmese_authors = "\224\128\161\224\128\177\224\128\172\224\128\175\224\12
 
 -- 1. A very wide mandatory string, covers on (the gutter is present too).
 local covers_layout = LightHouse:layoutFor(true)
+print(string.format("covers_layout_rows=%d", covers_layout.rows))
+print(string.format("covers_layout_gutter=%d", covers_layout.gutter))
 local wide_row = LightHouse:buildRow{
     layout = covers_layout,
     primary = burmese_title,
@@ -4241,6 +4285,7 @@ report("wide_mandatory", wide_row, covers_layout)
 -- The same row without covers: no gutter, so the metadata column has more room
 -- and must still fit it.
 local plain_layout = LightHouse:layoutFor(false)
+print(string.format("plain_layout_rows=%d", plain_layout.rows))
 local wide_plain = LightHouse:buildRow{
     layout = plain_layout,
     primary = burmese_title,
@@ -4249,6 +4294,20 @@ local wide_plain = LightHouse:buildRow{
     callback = function() end,
 }
 report("wide_plain", wide_plain, plain_layout)
+
+-- 1b. On a device that can measure, the author survives when the pixels allow
+-- it: the rows above prove the column is bounded, this one proves it is not
+-- simply thrown away.
+local latin_row = LightHouse:buildRow{
+    layout = covers_layout,
+    primary = "Spice and Wolf, Vol. 1",
+    secondary = "Isuna Hasekura",
+    glance = "45%",
+    cover_glyph = "#",
+    callback = function() end,
+}
+report("latin", latin_row, covers_layout)
+print("latin_mandatory=" .. tostring(latin_row.mandatory))
 
 -- 2. An empty title must not become a zero-width line.
 local empty_title = LightHouse:buildRow{
@@ -4261,13 +4320,14 @@ local empty_title = LightHouse:buildRow{
 }
 report("empty_title", empty_title, covers_layout)
 
--- 3. The old character budget, measured the same way: this is the width the
+-- 3. The old character budget, measured the same way, in the container the
+-- device recorded - including its own 266px cover gutter. This is the width the
 -- device actually received, and the assertion below proves the fixture
 -- overflows instead of passing by luck.
 local legacy_meta = Ui.metaColumn(burmese_authors, Ui.glanceProgress(require("lighthouse_status"), 0.45))
 print(string.format("legacy_mandatory_w=%d", model_width(legacy_meta)))
 print(string.format("legacy_available=%d",
-    CONTENT_WIDTH - (covers_layout.gutter or 0) - MANDATORY_PADDING - model_width(legacy_meta)))
+    DEVICE_CONTENT_W - DEVICE_GUTTER - DEVICE_PADDING - model_width(legacy_meta)))
 
 print("OK")
 `;
@@ -4363,14 +4423,21 @@ describe("plugin row width", () => {
 
     // The fixture is a real overflow: the 1.4.0 character budget produced this
     // exact row, and this exact width, on the device.
-    expect(Number(out.legacy_available)).toBeLessThanOrEqual(0);
+    expect(Number(out.legacy_available)).toBeLessThan(0);
     expect(Number(out.legacy_mandatory_w)).toBeGreaterThan(500 - 21);
 
-    // Wide mandatory string, covers on: the metadata column fits its budget and
-    // the title keeps a drawable width.
+    // The page follows the screen the device reports. These row counts come from
+    // the recorded 1648px screen; the plugin's 800px fallback lays a cover page
+    // out at 4 rows and a text page at 7, so a lost screen measurement fails
+    // here even though every width still fits.
+    expect(Number(out.covers_layout_rows)).toBe(6);
+    expect(Number(out.plain_layout_rows)).toBe(16);
+
+    // Wide mandatory string, covers on: the metadata column fits inside the
+    // row's real content box and the title keeps its minimum drawable width.
     expect(out.wide_mandatory_makeline_ok).toBe("true");
     expect(Number(out.wide_mandatory_available)).toBeGreaterThan(0);
-    expect(Number(out.wide_mandatory_available)).toBeGreaterThanOrEqual(40);
+    expect(Number(out.wide_mandatory_available)).toBeGreaterThanOrEqual(80);
     // The cover gutter survives - the fix narrows the column, never the covers.
     expect(Number(out.wide_mandatory_state_w)).toBeGreaterThan(0);
     expect(Number(out.wide_mandatory_cover_width)).toBeGreaterThan(0);
@@ -4379,6 +4446,11 @@ describe("plugin row width", () => {
     expect(out.wide_plain_makeline_ok).toBe("true");
     expect(Number(out.wide_plain_available)).toBeGreaterThan(0);
     expect(Number(out.wide_plain_state_w)).toBe(0);
+
+    // The fit gives up characters, not information: an author that fits in the
+    // measured budget is still drawn in full beside its progress.
+    expect(out.latin_mandatory).toContain("Isuna Hasekura");
+    expect(out.latin_mandatory).toContain("45%");
 
     // An empty title never becomes a zero-width line.
     expect(out.empty_title_makeline_ok).toBe("true");

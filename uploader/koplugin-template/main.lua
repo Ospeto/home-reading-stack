@@ -41,13 +41,18 @@ plugin to be rewritten.
 local DataStorage = require("datastorage")
 local Device = require("device")
 local DownloadMgr = require("ui/downloadmgr")
-local Font = require("ui/font")
+-- Guarded, like every optional module here: a build that lacks either of them
+-- still opens the catalog, drawing a capped metadata column instead of a
+-- measured one.
+local font_ok, Font = pcall(require, "ui/font")
+if not font_ok then Font = nil end
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local JSON = require("json")
 local Menu = require("ui/widget/menu")
 local NetworkMgr = require("ui/network/manager")
-local Size = require("ui/size")
+local size_ok, Size = pcall(require, "ui/size")
+if not size_ok then Size = nil end
 local TextViewer = require("ui/widget/textviewer")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
@@ -298,10 +303,13 @@ end
 
 --- Screen height in pixels, safe when the screen object is unavailable.
 -- @treturn number
-local function screenHeight()    local screen = Device and Device.screen
+local function screenHeight()
+    local screen = Device and Device.screen
     if type(screen) ~= "table" or type(screen.getHeight) ~= "function" then
         return 800
     end
+    local ok, value = pcall(screen.getHeight, screen)
+    if not ok then return 800 end
     local height = tonumber(value)
     if not height or height < 200 then return 800 end
     return height
@@ -534,6 +542,7 @@ end
 -- @number rows items per page for this view
 -- @treturn table|nil { face, info_face, font_size, info_size }
 local function rowFaces(rows)
+    if type(Font) ~= "table" or type(Font.getFace) ~= "function" then return nil end
     local per_page = tonumber(rows) or 0
     local item_setting, mandatory_setting
     pcall(function()
@@ -832,19 +841,16 @@ function LightHouse:buildRow(spec)
         bold = spec.bold == true,
     }
     local geometry = rowGeometry(layout)
-    local meta
-    if geometry then
-        -- A measured budget, not a character count: the same 40 characters are
-        -- twice the pixels in Burmese, and `makeLine` only knows about pixels.
-        meta = Ui.fitMetaColumn{
-            secondary = spec.secondary,
-            glance = spec.glance,
-            budget = geometry.budget,
-            measure = geometry.measure,
-        }
-    else
-        meta = Ui.metaColumn(spec.secondary, spec.glance)
-    end
+    -- A measured budget, not a character count: the same 40 characters are
+    -- twice the pixels in Burmese, and `makeLine` only knows about pixels. A
+    -- caller without a layout, or a device that cannot measure, gets the
+    -- pixel-free cap rather than an unbounded column.
+    local meta = Ui.fitMetaColumn{
+        secondary = spec.secondary,
+        glance = spec.glance,
+        budget = geometry and geometry.budget or nil,
+        measure = geometry and geometry.measure or nil,
+    }
     if meta ~= "" then item.mandatory = meta end
     if spec.details then
         item.sub_item_table = spec.details
@@ -1537,21 +1543,23 @@ local function statsSection(text)
     }
 end
 
---- Read-only stats row: label on the left, value on the right.
+--- Read-only stats row: label on the left, value in the right-hand column.
 -- A value the server did not send renders "unavailable"; zero stays zero.
+-- The row goes through the shared row builder so its value column is budgeted
+-- in pixels like every other row's instead of at a character count.
 -- @string label
 -- @string|nil value
 -- @boolean[opt] bold headline emphasis
+-- @tparam table[opt] layout result of `Ui.layout`
 -- @treturn table Menu item
-local function statsRow(label, value, bold)
-    return {
-        text = label,
+function LightHouse:statsRow(label, value, bold, layout)
+    return self:buildRow{
+        layout = layout,
+        primary = label,
         -- Values here are `Stats.*` output (a string or nil), but the row is
         -- also where an untrusted number could land, so it takes the guard.
-        mandatory = Status.str(value, Ui.UNAVAILABLE),
+        glance = Status.str(value, Ui.UNAVAILABLE),
         bold = bold == true,
-        select_enabled = false,
-        callback = function() end,
     }
 end
 
@@ -1587,8 +1595,9 @@ end
 -- health). Nothing from the earlier layout is dropped - only reordered, so the
 -- answer is above the fold and the detail is below it.
 -- @tparam table stats normalized stats from `fetchStats`
+-- @tparam table[opt] layout result of `Ui.layout`
 -- @treturn table array of Menu items
-function LightHouse:buildStatsItems(stats)
+function LightHouse:buildStatsItems(stats, layout)
     local items = {}
 
     -- 1. Headline numbers. Bold, and with no heading row above them: this is
@@ -1602,10 +1611,11 @@ function LightHouse:buildStatsItems(stats)
         { label = _("Books finished this year"), value = Stats.formatCount(stats.finishedThisYear) },
     }
     for row_index = 1, #headline_rows do
-        items[#items + 1] = statsRow(
+        items[#items + 1] = self:statsRow(
             headline_rows[row_index].label,
             headline_rows[row_index].value,
-            true
+            true,
+            layout
         )
     end
 
@@ -1627,7 +1637,7 @@ function LightHouse:buildStatsItems(stats)
             if value and goal_row.ratio then
                 value = Ui.glanceProgress(Status, goal_row.ratio) .. Ui.GLYPH.separator .. value
             end
-            items[#items + 1] = statsRow(goal_row.label, value)
+            items[#items + 1] = self:statsRow(goal_row.label, value, nil, layout)
         end
     end
 
@@ -1635,7 +1645,7 @@ function LightHouse:buildStatsItems(stats)
     items[#items + 1] = statsSection(_("Activity (newest week last)"))
     local weeks = Stats.heatmapRows(stats.heatmap)
     if #weeks == 0 then
-        items[#items + 1] = statsRow(_("Heatmap"), nil)
+        items[#items + 1] = self:statsRow(_("Heatmap"), nil, nil, layout)
     end
     for week_index = 1, #weeks do
         local week = weeks[week_index]
@@ -1647,10 +1657,11 @@ function LightHouse:buildStatsItems(stats)
                 callback = function() self:showDayStats(day) end,
             }
         end
-        items[#items + 1] = {
-            text = Stats.heatmapRowText(week),
-            mandatory = Stats.shortDate(week[#week].date),
-            sub_item_table = days,
+        items[#items + 1] = self:buildRow{
+            layout = layout,
+            primary = Stats.heatmapRowText(week),
+            glance = Stats.shortDate(week[#week].date),
+            details = days,
         }
     end
     items[#items + 1] = statsSection(heatmapKeyLabel())
@@ -1658,9 +1669,9 @@ function LightHouse:buildStatsItems(stats)
     -- 4. Supporting detail: library health as three counts.
     items[#items + 1] = statsSection(_("Library health"))
     local health = stats.health or {}
-    items[#items + 1] = statsRow(_("Unread"), Stats.formatCount(health.unread))
-    items[#items + 1] = statsRow(_("Reading"), Stats.formatCount(health.reading))
-    items[#items + 1] = statsRow(_("Finished"), Stats.formatCount(health.finished))
+    items[#items + 1] = self:statsRow(_("Unread"), Stats.formatCount(health.unread), nil, layout)
+    items[#items + 1] = self:statsRow(_("Reading"), Stats.formatCount(health.reading), nil, layout)
+    items[#items + 1] = self:statsRow(_("Finished"), Stats.formatCount(health.finished), nil, layout)
 
     return items
 end
@@ -1694,7 +1705,11 @@ function LightHouse:showStats()
         return
     end
 
-    self:showMenu(_("Reading stats"), self:buildStatsItems(stats), { covers = false })
+    local layout = self:layoutFor(false)
+    self:showMenu(_("Reading stats"), self:buildStatsItems(stats, layout), {
+        covers = false,
+        layout = layout,
+    })
 end
 
 --- Shows the reading time recorded on one heatmap day.

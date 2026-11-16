@@ -46,6 +46,14 @@ Ui.tokens = {
     --: Total width of the metadata column. The glance is budgeted inside it
     --: first, so a runaway author list can never push progress or rating out.
     meta_max_chars = 64,
+    --: Graphemes the metadata column may carry when the device cannot measure
+    --: pixels at all. The 64 above is only safe behind a pixel fit: 64 wide
+    --: glyphs are wider than a whole row, which is the crash this plugin now
+    --: cannot reach. The unmeasurable fallback therefore takes the narrowest
+    --: column that still holds the widest glance the row language builds - the
+    --: bar, the percent, the finished check and the rating - plus a usable word
+    --: of the secondary line.
+    meta_unmeasured_chars = 28,
     --: Characters kept in the secondary metadata before it is ellipsized, so a
     --: long author list can never dominate the metadata column.
     secondary_max_chars = 44,
@@ -358,8 +366,10 @@ function Ui.fitToWidth(text, measure, budget)
     budget = tonumber(budget)
     if not budget or budget ~= budget then return "" end
     local width = Ui.textWidth(text, measure)
-    -- Unmeasurable: the caller's character budget is the only bound there is.
-    if width == nil then return text end
+    -- Unmeasurable: fall back to the pixel-free cap rather than the raw string.
+    -- Returning `text` here is what handed the device a column wider than the
+    -- row it had to be drawn in.
+    if width == nil then return Ui.ellipsize(text, Ui.tokens.meta_unmeasured_chars) end
     if width <= budget then return text end
     local ellipsis = Ui.GLYPH.ellipsis
     local ellipsis_width = Ui.textWidth(ellipsis, measure) or 0
@@ -392,7 +402,9 @@ end
 -- The glance survives: progress and rating are what a catalog row is for, so
 -- the secondary text (author, series) is shortened first. Only when the glance
 -- alone cannot fit is it shortened too - a partial bar is a far better outcome
--- than a row that takes KOReader down with it.
+-- than a row that takes KOReader down with it. A device that cannot measure
+-- pixels at all gets the small fixed `meta_unmeasured_chars` column instead, so
+-- an unmeasurable row is still bounded.
 -- @tparam table options { secondary, glance, max_chars, budget, measure }
 -- @treturn string never wider than `budget` when the runtime can measure
 function Ui.fitMetaColumn(options)
@@ -401,14 +413,19 @@ function Ui.fitMetaColumn(options)
     local glance = oneLine(options.glance)
     local measure = options.measure
     local budget = tonumber(options.budget)
+    local cap = Ui.tokens.meta_unmeasured_chars
     -- The character pre-pass keeps a short row looking exactly as it did; the
-    -- pixel fit below is what actually guarantees the row can be drawn.
+    -- pixel fit below is what actually guarantees the row can be drawn. When
+    -- no pixel can be measured, the small fixed cap is the only bound there
+    -- is - and returning the 64-character column instead is what killed both
+    -- devices.
     local text = Ui.metaColumn(secondary, glance, options.max_chars)
     if not budget or budget ~= budget or type(measure) ~= "function" then
-        return text
+        return Ui.metaColumn(secondary, glance, cap)
     end
     local width = Ui.textWidth(text, measure)
-    if width == nil or width <= budget then return text end
+    if width == nil then return Ui.metaColumn(secondary, glance, cap) end
+    if width <= budget then return text end
 
     local separator = glance ~= "" and secondary ~= "" and SEPARATOR or ""
     local glance_width = Ui.textWidth(glance, measure) or 0
@@ -417,7 +434,8 @@ function Ui.fitMetaColumn(options)
     local trimmed = room > 0 and Ui.fitToWidth(secondary, measure, room) or ""
     local result = Ui.join({ trimmed, glance })
     local result_width = Ui.textWidth(result, measure)
-    if result_width == nil or result_width <= budget then return result end
+    if result_width == nil then return Ui.metaColumn(secondary, glance, cap) end
+    if result_width <= budget then return result end
 
     -- Even the glance overflows on its own: it gives up characters last, and a
     -- row with no metadata at all is still a row that draws.
