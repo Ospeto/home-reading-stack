@@ -41,11 +41,18 @@ plugin to be rewritten.
 local DataStorage = require("datastorage")
 local Device = require("device")
 local DownloadMgr = require("ui/downloadmgr")
+-- Guarded, like every optional module here: a build that lacks either of them
+-- still opens the catalog, drawing a capped metadata column instead of a
+-- measured one.
+local font_ok, Font = pcall(require, "ui/font")
+if not font_ok then Font = nil end
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local JSON = require("json")
 local Menu = require("ui/widget/menu")
 local NetworkMgr = require("ui/network/manager")
+local size_ok, Size = pcall(require, "ui/size")
+if not size_ok then Size = nil end
 local TextViewer = require("ui/widget/textviewer")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
@@ -308,6 +315,59 @@ local function screenHeight()
     return height
 end
 
+--- Screen width in pixels, safe when the screen object is unavailable.
+-- The fallback is the narrowest screen this plugin is expected on rather than a
+-- guess at a wide one: every width this feeds is a budget, and a budget that is
+-- too large is a row that cannot be drawn.
+-- @treturn number
+local function screenWidth()
+    local screen = Device and Device.screen
+    if type(screen) ~= "table" or type(screen.getWidth) ~= "function" then
+        return 600
+    end
+    local ok, value = pcall(screen.getWidth, screen)
+    if not ok then return 600 end
+    local width = tonumber(value)
+    if not width or width < 200 then return 600 end
+    return width
+end
+
+--- One of KOReader's `Size` tokens, scaled by nobody's guess but the runtime's.
+-- The padding around a row's text is what `menu.lua` subtracts from the content
+-- width, so it has to come from the same table; the fallback is the token's
+-- value at 160 dpi multiplied by the device scale.
+-- @string group Size sub-table name
+-- @string key field inside that table
+-- @number fallback pixels
+-- @treturn number
+local function sizeValue(group, key, fallback)
+    local ok, value = pcall(function() return Size[group][key] end)
+    local pixels = tonumber(ok and value or nil)
+    if not pixels or pixels < 0 then return fallback end
+    return pixels
+end
+
+--- Pixel width of one menu row's content box.
+-- `MenuItem:init` computes `content_width = dimen.w - 2 * Size.padding.fullscreen`
+-- and the plugin never passes a width to `Menu`, so the menu is as wide as the
+-- screen minus the window border. This is the width the title and the metadata
+-- column have to share.
+-- @treturn number
+local function rowContentWidth()
+    local scale = screenScale()
+    local border = sizeValue("border", "window", math.max(math.floor(1.5 * scale), 1))
+    local padding = sizeValue("padding", "fullscreen", math.floor(10 * scale))
+    local width = screenWidth() - 2 * border - 2 * padding
+    if width < 1 then return 1 end
+    return width
+end
+
+--- Pixels `menu.lua` reserves between the title and the metadata column.
+-- @treturn number
+local function mandatoryPadding()
+    return sizeValue("span", "horizontal_default", math.floor(7 * screenScale()))
+end
+
 --- Directory holding cached cover thumbnails.
 -- @treturn string
 local function coverDir()
@@ -473,11 +533,153 @@ local function errorHeadline(err)
     return _("The request failed")
 end
 
+--- The two faces a row is drawn with, resolved the way KOReader resolves them.
+--
+-- `Menu:updateItems` picks the row font from the item count
+-- (`Menu.getItemFontSize`) or the reader's own `items_font_size` override, and
+-- the metadata column is four points smaller unless `items_mandatory_font_size`
+-- says otherwise. Measuring with any other size would make the budget fiction.
+-- @number rows items per page for this view
+-- @treturn table|nil { face, info_face, font_size, info_size }
+local function rowFaces(rows)
+    if type(Font) ~= "table" or type(Font.getFace) ~= "function" then return nil end
+    local per_page = tonumber(rows) or 0
+    local item_setting, mandatory_setting
+    pcall(function()
+        item_setting = G_reader_settings:readSetting("items_font_size")
+        mandatory_setting = G_reader_settings:readSetting("items_mandatory_font_size")
+    end)
+    local font_size = tonumber(item_setting)
+    if not font_size and type(Menu.getItemFontSize) == "function" then
+        local ok, value = pcall(Menu.getItemFontSize, per_page)
+        if ok then font_size = tonumber(value) end
+    end
+    -- Same formula as `Menu.getItemFontSize`, for a build that lacks the class.
+    font_size = font_size or math.floor(24 - ((per_page - 6) / 18) * 10)
+    if font_size < 1 then return nil end
+    local info_size = tonumber(mandatory_setting) or (font_size - 4)
+    if info_size < 1 then info_size = 1 end
+    local ok_face, face = pcall(Font.getFace, Font, "smallinfofont", font_size)
+    local ok_info, info_face = pcall(Font.getFace, Font, "infont", info_size)
+    if not ok_face or not face or not ok_info or not info_face then return nil end
+    return {
+        face = face,
+        info_face = info_face,
+        font_size = font_size,
+        info_size = info_size,
+    }
+end
+
+--- A measuring function for one face, or nil when this build cannot measure.
+--
+-- KOReader's own `TextWidget:getWidth` is the only measurement that matches what
+-- the device paints with, so the row budget is built from it and nowhere else.
+-- Widths are cached: one page re-measures the same authors on every page turn.
+-- @param face
+-- @boolean bold
+-- @treturn function|nil
+local function faceMeasurer(face, bold)
+    if face == nil then return nil end
+    local ok, TextWidget = pcall(require, "ui/widget/textwidget")
+    if not ok or type(TextWidget) ~= "table" or type(TextWidget.new) ~= "function" then
+        return nil
+    end
+    local cache = {}
+    local cached = 0
+    local cache_key = tostring(face) .. (bold == true and "|bold" or "")
+    return function(text)
+        if type(text) ~= "string" then return nil end
+        local key = cache_key .. "\1" .. text
+        local hit = cache[key]
+        if hit ~= nil then return hit end
+        local widget_ok, widget = pcall(TextWidget.new, TextWidget, {
+            text = text,
+            face = face,
+            bold = bold == true,
+        })
+        if not widget_ok or type(widget) ~= "table" then return nil end
+        local width = type(widget.getWidth) == "function" and widget:getWidth() or nil
+        if type(widget.free) == "function" then pcall(widget.free, widget) end
+        width = tonumber(width)
+        -- A cache that grows without bound on a 2000-book library is a leak;
+        -- dropping it costs a re-measure, never correctness.
+        if cached > 512 then
+            cache = {}
+            cached = 0
+        end
+        if width then
+            cache[key] = width
+            cached = cached + 1
+        end
+        return width
+    end
+end
+
+--- The pixel budget a row's metadata column may occupy, cached per layout.
+--
+-- `menu.lua` computes
+--   available_width = content_width - state_width
+--                                 - text_mandatory_padding - mandatory_w
+-- and hands that straight to a `TextBoxWidget`, whose `makeLine` raises when it
+-- is not strictly positive. `state_width` is the gutter this plugin put there
+-- and `mandatory_w` is the column this plugin wrote, so both are ours to bound:
+-- the metadata column gets a measured pixel budget, and the title column is
+-- guaranteed the rest.
+-- @tparam table layout result of `Ui.layout`
+-- @treturn table|nil { content_width, usable, budget, name_min, measure }
+local function rowGeometry(layout)
+    if type(layout) ~= "table" then return nil end
+    if layout.row_geometry ~= nil then return layout.row_geometry or nil end
+    layout.row_geometry = false
+    local content_width = rowContentWidth()
+    local mandatory_padding = mandatoryPadding()
+    local gutter = tonumber(layout.gutter) or 0
+    local scale = screenScale()
+    local faces = rowFaces(layout.rows)
+    local measure = faces and faceMeasurer(faces.face, false) or nil
+    local info_measure = faces and faceMeasurer(faces.info_face, false) or nil
+    local usable = content_width - gutter - mandatory_padding
+    if usable < 1 then usable = 0 end
+    local name_min = math.floor(Ui.tokens.name_min_units * scale)
+    -- The title column must also be wider than the ellipsis KOReader draws when
+    -- it truncates, or the truncated name re-shapes itself to a negative width
+    -- (the second call site in the device crash logs).
+    local ellipsis_width = Ui.textWidth(Ui.GLYPH.ellipsis, measure) or 0
+    if ellipsis_width * 3 > name_min then name_min = math.floor(ellipsis_width * 3) end
+    local budget = math.floor(usable * Ui.tokens.mandatory_share)
+    local room = usable - name_min
+    if room < budget then budget = room end
+    if budget < 0 then budget = 0 end
+    layout.row_geometry = {
+        content_width = content_width,
+        usable = usable,
+        budget = budget,
+        name_min = name_min,
+        measure = info_measure,
+        title_measure = measure,
+    }
+    return layout.row_geometry
+end
+
 --- Geometry for one view.
 -- @boolean with_covers
 -- @treturn table result of `Ui.layout`
 function LightHouse:layoutFor(with_covers)
-    return Ui.layout(screenHeight(), screenScale(), with_covers == true)
+    local layout = Ui.layout(screenHeight(), screenScale(), with_covers == true)
+    local scale = screenScale()
+    -- The cover keeps its place: the gutter is clamped so the title column
+    -- always has a drawable width, and only a screen where no cover can leave
+    -- one falls back to text rows.
+    Ui.clampLayout(layout, {
+        content_width = rowContentWidth(),
+        padding = mandatoryPadding(),
+        scale = scale,
+        name_min = math.floor(Ui.tokens.name_min_units * scale),
+    })
+    if layout.gutter_reduced then
+        logger.info("LightHouse: cover slot narrowed to keep the title column drawable")
+    end
+    return layout
 end
 
 --- The reader's preference for cover thumbnails, on by default.
@@ -629,11 +831,26 @@ end
 function LightHouse:buildRow(spec)
     spec = spec or {}
     local layout = spec.layout
+    -- `menu.lua` turns an empty title into a zero-width line; a row with no
+    -- text is not a row the reader can use, so it gets the neutral label the
+    -- catalog already uses for a book with no title.
+    local title = Ui.rowTitle(spec.primary)
+    if title == "" then title = _("Untitled") end
     local item = {
-        text = Ui.rowTitle(spec.primary),
+        text = title,
         bold = spec.bold == true,
     }
-    local meta = Ui.metaColumn(spec.secondary, spec.glance)
+    local geometry = rowGeometry(layout)
+    -- A measured budget, not a character count: the same 40 characters are
+    -- twice the pixels in Burmese, and `makeLine` only knows about pixels. A
+    -- caller without a layout, or a device that cannot measure, gets the
+    -- pixel-free cap rather than an unbounded column.
+    local meta = Ui.fitMetaColumn{
+        secondary = spec.secondary,
+        glance = spec.glance,
+        budget = geometry and geometry.budget or nil,
+        measure = geometry and geometry.measure or nil,
+    }
     if meta ~= "" then item.mandatory = meta end
     if spec.details then
         item.sub_item_table = spec.details
@@ -1326,21 +1543,23 @@ local function statsSection(text)
     }
 end
 
---- Read-only stats row: label on the left, value on the right.
+--- Read-only stats row: label on the left, value in the right-hand column.
 -- A value the server did not send renders "unavailable"; zero stays zero.
+-- The row goes through the shared row builder so its value column is budgeted
+-- in pixels like every other row's instead of at a character count.
 -- @string label
 -- @string|nil value
 -- @boolean[opt] bold headline emphasis
+-- @tparam table[opt] layout result of `Ui.layout`
 -- @treturn table Menu item
-local function statsRow(label, value, bold)
-    return {
-        text = label,
+function LightHouse:statsRow(label, value, bold, layout)
+    return self:buildRow{
+        layout = layout,
+        primary = label,
         -- Values here are `Stats.*` output (a string or nil), but the row is
         -- also where an untrusted number could land, so it takes the guard.
-        mandatory = Status.str(value, Ui.UNAVAILABLE),
+        glance = Status.str(value, Ui.UNAVAILABLE),
         bold = bold == true,
-        select_enabled = false,
-        callback = function() end,
     }
 end
 
@@ -1376,8 +1595,9 @@ end
 -- health). Nothing from the earlier layout is dropped - only reordered, so the
 -- answer is above the fold and the detail is below it.
 -- @tparam table stats normalized stats from `fetchStats`
+-- @tparam table[opt] layout result of `Ui.layout`
 -- @treturn table array of Menu items
-function LightHouse:buildStatsItems(stats)
+function LightHouse:buildStatsItems(stats, layout)
     local items = {}
 
     -- 1. Headline numbers. Bold, and with no heading row above them: this is
@@ -1391,10 +1611,11 @@ function LightHouse:buildStatsItems(stats)
         { label = _("Books finished this year"), value = Stats.formatCount(stats.finishedThisYear) },
     }
     for row_index = 1, #headline_rows do
-        items[#items + 1] = statsRow(
+        items[#items + 1] = self:statsRow(
             headline_rows[row_index].label,
             headline_rows[row_index].value,
-            true
+            true,
+            layout
         )
     end
 
@@ -1416,7 +1637,7 @@ function LightHouse:buildStatsItems(stats)
             if value and goal_row.ratio then
                 value = Ui.glanceProgress(Status, goal_row.ratio) .. Ui.GLYPH.separator .. value
             end
-            items[#items + 1] = statsRow(goal_row.label, value)
+            items[#items + 1] = self:statsRow(goal_row.label, value, nil, layout)
         end
     end
 
@@ -1424,7 +1645,7 @@ function LightHouse:buildStatsItems(stats)
     items[#items + 1] = statsSection(_("Activity (newest week last)"))
     local weeks = Stats.heatmapRows(stats.heatmap)
     if #weeks == 0 then
-        items[#items + 1] = statsRow(_("Heatmap"), nil)
+        items[#items + 1] = self:statsRow(_("Heatmap"), nil, nil, layout)
     end
     for week_index = 1, #weeks do
         local week = weeks[week_index]
@@ -1436,10 +1657,11 @@ function LightHouse:buildStatsItems(stats)
                 callback = function() self:showDayStats(day) end,
             }
         end
-        items[#items + 1] = {
-            text = Stats.heatmapRowText(week),
-            mandatory = Stats.shortDate(week[#week].date),
-            sub_item_table = days,
+        items[#items + 1] = self:buildRow{
+            layout = layout,
+            primary = Stats.heatmapRowText(week),
+            glance = Stats.shortDate(week[#week].date),
+            details = days,
         }
     end
     items[#items + 1] = statsSection(heatmapKeyLabel())
@@ -1447,9 +1669,9 @@ function LightHouse:buildStatsItems(stats)
     -- 4. Supporting detail: library health as three counts.
     items[#items + 1] = statsSection(_("Library health"))
     local health = stats.health or {}
-    items[#items + 1] = statsRow(_("Unread"), Stats.formatCount(health.unread))
-    items[#items + 1] = statsRow(_("Reading"), Stats.formatCount(health.reading))
-    items[#items + 1] = statsRow(_("Finished"), Stats.formatCount(health.finished))
+    items[#items + 1] = self:statsRow(_("Unread"), Stats.formatCount(health.unread), nil, layout)
+    items[#items + 1] = self:statsRow(_("Reading"), Stats.formatCount(health.reading), nil, layout)
+    items[#items + 1] = self:statsRow(_("Finished"), Stats.formatCount(health.finished), nil, layout)
 
     return items
 end
@@ -1483,7 +1705,11 @@ function LightHouse:showStats()
         return
     end
 
-    self:showMenu(_("Reading stats"), self:buildStatsItems(stats), { covers = false })
+    local layout = self:layoutFor(false)
+    self:showMenu(_("Reading stats"), self:buildStatsItems(stats, layout), {
+        covers = false,
+        layout = layout,
+    })
 end
 
 --- Shows the reading time recorded on one heatmap day.

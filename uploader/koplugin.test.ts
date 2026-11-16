@@ -49,6 +49,17 @@ import {
 const LUA_BINARY = Bun.which("luajit") || Bun.which("lua5.1") || Bun.which("lua");
 const UNZIP_BINARY = Bun.which("unzip");
 
+/**
+ * Grapheme cap on a row's metadata column when the device cannot measure pixels.
+ *
+ * The oracle is the documented contract, not the plugin's own token:
+ * `README.md` and the in-app guide both promise "a small fixed 28-glyph cap" for
+ * a build that cannot measure, so restoring the pre-fix 64 (which produced the
+ * 1564px column and `available_width = -685` on the device) fails these
+ * assertions.
+ */
+const UNMEASURED_COLUMN_CAP = 28;
+
 const SAMPLE_SETTINGS: KopluginSettings = {
   baseUrl: "http://192.168.31.15:8086",
   apiKey: "test-api-key-not-a-real-secret",
@@ -1737,6 +1748,15 @@ package.preload["ui/widget/textwidget"] = function() return stub_widget("textwid
 package.preload["ui/font"] = function()
   return { getFace = function(_, name) return "face:" .. tostring(name) end }
 end
+-- main.lua reads the padding menu.lua subtracts from a row's content width,
+-- so the stubs report the same tokens a 160-dpi device reports.
+package.preload["ui/size"] = function()
+  return {
+    padding = { fullscreen = 10 },
+    border = { window = 2 },
+    span = { horizontal_default = 7, horizontal_small = 4 },
+  }
+end
 package.preload["ui/geometry"] = function()
   local geom = {}
   function geom:new(options)
@@ -1944,7 +1964,6 @@ local long_row = LightHouse:buildCatalogItem({
 }, layout)
 print("long_text=" .. tostring(long_row.text))
 print("long_mandatory=" .. tostring(long_row.mandatory))
-print("long_limit=" .. tostring(require("lighthouse_ui").tokens.meta_max_chars))
 
 -- Connection screen must expose the baked-in origin and endpoint paths.
 LightHouse:showConnection(true)
@@ -2029,27 +2048,30 @@ describe("generated plugin tree boots like a real KOReader plugin", () => {
     expect(submenu).toContain("Connection");
 
     // Row anatomy: the title is the row text, and the right-hand metadata
-    // column carries author, series, progress and rating together. KOReader's
-    // MenuItem flattens newlines out of the row text, so the metadata must not
-    // be a second line in `text`.
+    // column carries progress and rating together. KOReader's MenuItem flattens
+    // newlines out of the row text, so the metadata must not be a second line in
+    // `text`. These stubs cannot measure pixels, so the column takes the small
+    // fixed cap instead of a measured fit: the glance is what has to survive,
+    // and the author and series stay one tap away in the detail view (asserted
+    // below).
     expect(out.row_text).toBe("Spice and Wolf, Vol. 1");
     expect(out.row_text_has_newline).toBe("false");
-    expect(out.row_mandatory).toContain("Isuna Hasekura");
-    expect(out.row_mandatory).toContain("Spice and Wolf 01");
     expect(out.row_mandatory).toContain("45%");
     expect(out.row_mandatory).toContain("★★★★☆");
     expect(out.row_mandatory).not.toContain("\n");
+    expect(Array.from(out.row_mandatory).length).toBeLessThanOrEqual(
+      UNMEASURED_COLUMN_CAP,
+    );
 
     // A long author and series run must keep the whole glance: the bar, the
     // finished check and all five stars. Capping the composed metadata string
     // would leave this row showing three stars.
     expect(out.long_text).toBe("The Way of Kings");
-    expect(out.long_mandatory).toContain("Brandon Sanderson");
     expect(out.long_mandatory).toContain("100%");
     expect(out.long_mandatory).toContain("✓");
     expect(out.long_mandatory.endsWith("★★★★☆")).toBe(true);
     expect(Array.from(out.long_mandatory).length).toBeLessThanOrEqual(
-      Number(out.long_limit),
+      UNMEASURED_COLUMN_CAP,
     );
 
     // Covers: one geometry rule drives the page, and a row whose cover is not on
@@ -2345,7 +2367,6 @@ local long_menu = current_menu()
 local long_row = long_menu and long_menu.item_table and long_menu.item_table[1]
 print("shelf_long_ok=" .. tostring(long_ok))
 print("shelf_long_mandatory=" .. tostring(long_row and long_row.mandatory))
-print("shelf_long_limit=" .. tostring(require("lighthouse_ui").tokens.meta_max_chars))
 
 print("OK")
 `)
@@ -2410,12 +2431,17 @@ describe("plugin currently-reading shelf", () => {
     expect(out.items).toBe("4");
 
     // Row 1: linked session, newest first. The title is the row text and the
-    // metadata column carries author, device and progress - no tap needed.
+    // metadata column carries the author and the progress - no tap needed. The
+    // stubs have no measurable faces, so the column is the pixel-free capped
+    // one: the author is shortened, the progress survives.
     expect(out.rows_with_newlines).toBe("0");
     const first = out.item1.split("\t");
     expect(first[0]).toBe("Spice and Wolf, Vol. 1");
-    expect(first[1]).toContain("Isuna Hasekura · Paperwhite");
+    expect(first[1]).toContain("Isuna Hase");
     expect(first[1]).toContain("45%");
+    expect(Array.from(first[1]).length).toBeLessThanOrEqual(
+      UNMEASURED_COLUMN_CAP,
+    );
     const firstDetails = first[2].split("|");
     expect(firstDetails[0]).toBe("Download EPUB");
     expect(firstDetails).toContain("Progress: ████░░░░ 45%");
@@ -2425,7 +2451,7 @@ describe("plugin currently-reading shelf", () => {
     // Row 2: no Calibre match, so the download row is replaced, not dropped.
     const second = out.item2.split("\t");
     expect(second[0]).toBe("Dune & Sons <Deluxe>");
-    expect(second[1]).toContain("Frank Herbert · Kindle");
+    expect(second[1]).toContain("Frank Herb");
     expect(second[1]).toContain("20%");
     const secondDetails = second[2].split("|");
     expect(secondDetails[0]).toBe("No matching book in the library");
@@ -2448,7 +2474,7 @@ describe("plugin currently-reading shelf", () => {
     // and a finished book is marked with a check glyph, not a colour.
     const fourth = out.item4.split("\t");
     expect(fourth[0]).toBe(BURMESE_PROBE);
-    expect(fourth[1]).toContain("Unknown · Kobo");
+    expect(fourth[1]).toContain("Unknown");
     expect(fourth[1]).toContain("100%");
     expect(fourth[1]).toContain("✓");
     expect(fourth[2].split("|")[0]).toBe("Download EPUB");
@@ -2489,7 +2515,7 @@ describe("plugin currently-reading shelf", () => {
     expect(out.shelf_long_mandatory).toContain("✓");
     expect(
       Array.from(out.shelf_long_mandatory).length,
-    ).toBeLessThanOrEqual(Number(out.shelf_long_limit));
+    ).toBeLessThanOrEqual(UNMEASURED_COLUMN_CAP);
 
     expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
@@ -3856,6 +3882,7 @@ if coauthored_ok then
   end
   print("catalog_coauthored_details=" .. table.concat(labels, "|"))
   print("catalog_coauthored_mandatory=" .. bracket(coauthored_row.mandatory))
+  print("catalog_coauthored_column=" .. tostring(coauthored_row.mandatory))
 end
 
 -- 6. The pcall fallback: one bad row renders a safe row, never the process --
@@ -4071,14 +4098,16 @@ describe("plugin row safety against JSON nulls and malformed fields", () => {
     expect(out.catalog_tags_ok).toBe("true");
     expect(out.catalog_tags_details).toContain("Tags: Fantasy, 7");
 
-    // The detail view keeps every co-author; the row column still truncates.
+    // The detail view keeps every co-author; the row's own column is the
+    // bounded one, so the name list is what gives way there.
     expect(out.catalog_coauthored_ok).toBe("true");
     expect(out.catalog_coauthored_details).toContain(
       "Author: Ann One, Bob Two, Cyd Three",
     );
-    expect(out.catalog_coauthored_mandatory).toContain(
-      "Ann One, Bob Two +1 more",
-    );
+    expect(out.catalog_coauthored_mandatory).toContain("Ann One, Bob T");
+    expect(
+      Array.from(out.catalog_coauthored_column).length,
+    ).toBeLessThanOrEqual(UNMEASURED_COLUMN_CAP);
   });
 
   it("renders a safe fallback row when a row builder raises", () => {
@@ -4118,5 +4147,403 @@ describe("plugin row safety against JSON nulls and malformed fields", () => {
     expect(out.browse_row_text_types).toBe("string,string,string");
     expect(out.browse_texts).toContain("Spice and Wolf");
     expect(out.browse_texts).toContain("Dune");
+  });
+});
+
+/**
+ * Row-width regression (plugin 1.4.1).
+ *
+ * 1.4.0 fixed the null-sentinel crash and exposed a second one: on both Kindles,
+ * opening Browse library or Currently reading killed KOReader with
+ *
+ *   ./luajit: frontend/ui/widget/textboxwidget.lua:394:
+ *     bad argument #2 to 'makeLine' (width must be strictly positive)
+ *
+ * `menu.lua` computes
+ *
+ *   available_width = content_width - state_width
+ *                                 - text_mandatory_padding - mandatory_w
+ *
+ * and hands it straight to a TextBoxWidget. `Ui.metaColumn` budgeted that
+ * column in *graphemes* (64 chars), which is not a pixel bound: the same 64
+ * characters are two to three times wider in Burmese than in Latin, and the
+ * block glyphs in the progress bar are wider still. Measured on the Paperwhite
+ * (screen 1236x1648, real faces, 1166px of content, 266px cover gutter) a real
+ * row's metadata column was 1564px, leaving available_width = -685.
+ *
+ * The width model below is deliberately hostile in the same direction as the
+ * device, and the row's container is the width firstmate recorded on that
+ * device rather than a number the plugin's own geometry model produces, so the
+ * check cannot pass by agreeing with the implementation it tests.
+ */
+const ROW_WIDTH_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
+-- Distance the width model charges, in pixels: Latin per character, and per
+-- code point for everything else (Burmese, CJK, the block glyphs of the bar).
+local WIDTH_ASCII = 10
+local WIDTH_WIDE = 30
+
+local function model_width(text)
+    if type(text) ~= "string" then return 0 end
+    local total, index = 0, 1
+    while index <= #text do
+        local byte = text:byte(index)
+        local step = 1
+        if byte >= 0xF0 then step = 4
+        elseif byte >= 0xE0 then step = 3
+        elseif byte >= 0xC0 then step = 2 end
+        if step == 1 then total = total + WIDTH_ASCII else total = total + WIDTH_WIDE end
+        index = index + step
+    end
+    return total
+end
+
+-- What the device reported, not what the plugin believes: a Paperwhite-style
+-- Kindle is 1236x1648, two device pixels per 160-dpi unit, and a real row there
+-- had 1166px of content box (about 70px of horizontal chrome), a 266px cover
+-- gutter, 14px of mandatory padding and a 1564px metadata column - the -685 in
+-- the crash log. The plugin derives its own content width from the screen, so a
+-- plugin that stops reading the screen height lays every page out for its 800px
+-- fallback instead, which the row counts below catch.
+local DEVICE_SCREEN_W = 1236
+local DEVICE_SCREEN_H = 1648
+local DEVICE_CONTENT_W = 1166
+local DEVICE_PADDING = 14
+local DEVICE_GUTTER = 266
+local DEVICE_NAME_MIN = 80
+
+package.preload["device"] = function()
+    return {
+        screen = {
+            getWidth = function() return DEVICE_SCREEN_W end,
+            getHeight = function() return DEVICE_SCREEN_H end,
+            scaleBySize = function(_, size) return math.floor(size * 2 + 0.5) end,
+        },
+    }
+end
+-- The prelude's size tokens are the 160-dpi values; the device reports them
+-- already scaled, so a 2x screen sees 20px of padding and a 14px separator.
+package.preload["ui/size"] = function()
+    return {
+        padding = { fullscreen = 20 },
+        border = { window = 4 },
+        span = { horizontal_default = 14, horizontal_small = 8 },
+    }
+end
+
+-- The prelude's TextWidget stub cannot measure; replace it before main.lua
+-- loads, because the plugin builds its measurer from this class.
+package.preload["ui/widget/textwidget"] = function()
+    local widget = {}
+    function widget:new(options)
+        options = options or {}
+        options.__kind = "textwidget"
+        function options:getWidth() return model_width(self.text) end
+        function options:free() end
+        return options
+    end
+    return widget
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local Ui = require("lighthouse_ui")
+
+-- makeLine, exactly as TextBoxWidget raises it on the device.
+local function makeLine(width)
+    if type(width) ~= "number" or width <= 0 then
+        error("bad argument #2 to 'makeLine' (width must be strictly positive)", 2)
+    end
+    return width
+end
+
+-- The device arithmetic from menu.lua, against the content box firstmate
+-- measured: the row is 1166px wide, 14px of that is the mandatory padding,
+-- state_w is the gutter the plugin itself puts there, and the rest has to hold
+-- the title.
+local function report(label, item, layout)
+    local state_width = layout.gutter or 0
+    local mandatory_w = model_width(item.mandatory or "")
+    local available = DEVICE_CONTENT_W - state_width - DEVICE_PADDING - mandatory_w
+    local ok, err = pcall(makeLine, available)
+    print(string.format("%s_text=%s", label, tostring(item.text)))
+    print(string.format("%s_text_len=%d", label, #tostring(item.text)))
+    print(string.format("%s_mandatory_w=%d", label, mandatory_w))
+    print(string.format("%s_available=%d", label, available))
+    print(string.format("%s_makeline_ok=%s", label, tostring(ok)))
+    print(string.format("%s_state_w=%d", label, state_width))
+    print(string.format("%s_cover_width=%d", label, layout.cover_width or 0))
+    if not ok then print(string.format("%s_err=%s", label, tostring(err))) end
+    return available
+end
+
+-- A real catalogue row: three Burmese authors, a Burmese title, progress.
+local burmese_title = "\224\128\188\224\128\128\224\128\172\224\128\172\224\128\155\224\128\172\224\128\172\224\128\183\224\128\133\224\128\185\224\128\133\224\128\172"
+local burmese_authors = "\224\128\161\224\128\177\224\128\172\224\128\175\224\128\172\224\128\128\224\128\153\224\128\175\224\128\172\224\128\154\224\128\172\224\128\155\224\128\172\224\128\184\224\128\155\224\128\140\224\128\101\224\128\171\224\128\172\224\128\173\224\128\172\224\128\170\224\128\149\224\128\140\224\128\186\224\128\128\224\128\172\224\128\172\224\128\180\224\128\176\224\128\175\224\128\132\224\128\186\224\128\128\224\128\172\224\128\181\224\128\172\224\128\156\224\128\172\224\128\175\224\128\179\224\128\129\224\128\172\224\128\172\224\128\136\224\128\172\224\128\172\224\128\131\224\128\172\224\128\130"
+
+-- 1. A very wide mandatory string, covers on (the gutter is present too).
+local covers_layout = LightHouse:layoutFor(true)
+print(string.format("covers_layout_rows=%d", covers_layout.rows))
+print(string.format("covers_layout_gutter=%d", covers_layout.gutter))
+local wide_row = LightHouse:buildRow{
+    layout = covers_layout,
+    primary = burmese_title,
+    secondary = burmese_authors,
+    glance = Ui.glanceProgress(require("lighthouse_status"), 0.45),
+    cover_glyph = "#",
+    callback = function() end,
+}
+report("wide_mandatory", wide_row, covers_layout)
+
+-- The same row without covers: no gutter, so the metadata column has more room
+-- and must still fit it.
+local plain_layout = LightHouse:layoutFor(false)
+print(string.format("plain_layout_rows=%d", plain_layout.rows))
+local wide_plain = LightHouse:buildRow{
+    layout = plain_layout,
+    primary = burmese_title,
+    secondary = burmese_authors,
+    glance = Ui.glanceProgress(require("lighthouse_status"), 0.45),
+    callback = function() end,
+}
+report("wide_plain", wide_plain, plain_layout)
+
+-- 1b. On a device that can measure, the author survives when the pixels allow
+-- it: the rows above prove the column is bounded, this one proves it is not
+-- simply thrown away.
+local latin_row = LightHouse:buildRow{
+    layout = covers_layout,
+    primary = "Spice and Wolf, Vol. 1",
+    secondary = "Isuna Hasekura",
+    glance = "45%",
+    cover_glyph = "#",
+    callback = function() end,
+}
+report("latin", latin_row, covers_layout)
+print("latin_mandatory=" .. tostring(latin_row.mandatory))
+
+-- 2. An empty title must not become a zero-width line.
+local empty_title = LightHouse:buildRow{
+    layout = covers_layout,
+    primary = "   ",
+    secondary = "Isuna Hasekura",
+    glance = "45%",
+    cover_glyph = "#",
+    callback = function() end,
+}
+report("empty_title", empty_title, covers_layout)
+
+-- 3. The old character budget, measured the same way, in the container the
+-- device recorded - including its own 266px cover gutter. This is the width the
+-- device actually received, and the assertion below proves the fixture
+-- overflows instead of passing by luck.
+local legacy_meta = Ui.metaColumn(burmese_authors, Ui.glanceProgress(require("lighthouse_status"), 0.45))
+print(string.format("legacy_mandatory_w=%d", model_width(legacy_meta)))
+print(string.format("legacy_available=%d",
+    DEVICE_CONTENT_W - DEVICE_GUTTER - DEVICE_PADDING - model_width(legacy_meta)))
+
+-- 4. A device that cannot measure pixels at all. The plugin falls back to its
+-- fixed grapheme cap, and that fallback still has to leave a title column on
+-- the recorded screen - this is the case the 64-character column failed.
+package.preload["ui/widget/textwidget"] = function()
+    local widget = {}
+    function widget:new(options)
+        options = options or {}
+        options.__kind = "textwidget"
+        function options:free() end
+        return options
+    end
+    return widget
+end
+package.loaded["ui/widget/textwidget"] = nil
+local unmeasured_layout = LightHouse:layoutFor(true)
+local unmeasured_row = LightHouse:buildRow{
+    layout = unmeasured_layout,
+    primary = burmese_title,
+    secondary = burmese_authors,
+    glance = Ui.glanceProgress(require("lighthouse_status"), 0.45),
+    cover_glyph = "#",
+    callback = function() end,
+}
+report("unmeasured", unmeasured_row, unmeasured_layout)
+print(string.format("unmeasured_in_device_gutter=%d",
+    DEVICE_CONTENT_W - DEVICE_GUTTER - DEVICE_PADDING - model_width(unmeasured_row.mandatory or "")))
+
+print("OK")
+`;
+
+/**
+ * The pure geometry half of the same fix: the cover slot gives up pixels before
+ * the title column does, and a pixel fit is a pixel fit.
+ *
+ * `lighthouse_ui.lua` has no `require`s, so this harness loads it directly and
+ * needs none of the KOReader stubs.
+ */
+const ROW_GEOMETRY_HARNESS = String.raw`
+local Ui = assert(loadfile(assert(arg[1]) .. "/lighthouse_ui.lua"))()
+
+-- A screen too narrow for a full-size cover keeps the row: the slot shrinks.
+local shrunk = Ui.layout(800, 1, true)
+Ui.clampLayout(shrunk, { content_width = 160, padding = 7, scale = 1, name_min = 40 })
+print(string.format("clamp_shrunk_gutter=%d", shrunk.gutter))
+print(string.format("clamp_shrunk_cover_w=%d", shrunk.cover_width))
+print(string.format("clamp_shrunk_text_w=%d", 160 - shrunk.gutter - 7))
+
+-- A screen where no cover at all leaves a usable title column drops the slot
+-- rather than the row.
+local dropped = Ui.layout(800, 1, true)
+Ui.clampLayout(dropped, { content_width = 90, padding = 7, scale = 1, name_min = 40 })
+print(string.format("clamp_dropped_gutter=%d", dropped.gutter))
+print(string.format("clamp_dropped_cover_w=%d", dropped.cover_width))
+
+-- A layout with room for its cover is left exactly as it was.
+local kept = Ui.layout(800, 1, true)
+local kept_gutter = kept.gutter
+Ui.clampLayout(kept, { content_width = 576, padding = 7, scale = 1, name_min = 40 })
+print(string.format("clamp_kept_gutter=%d", kept.gutter - kept_gutter))
+
+-- fitToWidth is a genuine pixel fit, not a character count.
+local function width(text)
+    local total, index = 0, 1
+    while index <= #text do
+        local byte = text:byte(index)
+        local step = 1
+        if byte >= 0xF0 then step = 4
+        elseif byte >= 0xE0 then step = 3
+        elseif byte >= 0xC0 then step = 2 end
+        total = total + (step == 1 and 9 or 30)
+        index = index + step
+    end
+    return total
+end
+local wide = string.rep("\224\128\128", 40)
+print(string.format("fit_wide=%d", #Ui.fitToWidth(wide, width, 120)))
+print(string.format("fit_wide_width=%d", width(Ui.fitToWidth(wide, width, 120))))
+print(string.format("fit_kept=%s", tostring(Ui.fitToWidth("abc", width, 100) == "abc")))
+print(string.format("fit_too_tight=%s", tostring(Ui.fitToWidth("abc", width, 2) == "")))
+print("OK")
+`;
+
+describe("plugin row width", () => {
+  it("never hands TextBoxWidget a width that is not strictly positive", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "row-width-key",
+      generatedAt: "2026-11-14T00:00:00.000Z",
+    });
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-rowwidth-"));
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
+      encoding: "utf8",
+    });
+    expect(extract.status).toBe(0);
+
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "row_width_harness.lua");
+    fs.writeFileSync(harnessPath, ROW_WIDTH_HARNESS);
+
+    const res = spawnSync(LUA_BINARY, [harnessPath, pluginRoot], { encoding: "utf8" });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line) => line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+
+    // The fixture is a real overflow: the 1.4.0 character budget produced this
+    // exact row, and this exact width, on the device - the recorded metadata
+    // column there was 1564px, and the 266px gutter is the device's own.
+    expect(Number(out.legacy_available)).toBeLessThan(0);
+    expect(Number(out.legacy_mandatory_w)).toBeGreaterThanOrEqual(1564);
+
+    // The page follows the screen the device reports. These row counts come from
+    // the recorded 1648px screen; the plugin's 800px fallback lays a cover page
+    // out at 4 rows and a text page at 7, so a lost screen measurement fails
+    // here even though every width still fits.
+    expect(Number(out.covers_layout_rows)).toBe(6);
+    expect(Number(out.plain_layout_rows)).toBe(16);
+
+    // Wide mandatory string, covers on: the metadata column fits inside the
+    // row's real content box and the title keeps its minimum drawable width.
+    expect(out.wide_mandatory_makeline_ok).toBe("true");
+    expect(Number(out.wide_mandatory_available)).toBeGreaterThan(0);
+    expect(Number(out.wide_mandatory_available)).toBeGreaterThanOrEqual(80);
+    // The cover gutter survives - the fix narrows the column, never the covers.
+    expect(Number(out.wide_mandatory_state_w)).toBeGreaterThan(0);
+    expect(Number(out.wide_mandatory_cover_width)).toBeGreaterThan(0);
+
+    // Wide mandatory plus a cover gutter without covers: still fits.
+    expect(out.wide_plain_makeline_ok).toBe("true");
+    expect(Number(out.wide_plain_available)).toBeGreaterThan(0);
+    expect(Number(out.wide_plain_state_w)).toBe(0);
+
+    // The fit gives up characters, not information: an author that fits in the
+    // measured budget is still drawn in full beside its progress.
+    expect(out.latin_mandatory).toContain("Isuna Hasekura");
+    expect(out.latin_mandatory).toContain("45%");
+
+    // An empty title never becomes a zero-width line.
+    expect(out.empty_title_makeline_ok).toBe("true");
+    expect(Number(out.empty_title_text_len)).toBeGreaterThan(0);
+    expect(Number(out.empty_title_available)).toBeGreaterThan(0);
+
+    // A device that cannot measure pixels at all still draws: the fallback
+    // column fits the recorded content box, so restoring the 64-character budget
+    // that cost the device 685px fails here.
+    expect(out.unmeasured_makeline_ok).toBe("true");
+    expect(Number(out.unmeasured_mandatory_w)).toBeGreaterThan(0);
+    expect(Number(out.unmeasured_available)).toBeGreaterThan(0);
+    expect(Number(out.unmeasured_in_device_gutter)).toBeGreaterThan(0);
+
+    expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
+  });
+
+  it("shrinks the cover slot, never the row, and fits text in pixels", () => {
+    if (!LUA_BINARY) return;
+
+    const harnessPath = writeScratch("row_geometry_harness.lua", ROW_GEOMETRY_HARNESS);
+    const res = spawnSync(LUA_BINARY, [harnessPath, KOPLUGIN_TEMPLATE_DIR], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line) => line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+
+    // The slot shrinks before the row does, and only disappears when no cover
+    // can leave a usable title column.
+    expect(Number(out.clamp_shrunk_gutter)).toBeLessThan(89);
+    expect(Number(out.clamp_shrunk_cover_w)).toBeGreaterThan(0);
+    expect(Number(out.clamp_shrunk_text_w)).toBeGreaterThanOrEqual(80);
+    expect(Number(out.clamp_dropped_gutter)).toBe(0);
+    expect(Number(out.clamp_dropped_cover_w)).toBe(0);
+    // A page with room for its cover keeps the cover untouched.
+    expect(Number(out.clamp_kept_gutter)).toBe(0);
+
+    // fitToWidth shortens until the *measured* width fits, and leaves text that
+    // already fits alone.
+    expect(Number(out.fit_wide)).toBeLessThan(40);
+    expect(Number(out.fit_wide_width)).toBeLessThanOrEqual(120);
+    expect(out.fit_kept).toBe("true");
+    expect(out.fit_too_tight).toBe("true");
+
+    expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
 });

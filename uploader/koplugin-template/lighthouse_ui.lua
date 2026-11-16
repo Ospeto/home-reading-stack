@@ -46,6 +46,14 @@ Ui.tokens = {
     --: Total width of the metadata column. The glance is budgeted inside it
     --: first, so a runaway author list can never push progress or rating out.
     meta_max_chars = 64,
+    --: Graphemes the metadata column may carry when the device cannot measure
+    --: pixels at all. The 64 above is only safe behind a pixel fit: 64 wide
+    --: glyphs are wider than a whole row, which is the crash this plugin now
+    --: cannot reach. The unmeasurable fallback therefore takes the narrowest
+    --: column that still holds the widest glance the row language builds - the
+    --: bar, the percent, the finished check and the rating - plus a usable word
+    --: of the secondary line.
+    meta_unmeasured_chars = 28,
     --: Characters kept in the secondary metadata before it is ellipsized, so a
     --: long author list can never dominate the metadata column.
     secondary_max_chars = 44,
@@ -66,6 +74,15 @@ Ui.tokens = {
     --: Text views follow the screen height instead.
     rows_min = 4,
     rows_max = 9,
+    --: Hard ceiling on the metadata column's share of a row's text width, in
+    --: pixels. A character budget cannot bound a pixel width - a wide-glyph
+    --: script (Burmese, CJK) or the block glyphs in the progress bar measure
+    --: two to three times more per character than Latin - so this share is what
+    --: keeps the title column alive when a measurement is unavailable or the
+    --: reader's own font is wider than the one measured.
+    mandatory_share = 0.5,
+    --: Pixels the title column keeps even on the narrowest screen, title-units.
+    name_min_units = 40,
     --: Cover box height is clamped to this window, title-units.
     cover_min_units = 34,
     cover_max_units = 120,
@@ -312,6 +329,119 @@ function Ui.metaColumn(secondary, glance, max_chars)
     return Ui.join({ Ui.ellipsize(oneLine(secondary), limit - reserved), tail })
 end
 
+--- Measures text with a caller-supplied measurer, or nil when it cannot.
+--
+-- The measurer is a `function(text) -> pixels`; `main.lua` builds one from the
+-- face the device really draws with. Returning nil rather than 0 is deliberate:
+-- it lets a caller fall back to the character budget instead of pretending an
+-- unmeasurable string costs nothing.
+-- @string text
+-- @function[opt] measure
+-- @treturn number|nil
+function Ui.textWidth(text, measure)
+    if type(text) ~= "string" or text == "" then return 0 end
+    if type(measure) ~= "function" then return nil end
+    local ok, width = pcall(measure, text)
+    if not ok then return nil end
+    width = tonumber(width)
+    if not width or width ~= width or width < 0 then return nil end
+    return width
+end
+
+--- Shortens text with the ellipsis until its measured width fits `budget`.
+--
+-- This is the pixel-level counterpart of `Ui.ellipsize`, and it exists because
+-- a code-point budget cannot bound a pixel width: 64 Burmese letters and 64
+-- Latin letters are not the same column. KOReader's `TextBoxWidget:makeLine`
+-- raises on a width that is not strictly positive, that raise escapes
+-- `MenuItem:init`, and the process dies - so the column that overflows has to
+-- give up characters until the face the device draws with fits the pixels
+-- available.
+-- @string text
+-- @function[opt] measure
+-- @number budget pixels available to this string
+-- @treturn string the longest prefix + ellipsis that fits, or ""
+function Ui.fitToWidth(text, measure, budget)
+    if type(text) ~= "string" or text == "" then return "" end
+    budget = tonumber(budget)
+    if not budget or budget ~= budget then return "" end
+    local width = Ui.textWidth(text, measure)
+    -- Unmeasurable: fall back to the pixel-free cap rather than the raw string.
+    -- Returning `text` here is what handed the device a column wider than the
+    -- row it had to be drawn in.
+    if width == nil then return Ui.ellipsize(text, Ui.tokens.meta_unmeasured_chars) end
+    if width <= budget then return text end
+    local ellipsis = Ui.GLYPH.ellipsis
+    local ellipsis_width = Ui.textWidth(ellipsis, measure) or 0
+    if budget < ellipsis_width then return "" end
+    -- Widest prefix that still fits. `ellipsize` cuts on code-point
+    -- boundaries, so a Burmese or CJK letter is never split in half, and the
+    -- measured width grows with the prefix - a binary search is therefore
+    -- exact, not an approximation.
+    local total = graphemeCount(text)
+    local low, high, best = 1, total, 0
+    local rounds = 0
+    while low <= high and rounds < 12 do
+        rounds = rounds + 1
+        local middle = math.floor((low + high) / 2)
+        local candidate = Ui.ellipsize(text, middle)
+        local candidate_width = Ui.textWidth(candidate, measure)
+        if candidate_width and candidate_width <= budget then
+            best = middle
+            low = middle + 1
+        else
+            high = middle - 1
+        end
+    end
+    if best < 1 then return "" end
+    return Ui.ellipsize(text, best)
+end
+
+--- Builds a row's metadata column to a measured pixel budget.
+--
+-- The glance survives: progress and rating are what a catalog row is for, so
+-- the secondary text (author, series) is shortened first. Only when the glance
+-- alone cannot fit is it shortened too - a partial bar is a far better outcome
+-- than a row that takes KOReader down with it. A device that cannot measure
+-- pixels at all gets the small fixed `meta_unmeasured_chars` column instead, so
+-- an unmeasurable row is still bounded.
+-- @tparam table options { secondary, glance, max_chars, budget, measure }
+-- @treturn string never wider than `budget` when the runtime can measure
+function Ui.fitMetaColumn(options)
+    options = options or {}
+    local secondary = oneLine(options.secondary)
+    local glance = oneLine(options.glance)
+    local measure = options.measure
+    local budget = tonumber(options.budget)
+    local cap = Ui.tokens.meta_unmeasured_chars
+    -- The character pre-pass keeps a short row looking exactly as it did; the
+    -- pixel fit below is what actually guarantees the row can be drawn. When
+    -- no pixel can be measured, the small fixed cap is the only bound there
+    -- is - and returning the 64-character column instead is what killed both
+    -- devices.
+    local text = Ui.metaColumn(secondary, glance, options.max_chars)
+    if not budget or budget ~= budget or type(measure) ~= "function" then
+        return Ui.metaColumn(secondary, glance, cap)
+    end
+    local width = Ui.textWidth(text, measure)
+    if width == nil then return Ui.metaColumn(secondary, glance, cap) end
+    if width <= budget then return text end
+
+    local separator = glance ~= "" and secondary ~= "" and SEPARATOR or ""
+    local glance_width = Ui.textWidth(glance, measure) or 0
+    local separator_width = separator ~= "" and (Ui.textWidth(separator, measure) or 0) or 0
+    local room = budget - glance_width - separator_width
+    local trimmed = room > 0 and Ui.fitToWidth(secondary, measure, room) or ""
+    local result = Ui.join({ trimmed, glance })
+    local result_width = Ui.textWidth(result, measure)
+    if result_width == nil then return Ui.metaColumn(secondary, glance, cap) end
+    if result_width <= budget then return result end
+
+    -- Even the glance overflows on its own: it gives up characters last, and a
+    -- row with no metadata at all is still a row that draws.
+    return Ui.fitToWidth(glance, measure, budget)
+end
+
 --- Renders a progress bar sized for the glance column.
 -- Delegates to the reading-status module so the plugin has exactly one bar
 -- renderer, and only chooses how many slots the narrow column can carry.
@@ -381,6 +511,54 @@ function Ui.layout(screen_h, scale, with_covers)
         layout.gutter = layout.cover_width + math.floor(tokens.gutter_units * screen_scale)
     end
 
+    return layout
+end
+
+--- Keeps a cover gutter from eating the title column.
+--
+-- The cover is a feature of this list, so the *slot* gives up pixels first: it
+-- shrinks to the widest cover that still leaves `name_min` pixels for the
+-- title, and only when even that slot would leave no room does the gutter go
+-- to zero - a text row, never a row that cannot be drawn.
+-- @tparam table layout result of `Ui.layout`
+-- @tparam table geometry { content_width, padding, scale, name_min }
+-- @treturn table the layout, clamped in place
+function Ui.clampLayout(layout, geometry)
+    if type(layout) ~= "table" then return layout end
+    geometry = geometry or {}
+    local gutter = numberIn(layout.gutter, 0, 0)
+    if gutter <= 0 then return layout end
+    local content = numberIn(geometry.content_width, 0, 0)
+    if content <= 0 then return layout end
+    local padding = numberIn(geometry.padding, 0, 0)
+    local scale = numberIn(geometry.scale, 1, 0.5, 4)
+    local share = numberIn(Ui.tokens.mandatory_share, 0.5, 0.1, 0.9)
+    local name_min = numberIn(
+        geometry.name_min,
+        math.floor(Ui.tokens.name_min_units * scale),
+        1
+    )
+    -- The narrowest text column that still leaves `name_min` for the title.
+    local usable_min = math.ceil(name_min / (1 - share))
+    local gutter_max = content - padding - usable_min
+    if gutter <= gutter_max then return layout end
+    local slot_padding = math.floor(Ui.tokens.gutter_units * scale)
+    if gutter_max < slot_padding + 1 then
+        -- Not even a 1px cover leaves a usable title column: this page draws
+        -- text rows instead of covers.
+        layout.gutter = 0
+        layout.cover_width = 0
+        layout.cover_height = 0
+        layout.gutter_reduced = true
+        return layout
+    end
+    layout.cover_width = gutter_max - slot_padding
+    layout.cover_height = math.max(
+        math.floor(layout.cover_width / Ui.tokens.cover_aspect + 0.5),
+        1
+    )
+    layout.gutter = layout.cover_width + slot_padding
+    layout.gutter_reduced = true
     return layout
 end
 

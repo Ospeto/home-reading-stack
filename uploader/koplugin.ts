@@ -32,7 +32,7 @@ export const KOPLUGIN_DIR_NAME = "lighthouse.koplugin";
 export const KOPLUGIN_DOWNLOAD_FILENAME = "lighthouse.koplugin";
 
 /** Version stamped into the generated configuration. */
-export const KOPLUGIN_VERSION = "1.4.0";
+export const KOPLUGIN_VERSION = "1.4.1";
 
 /** Per-socket-operation timeout for JSON/OPDS requests, in seconds. */
 export const KOPLUGIN_REQUEST_BLOCK_TIMEOUT = 10;
