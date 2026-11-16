@@ -19,8 +19,15 @@ What it gives you, on top of the built-in OPDS browser:
   * Book detail with one-tap EPUB download straight into your download folder.
   * Reading status per book, merged from the server's KOSync progress
     (`GET /api/kosync/active`), matched on Calibre id, filename or title.
+  * Local reading progress on top of that: every book KOReader has opened on
+    this device has a sidecar file beside it, and its `percent_finished` wins
+    over the server's number for that book (see `localRecordFor`).
+  * A "Highlights" view of this device's own highlights and notes, newest
+    first, grouped by book, read from those same sidecar files - no network
+    involved, no polling, and nothing written back.
   * Calibre rating per book (0–10 → five stars), served by the OPDS feed.
-  * A "Currently reading" shelf of every active device session.
+  * A "Currently reading" shelf of every active device session, with local
+    progress preferred and books only this device has read added to it.
   * A "Reading stats" view mirroring the web Reading Statistics modal, headline
     numbers first and then the activity picture: streak, reading time, books
     finished this year, the yearly goal, a monochrome 26-week activity heatmap
@@ -30,8 +37,12 @@ What it gives you, on top of the built-in OPDS browser:
 
 It deliberately uses only endpoints that already existed before this plugin:
 `/api/opds`, `/api/books/<id>/download/epub`, `/api/books/<id>/cover`,
-`/api/kosync/active`, `/api/kosync/stats`. Authentication reuses the server's
-existing scheme (`X-API-Key`, or an allowed WAN origin when no key is
+`/api/kosync/active`, `/api/kosync/stats`. Local progress and highlights add no
+endpoint at all: they are read from the sidecar files KOReader already writes
+beside the books (`<book>.sdr/metadata.<extension>.lua`, see
+`lighthouse_sidecar.lua`), and that surface is strictly read-only - the plugin
+never writes a sidecar and never uploads progress. Authentication reuses the
+server's existing scheme (`X-API-Key`, or an allowed WAN origin when no key is
 configured), so a later server-side change to scoped keys does not need this
 plugin to be rewritten.
 
@@ -69,6 +80,7 @@ local _ = require("gettext")
 local config = require("lighthouse_config")
 local Client = require("lighthouse_client")
 local OPDS = require("lighthouse_opds")
+local Sidecar = require("lighthouse_sidecar")
 local Stats = require("lighthouse_stats")
 local Status = require("lighthouse_status")
 local Ui = require("lighthouse_ui")
@@ -958,6 +970,11 @@ function LightHouse:addToMainMenu(menu_items)
                 callback = function() self:showReading() end,
             },
             {
+                text = _("Highlights"),
+                callback = function() self:showHighlights() end,
+                help_text = _("Highlights and notes from this device, read from KOReader's own sidecar files. No connection is needed and nothing is uploaded."),
+            },
+            {
                 text = _("Reading stats"),
                 callback = function() self:showStats() end,
             },
@@ -1010,6 +1027,7 @@ function LightHouse:showConnection(configured)
         _("Progress endpoint:") .. " /api/kosync/active",
         _("Statistics endpoint:") .. " /api/kosync/stats",
         _("Download folder:") .. " " .. self:getDownloadDir(),
+        _("Local progress and highlights:") .. " " .. _("read from this device's KOReader sidecar files"),
         _("Cover thumbnails:") .. " " .. (self:coversEnabled() and _("shown") or _("hidden (fastest)")),
         _("Cover cache:") .. " " .. coverDir(),
         _("Plugin version:") .. " " .. tostring(config.plugin_version or "unknown"),
@@ -1076,6 +1094,195 @@ function LightHouse:fetchSessions()
         return nil, "invalid_response"
     end
     return Status.normalizeSessions(decoded)
+end
+
+--- Directories searched for books and their sidecars on this device.
+-- Kindle keeps sideloaded books in `/mnt/us/books` and `/mnt/us/documents`
+-- (both from `Sidecar.DEVICE_DIRS`), and the plugin's own download folder plus
+-- KOReader's configured home directory are added on top so a book downloaded
+-- from this plugin and a book copied by hand are both found. Read-only.
+-- @treturn table array of directory paths
+function LightHouse:localSearchDirs()
+    local dirs = {}
+    for dir_index = 1, #Sidecar.DEVICE_DIRS do
+        dirs[#dirs + 1] = Sidecar.DEVICE_DIRS[dir_index]
+    end
+    local download_dir = self:getDownloadDir()
+    if Status.str(download_dir) ~= "" then dirs[#dirs + 1] = download_dir end
+    local home_dir = G_reader_settings:readSetting("home_dir")
+    if type(home_dir) == "string" and home_dir ~= "" then dirs[#dirs + 1] = home_dir end
+    return dirs
+end
+
+--- Scans this device's KOReader sidecars once, read-only, cached for the session.
+--
+-- This is what makes progress and highlights offline-first: ONE directory walk
+-- when a view that needs it opens, no network, and no refresh timer. `force`
+-- re-walks the device for a view's own Refresh action; otherwise the previous
+-- scan is reused, so opening Highlights then Currently reading costs one walk.
+-- A scan that fails is "no local data", never a raised error on screen.
+-- @boolean[opt] force re-walk the device instead of using the cached scan
+-- @treturn table array of sidecar records
+function LightHouse:localRecords(force)
+    if self.local_scan and not force then return self.local_scan end
+    local scanned, records = pcall(Sidecar.scan, { dirs = self:localSearchDirs() })
+    if not scanned or type(records) ~= "table" then
+        logger.warn("LightHouse: local sidecar scan failed:", tostring(records))
+        records = {}
+    end
+    self.local_scan = records
+    self.local_index = Sidecar.index(records)
+    return records
+end
+
+--- The matching index for the current scan, built on demand.
+-- @treturn table result of `Sidecar.index`
+function LightHouse:localIndex()
+    if not self.local_index then self:localRecords() end
+    return self.local_index or { by_stem = {}, by_title = {}, records = {} }
+end
+
+--- The local sidecar record for one book, when this device has it.
+--
+-- THE AUTHORITY RULE, in one place: when a book exists both on this device and
+-- in the server's KOSync sessions, the LOCAL value wins - see
+-- `applyLocalToSession` and `applyLocalToEntry`, which are its only callers.
+-- The device is the authority for the book in the reader's hand: it wrote that
+-- percentage from the reading session happening right now, while the server
+-- copy is only as fresh as the last progress upload. A device that has not
+-- synced yet would otherwise show a stale number, or none at all.
+-- @tparam table keys { stem = string, title = string, authors = table }
+-- @treturn table|nil sidecar record
+function LightHouse:localRecordFor(keys)
+    return Sidecar.find(self:localIndex(), keys)
+end
+
+--- Prefers this device's own progress for one KOSync session (shelf row).
+-- Local wins over the server here; see `localRecordFor` for why.
+-- @tparam table session normalized KOSync session (mutated in place)
+-- @treturn table|nil local record when this book is on this device
+function LightHouse:applyLocalToSession(session)
+    if type(session) ~= "table" then return nil end
+    local record = self:localRecordFor{
+        stem = Sidecar.stemKey(session.filename),
+        title = Status.normalize(session.title),
+        authors = type(session.normalized_authors) == "table"
+            and session.normalized_authors or {},
+    }
+    if not record then return nil end
+    session.local_record = record
+    session.book_path = Status.str(record.book_path)
+    local ratio = Status.num(record.percent_finished)
+    if ratio then
+        session.percentage = Status.clampPercentage(ratio)
+        session.progress_source = "device"
+    end
+    return record
+end
+
+--- Prefers this device's own progress for one catalog entry (catalog row).
+-- A catalog row draws its progress from `entry.status`, so the local value goes
+-- there; a book only this device has read has no server session at all, which
+-- is why the status table is created from the local record in that case.
+-- Local wins over the server here; see `localRecordFor` for why.
+-- @tparam table entry OPDS entry (mutated in place)
+-- @treturn table|nil local record when this book is on this device
+function LightHouse:applyLocalToEntry(entry)
+    if type(entry) ~= "table" then return nil end
+    local record = self:localRecordFor{
+        stem = Sidecar.stemKey(buildFilename(entry)),
+        title = Status.normalize(entry.title),
+        authors = Status.authorList(entry.authors),
+    }
+    if not record then return nil end
+    entry.local_record = record
+    local ratio = Status.num(record.percent_finished)
+    if not ratio then return record end
+    ratio = Status.clampPercentage(ratio)
+    if type(entry.status) ~= "table" then
+        entry.status = {
+            percentage = ratio,
+            device = "",
+            progress_source = "device",
+            title = Status.str(entry.title),
+            authors = Status.str(entry.authors),
+        }
+    else
+        entry.status.percentage = ratio
+        entry.status.progress_source = "device"
+    end
+    return record
+end
+
+--- A shelf row for a book this device has read but the server has no session for.
+-- Shaped like a normalized KOSync session so the shelf row, the covers pass and
+-- the sorting rule need no special case for "local only".
+-- @tparam table record sidecar record
+-- @treturn table session-shaped row
+function LightHouse:localOnlySession(record)
+    return {
+        title = Sidecar.displayTitle(record),
+        authors = Status.str(record.authors),
+        filename = Sidecar.fileName(record.book_path),
+        device = "",
+        percentage = Status.num(record.percent_finished),
+        timestamp = Status.num(record.modified) or 0,
+        book_id = nil,
+        book_path = Status.str(record.book_path),
+        normalized_authors = Sidecar.authorList(record.authors),
+        progress_source = "device",
+        local_record = record,
+    }
+end
+
+--- True when a sidecar record describes a book that is actually in progress.
+-- The server's own "active" definition, applied to the device's numbers so a
+-- local-only row means the same thing a server row does: `0 < progress < 0.99`
+-- (see `uploader/ssd-backup.ts`'s shelf semantics and the bot's `/reading`).
+-- Without it, every book the device has ever opened - finished ones included,
+-- and the real device has plenty at exactly 1 - would pile onto the shelf.
+-- @tparam table record sidecar record
+-- @treturn boolean
+function LightHouse:localIsInProgress(record)
+    local ratio = Status.num(record and record.percent_finished)
+    if not ratio then return false end
+    ratio = Status.clampPercentage(ratio)
+    return ratio > 0 and ratio < 0.99
+end
+
+--- Builds the shelf: server sessions with local progress preferred, then books
+-- only this device knows about.
+-- @tparam table|nil sessions normalized KOSync sessions
+-- @tparam table local_records sidecar records from `localRecords`
+-- @treturn table session-shaped shelf rows, newest first
+function LightHouse:mergeReadingShelf(sessions, local_records)
+    local shelf = {}
+    local covered = {}
+    local session_list = type(sessions) == "table" and sessions or {}
+    for session_index = 1, #session_list do
+        local session = session_list[session_index]
+        local record = self:applyLocalToSession(session)
+        if record and Status.str(record.book_path) ~= "" then
+            covered[Status.str(record.book_path)] = true
+        end
+        shelf[#shelf + 1] = session
+    end
+    for record_index = 1, #(local_records or {}) do
+        local record = local_records[record_index]
+        local book_path = Status.str(record and record.book_path)
+        if book_path ~= ""
+            and not covered[book_path]
+            and self:localIsInProgress(record)
+        then
+            shelf[#shelf + 1] = self:localOnlySession(record)
+        end
+    end
+    -- Newest first, so the book opened last on any device leads the shelf; a
+    -- local-only row is dated by its sidecar's mtime.
+    table.sort(shelf, function(left, right)
+        return (Status.num(left.timestamp) or 0) > (Status.num(right.timestamp) or 0)
+    end)
+    return shelf
 end
 
 --- Opens a catalog page.
@@ -1157,6 +1364,17 @@ function LightHouse:openCatalog(query, start_index, page_number)
         return self:fetchSessions()
     end) or {}
     Status.merge(feed.entries, sessions)
+
+    -- Local sidecars beat the server for any book this device has opened (see
+    -- `localRecordFor`), and a book only this device has read gets its progress
+    -- from the sidecar because the server sent no session for it at all.
+    for entry_index = 1, #feed.entries do
+        local entry = feed.entries[entry_index]
+        local applied = pcall(function() self:applyLocalToEntry(entry) end)
+        if not applied then
+            logger.warn("LightHouse: local progress match failed for", tostring(entry.title))
+        end
+    end
 
     local with_covers = self:coversEnabled()
     if with_covers then
@@ -1258,6 +1476,23 @@ function LightHouse:buildCatalogItem(entry, layout)
         text = T(_("Progress: %1"), Status.statusLabel(entry)),
         callback = function() end,
     }
+    -- Local sidecar data, when this device has this book: the progress above is
+    -- then the device's own number (see `localRecordFor`), and the highlights
+    -- are only ever read from the device.
+    if status and Status.str(status.progress_source) == "device" then
+        details[#details + 1] = {
+            text = _("Progress read from this device"),
+            select_enabled = false,
+            callback = function() end,
+        }
+    end
+    local local_record = type(entry.local_record) == "table" and entry.local_record or nil
+    if local_record and (Status.num(local_record.annotation_count) or 0) > 0 then
+        details[#details + 1] = {
+            text = T(_("Highlights: %1"), Status.num(local_record.annotation_count)),
+            callback = function() self:showHighlights() end,
+        }
+    end
     local device = status and Status.str(status.device) or ""
     if device ~= "" then
         details[#details + 1] = {
@@ -1374,12 +1609,32 @@ function LightHouse:buildReadingItem(session, layout)
     if book_id then book_id = math.floor(book_id) end
 
     local details = {}
+    -- A session can point at a book this device no longer has (deleted after it
+    -- was read), so the file itself decides which action the row offers.
+    local local_book_path = Status.str(session.book_path)
+    local has_local_file = local_book_path ~= "" and Sidecar.bookExists(local_book_path)
     if book_id then
         local session_for_download = session
         details[#details + 1] = {
             text = _("Download EPUB"),
             bold = true,
             callback = function() self:downloadBookId(session_for_download) end,
+        }
+    elseif has_local_file then
+        -- A book this device already has (and the server has no Calibre id
+        -- for) is opened from disk instead of being offered for download.
+        details[#details + 1] = {
+            text = _("Open book"),
+            bold = true,
+            callback = function() self:openBookFile(local_book_path) end,
+        }
+    elseif local_book_path ~= "" then
+        -- The sidecar outlived the book: the row stays (its progress and
+        -- highlights are real) but must not pretend it can open a gone file.
+        details[#details + 1] = {
+            text = _("Book file is missing from this device"),
+            enabled = false,
+            callback = function() end,
         }
     else
         details[#details + 1] = {
@@ -1392,6 +1647,22 @@ function LightHouse:buildReadingItem(session, layout)
         text = T(_("Progress: %1"), Status.progressBar(Status.num(session.percentage))),
         callback = function() end,
     }
+    -- Where the number came from. A local sidecar value replaces the server's
+    -- for this book (see `localRecordFor`), and the row says so.
+    if Status.str(session.progress_source) == "device" then
+        details[#details + 1] = {
+            text = _("Progress read from this device"),
+            select_enabled = false,
+            callback = function() end,
+        }
+    end
+    local local_record = type(session.local_record) == "table" and session.local_record or nil
+    if local_record and (Status.num(local_record.annotation_count) or 0) > 0 then
+        details[#details + 1] = {
+            text = T(_("Highlights: %1"), Status.num(local_record.annotation_count)),
+            callback = function() self:showHighlights() end,
+        }
+    end
     if device ~= "" then
         details[#details + 1] = {
             text = T(_("Device: %1"), device),
@@ -1419,54 +1690,76 @@ function LightHouse:buildReadingItem(session, layout)
     }
 end
 
---- Shows every active KOSync session, newest first.
+--- Shows every active KOSync session, newest first, with this device's own
+-- books and progress in front of the server's copy.
+--
+-- Offline-first: the shelf is built from the device's sidecar files, so it opens
+-- with no connection at all. The server's sessions are merged on top when they
+-- are reachable, and only the books this device has never seen depend on them.
 function LightHouse:showReading()
-    if not Client.isConfigured(config) then
-        self:showProblem{
-            title = _("Currently reading"),
-            headline = errorHeadline("not_configured"),
-            detail = describeError("not_configured"),
-            actions = { connectionAction(self) },
-        }
-        return
-    end
-    if not NetworkMgr:isOnline() then
-        NetworkMgr:willRerunWhenOnline(function() self:showReading() end)
-        return
+    local local_records = self:localRecords()
+    local configured = Client.isConfigured(config)
+    local online = NetworkMgr:isOnline()
+
+    if #local_records == 0 then
+        if not configured then
+            self:showProblem{
+                title = _("Currently reading"),
+                headline = errorHeadline("not_configured"),
+                detail = describeError("not_configured"),
+                actions = { connectionAction(self) },
+            }
+            return
+        end
+        if not online then
+            NetworkMgr:willRerunWhenOnline(function() self:showReading() end)
+            return
+        end
     end
 
-    local sessions, err = self:withSpinner(_("Loading reading progress…"), function()
-        return self:fetchSessions()
-    end)
-    if not sessions then
-        self:showProblem{
-            title = _("Currently reading"),
-            headline = errorHeadline(err),
-            detail = describeError(err),
-            actions = { retryAction(_("Try again"), function() self:showReading() end) },
-        }
-        return
+    local sessions, err
+    if configured and online then
+        sessions, err = self:withSpinner(_("Loading reading progress…"), function()
+            return self:fetchSessions()
+        end)
     end
-    if #sessions == 0 then
-        self:showProblem{
-            title = _("Currently reading"),
-            headline = _("Nothing in progress yet"),
-            detail = _("Open a book in KOReader with progress sync on, then come back."),
-            actions = {
-                retryAction(_("Refresh"), function() self:showReading() end),
-                { text = _("Browse library"), callback = function() self:openCatalog("", 0, 1) end },
-            },
-        }
+
+    local shelf = self:mergeReadingShelf(sessions, local_records)
+    if #shelf == 0 then
+        if not sessions then
+            -- No server sessions and nothing local: a failed request is what
+            -- happened, so say that instead of claiming nothing is in progress.
+            self:showProblem{
+                title = _("Currently reading"),
+                headline = errorHeadline(err),
+                detail = describeError(err),
+                actions = {
+                    retryAction(_("Try again"), function() self:showReading() end),
+                    connectionAction(self),
+                },
+            }
+        else
+            self:showProblem{
+                title = _("Currently reading"),
+                headline = _("Nothing in progress yet"),
+                detail = _("Open a book in KOReader with progress sync on, then come back."),
+                actions = {
+                    retryAction(_("Refresh"), function() self:showReading() end),
+                    { text = _("Browse library"), callback = function() self:openCatalog("", 0, 1) end },
+                },
+            }
+        end
         return
     end
 
     local with_covers = self:coversEnabled()
     if with_covers then
         -- The progress endpoint carries the Calibre id, so the shelf can show
-        -- covers without asking the server for anything else.
+        -- covers without asking the server for anything else. A book only this
+        -- device has read has no id, so it simply has no cover here.
         local cover_entries = {}
-        for session_index = 1, #sessions do
-            local session = sessions[session_index]
+        for session_index = 1, #shelf do
+            local session = shelf[session_index]
             local book_id = Status.num(session.book_id)
             if book_id then
                 book_id = math.floor(book_id)
@@ -1497,19 +1790,216 @@ function LightHouse:showReading()
 
     local layout = self:layoutFor(with_covers)
     local items = {}
+    -- The server did not answer but this device did: say which data is on
+    -- screen instead of presenting a partial shelf as the whole truth. It is a
+    -- note row, not an action, and every book row below it still works.
+    if not sessions and err ~= nil then
+        items[#items + 1] = self:buildRow{
+            primary = _("This device only - the server could not be reached."),
+            select_enabled = false,
+        }
+    end
     -- `session_index`, not `_`: `_` is gettext in this file (see the note by
     -- its require), so using it as a throwaway aborted the whole process on
     -- the device the moment a row called `_("…")`.
     -- Every row is built through `buildSafeRow`: a session this shelf cannot
     -- render costs its own row, not the remaining rows and not the process.
-    for session_index = 1, #sessions do
-        local session = sessions[session_index]
+    for session_index = 1, #shelf do
+        local session = shelf[session_index]
         items[#items + 1] = self:buildSafeRow(function()
             return self:buildReadingItem(session, layout)
         end)
     end
 
     self:showMenu(_("Currently reading"), items, { covers = with_covers, layout = layout })
+end
+
+--- Shows this device's highlights, newest first, grouped by book.
+--
+-- Offline-first and strictly read-only: the rows come from the sidecar files
+-- beside the books on this device, read once when the view opens (`localRecords`
+-- caches that scan for the session), with no network call and no polling.
+function LightHouse:showHighlights()
+    local groups = Sidecar.highlightGroups(self:localRecords())
+    if #groups == 0 then
+        self:showProblem{
+            title = _("Highlights"),
+            headline = _("No highlights on this device yet"),
+            detail = _("Highlight a passage in KOReader and it appears here, read from this device - no connection needed."),
+            actions = {
+                retryAction(_("Refresh"), function()
+                    self:localRecords(true)
+                    self:showHighlights()
+                end),
+                { text = _("Browse library"), callback = function() self:openCatalog("", 0, 1) end },
+            },
+        }
+        return
+    end
+
+    local items = {}
+    for group_index = 1, #groups do
+        local group = groups[group_index]
+        local annotations = {}
+        for annotation_index = 1, #group.annotations do
+            local annotation = group.annotations[annotation_index]
+            -- One unrenderable highlight costs its own row, never the view.
+            annotations[#annotations + 1] = self:buildSafeRow(function()
+                return self:buildHighlightItem(group, annotation)
+            end)
+        end
+        items[#items + 1] = self:buildSafeRow(function()
+            return self:buildHighlightGroupItem(group, annotations)
+        end)
+    end
+
+    self:showMenu(_("Highlights on this device"), items, { covers = false })
+end
+
+--- One book heading in the highlights view: title, author, highlight count.
+-- @tparam table group entry from `Sidecar.highlightGroups`
+-- @tparam table annotations prebuilt highlight rows for this book
+-- @treturn table Menu item
+function LightHouse:buildHighlightGroupItem(group, annotations)
+    local title = Status.str(group and group.title)
+    if title == "" then title = _("Untitled") end
+    return self:buildRow{
+        primary = title,
+        secondary = Status.str(group and group.authors, _("Unknown")),
+        glance = T(_("Highlights: %1"), Status.num(group and group.annotation_count)),
+        details = annotations,
+    }
+end
+
+--- One highlight row: the quote leads, its position and style follow.
+--
+-- Colour and style are OPTIONAL - the verified device book's annotations carried
+-- neither `color` nor `drawer` - so an absent style costs nothing on the row
+-- instead of a placeholder that would imply something is missing.
+-- @tparam table group book this highlight belongs to
+-- @tparam table annotation normalized annotation
+-- @treturn table Menu item
+function LightHouse:buildHighlightItem(group, annotation)
+    local text = Sidecar.annotationText(annotation)
+    -- A menu row is one line, so the quote is flattened here rather than left
+    -- to KOReader's own newline handling.
+    if text == "" then text = _("Untitled note") end
+
+    local glance_parts = {}
+    local page = Sidecar.annotationPage(annotation)
+    if page then glance_parts[#glance_parts + 1] = T(_("p. %1"), page) end
+    local style = Sidecar.styleLabel(annotation)
+    if style ~= "" then glance_parts[#glance_parts + 1] = style end
+
+    return self:buildRow{
+        primary = text,
+        secondary = Status.str(annotation and annotation.chapter),
+        glance = Ui.join(glance_parts),
+        callback = function() self:openHighlight(group, annotation) end,
+    }
+end
+
+--- Opens the book behind one highlight.
+--
+-- Strictly read-only: no sidecar is written and no progress is sent anywhere -
+-- the write surface of this plugin is unchanged. The page jump goes through the
+-- reader's own navigation module inside `pcall`, so a KOReader build without
+-- that hook opens the book at its last position instead of raising. When the
+-- book file itself is gone, the note text is shown instead - it is the only
+-- thing left to offer, and it is what the reader tapped for.
+-- @tparam table group book this highlight belongs to
+-- @tparam table annotation normalized annotation
+function LightHouse:openHighlight(group, annotation)
+    local book_path = Status.str(group and group.book_path)
+    if book_path == "" or not Sidecar.bookExists(book_path) then
+        self:showHighlightNote(group, annotation)
+        return
+    end
+    local opened = self:openBookFile(book_path)
+    if not opened then
+        self:showHighlightNote(group, annotation)
+        return
+    end
+    local page = Sidecar.annotationPage(annotation)
+    if page then self:jumpToPage(page) end
+end
+
+--- Opens one book that is already on this device.
+-- Fully guarded: a book KOReader refuses to open is reported in the log and
+-- returns false, instead of raising out of a menu callback.
+-- @string book_path
+-- @treturn boolean opened
+function LightHouse:openBookFile(book_path)
+    local path = Status.str(book_path)
+    if path == "" then return false end
+    local opened, raise = pcall(function()
+        local ReaderUI = require("apps/reader/readerui")
+        ReaderUI:showReader(path)
+    end)
+    if not opened then
+        logger.warn("LightHouse: opening", path, "raised:", tostring(raise))
+        return false
+    end
+    return true
+end
+
+--- Jumps the freshly opened book to a highlight's page, best effort.
+-- The reader instance is not created synchronously, so the jump is deferred a
+-- tick and every hop is `pcall`ed: a build without `rolling`/`paging`
+-- navigation, or a page past the end, must cost the jump and not the process.
+-- @number page 1-based page number
+-- @treturn boolean scheduled
+function LightHouse:jumpToPage(page)
+    local target = Status.num(page)
+    if not target then return false end
+    target = math.floor(target)
+    if target < 1 then return false end
+    local scheduled, raise = pcall(function()
+        UIManager:nextTick(function()
+            local jumped, jump_error = pcall(function()
+                local ReaderUI = require("apps/reader/readerui")
+                local reader = ReaderUI.instance
+                if type(reader) ~= "table" then return end
+                local navigation = reader.rolling or reader.paging
+                if type(navigation) ~= "table" then return end
+                local goto_page = navigation.onGotoPage
+                if type(goto_page) ~= "function" then return end
+                goto_page(navigation, target)
+            end)
+            if not jumped then
+                logger.warn("LightHouse: page jump failed:", tostring(jump_error))
+            end
+        end)
+    end)
+    if not scheduled then
+        logger.warn("LightHouse: page jump not scheduled:", tostring(raise))
+        return false
+    end
+    return true
+end
+
+--- Shows one highlight's own text when its book cannot be opened.
+-- @tparam table group book this highlight belongs to
+-- @tparam table annotation normalized annotation
+function LightHouse:showHighlightNote(group, annotation)
+    local lines = {}
+    local title = Status.str(group and group.title)
+    if title ~= "" then lines[#lines + 1] = title end
+    local chapter = Status.str(annotation and annotation.chapter)
+    if chapter ~= "" then lines[#lines + 1] = chapter end
+    local text = Sidecar.annotationText(annotation)
+    if text ~= "" then lines[#lines + 1] = text end
+    local note = Sidecar.annotationNote(annotation)
+    if note ~= "" and note ~= text then lines[#lines + 1] = note end
+    local page = Sidecar.annotationPage(annotation)
+    if page then lines[#lines + 1] = T(_("Page %1"), page) end
+    local datetime = Status.str(annotation and annotation.datetime)
+    if datetime ~= "" then lines[#lines + 1] = datetime end
+    if #lines == 0 then lines[#lines + 1] = _("This highlight has no text.") end
+    UIManager:show(TextViewer:new{
+        title = _("Highlight"),
+        text = table.concat(lines, "\n\n"),
+    })
 end
 
 --- Fetches and normalizes `GET /api/kosync/stats`.
