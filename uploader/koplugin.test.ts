@@ -1737,6 +1737,15 @@ package.preload["ui/widget/textwidget"] = function() return stub_widget("textwid
 package.preload["ui/font"] = function()
   return { getFace = function(_, name) return "face:" .. tostring(name) end }
 end
+-- main.lua reads the padding menu.lua subtracts from a row's content width,
+-- so the stubs report the same tokens a 160-dpi device reports.
+package.preload["ui/size"] = function()
+  return {
+    padding = { fullscreen = 10 },
+    border = { window = 2 },
+    span = { horizontal_default = 7, horizontal_small = 4 },
+  }
+end
 package.preload["ui/geometry"] = function()
   local geom = {}
   function geom:new(options)
@@ -4118,5 +4127,304 @@ describe("plugin row safety against JSON nulls and malformed fields", () => {
     expect(out.browse_row_text_types).toBe("string,string,string");
     expect(out.browse_texts).toContain("Spice and Wolf");
     expect(out.browse_texts).toContain("Dune");
+  });
+});
+
+/**
+ * Row-width regression (plugin 1.4.1).
+ *
+ * 1.4.0 fixed the null-sentinel crash and exposed a second one: on both Kindles,
+ * opening Browse library or Currently reading killed KOReader with
+ *
+ *   ./luajit: frontend/ui/widget/textboxwidget.lua:394:
+ *     bad argument #2 to 'makeLine' (width must be strictly positive)
+ *
+ * `menu.lua` computes
+ *
+ *   available_width = content_width - state_width
+ *                                 - text_mandatory_padding - mandatory_w
+ *
+ * and hands it straight to a TextBoxWidget. `Ui.metaColumn` budgeted that
+ * column in *graphemes* (64 chars), which is not a pixel bound: the same 64
+ * characters are two to three times wider in Burmese than in Latin, and the
+ * block glyphs in the progress bar are wider still. Measured on the Paperwhite
+ * (screen 1236x1648, real faces, 1166px of content, 266px cover gutter) a real
+ * row's metadata column was 1564px, leaving available_width = -685.
+ *
+ * The width model below is deliberately hostile in the same direction as the
+ * device, so a character budget cannot pass it by luck.
+ */
+const ROW_WIDTH_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
+-- Distance the width model charges, in pixels: Latin per character, and per
+-- code point for everything else (Burmese, CJK, the block glyphs of the bar).
+local WIDTH_ASCII = 9
+local WIDTH_WIDE = 30
+
+local function model_width(text)
+    if type(text) ~= "string" then return 0 end
+    local total, index = 0, 1
+    while index <= #text do
+        local byte = text:byte(index)
+        local step = 1
+        if byte >= 0xF0 then step = 4
+        elseif byte >= 0xE0 then step = 3
+        elseif byte >= 0xC0 then step = 2 end
+        if step == 1 then total = total + WIDTH_ASCII else total = total + WIDTH_WIDE end
+        index = index + step
+    end
+    return total
+end
+
+-- The prelude's TextWidget stub cannot measure; replace it before main.lua
+-- loads, because the plugin builds its measurer from this class.
+package.preload["ui/widget/textwidget"] = function()
+    local widget = {}
+    function widget:new(options)
+        options = options or {}
+        options.__kind = "textwidget"
+        function options:getWidth() return model_width(self.text) end
+        function options:free() end
+        return options
+    end
+    return widget
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local Ui = require("lighthouse_ui")
+
+-- makeLine, exactly as TextBoxWidget raises it on the device.
+local function makeLine(width)
+    if type(width) ~= "number" or width <= 0 then
+        error("bad argument #2 to 'makeLine' (width must be strictly positive)", 2)
+    end
+    return width
+end
+
+-- The device arithmetic from menu.lua: the stub reports a 600x800 screen with
+-- Size.padding.fullscreen = 10 and Size.border.window = 2, so a row's content
+-- box is 600 - 2*2 - 2*10 = 576px, and 7px of mandatory padding.
+local CONTENT_WIDTH = 600 - 2 * 2 - 2 * 10
+local MANDATORY_PADDING = 7
+
+local function report(label, item, layout)
+    local state_width = layout.gutter or 0
+    local mandatory_w = model_width(item.mandatory or "")
+    local available = CONTENT_WIDTH - state_width - MANDATORY_PADDING - mandatory_w
+    local ok, err = pcall(makeLine, available)
+    print(string.format("%s_text=%s", label, tostring(item.text)))
+    print(string.format("%s_text_len=%d", label, #tostring(item.text)))
+    print(string.format("%s_mandatory_w=%d", label, mandatory_w))
+    print(string.format("%s_available=%d", label, available))
+    print(string.format("%s_makeline_ok=%s", label, tostring(ok)))
+    print(string.format("%s_state_w=%d", label, state_width))
+    print(string.format("%s_cover_width=%d", label, layout.cover_width or 0))
+    if not ok then print(string.format("%s_err=%s", label, tostring(err))) end
+    return available
+end
+
+-- A real catalogue row: three Burmese authors, a Burmese title, progress.
+local burmese_title = "\224\128\188\224\128\128\224\128\172\224\128\172\224\128\155\224\128\172\224\128\172\224\128\183\224\128\133\224\128\185\224\128\133\224\128\172"
+local burmese_authors = "\224\128\161\224\128\177\224\128\172\224\128\175\224\128\172\224\128\128\224\128\153\224\128\175\224\128\172\224\128\154\224\128\172\224\128\155\224\128\172\224\128\184\224\128\155\224\128\140\224\128\101\224\128\171\224\128\172\224\128\173\224\128\172\224\128\170\224\128\149\224\128\140\224\128\186\224\128\128\224\128\172\224\128\172\224\128\180\224\128\176\224\128\175\224\128\132\224\128\186\224\128\128\224\128\172\224\128\181\224\128\172\224\128\156\224\128\172\224\128\175\224\128\179\224\128\129\224\128\172\224\128\172\224\128\136\224\128\172\224\128\172\224\128\131\224\128\172\224\128\130"
+
+-- 1. A very wide mandatory string, covers on (the gutter is present too).
+local covers_layout = LightHouse:layoutFor(true)
+local wide_row = LightHouse:buildRow{
+    layout = covers_layout,
+    primary = burmese_title,
+    secondary = burmese_authors,
+    glance = Ui.glanceProgress(require("lighthouse_status"), 0.45),
+    cover_glyph = "#",
+    callback = function() end,
+}
+report("wide_mandatory", wide_row, covers_layout)
+
+-- The same row without covers: no gutter, so the metadata column has more room
+-- and must still fit it.
+local plain_layout = LightHouse:layoutFor(false)
+local wide_plain = LightHouse:buildRow{
+    layout = plain_layout,
+    primary = burmese_title,
+    secondary = burmese_authors,
+    glance = Ui.glanceProgress(require("lighthouse_status"), 0.45),
+    callback = function() end,
+}
+report("wide_plain", wide_plain, plain_layout)
+
+-- 2. An empty title must not become a zero-width line.
+local empty_title = LightHouse:buildRow{
+    layout = covers_layout,
+    primary = "   ",
+    secondary = "Isuna Hasekura",
+    glance = "45%",
+    cover_glyph = "#",
+    callback = function() end,
+}
+report("empty_title", empty_title, covers_layout)
+
+-- 3. The old character budget, measured the same way: this is the width the
+-- device actually received, and the assertion below proves the fixture
+-- overflows instead of passing by luck.
+local legacy_meta = Ui.metaColumn(burmese_authors, Ui.glanceProgress(require("lighthouse_status"), 0.45))
+print(string.format("legacy_mandatory_w=%d", model_width(legacy_meta)))
+print(string.format("legacy_available=%d",
+    CONTENT_WIDTH - (covers_layout.gutter or 0) - MANDATORY_PADDING - model_width(legacy_meta)))
+
+print("OK")
+`;
+
+/**
+ * The pure geometry half of the same fix: the cover slot gives up pixels before
+ * the title column does, and a pixel fit is a pixel fit.
+ *
+ * `lighthouse_ui.lua` has no `require`s, so this harness loads it directly and
+ * needs none of the KOReader stubs.
+ */
+const ROW_GEOMETRY_HARNESS = String.raw`
+local Ui = assert(loadfile(assert(arg[1]) .. "/lighthouse_ui.lua"))()
+
+-- A screen too narrow for a full-size cover keeps the row: the slot shrinks.
+local shrunk = Ui.layout(800, 1, true)
+Ui.clampLayout(shrunk, { content_width = 160, padding = 7, scale = 1, name_min = 40 })
+print(string.format("clamp_shrunk_gutter=%d", shrunk.gutter))
+print(string.format("clamp_shrunk_cover_w=%d", shrunk.cover_width))
+print(string.format("clamp_shrunk_text_w=%d", 160 - shrunk.gutter - 7))
+
+-- A screen where no cover at all leaves a usable title column drops the slot
+-- rather than the row.
+local dropped = Ui.layout(800, 1, true)
+Ui.clampLayout(dropped, { content_width = 90, padding = 7, scale = 1, name_min = 40 })
+print(string.format("clamp_dropped_gutter=%d", dropped.gutter))
+print(string.format("clamp_dropped_cover_w=%d", dropped.cover_width))
+
+-- A layout with room for its cover is left exactly as it was.
+local kept = Ui.layout(800, 1, true)
+local kept_gutter = kept.gutter
+Ui.clampLayout(kept, { content_width = 576, padding = 7, scale = 1, name_min = 40 })
+print(string.format("clamp_kept_gutter=%d", kept.gutter - kept_gutter))
+
+-- fitToWidth is a genuine pixel fit, not a character count.
+local function width(text)
+    local total, index = 0, 1
+    while index <= #text do
+        local byte = text:byte(index)
+        local step = 1
+        if byte >= 0xF0 then step = 4
+        elseif byte >= 0xE0 then step = 3
+        elseif byte >= 0xC0 then step = 2 end
+        total = total + (step == 1 and 9 or 30)
+        index = index + step
+    end
+    return total
+end
+local wide = string.rep("\224\128\128", 40)
+print(string.format("fit_wide=%d", #Ui.fitToWidth(wide, width, 120)))
+print(string.format("fit_wide_width=%d", width(Ui.fitToWidth(wide, width, 120))))
+print(string.format("fit_kept=%s", tostring(Ui.fitToWidth("abc", width, 100) == "abc")))
+print(string.format("fit_too_tight=%s", tostring(Ui.fitToWidth("abc", width, 2) == "")))
+print("OK")
+`;
+
+describe("plugin row width", () => {
+  it("never hands TextBoxWidget a width that is not strictly positive", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "row-width-key",
+      generatedAt: "2026-11-14T00:00:00.000Z",
+    });
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-rowwidth-"));
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
+      encoding: "utf8",
+    });
+    expect(extract.status).toBe(0);
+
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "row_width_harness.lua");
+    fs.writeFileSync(harnessPath, ROW_WIDTH_HARNESS);
+
+    const res = spawnSync(LUA_BINARY, [harnessPath, pluginRoot], { encoding: "utf8" });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line) => line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+
+    // The fixture is a real overflow: the 1.4.0 character budget produced this
+    // exact row, and this exact width, on the device.
+    expect(Number(out.legacy_available)).toBeLessThanOrEqual(0);
+    expect(Number(out.legacy_mandatory_w)).toBeGreaterThan(500 - 21);
+
+    // Wide mandatory string, covers on: the metadata column fits its budget and
+    // the title keeps a drawable width.
+    expect(out.wide_mandatory_makeline_ok).toBe("true");
+    expect(Number(out.wide_mandatory_available)).toBeGreaterThan(0);
+    expect(Number(out.wide_mandatory_available)).toBeGreaterThanOrEqual(40);
+    // The cover gutter survives - the fix narrows the column, never the covers.
+    expect(Number(out.wide_mandatory_state_w)).toBeGreaterThan(0);
+    expect(Number(out.wide_mandatory_cover_width)).toBeGreaterThan(0);
+
+    // Wide mandatory plus a cover gutter without covers: still fits.
+    expect(out.wide_plain_makeline_ok).toBe("true");
+    expect(Number(out.wide_plain_available)).toBeGreaterThan(0);
+    expect(Number(out.wide_plain_state_w)).toBe(0);
+
+    // An empty title never becomes a zero-width line.
+    expect(out.empty_title_makeline_ok).toBe("true");
+    expect(Number(out.empty_title_text_len)).toBeGreaterThan(0);
+    expect(Number(out.empty_title_available)).toBeGreaterThan(0);
+
+    expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
+  });
+
+  it("shrinks the cover slot, never the row, and fits text in pixels", () => {
+    if (!LUA_BINARY) return;
+
+    const harnessPath = writeScratch("row_geometry_harness.lua", ROW_GEOMETRY_HARNESS);
+    const res = spawnSync(LUA_BINARY, [harnessPath, KOPLUGIN_TEMPLATE_DIR], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line) => line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+
+    // The slot shrinks before the row does, and only disappears when no cover
+    // can leave a usable title column.
+    expect(Number(out.clamp_shrunk_gutter)).toBeLessThan(89);
+    expect(Number(out.clamp_shrunk_cover_w)).toBeGreaterThan(0);
+    expect(Number(out.clamp_shrunk_text_w)).toBeGreaterThanOrEqual(80);
+    expect(Number(out.clamp_dropped_gutter)).toBe(0);
+    expect(Number(out.clamp_dropped_cover_w)).toBe(0);
+    // A page with room for its cover keeps the cover untouched.
+    expect(Number(out.clamp_kept_gutter)).toBe(0);
+
+    // fitToWidth shortens until the *measured* width fits, and leaves text that
+    // already fits alone.
+    expect(Number(out.fit_wide)).toBeLessThan(40);
+    expect(Number(out.fit_wide_width)).toBeLessThanOrEqual(120);
+    expect(out.fit_kept).toBe("true");
+    expect(out.fit_too_tight).toBe("true");
+
+    expect(res.stdout.trimEnd().endsWith("OK")).toBe(true);
   });
 });
