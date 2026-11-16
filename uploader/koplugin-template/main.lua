@@ -501,6 +501,7 @@ local function coverPlaceholder(layout)
         h = math.max(layout.cover_height - 2 * border, 1),
     }
     return widgets.frame:new{
+        radius = Ui.tokens.corner_radius,
         bordersize = border,
         padding = 0,
         widgets.center:new{
@@ -1352,6 +1353,7 @@ function LightHouse:pageLabels()
         activity = _("ACTIVITY"),
         recent_sessions = _("RECENT SESSIONS"),
         last_52_weeks = _("LAST 52 WEEKS"),
+        books_upper = _("BOOKS"),
         search = _("Search library…"),
         next_page = _("Next page"),
         page = _("Page %d of %d"),
@@ -1728,11 +1730,13 @@ function LightHouse:openLibrary(options)
     end
 
     local plan = self:libraryPlan()
-    -- Two rows of the page are navigation, not content: the search row on the
-    -- first page and the next-page row while the catalog has more. The
-    -- configured page size stays an upper bound, so a reader who tuned it keeps
-    -- their setting while the screen decides what actually fits.
-    local page_size = math.max(math.min(plan.rows - 2, pageSize()), 1)
+    -- Some rows of the page are navigation, not content: the catalog's first page
+    -- carries the search row and a page carries a next-page row while more
+    -- follows, while a grouping page draws its rows plus that one next-page row.
+    -- The configured page size stays an upper bound, so a reader who tuned it
+    -- keeps their setting while the screen decides what actually fits.
+    local navigation = mode == "books" and 2 or 1
+    local page_size = math.max(math.min(plan.rows - navigation, pageSize()), 1)
     local context = { page = page, page_size = page_size, query = query, totals = {} }
 
     if mode == "books" then

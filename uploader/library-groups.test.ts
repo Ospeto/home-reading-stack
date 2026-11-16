@@ -7,15 +7,15 @@
  * The module is pure - Calibre rows plus a furthest-progress map go in, grouping
  * rows come out - so these tests assert the arithmetic the device shows: volume
  * counts, how many are read, how far through a series the reader is, and which
- * volume comes next. Read state is injected, which is what keeps this module from
- * growing a second definition of "finished" that could drift from the OPDS feed.
+ * volume provides the row's cover. Read state is injected, which is what keeps
+ * this module from growing a second definition of "finished" that could drift
+ * from the OPDS feed.
  */
 
 import { describe, expect, it } from "bun:test";
 
 import {
   buildLibraryGroups,
-  formatSeriesIndex,
   groupByAuthor,
   groupBySeries,
   splitAuthors,
@@ -50,34 +50,23 @@ const PROGRESS = new Map<number, number>([
 ]);
 
 describe("library groupings: series", () => {
-  it("counts volumes, read volumes and the next unread volume", () => {
+  it("counts volumes and read volumes, and shows the next unread volume's cover", () => {
     const groups = groupBySeries(BOOKS, PROGRESS, FINISHED);
     const spice = groups.find((group) => group.name === "Spice and Wolf");
     expect(spice).toBeDefined();
     expect(spice!.books).toBe(4);
     expect(spice!.read).toBe(2);
-    // Volume 3 is in progress and is the lowest unread volume.
-    expect(spice!.nextIndex).toBe("3");
     expect(spice!.author).toBe("Isuna Hasekura");
     // The cover illustrates the row: the next unread volume that has one, and
     // only when nothing is unread the first volume that does.
     expect(spice!.coverId).toBe(1);
   });
 
-  it("names the first volume of a series nobody has started", () => {
+  it("counts a series nobody has started", () => {
     const groups = groupBySeries(BOOKS, PROGRESS, FINISHED);
     const witcher = groups.find((group) => group.name === "The Witcher");
     expect(witcher!.books).toBe(2);
     expect(witcher!.read).toBe(0);
-    expect(witcher!.nextIndex).toBe("1");
-  });
-
-  it("gives a finished series no next volume", () => {
-    const groups = groupBySeries(BOOKS, PROGRESS, FINISHED);
-    const mono = groups.find((group) => group.name === "Monogatari");
-    expect(mono!.books).toBe(1);
-    expect(mono!.read).toBe(1);
-    expect(mono!.nextIndex).toBeUndefined();
   });
 
   it("leaves standalones out of the series grouping", () => {
@@ -105,20 +94,21 @@ describe("library groupings: series", () => {
       FINISHED,
     );
     expect(groups[0].read).toBe(1);
-    expect(groups[0].nextIndex).toBe("2");
   });
 
   it("keeps an unnumbered volume from hiding a numbered one", () => {
     const groups = groupBySeries(
       [
-        { id: 20, authors: "A", series: "S", series_index: null },
-        { id: 21, authors: "A", series: "S", series_index: 5 },
+        { id: 20, authors: "A", series: "S", series_index: null, cover: true },
+        { id: 21, authors: "A", series: "S", series_index: 5, cover: true },
       ],
       new Map(),
       FINISHED,
     );
     expect(groups[0].books).toBe(2);
-    expect(groups[0].nextIndex).toBe("5");
+    // The numbered volume is the one the reader would start next, so its cover
+    // is the row's; the unnumbered omnibus never displaces it.
+    expect(groups[0].coverId).toBe(21);
   });
 });
 
@@ -167,7 +157,6 @@ describe("library groupings: payload and edge cases", () => {
     const groups = groupBySeries(BOOKS, { "1": 1, "2": 1, "3": 0.4 }, FINISHED);
     const spice = groups.find((group) => group.name === "Spice and Wolf")!;
     expect(spice.read).toBe(2);
-    expect(spice.nextIndex).toBe("3");
   });
 
   it("survives malformed input without inventing rows", () => {
@@ -183,14 +172,6 @@ describe("library groupings: payload and edge cases", () => {
     expect(groups).toHaveLength(1);
     expect(groups[0].name).toBe("Real");
     expect(buildLibraryGroups(undefined as never, new Map(), "series").books).toBe(0);
-  });
-
-  it("formats a fractional Calibre index as Calibre stores it", () => {
-    expect(formatSeriesIndex(3)).toBe("3");
-    expect(formatSeriesIndex("2.5")).toBe("2.5");
-    expect(formatSeriesIndex(0)).toBeUndefined();
-    expect(formatSeriesIndex(null)).toBeUndefined();
-    expect(formatSeriesIndex("junk")).toBeUndefined();
   });
 
   it("splits the author spellings Calibre actually stores", () => {

@@ -189,9 +189,9 @@ print("books_last_footer=" .. flat(books_last_page.footer.left) .. "/" .. flat(b
 
 -- Library: series ----------------------------------------------------------
 local series_groups = {
-  { name = "Ballad of a Shinigami", author = "K-Ske Hasegawa", books = 3, read = 2, nextIndex = "2", coverId = 11 },
-  { name = "Spice and Wolf", author = "Isuna Hasekura", books = 21, read = 9, nextIndex = "10", coverId = 12 },
-  { name = "The Witcher", author = "Andrzej Sapkowski", books = 8, read = 0, nextIndex = "1", coverId = 13 },
+  { name = "Ballad of a Shinigami", author = "K-Ske Hasegawa", books = 3, read = 2, coverId = 11 },
+  { name = "Spice and Wolf", author = "Isuna Hasekura", books = 21, read = 9, coverId = 12 },
+  { name = "The Witcher", author = "Andrzej Sapkowski", books = 8, read = 0, coverId = 13 },
   { name = "Monogatari", author = "Nisio Isin", books = 14, read = 14, coverId = 14 },
 }
 local series_model = Views.libraryModel("series", {
@@ -209,17 +209,6 @@ for row_index = 1, #series_rows do
     .. "//" .. flat(row.value) .. "//" .. flat(row.value_sub) .. "//" .. flat(row.ratio)
     .. "//" .. flat(row.cover_id))
 end
-
--- A fractional Calibre index is a volume number, not a rounding error: the
--- grouping document carries it as text (formatSeriesIndex returns "2.5").
-local normalized = Status.normalizeGroups({
-  { name = "Ballad of a Shinigami", author = "K-Ske Hasegawa", books = 3, read = 1, nextIndex = "2.5" },
-  { name = "Spice and Wolf", author = "Isuna Hasekura", books = 21, read = 9, nextIndex = 10 },
-  { name = "The Witcher", author = "Andrzej Sapkowski", books = 8, read = 1, nextIndex = "" },
-})
-print("group_fraction=" .. flat(normalized[1].nextIndex))
-print("group_integer=" .. flat(normalized[2].nextIndex))
-print("group_missing=" .. flat(normalized[3].nextIndex))
 
 -- Library: authors ---------------------------------------------------------
 local author_model = Views.libraryModel("authors", {
@@ -420,17 +409,6 @@ describe("plugin library page model: Series", () => {
     expect(out.series_row_4).toBe(
       "Monogatari//Nisio Isin · 14 books · 14 read//done//14 / 14//1//14",
     );
-  });
-
-  it("keeps a fractional series index as the volume the document names", () => {
-    if (!LUA_BINARY) return;
-    const out = runHarness();
-    // Calibre stores 2.5 for a volume between 2 and 3, and the grouping document
-    // carries it as text; the row no longer prints it, so the normalized record
-    // is the contract that has to survive.
-    expect(out.group_fraction).toBe("2.5");
-    expect(out.group_integer).toBe("10");
-    expect(out.group_missing).toBe("nil");
   });
 
   it("pages a grouping on the device", () => {

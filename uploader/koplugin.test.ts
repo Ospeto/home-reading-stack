@@ -3353,6 +3353,20 @@ print("fail_raised=" .. tostring(fail_raised))
 dump_problem("fail")
 http.request = working_request
 
+-- 6. Every label the page models can print is supplied by the plugin ---------
+-- The models carry an English default for each label; the plugin overrides them
+-- all with gettext so a translated reader UI shows translated words. One key the
+-- plugin forgets stays English on the device, so the two vocabularies have to
+-- match exactly.
+local Views = require("lighthouse_views")
+local supplied = LightHouse:pageLabels()
+local missing = {}
+for key in pairs(Views.LABELS) do
+  if supplied[key] == nil then missing[#missing + 1] = key end
+end
+table.sort(missing)
+print("missing_labels=" .. table.concat(missing, ","))
+
 print("OK")
 `);
 
@@ -3501,6 +3515,16 @@ describe("plugin reading stats view", () => {
     // assertion that says "one page": a plan taller than the screen would have
     // to scroll, which is what the old per-week rows did.
     expect(out.plan_fits).toBe("true");
+  });
+
+  it("translates every label the page models can print", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runHarness(READING_STATS_HARNESS);
+
+    // The models' label table and the plugin's gettext table are two
+    // vocabularies for the same words; a key missing from the second stays
+    // English on a translated device.
+    expect(out.missing_labels).toBe("");
   });
 
   it("measures the page it draws - not just its plan - inside every screen", () => {
@@ -3800,6 +3824,11 @@ local leftover = entry(401, href(401))
 cover_file(401, "\255\216" .. string.rep("coverbytes", 40))
 local leftover_slot = LightHouse:coverSlot(leftover, layout)
 print("truncated_slot=" .. tostring(leftover_slot and leftover_slot.__kind))
+-- A coverless book draws the neutral placeholder, and that box is square like
+-- every other corner in the plugin: it must not inherit KOReader's radius.
+local placeholder = LightHouse:coverSlot(entry(499, href(499)), layout)
+print("placeholder_kind=" .. tostring(placeholder and placeholder.__kind))
+print("placeholder_radius=" .. tostring(placeholder and placeholder.radius))
 requests = {}
 LightHouse:prefetchCovers({ leftover })
 print("truncated_refetched=" .. tostring(#requests))
@@ -3899,6 +3928,11 @@ describe("plugin cover prefetch", () => {
     // fresh.
     expect(out.truncated_slot).toBe("framecontainer");
     expect(out.truncated_refetched).toBe("1");
+
+    // The coverless placeholder is a square box like every other corner in the
+    // plugin: it must not inherit KOReader's default radius.
+    expect(out.placeholder_kind).toBe("framecontainer");
+    expect(out.placeholder_radius).toBe("0");
     expect(out.repaired_slot).toBe("imagewidget");
     expect(out.repaired_requests).toBe("0");
 
@@ -3966,7 +4000,6 @@ package.preload["json"] = function()
           author = "A Writer",
           books = 3,
           read = 1,
-          nextIndex = "2",
         }
       end
       return { groups = groups, books = 18, authors = 6, series = 6 }
@@ -3990,6 +4023,10 @@ end
 
 open{ mode = "series", page = 1 }
 print("series_first=" .. fetched.series)
+-- A grouping page fills the screen: its content rows plus the one next-page row
+-- are exactly the rows the layout fits.
+print("grouping_page_rows=" .. tostring(#models[1].blocks[1].rows))
+print("grouping_plan_rows=" .. tostring(LightHouse:libraryPlan().rows))
 open{ mode = "series", page = 2 }
 print("series_page_turn=" .. fetched.series)
 open{ page = 2, refresh = true }
@@ -4072,9 +4109,13 @@ describe("plugin library groupings", () => {
     // Switching back is a fresh open of that grouping, not the old document.
     expect(out.series_after_switch).toBe("3");
 
-    // And the refreshed page draws what the server just sent: page 2's second
+    // And the refreshed page draws what the server just sent: page 2's single
     // row of the six-group document, with no next-volume marker of its own.
-    expect(out.refresh_row).toBe("series 5//A Writer · 3 books · 1 read//33%//1 / 3");
+    expect(out.refresh_row).toBe("series 6//A Writer · 3 books · 1 read//33%//1 / 3");
+
+    // A grouping page is sized from the rows the model draws, so it fills the
+    // screen instead of leaving slack above the footer.
+    expect(out.grouping_page_rows).toBe(out.grouping_plan_rows);
 
     // Both footer halves turn the page, and neither is active past its end.
     expect(out.pager_at_open).toBe("2/2");

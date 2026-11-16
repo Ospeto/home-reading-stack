@@ -371,7 +371,7 @@ end
 -- ----------------------------------------------------------------------------
 
 --- One series row: name, author and counts, progress over the read fraction.
--- @tparam table group { name, author, books, read, nextIndex, percent }
+-- @tparam table group { name, author, books, read, coverId }
 -- @tparam table text labels
 -- @treturn table row model
 function Views.seriesRow(group, text)

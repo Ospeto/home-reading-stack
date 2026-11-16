@@ -43,8 +43,6 @@ export interface LibraryGroup {
   books: number;
   /** How many of them reached the finished threshold. */
   read: number;
-  /** Lowest unread volume index, as text, when the group has one. */
-  nextIndex?: string;
   /** Book id whose cover illustrates the row. */
   coverId?: number;
 }
@@ -75,13 +73,6 @@ export function splitAuthors(value: unknown): string[] {
     if (name && !names.includes(name)) names.push(name);
   }
   return names;
-}
-
-/** Formats a Calibre series index for display: `3`, `2.5`, or undefined. */
-export function formatSeriesIndex(value: unknown): string | undefined {
-  const raw = Number(value);
-  if (!Number.isFinite(raw) || raw <= 0) return undefined;
-  return String(raw);
 }
 
 /** Reads the furthest percentage recorded for one book. */
@@ -115,7 +106,6 @@ export function groupBySeries(
       author: string;
       books: number;
       read: number;
-      nextIndex?: string;
       nextValue: number;
       /** Cover of the next unread volume: what the row is about. */
       nextCoverId?: number;
@@ -162,7 +152,6 @@ export function groupBySeries(
     const value = Number.isFinite(index) && index > 0 ? index : Infinity;
     if (value < group.nextValue) {
       group.nextValue = value;
-      group.nextIndex = formatSeriesIndex(index);
     }
     if (book.cover && value < group.nextCoverValue) {
       group.nextCoverValue = value;
@@ -177,7 +166,6 @@ export function groupBySeries(
       author: group.author || undefined,
       books: group.books,
       read: group.read,
-      nextIndex: group.read >= group.books ? undefined : group.nextIndex,
       coverId: group.nextCoverId ?? group.anyCoverId,
     });
   }
