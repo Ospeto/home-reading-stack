@@ -208,7 +208,8 @@ local function parseEntry(block)
         entry.categories[#entry.categories + 1] = parseAttrs(attrs)
     end
 
-    for _, category in ipairs(entry.categories) do
+    for category_index = 1, #entry.categories do
+        local category = entry.categories[category_index]
         local term = category.term
         if term and term ~= "" then
             local volume = category.label and category.label:match("^Volume%s+([%d%.]+)$")
@@ -221,7 +222,8 @@ local function parseEntry(block)
         end
     end
 
-    for _, link in ipairs(entry.links) do
+    for link_index = 1, #entry.links do
+        local link = entry.links[link_index]
         local rel = link.rel or ""
         if rel == "http://opds-spec.org/acquisition" and not entry.download_href then
             entry.download_href = link.href

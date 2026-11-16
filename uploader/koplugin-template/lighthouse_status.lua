@@ -23,6 +23,71 @@ A session record as emitted by /api/kosync/active (fields used here):
 
 local Status = {}
 
+--- THE string guard: the only way an untrusted value becomes text.
+--
+-- Everything the plugin did not build itself - a field of
+-- `GET /api/kosync/active`, an OPDS entry, a sidecar value - is untrusted until
+-- it has passed through here. Two facts make this mandatory rather than tidy:
+--
+--   1. KOReader's `T()` (ffi/util `template`) substitutes a placeholder by
+--      yielding the argument to `string.gsub`, and a value that is not a
+--      string/number makes gsub itself raise - on the device,
+--      `./luajit: ./ffi/util.lua:779: invalid replacement value (a function)` -
+--      which kills the process; there is no pcall between a menu callback and
+--      the top level. (The exact body of `template` is inferred from that
+--      traceback: KOReader's frontend source is not available to this repo.)
+--   2. A missing JSON field is NOT nil in this plugin's hands: the decoder maps
+--      `null` to a truthy callable sentinel, so the familiar guards
+--      `if value and value ~= ""` are TRUE for a null field and let it through.
+--
+-- Contract (assert these, and no screen can be reached with a non-string):
+--
+--   * string                        -> returned unchanged (empty stays empty)
+--   * number                        -> formatted with `tostring`
+--   * NaN / infinity                -> the fallback
+--   * nil, boolean, table, function, userdata, thread, sentinel -> fallback
+--   * the return value is ALWAYS a string; it is never nil
+--
+-- Numbers are formatted rather than dropped because several call sites
+-- interpolate a real number (a Calibre series index, a page number); the
+-- fallback exists so a caller can name the reader-facing substitute
+-- (`_("Unknown")`) instead of an empty string in one step.
+-- @param value untrusted value of any type
+-- @string[opt] fallback text for anything unusable (default "")
+-- @treturn string never nil
+function Status.str(value, fallback)
+    if type(value) == "string" then return value end
+    if type(value) == "number" then
+        -- NaN and the infinities have no reader-facing spelling, so they take
+        -- the fallback.
+        if value ~= value or value == math.huge or value == -math.huge then
+            return fallback or ""
+        end
+        return tostring(value)
+    end
+    return fallback or ""
+end
+
+--- THE number guard, the `Status.str` counterpart for counts and ratios.
+-- Untrusted values become a finite number or nil - never a boolean, a table, a
+-- callable sentinel or NaN - so arithmetic and `%d` formatting downstream stay
+-- safe.
+-- @param value untrusted value of any type
+-- @treturn number|nil finite number, or nil for anything unusable
+function Status.num(value)
+    local parsed
+    if type(value) == "number" then
+        parsed = value
+    elseif type(value) == "string" then
+        parsed = tonumber(value)
+    else
+        return nil
+    end
+    if not parsed or parsed ~= parsed then return nil end -- nil or NaN
+    if parsed == math.huge or parsed == -math.huge then return nil end
+    return parsed
+end
+
 --- Normalizes free text for tolerant comparison.
 -- Lowercases, turns punctuation into spaces, and collapses whitespace so that
 -- "Spice and Wolf, Vol. 1" matches "spice and wolf vol 1".
@@ -59,9 +124,9 @@ end
 -- @tparam table right normalized author list
 -- @treturn boolean
 local function sharesAuthor(left, right)
-    for leftIndex, leftAuthor in ipairs(left) do
-        for rightIndex, rightAuthor in ipairs(right) do
-            if leftAuthor == rightAuthor then return true end
+    for left_index = 1, #left do
+        for right_index = 1, #right do
+            if left[left_index] == right[right_index] then return true end
         end
     end
     return false
@@ -83,20 +148,33 @@ end
 -- @treturn table|nil normalized session
 function Status.normalizeSession(session)
     if type(session) ~= "table" then return nil end
-    local title = session.displayTitle or session.title or ""
-    local authors = session.displayAuthors or session.authors or ""
+
+    -- Every field is coerced HERE, once, at the boundary where the untrusted
+    -- payload becomes a session. A sentinel or a table can therefore never
+    -- reach the shelf, the row builder or `T()`: by the time this returns, the
+    -- text fields are strings and the numeric ones are finite numbers or nil.
+    local title = Status.str(session.displayTitle)
+    if title == "" then title = Status.str(session.title) end
+    local authors = Status.str(session.displayAuthors)
+    if authors == "" then authors = Status.str(session.authors) end
+    local filename = Status.str(session.filename)
+
+    local book_id = Status.num(session.bookId)
+    if not book_id then book_id = Status.num(session.book_id) end
+    if book_id then book_id = math.floor(book_id) end
+
     local normalized = {
-        document = session.document,
-        filename = session.filename,
-        device = session.device,
-        timestamp = tonumber(session.timestamp) or 0,
-        percentage = Status.clampPercentage(session.percentage),
-        book_id = tonumber(session.bookId) or tonumber(session.book_id),
+        document = Status.str(session.document),
+        filename = filename,
+        device = Status.str(session.device),
+        timestamp = Status.num(session.timestamp) or 0,
+        percentage = Status.clampPercentage(Status.num(session.percentage)),
+        book_id = book_id,
         title = title,
         authors = authors,
         normalized_title = Status.normalize(title),
         normalized_authors = Status.authorList(authors),
-        normalized_filename = Status.normalize(session.filename or ""),
+        normalized_filename = Status.normalize(filename),
     }
     return normalized
 end
@@ -107,8 +185,8 @@ end
 function Status.normalizeSessions(sessions)
     local list = {}
     if type(sessions) ~= "table" then return list end
-    for sessionIndex, session in ipairs(sessions) do
-        local normalized = Status.normalizeSession(session)
+    for session_index = 1, #sessions do
+        local normalized = Status.normalizeSession(sessions[session_index])
         if normalized then list[#list + 1] = normalized end
     end
     table.sort(list, function(a, b) return a.timestamp > b.timestamp end)
@@ -124,11 +202,17 @@ end
 -- @treturn table map book_id -> session
 function Status.indexByBookId(sessions)
     local index = {}
-    for sessionIndex, session in ipairs(sessions or {}) do
-        if session.book_id then
-            local current = index[session.book_id]
-            if not current or session.timestamp > current.timestamp then
-                index[session.book_id] = session
+    for session_index = 1, #(sessions or {}) do
+        local session = sessions[session_index]
+        -- Coerced, because an index key must be a number and the comparison
+        -- must never see a sentinel: `session.timestamp > current` on a
+        -- callable would raise and take the page with it.
+        local book_id = Status.num(session.book_id)
+        local timestamp = Status.num(session.timestamp) or 0
+        if book_id then
+            local current = index[book_id]
+            if not current or timestamp > (Status.num(current.timestamp) or 0) then
+                index[book_id] = session
             end
         end
     end
@@ -148,37 +232,46 @@ end
 function Status.findSession(entry, sessions, index)
     if type(entry) ~= "table" or type(sessions) ~= "table" then return nil end
 
-    if entry.book_id then
-        local by_id = (index or Status.indexByBookId(sessions))[entry.book_id]
+    local entry_book_id = Status.num(entry.book_id)
+    if entry_book_id then
+        local by_id = (index or Status.indexByBookId(sessions))[entry_book_id]
         if by_id then return by_id end
     end
 
     local entry_title = Status.normalize(entry.title)
     local entry_authors = Status.authorList(entry.authors)
     local best
-    for sessionIndex, session in ipairs(sessions) do
+    for session_index = 1, #sessions do
+        local session = sessions[session_index]
+        -- A caller may hand in sessions it did not normalize, so every field
+        -- read here is coerced rather than trusted.
+        local session_title = Status.str(session.normalized_title)
+        local session_filename = Status.str(session.normalized_filename)
+        local session_timestamp = Status.num(session.timestamp) or 0
+        local session_authors = type(session.normalized_authors) == "table"
+            and session.normalized_authors or {}
         local matched = false
         if entry_title ~= "" then
-            if session.normalized_filename == entry_title
-                or session.normalized_filename == entry_title .. " epub"
-                or session.normalized_title == entry_title then
+            if session_filename == entry_title
+                or session_filename == entry_title .. " epub"
+                or session_title == entry_title then
                 matched = true
             end
         end
-        if not matched and entry_title ~= "" and session.normalized_title ~= "" then
+        if not matched and entry_title ~= "" and session_title ~= "" then
             -- Tolerate "01 - Title" / "Title (Author)" style filename prefixes.
-            if session.normalized_title:find(entry_title, 1, true)
-                or entry_title:find(session.normalized_title, 1, true)
+            if session_title:find(entry_title, 1, true)
+                or entry_title:find(session_title, 1, true)
             then
                 if #entry_authors == 0
-                    or #session.normalized_authors == 0
-                    or sharesAuthor(entry_authors, session.normalized_authors)
+                    or #session_authors == 0
+                    or sharesAuthor(entry_authors, session_authors)
                 then
                     matched = true
                 end
             end
         end
-        if matched and (not best or session.timestamp > best.timestamp) then
+        if matched and (not best or session_timestamp > (Status.num(best.timestamp) or 0)) then
             best = session
         end
     end
@@ -193,7 +286,8 @@ end
 -- @treturn table the same entries, each with an optional `.status` session
 function Status.merge(entries, sessions)
     local by_id = Status.indexByBookId(sessions)
-    for entryIndex, entry in ipairs(entries or {}) do
+    for entry_index = 1, #(entries or {}) do
+        local entry = entries[entry_index]
         entry.status = Status.findSession(entry, sessions, by_id)
     end
     return entries
@@ -218,18 +312,25 @@ end
 -- @tparam table entry OPDS entry
 -- @treturn string e.g. "████░░░░ 45% · Paperwhite", or "Unread"
 function Status.statusLabel(entry)
-    if type(entry) ~= "table" or not entry.status then
+    -- `entry.status` is a table or nothing: a sentinel or a table-shaped
+    -- impostor must not be indexed below.
+    if type(entry) ~= "table" or type(entry.status) ~= "table" then
         return "Unread"
     end
     local session = entry.status
-    local label = Status.progressBar(session.percentage)
-    if session.percentage >= 0.99 then
+    local percentage = Status.clampPercentage(Status.num(session.percentage))
+    local label = Status.progressBar(percentage)
+    if percentage >= 0.99 then
         label = label .. " · Finished"
-    elseif session.percentage <= 0 then
+    elseif percentage <= 0 then
         label = label .. " · Opened"
     end
-    if session.device and session.device ~= "" then
-        label = label .. " · " .. session.device
+    -- `..` on a non-string raises just as hard as gsub does, so the device
+    -- name is coerced before it is concatenated: an entry annotated by
+    -- `Status.merge` may have been built by a caller that never normalized it.
+    local device = Status.str(session.device)
+    if device ~= "" then
+        label = label .. " · " .. device
     end
     return label
 end
