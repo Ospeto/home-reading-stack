@@ -24,8 +24,11 @@ Design rules this file encodes (e-ink, judged at 1 bit):
     the glanceable values readable without tapping. Section headings are marked
     with a left block bar, the e-ink equivalent of the web app's accent border.
   * Every measure below is expressed in "units" that main.lua multiplies by
-    `Screen:scaleBySize(1)`, so the same layout appears on a 600px and a
-    1072px screen without a second table of magic numbers.
+    the device's pixels-per-unit factor (itself derived from a 600-unit
+    `Screen:scaleBySize` probe, because the answer for one unit is rounded up
+    to a whole pixel), so the same layout appears on a 600px and a
+    1072px screen without a second table of magic numbers. A build that cannot
+    answer that probe passes 1 - one unit is one pixel.
 
 The module is pure Lua: no sockets, no widgets, no KOReader requires. The
 repository's off-device suite exercises every helper here directly.
@@ -608,7 +611,7 @@ end
 -- a coherent page instead of a fixed guess. Only a cover page is clamped: a
 -- cover cell is genuinely tall, while a text page follows the screen.
 -- @number screen_h screen height in pixels
--- @number scale Screen:scaleBySize(1) for the current device
+-- @number scale pixels per unit for this device (the factor main.lua derives; 1 = one unit is one pixel)
 -- @boolean with_covers whether this view draws cover thumbnails
 -- @treturn table { rows, row_height, cover_width, cover_height, gutter }
 function Ui.layout(screen_h, scale, with_covers)
@@ -1071,7 +1074,7 @@ end
 -- edge, because the sum of the parts is what is returned.
 -- @number screen_w screen width in pixels
 -- @number screen_h screen height in pixels
--- @number scale Screen:scaleBySize(1)
+-- @number scale pixels per unit for this device (the factor main.lua derives; 1 = one unit is one pixel)
 -- @treturn table plan { pad, content_w, header, hero, band_head, band_row,
 --                       section_head, footer, hairline, bar, reading_rows,
 --                       reading_h, reading_cover_w, reading_cover_h,
@@ -1273,7 +1276,7 @@ end
 -- rows.
 -- @number screen_w screen width in pixels
 -- @number screen_h screen height in pixels
--- @number scale Screen:scaleBySize(1)
+-- @number scale pixels per unit for this device (the factor main.lua derives; 1 = one unit is one pixel)
 -- @tparam table[opt] options { with_switch = boolean, min_rows = number }
 -- @treturn table plan { pad, content_w, header, hairline, switch_h, subline_h,
 --                       footer, row_h, rows, bar, cover_w, cover_h, total,

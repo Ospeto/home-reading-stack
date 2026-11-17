@@ -3352,34 +3352,34 @@ print("OK")
  * leaves the tail of the last page on the glass. This harness builds the real
  * widget tree for page 1 and page 2 of a library through `Page.build` on the
  * 1236x1648 panel the regression was reported on and measures both: the pixels
- * the row title is drawn at, and the height of each page.
+ * the row title is drawn at, and the height of each page. The plan itself comes
+ * from `LightHouse:libraryPlan()`, so the density factor is the one the plugin
+ * derives from the device rather than one the harness works out for itself.
  */
 const LIBRARY_PAGE_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
-local Ui = require("lighthouse_ui")
-local Views = require("lighthouse_views")
-
 local DEVICE_W, DEVICE_H = 1236, 1648
 local DEVICE_FACTOR = 1236 / 600
 
--- The runtime's only density answer: whole pixels, rounded, from the real factor.
-local function scaleBySize(units) return math.floor(units * DEVICE_FACTOR + 0.5) end
+-- The runtime's only density answer: whole pixels, rounded *up*, so the answer
+-- for one unit is 3 on this panel while the factor is 2.06.
+local function scaleBySize(units) return math.ceil(units * DEVICE_FACTOR) end
 
--- The factor the plugin itself derives from the probe those answers give.
-local scale = assert(Ui.scaleFactor(scaleBySize(600), 600), "the 600-unit probe must be usable")
+-- Font.getFace opens the size it is handed multiplied by the device scale and
+-- rounded to whole pixels, so this stub draws what the runtime would draw, not
+-- what the page asked for.
+local function facePixels(units) return math.floor(units * DEVICE_FACTOR + 0.5) end
 
--- Font.getFace draws the size it is handed multiplied by the device scale, so
--- this stub draws what the runtime would draw, not what the page asked for.
+-- Records the pixel size that reaches each text, so the size drawn is read back
+-- from the tree instead of from the module that asked for it.
 local drawn = {}
 package.preload["ui/font"] = function()
   return {
     getFace = function(_, name, size)
       local units = tonumber(size) or 0
-      return { name = name, units = units, px = scaleBySize(units) }
+      return { name = name, units = units, px = facePixels(units) }
     end,
   }
 end
--- Records the pixel size that reaches each text, so the size drawn is read back
--- from the tree instead of from the module that asked for it.
 package.preload["ui/widget/textwidget"] = function()
   local text = {}
   function text:new(options)
@@ -3395,7 +3395,24 @@ package.preload["ui/widget/textwidget"] = function()
   function text.getTextWidth(value) return #tostring(value or "") end
   return text
 end
+-- The panel the regression was reported on, answering density the way the
+-- runtime answers it.
+package.preload["device"] = function()
+  return {
+    screen = {
+      getWidth = function() return DEVICE_W end,
+      getHeight = function() return DEVICE_H end,
+      scaleBySize = function(_, size) return scaleBySize(size) end,
+    },
+  }
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local Views = require("lighthouse_views")
 local Page = require("lighthouse_page")
+
+print("probe_one_unit=" .. scaleBySize(1))
+print("probe_600_units=" .. scaleBySize(600))
 
 local entries = {
   { title = "Ballad of a Shinigami vol. 2", authors = "K-Ske Hasegawa",
@@ -3410,7 +3427,7 @@ local entries = {
   { title = "Kino's Journey", authors = "Keiichi Sigsawa", book_id = 17 },
 }
 
-local plan = Ui.listPlan(DEVICE_W, DEVICE_H, scale, { with_switch = true, min_rows = 3 })
+local plan = assert(LightHouse:libraryPlan(), "the library plan must build")
 local page_size = math.max(plan.rows - 2, 1)
 
 local function model_for(number, has_next, size)
@@ -3428,6 +3445,7 @@ end
 
 local first = assert(Page.build{ model = model_for(1, true, page_size), plan = plan })
 local second = assert(Page.build{ model = model_for(2, false, page_size), plan = plan })
+print("library_plan_scale=" .. string.format("%.3f", plan.scale or 0))
 print("library_plan_rows=" .. plan.rows)
 print("library_row_h=" .. plan.row_h)
 print("library_screen_height=" .. DEVICE_H)
@@ -3548,6 +3566,16 @@ describe("plugin one-page views", () => {
     if (!LUA_BINARY || !UNZIP_BINARY) return;
     const out = runHarness(LIBRARY_PAGE_HARNESS);
 
+    // The density the plugin reads, on a panel that rounds its answers up: a
+    // 600-unit probe survives the rounding (1236px), one unit does not (3px on
+    // a 2.06 panel). The planned shelf is the device readback, six rows of a
+    // 207px band; a one-unit probe plans four fat rows of ~302px instead.
+    expect(out.probe_one_unit).toBe("3");
+    expect(out.probe_600_units).toBe("1236");
+    expect(out.library_plan_scale).toBe("2.060");
+    expect(Number(out.library_plan_rows)).toBe(6);
+    expect(Number(out.library_row_h)).toBe(207);
+
     // Both pages measure one screen: page 1 carries the search and next-page
     // rows, page 2 carries neither, and the page that draws less must still
     // paint (and invalidate) the whole glass or the previous page's tail stays
@@ -3560,7 +3588,6 @@ describe("plugin one-page views", () => {
     // regression was reported on draws a 207px row, and the device readback of
     // the fixed build is 31px of title in it. Handing the pixel measure
     // straight to Font.getFace drew 64px in the same row.
-    expect(Number(out.library_row_h)).toBe(207);
     expect(Number(out.library_row_title_px)).toBe(31);
     expect(out.library_row_title_fits).toBe("true");
 
