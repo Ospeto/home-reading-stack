@@ -1842,20 +1842,22 @@ end
 -- costs 153ms plus 8ms to decode, against 42ms for the catalog page the reader
 -- actually asked for, and it is fetched again for every page. The shelf is
 -- therefore kept for `SHELF_REUSE_SECONDS`, refetched when that window is up,
--- and refetched immediately after anything this plugin did that changes it.
+-- and refetched immediately after anything this plugin did that changes it -
+-- `forgetShelf()` is that invalidation and its only owner.
 -- Only an answer is kept: a request that failed is never stored, so a busy
 -- progress endpoint costs one page its server progress and the next view asks
 -- again instead of every page reusing a shelf it never received.
--- @boolean[opt] force ignore the kept shelf
 -- @treturn table|nil normalized sessions; nil when the server cannot be reached
 -- @treturn string|nil error code from the failed request
-function LightHouse:shelfSessions(force)
+function LightHouse:shelfSessions()
     local kept = self._shelf
-    local now = os.time()
-    if kept and not force and type(kept.at) == "number"
-        and now - kept.at <= LightHouse.SHELF_REUSE_SECONDS then
-        return kept.sessions
+    if type(kept) == "table" and type(kept.at) == "number" then
+        local age = os.time() - kept.at
+        if age >= 0 and age <= LightHouse.SHELF_REUSE_SECONDS then
+            return kept.sessions
+        end
     end
+    local now = os.time()
     local sessions, err = self:withSpinner(_("Checking reading progress…"), function()
         return self:fetchSessions()
     end)
@@ -1888,6 +1890,10 @@ function LightHouse:openLibrary(options)
     -- cache is what makes paging local. It is not kept across an explicit
     -- refresh or a grouping switch: finishing or downloading a book changes the
     -- read counts, and a reader asking again must see the server's answer.
+    if options.refresh then
+        self.local_scan = nil
+        self.local_index = nil
+    end
     if options.refresh or (previous.mode ~= nil and previous.mode ~= mode) then
         self._groupings = nil
         self:forgetShelf()
@@ -2000,20 +2006,21 @@ function LightHouse:openLibrary(options)
 
         -- A failed shelf request is reported once and NOT kept: the rows fall
         -- back to what this device knows, and the next view asks again.
-        local sessions, shelf_err = self:shelfSessions(options.refresh == true)
+        local sessions, shelf_err = self:shelfSessions()
         if sessions then
             Status.merge(feed.entries, sessions)
         else
-            shelf_notice = T(_("Reading progress unavailable (%1) - showing what this device has."),
-                describeError(shelf_err))
+            shelf_notice = T(_("Reading progress: %1"), errorHeadline(shelf_err))
         end
 
         -- Local sidecars beat the server for any book this device has opened (see
         -- `localRecordFor`), and a book only this device has read gets its progress
         -- from the sidecar because the server sent no session for it at all. The
-        -- walk happens ONCE, behind a spinner, before any row is drawn.
+        -- walk happens ONCE, behind a spinner, before any row is drawn, and
+        -- **Refresh** walks the device again instead of reusing the session's scan.
+        local refresh_device = options.refresh == true
         self:withLocalScan(_("Reading books on this device…"), function()
-            return self:localRecords()
+            return self:localRecords(refresh_device)
         end)
         for entry_index = 1, #feed.entries do
             local entry = feed.entries[entry_index]
@@ -2760,6 +2767,7 @@ function LightHouse:startDownload(entry, filepath)
     -- refetches instead of drawing the old one.
     self:forgetShelf()
     self.local_scan = nil
+    self.local_index = nil
     forgetSidecarList()
 
     UIManager:show(squareWidget(require("ui/widget/confirmbox"), {

@@ -6637,6 +6637,40 @@ local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
 LightHouse.ui = { menu = { registerToMainMenu = function() end } }
 LightHouse:init()
 
+-- The device tree, so a directory listing can be counted: a page turn reuses the
+-- session's scan, while a Refresh is the reader asking the device again.
+local Sidecar = require("lighthouse_sidecar")
+local tree = {
+  ["/books"] = { "Alpha.epub", "Alpha.epub.sdr" },
+  ["/books/Alpha.epub.sdr"] = { "metadata.epub.lua" },
+}
+local listed = {}
+Sidecar.io = {
+  open = function() return nil end,
+  loadfile = function() return nil end,
+  list = function(path)
+    listed[#listed + 1] = path
+    local names = tree[path]
+    if not names then return nil end
+    local copy = {}
+    for index = 1, #names do copy[index] = names[index] end
+    return copy
+  end,
+  attributes = function(path, field)
+    if field == "mode" then
+      if tree[path] then return "directory" end
+      if path:sub(-5) == ".epub" then return "file" end
+    end
+    return nil
+  end,
+}
+LightHouse.localSearchDirs = function() return { "/books" } end
+local function walk_listings()
+  local count = #listed
+  listed = {}
+  return count
+end
+
 G_reader_settings.readSetting = function(_, key)
   if key == "lighthouse_covers" then return false end
   return nil
@@ -6668,12 +6702,15 @@ end
 
 -- Three page turns in one view, then the reader asks for a refresh.
 local ok1 = open{ mode = "books", page = 1 }
+print("page1_listings=" .. walk_listings())
 print("page1_ok=" .. tostring(ok1))
 print("after_page1_catalog=" .. catalog_requests .. " shelf=" .. shelf_requests)
 open{ mode = "books", page = 2 }
 open{ mode = "books", page = 3 }
+print("page_turn_listings=" .. walk_listings())
 print("after_three_pages_catalog=" .. catalog_requests .. " shelf=" .. shelf_requests)
 open{ mode = "books", page = 1, refresh = true }
+print("refresh_listings=" .. walk_listings())
 print("after_refresh_catalog=" .. catalog_requests .. " shelf=" .. shelf_requests)
 
 -- A grouping switch reads a different document; coming back to the books view
@@ -6699,6 +6736,13 @@ print("after_retried_page_shelf=" .. shelf_requests)
 -- A real answer IS kept: the page after it reuses it.
 open{ mode = "books", page = 3 }
 print("after_cached_page_shelf=" .. shelf_requests)
+
+-- A stamp in the future (a Kindle clock set ahead, then corrected) is not a
+-- usable age: the shelf is fetched again instead of being reused all session.
+LightHouse._shelf.at = os.time() + 3600
+local before_future = shelf_requests
+open{ mode = "books", page = 4 }
+print("future_stamp_refetched=" .. (shelf_requests - before_future))
 
 print("OK")
 `;
@@ -6731,6 +6775,18 @@ describe("plugin library page: one shelf request per view, not per page", () => 
     expect(out.after_page1_catalog).toBe("1 shelf=1");
     // The measured claim: three page turns, one shelf fetch, three page fetches.
     expect(out.after_three_pages_catalog).toBe("3 shelf=1");
+    // And one device walk: the tree is read when the view opens, not per page.
+    expect(out.page1_listings).toBe("2");
+    expect(out.page_turn_listings).toBe("0");
+  });
+
+  it("re-walks the device when the reader refreshes", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // Refresh is the reader asking what is really on the device now: it must
+    // walk the tree again (book root plus its sidecar folder), not draw the
+    // session's scan.
+    expect(out.refresh_listings).toBe("2");
   });
 
   it("asks the server again when the reader refreshes or switches grouping", () => {
@@ -6756,6 +6812,14 @@ describe("plugin library page: one shelf request per view, not per page", () => 
     expect(out.retried_page_reported).toBe("false");
     expect(out.after_retried_page_shelf).toBe("5");
     expect(out.after_cached_page_shelf).toBe("5");
+  });
+
+  it("does not reuse a shelf stamped in the future", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // A negative age means the stamp cannot be trusted, so the next page asks
+    // the server instead of freezing the shelf for the rest of the session.
+    expect(out.future_stamp_refetched).toBe("1");
   });
 });
 
@@ -6931,5 +6995,255 @@ describe("plugin sidecar walk: fewer stats, fewer walks", () => {
     const out = runHarness();
     expect(out.stale_records).toBe("2");
     expect(out.stale_walked).toBe("true");
+  });
+});
+
+/**
+ * The on-disk sidecar list's whole lifecycle, held to by test.
+ *
+ * The list exists so a later session does not walk the library again, and the
+ * guide promises four things about it: a first scan writes the folder paths, a
+ * fresh list is reused instead of walking, a list older than
+ * `SIDECAR_LIST_TTL_SECONDS` is not reused, **Refresh** rewrites it, and a
+ * download deletes it. The oracle is the file itself (its lines, and its age as
+ * the plugin reads it) plus how many directories were listed: an implementation
+ * that never expires, never rewrites, or never invalidates its list lists the
+ * whole tree on the wrong call and fails here.
+ */
+const SIDECAR_LIST_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
+local plugin_root = assert(arg[1], "plugin root argument required")
+local data_dir = assert(arg[2], "data dir argument required")
+local list_path = data_dir .. "/cache/lighthouse-sidecars.txt"
+
+local plugin_config = {
+  base_url = "http://192.168.31.15:8086",
+  api_key = "harness-key",
+  page_size = 40,
+  plugin_version = "1.6.2",
+  generated_at = "2026-11-17T00:00:00.000Z",
+  request_block_timeout = 10,
+  request_total_timeout = 90,
+  download_block_timeout = 15,
+  download_total_timeout = 300,
+}
+package.preload["lighthouse_config"] = function() return plugin_config end
+package.preload["datastorage"] = function()
+  return {
+    getDataDir = function() return data_dir end,
+    getSettingsDir = function() return data_dir .. "/settings" end,
+  }
+end
+
+-- The device's filesystem, faked: the off-device machine has no LuaFileSystem,
+-- so existence and modification time come from what this harness saw written.
+-- The file contents themselves are real, written and read by the plugin's io.
+local stamps, dirs = {}, {}
+local real_open, real_remove = io.open, os.remove
+io.open = function(path, mode)
+  local handle = real_open(path, mode)
+  if handle and type(mode) == "string" and (mode:find("w") or mode:find("a")) then
+    stamps[path] = os.time()
+  end
+  return handle
+end
+os.remove = function(path)
+  local ok, err = real_remove(path)
+  stamps[path] = nil
+  return ok, err
+end
+package.preload["libs/libkoreader-lfs"] = function()
+  return {
+    attributes = function(path, field)
+      if field == "mode" then
+        if dirs[path] then return "directory" end
+        if stamps[path] then return "file" end
+        return nil
+      end
+      if field == "modification" then return stamps[path] end
+      return nil
+    end,
+    mkdir = function(path) dirs[path] = true return true end,
+  }
+end
+
+-- The book tree the walk reads, and what it listed.
+local tree = {
+  ["/books"] = { "Alpha.epub", "Alpha.epub.sdr", "Author" },
+  ["/books/Alpha.epub.sdr"] = { "metadata.epub.lua" },
+  ["/books/Author"] = { "Beta.epub", "Beta.epub.sdr" },
+  ["/books/Author/Beta.epub.sdr"] = { "metadata.epub.lua" },
+}
+local bodies = {
+  ["/books/Alpha.epub.sdr/metadata.epub.lua"] =
+    "return { title = \"Alpha\", percent_finished = 0.5 }",
+  ["/books/Author/Beta.epub.sdr/metadata.epub.lua"] =
+    "return { title = \"Beta\", percent_finished = 0.5 }",
+}
+local listed = {}
+local Sidecar = require("lighthouse_sidecar")
+Sidecar.io = {
+  open = function(path)
+    if not bodies[path] then return nil end
+    return { close = function() end }
+  end,
+  loadfile = function(path)
+    local body = bodies[path]
+    if not body then return nil, "missing" end
+    return loadstring(body)
+  end,
+  list = function(path)
+    listed[#listed + 1] = path
+    local names = tree[path]
+    if not names then return nil end
+    local copy = {}
+    for index = 1, #names do copy[index] = names[index] end
+    return copy
+  end,
+  attributes = function(path, field)
+    if field == "mode" then
+      if tree[path] then return "directory" end
+      if path:sub(-5) == ".epub" then return "file" end
+    end
+    return nil
+  end,
+}
+
+local function reset() listed = {} end
+local function list_body()
+  local handle = real_open(list_path, "rb")
+  if not handle then return nil end
+  local body = handle:read("*a")
+  handle:close()
+  return body
+end
+local function line_count(body)
+  if type(body) ~= "string" then return -1 end
+  local count = 0
+  for line in body:gmatch("[^\r\n]+") do
+    if line ~= "" then count = count + 1 end
+  end
+  return count
+end
+local function new_plugin()
+  local plugin = assert(loadfile(plugin_root .. "/main.lua"))()
+  plugin.ui = { menu = { registerToMainMenu = function() end } }
+  plugin:init()
+  plugin.localSearchDirs = function() return { "/books" } end
+  return plugin
+end
+
+-- 1. A session's first scan walks the tree and writes the folder paths.
+local first = new_plugin()
+reset()
+local walked = first:localRecords()
+print("first_records=" .. #walked)
+print("first_listings=" .. #listed)
+local body = list_body()
+print("first_list_lines=" .. line_count(body))
+print("first_list_is_folders=" .. tostring(body ~= nil
+  and body:find("/books/Alpha.epub.sdr", 1, true) ~= nil
+  and body:find("percent_finished", 1, true) == nil))
+
+-- 2. A later session reuses that list instead of walking the tree again.
+local second = new_plugin()
+reset()
+local reused = second:localRecords()
+print("second_records=" .. #reused)
+print("second_listings=" .. #listed)
+print("second_same_titles=" .. tostring(reused[1] ~= nil and walked[1] ~= nil
+  and reused[1].title == walked[1].title))
+
+-- 3. A list older than the TTL is not reused: the session walks and rewrites.
+stamps[list_path] = os.time() - second.SIDECAR_LIST_TTL_SECONDS - 1
+local stale_stamp = stamps[list_path]
+local third = new_plugin()
+reset()
+local expired = third:localRecords()
+print("expired_records=" .. #expired)
+print("expired_listings=" .. #listed)
+print("expired_rewrote=" .. tostring(stamps[list_path] > stale_stamp))
+
+-- 4. A forced rescan (the library's Refresh) walks and rewrites at once.
+local fourth = new_plugin()
+fourth:localRecords()
+stamps[list_path] = os.time() - 5
+local before_forced = stamps[list_path]
+reset()
+fourth:localRecords(true)
+print("forced_listings=" .. #listed)
+print("forced_rewrote=" .. tostring(stamps[list_path] > before_forced))
+
+-- 5. A download deletes the list, so the next scan walks again.
+local Client = require("lighthouse_client")
+local real_download = Client.download
+Client.download = function() return true end
+fourth:startDownload({ title = "Alpha", download_href = "http://host/api/books/1/download/epub" },
+  data_dir .. "/Alpha.epub")
+Client.download = real_download
+print("download_list_gone=" .. tostring(list_body() == nil))
+reset()
+local after_download = fourth:localRecords()
+print("after_download_listings=" .. #listed)
+print("after_download_records=" .. #after_download)
+
+print("OK")
+`;
+
+describe("plugin sidecar list: written, reused, expired, invalidated", () => {
+  function runHarness(): Record<string, string> {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-sidecar-list-"));
+    fs.mkdirSync(path.join(workdir, "cache"), { recursive: true });
+    const harnessPath = path.join(workdir, "sidecar_list_harness.lua");
+    fs.writeFileSync(harnessPath, SIDECAR_LIST_HARNESS);
+    const res = spawnSync(LUA_BINARY as string, [harnessPath, KOPLUGIN_TEMPLATE_DIR, workdir], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    return Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+  }
+
+  it("writes the folder paths a walk found and reuses them next session", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.first_records).toBe("2");
+    // The walk lists every folder it descends; the sidecars are read from files.
+    expect(out.first_listings).toBe("4");
+    expect(out.first_list_lines).toBe("2");
+    // Folders, not reading data: a percentage in the list would be a cache of
+    // what a reader sees, and the sidecars must stay the authority.
+    expect(out.first_list_is_folders).toBe("true");
+    // A later session reads the two sidecar folders, never the tree.
+    expect(out.second_records).toBe("2");
+    expect(out.second_listings).toBe("2");
+    expect(out.second_same_titles).toBe("true");
+  });
+
+  it("walks instead of reusing a list older than the TTL", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.expired_records).toBe("2");
+    expect(out.expired_listings).toBe("4");
+    expect(out.expired_rewrote).toBe("true");
+  });
+
+  it("walks on a forced rescan and deletes the list on a download", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.forced_listings).toBe("4");
+    expect(out.forced_rewrote).toBe("true");
+    // The download invalidates both caches: the list is gone and the next scan
+    // walks the tree rather than reading folders that may have moved.
+    expect(out.download_list_gone).toBe("true");
+    expect(out.after_download_listings).toBe("4");
+    expect(out.after_download_records).toBe("2");
   });
 });
