@@ -36,6 +36,9 @@ import {
   parseIfconfig,
   parseMdnsBrowse,
   parseMdnsResolve,
+  pingHost,
+  selectKindle,
+  sweepLiveHosts,
   probeTcp,
   readSshBanner,
   resolveDeviceAlias,
@@ -54,6 +57,7 @@ function makeDiscovery(overrides: Partial<DiscoveryResult> = {}): DiscoveryResul
     devices: [],
     layers: [],
     scannedHosts: 254,
+    liveHostCount: 0,
     scanTargets: [
       {
         network: "192.168.31.0",
@@ -374,14 +378,35 @@ describe("diagnoseRoute", () => {
     expect(body).toContain("Permission denied");
   });
 
-  it("distinguishes a closed SSH port on a live device", () => {
+  it("asks for a full probe when a responder was found but auth was not attempted", () => {
     const decision = diagnoseRoute({
       discovery: makeDiscovery({ devices: [kindleDevice({ port: KINDLE_SSH_PORT })] }),
       alias: "kindle2",
     });
     expect(decision.state).toBe("ssh-closed");
     expect(decision.code).toBe(2);
-    expect(decision.body.join("\n")).toContain("Tools (wrench)");
+    expect(decision.headline).toContain("authentication was not verified");
+    expect(decision.body.join("\n")).toContain("kindle-ssh probe");
+  });
+
+  it("reports a requested device that discovery could not supply", () => {
+    const decision = diagnoseRoute({
+      discovery: makeDiscovery({ devices: [kindleDevice({ host: "192.168.31.73" })] }),
+      alias: "kindle2",
+      selectionNote: "kindle2 was requested but only 1 Kindle(s) answered (192.168.31.73).",
+    });
+    expect(decision.code).toBe(2);
+    expect(decision.headline).toContain("only 1 Kindle");
+    expect(decision.body.join("\n")).toContain("192.168.31.73:2222");
+  });
+
+  it("says hosts were up but nothing serves 2222 when ICMP found live hosts", () => {
+    const discovery = makeDiscovery({ devices: [], scannedHosts: 7 });
+    discovery.liveHostCount = 7;
+    const decision = diagnoseRoute({ discovery, alias: "kindle1" });
+    const body = decision.body.join("\n");
+    expect(body).toContain("7 host(s) answered");
+    expect(body).toContain("none is serving Kindle SSH");
   });
 
   it("mentions every subnet that was actually scanned", () => {
@@ -913,5 +938,103 @@ describe("kindle-key-install.sh", () => {
     // The warning only fires for RAM-backed paths such as /tmp.
     expect(out.stdout.includes("VOLATILE")).toBe(target.startsWith("/tmp"));
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Device selection (two devices on one LAN)
+// ---------------------------------------------------------------------------
+
+describe("selectKindle", () => {
+  const two = [
+    kindleDevice({ host: "192.168.31.167" }),
+    kindleDevice({ host: "192.168.31.73" }),
+    kindleDevice({ host: "192.168.31.5", kindleLikely: false, server: "openssh", banner: "SSH-2.0-OpenSSH_10.3" }),
+  ];
+
+  it("orders by address so device 1 and 2 are stable across runs", () => {
+    expect(selectKindle(two, "kindle1").selected?.host).toBe("192.168.31.73");
+    expect(selectKindle(two, "kindle2").selected?.host).toBe("192.168.31.167");
+  });
+
+  it("ignores non-Kindle responders when indexing", () => {
+    // 192.168.31.5 sorts first numerically but is OpenSSH, so it must not become "device 1".
+    expect(selectKindle(two, "kindle1").selected?.kindleLikely).toBe(true);
+  });
+
+  it("pins an explicit address", () => {
+    expect(selectKindle(two, "kindle1", "192.168.31.167").selected?.host).toBe("192.168.31.167");
+  });
+
+  it("explains an explicit address that did not answer", () => {
+    const { selected, note } = selectKindle(two, "kindle1", "192.168.31.99");
+    expect(selected).toBeUndefined();
+    expect(note).toContain("192.168.31.99");
+    expect(note).toContain("192.168.31.73");
+  });
+
+  it("explains a missing second device instead of silently using the first", () => {
+    const onlyOne = [kindleDevice({ host: "192.168.31.73" })];
+    const { selected, note } = selectKindle(onlyOne, "kindle2");
+    expect(selected).toBeUndefined();
+    expect(note).toContain("only 1 Kindle");
+  });
+
+  it("returns nothing to say when no Kindle answered at all", () => {
+    const { selected, note } = selectKindle([], "kindle1");
+    expect(selected).toBeUndefined();
+    expect(note).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Liveness pre-filter
+// ---------------------------------------------------------------------------
+
+describe("liveness filtering", () => {
+  it("pings loopback successfully with the native ping binary", async () => {
+    const result = await pingHost("127.0.0.1", 1000);
+    expect(result.alive).toBe(true);
+    expect(result.host).toBe("127.0.0.1");
+  });
+
+  it("reports a dead address without hanging", async () => {
+    const result = await pingHost("192.0.2.1", 400); // TEST-NET-1, never routed
+    expect(result.alive).toBe(false);
+  });
+
+  it("sweepLiveHosts keeps only responders", async () => {
+    const live = await sweepLiveHosts(["127.0.0.1", "192.0.2.1"], 2, 400);
+    expect(live).toEqual(["127.0.0.1"]);
+  });
+
+  it("probes only the hosts the live filter allows", async () => {
+    const probed: string[] = [];
+    const result = await discoverKindle({
+      ifaces: [{ name: "en0", address: "192.168.31.15", netmask: "255.255.255.0" }],
+      mdns: false,
+      includeUsb: false,
+      concurrency: 8,
+      icmpFilter: true,
+      liveFilter: async () => ["192.168.31.73"],
+      probe: async (host, port) => {
+        probed.push(`${host}:${port}`);
+        return { host, port, open: host === "192.168.31.73" && port === 2222, latencyMs: 1 };
+      },
+      banner: async () => "SSH-2.0-dropbear_2026.92 (KOReader)",
+    });
+
+    // Only the filtered host was probed, not all 254 addresses.
+    expect(probed.every((entry) => entry.startsWith("192.168.31.73:"))).toBe(true);
+    expect(result.scannedHosts).toBe(1);
+    expect(result.liveHostCount).toBe(1);
+    expect(result.devices).toHaveLength(1);
+    expect(result.devices[0].host).toBe("192.168.31.73");
+  });
+
+  it("reports the KOReader banner version verbatim", () => {
+    const info = classifySshServer("SSH-2.0-dropbear_2026.92 (KOReader)");
+    expect(info.server).toBe("dropbear");
+    expect(info.kindleLikely).toBe(true);
   });
 });

@@ -1042,6 +1042,8 @@ Discovery runs four layers in order and reports each one, so a miss tells you *w
 
 Only a **dropbear** banner counts as a Kindle. An `OpenSSH` responder on port 22 is a different machine (this Mac mini itself answers on `22`), and the tool refuses to treat it as a device. This Mac's own addresses are excluded from results.
 
+> **Kindles do not answer `ping`.** Their firmware drops ICMP while serving SSH normally, so any ping-first scan will report a healthy device as absent. The default sweep therefore probes every address in the subnet. `--fast` opts into an ICMP pre-filter for speed and carries a warning for exactly this reason - if a device that is definitely on goes missing, that flag is the first suspect.
+
 `find` exits `0` when a Kindle responder was found, `1` when nothing was found, `2` when something was found but the route is not usable yet.
 
 ### 2. Why there is no DHCP reservation pinning the address
@@ -1186,47 +1188,82 @@ ssh -p 22 -i ~/.ssh/id_ed25519 -o BatchMode=yes -o ConnectTimeout=8 root@192.168
 
 | Symptom | What it means | What to do |
 | --- | --- | --- |
-| `find` reports all layers empty | Device powered off, asleep, off Wi-Fi, or KOReader closed | Wake the device, start KOReader's SSH server (Tools -> SSH), rerun `find` |
-| Device answers ping but `2222` is closed | Device is on the network; KOReader is not running | Start KOReader's SSH server. Not a network fault |
+| **The Kindle does not answer `ping` but SSH works** | **Normal.** Kindle firmware drops ICMP. This is the single most misleading symptom on this network | Ignore ping entirely; judge reachability by a TCP connection on `2222` |
+| `find` reports all layers empty | Device powered off, off Wi-Fi, or KOReader closed | Wake it, start KOReader's SSH server (Tools -> SSH), rerun `find` |
+| `find --fast` misses a device that is definitely on | The ICMP pre-filter skipped it, because Kindles are ICMP-silent | Drop `--fast`; the default probes every address |
+| Hosts up but `2222` closed | The network is fine; KOReader is not running | Start KOReader's SSH server. Not a network fault |
 | `probe` says *key authentication failed* | Route exists, key is not trusted | `bin/lighthouse kindle-ssh key --device 1` (needs password auth once) |
 | `22` answers with `OpenSSH` | Not the Kindle - a computer or NAS on the same subnet | Ignore; the tool already refuses it as a candidate |
 | Login hangs then says *Connection timed out* | The address moved (DHCP) or the device slept mid-session | Rerun `bin/lighthouse kindle-ssh find`; never reuse an old address |
 | Key auth worked yesterday, fails today after reboot | Key landed in a RAM-backed path (`/tmp/root`) | Reinstall the key; make it persistent (see the installer's `VOLATILE` warning) |
+| A hand-written `net.connect()` probe says ECONNREFUSED to a device that `ssh` reaches | Runtime sockets to the LAN fail on this host (scoped routing / VPN layering), while native binaries succeed | Do not debug the device - use the tool, which probes through `nc` and `ssh` |
 | `usb` says *no USB network adapter present* | Device is not connected, or is in mass-storage mode | Plug in and enable USB networking on the device; confirm the gadget switch |
 | `usb` sees an adapter but `192.168.15.244` does not answer | USB networking is off on the device | Enable it (`/mnt/us/usbnet/bin/usbnetwork`) |
 | `ping 192.168.15.244` fails on the Mac | No address on the USB link | Run the `sudo ifconfig <enX>` step |
 | `sync-kindle` cannot find the Kindle | USB networking is still active, so there is no drive | Disable USB networking, or reboot the device |
 
-### 6. Proof status (read this before believing the section)
+### 6. Proof status
 
-This section is a complete, executable procedure with working tooling. Hardware proof is **outstanding** and is recorded honestly here rather than claimed.
+Route A (wireless) is **proven on both devices**: key-based login from this Mac mini returned real remote output, no password prompt. Route B (USB cable) is **implemented and documented but not exercised** — no cable was attached. That distinction is deliberate; see the last subsection.
 
-Verified on this Mac mini (real runs, not configuration):
+#### Proven: Route A on both devices
+
+| | Device 1 | Device 2 |
+| --- | --- | --- |
+| Address found by `find` | `192.168.31.73:2222` | `192.168.31.167:2222` |
+| Banner | `SSH-2.0-dropbear_2026.92 (KOReader)` | `SSH-2.0-dropbear_2026.92 (KOReader)` |
+| Serial (`/proc/usid`) | `G001LG1221170MVV` | `G092AP03315200G6` |
+| Kernel | `Linux 4.9.77-lab126 armv7l` | `Linux 4.9.77-lab126 armv7l` |
+| Auth | publickey, `BatchMode=yes`, no prompt | publickey, `BatchMode=yes`, no prompt |
+
+The command and its real output, for device 1:
+
+```bash
+bin/lighthouse kindle-ssh connect --device 1 -- 'cat /proc/usid; hostname; uname -srm; uptime'
+```
+
+```text
+G001LG1221170MVV
+kindle
+Linux 4.9.77-lab126 armv7l
+ 08:39:06 up 1 day, 17:35,  0 users,  load average: 2.26, 0.97, 0.50
+```
+
+and device 2 (same command, `--device 2`):
+
+```text
+G092AP03315200G6
+kindle
+Linux 4.9.77-lab126 armv7l
+ 08:39:20 up 28 days, 11:45,  0 users,  load average: 0.15, 0.19, 0.17
+```
+
+`lab126` is Amazon's Kindle hardware division, so the identity is confirmed by the device itself rather than inferred from its port.
+
+Also verified on this Mac mini (real runs):
 
 | Check | Result |
 | --- | --- |
-| `bin/lighthouse kindle-ssh find` | Ran; mDNS empty, USB empty, `192.168.31.0/24` swept (254 hosts), no Kindle; exit `1` |
-| `bin/lighthouse kindle-ssh probe` | Ran; printed the KOReader-dependency diagnosis and next steps, not a bare timeout |
-| `bin/lighthouse kindle-ssh usb` | Ran; correctly reported *no USB network adapter present*, **not** a false hit on the built-in Ethernet or VPN adapters |
-| `scripts/kindle-key-install.sh` | Idempotent install, `700`/`600` permissions, exact-line uninstall, `--dry-run` writes nothing, bad key rejected with exit `2` - all exercised against a sandbox directory |
-| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 77 passing |
+| `find` | Finds both Kindles on `192.168.31.0/24`, rejects the Mac's own `OpenSSH` on `:22` and another host's `OpenSSH`, exit `0` |
+| `find --device 2` / `connect --device 2` | Selects the second device by address order; refuses to silently substitute the first |
+| `usb` | Reports *no USB network adapter present* - no false hit on the built-in Ethernet or VPN adapters |
+| `scripts/kindle-key-install.sh` | Idempotent install, `700`/`600` permissions, exact-line uninstall, `--dry-run` writes nothing, bad key rejected |
+| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 90 passing |
 
-Not verified, and why:
+#### Not proven: Route B (USB cable)
 
-- **No route has been proven on a device.** At the time of writing both Kindles were dark: neither `192.168.31.167` nor `192.168.31.73` answered, no Kindle interface was mounted under `/Volumes`, `_ssh._tcp` advertised only the Mac mini and the M4 Air, and nothing on the subnet served dropbear on `2222` or `22`. A route counts as working only after a login returns real remote output, so neither route is claimed.
-- **No key was installed on either device.** That step needs one working route; none existed.
-- **No USB package was installed,** and no pre-flight was possible without a mounted volume.
+No USB cable was attached during this work: `/Volumes` held no Kindle, no `192.168.15.0/24` interface existed, and `bin/lighthouse kindle-ssh usb` reported *no USB network adapter present*. Consequently:
 
-To close the gap, with a device awake:
+- the USBNetwork pre-flight (`ls -d /Volumes/*/usbnet`) could not be run, so whether the package is already installed on either device is **unknown**;
+- nothing was installed, and no uninstall `.bin` was needed;
+- the host-side `sudo ifconfig <enX> inet 192.168.15.201 netmask 255.255.255.0 up` step is untested on this host.
 
-```bash
-bin/lighthouse kindle-ssh find                 # 1. discover the address
-bin/lighthouse kindle-ssh probe                # 2. confirm banner + key auth
-bin/lighthouse kindle-ssh key --device 1       # 3. install the key (once, needs password)
-bin/lighthouse kindle-ssh connect -- 'uname -srm; cat /etc/kindle-version; uptime'   # 4. prove it
-```
+Route B is therefore a documented, gated procedure, not a working route. Closing it needs a cable and a decision about installing USBNetwork if it is absent (that step patches the device root filesystem).
 
-Record the command and its output when it succeeds; that output is what turns this from configuration into a proven route.
+#### Two environmental facts worth remembering
+
+1. **Kindles are ICMP-silent.** Both devices served SSH on `2222` while answering no ping at all. Any scan that pre-filters on ping will conclude the device is absent. The tool probes every address by default for exactly this reason, and `--fast` carries that warning.
+2. **Runtime sockets to the LAN fail on this host.** A hand-written `net.connect('192.168.31.73', 2222)` returns `ECONNREFUSED` and a Python socket returns `EHOSTUNREACH`, while `nc`, `ssh` and `curl` reach the very same address. This is host scoped-routing/VPN layering, not a device fault. All probing in `scripts/kindle-ssh.ts` therefore delegates to `nc` (and `ssh` for auth/identity) instead of using runtime sockets; a socket-based implementation reports a healthy device as missing.
 
 ---
 

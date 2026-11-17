@@ -35,7 +35,6 @@
  *   3  usage error
  */
 
-import * as net from "node:net";
 import * as dns from "node:dns/promises";
 import * as os from "node:os";
 import * as fs from "node:fs";
@@ -446,67 +445,120 @@ export interface PortProbe {
   error?: string;
 }
 
-export function probeTcp(host: string, port: number, timeoutMs = 400): Promise<PortProbe> {
+/**
+ * Native binary used for TCP probes.
+ *
+ * This deliberately does NOT use a Bun/Node socket. In this environment raw
+ * runtime sockets to the LAN fail while native binaries succeed on the same
+ * address: `net.connect('192.168.31.73', 2222)` returns ECONNREFUSED and a
+ * Python socket returns EHOSTUNREACH, while `nc` and `ssh` reach the device
+ * normally. The cause is the host's scoped-route/VPN layering, not the device.
+ * Delegating to `nc` keeps discovery honest instead of silently blind.
+ */
+const NC_BIN = fs.existsSync("/usr/bin/nc") ? "/usr/bin/nc" : "nc";
+/** Native ssh binary; used for probing because it handles the same env correctly. */
+export const SSH_BIN = fs.existsSync("/usr/bin/ssh") ? "/usr/bin/ssh" : "ssh";
+
+function msToSeconds(timeoutMs: number): number {
+  return Math.max(1, Math.ceil(timeoutMs / 1000));
+}
+
+/**
+ * Test whether a TCP port accepts connections.
+ *
+ * Returns `open: false` plus a reason for refused and timed-out ports, so the
+ * caller can distinguish "host is up, nothing listening" from "host is not
+ * answering" and never reports a bare timeout.
+ */
+export function probeTcp(host: string, port: number, timeoutMs = 1000): Promise<PortProbe> {
+  const seconds = msToSeconds(timeoutMs);
   return new Promise((resolve) => {
     const started = Date.now();
     let settled = false;
-    const socket = new net.Socket();
+    let stderr = "";
+    let child: ReturnType<typeof spawn>;
 
     const finish = (open: boolean, error?: string) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       try {
-        socket.destroy();
+        child.kill("SIGKILL");
       } catch {
-        /* already destroyed */
+        /* already gone */
       }
       resolve({ host, port, open, latencyMs: Date.now() - started, error });
     };
 
-    socket.setTimeout(Math.max(50, timeoutMs));
-    socket.once("connect", () => finish(true));
-    socket.once("timeout", () => finish(false, "timeout"));
-    socket.once("error", (error: NodeJS.ErrnoException) => finish(false, error.code || error.message));
+    // Backstop: nc honours -w, but never let a probe outlive its budget.
+    const timer = setTimeout(() => finish(false, "timeout"), seconds * 1000 + 700);
+
     try {
-      socket.connect(port, host);
+      child = spawn(NC_BIN, ["-z", "-w", String(seconds), host, String(port)], {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
     } catch (error) {
-      finish(false, error instanceof Error ? error.message : String(error));
+      clearTimeout(timer);
+      resolve({ host, port, open: false, latencyMs: 0, error: `spawn failed: ${String(error)}` });
+      return;
     }
+
+    child.stderr?.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.once("error", (error) => finish(false, String(error)));
+    child.once("close", (code) => {
+      if (code === 0) return finish(true);
+      const firstLine = stderr.trim().split("\n")[0]?.trim();
+      finish(false, firstLine || (code === null ? "timeout" : `exit ${code}`));
+    });
   });
 }
 
 /** Read the SSH identification string a listener sends unprompted. */
 export function readSshBanner(host: string, port: number, timeoutMs = 1500, maxBytes = 256): Promise<string | null> {
+  const seconds = msToSeconds(timeoutMs);
   return new Promise((resolve) => {
     let buffer = "";
     let settled = false;
-    const socket = new net.Socket();
+    let child: ReturnType<typeof spawn>;
 
     const finish = (value: string | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       try {
-        socket.destroy();
+        child.kill("SIGKILL");
       } catch {
-        /* already destroyed */
+        /* already gone */
       }
       resolve(value);
     };
 
-    const timer = setTimeout(() => finish(buffer.trim() || null), Math.max(100, timeoutMs));
-    socket.setTimeout(Math.max(100, timeoutMs));
-    socket.once("timeout", () => finish(buffer.trim() || null));
-    socket.once("error", () => finish(buffer.trim() || null));
-    socket.on("data", (chunk) => {
+    const timer = setTimeout(() => finish(buffer.trim() || null), seconds * 1000 + 700);
+
+    try {
+      child = spawn(NC_BIN, ["-w", String(seconds), host, String(port)], {
+        stdio: ["pipe", "pipe", "ignore"],
+      });
+    } catch {
+      clearTimeout(timer);
+      resolve(null);
+      return;
+    }
+
+    child.stdout?.on("data", (chunk) => {
       buffer += String(chunk);
-      if (buffer.includes("\n")) finish(buffer.split("\n")[0].trim());
+      if (buffer.includes("\n")) finish(buffer.split("\n")[0].replace(/\r$/, "").trim());
       else if (buffer.length >= maxBytes) finish(buffer.trim());
     });
+    child.once("error", () => finish(buffer.trim() || null));
+    child.once("close", () => finish(buffer.trim() || null));
+    // Close stdin at once: we only want to read the server's greeting.
     try {
-      socket.connect(port, host);
+      child.stdin?.end();
     } catch {
-      finish(null);
+      /* ignore */
     }
   });
 }
@@ -559,6 +611,8 @@ export interface DiscoveryResult {
   devices: DiscoveredDevice[];
   layers: LayerReport[];
   scannedHosts: number;
+  /** Hosts that answered ICMP on the scanned subnet(s). */
+  liveHostCount: number;
   scanTargets: ScanTarget[];
   durationMs: number;
 }
@@ -569,6 +623,13 @@ export interface DiscoverOptions {
   concurrency?: number;
   mdns?: boolean;
   includeUsb?: boolean;
+  /**
+   * Enable the ICMP pre-filter (faster, but misses ICMP-silent devices such as
+   * every Kindle). Off by default.
+   */
+  icmpFilter?: boolean;
+  /** Injected for tests: narrows the candidate host list (defaults to an ICMP sweep). */
+  liveFilter?: (hosts: string[]) => Promise<string[]>;
   routerToken?: string;
   /** Injected for tests: interface addresses to scan instead of live ones. */
   ifaces?: IfaceAddr[];
@@ -597,6 +658,13 @@ interface DiscoveryContext {
   ports: number[];
   timeoutMs: number;
   concurrency: number;
+  /**
+   * Opt-in ICMP pre-filter. OFF by default because Kindle firmware drops ICMP:
+   * a ping-first scan silently skips the very device it is looking for.
+   */
+  icmpFilter: boolean;
+  /** Narrows the address list when icmpFilter is on. */
+  liveFilter: (hosts: string[]) => Promise<string[]>;
   probe: (host: string, port: number, timeoutMs: number) => Promise<PortProbe>;
   bannerFn: (host: string, port: number) => Promise<string | null>;
   ifaces: IfaceAddr[];
@@ -673,34 +741,106 @@ async function runUsbLayer(ctx: DiscoveryContext, enabled: boolean): Promise<Lay
   };
 }
 
+export interface PingResult {
+  host: string;
+  alive: boolean;
+  latencyMs: number;
+}
+
+/**
+ * ICMP liveness check via the native `ping` binary.
+ *
+ * Used as a cheap pre-filter before TCP probes: it cuts a 254-address sweep
+ * down to the handful of hosts that actually exist, which both speeds the scan
+ * up and lets the TCP probes use a generous timeout instead of a rushed one.
+ */
+export function pingHost(host: string, timeoutMs = 1000): Promise<PingResult> {
+  const seconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+  return new Promise((resolve) => {
+    const started = Date.now();
+    let settled = false;
+    let child: ReturnType<typeof spawn>;
+    const finish = (alive: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      resolve({ host, alive, latencyMs: Date.now() - started });
+    };
+    // -W is milliseconds on macOS ping, seconds on Linux; the backstop timer
+    // above keeps both honest.
+    const timer = setTimeout(() => finish(false), seconds * 1000 + 900);
+    try {
+      child = spawn("ping", ["-c", "1", "-W", String(timeoutMs), host], { stdio: "ignore" });
+    } catch {
+      clearTimeout(timer);
+      resolve({ host, alive: false, latencyMs: 0 });
+      return;
+    }
+    child.once("error", () => finish(false));
+    child.once("close", (code) => finish(code === 0));
+  });
+}
+
+/** Return the subset of hosts that answer ICMP. */
+export async function sweepLiveHosts(hosts: string[], concurrency: number, timeoutMs = 1000): Promise<string[]> {
+  const results = await mapWithConcurrency(hosts, concurrency, (host) => pingHost(host, timeoutMs));
+  return results.filter((result) => result.alive).map((result) => result.host);
+}
+
 async function runLanLayer(
   ctx: DiscoveryContext,
-): Promise<{ report: LayerReport; scannedHosts: number; targets: ScanTarget[] }> {
+): Promise<{ report: LayerReport; scannedHosts: number; liveHostCount: number; targets: ScanTarget[] }> {
   const targets = deriveScanTargets(ctx.ifaces);
   if (targets.length === 0) {
     return {
       report: { layer: "LAN sweep", status: "skipped", detail: "no scannable IPv4 interface found" },
       scannedHosts: 0,
+      liveHostCount: 0,
       targets,
     };
   }
 
-  let scannedHosts = 0;
+  let probedHosts = 0;
+  let liveHosts = 0;
+  let totalLive = 0;
+
   for (const target of targets) {
+    const hosts = expandScanHosts(target);
     // Skip hosts an earlier layer already identified.
-    const pending = expandScanHosts(target).filter((host) => !ctx.ports.every((port) => ctx.seen.has(`${host}:${port}`)));
-    scannedHosts += pending.length;
-    await mapWithConcurrency(pending, ctx.concurrency, (host) => probeHostPorts(ctx, host, "lan-scan", ctx.ports));
+    const pending = hosts.filter((host) => !ctx.ports.every((port) => ctx.seen.has(`${host}:${port}`)));
+
+    // Probe every address by default: Kindles drop ICMP, so a ping-first scan
+    // would skip the device it is looking for. --fast opts into the filter.
+    const candidates = ctx.icmpFilter ? await ctx.liveFilter(pending) : pending;
+    if (ctx.icmpFilter) {
+      liveHosts += candidates.length;
+      totalLive += candidates.length;
+    }
+    probedHosts += candidates.length;
+
+    await mapWithConcurrency(candidates, ctx.concurrency, (host) =>
+      probeHostPorts(ctx, host, "lan-scan", ctx.ports),
+    );
   }
 
-  const summary = targets.map((t) => `${t.network}/${t.prefix} (${t.hostCount} hosts on ${t.interface})`).join(", ");
+  const summary = targets
+    .map((t) => `${t.network}/${t.prefix} (${t.hostCount} hosts on ${t.interface}${ctx.icmpFilter ? ", ICMP-filtered" : ""})`)
+    .join(", ");
   return {
     report: {
       layer: "LAN sweep",
       status: ctx.devices.some((device) => device.source === "lan-scan") ? "found" : "empty",
-      detail: summary,
+      detail: `${summary}; ${probedHosts} host(s) probed on ${ctx.ports.join("/")}${
+        ctx.icmpFilter ? ` (${liveHosts} answered ICMP)` : ""
+      }`,
     },
-    scannedHosts,
+    scannedHosts: probedHosts,
+    liveHostCount: totalLive,
     targets,
   };
 }
@@ -725,8 +865,12 @@ export async function discoverKindle(options: DiscoverOptions = {}): Promise<Dis
   const ifaces = options.ifaces ?? readLiveInterfaces();
   const ctx: DiscoveryContext = {
     ports: options.ports ?? [KINDLE_SSH_PORT, KINDLE_ALT_SSH_PORT],
-    timeoutMs: options.timeoutMs ?? 400,
+    timeoutMs: options.timeoutMs ?? 1200,
     concurrency: options.concurrency ?? 64,
+    icmpFilter: options.icmpFilter === true,
+    liveFilter:
+      options.liveFilter ??
+      ((hosts) => sweepLiveHosts(hosts, options.concurrency ?? 64, options.timeoutMs ?? 1200)),
     probe: options.probe ?? ((host, port, t) => probeTcp(host, port, t)),
     bannerFn: options.banner ?? ((host, port) => readSshBanner(host, port)),
     ifaces,
@@ -748,6 +892,7 @@ export async function discoverKindle(options: DiscoverOptions = {}): Promise<Dis
     devices: ctx.devices,
     layers,
     scannedHosts: lan.scannedHosts,
+    liveHostCount: lan.liveHostCount,
     scanTargets: lan.targets,
     durationMs: Date.now() - started,
   };
@@ -771,6 +916,10 @@ export interface DiagnosisInput {
   discovery: DiscoveryResult;
   alias: string;
   authResult?: { authenticated: boolean; error?: string; output?: string };
+  /** Set when a specific device was requested but could not be selected. */
+  selectionNote?: string;
+  /** The device actually selected for this operation, if any. */
+  selected?: DiscoveredDevice;
 }
 
 /**
@@ -779,29 +928,51 @@ export interface DiagnosisInput {
  * names the condition and the next step.
  */
 export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
-  const { discovery, alias, authResult } = input;
+  const { discovery, alias, authResult, selectionNote, selected } = input;
   const targets = discovery.scanTargets.map((t) => `${t.network}/${t.prefix}`).join(", ") || "no scannable subnet";
 
   const kindleCandidates = discovery.devices.filter((device) => device.kindleLikely);
   const otherCandidates = discovery.devices.filter((device) => !device.kindleLikely);
 
+  // A specific device was asked for and discovery could not supply it. Say that
+  // instead of describing a different device's state as if it were this one's.
+  if (selectionNote) {
+    return {
+      state: "not-found",
+      code: 2,
+      headline: selectionNote,
+      body: [
+        kindleCandidates.length > 0
+          ? `Reachable Kindle(s): ${kindleCandidates.map((d) => `${d.host}:${d.port}`).join(", ")}.`
+          : "No Kindle answered discovery at all on this run.",
+        "",
+        "Confirm the device is powered on with Wi-Fi connected and KOReader's SSH server started,",
+        `then re-run: bin/lighthouse kindle-ssh find`,
+      ],
+    };
+  }
+
   // An already-open port can still exist on a device whose daemon then refuses auth.
   if (kindleCandidates.length === 0 && otherCandidates.length === 0) {
+    const live = discovery.liveHostCount;
+    const liveLine =
+      live > 0
+        ? `${live} host(s) answered ICMP on ${targets} but none is serving Kindle SSH on ${KINDLE_SSH_PORT}.`
+        : `${discovery.scannedHosts} address(es) were probed on ${targets}; none is serving Kindle SSH on ${KINDLE_SSH_PORT}.`;
     return {
       state: "not-found",
       code: 1,
       headline: `No ${alias} SSH route is reachable from this Mac mini.`,
       body: [
-        `Checked: mDNS (${MDNS_HOST_CANDIDATES.join(", ")}), USB gadget ${KINDLE_USB_HOST}, and a TCP scan of ${targets} on ports ${KINDLE_SSH_PORT}/${KINDLE_ALT_SSH_PORT} (${discovery.scannedHosts} hosts).`,
+        `Checked: mDNS (${MDNS_HOST_CANDIDATES.join(", ")}), USB gadget ${KINDLE_USB_HOST}, and a scan of ${targets} on ports ${KINDLE_SSH_PORT}/${KINDLE_ALT_SSH_PORT}.`,
+        liveLine,
         "",
-        "This means one of:",
-        "  * the device is powered off or asleep (press the power button to wake it),",
-        "  * the device is awake but not associated with Wi-Fi,",
-        "  * KOReader is closed, or its SSH server was not started.",
-        "",
-        "The wireless route ONLY exists while KOReader is running:",
+        "If hosts are up but none serves 2222, the network is fine and the SSH daemon is not running:",
+        "KOReader's SSH server only exists while KOReader runs.",
         "  On the Kindle: open KOReader -> Tools (wrench) -> SSH -> start the server.",
-        `  Then re-run: bin/lighthouse kindle-ssh find --device ${alias}`,
+        `  Then re-run: bin/lighthouse kindle-ssh find`,
+        "",
+        "If no host answered at all, the device is off/asleep or not associated with Wi-Fi.",
         "",
         "Fallback that works with Wi-Fi off:",
         "  Plug the device in over USB-C and run: bin/lighthouse kindle-ssh usb",
@@ -827,7 +998,7 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
     };
   }
 
-  const device = kindleCandidates[0];
+  const device = selected ?? kindleCandidates[0];
 
   if (authResult?.authenticated) {
     return {
@@ -859,16 +1030,15 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
     };
   }
 
+  // A Kindle-banner responder implies the port was open; reaching here means
+  // discovery succeeded but no authentication attempt was made for this run.
   return {
     state: "ssh-closed",
     code: 2,
-    headline: `${alias} was found at ${device.host} but nothing is listening on port ${KINDLE_SSH_PORT}.`,
+    headline: `${alias} answered on ${device.host}:${device.port} but authentication was not verified.`,
     body: [
-      "The device is on the network, so power and Wi-Fi are fine. The SSH daemon is simply not running,",
-      "which means KOReader is closed or its SSH server was stopped.",
-      "",
-      "Start it: KOReader -> Tools (wrench) -> SSH -> start the server.",
-      `Then re-run: bin/lighthouse kindle-ssh probe --device ${alias}`,
+      "Run a full probe to attempt key authentication and capture the remote identity:",
+      `  bin/lighthouse kindle-ssh probe --device ${alias}`,
     ],
     device,
   };
@@ -1184,9 +1354,13 @@ export function formatUsbReport(status: UsbStatus): string {
 interface CliOptions {
   subcommand: string;
   device: string;
+  /** Explicit address override; still verified by banner before use. */
+  host?: string;
   json: boolean;
   mdns: boolean;
   usb: boolean;
+  /** Opt-in ICMP pre-filter (off by default; Kindles are ICMP-silent). */
+  icmpFilter: boolean;
   ports: number[];
   timeoutMs: number;
   remote: string[];
@@ -1201,13 +1375,13 @@ export function parseCliArgs(argv: string[]): CliOptions | { help: true } | { er
     json: false,
     mdns: true,
     usb: true,
+    icmpFilter: false,
     ports: [KINDLE_SSH_PORT, KINDLE_ALT_SSH_PORT],
     timeoutMs: 400,
     remote: [],
     identityFile: defaultIdentityFile(),
     configure: false,
   };
-
   const args = [...argv];
   if (args.length === 0) return { help: true };
 
@@ -1231,6 +1405,9 @@ export function parseCliArgs(argv: string[]): CliOptions | { help: true } | { er
       case "--no-usb":
         options.usb = false;
         break;
+      case "--fast":
+        options.icmpFilter = true;
+        break;
       case "--configure":
         options.configure = true;
         break;
@@ -1238,6 +1415,12 @@ export function parseCliArgs(argv: string[]): CliOptions | { help: true } | { er
       case "-d":
         options.device = resolveDeviceAlias(args[++i]);
         break;
+      case "--host": {
+        const value = args[++i] ?? "";
+        if (!isValidIpv4(value)) return { error: `--host requires an IPv4 address, got: ${value}` };
+        options.host = value;
+        break;
+      }
       case "--port":
       case "-p":
         options.ports = [Number(args[++i])];
@@ -1287,12 +1470,15 @@ Subcommands:
   usb       Report and prepare the USB-cable fallback route
 
 Options:
-  --device <1|2|kindle1|kindle2>  Which Kindle to target (default: kindle1)
+  --device <1|2|kindle1|kindle2>  Which Kindle to target (1 = first found, 2 = second)
+  --host <ipv4>                   Pin an exact address (still banner-verified)
   --timeout <ms>                  Per-host TCP probe timeout (default: 400)
   --port <port>                   Probe a single SSH port instead of 2222 and 22
   --identity <path>               SSH private key (default: ~/.ssh/id_ed25519)
   --no-mdns                       Skip the mDNS discovery layer
   --no-usb                        Skip the USB-gadget discovery layer
+  --fast                          Speed up with an ICMP pre-filter. WARNING: Kindles
+                                  do not answer ping, so this can skip the device.
   --json                          Machine-readable output
   --configure                     (usb) Actually run the host-side ifconfig, not just print it
 
@@ -1308,26 +1494,65 @@ Notes:
   * BatchMode=yes means a missing key fails loudly instead of blocking on a password prompt.
 `;
 
+/**
+ * Pick which Kindle to act on.
+ *
+ * `--device 1` / `--device 2` select the first / second Kindle found, ordered by
+ * address so the mapping is stable across runs. `--host` pins one explicitly.
+ * A selection is never asserted blindly: the chosen address still has to answer
+ * with a dropbear banner before it is used.
+ */
+export function selectKindle(
+  devices: DiscoveredDevice[],
+  device: string,
+  host?: string,
+): { selected?: DiscoveredDevice; note?: string } {
+  const kindles = devices
+    .filter((entry) => entry.kindleLikely)
+    .sort((a, b) => ipv4ToInt(a.host) - ipv4ToInt(b.host));
+
+  if (host) {
+    const match = kindles.find((entry) => entry.host === host);
+    if (match) return { selected: match };
+    if (kindles.length === 0) return { note: `${host} was requested but no Kindle answered discovery.` };
+    return {
+      selected: undefined,
+      note: `${host} was requested but did not answer; found ${kindles.map((k) => k.host).join(", ")}.`,
+    };
+  }
+
+  const index = /2$/.test(device) ? 1 : 0;
+  if (kindles[index]) return { selected: kindles[index] };
+  if (kindles.length === 0) return {};
+  return {
+    selected: undefined,
+    note: `${device} was requested but only ${kindles.length} Kindle(s) answered (${kindles
+      .map((k) => k.host)
+      .join(", ")}).`,
+  };
+}
+
 async function resolveTarget(
   options: CliOptions,
-): Promise<{ target?: SshTarget; discovery: DiscoveryResult; auth?: AuthCheck }> {
+): Promise<{ target?: SshTarget; discovery: DiscoveryResult; auth?: AuthCheck; note?: string }> {
   const discovery = await discoverKindle({
     ports: options.ports,
     timeoutMs: options.timeoutMs,
     mdns: options.mdns,
     includeUsb: options.usb,
+    icmpFilter: options.icmpFilter,
   });
 
-  const kindle = discovery.devices.find((device) => device.kindleLikely);
-  if (!kindle) return { discovery };
+  const { selected, note } = selectKindle(discovery.devices, options.device, options.host);
+  if (!selected) return { discovery, note };
 
   const target: SshTarget = {
-    host: kindle.host,
-    port: kindle.port,
+    host: selected.host,
+    port: selected.port,
     identityFile: options.identityFile,
   };
   const auth = await verifyKeyAuth(target, Math.max(10000, options.timeoutMs * 20));
-  return { target, discovery, auth };
+  return { target, discovery, auth, note };
 }
 
 async function cmdFind(options: CliOptions): Promise<number> {
@@ -1336,6 +1561,7 @@ async function cmdFind(options: CliOptions): Promise<number> {
     timeoutMs: options.timeoutMs,
     mdns: options.mdns,
     includeUsb: options.usb,
+    icmpFilter: options.icmpFilter,
   });
 
   if (options.json) {
@@ -1349,10 +1575,15 @@ async function cmdFind(options: CliOptions): Promise<number> {
 }
 
 async function cmdProbe(options: CliOptions): Promise<number> {
-  const { target, discovery, auth } = await resolveTarget(options);
+  const { target, discovery, auth, note } = await resolveTarget(options);
+  const selected = target
+    ? discovery.devices.find((device) => device.host === target.host && device.port === target.port)
+    : undefined;
   const decision = diagnoseRoute({
     discovery,
     alias: options.device,
+    selected,
+    selectionNote: note,
     authResult: auth
       ? { authenticated: auth.authenticated, error: auth.error, output: auth.output }
       : target
