@@ -2014,7 +2014,9 @@ end
 -- Layout containers: children are appended to the container table itself, which
 -- is what a group is in KOReader (group[#group + 1] = widget). A horizontal
 -- group is as tall as its tallest child and as wide as all of them; a vertical
--- group is as wide as its widest child and as tall as all of them.
+-- group is as wide as its widest child and as tall as all of them. Like the
+-- real classes, a container keeps the size it measured until resetLayout
+-- clears it, so a tree that changes after being measured has to say so.
 local function layout_container(kind, stacks)
   return function()
     local group = {}
@@ -2026,14 +2028,22 @@ local function layout_container(kind, stacks)
       return options
     end
     function group:getSize()
+      if self._size then return self._size end
       local width, height = 0, 0
       for index = 1, #self do
         local size = self[index] and self[index]:getSize() or { w = 0, h = 0 }
         width = stacks and math.max(width, size.w or 0) or (width + (size.w or 0))
         height = stacks and (height + (size.h or 0)) or math.max(height, size.h or 0)
       end
-      if self.dimen then return self.dimen end
-      return { w = width, h = height }
+      self._size = self.dimen or { w = width, h = height }
+      return self._size
+    end
+    function group:resetLayout()
+      self._size = nil
+      for index = 1, #self do
+        local child = self[index]
+        if child and child.resetLayout then child:resetLayout() end
+      end
     end
     function group:paintTo(bb, x, y)
       self.__painted = { x = x, y = y }
@@ -3342,7 +3352,130 @@ end
 print("OK")
 `);
 
-describe("plugin reading stats view", () => {
+/**
+ * What a library page actually draws, at the density the device reports.
+ *
+ * `Ui.listPlan` hands the renderer pixel measures, and the renderer turns them
+ * into font faces. `Font.getFace` multiplies the size it is given by the device
+ * scale before anything is drawn, so a page can fit its plan and still draw its
+ * type two to three times too large - and a page that shrinks to its content
+ * leaves the tail of the last page on the glass. This harness builds the real
+ * widget tree for page 1 and page 2 of a library through `Page.build` on a
+ * 1236x1648 panel and measures both: the pixels the row title is drawn at, and
+ * the height of each page. The plan itself comes from `LightHouse:libraryPlan()`,
+ * so the density factor is the one the plugin derives from the device rather
+ * than one the harness works out for itself. The device round is still the proof
+ * of the reported symptoms; this is what the drawn tree can show off-device.
+ */
+const LIBRARY_PAGE_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local DEVICE_W, DEVICE_H = 1236, 1648
+local DEVICE_FACTOR = 1236 / 600
+
+-- The runtime's only density answer: whole pixels, rounded *up*, so the answer
+-- for one unit is 3 on this panel while the factor is 2.06.
+local function scaleBySize(units) return math.ceil(units * DEVICE_FACTOR) end
+
+-- Font.getFace hands the size it is given to the same density answer and draws
+-- that many pixels, so this stub draws what the runtime would draw, not what the
+-- page asked for.
+-- Records the pixel size that reaches each text, so the size drawn is read back
+-- from the tree instead of from the module that asked for it.
+local drawn = {}
+package.preload["ui/font"] = function()
+  return {
+    getFace = function(_, name, size)
+      local units = tonumber(size) or 0
+      return { name = name, units = units, px = scaleBySize(units) }
+    end,
+  }
+end
+package.preload["ui/widget/textwidget"] = function()
+  local text = {}
+  function text:new(options)
+    options = options or {}
+    options.__kind = "textwidget"
+    if options.face then drawn[tostring(options.text)] = options.face.px end
+    function options:getSize() return { w = #tostring(self.text or ""), h = 1 } end
+    function options:getWidth() return nil end
+    function options:paintTo() end
+    function options:free() end
+    return options
+  end
+  function text.getTextWidth(value) return #tostring(value or "") end
+  return text
+end
+-- A 1236x1648 panel - the Kindle size the regression came from - answering
+-- density the way the runtime answers it.
+package.preload["device"] = function()
+  return {
+    screen = {
+      getWidth = function() return DEVICE_W end,
+      getHeight = function() return DEVICE_H end,
+      scaleBySize = function(_, size) return scaleBySize(size) end,
+    },
+  }
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local Views = require("lighthouse_views")
+local Page = require("lighthouse_page")
+
+print("probe_one_unit=" .. scaleBySize(1))
+print("probe_600_units=" .. scaleBySize(600))
+
+local entries = {
+  { title = "Ballad of a Shinigami vol. 2", authors = "K-Ske Hasegawa",
+    series = "Ballad of a Shinigami", series_index = 2, book_id = 11,
+    status = { percentage = 0.62 } },
+  { title = "Spice and Wolf, Vol. 9", authors = "Isuna Hasekura", book_id = 12,
+    status = { percentage = 0.41 } },
+  { title = "Ascendance of a Bookworm", authors = "Miya Kazuki", book_id = 13 },
+  { title = "Legend of the Galactic Heroes", authors = "Yoshiki Tanaka", book_id = 14 },
+  { title = "The Saga of Tanya the Evil", authors = "Carlo Zen", book_id = 15 },
+  { title = "Violet Evergarden", authors = "Kana Akatsuki", book_id = 16 },
+  { title = "Kino's Journey", authors = "Keiichi Sigsawa", book_id = 17 },
+}
+
+local plan = assert(LightHouse:libraryPlan(), "the library plan must build")
+local page_size = math.max(plan.rows - 2, 1)
+
+local function model_for(number, has_next, size)
+  -- The catalog feed pages the server side, so the model draws exactly the
+  -- entries that page returned.
+  local window = {}
+  for index = (number - 1) * size + 1, math.min(number * size, #entries) do
+    window[#window + 1] = entries[index]
+  end
+  return Views.libraryModel("books", {
+    entries = window, page = number, page_size = size, has_next = has_next,
+    query = "", totals = { books = 1802 },
+  })
+end
+
+local first = assert(Page.build{ model = model_for(1, true, page_size), plan = plan })
+local second = assert(Page.build{ model = model_for(2, false, page_size), plan = plan })
+print("library_plan_scale=" .. string.format("%.3f", plan.scale or 0))
+print("library_plan_rows=" .. plan.rows)
+print("library_row_h=" .. plan.row_h)
+print("library_screen_height=" .. DEVICE_H)
+print("library_page_1_height=" .. first:getSize().h)
+print("library_page_2_height=" .. second:getSize().h)
+print("library_row_title_px=" .. tostring(drawn["Ballad of a Shinigami vol. 2"]))
+print("library_row_title_fits=" .. tostring((drawn["Ballad of a Shinigami vol. 2"] or 0) <= plan.row_h))
+
+-- A page whose rows do not fit its plan at all: the leftover the plan reports is
+-- not free space to pad with, so the plan's own slack must not change what is
+-- drawn. Two plans that differ only in that slack must measure the same page.
+local slackless = {}
+for key, value in pairs(plan) do slackless[key] = value end
+slackless.slack = 0
+local crowded = model_for(1, true, #entries)print("library_overflow_height=" .. assert(Page.build{ model = crowded, plan = plan }):getSize().h)
+print("library_overflow_slackless=" .. assert(Page.build{ model = crowded, plan = slackless }):getSize().h)
+print("library_plan_slack=" .. plan.slack)
+print("OK")
+`);
+
+describe("plugin one-page views", () => {
   /** Extracts the generated archive the documented way and runs a harness on it. */
   function runHarness(harness: string): Record<string, string> {
     const { zip } = generateKoplugin({
@@ -3436,6 +3569,43 @@ describe("plugin reading stats view", () => {
       // the page still uses most of the screen instead of shrinking to chrome.
       expect(drawn).toBeGreaterThan(height * 0.8);
     }
+  });
+
+  it("draws the library row title at its planned size and every page one screen tall", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runHarness(LIBRARY_PAGE_HARNESS);
+
+    // The density the plugin reads, on a panel that rounds its answers up: a
+    // 600-unit probe survives the rounding (1236px), one unit does not (3px on
+    // a 2.06 panel), so the plan is six 207px rows. A one-unit probe plans four
+    // rows of 266px instead.
+    expect(out.probe_one_unit).toBe("3");
+    expect(out.probe_600_units).toBe("1236");
+    expect(out.library_plan_scale).toBe("2.060");
+    expect(Number(out.library_plan_rows)).toBe(6);
+    expect(Number(out.library_row_h)).toBe(207);
+
+    // Both pages measure one screen: page 1 carries the search and next-page
+    // rows, page 2 carries neither, and the page that draws less must still
+    // paint (and invalidate) the whole glass or the previous page's tail stays
+    // on it until a manual refresh.
+    const height = Number(out.library_screen_height);
+    expect(Number(out.library_page_1_height)).toBe(height);
+    expect(Number(out.library_page_2_height)).toBe(height);
+
+    // The row title is asked for in pixels and drawn in pixels: the plan rule
+    // gives a 207px row a `floor(min(row_h, 120) * 0.26)` = 31px title, and the
+    // density answer returns those 31px back (a 15.049-unit request). Handing
+    // the pixel measure straight to Font.getFace draws 64px in the same row,
+    // which is the oversized type the report describes.
+    expect(Number(out.library_row_title_px)).toBe(31);
+    expect(out.library_row_title_fits).toBe("true");
+
+    // A page the plan cannot hold is not padded with the plan's leftover: the
+    // slack is only a stand-in for a missing measurement, so two plans that
+    // differ only in their slack draw the same height.
+    expect(Number(out.library_plan_slack)).toBeGreaterThan(0);
+    expect(Number(out.library_overflow_height)).toBe(Number(out.library_overflow_slackless));
   });
 
   it("leads with the four headline numbers", () => {

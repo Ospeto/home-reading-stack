@@ -321,6 +321,32 @@ print("list_plan_fits=" .. tostring(list_plan.total <= 800))
 print("list_plan_tiny=" .. list_tiny.rows .. "," .. tostring(list_tiny.total <= 200))
 print("list_plan_switch=" .. tostring(list_plan.switch_h > 0) .. "," .. tostring(list_plan.content_w > 0))
 
+-- Density factor: what the plugin multiplies its units by -------------------
+-- scaleBySize rounds up, so the answer for ONE unit is not the factor. These
+-- are the numbers a Kindle Paperwhite 5 SE (1236x1648) actually reports.
+local scale_probe = Ui.scaleFactor(1236, 600)
+print("scale_factor_device=" .. string.format("%.3f", scale_probe))
+print("scale_factor_one_unit=" .. string.format("%.3f", Ui.scaleFactor(3, 1)))
+print("scale_factor_triple=" .. string.format("%.3f", Ui.scaleFactor(1800, 600)))
+print("scale_factor_junk=" .. tostring(Ui.scaleFactor(nil, 600)) .. ","
+  .. tostring(Ui.scaleFactor(0, 600)) .. "," .. tostring(Ui.scaleFactor(1200, 0)))
+
+-- The device's own library page, planned with the factor the runtime really
+-- has: it must hold a shelf, not a couple of rows, and must fit the screen.
+local device_plan = Ui.listPlan(1236, 1648, scale_probe, { with_switch = true, min_rows = 3 })
+print("device_plan_rows=" .. device_plan.rows)
+print("device_plan_rowh=" .. device_plan.row_h)
+print("device_plan_fits=" .. tostring(device_plan.total <= device_plan.height))
+print("device_plan_full_height=" .. tostring(device_plan.total >= device_plan.height - device_plan.gap))
+print("device_plan_rowh_shrank=" .. tostring(device_plan.row_h < Ui.listPlan(1236, 1648, 3, { with_switch = true }).row_h))
+
+-- Face sizes: getFace multiplies by the device scale, so a pixel measure has to
+-- be turned back into units first. 31px on this panel is 15.05 units.
+print("face_units_device=" .. string.format("%.3f", Ui.faceUnits(31, scale_probe)))
+print("face_units_one=" .. string.format("%.3f", Ui.faceUnits(31, 1)))
+print("face_units_nil_scale=" .. string.format("%.3f", Ui.faceUnits(31, nil)))
+print("face_units_junk=" .. tostring(Ui.faceUnits(nil, 2.06)) .. "," .. tostring(Ui.faceUnits(31, 0)))
+
 -- Heatmap columns ----------------------------------------------------------
 print("weekday_mon=" .. tostring(Ui.weekdayIndex("2026-11-16")))
 print("weekday_sun=" .. tostring(Ui.weekdayIndex("2026-11-15")))
@@ -728,6 +754,40 @@ describe("plugin UI primitives: one-page geometry", () => {
     expect(out.list_plan_switch).toBe("true,true");
     expect(Number(out.list_plan_rows)).toBeGreaterThanOrEqual(1);
     expect(out.list_plan_tiny.endsWith("true")).toBe(true);
+  });
+
+  it("derives the density factor from a wide probe, not from one unit", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // 1236x1648 @300dpi: the runtime answers 3 for one unit, but the factor is
+    // 2.06. Multiplying by 3 is what made every band 46% too big.
+    expect(out.scale_factor_device).toBe("2.060");
+    expect(out.scale_factor_one_unit).toBe("3.000");
+    expect(out.scale_factor_triple).toBe("3.000");
+    expect(out.scale_factor_junk).toBe("nil,nil,nil");
+  });
+
+  it("turns a pixel face size into the unit size the font API scales", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // 31px of row title on a 2.06x panel is 15.05 units; asking for 31 units
+    // drew 64px of type in a 207px row and is what made the list type oversized.
+    expect(out.face_units_device).toBe("15.049");
+    expect(out.face_units_one).toBe("31.000");
+    expect(out.face_units_nil_scale).toBe("31.000");
+    expect(out.face_units_junk).toBe("nil,31");
+  });
+
+  it("plans a full shelf of rows on a real Kindle instead of a couple", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // The regression this guards: with the one-unit scale the same screen
+    // planned four rows, two of them navigation, so the library showed two
+    // books a page at twice the intended type size.
+    expect(Number(out.device_plan_rows)).toBeGreaterThanOrEqual(6);
+    expect(out.device_plan_fits).toBe("true");
+    expect(out.device_plan_full_height).toBe("true");
+    expect(out.device_plan_rowh_shrank).toBe("true");
   });
 });
 

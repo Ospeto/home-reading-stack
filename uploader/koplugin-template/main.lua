@@ -323,17 +323,29 @@ end
 -- Browse, Search, Currently reading and Reading stats.
 
 --- Device scale factor, safe when the screen object is unavailable.
--- @treturn number
+--
+-- This number multiplies every unit the plugin draws, so it has to be
+-- KOReader's own density factor and nothing rounder. `Screen:scaleBySize`
+-- works in whole pixels and rounds *up*, so asking it what one unit is, and
+-- multiplying the answer, is not the factor: on a 1236x1648 panel it answers 3
+-- for a real factor of 2.06, and every band built from it - the page header,
+-- the footer, the switch and above all the row height - comes out ~46% too
+-- big. A row band that fat is what collapses the page to a couple of rows and
+-- hands the type scale its oversized faces.
+--
+-- Probe with a wide reference instead: the answer is `ceil(600 * factor)`, so
+-- its rounding error is one part in 600 rather than one part in two. A build
+-- that cannot answer that probe gets 1 - one unit is one pixel - rather than a
+-- one-unit probe, which only ever recovers the ceiling factor this fixes.
+-- @treturn number pixels per unit
 local function screenScale()
     local screen = Device and Device.screen
     if type(screen) ~= "table" or type(screen.scaleBySize) ~= "function" then
         return 1
     end
-    local ok, value = pcall(screen.scaleBySize, screen, 1)
+    local ok, value = pcall(screen.scaleBySize, screen, 600)
     if not ok then return 1 end
-    local scale = tonumber(value)
-    if not scale or scale <= 0 then return 1 end
-    return scale
+    return Ui.scaleFactor(value, 600) or 1
 end
 
 --- Screen height in pixels, safe when the screen object is unavailable.

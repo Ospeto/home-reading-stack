@@ -24,8 +24,11 @@ Design rules this file encodes (e-ink, judged at 1 bit):
     the glanceable values readable without tapping. Section headings are marked
     with a left block bar, the e-ink equivalent of the web app's accent border.
   * Every measure below is expressed in "units" that main.lua multiplies by
-    `Screen:scaleBySize(1)`, so the same layout appears on a 600px and a
-    1072px screen without a second table of magic numbers.
+    the device's pixels-per-unit factor (itself derived from a 600-unit
+    `Screen:scaleBySize` probe, because the answer for one unit is rounded up
+    to a whole pixel), so the same layout appears on a 600px and a
+    1072px screen without a second table of magic numbers. A build that cannot
+    answer that probe passes 1 - one unit is one pixel.
 
 The module is pure Lua: no sockets, no widgets, no KOReader requires. The
 repository's off-device suite exercises every helper here directly.
@@ -280,6 +283,49 @@ local function numberIn(value, fallback, minimum, maximum)
     if minimum and parsed < minimum then parsed = minimum end
     if maximum and parsed > maximum then parsed = maximum end
     return parsed
+end
+
+--- The density factor a "how many pixels is one unit" answer hides.
+--
+-- `Screen:scaleBySize(n)` is the runtime's only density answer, and it is
+-- `ceil(n * factor)`: it works in whole pixels and rounds *up*. Asking it what
+-- one unit is, and multiplying by that answer, therefore is not the factor - it
+-- is the factor rounded up to the next whole pixel. On a 1236x1648 panel it
+-- answers 3 for a real factor of 2.06, and every band built from it comes out
+-- ~46% too big, which is how a page ends up holding two rows instead of a
+-- shelf. Probe with a wide reference: at 600 units one pixel of rounding is one
+-- part in 600, so the factor survives the ceiling.
+-- @param probe_pixels number|string result of `scaleBySize(probe_units)`
+-- @number probe_units the unit count that was probed with
+-- @treturn number|nil pixels per unit, nil when the answer is not usable
+function Ui.scaleFactor(probe_pixels, probe_units)
+    local units = tonumber(probe_units)
+    if not units or units < 1 then return nil end
+    local pixels = tonumber(probe_pixels)
+    if not pixels or pixels <= 0 then return nil end
+    local factor = pixels / units
+    if factor ~= factor or factor < 0.5 or factor > 4 then return nil end
+    return factor
+end
+
+--- Converts a pixel size into the size `Font.getFace` expects.
+--
+-- `Font.getFace(name, size)` multiplies the size it is given by the device scale
+-- before it opens the face, so its argument is a unit, not a pixel. Every
+-- measure this plugin derives a face from - a page header, a row band, a footer
+-- - is a pixel measure, because that is what the layout functions return. Handing
+-- those pixels straight to `getFace` draws them two to three times too large,
+-- and the type stops fitting the band it was sized for. Divide the scale back
+-- out and the size asked for is the size drawn.
+-- @number size_px wanted size in pixels
+-- @number[opt] scale pixels per unit for this device (nil or 1: units are pixels)
+-- @treturn number size in the units the runtime scales
+function Ui.faceUnits(size_px, scale)
+    local pixels = tonumber(size_px)
+    if not pixels or pixels ~= pixels then return size_px end
+    local factor = tonumber(scale)
+    if not factor or factor <= 0 or factor ~= factor then return pixels end
+    return pixels / factor
 end
 
 --- Shortens a string to at most `max_chars` code points, ending in an ellipsis.
@@ -565,7 +611,7 @@ end
 -- a coherent page instead of a fixed guess. Only a cover page is clamped: a
 -- cover cell is genuinely tall, while a text page follows the screen.
 -- @number screen_h screen height in pixels
--- @number scale Screen:scaleBySize(1) for the current device
+-- @number scale pixels per unit for this device (the factor main.lua derives; 1 = one unit is one pixel)
 -- @boolean with_covers whether this view draws cover thumbnails
 -- @treturn table { rows, row_height, cover_width, cover_height, gutter }
 function Ui.layout(screen_h, scale, with_covers)
@@ -1028,12 +1074,12 @@ end
 -- edge, because the sum of the parts is what is returned.
 -- @number screen_w screen width in pixels
 -- @number screen_h screen height in pixels
--- @number scale Screen:scaleBySize(1)
--- @treturn table plan { pad, content_w, header, hero, band_head, band_row,
---                       section_head, footer, hairline, bar, reading_rows,
---                       reading_h, reading_cover_w, reading_cover_h,
---                       session_rows, session_h, heat_weeks, heat_gap,
---                       heat_cell_w, heat_cell_h, total, slack }
+-- @number scale pixels per unit for this device (the factor main.lua derives; 1 = one unit is one pixel)
+-- @treturn table plan { scale, height, pad, content_w, header, hero,
+--                       band_head, band_row, section_head, footer, hairline,
+--                       bar, reading_rows, reading_h, reading_cover_w,
+--                       reading_cover_h, session_rows, session_h, heat_weeks,
+--                       heat_gap, heat_cell_w, heat_cell_h, total, slack }
 function Ui.pagePlan(screen_w, screen_h, scale)
     local tokens = Ui.tokens
     local s = numberIn(scale, 1, 0.5, 4)
@@ -1230,11 +1276,11 @@ end
 -- rows.
 -- @number screen_w screen width in pixels
 -- @number screen_h screen height in pixels
--- @number scale Screen:scaleBySize(1)
+-- @number scale pixels per unit for this device (the factor main.lua derives; 1 = one unit is one pixel)
 -- @tparam table[opt] options { with_switch = boolean, min_rows = number }
--- @treturn table plan { pad, content_w, header, hairline, switch_h, subline_h,
---                       footer, row_h, rows, bar, cover_w, cover_h, total,
---                       slack }
+-- @treturn table plan { scale, height, pad, content_w, header, hairline,
+--                       switch_h, subline_h, footer, row_h, rows, bar, cover_w,
+--                       cover_h, total, slack }
 function Ui.listPlan(screen_w, screen_h, scale, options)
     options = options or {}
     local tokens = Ui.tokens
