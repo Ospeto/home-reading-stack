@@ -235,6 +235,13 @@ local books_last_page = Views.libraryModel("books", {
 print("books_last_rows=" .. #books_last_page.blocks[1].rows)
 print("books_last_footer=" .. flat(books_last_page.footer.left) .. "/" .. flat(books_last_page.footer.right))
 
+-- A feed that reports no total (a server that only sends the next link) still
+-- has to name a page, and the next link is all the count there is.
+local books_untotaled = Views.libraryModel("books", {
+  entries = entries, page = 3, page_size = 4, has_next = true,
+})
+print("books_untotaled_footer=" .. flat(books_untotaled.footer.left))
+
 -- Library: series ----------------------------------------------------------
 local series_groups = {
   { name = "Ballad of a Shinigami", author = "K-Ske Hasegawa", books = 3, read = 2, coverId = 11 },
@@ -457,14 +464,23 @@ describe("plugin library page model: Books", () => {
     );
     expect(out.books_first_value).toBe("62%//0.62");
     expect(out.books_last_action).toBe("page");
-    expect(out.books_footer).toBe("Page 1 of 2/All books");
+    // The footer counts the whole catalog the feed reported, not just one page
+    // past the one on screen: "Page 1 of 2" over 1,802 books is a lie the pager
+    // should never tell.
+    expect(out.books_footer).toBe("Page 1 of 451/All books");
   });
 
   it("shows no search or next-page row when neither applies", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
     expect(out.books_last_rows).toBe("2");
-    expect(out.books_last_footer).toBe("Page 2 of 2/All books");
+    expect(out.books_last_footer).toBe("Page 2 of 451/All books");
+  });
+
+  it("pages by the feed's next link when it reports no total", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.books_untotaled_footer).toBe("Page 3 of 4");
   });
 });
 

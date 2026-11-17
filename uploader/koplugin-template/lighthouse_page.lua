@@ -158,19 +158,28 @@ end
 
 local face_cache = {}
 
---- One font face, cached per name and size.
--- Repeated pages ask for the same handful of faces (title, secondary, heading,
--- value); building a face is the expensive part of a page, so it happens once.
+--- One font face, cached per name and pixel size.
+--
+-- `size` is the size this module wants in PIXELS, because every measure it
+-- derives a face from - `plan.header`, `plan.row_h`, `plan.footer` - is a pixel
+-- measure. `Font:getFace` does not take pixels: KOReader multiplies the size it
+-- is handed by the device scale (`scaleBySize`), so a pixel count passed
+-- straight in comes out two to three times too large. That is what pushed the
+-- row type past the row band it sits in, and why the type looked nothing like
+-- the row height it was derived from. Convert back to the units the runtime
+-- expects, and the size asked for is the size drawn.
 -- @string name KOReader font-map key
 -- @number size pixel size
+-- @number[opt] scale pixels per unit for this device (default: 1 unit = 1 pixel)
 -- @treturn table|nil face
-local function face(name, size)
+local function face(name, size, scale)
     local pixels = math.floor(tonumber(size) or 0)
     if pixels < 8 then pixels = 8 end
     local key = name .. ":" .. tostring(pixels)
     local cached = face_cache[key]
     if cached ~= nil then return cached or nil end
-    local ok, built = pcall(Font.getFace, Font, name, pixels)
+    local units = Ui.faceUnits(pixels, scale)
+    local ok, built = pcall(Font.getFace, Font, name, units)
     face_cache[key] = (ok and built) or false
     if not ok then return nil end
     return built
@@ -264,16 +273,16 @@ local function buildFaces(plan)
     local row_small = math.max(row_title - math.floor(scale * 3), 11)
     local footer = math.max(math.floor((plan.footer or 26) * 0.6), 9)
     return {
-        header = face("cfont", header),
-        title = face("cfont", math.floor(plan.header * 0.52)),
-        heading = face("cfont", heading),
-        band_head = face("cfont", band_head),
-        hero_label = face("cfont", hero_label),
-        hero_value = face("cfont", hero_value),
-        row_title = face("cfont", math.max(row_title, 12)),
-        row_small = face("cfont", math.max(row_small, 10)),
-        row_value = face("cfont", math.max(row_title, 12)),
-        footer = face("cfont", math.max(footer, 10)),
+        header = face("cfont", header, scale),
+        title = face("cfont", math.floor(plan.header * 0.52), scale),
+        heading = face("cfont", heading, scale),
+        band_head = face("cfont", band_head, scale),
+        hero_label = face("cfont", hero_label, scale),
+        hero_value = face("cfont", hero_value, scale),
+        row_title = face("cfont", math.max(row_title, 12), scale),
+        row_small = face("cfont", math.max(row_small, 10), scale),
+        row_value = face("cfont", math.max(row_title, 12), scale),
+        footer = face("cfont", math.max(footer, 10), scale),
     }
 end
 
@@ -723,10 +732,25 @@ function PageWidget:init()
         end
     end
 
-    -- The footer sits at the bottom of the screen: the slack between the last
-    -- band and the rule is one empty block rather than a page of scrolling.
-    content[#content + 1] = VerticalSpan:new{ width = math.max(plan.slack or 0, 0) }
+    -- The page is exactly one screen tall, whatever it happens to draw: a
+    -- paged view that shrinks to its content leaves the tail of the previous
+    -- page on the glass, because the repaint only covers what the new page
+    -- paints. Page 1 carries a search row and page 2 does not, so the two pages
+    -- are different heights unless the band is padded back out here. The filler
+    -- is measured from the content that was actually built, so the footer lands
+    -- on the bottom edge on every page and the painted region and the invalidated
+    -- region are the same rectangle.
+    local plan_height = math.floor(tonumber(plan.height) or 0)
     content[#content + 1] = self:buildFooter()
+    if content.resetLayout then content:resetLayout() end
+    local inner_height = plan_height - 2 * plan.hairline - 2 * plan.pad
+    local measured_ok, content_size = pcall(function() return content:getSize() end)
+    local content_height = measured_ok and tonumber(content_size and content_size.h) or nil
+    local filler = content_height and (inner_height - content_height) or nil
+    if not filler or filler < 0 then filler = math.max(plan.slack or 0, 0) end
+    -- The filler goes above the footer, so the footer keeps the bottom edge.
+    table.insert(content, #content, VerticalSpan:new{ width = math.max(filler, 0) })
+    if content.resetLayout then content:resetLayout() end
 
     self.widget = FrameContainer:new{
         radius = Ui.tokens.corner_radius,

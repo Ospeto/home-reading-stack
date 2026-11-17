@@ -282,6 +282,49 @@ local function numberIn(value, fallback, minimum, maximum)
     return parsed
 end
 
+--- The density factor a "how many pixels is one unit" answer hides.
+--
+-- `Screen:scaleBySize(n)` is the runtime's only density answer, and it is
+-- `ceil(n * factor)`: it works in whole pixels and rounds *up*. Asking it what
+-- one unit is, and multiplying by that answer, therefore is not the factor - it
+-- is the factor rounded up to the next whole pixel. On a 1236x1648 panel it
+-- answers 3 for a real factor of 2.06, and every band built from it comes out
+-- ~46% too big, which is how a page ends up holding two rows instead of a
+-- shelf. Probe with a wide reference: at 600 units one pixel of rounding is one
+-- part in 600, so the factor survives the ceiling.
+-- @param probe_pixels number|string result of `scaleBySize(probe_units)`
+-- @number probe_units the unit count that was probed with
+-- @treturn number|nil pixels per unit, nil when the answer is not usable
+function Ui.scaleFactor(probe_pixels, probe_units)
+    local units = tonumber(probe_units)
+    if not units or units < 1 then return nil end
+    local pixels = tonumber(probe_pixels)
+    if not pixels or pixels <= 0 then return nil end
+    local factor = pixels / units
+    if factor ~= factor or factor < 0.5 or factor > 4 then return nil end
+    return factor
+end
+
+--- Converts a pixel size into the size `Font.getFace` expects.
+--
+-- `Font.getFace(name, size)` multiplies the size it is given by the device scale
+-- before it opens the face, so its argument is a unit, not a pixel. Every
+-- measure this plugin derives a face from - a page header, a row band, a footer
+-- - is a pixel measure, because that is what the layout functions return. Handing
+-- those pixels straight to `getFace` draws them two to three times too large,
+-- and the type stops fitting the band it was sized for. Divide the scale back
+-- out and the size asked for is the size drawn.
+-- @number size_px wanted size in pixels
+-- @number[opt] scale pixels per unit for this device (nil or 1: units are pixels)
+-- @treturn number size in the units the runtime scales
+function Ui.faceUnits(size_px, scale)
+    local pixels = tonumber(size_px)
+    if not pixels or pixels ~= pixels then return size_px end
+    local factor = tonumber(scale)
+    if not factor or factor <= 0 or factor ~= factor then return pixels end
+    return pixels / factor
+end
+
 --- Shortens a string to at most `max_chars` code points, ending in an ellipsis.
 --
 -- Byte-wise truncation would split a Burmese or CJK letter in half and the
