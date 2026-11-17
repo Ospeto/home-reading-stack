@@ -127,6 +127,24 @@ local LightHouse = WidgetContainer:extend{
     is_doc_only = false,
 }
 
+--- How long a fetched reading shelf may be reused, in seconds.
+--
+-- Long enough to cover a reader paging through the catalog, short enough that a
+-- percentage changed on another device shows up while the reader is still
+-- looking. Anything this plugin does that changes the shelf calls
+-- `forgetShelf()` and refetches immediately.
+LightHouse.SHELF_REUSE_SECONDS = 60
+
+--- How long the list of sidecar directories may be reused, in seconds.
+--
+-- The list holds only WHERE sidecars live, never what they say: every scan
+-- re-reads each sidecar's own metadata file, so progress and highlights are
+-- always current. What the window bounds is how long a sidecar created since the
+-- last walk can go unseen - a book copied on from a computer, or one opened in
+-- KOReader since. Refresh walks the device and rewrites the list, and a download
+-- through this plugin deletes it.
+LightHouse.SIDECAR_LIST_TTL_SECONDS = 600
+
 --- Maximum length of a generated EPUB filename, in bytes.
 local MAX_FILENAME_LENGTH = 120
 
@@ -419,6 +437,64 @@ end
 -- @treturn string
 local function coverDir()
     return DataStorage:getDataDir() .. "/cache/lighthouse-covers"
+end
+
+--- Directory holding this plugin's own caches.
+-- @treturn string
+local function cacheDir()
+    return DataStorage:getDataDir() .. "/cache"
+end
+
+--- File remembering which sidecar directories the last walk found.
+-- @treturn string
+local function sidecarListPath()
+    return cacheDir() .. "/lighthouse-sidecars.txt"
+end
+
+--- Forgets the kept sidecar directory list, so the next scan walks the tree.
+-- Called when this plugin changed the library itself: a book it just saved has
+-- a sidecar the kept list cannot know about. Removal failure is silent - the
+-- worst it costs is one walk.
+local function forgetSidecarList()
+    pcall(os.remove, sidecarListPath())
+end
+
+--- The sidecar directories a recent walk found, when the list is still fresh.
+-- Holds paths only, never what a sidecar says, so nothing a reader sees is
+-- served from here; the window bounds how long a sidecar created since the last
+-- walk can go unseen (a book copied on, or one opened in KOReader since), and a
+-- download through this plugin deletes the list outright.
+-- @treturn table|nil array of `*.sdr` directory paths
+local function keptSidecarList()
+    local path = sidecarListPath()
+    local stamp = lfs.attributes(path, "modification")
+    if type(stamp) ~= "number" then return nil end
+    local age = os.time() - stamp
+    if age < 0 or age > LightHouse.SIDECAR_LIST_TTL_SECONDS then return nil end
+    local handle = io.open(path, "rb")
+    if not handle then return nil end
+    local body
+    pcall(function() body = handle:read("*a") end)
+    pcall(handle.close, handle)
+    if type(body) ~= "string" or body == "" then return nil end
+    local directories = {}
+    for line in body:gmatch("[^\r\n]+") do
+        if line ~= "" then directories[#directories + 1] = line end
+    end
+    if #directories == 0 then return nil end
+    return directories
+end
+
+--- Remembers the sidecar directories a walk found.
+-- Failing to write costs the next walk, never a record.
+-- @tparam table directories
+local function rememberSidecarList(directories)
+    if type(directories) ~= "table" or #directories == 0 then return end
+    if not makeDirs(cacheDir()) then return end
+    local handle = io.open(sidecarListPath(), "wb")
+    if not handle then return end
+    pcall(function() handle:write(table.concat(directories, "\n") .. "\n") end)
+    pcall(handle.close, handle)
 end
 
 --- Cached cover path for an entry, or nil when the book has no usable id.
@@ -1150,18 +1226,34 @@ function LightHouse:localSearchDirs()
     return dirs
 end
 
---- Scans this device's KOReader sidecars once, read-only, cached for the session.
+--- Scans this device's KOReader sidecars, read-only, and caches the result.
 --
--- This is what makes progress and highlights offline-first: ONE directory walk
--- when a view that needs it opens, no network, and no refresh timer. `force`
--- re-walks the device for a view's own Refresh action; otherwise the previous
--- scan is reused, so opening Highlights then Currently reading costs one walk.
--- A scan that fails is "no local data", never a raised error on screen.
+-- This is what makes progress and highlights offline-first: no network, no
+-- refresh timer, and one scan for the whole session. Measured on the verified
+-- PaperWhite (KOReader v2026.07.1, 525 folders and 96 sidecar folders returning
+-- 15 usable records), walking the tree costs 804.8ms, the walk's
+-- name-before-stat skip takes it to 595.1ms, and reading the kept list of
+-- sidecar folder paths instead of walking costs 131.3ms - a session whose kept
+-- list is fresh walks no directory tree at all, it re-reads every sidecar from
+-- its own metadata file. `force` (the library's Refresh, and the Highlights
+-- retry) walks the tree again and rewrites the kept list. A scan that fails is
+-- "no local data", never a raised error on screen.
 -- @boolean[opt] force re-walk the device instead of using the cached scan
 -- @treturn table array of sidecar records
 function LightHouse:localRecords(force)
     if self.local_scan and not force then return self.local_scan end
-    local scanned, records = pcall(Sidecar.scan, { dirs = self:localSearchDirs() })
+    local options = { dirs = self:localSearchDirs() }
+    -- A forced scan is the reader asking the device what is really there, so it
+    -- walks the tree. Either way the list the walk finds is written back, so a
+    -- forced scan also refreshes what the next session reuses. Every scan that
+    -- reuses the list still reads each sidecar from its own metadata file, so it
+    -- costs one directory listing per sidecar instead of one per folder on the
+    -- device.
+    options.on_directories = rememberSidecarList
+    if not force then
+        options.known_directories = keptSidecarList()
+    end
+    local scanned, records = pcall(Sidecar.scan, options)
     if not scanned or type(records) ~= "table" then
         logger.warn("LightHouse: local sidecar scan failed:", tostring(records))
         records = {}
@@ -1180,12 +1272,14 @@ end
 
 --- Runs the device walk behind a spinner the first time, plainly afterwards.
 --
--- KOReader is single threaded, so the first scan of a session blocks the menu
--- while it walks the book roots. It is cheap on the verified device (18
--- sidecars, about a second) but `home_dir` can default to the whole user
--- partition, so the first walk gets the same feedback as every server call
--- instead of a frozen screen with nothing on it. Later calls are cached and
--- return without any UI at all.
+-- KOReader is single threaded, so a walk blocks the menu while it runs: 804.8ms
+-- on the verified PaperWhite, 595.1ms once the walk stops asking the filesystem
+-- about children whose names prove they are files, and 131.3ms when it reads
+-- the kept list of sidecar folders instead. `home_dir` can default to the whole
+-- user partition, so a walk gets the same feedback as every server call (a
+-- spinner) instead of a frozen screen with nothing on it. A scan the session
+-- already holds draws no UI at all; a Refresh drops it, so that walk goes
+-- behind the spinner again.
 -- @string text spinner label
 -- @function func returns the records
 -- @treturn table records, never nil
@@ -1260,8 +1354,13 @@ function LightHouse:applyLocalToEntry(entry)
             authors = Status.str(entry.authors),
         }
     else
-        entry.status.percentage = ratio
-        entry.status.progress_source = "device"
+        -- The shelf keeps the session this status came from, and that session is
+        -- what the server said: the device override goes on a copy of it.
+        local override = {}
+        for key, value in pairs(entry.status) do override[key] = value end
+        override.percentage = ratio
+        override.progress_source = "device"
+        entry.status = override
     end
     return record
 end
@@ -1750,6 +1849,44 @@ function LightHouse:fetchGrouping(by)
     return grouping
 end
 
+--- The reading shelf for this library view, re-fetched only when it is stale.
+--
+-- A page turn used to pay a second round trip for a document that cannot have
+-- changed between two presses: measured on the device, `/api/kosync/active`
+-- costs 153ms plus 8ms to decode, against 42ms for the catalog page the reader
+-- actually asked for, and it is fetched again for every page. The shelf is
+-- therefore kept for `SHELF_REUSE_SECONDS`, refetched when that window is up,
+-- and refetched immediately after anything this plugin did that changes it -
+-- `forgetShelf()` is that invalidation and its only owner.
+-- Only an answer is kept: a request that failed is never stored, so a busy
+-- progress endpoint costs one page its server progress and the next view asks
+-- again instead of every page reusing a shelf it never received.
+-- @treturn table|nil normalized sessions; nil when the server cannot be reached
+-- @treturn string|nil error code from the failed request
+function LightHouse:shelfSessions()
+    local kept = self._shelf
+    if type(kept) == "table" and type(kept.at) == "number" then
+        local age = os.time() - kept.at
+        if age >= 0 and age <= LightHouse.SHELF_REUSE_SECONDS then
+            return kept.sessions
+        end
+    end
+    local now = os.time()
+    local sessions, err = self:withSpinner(_("Checking reading progress…"), function()
+        return self:fetchSessions()
+    end)
+    if type(sessions) ~= "table" then
+        return nil, err
+    end
+    self._shelf = { at = now, sessions = sessions }
+    return sessions
+end
+
+--- Drops the kept shelf, so the next view asks the server again.
+function LightHouse:forgetShelf()
+    self._shelf = nil
+end
+
 --- Builds and shows the library page for one grouping.
 -- @tparam table[opt] options { mode, page, query, refresh }
 function LightHouse:openLibrary(options)
@@ -1767,12 +1904,19 @@ function LightHouse:openLibrary(options)
     -- cache is what makes paging local. It is not kept across an explicit
     -- refresh or a grouping switch: finishing or downloading a book changes the
     -- read counts, and a reader asking again must see the server's answer.
+    if options.refresh then
+        self.local_scan = nil
+        self.local_index = nil
+    end
     if options.refresh or (previous.mode ~= nil and previous.mode ~= mode) then
         self._groupings = nil
+        self:forgetShelf()
     end
 
     local state = { mode = mode, page = page, query = query }
     self.library_state = state
+    -- Reported after the page is drawn, so the message is not hidden under it.
+    local shelf_notice
 
     if not Client.isConfigured(config) then
         self.library_state = nil
@@ -1785,7 +1929,9 @@ function LightHouse:openLibrary(options)
         return
     end
     if not NetworkMgr:isOnline() then
-        NetworkMgr:willRerunWhenOnline(function() self:openLibrary{ mode = mode, page = page, query = query } end)
+        NetworkMgr:willRerunWhenOnline(function()
+            self:openLibrary{ mode = mode, page = page, query = query, refresh = options.refresh }
+        end)
         return
     end
 
@@ -1820,7 +1966,8 @@ function LightHouse:openLibrary(options)
                 detail = describeError(err),
                 actions = {
                     retryAction(_("Try again"), function()
-                        self:openLibrary{ mode = mode, page = page, query = query }
+                        self:openLibrary{ mode = mode, page = page, query = query,
+                            refresh = options.refresh }
                     end),
                 },
             }
@@ -1842,7 +1989,8 @@ function LightHouse:openLibrary(options)
                         self:openLibrary{ mode = mode, page = 1, query = "" }
                     end),
                     retryAction(_("Try again"), function()
-                        self:openLibrary{ mode = mode, page = page, query = query }
+                        self:openLibrary{ mode = mode, page = page, query = query,
+                            refresh = options.refresh }
                     end),
                 },
             }
@@ -1866,7 +2014,7 @@ function LightHouse:openLibrary(options)
                     headline = _("This library is empty"),
                     detail = _("Add EPUBs from the LightHouse web app, then browse again."),
                     actions = {
-                        retryAction(_("Refresh"), function() self:openLibrary{ page = 1 } end),
+                        retryAction(_("Refresh"), function() self:openLibrary{ page = 1, refresh = true } end),
                         connectionAction(self),
                     },
                 }
@@ -1874,17 +2022,23 @@ function LightHouse:openLibrary(options)
             return
         end
 
-        local sessions = self:withSpinner(_("Checking reading progress…"), function()
-            return self:fetchSessions()
-        end) or {}
-        Status.merge(feed.entries, sessions)
+        -- A failed shelf request is reported once and NOT kept: the rows fall
+        -- back to what this device knows, and the next view asks again.
+        local sessions, shelf_err = self:shelfSessions()
+        if sessions then
+            Status.merge(feed.entries, sessions)
+        else
+            shelf_notice = T(_("Reading progress: %1"), errorHeadline(shelf_err))
+        end
 
         -- Local sidecars beat the server for any book this device has opened (see
         -- `localRecordFor`), and a book only this device has read gets its progress
         -- from the sidecar because the server sent no session for it at all. The
-        -- walk happens ONCE, behind a spinner, before any row is drawn.
+        -- walk happens ONCE, behind a spinner, before any row is drawn, and
+        -- **Refresh** walks the device again instead of reusing the session's scan.
+        local refresh_device = options.refresh == true
         self:withLocalScan(_("Reading books on this device…"), function()
-            return self:localRecords()
+            return self:localRecords(refresh_device)
         end)
         for entry_index = 1, #feed.entries do
             local entry = feed.entries[entry_index]
@@ -1925,7 +2079,7 @@ function LightHouse:openLibrary(options)
                 detail = describeError(err),
                 actions = {
                     retryAction(_("Try again"), function()
-                        self:openLibrary{ mode = mode, page = page }
+                        self:openLibrary{ mode = mode, page = page, refresh = options.refresh }
                     end),
                 },
             }
@@ -1977,6 +2131,7 @@ function LightHouse:openLibrary(options)
             self:openLibrary{ mode = key, page = 1 }
         end,
     })
+    if shelf_notice then notice(shelf_notice, 4) end
 end
 
 --- Shows the synopsis/description of one book.
@@ -2625,6 +2780,13 @@ function LightHouse:startDownload(entry, filepath)
     if self.ui and self.ui.onRefresh then
         pcall(function() self.ui:onRefresh() end)
     end
+    -- A book just landed on this device: the shelf and the local sidecar walk
+    -- both describe a library that no longer matches it, so the next view
+    -- refetches instead of drawing the old one.
+    self:forgetShelf()
+    self.local_scan = nil
+    self.local_index = nil
+    forgetSidecarList()
 
     UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
         text = T(_("Saved to:\n%1"), filepath),

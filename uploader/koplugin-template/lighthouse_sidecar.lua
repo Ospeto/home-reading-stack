@@ -59,6 +59,39 @@ Sidecar.DEVICE_DIRS = { "/mnt/us/books", "/mnt/us/documents" }
 -- walk itself.
 Sidecar.SCAN_LIMITS = { depth = 6, directories = 2000, sidecars = 200 }
 
+--- Suffixes that mean the entry under a book root is a file, not a folder.
+--
+-- The walk has to know which children are directories before it can descend, and
+-- asking that of the filesystem is expensive on a Kindle: the walk over this
+-- device's tree enumerated 2239 children under 431 folder listings and made 2053
+-- `lfs.attributes` calls, re-asking a question the name already answers.
+-- Skipping the stat for a name that proves it is a file took the whole scan from
+-- 804.8ms to 595.1ms (interleaved old/new A/B in one process).
+--
+-- Restricted to the extensions this device was measured to carry a book file
+-- under a book root, each with the census that justifies it: `epub` (1615 of
+-- those 2239 children), `azw3` (2) and `txt` (2). Everything else - `Books.old`,
+-- `Notes.json`, `My Books`, any name without an extension - still gets its
+-- `lfs.attributes` question and is still walked, so no folder can be dropped by
+-- a suffix this walk was not measured to see. A folder deliberately named like a
+-- book file would be a layout this walk never produced.
+Sidecar.FILE_SUFFIXES = {
+    epub = true,
+    azw3 = true,
+    txt = true,
+}
+
+--- True when a directory entry's name proves the entry is not a folder.
+-- Used to skip the per-child `lfs.attributes(path, "mode")` in the scan walk.
+-- @string name bare entry name (no path)
+-- @treturn boolean
+function Sidecar.nameCannotBeDirectory(name)
+    if type(name) ~= "string" or name == "" then return false end
+    local suffix = name:match("%.([%w_]+)$")
+    if not suffix then return false end
+    return Sidecar.FILE_SUFFIXES[suffix:lower()] == true
+end
+
 --- Environment a sidecar is evaluated in.
 -- A sidecar is a data file, so it gets no `os`, no `io` and no `load*`: a
 -- corrupt or hostile file can return a table and nothing else. Kept minimal on
@@ -565,14 +598,30 @@ end
 
 --- Walks the device's book roots and returns one record per sidecar.
 --
--- ONE directory walk per call, no network, no polling: the caller caches the
--- result for the session (see `localRecords` in main.lua). Bounded by
+-- ONE directory walk per call - none at all when the caller hands back the
+-- paths a previous walk found - with no network and no polling: the caller
+-- caches the result for the session (see `localRecords` in main.lua). Bounded by
 -- `Sidecar.SCAN_LIMITS` so a very large library cannot stall a menu.
+--
+-- Measured on the device: 431 folder listings and 2053 stats over a 525-folder
+-- tree return 15 usable records, and the whole scan costs 804.8ms (interleaved
+-- old/new A/B in one process, the 96 sidecar reads included). The tree walk is
+-- the majority of that scan; the sidecar reads make up the rest and were timed
+-- in a separate instrumented pass, so the two do not add up exactly.
+-- Progress is never stale in that list - every record is re-read from its own
+-- metadata file, so a percentage or a highlight is never served from the list
+-- itself. What a kept list can miss is a sidecar created since the walk: a book
+-- copied on from a computer, or a book opened in KOReader since. That is rare
+-- compared with how often a reader opens the plugin, so a caller that keeps the
+-- paths `on_directories` hands it may pass them back as `known_directories` and
+-- skip the walk until its own window expires or a refresh rewrites the list.
+-- This module never writes: persisting the list is the caller's job.
 --
 -- Records are returned newest-read first. A book whose file has been deleted
 -- but whose sidecar remains is included on purpose - its highlights still
 -- exist - and `bookExists` tells the caller whether it can be opened.
--- @tparam[opt] table options { dirs = {paths}, max_depth, max_sidecars }
+-- @tparam[opt] table options { dirs, max_depth, max_sidecars,
+--                             known_directories, on_directories }
 -- @treturn table array of records
 function Sidecar.scan(options)
     options = options or {}
@@ -581,7 +630,20 @@ function Sidecar.scan(options)
     local max_sidecars = numberOf(options.max_sidecars) or Sidecar.SCAN_LIMITS.sidecars
     local suffix_length = #Sidecar.SIDECAR_SUFFIX
 
+    -- Sidecar directories from an earlier walk, when the caller kept them: read
+    -- the sidecars they name instead of walking the tree again. A list whose
+    -- entries are all gone yields nothing, and the walk below answers instead.
+    local known = options.known_directories
+    if type(known) == "table" and #known > 0 then
+        local kept = Sidecar.recordsFromDirectories(known, max_sidecars, suffix_length)
+        if kept and #kept > 0 then
+            Sidecar.sortRecords(kept)
+            return kept
+        end
+    end
+
     local records = {}
+    local found = {}
     local visited = {}
     local pending = {}
     for root_index = 1, #(roots or {}) do
@@ -617,13 +679,21 @@ function Sidecar.scan(options)
                             record.sidecar_dir = child
                             records[#records + 1] = record
                         end
+                        found[#found + 1] = child
                     elseif node.depth < max_depth then
                         -- Only real directories are queued: on a Kindle the
                         -- roots also hold book files, and queueing those would
-                        -- cost one failed directory open each. Without
-                        -- LuaFileSystem the mode is unknown, so queue and let
-                        -- `list` answer nil.
-                        local mode = Sidecar.io.attributes(child, "mode")
+                        -- cost one failed directory open each. A name that
+                        -- carries a book or media suffix answers that question
+                        -- on its own: measured on this device, 1615 of 2239
+                        -- children are `*.epub`, and skipping their stat took
+                        -- the scan from 804.8ms to 595.1ms (interleaved A/B).
+                        local mode
+                        if Sidecar.nameCannotBeDirectory(name) then
+                            mode = "file"
+                        else
+                            mode = Sidecar.io.attributes(child, "mode")
+                        end
                         if mode == "directory" or mode == nil then
                             pending[#pending + 1] = { path = child, depth = node.depth + 1 }
                         end
@@ -634,12 +704,55 @@ function Sidecar.scan(options)
     end
 
     -- Newest-read first: the last book opened is the one a reader looks for.
+    Sidecar.sortRecords(records)
+    if type(options.on_directories) == "function" then
+        pcall(options.on_directories, found)
+    end
+    return records
+end
+
+--- Orders records newest-read first, with the file name as the tie-break.
+-- @tparam table records
+-- @treturn table the same table, ordered
+function Sidecar.sortRecords(records)
+    if type(records) ~= "table" then return records end
     table.sort(records, function(left, right)
         local left_stamp = numberOf(left.modified) or 0
         local right_stamp = numberOf(right.modified) or 0
         if left_stamp ~= right_stamp then return left_stamp > right_stamp end
         return Sidecar.fileName(left.book_path) < Sidecar.fileName(right.book_path)
     end)
+    return records
+end
+
+--- Reads one record per named sidecar directory, or nil when the list is unusable.
+-- A kept directory that has since been deleted simply contributes no record, so a
+-- stale list costs entries, never an error.
+-- @tparam table sidecar_dirs absolute `*.sdr` directory paths
+-- @number max_sidecars
+-- @number suffix_length
+-- @treturn table|nil
+function Sidecar.recordsFromDirectories(sidecar_dirs, max_sidecars, suffix_length)
+    if type(sidecar_dirs) ~= "table" or #sidecar_dirs == 0 then return nil end
+    local limit = numberOf(max_sidecars) or Sidecar.SCAN_LIMITS.sidecars
+    local records = {}
+    for dir_index = 1, #sidecar_dirs do
+        if #records >= limit then break end
+        local directory = textOf(sidecar_dirs[dir_index])
+        if directory ~= "" then
+            local book_path = directory
+            if #directory > suffix_length
+                and directory:sub(-suffix_length) == Sidecar.SIDECAR_SUFFIX
+            then
+                book_path = directory:sub(1, #directory - suffix_length)
+            end
+            local read, record = pcall(Sidecar.read, book_path)
+            if read and record then
+                record.sidecar_dir = directory
+                records[#records + 1] = record
+            end
+        end
+    end
     return records
 end
 

@@ -6539,3 +6539,883 @@ describe("plugin library page behaviour", () => {
     expect(out.past_offers_way_back).toBe("true");
   });
 });
+
+/**
+ * The two measured costs of a library page turn, held to by test.
+ *
+ * On the device, `/api/kosync/active` costs 153ms plus 8ms to decode while the
+ * catalog page the reader actually asked for costs 42ms, and it used to be
+ * fetched again for every page - so five page turns paid the shelf five times
+ * for a document that cannot change between two presses.
+ */
+const LIBRARY_SHELF_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
+local plugin_config = {
+  base_url = "http://192.168.31.15:8086",
+  api_key = "harness-key",
+  page_size = 40,
+  plugin_version = "1.6.2",
+  generated_at = "2026-11-17T00:00:00.000Z",
+  request_block_timeout = 10,
+  request_total_timeout = 90,
+  download_block_timeout = 15,
+  download_total_timeout = 300,
+}
+package.preload["lighthouse_config"] = function() return plugin_config end
+
+local QUOTE = string.char(34)
+local function feed_xml(count)
+  local entries = {}
+  for index = 1, count do
+    local href = "http://host/api/books/" .. index .. "/download/epub"
+    entries[#entries + 1] = "<entry><title>Book " .. index .. "</title><id>urn:uuid:" .. index
+      .. "</id><link rel=" .. QUOTE .. "http://opds-spec.org/acquisition" .. QUOTE
+      .. " href=" .. QUOTE .. href .. QUOTE .. "/></entry>"
+  end
+  return "<feed><title>LightHouse</title>" .. table.concat(entries, "") .. "</feed>"
+end
+
+local catalog_requests, shelf_requests = 0, 0
+local shelf_broken = false
+local SHELF_BODY = "book-2-session"
+package.loaded["socket.http"] = {
+  request = function(request)
+    local url = tostring(request and request.url or "")
+    local body
+    if url:find("kosync/active", 1, true) then
+      shelf_requests = shelf_requests + 1
+      if shelf_broken then return 500, {}, nil end
+      body = SHELF_BODY
+    else
+      catalog_requests = catalog_requests + 1
+      body = feed_xml(4)
+    end
+    if request and request.sink then
+      request.sink(body)
+      request.sink(nil)
+    end
+    return 1, 200, {}
+  end,
+}
+package.loaded["socket.https"] = package.loaded["socket.http"]
+package.loaded["ltn2"] = nil
+package.loaded["ltn12"] = {
+  sink = {
+    table = function(target)
+      return function(chunk)
+        if chunk then target[#target + 1] = chunk end
+        return 1
+      end
+    end,
+    file = function() end,
+  },
+}
+package.loaded["json"] = {
+  -- A shape the merger accepts: the shelf payload carries one session for
+  -- "Book 2" (whose progress nothing on the device overrides) and one for
+  -- "Book 3" (whose sidecar reads higher), so a page that merged the shelf, one
+  -- that overrode it from the device, and one that reused a stale override all
+  -- draw differently.
+  decode = function(body)
+    if tostring(body):find("book-2-session", 1, true) then
+      return {
+        { filename = "Book 2.epub", percentage = 0.42, timestamp = 100,
+          device = "Paperwhite" },
+        { filename = "Book 3.epub", percentage = 0.4, timestamp = 100,
+          device = "Paperwhite" },
+      }
+    end
+    return {}
+  end,
+}
+
+-- The drawn page model is a public view-model, so the harness records it and
+-- reads the progress column the reader actually sees.
+local Views = require("lighthouse_views")
+local build_library_model = Views.libraryModel
+local drawn_model
+Views.libraryModel = function(mode, context, options)
+  local model = build_library_model(mode, context, options)
+  drawn_model = model
+  return model
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+
+-- The device tree, so a directory listing can be counted: a page turn reuses the
+-- session's scan, while a Refresh is the reader asking the device again.
+local Sidecar = require("lighthouse_sidecar")
+local tree = {
+  ["/books"] = { "Alpha.epub", "Alpha.epub.sdr" },
+  ["/books/Alpha.epub.sdr"] = { "metadata.epub.lua" },
+}
+local bodies = {}
+local listed = {}
+Sidecar.io = {
+  open = function(path)
+    if not bodies[path] then return nil end
+    return { close = function() end }
+  end,
+  loadfile = function(path)
+    local body = bodies[path]
+    if not body then return nil, "missing" end
+    return loadstring(body)
+  end,
+  list = function(path)
+    listed[#listed + 1] = path
+    local names = tree[path]
+    if not names then return nil end
+    local copy = {}
+    for index = 1, #names do copy[index] = names[index] end
+    return copy
+  end,
+  attributes = function(path, field)
+    if field == "mode" then
+      if tree[path] then return "directory" end
+      if path:sub(-5) == ".epub" then return "file" end
+    end
+    return nil
+  end,
+}
+LightHouse.localSearchDirs = function() return { "/books" } end
+local function walk_listings()
+  local count = #listed
+  listed = {}
+  return count
+end
+
+G_reader_settings.readSetting = function(_, key)
+  if key == "lighthouse_covers" then return false end
+  return nil
+end
+
+local function open(options)
+  local ok, raised = pcall(function() LightHouse:openLibrary(options) end)
+  if not ok then print("ERROR " .. tostring(raised)) end
+  return ok
+end
+
+-- The progress column drawn for one book title, e.g. "42%" or "Unread".
+local function drawn_progress(title)
+  for block_index = 1, #((drawn_model or {}).blocks or {}) do
+    local rows = drawn_model.blocks[block_index].rows or {}
+    for row_index = 1, #rows do
+      if rows[row_index].title == title then return tostring(rows[row_index].value) end
+    end
+  end
+  return ""
+end
+
+-- The message the reader is left with, when the last thing shown is a notice.
+local function last_notice()
+  local widget = shown[#shown]
+  if type(widget) ~= "table" or widget.__kind ~= "infomessage" then return "" end
+  return tostring(widget.text or "")
+end
+
+-- Three page turns in one view, then the reader asks for a refresh.
+local ok1 = open{ mode = "books", page = 1 }
+print("page1_listings=" .. walk_listings())
+print("page1_ok=" .. tostring(ok1))
+print("after_page1_catalog=" .. catalog_requests .. " shelf=" .. shelf_requests)
+open{ mode = "books", page = 2 }
+open{ mode = "books", page = 3 }
+print("page_turn_listings=" .. walk_listings())
+print("after_three_pages_catalog=" .. catalog_requests .. " shelf=" .. shelf_requests)
+open{ mode = "books", page = 1, refresh = true }
+print("refresh_listings=" .. walk_listings())
+print("after_refresh_catalog=" .. catalog_requests .. " shelf=" .. shelf_requests)
+
+-- A grouping switch reads a different document; coming back to the books view
+-- is a different view again and must ask the server again.
+open{ mode = "authors", page = 1 }
+print("after_switch_shelf=" .. shelf_requests)
+open{ mode = "books", page = 1 }
+print("after_switch_back_shelf=" .. shelf_requests)
+
+-- A shelf request that fails is a failure, not an empty shelf: it must not be
+-- kept, so the next page asks again instead of drawing "Unread" for a minute.
+LightHouse:forgetShelf()
+shelf_broken = true
+open{ mode = "books", page = 1 }
+print("failed_page_progress=" .. drawn_progress("Book 2"))
+print("failed_page_reported=" .. tostring(#last_notice() > 0))
+print("after_failed_page_shelf=" .. shelf_requests)
+shelf_broken = false
+open{ mode = "books", page = 2 }
+print("retried_page_progress=" .. drawn_progress("Book 2"))
+print("retried_page_reported=" .. tostring(#last_notice() > 0))
+print("after_retried_page_shelf=" .. shelf_requests)
+-- A real answer IS kept: the page after it reuses it.
+open{ mode = "books", page = 3 }
+print("after_cached_page_shelf=" .. shelf_requests)
+
+-- A stamp in the future (a Kindle clock set ahead, then corrected) is not a
+-- usable age: the shelf is fetched again instead of being reused all session.
+LightHouse._shelf.at = os.time() + 3600
+local before_future = shelf_requests
+open{ mode = "books", page = 4 }
+print("future_stamp_refetched=" .. (shelf_requests - before_future))
+
+-- -------------------------------------- the kept shelf holds the server's word
+-- Book 3 is on the device, and its sidecar reads 80% where the server says 40%.
+tree["/books"] = { "Alpha.epub", "Alpha.epub.sdr", "Book 3.epub", "Book 3.epub.sdr" }
+tree["/books/Book 3.epub.sdr"] = { "metadata.epub.lua" }
+bodies["/books/Book 3.epub.sdr/metadata.epub.lua"] =
+  "return { title = \"Book 3\", percent_finished = 0.8 }"
+LightHouse:forgetShelf()
+LightHouse:localRecords(true)
+open{ mode = "books", page = 1 }
+print("aliasing_page1_book3=" .. drawn_progress("Book 3"))
+-- The reader deletes that sidecar and the scan is rebuilt without it, while the
+-- shelf is still inside its reuse window: the next page reads the kept answer.
+tree["/books"] = { "Alpha.epub", "Alpha.epub.sdr" }
+tree["/books/Book 3.epub.sdr"] = nil
+bodies["/books/Book 3.epub.sdr/metadata.epub.lua"] = nil
+LightHouse:localRecords(true)
+local before_alias = shelf_requests
+open{ mode = "books", page = 2 }
+print("aliasing_page2_shelf=" .. (shelf_requests - before_alias))
+print("aliasing_page2_book3=" .. drawn_progress("Book 3"))
+
+print("OK")
+`;
+
+describe("plugin library page: one shelf request per view, not per page", () => {
+  function runHarness(): Record<string, string> {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-shelf-"));
+    const harnessPath = path.join(workdir, "library_shelf_harness.lua");
+    fs.writeFileSync(harnessPath, LIBRARY_SHELF_HARNESS);
+    const res = spawnSync(LUA_BINARY as string, [harnessPath, KOPLUGIN_TEMPLATE_DIR], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    return Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+  }
+
+  it("draws three pages off one reading shelf", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.page1_ok).toBe("true");
+    expect(out.after_page1_catalog).toBe("1 shelf=1");
+    // The measured claim: three page turns, one shelf fetch, three page fetches.
+    expect(out.after_three_pages_catalog).toBe("3 shelf=1");
+    // And one device walk: the tree is read when the view opens, not per page.
+    expect(out.page1_listings).toBe("2");
+    expect(out.page_turn_listings).toBe("0");
+  });
+
+  it("re-walks the device when the reader refreshes", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // Refresh is the reader asking what is really on the device now: it must
+    // walk the tree again (book root plus its sidecar folder), not draw the
+    // session's scan.
+    expect(out.refresh_listings).toBe("2");
+  });
+
+  it("asks the server again when the reader refreshes or switches grouping", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.after_refresh_catalog).toBe("4 shelf=2");
+    // The grouping view never asks for the shelf; returning to Books does.
+    expect(out.after_switch_shelf).toBe("2");
+    expect(out.after_switch_back_shelf).toBe("3");
+  });
+
+  it("does not keep a shelf fetch that failed", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // The endpoint answered 500: this page has no server progress, says so, and
+    // the failure is not cached, so the next page asks again.
+    expect(out.failed_page_progress).toBe("Unread");
+    expect(out.failed_page_reported).toBe("true");
+    expect(out.after_failed_page_shelf).toBe("4");
+    // The retry reached the server, so the percentage is drawn, kept, and no
+    // failure is reported.
+    expect(out.retried_page_progress).toBe("42%");
+    expect(out.retried_page_reported).toBe("false");
+    expect(out.after_retried_page_shelf).toBe("5");
+    expect(out.after_cached_page_shelf).toBe("5");
+  });
+
+  it("does not reuse a shelf stamped in the future", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // A negative age means the stamp cannot be trusted, so the next page asks
+    // the server instead of freezing the shelf for the rest of the session.
+    expect(out.future_stamp_refetched).toBe("1");
+  });
+
+  it("keeps the server's answer in the shelf when the device overrides a row", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // The device is the authority for the row it is drawn on, so page 1 shows
+    // the sidecar's 80%.
+    expect(out.aliasing_page1_book3).toBe("80%");
+    // The shelf was reused, not refetched, while the book's sidecar went away:
+    // the row must fall back to the server's 40%, so the override never reached
+    // the cached response.
+    expect(out.aliasing_page2_shelf).toBe("0");
+    expect(out.aliasing_page2_book3).toBe("40%");
+  });
+});
+
+/**
+ * The sidecar walk's two measured costs, held to by test.
+ *
+ * The walk lists every folder under the book roots and stats every child to
+ * find the `*.sdr` directories. On the device that is 431 listings and 2053
+ * stats over a 525-folder tree to return 15 records, inside a scan whose total
+ * is 804.8ms (interleaved old/new A/B in one process, the 96 sidecar reads
+ * included). The tree walk is the majority of that scan; the sidecar reads make
+ * up the rest and were timed in a separate instrumented pass, so the two do not
+ * add up exactly. Skipping the stat for a name that proves it is a file took the
+ * scan from 804.8ms to 595.1ms; keeping the sidecar directory list across
+ * sessions takes it to 131.3ms.
+ */
+const SIDECAR_WALK_HARNESS = String.raw`
+local plugin_root = assert(arg[1], "plugin root argument required")
+local Sidecar = assert(loadfile(plugin_root .. "/lighthouse_sidecar.lua"))()
+
+local fake_dirs, fake_modes = {}, {}
+local statted, listed = {}, {}
+
+local function put_dir(path, names)
+  fake_dirs[path] = names
+  fake_modes[path] = "directory"
+end
+
+local function put_file(path, body)
+  fake_dirs[path] = nil
+  fake_modes[path] = "file"
+  fake_dirs[path] = { body = body }
+end
+
+local metadata_body = function(title)
+  return "return { title = " .. string.format("%q", title) .. ", percent_finished = 0.5 }"
+end
+
+-- A device-shaped tree: books beside their sidecar folders, one author folder.
+put_dir("/books", { "Alpha.epub", "Alpha.epub.sdr", "Author", "notes.txt" })
+put_dir("/books/Alpha.epub.sdr", { "metadata.epub.lua", "settings.epub.lua" })
+put_dir("/books/Author", { "Beta.epub", "Beta.epub.sdr" })
+put_dir("/books/Author/Beta.epub.sdr", { "metadata.epub.lua" })
+
+local function is_metadata(path)
+  return path == "/books/Alpha.epub.sdr/metadata.epub.lua"
+    or path == "/books/Author/Beta.epub.sdr/metadata.epub.lua"
+end
+
+Sidecar.io = {
+  -- The reader opens the file first to tell "not there" from "will not parse".
+  open = function(path)
+    if not is_metadata(path) then return nil end
+    return { close = function() end }
+  end,
+  loadfile = function(path)
+    if path == "/books/Alpha.epub.sdr/metadata.epub.lua" then
+      return loadstring(metadata_body("Alpha"))
+    end
+    if path == "/books/Author/Beta.epub.sdr/metadata.epub.lua" then
+      return loadstring(metadata_body("Beta"))
+    end
+    return nil, "missing"
+  end,
+  list = function(path)
+    listed[#listed + 1] = path
+    local entry = fake_dirs[path]
+    if not entry or entry.body then return nil end
+    local names = {}
+    for index = 1, #entry do names[index] = entry[index] end
+    return names
+  end,
+  attributes = function(path, field)
+    if field == "mode" then
+      statted[#statted + 1] = path
+      return fake_modes[path]
+    end
+    return nil
+  end,
+}
+
+local function reset()
+  statted, listed = {}, {}
+end
+
+local function count(tbl, value)
+  local n = 0
+  for index = 1, #tbl do if tbl[index] == value then n = n + 1 end end
+  return n
+end
+
+-- 1. The walk, with the names it collects handed back to the caller.
+local kept = nil
+reset()
+local records = Sidecar.scan{ dirs = { "/books" }, on_directories = function(dirs) kept = dirs end }
+print("walk_records=" .. #records)
+print("walk_listings=" .. #listed)
+print("walk_statted_epub=" .. count(statted, "/books/Alpha.epub"))
+print("walk_statted_txt=" .. count(statted, "/books/notes.txt"))
+print("walk_statted_author=" .. count(statted, "/books/Author"))
+print("walk_kept=" .. tostring(kept and #kept or -1))
+print("walk_kept_ok=" .. tostring(kept and kept[1] == "/books/Alpha.epub.sdr"))
+
+-- 2. The same scan with the list it just handed back: no tree walk at all.
+reset()
+local reused = Sidecar.scan{ dirs = { "/books" }, known_directories = kept }
+print("reuse_records=" .. #reused)
+print("reuse_listings=" .. #listed)
+print("reuse_same_titles=" .. tostring(reused[1] and reused[1].title == records[1].title))
+
+-- 3. A kept list whose directories are gone falls back to the walk, so a stale
+--    cache costs time, never the library.
+reset()
+local stale = Sidecar.scan{ dirs = { "/books" },
+  known_directories = { "/books/Nothing.epub.sdr", "/books/Gone.epub.sdr" } }
+print("stale_records=" .. #stale)
+print("stale_walked=" .. tostring(#listed > 0))
+
+print("OK")
+`;
+
+describe("plugin sidecar walk: fewer stats, fewer walks", () => {
+  function runHarness(): Record<string, string> {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-walk-"));
+    const harnessPath = path.join(workdir, "sidecar_walk_harness.lua");
+    fs.writeFileSync(harnessPath, SIDECAR_WALK_HARNESS);
+    const res = spawnSync(LUA_BINARY as string, [harnessPath, KOPLUGIN_TEMPLATE_DIR], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    return Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+  }
+
+  it("never stats a child whose name says it is a book file", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.walk_records).toBe("2");
+    expect(out.walk_statted_epub).toBe("0");
+    expect(out.walk_statted_txt).toBe("0");
+    // A folder still has to be asked about: that is the question names cannot answer.
+    expect(out.walk_statted_author).toBe("1");
+  });
+
+  it("hands back the sidecar folders it found", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.walk_kept).toBe("2");
+    expect(out.walk_kept_ok).toBe("true");
+  });
+
+  it("reads a kept list without walking the tree", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.reuse_records).toBe("2");
+    // One listing per sidecar folder instead of one per folder on the device:
+    // the tree walk costs more than the sidecars themselves.
+    expect(out.reuse_listings).toBe("2");
+    expect(Number(out.reuse_listings)).toBeLessThan(Number(out.walk_listings));
+    expect(out.reuse_same_titles).toBe("true");
+  });
+
+  it("walks again when the kept list no longer holds anything", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.stale_records).toBe("2");
+    expect(out.stale_walked).toBe("true");
+  });
+});
+
+/**
+ * The stat skip never reaches a name the device was not measured to carry as a
+ * book file.
+ *
+ * The skip exists for one measured cost: 1615 of the 2239 children under this
+ * device's book roots are `*.epub`, so 2053 `lfs.attributes` calls can drop to
+ * the names that are not proved to be files. The oracle is the filesystem: a
+ * folder named `Books.old` or `Notes.json` is a folder, so its sidecars must
+ * still be found, and only a name carrying a measured book suffix may skip the
+ * stat. An over-broad suffix table turns those folders into skipped children and
+ * loses their reading data silently, which this case rejects.
+ */
+const SIDECAR_SUFFIX_HARNESS = String.raw`
+local plugin_root = assert(arg[1], "plugin root argument required")
+local Sidecar = assert(loadfile(plugin_root .. "/lighthouse_sidecar.lua"))()
+
+local fake_dirs, statted = {}, {}
+local function put_dir(path, names)
+  fake_dirs[path] = names
+end
+
+local function metadata_body(title)
+  return "return { doc_props = { title = " .. string.format("%q", title)
+    .. " }, percent_finished = 0.5 }"
+end
+
+-- A root whose subfolders deliberately carry suffixes that look like files.
+put_dir("/root", { "Books.old", "Notes.json", "Plain", "X.epub" })
+put_dir("/root/Books.old", { "Old.epub", "Old.epub.sdr" })
+put_dir("/root/Books.old/Old.epub.sdr", { "metadata.epub.lua" })
+put_dir("/root/Notes.json", { "Note.epub", "Note.epub.sdr" })
+put_dir("/root/Notes.json/Note.epub.sdr", { "metadata.epub.lua" })
+put_dir("/root/Plain", { "Plaintext.epub", "Plaintext.epub.sdr" })
+put_dir("/root/Plain/Plaintext.epub.sdr", { "metadata.epub.lua" })
+
+local bodies = {
+  ["/root/Books.old/Old.epub.sdr/metadata.epub.lua"] = metadata_body("Old"),
+  ["/root/Notes.json/Note.epub.sdr/metadata.epub.lua"] = metadata_body("Note"),
+  ["/root/Plain/Plaintext.epub.sdr/metadata.epub.lua"] = metadata_body("Plaintext"),
+}
+
+Sidecar.io = {
+  open = function(path)
+    if not bodies[path] then return nil end
+    return { close = function() end }
+  end,
+  loadfile = function(path)
+    local body = bodies[path]
+    if not body then return nil, "missing" end
+    return loadstring(body)
+  end,
+  list = function(path)
+    local names = fake_dirs[path]
+    if not names then return nil end
+    local copy = {}
+    for index = 1, #names do copy[index] = names[index] end
+    return copy
+  end,
+  attributes = function(path, field)
+    if field == "mode" then
+      statted[#statted + 1] = path
+      if fake_dirs[path] then return "directory" end
+      return "file"
+    end
+    return nil
+  end,
+}
+
+local records = Sidecar.scan{ dirs = { "/root" } }
+local titles = {}
+for index = 1, #records do titles[#titles + 1] = tostring(records[index].title) end
+table.sort(titles)
+print("suffix_records=" .. #records)
+print("suffix_titles=" .. table.concat(titles, ","))
+
+local function stat_count(path)
+  local count = 0
+  for index = 1, #statted do if statted[index] == path then count = count + 1 end end
+  return count
+end
+print("suffix_statted_books_old=" .. stat_count("/root/Books.old"))
+print("suffix_statted_notes_json=" .. stat_count("/root/Notes.json"))
+print("suffix_statted_plain=" .. stat_count("/root/Plain"))
+print("suffix_statted_epub=" .. stat_count("/root/X.epub"))
+
+print("OK")
+`;
+
+describe("plugin sidecar walk: only measured book suffixes skip the stat", () => {
+  function runHarness(): Record<string, string> {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-suffix-"));
+    const harnessPath = path.join(workdir, "sidecar_suffix_harness.lua");
+    fs.writeFileSync(harnessPath, SIDECAR_SUFFIX_HARNESS);
+    const res = spawnSync(LUA_BINARY as string, [harnessPath, KOPLUGIN_TEMPLATE_DIR], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    return Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+  }
+
+  it("still walks a folder whose name merely ends in a file suffix", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.suffix_records).toBe("3");
+    expect(out.suffix_titles).toBe("Note,Old,Plaintext");
+    // Folders keep their stat: the name ended in `.old` / `.json` / nothing, so
+    // nothing proved they are files and nothing may skip them.
+    expect(out.suffix_statted_books_old).toBe("1");
+    expect(out.suffix_statted_notes_json).toBe("1");
+    expect(out.suffix_statted_plain).toBe("1");
+    // A book file is still stat-free, which is the measured saving.
+    expect(out.suffix_statted_epub).toBe("0");
+  });
+});
+
+/**
+ * The on-disk sidecar list's whole lifecycle, held to by test.
+ *
+ * The list exists so a later session does not walk the library again, and the
+ * guide promises four things about it: a first scan writes the folder paths, a
+ * fresh list is reused instead of walking, a list older than
+ * `SIDECAR_LIST_TTL_SECONDS` is not reused, **Refresh** rewrites it, and a
+ * download deletes it. The oracle is the file itself (its lines, and its age as
+ * the plugin reads it) plus how many directories were listed: an implementation
+ * that never expires, never rewrites, or never invalidates its list lists the
+ * whole tree on the wrong call and fails here.
+ */
+const SIDECAR_LIST_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
+local plugin_root = assert(arg[1], "plugin root argument required")
+local data_dir = assert(arg[2], "data dir argument required")
+local list_path = data_dir .. "/cache/lighthouse-sidecars.txt"
+
+local plugin_config = {
+  base_url = "http://192.168.31.15:8086",
+  api_key = "harness-key",
+  page_size = 40,
+  plugin_version = "1.6.2",
+  generated_at = "2026-11-17T00:00:00.000Z",
+  request_block_timeout = 10,
+  request_total_timeout = 90,
+  download_block_timeout = 15,
+  download_total_timeout = 300,
+}
+package.preload["lighthouse_config"] = function() return plugin_config end
+package.preload["datastorage"] = function()
+  return {
+    getDataDir = function() return data_dir end,
+    getSettingsDir = function() return data_dir .. "/settings" end,
+  }
+end
+
+-- The device's filesystem, faked: the off-device machine has no LuaFileSystem,
+-- so existence and modification time come from what this harness saw written.
+-- The file contents themselves are real, written and read by the plugin's io.
+local stamps, dirs = {}, {}
+local real_open, real_remove = io.open, os.remove
+io.open = function(path, mode)
+  local handle = real_open(path, mode)
+  if handle and type(mode) == "string" and (mode:find("w") or mode:find("a")) then
+    stamps[path] = os.time()
+  end
+  return handle
+end
+os.remove = function(path)
+  local ok, err = real_remove(path)
+  stamps[path] = nil
+  return ok, err
+end
+package.preload["libs/libkoreader-lfs"] = function()
+  return {
+    attributes = function(path, field)
+      if field == "mode" then
+        if dirs[path] then return "directory" end
+        if stamps[path] then return "file" end
+        return nil
+      end
+      if field == "modification" then return stamps[path] end
+      return nil
+    end,
+    mkdir = function(path) dirs[path] = true return true end,
+  }
+end
+
+-- The book tree the walk reads, and what it listed.
+local tree = {
+  ["/books"] = { "Alpha.epub", "Alpha.epub.sdr", "Author" },
+  ["/books/Alpha.epub.sdr"] = { "metadata.epub.lua" },
+  ["/books/Author"] = { "Beta.epub", "Beta.epub.sdr" },
+  ["/books/Author/Beta.epub.sdr"] = { "metadata.epub.lua" },
+}
+local bodies = {
+  ["/books/Alpha.epub.sdr/metadata.epub.lua"] =
+    "return { doc_props = { title = \"Alpha\" }, percent_finished = 0.5 }",
+  ["/books/Author/Beta.epub.sdr/metadata.epub.lua"] =
+    "return { doc_props = { title = \"Beta\" }, percent_finished = 0.5 }",
+}
+local listed = {}
+local Sidecar = require("lighthouse_sidecar")
+Sidecar.io = {
+  open = function(path)
+    if not bodies[path] then return nil end
+    return { close = function() end }
+  end,
+  loadfile = function(path)
+    local body = bodies[path]
+    if not body then return nil, "missing" end
+    return loadstring(body)
+  end,
+  list = function(path)
+    listed[#listed + 1] = path
+    local names = tree[path]
+    if not names then return nil end
+    local copy = {}
+    for index = 1, #names do copy[index] = names[index] end
+    return copy
+  end,
+  attributes = function(path, field)
+    if field == "mode" then
+      if tree[path] then return "directory" end
+      if path:sub(-5) == ".epub" then return "file" end
+    end
+    return nil
+  end,
+}
+
+local function reset() listed = {} end
+local function list_body()
+  local handle = real_open(list_path, "rb")
+  if not handle then return nil end
+  local body = handle:read("*a")
+  handle:close()
+  return body
+end
+local function line_count(body)
+  if type(body) ~= "string" then return -1 end
+  local count = 0
+  for line in body:gmatch("[^\r\n]+") do
+    if line ~= "" then count = count + 1 end
+  end
+  return count
+end
+local function new_plugin()
+  local plugin = assert(loadfile(plugin_root .. "/main.lua"))()
+  plugin.ui = { menu = { registerToMainMenu = function() end } }
+  plugin:init()
+  plugin.localSearchDirs = function() return { "/books" } end
+  return plugin
+end
+
+-- 1. A session's first scan walks the tree and writes the folder paths.
+local first = new_plugin()
+reset()
+local walked = first:localRecords()
+print("first_records=" .. #walked)
+print("first_listings=" .. #listed)
+local body = list_body()
+print("first_list_lines=" .. line_count(body))
+print("first_list_is_folders=" .. tostring(body ~= nil
+  and body:find("/books/Alpha.epub.sdr", 1, true) ~= nil
+  and body:find("percent_finished", 1, true) == nil))
+
+-- 2. A later session reuses that list instead of walking the tree again.
+local second = new_plugin()
+reset()
+local reused = second:localRecords()
+print("second_records=" .. #reused)
+print("second_listings=" .. #listed)
+print("second_same_titles=" .. tostring(reused[1] ~= nil and walked[1] ~= nil
+  and reused[1].title == walked[1].title))
+
+-- 3. A list older than the TTL is not reused: the session walks and rewrites.
+stamps[list_path] = os.time() - second.SIDECAR_LIST_TTL_SECONDS - 1
+local stale_stamp = stamps[list_path]
+local third = new_plugin()
+reset()
+local expired = third:localRecords()
+print("expired_records=" .. #expired)
+print("expired_listings=" .. #listed)
+print("expired_rewrote=" .. tostring(stamps[list_path] > stale_stamp))
+
+-- 4. A forced rescan (the library's Refresh) walks and rewrites at once.
+local fourth = new_plugin()
+fourth:localRecords()
+stamps[list_path] = os.time() - 5
+local before_forced = stamps[list_path]
+reset()
+fourth:localRecords(true)
+print("forced_listings=" .. #listed)
+print("forced_rewrote=" .. tostring(stamps[list_path] > before_forced))
+
+-- 5. A download deletes the list, so the next scan walks again.
+local Client = require("lighthouse_client")
+local real_download = Client.download
+Client.download = function() return true end
+fourth:startDownload({ title = "Alpha", download_href = "http://host/api/books/1/download/epub" },
+  data_dir .. "/Alpha.epub")
+Client.download = real_download
+print("download_list_gone=" .. tostring(list_body() == nil))
+reset()
+local after_download = fourth:localRecords()
+print("after_download_listings=" .. #listed)
+print("after_download_records=" .. #after_download)
+
+print("OK")
+`;
+
+describe("plugin sidecar list: written, reused, expired, invalidated", () => {
+  function runHarness(): Record<string, string> {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-sidecar-list-"));
+    fs.mkdirSync(path.join(workdir, "cache"), { recursive: true });
+    const harnessPath = path.join(workdir, "sidecar_list_harness.lua");
+    fs.writeFileSync(harnessPath, SIDECAR_LIST_HARNESS);
+    const res = spawnSync(LUA_BINARY as string, [harnessPath, KOPLUGIN_TEMPLATE_DIR, workdir], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    return Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+  }
+
+  it("writes the folder paths a walk found and reuses them next session", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.first_records).toBe("2");
+    // The walk lists every folder it descends; the sidecars are read from files.
+    expect(out.first_listings).toBe("4");
+    expect(out.first_list_lines).toBe("2");
+    // Folders, not reading data: a percentage in the list would be a cache of
+    // what a reader sees, and the sidecars must stay the authority.
+    expect(out.first_list_is_folders).toBe("true");
+    // A later session reads the two sidecar folders, never the tree.
+    expect(out.second_records).toBe("2");
+    expect(out.second_listings).toBe("2");
+    expect(out.second_same_titles).toBe("true");
+  });
+
+  it("walks instead of reusing a list older than the TTL", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.expired_records).toBe("2");
+    expect(out.expired_listings).toBe("4");
+    expect(out.expired_rewrote).toBe("true");
+  });
+
+  it("walks on a forced rescan and deletes the list on a download", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.forced_listings).toBe("4");
+    expect(out.forced_rewrote).toBe("true");
+    // The download invalidates both caches: the list is gone and the next scan
+    // walks the tree rather than reading folders that may have moved.
+    expect(out.download_list_gone).toBe("true");
+    expect(out.after_download_listings).toBe("4");
+    expect(out.after_download_records).toBe("2");
+  });
+});
