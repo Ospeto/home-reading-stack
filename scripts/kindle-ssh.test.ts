@@ -37,6 +37,7 @@ import {
   parseCliArgs,
   parseHardwarePorts,
   parseIfconfig,
+  parseSerialFromIdentity,
   selectKindle,
   probeTcp,
   readSshBanner,
@@ -50,6 +51,17 @@ import {
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..");
 const KEY_INSTALLER = path.join(REPO_ROOT, "scripts", "kindle-key-install.sh");
+
+// Recorded VERIFY_REMOTE_COMMAND output for the cabled unit (RUNBOOK §6).
+const VERIFY_SAMPLE = [
+  "G092AP03315200G6",
+  "Linux 4.9.77-lab126 armv7l",
+  "kindle",
+  "no /etc/kindle-version",
+  "us-partition=present",
+  "koreader=present",
+  " 08:39:20 up 28 days, 11:45,  0 users,  load average: 0.15, 0.19, 0.17",
+].join("\n");
 
 function makeDiscovery(overrides: Partial<DiscoveryResult> = {}): DiscoveryResult {
   return {
@@ -312,6 +324,57 @@ describe("diagnoseRoute", () => {
     expect(decision.device?.host).toBe("192.168.31.87");
   });
 
+  it("names the serial of the unit that answered", () => {
+    const decision = diagnoseRoute({
+      discovery: makeDiscovery({ devices: [kindleDevice()] }),
+      alias: "kindle1",
+      authResult: { authenticated: true, output: VERIFY_SAMPLE },
+      serial: parseSerialFromIdentity(VERIFY_SAMPLE),
+    });
+    expect(decision.state).toBe("verified");
+    expect(decision.headline).toContain("G092AP03315200G6");
+  });
+
+  it("fails loudly when the wrong Kindle answered", () => {
+    // Recorded identities: device 1 = G001LG1221170MVV, device 2 = G092AP03315200G6.
+    const decision = diagnoseRoute({
+      discovery: makeDiscovery({ devices: [kindleDevice()] }),
+      alias: "kindle1",
+      authResult: { authenticated: true, output: VERIFY_SAMPLE },
+      serial: parseSerialFromIdentity(VERIFY_SAMPLE),
+      expectedSerial: "G001LG1221170MVV",
+    });
+    expect(decision.state).toBe("identity-mismatch");
+    expect(decision.code).toBe(2);
+    expect(decision.headline).toContain("G092AP03315200G6");
+    expect(decision.headline).toContain("G001LG1221170MVV");
+    expect(decision.body.join("\n")).toContain("bin/lighthouse kindle-ssh find");
+  });
+
+  it("verifies when the expected serial is the one that answered", () => {
+    const decision = diagnoseRoute({
+      discovery: makeDiscovery({ devices: [kindleDevice()] }),
+      alias: "kindle2",
+      authResult: { authenticated: true, output: VERIFY_SAMPLE },
+      serial: parseSerialFromIdentity(VERIFY_SAMPLE),
+      expectedSerial: "G092AP03315200G6",
+    });
+    expect(decision.state).toBe("verified");
+    expect(decision.code).toBe(0);
+    expect(decision.headline).toContain("G092AP03315200G6");
+  });
+
+  it("says so when the device cannot report which unit it is", () => {
+    const decision = diagnoseRoute({
+      discovery: makeDiscovery({ devices: [kindleDevice()] }),
+      alias: "kindle1",
+      authResult: { authenticated: true, output: "no-usid\nLinux kindle 4.9" },
+      serial: parseSerialFromIdentity("no-usid\nLinux kindle 4.9"),
+    });
+    expect(decision.state).toBe("verified");
+    expect(decision.body.join("\n")).toContain("/proc/usid");
+  });
+
   it("names the key-install step when auth fails", () => {
     const decision = diagnoseRoute({
       discovery: makeDiscovery({ devices: [kindleDevice()] }),
@@ -525,15 +588,17 @@ describe("USB route helpers", () => {
     expect(port).toBeUndefined();
   });
 
-  it("refuses a soft-MAC virtual adapter even when its name looks ethernet-ish", () => {
+  it("ignores a virtual bridge, whose port name is not a gadget", () => {
     const ports = parseHardwarePorts(HARDWARE_PORTS).filter((p) => p.device !== "en7");
     expect(findUsbEthernetPort(ports)).toBeUndefined();
   });
 
-  it("never picks the interface already serving the LAN", () => {
+  it("requires a gadget-named port, not just any USB adapter", () => {
     const ports = parseHardwarePorts(HARDWARE_PORTS + GADGET_PORT_BLOCK);
     expect(findUsbEthernetPort(ports)?.device).toBe("en6");
-    expect(findUsbEthernetPort(ports.map((p) => (p.name === "RNDIS/Ethernet Gadget" ? { ...p, name: "USB 10/100/1000 LAN" } : p)))).toBeUndefined();
+    expect(
+      findUsbEthernetPort(ports.map((p) => (p.name === "RNDIS/Ethernet Gadget" ? { ...p, name: "USB 10/100/1000 LAN" } : p))),
+    ).toBeUndefined();
   });
 
   it("reports an unreachable USB route with the disabled reason", () => {
@@ -596,6 +661,15 @@ describe("USB route helpers", () => {
     expect(report).toContain("en9");
     expect(report).toContain("USB networking may be off on the device, or this adapter is not the gadget");
     expect(report).not.toContain("Next:");
+  });
+
+  it("prefers the addressed gadget over a stray link-local interface", () => {
+    const strayLinkLocal: IfaceAddr = { name: "en0", address: "169.254.10.20", netmask: "255.255.0.0" };
+    const gadget: IfaceAddr = { name: "en6", address: MAC_USB_HOST, netmask: "255.255.255.0", mac: "02:00:00:00:00:00" };
+    // RUNBOOK §4: an address on the gadget's /24 is the reliable signal; 169.254 is
+    // only the cold-start hint, so Wi-Fi losing its lease cannot shadow the cable.
+    expect(findUsbLinkInterface([strayLinkLocal, gadget])?.name).toBe("en6");
+    expect(findUsbLinkInterface([strayLinkLocal])?.name).toBe("en0");
   });
 
   it("identifies the link from its 192.168.15.x address when the host MAC is locally administered", () => {
@@ -680,6 +754,20 @@ describe("USB constants match the documented device defaults", () => {
 // CLI parsing
 // ---------------------------------------------------------------------------
 
+describe("parseSerialFromIdentity", () => {
+  it("takes the serial from the first line of the identity readback", () => {
+    expect(parseSerialFromIdentity(VERIFY_SAMPLE)).toBe("G092AP03315200G6");
+    expect(parseSerialFromIdentity("G001LG1221170MVV\nLinux 4.9.77-lab126 armv7l")).toBe("G001LG1221170MVV");
+  });
+
+  it("reports no serial when the device could not answer", () => {
+    // /proc/usid absent on the device: the command's fallback line must not be
+    // mistaken for a serial, or the identity check would compare two fictions.
+    expect(parseSerialFromIdentity("no-usid\nLinux 4.9.77-lab126 armv7l")).toBeUndefined();
+    expect(parseSerialFromIdentity(undefined)).toBeUndefined();
+  });
+});
+
 describe("parseCliArgs", () => {
   it("prints help with no arguments", () => {
     expect(parseCliArgs([])).toEqual({ help: true });
@@ -720,6 +808,16 @@ describe("parseCliArgs", () => {
   it("rejects invalid timeout and port values", () => {
     expect(parseCliArgs(["find", "--timeout", "0"])).toHaveProperty("error");
     expect(parseCliArgs(["find", "--port", "70000"])).toHaveProperty("error");
+  });
+
+  it("takes a serial for identity verification, normalised to upper case", () => {
+    const parsed = parseCliArgs(["probe", "--expect-serial", "g092ap03315200g6"]);
+    if ("help" in parsed || "error" in parsed) throw new Error("expected options");
+    expect(parsed.expectSerial).toBe("G092AP03315200G6");
+  });
+
+  it("rejects a malformed expected serial", () => {
+    expect(parseCliArgs(["probe", "--expect-serial", "@@"])).toHaveProperty("error");
   });
 
   it("collects a remote command after -- without swallowing flags", () => {
@@ -908,8 +1006,10 @@ describe("discoverKindle", () => {
 
   it("probes the USB link on the selected port only", async () => {
     const probed: string[] = [];
+    // The gadget holds only a 169.254 address here, so the LAN sweep has no target
+    // on that subnet and every recorded probe comes from the USB layer itself.
     await discoverKindle({
-      ifaces: [{ name: "en6", address: "192.168.15.201", netmask: "255.255.255.0" }],
+      ifaces: [{ name: "en6", address: "169.254.44.7", netmask: "255.255.0.0", mac: "02:00:00:00:00:00" }],
       mdns: false,
       concurrency: 8,
       ports: [KINDLE_SSH_PORT],
@@ -920,8 +1020,7 @@ describe("discoverKindle", () => {
       },
       banner: async () => null,
     });
-    expect(probed).toContain(`${KINDLE_USB_HOST}:${KINDLE_SSH_PORT}`);
-    expect(probed).not.toContain(`${KINDLE_USB_HOST}:${KINDLE_ALT_SSH_PORT}`);
+    expect(probed).toEqual([`${KINDLE_USB_HOST}:${KINDLE_SSH_PORT}`]);
   });
 });
 
@@ -1091,7 +1190,7 @@ describe("selectKindle", () => {
     kindleDevice({ host: "192.168.31.5", kindleLikely: false, server: "openssh", banner: "SSH-2.0-OpenSSH_10.3" }),
   ];
 
-  it("orders by address so device 1 and 2 are stable across runs", () => {
+  it("maps device 1 and 2 to address order, not to a physical unit", () => {
     expect(selectKindle(two, "kindle1").selected?.host).toBe("192.168.31.73");
     expect(selectKindle(two, "kindle2").selected?.host).toBe("192.168.31.167");
   });

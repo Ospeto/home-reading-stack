@@ -1043,7 +1043,7 @@ Only a **dropbear** banner counts as a Kindle. An `OpenSSH` responder on port 22
 
 > **Kindles do not answer `ping`.** Their firmware drops ICMP while serving SSH normally, so any ping-first scan will report a healthy device as absent. The tool therefore probes every address in the subnet on both ports and never pre-filters on ICMP.
 
-`find` exits `0` when a Kindle responder was found and `1` when nothing was found - it is discovery only, so it never authenticates and never returns `2`. When the printed candidates do not include the device you asked for, `find` says so in place of the login command instead of printing another device's address. `probe`, `connect` and `key` exit `0` only on a verified route, and `connect -- <command>` exits with the remote command's own status, exactly as `ssh` does. `usb` exits `0` when the link answered, `2` when the USB route is not up (no candidate link interface, or nothing answered on either port).
+`find` exits `0` when a Kindle responder was found and `1` when nothing was found - it is discovery only, so it never authenticates and never returns `2`. When the printed candidates do not include the device you asked for, `find` says so in place of the login command instead of printing another device's address. `probe`, `connect` and `key` exit `0` only on a verified route; they exit `2` when the route exists but cannot log in yet, or when the unit that answered reports a different serial than `--expect-serial`. `connect -- <command>` exits with the remote command's own status, exactly as `ssh` does, and `255` if the wrapper killed that command at its 120 s budget (the route was fine; use `ssh` directly for long jobs). `usb` exits `0` when the link answered, `2` when the USB route is not up (no candidate link interface, or nothing answered on either port).
 
 ### 2. Why there is no DHCP reservation pinning the address
 
@@ -1057,6 +1057,14 @@ curl -s http://192.168.31.1/cgi-bin/luci/api/xqsystem/router_info
 This home holds no router admin credentials, so a reservation cannot be created and none is pretended to exist. **Documented find-first discovery is the accepted answer**, and it is one command. There is deliberately no router-lease discovery layer either: nothing on this host can authenticate to the router, so a layer that could never run would only imply a capability that does not exist.
 
 Once `find` prints a stable address you may pin it yourself in `~/.ssh/config` - the tool prints a ready-to-paste `Host` block for the device you asked for and **never edits your SSH config**. That pin is a convenience, not a substitute for discovery: rerun `find` whenever the device has been off for a while. When you pin an address with `--host`, every command it prints carries that same `--host`, and when you select a key with `--identity` every printed login command, pin block and follow-up suggestion carries that key too - so the printed wrapper and the `probe` / `key` follow-up suggestions reach the device they name, with the key you actually verified.
+
+**`--device 1` / `--device 2` are address-order labels, not identities.** The lease moves, so "device 1" can be the other Kindle on the next run. What identifies a unit is its serial (`/proc/usid`), which `probe` and `connect` read back and print in the identity block - the two Kindles share hostname and kernel, so the serial is the only field that tells them apart. For any run that has to prove *one specific* device, state it:
+
+```bash
+bin/lighthouse kindle-ssh connect --device 1 --expect-serial G001LG1221170MVV -- 'uname -srm'
+```
+
+With `--expect-serial` a different unit is a hard failure (exit `2`, with both serials named), never a silent success against the wrong Kindle.
 
 > Existing `Host kindle1` / `Host kindle2` entries in `~/.ssh/config` are **wrong in both directions**: `kindle1` points at `192.168.31.167`, which is the *second* device's address, and `kindle2` still carries the literal placeholder `192.168.31.XXX`. A bare `ssh kindle1` therefore reaches the wrong device or fails for a reason that has nothing to do with the daemon. Use `bin/lighthouse kindle-ssh connect`, or update those blocks from what `find` prints.
 
@@ -1208,6 +1216,8 @@ After the revert the host re-enumerated "Internal Storage", `en6` disappeared, `
 | `probe` says *key authentication failed* | Route exists, key is not trusted | `bin/lighthouse kindle-ssh key --device 1` (needs password auth once) |
 | `22` answers with `OpenSSH` | Not the Kindle - a computer or NAS on the same subnet | Ignore; the tool already refuses it as a candidate |
 | Login hangs then says *Connection timed out* | The address moved (DHCP) or the device slept mid-session | Rerun `bin/lighthouse kindle-ssh find`; never reuse an old address |
+| `probe`/`connect` says *not the expected … serial* | The route works but it reached the other Kindle: the lease moved, and `--device 1` is address order, not identity | Read the serial it printed, confirm it is the unit you meant, and rerun `find`; keep `--expect-serial` on verification runs |
+| `probe` says *which Kindle answered is unconfirmed* | The device did not report `/proc/usid`, so the identity cannot be checked | Treat the run as unverified and read the serial by hand before trusting conclusions about a specific device |
 | Key auth worked yesterday, fails today after reboot | Key landed in a RAM-backed path (`/tmp/root`) | Reinstall the key; make it persistent (see the installer's `VOLATILE` warning) |
 | A hand-written `net.connect()` probe says ECONNREFUSED to a device that `ssh` reaches | Runtime sockets to the LAN fail on this host (scoped routing / VPN layering), while native binaries succeed | Do not debug the device - use the tool, which probes through `nc` and `ssh` |
 | `usb` says *no USB link evidence on this Mac* | No address on `192.168.15.0/24`, no `169.254` self-assigned `en*` and no RNDIS/CDC port: the gadget is not up on the device (or the cable is not a data cable) | Start the gadget on the device (see §4), then confirm the Mac holds an address on the link |
@@ -1251,7 +1261,7 @@ Linux 4.9.77-lab126 armv7l
  08:39:20 up 28 days, 11:45,  0 users,  load average: 0.15, 0.19, 0.17
 ```
 
-`lab126` is Amazon's Kindle hardware division, so the identity is confirmed by the device itself rather than inferred from its port.
+`lab126` is Amazon's Kindle hardware division, so the identity is confirmed by the device itself rather than inferred from its port. Each recorded run named the unit by its serial, and the tool now reads that serial back itself: `probe`/`connect` print it in the identity block, and `--expect-serial` refuses to report success against the other Kindle.
 
 Also verified on this Mac mini (real runs):
 
@@ -1261,7 +1271,7 @@ Also verified on this Mac mini (real runs):
 | `find --device 2` / `connect --device 2` | Selects the second device by address order; refuses to silently substitute the first |
 | `usb` | With the cable attached and the gadget up, reports the `RNDIS/Ethernet Gadget` link and, once it answers, prints the login command for the port that answered; a USB Ethernet dongle serving the LAN is not mistaken for the gadget |
 | `scripts/kindle-key-install.sh` | Idempotent install, `700`/`600` permissions, exact-line uninstall, `--dry-run` writes nothing, bad key rejected |
-| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 92 passing |
+| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 101 passing |
 
 #### Proven: Route B on one device (USB cable)
 
@@ -1278,6 +1288,7 @@ Also verified on this Mac mini (real runs):
 | Revert | `g_mass_storage` restored, "Internal Storage" re-enumerated, `en6` gone, tmpfs cleaned |
 
 **Still not proven, and stated plainly:** nothing survives a reboot or a KOReader close without a `/mnt/us` autostart hook (a device-install decision deliberately not taken and still pending), and only this one cabled unit was exercised - the other Kindle is the same platform but unproven over USB.
+
 #### Two environmental facts worth remembering
 
 1. **Kindles are ICMP-silent.** Both devices served SSH on `2222` while answering no ping at all. Any scan that pre-filters on ping will conclude the device is absent, so the tool probes every address and uses no ICMP filter.

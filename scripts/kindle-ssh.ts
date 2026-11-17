@@ -30,9 +30,15 @@
  *      USB link answered
  *   1  find: nothing answered discovery; probe/connect/key: no device could be found
  *   2  probe/connect/key: a device was found but the route is not usable yet (SSH closed / key
- *      missing); usb: the USB route is not up (no candidate link interface, or nothing answered)
+ *      missing), or it reported a different serial than --expect-serial;
+ *      usb: the USB route is not up (no candidate link interface, or nothing answered)
  *   3  usage error
- * `connect -- <command>` instead exits with the remote command's own status, as ssh does.
+ * `connect -- <command>` instead exits with the remote command's own status, as ssh does, and 255
+ * when the wrapper killed that command at its 120 s budget.
+ *
+ * `--device 1` / `--device 2` are address-order labels, not identities: the DHCP lease moves. The
+ * serial (USID) read back after login is the identity, and `--expect-serial` makes a different unit
+ * a hard failure.
  */
 
 import * as dns from "node:dns/promises";
@@ -86,6 +92,7 @@ export const MDNS_HOST_CANDIDATES = [
 
 /** Command run on the device to prove both identity and that a shell really works. */
 export const VERIFY_REMOTE_COMMAND = [
+  "cat /proc/usid 2>/dev/null || echo no-usid",
   "uname -srm",
   "hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null",
   "cat /etc/kindle-version 2>/dev/null || echo 'no /etc/kindle-version'",
@@ -93,6 +100,15 @@ export const VERIFY_REMOTE_COMMAND = [
   "test -d /mnt/us/koreader && echo 'koreader=present' || echo 'koreader=absent'",
   "uptime",
 ].join("; ");
+
+/**
+ * The Kindle serial (USID) from a VERIFY_REMOTE_COMMAND readback. It is the only
+ * field that differs between the units: they share hostname and kernel.
+ */
+export function parseSerialFromIdentity(output: string | undefined): string | undefined {
+  const first = (output ?? "").split("\n")[0]?.trim() ?? "";
+  return /^[A-Z0-9]{12,17}$/.test(first) ? first : undefined;
+}
 
 // ---------------------------------------------------------------------------
 // IPv4 helpers (pure)
@@ -681,7 +697,7 @@ async function runUsbLayer(ctx: DiscoveryContext, enabled: boolean): Promise<Lay
     status: "empty",
     detail: usbLinkUp
       ? `USB link is up but ${KINDLE_USB_HOST} did not answer on ${ctx.ports.join("/")}`
-      : `no USB link evidence on this Mac (no address on ${USB_LINK_PREFIX}0/24, no RNDIS/CDC port, no 169.254 en*); ${KINDLE_USB_HOST} unreachable`,
+      : `no USB link address evidence on this Mac (no address on ${USB_LINK_PREFIX}0/24 and no 169.254 en*); ${KINDLE_USB_HOST} unreachable`,
   };
 }
 
@@ -759,7 +775,7 @@ export async function discoverKindle(options: DiscoverOptions = {}): Promise<Dis
 // Route evaluation / diagnosis
 // ---------------------------------------------------------------------------
 
-export type RouteState = "verified" | "auth-failed" | "ssh-closed" | "not-found";
+export type RouteState = "verified" | "identity-mismatch" | "auth-failed" | "ssh-closed" | "not-found";
 
 export interface RouteDecision {
   state: RouteState;
@@ -780,6 +796,10 @@ export interface DiagnosisInput {
   selected?: DiscoveredDevice;
   /** SSH private key the caller used, so printed follow-up commands re-use it. */
   identityFile?: string;
+  /** Serial (USID) the reached device reported, when it could be read. */
+  serial?: string;
+  /** Serial the caller asked to verify, making a different unit a hard failure. */
+  expectedSerial?: string;
 }
 
 /**
@@ -788,7 +808,7 @@ export interface DiagnosisInput {
  * names the condition and the next step.
  */
 export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
-  const { discovery, alias, authResult, selectionNote, selected, identityFile } = input;
+  const { discovery, alias, authResult, selectionNote, selected, identityFile, serial, expectedSerial } = input;
   const targets = discovery.scanTargets.map((t) => `${t.network}/${t.prefix}`).join(", ") || "no scannable subnet";
   const ports = discovery.probedPorts.join("/");
 
@@ -858,11 +878,29 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
   const device = selected ?? kindleCandidates[0];
 
   if (authResult?.authenticated) {
+    if (expectedSerial && serial !== expectedSerial) {
+      return {
+        state: "identity-mismatch",
+        code: 2,
+        headline: `${alias} answered at ${device.host}:${device.port} as ${serial ?? "an unreadable serial"}, not the expected ${expectedSerial}.`,
+        body: [
+          "The route works, but it reached a different unit than the one you asked to verify.",
+          "The DHCP lease moves between the Kindles, so an address is not an identity.",
+          `  bin/lighthouse kindle-ssh find`,
+          "Match the serial above against the device you meant before trusting any result from this route.",
+        ],
+        device,
+      };
+    }
     return {
       state: "verified",
       code: 0,
-      headline: `${alias} is reachable and key-authenticated at ${device.host}:${device.port}.`,
-      body: [],
+      headline: `${alias} is reachable and key-authenticated at ${device.host}:${device.port}${
+        serial ? ` (serial ${serial})` : ""
+      }.`,
+      body: serial
+        ? []
+        : ["The device did not report /proc/usid, so which Kindle answered is unconfirmed."],
       device,
     };
   }
@@ -1062,11 +1100,12 @@ export function parseHardwarePorts(text: string): HardwarePort[] {
  * on a newly appeared en* interface.
  */
 export function findUsbLinkInterface(ifaces: IfaceAddr[]): IfaceAddr | undefined {
+  const byAddress = ifaces.find((iface) => iface.address.startsWith(USB_LINK_PREFIX));
+  if (byAddress) return byAddress;
+  const byAmazonOui = ifaces.find((iface) => (iface.mac ?? "").startsWith(AMAZON_OUI));
+  if (byAmazonOui) return byAmazonOui;
   return ifaces.find(
-    (iface) =>
-      (iface.mac ?? "").startsWith(AMAZON_OUI) ||
-      iface.address.startsWith(USB_LINK_PREFIX) ||
-      (/^en\d+$/.test(iface.name) && iface.address.startsWith("169.254.")),
+    (iface) => /^en\d+$/.test(iface.name) && iface.address.startsWith("169.254."),
   );
 }
 
@@ -1248,6 +1287,8 @@ interface CliOptions {
   timeoutMs: number;
   remote: string[];
   identityFile: string;
+  /** Serial (USID) the caller expects the reached device to report. */
+  expectSerial?: string;
 }
 
 export function parseCliArgs(argv: string[]): CliOptions | { help: true } | { error: string } {
@@ -1309,6 +1350,12 @@ export function parseCliArgs(argv: string[]): CliOptions | { help: true } | { er
       case "-i":
         options.identityFile = expandHome(args[++i] ?? "");
         break;
+      case "--expect-serial": {
+        const value = (args[++i] ?? "").trim();
+        if (!/^[A-Za-z0-9]{6,}$/.test(value)) return { error: `--expect-serial requires a Kindle serial (USID), got: ${value}` };
+        options.expectSerial = value.toUpperCase();
+        break;
+      }
       case "--":
         options.remote = args.slice(i + 1);
         i = args.length;
@@ -1346,6 +1393,7 @@ Subcommands:
 Options:
   --device <1|2|kindle1|kindle2>  Which Kindle to target (1 = first found, 2 = second)
   --host <ipv4>                   Pin an exact address (still banner-verified)
+  --expect-serial <usid>          Fail if the unit that answers reports a different serial
   --timeout <ms>                  Per-host TCP probe timeout (default: 400)
   --port <port>                   Probe a single SSH port instead of 2222 and 22
   --identity <path>               SSH private key (default: ~/.ssh/id_ed25519)
@@ -1357,10 +1405,12 @@ Exit codes:
   0  find: a Kindle responder was discovered; probe/connect/key: the route is verified; usb: the USB
      link answered
   1  find: nothing answered discovery; probe/connect/key: no device could be found
-  2  probe/connect/key: device found but the route is not usable yet (SSH closed / key missing);
+  2  probe/connect/key: device found but the route is not usable yet (SSH closed / key missing), or
+     the device that answered reported a different serial than --expect-serial;
      usb: the USB route is not up (no candidate link interface, or nothing answered)
   3  usage error
-  connect -- <command> instead exits with the remote command's own status, as ssh does
+  connect -- <command> instead exits with the remote command's own status, as ssh does,
+  and 255 if the wrapper killed it at its 120 s budget
 
 Notes:
   * The wireless route exists ONLY while KOReader is running with its SSH server started.
@@ -1373,7 +1423,9 @@ Notes:
  * Pick which Kindle to act on.
  *
  * `--device 1` / `--device 2` select the first / second Kindle found, ordered by
- * address so the mapping is stable across runs. `--host` pins one explicitly.
+ * address - an ordering label, not an identity: the DHCP lease moves, so which
+ * unit is "1" can change between runs. The serial readback (`--expect-serial`)
+ * is what pins a run to one physical unit. `--host` pins an address explicitly.
  * A selection is never asserted blindly: the chosen address still has to answer
  * with a dropbear banner before it is used.
  */
@@ -1447,6 +1499,8 @@ function decideRoute(options: CliOptions, resolved: Awaited<ReturnType<typeof re
     selected: resolved.selected,
     selectionNote: resolved.note,
     identityFile: options.identityFile,
+    serial: parseSerialFromIdentity(resolved.auth?.output),
+    expectedSerial: options.expectSerial,
     authResult: resolved.auth
       ? {
           authenticated: resolved.auth.authenticated,
@@ -1534,6 +1588,12 @@ async function cmdConnect(options: CliOptions): Promise<number> {
   const result = await runWithTimeout(SSH_BIN, args, 120000);
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
+  if (result.timedOut) {
+    console.error(`The remote command was killed at this wrapper's 120 s budget; the route itself verified fine.`);
+    console.error("For a long-running command, use ssh directly so it is not killed:");
+    console.error(`  ${formatRawSshCommand(target, remote)}`);
+    return 255;
+  }
   return result.status ?? 2;
 }
 
@@ -1556,6 +1616,13 @@ async function cmdKey(options: CliOptions): Promise<number> {
     console.error(decision.headline);
     for (const line of decision.body) console.error(line);
     return decision.code;
+  }
+
+  const identity = decideRoute(options, resolved);
+  if (identity.state === "identity-mismatch") {
+    console.error(identity.headline);
+    for (const line of identity.body) console.error(line);
+    return identity.code;
   }
 
   if (auth?.authenticated) {
@@ -1589,6 +1656,15 @@ async function cmdKey(options: CliOptions): Promise<number> {
 
   const verify = await verifyKeyAuth(target, 15000);
   if (verify.authenticated) {
+    const serial = parseSerialFromIdentity(verify.output);
+    if (options.expectSerial && serial !== options.expectSerial) {
+      console.error(
+        `Key installed at ${target.host}:${target.port}, but that unit reported ${
+          serial ?? "an unreadable serial"
+        }, not the expected ${options.expectSerial}.`,
+      );
+      return 2;
+    }
     console.log("");
     console.log(`Verified: key login now works at ${target.host}:${target.port}.`);
     console.log(`  ${formatRawSshCommand(target, ["uname -srm"])}`);
