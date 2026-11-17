@@ -394,6 +394,7 @@ describe("diagnoseRoute", () => {
     const body = decision.body.join("\n");
     expect(body).toContain("--timeout 1500");
     expect(body).not.toContain("kindle-ssh key");
+    expect(body).toContain("-o StrictHostKeyChecking=accept-new");
   });
 
   it("keeps the selected key and port in the timeout re-check it prints", () => {
@@ -752,6 +753,13 @@ describe("USB route helpers", () => {
     // A printed login command has to carry the key the operator selected, or it
     // fails publickey auth even though `probe --identity <key>` verified the route.
     expect(formatUsbReport(status, "/tmp/kindle_ed25519")).toContain("-i /tmp/kindle_ed25519");
+
+    // First contact on this link is the normal case (the device-side dropbear host
+    // key lives in /tmp), so the printed command must accept a NEW key - while still
+    // refusing a changed one, which is why it is not StrictHostKeyChecking=no.
+    const next = report.split("\n").find((line) => line.includes("root@")) ?? "";
+    expect(next).toContain("StrictHostKeyChecking=accept-new");
+    expect(next).not.toContain("StrictHostKeyChecking=no");
   });
 
   it("identifies an Amazon-OUI adapter even when hardware ports are unknown", () => {

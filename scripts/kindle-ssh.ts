@@ -927,7 +927,7 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
         "",
         "Re-run with a longer budget, or read the identity by hand:",
         `  bin/lighthouse kindle-ssh probe${routeArgs(device.host, device.port, identityFile)} --timeout 1500`,
-        `  ssh -p ${device.port} -i ${identityFile ?? defaultIdentityFile()} -o BatchMode=yes root@${device.host} 'cat /proc/usid'`,
+        `  ssh -p ${device.port} -i ${identityFile ?? defaultIdentityFile()} -o BatchMode=yes -o StrictHostKeyChecking=accept-new root@${device.host} 'cat /proc/usid'`,
         "",
         `SSH said: ${authResult.error ?? `ssh did not finish within its budget`}`,
       ],
@@ -1350,7 +1350,7 @@ export function formatUsbReport(status: UsbStatus, identityFile?: string): strin
   if (status.sshPort !== undefined) {
     lines.push("Next:");
     lines.push(
-      `  ssh -p ${status.sshPort} -i ${identityFile ?? defaultIdentityFile()} -o BatchMode=yes root@${KINDLE_USB_HOST} uname -srm`,
+      `  ssh -p ${status.sshPort} -i ${identityFile ?? defaultIdentityFile()} -o BatchMode=yes -o StrictHostKeyChecking=accept-new root@${KINDLE_USB_HOST} uname -srm`,
     );
     return lines.join("\n");
   }

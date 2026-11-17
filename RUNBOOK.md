@@ -1185,7 +1185,7 @@ sudo ifconfig <enX> inet 192.168.15.201 netmask 255.255.255.0 up
 
 # Confirm and log in
 ping -c 2 192.168.15.244
-ssh -p 22 -i ~/.ssh/id_ed25519 -o BatchMode=yes -o ConnectTimeout=8 root@192.168.15.244 'uname -srm'
+ssh -p 22 -i ~/.ssh/id_ed25519 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 root@192.168.15.244 'uname -srm'
 ```
 
 `bin/lighthouse kindle-ssh find` also probes `192.168.15.244` on every scanned port, so it reports this route once the link is up.
