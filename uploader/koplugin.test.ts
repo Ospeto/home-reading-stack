@@ -6460,13 +6460,24 @@ failure = false
 require("ui/network/manager").isOnline = function() return true end
 local browse_ok, browse_raised = pcall(taps["Browse library"])
 print("browse_ok=" .. tostring(browse_ok) .. " " .. tostring(browse_raised))
-local browse = current_menu()
-local book_row = browse and browse.item_table and browse.item_table[2]
-print("browse_rows=" .. tostring(#(browse and browse.item_table or {})))
-print("browse_book=" .. tostring(book_row and book_row.text) .. "\t" .. tostring(book_row and book_row.mandatory))
+-- The catalog is one of the plugin's pages, so its rows are read from the model
+-- that page drew: row 1 is the search row, so the first book is row 2. (It used
+-- to read them off a menu, which only worked while a menu from an earlier view
+-- was still on screen.)
+local browse_model = LightHouse.last_page_model
+local browse_rows = browse_model and browse_model.blocks and browse_model.blocks[1].rows or {}
+local book_row = browse_rows[2]
+print("browse_rows=" .. tostring(#browse_rows))
+print("browse_book=" .. tostring(book_row and book_row.title) .. "\t"
+  .. tostring(book_row and book_row.secondary) .. "\t" .. tostring(book_row and book_row.value))
+-- Tapping that row is what opens the book's detail view; the same tap the
+-- device makes, through the page's own dispatcher.
+local detail_ok, detail_raised = pcall(function() LightHouse.page:run(book_row.action) end)
+print("browse_detail_ok=" .. tostring(detail_ok) .. " " .. tostring(detail_raised))
+local detail_menu = current_menu()
 local browse_details = {}
-for detail_index = 1, #(book_row and book_row.sub_item_table or {}) do
-  browse_details[#browse_details + 1] = tostring(book_row.sub_item_table[detail_index].text)
+for detail_index = 1, #(detail_menu and detail_menu.item_table or {}) do
+  browse_details[#browse_details + 1] = tostring(detail_menu.item_table[detail_index].text)
 end
 print("browse_details=" .. table.concat(browse_details, "|"))
 
@@ -6593,10 +6604,16 @@ describe("KOReader plugin local progress and highlights", () => {
     const out = runLocalProgressHarness();
 
     expect(out.browse_ok).toBe("true nil");
+    // Row 2 of the catalog page: the search row is row 1.
     const book = out.browse_book.split("\t");
     expect(book[0]).toBe("Spice and Wolf, Vol. 1");
-    expect(book[1]).toContain("98%");
-    expect(book[1]).not.toContain("45%");
+    // The session says 45%; this device's sidecar says 98%, and the catalog row
+    // is drawn from the same merge the shelf is.
+    expect(book[2]).toBe("98%");
+    expect(out.browse_book).not.toContain("45%");
+    // Its detail view, opened by tapping the row, names where the number came
+    // from.
+    expect(out.browse_detail_ok).toBe("true nil");
     expect(out.browse_details).toContain("Progress read from this device");
     expect(out.browse_details).toContain("Highlights: 2");
   });
@@ -7652,5 +7669,568 @@ describe("plugin sidecar list: written, reused, expired, invalidated", () => {
     expect(out.download_list_gone).toBe("true");
     expect(out.after_download_listings).toBe("4");
     expect(out.after_download_records).toBe("2");
+  });
+});
+
+/**
+ * Navigation: one stack of levels, and Back that goes up a level.
+ *
+ * Before this the plugin had no notion of a level. Every screen wrote over the
+ * one before it, so Back could only close - which on the device is the file
+ * manager, not the grouping the reader had just drilled out of. From inside one
+ * series' books the series list was unreachable.
+ *
+ * The harness drives the same entry points the device's taps run - the page's
+ * own dispatcher for a row and for the back mark - and reads the level stack,
+ * the drawn page model and the widget identity, so a step up is proved to
+ * restore the view the reader came from rather than to open a new one.
+ */
+const NAVIGATION_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local expected_base_url = assert(arg[2], "expected base url argument required")
+
+local current_url = ""
+local opds_requests = 0
+local group_count = 12
+
+local function percent_decode(text)
+  return (tostring(text):gsub("%%(%x%x)", function(hex)
+    return string.char(tonumber(hex, 16))
+  end))
+end
+
+--- The catalogue the plugin parses: an unfiltered list, and a filtered one that
+-- is obviously a different list, so "you are back where you came from" is not
+-- asserted against the same rows twice.
+local function opds_body(url)
+  local searched = url:match("[?&]search=([^&]*)") or ""
+  searched = percent_decode(searched)
+  local titles
+  if searched == "" then
+    titles = { "Book One", "Book Two", "Book Three" }
+  else
+    titles = { searched .. " Vol 1", searched .. " Vol 2" }
+  end
+  local parts = {
+    '<?xml version="1.0" encoding="utf-8"?>',
+    '<feed xmlns="http://www.w3.org/2005/Atom"><title>LightHouse</title>',
+  }
+  for index = 1, #titles do
+    parts[#parts + 1] = '<entry><id>urn:calibre:book:' .. tostring(100 + index)
+      .. '</id><title>' .. titles[index]
+      .. '</title><author><name>A Writer</name></author></entry>'
+  end
+  parts[#parts + 1] = '</feed>'
+  return table.concat(parts)
+end
+
+local function groups_payload(by)
+  local groups = {}
+  for index = 1, group_count do
+    groups[index] = {
+      name = (by == "series" and "Series " or "Author ") .. tostring(index),
+      author = "A Writer",
+      books = 3,
+      read = 1,
+    }
+  end
+  return { groups = groups, books = group_count * 3, authors = group_count, series = group_count }
+end
+
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      current_url = tostring(request and request.url or "")
+      local body = "{}"
+      if current_url:find("/api/opds", 1, true) then
+        opds_requests = opds_requests + 1
+        body = opds_body(current_url)
+      elseif current_url:find("/api/kosync/active", 1, true) then
+        body = "[]"
+      end
+      if request and request.sink then
+        request.sink(body)
+        request.sink(nil)
+      end
+      return 1, 200, {}
+    end,
+  }
+end
+package.preload["ltn12"] = function()
+  return {
+    sink = {
+      table = function(target)
+        return function(chunk)
+          if chunk then target[#target + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function() end,
+    },
+  }
+end
+package.preload["json"] = function()
+  return {
+    decode = function()
+      local by = current_url:match("/api/library/groups%?by=(%a+)")
+      if by then return groups_payload(by) end
+      if current_url:find("/api/kosync/active", 1, true) then
+        return {
+          {
+            id = 1,
+            percentage = 0.42,
+            device = "Paperwhite",
+            title = "Book One",
+            authors = "A Writer",
+            timestamp = 1794633720,
+            bookId = 101,
+          },
+        }
+      end
+      return {}
+    end,
+  }
+end
+
+-- KOReader's Menu, faithfully enough for the submenu rule: Back pops the
+-- menu's own item-table stack, and only an empty stack closes the menu and runs
+-- its close_callback. A submenu is not a level, and this is what proves it.
+package.preload["ui/widget/menu"] = function()
+  local menu = {}
+  function menu:new(options)
+    options = options or {}
+    options.__kind = "menu"
+    options.item_table_stack = {}
+    options.switched = {}
+    function options:switchItemTable(title, items)
+      self.switched[#self.switched + 1] = { title = title, items = items }
+    end
+    function options:onMenuChoice(item)
+      if type(item) ~= "table" then return end
+      if item.sub_item_table then
+        table.insert(self.item_table_stack, { title = self.title, item_table = self.item_table })
+        self.title = item.text
+        self.item_table = item.sub_item_table
+      elseif item.callback then
+        item.callback()
+      end
+    end
+    function options:onClose()
+      if #self.item_table_stack == 0 then
+        require("ui/uimanager").close(self)
+        if type(self.close_callback) == "function" then self.close_callback() end
+      else
+        local parent = table.remove(self.item_table_stack)
+        self.title = parent.title
+        self.item_table = parent.item_table
+      end
+    end
+    return options
+  end
+  return menu
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local config = require("lighthouse_config")
+assert(config.base_url == expected_base_url,
+  "harness needs the generated config, got " .. tostring(config.base_url))
+local Nav = require("lighthouse_nav")
+local UIManager = require("ui/uimanager")
+
+--- Back on a menu: KOReader closes it and then calls its close_callback (see
+-- Menu:onCloseAllMenus), which is the path the plugin's step up hangs on.
+local function press_menu_back()
+  local menu = LightHouse.menu
+  if not menu then return false end
+  UIManager:close(menu)
+  if type(menu.close_callback) == "function" then menu.close_callback() end
+  return true
+end
+
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+LightHouse.coversEnabled = function() return false end
+
+local function depth() return #LightHouse.nav end
+
+local function top()
+  local stack = LightHouse.nav or {}
+  return stack[#stack]
+end
+
+--- The level the reader is on, in one line: kind, key, and its state.
+local function level()
+  local entry = top()
+  if not entry then return "none" end
+  local state = entry.state or {}
+  return string.format("%s|%s|%s|p%s|q%s", tostring(entry.kind), tostring(entry.key),
+    tostring(state.mode), tostring(state.page), tostring(state.query))
+end
+
+local function rows()
+  local model = LightHouse.last_page_model
+  local list = {}
+  for block_index = 1, #(model and model.blocks or {}) do
+    local block = model.blocks[block_index]
+    for row_index = 1, #(block.rows or {}) do
+      list[#list + 1] = block.rows[row_index]
+    end
+  end
+  return list
+end
+
+local function titles()
+  local list = rows()
+  local out = {}
+  for index = 1, #list do out[index] = tostring(list[index].title) end
+  return table.concat(out, "|")
+end
+
+local function active_group()
+  local model = LightHouse.last_page_model
+  for index = 1, #(model and model.switch or {}) do
+    if model.switch[index].active then return tostring(model.switch[index].key) end
+  end
+  return "none"
+end
+
+local function report(name)
+  print(name .. "_depth=" .. tostring(depth()))
+  print(name .. "_level=" .. level())
+  print(name .. "_titles=" .. titles())
+end
+
+-- Each section starts by leaving the plugin, the way a reader does between
+-- visits, so the depths below are one visit's depths and not a running total.
+-- The top level: the catalogue, Books grouping.
+LightHouse:exitPlugin()
+LightHouse:openLibrary{ mode = "books", page = 1 }
+report("root")
+print("root_group=" .. active_group())
+
+-- Switching grouping is a sibling, not a step: the level stays one deep, so
+-- Back from Series still leaves the plugin.
+LightHouse:openLibrary{ mode = "series", page = 1 }
+report("switched")
+print("switched_group=" .. active_group())
+print("switched_title=" .. titles())
+
+-- The second page of the same grouping: still the same level.
+LightHouse.page:run({ kind = "page", page = 2 })
+report("paged")
+print("paged_pager=" .. tostring(LightHouse.last_page_model.pager.page))
+
+-- Tapping a series row opens that series' books: one level deeper.
+local series_row = rows()[1]
+print("drill_series=" .. tostring(series_row and series_row.title))
+local grouped_page = LightHouse.page
+LightHouse.page:run(series_row.action)
+report("drilled")
+print("drilled_group=" .. active_group())
+local drilled_requests = opds_requests
+
+-- Back, pressed exactly as the header's back mark is pressed.
+LightHouse.page:run({ kind = "back" })
+report("after_back")
+print("after_back_group=" .. active_group())
+print("after_back_pager=" .. tostring(LightHouse.last_page_model.pager.page))
+-- The list the reader came from is redrawn from the model the level kept, so
+-- coming back costs no request: the grouping and the page come back with it.
+print("after_back_new_requests=" .. tostring(opds_requests - drilled_requests))
+print("after_back_rebuilt_page=" .. tostring(LightHouse.page ~= nil and LightHouse.page ~= grouped_page))
+
+-- Authors: drill from a later page, and come back to it.
+LightHouse:exitPlugin()
+LightHouse:openLibrary{ mode = "authors", page = 2 }
+report("authors_paged")
+local author_row = rows()[1]
+print("drill_author=" .. tostring(author_row and author_row.title))
+LightHouse.page:run(author_row.action)
+report("author_drilled")
+LightHouse.page:run({ kind = "back" })
+report("author_after_back")
+print("author_after_back_group=" .. active_group())
+print("author_after_back_pager=" .. tostring(LightHouse.last_page_model.pager.page))
+
+-- A search is a level of its own: back returns to the unfiltered grouping.
+LightHouse:exitPlugin()
+LightHouse:openLibrary{ mode = "books", page = 1 }
+LightHouse:openLibrary{ mode = "books", page = 1, query = "Series 3" }
+report("search")
+LightHouse.page:run({ kind = "back" })
+report("search_after_back")
+
+-- A book's detail view sits above the page it was opened from; back returns to
+-- that page, which never left the glass.
+LightHouse:exitPlugin()
+LightHouse:openLibrary{ mode = "books", page = 1 }
+local book_row = rows()[2]
+print("detail_book=" .. tostring(book_row and book_row.title))
+local catalogue_page = LightHouse.page
+LightHouse.page:run(book_row.action)
+print("detail_depth=" .. tostring(depth()))
+print("detail_level=" .. level())
+print("detail_is_menu=" .. tostring(LightHouse.menu ~= nil))
+press_menu_back()
+print("detail_after_close_depth=" .. tostring(depth()))
+print("detail_after_close_level=" .. level())
+print("detail_after_close_same_page=" .. tostring(LightHouse.page == catalogue_page))
+print("detail_after_close_menu_gone=" .. tostring(LightHouse.menu == nil))
+
+-- A menu view that opens a page: back returns to the menu.
+LightHouse:exitPlugin()
+LightHouse:showReading()
+print("reading_depth=" .. tostring(depth()))
+print("reading_level=" .. level())
+print("reading_menu=" .. tostring(LightHouse.menu and LightHouse.menu.title))
+LightHouse:openLibrary{ mode = "books", page = 1 }
+print("reading_drilled_depth=" .. tostring(depth()))
+print("reading_drilled_level=" .. level())
+LightHouse.page:run({ kind = "back" })
+print("reading_after_back_depth=" .. tostring(depth()))
+print("reading_after_back_level=" .. level())
+print("reading_after_back_menu=" .. tostring(LightHouse.menu and LightHouse.menu.title))
+
+-- A submenu inside a menu view is not a level: Back pops the menu's own stack
+-- and leaves the level stack alone, so the reader lands back on the list they
+-- opened the book from without the plugin moving.
+LightHouse:exitPlugin()
+LightHouse:showReading()
+local shelf_menu = LightHouse.menu
+local shelf_row = shelf_menu.item_table[1]
+print("submenu_row=" .. tostring(shelf_row and shelf_row.text)
+  .. " details=" .. tostring(#(shelf_row and shelf_row.sub_item_table or {})))
+print("submenu_level=" .. level())
+shelf_menu:onMenuChoice(shelf_row)
+print("submenu_opened_title=" .. tostring(shelf_menu.title)
+  .. " stack=" .. tostring(#shelf_menu.item_table_stack))
+print("submenu_opened_depth=" .. tostring(depth()))
+shelf_menu:onClose()
+print("submenu_popped_title=" .. tostring(shelf_menu.title)
+  .. " stack=" .. tostring(#shelf_menu.item_table_stack))
+print("submenu_popped_depth=" .. tostring(depth()))
+print("submenu_popped_same_menu=" .. tostring(LightHouse.menu == shelf_menu))
+shelf_menu:onClose()
+print("submenu_closed_depth=" .. tostring(depth()))
+print("submenu_closed_menu_gone=" .. tostring(LightHouse.menu == nil))
+
+-- Back at the top level leaves the plugin: no widget of ours and no level left
+-- behind for the next visit to inherit.
+LightHouse:exitPlugin()
+LightHouse:openLibrary{ mode = "books", page = 1 }
+print("last_root_depth=" .. tostring(depth()))
+LightHouse.page:run({ kind = "back" })
+print("exit_depth=" .. tostring(depth()))
+print("exit_page_gone=" .. tostring(LightHouse.page == nil))
+print("exit_menu_gone=" .. tostring(LightHouse.menu == nil))
+
+-- The navigation module's own contract, driven directly.
+local stack = {}
+print("nav_first=" .. Nav.show(stack, { kind = "library", key = "root" }))
+print("nav_same=" .. Nav.show(stack, { kind = "library", key = "root" }))
+print("nav_deeper=" .. Nav.show(stack, { kind = "library", key = "query:X" }))
+print("nav_depth=" .. tostring(#stack))
+print("nav_up=" .. tostring((Nav.up(stack) or {}).key))
+print("nav_up_depth=" .. tostring(#stack))
+print("nav_keys=" .. Nav.libraryKey("  Spice and Wolf  ") .. "," .. Nav.libraryKey("")
+  .. "," .. Nav.libraryKey(nil))
+local capped = {}
+for index = 1, Nav.MAX_DEPTH + 4 do
+  Nav.show(capped, { kind = "library", key = "query:" .. tostring(index) })
+end
+print("nav_capped=" .. tostring(#capped))
+print("nav_capped_top=" .. tostring(capped[#capped].key))
+
+print("OK")
+`);
+
+describe("plugin navigation: going up a level", () => {
+  function runNavHarness(): Record<string, string> {
+    if (!LUA_BINARY || !UNZIP_BINARY) return {};
+
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "harness-api-key",
+      generatedAt: "2026-11-14T00:00:00.000Z",
+    });
+
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-nav-"));
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(
+      UNZIP_BINARY as string,
+      ["-q", zipPath, "-d", pluginsDir],
+      { encoding: "utf8" },
+    );
+    expect(extract.status).toBe(0);
+
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "navigation_harness.lua");
+    fs.writeFileSync(harnessPath, NAVIGATION_HARNESS);
+
+    const res = spawnSync(
+      LUA_BINARY as string,
+      [harnessPath, pluginRoot, "http://192.168.31.15:8086"],
+      { encoding: "utf8" },
+    );
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    return Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+  }
+
+  it("opens one series' books one level below the series list", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNavHarness();
+
+    // The grouping switch and the page turn stay on the level they were made
+    // on: a level is where the reader IS, not every action taken there.
+    expect(out.root_depth).toBe("1");
+    expect(out.root_level).toBe("library|root|books|p1|q");
+    expect(out.switched_depth).toBe("1");
+    expect(out.switched_level).toBe("library|root|series|p1|q");
+    expect(out.switched_group).toBe("series");
+    expect(out.paged_depth).toBe("1");
+    expect(out.paged_level).toBe("library|root|series|p2|q");
+    expect(out.paged_pager).toBe("2");
+
+    // The row tap is one level deeper, and it really is another list. The row
+    // is whatever the plugin drew (the first row of that page), so the
+    // assertions are about the relationship, not a hard-coded page size.
+    expect(out.drill_series).toMatch(/^Series \d+$/);
+    expect(out.drilled_depth).toBe("2");
+    expect(out.drilled_level).toBe(
+      `library|query:${out.drill_series}|books|p1|q${out.drill_series}`,
+    );
+    expect(out.drilled_titles).toContain(`${out.drill_series} Vol 1`);
+    expect(out.drilled_group).toBe("books");
+  });
+
+  it("returns from one series' books to the series list, on its page", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNavHarness();
+
+    // Back pops the drill, not the plugin: the reader is one level down from
+    // where they were, and now they are back on it.
+    expect(out.after_back_depth).toBe("1");
+    expect(out.after_back_level).toBe("library|root|series|p2|q");
+    expect(out.after_back_group).toBe("series");
+    expect(out.after_back_pager).toBe("2");
+    expect(out.after_back_titles).toContain(out.drill_series ?? "");
+    // Redrawn from the model this level kept, so restoring it costs nothing on
+    // the wire - and it is a page the reader came back to, not the one they
+    // left (the drill had replaced it).
+    expect(out.after_back_new_requests).toBe("0");
+    expect(out.after_back_rebuilt_page).toBe("true");
+  });
+
+  it("returns an author drill to the authors page it was opened from", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNavHarness();
+
+    expect(out.authors_paged_level).toBe("library|root|authors|p2|q");
+    expect(out.drill_author).toMatch(/^Author \d+$/);
+    expect(out.author_drilled_level).toBe(
+      `library|query:${out.drill_author}|books|p1|q${out.drill_author}`,
+    );
+    expect(out.author_after_back_level).toBe("library|root|authors|p2|q");
+    expect(out.author_after_back_group).toBe("authors");
+    expect(out.author_after_back_pager).toBe("2");
+  });
+
+  it("returns a search result to the grouping it was searched from", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNavHarness();
+
+    expect(out.search_level).toBe("library|query:Series 3|books|p1|qSeries 3");
+    expect(out.search_titles).toContain("Series 3 Vol 1");
+    expect(out.search_after_back_level).toBe("library|root|books|p1|q");
+    expect(out.search_after_back_titles).toContain("Book One");
+    expect(out.search_after_back_titles).not.toContain("Series 3 Vol 1");
+  });
+
+  it("returns a book's detail view to the page it was opened from", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNavHarness();
+
+    expect(out.detail_depth).toBe("2");
+    // A detail view has no state of its own: it is opened from the entry the
+    // reader tapped, and the level underneath it owns the state.
+    expect(out.detail_level).toBe("book|id:101|nil|pnil|qnil");
+    expect(out.detail_is_menu).toBe("true");
+    // Closing the menu is the same step up the header's back mark takes.
+    expect(out.detail_after_close_depth).toBe("1");
+    expect(out.detail_after_close_level).toBe("library|root|books|p1|q");
+    expect(out.detail_after_close_same_page).toBe("true");
+    expect(out.detail_after_close_menu_gone).toBe("true");
+  });
+
+  it("returns a page opened from a menu to that menu", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNavHarness();
+
+    expect(out.reading_depth).toBe("1");
+    expect(out.reading_level).toBe("reading|reading|nil|pnil|qnil");
+    expect(out.reading_drilled_level).toBe("library|root|books|p1|q");
+    expect(out.reading_after_back_depth).toBe("1");
+    expect(out.reading_after_back_level).toBe("reading|reading|nil|pnil|qnil");
+    expect(out.reading_after_back_menu).toBe("Currently reading");
+  });
+
+  it("treats a submenu inside a menu view as part of the level, not a level", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNavHarness();
+
+    // The row carries a detail submenu (its count is the plugin's business);
+    // what matters is that opening it stays inside this menu.
+    expect(out.submenu_row).toMatch(/^Book One details=[1-9]\d*$/);
+    expect(out.submenu_level).toBe("reading|reading|nil|pnil|qnil");
+    // The book's own rows open inside the same menu.
+    expect(out.submenu_opened_title).toBe("Book One stack=1");
+    expect(out.submenu_opened_depth).toBe("1");
+    // Back inside them pops them and does not touch the level stack.
+    expect(out.submenu_popped_title).toBe("Currently reading stack=0");
+    expect(out.submenu_popped_depth).toBe("1");
+    expect(out.submenu_popped_same_menu).toBe("true");
+    // Back again is the step out of the shelf, which is the top level.
+    expect(out.submenu_closed_depth).toBe("0");
+    expect(out.submenu_closed_menu_gone).toBe("true");
+  });
+
+  it("still leaves the plugin when Back is pressed at the top level", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNavHarness();
+
+    expect(out.last_root_depth).toBe("1");
+    expect(out.exit_depth).toBe("0");
+    expect(out.exit_page_gone).toBe("true");
+    expect(out.exit_menu_gone).toBe("true");
+  });
+
+  it("pushes only when the level changes", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runNavHarness();
+
+    expect(out.nav_first).toBe("pushed");
+    // Two visits to one grouping are one level: the second replaces it.
+    expect(out.nav_same).toBe("replaced");
+    expect(out.nav_deeper).toBe("pushed");
+    expect(out.nav_depth).toBe("2");
+    expect(out.nav_up).toBe("root");
+    expect(out.nav_up_depth).toBe("1");
+
+    // The same query is one key however it was typed, and no query is the root.
+    expect(out.nav_keys).toBe("query:Spice and Wolf,root,root");
+    // A session that never restarts cannot grow the stack without bound.
+    expect(out.nav_capped).toBe(String(12));
+    expect(out.nav_capped_top).toBe("query:16");
   });
 });

@@ -25,8 +25,12 @@ Interaction, on both device families:
 
   * touch: a tap hit-tests the recorded row rectangles, top-most first;
   * keys: Next/Prev move a focus line down the focusable rows, Select activates,
-    Back closes - so a Kindle with a 5-way controller is as usable as a
-    Paperwhite.
+    Back goes up one level - so a Kindle with a 5-way controller is as usable as
+    a Paperwhite.
+
+The header already carries the house affordances - back, title, overflow - so a
+nested view needs no widget of its own; what Back *does* is the caller's, and it
+arrives through `on_back` (see `PageWidget:onBack`).
 ]]
 
 local Blitbuffer = require("ffi/blitbuffer")
@@ -904,7 +908,18 @@ function PageWidget:onSelectItem()
     return true
 end
 
+--- Back: the header's back mark, the Back key and a tap outside all arrive
+-- here.
+--
+-- The caller owns what Back means (`on_back`): a nested view goes up one level
+-- to the view it was opened from, and the top level leaves the plugin. A build
+-- without that handler keeps the old behaviour and simply closes, so nothing
+-- outside the plugin can be broken by a page it did not open.
 function PageWidget:onBack()
+    if type(self.on_back) == "function" then
+        self.on_back()
+        return true
+    end
     UIManager:close(self)
     if type(self.close_callback) == "function" then self.close_callback() end
     return true
@@ -922,7 +937,7 @@ end
 
 --- Builds one page widget from a model and its layout plan.
 -- @tparam table options { model, plan, cover_widget, on_action,
---                         on_overflow, on_switch, close_callback }
+--                         on_overflow, on_switch, on_back, close_callback }
 -- @treturn table page widget
 function Page.build(options)
     options = options or {}
@@ -935,6 +950,7 @@ function Page.build(options)
         on_action = options.on_action,
         on_overflow = options.on_overflow,
         on_switch = options.on_switch,
+        on_back = options.on_back,
         close_callback = options.close_callback,
     }
     return widget
