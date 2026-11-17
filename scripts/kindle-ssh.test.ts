@@ -13,6 +13,7 @@ import {
   KINDLE_USB_HOST,
   MAC_USB_HOST,
   MDNS_HOST_CANDIDATES,
+  USB_LINK_PREFIX,
   buildSshArgs,
   classifySshServer,
   defaultIdentityFile,
@@ -22,8 +23,10 @@ import {
   expandScanHosts,
   expandHome,
   findUsbEthernetPort,
+  findUsbLinkInterface,
   formatRawSshCommand,
   formatSshConfigBlock,
+  formatDiscoveryReport,
   formatUsbReport,
   intToIpv4,
   ipv4ToInt,
@@ -554,10 +557,38 @@ describe("USB route helpers", () => {
     expect(status.gadgetInterface).toBe("en9");
   });
 
+  it("identifies the link from its 192.168.15.x address when the host MAC is locally administered", () => {
+    // Recorded on this Mac: the gadget's host end carries a locally administered
+    // address and ifconfig masks it to 02:00:... - so the OUI can never match.
+    const gadgetIface: IfaceAddr = {
+      name: "en6",
+      address: MAC_USB_HOST,
+      netmask: "255.255.255.0",
+      mac: "02:00:00:00:00:00",
+    };
+    const gadgetPorts = parseHardwarePorts(`Hardware Port: RNDIS/Ethernet Gadget
+Device: en6
+Ethernet Address: 86:f3:c5:7c:22:06
+`);
+    expect(findUsbEthernetPort(gadgetPorts)).toBeUndefined();
+    expect(isLocallyAdministeredMac(gadgetIface.mac)).toBe(true);
+    expect(findUsbLinkInterface([gadgetIface])?.name).toBe("en6");
+    expect(findUsbLinkInterface([{ name: "en0", address: "192.168.31.15", netmask: "255.255.255.0" }])).toBeUndefined();
+
+    const status = summarizeUsbStatus({ ifaces: [gadgetIface], ports: gadgetPorts, mountedVolumes: [] });
+    expect(status.gadgetConnected).toBe(true);
+    expect(status.gadgetInterface).toBe("en6");
+    expect(status.probeDetail).toContain("USB networking may be disabled");
+    expect(formatUsbReport(status)).toContain("en6");
+  });
+
   it("reports no adapter when nothing is plugged in", () => {
     const status = summarizeUsbStatus({ ifaces: [], ports: [], mountedVolumes: [] });
     expect(status.gadgetConnected).toBe(false);
-    expect(status.probeDetail).toContain("no USB network adapter present");
+    expect(status.gadgetInterface).toBeUndefined();
+    // The honest statement is that no candidate interface was found, not that the
+    // device is absent: the link is only observable from the Mac end.
+    expect(status.probeDetail).toContain(`${USB_LINK_PREFIX}0/24`);
   });
 
   it("reports USBNetwork presence from the mounted volume", () => {
@@ -737,8 +768,7 @@ describe("discoverKindle", () => {
     expect(result.devices[0].host).toBe("192.168.31.87");
     expect(result.devices[0].kindleLikely).toBe(true);
     expect(result.devices[0].source).toBe("lan-scan");
-    expect(result.layers.map((l) => l.layer)).toEqual(["mDNS", "USB gadget", "LAN sweep", "Router leases"]);
-    expect(result.layers.find((l) => l.layer === "Router leases")?.status).toBe("skipped");
+    expect(result.layers.map((l) => l.layer)).toEqual(["mDNS", "USB gadget", "LAN sweep"]);
   });
 
   it("records a skipped layer reason instead of silently omitting discovery", async () => {
@@ -753,8 +783,9 @@ describe("discoverKindle", () => {
     const mdns = result.layers.find((l) => l.layer === "mDNS");
     expect(mdns?.status).toBe("skipped");
     expect(mdns?.detail).toContain("--no-mdns");
-    const router = result.layers.find((l) => l.layer === "Router leases");
-    expect(router?.detail).toContain("no router credentials");
+    const usb = result.layers.find((l) => l.layer === "USB gadget");
+    expect(usb?.status).toBe("skipped");
+    expect(usb?.detail).toContain("--no-usb");
   });
 
   it("finds the device over the USB gadget link", async () => {
@@ -986,6 +1017,44 @@ describe("selectKindle", () => {
     const { selected, note } = selectKindle([], "kindle1");
     expect(selected).toBeUndefined();
     expect(note).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Discovery report describes the device that was asked for
+// ---------------------------------------------------------------------------
+
+describe("formatDiscoveryReport", () => {
+  it("prints the pin block for the requested device, not the first one discovered", () => {
+    // Push order is discovery order: the .167 banner happened to answer first, and
+    // the runbook records device 1 at .73 and device 2 at .167.
+    const discovery = makeDiscovery({
+      devices: [kindleDevice({ host: "192.168.31.167" }), kindleDevice({ host: "192.168.31.73" })],
+    });
+
+    const first = formatDiscoveryReport(discovery, "kindle1");
+    expect(first).toContain("HostName 192.168.31.73");
+    expect(first).not.toContain("HostName 192.168.31.167");
+
+    const second = formatDiscoveryReport(discovery, "kindle2");
+    expect(second).toContain("Host kindle2");
+    expect(second).toContain("HostName 192.168.31.167");
+  });
+
+  it("pins an explicit address that did answer", () => {
+    const discovery = makeDiscovery({
+      devices: [kindleDevice({ host: "192.168.31.167" }), kindleDevice({ host: "192.168.31.73" })],
+    });
+    const report = formatDiscoveryReport(discovery, "kindle1", "192.168.31.167");
+    expect(report).toContain("HostName 192.168.31.167");
+  });
+
+  it("states the selection refusal instead of printing a command for another device", () => {
+    const discovery = makeDiscovery({ devices: [kindleDevice({ host: "192.168.31.73" })] });
+    const report = formatDiscoveryReport(discovery, "kindle2");
+    expect(report).toContain("only 1 Kindle");
+    expect(report).not.toContain("Login command");
+    expect(report).not.toContain("HostName");
   });
 });
 

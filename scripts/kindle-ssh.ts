@@ -17,21 +17,19 @@
  *   3. LAN sweep     - TCP connect on the real LAN subnet(s) for ports 2222/22,
  *                      then an SSH banner read to prove the responder is
  *                      dropbear (the Kindle SSH daemon) and not something else
- *   4. Router leases - optional, only when a MiWiFi auth token is supplied;
- *                      this home holds no router credentials, so it is skipped
- *                      with an explicit reason rather than silently ignored
  *
  * Subcommands (also exposed as `bin/lighthouse kindle-ssh <subcommand>`):
  *   find      Report every reachable Kindle candidate and the exact login command
  *   probe     Full diagnosis of one device: port, banner, key auth, remote identity
  *   connect   Log in (or run a remote command) over the working route
  *   key       Install this Mac mini's public key on the device, idempotently
- *   usb       Report/prepare the USB-cable fallback route (192.168.15.0/24)
+ *   usb       Report the USB-cable fallback route and the steps to bring it up (192.168.15.0/24)
  *
  * Exit codes are meaningful so scripts can branch on them:
- *   0  success - `find` discovered a Kindle responder, the other subcommands verified the route
- *   1  no device could be found at all
- *   2  a device was found but the route is not usable yet (SSH closed / key missing)
+ *   0  find: a Kindle responder was discovered; probe/connect/key: the route is verified
+ *   1  find: nothing answered discovery; probe/connect/key: no device could be found
+ *   2  probe/connect/key: a device was found but the route is not usable yet (SSH closed / key
+ *      missing); usb: the USB route is not up (no candidate link interface, or nothing answered)
  *   3  usage error
  * `connect -- <command>` instead exits with the remote command's own status, as ssh does.
  */
@@ -55,14 +53,16 @@ export const KINDLE_ALT_SSH_PORT = 22;
 export const KINDLE_USB_PORTS = [KINDLE_SSH_PORT, KINDLE_ALT_SSH_PORT];
 /** Address the Kindle takes on its own USB network interface. */
 export const KINDLE_USB_HOST = "192.168.15.244";
+/** The /24 the Kindle's USB gadget creates; any Mac interface holding an address on it is the link. */
+export const USB_LINK_PREFIX = KINDLE_USB_HOST.replace(/\.\d+$/, ".");
 /** Address this Mac must take on the same USB network link. */
 export const MAC_USB_HOST = "192.168.15.201";
 /** Netmask for the USB link. */
 export const USB_NETMASK = "255.255.255.0";
 /**
- * Amazon Technologies OUI. Kindles present their USB or Wi-Fi adapter under an
- * address with this prefix, which lets us identify a device without trusting an
- * IP address.
+ * Amazon Technologies OUI. Some Kindles present their Wi-Fi adapter under an
+ * address with this prefix, so it is a positive hint when scanning. The Mac-side
+ * end of the USB link is often NOT Amazon-assigned - see `findUsbLinkInterface`.
  */
 export const AMAZON_OUI = "c0:8d:51";
 
@@ -554,7 +554,7 @@ export async function mapWithConcurrency<T, R>(
 // Discovery
 // ---------------------------------------------------------------------------
 
-export type DiscoverySource = "mdns" | "usb" | "lan-scan" | "router";
+export type DiscoverySource = "mdns" | "usb" | "lan-scan";
 
 export interface DiscoveredDevice {
   host: string;
@@ -588,7 +588,6 @@ export interface DiscoverOptions {
   concurrency?: number;
   mdns?: boolean;
   includeUsb?: boolean;
-  routerToken?: string;
   /** Injected for tests: interface addresses to scan instead of live ones. */
   ifaces?: IfaceAddr[];
   /** Injected for tests. */
@@ -671,9 +670,7 @@ async function runMdnsLayer(ctx: DiscoveryContext, enabled: boolean): Promise<La
 async function runUsbLayer(ctx: DiscoveryContext, enabled: boolean): Promise<LayerReport> {
   if (!enabled) return { layer: "USB gadget", status: "skipped", detail: "disabled with --no-usb" };
 
-  const usbLinkUp = ctx.ifaces.some(
-    (iface) => iface.address.startsWith("192.168.15.") || (iface.mac ?? "").startsWith(AMAZON_OUI),
-  );
+  const usbLinkUp = findUsbLinkInterface(ctx.ifaces) !== undefined;
   const usbTimeout = Math.max(ctx.timeoutMs, 600);
 
   for (const port of KINDLE_USB_PORTS) {
@@ -688,7 +685,7 @@ async function runUsbLayer(ctx: DiscoveryContext, enabled: boolean): Promise<Lay
     status: "empty",
     detail: usbLinkUp
       ? `USB link is up but ${KINDLE_USB_HOST} did not answer on ${KINDLE_USB_PORTS.join("/")}`
-      : `no USB network link present (no interface on 192.168.15.0/24 and no ${AMAZON_OUI} adapter); ${KINDLE_USB_HOST} unreachable`,
+      : `no USB network link present (no interface on ${USB_LINK_PREFIX}0/24 and no ${AMAZON_OUI} adapter); ${KINDLE_USB_HOST} unreachable`,
   };
 }
 
@@ -730,21 +727,6 @@ async function runLanLayer(
   };
 }
 
-function runRouterLayer(routerToken?: string): LayerReport {
-  if (!routerToken) {
-    return {
-      layer: "Router leases",
-      status: "skipped",
-      detail: "no MiWiFi token supplied (KINDLE_ROUTER_TOKEN); this home holds no router credentials",
-    };
-  }
-  return {
-    layer: "Router leases",
-    status: "skipped",
-    detail: "token supplied but lease lookup is not implemented for this firmware; resolve by scan",
-  };
-}
-
 export async function discoverKindle(options: DiscoverOptions = {}): Promise<DiscoveryResult> {
   const started = Date.now();
   const ifaces = options.ifaces ?? readLiveInterfaces();
@@ -767,7 +749,6 @@ export async function discoverKindle(options: DiscoverOptions = {}): Promise<Dis
 
   const lan = await runLanLayer(ctx);
   layers.push(lan.report);
-  layers.push(runRouterLayer(options.routerToken));
 
   return {
     devices: ctx.devices,
@@ -1028,7 +1009,9 @@ export async function verifyKeyAuth(target: SshTarget, timeoutMs = 15000): Promi
   if (result.status === 0) {
     return { authenticated: true, output: result.stdout.trim(), rawCommand };
   }
-  const error = (result.stderr || result.stdout || "ssh exited non-zero").trim().split("\n").slice(-3).join(" | ");
+  const error = result.timedOut
+    ? `ssh did not finish within ${timeoutMs} ms, so the key state is unknown (a busy or sleeping device looks like this, not like an untrusted key)`
+    : (result.stderr || result.stdout || "ssh exited non-zero").trim().split("\n").slice(-3).join(" | ");
   return { authenticated: false, error, rawCommand };
 }
 
@@ -1076,13 +1059,28 @@ export function isLocallyAdministeredMac(mac: string | undefined): boolean {
 }
 
 /**
+ * The Mac-side end of the Kindle USB link.
+ *
+ * The Amazon OUI is a positive hint, never the gate: the host end of the gadget
+ * on this Mac carries a locally administered address (masked by ifconfig to
+ * 02:00:...), so an interface holding an address on the gadget's own /24 is the
+ * reliable signal that the cabled link is up.
+ */
+export function findUsbLinkInterface(ifaces: IfaceAddr[]): IfaceAddr | undefined {
+  return ifaces.find(
+    (iface) => (iface.mac ?? "").startsWith(AMAZON_OUI) || iface.address.startsWith(USB_LINK_PREFIX),
+  );
+}
+
+/**
  * Guess which interface is the device's USB network link.
  *
  * Deliberately narrow: only USB-specific port names qualify (a bare "Ethernet"
  * port is the built-in NIC, not a gadget), soft-MAC virtual adapters are
- * refused, and the interface already serving the LAN is excluded. The OUI check
- * in `summarizeUsbStatus` is the authoritative signal; this is only a fallback
- * for hubs whose port name macOS reports generically.
+ * refused, and the interface already serving the LAN is excluded. An interface
+ * holding an address on the gadget's own /24 is the authoritative signal (see
+ * `findUsbLinkInterface`); this is only a fallback for hubs whose port name
+ * macOS reports generically.
  */
 export function findUsbEthernetPort(ports: HardwarePort[], primaryInterface?: string): HardwarePort | undefined {
   return ports.find((port) => {
@@ -1109,12 +1107,11 @@ export function summarizeUsbStatus(input: {
   mountedVolumes: string[];
   probes?: PortProbe[];
 }): UsbStatus {
-  const amazonIface = input.ifaces.find((iface) => (iface.mac ?? "").startsWith(AMAZON_OUI));
   const primaryInterface = input.ifaces.find(
     (iface) => shouldScanInterface(iface.name, iface.address) && !(iface.mac ?? "").startsWith(AMAZON_OUI),
   )?.name;
   const usbPort = findUsbEthernetPort(input.ports, primaryInterface);
-  const gadgetInterface = amazonIface?.name ?? usbPort?.device;
+  const gadgetInterface = findUsbLinkInterface(input.ifaces)?.name ?? usbPort?.device;
 
   const kindleVolume = input.mountedVolumes.find((volume) => /kindle/i.test(volume));
   let usbnetInstalled: boolean | undefined;
@@ -1123,14 +1120,15 @@ export function summarizeUsbStatus(input: {
     usbnetInstalled = fs.existsSync(usbnetPath);
   }
 
-  const connected = Boolean(amazonIface || usbPort);
+  const connected = gadgetInterface !== undefined;
   const sshPort = input.probes?.find((probe) => probe.open)?.port;
 
   let probeDetail: string;
   if (sshPort !== undefined) probeDetail = `${KINDLE_USB_HOST}:${sshPort} answered`;
   else if (connected)
-    probeDetail = `${KINDLE_USB_HOST} did not answer on ${KINDLE_USB_PORTS.join("/")} (USB networking may be disabled on the device)`;
-  else probeDetail = "no USB network adapter present (device not plugged in, or it is in mass-storage mode)";
+    probeDetail = `${gadgetInterface} carries the USB link but ${KINDLE_USB_HOST} did not answer on ${KINDLE_USB_PORTS.join("/")} (USB networking may be disabled on the device)`;
+  else
+    probeDetail = `no candidate USB link interface found (no address on ${USB_LINK_PREFIX}0/24 and no USB-named adapter); the device may be unplugged or in mass-storage mode`;
 
   return {
     gadgetInterface,
@@ -1146,7 +1144,7 @@ export function summarizeUsbStatus(input: {
 // Output formatting
 // ---------------------------------------------------------------------------
 
-export function formatDiscoveryReport(result: DiscoveryResult, alias: string): string {
+export function formatDiscoveryReport(result: DiscoveryResult, device: string, host?: string): string {
   const lines: string[] = [];
   lines.push(`Kindle SSH discovery (${result.durationMs} ms, ${result.scannedHosts} host probes)`);
   lines.push("");
@@ -1164,25 +1162,32 @@ export function formatDiscoveryReport(result: DiscoveryResult, alias: string): s
   }
 
   lines.push("Candidates:");
-  for (const device of result.devices) {
-    const verdict = device.kindleLikely ? "kindle (dropbear)" : `not kindle (${device.server})`;
-    lines.push(`  ${device.host}:${device.port}  ${verdict}  via ${device.source}`);
-    if (device.banner) lines.push(`      banner: ${device.banner}`);
+  for (const candidate of result.devices) {
+    const verdict = candidate.kindleLikely ? "kindle (dropbear)" : `not kindle (${candidate.server})`;
+    lines.push(`  ${candidate.host}:${candidate.port}  ${verdict}  via ${candidate.source}`);
+    if (candidate.banner) lines.push(`      banner: ${candidate.banner}`);
   }
 
-  const kindle = result.devices.find((device) => device.kindleLikely);
-  if (kindle) {
-    const target: SshTarget = { host: kindle.host, port: kindle.port };
-    lines.push("");
-    lines.push("Login command:");
-    lines.push(`  ${formatRawSshCommand(target, ["uname -srm"])}`);
-    lines.push("");
-    lines.push("Wrapper:");
-    lines.push(`  bin/lighthouse kindle-ssh connect --device ${alias}`);
-    lines.push("");
-    lines.push("Optional pin (paste into ~/.ssh/config yourself; this tool never edits your config):");
-    for (const line of formatSshConfigBlock(alias, target).split("\n")) lines.push(`  ${line}`);
+  const { selected, note } = selectKindle(result.devices, device, host);
+  if (!selected) {
+    if (note) {
+      lines.push("");
+      lines.push(note);
+    }
+    return lines.join("\n");
   }
+
+  const target: SshTarget = { host: selected.host, port: selected.port };
+  lines.push("");
+  lines.push(`Requested device: ${device} -> ${target.host}:${target.port}`);
+  lines.push("Login command:");
+  lines.push(`  ${formatRawSshCommand(target, ["uname -srm"])}`);
+  lines.push("");
+  lines.push("Wrapper:");
+  lines.push(`  bin/lighthouse kindle-ssh connect --device ${device}`);
+  lines.push("");
+  lines.push("Optional pin (paste into ~/.ssh/config yourself; this tool never edits your config):");
+  for (const line of formatSshConfigBlock(device, target).split("\n")) lines.push(`  ${line}`);
   return lines.join("\n");
 }
 
@@ -1217,8 +1222,8 @@ export function formatUsbReport(status: UsbStatus): string {
   lines.push("  2. Enable USB networking: /mnt/us/usbnet/bin/usbnetwork");
   lines.push("     (or create an empty marker file /mnt/us/usbnet/AUTO and replug)");
   lines.push("");
-  lines.push(`An Amazon MAC (${AMAZON_OUI}:...) on a fresh interface is the reliable sign the link is up;`);
-  lines.push("a built-in Ethernet or VPN adapter will not match it.");
+  lines.push(`An interface holding an address on ${USB_LINK_PREFIX}0/24 is the reliable sign the link is up;`);
+  lines.push(`its MAC need not be Amazon's (${AMAZON_OUI}:...), and a built-in Ethernet or VPN adapter will not match it.`);
   lines.push("");
   lines.push("Mac-side steps:");
   lines.push(`  sudo ifconfig <usb-iface> inet ${MAC_USB_HOST} netmask ${USB_NETMASK} up`);
@@ -1351,8 +1356,9 @@ Options:
 
 Exit codes:
   0  find: a Kindle responder was discovered; probe/connect/key: the route is verified
-  1  no device found
-  2  device found but route not usable yet (SSH closed / key missing)
+  1  find: nothing answered discovery; probe/connect/key: no device could be found
+  2  probe/connect/key: device found but the route is not usable yet (SSH closed / key missing);
+     usb: the USB route is not up (no candidate link interface, or nothing answered)
   3  usage error
   connect -- <command> instead exits with the remote command's own status, as ssh does
 
@@ -1461,7 +1467,7 @@ async function cmdFind(options: CliOptions): Promise<number> {
   if (options.json) {
     console.log(JSON.stringify(result, null, 2));
   } else {
-    console.log(formatDiscoveryReport(result, options.device));
+    console.log(formatDiscoveryReport(result, options.device, options.host));
   }
 
   if (result.devices.some((device) => device.kindleLikely)) return 0;
@@ -1588,7 +1594,11 @@ async function cmdKey(options: CliOptions): Promise<number> {
     return 0;
   }
   console.error("");
-  console.error("Key install ran but key authentication still fails.");
+  if (result.timedOut) {
+    console.error("The installer session did not finish within 60s, so whether the key was written is unknown.");
+  } else {
+    console.error("Key install ran but key authentication still fails.");
+  }
   console.error(`  ${verify.error ?? "unknown error"}`);
   console.error("Re-run the installer over an interactive session: scripts/kindle-key-install.sh");
   return 2;
@@ -1611,11 +1621,11 @@ function runWithTimeoutWithInput(
       resolve({ stdout: "", stderr: String(error), status: null, timedOut: false });
       return;
     }
-    const finish = (status: number | null) => {
+    const finish = (status: number | null, timedOut = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ stdout, stderr, status, timedOut: false });
+      resolve({ stdout, stderr, status, timedOut });
     };
     const timer = setTimeout(() => {
       try {
@@ -1623,7 +1633,7 @@ function runWithTimeoutWithInput(
       } catch {
         /* already gone */
       }
-      finish(null);
+      finish(null, true);
     }, timeoutMs);
     child.stdout?.on("data", (chunk) => {
       stdout += String(chunk);

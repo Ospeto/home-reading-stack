@@ -1031,20 +1031,19 @@ bin/lighthouse kindle-ssh find --device 2
 bin/lighthouse kindle-ssh find --json          # full discovery result as JSON
 ```
 
-Discovery runs four layers in order and reports each one, so a miss tells you *why* it missed:
+Discovery runs three layers in order and reports each one, so a miss tells you *why* it missed:
 
 | Layer | What it checks | What a miss means |
 | --- | --- | --- |
 | mDNS | `kindle.local`, `kindle1.local`, `kindle2.local`, `kindlepaperwhite.local` | The device publishes no `.local` name (Kindles usually do not) |
 | USB gadget | `192.168.15.244` (the device's own USB-network address) | No USB network link, or USB networking is off |
 | LAN sweep | TCP `2222` and `22` across the real LAN subnet(s), then an SSH banner read | Nothing on the network is serving Kindle SSH |
-| Router leases | MiWiFi DHCP client list - **skipped without a token** (see §2) | No router credentials on this host |
 
 Only a **dropbear** banner counts as a Kindle. An `OpenSSH` responder on port 22 is a different machine (this Mac mini itself answers on `22`), and the tool refuses to treat it as a device. This Mac's own addresses are excluded from results.
 
 > **Kindles do not answer `ping`.** Their firmware drops ICMP while serving SSH normally, so any ping-first scan will report a healthy device as absent. The tool therefore probes every address in the subnet on both ports and never pre-filters on ICMP.
 
-`find` exits `0` when a Kindle responder was found, `1` when nothing was found, `2` when something was found but the route is not usable yet - discovery is not authentication, so `find` succeeds on a responder whose key is not trusted. `probe`, `connect` and `key` exit `0` only on a verified route, and `connect -- <command>` exits with the remote command's own status, exactly as `ssh` does.
+`find` exits `0` when a Kindle responder was found and `1` when nothing was found - it is discovery only, so it never authenticates and never returns `2`. When the printed candidates do not include the device you asked for, `find` says so in place of the login command instead of printing another device's address. `probe`, `connect` and `key` exit `0` only on a verified route, and `connect -- <command>` exits with the remote command's own status, exactly as `ssh` does. `usb` exits `0` when the link answered, `2` when the USB route is not up (no candidate link interface, or nothing answered on either port).
 
 ### 2. Why there is no DHCP reservation pinning the address
 
@@ -1055,15 +1054,9 @@ curl -s http://192.168.31.1/cgi-bin/luci/api/xqsystem/router_info
 # {"code":401,"msg":"Invalid token"}
 ```
 
-This home holds no router admin credentials, so a reservation cannot be created and none is pretended to exist. **Documented find-first discovery is the accepted answer**, and it is one command.
+This home holds no router admin credentials, so a reservation cannot be created and none is pretended to exist. **Documented find-first discovery is the accepted answer**, and it is one command. There is deliberately no router-lease discovery layer either: nothing on this host can authenticate to the router, so a layer that could never run would only imply a capability that does not exist.
 
-If a router token is ever obtained, export it before running `find` and the router layer will stop reporting itself as skipped:
-
-```bash
-KINDLE_ROUTER_TOKEN=<token> bin/lighthouse kindle-ssh find
-```
-
-Once `find` prints a stable address you may pin it yourself in `~/.ssh/config` - the tool prints a ready-to-paste `Host` block and **never edits your SSH config**. That pin is a convenience, not a substitute for discovery: rerun `find` whenever the device has been off for a while.
+Once `find` prints a stable address you may pin it yourself in `~/.ssh/config` - the tool prints a ready-to-paste `Host` block for the device you asked for and **never edits your SSH config**. That pin is a convenience, not a substitute for discovery: rerun `find` whenever the device has been off for a while.
 
 > Existing `Host kindle1` / `Host kindle2` entries in `~/.ssh/config` are **wrong in both directions**: `kindle1` points at `192.168.31.167`, which is the *second* device's address, and `kindle2` still carries the literal placeholder `192.168.31.XXX`. A bare `ssh kindle1` therefore reaches the wrong device or fails for a reason that has nothing to do with the daemon. Use `bin/lighthouse kindle-ssh connect`, or update those blocks from what `find` prints.
 
@@ -1165,8 +1158,9 @@ To make it start on every boot, place an empty marker file at `/mnt/us/usbnet/au
 #### Mac-side steps (once, per plug-in)
 
 ```bash
-# Find the Kindle interface: an Amazon MAC (c0:8d:51:..) on a newly appeared en* adapter
-ifconfig -a | grep -B4 'c0:8d:51'
+# Find the Kindle interface: a newly appeared en* adapter holding an address on 192.168.15.0/24
+# (the host end's MAC need not be Amazon's - it is often locally administered)
+ifconfig -a | grep -B4 'inet 192.168.15.'
 
 # Assign this Mac's address on the USB link
 sudo ifconfig <enX> inet 192.168.15.201 netmask 255.255.255.0 up
@@ -1198,8 +1192,8 @@ ssh -p 22 -i ~/.ssh/id_ed25519 -o BatchMode=yes -o ConnectTimeout=8 root@192.168
 | Login hangs then says *Connection timed out* | The address moved (DHCP) or the device slept mid-session | Rerun `bin/lighthouse kindle-ssh find`; never reuse an old address |
 | Key auth worked yesterday, fails today after reboot | Key landed in a RAM-backed path (`/tmp/root`) | Reinstall the key; make it persistent (see the installer's `VOLATILE` warning) |
 | A hand-written `net.connect()` probe says ECONNREFUSED to a device that `ssh` reaches | Runtime sockets to the LAN fail on this host (scoped routing / VPN layering), while native binaries succeed | Do not debug the device - use the tool, which probes through `nc` and `ssh` |
-| `usb` says *no USB network adapter present* | Device is not connected, or is in mass-storage mode | Plug in and enable USB networking on the device; confirm the gadget switch |
-| `usb` sees an adapter but `192.168.15.244` does not answer | USB networking is off on the device | Enable it (`/mnt/us/usbnet/bin/usbnetwork`) |
+| `usb` says *no candidate USB link interface found* | No Mac interface holds an address on `192.168.15.0/24`, so the link is not up on this end | Plug in a data cable and enable USB networking on the device; confirm the gadget switch |
+| `usb` sees a link interface but `192.168.15.244` does not answer | USB networking is off on the device | Enable it (`/mnt/us/usbnet/bin/usbnetwork`) |
 | `ping 192.168.15.244` fails on the Mac | No address on the USB link | Run the `sudo ifconfig <enX>` step |
 | `sync-kindle` cannot find the Kindle | USB networking is still active, so there is no drive | Disable USB networking, or reboot the device |
 
@@ -1247,13 +1241,13 @@ Also verified on this Mac mini (real runs):
 | --- | --- |
 | `find` | Finds both Kindles on `192.168.31.0/24`, rejects the Mac's own `OpenSSH` on `:22` and another host's `OpenSSH`, exit `0` |
 | `find --device 2` / `connect --device 2` | Selects the second device by address order; refuses to silently substitute the first |
-| `usb` | Reports *no USB network adapter present* - no false hit on the built-in Ethernet or VPN adapters |
+| `usb` | Reports no USB link - the built-in Ethernet or VPN adapters are not mistaken for the gadget |
 | `scripts/kindle-key-install.sh` | Idempotent install, `700`/`600` permissions, exact-line uninstall, `--dry-run` writes nothing, bad key rejected |
-| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 82 passing |
+| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 86 passing |
 
 #### Not proven: Route B (USB cable)
 
-No USB cable was attached during this work: `/Volumes` held no Kindle, no `192.168.15.0/24` interface existed, and `bin/lighthouse kindle-ssh usb` reported *no USB network adapter present*. Consequently:
+No USB cable was attached during this work: `/Volumes` held no Kindle, no `192.168.15.0/24` interface existed, and `bin/lighthouse kindle-ssh usb` found no USB link. Consequently:
 
 - the USBNetwork pre-flight (`ls -d /Volumes/*/usbnet`) could not be run, so whether the package is already installed on either device is **unknown**;
 - nothing was installed, and no uninstall `.bin` was needed;
