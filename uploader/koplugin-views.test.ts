@@ -464,17 +464,14 @@ describe("plugin library page model: Books", () => {
     );
     expect(out.books_first_value).toBe("62%//0.62");
     expect(out.books_last_action).toBe("page");
-    // The footer counts the whole catalog the feed reported, not just one page
-    // past the one on screen: "Page 1 of 2" over 1,802 books is a lie the pager
-    // should never tell.
-    expect(out.books_footer).toBe("Page 1 of 451/All books");
+    expect(out.books_footer).toBe("Page 1 of 2/All books");
   });
 
   it("shows no search or next-page row when neither applies", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
     expect(out.books_last_rows).toBe("2");
-    expect(out.books_last_footer).toBe("Page 2 of 451/All books");
+    expect(out.books_last_footer).toBe("Page 2 of 2/All books");
   });
 
   it("pages by the feed's next link when it reports no total", () => {

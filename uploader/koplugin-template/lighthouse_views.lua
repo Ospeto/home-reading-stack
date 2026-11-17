@@ -552,17 +552,9 @@ function Views.libraryModel(mode, context, options)
         for entry_index = 1, #entries do
             rows[#rows + 1] = Views.bookRow(entries[entry_index], text)
         end
-        -- The catalog pages itself, so the footer must not guess: the total the
-        -- feed reports is what turns a flat "page 1 of 2" into the real count on
-        -- an 1800-book library. A feed that reports no total still falls back to
-        -- the one page ahead the next link implies, and the feed is never
-        -- allowed to name fewer pages than it says exist.
-        local known_pages = context.has_next and (page + 1) or page
-        local total_books = tonumber(totals.books)
-        if total_books and total_books > 0 then
-            known_pages = math.max(known_pages, math.ceil(total_books / page_size))
-        end
-        pages = known_pages
+        -- The catalog pages itself: one more page exists exactly when the feed
+        -- said so, so the footer never promises a page the server cannot serve.
+        pages = context.has_next and (page + 1) or page
         if context.has_next then
             rows[#rows + 1] = {
                 kind = "action",

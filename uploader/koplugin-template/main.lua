@@ -334,7 +334,9 @@ end
 -- hands the type scale its oversized faces.
 --
 -- Probe with a wide reference instead: the answer is `ceil(600 * factor)`, so
--- its rounding error is one part in 600 rather than one part in two.
+-- its rounding error is one part in 600 rather than one part in two. A build
+-- that cannot answer that probe gets 1 - one unit is one pixel - rather than a
+-- one-unit probe, which only ever recovers the ceiling factor this fixes.
 -- @treturn number pixels per unit
 local function screenScale()
     local screen = Device and Device.screen
@@ -342,16 +344,8 @@ local function screenScale()
         return 1
     end
     local ok, value = pcall(screen.scaleBySize, screen, 600)
-    if ok then
-        local factor = Ui.scaleFactor(value, 600)
-        if factor then return factor end
-    end
-    -- A build whose scale cannot be probed still gets a usable number.
-    local fallback_ok, fallback = pcall(screen.scaleBySize, screen, 1)
-    if not fallback_ok then return 1 end
-    local scale = tonumber(fallback)
-    if not scale or scale <= 0 then return 1 end
-    return scale
+    if not ok then return 1 end
+    return Ui.scaleFactor(value, 600) or 1
 end
 
 --- Screen height in pixels, safe when the screen object is unavailable.

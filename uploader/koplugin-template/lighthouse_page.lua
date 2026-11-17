@@ -747,9 +747,17 @@ function PageWidget:init()
     local measured_ok, content_size = pcall(function() return content:getSize() end)
     local content_height = measured_ok and tonumber(content_size and content_size.h) or nil
     local filler = content_height and (inner_height - content_height) or nil
-    if not filler or filler < 0 then filler = math.max(plan.slack or 0, 0) end
+    -- No measurement: the plan's leftover is the best evidence of where the
+    -- bottom edge is. A measured overflow is the other case - the content is
+    -- already taller than the page, so padding it would only push the footer
+    -- further past the edge.
+    if not filler then
+        filler = math.max(plan.slack or 0, 0)
+    elseif filler < 0 then
+        filler = 0
+    end
     -- The filler goes above the footer, so the footer keeps the bottom edge.
-    table.insert(content, #content, VerticalSpan:new{ width = math.max(filler, 0) })
+    table.insert(content, #content, VerticalSpan:new{ width = filler })
     if content.resetLayout then content:resetLayout() end
 
     self.widget = FrameContainer:new{
