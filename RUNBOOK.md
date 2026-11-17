@@ -1014,7 +1014,7 @@ Shell access to a Kindle from this Mac mini, so device behaviour can be verified
 | Route | Works when | SSH daemon | Port | Independent of KOReader? |
 | --- | --- | --- | --- | --- |
 | **A. Wireless** | Device awake, on Wi-Fi, KOReader running with its SSH server started | KOReader `SSH.koplugin` (patched dropbear) | `2222` | **No** — stops when KOReader exits |
-| **B. USB cable** | Device plugged in by USB-C; Wi-Fi may be off; KOReader may be closed | USBNetwork dropbear (system level) | `22` on the USB link | **Yes** — outside KOReader |
+| **B. USB cable** | Device plugged in by USB-C; Wi-Fi may be off; KOReader may be closed | A dropbear started on the device, independent of KOReader | `22` on the USB link | **Yes** — outside KOReader |
 
 The distinction matters: route A is the everyday path because it needs no cable, and route B exists precisely for the case route A cannot cover.
 
@@ -1036,7 +1036,7 @@ Discovery runs three layers in order and reports each one, so a miss tells you *
 | Layer | What it checks | What a miss means |
 | --- | --- | --- |
 | mDNS | `kindle.local`, `kindle1.local`, `kindle2.local`, `kindlepaperwhite.local` | The device publishes no `.local` name (Kindles usually do not) |
-| USB gadget | `192.168.15.244` (the device's own USB-network address) | No USB network link, or USB networking is off |
+| USB gadget | `192.168.15.244` (the device's own USB-network address) | No USB link evidence on this Mac: the device has not started its gadget, or this Mac holds no address on `192.168.15.0/24` |
 | LAN sweep | TCP `2222` and `22` across the real LAN subnet(s), then an SSH banner read | Nothing on the network is serving Kindle SSH |
 
 Only a **dropbear** banner counts as a Kindle. An `OpenSSH` responder on port 22 is a different machine (this Mac mini itself answers on `22`), and the tool refuses to treat it as a device. This Mac's own addresses are excluded from results.
@@ -1097,15 +1097,39 @@ To confirm key auth end to end, `probe` must report `verified` with a remote ide
 
 ### 4. Route B - USB cable fallback
 
-Use when Wi-Fi is off, or when KOReader is closed and route A therefore has no daemon. The jailbroken devices expose a USB network gadget, giving a root shell that does not depend on KOReader at all.
+Use when Wi-Fi is off, or when KOReader is closed and route A therefore has no daemon. The jailbroken devices can expose a USB network gadget, giving a root shell that does not depend on KOReader at all.
 
-Addressing (device defaults):
+**Proven on hardware** (2026-11-17, unit `G092AP03315200G6`, cabled to this Mac mini). Login over the cable, with its real output:
+
+```bash
+bin/lighthouse kindle-ssh connect --host 192.168.15.244 --port 22 -- uname -srm
+```
+
+```text
+Linux 4.9.77-lab126 armv7l
+```
+
+```bash
+ssh -p 22 root@192.168.15.244 'id; hostname; cat /proc/usid'
+```
+
+```text
+uid=0(root) gid=0(root) groups=0(root)
+kindle
+G092AP03315200G6
+```
+
+Path proof from the same run: `route -n get 192.168.15.244` returned interface `en6`, which macOS lists as hardware port **RNDIS/Ethernet Gadget**; the host end of `en6` held `192.168.15.201/24`, the device read `$SSH_CONNECTION` as `192.168.15.201 ... 192.168.15.244`, and interface counters rose on both ends across the logins. Device side: `usb0` MAC `c0:8d:51:03:31:52` (Amazon OUI set explicitly), udc state `configured`, a dropbear answering on `22` as a process independent of KOReader, and KOReader's own server also up on `2222`.
+
+Addressing:
 
 | | Value |
 | --- | --- |
 | Kindle address on the USB link | `192.168.15.244` |
-| This Mac must take | `192.168.15.201` / `255.255.255.0` |
-| SSH port on the link | `22` (USBNetwork daemon), also `2222` if KOReader's plugin happens to run |
+| This Mac took | `192.168.15.201` / `255.255.255.0` |
+| SSH port on the link | `22` (the independent dropbear), also `2222` when KOReader's plugin is running |
+
+Identify the gadget from what macOS reports, not from the Kindle's OUI: the Mac end of this link carries a **locally administered** MAC (`86:f3:c5:...`, masked by `ifconfig` to `02:00:...`), so Amazon's OUI can only ever be a hint. Link evidence is an address on `192.168.15.0/24`; before this Mac has one, a self-assigned `169.254.x.x` on a newly appeared `en*`, or an `RNDIS`/CDC hardware port, is the hint that the cable is up.
 
 Check the current state first - this is read-only and cannot disturb the device:
 
@@ -1114,55 +1138,41 @@ bin/lighthouse kindle-ssh usb          # adapter, mounted volume, USBNetwork pre
 bin/lighthouse kindle-ssh usb --json   # machine-readable
 ```
 
-It probes both link ports, so a link that answers only on `22` (USBNetwork, KOReader closed - the ordinary case) is reported reachable, and the login command it prints carries the port that actually answered and the key you selected with `--identity`. It never runs `sudo` or changes host networking; the Mac-side command in "Mac-side steps" below is yours to run.
+It probes the link on the ports you select (default `2222` and `22`), so a link that answers only on `22` (the ordinary case with KOReader closed) is reported reachable, and the login command it prints carries the port that answered and the key you passed with `--identity`. It never runs `sudo` or changes host networking; the Mac-side command below is yours to run.
 
-**Pre-flight, no shell required.** With the device plugged in as an ordinary USB drive, the user partition is mounted at `/Volumes/<Kindle>/`, so USBNetwork's presence is directly observable:
+#### Device side: switch the gadget on (runtime only, nothing installed)
+
+This platform (MT8110) already ships `g_ether.ko`, `usb_f_rndis.ko` and `u_ether.ko`, so the proven route is a **runtime module swap**: no `.bin`, no `mrpackages`, no rootfs patch, no KOReader edit. **Do not write a rootfs-patching USBNetwork package for this platform** - it is not needed, and an unremovable patch on a device with no console access is exactly the trap this section exists to avoid.
 
 ```bash
-ls -d /Volumes/*/usbnet 2>/dev/null && echo "USBNetwork already installed"
+# 1. Switch the USB gadget from mass storage to ethernet (this is the whole "install")
+modprobe g_ether dev_addr=c0:8d:51:03:31:52
+
+# 2. Address the gadget and bring it up
+ip addr add 192.168.15.244/24 dev usb0
+ip link set usb0 up
+
+# 3. Hand the Mac its address (busybox udhcpd on the device). Deliberately do NOT
+#    advertise a router option: the Mac keeps its own default route (utun4 in the
+#    proven run), so the Kindle never hijacks the Mac's internet.
+
+# 4. An SSH daemon that does not depend on KOReader
+cp /mnt/us/koreader/dropbear /tmp/dropbear
+/tmp/dropbear -r <host_key> -D <dir> -s -p 192.168.15.244:22
 ```
 
-If that directory exists, **install nothing** - skip to "Enable".
+**Amazon's own autostart cannot do this on this build.** `/etc/upstart/usbnetd.conf`, `/etc/upstart/usbnet-autostart.conf` and the `/mnt/us/ENABLE_USBNET` marker all exist, but `/usr/local/sbin/usbnetd` is absent (`lipc-get-prop com.lab126.usbnetd` returns `lipcErrNoSuchSource`) and `/usr/sbin/usbnetwork` is a stub, so the OEM path is dead as shipped.
 
-#### Recorded INSTALL steps (only if `/Volumes/<Kindle>/usbnet` does not exist)
+#### Mac side: no sudo needed
 
-The package that provides this is the MobileRead **USBNetwork** hack. Installing it patches the device's root filesystem, which is a real change to the device even though it leaves `/mnt/us/koreader` untouched.
-
-1. Identify the exact model and firmware version (Kindle UI: `Settings -> Device Options -> Device Info`).
-2. Download the USBNetwork build that matches **that** model and firmware line.
-3. Copy the `Update_usbnet_<model>_install.bin` file into `/Volumes/<Kindle>/mrpackages/`.
-4. Eject cleanly, then run it from the device via **KUAL -> Helper -> Install MR Packages** (or the framework's `Menu -> Settings -> Update Your Kindle` when MRPI is installed).
-5. After reboot, confirm `/Volumes/<Kindle>/usbnet/bin/usbnetwork` exists.
-
-#### Recorded UNINSTALL steps (record these BEFORE installing)
-
-1. Copy `Update_usbnet_<model>_uninstall.bin` into `/Volumes/<Kindle>/mrpackages/`.
-2. Run it through the same MRPI route, then reboot.
-3. Verify `/Volumes/<Kindle>/usbnet` is gone and mass-storage mode is back.
-
-If the uninstall `.bin` for the installed build is not on hand, **do not install** - an unremovable rootfs patch on a device with no console access is exactly the trap this section exists to avoid.
-
-#### Enable / disable USB networking (no install needed if already present)
+macOS bound `en6` ("RNDIS/Ethernet Gadget", status active, service already `ConfigMethod DHCP`) by itself, and the device's `udhcpd` gave it `192.168.15.201`. The `ifconfig` line is only a fallback for a Mac that does not get a lease (macOS 27 behaviour):
 
 ```bash
-# On the device, in a shell or via KUAL:
-/mnt/us/usbnet/bin/usbnetwork          # toggle USB networking
-```
-
-Equivalent from the device's search bar: `;debugOn`, then `~usbNetwork`, then `;debugOff`.
-
-To make it start on every boot, place an empty marker file at `/mnt/us/usbnet/auto`.
-
-**Consequence to know:** while USB networking is active the Kindle stops presenting itself as a USB mass-storage drive. That breaks the drive-based `bin/lighthouse sync-kindle` path until you toggle back - so this is a mode switch, not a permanent state. Disable it (re-run `usbnetwork`, or reboot when the `auto` marker is absent) before doing a normal USB book sync.
-
-#### Mac-side steps (once, per plug-in)
-
-```bash
-# Find the Kindle interface: a newly appeared en* adapter holding an address on 192.168.15.0/24
-# (the host end's MAC need not be Amazon's - it is often locally administered)
+# Identify the gadget: the hardware port list, or a newly appeared en*
+networksetup -listallhardwareports | grep -A3 -i rndis
 ifconfig -a | grep -B4 'inet 192.168.15.'
 
-# Assign this Mac's address on the USB link
+# Only if the Mac did not get 192.168.15.201 over DHCP:
 sudo ifconfig <enX> inet 192.168.15.201 netmask 255.255.255.0 up
 
 # Confirm and log in
@@ -1170,15 +1180,23 @@ ping -c 2 192.168.15.244
 ssh -p 22 -i ~/.ssh/id_ed25519 -o BatchMode=yes -o ConnectTimeout=8 root@192.168.15.244 'uname -srm'
 ```
 
-`bin/lighthouse kindle-ssh find` already probes `192.168.15.244` on both ports, so it reports this route automatically once the link is up.
+`bin/lighthouse kindle-ssh find` also probes `192.168.15.244` on every scanned port, so it reports this route once the link is up.
 
-#### Risk to KOReader, and where this stops
+#### Revert (proven)
 
-- The route itself (enabling the gadget) does not read or write any KOReader file. KOReader's data, settings, plugins and sidecars are never touched by this procedure.
-- The **install** step is the only genuinely invasive part: it patches the root filesystem. It is therefore gated on a matching package plus an on-hand uninstall `.bin`, and it is **not** to be run on a guess about model or firmware.
-- Hard stop: if the device cannot be identified confidently, or its uninstall `.bin` is unavailable, or the device will not mount as a volume to verify the pre-flight, stop and report rather than installing.
+```bash
+# Back to the OEM mass-storage gadget, with the exact boot parameters
+modprobe g_mass_storage file="" removable=1 idVendor=0x1949 idProduct=0x324 stall=0
+```
 
-**Current state: nothing was installed.** The devices themselves were answering over Wi-Fi throughout this work (route A, §6), but no Kindle volume was mounted and no `192.168.15.0/24` interface existed on this Mac, so the USB pre-flight (which needs a mounted volume) could not be run, and no package was downloaded, copied, or executed. Route B is documented and tooled but unproven on hardware - see §6.
+After the revert the host re-enumerated "Internal Storage", `en6` disappeared, `192.168.15.244` became unreachable, the tmpfs copies were removed and no `/mnt/us/usbnet` existed. A reboot alone also restores everything, because module state and `/tmp` are runtime-only.
+
+#### Limits to keep in view
+
+- **Nothing survives a reboot or a KOReader close.** Persisting the gadget needs a `/mnt/us` autostart hook, which is a deliberate device-install decision that has **not** been taken and is still pending.
+- **Only the cabled unit `G092AP03315200G6` was exercised.** The other Kindle is the same platform but remains unproven over USB.
+- **While `g_ether` is loaded the Kindle stops presenting mass storage**, so the drive-based `bin/lighthouse sync-kindle` path is unavailable until the revert or a reboot.
+- Route B is not a cold-start fallback: it needs the device reachable once (to start the gadget) and a decision about that boot hook.
 
 ### 5. Known failure modes
 
@@ -1192,14 +1210,14 @@ ssh -p 22 -i ~/.ssh/id_ed25519 -o BatchMode=yes -o ConnectTimeout=8 root@192.168
 | Login hangs then says *Connection timed out* | The address moved (DHCP) or the device slept mid-session | Rerun `bin/lighthouse kindle-ssh find`; never reuse an old address |
 | Key auth worked yesterday, fails today after reboot | Key landed in a RAM-backed path (`/tmp/root`) | Reinstall the key; make it persistent (see the installer's `VOLATILE` warning) |
 | A hand-written `net.connect()` probe says ECONNREFUSED to a device that `ssh` reaches | Runtime sockets to the LAN fail on this host (scoped routing / VPN layering), while native binaries succeed | Do not debug the device - use the tool, which probes through `nc` and `ssh` |
-| `usb` says *no candidate USB link interface found* | No Mac interface holds an address on `192.168.15.0/24`, so the link is not up on this end | Plug in a data cable and enable USB networking on the device; confirm the gadget switch |
-| `usb` sees a link interface but `192.168.15.244` does not answer | USB networking is off on the device | Enable it (`/mnt/us/usbnet/bin/usbnetwork`) |
-| `ping 192.168.15.244` fails on the Mac | No address on the USB link | Run the `sudo ifconfig <enX>` step |
-| `sync-kindle` cannot find the Kindle | USB networking is still active, so there is no drive | Disable USB networking, or reboot the device |
+| `usb` says *no USB link evidence on this Mac* | No address on `192.168.15.0/24`, no `169.254` self-assigned `en*` and no RNDIS/CDC port: the gadget is not up on the device (or the cable is not a data cable) | Start the gadget on the device (see §4), then confirm the Mac holds an address on the link |
+| `usb` names a link interface but `192.168.15.244` does not answer | The Mac end is up, the device's SSH daemon on the link is not | Start the independent dropbear on the device (`/tmp/dropbear ... -p 192.168.15.244:22`), or start KOReader's SSH server for `2222` |
+| `ping 192.168.15.244` fails on the Mac | No address on the USB link | Confirm the Mac got `192.168.15.201`; only if it did not, run the `sudo ifconfig <enX>` fallback |
+| `sync-kindle` cannot find the Kindle | USB networking is still active, so there is no drive | Revert to `g_mass_storage` (see §4), or reboot the device |
 
 ### 6. Proof status
 
-Route A (wireless) is **proven on both devices**: key-based login from this Mac mini returned real remote output, no password prompt. Route B (USB cable) is **implemented and documented but not exercised** — no cable was attached. That distinction is deliberate; see the last subsection.
+Route A (wireless) is **proven on both devices**: key-based login from this Mac mini returned real remote output, no password prompt. Route B (USB cable) is **proven on one device**: a real login from this Mac mini over the cable, with the two gaps that remain stated with it.
 
 #### Proven: Route A on both devices
 
@@ -1241,20 +1259,25 @@ Also verified on this Mac mini (real runs):
 | --- | --- |
 | `find` | Finds both Kindles on `192.168.31.0/24`, rejects the Mac's own `OpenSSH` on `:22` and another host's `OpenSSH`, exit `0` |
 | `find --device 2` / `connect --device 2` | Selects the second device by address order; refuses to silently substitute the first |
-| `usb` | Reports no USB link - the built-in Ethernet or VPN adapters are not mistaken for the gadget |
+| `usb` | With the cable attached and the gadget up, reports the `RNDIS/Ethernet Gadget` link and, once it answers, prints the login command for the port that answered; a USB Ethernet dongle serving the LAN is not mistaken for the gadget |
 | `scripts/kindle-key-install.sh` | Idempotent install, `700`/`600` permissions, exact-line uninstall, `--dry-run` writes nothing, bad key rejected |
-| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 90 passing |
+| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 92 passing |
 
-#### Not proven: Route B (USB cable)
+#### Proven: Route B on one device (USB cable)
 
-No USB cable was attached during this work: `/Volumes` held no Kindle, no `192.168.15.0/24` interface existed, and `bin/lighthouse kindle-ssh usb` found no USB link. Consequently:
+`G092AP03315200G6`, cabled to this Mac mini on 2026-11-17, answered a real login from the Mac mini with no password prompt:
 
-- the USBNetwork pre-flight (`ls -d /Volumes/*/usbnet`) could not be run, so whether the package is already installed on either device is **unknown**;
-- nothing was installed, and no uninstall `.bin` was needed;
-- the host-side `sudo ifconfig <enX> inet 192.168.15.201 netmask 255.255.255.0 up` step is untested on this host.
+| | Result |
+| --- | --- |
+| Wrapper login | `bin/lighthouse kindle-ssh connect --host 192.168.15.244 --port 22 -- uname -srm` -> `Linux 4.9.77-lab126 armv7l` |
+| Raw login | `ssh -p 22 root@192.168.15.244 'id; hostname; cat /proc/usid'` -> `uid=0(root) gid=0(root) groups=0(root)`, `kindle`, `G092AP03315200G6` |
+| Host path | `route -n get 192.168.15.244` -> interface `en6`, hardware port "RNDIS/Ethernet Gadget", host address `192.168.15.201/24` |
+| Device view | `$SSH_CONNECTION` read `192.168.15.201 ... 192.168.15.244`; interface counters rose on both ends |
+| Gadget | `usb0` MAC `c0:8d:51:03:31:52`, udc `configured`, dropbear on `22` independent of KOReader |
+| Footprint | none: `g_ether.ko` / `usb_f_rndis.ko` / `u_ether.ko` already present, runtime module swap only |
+| Revert | `g_mass_storage` restored, "Internal Storage" re-enumerated, `en6` gone, tmpfs cleaned |
 
-Route B is therefore a documented, gated procedure, not a working route. Closing it needs a cable and a decision about installing USBNetwork if it is absent (that step patches the device root filesystem).
-
+**Still not proven, and stated plainly:** nothing survives a reboot or a KOReader close without a `/mnt/us` autostart hook (a device-install decision deliberately not taken and still pending), and only this one cabled unit was exercised - the other Kindle is the same platform but unproven over USB.
 #### Two environmental facts worth remembering
 
 1. **Kindles are ICMP-silent.** Both devices served SSH on `2222` while answering no ping at all. Any scan that pre-filters on ping will conclude the device is absent, so the tool probes every address and uses no ICMP filter.

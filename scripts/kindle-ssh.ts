@@ -202,15 +202,10 @@ export function deriveScanTargets(ifaces: IfaceAddr[], maxHostsPerTarget = 254):
     if (prefix > 30) continue;
 
     const localInt = ipv4ToInt(iface.address);
-    let networkInt = prefix >= 24
+    const networkInt = prefix >= 24
       ? (localInt & (0xffffffff << (32 - prefix))) >>> 0
       : (localInt & 0xffffff00) >>> 0;
-    let effectivePrefix = prefix >= 24 ? prefix : 24;
-
-    if (effectivePrefix < 24) {
-      networkInt = (localInt & 0xffffff00) >>> 0;
-      effectivePrefix = 24;
-    }
+    const effectivePrefix = prefix >= 24 ? prefix : 24;
 
     const key = `${intToIpv4(networkInt)}/${effectivePrefix}`;
     if (seen.has(key)) continue;
@@ -674,7 +669,7 @@ async function runUsbLayer(ctx: DiscoveryContext, enabled: boolean): Promise<Lay
   const usbLinkUp = findUsbLinkInterface(ctx.ifaces) !== undefined;
   const usbTimeout = Math.max(ctx.timeoutMs, 600);
 
-  for (const port of KINDLE_USB_PORTS) {
+  for (const port of ctx.ports) {
     const result = await ctx.probe(KINDLE_USB_HOST, port, usbTimeout);
     if (!result.open) continue;
     await recordCandidate(ctx, KINDLE_USB_HOST, port, "usb");
@@ -685,8 +680,8 @@ async function runUsbLayer(ctx: DiscoveryContext, enabled: boolean): Promise<Lay
     layer: "USB gadget",
     status: "empty",
     detail: usbLinkUp
-      ? `USB link is up but ${KINDLE_USB_HOST} did not answer on ${KINDLE_USB_PORTS.join("/")}`
-      : `no USB network link present (no interface on ${USB_LINK_PREFIX}0/24 and no ${AMAZON_OUI} adapter); ${KINDLE_USB_HOST} unreachable`,
+      ? `USB link is up but ${KINDLE_USB_HOST} did not answer on ${ctx.ports.join("/")}`
+      : `no USB link evidence on this Mac (no address on ${USB_LINK_PREFIX}0/24, no RNDIS/CDC port, no 169.254 en*); ${KINDLE_USB_HOST} unreachable`,
   };
 }
 
@@ -1058,47 +1053,31 @@ export function parseHardwarePorts(text: string): HardwarePort[] {
 }
 
 /**
- * A locally administered MAC (second-least-significant bit of the first octet)
- * is assigned by software: VPN tun adapters and virtual bridges use one. A real
- * Kindle USB adapter carries an Amazon-assigned address instead.
- */
-export function isLocallyAdministeredMac(mac: string | undefined): boolean {
-  if (!mac) return false;
-  const firstOctet = parseInt(mac.split(":")[0] ?? "", 16);
-  return Number.isFinite(firstOctet) && (firstOctet & 0x02) !== 0;
-}
-
-/**
  * The Mac-side end of the Kindle USB link.
  *
- * The Amazon OUI is a positive hint, never the gate: the host end of the gadget
- * on this Mac carries a locally administered address (masked by ifconfig to
- * 02:00:...), so an interface holding an address on the gadget's own /24 is the
- * reliable signal that the cabled link is up.
+ * The Amazon OUI is only ever a positive hint: the host end of the gadget on
+ * this Mac carries a locally administered address (masked by ifconfig to
+ * 02:00:...). Link evidence is therefore an address on the gadget's own /24, or
+ * - before this Mac has been given that address - a link-local 169.254 address
+ * on a newly appeared en* interface.
  */
 export function findUsbLinkInterface(ifaces: IfaceAddr[]): IfaceAddr | undefined {
   return ifaces.find(
-    (iface) => (iface.mac ?? "").startsWith(AMAZON_OUI) || iface.address.startsWith(USB_LINK_PREFIX),
+    (iface) =>
+      (iface.mac ?? "").startsWith(AMAZON_OUI) ||
+      iface.address.startsWith(USB_LINK_PREFIX) ||
+      (/^en\d+$/.test(iface.name) && iface.address.startsWith("169.254.")),
   );
 }
 
 /**
- * Guess which interface is the device's USB network link.
+ * Find the device's USB network gadget from the macOS hardware-port list.
  *
- * Deliberately narrow: only USB-specific port names qualify (a bare "Ethernet"
- * port is the built-in NIC, not a gadget), soft-MAC virtual adapters are
- * refused, and the interface already serving the LAN is excluded. An interface
- * holding an address on the gadget's own /24 is the authoritative signal (see
- * `findUsbLinkInterface`); this is only a fallback for hubs whose port name
- * macOS reports generically.
+ * Only a port macOS itself names as an RNDIS/CDC/ECM gadget qualifies; a USB
+ * Ethernet dongle serving the LAN is not the gadget.
  */
-export function findUsbEthernetPort(ports: HardwarePort[], primaryInterface?: string): HardwarePort | undefined {
-  return ports.find((port) => {
-    if (!/^en\d+$/.test(port.device)) return false;
-    if (primaryInterface && port.device === primaryInterface) return false;
-    if (isLocallyAdministeredMac(port.mac)) return false;
-    return /usb|cdc|ecm|rndis/i.test(port.name);
-  });
+export function findUsbEthernetPort(ports: HardwarePort[]): HardwarePort | undefined {
+  return ports.find((port) => /^en\d+$/.test(port.device) && /rndis|cdc|ecm|gadget/i.test(port.name));
 }
 
 export interface UsbStatus {
@@ -1117,11 +1096,9 @@ export function summarizeUsbStatus(input: {
   mountedVolumes: string[];
   probes?: PortProbe[];
 }): UsbStatus {
-  const primaryInterface = input.ifaces.find(
-    (iface) => shouldScanInterface(iface.name, iface.address) && !(iface.mac ?? "").startsWith(AMAZON_OUI),
-  )?.name;
-  const usbPort = findUsbEthernetPort(input.ports, primaryInterface);
-  const gadgetInterface = findUsbLinkInterface(input.ifaces)?.name ?? usbPort?.device;
+  const sshPort = input.probes?.find((probe) => probe.open)?.port;
+  const gadgetInterface =
+    findUsbLinkInterface(input.ifaces)?.name ?? findUsbEthernetPort(input.ports)?.device;
 
   const kindleVolume = input.mountedVolumes.find((volume) => /kindle/i.test(volume));
   let usbnetInstalled: boolean | undefined;
@@ -1130,15 +1107,15 @@ export function summarizeUsbStatus(input: {
     usbnetInstalled = fs.existsSync(usbnetPath);
   }
 
-  const connected = gadgetInterface !== undefined;
-  const sshPort = input.probes?.find((probe) => probe.open)?.port;
+  const connected = gadgetInterface !== undefined || sshPort !== undefined;
+  const probedPorts = input.probes?.map((probe) => probe.port) ?? KINDLE_USB_PORTS;
 
   let probeDetail: string;
   if (sshPort !== undefined) probeDetail = `${KINDLE_USB_HOST}:${sshPort} answered`;
-  else if (connected)
-    probeDetail = `${gadgetInterface} carries the USB link but ${KINDLE_USB_HOST} did not answer on ${KINDLE_USB_PORTS.join("/")} (USB networking may be disabled on the device)`;
+  else if (gadgetInterface)
+    probeDetail = `${gadgetInterface} looks like the USB link, but ${KINDLE_USB_HOST} did not answer on ${probedPorts.join("/")} (USB networking may be off on the device, or this adapter is not the gadget)`;
   else
-    probeDetail = `no candidate USB link interface found (no address on ${USB_LINK_PREFIX}0/24 and no USB-named adapter); the device may be unplugged or in mass-storage mode`;
+    probeDetail = `no USB link evidence on this Mac (no address on ${USB_LINK_PREFIX}0/24, no 169.254 self-assigned en*, no RNDIS/CDC hardware port), so ${KINDLE_USB_HOST} is unreachable until the device starts its gadget and this Mac holds an address on that link`;
 
   return {
     gadgetInterface,
@@ -1210,7 +1187,12 @@ export function formatUsbReport(status: UsbStatus, identityFile?: string): strin
   const lines: string[] = [];
   lines.push("Kindle USB-cable route (fallback for Wi-Fi off / KOReader closed)");
   lines.push("");
-  lines.push(`  USB network adapter : ${status.gadgetInterface ?? "none detected"}`);
+  lines.push(
+    `  USB network adapter : ${
+      status.gadgetInterface ??
+      (status.sshPort !== undefined ? `unidentified (the link answered on ${KINDLE_USB_HOST}:${status.sshPort})` : "none detected")
+    }`,
+  );
   if (status.gadgetInterface && status.sshPort === undefined) {
     lines.push("                        (no SSH answer on the link - USB networking may be off on the device, or this adapter is not the gadget)");
   }
@@ -1232,15 +1214,17 @@ export function formatUsbReport(status: UsbStatus, identityFile?: string): strin
     return lines.join("\n");
   }
 
-  lines.push("Device-side steps (on the Kindle, one time):");
-  lines.push("  1. Confirm USBNetwork is installed: /mnt/us/usbnet/bin/usbnetwork exists");
-  lines.push("  2. Enable USB networking: /mnt/us/usbnet/bin/usbnetwork");
-  lines.push("     (or create an empty marker file /mnt/us/usbnet/AUTO and replug)");
+  lines.push("Device-side steps (runtime only; nothing survives a reboot):");
+  lines.push("  1. Switch the USB gadget from mass storage to ethernet: modprobe g_ether dev_addr=c0:8d:51:03:31:52");
+  lines.push(`  2. Address and raise it: ip addr add ${KINDLE_USB_HOST}/24 dev usb0; ip link set usb0 up`);
+  lines.push("  3. Start an SSH daemon outside KOReader (see RUNBOOK.md, 'Kindle SSH Device Access').");
   lines.push("");
-  lines.push(`An interface holding an address on ${USB_LINK_PREFIX}0/24 is the reliable sign the link is up;`);
-  lines.push(`its MAC need not be Amazon's (${AMAZON_OUI}:...), and a built-in Ethernet or VPN adapter will not match it.`);
+  lines.push(`An address on ${USB_LINK_PREFIX}0/24 proves the link is up; before this Mac has one, a 169.254 self-assigned`);
+  lines.push(`en* or an RNDIS/CDC hardware port is the hint. The adapter's MAC need not be Amazon's (${AMAZON_OUI}:...).`);
   lines.push("");
   lines.push("Mac-side steps:");
+  lines.push("  Identify the gadget: networksetup -listallhardwareports | grep -A3 -i rndis");
+  lines.push(`  macOS normally takes ${MAC_USB_HOST} by DHCP from the device; only if it does not:`);
   lines.push(`  sudo ifconfig <usb-iface> inet ${MAC_USB_HOST} netmask ${USB_NETMASK} up`);
   lines.push(`  ping -c 2 ${KINDLE_USB_HOST}`);
   lines.push("");
@@ -1673,7 +1657,7 @@ async function cmdUsb(options: CliOptions): Promise<number> {
   const hwPorts = portsText.stdout ? parseHardwarePorts(portsText.stdout) : [];
   const mountedVolumes = fs.existsSync("/Volumes") ? fs.readdirSync("/Volumes") : [];
   const probes = await Promise.all(
-    KINDLE_USB_PORTS.map((port) => probeTcp(KINDLE_USB_HOST, port, Math.max(600, options.timeoutMs))),
+    options.ports.map((port) => probeTcp(KINDLE_USB_HOST, port, Math.max(600, options.timeoutMs))),
   );
 
   const status = summarizeUsbStatus({ ifaces, ports: hwPorts, mountedVolumes, probes });

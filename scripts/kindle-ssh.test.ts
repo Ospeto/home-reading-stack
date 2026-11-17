@@ -31,7 +31,6 @@ import {
   intToIpv4,
   ipv4ToInt,
   isTunnelAddress,
-  isLocallyAdministeredMac,
   isValidIpv4,
   mapWithConcurrency,
   netmaskToPrefix,
@@ -500,6 +499,14 @@ Device: bridge0
 Ethernet Address: 02:00:00:00:00:00
 `;
 
+// The port macOS actually reports for the Kindle's RNDIS gadget. Its host-side
+// MAC is locally administered (86:f3:c5:... / masked to 02:00:...), which is why
+// the Amazon OUI can never be the gate.
+const GADGET_PORT_BLOCK = `Hardware Port: RNDIS/Ethernet Gadget
+Device: en6
+Ethernet Address: 86:f3:c5:7c:22:06
+`;
+
 describe("USB route helpers", () => {
   it("parses networksetup hardware ports with their MAC addresses", () => {
     const ports = parseHardwarePorts(HARDWARE_PORTS);
@@ -507,14 +514,15 @@ describe("USB route helpers", () => {
     expect(ports).toContainEqual({ name: "USB 10/100/1000 LAN", device: "en7", mac: "c0:8d:51:99:7e:21" });
   });
 
-  it("finds the USB ethernet port", () => {
-    const port = findUsbEthernetPort(parseHardwarePorts(HARDWARE_PORTS));
-    expect(port?.device).toBe("en7");
+  it("finds the RNDIS gadget port macOS reports for the cabled Kindle", () => {
+    const port = findUsbEthernetPort(parseHardwarePorts(HARDWARE_PORTS + GADGET_PORT_BLOCK));
+    expect(port?.device).toBe("en6");
+    expect(port?.name).toBe("RNDIS/Ethernet Gadget");
   });
 
-  it("refuses the built-in Ethernet port when no USB adapter is attached", () => {
-    const withoutUsb = HARDWARE_PORTS.split("Hardware Port: USB 10/100/1000 LAN").slice(0, 1).join("");
-    expect(findUsbEthernetPort(parseHardwarePorts(withoutUsb))).toBeUndefined();
+  it("does not mistake a USB Ethernet dongle for the Kindles gadget", () => {
+    const port = findUsbEthernetPort(parseHardwarePorts(HARDWARE_PORTS));
+    expect(port).toBeUndefined();
   });
 
   it("refuses a soft-MAC virtual adapter even when its name looks ethernet-ish", () => {
@@ -523,14 +531,9 @@ describe("USB route helpers", () => {
   });
 
   it("never picks the interface already serving the LAN", () => {
-    const port = findUsbEthernetPort(parseHardwarePorts(HARDWARE_PORTS), "en7");
-    expect(port).toBeUndefined();
-  });
-
-  it("flags locally administered MAC addresses", () => {
-    expect(isLocallyAdministeredMac("ba:08:ec:72:a1:49")).toBe(true);
-    expect(isLocallyAdministeredMac("c0:8d:51:99:7e:21")).toBe(false);
-    expect(isLocallyAdministeredMac(undefined)).toBe(false);
+    const ports = parseHardwarePorts(HARDWARE_PORTS + GADGET_PORT_BLOCK);
+    expect(findUsbEthernetPort(ports)?.device).toBe("en6");
+    expect(findUsbEthernetPort(ports.map((p) => (p.name === "RNDIS/Ethernet Gadget" ? { ...p, name: "USB 10/100/1000 LAN" } : p)))).toBeUndefined();
   });
 
   it("reports an unreachable USB route with the disabled reason", () => {
@@ -549,7 +552,7 @@ describe("USB route helpers", () => {
     expect(status.gadgetConnected).toBe(true);
     expect(status.gadgetInterface).toBe("en7");
     expect(status.sshPort).toBeUndefined();
-    expect(status.probeDetail).toContain("USB networking may be disabled");
+    expect(status.probeDetail).toContain("USB networking may be off on the device, or this adapter is not the gadget");
     expect(status.probeDetail).toContain(`${KINDLE_SSH_PORT}/${KINDLE_ALT_SSH_PORT}`);
   });
 
@@ -604,29 +607,55 @@ describe("USB route helpers", () => {
       netmask: "255.255.255.0",
       mac: "02:00:00:00:00:00",
     };
-    const gadgetPorts = parseHardwarePorts(`Hardware Port: RNDIS/Ethernet Gadget
-Device: en6
-Ethernet Address: 86:f3:c5:7c:22:06
-`);
-    expect(findUsbEthernetPort(gadgetPorts)).toBeUndefined();
-    expect(isLocallyAdministeredMac(gadgetIface.mac)).toBe(true);
+    const gadgetPorts = parseHardwarePorts(GADGET_PORT_BLOCK);
+    expect(findUsbEthernetPort(gadgetPorts)?.device).toBe("en6");
     expect(findUsbLinkInterface([gadgetIface])?.name).toBe("en6");
     expect(findUsbLinkInterface([{ name: "en0", address: "192.168.31.15", netmask: "255.255.255.0" }])).toBeUndefined();
 
     const status = summarizeUsbStatus({ ifaces: [gadgetIface], ports: gadgetPorts, mountedVolumes: [] });
     expect(status.gadgetConnected).toBe(true);
     expect(status.gadgetInterface).toBe("en6");
-    expect(status.probeDetail).toContain("USB networking may be disabled");
+    expect(status.probeDetail).toContain("USB networking may be off on the device, or this adapter is not the gadget");
     expect(formatUsbReport(status)).toContain("en6");
+  });
+
+  it("sees the link before this Mac has an address on it", () => {
+    // The cold-start state the subcommand exists for: cable attached, gadget up on
+    // the device, macOS holding only a self-assigned 169.254 address.
+    const coldStart: IfaceAddr = { name: "en6", address: "169.254.44.7", netmask: "255.255.0.0", mac: "02:00:00:00:00:00" };
+    expect(findUsbLinkInterface([coldStart])?.name).toBe("en6");
+
+    const status = summarizeUsbStatus({ ifaces: [coldStart], ports: [], mountedVolumes: [] });
+    expect(status.gadgetConnected).toBe(true);
+    expect(status.gadgetInterface).toBe("en6");
+
+    const report = formatUsbReport(status);
+    expect(report).not.toContain("none detected");
+    // The next step is the Mac-side address, not a claim that the device is absent.
+    expect(report).toContain(MAC_USB_HOST);
+  });
+
+  it("never reports the adapter as absent while the link answers", () => {
+    const status = summarizeUsbStatus({
+      ifaces: [],
+      ports: [],
+      mountedVolumes: [],
+      probes: [{ host: KINDLE_USB_HOST, port: KINDLE_ALT_SSH_PORT, open: true, latencyMs: 9 }],
+    });
+    expect(status.gadgetConnected).toBe(true);
+    expect(status.sshPort).toBe(KINDLE_ALT_SSH_PORT);
+    const report = formatUsbReport(status);
+    expect(report).not.toContain("none detected");
+    expect(report).toContain("Next:");
   });
 
   it("reports no adapter when nothing is plugged in", () => {
     const status = summarizeUsbStatus({ ifaces: [], ports: [], mountedVolumes: [] });
     expect(status.gadgetConnected).toBe(false);
     expect(status.gadgetInterface).toBeUndefined();
-    // The honest statement is that no candidate interface was found, not that the
-    // device is absent: the link is only observable from the Mac end.
+    // The honest statement is the missing Mac-side evidence, not that the device is absent.
     expect(status.probeDetail).toContain(`${USB_LINK_PREFIX}0/24`);
+    expect(status.probeDetail).toContain("this Mac");
   });
 
   it("reports USBNetwork presence from the mounted volume", () => {
@@ -875,6 +904,24 @@ describe("discoverKindle", () => {
     });
     expect([...probed]).toEqual([KINDLE_ALT_SSH_PORT]);
     expect(result.probedPorts).toEqual([KINDLE_ALT_SSH_PORT]);
+  });
+
+  it("probes the USB link on the selected port only", async () => {
+    const probed: string[] = [];
+    await discoverKindle({
+      ifaces: [{ name: "en6", address: "192.168.15.201", netmask: "255.255.255.0" }],
+      mdns: false,
+      concurrency: 8,
+      ports: [KINDLE_SSH_PORT],
+      timeoutMs: 50,
+      probe: async (host, port) => {
+        probed.push(`${host}:${port}`);
+        return { host, port, open: false, latencyMs: 0 };
+      },
+      banner: async () => null,
+    });
+    expect(probed).toContain(`${KINDLE_USB_HOST}:${KINDLE_SSH_PORT}`);
+    expect(probed).not.toContain(`${KINDLE_USB_HOST}:${KINDLE_ALT_SSH_PORT}`);
   });
 });
 
