@@ -6205,3 +6205,167 @@ describe("KOReader plugin local progress and highlights", () => {
     expect(out.sidecar_percent_unchanged).toBe("true");
   });
 });
+
+/**
+ * Library page behaviour: the covers preference and a page past the end.
+ *
+ * Both are behaviours of `main.lua`'s library entry point rather than of a pure
+ * model, so this harness drives the shipped `openLibrary` against a stubbed
+ * catalog and counts what the page asked for.
+ */
+const LIBRARY_BEHAVIOUR_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
+-- A configured plugin, the way the server hands it over: the committed template
+-- carries no base_url, and an unconfigured plugin never reaches the catalog.
+local plugin_config = {
+  base_url = "http://192.168.31.15:8086",
+  api_key = "harness-key",
+  page_size = 40,
+  plugin_version = "1.6.1",
+  generated_at = "2026-11-16T00:00:00.000Z",
+  request_block_timeout = 10,
+  request_total_timeout = 90,
+  download_block_timeout = 15,
+  download_total_timeout = 300,
+}
+package.preload["lighthouse_config"] = function() return plugin_config end
+
+-- A stubbed catalog: one entry per book, served through the client's transport.
+local QUOTE = string.char(34)
+local served_entries = 2
+local function feed_xml(count)
+  local entries = {}
+  for index = 1, count do
+    local href = "http://host/api/books/" .. index .. "/download/epub"
+    entries[#entries + 1] = "<entry><title>Book " .. index .. "</title><id>urn:uuid:" .. index
+      .. "</id><link rel=" .. QUOTE .. "http://opds-spec.org/acquisition" .. QUOTE
+      .. " href=" .. QUOTE .. href .. QUOTE .. "/></entry>"
+  end
+  return "<feed><title>LightHouse</title>" .. table.concat(entries, "") .. "</feed>"
+end
+
+-- Installed into package.loaded BEFORE main.lua loads: the client resolves its
+-- transport when it is required, and a later preload would be ignored.
+package.loaded["socket.http"] = {
+  request = function(request)
+    local body = feed_xml(served_entries)
+    if request and request.sink then
+      request.sink(body)
+      request.sink(nil)
+    end
+    return 1, 200, {}
+  end,
+}
+package.loaded["socket.https"] = package.loaded["socket.http"]
+package.loaded["ltn12"] = {
+  sink = {
+    table = function(target)
+      return function(chunk)
+        if chunk then target[#target + 1] = chunk end
+        return 1
+      end
+    end,
+    file = function() end,
+  },
+}
+package.loaded["json"] = { decode = function() return {} end }
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+
+-- Count the covers the page asks for, and answer through the real lookup (the
+-- cover cache is empty here, so it answers "no image" and the row draws its
+-- placeholder).
+local cover_requests = 0
+local real_cover = LightHouse.coverWidgetFor
+function LightHouse:coverWidgetFor(id, width, height)
+  cover_requests = cover_requests + 1
+  return real_cover(self, id, width, height)
+end
+
+local covers_setting = nil
+G_reader_settings.readSetting = function(_, key)
+  if key == "lighthouse_covers" then return covers_setting end
+  return nil
+end
+
+local function open_library(options)
+  cover_requests = 0
+  local ok, raised = pcall(function() LightHouse:openLibrary(options) end)
+  return ok, raised, cover_requests, LightHouse.last_page_model
+end
+
+-- 1. Covers on (the default): each row asks for a cover.
+local ok_on, raise_on, asks_on = open_library{ mode = "books", page = 1 }
+print("covers_on_ok=" .. tostring(ok_on) .. " " .. tostring(raise_on))
+print("covers_on_asks=" .. tostring(asks_on > 0))
+
+-- 2. Covers off: no row asks for one at all, and the list still draws.
+covers_setting = false
+local ok_off, raise_off, asks_off, model_off = open_library{ mode = "books", page = 1 }
+print("covers_off_ok=" .. tostring(ok_off) .. " " .. tostring(raise_off))
+print("covers_off_asks=" .. tostring(asks_off))
+print("covers_off_rows=" .. tostring(model_off and #(model_off.blocks[1].rows or {}) or -1))
+
+-- 3. A page past the end is its own designed screen, not "the library is empty".
+served_entries = 0
+local ok_past, raise_past = open_library{ mode = "books", page = 5 }
+print("past_ok=" .. tostring(ok_past) .. " " .. tostring(raise_past))
+local problem_rows = {}
+local last_widget = shown[#shown]
+if type(last_widget) == "table" and last_widget.item_table then
+  for row_index = 1, #last_widget.item_table do
+    problem_rows[#problem_rows + 1] = tostring(last_widget.item_table[row_index].text)
+  end
+end
+local problem_text = table.concat(problem_rows, "|")
+print("past_headline=" .. tostring(problem_rows[1]))
+print("past_claims_empty=" .. tostring(problem_text:find("This library is empty", 1, true) ~= nil))
+print("past_offers_way_back=" .. tostring(problem_text:find("Back to the first page", 1, true) ~= nil))
+
+print("OK")
+`;
+
+describe("plugin library page behaviour", () => {
+  /** Runs the behaviour harness against the committed template. */
+  function runHarness(): Record<string, string> {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-library-"));
+    const harnessPath = path.join(workdir, "library_behaviour_harness.lua");
+    fs.writeFileSync(harnessPath, LIBRARY_BEHAVIOUR_HARNESS);
+    const res = spawnSync(LUA_BINARY as string, [harnessPath, KOPLUGIN_TEMPLATE_DIR], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    return Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+  }
+
+  it("honours the covers preference instead of ignoring it", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // On: the page asks for a cover per row.
+    expect(out.covers_on_ok).toBe("true nil");
+    expect(out.covers_on_asks).toBe("true");
+    // Off: it asks for none and still draws its rows.
+    expect(out.covers_off_ok).toBe("true nil");
+    expect(out.covers_off_asks).toBe("0");
+    expect(Number(out.covers_off_rows)).toBeGreaterThan(1);
+  });
+
+  it("steps back a page past the end instead of calling the library empty", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.past_ok).toBe("true nil");
+    expect(out.past_headline).toBe("That page is past the end of the library now");
+    expect(out.past_claims_empty).toBe("false");
+    expect(out.past_offers_way_back).toBe("true");
+  });
+});

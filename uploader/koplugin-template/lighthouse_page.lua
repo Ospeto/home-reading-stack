@@ -241,6 +241,8 @@ local PageWidget = InputContainer:extend{
     on_overflow = nil,
     on_switch = nil,
     cover_widget = nil,
+    --: Whether rows reserve a cover column (the reader's preference).
+    covers = true,
     dimen = nil,
 }
 
@@ -502,7 +504,10 @@ function PageWidget:buildRow(row, height)
     local cover_w = 0
     local cover = nil
 
-    if row.kind == "reading" and type(self.cover_widget) == "function" then
+    -- The reader's "Show cover thumbnails" preference decides whether a row
+    -- reserves a cover column at all: turning it off must give the text the
+    -- space back, not paint a placeholder where a picture used to be.
+    if self.covers and row.kind == "reading" and type(self.cover_widget) == "function" then
         cover_w = plan.reading_cover_w or 0
         local ok, widget = pcall(self.cover_widget, row.cover_id, cover_w, plan.reading_cover_h or 0)
         if ok and widget then cover = widget end
@@ -515,7 +520,9 @@ function PageWidget:buildRow(row, height)
     local small_face = self.faces.row_small
     local content = VerticalGroup:new{
         align = "left",
-        label(row.title or "", title_face, { bold = true, width = text_w }),
+        -- Rows lead in bold by default; a row that says otherwise (a recent
+        -- session) keeps its own weight instead of being forced bold.
+        label(row.title or "", title_face, { bold = row.bold ~= false, width = text_w }),
     }
     if row.secondary and row.secondary ~= "" then
         content[#content + 1] = label(row.secondary, small_face, { width = text_w })
@@ -892,6 +899,7 @@ function Page.build(options)
         plan = options.plan,
         faces = options.faces,
         cover_widget = options.cover_widget,
+        covers = options.covers ~= false,
         on_action = options.on_action,
         on_overflow = options.on_overflow,
         on_switch = options.on_switch,

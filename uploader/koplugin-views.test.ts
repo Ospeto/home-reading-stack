@@ -48,6 +48,10 @@ local function flat(value)
   return (tostring(value):gsub("\n", " "))
 end
 
+-- Every fixture time is derived from one local wall-clock anchor, so the
+-- wording these tests assert is the same in any timezone.
+local SESSION_T0 = os.time{ year = 2026, month = 11, day = 16, hour = 18, min = 0 }
+
 -- A payload shaped exactly like GET /api/kosync/stats.
 local payload = {
   streaks = { currentStreak = 4, longestStreak = 18 },
@@ -59,11 +63,11 @@ local payload = {
   goal = { year = 2026, currentBooks = 6 },
   summary = { totalSessionsCount = 220, averageDailyMinutes = 68 },
   recentSessions = {
-    { title = "Ballad of a Shinigami vol. 2", startTime = 1763300000, durationSeconds = 337, device = "Kindle" },
-    { title = "Spice and Wolf, Vol. 9", startTime = 1763200000, durationSeconds = 2280, device = "Kindle" },
-    { title = "Ascendance of a Bookworm", startTime = 1763100000, durationSeconds = 4320, device = "" },
-    { title = "Fourth session", startTime = 1763000000, durationSeconds = 100, device = "KOReader" },
-    { title = "No duration", startTime = 1763000000, device = "KOReader" },
+    { title = "Ballad of a Shinigami vol. 2", startTime = SESSION_T0, durationSeconds = 337, device = "Kindle" },
+    { title = "Spice and Wolf, Vol. 9", startTime = SESSION_T0 - 86400, durationSeconds = 2280, device = "Kindle" },
+    { title = "Ascendance of a Bookworm", startTime = SESSION_T0 - 2 * 86400, durationSeconds = 4320, device = "" },
+    { title = "Fourth session", startTime = SESSION_T0 - 3 * 86400, durationSeconds = 100, device = "KOReader" },
+    { title = "No duration", startTime = SESSION_T0 - 3 * 86400, device = "KOReader" },
   },
   heatmap = {
     { date = "2026-11-09", level = 1, minutes = 5, seconds = 300, count = 1, bookCount = 1 },
@@ -72,15 +76,17 @@ local payload = {
   },
   activeBooks = {
     { bookId = 11, displayTitle = "Ballad of a Shinigami vol. 2", displayAuthors = "K-Ske Hasegawa",
-      percentage = 0.62, timestamp = 1763300000, device = "Kindle" },
+      percentage = 0.62, timestamp = SESSION_T0, device = "Kindle" },
     { bookId = 12, displayTitle = "Spice and Wolf, Vol. 9", displayAuthors = "Isuna Hasekura",
-      percentage = 0.41, timestamp = 1763200000, device = "Kindle" },
+      percentage = 0.41, timestamp = SESSION_T0 - 86400, device = "Kindle" },
   },
 }
 
 local numbers = Stats.normalize(payload)
 local sessions = Status.normalizeSessions(payload.activeBooks)
-local now = 1763300000 + 3600
+-- Built from local wall-clock time, not a fixed epoch: the month and day this
+-- harness asserts must be the same on a machine in UTC and one in UTC+6:30.
+local now = SESSION_T0 + 3600
 local model = Views.statsModel(numbers, sessions, now, {
   weeks = 52,
   year = 2026,
@@ -154,7 +160,7 @@ local translated = Views.statsModel(
     { title = "Ballad of a Shinigami vol. 2", authors = "K-Ske Hasegawa", percentage = 0.62,
       timestamp = now - 30 },
     { title = "Spice and Wolf, Vol. 9", authors = "Isuna Hasekura", percentage = 0.41,
-      timestamp = now - 10 * 86400 },
+      timestamp = os.time{ year = 2026, month = 11, day = 6, hour = 12, min = 0 } },
   },
   now,
   {
@@ -310,6 +316,12 @@ print("junk_rows=" .. #junk.blocks[1].rows)
 local unknown_mode = Views.libraryModel("nonsense", { entries = entries, page = 1, page_size = 4 })
 print("unknown_mode_active=" .. flat(unknown_mode.switch[1].active))
 
+-- One definition of the time wording, inherited by the model's label table.
+print("views_labels_defines_time_words=" .. tostring(Views.LABELS.just_now ~= nil
+  or Views.LABELS.clock_today ~= nil or Views.LABELS.months ~= nil))
+print("merged_time_words=" .. flat(Views.labels().just_now) .. "|"
+  .. flat(Views.labels().clock_today) .. "|" .. flat(Views.labels().months[11]))
+
 print("OK")
 `;
 
@@ -330,6 +342,17 @@ function runHarness(): Record<string, string> {
   }
   return out;
 }
+
+describe("plugin page models: label surface", () => {
+  it("keeps one definition of the time wording, inherited by the model", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // The relative-time, clock and duration words live in Ui.TIME_LABELS only;
+    // the model inherits them instead of carrying a second copy.
+    expect(out.views_labels_defines_time_words).toBe("false");
+    expect(out.merged_time_words).toBe("just now|Today|Nov");
+  });
+});
 
 describe("plugin reading-stats page model", () => {
   it("is one page of bands, in the accepted order", () => {
@@ -389,9 +412,9 @@ describe("plugin reading-stats page model", () => {
     expect(out.recent_heading).toBe("RECENT SESSIONS/LAST 3");
     expect(out.recent_rows).toBe("3");
     expect(out.recent_first).toBe("Ballad of a Shinigami vol. 2//6m");
-    // Local time of the fixture is what `os.date` reports for the epoch, so the
-    // line is asserted by shape: a day name, a clock and the device.
-    expect(out.recent_second_line).toMatch(/^(Today|Yesterday|\d+ \w+ \d{2}:\d{2}) · /);
+    // The fixture time is a local wall clock, so the line is asserted by shape:
+    // a day word or date, then the clock, then the duration and the device.
+    expect(out.recent_second_line).toMatch(/^(Today|Yesterday|\d+ \w+) \d{2}:\d{2} · /);
     expect(out.recent_second_line).toContain("5 m 37 s");
     expect(out.recent_second_line).toContain("Kindle");
     // The row with no duration is dropped rather than drawn as a blank.
@@ -457,14 +480,16 @@ describe("plugin library page model: Books", () => {
     );
     expect(out.books_first_value).toBe("62%//0.62");
     expect(out.books_last_action).toBe("page");
-    expect(out.books_footer).toBe("Page 1 of 2/All books");
+    // 1,802 books at 4 rows a page: the footer names the real count instead of a
+// rolling "of 2".
+    expect(out.books_footer).toBe("Page 1 of 451/All books");
   });
 
   it("shows no search or next-page row when neither applies", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
     expect(out.books_last_rows).toBe("2");
-    expect(out.books_last_footer).toBe("Page 2 of 2/All books");
+    expect(out.books_last_footer).toBe("Page 2 of 451/All books");
   });
 });
 
