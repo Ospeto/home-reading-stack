@@ -602,8 +602,9 @@ end
 
 --- Walks the device's book roots and returns one record per sidecar.
 --
--- ONE directory walk per call, no network, no polling: the caller caches the
--- result for the session (see `localRecords` in main.lua). Bounded by
+-- ONE directory walk per call - none at all when the caller hands back the
+-- paths a previous walk found - with no network and no polling: the caller
+-- caches the result for the session (see `localRecords` in main.lua). Bounded by
 -- `Sidecar.SCAN_LIMITS` so a very large library cannot stall a menu.
 --
 -- Measured on the device: 431 directory listings and 2053 stats over a
