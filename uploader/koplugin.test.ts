@@ -2014,7 +2014,9 @@ end
 -- Layout containers: children are appended to the container table itself, which
 -- is what a group is in KOReader (group[#group + 1] = widget). A horizontal
 -- group is as tall as its tallest child and as wide as all of them; a vertical
--- group is as wide as its widest child and as tall as all of them.
+-- group is as wide as its widest child and as tall as all of them. Like the
+-- real classes, a container keeps the size it measured until resetLayout
+-- clears it, so a tree that changes after being measured has to say so.
 local function layout_container(kind, stacks)
   return function()
     local group = {}
@@ -2026,14 +2028,22 @@ local function layout_container(kind, stacks)
       return options
     end
     function group:getSize()
+      if self._size then return self._size end
       local width, height = 0, 0
       for index = 1, #self do
         local size = self[index] and self[index]:getSize() or { w = 0, h = 0 }
         width = stacks and math.max(width, size.w or 0) or (width + (size.w or 0))
         height = stacks and (height + (size.h or 0)) or math.max(height, size.h or 0)
       end
-      if self.dimen then return self.dimen end
-      return { w = width, h = height }
+      self._size = self.dimen or { w = width, h = height }
+      return self._size
+    end
+    function group:resetLayout()
+      self._size = nil
+      for index = 1, #self do
+        local child = self[index]
+        if child and child.resetLayout then child:resetLayout() end
+      end
     end
     function group:paintTo(bb, x, y)
       self.__painted = { x = x, y = y }
@@ -3365,11 +3375,9 @@ local DEVICE_FACTOR = 1236 / 600
 -- for one unit is 3 on this panel while the factor is 2.06.
 local function scaleBySize(units) return math.ceil(units * DEVICE_FACTOR) end
 
--- Font.getFace opens the size it is handed multiplied by the device scale and
--- rounded to whole pixels, so this stub draws what the runtime would draw, not
--- what the page asked for.
-local function facePixels(units) return math.floor(units * DEVICE_FACTOR + 0.5) end
-
+-- Font.getFace hands the size it is given to the same density answer and draws
+-- that many pixels, so this stub draws what the runtime would draw, not what the
+-- page asked for.
 -- Records the pixel size that reaches each text, so the size drawn is read back
 -- from the tree instead of from the module that asked for it.
 local drawn = {}
@@ -3377,7 +3385,7 @@ package.preload["ui/font"] = function()
   return {
     getFace = function(_, name, size)
       local units = tonumber(size) or 0
-      return { name = name, units = units, px = facePixels(units) }
+      return { name = name, units = units, px = scaleBySize(units) }
     end,
   }
 end
@@ -3570,7 +3578,7 @@ describe("plugin one-page views", () => {
     // The density the plugin reads, on a panel that rounds its answers up: a
     // 600-unit probe survives the rounding (1236px), one unit does not (3px on
     // a 2.06 panel), so the plan is six 207px rows. A one-unit probe plans four
-    // fat rows of ~302px instead.
+    // rows of 266px instead.
     expect(out.probe_one_unit).toBe("3");
     expect(out.probe_600_units).toBe("1236");
     expect(out.library_plan_scale).toBe("2.060");
@@ -3586,10 +3594,10 @@ describe("plugin one-page views", () => {
     expect(Number(out.library_page_2_height)).toBe(height);
 
     // The row title is asked for in pixels and drawn in pixels: the plan rule
-    // gives a 207px row a `floor(min(row_h, 120) * 0.26)` = 31px title, so 31 is
-    // the planned measure, not a device readback. Handing that pixel measure
-    // straight to Font.getFace draws 64px in the same row, which is the
-    // oversized type the report describes.
+    // gives a 207px row a `floor(min(row_h, 120) * 0.26)` = 31px title, and the
+    // density answer returns those 31px back (a 15.049-unit request). Handing
+    // the pixel measure straight to Font.getFace draws 64px in the same row,
+    // which is the oversized type the report describes.
     expect(Number(out.library_row_title_px)).toBe(31);
     expect(out.library_row_title_fits).toBe("true");
 
