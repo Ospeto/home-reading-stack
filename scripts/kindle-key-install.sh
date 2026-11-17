@@ -38,7 +38,7 @@ while [ $# -gt 0 ]; do
     --uninstall) UNINSTALL=1 ;;
     --target) shift; TARGET_OVERRIDE="${1:-}" ;;
     --key) shift; KEY_FILE="${1:-}" ;;
-    -h|--help) sed -n '2,29p' "$0" 2>/dev/null; exit 0 ;;
+    -h|--help) sed -n '2,27p' "$0" 2>/dev/null; exit 0 ;;
     *) echo "ERROR: unknown argument: $1" >&2; exit 2 ;;
   esac
   shift

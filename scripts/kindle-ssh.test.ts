@@ -452,6 +452,38 @@ describe("diagnoseRoute", () => {
     expect(classifySshFailure("ssh did not finish", true)).toBe("timeout");
   });
 
+  it("keeps the selected key in its not-found follow-ups", () => {
+    // RUNBOOK §1: with --identity, every printed follow-up carries that key. The
+    // usb/find re-checks therefore must not silently fall back to the default key.
+    const decision = diagnoseRoute({
+      discovery: makeDiscovery({ devices: [] }),
+      alias: "kindle1",
+      identityFile: "/tmp/kindle_ed25519",
+    });
+    const body = decision.body.join("\n");
+    expect(body).toContain("kindle-ssh find --identity /tmp/kindle_ed25519");
+    expect(body).toContain("kindle-ssh usb --identity /tmp/kindle_ed25519");
+  });
+
+  it("keeps the selected key in the selection note and non-Kindle follow-ups", () => {
+    const selection = diagnoseRoute({
+      discovery: makeDiscovery({ devices: [kindleDevice({ host: "192.168.31.73" })] }),
+      alias: "kindle2",
+      selectionNote: "kindle2 was requested but only 1 Kindle(s) answered (192.168.31.73).",
+      identityFile: "/tmp/kindle_ed25519",
+    });
+    expect(selection.body.join("\n")).toContain("kindle-ssh find --identity /tmp/kindle_ed25519");
+
+    const other = diagnoseRoute({
+      discovery: makeDiscovery({
+        devices: [kindleDevice({ server: "openssh", kindleLikely: false, banner: "SSH-2.0-OpenSSH_10.3" })],
+      }),
+      alias: "kindle1",
+      identityFile: "/tmp/kindle_ed25519",
+    });
+    expect(other.body.join("\n")).not.toContain("find --identity");
+  });
+
   it("names the key-install step when auth fails", () => {
     const decision = diagnoseRoute({
       discovery: makeDiscovery({ devices: [kindleDevice()] }),
@@ -1172,6 +1204,16 @@ describe("kindle-key-install.sh", () => {
     expect(fs.existsSync(KEY_INSTALLER)).toBe(true);
     const mode = fs.statSync(KEY_INSTALLER).mode;
     expect(mode & 0o111).toBeGreaterThan(0);
+  });
+
+  it("prints only its usage block on --help", () => {
+    const out = runInstaller(["--help"], "");
+    expect(out.status).toBe(0);
+    expect(out.stdout).toContain("PURPOSE");
+    expect(out.stdout).toContain("EXIT CODES");
+    // The comment block ends before the script body starts.
+    expect(out.stdout).not.toContain("set -u");
+    expect(out.stdout).not.toContain("DRY_RUN=0");
   });
 
   it("rejects empty and malformed input with exit code 2", () => {

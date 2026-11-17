@@ -70,9 +70,9 @@ export const MAC_USB_HOST = "192.168.15.201";
 /** Netmask for the USB link. */
 export const USB_NETMASK = "255.255.255.0";
 /**
- * Amazon Technologies OUI. Some Kindles present their Wi-Fi adapter under an
- * address with this prefix, so it is a positive hint when scanning. The Mac-side
- * end of the USB link is often NOT Amazon-assigned - see `findUsbLinkInterface`.
+ * Amazon Technologies OUI. It is only a positive hint that an interface is the
+ * Kindle USB link - never the gate: the Mac-side end of that link is often not
+ * Amazon-assigned, and no scan path reads MAC addresses.
  */
 export const AMAZON_OUI = "c0:8d:51";
 
@@ -840,7 +840,7 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
           : "No Kindle answered discovery at all on this run.",
         "",
         "Confirm the device is powered on with Wi-Fi connected and KOReader's SSH server started,",
-        `then re-run: bin/lighthouse kindle-ssh find`,
+        `then re-run: bin/lighthouse kindle-ssh find${identityArg(identityFile)}`,
       ],
     };
   }
@@ -858,12 +858,12 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
         "If hosts are up but nothing answers those ports, the network is fine and the SSH daemon is not running:",
         "KOReader's SSH server only exists while KOReader runs.",
         "  On the Kindle: open KOReader -> Tools (wrench) -> SSH -> start the server.",
-        `  Then re-run: bin/lighthouse kindle-ssh find`,
+        `  Then re-run: bin/lighthouse kindle-ssh find${identityArg(identityFile)}`,
         "",
         "If no host answered at all, the device is off/asleep or not associated with Wi-Fi.",
         "",
         "Fallback that works with Wi-Fi off:",
-        "  Plug the device in over USB-C and run: bin/lighthouse kindle-ssh usb",
+        `  Plug the device in over USB-C and run: bin/lighthouse kindle-ssh usb${identityArg(identityFile)}`,
         "  (requires USB networking enabled on the device; see RUNBOOK.md, Kindle SSH section).",
       ],
     };
@@ -897,7 +897,7 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
         body: [
           "The route works, but it reached a different unit than the one you asked to verify.",
           "The DHCP lease moves between the Kindles, so an address is not an identity.",
-          `  bin/lighthouse kindle-ssh find`,
+          `  bin/lighthouse kindle-ssh find${identityArg(identityFile)}`,
           "Match the serial above against the device you meant before trusting any result from this route.",
         ],
         device,
