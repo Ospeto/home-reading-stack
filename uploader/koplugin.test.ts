@@ -6575,13 +6575,16 @@ local function feed_xml(count)
 end
 
 local catalog_requests, shelf_requests = 0, 0
+local shelf_broken = false
+local SHELF_BODY = "book-2-session"
 package.loaded["socket.http"] = {
   request = function(request)
     local url = tostring(request and request.url or "")
-    local body = ""
+    local body
     if url:find("kosync/active", 1, true) then
       shelf_requests = shelf_requests + 1
-      body = "[]"
+      if shelf_broken then return 500, {}, nil end
+      body = SHELF_BODY
     else
       catalog_requests = catalog_requests + 1
       body = feed_xml(4)
@@ -6607,9 +6610,28 @@ package.loaded["ltn12"] = {
   },
 }
 package.loaded["json"] = {
-  -- A shape the merger accepts, and a value the plugin can act on: nothing.
-  decode = function() return {} end,
+  -- A shape the merger accepts: the shelf payload carries one session for
+  -- "Book 2", so a page that merged the shelf draws differently from one that
+  -- did not, and every other body decodes to nothing in progress.
+  decode = function(body)
+    if tostring(body):find("book-2-session", 1, true) then
+      return { { filename = "Book 2.epub", percentage = 0.42, timestamp = 100,
+        device = "Paperwhite" } }
+    end
+    return {}
+  end,
 }
+
+-- The drawn page model is a public view-model, so the harness records it and
+-- reads the progress column the reader actually sees.
+local Views = require("lighthouse_views")
+local build_library_model = Views.libraryModel
+local drawn_model
+Views.libraryModel = function(mode, context, options)
+  local model = build_library_model(mode, context, options)
+  drawn_model = model
+  return model
+end
 
 local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
 LightHouse.ui = { menu = { registerToMainMenu = function() end } }
@@ -6624,6 +6646,24 @@ local function open(options)
   local ok, raised = pcall(function() LightHouse:openLibrary(options) end)
   if not ok then print("ERROR " .. tostring(raised)) end
   return ok
+end
+
+-- The progress column drawn for one book title, e.g. "42%" or "Unread".
+local function drawn_progress(title)
+  for block_index = 1, #((drawn_model or {}).blocks or {}) do
+    local rows = drawn_model.blocks[block_index].rows or {}
+    for row_index = 1, #rows do
+      if rows[row_index].title == title then return tostring(rows[row_index].value) end
+    end
+  end
+  return ""
+end
+
+-- The message the reader is left with, when the last thing shown is a notice.
+local function last_notice()
+  local widget = shown[#shown]
+  if type(widget) ~= "table" or widget.__kind ~= "infomessage" then return "" end
+  return tostring(widget.text or "")
 end
 
 -- Three page turns in one view, then the reader asks for a refresh.
@@ -6642,6 +6682,23 @@ open{ mode = "authors", page = 1 }
 print("after_switch_shelf=" .. shelf_requests)
 open{ mode = "books", page = 1 }
 print("after_switch_back_shelf=" .. shelf_requests)
+
+-- A shelf request that fails is a failure, not an empty shelf: it must not be
+-- kept, so the next page asks again instead of drawing "Unread" for a minute.
+LightHouse:forgetShelf()
+shelf_broken = true
+open{ mode = "books", page = 1 }
+print("failed_page_progress=" .. drawn_progress("Book 2"))
+print("failed_page_reported=" .. tostring(#last_notice() > 0))
+print("after_failed_page_shelf=" .. shelf_requests)
+shelf_broken = false
+open{ mode = "books", page = 2 }
+print("retried_page_progress=" .. drawn_progress("Book 2"))
+print("retried_page_reported=" .. tostring(#last_notice() > 0))
+print("after_retried_page_shelf=" .. shelf_requests)
+-- A real answer IS kept: the page after it reuses it.
+open{ mode = "books", page = 3 }
+print("after_cached_page_shelf=" .. shelf_requests)
 
 print("OK")
 `;
@@ -6684,6 +6741,22 @@ describe("plugin library page: one shelf request per view, not per page", () => 
     expect(out.after_switch_shelf).toBe("2");
     expect(out.after_switch_back_shelf).toBe("3");
   });
+
+  it("does not keep a shelf fetch that failed", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // The endpoint answered 500: this page has no server progress, says so, and
+    // the failure is not cached, so the next page asks again.
+    expect(out.failed_page_progress).toBe("Unread");
+    expect(out.failed_page_reported).toBe("true");
+    expect(out.after_failed_page_shelf).toBe("4");
+    // The retry reached the server, so the percentage is drawn, kept, and no
+    // failure is reported.
+    expect(out.retried_page_progress).toBe("42%");
+    expect(out.retried_page_reported).toBe("false");
+    expect(out.after_retried_page_shelf).toBe("5");
+    expect(out.after_cached_page_shelf).toBe("5");
+  });
 });
 
 /**
@@ -6691,10 +6764,13 @@ describe("plugin library page: one shelf request per view, not per page", () => 
  *
  * The walk lists every folder under the book roots and stats every child to
  * find the `*.sdr` directories. On the device that is 431 listings and 2053
- * stats over a 525-folder tree to return 15 records, and it costs 730.5ms of a
- * 923ms scan. Skipping the stat for a name that proves it is a file saved
- * 240.6ms of it; keeping the sidecar directory list across sessions turns the
- * other ~490ms into one listing per sidecar.
+ * stats over a 525-folder tree to return 15 records, inside a scan whose total
+ * is 804.8ms (interleaved old/new A/B in one process, sidecar reads included).
+ * The walk alone, timed per call in a separate pass, is 730.5ms - those timers
+ * inflate it slightly, so it does not subtract cleanly from that total - and the
+ * 96 sidecar reads make up most of the rest. Skipping the stat for a name that
+ * proves it is a file took the scan from 804.8ms to 595.1ms; keeping the sidecar
+ * directory list across sessions takes it to 131.3ms.
  */
 const SIDECAR_WALK_HARNESS = String.raw`
 local plugin_root = assert(arg[1], "plugin root argument required")

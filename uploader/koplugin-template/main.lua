@@ -1843,8 +1843,12 @@ end
 -- actually asked for, and it is fetched again for every page. The shelf is
 -- therefore kept for `SHELF_REUSE_SECONDS`, refetched when that window is up,
 -- and refetched immediately after anything this plugin did that changes it.
+-- Only an answer is kept: a request that failed is never stored, so a busy
+-- progress endpoint costs one page its server progress and the next view asks
+-- again instead of every page reusing a shelf it never received.
 -- @boolean[opt] force ignore the kept shelf
--- @treturn table normalized sessions, or {} when the server cannot be reached
+-- @treturn table|nil normalized sessions; nil when the server cannot be reached
+-- @treturn string|nil error code from the failed request
 function LightHouse:shelfSessions(force)
     local kept = self._shelf
     local now = os.time()
@@ -1852,9 +1856,12 @@ function LightHouse:shelfSessions(force)
         and now - kept.at <= LightHouse.SHELF_REUSE_SECONDS then
         return kept.sessions
     end
-    local sessions = self:withSpinner(_("Checking reading progress…"), function()
+    local sessions, err = self:withSpinner(_("Checking reading progress…"), function()
         return self:fetchSessions()
-    end) or {}
+    end)
+    if type(sessions) ~= "table" then
+        return nil, err
+    end
     self._shelf = { at = now, sessions = sessions }
     return sessions
 end
@@ -1888,6 +1895,8 @@ function LightHouse:openLibrary(options)
 
     local state = { mode = mode, page = page, query = query }
     self.library_state = state
+    -- Reported after the page is drawn, so the message is not hidden under it.
+    local shelf_notice
 
     if not Client.isConfigured(config) then
         self.library_state = nil
@@ -1989,8 +1998,15 @@ function LightHouse:openLibrary(options)
             return
         end
 
-        local sessions = self:shelfSessions(options.refresh == true)
-        Status.merge(feed.entries, sessions)
+        -- A failed shelf request is reported once and NOT kept: the rows fall
+        -- back to what this device knows, and the next view asks again.
+        local sessions, shelf_err = self:shelfSessions(options.refresh == true)
+        if sessions then
+            Status.merge(feed.entries, sessions)
+        else
+            shelf_notice = T(_("Reading progress unavailable (%1) - showing what this device has."),
+                describeError(shelf_err))
+        end
 
         -- Local sidecars beat the server for any book this device has opened (see
         -- `localRecordFor`), and a book only this device has read gets its progress
@@ -2090,6 +2106,7 @@ function LightHouse:openLibrary(options)
             self:openLibrary{ mode = key, page = 1 }
         end,
     })
+    if shelf_notice then notice(shelf_notice, 4) end
 end
 
 --- Shows the synopsis/description of one book.

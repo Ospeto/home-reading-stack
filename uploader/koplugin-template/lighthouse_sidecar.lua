@@ -63,12 +63,15 @@ Sidecar.SCAN_LIMITS = { depth = 6, directories = 2000, sidecars = 200 }
 --
 -- The walk has to know which children are directories before it can descend, and
 -- asking that of the filesystem is expensive on a Kindle: measured over this
--- device's 429-directory tree, 2053 `lfs.attributes` calls where 2239 children
--- were enumerated cost 240.6ms of a 730.5ms walk - a third of the scan, spent
--- re-asking a question the name already answers. A child named `*.epub` is not a
--- directory here: books are files, their sidecars are the `*.epub.sdr`
--- directories beside them, and a folder deliberately named like a book file
--- would be a layout this walk never produced.
+-- device's 431 folder listings, 2053 `lfs.attributes` calls where 2239 children
+-- were enumerated cost 240.6ms of a 730.5ms walk, spent re-asking a question
+-- the name already answers. (Both figures come from a separate pass that timed
+-- each call, whose own timers inflate the walk slightly: the interleaved A/B
+-- total for the whole scan is 804.8ms, and eliding these stats took that scan
+-- to 595.1ms.) A child named `*.epub` is not a directory here: books are files,
+-- their sidecars are the `*.epub.sdr` directories beside them, and a folder
+-- deliberately named like a book file would be a layout this walk never
+-- produced.
 Sidecar.FILE_SUFFIXES = {
     epub = true, kepub = true, pdf = true, mobi = true, azw = true, azw3 = true,
     fb2 = true, djvu = true, txt = true, rtf = true, doc = true, docx = true,
@@ -603,9 +606,12 @@ end
 -- result for the session (see `localRecords` in main.lua). Bounded by
 -- `Sidecar.SCAN_LIMITS` so a very large library cannot stall a menu.
 --
--- Measured on the device, that walk is the scan: 431 directory listings and 2053
--- stats over a 525-directory tree return 15 usable records, and the whole scan
--- costs 804.8ms. Progress is never stale in that list - a book file and its
+-- Measured on the device: 431 directory listings and 2053 stats over a
+-- 525-directory tree return 15 usable records, and the whole scan costs 804.8ms
+-- (interleaved old/new A/B in one process, sidecar reads included). The walk
+-- alone, timed per call in a separate pass, is 730.5ms; those timers inflate it
+-- slightly, which is why it does not subtract cleanly from that total.
+-- Progress is never stale in that list - a book file and its
 -- sidecar directory change when a book is added or removed, which is rare
 -- compared with how often a reader opens the plugin - so a caller that keeps the
 -- paths `on_directories` hands it may pass them back as `known_directories` and
@@ -683,7 +689,8 @@ function Sidecar.scan(options)
                         -- carries a book or media suffix answers that question
                         -- on its own: measured on this device, 1615 of 2239
                         -- children are `*.epub`, and skipping their stat saved
-                        -- 240.6ms of a 730.5ms walk.
+                        -- 240.6ms of the walk: the scan went from 804.8ms to
+                        -- 595.1ms in an interleaved old/new A/B.
                         local mode
                         if Sidecar.nameCannotBeDirectory(name) then
                             mode = "file"
