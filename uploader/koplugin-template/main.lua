@@ -1475,6 +1475,9 @@ function LightHouse:showPage(model, plan, handlers)
         cover_widget = function(cover_id, width, height)
             return self:coverWidgetFor(cover_id, width, height)
         end,
+        -- The reader's cover preference, read once per page: with covers off a
+        -- row gives the column back to the text instead of drawing a frame.
+        covers = self:coversEnabled(),
         on_action = handlers.on_action,
         on_switch = handlers.on_switch,
         on_overflow = handlers.on_overflow or function() self:showPageOverflow() end,
@@ -1812,6 +1815,27 @@ function LightHouse:openLibrary(options)
             return
         end
         local feed = OPDS.parse(body)
+        if #feed.entries == 0 and page > 1 then
+            -- Past the end of the catalog: the library shrank (a book was
+            -- deleted on the server) or the reader overshot. That is not an
+            -- empty library, and retrying the previous page is not a fix - say
+            -- what happened and offer the way back.
+            self.library_state = nil
+            self:showProblem{
+                title = _("Library"),
+                headline = _("That page is past the end of the library now"),
+                detail = _("The library changed since this page was opened. Go back to the first page to see what is there."),
+                actions = {
+                    retryAction(_("Back to the first page"), function()
+                        self:openLibrary{ mode = mode, page = 1, query = "" }
+                    end),
+                    retryAction(_("Try again"), function()
+                        self:openLibrary{ mode = mode, page = page, query = query }
+                    end),
+                },
+            }
+            return
+        end
         if #feed.entries == 0 then
             self.library_state = nil
             if query ~= "" then

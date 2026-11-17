@@ -86,24 +86,6 @@ Views.LABELS = {
     az = "A–Z",
     no_series = "No series in this library yet",
     no_authors = "No authors in this library yet",
-    just_now = "just now",
-    one_minute_ago = "1 min ago",
-    minutes_ago = "%d min ago",
-    one_hour_ago = "1 h ago",
-    hours_ago = "%d h ago",
-    relative_yesterday = "yesterday",
-    days_ago = "%d days ago",
-    clock_today = "Today",
-    clock_yesterday = "Yesterday",
-    seconds_short = "%d s",
-    minutes_short = "%d m",
-    minutes_seconds = "%d m %d s",
-    hours_short = "%d h",
-    hours_minutes = "%d h %d m",
-    months = {
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    },
     author_count = "%s authors",
     series_count = "%s series",
 }
@@ -113,7 +95,12 @@ Views.LABELS = {
 -- @tparam table[opt] labels
 -- @treturn table
 function Views.labels(labels)
+    -- The relative-time, clock and duration wording lives in exactly one place
+    -- (`Ui.TIME_LABELS`) because `Ui` is what formats those lines; copying it
+    -- here as well is what the review flagged as three definitions of the same
+    -- words. A caller's translation still wins over both.
     local merged = {}
+    for key, value in pairs(Ui.TIME_LABELS) do merged[key] = value end
     for key, value in pairs(Views.LABELS) do merged[key] = value end
     if type(labels) == "table" then
         for key, value in pairs(labels) do
@@ -553,8 +540,15 @@ function Views.libraryModel(mode, context, options)
             rows[#rows + 1] = Views.bookRow(entries[entry_index], text)
         end
         -- The catalog pages itself: one more page exists exactly when the feed
-        -- said so, so the footer never promises a page the server cannot serve.
-        pages = context.has_next and (page + 1) or page
+        -- said so. When the feed also reports how many books matched, the footer
+        -- can name the real page count instead of a rolling window that always
+        -- claims the reader is on the last page.
+        local total = Status.num(totals.books)
+        if total and total > 0 then
+            pages = math.max(math.ceil(total / page_size), page)
+        else
+            pages = context.has_next and (page + 1) or page
+        end
         if context.has_next then
             rows[#rows + 1] = {
                 kind = "action",
