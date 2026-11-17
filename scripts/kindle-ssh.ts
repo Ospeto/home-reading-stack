@@ -685,10 +685,9 @@ async function runMdnsLayer(ctx: DiscoveryContext, enabled: boolean): Promise<La
 async function runUsbLayer(ctx: DiscoveryContext, enabled: boolean): Promise<LayerReport> {
   if (!enabled) return { layer: "USB gadget", status: "skipped", detail: "disabled with --no-usb" };
 
-  const hasAddressEvidence = ctx.ifaces.some(
-    (iface) =>
-      iface.address.startsWith(USB_LINK_PREFIX) ||
-      (/^en\d+$/.test(iface.name) && iface.address.startsWith("169.254.")),
+  const hasUsbAddress = ctx.ifaces.some((iface) => iface.address.startsWith(USB_LINK_PREFIX));
+  const hasLinkLocalHint = ctx.ifaces.some(
+    (iface) => /^en\d+$/.test(iface.name) && iface.address.startsWith("169.254."),
   );
   const hasAmazonHint = ctx.ifaces.some((iface) => (iface.mac ?? "").startsWith(AMAZON_OUI));
   const usbTimeout = Math.max(ctx.timeoutMs, 600);
@@ -700,15 +699,18 @@ async function runUsbLayer(ctx: DiscoveryContext, enabled: boolean): Promise<Lay
     return { layer: "USB gadget", status: "found", detail: `${KINDLE_USB_HOST}:${port} answered` };
   }
 
-  return {
-    layer: "USB gadget",
-    status: "empty",
-    detail: hasAddressEvidence
-      ? `USB link is up but ${KINDLE_USB_HOST} did not answer on ${ctx.ports.join("/")}`
-      : hasAmazonHint
-        ? `an Amazon-OUI adapter is present, which is only a hint (no address on ${USB_LINK_PREFIX}0/24 and no 169.254 en*); ${KINDLE_USB_HOST} unreachable`
-        : `no USB link address evidence on this Mac (no address on ${USB_LINK_PREFIX}0/24 and no 169.254 en*); ${KINDLE_USB_HOST} unreachable`,
-  };
+  let detail: string;
+  if (hasUsbAddress) {
+    detail = `USB link is up but ${KINDLE_USB_HOST} did not answer on ${ctx.ports.join("/")}`;
+  } else if (hasLinkLocalHint) {
+    detail = `a 169.254 self-assigned en* is only a hint that the cable may be up: ${KINDLE_USB_HOST} did not answer on ${ctx.ports.join("/")} and this Mac holds no address on ${USB_LINK_PREFIX}0/24`;
+  } else if (hasAmazonHint) {
+    detail = `an Amazon-OUI adapter is present, which is only a hint (no address on ${USB_LINK_PREFIX}0/24 and no 169.254 en*); ${KINDLE_USB_HOST} unreachable`;
+  } else {
+    detail = `no USB link address evidence on this Mac (no address on ${USB_LINK_PREFIX}0/24 and no 169.254 en*); ${KINDLE_USB_HOST} unreachable`;
+  }
+
+  return { layer: "USB gadget", status: "empty", detail };
 }
 
 async function runLanLayer(

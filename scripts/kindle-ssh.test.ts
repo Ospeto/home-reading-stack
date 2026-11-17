@@ -756,6 +756,23 @@ describe("USB route helpers", () => {
     expect(findUsbLinkInterface([ouiAdapter, coldStart])?.name).toBe("en6");
   });
 
+  it("hedges a link-local hint instead of calling the link up", async () => {
+    // RUNBOOK §4: only an address on the gadget's own /24 is established evidence;
+    // 169.254 is the cold-start hint and must be worded as one.
+    const result = await discoverKindle({
+      ifaces: [{ name: "en6", address: "169.254.44.7", netmask: "255.255.0.0", mac: "02:00:00:00:00:00" }],
+      mdns: false,
+      concurrency: 8,
+      timeoutMs: 50,
+      probe: async (host, port) => ({ host, port, open: false, latencyMs: 0 }),
+      banner: async () => null,
+    });
+    const usb = result.layers.find((layer) => layer.layer === "USB gadget");
+    expect(usb?.detail).not.toContain("USB link is up");
+    expect(usb?.detail).toContain("only a hint");
+    expect(usb?.detail).toContain(`${USB_LINK_PREFIX}0/24`);
+  });
+
   it("does not report the link as up on an Amazon-OUI match alone", async () => {
     // A LAN USB dongle with an Amazon MAC is not the Kindle gadget: the OUI is a hint.
     const result = await discoverKindle({

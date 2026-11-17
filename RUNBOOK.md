@@ -1014,7 +1014,7 @@ Shell access to a Kindle from this Mac mini, so device behaviour can be verified
 | Route | Works when | SSH daemon | Port | Independent of KOReader? |
 | --- | --- | --- | --- | --- |
 | **A. Wireless** | Device awake, on Wi-Fi, KOReader running with its SSH server started | KOReader `SSH.koplugin` (patched dropbear) | `2222` | **No** — stops when KOReader exits |
-| **B. USB cable** | Device plugged in by USB-C; Wi-Fi may be off; KOReader may be closed | A dropbear started on the device, independent of KOReader | `22` on the USB link | **Yes** — outside KOReader |
+| **B. USB cable** | The device's gadget is **already started** (over Wi-Fi or from the device's own shell); after that, Wi-Fi may be off and KOReader closed | A dropbear started on the device, independent of KOReader | `22` on the USB link | **Yes** — outside KOReader |
 
 The distinction matters: route A is the everyday path because it needs no cable, and route B exists precisely for the case route A cannot cover.
 
@@ -1113,7 +1113,7 @@ To confirm key auth end to end, `probe` must report `verified` with a remote ide
 
 ### 4. Route B - USB cable fallback
 
-Use when Wi-Fi is off, or when KOReader is closed and route A therefore has no daemon. The jailbroken devices can expose a USB network gadget, giving a root shell that does not depend on KOReader at all.
+Use once the device's USB gadget is already running: from then on it gives a root shell that does not depend on KOReader, so it survives closing KOReader or losing Wi-Fi. Starting that gadget needs the device reachable once - a Wi-Fi shell or the device's own console - so this is **not a cold-start fallback**; see the device-side steps below and the limits at the end of this section.
 
 **Proven on hardware** (2026-11-17, unit `G092AP03315200G6`, cabled to this Mac mini). Login over the cable, with its real output:
 
@@ -1282,7 +1282,7 @@ Also verified on this Mac mini (real runs):
 | `find --device 2` / `connect --device 2` | Selects the second *device* by address order (one entry per host, even when a unit answers on both `2222` and `22`); refuses to silently substitute the first |
 | `usb` | With the cable attached and the gadget up, reports the `RNDIS/Ethernet Gadget` link and, once it answers, prints the login command for the port that answered; a USB Ethernet dongle serving the LAN is not mistaken for the gadget |
 | `scripts/kindle-key-install.sh` | Idempotent install, `700`/`600` permissions, exact-line uninstall, `--dry-run` writes nothing, bad key rejected |
-| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 121 passing |
+| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 122 passing |
 
 #### Proven: Route B on one device (USB cable)
 
