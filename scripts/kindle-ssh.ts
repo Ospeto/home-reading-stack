@@ -879,7 +879,7 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
         `This is a route that exists but cannot log in yet: the SSH daemon is running, the key is not trusted.`,
         "",
         "Install this Mac mini's public key on the device (one time, while a route works):",
-        `  bin/lighthouse kindle-ssh key --device ${alias}`,
+        `  bin/lighthouse kindle-ssh key --host ${device.host}`,
         "",
         "If a password prompt is acceptable for that one step, do it by hand instead:",
         `  ssh -p ${device.port} root@${device.host} 'sh -s' < scripts/kindle-key-install.sh`,
@@ -898,7 +898,7 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
     headline: `${alias} answered on ${device.host}:${device.port} but authentication was not verified.`,
     body: [
       "Run a full probe to attempt key authentication and capture the remote identity:",
-      `  bin/lighthouse kindle-ssh probe --device ${alias}`,
+      `  bin/lighthouse kindle-ssh probe --host ${device.host}`,
     ],
     device,
   };
@@ -1186,7 +1186,7 @@ export function formatDiscoveryReport(result: DiscoveryResult, device: string, h
   lines.push(`  ${formatRawSshCommand(target, ["uname -srm"])}`);
   lines.push("");
   lines.push("Wrapper:");
-  lines.push(`  bin/lighthouse kindle-ssh connect --device ${device}`);
+  lines.push(`  bin/lighthouse kindle-ssh connect --device ${device}${host ? ` --host ${host}` : ""}`);
   lines.push("");
   lines.push("Optional pin (paste into ~/.ssh/config yourself; this tool never edits your config):");
   for (const line of formatSshConfigBlock(device, target).split("\n")) lines.push(`  ${line}`);
@@ -1199,7 +1199,7 @@ export function formatUsbReport(status: UsbStatus): string {
   lines.push("");
   lines.push(`  USB network adapter : ${status.gadgetInterface ?? "none detected"}`);
   if (status.gadgetInterface && status.sshPort === undefined) {
-    lines.push("                        (the adapter is present, but the device has not started its USB network)");
+    lines.push("                        (no SSH answer on the link - USB networking may be off on the device, or this adapter is not the gadget)");
   }
   lines.push(`  Mass-storage volume : ${status.kindleDeviceMounted ? `/Volumes/${status.kindleDeviceMounted}` : "none mounted"}`);
   const usbnetLabel =

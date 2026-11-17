@@ -1056,7 +1056,7 @@ curl -s http://192.168.31.1/cgi-bin/luci/api/xqsystem/router_info
 
 This home holds no router admin credentials, so a reservation cannot be created and none is pretended to exist. **Documented find-first discovery is the accepted answer**, and it is one command. There is deliberately no router-lease discovery layer either: nothing on this host can authenticate to the router, so a layer that could never run would only imply a capability that does not exist.
 
-Once `find` prints a stable address you may pin it yourself in `~/.ssh/config` - the tool prints a ready-to-paste `Host` block for the device you asked for and **never edits your SSH config**. That pin is a convenience, not a substitute for discovery: rerun `find` whenever the device has been off for a while.
+Once `find` prints a stable address you may pin it yourself in `~/.ssh/config` - the tool prints a ready-to-paste `Host` block for the device you asked for and **never edits your SSH config**. That pin is a convenience, not a substitute for discovery: rerun `find` whenever the device has been off for a while. When you pin an address with `--host`, every command it prints carries that same `--host`, so the printed wrapper and the `probe` / `key` follow-up suggestions reach the device they name instead of re-selecting by alias.
 
 > Existing `Host kindle1` / `Host kindle2` entries in `~/.ssh/config` are **wrong in both directions**: `kindle1` points at `192.168.31.167`, which is the *second* device's address, and `kindle2` still carries the literal placeholder `192.168.31.XXX`. A bare `ssh kindle1` therefore reaches the wrong device or fails for a reason that has nothing to do with the daemon. Use `bin/lighthouse kindle-ssh connect`, or update those blocks from what `find` prints.
 
@@ -1243,7 +1243,7 @@ Also verified on this Mac mini (real runs):
 | `find --device 2` / `connect --device 2` | Selects the second device by address order; refuses to silently substitute the first |
 | `usb` | Reports no USB link - the built-in Ethernet or VPN adapters are not mistaken for the gadget |
 | `scripts/kindle-key-install.sh` | Idempotent install, `700`/`600` permissions, exact-line uninstall, `--dry-run` writes nothing, bad key rejected |
-| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 86 passing |
+| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 87 passing |
 
 #### Not proven: Route B (USB cable)
 

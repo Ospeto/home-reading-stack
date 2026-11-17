@@ -324,6 +324,8 @@ describe("diagnoseRoute", () => {
     expect(decision.headline).toContain("key authentication failed");
     const body = decision.body.join("\n");
     expect(body).toContain("kindle-ssh key");
+    // The suggestion has to name the device that failed auth, not just its alias.
+    expect(body).toContain(`kindle-ssh key --host ${decision.device?.host}`);
     expect(body).toContain("Permission denied");
   });
 
@@ -336,6 +338,7 @@ describe("diagnoseRoute", () => {
     expect(decision.code).toBe(2);
     expect(decision.headline).toContain("authentication was not verified");
     expect(decision.body.join("\n")).toContain("kindle-ssh probe");
+    expect(decision.body.join("\n")).toContain(`kindle-ssh probe --host ${decision.device?.host}`);
   });
 
   it("reports a requested device that discovery could not supply", () => {
@@ -566,8 +569,14 @@ describe("USB route helpers", () => {
     });
     expect(status.gadgetConnected).toBe(true);
     expect(status.gadgetInterface).toBe("en9");
-    // The interface was identified by MAC, not by an address on the gadget's /24.
-    expect(formatUsbReport(status)).not.toContain("identified by address");
+
+    const report = formatUsbReport(status);
+    // RUNBOOK §4/§5: an adapter with no SSH answer is a link whose daemon may be
+    // off (or an adapter that is not the gadget), not a working route - so the
+    // report names the adapter, stays hedged, and prints no login command.
+    expect(report).toContain("en9");
+    expect(report).toContain("USB networking may be off on the device, or this adapter is not the gadget");
+    expect(report).not.toContain("Next:");
   });
 
   it("identifies the link from its 192.168.15.x address when the host MAC is locally administered", () => {
@@ -1060,6 +1069,9 @@ describe("formatDiscoveryReport", () => {
     });
     const report = formatDiscoveryReport(discovery, "kindle1", "192.168.31.167");
     expect(report).toContain("HostName 192.168.31.167");
+    // The printed wrapper has to reach the same device as the login command and
+    // the pin block; --device alone would re-select the sorted-first Kindle (.73).
+    expect(report).toContain("connect --device kindle1 --host 192.168.31.167");
   });
 
   it("states the selection refusal instead of printing a command for another device", () => {
