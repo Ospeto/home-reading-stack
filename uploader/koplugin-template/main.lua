@@ -85,6 +85,7 @@ local _ = require("gettext")
 
 local config = require("lighthouse_config")
 local Client = require("lighthouse_client")
+local Nav = require("lighthouse_nav")
 local OPDS = require("lighthouse_opds")
 local Page = require("lighthouse_page")
 local Sidecar = require("lighthouse_sidecar")
@@ -1060,6 +1061,9 @@ local function connectionAction(light_house)
 end
 
 function LightHouse:init()
+    -- Where the reader is, one entry per level; `lighthouse_nav.lua` owns the
+    -- rules and `LightHouse:goUp()` is the only thing that walks it back.
+    self.nav = {}
     self.ui.menu:registerToMainMenu(self)
 end
 
@@ -1566,7 +1570,99 @@ function LightHouse:prefetchCoverIds(ids, label)
     end)
 end
 
---- Shows one page model as a full-screen page.
+--- ---------------------------------------------------------------------------
+-- Navigation: one stack of levels, one rule for going up
+-- ---------------------------------------------------------------------------
+
+--- The plugin's navigation stack, top last.
+-- `lighthouse_nav.lua` owns the push/replace/pop rules; this is only where the
+-- plugin keeps them.
+-- @treturn table array of levels
+function LightHouse:navStack()
+    if type(self.nav) ~= "table" then self.nav = {} end
+    return self.nav
+end
+
+--- Closes one plugin screen without counting it as going up.
+-- Every render calls this on what it replaces: the level stack already says
+-- where the reader is going, so the widget's own back must not run.
+-- @tparam table|nil widget
+function LightHouse:dismissWidget(widget)
+    if not widget then return end
+    local was_navigating = self.navigating
+    self.navigating = true
+    pcall(UIManager.close, UIManager, widget)
+    self.navigating = was_navigating
+end
+
+--- Shows one level of the plugin, remembering how to draw it again.
+--
+-- The whole model in one function. A level with the same kind and key as the
+-- one on the glass replaces it - a page turn, a grouping switch, a refresh, a
+-- retry: the reader has not moved. Any other level is one step deeper and is
+-- pushed, so Back returns to it with the state it was left in.
+-- `render` draws the level and closes whatever it replaces.
+-- @tparam table level { kind, key, surface = "page"|"menu", state }
+-- @function render draws this level
+-- @treturn string|nil "pushed" or "replaced"
+function LightHouse:showLevel(level, render)
+    if type(level) ~= "table" or type(render) ~= "function" then return nil end
+    level.render = render
+    local stack = self:navStack()
+    local parent = Nav.top(stack)
+    -- A detail view of the screen underneath may leave that screen drawn: the
+    -- page the reader came from is revealed by closing the menu instead of
+    -- being painted again. Only the parent level's own page qualifies.
+    level.over_page = parent ~= nil
+        and parent.surface == "page"
+        and parent.widget ~= nil
+        and parent.widget == self.page
+    local action = Nav.show(stack, level)
+    if action == nil then return nil end
+    render()
+    return action
+end
+
+--- Goes up one level.
+-- The header's back mark, the Back key and a menu's own close all end here.
+-- Pops the level the reader is on and draws the one below it with the state it
+-- was left in; a parent whose page is still on the glass needs no redraw,
+-- because revealing it is the whole of going back. Popping the last level
+-- leaves the plugin, which is what Back has always done at the top.
+function LightHouse:goUp()
+    local stack = self:navStack()
+    local current = Nav.top(stack)
+    -- A menu view is redrawn from its items, so where it was scrolled to has to
+    -- be taken down before it is dropped.
+    if current and self.menu and type(self.menu.page) == "number" then
+        current.state = type(current.state) == "table" and current.state or {}
+        current.state.menu_page = self.menu.page
+    end
+    local previous = Nav.up(stack)
+    if not previous then
+        self:exitPlugin()
+        return
+    end
+    if previous.widget and previous.widget == self.page then
+        UIManager:setDirty(previous.widget, "ui")
+        return
+    end
+    if type(previous.render) == "function" then previous.render() end
+end
+
+--- Leaves the plugin, the way Back at the top level always has.
+function LightHouse:exitPlugin()
+    self:dismissWidget(self.menu)
+    self.menu = nil
+    self:dismissWidget(self.page)
+    self.page = nil
+    -- Nothing of this visit outlives it: a later visit starts at a top level
+    -- rather than inheriting a chain the reader has already left.
+    self.library_state = nil
+    Nav.reset(self:navStack())
+end
+
+--- Draws one page model as the plugin's full-screen view.
 -- The page replaces any page already on screen. A build that raises is reported
 -- as a designed failure screen instead of taking the process with it, because
 -- every widget construction here runs inside KOReader's paint path.
@@ -1576,6 +1672,11 @@ end
 -- @treturn table|nil the page widget
 function LightHouse:showPage(model, plan, handlers)
     handlers = handlers or {}
+    -- A page is a whole screen, so a menu left over from a level the reader has
+    -- left must not stay on the glass behind it. Closing it is not a step up:
+    -- the level stack already says where the reader is.
+    self:dismissWidget(self.menu)
+    self.menu = nil
     if self.page then
         UIManager:close(self.page)
         self.page = nil
@@ -1592,6 +1693,9 @@ function LightHouse:showPage(model, plan, handlers)
         on_action = handlers.on_action,
         on_switch = handlers.on_switch,
         on_overflow = handlers.on_overflow or function() self:showPageOverflow() end,
+        -- Back goes up one level. Before there was a stack this widget could
+        -- only close, which is why the header's back mark was an exit.
+        on_back = function() self:goUp() end,
         close_callback = function() self.page = nil end,
     })
     if not built_ok or type(page) ~= "table" then
@@ -1605,6 +1709,11 @@ function LightHouse:showPage(model, plan, handlers)
         return nil
     end
     self.page = page
+    -- The level owns the screen it drew: a menu opened over this page is gone
+    -- when the page is, and a step back onto this level needs no redraw while
+    -- the widget is still on the glass.
+    local level = Nav.top(self:navStack())
+    if level then level.widget = page end
     -- The model is kept on the plugin, not only inside the widget: it is what
     -- the screen was asked to draw, and the off-device suite asserts it (a
     -- framebuffer is not available there, and a screenshot is the device's
@@ -1804,7 +1913,14 @@ function LightHouse:openBookDetails(entry)
     end
     local title = Ui.rowTitle(target.title)
     if title == "" then title = _("Untitled") end
-    self:showMenu(title, self:buildBookDetails(target), { covers = false })
+    local items = self:buildBookDetails(target)
+    -- Open as the entry does: `book_id` when the row carries one (a session
+    -- row does, an OPDS row does not), else the title the reader tapped.
+    local book_id = Status.num(entry.book_id)
+    local key = book_id and ("id:" .. tostring(math.floor(book_id))) or ("title:" .. title)
+    self:showLevel({ kind = "book", key = key, surface = "menu" }, function()
+        self:showMenu(title, items, { covers = false })
+    end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -1899,6 +2015,9 @@ function LightHouse:forgetShelf()
 end
 
 --- Builds and shows the library page for one grouping.
+-- The page belongs to one level: the groupings and their pages are the top
+-- level, and a list filtered to one series, one author or one search is a level
+-- below it, so Back from that list returns to the grouping it was opened from.
 -- @tparam table[opt] options { mode, page, query, refresh }
 function LightHouse:openLibrary(options)
     options = options or {}
@@ -1929,9 +2048,24 @@ function LightHouse:openLibrary(options)
     -- Reported after the page is drawn, so the message is not hidden under it.
     local shelf_notice
 
+    -- The level this view is. A failure is still that level - the reader is on
+    -- the page they asked for, it just could not be drawn - so a failure
+    -- renders into the same level and Back keeps meaning "one step up".
+    local level = {
+        kind = "library",
+        key = Nav.libraryKey(query),
+        surface = "page",
+        state = state,
+    }
+    local function show_problem(spec)
+        self:showLevel(level, function()
+            self:showProblem(spec)
+        end)
+    end
+
     if not Client.isConfigured(config) then
         self.library_state = nil
-        self:showProblem{
+        show_problem{
             title = _("Library"),
             headline = errorHeadline("not_configured"),
             detail = describeError("not_configured"),
@@ -1971,7 +2105,7 @@ function LightHouse:openLibrary(options)
         end)
         if not body then
             self.library_state = nil
-            self:showProblem{
+            show_problem{
                 title = _("Library"),
                 headline = errorHeadline(err),
                 detail = describeError(err),
@@ -1991,7 +2125,7 @@ function LightHouse:openLibrary(options)
             -- empty library, and retrying the previous page is not a fix - say
             -- what happened and offer the way back.
             self.library_state = nil
-            self:showProblem{
+            show_problem{
                 title = _("Library"),
                 headline = _("That page is past the end of the library now"),
                 detail = _("The library changed since this page was opened. Go back to the first page to see what is there."),
@@ -2010,7 +2144,7 @@ function LightHouse:openLibrary(options)
         if #feed.entries == 0 then
             self.library_state = nil
             if query ~= "" then
-                self:showProblem{
+                show_problem{
                     title = _("Library"),
                     headline = T(_("No books match “%1”"), query),
                     detail = _("Check the spelling, or search by author or series."),
@@ -2020,7 +2154,7 @@ function LightHouse:openLibrary(options)
                     },
                 }
             else
-                self:showProblem{
+                show_problem{
                     title = _("Library"),
                     headline = _("This library is empty"),
                     detail = _("Add EPUBs from the LightHouse web app, then browse again."),
@@ -2084,7 +2218,7 @@ function LightHouse:openLibrary(options)
         end)
         if not grouping then
             self.library_state = nil
-            self:showProblem{
+            show_problem{
                 title = _("Library"),
                 headline = errorHeadline(err),
                 detail = describeError(err),
@@ -2136,12 +2270,21 @@ function LightHouse:openLibrary(options)
         end
     end
 
-    self:showPage(model, plan, {
-        on_action = dispatch,
-        on_switch = function(key)
-            self:openLibrary{ mode = key, page = 1 }
-        end,
-    })
+    -- Drawn through the level, so coming back to this list redraws the page
+    -- the reader left instead of fetching it again - and so the grouping, the
+    -- query and the page come back with it. `library_state` is put back at the
+    -- same time: the header's overflow menu reads it to offer refresh and the
+    -- grouping switch, and a restored level must offer its own, not its
+    -- child's.
+    self:showLevel(level, function()
+        self.library_state = state
+        self:showPage(model, plan, {
+            on_action = dispatch,
+            on_switch = function(key)
+                self:openLibrary{ mode = key, page = 1 }
+            end,
+        })
+    end)
     if shelf_notice then notice(shelf_notice, 4) end
 end
 
@@ -2305,6 +2448,15 @@ end
 -- with no connection at all. The server's sessions are merged on top when they
 -- are reachable, and only the books this device has never seen depend on them.
 function LightHouse:showReading()
+    -- A top-level level: Back from the shelf leaves the plugin, and the book
+    -- rows keep their own detail submenu inside this menu.
+    local level = { kind = "reading", key = "reading", surface = "menu" }
+    local function show_problem(spec)
+        self:showLevel(level, function()
+            self:showProblem(spec)
+        end)
+    end
+
     local local_records = self:withLocalScan(_("Reading books on this device…"), function()
         return self:localRecords()
     end)
@@ -2313,7 +2465,7 @@ function LightHouse:showReading()
 
     if #local_records == 0 then
         if not configured then
-            self:showProblem{
+            show_problem{
                 title = _("Currently reading"),
                 headline = errorHeadline("not_configured"),
                 detail = describeError("not_configured"),
@@ -2339,7 +2491,7 @@ function LightHouse:showReading()
         if not sessions then
             -- No server sessions and nothing local: a failed request is what
             -- happened, so say that instead of claiming nothing is in progress.
-            self:showProblem{
+            show_problem{
                 title = _("Currently reading"),
                 headline = errorHeadline(err),
                 detail = describeError(err),
@@ -2349,7 +2501,7 @@ function LightHouse:showReading()
                 },
             }
         else
-            self:showProblem{
+            show_problem{
                 title = _("Currently reading"),
                 headline = _("Nothing in progress yet"),
                 detail = _("Open a book in KOReader with progress sync on, then come back."),
@@ -2421,7 +2573,9 @@ function LightHouse:showReading()
         end)
     end
 
-    self:showMenu(_("Currently reading"), items, { covers = with_covers, layout = layout })
+    self:showLevel(level, function()
+        self:showMenu(_("Currently reading"), items, { covers = with_covers, layout = layout })
+    end)
 end
 
 --- Shows this device's highlights, newest first, grouped by book.
@@ -2430,11 +2584,18 @@ end
 -- beside the books on this device, read once when the view opens (`localRecords`
 -- caches that scan for the session), with no network call and no polling.
 function LightHouse:showHighlights()
+    local level = { kind = "highlights", key = "highlights", surface = "menu" }
+    local function show_problem(spec)
+        self:showLevel(level, function()
+            self:showProblem(spec)
+        end)
+    end
+
     local groups = Sidecar.highlightGroups(self:withLocalScan(_("Reading this device's highlights…"), function()
         return self:localRecords()
     end))
     if #groups == 0 then
-        self:showProblem{
+        show_problem{
             title = _("Highlights"),
             headline = _("No highlights on this device yet"),
             detail = _("Highlight a passage in KOReader and it appears here, read from this device - no connection needed."),
@@ -2465,7 +2626,9 @@ function LightHouse:showHighlights()
         end)
     end
 
-    self:showMenu(_("Highlights on this device"), items, { covers = false })
+    self:showLevel(level, function()
+        self:showMenu(_("Highlights on this device"), items, { covers = false })
+    end)
 end
 
 --- One book heading in the highlights view: title, author, highlight count.
@@ -2667,9 +2830,17 @@ end
 -- it ten pages long; the picture is now drawn as a 52-week grid of rects and the
 -- four bands around it are laid out to the height the screen reports, so nothing
 -- scrolls, nothing pages and every number still comes from the server.
+-- It is a top-level level, so Back from it leaves the plugin as it always has.
 function LightHouse:showStats()
+    local level = { kind = "stats", key = "stats", surface = "page" }
+    local function show_problem(spec)
+        self:showLevel(level, function()
+            self:showProblem(spec)
+        end)
+    end
+
     if not Client.isConfigured(config) then
-        self:showProblem{
+        show_problem{
             title = _("Reading stats"),
             headline = errorHeadline("not_configured"),
             detail = describeError("not_configured"),
@@ -2686,7 +2857,7 @@ function LightHouse:showStats()
         return self:fetchStats()
     end)
     if not payload or type(payload.numbers) ~= "table" then
-        self:showProblem{
+        show_problem{
             title = _("Reading stats"),
             headline = errorHeadline(err),
             detail = describeError(err),
@@ -2720,11 +2891,13 @@ function LightHouse:showStats()
     -- The statistics page is not the library: the overflow menu offers refresh
     -- and the library, not the grouping switch.
     self.library_state = nil
-    self:showPage(model, plan, {
-        on_action = function(action)
-            if action.kind == "book" then self:openBookDetails(action.entry) end
-        end,
-    })
+    self:showLevel(level, function()
+        self:showPage(model, plan, {
+            on_action = function(action)
+                if action.kind == "book" then self:openBookDetails(action.entry) end
+            end,
+        })
+    end)
 end
 
 --- Downloads a book by its resolved Calibre id (used by the reading shelf).
@@ -2810,10 +2983,18 @@ function LightHouse:startDownload(entry, filepath)
     }))
 end
 
---- Shows (or re-uses) the results menu.
+--- Draws one results menu: the current list, the shelf, Highlights, a book.
 -- The page geometry comes from `Ui.layout`, so every view shares one row
 -- rhythm: the same margins, the same one-line rows, and a left gutter exactly
 -- as wide as the cover slot on views that draw covers.
+--
+-- Every level gets its own menu widget. Reusing one and swapping its item table
+-- is what used to make a view unreachable: the swap had to clear the menu's own
+-- sub-item history (a new top-level view must not inherit the previous submenu
+-- chain), and nothing then remembered the screen the reader had come from. A
+-- fresh widget has no history to clear, and the level stack remembers the
+-- screen; a submenu still pops inside its own menu, which is the only thing
+-- that history is for.
 -- @string title menu title
 -- @tparam table items item_table
 -- @tparam[opt] table options { covers = boolean, layout = table }
@@ -2821,13 +3002,15 @@ function LightHouse:showMenu(title, items, options)
     options = options or {}
     local layout = options.layout or self:layoutFor(options.covers == true)
     local gutter = options.covers == true and layout.gutter or 0
-    if self.menu then
-        -- A new top-level view must not inherit the previous submenu back-stack.
-        self.menu.item_table_stack = {}
-        self.menu.items_per_page = layout.rows
-        self.menu.state_w = gutter
-        self.menu:switchItemTable(title, items)
-        return
+    self:dismissWidget(self.menu)
+    self.menu = nil
+    local level = Nav.top(self:navStack())
+    -- A page stays on the glass only when it belongs to the level this menu was
+    -- opened from - a book's detail view of the list underneath. A page from a
+    -- level the reader has left would come back with the wrong table.
+    if self.page and not (level and level.over_page) then
+        self:dismissWidget(self.page)
+        self.page = nil
     end
     self.menu = squareWidget(Menu, {
         title = title,
@@ -2835,9 +3018,24 @@ function LightHouse:showMenu(title, items, options)
         title_multilines = true,
         items_per_page = layout.rows,
         state_w = gutter,
-        close_callback = function() self.menu = nil end,
+        close_callback = function()
+            self.menu = nil
+            -- A menu closes for two reasons: the reader pressed Back, which is
+            -- a step up, or the plugin closed it while drawing another level,
+            -- which is not. `navigating` is set for the second.
+            if not self.navigating then self:goUp() end
+        end,
     })
+    if level then level.widget = self.menu end
     UIManager:show(self.menu)
+    -- A menu level is drawn again from its items when the reader comes back to
+    -- it, so put it back on the page it was left on.
+    local state = level and level.state
+    if type(state) == "table" and type(state.menu_page) == "number" and state.menu_page > 1 then
+        -- Guarded: the page jump is the menu's own API, and a build without it
+        -- shows the first page rather than raising inside a render.
+        pcall(function() self.menu:onGotoPage(state.menu_page) end)
+    end
 end
 
 -- Pure helpers exposed for the repository's Lua test harness. They stay plain
