@@ -1075,11 +1075,11 @@ end
 -- @number screen_w screen width in pixels
 -- @number screen_h screen height in pixels
 -- @number scale pixels per unit for this device (the factor main.lua derives; 1 = one unit is one pixel)
--- @treturn table plan { pad, content_w, header, hero, band_head, band_row,
---                       section_head, footer, hairline, bar, reading_rows,
---                       reading_h, reading_cover_w, reading_cover_h,
---                       session_rows, session_h, heat_weeks, heat_gap,
---                       heat_cell_w, heat_cell_h, total, slack }
+-- @treturn table plan { scale, height, pad, content_w, header, hero,
+--                       band_head, band_row, section_head, footer, hairline,
+--                       bar, reading_rows, reading_h, reading_cover_w,
+--                       reading_cover_h, session_rows, session_h, heat_weeks,
+--                       heat_gap, heat_cell_w, heat_cell_h, total, slack }
 function Ui.pagePlan(screen_w, screen_h, scale)
     local tokens = Ui.tokens
     local s = numberIn(scale, 1, 0.5, 4)
@@ -1278,9 +1278,9 @@ end
 -- @number screen_h screen height in pixels
 -- @number scale pixels per unit for this device (the factor main.lua derives; 1 = one unit is one pixel)
 -- @tparam table[opt] options { with_switch = boolean, min_rows = number }
--- @treturn table plan { pad, content_w, header, hairline, switch_h, subline_h,
---                       footer, row_h, rows, bar, cover_w, cover_h, total,
---                       slack }
+-- @treturn table plan { scale, height, pad, content_w, header, hairline,
+--                       switch_h, subline_h, footer, row_h, rows, bar, cover_w,
+--                       cover_h, total, slack }
 function Ui.listPlan(screen_w, screen_h, scale, options)
     options = options or {}
     local tokens = Ui.tokens
