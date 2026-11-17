@@ -1611,6 +1611,17 @@ function LightHouse:showPage(model, plan, handlers)
     -- job).
     self.last_page_model = model
     UIManager:show(page)
+    -- The page covers the screen, so the swap has to invalidate the screen. It
+    -- cannot leave that to whatever refresh happens to be queued: `UIManager`
+    -- `show` and `close` enqueue none of their own (`_refresh` returns early
+    -- when it is given no refresh mode), and the fallback that replaces a
+    -- missing refresh only runs while the queue is empty. The spinner this
+    -- view shows while it fetches leaves a deferred refresh behind that reports
+    -- its own box - a band across the middle of the screen - so a page turn
+    -- could be flushed over that band alone, leaving the rest of the glass
+    -- showing the page just left. Ask for the page's own box explicitly; the
+    -- queued band then merges into it instead of standing in for it.
+    UIManager:setDirty(page, "ui")
     return page
 end
 

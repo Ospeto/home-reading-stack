@@ -1720,8 +1720,10 @@ package.path = plugin_root .. "/?.lua;" .. package.path
 
 -- ---------------------------------------------------------------- KOReader stubs
 local shown = {}
+local dirty = {}
 local logs = {}
 _G.__lighthouse_logs = logs
+_G.__lighthouse_dirty = dirty
 
 -- KOReader widgets are constructed with Widget:new{...} (colon call), so the
 -- stub must accept (self, options) and hand the options table back with a tag.
@@ -1883,7 +1885,13 @@ package.preload["ui/uimanager"] = function()
     show = function(_, widget) shown[#shown + 1] = widget end,
     close = function() end,
     forceRePaint = function() end,
-    setDirty = function() end,
+    -- Records every invalidation the plugin asks for, so a harness can assert
+    -- which region a screen swap claims. The real UIManager turns a call with
+    -- no region into the whole screen (_refresh), which is what the repaint
+    -- harness models; a record is kept here so nothing else has to guess.
+    setDirty = function(_, widget, refreshtype, region)
+      dirty[#dirty + 1] = { widget = widget, mode = refreshtype, region = region }
+    end,
   }
 end
 package.preload["ui/widget/container/widgetcontainer"] = function()
@@ -3702,6 +3710,233 @@ describe("plugin one-page views", () => {
       "Could not reach the LightHouse server. Check Wi-Fi and the server address in the Connection screen.",
     );
     expect(out.fail_actions).toContain("Try again");
+  });
+});
+
+/**
+ * The region a page swap asks the panel to repaint.
+ *
+ * UIManager:show() and close() enqueue no refresh of their own: _refresh
+ * returns immediately when it is handed no mode, and the whole-screen fallback
+ * that replaces a missing refresh runs only while the queue is empty. So a view
+ * that swaps a full-screen widget and says nothing inherits whatever refresh is
+ * already queued - and the spinner this plugin shows while it fetches leaves a
+ * deferred refresh behind that reports its own box, a band across the middle of
+ * the screen. A page turn can then be flushed over that band alone, and the rest
+ * of the glass keeps the page just left: the pixels change in the middle and
+ * nowhere else, which is exactly the reported symptom.
+ *
+ * This harness models the framework's own arithmetic (a missing region is the
+ * screen, a region that open-intersects a queued one is merged into it, and the
+ * empty-queue fallback) and asserts three things about a library page turn: the
+ * page box is the screen, the swap asks for the whole screen itself, and the
+ * same repaint without that ask would cover the spinner's band only.
+ */
+const PAGE_REPAINT_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
+-- A configured plugin, the way the server hands it over.
+local plugin_config = {
+  base_url = "http://192.168.31.15:8086",
+  api_key = "harness-key",
+  page_size = 40,
+  plugin_version = "1.6.2",
+  generated_at = "2026-11-17T00:00:00.000Z",
+  request_block_timeout = 10,
+  request_total_timeout = 90,
+  download_block_timeout = 15,
+  download_total_timeout = 300,
+}
+package.preload["lighthouse_config"] = function() return plugin_config end
+
+-- A stubbed catalog, served through the client's transport.
+local QUOTE = string.char(34)
+local function feed_xml(count)
+  local entries = {}
+  for index = 1, count do
+    local href = "http://host/api/books/" .. index .. "/download/epub"
+    entries[#entries + 1] = "<entry><title>Book " .. index .. "</title><id>urn:uuid:" .. index
+      .. "</id><link rel=" .. QUOTE .. "http://opds-spec.org/acquisition" .. QUOTE
+      .. " href=" .. QUOTE .. href .. QUOTE .. "/></entry>"
+  end
+  return "<feed><title>LightHouse</title>" .. table.concat(entries, "") .. "</feed>"
+end
+
+package.loaded["socket.http"] = {
+  request = function(request)
+    local body = feed_xml(12)
+    if request and request.sink then
+      request.sink(body)
+      request.sink(nil)
+    end
+    return 1, 200, {}
+  end,
+}
+package.loaded["socket.https"] = package.loaded["socket.http"]
+package.loaded["ltn12"] = {
+  sink = {
+    table = function(target)
+      return function(chunk)
+        if chunk then target[#target + 1] = chunk end
+        return 1
+      end
+    end,
+    file = function() end,
+  },
+}
+package.loaded["json"] = { decode = function() return {} end }
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+
+-- What the stubbed Device.screen reports, and therefore what UIManager calls
+-- the whole screen.
+local SCREEN_W, SCREEN_H = 600, 800
+
+local function full_screen()
+  return { x = 0, y = 0, w = SCREEN_W, h = SCREEN_H }
+end
+
+local function covers_screen(rect)
+  if type(rect) ~= "table" then return false end
+  local x, y = rect.x or 0, rect.y or 0
+  return x <= 0 and y <= 0 and x + (rect.w or 0) >= SCREEN_W and y + (rect.h or 0) >= SCREEN_H
+end
+
+local function open_intersect(a, b)
+  return a.x < b.x + b.w and b.x < a.x + a.w and a.y < b.y + b.h and b.y < a.y + a.h
+end
+
+local function combine(a, b)
+  local x = math.min(a.x, b.x)
+  local y = math.min(a.y, b.y)
+  local right = math.max(a.x + a.w, b.x + b.w)
+  local bottom = math.max(a.y + a.h, b.y + b.h)
+  return { x = x, y = y, w = right - x, h = bottom - y }
+end
+
+local function describe(rect)
+  if type(rect) ~= "table" then return "nil" end
+  return string.format("%d,%d,%d,%d", rect.x or 0, rect.y or 0, rect.w or 0, rect.h or 0)
+end
+
+-- UIManager:_refresh and _repaint, in full: a request with no region is the
+-- screen, a request that open-intersects a queued one is merged into it, and the
+-- whole-screen fallback fires only when nothing at all was enqueued.
+local function simulate_repaint(immediate, deferred)
+  local queue = {}
+  local function enqueue(region)
+    region = region or full_screen()
+    for index = 1, #queue do
+      if open_intersect(region, queue[index]) then
+        local merged = combine(region, queue[index])
+        table.remove(queue, index)
+        return enqueue(merged)
+      end
+    end
+    queue[#queue + 1] = region
+  end
+  for _, request in ipairs(immediate or {}) do enqueue(request.region) end
+  for _, pending in ipairs(deferred or {}) do enqueue(pending()) end
+  if #queue == 0 then enqueue(nil) end
+  local union = queue[1]
+  for index = 2, #queue do union = combine(union, queue[index]) end
+  return union
+end
+
+-- The deferred refresh an InfoMessage leaves behind when it closes
+-- (frontend/ui/widget/infomessage.lua reports its own box): measured on the
+-- device as 828x96 at 122,676, a band across the middle of the screen.
+local spinner_box = { x = 122, y = 676, w = 828, h = 96 }
+local function spinner_refresh() return spinner_box end
+
+-- 1. A library page, drawn the way the plugin draws it.
+local before = #_G.__lighthouse_dirty
+LightHouse:openLibrary{ mode = "books", page = 1 }
+
+local page
+for index = #_G.__lighthouse_dirty, before + 1, -1 do
+  local call = _G.__lighthouse_dirty[index]
+  if type(call.widget) == "table" and call.widget.plan and call.widget.panels then
+    page = call.widget
+    break
+  end
+end
+print("page_shown=" .. tostring(page ~= nil))
+
+-- Every invalidation the swap asked for, and the ones that name the page.
+local asks = {}
+for index = before + 1, #_G.__lighthouse_dirty do asks[#asks + 1] = _G.__lighthouse_dirty[index] end
+local page_asks = {}
+for _, call in ipairs(asks) do
+  if call.widget == page and type(call.mode) == "string" then page_asks[#page_asks + 1] = call end
+end
+print("page_asks=" .. tostring(#page_asks))
+print("page_ask_mode=" .. tostring(page_asks[1] and page_asks[1].mode or "none"))
+print("page_ask_has_region=" .. tostring(page_asks[1] ~= nil and page_asks[1].region ~= nil))
+
+-- 2. The turn's repaint with the spinner refresh still queued. A request with
+-- no region is the screen, exactly as UIManager reads it.
+local immediate = {}
+for _, call in ipairs(page_asks) do immediate[#immediate + 1] = { mode = call.mode, region = call.region } end
+local swap = simulate_repaint(immediate, { spinner_refresh })
+print("swap_region=" .. describe(swap))
+print("swap_covers_screen=" .. tostring(covers_screen(swap)))
+
+-- 3. The same repaint without the page's own ask: the spinner band alone.
+local spinner_only = simulate_repaint({}, { spinner_refresh })
+print("spinner_region=" .. describe(spinner_only))
+print("spinner_covers_screen=" .. tostring(covers_screen(spinner_only)))
+
+-- 4. The box the page itself reports is the screen.
+local page_size = page and page:getSize() or {}
+local page_box = { x = 0, y = 0, w = page_size.w or 0, h = page_size.h or 0 }
+print("page_box=" .. describe(page_box))
+print("page_box_covers_screen=" .. tostring(covers_screen(page_box)))
+
+print("OK")
+`;
+
+describe("plugin page swaps invalidate the screen they cover", () => {
+  /** Runs the repaint harness against the committed template. */
+  function runHarness(): Record<string, string> {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-repaint-"));
+    const harnessPath = path.join(workdir, "page_repaint_harness.lua");
+    fs.writeFileSync(harnessPath, PAGE_REPAINT_HARNESS);
+    const res = spawnSync(LUA_BINARY as string, [harnessPath, KOPLUGIN_TEMPLATE_DIR], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    return Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+  }
+
+  it("asks for the whole screen, so a queued spinner band is never the turn's only refresh", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+
+    // The page is shown, and the swap says so itself: one ask, in the fast UI
+    // mode, with no hand-written region (UIManager turns that into the screen).
+    expect(out.page_shown).toBe("true");
+    expect(out.page_asks).toBe("1");
+    expect(out.page_ask_mode).toBe("ui");
+    expect(out.page_ask_has_region).toBe("false");
+
+    // With the spinner's deferred refresh still queued, the turn covers the
+    // screen: the band merges into the page's own rectangle.
+    expect(out.swap_covers_screen).toBe("true");
+
+    // Without the page's ask the same repaint flushes the band and nothing
+    // else, which is the defect this fix removes.
+    expect(out.spinner_region).toBe("122,676,828,96");
+    expect(out.spinner_covers_screen).toBe("false");
   });
 });
 
