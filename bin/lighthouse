@@ -2039,6 +2039,14 @@ cmd_sync_kindle() {
   fi
   exec bun run "$script_path" "$@"
 }
+cmd_kindle_ssh() {
+  local script_path="${LIGHTHOUSE_ROOT}/scripts/kindle-ssh.ts"
+  if [ ! -f "$script_path" ]; then
+    echo "Error: ${script_path} not found" >&2
+    exit 1
+  fi
+  exec bun run "$script_path" "$@"
+}
 cmd_firecrawl() {
   local script_path="${LIGHTHOUSE_ROOT}/scripts/firecrawl-cli.ts"
   if [ ! -f "$script_path" ]; then
@@ -2174,6 +2182,7 @@ Commands:
   enrich-synopsis [options] Batch enrich missing book synopses from local EPUBs and online APIs
   sync-obsidian [options]  Sync highlights and reading notes from KOReader/Kindle to Obsidian
   sync-kindle [options]    Two-way sync: push books & pull highlights from USB-C Kindle/e-Reader
+  kindle-ssh <subcommand>  Discover, probe and log in to a Kindle over Wi-Fi (KOReader SSH) or USB
   heal-covers [options]    Audit & heal Calibre volume covers, purge stale thumbnail caches
   ingest-novel <url> [options] Ingest web novel via FanFicFare (RoyalRoad, AO3, ScribbleHub, etc.)
   firecrawl <cmd> [options] Control self-hosted Firecrawl on-demand cluster (status|up|down)
@@ -2288,6 +2297,7 @@ case "$ACTION" in
   ingest-novel|webnovel) cmd_ingest_novel "$@" ;;
   sync-obsidian) cmd_sync_obsidian "$@" ;;
   sync-kindle) cmd_sync_kindle "$@" ;;
+  kindle-ssh) cmd_kindle_ssh "$@" ;;
   firecrawl) cmd_firecrawl "$@" ;;
   backup-ssd) cmd_backup_ssd "$@" ;;
   install-daemons) cmd_install_daemons "$@" ;;
