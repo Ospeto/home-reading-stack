@@ -15,6 +15,7 @@ import {
   MDNS_HOST_CANDIDATES,
   USB_LINK_PREFIX,
   buildSshArgs,
+  classifySshFailure,
   classifySshServer,
   defaultIdentityFile,
   deriveScanTargets,
@@ -395,6 +396,62 @@ describe("diagnoseRoute", () => {
     expect(body).not.toContain("kindle-ssh key");
   });
 
+  it("keeps the selected key and port in the timeout re-check it prints", () => {
+    const decision = diagnoseRoute({
+      discovery: makeDiscovery({ devices: [kindleDevice({ host: "192.168.31.73", port: KINDLE_ALT_SSH_PORT })] }),
+      alias: "kindle1",
+      identityFile: "/tmp/kindle_ed25519",
+      authResult: { authenticated: false, timedOut: true, error: "ssh did not finish within 10000 ms" },
+    });
+    // Re-checking on discovery defaults would verify a different route and key.
+    expect(decision.body.join("\n")).toContain(
+      "probe --host 192.168.31.73 --port 22 --identity /tmp/kindle_ed25519 --timeout 1500",
+    );
+  });
+
+  it("blames the changed host key, not the key the operator installed", () => {
+    const decision = diagnoseRoute({
+      discovery: makeDiscovery({ devices: [kindleDevice()] }),
+      alias: "kindle1",
+      authResult: {
+        authenticated: false,
+        failure: "host-key",
+        error: "Host key verification failed.",
+      },
+    });
+    expect(decision.state).toBe("host-key-changed");
+    expect(decision.code).toBe(2);
+    expect(decision.headline).toContain("host key");
+    const body = decision.body.join("\n");
+    expect(body).toContain("ssh-keygen -R");
+    expect(body).not.toContain("Install this Mac mini's public key");
+  });
+
+  it("separates a failed connection from an untrusted key", () => {
+    const decision = diagnoseRoute({
+      discovery: makeDiscovery({ devices: [kindleDevice()] }),
+      alias: "kindle1",
+      authResult: { authenticated: false, failure: "connect", error: "Connection timed out during banner exchange" },
+    });
+    expect(decision.state).toBe("ssh-unreachable");
+    expect(decision.code).toBe(2);
+    const body = decision.body.join("\n");
+    expect(body).toContain("route -n get 192.168.31.87");
+    expect(body).not.toContain("Install this Mac mini's public key");
+  });
+
+  it("classifies what ssh said so the remedy matches it", () => {
+    // Independently derived from openssh's own diagnostics.
+    expect(classifySshFailure("Host key verification failed.", false)).toBe("host-key");
+    expect(
+      classifySshFailure("@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@", false),
+    ).toBe("host-key");
+    expect(classifySshFailure("Permission denied (publickey).", false)).toBe("key");
+    expect(classifySshFailure("Connection timed out during banner exchange", false)).toBe("connect");
+    expect(classifySshFailure("No route to host", false)).toBe("connect");
+    expect(classifySshFailure("ssh did not finish", true)).toBe("timeout");
+  });
+
   it("names the key-install step when auth fails", () => {
     const decision = diagnoseRoute({
       discovery: makeDiscovery({ devices: [kindleDevice()] }),
@@ -420,7 +477,7 @@ describe("diagnoseRoute", () => {
     });
     // `key` installs the public half of the selected key; without --identity the
     // suggestion would install the default key and verify against the wrong one.
-    expect(decision.body.join("\n")).toContain("kindle-ssh key --host 192.168.31.87 --identity /tmp/kindle_ed25519");
+    expect(decision.body.join("\n")).toContain("kindle-ssh key --host 192.168.31.87 --port 2222 --identity /tmp/kindle_ed25519");
   });
 
   it("asks for a full probe when a responder was found but auth was not attempted", () => {
@@ -679,7 +736,8 @@ describe("USB route helpers", () => {
     // off (or an adapter that is not the gadget), not a working route - so the
     // report names the adapter, stays hedged, and prints no login command.
     expect(report).toContain("en9");
-    expect(report).toContain("USB networking may be off on the device, or this adapter is not the gadget");
+    const hedges = report.split("USB networking may be off on the device").length - 1;
+    expect(hedges).toBe(1);
     expect(report).not.toContain("Next:");
   });
 
@@ -834,6 +892,25 @@ describe("parseCliArgs", () => {
     const parsed = parseCliArgs(["probe", "--expect-serial", "g092ap03315200g6"]);
     if ("help" in parsed || "error" in parsed) throw new Error("expected options");
     expect(parsed.expectSerial).toBe("G092AP03315200G6");
+  });
+
+  it("rejects an unknown device alias instead of treating it as device 1", () => {
+    for (const value of ["3", "foo"]) {
+      const parsed = parseCliArgs(["probe", "--device", value]);
+      if (!("error" in parsed)) throw new Error(`expected a usage error for ${value}`);
+      expect(parsed.error).toContain("--device must be");
+    }
+    expect(parseCliArgs(["probe", "--device"])).toHaveProperty("error");
+  });
+
+  it("rejects an identity option with no value instead of passing an empty path", () => {
+    expect(parseCliArgs(["probe", "--identity"])).toHaveProperty("error");
+    expect(parseCliArgs(["probe", "--identity", ""])).toHaveProperty("error");
+  });
+
+  it("refuses device options on usb, which only reports the cable link", () => {
+    expect(parseCliArgs(["usb", "--host", "192.168.15.244"])).toHaveProperty("error");
+    expect(parseCliArgs(["usb", "--device", "2"])).toHaveProperty("error");
   });
 
   it("rejects a malformed expected serial", () => {
@@ -1329,6 +1406,7 @@ describe("formatDiscoveryReport", () => {
     // The printed wrapper has to reach the same device as the login command and
     // the pin block; --device alone would re-select the sorted-first Kindle (.73).
     expect(report).toContain("connect --device kindle1 --host 192.168.31.167");
+    expect(report).toContain("--port 2222");
   });
 
   it("prints the selected identity key instead of the default", () => {

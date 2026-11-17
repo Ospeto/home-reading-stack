@@ -1043,7 +1043,7 @@ Only a **dropbear** banner counts as a Kindle. An `OpenSSH` responder on port 22
 
 > **Kindles do not answer `ping`.** Their firmware drops ICMP while serving SSH normally, so any ping-first scan will report a healthy device as absent. The tool therefore probes every address in the subnet on both ports and never pre-filters on ICMP.
 
-`find` exits `0` when a Kindle responder was found and `1` when nothing was found - it is discovery only, so it never authenticates and never returns `2`. When the printed candidates do not include the device you asked for, `find` says so in place of the login command instead of printing another device's address. `probe`, `connect` and `key` exit `0` only on a verified route; they exit `2` when the route exists but cannot log in yet, or when the unit that answered reports a different serial than `--expect-serial`. `connect -- <command>` exits with the remote command's own status, exactly as `ssh` does, and `255` if the wrapper killed that command at its 120 s budget (the route was fine; use `ssh` directly for long jobs). `usb` exits `0` when the link answered, `2` when the USB route is not up (no candidate link interface, or nothing answered on either port).
+`find` exits `0` when a Kindle responder was found and `1` when nothing was found - it is discovery only, so it never authenticates and never returns `2`. When the printed candidates do not include the device you asked for, `find` says so in place of the login command instead of printing another device's address. `probe`, `connect` and `key` exit `0` only on a verified route; they exit `2` when the route exists but cannot be used yet - SSH closed, key missing, a different serial than `--expect-serial`, a changed host key, a failed connection, or a key check that ran out of time (retry with a longer budget; that one is not an untrusted key). `connect -- <command>` exits with the remote command's own status, exactly as `ssh` does, and `255` if the wrapper killed that command at its 120 s budget (the route was fine; use `ssh` directly for long jobs). `usb` exits `0` when the link answered, `2` when the USB route is not up (no candidate link interface, or nothing answered on either port).
 
 ### 2. Why there is no DHCP reservation pinning the address
 
@@ -1215,6 +1215,8 @@ After the revert the host re-enumerated "Internal Storage", `en6` disappeared, `
 | Hosts up but `2222` closed | The network is fine; KOReader is not running | Start KOReader's SSH server. Not a network fault |
 | `probe` says *key authentication failed* | Route exists, key is not trusted | `bin/lighthouse kindle-ssh key --device 1` (needs password auth once) |
 | `probe` says *did not finish the key check within the budget* | The daemon is up, the device was too busy or asleep to complete the key exchange in time - the key state is **unknown**, not wrong | Do not reinstall the key; re-run with `--timeout 1500`, or read `/proc/usid` by hand over `ssh` |
+| `probe` says *not with the host key this Mac remembers* | The address now presents a different host key - a moved DHCP lease, another Kindle, or a reflashed device. Installing a key cannot fix it | Clear the stale entry (`ssh-keygen -R '[<addr>]:<port>'`), re-run `probe`, and confirm the serial is the unit you meant |
+| `probe` says *the connection itself failed* | The banner answered but the session did not get through: routing or a sleeping device on this Mac's side, not an untrusted key | Re-run `probe`; if it persists check `route -n get <addr>`. Do not reinstall the key |
 | `22` answers with `OpenSSH` | Not the Kindle - a computer or NAS on the same subnet | Ignore; the tool already refuses it as a candidate |
 | Login hangs then says *Connection timed out* | The address moved (DHCP) or the device slept mid-session | Rerun `bin/lighthouse kindle-ssh find`; never reuse an old address |
 | `probe`/`connect` says *not the expected … serial* | The route works but it reached the other Kindle: the lease moved, and `--device 1` is address order, not identity | Read the serial it printed, confirm it is the unit you meant, and rerun `find`; keep `--expect-serial` on verification runs |
@@ -1272,7 +1274,7 @@ Also verified on this Mac mini (real runs):
 | `find --device 2` / `connect --device 2` | Selects the second *device* by address order (one entry per host, even when a unit answers on both `2222` and `22`); refuses to silently substitute the first |
 | `usb` | With the cable attached and the gadget up, reports the `RNDIS/Ethernet Gadget` link and, once it answers, prints the login command for the port that answered; a USB Ethernet dongle serving the LAN is not mistaken for the gadget |
 | `scripts/kindle-key-install.sh` | Idempotent install, `700`/`600` permissions, exact-line uninstall, `--dry-run` writes nothing, bad key rejected |
-| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 105 passing |
+| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 112 passing |
 
 #### Proven: Route B on one device (USB cable)
 

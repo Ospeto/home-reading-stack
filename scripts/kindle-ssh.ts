@@ -30,7 +30,9 @@
  *      USB link answered
  *   1  find: nothing answered discovery; probe/connect/key: no device could be found
  *   2  probe/connect/key: a device was found but the route is not usable yet (SSH closed / key
- *      missing), or it reported a different serial than --expect-serial;
+ *      missing), it reported a different serial than --expect-serial, the address now presents a
+ *      different host key, the connection failed, or the key check ran out of time and the key
+ *      state is unknown (retry with a longer budget - do not reinstall the key);
  *      usb: the USB route is not up (no candidate link interface, or nothing answered)
  *   3  usage error
  * `connect -- <command>` instead exits with the remote command's own status, as ssh does, and 255
@@ -776,7 +778,15 @@ export async function discoverKindle(options: DiscoverOptions = {}): Promise<Dis
 // Route evaluation / diagnosis
 // ---------------------------------------------------------------------------
 
-export type RouteState = "verified" | "identity-mismatch" | "auth-failed" | "ssh-timeout" | "ssh-closed" | "not-found";
+export type RouteState =
+  | "verified"
+  | "identity-mismatch"
+  | "auth-failed"
+  | "host-key-changed"
+  | "ssh-unreachable"
+  | "ssh-timeout"
+  | "ssh-closed"
+  | "not-found";
 
 export interface RouteDecision {
   state: RouteState;
@@ -790,7 +800,7 @@ export interface RouteDecision {
 export interface DiagnosisInput {
   discovery: DiscoveryResult;
   alias: string;
-  authResult?: { authenticated: boolean; error?: string; output?: string; timedOut?: boolean };
+  authResult?: { authenticated: boolean; error?: string; output?: string; timedOut?: boolean; failure?: SshFailure };
   /** Set when a specific device was requested but could not be selected. */
   selectionNote?: string;
   /** The device actually selected for this operation, if any. */
@@ -916,10 +926,48 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
         "A busy or sleeping device looks exactly like this, so do not reinstall the key on the strength of it.",
         "",
         "Re-run with a longer budget, or read the identity by hand:",
-        `  bin/lighthouse kindle-ssh probe --host ${device.host} --timeout 1500`,
+        `  bin/lighthouse kindle-ssh probe${routeArgs(device.host, device.port, identityFile)} --timeout 1500`,
         `  ssh -p ${device.port} -i ${identityFile ?? defaultIdentityFile()} -o BatchMode=yes root@${device.host} 'cat /proc/usid'`,
         "",
         `SSH said: ${authResult.error ?? `ssh did not finish within its budget`}`,
+      ],
+      device,
+    };
+  }
+
+  if (authResult?.failure === "host-key") {
+    return {
+      state: "host-key-changed",
+      code: 2,
+      headline: `${alias} answered at ${device.host}:${device.port}, but not with the host key this Mac remembers.`,
+      body: [
+        "The SSH daemon is running; what changed is the host key this Mac has on file for that address.",
+        "That is what a moved DHCP lease or a reflashed device looks like, and installing the key cannot fix it.",
+        "",
+        "Clear the stale entry, then re-run the probe to confirm which unit answers:",
+        `  ssh-keygen -R '[${device.host}]:${device.port}'`,
+        `  bin/lighthouse kindle-ssh probe${routeArgs(device.host, device.port, identityFile)}`,
+        "",
+        `SSH said: ${authResult.error ?? "Host key verification failed"}`,
+      ],
+      device,
+    };
+  }
+
+  if (authResult?.failure === "connect") {
+    return {
+      state: "ssh-unreachable",
+      code: 2,
+      headline: `${alias} could not be reached at ${device.host}:${device.port}: the connection itself failed.`,
+      body: [
+        "The banner answered a moment ago, so the daemon is up but the session did not get through.",
+        "This is a network or routing condition on this Mac, not an untrusted key, so installing the key again will not help.",
+        "",
+        "Re-run the probe, and if it persists check the route to that address:",
+        `  bin/lighthouse kindle-ssh probe${routeArgs(device.host, device.port, identityFile)}`,
+        `  route -n get ${device.host}`,
+        "",
+        `SSH said: ${authResult.error ?? "connection failed"}`,
       ],
       device,
     };
@@ -934,7 +982,7 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
         `This is a route that exists but cannot log in yet: the SSH daemon is running, the key is not trusted.`,
         "",
         "Install this Mac mini's public key on the device (one time, while a route works):",
-        `  bin/lighthouse kindle-ssh key --host ${device.host}${identityArg(identityFile)}`,
+        `  bin/lighthouse kindle-ssh key${routeArgs(device.host, device.port, identityFile)}`,
         "",
         "If a password prompt is acceptable for that one step, do it by hand instead:",
         `  ssh -p ${device.port} root@${device.host} 'sh -s' < scripts/kindle-key-install.sh`,
@@ -953,7 +1001,7 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
     headline: `${alias} answered on ${device.host}:${device.port} but authentication was not verified.`,
     body: [
       "Run a full probe to attempt key authentication and capture the remote identity:",
-      `  bin/lighthouse kindle-ssh probe --host ${device.host}${identityArg(identityFile)}`,
+      `  bin/lighthouse kindle-ssh probe${routeArgs(device.host, device.port, identityFile)}`,
     ],
     device,
   };
@@ -985,6 +1033,14 @@ export function defaultIdentityFile(): string {
 function identityArg(identityFile?: string): string {
   if (!identityFile || identityFile === defaultIdentityFile()) return "";
   return ` --identity ${identityFile}`;
+}
+
+/**
+ * Address/port/identity fragment for a printed follow-up command, so pasting it
+ * re-runs the route that was actually tried rather than discovery's defaults.
+ */
+function routeArgs(host: string | undefined, port: number, identityFile?: string): string {
+  return `${host ? ` --host ${host}` : ""} --port ${port}${identityArg(identityFile)}`;
 }
 
 export function expandHome(file: string): string {
@@ -1060,6 +1116,31 @@ export interface AuthCheck {
   rawCommand: string;
   /** The ssh session was killed at its budget, so the key state is unknown. */
   timedOut: boolean;
+  /** Why ssh failed, so the caller can name the right next step. */
+  failure: SshFailure;
+}
+
+export type SshFailure = "none" | "timeout" | "host-key" | "connect" | "key";
+
+/**
+ * Separate what ssh actually said from "the key is untrusted": a changed host key
+ * or a connect failure needs a different remedy, and reinstalling the key cannot
+ * fix either of them.
+ */
+export function classifySshFailure(text: string, timedOut: boolean): SshFailure {
+  if (timedOut) return "timeout";
+  if (/host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED|POSSIBLE DNS SPOOFING|host key for .* has changed/i.test(text)) {
+    return "host-key";
+  }
+  if (/permission denied|no matching (host key|key exchange)|publickey/i.test(text)) return "key";
+  if (
+    /connection timed out|operation timed out|no route to host|network is unreachable|connection refused|connection closed|connection reset|broken pipe/i.test(
+      text,
+    )
+  ) {
+    return "connect";
+  }
+  return "key";
 }
 
 export async function verifyKeyAuth(target: SshTarget, timeoutMs = 15000): Promise<AuthCheck> {
@@ -1073,12 +1154,13 @@ export async function verifyKeyAuth(target: SshTarget, timeoutMs = 15000): Promi
   ]);
   const result = await runWithTimeout(SSH_BIN, args, timeoutMs);
   if (result.status === 0) {
-    return { authenticated: true, output: result.stdout.trim(), rawCommand, timedOut: false };
+    return { authenticated: true, output: result.stdout.trim(), rawCommand, timedOut: false, failure: "none" };
   }
+  const sshText = (result.stderr || result.stdout || "ssh exited non-zero").trim().split("\n").slice(-3).join(" | ");
   const error = result.timedOut
     ? `ssh did not finish within ${timeoutMs} ms, so the key state is unknown (a busy or sleeping device looks like this, not like an untrusted key)`
-    : (result.stderr || result.stdout || "ssh exited non-zero").trim().split("\n").slice(-3).join(" | ");
-  return { authenticated: false, error, rawCommand, timedOut: result.timedOut };
+    : sshText;
+  return { authenticated: false, error, rawCommand, timedOut: result.timedOut, failure: classifySshFailure(error, result.timedOut) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1238,7 +1320,7 @@ export function formatDiscoveryReport(
   lines.push(`  ${formatRawSshCommand(target, ["uname -srm"])}`);
   lines.push("");
   lines.push("Wrapper:");
-  lines.push(`  bin/lighthouse kindle-ssh connect --device ${device}${host ? ` --host ${host}` : ""}${identityArg(identityFile)}`);
+  lines.push(`  bin/lighthouse kindle-ssh connect --device ${device}${routeArgs(host, selected.port, identityFile)}`);
   lines.push("");
   lines.push("Optional pin (paste into ~/.ssh/config yourself; this tool never edits your config):");
   for (const line of formatSshConfigBlock(device, target).split("\n")) lines.push(`  ${line}`);
@@ -1255,9 +1337,6 @@ export function formatUsbReport(status: UsbStatus, identityFile?: string): strin
       (status.sshPort !== undefined ? `unidentified (the link answered on ${KINDLE_USB_HOST}:${status.sshPort})` : "none detected")
     }`,
   );
-  if (status.gadgetInterface && status.sshPort === undefined) {
-    lines.push("                        (no SSH answer on the link - USB networking may be off on the device, or this adapter is not the gadget)");
-  }
   lines.push(`  Mass-storage volume : ${status.kindleDeviceMounted ? `/Volumes/${status.kindleDeviceMounted}` : "none mounted"}`);
   const usbnetLabel =
     status.usbnetInstalled === undefined ? "unknown (volume not mounted)" : status.usbnetInstalled ? "yes (/Volumes/<Kindle>/usbnet)" : "no";
@@ -1312,6 +1391,9 @@ interface CliOptions {
   identityFile: string;
   /** Serial (USID) the caller expects the reached device to report. */
   expectSerial?: string;
+  /** Set when --device / --host were passed, so a subcommand that ignores them can refuse. */
+  deviceGiven?: boolean;
+  hostGiven?: boolean;
 }
 
 export function parseCliArgs(argv: string[]): CliOptions | { help: true } | { error: string } {
@@ -1350,13 +1432,22 @@ export function parseCliArgs(argv: string[]): CliOptions | { help: true } | { er
         options.usb = false;
         break;
       case "--device":
-      case "-d":
-        options.device = resolveDeviceAlias(args[++i]);
+      case "-d": {
+        const raw = (args[++i] ?? "").trim();
+        if (!raw) return { error: "--device requires a value (1, 2, kindle1 or kindle2)" };
+        const alias = resolveDeviceAlias(raw);
+        if (!/^kindle[12]$/.test(alias)) {
+          return { error: `--device must be 1, 2, kindle1 or kindle2, got: ${raw}` };
+        }
+        options.device = alias;
+        options.deviceGiven = true;
         break;
+      }
       case "--host": {
         const value = args[++i] ?? "";
         if (!isValidIpv4(value)) return { error: `--host requires an IPv4 address, got: ${value}` };
         options.host = value;
+        options.hostGiven = true;
         break;
       }
       case "--port":
@@ -1370,9 +1461,12 @@ export function parseCliArgs(argv: string[]): CliOptions | { help: true } | { er
         break;
       }
       case "--identity":
-      case "-i":
-        options.identityFile = expandHome(args[++i] ?? "");
+      case "-i": {
+        const value = args[++i];
+        if (!value || value.trim() === "") return { error: "--identity requires a private key path" };
+        options.identityFile = expandHome(value);
         break;
+      }
       case "--expect-serial": {
         const value = (args[++i] ?? "").trim();
         if (!/^[A-Za-z0-9]{6,}$/.test(value)) return { error: `--expect-serial requires a Kindle serial (USID), got: ${value}` };
@@ -1402,6 +1496,10 @@ export function parseCliArgs(argv: string[]): CliOptions | { help: true } | { er
     return {
       error: `--expect-serial cannot be checked by ${options.subcommand}: it never logs in. Use probe, connect or key.`,
     };
+  }
+
+  if (options.subcommand === "usb" && (options.deviceGiven || options.hostGiven)) {
+    return { error: "usb reports the cable link only: --device and --host do not apply. Use probe or connect for a device." };
   }
 
   return options;
@@ -1434,8 +1532,9 @@ Exit codes:
   0  find: a Kindle responder was discovered; probe/connect/key: the route is verified; usb: the USB
      link answered
   1  find: nothing answered discovery; probe/connect/key: no device could be found
-  2  probe/connect/key: device found but the route is not usable yet (SSH closed / key missing), or
-     the device that answered reported a different serial than --expect-serial;
+  2  probe/connect/key: device found but the route is not usable yet (SSH closed / key missing),
+     a different serial than --expect-serial, a changed host key, a failed connection, or a key
+     check that ran out of time (retry - do not reinstall the key);
      usb: the USB route is not up (no candidate link interface, or nothing answered)
   3  usage error
   connect -- <command> instead exits with the remote command's own status, as ssh does,
@@ -1554,6 +1653,7 @@ function decideRoute(options: CliOptions, resolved: Awaited<ReturnType<typeof re
           error: resolved.auth.error,
           output: resolved.auth.output,
           timedOut: resolved.auth.timedOut,
+          failure: resolved.auth.failure,
         }
       : undefined,
   });
@@ -1723,6 +1823,11 @@ async function cmdKey(options: CliOptions): Promise<number> {
     console.error("The installer session did not finish within 60s, so whether the key was written is unknown.");
   } else if (verify.timedOut) {
     console.error("Key install finished, but the verification session ran out of time: the key state is unknown, not necessarily broken.");
+  } else if (verify.failure === "host-key") {
+    console.error("Key install finished, but the verification session was refused because that address now presents a different host key.");
+    console.error(`  ssh-keygen -R '[${target.host}]:${target.port}'`);
+  } else if (verify.failure === "connect") {
+    console.error("Key install finished, but the verification session could not connect: the key state is unknown, not untrusted.");
   } else {
     console.error("Key install ran but key authentication still fails.");
   }
