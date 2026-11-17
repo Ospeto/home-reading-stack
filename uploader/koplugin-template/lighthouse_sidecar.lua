@@ -604,8 +604,8 @@ end
 -- `Sidecar.SCAN_LIMITS` so a very large library cannot stall a menu.
 --
 -- Measured on the device, that walk is the scan: 431 directory listings and 2053
--- stats over a 525-directory tree return 15 usable records, and it costs 730.5ms
--- of a 923ms scan. Progress is never stale in that list - a book file and its
+-- stats over a 525-directory tree return 15 usable records, and the whole scan
+-- costs 804.8ms. Progress is never stale in that list - a book file and its
 -- sidecar directory change when a book is added or removed, which is rare
 -- compared with how often a reader opens the plugin - so a caller that keeps the
 -- paths `on_directories` hands it may pass them back as `known_directories` and
