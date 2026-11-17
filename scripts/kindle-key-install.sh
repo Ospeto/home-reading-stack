@@ -23,7 +23,7 @@
 # EXIT CODES
 #   0 installed/already present/removed (or dry-run ok)
 #   2 bad input (empty or malformed key)
-#   3 filesystem write failure
+#   3 filesystem write failure, or the authorized_keys file could not be read
 
 set -u
 
@@ -109,7 +109,13 @@ fi
 if [ "$UNINSTALL" = "1" ]; then
   if [ -f "$TARGET" ]; then
     TMP="${TARGET}.lighthouse.$$"
-    grep -vF "$KEY" "$TARGET" > "$TMP" 2>/dev/null || : > "$TMP"
+    grep -vF "$KEY" "$TARGET" > "$TMP" 2>/dev/null
+    REMOVE_STATUS=$?
+    if [ "$REMOVE_STATUS" -ne 0 ] && [ "$REMOVE_STATUS" -ne 1 ]; then
+      rm -f "$TMP" 2>/dev/null
+      echo "ERROR: could not read ${TARGET} (grep exit ${REMOVE_STATUS}); nothing was changed" >&2
+      exit 3
+    fi
     mv "$TMP" "$TARGET" 2>/dev/null || { echo "ERROR: could not rewrite ${TARGET}" >&2; exit 3; }
     chmod 600 "$TARGET" 2>/dev/null
     echo "REMOVED ${TARGET}"

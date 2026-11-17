@@ -1056,7 +1056,7 @@ curl -s http://192.168.31.1/cgi-bin/luci/api/xqsystem/router_info
 
 This home holds no router admin credentials, so a reservation cannot be created and none is pretended to exist. **Documented find-first discovery is the accepted answer**, and it is one command. There is deliberately no router-lease discovery layer either: nothing on this host can authenticate to the router, so a layer that could never run would only imply a capability that does not exist.
 
-Once `find` prints a stable address you may pin it yourself in `~/.ssh/config` - the tool prints a ready-to-paste `Host` block for the device you asked for and **never edits your SSH config**. That pin is a convenience, not a substitute for discovery: rerun `find` whenever the device has been off for a while. When you pin an address with `--host`, every command it prints carries that same `--host`, so the printed wrapper and the `probe` / `key` follow-up suggestions reach the device they name instead of re-selecting by alias.
+Once `find` prints a stable address you may pin it yourself in `~/.ssh/config` - the tool prints a ready-to-paste `Host` block for the device you asked for and **never edits your SSH config**. That pin is a convenience, not a substitute for discovery: rerun `find` whenever the device has been off for a while. When you pin an address with `--host`, every command it prints carries that same `--host`, and when you select a key with `--identity` every printed login command, pin block and follow-up suggestion carries that key too - so the printed wrapper and the `probe` / `key` follow-up suggestions reach the device they name, with the key you actually verified.
 
 > Existing `Host kindle1` / `Host kindle2` entries in `~/.ssh/config` are **wrong in both directions**: `kindle1` points at `192.168.31.167`, which is the *second* device's address, and `kindle2` still carries the literal placeholder `192.168.31.XXX`. A bare `ssh kindle1` therefore reaches the wrong device or fails for a reason that has nothing to do with the daemon. Use `bin/lighthouse kindle-ssh connect`, or update those blocks from what `find` prints.
 
@@ -1091,7 +1091,7 @@ bin/lighthouse kindle-ssh connect -- 'uname -srm'  # run one remote command
 bin/lighthouse kindle-ssh key --device 1
 ```
 
-Under the hood it pipes `scripts/kindle-key-install.sh` to the device over `sh -s`. That script resolves root's home from `/etc/passwd`, appends the key only if absent, sets `700`/`600` permissions, and touches nothing else - no KOReader file, no service restart. It warns loudly when the resolved path is RAM-backed (`/tmp/...`), because a Kindle whose root home lives on a volatile mount must have the key reinstalled after each reboot. Reverse it with `--uninstall` (removes exactly that key line).
+Under the hood it pipes `scripts/kindle-key-install.sh` to the device over `sh -s`. That script resolves root's home from `/etc/passwd`, appends the key only if absent, sets `700`/`600` permissions, and touches nothing else - no KOReader file, no service restart. It warns loudly when the resolved path is RAM-backed (`/tmp/...`), because a Kindle whose root home lives on a volatile mount must have the key reinstalled after each reboot. Reverse it with `--uninstall` (removes exactly that key line). That path is fail-closed: if the target file cannot be read, it aborts with exit `3` and leaves the file untouched rather than rewriting it with the other keys missing.
 
 To confirm key auth end to end, `probe` must report `verified` with a remote identity block - a working port alone is not proof.
 
@@ -1114,7 +1114,7 @@ bin/lighthouse kindle-ssh usb          # adapter, mounted volume, USBNetwork pre
 bin/lighthouse kindle-ssh usb --json   # machine-readable
 ```
 
-It probes both link ports, so a link that answers only on `22` (USBNetwork, KOReader closed - the ordinary case) is reported reachable, and the login command it prints carries the port that actually answered. It never runs `sudo` or changes host networking; the Mac-side command in "Mac-side steps" below is yours to run.
+It probes both link ports, so a link that answers only on `22` (USBNetwork, KOReader closed - the ordinary case) is reported reachable, and the login command it prints carries the port that actually answered and the key you selected with `--identity`. It never runs `sudo` or changes host networking; the Mac-side command in "Mac-side steps" below is yours to run.
 
 **Pre-flight, no shell required.** With the device plugged in as an ordinary USB drive, the user partition is mounted at `/Volumes/<Kindle>/`, so USBNetwork's presence is directly observable:
 
@@ -1243,7 +1243,7 @@ Also verified on this Mac mini (real runs):
 | `find --device 2` / `connect --device 2` | Selects the second device by address order; refuses to silently substitute the first |
 | `usb` | Reports no USB link - the built-in Ethernet or VPN adapters are not mistaken for the gadget |
 | `scripts/kindle-key-install.sh` | Idempotent install, `700`/`600` permissions, exact-line uninstall, `--dry-run` writes nothing, bad key rejected |
-| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 87 passing |
+| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 90 passing |
 
 #### Not proven: Route B (USB cable)
 

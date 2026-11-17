@@ -783,6 +783,8 @@ export interface DiagnosisInput {
   selectionNote?: string;
   /** The device actually selected for this operation, if any. */
   selected?: DiscoveredDevice;
+  /** SSH private key the caller used, so printed follow-up commands re-use it. */
+  identityFile?: string;
 }
 
 /**
@@ -791,7 +793,7 @@ export interface DiagnosisInput {
  * names the condition and the next step.
  */
 export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
-  const { discovery, alias, authResult, selectionNote, selected } = input;
+  const { discovery, alias, authResult, selectionNote, selected, identityFile } = input;
   const targets = discovery.scanTargets.map((t) => `${t.network}/${t.prefix}`).join(", ") || "no scannable subnet";
   const ports = discovery.probedPorts.join("/");
 
@@ -879,7 +881,7 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
         `This is a route that exists but cannot log in yet: the SSH daemon is running, the key is not trusted.`,
         "",
         "Install this Mac mini's public key on the device (one time, while a route works):",
-        `  bin/lighthouse kindle-ssh key --host ${device.host}`,
+        `  bin/lighthouse kindle-ssh key --host ${device.host}${identityArg(identityFile)}`,
         "",
         "If a password prompt is acceptable for that one step, do it by hand instead:",
         `  ssh -p ${device.port} root@${device.host} 'sh -s' < scripts/kindle-key-install.sh`,
@@ -898,7 +900,7 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
     headline: `${alias} answered on ${device.host}:${device.port} but authentication was not verified.`,
     body: [
       "Run a full probe to attempt key authentication and capture the remote identity:",
-      `  bin/lighthouse kindle-ssh probe --host ${device.host}`,
+      `  bin/lighthouse kindle-ssh probe --host ${device.host}${identityArg(identityFile)}`,
     ],
     device,
   };
@@ -924,6 +926,12 @@ export function resolveDeviceAlias(raw: string | undefined): string {
 
 export function defaultIdentityFile(): string {
   return path.join(os.homedir(), ".ssh", "id_ed25519");
+}
+
+/** `--identity` fragment for a printed command, omitted when it is the default key. */
+function identityArg(identityFile?: string): string {
+  if (!identityFile || identityFile === defaultIdentityFile()) return "";
+  return ` --identity ${identityFile}`;
 }
 
 export function expandHome(file: string): string {
@@ -1146,7 +1154,12 @@ export function summarizeUsbStatus(input: {
 // Output formatting
 // ---------------------------------------------------------------------------
 
-export function formatDiscoveryReport(result: DiscoveryResult, device: string, host?: string): string {
+export function formatDiscoveryReport(
+  result: DiscoveryResult,
+  device: string,
+  host?: string,
+  identityFile?: string,
+): string {
   const lines: string[] = [];
   lines.push(`Kindle SSH discovery (${result.durationMs} ms, ${result.scannedHosts} host probes)`);
   lines.push("");
@@ -1179,21 +1192,21 @@ export function formatDiscoveryReport(result: DiscoveryResult, device: string, h
     return lines.join("\n");
   }
 
-  const target: SshTarget = { host: selected.host, port: selected.port };
+  const target: SshTarget = { host: selected.host, port: selected.port, identityFile };
   lines.push("");
   lines.push(`Requested device: ${device} -> ${target.host}:${target.port}`);
   lines.push("Login command:");
   lines.push(`  ${formatRawSshCommand(target, ["uname -srm"])}`);
   lines.push("");
   lines.push("Wrapper:");
-  lines.push(`  bin/lighthouse kindle-ssh connect --device ${device}${host ? ` --host ${host}` : ""}`);
+  lines.push(`  bin/lighthouse kindle-ssh connect --device ${device}${host ? ` --host ${host}` : ""}${identityArg(identityFile)}`);
   lines.push("");
   lines.push("Optional pin (paste into ~/.ssh/config yourself; this tool never edits your config):");
   for (const line of formatSshConfigBlock(device, target).split("\n")) lines.push(`  ${line}`);
   return lines.join("\n");
 }
 
-export function formatUsbReport(status: UsbStatus): string {
+export function formatUsbReport(status: UsbStatus, identityFile?: string): string {
   const lines: string[] = [];
   lines.push("Kindle USB-cable route (fallback for Wi-Fi off / KOReader closed)");
   lines.push("");
@@ -1214,7 +1227,7 @@ export function formatUsbReport(status: UsbStatus): string {
   if (status.sshPort !== undefined) {
     lines.push("Next:");
     lines.push(
-      `  ssh -p ${status.sshPort} -i ${defaultIdentityFile()} -o BatchMode=yes root@${KINDLE_USB_HOST} uname -srm`,
+      `  ssh -p ${status.sshPort} -i ${identityFile ?? defaultIdentityFile()} -o BatchMode=yes root@${KINDLE_USB_HOST} uname -srm`,
     );
     return lines.join("\n");
   }
@@ -1449,6 +1462,7 @@ function decideRoute(options: CliOptions, resolved: Awaited<ReturnType<typeof re
     alias: options.device,
     selected: resolved.selected,
     selectionNote: resolved.note,
+    identityFile: options.identityFile,
     authResult: resolved.auth
       ? {
           authenticated: resolved.auth.authenticated,
@@ -1470,7 +1484,7 @@ async function cmdFind(options: CliOptions): Promise<number> {
   if (options.json) {
     console.log(JSON.stringify(result, null, 2));
   } else {
-    console.log(formatDiscoveryReport(result, options.device, options.host));
+    console.log(formatDiscoveryReport(result, options.device, options.host, options.identityFile));
   }
 
   if (result.devices.some((device) => device.kindleLikely)) return 0;
@@ -1667,7 +1681,7 @@ async function cmdUsb(options: CliOptions): Promise<number> {
   if (options.json) {
     console.log(JSON.stringify({ status, probes }, null, 2));
   } else {
-    console.log(formatUsbReport(status));
+    console.log(formatUsbReport(status, options.identityFile));
   }
 
   return status.sshPort !== undefined ? 0 : 2;

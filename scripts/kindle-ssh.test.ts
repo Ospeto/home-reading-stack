@@ -329,6 +329,18 @@ describe("diagnoseRoute", () => {
     expect(body).toContain("Permission denied");
   });
 
+  it("repeats the selected identity key in the suggested key install", () => {
+    const decision = diagnoseRoute({
+      discovery: makeDiscovery({ devices: [kindleDevice()] }),
+      alias: "kindle1",
+      authResult: { authenticated: false, error: "Permission denied (publickey)." },
+      identityFile: "/tmp/kindle_ed25519",
+    });
+    // `key` installs the public half of the selected key; without --identity the
+    // suggestion would install the default key and verify against the wrong one.
+    expect(decision.body.join("\n")).toContain("kindle-ssh key --host 192.168.31.87 --identity /tmp/kindle_ed25519");
+  });
+
   it("asks for a full probe when a responder was found but auth was not attempted", () => {
     const decision = diagnoseRoute({
       discovery: makeDiscovery({ devices: [kindleDevice({ port: KINDLE_SSH_PORT })] }),
@@ -559,6 +571,10 @@ describe("USB route helpers", () => {
     const report = formatUsbReport(status);
     expect(report).toContain(`ssh -p ${KINDLE_ALT_SSH_PORT}`);
     expect(report).not.toContain("did not answer");
+
+    // A printed login command has to carry the key the operator selected, or it
+    // fails publickey auth even though `probe --identity <key>` verified the route.
+    expect(formatUsbReport(status, "/tmp/kindle_ed25519")).toContain("-i /tmp/kindle_ed25519");
   });
 
   it("identifies an Amazon-OUI adapter even when hardware ports are unknown", () => {
@@ -959,6 +975,27 @@ describe("kindle-key-install.sh", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("fails closed when the authorized_keys file cannot be read on --uninstall", () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) return; // root reads 000 files
+    const dir = tempDir();
+    try {
+      const target = path.join(dir, "authorized_keys");
+      fs.writeFileSync(target, "ssh-ed25519 AAAAOTHER other@host\nssh-ed25519 AAAATHIRD third@host\n");
+      fs.chmodSync(target, 0o000);
+
+      const out = runInstaller(["--uninstall", "--target", target], "ssh-ed25519 AAAA test\n");
+      expect(out.status).toBe(3);
+      expect(out.stderr).toContain("nothing was changed");
+
+      fs.chmodSync(target, 0o600);
+      const after = fs.readFileSync(target, "utf8");
+      expect(after).toContain("AAAAOTHER");
+      expect(after).toContain("AAAATHIRD");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("writes nothing on --dry-run", () => {
     const dir = tempDir();
     const target = path.join(dir, "nested", ".ssh", "authorized_keys");
@@ -1072,6 +1109,15 @@ describe("formatDiscoveryReport", () => {
     // The printed wrapper has to reach the same device as the login command and
     // the pin block; --device alone would re-select the sorted-first Kindle (.73).
     expect(report).toContain("connect --device kindle1 --host 192.168.31.167");
+  });
+
+  it("prints the selected identity key instead of the default", () => {
+    const discovery = makeDiscovery({ devices: [kindleDevice({ host: "192.168.31.73" })] });
+    const report = formatDiscoveryReport(discovery, "kindle1", undefined, "/tmp/kindle_ed25519");
+    expect(report).toContain("-i /tmp/kindle_ed25519");
+    expect(report).toContain("IdentityFile /tmp/kindle_ed25519");
+    expect(report).toContain("--identity /tmp/kindle_ed25519");
+    expect(report).not.toContain(defaultIdentityFile());
   });
 
   it("states the selection refusal instead of printing a command for another device", () => {
