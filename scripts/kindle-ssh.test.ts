@@ -745,6 +745,33 @@ describe("USB route helpers", () => {
     ).toBeUndefined();
   });
 
+  it("prefers a link-local gadget address over an Amazon-OUI adapter", () => {
+    const ouiAdapter: IfaceAddr = {
+      name: "en7",
+      address: "10.0.0.9",
+      netmask: "255.255.255.0",
+      mac: `${AMAZON_OUI}:11:22:33`,
+    };
+    const coldStart: IfaceAddr = { name: "en6", address: "169.254.44.7", netmask: "255.255.0.0", mac: "02:00:00:00:00:00" };
+    expect(findUsbLinkInterface([ouiAdapter, coldStart])?.name).toBe("en6");
+  });
+
+  it("does not report the link as up on an Amazon-OUI match alone", async () => {
+    // A LAN USB dongle with an Amazon MAC is not the Kindle gadget: the OUI is a hint.
+    const result = await discoverKindle({
+      ifaces: [{ name: "en7", address: "10.0.0.9", netmask: "255.255.255.0", mac: `${AMAZON_OUI}:99:7e:21` }],
+      mdns: false,
+      concurrency: 8,
+      timeoutMs: 50,
+      probe: async (host, port) => ({ host, port, open: false, latencyMs: 0 }),
+      banner: async () => null,
+    });
+    const usb = result.layers.find((layer) => layer.layer === "USB gadget");
+    expect(usb?.status).toBe("empty");
+    expect(usb?.detail).not.toContain("USB link is up");
+    expect(usb?.detail).toContain("only a hint");
+  });
+
   it("reports an unreachable USB route with the disabled reason", () => {
     const status = summarizeUsbStatus({
       ifaces: [
@@ -1225,8 +1252,9 @@ describe("mDNS candidates", () => {
 // ---------------------------------------------------------------------------
 
 describe("kindle-key-install.sh", () => {
-  const pubKeyPath = `${defaultIdentityFile()}.pub`;
-  const hasKey = fs.existsSync(pubKeyPath);
+  // Fixed synthetic key: the assertions must run on every machine, including a
+  // clean CI runner that has no developer key installed.
+  const TEST_KEY = "ssh-ed25519 AAAALIGHTHOUSEFIXEDKEY lighthouse@test";
 
   function runInstaller(args: string[], stdin: string, env: Record<string, string> = {}) {
     const result = spawnSync("sh", [KEY_INSTALLER, ...args], {
@@ -1246,8 +1274,7 @@ describe("kindle-key-install.sh", () => {
     const dir = tempDir();
     try {
       const target = path.join(dir, "authorized_keys");
-      const key = "ssh-ed25519 AAAALIGHTHOUSETESTKEY lighthouse@test";
-      // The wrapper's real invocation shape: `LIGHTHOUSE_PUBKEY=... sh -s` with the
+      const key = "ssh-ed25519 AAAALIGHTHOUSETESTKEY lighthouse@test";      // The wrapper's real invocation shape: `LIGHTHOUSE_PUBKEY=... sh -s` with the
       // script piped to stdin. stdin cannot carry the key as well.
       const result = spawnSync("sh", ["-s", "--", "--target", target], {
         input: fs.readFileSync(KEY_INSTALLER, "utf8"),
@@ -1309,7 +1336,7 @@ describe("kindle-key-install.sh", () => {
     const dir = tempDir();
     const passwd = path.join(dir, "passwd");
     fs.writeFileSync(passwd, "root:x:0:0::/home/root:/bin/sh\n");
-    const out = runInstaller(["--dry-run"], `${hasKey ? fs.readFileSync(pubKeyPath, "utf8") : "ssh-ed25519 AAAA test\n"}`, {
+    const out = runInstaller(["--dry-run"], `${TEST_KEY}\n`, {
       KEYINSTALL_PASSWD: passwd,
     });
     expect(out.status).toBe(0);
@@ -1318,10 +1345,9 @@ describe("kindle-key-install.sh", () => {
   });
 
   it("installs once, is idempotent, and sets correct permissions", () => {
-    if (!hasKey) return; // no local key to install in this environment
     const dir = tempDir();
     const target = path.join(dir, "root", ".ssh", "authorized_keys");
-    const key = fs.readFileSync(pubKeyPath, "utf8");
+    const key = TEST_KEY;
 
     const first = runInstaller(["--target", target], key);
     expect(first.status).toBe(0);
@@ -1340,10 +1366,9 @@ describe("kindle-key-install.sh", () => {
   });
 
   it("removes exactly the installed key on --uninstall", () => {
-    if (!hasKey) return;
     const dir = tempDir();
     const target = path.join(dir, "authorized_keys");
-    const key = fs.readFileSync(pubKeyPath, "utf8");
+    const key = TEST_KEY;
     fs.writeFileSync(target, "ssh-ed25519 AAAAPREEXISTING other@host\n");
 
     runInstaller(["--target", target], key);
@@ -1379,11 +1404,10 @@ describe("kindle-key-install.sh", () => {
   });
 
   it("keeps a pre-existing key when the file has no trailing newline", () => {
-    if (!hasKey) return;
     const dir = tempDir();
     try {
       const target = path.join(dir, "authorized_keys");
-      const key = fs.readFileSync(pubKeyPath, "utf8").trim();
+      const key = TEST_KEY;
       // Written without a final newline, as an editor or `echo -n` would.
       fs.writeFileSync(target, "ssh-ed25519 AAAAEXISTING existing@host");
 

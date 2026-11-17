@@ -685,7 +685,12 @@ async function runMdnsLayer(ctx: DiscoveryContext, enabled: boolean): Promise<La
 async function runUsbLayer(ctx: DiscoveryContext, enabled: boolean): Promise<LayerReport> {
   if (!enabled) return { layer: "USB gadget", status: "skipped", detail: "disabled with --no-usb" };
 
-  const usbLinkUp = findUsbLinkInterface(ctx.ifaces) !== undefined;
+  const hasAddressEvidence = ctx.ifaces.some(
+    (iface) =>
+      iface.address.startsWith(USB_LINK_PREFIX) ||
+      (/^en\d+$/.test(iface.name) && iface.address.startsWith("169.254.")),
+  );
+  const hasAmazonHint = ctx.ifaces.some((iface) => (iface.mac ?? "").startsWith(AMAZON_OUI));
   const usbTimeout = Math.max(ctx.timeoutMs, 600);
 
   for (const port of ctx.ports) {
@@ -698,9 +703,11 @@ async function runUsbLayer(ctx: DiscoveryContext, enabled: boolean): Promise<Lay
   return {
     layer: "USB gadget",
     status: "empty",
-    detail: usbLinkUp
+    detail: hasAddressEvidence
       ? `USB link is up but ${KINDLE_USB_HOST} did not answer on ${ctx.ports.join("/")}`
-      : `no USB link address evidence on this Mac (no address on ${USB_LINK_PREFIX}0/24 and no 169.254 en*); ${KINDLE_USB_HOST} unreachable`,
+      : hasAmazonHint
+        ? `an Amazon-OUI adapter is present, which is only a hint (no address on ${USB_LINK_PREFIX}0/24 and no 169.254 en*); ${KINDLE_USB_HOST} unreachable`
+        : `no USB link address evidence on this Mac (no address on ${USB_LINK_PREFIX}0/24 and no 169.254 en*); ${KINDLE_USB_HOST} unreachable`,
   };
 }
 
@@ -1228,11 +1235,11 @@ export function parseHardwarePorts(text: string): HardwarePort[] {
 export function findUsbLinkInterface(ifaces: IfaceAddr[]): IfaceAddr | undefined {
   const byAddress = ifaces.find((iface) => iface.address.startsWith(USB_LINK_PREFIX));
   if (byAddress) return byAddress;
-  const byAmazonOui = ifaces.find((iface) => (iface.mac ?? "").startsWith(AMAZON_OUI));
-  if (byAmazonOui) return byAmazonOui;
-  return ifaces.find(
+  const byLinkLocal = ifaces.find(
     (iface) => /^en\d+$/.test(iface.name) && iface.address.startsWith("169.254."),
   );
+  if (byLinkLocal) return byLinkLocal;
+  return ifaces.find((iface) => (iface.mac ?? "").startsWith(AMAZON_OUI));
 }
 
 /**
