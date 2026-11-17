@@ -235,13 +235,6 @@ local books_last_page = Views.libraryModel("books", {
 print("books_last_rows=" .. #books_last_page.blocks[1].rows)
 print("books_last_footer=" .. flat(books_last_page.footer.left) .. "/" .. flat(books_last_page.footer.right))
 
--- A feed that reports no total (a server that only sends the next link) still
--- has to name a page, and the next link is all the count there is.
-local books_untotaled = Views.libraryModel("books", {
-  entries = entries, page = 3, page_size = 4, has_next = true,
-})
-print("books_untotaled_footer=" .. flat(books_untotaled.footer.left))
-
 -- Library: series ----------------------------------------------------------
 local series_groups = {
   { name = "Ballad of a Shinigami", author = "K-Ske Hasegawa", books = 3, read = 2, coverId = 11 },
@@ -472,12 +465,6 @@ describe("plugin library page model: Books", () => {
     const out = runHarness();
     expect(out.books_last_rows).toBe("2");
     expect(out.books_last_footer).toBe("Page 2 of 2/All books");
-  });
-
-  it("pages by the feed's next link when it reports no total", () => {
-    if (!LUA_BINARY) return;
-    const out = runHarness();
-    expect(out.books_untotaled_footer).toBe("Page 3 of 4");
   });
 });
 

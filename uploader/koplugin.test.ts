@@ -3350,11 +3350,12 @@ print("OK")
  * scale before anything is drawn, so a page can fit its plan and still draw its
  * type two to three times too large - and a page that shrinks to its content
  * leaves the tail of the last page on the glass. This harness builds the real
- * widget tree for page 1 and page 2 of a library through `Page.build` on the
- * 1236x1648 panel the regression was reported on and measures both: the pixels
- * the row title is drawn at, and the height of each page. The plan itself comes
- * from `LightHouse:libraryPlan()`, so the density factor is the one the plugin
- * derives from the device rather than one the harness works out for itself.
+ * widget tree for page 1 and page 2 of a library through `Page.build` on a
+ * 1236x1648 panel and measures both: the pixels the row title is drawn at, and
+ * the height of each page. The plan itself comes from `LightHouse:libraryPlan()`,
+ * so the density factor is the one the plugin derives from the device rather
+ * than one the harness works out for itself. The device round is still the proof
+ * of the reported symptoms; this is what the drawn tree can show off-device.
  */
 const LIBRARY_PAGE_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
 local DEVICE_W, DEVICE_H = 1236, 1648
@@ -3395,8 +3396,8 @@ package.preload["ui/widget/textwidget"] = function()
   function text.getTextWidth(value) return #tostring(value or "") end
   return text
 end
--- The panel the regression was reported on, answering density the way the
--- runtime answers it.
+-- A 1236x1648 panel - the Kindle size the regression came from - answering
+-- density the way the runtime answers it.
 package.preload["device"] = function()
   return {
     screen = {
@@ -3568,8 +3569,8 @@ describe("plugin one-page views", () => {
 
     // The density the plugin reads, on a panel that rounds its answers up: a
     // 600-unit probe survives the rounding (1236px), one unit does not (3px on
-    // a 2.06 panel). The planned shelf is the device readback, six rows of a
-    // 207px band; a one-unit probe plans four fat rows of ~302px instead.
+    // a 2.06 panel), so the plan is six 207px rows. A one-unit probe plans four
+    // fat rows of ~302px instead.
     expect(out.probe_one_unit).toBe("3");
     expect(out.probe_600_units).toBe("1236");
     expect(out.library_plan_scale).toBe("2.060");
@@ -3584,10 +3585,11 @@ describe("plugin one-page views", () => {
     expect(Number(out.library_page_1_height)).toBe(height);
     expect(Number(out.library_page_2_height)).toBe(height);
 
-    // The row title is asked for in pixels and drawn in pixels: the panel the
-    // regression was reported on draws a 207px row, and the device readback of
-    // the fixed build is 31px of title in it. Handing the pixel measure
-    // straight to Font.getFace drew 64px in the same row.
+    // The row title is asked for in pixels and drawn in pixels: the plan rule
+    // gives a 207px row a `floor(min(row_h, 120) * 0.26)` = 31px title, so 31 is
+    // the planned measure, not a device readback. Handing that pixel measure
+    // straight to Font.getFace draws 64px in the same row, which is the
+    // oversized type the report describes.
     expect(Number(out.library_row_title_px)).toBe(31);
     expect(out.library_row_title_fits).toBe("true");
 
