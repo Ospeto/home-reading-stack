@@ -1178,7 +1178,7 @@ ssh -p 22 -i ~/.ssh/id_ed25519 -o BatchMode=yes -o ConnectTimeout=8 root@192.168
 - The **install** step is the only genuinely invasive part: it patches the root filesystem. It is therefore gated on a matching package plus an on-hand uninstall `.bin`, and it is **not** to be run on a guess about model or firmware.
 - Hard stop: if the device cannot be identified confidently, or its uninstall `.bin` is unavailable, or the device will not mount as a volume to verify the pre-flight, stop and report rather than installing.
 
-**Current state: nothing was installed.** Both devices were unreachable throughout this work, so the pre-flight (which requires a mounted volume) could not even be run, and no package was downloaded, copied, or executed. Route B is documented and tooled but unproven on hardware - see §6.
+**Current state: nothing was installed.** The devices themselves were answering over Wi-Fi throughout this work (route A, §6), but no Kindle volume was mounted and no `192.168.15.0/24` interface existed on this Mac, so the USB pre-flight (which needs a mounted volume) could not be run, and no package was downloaded, copied, or executed. Route B is documented and tooled but unproven on hardware - see §6.
 
 ### 5. Known failure modes
 

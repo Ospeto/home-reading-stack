@@ -349,6 +349,17 @@ describe("diagnoseRoute", () => {
     expect(decision.body.join("\n")).toContain("192.168.31.73:2222");
   });
 
+  it("exits 1 when the requested device never answered discovery at all", () => {
+    const decision = diagnoseRoute({
+      discovery: makeDiscovery({ devices: [] }),
+      alias: "kindle1",
+      selectionNote: "192.168.31.99 was requested but no Kindle answered discovery.",
+    });
+    expect(decision.state).toBe("not-found");
+    expect(decision.code).toBe(1);
+    expect(decision.body.join("\n")).toContain("No Kindle answered discovery at all");
+  });
+
   it("names the ports that were actually probed, not a hardcoded pair", () => {
     const discovery = makeDiscovery({ devices: [], scannedHosts: 7, probedPorts: [KINDLE_ALT_SSH_PORT] });
     const decision = diagnoseRoute({ discovery, alias: "kindle1" });
@@ -555,6 +566,8 @@ describe("USB route helpers", () => {
     });
     expect(status.gadgetConnected).toBe(true);
     expect(status.gadgetInterface).toBe("en9");
+    // The interface was identified by MAC, not by an address on the gadget's /24.
+    expect(formatUsbReport(status)).not.toContain("identified by address");
   });
 
   it("identifies the link from its 192.168.15.x address when the host MAC is locally administered", () => {

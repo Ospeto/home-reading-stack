@@ -11,7 +11,7 @@
  * It discovers the device from live evidence first, then connects to what it
  * actually found.
  *
- * Discovery ladder (each layer only runs if the previous found nothing):
+ * Discovery ladder (all three layers run every time; results are merged):
  *   1. mDNS          - <alias>.local hostname lookup
  *   2. USB gadget    - the jailbroken-device USB-network address 192.168.15.244
  *   3. LAN sweep     - TCP connect on the real LAN subnet(s) for ports 2222/22,
@@ -26,7 +26,8 @@
  *   usb       Report the USB-cable fallback route and the steps to bring it up (192.168.15.0/24)
  *
  * Exit codes are meaningful so scripts can branch on them:
- *   0  find: a Kindle responder was discovered; probe/connect/key: the route is verified
+ *   0  find: a Kindle responder was discovered; probe/connect/key: the route is verified; usb: the
+ *      USB link answered
  *   1  find: nothing answered discovery; probe/connect/key: no device could be found
  *   2  probe/connect/key: a device was found but the route is not usable yet (SSH closed / key
  *      missing); usb: the USB route is not up (no candidate link interface, or nothing answered)
@@ -800,9 +801,10 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
   // A specific device was asked for and discovery could not supply it. Say that
   // instead of describing a different device's state as if it were this one's.
   if (selectionNote) {
+    const anythingAnswered = kindleCandidates.length > 0 || otherCandidates.length > 0;
     return {
       state: "not-found",
-      code: 2,
+      code: anythingAnswered ? 2 : 1,
       headline: selectionNote,
       body: [
         kindleCandidates.length > 0
@@ -1197,7 +1199,7 @@ export function formatUsbReport(status: UsbStatus): string {
   lines.push("");
   lines.push(`  USB network adapter : ${status.gadgetInterface ?? "none detected"}`);
   if (status.gadgetInterface && status.sshPort === undefined) {
-    lines.push("                        (identified by address; the device is plugged in but has not started its USB network)");
+    lines.push("                        (the adapter is present, but the device has not started its USB network)");
   }
   lines.push(`  Mass-storage volume : ${status.kindleDeviceMounted ? `/Volumes/${status.kindleDeviceMounted}` : "none mounted"}`);
   const usbnetLabel =
@@ -1355,7 +1357,8 @@ Options:
   --json                          Machine-readable output
 
 Exit codes:
-  0  find: a Kindle responder was discovered; probe/connect/key: the route is verified
+  0  find: a Kindle responder was discovered; probe/connect/key: the route is verified; usb: the USB
+     link answered
   1  find: nothing answered discovery; probe/connect/key: no device could be found
   2  probe/connect/key: device found but the route is not usable yet (SSH closed / key missing);
      usb: the USB route is not up (no candidate link interface, or nothing answered)
