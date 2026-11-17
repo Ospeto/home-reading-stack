@@ -3460,8 +3460,39 @@ local function model_for(number, has_next, size)
   })
 end
 
-local first = assert(Page.build{ model = model_for(1, true, page_size), plan = plan })
-local second = assert(Page.build{ model = model_for(2, false, page_size), plan = plan })
+local first_model = model_for(1, true, page_size)
+local second_model = model_for(2, false, page_size)
+local first = assert(Page.build{ model = first_model, plan = plan })
+local second = assert(Page.build{ model = second_model, plan = plan })
+
+-- The page-level placement contract: every page of the list draws the search
+-- row, and the rows a page draws still fit the plan, whatever else it draws.
+local function list_rows(model)
+  for block_index = 1, #model.blocks do
+    if model.blocks[block_index].kind == "list" then return model.blocks[block_index].rows or {} end
+  end
+  return {}
+end
+
+local function row_kinds(model)
+  local rows = list_rows(model)
+  local out = {}
+  for row_index = 1, #rows do
+    local action = rows[row_index].action
+    out[row_index] = type(action) == "table" and tostring(action.kind) or tostring(rows[row_index].kind)
+  end
+  return table.concat(out, ",")
+end
+
+local library_page_1_rows = #list_rows(first_model)
+local library_page_2_rows = #list_rows(second_model)
+print("library_page_1_rows=" .. library_page_1_rows)
+print("library_page_1_kinds=" .. row_kinds(first_model))
+print("library_page_2_rows=" .. library_page_2_rows)
+print("library_page_2_kinds=" .. row_kinds(second_model))
+print("library_page_size=" .. page_size)
+print("library_rows_fit_plan=" .. tostring(library_page_1_rows <= plan.rows
+  and library_page_2_rows <= plan.rows))
 print("library_plan_scale=" .. string.format("%.3f", plan.scale or 0))
 print("library_plan_rows=" .. plan.rows)
 print("library_row_h=" .. plan.row_h)
@@ -3594,12 +3625,21 @@ describe("plugin one-page views", () => {
     expect(Number(out.library_row_h)).toBe(207);
 
     // Both pages measure one screen: page 1 carries the search and next-page
-    // rows, page 2 carries neither, and the page that draws less must still
-    // paint (and invalidate) the whole glass or the previous page's tail stays
-    // on it until a manual refresh.
+    // rows, page 2 carries the search row and no next page, and the page that
+    // draws less must still paint (and invalidate) the whole glass or the
+    // previous page's tail stays on it until a manual refresh.
     const height = Number(out.library_screen_height);
     expect(Number(out.library_page_1_height)).toBe(height);
     expect(Number(out.library_page_2_height)).toBe(height);
+
+    // The search row leads every page of the list, not just the first, and the
+    // page budget reserves it on every page: six planned rows hold the search
+    // row, four book rows and the next-page row on page 1, and the search row
+    // plus the rest of the window on page 2.
+    expect(out.library_page_size).toBe("4");
+    expect(out.library_page_1_kinds).toBe("search,book,book,book,book,page");
+    expect(out.library_page_2_kinds).toBe("search,book,book,book");
+    expect(out.library_rows_fit_plan).toBe("true");
 
     // The row title is asked for in pixels and drawn in pixels: the plan rule
     // gives a 207px row a `floor(min(row_h, 120) * 0.26)` = 31px title, and the
@@ -4331,9 +4371,30 @@ open{ mode = "series", page = 1 }
 print("series_after_switch=" .. fetched.series)
 
 -- What the reader sees after the refresh: the counts the server just sent.
+-- Row 1 is the grouping's search row on every page, so the entries are read
+-- from the rows that carry an entry of their own.
 local rows = models[3].blocks[1].rows
-print("refresh_row=" .. tostring(rows[1].title) .. "//" .. tostring(rows[1].secondary)
-  .. "//" .. tostring(rows[1].value) .. "//" .. tostring(rows[1].value_sub))
+local entry_titles = {}
+local row_kinds = {}
+for row_index = 1, #rows do
+  local action = rows[row_index].action
+  row_kinds[row_index] = type(action) == "table" and tostring(action.kind)
+    or tostring(rows[row_index].kind)
+  if type(action) == "table" and (action.kind == "series" or action.kind == "author") then
+    entry_titles[#entry_titles + 1] = tostring(rows[row_index].title)
+  end
+end
+print("refresh_row=" .. table.concat(entry_titles, "|"))
+print("refresh_row_kinds=" .. table.concat(row_kinds, ","))
+local first_entry
+for row_index = 1, #rows do
+  local action = rows[row_index].action
+  if type(action) == "table" and action.kind == "series" then first_entry = rows[row_index] break end
+end
+print("refresh_entry=" .. tostring(first_entry and first_entry.title) .. "//"
+  .. tostring(first_entry and first_entry.secondary) .. "//"
+  .. tostring(first_entry and first_entry.value) .. "//"
+  .. tostring(first_entry and first_entry.value_sub))
 
 -- The footer's two halves turn the page, and each is inert at the end it would
 -- step past: the left half is a real page turn, not a dead tap.
@@ -4360,6 +4421,14 @@ print("clamp_pager=" .. tostring(LightHouse.last_page_model.pager.page)
   .. "/" .. tostring(LightHouse.last_page_model.pager.pages))
 print("clamp_state_page=" .. tostring(LightHouse.library_state.page))
 print("clamp_rows=" .. tostring(#LightHouse.last_page_model.blocks[1].rows))
+local clamp_kinds = {}
+for row_index = 1, #LightHouse.last_page_model.blocks[1].rows do
+  local row = LightHouse.last_page_model.blocks[1].rows[row_index]
+  local action = row.action
+  clamp_kinds[row_index] = type(action) == "table" and tostring(action.kind)
+    or tostring(row.kind)
+end
+print("clamp_row_kinds=" .. table.concat(clamp_kinds, ","))
 print("clamp_footer=" .. tostring(LightHouse.last_page_model.footer.left))
 group_count = 6
 open{ mode = "series", page = 1, refresh = true }
@@ -4448,9 +4517,11 @@ describe("plugin library groupings", () => {
     // Switching back is a fresh open of that grouping, not the old document.
     expect(out.series_after_switch).toBe("3");
 
-    // And the refreshed page draws what the server just sent: page 2's single
-    // row of the six-group document, with no next-volume marker of its own.
-    expect(out.refresh_row).toBe("series 6//A Writer · 3 books · 1 read//33%//1 / 3");
+    // And the refreshed page draws what the server just sent: page 2 of the
+    // six-group document, led by the search row every page carries.
+    expect(out.refresh_row_kinds).toBe("search,series,series");
+    expect(out.refresh_row).toBe("series 5|series 6");
+    expect(out.refresh_entry).toBe("series 5//A Writer · 3 books · 1 read//33%//1 / 3");
 
     // A grouping page is sized from the rows the model draws, so it fills the
     // screen instead of leaving slack above the footer.
@@ -4467,7 +4538,9 @@ describe("plugin library groupings", () => {
     // pager, the plugin's own page state and the footer all agree.
     expect(out.clamp_pager).toBe("1/1");
     expect(out.clamp_state_page).toBe("1");
-    expect(out.clamp_rows).toBe("2");
+    // Two series left of a four-row page: the search row plus both entries.
+    expect(out.clamp_rows).toBe("3");
+    expect(out.clamp_row_kinds).toBe("search,series,series");
     expect(out.clamp_footer).toBe("Page 1 of 1");
 
     // On a keyed device the cycle holds the rows the page draws and none of the
@@ -7885,6 +7958,30 @@ local function titles()
   return table.concat(out, "|")
 end
 
+-- The row a reader would tap to open a grouping entry: picked by what the row
+-- does, not by where it sits. Every page leads with the search row now, so a
+-- positional pick would tap the search row on a grouping page.
+local function row_of_kind(kind)
+  local list = rows()
+  for index = 1, #list do
+    local action = list[index].action
+    if type(action) == "table" and action.kind == kind then return list[index] end
+  end
+  return nil
+end
+
+-- The row kinds this page drew, in order: the evidence that the search row is
+-- there on a page other than the first.
+local function row_kinds()
+  local list = rows()
+  local out = {}
+  for index = 1, #list do
+    local action = list[index].action
+    out[index] = type(action) == "table" and tostring(action.kind) or tostring(list[index].kind)
+  end
+  return table.concat(out, ",")
+end
+
 local function active_group()
   local model = LightHouse.last_page_model
   for index = 1, #(model and model.switch or {}) do
@@ -7914,13 +8011,16 @@ report("switched")
 print("switched_group=" .. active_group())
 print("switched_title=" .. titles())
 
--- The second page of the same grouping: still the same level.
+-- The second page of the same grouping: still the same level, and it still
+-- carries the search row.
 LightHouse.page:run({ kind = "page", page = 2 })
 report("paged")
 print("paged_pager=" .. tostring(LightHouse.last_page_model.pager.page))
+print("paged_row_kinds=" .. row_kinds())
+print("paged_first_row=" .. tostring(rows()[1] and rows()[1].title))
 
 -- Tapping a series row opens that series' books: one level deeper.
-local series_row = rows()[1]
+local series_row = row_of_kind("series")
 print("drill_series=" .. tostring(series_row and series_row.title))
 local grouped_page = LightHouse.page
 LightHouse.page:run(series_row.action)
@@ -7942,7 +8042,7 @@ print("after_back_rebuilt_page=" .. tostring(LightHouse.page ~= nil and LightHou
 LightHouse:exitPlugin()
 LightHouse:openLibrary{ mode = "authors", page = 2 }
 report("authors_paged")
-local author_row = rows()[1]
+local author_row = row_of_kind("author")
 print("drill_author=" .. tostring(author_row and author_row.title))
 LightHouse.page:run(author_row.action)
 report("author_drilled")
@@ -7963,7 +8063,7 @@ report("search_after_back")
 -- that page, which never left the glass.
 LightHouse:exitPlugin()
 LightHouse:openLibrary{ mode = "books", page = 1 }
-local book_row = rows()[2]
+local book_row = row_of_kind("book")
 print("detail_book=" .. tostring(book_row and book_row.title))
 local catalogue_page = LightHouse.page
 LightHouse.page:run(book_row.action)

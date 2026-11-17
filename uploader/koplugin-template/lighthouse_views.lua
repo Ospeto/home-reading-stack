@@ -526,16 +526,20 @@ function Views.libraryModel(mode, context, options)
     local rows = {}
     local pages = 1
 
+    -- Every page of every grouping leads with the search row: a reader who has
+    -- paged forward must still be able to search without paging back, and the
+    -- row is the same row (same label, same `search` action) on every page.
+    -- The page budget in `main.lua` reserves it on every page too, so reserving
+    -- it here is what keeps the drawn rows inside the plan.
+    rows[#rows + 1] = {
+        kind = "action",
+        title = text.search,
+        value = Ui.GLYPH.chevron,
+        action = { kind = "search" },
+    }
+
     if mode == "books" then
         local entries = type(context.entries) == "table" and context.entries or {}
-        if page == 1 then
-            rows[#rows + 1] = {
-                kind = "action",
-                title = text.search,
-                value = Ui.GLYPH.chevron,
-                action = { kind = "search" },
-            }
-        end
         for entry_index = 1, #entries do
             rows[#rows + 1] = Views.bookRow(entries[entry_index], text)
         end
@@ -564,13 +568,17 @@ function Views.libraryModel(mode, context, options)
         -- last page is what there is to draw, and the footer says so.
         if page > pages then page = pages end
         local first = (page - 1) * page_size + 1
+        -- Counted separately from `#rows`: the search row is navigation, not one
+        -- of this page's `page_size` group rows.
+        local drawn = 0
         for group_index = first, #groups do
-            if #rows >= page_size then break end
+            if drawn >= page_size then break end
             local group = groups[group_index]
             if type(group) == "table" and Status.str(group.name) ~= "" then
                 rows[#rows + 1] = mode == "series"
                     and Views.seriesRow(group, text)
                     or Views.authorRow(group, text)
+                drawn = drawn + 1
             end
         end
         if #groups == 0 then

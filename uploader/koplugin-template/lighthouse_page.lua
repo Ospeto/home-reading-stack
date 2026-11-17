@@ -746,8 +746,9 @@ function PageWidget:init()
     -- The page is exactly one screen tall, whatever it happens to draw: a
     -- paged view that shrinks to its content leaves the tail of the previous
     -- page on the glass, because the repaint only covers what the new page
-    -- paints. Page 1 carries a search row and page 2 does not, so the two pages
-    -- are different heights unless the band is padded back out here. The filler
+    -- paints. A page that draws a next-page row is a different height from the
+    -- last page that does not, so the two pages are different heights unless the
+    -- band is padded back out here. The filler
     -- is measured from the content that was actually built, so the footer lands
     -- on the bottom edge on every page and the painted region and the invalidated
     -- region are the same rectangle.
