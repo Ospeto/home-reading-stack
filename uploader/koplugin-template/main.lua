@@ -1352,8 +1352,13 @@ function LightHouse:applyLocalToEntry(entry)
             authors = Status.str(entry.authors),
         }
     else
-        entry.status.percentage = ratio
-        entry.status.progress_source = "device"
+        -- The shelf keeps the session this status came from, and that session is
+        -- what the server said: the device override goes on a copy of it.
+        local override = {}
+        for key, value in pairs(entry.status) do override[key] = value end
+        override.percentage = ratio
+        override.progress_source = "device"
+        entry.status = override
     end
     return record
 end

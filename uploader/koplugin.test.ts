@@ -6611,12 +6611,18 @@ package.loaded["ltn12"] = {
 }
 package.loaded["json"] = {
   -- A shape the merger accepts: the shelf payload carries one session for
-  -- "Book 2", so a page that merged the shelf draws differently from one that
-  -- did not, and every other body decodes to nothing in progress.
+  -- "Book 2" (whose progress nothing on the device overrides) and one for
+  -- "Book 3" (whose sidecar reads higher), so a page that merged the shelf, one
+  -- that overrode it from the device, and one that reused a stale override all
+  -- draw differently.
   decode = function(body)
     if tostring(body):find("book-2-session", 1, true) then
-      return { { filename = "Book 2.epub", percentage = 0.42, timestamp = 100,
-        device = "Paperwhite" } }
+      return {
+        { filename = "Book 2.epub", percentage = 0.42, timestamp = 100,
+          device = "Paperwhite" },
+        { filename = "Book 3.epub", percentage = 0.4, timestamp = 100,
+          device = "Paperwhite" },
+      }
     end
     return {}
   end,
@@ -6644,10 +6650,18 @@ local tree = {
   ["/books"] = { "Alpha.epub", "Alpha.epub.sdr" },
   ["/books/Alpha.epub.sdr"] = { "metadata.epub.lua" },
 }
+local bodies = {}
 local listed = {}
 Sidecar.io = {
-  open = function() return nil end,
-  loadfile = function() return nil end,
+  open = function(path)
+    if not bodies[path] then return nil end
+    return { close = function() end }
+  end,
+  loadfile = function(path)
+    local body = bodies[path]
+    if not body then return nil, "missing" end
+    return loadstring(body)
+  end,
   list = function(path)
     listed[#listed + 1] = path
     local names = tree[path]
@@ -6744,6 +6758,27 @@ local before_future = shelf_requests
 open{ mode = "books", page = 4 }
 print("future_stamp_refetched=" .. (shelf_requests - before_future))
 
+-- -------------------------------------- the kept shelf holds the server's word
+-- Book 3 is on the device, and its sidecar reads 80% where the server says 40%.
+tree["/books"] = { "Alpha.epub", "Alpha.epub.sdr", "Book 3.epub", "Book 3.epub.sdr" }
+tree["/books/Book 3.epub.sdr"] = { "metadata.epub.lua" }
+bodies["/books/Book 3.epub.sdr/metadata.epub.lua"] =
+  "return { title = \"Book 3\", percent_finished = 0.8 }"
+LightHouse:forgetShelf()
+LightHouse:localRecords(true)
+open{ mode = "books", page = 1 }
+print("aliasing_page1_book3=" .. drawn_progress("Book 3"))
+-- The reader deletes that sidecar and the scan is rebuilt without it, while the
+-- shelf is still inside its reuse window: the next page reads the kept answer.
+tree["/books"] = { "Alpha.epub", "Alpha.epub.sdr" }
+tree["/books/Book 3.epub.sdr"] = nil
+bodies["/books/Book 3.epub.sdr/metadata.epub.lua"] = nil
+LightHouse:localRecords(true)
+local before_alias = shelf_requests
+open{ mode = "books", page = 2 }
+print("aliasing_page2_shelf=" .. (shelf_requests - before_alias))
+print("aliasing_page2_book3=" .. drawn_progress("Book 3"))
+
 print("OK")
 `;
 
@@ -6821,6 +6856,19 @@ describe("plugin library page: one shelf request per view, not per page", () => 
     // the server instead of freezing the shelf for the rest of the session.
     expect(out.future_stamp_refetched).toBe("1");
   });
+
+  it("keeps the server's answer in the shelf when the device overrides a row", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    // The device is the authority for the row it is drawn on, so page 1 shows
+    // the sidecar's 80%.
+    expect(out.aliasing_page1_book3).toBe("80%");
+    // The shelf was reused, not refetched, while the book's sidecar went away:
+    // the row must fall back to the server's 40%, so the override never reached
+    // the cached response.
+    expect(out.aliasing_page2_shelf).toBe("0");
+    expect(out.aliasing_page2_book3).toBe("40%");
+  });
 });
 
 /**
@@ -6829,12 +6877,12 @@ describe("plugin library page: one shelf request per view, not per page", () => 
  * The walk lists every folder under the book roots and stats every child to
  * find the `*.sdr` directories. On the device that is 431 listings and 2053
  * stats over a 525-folder tree to return 15 records, inside a scan whose total
- * is 804.8ms (interleaved old/new A/B in one process, sidecar reads included).
- * The walk alone, timed per call in a separate pass, is 730.5ms - those timers
- * inflate it slightly, so it does not subtract cleanly from that total - and the
- * 96 sidecar reads make up most of the rest. Skipping the stat for a name that
- * proves it is a file took the scan from 804.8ms to 595.1ms; keeping the sidecar
- * directory list across sessions takes it to 131.3ms.
+ * is 804.8ms (interleaved old/new A/B in one process, the 96 sidecar reads
+ * included). The tree walk is the majority of that scan; the sidecar reads make
+ * up the rest and were timed in a separate instrumented pass, so the two do not
+ * add up exactly. Skipping the stat for a name that proves it is a file took the
+ * scan from 804.8ms to 595.1ms; keeping the sidecar directory list across
+ * sessions takes it to 131.3ms.
  */
 const SIDECAR_WALK_HARNESS = String.raw`
 local plugin_root = assert(arg[1], "plugin root argument required")
