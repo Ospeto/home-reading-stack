@@ -38,7 +38,8 @@
  *
  * `--device 1` / `--device 2` are address-order labels, not identities: the DHCP lease moves. The
  * serial (USID) read back after login is the identity, and `--expect-serial` makes a different unit
- * a hard failure.
+ * a hard failure on probe/connect/key. `find` and `usb` never log in, so they reject that option
+ * rather than accepting an identity check they cannot perform.
  */
 
 import * as dns from "node:dns/promises";
@@ -775,7 +776,7 @@ export async function discoverKindle(options: DiscoverOptions = {}): Promise<Dis
 // Route evaluation / diagnosis
 // ---------------------------------------------------------------------------
 
-export type RouteState = "verified" | "identity-mismatch" | "auth-failed" | "ssh-closed" | "not-found";
+export type RouteState = "verified" | "identity-mismatch" | "auth-failed" | "ssh-timeout" | "ssh-closed" | "not-found";
 
 export interface RouteDecision {
   state: RouteState;
@@ -789,7 +790,7 @@ export interface RouteDecision {
 export interface DiagnosisInput {
   discovery: DiscoveryResult;
   alias: string;
-  authResult?: { authenticated: boolean; error?: string; output?: string };
+  authResult?: { authenticated: boolean; error?: string; output?: string; timedOut?: boolean };
   /** Set when a specific device was requested but could not be selected. */
   selectionNote?: string;
   /** The device actually selected for this operation, if any. */
@@ -812,7 +813,7 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
   const targets = discovery.scanTargets.map((t) => `${t.network}/${t.prefix}`).join(", ") || "no scannable subnet";
   const ports = discovery.probedPorts.join("/");
 
-  const kindleCandidates = discovery.devices.filter((device) => device.kindleLikely);
+  const kindleCandidates = uniqueDevicesByHost(discovery.devices.filter((device) => device.kindleLikely));
   const otherCandidates = discovery.devices.filter((device) => !device.kindleLikely);
 
   // A specific device was asked for and discovery could not supply it. Say that
@@ -901,6 +902,25 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
       body: serial
         ? []
         : ["The device did not report /proc/usid, so which Kindle answered is unconfirmed."],
+      device,
+    };
+  }
+
+  if (authResult?.timedOut) {
+    return {
+      state: "ssh-timeout",
+      code: 2,
+      headline: `${alias} answered at ${device.host}:${device.port}, but it did not finish the key check within the budget.`,
+      body: [
+        "The daemon is up and the route exists; the key state is simply unknown because the session ran out of time.",
+        "A busy or sleeping device looks exactly like this, so do not reinstall the key on the strength of it.",
+        "",
+        "Re-run with a longer budget, or read the identity by hand:",
+        `  bin/lighthouse kindle-ssh probe --host ${device.host} --timeout 1500`,
+        `  ssh -p ${device.port} -i ${identityFile ?? defaultIdentityFile()} -o BatchMode=yes root@${device.host} 'cat /proc/usid'`,
+        "",
+        `SSH said: ${authResult.error ?? `ssh did not finish within its budget`}`,
+      ],
       device,
     };
   }
@@ -1038,24 +1058,27 @@ export interface AuthCheck {
   output?: string;
   error?: string;
   rawCommand: string;
+  /** The ssh session was killed at its budget, so the key state is unknown. */
+  timedOut: boolean;
 }
 
 export async function verifyKeyAuth(target: SshTarget, timeoutMs = 15000): Promise<AuthCheck> {
+  const connectTimeoutSec = Math.max(2, Math.floor(timeoutMs / 1000) - 2);
   const args = buildSshArgs(
-    { ...target, connectTimeoutSec: Math.max(5, Math.round(timeoutMs / 1000)) },
+    { ...target, connectTimeoutSec },
     [`sh -c ${JSON.stringify(VERIFY_REMOTE_COMMAND)}`],
   );
-  const rawCommand = formatRawSshCommand({ ...target, connectTimeoutSec: Math.round(timeoutMs / 1000) }, [
+  const rawCommand = formatRawSshCommand({ ...target, connectTimeoutSec }, [
     `sh -c ${JSON.stringify(VERIFY_REMOTE_COMMAND)}`,
   ]);
   const result = await runWithTimeout(SSH_BIN, args, timeoutMs);
   if (result.status === 0) {
-    return { authenticated: true, output: result.stdout.trim(), rawCommand };
+    return { authenticated: true, output: result.stdout.trim(), rawCommand, timedOut: false };
   }
   const error = result.timedOut
     ? `ssh did not finish within ${timeoutMs} ms, so the key state is unknown (a busy or sleeping device looks like this, not like an untrusted key)`
     : (result.stderr || result.stdout || "ssh exited non-zero").trim().split("\n").slice(-3).join(" | ");
-  return { authenticated: false, error, rawCommand };
+  return { authenticated: false, error, rawCommand, timedOut: result.timedOut };
 }
 
 // ---------------------------------------------------------------------------
@@ -1375,6 +1398,12 @@ export function parseCliArgs(argv: string[]): CliOptions | { help: true } | { er
     return { error: "--port must be an integer between 1 and 65535" };
   }
 
+  if (options.expectSerial && (options.subcommand === "find" || options.subcommand === "usb")) {
+    return {
+      error: `--expect-serial cannot be checked by ${options.subcommand}: it never logs in. Use probe, connect or key.`,
+    };
+  }
+
   return options;
 }
 
@@ -1393,7 +1422,7 @@ Subcommands:
 Options:
   --device <1|2|kindle1|kindle2>  Which Kindle to target (1 = first found, 2 = second)
   --host <ipv4>                   Pin an exact address (still banner-verified)
-  --expect-serial <usid>          Fail if the unit that answers reports a different serial
+  --expect-serial <usid>          probe/connect/key: fail if the unit that answers reports another serial
   --timeout <ms>                  Per-host TCP probe timeout (default: 400)
   --port <port>                   Probe a single SSH port instead of 2222 and 22
   --identity <path>               SSH private key (default: ~/.ssh/id_ed25519)
@@ -1420,6 +1449,24 @@ Notes:
 `;
 
 /**
+ * One entry per physical device: the first endpoint recorded for each host.
+ *
+ * Discovery records endpoints (`host:port`), and one Kindle can answer on two
+ * ports (KOReader's plugin on 2222, the USB-link daemon on 22). Indexing those
+ * endpoints would make `--device 2` mean "the second port", not the second unit.
+ */
+export function uniqueDevicesByHost(devices: DiscoveredDevice[]): DiscoveredDevice[] {
+  const seen = new Set<string>();
+  const unique: DiscoveredDevice[] = [];
+  for (const device of devices) {
+    if (seen.has(device.host)) continue;
+    seen.add(device.host);
+    unique.push(device);
+  }
+  return unique;
+}
+
+/**
  * Pick which Kindle to act on.
  *
  * `--device 1` / `--device 2` select the first / second Kindle found, ordered by
@@ -1434,9 +1481,9 @@ export function selectKindle(
   device: string,
   host?: string,
 ): { selected?: DiscoveredDevice; note?: string } {
-  const kindles = devices
-    .filter((entry) => entry.kindleLikely)
-    .sort((a, b) => ipv4ToInt(a.host) - ipv4ToInt(b.host));
+  const kindles = uniqueDevicesByHost(devices.filter((entry) => entry.kindleLikely)).sort(
+    (a, b) => ipv4ToInt(a.host) - ipv4ToInt(b.host),
+  );
 
   if (host) {
     const match = kindles.find((entry) => entry.host === host);
@@ -1506,6 +1553,7 @@ function decideRoute(options: CliOptions, resolved: Awaited<ReturnType<typeof re
           authenticated: resolved.auth.authenticated,
           error: resolved.auth.error,
           output: resolved.auth.output,
+          timedOut: resolved.auth.timedOut,
         }
       : undefined,
   });
@@ -1673,6 +1721,8 @@ async function cmdKey(options: CliOptions): Promise<number> {
   console.error("");
   if (result.timedOut) {
     console.error("The installer session did not finish within 60s, so whether the key was written is unknown.");
+  } else if (verify.timedOut) {
+    console.error("Key install finished, but the verification session ran out of time: the key state is unknown, not necessarily broken.");
   } else {
     console.error("Key install ran but key authentication still fails.");
   }

@@ -1064,7 +1064,7 @@ Once `find` prints a stable address you may pin it yourself in `~/.ssh/config` -
 bin/lighthouse kindle-ssh connect --device 1 --expect-serial G001LG1221170MVV -- 'uname -srm'
 ```
 
-With `--expect-serial` a different unit is a hard failure (exit `2`, with both serials named), never a silent success against the wrong Kindle.
+With `--expect-serial` a different unit is a hard failure (exit `2`, with both serials named), never a silent success against the wrong Kindle. `find` and `usb` never log in, so they reject `--expect-serial` with a usage error rather than accept a check they cannot perform.
 
 > Existing `Host kindle1` / `Host kindle2` entries in `~/.ssh/config` are **wrong in both directions**: `kindle1` points at `192.168.31.167`, which is the *second* device's address, and `kindle2` still carries the literal placeholder `192.168.31.XXX`. A bare `ssh kindle1` therefore reaches the wrong device or fails for a reason that has nothing to do with the daemon. Use `bin/lighthouse kindle-ssh connect`, or update those blocks from what `find` prints.
 
@@ -1214,6 +1214,7 @@ After the revert the host re-enumerated "Internal Storage", `en6` disappeared, `
 | `find` reports all layers empty | Device powered off, off Wi-Fi, or KOReader closed | Wake it, start KOReader's SSH server (Tools -> SSH), rerun `find` |
 | Hosts up but `2222` closed | The network is fine; KOReader is not running | Start KOReader's SSH server. Not a network fault |
 | `probe` says *key authentication failed* | Route exists, key is not trusted | `bin/lighthouse kindle-ssh key --device 1` (needs password auth once) |
+| `probe` says *did not finish the key check within the budget* | The daemon is up, the device was too busy or asleep to complete the key exchange in time - the key state is **unknown**, not wrong | Do not reinstall the key; re-run with `--timeout 1500`, or read `/proc/usid` by hand over `ssh` |
 | `22` answers with `OpenSSH` | Not the Kindle - a computer or NAS on the same subnet | Ignore; the tool already refuses it as a candidate |
 | Login hangs then says *Connection timed out* | The address moved (DHCP) or the device slept mid-session | Rerun `bin/lighthouse kindle-ssh find`; never reuse an old address |
 | `probe`/`connect` says *not the expected … serial* | The route works but it reached the other Kindle: the lease moved, and `--device 1` is address order, not identity | Read the serial it printed, confirm it is the unit you meant, and rerun `find`; keep `--expect-serial` on verification runs |
@@ -1268,10 +1269,10 @@ Also verified on this Mac mini (real runs):
 | Check | Result |
 | --- | --- |
 | `find` | Finds both Kindles on `192.168.31.0/24`, rejects the Mac's own `OpenSSH` on `:22` and another host's `OpenSSH`, exit `0` |
-| `find --device 2` / `connect --device 2` | Selects the second device by address order; refuses to silently substitute the first |
+| `find --device 2` / `connect --device 2` | Selects the second *device* by address order (one entry per host, even when a unit answers on both `2222` and `22`); refuses to silently substitute the first |
 | `usb` | With the cable attached and the gadget up, reports the `RNDIS/Ethernet Gadget` link and, once it answers, prints the login command for the port that answered; a USB Ethernet dongle serving the LAN is not mistaken for the gadget |
 | `scripts/kindle-key-install.sh` | Idempotent install, `700`/`600` permissions, exact-line uninstall, `--dry-run` writes nothing, bad key rejected |
-| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 101 passing |
+| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 105 passing |
 
 #### Proven: Route B on one device (USB cable)
 

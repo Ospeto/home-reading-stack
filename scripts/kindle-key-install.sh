@@ -133,6 +133,10 @@ chmod 700 "$DIR" 2>/dev/null || true
 if [ -f "$TARGET" ] && grep -qF "$KEY" "$TARGET" 2>/dev/null; then
   echo "ALREADY_PRESENT ${TARGET}"
 else
+  if [ -s "$TARGET" ] && [ -n "$(tail -c 1 "$TARGET" 2>/dev/null)" ]; then
+    printf '\n' >> "$TARGET" 2>/dev/null || {
+      echo "ERROR: cannot append to ${TARGET}" >&2; exit 3; }
+  fi
   printf '%s\n' "$KEY" >> "$TARGET" 2>/dev/null || {
     echo "ERROR: cannot append to ${TARGET}" >&2; exit 3; }
   echo "INSTALLED ${TARGET}"

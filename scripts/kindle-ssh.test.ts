@@ -375,6 +375,26 @@ describe("diagnoseRoute", () => {
     expect(decision.body.join("\n")).toContain("/proc/usid");
   });
 
+  it("gives a timeout its own verdict instead of claiming the key is untrusted", () => {
+    // RUNBOOK §5 records load average 2.26 on the cabled unit: a busy device fails
+    // this way, and telling the operator to reinstall a trusted key sends them wrong.
+    const decision = diagnoseRoute({
+      discovery: makeDiscovery({ devices: [kindleDevice()] }),
+      alias: "kindle1",
+      authResult: {
+        authenticated: false,
+        timedOut: true,
+        error: "ssh did not finish within 10000 ms, so the key state is unknown",
+      },
+    });
+    expect(decision.state).toBe("ssh-timeout");
+    expect(decision.code).toBe(2);
+    expect(decision.headline).toContain("did not finish the key check");
+    const body = decision.body.join("\n");
+    expect(body).toContain("--timeout 1500");
+    expect(body).not.toContain("kindle-ssh key");
+  });
+
   it("names the key-install step when auth fails", () => {
     const decision = diagnoseRoute({
       discovery: makeDiscovery({ devices: [kindleDevice()] }),
@@ -820,6 +840,21 @@ describe("parseCliArgs", () => {
     expect(parseCliArgs(["probe", "--expect-serial", "@@"])).toHaveProperty("error");
   });
 
+  it("refuses an identity check on subcommands that never log in", () => {
+    // find and usb perform no authentication, so accepting --expect-serial there
+    // would promise a check the run never makes.
+    const findResult = parseCliArgs(["find", "--expect-serial", "G001LG1221170MVV"]);
+    if (!("error" in findResult)) throw new Error("expected a usage error");
+    expect(findResult.error).toContain("never logs in");
+    expect(parseCliArgs(["usb", "--expect-serial", "G001LG1221170MVV"])).toHaveProperty("error");
+
+    for (const subcommand of ["probe", "connect", "key"]) {
+      const parsed = parseCliArgs([subcommand, "--expect-serial", "G001LG1221170MVV"]);
+      if ("help" in parsed || "error" in parsed) throw new Error(`expected options for ${subcommand}`);
+      expect(parsed.expectSerial).toBe("G001LG1221170MVV");
+    }
+  });
+
   it("collects a remote command after -- without swallowing flags", () => {
     const parsed = parseCliArgs(["connect", "--device", "1", "--", "uptime", "-p"]);
     if ("help" in parsed || "error" in parsed) throw new Error("expected options");
@@ -1142,6 +1177,31 @@ describe("kindle-key-install.sh", () => {
     }
   });
 
+  it("keeps a pre-existing key when the file has no trailing newline", () => {
+    if (!hasKey) return;
+    const dir = tempDir();
+    try {
+      const target = path.join(dir, "authorized_keys");
+      const key = fs.readFileSync(pubKeyPath, "utf8").trim();
+      // Written without a final newline, as an editor or `echo -n` would.
+      fs.writeFileSync(target, "ssh-ed25519 AAAAEXISTING existing@host");
+
+      const first = runInstaller(["--target", target], key);
+      expect(first.status).toBe(0);
+      expect(first.stdout).toContain("INSTALLED");
+
+      const lines = fs.readFileSync(target, "utf8").split("\n").filter(Boolean);
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toBe("ssh-ed25519 AAAAEXISTING existing@host");
+
+      const second = runInstaller(["--target", target], key);
+      expect(second.stdout).toContain("ALREADY_PRESENT");
+      expect(fs.readFileSync(target, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("writes nothing on --dry-run", () => {
     const dir = tempDir();
     const target = path.join(dir, "nested", ".ssh", "authorized_keys");
@@ -1222,6 +1282,20 @@ describe("selectKindle", () => {
     const { selected, note } = selectKindle([], "kindle1");
     expect(selected).toBeUndefined();
     expect(note).toBeUndefined();
+  });
+
+  it("counts one Kindle once even when it answers on two ports", () => {
+    // The proven USB state: the unit serves KOReader on 2222 and the independent
+    // dropbear on 22. Two endpoints are still one device, so --device 2 must not
+    // resolve to the second port of that same unit.
+    const oneUnit = [kindleDevice({ host: "192.168.15.244", port: KINDLE_SSH_PORT }), kindleDevice({ host: "192.168.15.244", port: KINDLE_ALT_SSH_PORT })];
+    let result = selectKindle(oneUnit, "kindle2");
+    expect(result.selected).toBeUndefined();
+    expect(result.note).toContain("only 1 Kindle");
+
+    result = selectKindle(oneUnit, "kindle1");
+    expect(result.selected?.host).toBe("192.168.15.244");
+    expect(result.selected?.port).toBe(KINDLE_SSH_PORT);
   });
 });
 
