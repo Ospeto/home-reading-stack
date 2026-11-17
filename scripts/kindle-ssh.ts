@@ -822,6 +822,13 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
   const { discovery, alias, authResult, selectionNote, selected, identityFile, serial, expectedSerial } = input;
   const targets = discovery.scanTargets.map((t) => `${t.network}/${t.prefix}`).join(", ") || "no scannable subnet";
   const ports = discovery.probedPorts.join("/");
+  const layerText: Record<string, string> = {
+    mDNS: `mDNS (${MDNS_HOST_CANDIDATES.join(", ")})`,
+    "USB gadget": `USB gadget ${KINDLE_USB_HOST}`,
+    "LAN sweep": `a scan of ${targets} on ports ${ports}`,
+  };
+  const ranLayers = discovery.layers.filter((layer) => layer.status !== "skipped");
+  const skippedLayers = discovery.layers.filter((layer) => layer.status === "skipped");
 
   const kindleCandidates = uniqueDevicesByHost(discovery.devices.filter((device) => device.kindleLikely));
   const otherCandidates = discovery.devices.filter((device) => !device.kindleLikely);
@@ -852,8 +859,17 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
       code: 1,
       headline: `No ${alias} SSH route is reachable from this Mac mini.`,
       body: [
-        `Checked: mDNS (${MDNS_HOST_CANDIDATES.join(", ")}), USB gadget ${KINDLE_USB_HOST}, and a scan of ${targets} on ports ${ports}.`,
-        `${discovery.scannedHosts} address(es) were probed on ${targets}; none is serving Kindle SSH on ${ports}.`,
+        `Checked: ${
+          ranLayers.length
+            ? ranLayers.map((layer) => layerText[layer.layer] ?? layer.layer).join(", ")
+            : "nothing - every discovery layer was disabled"
+        }.`,
+        ...(skippedLayers.length
+          ? [`Skipped: ${skippedLayers.map((layer) => `${layer.layer} (${layer.detail})`).join(", ")}.`]
+          : []),
+        ranLayers.some((layer) => layer.layer === "LAN sweep")
+          ? `${discovery.scannedHosts} address(es) were probed on ${targets}; none is serving Kindle SSH on ${ports}.`
+          : "No LAN sweep was run, so no address on those subnets was probed.",
         "",
         "If hosts are up but nothing answers those ports, the network is fine and the SSH daemon is not running:",
         "KOReader's SSH server only exists while KOReader runs.",
@@ -985,7 +1001,7 @@ export function diagnoseRoute(input: DiagnosisInput): RouteDecision {
         `  bin/lighthouse kindle-ssh key${routeArgs(device.host, device.port, identityFile)}`,
         "",
         "If a password prompt is acceptable for that one step, do it by hand instead:",
-        `  ssh -p ${device.port} root@${device.host} 'sh -s' < scripts/kindle-key-install.sh`,
+        `  ssh -p ${device.port} root@${device.host} "LIGHTHOUSE_PUBKEY='$(cat ${identityFile ?? defaultIdentityFile()}.pub)' sh -s" < scripts/kindle-key-install.sh`,
         "",
         `SSH said: ${authResult.error ?? "authentication failed"}`,
       ],
@@ -1027,6 +1043,11 @@ export function resolveDeviceAlias(raw: string | undefined): string {
 
 export function defaultIdentityFile(): string {
   return path.join(os.homedir(), ".ssh", "id_ed25519");
+}
+
+/** Single-quote a value for a shell command line. */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 /** `--identity` fragment for a printed command, omitted when it is the default key. */
@@ -1780,7 +1801,8 @@ async function cmdKey(options: CliOptions): Promise<number> {
 
   // The key is not trusted yet, so this step needs password (or existing) auth.
   console.log(`Installing ${pubKeyPath} into ${target.host}:${target.port} (this may ask for the root password)...`);
-  const remote = `sh -s`;
+  const publicKey = fs.readFileSync(pubKeyPath, "utf8").trim();
+  const remote = `LIGHTHOUSE_PUBKEY=${shellQuote(publicKey)} sh -s`;
   const args = [
     "-p",
     String(target.port),
@@ -1801,6 +1823,7 @@ async function cmdKey(options: CliOptions): Promise<number> {
   const result = await runWithTimeoutWithInput(SSH_BIN, args, 60000, installer);
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
+  const installerWrote = /^(INSTALLED|ALREADY_PRESENT) /m.test(result.stdout);
 
   const verify = await verifyKeyAuth(target, 15000);
   if (verify.authenticated) {
@@ -1828,6 +1851,8 @@ async function cmdKey(options: CliOptions): Promise<number> {
     console.error(`  ssh-keygen -R '[${target.host}]:${target.port}'`);
   } else if (verify.failure === "connect") {
     console.error("Key install finished, but the verification session could not connect: the key state is unknown, not untrusted.");
+  } else if (!installerWrote) {
+    console.error("The installer did not report installing the key, so the key was almost certainly not written.");
   } else {
     console.error("Key install ran but key authentication still fails.");
   }

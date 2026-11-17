@@ -67,7 +67,11 @@ const VERIFY_SAMPLE = [
 function makeDiscovery(overrides: Partial<DiscoveryResult> = {}): DiscoveryResult {
   return {
     devices: [],
-    layers: [],
+    layers: [
+      { layer: "mDNS", status: "empty", detail: "no answer" },
+      { layer: "USB gadget", status: "empty", detail: "no USB link" },
+      { layer: "LAN sweep", status: "empty", detail: "nothing answered" },
+    ],
     scannedHosts: 254,
     probedPorts: [KINDLE_SSH_PORT, KINDLE_ALT_SSH_PORT],
     scanTargets: [
@@ -312,6 +316,36 @@ describe("diagnoseRoute", () => {
     expect(decision.code).toBe(2);
     expect(decision.headline).toContain("not the Kindle SSH daemon");
     expect(decision.body.join("\n")).toContain("dropbear");
+  });
+
+  it("states which discovery layers it skipped instead of claiming to have checked them", () => {
+    // `--no-usb`/`--no-mdns` leave layer records marked skipped; the report must not
+    // then claim the USB gadget address was checked.
+    const discovery = makeDiscovery({
+      devices: [],
+      layers: [
+        { layer: "mDNS", status: "skipped", detail: "disabled with --no-mdns" },
+        { layer: "USB gadget", status: "skipped", detail: "disabled with --no-usb" },
+        { layer: "LAN sweep", status: "empty", detail: "nothing answered" },
+      ],
+    });
+    const decision = diagnoseRoute({ discovery, alias: "kindle1" });
+    const body = decision.body.join("\n");
+    expect(decision.code).toBe(1);
+    expect(body).toContain("Skipped: mDNS (disabled with --no-mdns), USB gadget (disabled with --no-usb).");
+    expect(body.split("\n")[0]).not.toContain("USB gadget 192.168.15.244");
+    expect(body).toContain("none is serving Kindle SSH on 2222/22");
+  });
+
+  it("names the key channel in the manual install command it prints", () => {
+    const decision = diagnoseRoute({
+      discovery: makeDiscovery({ devices: [kindleDevice()] }),
+      alias: "kindle1",
+      authResult: { authenticated: false, error: "Permission denied (publickey)." },
+    });
+    const body = decision.body.join("\n");
+    expect(body).toContain("LIGHTHOUSE_PUBKEY='$(cat ");
+    expect(body).toContain("' sh -s\" < scripts/kindle-key-install.sh");
   });
 
   it("reports a verified route with exit code 0", () => {
@@ -1207,6 +1241,46 @@ describe("kindle-key-install.sh", () => {
   function tempDir(): string {
     return fs.mkdtempSync(path.join(os.tmpdir(), "kindle-key-test-"));
   }
+
+  it("installs the key the wrapper actually sends: script on stdin, key in the environment", () => {
+    const dir = tempDir();
+    try {
+      const target = path.join(dir, "authorized_keys");
+      const key = "ssh-ed25519 AAAALIGHTHOUSETESTKEY lighthouse@test";
+      // The wrapper's real invocation shape: `LIGHTHOUSE_PUBKEY=... sh -s` with the
+      // script piped to stdin. stdin cannot carry the key as well.
+      const result = spawnSync("sh", ["-s", "--", "--target", target], {
+        input: fs.readFileSync(KEY_INSTALLER, "utf8"),
+        encoding: "utf8",
+        env: { ...process.env, LIGHTHOUSE_PUBKEY: key },
+        timeout: 15000,
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("INSTALLED");
+      expect(fs.readFileSync(target, "utf8")).toContain(key);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes nothing when the script and the key are both expected on stdin", () => {
+    const dir = tempDir();
+    try {
+      const target = path.join(dir, "authorized_keys");
+      // Without LIGHTHOUSE_PUBKEY the installer's `cat` drains the remaining script
+      // from stdin, so the old shape can never install a key. Pin that behaviour so
+      // the wrapper cannot regress to it silently.
+      spawnSync("sh", ["-s", "--", "--target", target], {
+        input: fs.readFileSync(KEY_INSTALLER, "utf8"),
+        encoding: "utf8",
+        env: { ...process.env, LIGHTHOUSE_PUBKEY: "" },
+        timeout: 15000,
+      });
+      expect(fs.existsSync(target)).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it("ships as an executable POSIX shell script", () => {
     expect(fs.existsSync(KEY_INSTALLER)).toBe(true);

@@ -7,8 +7,11 @@
 #   reads, idempotently, so key-based login needs no password prompt.
 #
 # USAGE (from the Mac mini, over an SSH route that already works)
-#   ssh -p 2222 root@<kindle-ip> 'sh -s' < scripts/kindle-key-install.sh
+#   ssh -p 2222 root@<kindle-ip> "LIGHTHOUSE_PUBKEY='<key line>' sh -s" < scripts/kindle-key-install.sh
 #   bin/lighthouse kindle-ssh key --device 1          # wrapper does the above
+#
+#   The public key arrives in LIGHTHOUSE_PUBKEY, or via --key <file>. stdin carries
+#   the script itself under `sh -s`, so it is only a fallback when run as a file.
 #
 #   --dry-run          resolve and report the target path, write nothing
 #   --target <path>    force an exact authorized_keys path (testing / override)
@@ -38,7 +41,7 @@ while [ $# -gt 0 ]; do
     --uninstall) UNINSTALL=1 ;;
     --target) shift; TARGET_OVERRIDE="${1:-}" ;;
     --key) shift; KEY_FILE="${1:-}" ;;
-    -h|--help) sed -n '2,27p' "$0" 2>/dev/null; exit 0 ;;
+    -h|--help) sed -n '2,29p' "$0" 2>/dev/null; exit 0 ;;
     *) echo "ERROR: unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -47,7 +50,9 @@ done
 # ---------------------------------------------------------------------------
 # 1. Read and validate the public key
 # ---------------------------------------------------------------------------
-if [ -n "$KEY_FILE" ]; then
+if [ -n "${LIGHTHOUSE_PUBKEY:-}" ]; then
+  KEY="$LIGHTHOUSE_PUBKEY"
+elif [ -n "$KEY_FILE" ]; then
   [ -r "$KEY_FILE" ] || { echo "ERROR: cannot read key file: $KEY_FILE" >&2; exit 2; }
   KEY=$(cat "$KEY_FILE")
 else
@@ -56,7 +61,7 @@ fi
 
 # Strip CR so a key pasted through a Windows-ish path still matches.
 KEY=$(printf '%s' "$KEY" | tr -d '\r')
-[ -n "$KEY" ] || { echo "ERROR: no public key provided (stdin was empty)" >&2; exit 2; }
+[ -n "$KEY" ] || { echo "ERROR: no public key provided (LIGHTHOUSE_PUBKEY, --key and stdin were all empty)" >&2; exit 2; }
 
 case "$KEY" in
   ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-nistp256\ *|ecdsa-sha2-nistp384\ *|ecdsa-sha2-nistp521\ *)

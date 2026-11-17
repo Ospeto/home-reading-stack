@@ -1099,7 +1099,15 @@ bin/lighthouse kindle-ssh connect -- 'uname -srm'  # run one remote command
 bin/lighthouse kindle-ssh key --device 1
 ```
 
-Under the hood it pipes `scripts/kindle-key-install.sh` to the device over `sh -s`. That script resolves root's home from `/etc/passwd`, appends the key only if absent, sets `700`/`600` permissions, and touches nothing else - no KOReader file, no service restart. It warns loudly when the resolved path is RAM-backed (`/tmp/...`), because a Kindle whose root home lives on a volatile mount must have the key reinstalled after each reboot. Reverse it with `--uninstall` (removes exactly that key line). That path is fail-closed: if the target file cannot be read, it aborts with exit `3` and leaves the file untouched rather than rewriting it with the other keys missing.
+Under the hood it sends `scripts/kindle-key-install.sh` to the device over `sh -s` and passes the public key in the `LIGHTHOUSE_PUBKEY` environment variable: `sh -s` consumes stdin for the script itself, so the key and the script travel on separate channels. That script resolves root's home from `/etc/passwd`, appends the key only if absent, sets `700`/`600` permissions, and touches nothing else - no KOReader file, no service restart. It warns loudly when the resolved path is RAM-backed (`/tmp/...`), because a Kindle whose root home lives on a volatile mount must have the key reinstalled after each reboot. If the installer never reports `INSTALLED` or `ALREADY_PRESENT`, the wrapper says the key was probably not written instead of claiming success.
+
+To reverse an install, run that same installer with `--uninstall` over a working shell (the wrapper exposes no such flag):
+
+```bash
+ssh -p 2222 root@<kindle-ip> "LIGHTHOUSE_PUBKEY='$(cat ~/.ssh/id_ed25519.pub)' sh -s -- --uninstall" < scripts/kindle-key-install.sh
+```
+
+It removes exactly that key line, and it is fail-closed: if the target file cannot be read it aborts with exit `3` and leaves the file untouched rather than rewriting it with the other keys missing.
 
 To confirm key auth end to end, `probe` must report `verified` with a remote identity block - a working port alone is not proof.
 
@@ -1274,7 +1282,7 @@ Also verified on this Mac mini (real runs):
 | `find --device 2` / `connect --device 2` | Selects the second *device* by address order (one entry per host, even when a unit answers on both `2222` and `22`); refuses to silently substitute the first |
 | `usb` | With the cable attached and the gadget up, reports the `RNDIS/Ethernet Gadget` link and, once it answers, prints the login command for the port that answered; a USB Ethernet dongle serving the LAN is not mistaken for the gadget |
 | `scripts/kindle-key-install.sh` | Idempotent install, `700`/`600` permissions, exact-line uninstall, `--dry-run` writes nothing, bad key rejected |
-| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 115 passing |
+| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 119 passing |
 
 #### Proven: Route B on one device (USB cable)
 
