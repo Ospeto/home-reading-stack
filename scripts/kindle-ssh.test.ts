@@ -9,6 +9,7 @@ import { spawnSync } from "node:child_process";
 import {
   AMAZON_OUI,
   KINDLE_SSH_PORT,
+  KINDLE_ALT_SSH_PORT,
   KINDLE_USB_HOST,
   MAC_USB_HOST,
   MDNS_HOST_CANDIDATES,
@@ -23,9 +24,9 @@ import {
   findUsbEthernetPort,
   formatRawSshCommand,
   formatSshConfigBlock,
+  formatUsbReport,
   intToIpv4,
   ipv4ToInt,
-  isPrivateIpv4,
   isTunnelAddress,
   isLocallyAdministeredMac,
   isValidIpv4,
@@ -34,11 +35,7 @@ import {
   parseCliArgs,
   parseHardwarePorts,
   parseIfconfig,
-  parseMdnsBrowse,
-  parseMdnsResolve,
-  pingHost,
   selectKindle,
-  sweepLiveHosts,
   probeTcp,
   readSshBanner,
   resolveDeviceAlias,
@@ -57,7 +54,7 @@ function makeDiscovery(overrides: Partial<DiscoveryResult> = {}): DiscoveryResul
     devices: [],
     layers: [],
     scannedHosts: 254,
-    liveHostCount: 0,
+    probedPorts: [KINDLE_SSH_PORT, KINDLE_ALT_SSH_PORT],
     scanTargets: [
       {
         network: "192.168.31.0",
@@ -118,14 +115,6 @@ describe("IPv4 helpers", () => {
     expect(netmaskToPrefix("255.255.255.255")).toBe(32);
     expect(netmaskToPrefix("255.255.255.252")).toBe(30);
     expect(() => netmaskToPrefix("255.0.255.0")).toThrow();
-  });
-
-  it("recognises private ranges", () => {
-    expect(isPrivateIpv4("192.168.31.15")).toBe(true);
-    expect(isPrivateIpv4("10.1.2.3")).toBe(true);
-    expect(isPrivateIpv4("172.16.0.5")).toBe(true);
-    expect(isPrivateIpv4("172.32.0.5")).toBe(false);
-    expect(isPrivateIpv4("8.8.8.8")).toBe(false);
   });
 
   it("treats the 198.18.0.0/15 fake-IP tunnel range as unscannable", () => {
@@ -278,49 +267,6 @@ describe("classifySshServer", () => {
 // mDNS parsing
 // ---------------------------------------------------------------------------
 
-const DNS_SD_BROWSE = `Browsing for _ssh._tcp.local.
-DATE: ---Tue 17 Nov 2026---
- 8:10:16.630  ...STARTING...
-Timestamp     A/R    Flags  if Domain               Service Type         Instance Name
- 8:10:16.632  Add        3   6 local.               _ssh._tcp.           Ospeto's M4 Air
- 8:10:16.632  Add        3   1 local.               _ssh._tcp.           mac mini
- 8:10:17.100  Rmv        3   6 local.               _ssh._tcp.           Old Laptop
- 8:10:18.500  Add        2   1 local.               _ssh._tcp.           kindle-pw5
-`;
-
-describe("parseMdnsBrowse", () => {
-  it("collects advertised instances and flags kindle-like ones", () => {
-    const found = parseMdnsBrowse(DNS_SD_BROWSE);
-    expect(found.map((f) => f.instance)).toEqual(["Ospeto's M4 Air", "mac mini", "kindle-pw5"]);
-    expect(found.filter((f) => f.kindleLike).map((f) => f.instance)).toEqual(["kindle-pw5"]);
-  });
-
-  it("ignores removals and the header rows", () => {
-    const found = parseMdnsBrowse(DNS_SD_BROWSE);
-    expect(found.some((f) => f.instance === "Old Laptop")).toBe(false);
-  });
-
-  it("returns an empty list for terminal noise", () => {
-    expect(parseMdnsBrowse("Browsing for _ssh._tcp.local.\n\n")).toEqual([]);
-  });
-});
-
-describe("parseMdnsResolve", () => {
-  it("extracts an explicit host and port", () => {
-    const text = "kindle-pw5._ssh._tcp.local. can be reached at kindle.local.:2222 (interface 1)";
-    expect(parseMdnsResolve(text)).toEqual({ host: "kindle.local.", port: 2222 });
-  });
-
-  it("extracts a host with no port", () => {
-    const text = "kindle._ssh._tcp.local. can be reached at 192.168.31.87:22";
-    expect(parseMdnsResolve(text)).toEqual({ host: "192.168.31.87", port: 22 });
-  });
-
-  it("returns an empty object when nothing resolved", () => {
-    expect(parseMdnsResolve("no such record")).toEqual({});
-  });
-});
-
 // ---------------------------------------------------------------------------
 // Route diagnosis - the anti-bare-timeout contract
 // ---------------------------------------------------------------------------
@@ -400,13 +346,12 @@ describe("diagnoseRoute", () => {
     expect(decision.body.join("\n")).toContain("192.168.31.73:2222");
   });
 
-  it("says hosts were up but nothing serves 2222 when ICMP found live hosts", () => {
-    const discovery = makeDiscovery({ devices: [], scannedHosts: 7 });
-    discovery.liveHostCount = 7;
+  it("names the ports that were actually probed, not a hardcoded pair", () => {
+    const discovery = makeDiscovery({ devices: [], scannedHosts: 7, probedPorts: [KINDLE_ALT_SSH_PORT] });
     const decision = diagnoseRoute({ discovery, alias: "kindle1" });
     const body = decision.body.join("\n");
-    expect(body).toContain("7 host(s) answered");
-    expect(body).toContain("none is serving Kindle SSH");
+    expect(body).toContain("none is serving Kindle SSH on 22");
+    expect(body).not.toContain(String(KINDLE_SSH_PORT));
   });
 
   it("mentions every subnet that was actually scanned", () => {
@@ -567,12 +512,36 @@ describe("USB route helpers", () => {
       ],
       ports: parseHardwarePorts(HARDWARE_PORTS),
       mountedVolumes: [],
-      probe: { host: KINDLE_USB_HOST, port: KINDLE_SSH_PORT, open: false, latencyMs: 600, error: "timeout" },
+      probes: [
+        { host: KINDLE_USB_HOST, port: KINDLE_SSH_PORT, open: false, latencyMs: 600, error: "timeout" },
+        { host: KINDLE_USB_HOST, port: KINDLE_ALT_SSH_PORT, open: false, latencyMs: 600, error: "timeout" },
+      ],
     });
     expect(status.gadgetConnected).toBe(true);
     expect(status.gadgetInterface).toBe("en7");
-    expect(status.reachable).toBe(false);
+    expect(status.sshPort).toBeUndefined();
     expect(status.probeDetail).toContain("USB networking may be disabled");
+    expect(status.probeDetail).toContain(`${KINDLE_SSH_PORT}/${KINDLE_ALT_SSH_PORT}`);
+  });
+
+  it("reports the USB link reachable on port 22 with the USBNetwork daemon only", () => {
+    const status = summarizeUsbStatus({
+      ifaces: [{ name: "en7", address: "192.168.15.201", netmask: "255.255.255.0", mac: `${AMAZON_OUI}:99:7e:21` }],
+      ports: parseHardwarePorts(HARDWARE_PORTS),
+      mountedVolumes: [],
+      probes: [
+        { host: KINDLE_USB_HOST, port: KINDLE_SSH_PORT, open: false, latencyMs: 40, error: "connection refused" },
+        { host: KINDLE_USB_HOST, port: KINDLE_ALT_SSH_PORT, open: true, latencyMs: 12 },
+      ],
+    });
+    // The documented route-B daemon is USBNetwork's dropbear on 22; reporting the
+    // link as dead because 2222 alone was probed would break the fallback route.
+    expect(status.sshPort).toBe(KINDLE_ALT_SSH_PORT);
+    expect(status.probeDetail).toContain(`${KINDLE_USB_HOST}:${KINDLE_ALT_SSH_PORT} answered`);
+
+    const report = formatUsbReport(status);
+    expect(report).toContain(`ssh -p ${KINDLE_ALT_SSH_PORT}`);
+    expect(report).not.toContain("did not answer");
   });
 
   it("identifies an Amazon-OUI adapter even when hardware ports are unknown", () => {
@@ -820,6 +789,24 @@ describe("discoverKindle", () => {
     expect(result.scannedHosts).toBe(254);
     expect(result.layers.find((l) => l.layer === "LAN sweep")?.status).toBe("empty");
   });
+
+  it("records the ports it actually probed", async () => {
+    const probed = new Set<number>();
+    const result = await discoverKindle({
+      ifaces: lanIfaces,
+      mdns: false,
+      includeUsb: false,
+      concurrency: 8,
+      ports: [KINDLE_ALT_SSH_PORT],
+      probe: async (host, port) => {
+        probed.add(port);
+        return { host, port, open: false, latencyMs: 0 };
+      },
+      banner: async () => null,
+    });
+    expect([...probed]).toEqual([KINDLE_ALT_SSH_PORT]);
+    expect(result.probedPorts).toEqual([KINDLE_ALT_SSH_PORT]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -930,14 +917,29 @@ describe("kindle-key-install.sh", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("warns when the resolved path will not survive a reboot", () => {
+  it("warns when the authorized_keys path will not survive a reboot", () => {
+    const dir = fs.mkdtempSync("/tmp/kindle-key-volatile-");
+    try {
+      const target = path.join(dir, "authorized_keys");
+      const out = runInstaller(["--target", target], "ssh-ed25519 AAAA test\n");
+      expect(out.status).toBe(0);
+      expect(out.stdout).toContain("VOLATILE");
+      expect(fs.readFileSync(target, "utf8")).toContain("ssh-ed25519 AAAA test");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stays quiet for an authorized_keys path that outlives a reboot", () => {
     const dir = tempDir();
-    const target = path.join(dir, "authorized_keys");
-    const out = runInstaller(["--target", target], "ssh-ed25519 AAAA test\n");
-    expect(out.status).toBe(0);
-    // The warning only fires for RAM-backed paths such as /tmp.
-    expect(out.stdout.includes("VOLATILE")).toBe(target.startsWith("/tmp"));
-    fs.rmSync(dir, { recursive: true, force: true });
+    try {
+      const target = path.join(dir, "authorized_keys");
+      const out = runInstaller(["--target", target], "ssh-ed25519 AAAA test\n");
+      expect(out.status).toBe(0);
+      expect(out.stdout).not.toContain("VOLATILE");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -988,50 +990,10 @@ describe("selectKindle", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Liveness pre-filter
+// Banner classification
 // ---------------------------------------------------------------------------
 
-describe("liveness filtering", () => {
-  it("pings loopback successfully with the native ping binary", async () => {
-    const result = await pingHost("127.0.0.1", 1000);
-    expect(result.alive).toBe(true);
-    expect(result.host).toBe("127.0.0.1");
-  });
-
-  it("reports a dead address without hanging", async () => {
-    const result = await pingHost("192.0.2.1", 400); // TEST-NET-1, never routed
-    expect(result.alive).toBe(false);
-  });
-
-  it("sweepLiveHosts keeps only responders", async () => {
-    const live = await sweepLiveHosts(["127.0.0.1", "192.0.2.1"], 2, 400);
-    expect(live).toEqual(["127.0.0.1"]);
-  });
-
-  it("probes only the hosts the live filter allows", async () => {
-    const probed: string[] = [];
-    const result = await discoverKindle({
-      ifaces: [{ name: "en0", address: "192.168.31.15", netmask: "255.255.255.0" }],
-      mdns: false,
-      includeUsb: false,
-      concurrency: 8,
-      icmpFilter: true,
-      liveFilter: async () => ["192.168.31.73"],
-      probe: async (host, port) => {
-        probed.push(`${host}:${port}`);
-        return { host, port, open: host === "192.168.31.73" && port === 2222, latencyMs: 1 };
-      },
-      banner: async () => "SSH-2.0-dropbear_2026.92 (KOReader)",
-    });
-
-    // Only the filtered host was probed, not all 254 addresses.
-    expect(probed.every((entry) => entry.startsWith("192.168.31.73:"))).toBe(true);
-    expect(result.scannedHosts).toBe(1);
-    expect(result.liveHostCount).toBe(1);
-    expect(result.devices).toHaveLength(1);
-    expect(result.devices[0].host).toBe("192.168.31.73");
-  });
-
+describe("classifySshServer", () => {
   it("reports the KOReader banner version verbatim", () => {
     const info = classifySshServer("SSH-2.0-dropbear_2026.92 (KOReader)");
     expect(info.server).toBe("dropbear");

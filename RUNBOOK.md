@@ -1020,7 +1020,7 @@ The distinction matters: route A is the everyday path because it needs no cable,
 
 ### 1. Entry point: find the device, then connect to what you found
 
-Do not assume an address. The Kindles have no stable IP: the DHCP lease can move them, and the addresses they used before (`192.168.31.167` and, earlier, `192.168.31.73` for the first device) are worthless once the lease expires - at the time of writing neither answered and the ARP entry for the older one had gone stale. The macOS ARP cache is not a source of truth either - `arp -an` returns nothing on this host even while hosts are answering.
+Do not assume an address. The Kindles have no stable IP: the DHCP lease can move them, so any address you saw last time - `192.168.31.73` and `192.168.31.167` were the two in the last recorded run - is a snapshot of that lease, not a property of the device. A lease change silently invalidates a pasted address, and the macOS ARP cache is not a source of truth either - `arp -an` returns nothing on this host even while hosts are answering.
 
 ```bash
 # The entry point. Reports the device's current address from live evidence.
@@ -1042,9 +1042,9 @@ Discovery runs four layers in order and reports each one, so a miss tells you *w
 
 Only a **dropbear** banner counts as a Kindle. An `OpenSSH` responder on port 22 is a different machine (this Mac mini itself answers on `22`), and the tool refuses to treat it as a device. This Mac's own addresses are excluded from results.
 
-> **Kindles do not answer `ping`.** Their firmware drops ICMP while serving SSH normally, so any ping-first scan will report a healthy device as absent. The default sweep therefore probes every address in the subnet. `--fast` opts into an ICMP pre-filter for speed and carries a warning for exactly this reason - if a device that is definitely on goes missing, that flag is the first suspect.
+> **Kindles do not answer `ping`.** Their firmware drops ICMP while serving SSH normally, so any ping-first scan will report a healthy device as absent. The tool therefore probes every address in the subnet on both ports and never pre-filters on ICMP.
 
-`find` exits `0` when a Kindle responder was found, `1` when nothing was found, `2` when something was found but the route is not usable yet.
+`find` exits `0` when a Kindle responder was found, `1` when nothing was found, `2` when something was found but the route is not usable yet - discovery is not authentication, so `find` succeeds on a responder whose key is not trusted. `probe`, `connect` and `key` exit `0` only on a verified route, and `connect -- <command>` exits with the remote command's own status, exactly as `ssh` does.
 
 ### 2. Why there is no DHCP reservation pinning the address
 
@@ -1065,7 +1065,7 @@ KINDLE_ROUTER_TOKEN=<token> bin/lighthouse kindle-ssh find
 
 Once `find` prints a stable address you may pin it yourself in `~/.ssh/config` - the tool prints a ready-to-paste `Host` block and **never edits your SSH config**. That pin is a convenience, not a substitute for discovery: rerun `find` whenever the device has been off for a while.
 
-> Existing `Host kindle1` / `Host kindle2` entries in `~/.ssh/config` are **stale**: `kindle1` points at the dead `192.168.31.167` and `kindle2` carries the literal placeholder `192.168.31.XXX`. A bare `ssh kindle1` therefore fails for a reason that has nothing to do with the device. Use `bin/lighthouse kindle-ssh connect`, or update those blocks from what `find` prints.
+> Existing `Host kindle1` / `Host kindle2` entries in `~/.ssh/config` are **wrong in both directions**: `kindle1` points at `192.168.31.167`, which is the *second* device's address, and `kindle2` still carries the literal placeholder `192.168.31.XXX`. A bare `ssh kindle1` therefore reaches the wrong device or fails for a reason that has nothing to do with the daemon. Use `bin/lighthouse kindle-ssh connect`, or update those blocks from what `find` prints.
 
 ### 3. Route A - Wireless (KOReader must be running)
 
@@ -1120,6 +1120,8 @@ Check the current state first - this is read-only and cannot disturb the device:
 bin/lighthouse kindle-ssh usb          # adapter, mounted volume, USBNetwork presence, link state
 bin/lighthouse kindle-ssh usb --json   # machine-readable
 ```
+
+It probes both link ports, so a link that answers only on `22` (USBNetwork, KOReader closed - the ordinary case) is reported reachable, and the login command it prints carries the port that actually answered. It never runs `sudo` or changes host networking; the Mac-side command in "Mac-side steps" below is yours to run.
 
 **Pre-flight, no shell required.** With the device plugged in as an ordinary USB drive, the user partition is mounted at `/Volumes/<Kindle>/`, so USBNetwork's presence is directly observable:
 
@@ -1190,7 +1192,6 @@ ssh -p 22 -i ~/.ssh/id_ed25519 -o BatchMode=yes -o ConnectTimeout=8 root@192.168
 | --- | --- | --- |
 | **The Kindle does not answer `ping` but SSH works** | **Normal.** Kindle firmware drops ICMP. This is the single most misleading symptom on this network | Ignore ping entirely; judge reachability by a TCP connection on `2222` |
 | `find` reports all layers empty | Device powered off, off Wi-Fi, or KOReader closed | Wake it, start KOReader's SSH server (Tools -> SSH), rerun `find` |
-| `find --fast` misses a device that is definitely on | The ICMP pre-filter skipped it, because Kindles are ICMP-silent | Drop `--fast`; the default probes every address |
 | Hosts up but `2222` closed | The network is fine; KOReader is not running | Start KOReader's SSH server. Not a network fault |
 | `probe` says *key authentication failed* | Route exists, key is not trusted | `bin/lighthouse kindle-ssh key --device 1` (needs password auth once) |
 | `22` answers with `OpenSSH` | Not the Kindle - a computer or NAS on the same subnet | Ignore; the tool already refuses it as a candidate |
@@ -1248,7 +1249,7 @@ Also verified on this Mac mini (real runs):
 | `find --device 2` / `connect --device 2` | Selects the second device by address order; refuses to silently substitute the first |
 | `usb` | Reports *no USB network adapter present* - no false hit on the built-in Ethernet or VPN adapters |
 | `scripts/kindle-key-install.sh` | Idempotent install, `700`/`600` permissions, exact-line uninstall, `--dry-run` writes nothing, bad key rejected |
-| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 90 passing |
+| Unit suite | `bun test scripts/kindle-ssh.test.ts` - 82 passing |
 
 #### Not proven: Route B (USB cable)
 
@@ -1262,7 +1263,7 @@ Route B is therefore a documented, gated procedure, not a working route. Closing
 
 #### Two environmental facts worth remembering
 
-1. **Kindles are ICMP-silent.** Both devices served SSH on `2222` while answering no ping at all. Any scan that pre-filters on ping will conclude the device is absent. The tool probes every address by default for exactly this reason, and `--fast` carries that warning.
+1. **Kindles are ICMP-silent.** Both devices served SSH on `2222` while answering no ping at all. Any scan that pre-filters on ping will conclude the device is absent, so the tool probes every address and uses no ICMP filter.
 2. **Runtime sockets to the LAN fail on this host.** A hand-written `net.connect('192.168.31.73', 2222)` returns `ECONNREFUSED` and a Python socket returns `EHOSTUNREACH`, while `nc`, `ssh` and `curl` reach the very same address. This is host scoped-routing/VPN layering, not a device fault. All probing in `scripts/kindle-ssh.ts` therefore delegates to `nc` (and `ssh` for auth/identity) instead of using runtime sockets; a socket-based implementation reports a healthy device as missing.
 
 ---
