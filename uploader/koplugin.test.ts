@@ -7047,6 +7047,130 @@ describe("plugin sidecar walk: fewer stats, fewer walks", () => {
 });
 
 /**
+ * The stat skip never reaches a name the device was not measured to carry as a
+ * book file.
+ *
+ * The skip exists for one measured cost: 1615 of the 2239 children under this
+ * device's book roots are `*.epub`, so 2053 `lfs.attributes` calls can drop to
+ * the names that are not proved to be files. The oracle is the filesystem: a
+ * folder named `Books.old` or `Notes.json` is a folder, so its sidecars must
+ * still be found, and only a name carrying a measured book suffix may skip the
+ * stat. An over-broad suffix table turns those folders into skipped children and
+ * loses their reading data silently, which this case rejects.
+ */
+const SIDECAR_SUFFIX_HARNESS = String.raw`
+local plugin_root = assert(arg[1], "plugin root argument required")
+local Sidecar = assert(loadfile(plugin_root .. "/lighthouse_sidecar.lua"))()
+
+local fake_dirs, statted = {}, {}
+local function put_dir(path, names)
+  fake_dirs[path] = names
+end
+
+local function metadata_body(title)
+  return "return { doc_props = { title = " .. string.format("%q", title)
+    .. " }, percent_finished = 0.5 }"
+end
+
+-- A root whose subfolders deliberately carry suffixes that look like files.
+put_dir("/root", { "Books.old", "Notes.json", "Plain", "X.epub" })
+put_dir("/root/Books.old", { "Old.epub", "Old.epub.sdr" })
+put_dir("/root/Books.old/Old.epub.sdr", { "metadata.epub.lua" })
+put_dir("/root/Notes.json", { "Note.epub", "Note.epub.sdr" })
+put_dir("/root/Notes.json/Note.epub.sdr", { "metadata.epub.lua" })
+put_dir("/root/Plain", { "Plaintext.epub", "Plaintext.epub.sdr" })
+put_dir("/root/Plain/Plaintext.epub.sdr", { "metadata.epub.lua" })
+
+local bodies = {
+  ["/root/Books.old/Old.epub.sdr/metadata.epub.lua"] = metadata_body("Old"),
+  ["/root/Notes.json/Note.epub.sdr/metadata.epub.lua"] = metadata_body("Note"),
+  ["/root/Plain/Plaintext.epub.sdr/metadata.epub.lua"] = metadata_body("Plaintext"),
+}
+
+Sidecar.io = {
+  open = function(path)
+    if not bodies[path] then return nil end
+    return { close = function() end }
+  end,
+  loadfile = function(path)
+    local body = bodies[path]
+    if not body then return nil, "missing" end
+    return loadstring(body)
+  end,
+  list = function(path)
+    local names = fake_dirs[path]
+    if not names then return nil end
+    local copy = {}
+    for index = 1, #names do copy[index] = names[index] end
+    return copy
+  end,
+  attributes = function(path, field)
+    if field == "mode" then
+      statted[#statted + 1] = path
+      if fake_dirs[path] then return "directory" end
+      return "file"
+    end
+    return nil
+  end,
+}
+
+local records = Sidecar.scan{ dirs = { "/root" } }
+local titles = {}
+for index = 1, #records do titles[#titles + 1] = tostring(records[index].title) end
+table.sort(titles)
+print("suffix_records=" .. #records)
+print("suffix_titles=" .. table.concat(titles, ","))
+
+local function stat_count(path)
+  local count = 0
+  for index = 1, #statted do if statted[index] == path then count = count + 1 end end
+  return count
+end
+print("suffix_statted_books_old=" .. stat_count("/root/Books.old"))
+print("suffix_statted_notes_json=" .. stat_count("/root/Notes.json"))
+print("suffix_statted_plain=" .. stat_count("/root/Plain"))
+print("suffix_statted_epub=" .. stat_count("/root/X.epub"))
+
+print("OK")
+`;
+
+describe("plugin sidecar walk: only measured book suffixes skip the stat", () => {
+  function runHarness(): Record<string, string> {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-suffix-"));
+    const harnessPath = path.join(workdir, "sidecar_suffix_harness.lua");
+    fs.writeFileSync(harnessPath, SIDECAR_SUFFIX_HARNESS);
+    const res = spawnSync(LUA_BINARY as string, [harnessPath, KOPLUGIN_TEMPLATE_DIR], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    return Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+  }
+
+  it("still walks a folder whose name merely ends in a file suffix", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.suffix_records).toBe("3");
+    expect(out.suffix_titles).toBe("Note,Old,Plaintext");
+    // Folders keep their stat: the name ended in `.old` / `.json` / nothing, so
+    // nothing proved they are files and nothing may skip them.
+    expect(out.suffix_statted_books_old).toBe("1");
+    expect(out.suffix_statted_notes_json).toBe("1");
+    expect(out.suffix_statted_plain).toBe("1");
+    // A book file is still stat-free, which is the measured saving.
+    expect(out.suffix_statted_epub).toBe("0");
+  });
+});
+
+/**
  * The on-disk sidecar list's whole lifecycle, held to by test.
  *
  * The list exists so a later session does not walk the library again, and the
@@ -7123,9 +7247,9 @@ local tree = {
 }
 local bodies = {
   ["/books/Alpha.epub.sdr/metadata.epub.lua"] =
-    "return { title = \"Alpha\", percent_finished = 0.5 }",
+    "return { doc_props = { title = \"Alpha\" }, percent_finished = 0.5 }",
   ["/books/Author/Beta.epub.sdr/metadata.epub.lua"] =
-    "return { title = \"Beta\", percent_finished = 0.5 }",
+    "return { doc_props = { title = \"Beta\" }, percent_finished = 0.5 }",
 }
 local listed = {}
 local Sidecar = require("lighthouse_sidecar")

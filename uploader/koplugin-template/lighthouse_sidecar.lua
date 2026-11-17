@@ -66,21 +66,19 @@ Sidecar.SCAN_LIMITS = { depth = 6, directories = 2000, sidecars = 200 }
 -- device's tree enumerated 2239 children under 431 folder listings and made 2053
 -- `lfs.attributes` calls, re-asking a question the name already answers.
 -- Skipping the stat for a name that proves it is a file took the whole scan from
--- 804.8ms to 595.1ms (interleaved old/new A/B in one process). A child named
--- `*.epub` is not a directory here: books are files, their sidecars are the
--- `*.epub.sdr` directories beside them, and a folder deliberately named like a
+-- 804.8ms to 595.1ms (interleaved old/new A/B in one process).
+--
+-- Restricted to the extensions this device was measured to carry a book file
+-- under a book root, each with the census that justifies it: `epub` (1615 of
+-- those 2239 children), `azw3` (2) and `txt` (2). Everything else - `Books.old`,
+-- `Notes.json`, `My Books`, any name without an extension - still gets its
+-- `lfs.attributes` question and is still walked, so no folder can be dropped by
+-- a suffix this walk was not measured to see. A folder deliberately named like a
 -- book file would be a layout this walk never produced.
 Sidecar.FILE_SUFFIXES = {
-    epub = true, kepub = true, pdf = true, mobi = true, azw = true, azw3 = true,
-    fb2 = true, djvu = true, txt = true, rtf = true, doc = true, docx = true,
-    html = true, htm = true, md = true, lrf = true, pdb = true, prc = true,
-    cbz = true, cbr = true, zip = true, rar = true, tar = true, gz = true,
-    tgz = true, bz2 = true, xz = true, otf = true, ttf = true, woff = true,
-    jpg = true, jpeg = true, png = true, gif = true, webp = true, bmp = true,
-    tiff = true, mp3 = true, m4a = true, m4b = true, ogg = true, opus = true,
-    flac = true, wav = true, mp4 = true, mkv = true, avi = true,
-    log = true, old = true, lua = true, sh = true, txt_bak = true,
-    sqlite = true, sqlite3 = true, db = true, json = true, xml = true,
+    epub = true,
+    azw3 = true,
+    txt = true,
 }
 
 --- True when a directory entry's name proves the entry is not a folder.
@@ -610,13 +608,14 @@ end
 -- old/new A/B in one process, the 96 sidecar reads included). The tree walk is
 -- the majority of that scan; the sidecar reads make up the rest and were timed
 -- in a separate instrumented pass, so the two do not add up exactly.
--- Progress is never stale in that list - a book file and its
--- sidecar directory change when a book is added or removed, which is rare
--- compared with how often a reader opens the plugin - so a caller that keeps the
+-- Progress is never stale in that list - every record is re-read from its own
+-- metadata file, so a percentage or a highlight is never served from the list
+-- itself. What a kept list can miss is a sidecar created since the walk: a book
+-- copied on from a computer, or a book opened in KOReader since. That is rare
+-- compared with how often a reader opens the plugin, so a caller that keeps the
 -- paths `on_directories` hands it may pass them back as `known_directories` and
--- skip the walk. Every record is still re-read from its own metadata file, so a
--- percentage or a highlight is never served from a list. This module never
--- writes: persisting the list is the caller's job.
+-- skip the walk until its own window expires or a refresh rewrites the list.
+-- This module never writes: persisting the list is the caller's job.
 --
 -- Records are returned newest-read first. A book whose file has been deleted
 -- but whose sidecar remains is included on purpose - its highlights still

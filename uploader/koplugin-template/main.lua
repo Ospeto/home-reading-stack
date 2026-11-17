@@ -139,9 +139,10 @@ LightHouse.SHELF_REUSE_SECONDS = 60
 --
 -- The list holds only WHERE sidecars live, never what they say: every scan
 -- re-reads each sidecar's own metadata file, so progress and highlights are
--- always current. What the window bounds is how long a newly added book can go
--- unseen by the walk, and a download through this plugin deletes the list, so
--- the only case left is a book copied on from a computer.
+-- always current. What the window bounds is how long a sidecar created since the
+-- last walk can go unseen - a book copied on from a computer, or one opened in
+-- KOReader since. Refresh walks the device and rewrites the list, and a download
+-- through this plugin deletes it.
 LightHouse.SIDECAR_LIST_TTL_SECONDS = 600
 
 --- Maximum length of a generated EPUB filename, in bytes.
@@ -460,8 +461,9 @@ end
 
 --- The sidecar directories a recent walk found, when the list is still fresh.
 -- Holds paths only, never what a sidecar says, so nothing a reader sees is
--- served from here; the window bounds how long a book copied on from a computer
--- can go unseen, and a download through this plugin deletes the list outright.
+-- served from here; the window bounds how long a sidecar created since the last
+-- walk can go unseen (a book copied on, or one opened in KOReader since), and a
+-- download through this plugin deletes the list outright.
 -- @treturn table|nil array of `*.sdr` directory paths
 local function keptSidecarList()
     local path = sidecarListPath()
@@ -1927,7 +1929,9 @@ function LightHouse:openLibrary(options)
         return
     end
     if not NetworkMgr:isOnline() then
-        NetworkMgr:willRerunWhenOnline(function() self:openLibrary{ mode = mode, page = page, query = query } end)
+        NetworkMgr:willRerunWhenOnline(function()
+            self:openLibrary{ mode = mode, page = page, query = query, refresh = options.refresh }
+        end)
         return
     end
 
@@ -1962,7 +1966,8 @@ function LightHouse:openLibrary(options)
                 detail = describeError(err),
                 actions = {
                     retryAction(_("Try again"), function()
-                        self:openLibrary{ mode = mode, page = page, query = query }
+                        self:openLibrary{ mode = mode, page = page, query = query,
+                            refresh = options.refresh }
                     end),
                 },
             }
@@ -1984,7 +1989,8 @@ function LightHouse:openLibrary(options)
                         self:openLibrary{ mode = mode, page = 1, query = "" }
                     end),
                     retryAction(_("Try again"), function()
-                        self:openLibrary{ mode = mode, page = page, query = query }
+                        self:openLibrary{ mode = mode, page = page, query = query,
+                            refresh = options.refresh }
                     end),
                 },
             }
@@ -2008,7 +2014,7 @@ function LightHouse:openLibrary(options)
                     headline = _("This library is empty"),
                     detail = _("Add EPUBs from the LightHouse web app, then browse again."),
                     actions = {
-                        retryAction(_("Refresh"), function() self:openLibrary{ page = 1 } end),
+                        retryAction(_("Refresh"), function() self:openLibrary{ page = 1, refresh = true } end),
                         connectionAction(self),
                     },
                 }
@@ -2073,7 +2079,7 @@ function LightHouse:openLibrary(options)
                 detail = describeError(err),
                 actions = {
                     retryAction(_("Try again"), function()
-                        self:openLibrary{ mode = mode, page = page }
+                        self:openLibrary{ mode = mode, page = page, refresh = options.refresh }
                     end),
                 },
             }
