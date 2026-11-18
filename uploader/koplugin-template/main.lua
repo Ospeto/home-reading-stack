@@ -2081,12 +2081,14 @@ function LightHouse:openLibrary(options)
     end
 
     local plan = self:libraryPlan()
-    -- Some rows of the page are navigation, not content: the catalog's first page
-    -- carries the search row and a page carries a next-page row while more
-    -- follows, while a grouping page draws its rows plus that one next-page row.
-    -- The configured page size stays an upper bound, so a reader who tuned it
-    -- keeps their setting while the screen decides what actually fits.
-    local navigation = mode == "books" and 2 or 1
+    -- Two rows of every page are navigation, not content: the search row leads
+    -- every page of every grouping, and a page carries a next-page row while
+    -- more follows. Reserving both on every page is what keeps the search row
+    -- from overflowing the plan on a page that also draws a next-page row - the
+    -- cost is one fewer content row per page, which is the honest trade. The
+    -- configured page size stays an upper bound, so a reader who tuned it keeps
+    -- their setting while the screen decides what actually fits.
+    local navigation = 2
     local page_size = math.max(math.min(plan.rows - navigation, pageSize()), 1)
     local context = { page = page, page_size = page_size, query = query, totals = {} }
 
