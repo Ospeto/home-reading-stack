@@ -61,6 +61,10 @@ local Page = {}
 -- pass, where nothing can catch it.
 local COLOR_BLACK = Blitbuffer.COLOR_BLACK
 local COLOR_WHITE = Blitbuffer.COLOR_WHITE
+local COLOR_MUTED = Blitbuffer.COLOR_DARK_GRAY or COLOR_BLACK
+local COLOR_DIVIDER = Blitbuffer.COLOR_LIGHT_GRAY or Blitbuffer.COLOR_GRAY or COLOR_BLACK
+local COLOR_BORDER = Blitbuffer.COLOR_GRAY or Blitbuffer.COLOR_DARK_GRAY or COLOR_BLACK
+local COLOR_PLACEHOLDER_BG = Blitbuffer.COLOR_GRAY_E or COLOR_WHITE
 local COLOR_TRACK = Blitbuffer.COLOR_LIGHT_GRAY or Blitbuffer.COLOR_GRAY or COLOR_WHITE
 local HEAT_COLORS = {
     [0] = Blitbuffer.COLOR_GRAY_E or COLOR_TRACK,
@@ -152,7 +156,7 @@ end
 -- @boolean focused
 function Panel:setFocused(focused)
     if not self.focus_line then return end
-    self.focus_line.background = focused and COLOR_BLACK or COLOR_WHITE
+    self.focus_line.background = focused and COLOR_BLACK or COLOR_DIVIDER
     UIManager:setDirty(self, "ui")
 end
 
@@ -211,20 +215,22 @@ end
 --- A horizontal rule the width of the page.
 -- @number width
 -- @number thickness
+-- @param[opt] color
 -- @treturn table LineWidget
-local function rule(width, thickness)
+local function rule(width, thickness, color)
     return LineWidget:new{
         dimen = Geom:new{ w = math.max(width, 1), h = math.max(thickness, 1) },
-        background = COLOR_BLACK,
+        background = color or COLOR_BLACK,
     }
 end
 
 --- A vertical rule between two columns.
 -- @number height
 -- @number thickness
+-- @param[opt] color
 -- @treturn table Rect
-local function column_rule(height, thickness)
-    return Rect:new{ width = math.max(thickness, 1), height = math.max(height, 1), color = COLOR_BLACK }
+local function column_rule(height, thickness, color)
+    return Rect:new{ width = math.max(thickness, 1), height = math.max(height, 1), color = color or COLOR_BLACK }
 end
 
 --- A progress bar: filled part, then the track.
@@ -292,28 +298,33 @@ local function buildFaces(plan)
     }
 end
 
---- Builds the header row: back, title, overflow.
+--- Builds the header row: back, title, optional search, overflow.
 -- @tparam table self page
 -- @treturn table widget
 function PageWidget:buildHeader()
     local plan = self.plan
     local width = plan.content_w
-    local third = math.floor(width / 3)
+    local actions = self.model.header_actions
+    local has_search = type(actions) == "table" and actions.search == true
+
+    local back_w = math.floor(width * 0.14)
+    local overflow_w = has_search and math.floor(width * 0.10) or math.floor(width * 0.14)
+    local search_w = has_search and math.floor(width * 0.20) or 0
+    local title_w = math.max(width - back_w - search_w - overflow_w, 1)
+
     local back = LeftContainer:new{
-        dimen = Geom:new{ w = third, h = plan.header },
-        label(Ui.GLYPH.back, self.faces.header, { width = third }),
+        dimen = Geom:new{ w = back_w, h = plan.header },
+        label(Ui.GLYPH.back, self.faces.header, { width = back_w }),
     }
     local title = CenterContainer:new{
-        dimen = Geom:new{ w = width - 2 * third, h = plan.header },
-        label(self.model.title or "", self.faces.title, { bold = true, width = width - 2 * third }),
+        dimen = Geom:new{ w = title_w, h = plan.header },
+        label(self.model.title or "", self.faces.title, { bold = true, width = title_w, align = "center" }),
     }
     local overflow = RightContainer:new{
-        dimen = Geom:new{ w = third, h = plan.header },
-        label(Ui.GLYPH.overflow, self.faces.header, { width = third, align = "right" }),
+        dimen = Geom:new{ w = overflow_w, h = plan.header },
+        label(Ui.GLYPH.overflow, self.faces.header, { width = overflow_w, align = "right" }),
     }
-    -- The two header affordances are rows too, so touch reaches them the same
-    -- way it reaches any other tappable line. They carry no focus line: chrome
-    -- that cannot show focus stays out of the key cycle.
+
     local back_panel = Panel:new{
         child = back,
         action = { kind = "back" },
@@ -323,13 +334,28 @@ function PageWidget:buildHeader()
         action = { kind = "overflow" },
     }
     self:register(back_panel)
-    self:register(overflow_panel)
-    return HorizontalGroup:new{
+
+    local group = HorizontalGroup:new{
         align = "center",
         back_panel,
         title,
-        overflow_panel,
     }
+    if has_search then
+        local search_text = actions.search_label or "Search"
+        local search = RightContainer:new{
+            dimen = Geom:new{ w = search_w, h = plan.header },
+            label(search_text, self.faces.heading, { bold = true, width = search_w, align = "right" }),
+        }
+        local search_panel = Panel:new{
+            child = search,
+            action = { kind = "search" },
+        }
+        self:register(search_panel)
+        group[#group + 1] = search_panel
+    end
+    self:register(overflow_panel)
+    group[#group + 1] = overflow_panel
+    return group
 end
 
 --- Builds the library's three-segment switch.
@@ -370,6 +396,7 @@ function PageWidget:buildSwitch()
             cell = CenterContainer:new{
                 dimen = Geom:new{ w = cell_w, h = plan.switch_h },
                 label(segment.label, self.faces.heading, {
+                    color = COLOR_MUTED,
                     width = cell_w,
                     align = "center",
                 }),
@@ -382,14 +409,14 @@ function PageWidget:buildSwitch()
         self:register(panel)
         group[#group + 1] = panel
         if segment_index < count then
-            group[#group + 1] = column_rule(plan.switch_h, thickness)
+            group[#group + 1] = column_rule(plan.switch_h, thickness, COLOR_BORDER)
         end
     end
     return VerticalGroup:new{
         align = "center",
-        rule(width, thickness),
+        rule(width, thickness, COLOR_BORDER),
         group,
-        rule(width, thickness),
+        rule(width, thickness, COLOR_BORDER),
     }
 end
 
@@ -403,19 +430,32 @@ function PageWidget:buildHero(cells)
     local count = math.max(#cells, 1)
     local thickness = plan.hairline
     local cell_w = math.floor((width - (count - 1) * thickness) / count)
+    local cell_pad = math.max(math.floor(plan.gap), 4)
+    local label_gap = math.max(math.floor(plan.gap / 3), 2)
     local group = HorizontalGroup:new{ align = "top" }
     for cell_index = 1, count do
         local cell = cells[cell_index] or { label = "", value = "" }
+        local pad_left = cell_index > 1 and cell_pad or 0
+        local pad_right = cell_index < count and cell_pad or 0
+        local inner_w = math.max(cell_w - pad_left - pad_right, 1)
         local content = VerticalGroup:new{
             align = "left",
-            label(cell.label, self.faces.hero_label, { width = cell_w }),
-            label(cell.value, self.faces.hero_value, { bold = true, width = cell_w }),
+            label(cell.label, self.faces.hero_label, { width = inner_w, color = COLOR_MUTED }),
+            VerticalSpan:new{ width = label_gap },
+            label(cell.value, self.faces.hero_value, { bold = true, width = inner_w }),
         }
+        local padded = pad_left > 0
+            and HorizontalGroup:new{
+                align = "top",
+                HorizontalSpan:new{ width = pad_left },
+                content,
+            }
+            or content
         group[#group + 1] = LeftContainer:new{
             dimen = Geom:new{ w = cell_w, h = plan.hero },
-            content,
+            padded,
         }
-        if cell_index < count then group[#group + 1] = column_rule(plan.hero, thickness) end
+        if cell_index < count then group[#group + 1] = column_rule(plan.hero, thickness, COLOR_DIVIDER) end
     end
     return group
 end
@@ -430,6 +470,7 @@ function PageWidget:buildBand(columns)
     local thickness = plan.hairline
     local count = math.max(#columns, 1)
     local column_w = math.floor((width - (count - 1) * thickness) / count)
+    local cell_pad = math.max(math.floor(plan.gap), 4)
 
     local first = columns[1] or { rows = {} }
     local second = columns[2]
@@ -437,11 +478,18 @@ function PageWidget:buildBand(columns)
     local head_row = HorizontalGroup:new{ align = "top" }
     for column_index = 1, count do
         local column = columns[column_index] or { rows = {} }
+        local pad_left = column_index > 1 and cell_pad or 0
+        local pad_right = column_index < count and cell_pad or 0
+        local inner_w = math.max(column_w - pad_left - pad_right, 1)
+        local heading_label = label(column.heading or "", self.faces.band_head, { bold = true, width = inner_w })
+        local heading_cell = pad_left > 0
+            and HorizontalGroup:new{ align = "center", HorizontalSpan:new{ width = pad_left }, heading_label }
+            or heading_label
         head_row[#head_row + 1] = LeftContainer:new{
             dimen = Geom:new{ w = column_w, h = plan.band_head },
-            label(column.heading or "", self.faces.band_head, { bold = true, width = column_w }),
+            heading_cell,
         }
-        if column_index < count then head_row[#head_row + 1] = column_rule(plan.band_head, thickness) end
+        if column_index < count then head_row[#head_row + 1] = column_rule(plan.band_head, thickness, COLOR_DIVIDER) end
     end
     band[#band + 1] = head_row
 
@@ -451,22 +499,26 @@ function PageWidget:buildBand(columns)
         for column_index = 1, count do
             local column = columns[column_index] or { rows = {} }
             local entry = column.rows[row_index]
+            local pad_left = column_index > 1 and cell_pad or 0
+            local pad_right = column_index < count and cell_pad or 0
+            local inner_w = math.max(column_w - pad_left - pad_right, 1)
+            local label_w = math.max(math.floor((inner_w - plan.gap) * 0.62), 1)
+            local val_w = math.max(inner_w - label_w, 1)
             local cell = HorizontalGroup:new{ align = "center" }
+            if pad_left > 0 then cell[#cell + 1] = HorizontalSpan:new{ width = pad_left } end
             if entry then
                 cell[#cell + 1] = LeftContainer:new{
-                    dimen = Geom:new{ w = math.floor((column_w - plan.gap) * 0.62), h = plan.band_row },
+                    dimen = Geom:new{ w = label_w, h = plan.band_row },
                     label(entry.label or "", self.faces.row_small, {
-                        width = math.floor((column_w - plan.gap) * 0.62),
+                        width = label_w,
+                        color = COLOR_MUTED,
                     }),
                 }
                 cell[#cell + 1] = RightContainer:new{
-                    dimen = Geom:new{
-                        w = column_w - math.floor((column_w - plan.gap) * 0.62),
-                        h = plan.band_row,
-                    },
+                    dimen = Geom:new{ w = val_w, h = plan.band_row },
                     label(entry.value or "", self.faces.row_value, {
                         bold = true,
-                        width = column_w - math.floor((column_w - plan.gap) * 0.62),
+                        width = val_w,
                         align = "right",
                     }),
                 }
@@ -475,7 +527,7 @@ function PageWidget:buildBand(columns)
                 dimen = Geom:new{ w = column_w, h = plan.band_row },
                 cell,
             }
-            if column_index < count then group[#group + 1] = column_rule(plan.band_row, thickness) end
+            if column_index < count then group[#group + 1] = column_rule(plan.band_row, thickness, COLOR_DIVIDER) end
         end
         band[#band + 1] = group
     end
@@ -491,10 +543,11 @@ function PageWidget:buildSectionHeading(heading)
     local width = plan.content_w
     local right_w = math.floor(width * 0.42)
     local left_w = width - right_w
-    local left_widget = label(heading.left or "", self.faces.heading, { bold = true, width = left_w })
+    local left_text = heading.left and heading.left ~= "" and Ui.sectionText(heading.left) or ""
+    local left_widget = label(left_text, self.faces.heading, { bold = true, width = left_w })
     local right_widget = label(heading.right or "", self.faces.heading, {
-        bold = true,
         width = right_w,
+        color = COLOR_MUTED,
         align = "right",
     })
     return HorizontalGroup:new{
@@ -512,9 +565,11 @@ end
 function PageWidget:buildRow(row, height)
     local plan = self.plan
     local width = plan.content_w
-    local gutter = math.floor(plan.gap / 2)
-    local right_w = math.max(math.floor(width * 0.22), 1)
+    local gutter = math.max(plan.gap, 6)
+    local right_gap = math.max(plan.gap, 6)
+    local right_w = math.max(math.floor(width * 0.16), 1)
     local cover_w = 0
+    local cover_h = plan.reading_cover_h or height
     local cover = nil
 
     -- The reader's "Show cover thumbnails" preference decides whether a row
@@ -522,15 +577,21 @@ function PageWidget:buildRow(row, height)
     -- space back, not paint a placeholder where a picture used to be.
     if self.covers and row.kind == "reading" and type(self.cover_widget) == "function" then
         cover_w = plan.reading_cover_w or 0
-        local ok, widget = pcall(self.cover_widget, row.cover_id, cover_w, plan.reading_cover_h or 0)
-        if ok and widget then cover = widget end
+        if cover_w > 0 then
+            local inner_w = math.max(cover_w - 2, 1)
+            local inner_h = math.max(cover_h - 2, 1)
+            local ok, widget = pcall(self.cover_widget, row.cover_id, inner_w, inner_h)
+            if ok and widget then cover = widget end
+        end
     end
 
-    local text_w = width - right_w - (cover_w > 0 and (cover_w + gutter) or 0)
+    local text_w = width - right_w - right_gap - (cover_w > 0 and (cover_w + gutter) or 0)
     if text_w < 1 then text_w = 1 end
 
     local title_face = self.faces.row_title
     local small_face = self.faces.row_small
+    local sec_gap = math.max(math.floor(plan.gap / 4), 2)
+    local bar_gap = math.max(math.floor(plan.gap / 2), 3)
     local content = VerticalGroup:new{
         align = "left",
         -- Rows lead in bold by default; a row that says otherwise (a recent
@@ -538,18 +599,21 @@ function PageWidget:buildRow(row, height)
         label(row.title or "", title_face, { bold = row.bold ~= false, width = text_w }),
     }
     if row.secondary and row.secondary ~= "" then
-        content[#content + 1] = label(row.secondary, small_face, { width = text_w })
+        content[#content + 1] = VerticalSpan:new{ width = sec_gap }
+        content[#content + 1] = label(row.secondary, small_face, { width = text_w, color = COLOR_MUTED })
     end
     if row.ratio ~= nil and height > (plan.bar + 2 * plan.gap) then
         local filled = Ui.barFill(row.ratio, text_w)
-        content[#content + 1] = VerticalSpan:new{ width = plan.hairline }
+        content[#content + 1] = VerticalSpan:new{ width = bar_gap }
         content[#content + 1] = progressBar(filled, text_w, plan.bar)
     end
 
+    local value_muted = row.kind == "reading" and row.ratio == nil
     local value_column = VerticalGroup:new{
         align = "right",
         label(row.value or "", self.faces.row_value, {
-            bold = true,
+            bold = not value_muted,
+            color = value_muted and COLOR_MUTED or COLOR_BLACK,
             width = right_w,
             align = "right",
         }),
@@ -557,42 +621,53 @@ function PageWidget:buildRow(row, height)
     if row.value_sub and row.value_sub ~= "" then
         value_column[#value_column + 1] = label(row.value_sub, small_face, {
             width = right_w,
+            color = COLOR_MUTED,
             align = "right",
         })
     end
 
     local group = HorizontalGroup:new{ align = "center" }
     if cover_w > 0 then
+        local inner_w = math.max(cover_w - 2, 1)
+        local inner_h = math.max(cover_h - 2, 1)
+        local cover_box
         if cover then
-            group[#group + 1] = LeftContainer:new{
-                dimen = Geom:new{ w = cover_w, h = height },
-                cover,
+            cover_box = FrameContainer:new{
+                radius = Ui.tokens.corner_radius,
+                bordersize = 1,
+                padding = 0,
+                color = COLOR_BORDER,
+                CenterContainer:new{
+                    dimen = Geom:new{ w = inner_w, h = inner_h },
+                    cover,
+                },
             }
         else
-            group[#group + 1] = LeftContainer:new{
-                dimen = Geom:new{ w = cover_w, h = height },
-                FrameContainer:new{
-                    radius = Ui.tokens.corner_radius,
-                    bordersize = plan.hairline,
-                    padding = 0,
-                    CenterContainer:new{
-                        dimen = Geom:new{
-                            w = math.max(cover_w - 2 * plan.hairline, 1),
-                            h = math.max((plan.reading_cover_h or height) - 2 * plan.hairline, 1),
-                        },
-                        label(Ui.GLYPH.cover, self.faces.row_small, { align = "center" }),
-                    },
+            cover_box = FrameContainer:new{
+                radius = Ui.tokens.corner_radius,
+                bordersize = 1,
+                padding = 0,
+                color = COLOR_BORDER,
+                background = COLOR_PLACEHOLDER_BG,
+                CenterContainer:new{
+                    dimen = Geom:new{ w = inner_w, h = inner_h },
+                    label(Ui.GLYPH.cover, self.faces.row_small, { align = "center", color = COLOR_MUTED }),
                 },
             }
         end
+        group[#group + 1] = LeftContainer:new{
+            dimen = Geom:new{ w = cover_w, h = height },
+            cover_box,
+        }
         group[#group + 1] = HorizontalSpan:new{ width = gutter }
     end
     group[#group + 1] = LeftContainer:new{ dimen = Geom:new{ w = text_w, h = height }, content }
+    group[#group + 1] = HorizontalSpan:new{ width = right_gap }
     group[#group + 1] = RightContainer:new{ dimen = Geom:new{ w = right_w, h = height }, value_column }
 
     local focus_line = LineWidget:new{
         dimen = Geom:new{ w = width, h = plan.hairline },
-        background = COLOR_WHITE,
+        background = COLOR_DIVIDER,
     }
     local panel = Panel:new{
         child = VerticalGroup:new{ align = "left", group, focus_line },
@@ -603,56 +678,151 @@ function PageWidget:buildRow(row, height)
     return panel
 end
 
---- Builds the pixel heatmap band.
+--- Builds the pixel heatmap band with month axis and shade legend.
 -- @tparam table self page
--- @tparam table columns heatmap columns from `Ui.heatmapColumns`
+-- @tparam table block heatmap block { columns, months, legend } or raw columns
 -- @treturn table widget
-function PageWidget:buildHeatmap(columns)
+function PageWidget:buildHeatmap(block)
     local plan = self.plan
+    local columns = type(block) == "table" and block.columns or block
     local widget = Heatmap:new{
         columns = columns,
         cell_w = plan.heat_cell_w,
         cell_h = plan.heat_cell_h,
         gap = plan.heat_gap,
     }
-    return LeftContainer:new{
+    local heat_box = LeftContainer:new{
         dimen = Geom:new{ w = plan.content_w, h = 7 * plan.heat_cell_h + 6 * plan.heat_gap },
         widget,
     }
+    local legend_h = plan.heat_legend
+    if not legend_h or legend_h < 1 then return heat_box end
+
+    local width = plan.content_w
+    local left_w = math.floor(width * 0.65)
+    local right_w = math.max(width - left_w, 1)
+    local months = type(block) == "table" and type(block.months) == "table" and block.months or {}
+    local months_group = HorizontalGroup:new{ align = "center" }
+    if #months > 0 then
+        local step_w = math.floor(left_w / #months)
+        for month_index = 1, #months do
+            local tick_w = month_index == #months
+                and math.max(left_w - (#months - 1) * step_w, 1)
+                or math.max(step_w, 1)
+            months_group[#months_group + 1] = LeftContainer:new{
+                dimen = Geom:new{ w = tick_w, h = legend_h },
+                label(months[month_index], self.faces.footer, { width = tick_w, color = COLOR_MUTED }),
+            }
+        end
+    end
+
+    local legend = type(block) == "table" and type(block.legend) == "table" and block.legend or {}
+    local swatch_size = math.min(math.max(math.floor(legend_h * 0.45), 5), 14)
+    local swatch_gap = math.max(math.min(plan.heat_gap, 4), 1)
+    local text_gap = math.max(math.min(math.floor(plan.gap / 2), legend_h), 3)
+    local legend_group = HorizontalGroup:new{ align = "center" }
+    legend_group[#legend_group + 1] = label(legend.less or "Less", self.faces.footer, { color = COLOR_MUTED })
+    legend_group[#legend_group + 1] = HorizontalSpan:new{ width = text_gap }
+    for level = 0, 4 do
+        legend_group[#legend_group + 1] = Rect:new{
+            width = swatch_size,
+            height = swatch_size,
+            color = HEAT_COLORS[level] or COLOR_BLACK,
+        }
+        if level < 4 then
+            legend_group[#legend_group + 1] = HorizontalSpan:new{ width = swatch_gap }
+        end
+    end
+    legend_group[#legend_group + 1] = HorizontalSpan:new{ width = text_gap }
+    legend_group[#legend_group + 1] = label(legend.more or "More", self.faces.footer, { color = COLOR_MUTED })
+
+    local legend_row = HorizontalGroup:new{
+        align = "center",
+        LeftContainer:new{ dimen = Geom:new{ w = left_w, h = legend_h }, months_group },
+        RightContainer:new{ dimen = Geom:new{ w = right_w, h = legend_h }, legend_group },
+    }
+    return VerticalGroup:new{
+        align = "left",
+        heat_box,
+        legend_row,
+    }
 end
 
---- Builds the footer: a rule, then the two footer texts.
+--- Builds the footer: a rule, then explicit Prev / Page / Next or stats footer.
 -- @tparam table self page
 -- @treturn table widget
 function PageWidget:buildFooter()
     local plan = self.plan
     local width = plan.content_w
     local footer = self.model.footer or {}
+    local pager = self.model.pager
+
+    if pager then
+        local prev_w = math.floor(width * 0.25)
+        local next_w = math.floor(width * 0.25)
+        local center_w = math.max(width - prev_w - next_w, 1)
+        local has_prev = pager.has_prev == true
+        local has_next = pager.has_next == true
+
+        local prev_panel = Panel:new{
+            child = LeftContainer:new{
+                dimen = Geom:new{ w = prev_w, h = plan.footer },
+                label(footer.prev or footer.left or "", self.faces.footer, {
+                    bold = has_prev,
+                    color = has_prev and COLOR_BLACK or COLOR_DIVIDER,
+                    width = prev_w,
+                }),
+            },
+            action = { kind = "footer_left" },
+        }
+        local center_panel = Panel:new{
+            child = CenterContainer:new{
+                dimen = Geom:new{ w = center_w, h = plan.footer },
+                label(footer.center or footer.left or "", self.faces.footer, {
+                    color = COLOR_MUTED,
+                    width = center_w,
+                    align = "center",
+                }),
+            },
+            action = { kind = "page_jump", pager = pager },
+        }
+        local right_panel = Panel:new{
+            child = RightContainer:new{
+                dimen = Geom:new{ w = next_w, h = plan.footer },
+                label(footer.next or footer.right or "", self.faces.footer, {
+                    bold = has_next,
+                    color = has_next and COLOR_BLACK or COLOR_DIVIDER,
+                    width = next_w,
+                    align = "right",
+                }),
+            },
+            action = { kind = "footer_right" },
+        }
+        self:register(prev_panel)
+        self:register(center_panel)
+        self:register(right_panel)
+        return VerticalGroup:new{
+            align = "left",
+            rule(width, plan.hairline, COLOR_DIVIDER),
+            HorizontalGroup:new{ align = "center", prev_panel, center_panel, right_panel },
+        }
+    end
+
     local half = math.floor(width / 2)
-    local left_widget = label(footer.left or "", self.faces.footer, { width = half })
+    local left_widget = label(footer.left or "", self.faces.footer, { width = half, color = COLOR_MUTED })
     local right_widget = label(footer.right or "", self.faces.footer, {
         width = width - half,
+        color = COLOR_MUTED,
         align = "right",
     })
-    local left_panel = Panel:new{
-        child = LeftContainer:new{ dimen = Geom:new{ w = half, h = plan.footer }, left_widget },
-        action = { kind = "footer_left" },
-    }
-    local right_panel = Panel:new{
-        child = RightContainer:new{
-            dimen = Geom:new{ w = width - half, h = plan.footer },
-            right_widget,
-        },
-        action = { kind = "footer_right" },
-    }
-    if self.model.pager then
-        self:register(left_panel)
-        self:register(right_panel)
-    end
     return VerticalGroup:new{
         align = "left",
-        rule(width, plan.hairline),
-        HorizontalGroup:new{ align = "center", left_panel, right_panel },
+        rule(width, plan.hairline, COLOR_DIVIDER),
+        HorizontalGroup:new{
+            align = "center",
+            LeftContainer:new{ dimen = Geom:new{ w = half, h = plan.footer }, left_widget },
+            RightContainer:new{ dimen = Geom:new{ w = width - half, h = plan.footer }, right_widget },
+        },
     }
 end
 
@@ -686,44 +856,103 @@ function PageWidget:init()
 
     local content = VerticalGroup:new{ align = "left" }
     content[#content + 1] = self:buildHeader()
-    content[#content + 1] = rule(width, plan.hairline)
+    content[#content + 1] = rule(width, plan.hairline, COLOR_DIVIDER)
 
     if self.model.switch then
         content[#content + 1] = self:buildSwitch()
     end
     if self.model.subline then
         local subline = self.model.subline
-        local half = math.floor(width / 2)
-        content[#content + 1] = HorizontalGroup:new{
-            align = "center",
-            LeftContainer:new{
-                dimen = Geom:new{ w = half, h = plan.subline_h or plan.section_head },
-                label(subline.left or "", self.faces.row_small, { width = half }),
-            },
-            RightContainer:new{
-                dimen = Geom:new{ w = width - half, h = plan.subline_h or plan.section_head },
+        local sub_h = plan.subline_h or plan.section_head
+        if subline.clear then
+            local clear_w = math.floor(width * 0.18)
+            local right_w = math.floor(width * 0.34)
+            local left_w = math.max(width - clear_w - right_w, 1)
+            local sub_row = HorizontalGroup:new{ align = "center" }
+            sub_row[#sub_row + 1] = LeftContainer:new{
+                dimen = Geom:new{ w = left_w, h = sub_h },
+                label(subline.left or "", self.faces.row_small, { width = left_w, color = COLOR_MUTED }),
+            }
+            local clear_panel = Panel:new{
+                child = LeftContainer:new{
+                    dimen = Geom:new{ w = clear_w, h = sub_h },
+                    label(subline.clear.label or "", self.faces.row_small, {
+                        bold = true,
+                        width = clear_w,
+                        color = COLOR_BLACK,
+                    }),
+                },
+                action = subline.clear.action,
+            }
+            self:register(clear_panel)
+            sub_row[#sub_row + 1] = clear_panel
+            local right_box = RightContainer:new{
+                dimen = Geom:new{ w = right_w, h = sub_h },
                 label(subline.right or "", self.faces.row_small, {
-                    width = width - half,
+                    bold = subline.right_action ~= nil,
+                    color = subline.right_action and COLOR_BLACK or COLOR_MUTED,
+                    width = right_w,
                     align = "right",
                 }),
-            },
-        }
+            }
+            if subline.right_action then
+                local right_panel = Panel:new{
+                    child = right_box,
+                    action = subline.right_action,
+                }
+                self:register(right_panel)
+                sub_row[#sub_row + 1] = right_panel
+            else
+                sub_row[#sub_row + 1] = right_box
+            end
+            content[#content + 1] = sub_row
+        else
+            local left_w = math.floor(width * 0.58)
+            local right_w = math.max(width - left_w, 1)
+            local sub_row = HorizontalGroup:new{ align = "center" }
+            sub_row[#sub_row + 1] = LeftContainer:new{
+                dimen = Geom:new{ w = left_w, h = sub_h },
+                label(subline.left or "", self.faces.row_small, { width = left_w, color = COLOR_MUTED }),
+            }
+            local right_box = RightContainer:new{
+                dimen = Geom:new{ w = right_w, h = sub_h },
+                label(subline.right or "", self.faces.row_small, {
+                    bold = subline.right_action ~= nil,
+                    color = subline.right_action and COLOR_BLACK or COLOR_MUTED,
+                    width = right_w,
+                    align = "right",
+                }),
+            }
+            if subline.right_action then
+                local right_panel = Panel:new{
+                    child = right_box,
+                    action = subline.right_action,
+                }
+                self:register(right_panel)
+                sub_row[#sub_row + 1] = right_panel
+            else
+                sub_row[#sub_row + 1] = right_box
+            end
+            content[#content + 1] = sub_row
+        end
     end
 
+    local section_gap = plan.section_gap or math.max(math.floor((plan.gap or 8) / 2), 2)
     local blocks = self.model.blocks or {}
     for block_index = 1, #blocks do
         local block = blocks[block_index]
         if block.kind == "hero" then
             content[#content + 1] = self:buildHero(block.cells or {})
-            content[#content + 1] = rule(width, plan.hairline)
+            content[#content + 1] = rule(width, plan.hairline, COLOR_DIVIDER)
         elseif block.kind == "band" then
             content[#content + 1] = self:buildBand(block.columns or {})
-            content[#content + 1] = rule(width, plan.hairline)
+            content[#content + 1] = rule(width, plan.hairline, COLOR_DIVIDER)
         elseif block.kind == "section" then
             local rows = block.rows or {}
             -- A heading with no rows left is not drawn: an empty "RECENT
             -- SESSIONS" would read as a section that failed to load.
             if #rows > 0 then
+                content[#content + 1] = VerticalSpan:new{ width = section_gap }
                 content[#content + 1] = self:buildSectionHeading(block.heading or {})
                 local height = block.row_kind == "session"
                     and (plan.session_h or plan.row_h)
@@ -733,8 +962,9 @@ function PageWidget:init()
                 end
             end
         elseif block.kind == "heatmap" then
+            content[#content + 1] = VerticalSpan:new{ width = section_gap }
             content[#content + 1] = self:buildSectionHeading(block.heading or {})
-            content[#content + 1] = self:buildHeatmap(block.columns or {})
+            content[#content + 1] = self:buildHeatmap(block)
         elseif block.kind == "list" then
             local rows = block.rows or {}
             for row_index = 1, #rows do
@@ -755,7 +985,7 @@ function PageWidget:init()
     local plan_height = math.floor(tonumber(plan.height) or 0)
     content[#content + 1] = self:buildFooter()
     if content.resetLayout then content:resetLayout() end
-    local inner_height = plan_height - 2 * plan.hairline - 2 * plan.pad
+    local inner_height = plan_height - 2 * plan.pad
     local measured_ok, content_size = pcall(function() return content:getSize() end)
     local content_height = measured_ok and tonumber(content_size and content_size.h) or nil
     local filler = content_height and (inner_height - content_height) or nil
@@ -774,7 +1004,7 @@ function PageWidget:init()
 
     self.widget = FrameContainer:new{
         radius = Ui.tokens.corner_radius,
-        bordersize = plan.hairline,
+        bordersize = 0,
         padding = plan.pad,
         margin = 0,
         background = COLOR_WHITE,
@@ -793,10 +1023,23 @@ function PageWidget:init()
 
     if Device and Device.hasKeys and Device:hasKeys() then
         local group = Device.input and Device.input.group
+        local function keyList(...)
+            local list, seen = {}, {}
+            for key_index = 1, select("#", ...) do
+                local key = select(key_index, ...)
+                if type(key) == "string" and key ~= "" and not seen[key] then
+                    seen[key] = true
+                    list[#list + 1] = { key }
+                end
+            end
+            return list
+        end
         self.key_events = {
             Close = { { group and group.Back or "Back" } },
-            NextItem = { { "Down" }, { group and group.PgFwd or "PgFwd" } },
-            PrevItem = { { "Up" }, { group and group.PgBack or "PgBack" } },
+            NextItem = { { "Down" } },
+            PrevItem = { { "Up" } },
+            NextPage = keyList(group and group.PgFwd or "PgFwd", "RPgFwd", "LPgFwd"),
+            PrevPage = keyList(group and group.PgBack or "PgBack", "RPgBack", "LPgBack"),
             SelectItem = { { "Press" }, { "Right" }, { "Return" } },
         }
     else
@@ -851,6 +1094,12 @@ function PageWidget:onTapSelect(event_arg, ges)
     for panel_index = #self.panels, 1, -1 do
         local panel = self.panels[panel_index]
         if panel.dimen and ges.pos:intersectWith(panel.dimen) then
+            if panel.focus_line then
+                if self.focus_index and self.focus_panels and self.focus_panels[self.focus_index] then
+                    self.focus_panels[self.focus_index]:setFocused(false)
+                end
+                panel:setFocused(true)
+            end
             self:run(panel.action)
             return true
         end
@@ -897,6 +1146,24 @@ function PageWidget:onNextItem()
 end
 
 function PageWidget:onPrevItem()
+    self:moveFocus(-1)
+    return true
+end
+
+function PageWidget:onNextPage()
+    if self.model and self.model.pager then
+        self:run({ kind = "footer_right" })
+        return true
+    end
+    self:moveFocus(1)
+    return true
+end
+
+function PageWidget:onPrevPage()
+    if self.model and self.model.pager then
+        self:run({ kind = "footer_left" })
+        return true
+    end
     self:moveFocus(-1)
     return true
 end

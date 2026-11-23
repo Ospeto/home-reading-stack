@@ -1857,6 +1857,7 @@ package.preload["ui/widget/inputdialog"] = function()
   return dialog
 end
 package.preload["ui/widget/confirmbox"] = function() return stub_widget("confirmbox") end
+package.preload["ui/widget/buttondialog"] = function() return stub_widget("buttondialog") end
 package.preload["ui/widget/textviewer"] = function() return stub_widget("textviewer") end
 package.preload["json"] = function()
   return { decode = function() return {} end }
@@ -3442,10 +3443,13 @@ local entries = {
   { title = "The Saga of Tanya the Evil", authors = "Carlo Zen", book_id = 15 },
   { title = "Violet Evergarden", authors = "Kana Akatsuki", book_id = 16 },
   { title = "Kino's Journey", authors = "Keiichi Sigsawa", book_id = 17 },
+  { title = "Mushishi", authors = "Yuki Urushibara", book_id = 18 },
+  { title = "Natsume's Book of Friends", authors = "Yuki Midorikawa", book_id = 19 },
+  { title = "Baccano!", authors = "Ryohgo Narita", book_id = 20 },
 }
 
 local plan = assert(LightHouse:libraryPlan(), "the library plan must build")
-local page_size = math.max(plan.rows - 2, 1)
+local page_size = math.max(plan.rows, 1)
 
 local function model_for(number, has_next, size)
   -- The catalog feed pages the server side, so the model draws exactly the
@@ -3616,29 +3620,26 @@ describe("plugin one-page views", () => {
 
     // The density the plugin reads, on a panel that rounds its answers up: a
     // 600-unit probe survives the rounding (1236px), one unit does not (3px on
-    // a 2.06 panel), so the plan is six 207px rows. A one-unit probe plans four
-    // rows of 266px instead.
+    // a 2.06 panel), with the tighter 78-unit row target giving 7 rows on a
+    // borderless canvas.
     expect(out.probe_one_unit).toBe("3");
     expect(out.probe_600_units).toBe("1236");
     expect(out.library_plan_scale).toBe("2.060");
-    expect(Number(out.library_plan_rows)).toBe(6);
-    expect(Number(out.library_row_h)).toBe(207);
+    expect(Number(out.library_plan_rows)).toBe(7);
+    expect(Number(out.library_row_h)).toBe(178);
 
-    // Both pages measure one screen: page 1 carries the search and next-page
-    // rows, page 2 carries the search row and no next page, and the page that
-    // draws less must still paint (and invalidate) the whole glass or the
-    // previous page's tail stays on it until a manual refresh.
+    // Both pages measure one screen: no inline search or pagination rows live
+    // inside the list body (search moves to the header; paging lives in the
+    // 3-zone footer), and the shorter second page still paints the whole glass.
     const height = Number(out.library_screen_height);
     expect(Number(out.library_page_1_height)).toBe(height);
     expect(Number(out.library_page_2_height)).toBe(height);
 
-    // The search row leads every page of the list, not just the first, and the
-    // page budget reserves it on every page: six planned rows hold the search
-    // row, four book rows and the next-page row on page 1, and the search row
-    // plus the rest of the window on page 2.
-    expect(out.library_page_size).toBe("4");
-    expect(out.library_page_1_kinds).toBe("search,book,book,book,book,page");
-    expect(out.library_page_2_kinds).toBe("search,book,book,book");
+    // Seven planned rows hold seven books on page 1 and the remaining three
+    // books on page 2.
+    expect(out.library_page_size).toBe("7");
+    expect(out.library_page_1_kinds).toBe("book,book,book,book,book,book,book");
+    expect(out.library_page_2_kinds).toBe("book,book,book");
     expect(out.library_rows_fit_plan).toBe("true");
 
     // The row title is asked for in pixels and drawn in pixels: the plan rule
@@ -4291,7 +4292,7 @@ local expected_base_url = assert(arg[2], "expected base url argument required")
 
 local fetched = { authors = 0, series = 0 }
 local current_url = ""
-local group_count = 6
+local group_count = 10
 
 package.preload["socket.http"] = function()
   return {
@@ -4325,8 +4326,8 @@ package.preload["json"] = function()
     decode = function()
       local by = current_url:match("/api/library/groups%?by=(%a+)")
       if not by then return {} end
-      -- Six rows, so the second page has something to draw as well; the count
-      -- shrinks mid-harness to model books deleted on the server.
+      -- Ten rows, so the second page of a seven-row screen has three entries;
+      -- the count shrinks mid-harness to model books deleted on the server.
       local groups = {}
       for index = 1, group_count do
         groups[index] = {
@@ -4336,7 +4337,7 @@ package.preload["json"] = function()
           read = 1,
         }
       end
-      return { groups = groups, books = 18, authors = 6, series = 6 }
+      return { groups = groups, books = 30, authors = 10, series = 10 }
     end,
   }
 end
@@ -4430,7 +4431,7 @@ for row_index = 1, #LightHouse.last_page_model.blocks[1].rows do
 end
 print("clamp_row_kinds=" .. table.concat(clamp_kinds, ","))
 print("clamp_footer=" .. tostring(LightHouse.last_page_model.footer.left))
-group_count = 6
+group_count = 10
 open{ mode = "series", page = 1, refresh = true }
 local keyed = LightHouse.page
 local keyed_model = LightHouse.last_page_model
@@ -4518,10 +4519,10 @@ describe("plugin library groupings", () => {
     expect(out.series_after_switch).toBe("3");
 
     // And the refreshed page draws what the server just sent: page 2 of the
-    // six-group document, led by the search row every page carries.
-    expect(out.refresh_row_kinds).toBe("search,series,series");
-    expect(out.refresh_row).toBe("series 5|series 6");
-    expect(out.refresh_entry).toBe("series 5//A Writer · 3 books · 1 read//33%//1 / 3");
+    // ten-group document without an inline search row.
+    expect(out.refresh_row_kinds).toBe("series,series,series");
+    expect(out.refresh_row).toBe("series 8|series 9|series 10");
+    expect(out.refresh_entry).toBe("series 8//A Writer · 3 books · 1 read//33%//1 / 3");
 
     // A grouping page is sized from the rows the model draws, so it fills the
     // screen instead of leaving slack above the footer.
@@ -4538,9 +4539,9 @@ describe("plugin library groupings", () => {
     // pager, the plugin's own page state and the footer all agree.
     expect(out.clamp_pager).toBe("1/1");
     expect(out.clamp_state_page).toBe("1");
-    // Two series left of a four-row page: the search row plus both entries.
-    expect(out.clamp_rows).toBe("3");
-    expect(out.clamp_row_kinds).toBe("search,series,series");
+    // Two series left on the clamped first page.
+    expect(out.clamp_rows).toBe("2");
+    expect(out.clamp_row_kinds).toBe("series,series");
     expect(out.clamp_footer).toBe("Page 1 of 1");
 
     // On a keyed device the cycle holds the rows the page draws and none of the
@@ -5161,13 +5162,11 @@ describe("plugin row safety against JSON nulls and malformed fields", () => {
     expect(out.shelf_rows).toBe("2");
     expect(out.shelf_row_text_types).toBe("string,string");
 
-    // And browsing must still show every entry, one row each plus the search
-    // row.
+    // And browsing must still show every entry, one row each without an inline
+    // search row.
     expect(out.browse_ok).toBe("true nil");
-    expect(out.browse_rows).toBe("3");
-    expect(out.browse_row_text_types).toBe(
-      "string/string,string/string,string/string",
-    );
+    expect(out.browse_rows).toBe("2");
+    expect(out.browse_row_text_types).toBe("string/string,string/string");
     expect(out.browse_texts).toContain("Spice and Wolf");
     expect(out.browse_texts).toContain("Dune");
   });
@@ -6462,9 +6461,22 @@ for group_index = 1, #(view and view.item_table or {}) do
   end
 end
 
--- Tap the newest highlight: it must open its book and jump to page 48.
+-- Tap the newest highlight: it opens a confirmation dialog showing the full
+-- quote and offering "Open at p. 48", then opens the book when confirmed.
 local first_group = view.item_table[1]
-local open_ok, open_raised = pcall(first_group.sub_item_table[1].callback)
+local confirm_ok, confirm_raised = pcall(first_group.sub_item_table[1].callback)
+local confirm_dialog = shown[#shown]
+print("confirm_ok=" .. tostring(confirm_ok) .. " " .. tostring(confirm_raised))
+print("confirm_kind=" .. tostring(confirm_dialog and confirm_dialog.__kind))
+print("confirm_has_quote=" .. tostring(tostring(confirm_dialog and confirm_dialog.text):find("Second quote, no colour", 1, true) ~= nil))
+print("confirm_has_page=" .. tostring(tostring(confirm_dialog and confirm_dialog.text):find("Page 48", 1, true) ~= nil))
+print("confirm_ok_text=" .. tostring(confirm_dialog and confirm_dialog.ok_text))
+print("opened_before_confirm=" .. tostring(opened_path))
+local open_ok, open_raised = pcall(function()
+  if confirm_dialog and type(confirm_dialog.ok_cb) == "function" then
+    confirm_dialog.ok_cb()
+  end
+end)
 print("open_ok=" .. tostring(open_ok) .. " " .. tostring(open_raised))
 print("opened_is_spice=" .. tostring(opened_path == spice_book))
 print("jumped_page=" .. tostring(jumped_page))
@@ -6534,12 +6546,10 @@ require("ui/network/manager").isOnline = function() return true end
 local browse_ok, browse_raised = pcall(taps["Browse library"])
 print("browse_ok=" .. tostring(browse_ok) .. " " .. tostring(browse_raised))
 -- The catalog is one of the plugin's pages, so its rows are read from the model
--- that page drew: row 1 is the search row, so the first book is row 2. (It used
--- to read them off a menu, which only worked while a menu from an earlier view
--- was still on screen.)
+-- that page drew: search lives in the header, so row 1 is the first book.
 local browse_model = LightHouse.last_page_model
 local browse_rows = browse_model and browse_model.blocks and browse_model.blocks[1].rows or {}
-local book_row = browse_rows[2]
+local book_row = browse_rows[1]
 print("browse_rows=" .. tostring(#browse_rows))
 print("browse_book=" .. tostring(book_row and book_row.title) .. "\t"
   .. tostring(book_row and book_row.secondary) .. "\t" .. tostring(book_row and book_row.value))
@@ -6607,6 +6617,12 @@ describe("KOReader plugin local progress and highlights", () => {
     if (!LUA_BINARY || !UNZIP_BINARY) return;
     const out = runLocalProgressHarness();
 
+    expect(out.confirm_ok).toBe("true nil");
+    expect(out.confirm_kind).toBe("confirmbox");
+    expect(out.confirm_has_quote).toBe("true");
+    expect(out.confirm_has_page).toBe("true");
+    expect(out.confirm_ok_text).toBe("Open at p. 48");
+    expect(out.opened_before_confirm).toBe("nil");
     expect(out.open_ok).toBe("true nil");
     expect(out.opened_is_spice).toBe("true");
     expect(out.jumped_page).toBe("48");
@@ -6677,16 +6693,18 @@ describe("KOReader plugin local progress and highlights", () => {
     const out = runLocalProgressHarness();
 
     expect(out.browse_ok).toBe("true nil");
-    // Row 2 of the catalog page: the search row is row 1.
+    // Row 1 of the catalog page (search moved to the header).
     const book = out.browse_book.split("\t");
     expect(book[0]).toBe("Spice and Wolf, Vol. 1");
+    expect(book[1]).toContain("● On device");
     // The session says 45%; this device's sidecar says 98%, and the catalog row
     // is drawn from the same merge the shelf is.
     expect(book[2]).toBe("98%");
     expect(out.browse_book).not.toContain("45%");
     // Its detail view, opened by tapping the row, names where the number came
-    // from.
+    // from and puts "Open book" first because the file is already on device.
     expect(out.browse_detail_ok).toBe("true nil");
+    expect(out.browse_details.split("|")[0]).toBe("Open book");
     expect(out.browse_details).toContain("Progress read from this device");
     expect(out.browse_details).toContain("Highlights: 2");
   });
@@ -8026,6 +8044,8 @@ local grouped_page = LightHouse.page
 LightHouse.page:run(series_row.action)
 report("drilled")
 print("drilled_group=" .. active_group())
+print("drilled_title=" .. tostring(LightHouse.last_page_model and LightHouse.last_page_model.title))
+print("drilled_mode=" .. tostring(LightHouse.library_state and LightHouse.library_state.mode))
 local drilled_requests = opds_requests
 
 -- Back, pressed exactly as the header's back mark is pressed.
@@ -8211,7 +8231,9 @@ describe("plugin navigation: going up a level", () => {
       `library|query:${out.drill_series}|books|p1|q${out.drill_series}`,
     );
     expect(out.drilled_titles).toContain(`${out.drill_series} Vol 1`);
-    expect(out.drilled_group).toBe("books");
+    expect(out.drilled_group).toBe("none");
+    expect(out.drilled_title).toBe(out.drill_series);
+    expect(out.drilled_mode).toBe("books");
   });
 
   it("returns from one series' books to the series list, on its page", () => {
@@ -8332,5 +8354,485 @@ describe("plugin navigation: going up a level", () => {
     // A session that never restarts cannot grow the stack without bound.
     expect(out.nav_capped).toBe(String(12));
     expect(out.nav_capped_top).toBe("query:16");
+  });
+});
+
+/**
+ * Phase 1 & 2 UX Polish Regressions:
+ *  1. `Open book` primary action + non-interactive metadata (`select_enabled = false`)
+ *  2. OPDS `sort=series` on drill-down, `sort`/`filter` picker & query reset on clear/tab switch
+ *  3. Single consolidated spinner on cold `openLibrary`
+ *  4. Compact `ButtonDialog` overflow sheet & dismissal
+ *  5. Local sidecar progress merged on `showStats`
+ *  6. Hardware `onNextPage` / `onPrevPage` pagination
+ *  7. Book-scoped `showHighlights(only_record)` & A-Z letter jump (`showLetterJumpDialog`)
+ */
+const UX_POLISH_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local expected_base_url = assert(arg[2], "expected base url argument required")
+
+local opds_urls = {}
+local current_url = ""
+local settings_store = {}
+_G.G_reader_settings = {
+  readSetting = function(_, key) return settings_store[key] end,
+  saveSetting = function(_, key, value) settings_store[key] = value end,
+}
+
+local function opds_xml_for(url)
+  local start = tonumber(url:match("[?&]start=(%d+)") or "0") or 0
+  local count = tonumber(url:match("[?&]count=(%d+)") or "7") or 7
+  local total = 10
+  local parts = {
+    '<?xml version="1.0" encoding="utf-8"?>',
+    '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">',
+    '<title>LightHouse</title>',
+    '<opensearch:totalResults>' .. tostring(total) .. '</opensearch:totalResults>',
+  }
+  if start + count < total then
+    parts[#parts + 1] = '<link rel="next" href="/api/opds?start=' .. tostring(start + count) .. '&amp;count=' .. tostring(count) .. '"/>'
+  end
+  local last = math.min(start + count, total)
+  for index = start + 1, last do
+    local title = index == 1 and "Spice and Wolf, Vol. 1" or ("Catalog Book " .. tostring(index))
+    local author = index == 1 and "Isuna Hasekura" or ("Author " .. tostring(index))
+    local series_xml = index == 1 and '<meta property="belongs-to-collection">Spice and Wolf</meta>' or ""
+    parts[#parts + 1] = '<entry><id>urn:calibre:book:' .. tostring(10 + index)
+      .. '</id><title>' .. title
+      .. '</title><author><name>' .. author
+      .. '</name></author>'
+      .. '<link rel="http://opds-spec.org/acquisition" href="/api/books/' .. tostring(10 + index) .. '/download/epub" type="application/epub+zip"/>'
+      .. series_xml
+      .. '</entry>'
+  end
+  parts[#parts + 1] = '</feed>'
+  return table.concat(parts)
+end
+
+local groups_payload = {
+  series = {
+    groups = {
+      { name = "Alpha Series 1", author = "Writer A", books = 3, read = 1 },
+      { name = "Spice and Wolf", author = "Isuna Hasekura", books = 12, read = 1 },
+    },
+    books = 15, authors = 2, series = 2,
+  },
+  authors = {
+    groups = {
+      { name = "Alpha 1", books = 1, read = 0 },
+      { name = "Alpha 2", books = 1, read = 0 },
+      { name = "Alpha 3", books = 1, read = 0 },
+      { name = "Alpha 4", books = 1, read = 0 },
+      { name = "Alpha 5", books = 1, read = 0 },
+      { name = "Alpha 6", books = 1, read = 0 },
+      { name = "Alpha 7", books = 1, read = 0 },
+      { name = "Zeta 1", books = 1, read = 0 },
+    },
+    books = 8, authors = 8, series = 2,
+  },
+}
+
+local stats_response = {
+  totalSessions = 12,
+  readingDaysCount = 5,
+  finishedCount = 1,
+  finishedBooks = {},
+  activeBooks = {
+    { bookId = 11, displayTitle = "Spice and Wolf, Vol. 1",
+      displayAuthors = "Isuna Hasekura", percentage = 0.25,
+      timestamp = 1763290000, device = "Kindle" },
+  },
+  streaks = {
+    currentStreak = 2, longestStreak = 5, readingDaysCount = 5,
+    lastReadingDate = "2026-11-15", isActiveToday = true,
+  },
+  dailyReadingTime = {
+    todaySeconds = 1200, todayMinutes = 20,
+    thisWeekSeconds = 3600, thisWeekMinutes = 60,
+    thisMonthSeconds = 7200, thisMonthMinutes = 120,
+    totalSeconds = 18000, totalHours = 5, dailyAverageMinutes = 15,
+    days = {},
+  },
+  heatmap = {
+    { date = "2026-11-15", count = 1, seconds = 1200, minutes = 20, level = 2, bookCount = 1 },
+  },
+  libraryHealth = {
+    totalBooks = 10, unreadCount = 8, inProgressCount = 1,
+    finishedCount = 1, staleCount = 0,
+  },
+  goal = {
+    year = 2026, targetBooks = 20, targetHours = 50,
+    currentBooks = 1, currentHours = 5,
+    booksPercent = 5, hoursPercent = 10, isConfigured = true,
+  },
+  recentSessions = {
+    { title = "Spice and Wolf, Vol. 1", startTime = 1763290000, durationSeconds = 1200, device = "Kindle" },
+  },
+  summary = {
+    totalSessionsCount = 12, totalReadingSeconds = 18000,
+    totalReadingHours = 5, todayReadingSeconds = 1200,
+    thisWeekReadingSeconds = 3600, averageDailyMinutes = 15,
+    currentStreak = 2, longestStreak = 5,
+  },
+}
+
+package.preload["ltn12"] = function()
+  return {
+    sink = {
+      table = function(target)
+        return function(chunk)
+          if chunk then target[#target + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function() end,
+    },
+  }
+end
+
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      current_url = tostring(request and request.url or "")
+      local body = "{}"
+      if current_url:find("/api/opds", 1, true) then
+        opds_urls[#opds_urls + 1] = current_url
+        body = opds_xml_for(current_url)
+      elseif current_url:find("/api/kosync/active", 1, true) then
+        body = "[]"
+      elseif current_url:find("/api/library/groups", 1, true) then
+        body = current_url:find("by=series", 1, true) and '{"groups":"series"}' or '{"groups":"authors"}'
+      elseif current_url:find("/api/kosync/stats", 1, true) then
+        body = '{"stats":true}'
+      elseif current_url:find("/cover", 1, true) then
+        body = ""
+      end
+      if request and request.sink then
+        request.sink(body)
+        request.sink(nil)
+      end
+      return 1, current_url:find("/cover", 1, true) and 404 or 200, {}
+    end,
+  }
+end
+
+package.preload["json"] = function()
+  return {
+    decode = function(raw)
+      if type(raw) == "string" and raw:find("stats", 1, true) then
+        return stats_response
+      end
+      local by = current_url:match("/api/library/groups%?by=(%a+)")
+      if by then return groups_payload[by] or { groups = {} } end
+      return {}
+    end,
+  }
+end
+
+local Sidecar = require("lighthouse_sidecar")
+local fake_files, fake_dirs, fake_modes, fake_mtime = {}, {}, {}, {}
+local function put_file(file_path, body)
+  fake_files[file_path] = body
+  fake_modes[file_path] = "file"
+end
+local function put_dir(dir_path, names)
+  fake_dirs[dir_path] = names
+  fake_modes[dir_path] = "directory"
+end
+local function put_sidecar(book_path, body, modified)
+  local directory = book_path .. ".sdr"
+  local metadata = directory .. "/metadata.epub.lua"
+  put_file(metadata, body)
+  put_dir(directory, { "metadata.epub.lua" })
+  fake_mtime[metadata] = modified or 1794633720
+end
+
+local spice_book = "/mnt/us/books/Spice and Wolf, Vol. 1 - Isuna Hasekura.epub"
+put_file(spice_book, "EPUB")
+put_sidecar(spice_book, [==[
+return {
+    ["annotations"] = {
+        { ["chapter"] = "Ch 2", ["datetime"] = "2026-11-14 21:03:11", ["pageno"] = 48, ["text"] = "Second quote" },
+        { ["chapter"] = "Ch 1", ["datetime"] = "2026-11-01 09:00:00", ["pageno"] = 12, ["text"] = "First quote" },
+    },
+    ["doc_props"] = { ["title"] = "Spice and Wolf, Vol. 1", ["authors"] = "Isuna Hasekura" },
+    ["percent_finished"] = 0.88,
+}
+]==], 1794633720)
+put_dir("/mnt/us/books", { "Spice and Wolf, Vol. 1 - Isuna Hasekura.epub", "Spice and Wolf, Vol. 1 - Isuna Hasekura.epub.sdr" })
+
+Sidecar.io = {
+  open = function(open_path)
+    if fake_files[open_path] == nil then return nil end
+    return { close = function() end }
+  end,
+  loadfile = function(load_path)
+    local body = fake_files[load_path]
+    if not body then return nil, "missing" end
+    return loadstring(body, "=" .. load_path)
+  end,
+  list = function(list_path) return fake_dirs[list_path] end,
+  attributes = function(attribute_path, field)
+    if field == "mode" then return fake_modes[attribute_path] end
+    if field == "modification" then return fake_mtime[attribute_path] end
+    return nil
+  end,
+}
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local config = require("lighthouse_config")
+assert(config.base_url == expected_base_url, "harness needs expected base url")
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+LightHouse.localRecords(LightHouse, true)
+
+local local_records = LightHouse:localRecords(true)
+local spice_record = local_records[1]
+
+-- 1. Primary Open book & non-interactive metadata
+local detail_items = LightHouse:buildBookDetails({
+  book_id = 11,
+  title = "Spice and Wolf, Vol. 1",
+  authors = "Isuna Hasekura",
+  series = "Spice and Wolf",
+  series_index = 1,
+  rating = 8,
+  tags = { "Fantasy" },
+  book_path = spice_book,
+  download_href = expected_base_url .. "/api/books/11/download/epub",
+  status = { percentage = 0.25, device = "Kindle", progress_source = "device" },
+  local_record = spice_record,
+})
+local detail_map = {}
+for idx = 1, #detail_items do
+  detail_map[detail_items[idx].text] = detail_items[idx]
+end
+print("detail_first=" .. tostring(detail_items[1] and detail_items[1].text))
+print("detail_second=" .. tostring(detail_items[2] and detail_items[2].text))
+print("meta_rating_locked=" .. tostring(detail_map["Rating: 4.0 / 5"] and detail_map["Rating: 4.0 / 5"].select_enabled == false))
+print("meta_device_locked=" .. tostring(detail_map["Progress read from this device"] and detail_map["Progress read from this device"].select_enabled == false))
+print("meta_author_enabled=" .. tostring(detail_map["Author: Isuna Hasekura"] and detail_map["Author: Isuna Hasekura"].select_enabled ~= false))
+print("meta_series_enabled=" .. tostring(detail_map["Series: Spice and Wolf #1"] and detail_map["Series: Spice and Wolf #1"].select_enabled ~= false))
+
+local reading_row = LightHouse:buildReadingItem({
+  book_id = 11,
+  title = "Spice and Wolf, Vol. 1",
+  authors = "Isuna Hasekura",
+  percentage = 0.88,
+  device = "Kindle",
+  book_path = spice_book,
+  local_record = spice_record,
+})
+print("reading_first=" .. tostring(reading_row.sub_item_table[1] and reading_row.sub_item_table[1].text))
+print("reading_second=" .. tostring(reading_row.sub_item_table[2] and reading_row.sub_item_table[2].text))
+
+-- 3. Single consolidated spinner on cold openLibrary + 6. Hardware page keys
+shown = {}
+LightHouse:openLibrary{ mode = "books", page = 1 }
+local spinner_count = 0
+for idx = 1, #shown do
+  if shown[idx].__kind == "infomessage" then spinner_count = spinner_count + 1 end
+end
+print("cold_spinners=" .. tostring(spinner_count))
+print("page_initial=" .. tostring(LightHouse.library_state and LightHouse.library_state.page))
+LightHouse.page:onNextPage()
+print("page_after_next_key=" .. tostring(LightHouse.library_state and LightHouse.library_state.page))
+LightHouse.page:onPrevPage()
+print("page_after_prev_key=" .. tostring(LightHouse.library_state and LightHouse.library_state.page))
+
+-- 4. Compact overflow sheet & dismissal
+LightHouse:showPageOverflow()
+local overflow = shown[#shown]
+local overflow_labels = {}
+local close_btn
+for row_i = 1, #(overflow and overflow.buttons or {}) do
+  for btn_i = 1, #overflow.buttons[row_i] do
+    local btn = overflow.buttons[row_i][btn_i]
+    overflow_labels[#overflow_labels + 1] = btn.text
+    if btn.text == "Close" then close_btn = btn end
+  end
+end
+print("overflow_kind=" .. tostring(overflow and overflow.__kind))
+print("overflow_tracked=" .. tostring(LightHouse.overflow_menu == overflow))
+print("overflow_labels=" .. table.concat(overflow_labels, "|"))
+if close_btn and type(close_btn.callback) == "function" then close_btn.callback() end
+print("overflow_closed_nil=" .. tostring(LightHouse.overflow_menu == nil))
+
+-- 2. Series drill-down sort=series, Sort & Filter dialog, query reset on clear & tab switch
+LightHouse:openLibrary{ mode = "series", page = 1 }
+LightHouse.page:run({ kind = "series", name = "Spice and Wolf" })
+print("series_drill_url=" .. tostring(opds_urls[#opds_urls]))
+print("series_drill_title=" .. tostring(LightHouse.last_page_model and LightHouse.last_page_model.title))
+print("series_drill_switch=" .. tostring(LightHouse.last_page_model and LightHouse.last_page_model.switch))
+
+LightHouse:showSortFilterDialog()
+local sf_dialog = shown[#shown]
+local unread_btn
+for row_i = 1, #(sf_dialog and sf_dialog.buttons or {}) do
+  for btn_i = 1, #sf_dialog.buttons[row_i] do
+    local btn = sf_dialog.buttons[row_i][btn_i]
+    if tostring(btn.text):find("Unread only", 1, true) then unread_btn = btn end
+  end
+end
+print("sf_kind=" .. tostring(sf_dialog and sf_dialog.__kind))
+print("sf_title=" .. tostring(sf_dialog and sf_dialog.title))
+if unread_btn and type(unread_btn.callback) == "function" then unread_btn.callback() end
+print("sf_url=" .. tostring(opds_urls[#opds_urls]))
+print("sf_filter=" .. tostring(LightHouse.library_state and LightHouse.library_state.filter))
+
+LightHouse.page:run({ kind = "clear_query" })
+print("cleared_query=" .. tostring(LightHouse.library_state and LightHouse.library_state.query))
+print("cleared_title=" .. tostring(LightHouse.library_state and LightHouse.library_state.title))
+
+LightHouse:openLibrary{ mode = "books", query = "Dune", title = "Dune", page = 1 }
+LightHouse:openLibrary{ mode = "authors", page = 1 }
+print("tab_switch_query=" .. tostring(LightHouse.library_state and LightHouse.library_state.query))
+print("tab_switch_title=" .. tostring(LightHouse.library_state and LightHouse.library_state.title))
+
+-- 7b. A-Z letter jump on authors list
+LightHouse.page:run({ kind = "jump_letter" })
+local letter_dialog = shown[#shown]
+local z_btn
+for row_i = 1, #(letter_dialog and letter_dialog.buttons or {}) do
+  for btn_i = 1, #letter_dialog.buttons[row_i] do
+    local btn = letter_dialog.buttons[row_i][btn_i]
+    if btn.text == "Z" then z_btn = btn end
+  end
+end
+print("letter_kind=" .. tostring(letter_dialog and letter_dialog.__kind))
+if z_btn and type(z_btn.callback) == "function" then z_btn.callback() end
+print("letter_jumped_page=" .. tostring(LightHouse.library_state and LightHouse.library_state.page))
+
+-- 5. Local sidecar merge on showStats
+LightHouse:showStats()
+local stats_model = LightHouse.last_page_model
+local stats_reading_val = ""
+for b_idx = 1, #(stats_model and stats_model.blocks or {}) do
+  local block = stats_model.blocks[b_idx]
+  if block.kind == "section" and block.row_kind ~= "session" and block.rows and block.rows[1] then
+    stats_reading_val = tostring(block.rows[1].title) .. "::" .. tostring(block.rows[1].value)
+    break
+  end
+end
+print("stats_merged=" .. stats_reading_val)
+
+-- 7a. Book-scoped showHighlights(only_record)
+LightHouse:showHighlights(spice_record)
+local scoped_menu
+for idx = #shown, 1, -1 do
+  if shown[idx].__kind == "menu" then scoped_menu = shown[idx] break end
+end
+print("scoped_hl_title=" .. tostring(scoped_menu and scoped_menu.title))
+print("scoped_hl_count=" .. tostring(#(scoped_menu and scoped_menu.item_table or {})))
+print("scoped_hl_flat=" .. tostring(scoped_menu and scoped_menu.item_table[1] and scoped_menu.item_table[1].sub_item_table == nil))
+print("OK")
+`);
+
+describe("plugin Phase 1 & 2 UX polish", () => {
+  function runUxPolishHarness(): Record<string, string> {
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "harness-api-key",
+      generatedAt: "2026-11-14T00:00:00.000Z",
+    });
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-ux-polish-"));
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
+      encoding: "utf8",
+    });
+    expect(extract.status).toBe(0);
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "ux_polish_harness.lua");
+    fs.writeFileSync(harnessPath, UX_POLISH_HARNESS);
+    const res = spawnSync(LUA_BINARY as string, [harnessPath, pluginRoot, "http://192.168.31.15:8086"], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    return Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+  }
+
+  it("prioritizes Open book and disables selection on read-only metadata", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runUxPolishHarness();
+    expect(out.detail_first).toBe("Open book");
+    expect(out.detail_second).toBe("Download again");
+    expect(out.meta_rating_locked).toBe("true");
+    expect(out.meta_device_locked).toBe("true");
+    expect(out.meta_author_enabled).toBe("true");
+    expect(out.meta_series_enabled).toBe("true");
+    expect(out.reading_first).toBe("Open book");
+    expect(out.reading_second).toBe("Download EPUB");
+  });
+
+  it("consolidates cold openLibrary spinner and turns pages with hardware keys", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runUxPolishHarness();
+    expect(Number(out.cold_spinners)).toBeLessThanOrEqual(1);
+    expect(out.page_initial).toBe("1");
+    expect(out.page_after_next_key).toBe("2");
+    expect(out.page_after_prev_key).toBe("1");
+  });
+
+  it("shows a compact ButtonDialog overflow sheet and clears overflow_menu on close", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runUxPolishHarness();
+    expect(out.overflow_kind).toBe("buttondialog");
+    expect(out.overflow_tracked).toBe("true");
+    const labels = out.overflow_labels.split("|");
+    for (const expected of [
+      "Currently reading",
+      "Highlights",
+      "Reading stats",
+      "Refresh",
+      "Search",
+      "Sort & Filter",
+      "Connection",
+      "Close",
+    ]) {
+      expect(labels).toContain(expected);
+    }
+    expect(labels.some((label) => label.startsWith("Covers:"))).toBe(true);
+    expect(out.overflow_closed_nil).toBe("true");
+  });
+
+  it("applies sort=series on series drill, filter=unread via Sort & Filter, and resets queries", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runUxPolishHarness();
+    expect(out.series_drill_url).toContain("sort=series");
+    expect(out.series_drill_title).toBe("Spice and Wolf");
+    expect(out.series_drill_switch).toBe("nil");
+
+    expect(out.sf_kind).toBe("buttondialog");
+    expect(out.sf_title).toBe("Sort & Filter");
+    expect(out.sf_url).toContain("filter=unread");
+    expect(out.sf_url).toContain("sort=");
+    expect(out.sf_filter).toBe("unread");
+
+    expect(out.cleared_query).toBe("");
+    expect(out.cleared_title).toBe("");
+    expect(out.tab_switch_query).toBe("");
+    expect(out.tab_switch_title).toBe("");
+  });
+
+  it("merges local sidecar progress into stats, scopes single-book highlights, and jumps by letter", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runUxPolishHarness();
+    expect(out.letter_kind).toBe("buttondialog");
+    expect(out.letter_jumped_page).toBe("2");
+    expect(out.stats_merged).toBe("Spice and Wolf, Vol. 1::88%");
+    expect(out.scoped_hl_title).toBe("Highlights: Spice and Wolf, Vol. 1");
+    expect(out.scoped_hl_count).toBe("2");
+    expect(out.scoped_hl_flat).toBe("true");
   });
 });

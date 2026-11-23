@@ -283,7 +283,7 @@ local function buildFilename(entry)
     entry = entry or {}
 
     local function sanitize(value)
-        value = tostring(value or "")
+        value = Status.str(value)
         value = value:gsub("[/\\:*?\"<>|]", "_")
         value = value:gsub("%s+", " ")
         value = value:gsub("^%s+", "")
@@ -1476,8 +1476,22 @@ function LightHouse:pageLabels()
         last_52_weeks = _("LAST 52 WEEKS"),
         books_upper = _("BOOKS"),
         search = _("Search library…"),
+        search_short = _("Search"),
         next_page = _("Next page"),
+        prev_page = _("Prev"),
+        next_page_short = _("Next"),
         page = _("Page %d of %d"),
+        page_compact = _("Page %d / %d"),
+        clear_filter = _("Clear"),
+        on_device = _("On device"),
+        sort_newest = _("Newest"),
+        sort_title = _("A–Z"),
+        sort_author = _("Author"),
+        sort_series = _("Series"),
+        filter_unread = _("Unread"),
+        heat_less = _("Less"),
+        heat_more = _("More"),
+        jump_az = _("A–Z"),
         all_books = _("All books"),
         grouped_by_series = _("Grouped by series"),
         grouped_by_author = _("Grouped by author"),
@@ -1540,13 +1554,14 @@ function LightHouse:coverWidgetFor(cover_id, width, height)
     }
 end
 
---- Fetches the covers of these books, inside the caller's spinner.
+--- Fetches the covers of these books, inside the caller's spinner unless silent.
 -- A synthetic entry per id is enough: the cover endpoint is keyed by book id, so
 -- no OPDS row is needed. Bounded by the same count and wall-clock budget as the
 -- catalog prefetch, and every failure stays inside the prefetch.
 -- @tparam table ids array of book ids
 -- @string[opt] label spinner text
-function LightHouse:prefetchCoverIds(ids, label)
+-- @boolean[opt] silent skip creating an inner spinner when already inside one
+function LightHouse:prefetchCoverIds(ids, label, silent)
     if not self:coversEnabled() then return end
     local now = os.time()
     local entries = {}
@@ -1564,6 +1579,10 @@ function LightHouse:prefetchCoverIds(ids, label)
         end
     end
     if #entries == 0 then return end
+    if silent then
+        self:prefetchCovers(entries)
+        return
+    end
     self:withSpinner(label or _("Loading covers…"), function()
         self:prefetchCovers(entries)
         return true
@@ -1650,8 +1669,17 @@ function LightHouse:goUp()
     if type(previous.render) == "function" then previous.render() end
 end
 
+--- Closes any open overflow sheet or menu.
+function LightHouse:closeOverflow()
+    if self.overflow_menu then
+        self:dismissWidget(self.overflow_menu)
+        self.overflow_menu = nil
+    end
+end
+
 --- Leaves the plugin, the way Back at the top level always has.
 function LightHouse:exitPlugin()
+    self:closeOverflow()
     self:dismissWidget(self.menu)
     self.menu = nil
     self:dismissWidget(self.page)
@@ -1672,6 +1700,7 @@ end
 -- @treturn table|nil the page widget
 function LightHouse:showPage(model, plan, handlers)
     handlers = handlers or {}
+    self:closeOverflow()
     -- A page is a whole screen, so a menu left over from a level the reader has
     -- left must not stay on the glass behind it. Closing it is not a step up:
     -- the level stack already says where the reader is.
@@ -1734,65 +1763,147 @@ function LightHouse:showPage(model, plan, handlers)
     return page
 end
 
---- The overflow menu behind the header's ⋮.
--- Holds the actions that are not a row: refresh, the grouping switch's
--- keyboard/touch alternative, paging, covers and the connection screen.
+--- The overflow sheet behind the header's ⋮.
+-- Offers unified in-app navigation across Library / Reading / Highlights / Stats
+-- plus refresh, sort/filter, jump, covers toggle and connection details.
 function LightHouse:showPageOverflow()
-    local items = {}
+    self:closeOverflow()
     local state = self.library_state
-    if state then
-        items[#items + 1] = { text = _("Refresh"), bold = true, callback = function()
-            self:openLibrary{ page = state.page, refresh = true }
-        end }
-        if state.page > 1 then
-            items[#items + 1] = {
-                text = _("Previous page"),
-                callback = function() self:openLibrary{ page = state.page - 1 } end,
-            }
+    local rows = {}
+    local menu_items = {}
+
+    local function addAction(row_table, label_text, fn, bold)
+        local wrapped = function()
+            self:closeOverflow()
+            fn()
         end
-        for segment_index = 1, 3 do
-            local mode = ({ "books", "authors", "series" })[segment_index]
-            if mode ~= state.mode then
-                local switch_label = mode == "books" and _("Show books")
-                    or (mode == "authors" and _("Show authors") or _("Show series"))
-                items[#items + 1] = {
-                    text = switch_label,
-                    callback = function() self:openLibrary{ mode = mode, page = 1 } end,
-                }
-            end
-        end
-        items[#items + 1] = {
-            text = _("Search library…"),
-            callback = function() self:showSearchDialog() end,
-        }
-    else
-        items[#items + 1] = { text = _("Refresh"), bold = true, callback = function() self:showStats() end }
-        items[#items + 1] = { text = _("Library"), callback = function() self:openLibrary{ mode = "books", page = 1 } end }
+        row_table[#row_table + 1] = { text = label_text, callback = wrapped }
+        menu_items[#menu_items + 1] = { text = label_text, bold = bold == true, callback = wrapped }
     end
-    items[#items + 1] = {
-        text = _("Show cover thumbnails"),
-        callback = function()
-            self:toggleCovers()
-            self._library_plan = nil
-            if state then
-                self:openLibrary{ page = state.page }
-            else
-                self:showStats()
+
+    -- Unified in-app navigation across the plugin's screens.
+    local nav_row = {}
+    if state then
+        addAction(nav_row, _("Currently reading"), function() self:showReading() end)
+        addAction(nav_row, _("Highlights"), function() self:showHighlights() end)
+        addAction(nav_row, _("Reading stats"), function() self:showStats() end)
+    else
+        addAction(nav_row, _("Library"), function()
+            self:openLibrary{ mode = "books", page = 1, query = "", title = "" }
+        end)
+        addAction(nav_row, _("Currently reading"), function() self:showReading() end)
+        addAction(nav_row, _("Highlights"), function() self:showHighlights() end)
+    end
+    rows[#rows + 1] = nav_row
+
+    -- Current-screen actions.
+    local action_row = {}
+    if state then
+        addAction(action_row, _("Refresh"), function()
+            self:openLibrary{ page = state.page, refresh = true }
+        end, true)
+        addAction(action_row, _("Search"), function() self:showSearchDialog() end)
+        if state.mode == "books" then
+            addAction(action_row, _("Sort & Filter"), function() self:showSortFilterDialog() end)
+        else
+            local grouping = self._groupings and self._groupings[state.mode == "series" and "series" or "authors"]
+            if grouping and grouping.groups then
+                local plan = self:libraryPlan(state.query == "")
+                local page_size = math.max(math.min(plan.rows, pageSize()), 1)
+                addAction(action_row, _("Jump A–Z"), function()
+                    self:showLetterJumpDialog(grouping.groups, page_size)
+                end)
             end
-        end,
-        checked_func = function() return self:coversEnabled() end,
-    }
-    items[#items + 1] = {
-        text = _("Connection"),
-        callback = function() self:showConnection(Client.isConfigured(config)) end,
-    }
+        end
+    else
+        addAction(action_row, _("Refresh"), function() self:showStats() end, true)
+    end
+    rows[#rows + 1] = action_row
+
+    if state then
+        local switch_row = {}
+        local modes = { "books", "authors", "series" }
+        local labels = { books = _("Books"), authors = _("Authors"), series = _("Series") }
+        for mode_index = 1, #modes do
+            local mode = modes[mode_index]
+            if mode ~= state.mode or state.query ~= "" then
+                addAction(switch_row, labels[mode], function()
+                    self:openLibrary{ mode = mode, page = 1, query = "", title = "" }
+                end)
+            end
+        end
+        if #switch_row > 0 then rows[#rows + 1] = switch_row end
+    end
+
+    -- Settings & utility row.
+    local covers_label = self:coversEnabled()
+        and _("Covers: On")
+        or _("Covers: Off")
+    local util_row = {}
+    addAction(util_row, covers_label, function()
+        self:toggleCovers()
+        self._library_plan = nil
+        if state then
+            self:openLibrary{ page = state.page }
+        else
+            self:showStats()
+        end
+    end)
+    addAction(util_row, _("Connection"), function()
+        self:showConnection(Client.isConfigured(config))
+    end)
+    addAction(util_row, _("Close"), function() end)
+    rows[#rows + 1] = util_row
+
+    local ok_bd, ButtonDialog = pcall(require, "ui/widget/buttondialog")
+    if ok_bd and type(ButtonDialog) == "table" and type(ButtonDialog.new) == "function" then
+        local dialog = squareWidget(ButtonDialog, {
+            title = _("LightHouse library"),
+            buttons = rows,
+        })
+        self.overflow_menu = dialog
+        UIManager:show(dialog)
+        return
+    end
+
     local menu = squareWidget(Menu, {
         title = _("LightHouse library"),
-        item_table = items,
+        item_table = menu_items,
         title_multilines = true,
+        close_callback = function() self.overflow_menu = nil end,
     })
     self.overflow_menu = menu
     UIManager:show(menu)
+end
+
+--- Resolves an existing on-device EPUB path for a catalog entry or session.
+-- Checks explicit `book_path`, matched `local_record.book_path`, and the
+-- deterministic download destination under `getDownloadDir()`.
+-- @tparam table entry OPDS entry or KOSync session
+-- @treturn string|nil readable file path on this device
+function LightHouse:localBookPathFor(entry)
+    if type(entry) ~= "table" then return nil end
+    local candidates = {}
+    local direct = Status.str(entry.book_path)
+    if direct ~= "" then candidates[#candidates + 1] = direct end
+    local local_record = type(entry.local_record) == "table" and entry.local_record or nil
+    local record_path = local_record and Status.str(local_record.book_path) or ""
+    if record_path ~= "" and record_path ~= direct then
+        candidates[#candidates + 1] = record_path
+    end
+    local download_dir = Status.str(self:getDownloadDir())
+    if download_dir ~= "" and (Status.str(entry.title) ~= "" or Status.num(entry.book_id) ~= nil) then
+        local download_path = download_dir .. "/" .. buildFilename(entry)
+        if download_path ~= direct and download_path ~= record_path then
+            candidates[#candidates + 1] = download_path
+        end
+    end
+    for candidate_index = 1, #candidates do
+        if Sidecar.bookExists(candidates[candidate_index]) then
+            return candidates[candidate_index]
+        end
+    end
+    return nil
 end
 
 --- The detail actions for one book, shared by the library page and the shelf.
@@ -1812,26 +1923,54 @@ function LightHouse:buildBookDetails(entry)
     end
 
     local details = {}
-    details[#details + 1] = {
-        text = _("Download EPUB"),
-        bold = true,
-        enabled = entry.download_href ~= nil,
-        callback = function() self:downloadEntry(entry) end,
-    }
-    details[#details + 1] = {
-        text = T(_("Author: %1"), authors ~= "" and authors or _("Unknown")),
-        callback = function() end,
-    }
+    local local_path = self:localBookPathFor(entry)
+    if local_path then
+        details[#details + 1] = {
+            text = _("Open book"),
+            bold = true,
+            callback = function() self:openBookFile(local_path) end,
+        }
+        if entry.download_href ~= nil then
+            details[#details + 1] = {
+                text = _("Download again"),
+                callback = function() self:downloadEntry(entry) end,
+            }
+        end
+    else
+        details[#details + 1] = {
+            text = _("Download EPUB"),
+            bold = true,
+            enabled = entry.download_href ~= nil,
+            callback = function() self:downloadEntry(entry) end,
+        }
+    end
+    if authors ~= "" then
+        details[#details + 1] = {
+            text = T(_("Author: %1"), authors),
+            callback = function()
+                self:openLibrary{ mode = "books", query = authors, title = authors, page = 1 }
+            end,
+        }
+    else
+        details[#details + 1] = {
+            text = T(_("Author: %1"), _("Unknown")),
+            select_enabled = false,
+            callback = function() end,
+        }
+    end
     if series ~= "" then
         details[#details + 1] = {
             text = entry.series_index
                 and T(_("Series: %1 #%2"), series, entry.series_index)
                 or T(_("Series: %1"), series),
-            callback = function() end,
+            callback = function()
+                self:openLibrary{ mode = "books", query = series, title = series, sort = "series", page = 1 }
+            end,
         }
     end
     details[#details + 1] = {
         text = T(_("Rating: %1"), Status.ratingLabel(entry.rating)),
+        select_enabled = false,
         callback = function() end,
     }
     -- A row built from a reading session carries its percentage at the top
@@ -1852,6 +1991,7 @@ function LightHouse:buildBookDetails(entry)
     end
     details[#details + 1] = {
         text = T(_("Progress: %1"), Status.statusLabel(progress_entry)),
+        select_enabled = false,
         callback = function() end,
     }
     -- Local sidecar data, when this device has this book: the progress above is
@@ -1868,13 +2008,14 @@ function LightHouse:buildBookDetails(entry)
     if local_record and (Status.num(local_record.annotation_count) or 0) > 0 then
         details[#details + 1] = {
             text = T(_("Highlights: %1"), Status.num(local_record.annotation_count)),
-            callback = function() self:showHighlights() end,
+            callback = function() self:showHighlights(local_record) end,
         }
     end
     local device = status and Status.str(status.device) or ""
     if device ~= "" then
         details[#details + 1] = {
             text = T(_("Last device: %1"), device),
+            select_enabled = false,
             callback = function() end,
         }
     end
@@ -1887,6 +2028,7 @@ function LightHouse:buildBookDetails(entry)
     if #tags > 0 then
         details[#details + 1] = {
             text = T(_("Tags: %1"), table.concat(tags, ", ")),
+            select_enabled = false,
             callback = function() end,
         }
     end
@@ -1927,17 +2069,258 @@ end
 -- Library: Books / Authors / Series
 -- ---------------------------------------------------------------------------
 
---- Layout of the library page, cached per screen SIZE.
+local VALID_SORTS = {
+    added = true,
+    title = true,
+    author = true,
+    series = true,
+}
+
+--- Reader's preferred default library sort order.
+-- @treturn string "added" | "title" | "author" | "series"
+function LightHouse:defaultSort()
+    local stored = G_reader_settings:readSetting("lighthouse_sort")
+    if type(stored) == "string" and VALID_SORTS[stored] then
+        return stored
+    end
+    return "title"
+end
+
+--- Saves the reader's preferred library sort order.
+-- @string sort_key
+function LightHouse:saveDefaultSort(sort_key)
+    if type(sort_key) == "string" and VALID_SORTS[sort_key] then
+        G_reader_settings:saveSetting("lighthouse_sort", sort_key)
+    end
+end
+
+--- Opens the sort and filter picker for Books mode.
+function LightHouse:showSortFilterDialog()
+    local state = self.library_state or {}
+    local current_sort = VALID_SORTS[state.sort] and state.sort or self:defaultSort()
+    local current_filter = Status.str(state.filter)
+    local dialog
+
+    local function closePicker()
+        if dialog then
+            UIManager:close(dialog)
+            dialog = nil
+        end
+    end
+
+    local function applyChoice(next_sort, next_filter, persist_sort)
+        closePicker()
+        if persist_sort then self:saveDefaultSort(next_sort) end
+        self:openLibrary{
+            mode = "books",
+            page = 1,
+            sort = next_sort,
+            filter = next_filter,
+        }
+    end
+
+    local sort_options = {
+        { key = "added", label = _("Newest added") },
+        { key = "title", label = _("Title A–Z") },
+        { key = "author", label = _("Author") },
+        { key = "series", label = _("Series") },
+    }
+
+    local ok_bd, ButtonDialog = pcall(require, "ui/widget/buttondialog")
+    if ok_bd and type(ButtonDialog) == "table" and type(ButtonDialog.new) == "function" then
+        local rows = {}
+        local row1, row2 = {}, {}
+        for index = 1, #sort_options do
+            local opt = sort_options[index]
+            local prefix = current_sort == opt.key and (Ui.GLYPH.done .. " ") or ""
+            local btn = {
+                text = prefix .. opt.label,
+                callback = function() applyChoice(opt.key, current_filter, true) end,
+            }
+            if index <= 2 then row1[#row1 + 1] = btn else row2[#row2 + 1] = btn end
+        end
+        rows[#rows + 1] = row1
+        rows[#rows + 1] = row2
+
+        local unread_active = current_filter == "unread"
+        local next_filter = unread_active and "" or "unread"
+        local filter_label = (unread_active and (Ui.GLYPH.done .. " ") or "") .. _("Unread only")
+        rows[#rows + 1] = {
+            {
+                text = filter_label,
+                callback = function() applyChoice(current_sort, next_filter, false) end,
+            },
+            {
+                text = _("Cancel"),
+                callback = function() closePicker() end,
+            },
+        }
+        dialog = squareWidget(ButtonDialog, {
+            title = _("Sort & Filter"),
+            buttons = rows,
+        })
+        UIManager:show(dialog)
+        return
+    end
+
+    local items = {}
+    for index = 1, #sort_options do
+        local opt = sort_options[index]
+        local prefix = current_sort == opt.key and (Ui.GLYPH.done .. " ") or ""
+        items[#items + 1] = {
+            text = prefix .. opt.label,
+            bold = current_sort == opt.key,
+            callback = function() applyChoice(opt.key, current_filter, true) end,
+        }
+    end
+    local unread_active = current_filter == "unread"
+    local next_filter = unread_active and "" or "unread"
+    items[#items + 1] = {
+        text = (unread_active and (Ui.GLYPH.done .. " ") or "") .. _("Unread only"),
+        callback = function() applyChoice(current_sort, next_filter, false) end,
+    }
+    dialog = squareWidget(Menu, {
+        title = _("Sort & Filter"),
+        item_table = items,
+    })
+    UIManager:show(dialog)
+end
+
+--- Opens a numeric page jump dialog for any paged library screen.
+-- @tparam table pager { page, pages }
+function LightHouse:showPageJumpDialog(pager)
+    local total_pages = math.floor(tonumber(type(pager) == "table" and pager.pages or nil) or 1)
+    if total_pages <= 1 then return end
+    local current_page = math.max(1, math.min(math.floor(tonumber(pager.page) or 1), total_pages))
+    local dialog
+    dialog = squareWidget(InputDialog, {
+        title = _("Go to page"),
+        input = tostring(current_page),
+        input_hint = T(_("1 – %1"), total_pages),
+        input_type = "number",
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function() UIManager:close(dialog) end,
+                },
+                {
+                    text = _("Go"),
+                    is_enter_default = true,
+                    callback = function()
+                        local raw = dialog:getInputText()
+                        UIManager:close(dialog)
+                        local target = tonumber(Status.str(raw))
+                        if not target or target ~= target then return end
+                        target = math.max(1, math.min(math.floor(target), total_pages))
+                        self:openLibrary{ page = target }
+                    end,
+                },
+            },
+        },
+    })
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+--- Opens an A–Z jump picker over an already-loaded Author or Series list.
+-- @tparam table groups sorted grouping rows
+-- @number page_size rows per page
+function LightHouse:showLetterJumpDialog(groups, page_size)
+    if type(groups) ~= "table" or #groups == 0 then return end
+    local size = math.max(math.floor(tonumber(page_size) or 1), 1)
+    local seen = {}
+    local buckets = {}
+    for index = 1, #groups do
+        local name = Status.str(groups[index] and groups[index].name)
+        if name ~= "" then
+            local lead = name:match("^%s*([A-Za-z])")
+            local key = lead and lead:upper() or "#"
+            if not seen[key] then
+                seen[key] = true
+                buckets[#buckets + 1] = {
+                    label = key,
+                    page = math.floor((index - 1) / size) + 1,
+                }
+            end
+        end
+    end
+    if #buckets == 0 then return end
+
+    local dialog
+    local function closePicker()
+        if dialog then
+            UIManager:close(dialog)
+            dialog = nil
+        end
+    end
+
+    local ok_bd, ButtonDialog = pcall(require, "ui/widget/buttondialog")
+    if ok_bd and type(ButtonDialog) == "table" and type(ButtonDialog.new) == "function" then
+        local rows = {}
+        local current_row = {}
+        for bucket_index = 1, #buckets do
+            local bucket = buckets[bucket_index]
+            current_row[#current_row + 1] = {
+                text = bucket.label,
+                callback = function()
+                    closePicker()
+                    self:openLibrary{ page = bucket.page }
+                end,
+            }
+            if #current_row >= 6 then
+                rows[#rows + 1] = current_row
+                current_row = {}
+            end
+        end
+        if #current_row > 0 then rows[#rows + 1] = current_row end
+        rows[#rows + 1] = {
+            { text = _("Cancel"), callback = function() closePicker() end },
+        }
+        dialog = squareWidget(ButtonDialog, {
+            title = _("Jump to letter"),
+            buttons = rows,
+        })
+        UIManager:show(dialog)
+        return
+    end
+
+    local items = {}
+    for bucket_index = 1, #buckets do
+        local bucket = buckets[bucket_index]
+        items[#items + 1] = {
+            text = bucket.label,
+            mandatory = T(_("Page %1"), bucket.page),
+            callback = function()
+                closePicker()
+                self:openLibrary{ page = bucket.page }
+            end,
+        }
+    end
+    dialog = squareWidget(Menu, {
+        title = _("Jump to letter"),
+        item_table = items,
+    })
+    UIManager:show(dialog)
+end
+
+--- Layout of the library page, cached per screen SIZE, covers toggle and switch visibility.
 -- Keyed on the screen, not just cached once: a reader who rotates the device
--- gets a plan for the new geometry instead of the old one.
+-- or toggles covers gets a plan for the new geometry instead of the old one.
+-- @boolean[opt] with_switch default true
 -- @treturn table plan
-function LightHouse:libraryPlan()
+function LightHouse:libraryPlan(with_switch)
+    local show_switch = with_switch ~= false
+    local covers = self:coversEnabled()
     local key = tostring(screenWidth()) .. "x" .. tostring(screenHeight())
+        .. ":" .. tostring(covers) .. ":" .. tostring(show_switch)
     if self._library_plan and self._library_plan_key == key then
         return self._library_plan
     end
     local plan = Ui.listPlan(screenWidth(), screenHeight(), screenScale(), {
-        with_switch = true,
+        with_switch = show_switch,
+        with_covers = covers,
         min_rows = 3,
     })
     self._library_plan = plan
@@ -1988,9 +2371,10 @@ end
 -- Only an answer is kept: a request that failed is never stored, so a busy
 -- progress endpoint costs one page its server progress and the next view asks
 -- again instead of every page reusing a shelf it never received.
+-- @boolean[opt] silent skip inner spinner when already inside an outer spinner
 -- @treturn table|nil normalized sessions; nil when the server cannot be reached
 -- @treturn string|nil error code from the failed request
-function LightHouse:shelfSessions()
+function LightHouse:shelfSessions(silent)
     local kept = self._shelf
     if type(kept) == "table" and type(kept.at) == "number" then
         local age = os.time() - kept.at
@@ -1999,9 +2383,20 @@ function LightHouse:shelfSessions()
         end
     end
     local now = os.time()
-    local sessions, err = self:withSpinner(_("Checking reading progress…"), function()
-        return self:fetchSessions()
-    end)
+    local sessions, err
+    if silent then
+        local ok, fetched, fetch_err = pcall(self.fetchSessions, self)
+        if ok then
+            sessions, err = fetched, fetch_err
+        else
+            logger.warn("LightHouse: shelf fetch raised:", tostring(fetched))
+            sessions, err = nil, "exception: " .. tostring(fetched)
+        end
+    else
+        sessions, err = self:withSpinner(_("Checking reading progress…"), function()
+            return self:fetchSessions()
+        end)
+    end
     if type(sessions) ~= "table" then
         return nil, err
     end
@@ -2018,17 +2413,50 @@ end
 -- The page belongs to one level: the groupings and their pages are the top
 -- level, and a list filtered to one series, one author or one search is a level
 -- below it, so Back from that list returns to the grouping it was opened from.
--- @tparam table[opt] options { mode, page, query, refresh }
+-- @tparam table[opt] options { mode, page, query, title, sort, filter, refresh }
 function LightHouse:openLibrary(options)
     options = options or {}
     local previous = self.library_state or {}
     local mode = options.mode or previous.mode or "books"
     if mode ~= "authors" and mode ~= "series" then mode = "books" end
+    local mode_changed = previous.mode ~= nil and previous.mode ~= mode
     local page = math.floor(tonumber(options.page) or previous.page or 1)
     if page < 1 then page = 1 end
     local query = options.query
-    if query == nil then query = previous.query or "" end
+    if query == nil then
+        query = (mode ~= "books" or mode_changed) and "" or (previous.query or "")
+    end
     query = Status.str(query)
+
+    local query_changed = query ~= (previous.query or "")
+    local title
+    if options.title ~= nil then
+        title = Status.str(options.title)
+    elseif options.query ~= nil or mode ~= "books" or mode_changed then
+        title = ""
+    else
+        title = Status.str(previous.title)
+    end
+
+    local sort
+    if options.sort ~= nil and VALID_SORTS[options.sort] then
+        sort = options.sort
+    elseif query_changed then
+        sort = self:defaultSort()
+    elseif VALID_SORTS[previous.sort] then
+        sort = previous.sort
+    else
+        sort = self:defaultSort()
+    end
+
+    local filter
+    if options.filter ~= nil then
+        filter = Status.str(options.filter)
+    elseif mode ~= "books" or mode_changed then
+        filter = ""
+    else
+        filter = Status.str(previous.filter)
+    end
 
     -- A grouping document is fetched once and then paged on the device, so the
     -- cache is what makes paging local. It is not kept across an explicit
@@ -2038,12 +2466,19 @@ function LightHouse:openLibrary(options)
         self.local_scan = nil
         self.local_index = nil
     end
-    if options.refresh or (previous.mode ~= nil and previous.mode ~= mode) then
+    if options.refresh or mode_changed then
         self._groupings = nil
         self:forgetShelf()
     end
 
-    local state = { mode = mode, page = page, query = query }
+    local state = {
+        mode = mode,
+        page = page,
+        query = query,
+        title = title,
+        sort = sort,
+        filter = filter,
+    }
     self.library_state = state
     -- Reported after the page is drawn, so the message is not hidden under it.
     local shelf_notice
@@ -2075,52 +2510,98 @@ function LightHouse:openLibrary(options)
     end
     if not NetworkMgr:isOnline() then
         NetworkMgr:willRerunWhenOnline(function()
-            self:openLibrary{ mode = mode, page = page, query = query, refresh = options.refresh }
+            self:openLibrary{
+                mode = mode, page = page, query = query, title = title,
+                sort = sort, filter = filter, refresh = options.refresh,
+            }
         end)
         return
     end
 
-    local plan = self:libraryPlan()
-    -- Two rows of every page are navigation, not content: the search row leads
-    -- every page of every grouping, and a page carries a next-page row while
-    -- more follows. Reserving both on every page is what keeps the search row
-    -- from overflowing the plan on a page that also draws a next-page row - the
-    -- cost is one fewer content row per page, which is the honest trade. The
-    -- configured page size stays an upper bound, so a reader who tuned it keeps
-    -- their setting while the screen decides what actually fits.
-    local navigation = 2
-    local page_size = math.max(math.min(plan.rows - navigation, pageSize()), 1)
-    local context = { page = page, page_size = page_size, query = query, totals = {} }
+    local with_switch = query == ""
+    local plan = self:libraryPlan(with_switch)
+    local page_size = math.max(math.min(plan.rows, pageSize()), 1)
+    local context = {
+        page = page,
+        page_size = page_size,
+        query = query,
+        title = title,
+        sort = sort,
+        filter = filter,
+        totals = {},
+    }
 
     if mode == "books" then
-        local path = "/api/opds?" .. buildQuery({
+        local opds_params = {
             search = query,
             start = (page - 1) * page_size,
             count = page_size,
-            -- A–Z, the same order the two groupings are in: the server sorts the
-            -- whole matched set before the page window, so the order holds across
-            -- page turns instead of only within a page.
-            sort = "title",
-        })
-        local body, err = self:withSpinner(_("Loading LightHouse catalog…"), function()
-            return Client.get(config, path)
+            sort = sort,
+        }
+        if filter ~= "" then opds_params.filter = filter end
+        local path = "/api/opds?" .. buildQuery(opds_params)
+
+        local refresh_device = options.refresh == true
+        local loaded, load_err = self:withSpinner(_("Loading LightHouse catalog…"), function()
+            local body, err = Client.get(config, path)
+            if not body then return nil, err or "invalid_response" end
+            local feed = OPDS.parse(body)
+            if #feed.entries == 0 then
+                return { feed = feed }
+            end
+            local sessions, shelf_err = self:shelfSessions(true)
+            if sessions then
+                Status.merge(feed.entries, sessions)
+            end
+            self:localRecords(refresh_device)
+            for entry_index = 1, #feed.entries do
+                local entry = feed.entries[entry_index]
+                local applied = pcall(function() self:applyLocalToEntry(entry) end)
+                if not applied then
+                    logger.warn("LightHouse: local progress match failed for", tostring(entry.title))
+                end
+                if entry.local_record or self:localBookPathFor(entry) ~= nil then
+                    entry.on_device = true
+                end
+            end
+            if self:coversEnabled() then
+                local now = os.time()
+                local pending = 0
+                for entry_index = 1, #feed.entries do
+                    if coverNeedsFetch(feed.entries[entry_index], now) then
+                        pending = pending + 1
+                    end
+                end
+                if pending > 0 then
+                    self:prefetchCovers(feed.entries)
+                end
+            end
+            return { feed = feed, shelf_err = shelf_err }
         end)
-        if not body then
+
+        if not loaded then
             self.library_state = nil
             show_problem{
                 title = _("Library"),
-                headline = errorHeadline(err),
-                detail = describeError(err),
+                headline = errorHeadline(load_err),
+                detail = describeError(load_err),
                 actions = {
                     retryAction(_("Try again"), function()
-                        self:openLibrary{ mode = mode, page = page, query = query,
-                            refresh = options.refresh }
+                        self:openLibrary{
+                            mode = mode, page = page, query = query, title = title,
+                            sort = sort, filter = filter, refresh = options.refresh,
+                        }
                     end),
                 },
             }
             return
         end
-        local feed = OPDS.parse(body)
+
+        local feed = loaded.feed
+        if loaded.shelf_err then
+            shelf_notice = T(_("Reading progress: %1"), errorHeadline(loaded.shelf_err))
+        end
+
         if #feed.entries == 0 and page > 1 then
             -- Past the end of the catalog: the library shrank (a book was
             -- deleted on the server) or the reader overshot. That is not an
@@ -2133,11 +2614,13 @@ function LightHouse:openLibrary(options)
                 detail = _("The library changed since this page was opened. Go back to the first page to see what is there."),
                 actions = {
                     retryAction(_("Back to the first page"), function()
-                        self:openLibrary{ mode = mode, page = 1, query = "" }
+                        self:openLibrary{ mode = mode, page = 1, query = "", title = "" }
                     end),
                     retryAction(_("Try again"), function()
-                        self:openLibrary{ mode = mode, page = page, query = query,
-                            refresh = options.refresh }
+                        self:openLibrary{
+                            mode = mode, page = page, query = query, title = title,
+                            sort = sort, filter = filter, refresh = options.refresh,
+                        }
                     end),
                 },
             }
@@ -2145,14 +2628,22 @@ function LightHouse:openLibrary(options)
         end
         if #feed.entries == 0 then
             self.library_state = nil
-            if query ~= "" then
+            if query ~= "" or filter ~= "" then
+                local headline = query ~= ""
+                    and T(_("No books match “%1”"), query)
+                    or _("No unread books match this view")
                 show_problem{
                     title = _("Library"),
-                    headline = T(_("No books match “%1”"), query),
+                    headline = headline,
                     detail = _("Check the spelling, or search by author or series."),
                     actions = {
                         retryAction(_("Search again"), function() self:showSearchDialog() end),
-                        { text = _("Browse all books"), callback = function() self:openLibrary{ page = 1, query = "" } end },
+                        {
+                            text = _("Browse all books"),
+                            callback = function()
+                                self:openLibrary{ mode = "books", page = 1, query = "", title = "", filter = "" }
+                            end,
+                        },
                     },
                 }
             else
@@ -2169,54 +2660,25 @@ function LightHouse:openLibrary(options)
             return
         end
 
-        -- A failed shelf request is reported once and NOT kept: the rows fall
-        -- back to what this device knows, and the next view asks again.
-        local sessions, shelf_err = self:shelfSessions()
-        if sessions then
-            Status.merge(feed.entries, sessions)
-        else
-            shelf_notice = T(_("Reading progress: %1"), errorHeadline(shelf_err))
-        end
-
-        -- Local sidecars beat the server for any book this device has opened (see
-        -- `localRecordFor`), and a book only this device has read gets its progress
-        -- from the sidecar because the server sent no session for it at all. The
-        -- walk happens ONCE, behind a spinner, before any row is drawn, and
-        -- **Refresh** walks the device again instead of reusing the session's scan.
-        local refresh_device = options.refresh == true
-        self:withLocalScan(_("Reading books on this device…"), function()
-            return self:localRecords(refresh_device)
-        end)
-        for entry_index = 1, #feed.entries do
-            local entry = feed.entries[entry_index]
-            local applied = pcall(function() self:applyLocalToEntry(entry) end)
-            if not applied then
-                logger.warn("LightHouse: local progress match failed for", tostring(entry.title))
-            end
-        end
-
-        if self:coversEnabled() then
-            local now = os.time()
-            local pending = 0
-            for entry_index = 1, #feed.entries do
-                if coverNeedsFetch(feed.entries[entry_index], now) then
-                    pending = pending + 1
-                end
-            end
-            if pending > 0 then
-                self:withSpinner(_("Loading covers…"), function()
-                    self:prefetchCovers(feed.entries)
-                    return true
-                end)
-            end
-        end
-
         context.entries = feed.entries
         context.has_next = feed.next_href ~= nil
         context.totals = { books = feed.total }
     else
         local grouping, err = self:withSpinner(_("Loading the library…"), function()
-            return self:fetchGrouping(mode == "series" and "series" or "authors")
+            local fetched, fetch_err = self:fetchGrouping(mode == "series" and "series" or "authors")
+            if not fetched then return nil, fetch_err end
+            local available = math.max(math.ceil(#fetched.groups / page_size), 1)
+            local target_page = page > available and available or page
+            if self:coversEnabled() then
+                local ids = {}
+                local first = (target_page - 1) * page_size + 1
+                for group_index = first, first + page_size - 1 do
+                    local group = fetched.groups[group_index]
+                    if group and group.coverId then ids[#ids + 1] = group.coverId end
+                end
+                self:prefetchCoverIds(ids, nil, true)
+            end
+            return fetched
         end)
         if not grouping then
             self.library_state = nil
@@ -2243,15 +2705,6 @@ function LightHouse:openLibrary(options)
             state.page = page
             context.page = page
         end
-        if self:coversEnabled() then
-            local ids = {}
-            local first = (page - 1) * page_size + 1
-            for group_index = first, first + page_size - 1 do
-                local group = grouping.groups[group_index]
-                if group and group.coverId then ids[#ids + 1] = group.coverId end
-            end
-            self:prefetchCoverIds(ids)
-        end
     end
 
     local model = Views.libraryModel(mode, context, { labels = self:pageLabels() })
@@ -2262,13 +2715,31 @@ function LightHouse:openLibrary(options)
             self:showSearchDialog()
         elseif action.kind == "page" then
             self:openLibrary{ page = action.page }
+        elseif action.kind == "page_jump" then
+            self:showPageJumpDialog(action.pager or model.pager)
+        elseif action.kind == "clear_query" then
+            self:openLibrary{ mode = "books", page = 1, query = "", title = "" }
+        elseif action.kind == "sort_filter" then
+            self:showSortFilterDialog()
+        elseif action.kind == "jump_letter" then
+            self:showLetterJumpDialog(context.groups, page_size)
         elseif action.kind == "book" then
             self:openBookDetails(action.entry)
-        elseif action.kind == "series" or action.kind == "author" then
-            -- A grouping row opens the books in it: the OPDS feed already
-            -- matches series and author names, so the switch, the anchors and
-            -- the search box all resolve through the same feed.
-            self:openLibrary{ mode = "books", query = action.name, page = 1 }
+        elseif action.kind == "series" then
+            self:openLibrary{
+                mode = "books",
+                query = action.name,
+                title = action.name,
+                sort = "series",
+                page = 1,
+            }
+        elseif action.kind == "author" then
+            self:openLibrary{
+                mode = "books",
+                query = action.name,
+                title = action.name,
+                page = 1,
+            }
         end
     end
 
@@ -2283,7 +2754,7 @@ function LightHouse:openLibrary(options)
         self:showPage(model, plan, {
             on_action = dispatch,
             on_switch = function(key)
-                self:openLibrary{ mode = key, page = 1 }
+                self:openLibrary{ mode = key, page = 1, query = "", title = "", filter = "" }
             end,
         })
     end)
@@ -2330,9 +2801,9 @@ function LightHouse:showSearchDialog()
                         -- `:gsub` raise instead of searching.
                         query = Status.str(query):gsub("^%s+", ""):gsub("%s+$", "")
                         if query == "" then
-                            self:openLibrary{ mode = "books", page = 1, query = "" }
+                            self:openLibrary{ mode = "books", page = 1, query = "", title = "" }
                         else
-                            self:openLibrary{ mode = "books", page = 1, query = query }
+                            self:openLibrary{ mode = "books", page = 1, query = query, title = query }
                         end
                     end,
                 },
@@ -2362,24 +2833,29 @@ function LightHouse:buildReadingItem(session, layout)
     if book_id then book_id = math.floor(book_id) end
 
     local details = {}
-    -- A session can point at a book this device no longer has (deleted after it
-    -- was read), so the file itself decides which action the row offers.
-    local local_book_path = Status.str(session.book_path)
+    -- Check both the matched sidecar path and the plugin's download folder so
+    -- books already on this device always offer "Open book" first.
+    local local_book_path = self:localBookPathFor(session) or Status.str(session.book_path)
     local has_local_file = local_book_path ~= "" and Sidecar.bookExists(local_book_path)
-    if book_id then
+    if has_local_file then
+        details[#details + 1] = {
+            text = _("Open book"),
+            bold = true,
+            callback = function() self:openBookFile(local_book_path) end,
+        }
+        if book_id then
+            local session_for_download = session
+            details[#details + 1] = {
+                text = _("Download EPUB"),
+                callback = function() self:downloadBookId(session_for_download) end,
+            }
+        end
+    elseif book_id then
         local session_for_download = session
         details[#details + 1] = {
             text = _("Download EPUB"),
             bold = true,
             callback = function() self:downloadBookId(session_for_download) end,
-        }
-    elseif has_local_file then
-        -- A book this device already has (and the server has no Calibre id
-        -- for) is opened from disk instead of being offered for download.
-        details[#details + 1] = {
-            text = _("Open book"),
-            bold = true,
-            callback = function() self:openBookFile(local_book_path) end,
         }
     elseif local_book_path ~= "" then
         -- The sidecar outlived the book: the row stays (its progress and
@@ -2413,7 +2889,7 @@ function LightHouse:buildReadingItem(session, layout)
     if local_record and (Status.num(local_record.annotation_count) or 0) > 0 then
         details[#details + 1] = {
             text = T(_("Highlights: %1"), Status.num(local_record.annotation_count)),
-            callback = function() self:showHighlights() end,
+            callback = function() self:showHighlights(local_record) end,
         }
     end
     if device ~= "" then
@@ -2580,22 +3056,34 @@ function LightHouse:showReading()
     end)
 end
 
---- Shows this device's highlights, newest first, grouped by book.
+--- Shows this device's highlights, newest first, grouped by book (or one book).
 --
 -- Offline-first and strictly read-only: the rows come from the sidecar files
 -- beside the books on this device, read once when the view opens (`localRecords`
 -- caches that scan for the session), with no network call and no polling.
-function LightHouse:showHighlights()
-    local level = { kind = "highlights", key = "highlights", surface = "menu" }
+-- @tparam table[opt] only_record optional sidecar record to show only that book
+function LightHouse:showHighlights(only_record)
+    local is_single = type(only_record) == "table"
+    local book_key = is_single and Status.str(only_record.book_path, "local") or "highlights"
+    local level = {
+        kind = "highlights",
+        key = is_single and ("book:" .. book_key) or "highlights",
+        surface = "menu",
+    }
     local function show_problem(spec)
         self:showLevel(level, function()
             self:showProblem(spec)
         end)
     end
 
-    local groups = Sidecar.highlightGroups(self:withLocalScan(_("Reading this device's highlights…"), function()
-        return self:localRecords()
-    end))
+    local groups
+    if is_single then
+        groups = Sidecar.highlightGroups({ only_record })
+    else
+        groups = Sidecar.highlightGroups(self:withLocalScan(_("Reading this device's highlights…"), function()
+            return self:localRecords()
+        end))
+    end
     if #groups == 0 then
         show_problem{
             title = _("Highlights"),
@@ -2604,11 +3092,31 @@ function LightHouse:showHighlights()
             actions = {
                 retryAction(_("Refresh"), function()
                     self:localRecords(true)
-                    self:showHighlights()
+                    self:showHighlights(only_record)
                 end),
-                { text = _("Browse library"), callback = function() self:openLibrary{ mode = "books", page = 1 } end },
+                {
+                    text = _("Browse library"),
+                    callback = function() self:openLibrary{ mode = "books", page = 1, query = "", title = "" } end,
+                },
             },
         }
+        return
+    end
+
+    if is_single and #groups == 1 then
+        local group = groups[1]
+        local annotations = {}
+        for annotation_index = 1, #group.annotations do
+            local annotation = group.annotations[annotation_index]
+            annotations[#annotations + 1] = self:buildSafeRow(function()
+                return self:buildHighlightItem(group, annotation)
+            end)
+        end
+        local title = Status.str(group.title)
+        if title == "" then title = _("Untitled") end
+        self:showLevel(level, function()
+            self:showMenu(T(_("Highlights: %1"), title), annotations, { covers = false })
+        end)
         return
     end
 
@@ -2676,14 +3184,12 @@ function LightHouse:buildHighlightItem(group, annotation)
     }
 end
 
---- Opens the book behind one highlight.
+--- Shows the full quote and note first, offering a tap to open the book.
 --
 -- Strictly read-only: no sidecar is written and no progress is sent anywhere -
--- the write surface of this plugin is unchanged. The page jump goes through the
--- reader's own navigation module inside `pcall`, so a KOReader build without
--- that hook opens the book at its last position instead of raising. When the
--- book file itself is gone, the note text is shown instead - it is the only
--- thing left to offer, and it is what the reader tapped for.
+-- the write surface of this plugin is unchanged. When the book file is gone, a
+-- plain TextViewer shows the quote; when it exists on disk, a ConfirmBox shows
+-- the full passage + note and offers "Open at p. N" (or "Open book").
 -- @tparam table group book this highlight belongs to
 -- @tparam table annotation normalized annotation
 function LightHouse:openHighlight(group, annotation)
@@ -2692,12 +3198,41 @@ function LightHouse:openHighlight(group, annotation)
         self:showHighlightNote(group, annotation)
         return
     end
+
+    local lines = {}
+    local title = Status.str(group and group.title)
+    if title ~= "" then lines[#lines + 1] = title end
+    local chapter = Status.str(annotation and annotation.chapter)
+    if chapter ~= "" then lines[#lines + 1] = chapter end
+    local text = Sidecar.annotationText(annotation)
+    if text ~= "" then lines[#lines + 1] = text end
+    local note = Sidecar.annotationNote(annotation)
+    if note ~= "" and note ~= text then lines[#lines + 1] = note end
+    local page = Sidecar.annotationPage(annotation)
+    if page then lines[#lines + 1] = T(_("Page %1"), page) end
+    local datetime = Status.str(annotation and annotation.datetime)
+    if datetime ~= "" then lines[#lines + 1] = datetime end
+    if #lines == 0 then lines[#lines + 1] = _("This highlight has no text.") end
+
+    local ok_cb_box, ConfirmBox = pcall(require, "ui/widget/confirmbox")
+    if ok_cb_box and type(ConfirmBox) == "table" and type(ConfirmBox.new) == "function" then
+        UIManager:show(squareWidget(ConfirmBox, {
+            text = table.concat(lines, "\n\n"),
+            cancel_text = _("Close"),
+            ok_text = page and T(_("Open at p. %1"), page) or _("Open book"),
+            ok_cb = function()
+                local opened = self:openBookFile(book_path)
+                if opened and page then self:jumpToPage(page) end
+            end,
+        }))
+        return
+    end
+
     local opened = self:openBookFile(book_path)
     if not opened then
         self:showHighlightNote(group, annotation)
         return
     end
-    local page = Sidecar.annotationPage(annotation)
     if page then self:jumpToPage(page) end
 end
 
@@ -2855,8 +3390,27 @@ function LightHouse:showStats()
         return
     end
 
+    local plan = self:statsPlan()
     local payload, err = self:withSpinner(_("Loading reading statistics…"), function()
-        return self:fetchStats()
+        local fetched, fetch_err = self:fetchStats()
+        if not fetched or type(fetched.numbers) ~= "table" then
+            return nil, fetch_err
+        end
+        local sessions = fetched.sessions or {}
+        pcall(function()
+            self:localRecords()
+            for session_index = 1, #sessions do
+                self:applyLocalToSession(sessions[session_index])
+            end
+        end)
+        local cover_ids = {}
+        for session_index = 1, #sessions do
+            if #cover_ids >= plan.reading_rows then break end
+            local book_id = Status.num(sessions[session_index].book_id)
+            if book_id then cover_ids[#cover_ids + 1] = book_id end
+        end
+        self:prefetchCoverIds(cover_ids, nil, true)
+        return fetched
     end)
     if not payload or type(payload.numbers) ~= "table" then
         show_problem{
@@ -2868,17 +3422,7 @@ function LightHouse:showStats()
         return
     end
 
-    local plan = self:statsPlan()
     local sessions = payload.sessions or {}
-
-    -- Covers for the reading rows, bounded by what the plan can draw.
-    local cover_ids = {}
-    for session_index = 1, #sessions do
-        if #cover_ids >= plan.reading_rows then break end
-        local book_id = Status.num(sessions[session_index].book_id)
-        if book_id then cover_ids[#cover_ids + 1] = book_id end
-    end
-    self:prefetchCoverIds(cover_ids)
 
     local model = Views.statsModel(payload.numbers, sessions, os.time(), {
         labels = self:pageLabels(),
@@ -3002,6 +3546,7 @@ end
 -- @tparam[opt] table options { covers = boolean, layout = table }
 function LightHouse:showMenu(title, items, options)
     options = options or {}
+    self:closeOverflow()
     local layout = options.layout or self:layoutFor(options.covers == true)
     local gutter = options.covers == true and layout.gutter or 0
     self:dismissWidget(self.menu)

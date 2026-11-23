@@ -296,6 +296,7 @@ print("budget_nil_time=" .. tostring(Ui.coverBudgetLeft(1, nil, nil)))
 -- accepted design removed.
 local plan_small = Ui.pagePlan(600, 800, 1)
 local plan_paperwhite = Ui.pagePlan(1072, 1448, 1.79)
+local plan_1236 = Ui.pagePlan(1236, 1648, 2.06)
 local plan_tiny = Ui.pagePlan(200, 200, 0.5)
 print("plan_small_total=" .. tostring(plan_small.total))
 print("plan_small_fits=" .. tostring(plan_small.total <= 800))
@@ -309,6 +310,11 @@ print("plan_rows_capped=" .. tostring(plan_small.reading_rows <= Ui.tokens.page_
   and plan_small.session_rows <= Ui.tokens.page_session_max))
 print("plan_heat_weeks=" .. plan_small.heat_weeks .. "," .. plan_paperwhite.heat_weeks)
 print("plan_heat_cell=" .. plan_small.heat_cell_w .. "x" .. plan_small.heat_cell_h)
+print("plan_heat_square=" .. tostring(
+  plan_small.heat_cell_h <= plan_small.heat_cell_w
+  and plan_paperwhite.heat_cell_h <= plan_paperwhite.heat_cell_w
+  and plan_1236.heat_cell_h <= plan_1236.heat_cell_w
+))
 print("plan_cover_inside_row=" .. tostring(plan_small.reading_cover_h <= plan_small.reading_h))
 print("plan_grows=" .. tostring(plan_paperwhite.header >= plan_small.header
   and plan_paperwhite.reading_h >= plan_small.reading_h))
@@ -334,11 +340,17 @@ print("scale_factor_junk=" .. tostring(Ui.scaleFactor(nil, 600)) .. ","
 -- The device's own library page, planned with the factor the runtime really
 -- has: it must hold a shelf, not a couple of rows, and must fit the screen.
 local device_plan = Ui.listPlan(1236, 1648, scale_probe, { with_switch = true, min_rows = 3 })
+local device_compact = Ui.listPlan(1236, 1648, scale_probe, {
+  with_switch = true, with_covers = false, min_rows = 3,
+})
 print("device_plan_rows=" .. device_plan.rows)
 print("device_plan_rowh=" .. device_plan.row_h)
 print("device_plan_fits=" .. tostring(device_plan.total <= device_plan.height))
 print("device_plan_full_height=" .. tostring(device_plan.total >= device_plan.height - device_plan.gap))
 print("device_plan_rowh_shrank=" .. tostring(device_plan.row_h < Ui.listPlan(1236, 1648, 3, { with_switch = true }).row_h))
+print("device_compact_rows=" .. device_compact.rows)
+print("device_compact_fits=" .. tostring(device_compact.total <= device_compact.height))
+print("device_compact_cover_w=" .. device_compact.reading_cover_w)
 
 -- Face sizes: getFace multiplies by the device scale, so a pixel measure has to
 -- be turned back into units first. 31px on this panel is 15.05 units.
@@ -740,6 +752,7 @@ describe("plugin UI primitives: one-page geometry", () => {
     const out = runHarness();
     // The compact picture is the point: 52 columns, not a row per week.
     expect(out.plan_heat_weeks.split(",")).toEqual(["52", "52"]);
+    expect(out.plan_heat_square).toBe("true");
     expect(out.plan_cover_inside_row).toBe("true");
     expect(out.plan_grows).toBe("true");
     const [width, height] = out.plan_heat_cell.split("x").map(Number);
@@ -784,10 +797,14 @@ describe("plugin UI primitives: one-page geometry", () => {
     // The regression this guards: with the one-unit scale the same screen
     // planned four rows, two of them navigation, so the library showed two
     // books a page at twice the intended type size.
-    expect(Number(out.device_plan_rows)).toBeGreaterThanOrEqual(6);
+    expect(Number(out.device_plan_rows)).toBeGreaterThanOrEqual(7);
     expect(out.device_plan_fits).toBe("true");
     expect(out.device_plan_full_height).toBe("true");
     expect(out.device_plan_rowh_shrank).toBe("true");
+    // Compact mode without covers packs 10+ rows cleanly onto the same panel.
+    expect(Number(out.device_compact_rows)).toBeGreaterThanOrEqual(10);
+    expect(out.device_compact_fits).toBe("true");
+    expect(out.device_compact_cover_w).toBe("0");
   });
 });
 

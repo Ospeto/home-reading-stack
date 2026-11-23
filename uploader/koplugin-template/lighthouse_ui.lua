@@ -147,12 +147,16 @@ Ui.tokens = {
     page_section_head_units = 25,
     page_reading_units = 88,
     page_reading_min_units = 58,
+    page_list_row_units = 78,
+    page_list_compact_units = 52,
+    page_list_compact_min_units = 38,
     page_session_units = 56,
     page_session_min_units = 40,
     page_footer_units = 26,
     page_bar_units = 6,
     page_switch_units = 40,
     page_subline_units = 30,
+    page_heat_legend_units = 18,
     --: Heatmap: 52 weeks of seven days, drawn as a pixel grid rather than one
     --: text row per week (the shape that made the old screen ten pages long).
     page_heat_weeks = 52,
@@ -195,6 +199,10 @@ Ui.GLYPH = {
     --: reading face is not required to carry it).
     back = "◂",
     overflow = "⋮",
+    --: Sort/jump selector indicator, clear filter mark, and on-device dot.
+    dropdown = "▾",
+    clear = "✕",
+    local_dot = "●",
 }
 
 --- English wording for the relative-time, clock and duration lines.
@@ -1094,25 +1102,42 @@ function Ui.pagePlan(screen_w, screen_h, scale)
 
     local pad = scaled(tokens.page_pad_units)
     local gap = scaled(tokens.page_gap_units)
+    local section_gap = math.max(math.floor(gap / 2), 2)
     local hairline = math.max(math.floor(tokens.hairline_units * s + 0.5), 1)
     local header = scaled(tokens.page_header_units)
     local hero = scaled(tokens.page_hero_units)
     local band_head = scaled(tokens.page_band_head_units)
     local band_row = scaled(tokens.page_band_row_units)
     local section_head = scaled(tokens.page_section_head_units)
+    local heat_legend = scaled(tokens.page_heat_legend_units)
     local footer = scaled(tokens.page_footer_units)
     local bar = math.max(scaled(tokens.page_bar_units), 2)
     local reading_min = math.max(math.floor(tokens.page_reading_min_units * s + 0.5), 24)
+    local reading_max_h = math.max(math.floor(tokens.page_reading_units * s * 1.15 + 0.5), reading_min)
     local session_min = math.max(math.floor(tokens.page_session_min_units * s + 0.5), 18)
+    local session_max_h = math.max(math.floor(tokens.page_session_units * s * 1.15 + 0.5), session_min)
     local cell_min = math.max(math.floor(tokens.page_heat_cell_min_units * s + 0.5), 3)
     local cell_max = math.max(math.floor(tokens.page_heat_cell_max_units * s + 0.5), cell_min)
     local gap_x = math.max(scaled(tokens.page_heat_gap_units), 1)
 
-    -- The page frame draws its own border outside the padding, so both are
-    -- subtracted here: a plan that ignored the border would be a page slightly
-    -- wider and taller than the screen it is drawn on.
-    local content_w = width - 2 * pad - 2 * hairline
+    -- The full-screen page uses borderless padding (no outer frame box), so
+    -- content width is simply screen width minus horizontal padding.
+    local content_w = width - 2 * pad
     if content_w < 1 then content_w = 1 end
+
+    -- The heatmap's week count and cell width follow the content width:
+    -- 52 columns while a cell and a gap still fit, fewer only when narrow.
+    -- Computed upfront so cell height never stretches taller than cell width.
+    local weeks = math.floor(tokens.page_heat_weeks)
+    local min_weeks = math.floor(tokens.page_heat_min_weeks)
+    if weeks < 1 then weeks = 1 end
+    if min_weeks < 1 then min_weeks = 1 end
+    while weeks > min_weeks and math.floor((content_w - (weeks - 1) * gap_x) / weeks) < cell_min do
+        weeks = weeks - 7
+    end
+    local cell_w = math.floor((content_w - (weeks - 1) * gap_x) / weeks)
+    if cell_w < cell_min then cell_w = cell_min end
+    local square_cell_max = math.min(cell_max, cell_w)
 
     -- The band always budgets four rows: its row count follows the data, and a
     -- payload missing one of them must not move the whole page up and down
@@ -1120,11 +1145,11 @@ function Ui.pagePlan(screen_w, screen_h, scale)
     local band_rows = 4
     local band_h = band_head + band_rows * band_row
 
-    -- Frame border + padding + header + hero + band + three section headings +
-    -- footer, with a hairline under the header, the hero and the band and one
-    -- above the footer.
-    local fixed = 2 * hairline + pad + header + hairline + hero + hairline + band_h + hairline
-        + 3 * section_head + footer + hairline + pad + gap * 2
+    -- Padding + header + hero + band + three section headings + section gaps +
+    -- heatmap legend + footer, with interior hairlines.
+    local fixed = pad + header + hairline + hero + hairline + band_h + hairline
+        + 3 * section_head + 3 * section_gap + heat_legend
+        + footer + hairline + pad + gap * 2
     local available = height - fixed
     if available < 0 then available = 0 end
 
@@ -1134,7 +1159,10 @@ function Ui.pagePlan(screen_w, screen_h, scale)
     if session_rows < 1 then session_rows = 1 end
     local reading_h = math.max(math.floor(tokens.page_reading_units * s + 0.5), reading_min)
     local session_h = math.max(math.floor(tokens.page_session_units * s + 0.5), session_min)
-    local cell_h = math.max(math.floor(tokens.page_heat_cell_units * s + 0.5), cell_min)
+    local cell_h = math.min(
+        math.max(math.floor(tokens.page_heat_cell_units * s + 0.5), cell_min),
+        square_cell_max
+    )
 
     -- Shrink the three list bands together, 5% at a time, and drop a row only
     -- after the smallest scale still does not fit. The reading rows go first:
@@ -1160,7 +1188,10 @@ function Ui.pagePlan(screen_w, screen_h, scale)
             local factor = percent / 100
             local step_reading = math.max(math.floor(tokens.page_reading_units * s * factor + 0.5), reading_min)
             local step_session = math.max(math.floor(tokens.page_session_units * s * factor + 0.5), session_min)
-            local step_cell = math.max(math.floor(tokens.page_heat_cell_units * s * factor + 0.5), cell_min)
+            local step_cell = math.min(
+                math.max(math.floor(tokens.page_heat_cell_units * s * factor + 0.5), cell_min),
+                square_cell_max
+            )
             if fits(reading_rows, session_rows, step_reading, step_session, step_cell) then
                 reading_h, session_h, cell_h = step_reading, step_session, step_cell
                 chosen = true
@@ -1176,40 +1207,39 @@ function Ui.pagePlan(screen_w, screen_h, scale)
         else
             -- A screen with room for neither list: the heatmap is the only
             -- flexible band left, so it takes what is there.
-            cell_h = cell_min
+            cell_h = math.min(cell_min, square_cell_max)
             reading_rows = 0
             session_rows = 0
             chosen = true
         end
     end
 
-    if cell_h > cell_max then cell_h = cell_max end
+    if cell_h > square_cell_max then cell_h = square_cell_max end
 
-    -- Spend whatever height is left on the picture instead of leaving it as
-    -- blank paper above the footer: a taller heatmap cell is what a reader would
-    -- rather see, and the design's "no wide gaps" applies to the page, not only
-    -- to the rows. Bounded by `page_heat_cell_max_units`, so a huge screen gets a
-    -- readable grid rather than seven enormous blocks.
+    -- Grow heatmap cells only up to square (cell_h <= cell_w), then put
+    -- remaining vertical room into currently-reading and recent-session rows.
     local used = fixed
         + bandHeight(reading_rows, reading_h)
         + heatHeight(cell_h)
         + bandHeight(session_rows, session_h)
-    while cell_h < cell_max and (height - used) >= 7 do
+    while cell_h < square_cell_max and (height - used) >= 7 do
         cell_h = cell_h + 1
         used = used + 7
     end
-
-    -- The heatmap's week count follows the width: 52 columns while a cell and a
-    -- gap still fit, fewer only when the screen genuinely cannot carry them.
-    local weeks = math.floor(tokens.page_heat_weeks)
-    local min_weeks = math.floor(tokens.page_heat_min_weeks)
-    if weeks < 1 then weeks = 1 end
-    if min_weeks < 1 then min_weeks = 1 end
-    while weeks > min_weeks and math.floor((content_w - (weeks - 1) * gap_x) / weeks) < cell_min do
-        weeks = weeks - 7
+    local grew = true
+    while grew and (height - used) > 0 do
+        grew = false
+        if reading_rows > 0 and reading_h < reading_max_h and (height - used) >= reading_rows then
+            reading_h = reading_h + 1
+            used = used + reading_rows
+            grew = true
+        end
+        if session_rows > 0 and session_h < session_max_h and (height - used) >= session_rows then
+            session_h = session_h + 1
+            used = used + session_rows
+            grew = true
+        end
     end
-    local cell_w = math.floor((content_w - (weeks - 1) * gap_x) / weeks)
-    if cell_w < cell_min then cell_w = cell_min end
 
     local total = fixed
         + bandHeight(reading_rows, reading_h)
@@ -1235,6 +1265,7 @@ function Ui.pagePlan(screen_w, screen_h, scale)
         height = height,
         pad = pad,
         gap = gap,
+        section_gap = section_gap,
         content_w = content_w,
         header = header,
         hero = hero,
@@ -1243,6 +1274,7 @@ function Ui.pagePlan(screen_w, screen_h, scale)
         band_head = band_head,
         band_row = band_row,
         section_head = section_head,
+        heat_legend = heat_legend,
         footer = footer,
         hairline = hairline,
         bar = bar,
@@ -1277,10 +1309,10 @@ end
 -- @number screen_w screen width in pixels
 -- @number screen_h screen height in pixels
 -- @number scale pixels per unit for this device (the factor main.lua derives; 1 = one unit is one pixel)
--- @tparam table[opt] options { with_switch = boolean, min_rows = number }
+-- @tparam table[opt] options { with_switch = boolean, with_covers = boolean, min_rows = number }
 -- @treturn table plan { scale, height, pad, content_w, header, hairline,
 --                       switch_h, subline_h, footer, row_h, rows, bar, cover_w,
---                       cover_h, total, slack }
+--                       cover_h, with_covers, total, slack }
 function Ui.listPlan(screen_w, screen_h, scale, options)
     options = options or {}
     local tokens = Ui.tokens
@@ -1294,6 +1326,7 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
         return value
     end
 
+    local with_covers = options.with_covers ~= false
     local pad = scaled(tokens.page_pad_units)
     local gap = scaled(tokens.page_gap_units)
     local hairline = math.max(math.floor(tokens.hairline_units * s + 0.5), 1)
@@ -1302,21 +1335,24 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
     local bar = math.max(scaled(tokens.page_bar_units), 2)
     local switch_h = options.with_switch and scaled(tokens.page_switch_units) or 0
     local subline_h = scaled(tokens.page_subline_units)
-    local row_min = math.max(math.floor(tokens.page_reading_min_units * s + 0.5), 24)
-    local row_max = math.max(math.floor(tokens.page_reading_units * s * 1.15 + 0.5), row_min)
+    local target_units = with_covers and tokens.page_list_row_units or tokens.page_list_compact_units
+    local row_min_units = with_covers and tokens.page_reading_min_units or tokens.page_list_compact_min_units
+    local row_min = math.max(math.floor(row_min_units * s + 0.5), 24)
+    local max_mult = with_covers and 1.15 or 1.2
+    local row_max = math.max(math.floor(target_units * s * max_mult + 0.5), row_min)
     local min_rows = math.max(math.floor(tonumber(options.min_rows) or 3), 1)
 
-    local content_w = width - 2 * pad - 2 * hairline
+    local content_w = width - 2 * pad
     if content_w < 1 then content_w = 1 end
 
-    -- Header, the switch's own two rules, the sub-line, the footer rule, the
-    -- frame border and the page padding are all fixed; only the row band flexes.
-    local fixed = 2 * hairline + pad + header + hairline + subline_h + footer + hairline + pad + gap
+    -- Header, the switch's own two rules, the sub-line, the footer rule and
+    -- page padding are all fixed; only the row band flexes.
+    local fixed = pad + header + hairline + subline_h + footer + hairline + pad + gap
     if switch_h > 0 then fixed = fixed + switch_h + 2 * hairline end
     local available = height - fixed
     if available < 1 then available = 1 end
 
-    local row_h = scaled(tokens.page_reading_units)
+    local row_h = scaled(target_units)
     -- Every drawn row also carries its own focus line, so the band a row needs
     -- is the row plus one hairline.
     local step_h = row_h + hairline
@@ -1338,13 +1374,16 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
         end
     end
 
-    local cover_h = row_h - gap
-    if cover_h < 1 then cover_h = 1 end
-    local cover_w = math.max(math.floor(cover_h * tokens.cover_aspect + 0.5), 1)
-    local max_cover_w = math.floor(content_w / 4)
-    if cover_w > max_cover_w then
-        cover_w = max_cover_w
-        cover_h = math.max(math.floor(cover_w / tokens.cover_aspect + 0.5), 1)
+    local cover_w, cover_h = 0, 0
+    if with_covers then
+        cover_h = row_h - gap
+        if cover_h < 1 then cover_h = 1 end
+        cover_w = math.max(math.floor(cover_h * tokens.cover_aspect + 0.5), 1)
+        local max_cover_w = math.floor(content_w / 4)
+        if cover_w > max_cover_w then
+            cover_w = max_cover_w
+            cover_h = math.max(math.floor(cover_w / tokens.cover_aspect + 0.5), 1)
+        end
     end
 
     local total = fixed + rows * step_h
@@ -1367,6 +1406,7 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
         bar = bar,
         row_h = row_h,
         rows = rows,
+        with_covers = with_covers,
         reading_cover_w = cover_w,
         reading_cover_h = cover_h,
         total = total,

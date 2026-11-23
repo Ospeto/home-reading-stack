@@ -136,6 +136,8 @@ local heat = model.blocks[4]
 print("heat_kind=" .. flat(heat.kind))
 print("heat_columns=" .. #heat.columns)
 print("heat_heading=" .. flat(heat.heading.left) .. "/" .. flat(heat.heading.right))
+print("heat_months=" .. table.concat(heat.months or {}, ","))
+print("heat_legend=" .. flat(heat.legend and heat.legend.less) .. "/" .. flat(heat.legend and heat.legend.more))
 
 local recent = model.blocks[5]
 print("recent_heading=" .. flat(recent.heading.left) .. "/" .. flat(recent.heading.right))
@@ -216,11 +218,12 @@ print("capped_recent=" .. #capped.blocks[5].rows)
 -- Library: books -----------------------------------------------------------
 local entries = {
   { title = "Ballad of a Shinigami vol. 2", authors = "K-Ske Hasegawa", series = "Ballad of a Shinigami",
-    series_index = 2, book_id = 11, status = { percentage = 0.62 } },
+    series_index = 2, book_id = 11, rating = 8, status = { percentage = 0.62 },
+    local_record = { book_path = "/books/ballad.epub" } },
   { title = "Untouched", authors = "", book_id = 12 },
 }
--- The row a tap runs, in the model's own vocabulary: "search" / "page" /
--- "series" / "author" / "book" for an action row, the row's own kind otherwise.
+-- The row a tap runs, in the model's own vocabulary: "book" / "series" /
+-- "author" for an action row, the row's own kind otherwise.
 local function kind_of(row)
   local action = row.action
   if type(action) == "table" then return tostring(action.kind) end
@@ -233,33 +236,47 @@ local function kinds_of(rows)
   return table.concat(out, ",")
 end
 
--- The search row leads every page of every grouping, so each case below reads
--- row 1 as the search row and the grouping's own rows from row 2 on.
+-- Search lives in the header and paging lives in the footer, so every list
+-- row is a real content item.
 local books_model = Views.libraryModel("books", {
   entries = entries, page = 1, page_size = 4, has_next = true,
   query = "", totals = { books = 1802 },
 })
 print("books_title=" .. flat(books_model.title))
+print("books_header_search=" .. tostring(books_model.header_actions and books_model.header_actions.search))
 print("books_switch=" .. flat(books_model.switch[1].label) .. ":" .. flat(books_model.switch[1].active)
   .. "," .. flat(books_model.switch[2].label) .. ":" .. flat(books_model.switch[2].active)
   .. "," .. flat(books_model.switch[3].label) .. ":" .. flat(books_model.switch[3].active))
 print("books_subline=" .. flat(books_model.subline.left) .. "/" .. flat(books_model.subline.right))
+print("books_subline_action=" .. flat(books_model.subline.right_action and books_model.subline.right_action.kind))
 print("books_rows=" .. #books_model.blocks[1].rows)
 print("books_row_kinds=" .. kinds_of(books_model.blocks[1].rows))
-print("books_search_row=" .. flat(books_model.blocks[1].rows[1].title) .. "//"
-  .. flat(books_model.blocks[1].rows[1].value))
-print("books_first_row=" .. flat(books_model.blocks[1].rows[2].title) .. "//" .. flat(books_model.blocks[1].rows[2].secondary))
-print("books_first_value=" .. flat(books_model.blocks[1].rows[2].value) .. "//" .. flat(books_model.blocks[1].rows[2].ratio))
-print("books_last_action=" .. flat(books_model.blocks[1].rows[#books_model.blocks[1].rows].action.kind))
+print("books_first_row=" .. flat(books_model.blocks[1].rows[1].title) .. "//" .. flat(books_model.blocks[1].rows[1].secondary))
+print("books_first_value=" .. flat(books_model.blocks[1].rows[1].value) .. "//"
+  .. flat(books_model.blocks[1].rows[1].value_sub) .. "//" .. flat(books_model.blocks[1].rows[1].ratio))
+print("books_first_on_device=" .. tostring(books_model.blocks[1].rows[1].on_device))
 print("books_footer=" .. flat(books_model.footer.left) .. "/" .. flat(books_model.footer.right))
+print("books_footer_pager=" .. flat(books_model.footer.prev) .. "|" .. flat(books_model.footer.center)
+  .. "|" .. flat(books_model.footer.next))
+print("books_pager_flags=" .. tostring(books_model.pager.has_prev) .. "," .. tostring(books_model.pager.has_next))
 
 local books_last_page = Views.libraryModel("books", {
   entries = entries, page = 2, page_size = 4, has_next = false, totals = { books = 1802 },
 })
 print("books_last_rows=" .. #books_last_page.blocks[1].rows)
 print("books_last_row_kinds=" .. kinds_of(books_last_page.blocks[1].rows))
-print("books_last_search_row=" .. flat(books_last_page.blocks[1].rows[1].title))
 print("books_last_footer=" .. flat(books_last_page.footer.left) .. "/" .. flat(books_last_page.footer.right))
+
+local filtered_books = Views.libraryModel("books", {
+  entries = entries, page = 1, page_size = 4, has_next = false,
+  query = "Ballad", title = "Ballad of a Shinigami", sort = "series", filter = "unread",
+  totals = { books = 2 },
+})
+print("filtered_title=" .. flat(filtered_books.title))
+print("filtered_has_switch=" .. tostring(filtered_books.switch ~= nil))
+print("filtered_clear=" .. flat(filtered_books.subline.clear and filtered_books.subline.clear.label)
+  .. "//" .. flat(filtered_books.subline.clear and filtered_books.subline.clear.action.kind))
+print("filtered_subline=" .. flat(filtered_books.subline.left) .. "/" .. flat(filtered_books.subline.right))
 
 -- Library: series ----------------------------------------------------------
 local series_groups = {
@@ -274,14 +291,14 @@ local series_model = Views.libraryModel("series", {
 })
 print("series_switch_active=" .. flat(series_model.switch[3].active))
 print("series_subline=" .. flat(series_model.subline.left) .. "/" .. flat(series_model.subline.right))
+print("series_subline_action=" .. flat(series_model.subline.right_action and series_model.subline.right_action.kind))
 print("series_footer=" .. flat(series_model.footer.left) .. "/" .. flat(series_model.footer.right))
 local series_rows = series_model.blocks[1].rows
 print("series_row_count=" .. #series_rows)
 print("series_row_kinds=" .. kinds_of(series_rows))
-print("series_search_row=" .. flat(series_rows[1].title) .. "//" .. flat(series_rows[1].value))
-for row_index = 2, #series_rows do
+for row_index = 1, #series_rows do
   local row = series_rows[row_index]
-  print("series_row_" .. (row_index - 1) .. "=" .. flat(row.title) .. "//" .. flat(row.secondary)
+  print("series_row_" .. row_index .. "=" .. flat(row.title) .. "//" .. flat(row.secondary)
     .. "//" .. flat(row.value) .. "//" .. flat(row.value_sub) .. "//" .. flat(row.ratio)
     .. "//" .. flat(row.cover_id))
 end
@@ -297,9 +314,8 @@ local author_model = Views.libraryModel("authors", {
 print("author_switch_active=" .. flat(author_model.switch[2].active))
 print("author_subline=" .. flat(author_model.subline.left))
 print("author_footer=" .. flat(author_model.footer.right))
-print("author_search_row=" .. flat(author_model.blocks[1].rows[1].title))
-print("author_first=" .. flat(author_model.blocks[1].rows[2].title) .. "//"
-  .. flat(author_model.blocks[1].rows[2].secondary) .. "//" .. flat(author_model.blocks[1].rows[2].value))
+print("author_first=" .. flat(author_model.blocks[1].rows[1].title) .. "//"
+  .. flat(author_model.blocks[1].rows[1].secondary) .. "//" .. flat(author_model.blocks[1].rows[1].value))
 
 -- A grouping with no rows says so instead of drawing a blank body.
 local empty_series = Views.libraryModel("series", {
@@ -307,14 +323,14 @@ local empty_series = Views.libraryModel("series", {
   totals = { books = 1802, series = 0, authors = 512 },
 })
 print("empty_series_rows=" .. #empty_series.blocks[1].rows)
-print("empty_series_kind=" .. flat(empty_series.blocks[1].rows[2].kind))
-print("empty_series_title=" .. flat(empty_series.blocks[1].rows[2].title))
-print("empty_series_action=" .. flat(empty_series.blocks[1].rows[2].action))
+print("empty_series_kind=" .. flat(empty_series.blocks[1].rows[1].kind))
+print("empty_series_title=" .. flat(empty_series.blocks[1].rows[1].title))
+print("empty_series_action=" .. flat(empty_series.blocks[1].rows[1].action))
 print("empty_series_row_kinds=" .. kinds_of(empty_series.blocks[1].rows))
 local empty_authors = Views.libraryModel("authors", {
   groups = {}, page = 1, page_size = 4, totals = { books = 0, authors = 0 },
 })
-print("empty_authors_title=" .. flat(empty_authors.blocks[1].rows[2].title))
+print("empty_authors_title=" .. flat(empty_authors.blocks[1].rows[1].title))
 
 -- A page past the end draws the last page there is, and says so.
 local clamped = Views.libraryModel("series", {
@@ -336,8 +352,8 @@ print("paged_row_kinds=" .. kinds_of(paged.blocks[1].rows))
 print("paged_footer=" .. flat(paged.footer.left) .. "/" .. flat(paged.footer.right))
 print("paged_last_action=" .. flat(paged.blocks[1].rows[#paged.blocks[1].rows].action.kind))
 
--- Malformed input must not raise and must not invent rows: the only row drawn
--- is the search row, and no group row is invented for a nameless entry.
+-- Malformed input must not raise and must not invent rows: no group row is
+-- invented for a nameless entry.
 local junk = Views.libraryModel("series", { groups = { { name = "" }, 5, nil }, page = 1, page_size = 3 })
 print("junk_rows=" .. #junk.blocks[1].rows)
 print("junk_row_kinds=" .. kinds_of(junk.blocks[1].rows))
@@ -432,6 +448,8 @@ describe("plugin reading-stats page model", () => {
     expect(out.heat_kind).toBe("heatmap");
     expect(out.heat_columns).toBe("52");
     expect(out.heat_heading).toBe("ACTIVITY/LAST 52 WEEKS");
+    expect(out.heat_months).toBe("Jan,Mar,May,Jul,Sep,Nov");
+    expect(out.heat_legend).toBe("Less/More");
   });
 
   it("lists the last three sessions with when, duration and device", () => {
@@ -440,10 +458,10 @@ describe("plugin reading-stats page model", () => {
     expect(out.recent_heading).toBe("RECENT SESSIONS/LAST 3");
     expect(out.recent_rows).toBe("3");
     expect(out.recent_first).toBe("Ballad of a Shinigami vol. 2//6m");
-    // The fixture time is a local wall clock, so the line is asserted by shape:
-    // a day word or date, then the clock, then the duration and the device.
+    // The fixture time is a local wall clock, so the secondary line shows when
+    // and device without repeating the duration already in the right column.
     expect(out.recent_second_line).toMatch(/^(Today|Yesterday|\d+ \w+) \d{2}:\d{2} · /);
-    expect(out.recent_second_line).toContain("5 m 37 s");
+    expect(out.recent_second_line).not.toContain("5 m 37 s");
     expect(out.recent_second_line).toContain("Kindle");
     // The row with no duration is dropped rather than drawn as a blank.
     expect(out.stats_row_total).toBe("5");
@@ -461,11 +479,11 @@ describe("plugin reading-stats page model", () => {
   it("takes the time words on every row from the label table", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
-    // Same models, French labels: the relative line, the month name, the clock
-    // and the duration are all the caller's words, not hardcoded English.
+    // Same models, French labels: the relative line, the month name and the
+    // clock are all the caller's words, not hardcoded English.
     expect(out.translated_reading_line).toBe("K-Ske Hasegawa · a l'instant");
     expect(out.translated_old_line).toBe("Isuna Hasekura · 6 nov.");
-    expect(out.translated_recent_line).toBe("Aujourd'hui 13:19 · 5 mn 37 s · Kindle");
+    expect(out.translated_recent_line).toBe("Aujourd'hui 13:19 · Kindle");
   });
 
   it("keeps a one-line footer and no grouping switch", () => {
@@ -491,40 +509,44 @@ describe("plugin reading-stats page model", () => {
 });
 
 describe("plugin library page model: Books", () => {
-  it("leads with the switch and the search row", () => {
+  it("puts search in header, pager in footer, and keeps every row a content book", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
     expect(out.books_title).toBe("Library");
+    expect(out.books_header_search).toBe("true");
     expect(out.books_switch).toBe("BOOKS:true,AUTHORS:false,SERIES:false");
-    expect(out.books_subline).toBe("1,802 books/A–Z");
-    // Row 1 is the search row and row 2 the first book; the last row is the
-    // next-page row, because the feed said there is another page.
-    expect(out.books_row_kinds).toBe("search,book,book,page");
-    expect(out.books_search_row).toBe("Search library…//▸");
+    expect(out.books_subline).toBe("1,802 books/A–Z ▾");
+    expect(out.books_subline_action).toBe("sort_filter");
+    expect(out.books_row_kinds).toBe("book,book");
   });
 
-  it("shows a book's series and its progress, and offers the next page", () => {
+  it("shows a book's series, on-device indicator, progress and rating stars, with 3-zone footer", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
     expect(out.books_first_row).toBe(
-      "Ballad of a Shinigami vol. 2//K-Ske Hasegawa · Ballad of a Shinigami 02",
+      "Ballad of a Shinigami vol. 2//K-Ske Hasegawa · Ballad of a Shinigami 02 · ● On device",
     );
-    expect(out.books_first_value).toBe("62%//0.62");
-    expect(out.books_last_action).toBe("page");
-    // 1,802 books at 4 rows a page: the footer names the real count instead of a
-// rolling "of 2".
+    expect(out.books_first_value).toBe("62%//★★★★☆//0.62");
+    expect(out.books_first_on_device).toBe("true");
     expect(out.books_footer).toBe("Page 1 of 451/All books");
+    expect(out.books_footer_pager).toBe("◂ Prev|Page 1 / 451|Next ▸");
+    expect(out.books_pager_flags).toBe("false,true");
   });
 
-  it("keeps the search row on the last page, and offers no next page", () => {
+  it("renders filtered views without the grouping switch and with a Clear action", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
-    // Page 2 draws the same search row page 1 draws, so a reader who has paged
-    // forward can still search without paging back. 1,802 books at 4 rows a
-    // page: the footer names the real count instead of a rolling "of 2".
-    expect(out.books_last_rows).toBe("3");
-    expect(out.books_last_row_kinds).toBe("search,book,book");
-    expect(out.books_last_search_row).toBe("Search library…");
+    expect(out.filtered_title).toBe("Ballad of a Shinigami");
+    expect(out.filtered_has_switch).toBe("false");
+    expect(out.filtered_clear).toBe("✕ Clear//clear_query");
+    expect(out.filtered_subline).toBe("2 books · Unread/Series · Unread ▾");
+  });
+
+  it("keeps consistent rows on the last page", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.books_last_rows).toBe("2");
+    expect(out.books_last_row_kinds).toBe("book,book");
     expect(out.books_last_footer).toBe("Page 2 of 451/All books");
   });
 });
@@ -534,12 +556,11 @@ describe("plugin library page model: Series", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
     expect(out.series_switch_active).toBe("true");
-    expect(out.series_subline).toBe("418 series · 1,802 books/A–Z");
+    expect(out.series_subline).toBe("418 series · 1,802 books/A–Z ▾");
+    expect(out.series_subline_action).toBe("jump_letter");
     expect(out.series_footer).toBe("Page 1 of 1/Grouped by series");
-    // Four series plus the search row every page of the grouping leads with.
-    expect(out.series_row_count).toBe("5");
-    expect(out.series_row_kinds).toBe("search,series,series,series,series");
-    expect(out.series_search_row).toBe("Search library…//▸");
+    expect(out.series_row_count).toBe("4");
+    expect(out.series_row_kinds).toBe("series,series,series,series");
   });
 
   it("shows volumes, read count and progress over the read fraction", () => {
@@ -558,7 +579,8 @@ describe("plugin library page model: Series", () => {
     );
   });
 
-  it("reads a finished series as done, with its read count and a full bar", () => {    if (!LUA_BINARY) return;
+  it("reads a finished series as done, with its read count and a full bar", () => {
+    if (!LUA_BINARY) return;
     const out = runHarness();
     expect(out.series_row_4).toBe(
       "Monogatari//Nisio Isin · 14 books · 14 read//done//14 / 14//1//14",
@@ -568,12 +590,8 @@ describe("plugin library page model: Series", () => {
   it("says a grouping is empty instead of drawing a blank body", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
-    // A library whose books carry no series (or no author) still shows one row
-    // of the page's own language, so the screen is not an unexplained blank —
-    // and the search row stays, because searching is what an empty grouping
-    // needs.
-    expect(out.empty_series_rows).toBe("2");
-    expect(out.empty_series_row_kinds).toBe("search,plain");
+    expect(out.empty_series_rows).toBe("1");
+    expect(out.empty_series_row_kinds).toBe("plain");
     expect(out.empty_series_kind).toBe("plain");
     expect(out.empty_series_title).toBe("No series in this library yet");
     // Informational, like the sessions: there is nothing to open.
@@ -584,20 +602,17 @@ describe("plugin library page model: Series", () => {
   it("clamps a page past the end onto the last page there is", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
-    // A refresh after books were deleted must not print "Page 9 of 2" over an
-    // empty body: the footer, the pager and the rows all describe page 2.
     expect(out.clamped_pager).toBe("2/2");
-    expect(out.clamped_rows).toBe("3");
-    // The search row comes with it: a clamped page is still a page of the list.
-    expect(out.clamped_row_kinds).toBe("search,series,series");
+    expect(out.clamped_rows).toBe("2");
+    expect(out.clamped_row_kinds).toBe("series,series");
     expect(out.clamped_footer).toBe("Page 2 of 2");
   });
 
   it("pages a grouping on the device", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
-    expect(out.paged_rows).toBe("2");
-    expect(out.paged_row_kinds).toBe("search,series");
+    expect(out.paged_rows).toBe("1");
+    expect(out.paged_row_kinds).toBe("series");
     expect(out.paged_footer).toBe("Page 2 of 2/Grouped by series");
     expect(out.paged_last_action).toBe("series");
   });
@@ -610,15 +625,14 @@ describe("plugin library page model: Authors and edge cases", () => {
     expect(out.author_switch_active).toBe("true");
     expect(out.author_subline).toBe("512 authors · 1,802 books");
     expect(out.author_footer).toBe("Grouped by author");
-    expect(out.author_search_row).toBe("Search library…");
     expect(out.author_first).toBe("Isuna Hasekura//21 books · 9 read//43%");
   });
 
   it("drops a grouping row without a name instead of drawing a blank row", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
-    expect(out.junk_rows).toBe("1");
-    expect(out.junk_row_kinds).toBe("search");
+    expect(out.junk_rows).toBe("0");
+    expect(out.junk_row_kinds).toBe("");
   });
 
   it("falls back to the books segment for an unknown mode", () => {

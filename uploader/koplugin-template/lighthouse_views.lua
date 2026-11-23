@@ -68,8 +68,22 @@ Views.LABELS = {
     last_52_weeks = "LAST 52 WEEKS",
     books_upper = "BOOKS",
     search = "Search library…",
+    search_short = "Search",
     next_page = "Next page",
+    prev_page = "Prev",
+    next_page_short = "Next",
     page = "Page %d of %d",
+    page_compact = "Page %d / %d",
+    clear_filter = "Clear",
+    on_device = "On device",
+    sort_newest = "Newest",
+    sort_title = "A–Z",
+    sort_author = "Author",
+    sort_series = "Series",
+    filter_unread = "Unread",
+    heat_less = "Less",
+    heat_more = "More",
+    jump_az = "A–Z",
     all_books = "All books",
     grouped_by_series = "Grouped by series",
     grouped_by_author = "Grouped by author",
@@ -288,7 +302,6 @@ function Views.sessionRow(session, today, text)
     end
     local secondary = Ui.join({
         when,
-        Ui.durationLong(duration, labels),
         Status.str(session.device),
     })
     return {
@@ -298,6 +311,43 @@ function Views.sessionRow(session, today, text)
         value = duration and Stats.formatDuration(duration) or nil,
         bold = false,
     }
+end
+
+--- Month axis labels for the activity heatmap (oldest -> newest).
+-- @tparam table[opt] heatmap_days normalized heatmap entries
+-- @tparam table[opt] today os.date("*t") table
+-- @number[opt] weeks number of columns drawn
+-- @tparam table text labels
+-- @treturn table array of short month names
+local function heatmapMonths(heatmap_days, today, weeks, text)
+    local month_names = type(text) == "table" and type(text.months) == "table"
+        and #text.months == 12 and text.months or Ui.TIME_LABELS.months
+    local end_month
+    if type(heatmap_days) == "table" then
+        for day_index = #heatmap_days, 1, -1 do
+            local day = heatmap_days[day_index]
+            local date_str = type(day) == "table" and type(day.date) == "string" and day.date or nil
+            local month_num = date_str and tonumber(date_str:match("^%d%d%d%d%-(%d%d)%-%d%d$")) or nil
+            if month_num and month_num >= 1 and month_num <= 12 then
+                end_month = month_num
+                break
+            end
+        end
+    end
+    if not end_month and type(today) == "table" then
+        local month_num = tonumber(today.month)
+        if month_num and month_num >= 1 and month_num <= 12 then end_month = month_num end
+    end
+    if not end_month then return {} end
+
+    local span_weeks = math.max(math.floor(tonumber(weeks) or Ui.tokens.page_heat_weeks), 1)
+    local ticks = math.min(6, math.max(2, math.floor(span_weeks / 8)))
+    local labels = {}
+    for step = ticks - 1, 0, -1 do
+        local index = ((end_month - 1 - step * 2) % 12) + 1
+        labels[#labels + 1] = month_names[index]
+    end
+    return labels
 end
 
 --- Builds the single-page reading-statistics model.
@@ -347,6 +397,8 @@ function Views.statsModel(stats, sessions, now, options)
             kind = "heatmap",
             heading = { left = text.activity, right = text.last_52_weeks },
             columns = Ui.heatmapColumns(heatmap_days, options.weeks),
+            months = heatmapMonths(heatmap_days, today, options.weeks, text),
+            legend = { less = text.heat_less, more = text.heat_more },
         }
     end
 
@@ -478,7 +530,7 @@ function Views.authorRow(group, text)
     }
 end
 
---- One book row: cover, title, author and series, progress.
+--- One book row: cover, title, author and series, progress and rating.
 -- @tparam table entry OPDS entry already merged with reading progress
 -- @tparam table text labels
 -- @treturn table row model
@@ -488,15 +540,35 @@ function Views.bookRow(entry, text)
     local title = Ui.rowTitle(entry.title)
     if title == "" then title = labels.untitled end
     local value, ratio = Views.progressValue(entry.status, labels)
+    local on_device = entry.on_device == true or type(entry.local_record) == "table"
+    local secondary = Views.bookSecondary(entry)
+    if on_device then
+        secondary = Ui.join({ secondary, Ui.GLYPH.local_dot .. " " .. labels.on_device })
+    end
+    local rating = Status.num(entry.rating)
+    local value_sub = (rating and rating > 0) and Status.ratingStars(rating) or nil
     return {
         kind = "reading",
         title = title,
-        secondary = Views.bookSecondary(entry),
+        secondary = secondary,
         value = value,
+        value_sub = value_sub,
         ratio = ratio,
+        on_device = on_device,
         cover_id = Status.num(entry.book_id),
         action = { kind = "book", entry = entry },
     }
+end
+
+--- Resolves the display label for an OPDS sort key.
+-- @string[opt] sort_key "added" | "title" | "author" | "series"
+-- @tparam table text labels
+-- @treturn string
+local function sortLabel(sort_key, text)
+    if sort_key == "added" then return text.sort_newest end
+    if sort_key == "author" then return text.sort_author end
+    if sort_key == "series" then return text.sort_series end
+    return text.sort_title
 end
 
 --- Builds the library page model for one grouping.
@@ -506,6 +578,9 @@ end
 --     entries = catalog entries (books mode, already paged),
 --     groups = grouping rows (authors/series mode, all of them),
 --     query = current search text,
+--     title = contextual header title when filtered,
+--     sort = "added" | "title" | "author" | "series",
+--     filter = "" | "unread",
 --     totals = { books, authors, series },
 --     page = 1-based page number,
 --     page_size = rows per page,
@@ -522,21 +597,12 @@ function Views.libraryModel(mode, context, options)
     local page = math.max(math.floor(tonumber(context.page) or 1), 1)
     local page_size = math.max(math.floor(tonumber(context.page_size) or 1), 1)
     local totals = type(context.totals) == "table" and context.totals or {}
+    local query = Status.str(context.query)
+    local filter_key = Status.str(context.filter)
+    local sort_key = Status.str(context.sort)
 
     local rows = {}
     local pages = 1
-
-    -- Every page of every grouping leads with the search row: a reader who has
-    -- paged forward must still be able to search without paging back, and the
-    -- row is the same row (same label, same `search` action) on every page.
-    -- The page budget in `main.lua` reserves it on every page too, so reserving
-    -- it here is what keeps the drawn rows inside the plan.
-    rows[#rows + 1] = {
-        kind = "action",
-        title = text.search,
-        value = Ui.GLYPH.chevron,
-        action = { kind = "search" },
-    }
 
     if mode == "books" then
         local entries = type(context.entries) == "table" and context.entries or {}
@@ -553,14 +619,6 @@ function Views.libraryModel(mode, context, options)
         else
             pages = context.has_next and (page + 1) or page
         end
-        if context.has_next then
-            rows[#rows + 1] = {
-                kind = "action",
-                title = text.next_page,
-                value = Ui.GLYPH.chevron,
-                action = { kind = "page", page = page + 1 },
-            }
-        end
     else
         local groups = type(context.groups) == "table" and context.groups or {}
         pages = math.max(math.ceil(#groups / page_size), 1)
@@ -568,8 +626,6 @@ function Views.libraryModel(mode, context, options)
         -- last page is what there is to draw, and the footer says so.
         if page > pages then page = pages end
         local first = (page - 1) * page_size + 1
-        -- Counted separately from `#rows`: the search row is navigation, not one
-        -- of this page's `page_size` group rows.
         local drawn = 0
         for group_index = first, #groups do
             if drawn >= page_size then break end
@@ -588,62 +644,92 @@ function Views.libraryModel(mode, context, options)
                 bold = false,
             }
         end
-        if page < pages then
-            rows[#rows + 1] = {
-                kind = "action",
-                title = text.next_page,
-                value = Ui.GLYPH.chevron,
-                action = { kind = "page", page = page + 1 },
-            }
-        end
     end
 
-    -- Sub-line: how big this grouping is, and the order it is in.
-    local subline = { right = text.az }
+    -- Sub-line: shelf summary (with Clear when filtered) and interactive sort/jump.
+    local subline = {}
     if mode == "series" then
         subline.left = Ui.join({
             string.format(text.series_count, Ui.formatThousands(totals.series) or "0"),
             string.format(text.books_count, Ui.formatThousands(totals.books) or "0"),
         })
+        subline.right = text.jump_az .. " " .. Ui.GLYPH.dropdown
+        subline.right_action = { kind = "jump_letter" }
     elseif mode == "authors" then
         subline.left = Ui.join({
             string.format(text.author_count, Ui.formatThousands(totals.authors) or "0"),
             string.format(text.books_count, Ui.formatThousands(totals.books) or "0"),
         })
+        subline.right = text.jump_az .. " " .. Ui.GLYPH.dropdown
+        subline.right_action = { kind = "jump_letter" }
     else
-        local query = Status.str(context.query)
-        if query ~= "" then
+        local count_text = totals.books
+            and string.format(text.books_count, Ui.formatThousands(totals.books))
+            or nil
+        if filter_key == "unread" then
+            subline.left = Ui.join({ count_text, text.filter_unread })
+        elseif count_text then
+            subline.left = count_text
+        elseif query ~= "" then
             subline.left = query
-        elseif totals.books then
-            subline.left = string.format(text.books_count, Ui.formatThousands(totals.books))
         end
+        if query ~= "" then
+            subline.clear = {
+                label = Ui.GLYPH.clear .. " " .. text.clear_filter,
+                action = { kind = "clear_query" },
+            }
+        end
+        local active_sort = sortLabel(sort_key, text)
+        local right_label = filter_key == "unread"
+            and Ui.join({ active_sort, text.filter_unread })
+            or active_sort
+        subline.right = right_label .. " " .. Ui.GLYPH.dropdown
+        subline.right_action = { kind = "sort_filter" }
     end
 
-    local switch = {}
-    local segments = Ui.switchSegments(mode)
-    local label_for = { books = text.books, authors = text.authors, series = text.series }
-    for segment_index = 1, #segments do
-        local segment = segments[segment_index]
-        switch[#switch + 1] = {
-            key = segment.key,
-            label = label_for[segment.key] or segment.label,
-            active = segment.active,
-        }
+    -- Filtered views hide the grouping switch and show the active filter/query
+    -- as the header title so the reader always knows where they are.
+    local title = text.library
+    local switch = nil
+    if query ~= "" then
+        local context_title = Status.str(context.title)
+        title = context_title ~= "" and context_title or query
+    else
+        switch = {}
+        local segments = Ui.switchSegments(mode)
+        local label_for = { books = text.books, authors = text.authors, series = text.series }
+        for segment_index = 1, #segments do
+            local segment = segments[segment_index]
+            switch[#switch + 1] = {
+                key = segment.key,
+                label = label_for[segment.key] or segment.label,
+                active = segment.active,
+            }
+        end
     end
 
     local footer = {
         left = string.format(text.page, page, pages),
         right = mode == "series" and text.grouped_by_series
             or (mode == "authors" and text.grouped_by_author or text.all_books),
+        prev = Ui.GLYPH.back .. " " .. text.prev_page,
+        center = string.format(text.page_compact, page, pages),
+        next = text.next_page_short .. " " .. Ui.GLYPH.chevron,
     }
 
     return {
-        title = text.library,
+        title = title,
+        header_actions = { search = true, search_label = text.search_short },
         switch = switch,
         subline = subline,
         blocks = { { kind = "list", rows = rows } },
         footer = footer,
-        pager = { page = page, pages = pages },
+        pager = {
+            page = page,
+            pages = pages,
+            has_prev = page > 1,
+            has_next = page < pages,
+        },
     }
 end
 
