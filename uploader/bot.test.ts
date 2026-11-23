@@ -54,67 +54,14 @@ import {
 import { type CleanDuplicatesReport } from "../scripts/clean-duplicates";
 
 describe("Telegram Mini App (TMA) Integration", () => {
-  it("exports READING_WEBAPP_URL defaulting to production WAN domain", () => {
+  it("exports READING_WEBAPP_URL defaulting to LAN Reading HQ URL", () => {
     expect(READING_WEBAPP_URL).toBeDefined();
-    expect(READING_WEBAPP_URL).toBe("https://reading-sg.wavypremium.xyz:8443");
+    expect(READING_WEBAPP_URL).toBe("http://192.168.31.15:8086");
   });
 
-  it("exports KOSYNC_WAN_URL defaulting to production KOSync WAN domain", () => {
+  it("exports KOSYNC_WAN_URL defaulting to LAN KOSync URL", () => {
     expect(KOSYNC_WAN_URL).toBeDefined();
-    expect(KOSYNC_WAN_URL).toBe("http://kosync-sg.wavypremium.xyz");
-  });
-
-  it("com.ospeto.reading-vless-tunnel.plist contains required flags and ProxyCommand", () => {
-    const plistPath = path.join(
-      import.meta.dir,
-      "../scripts/com.ospeto.reading-vless-tunnel.plist",
-    );
-    expect(fs.existsSync(plistPath)).toBe(true);
-
-    const content = fs.readFileSync(plistPath, "utf8");
-    expect(content).toContain(
-      "<string>com.ospeto.reading-vless-tunnel</string>",
-    );
-    expect(content).toContain("<string>0.0.0.0:8086:127.0.0.1:8086</string>");
-    expect(content).toContain("<string>0.0.0.0:7200:127.0.0.1:7200</string>");
-    expect(content).toContain("ProxyCommand=nc -X 5 -x 127.0.0.1:7890 %h %p");
-    expect(content).toContain("ServerAliveInterval=15");
-    expect(content).toContain("ServerAliveCountMax=3");
-    expect(content).toContain("ExitOnForwardFailure=yes");
-    expect(content).toContain("<string>panel</string>");
-    expect(content).toContain("<key>RunAtLoad</key>");
-    expect(content).toContain("<true/>");
-    expect(content).toContain("<key>KeepAlive</key>");
-    expect(content).toContain(
-      "<string>/Users/ospeto/Library/Logs/reading-vless-tunnel.log</string>",
-    );
-  });
-
-  it("com.ospeto.reading-sg-tunnel.plist contains required flags and sg-vps remote target", () => {
-    const plistPath = path.join(
-      import.meta.dir,
-      "../scripts/com.ospeto.reading-sg-tunnel.plist",
-    );
-    expect(fs.existsSync(plistPath)).toBe(true);
-
-    const content = fs.readFileSync(plistPath, "utf8");
-    expect(content).toContain(
-      "<string>com.ospeto.reading-sg-tunnel</string>",
-    );
-    expect(content).toContain("<string>127.0.0.1:8086:127.0.0.1:8086</string>");
-    expect(content).toContain("<string>127.0.0.1:7200:127.0.0.1:7200</string>");
-    expect(content).toContain("ServerAliveInterval=15");
-    expect(content).toContain("ServerAliveCountMax=3");
-    expect(content).toContain("ExitOnForwardFailure=yes");
-    expect(content).toContain("BatchMode=yes");
-    expect(content).toContain("ConnectTimeout=8");
-    expect(content).toContain("<string>sg-vps</string>");
-    expect(content).toContain("<key>RunAtLoad</key>");
-    expect(content).toContain("<true/>");
-    expect(content).toContain("<key>KeepAlive</key>");
-    expect(content).toContain(
-      "<string>/Users/ospeto/Library/Logs/reading-sg-tunnel.log</string>",
-    );
+    expect(KOSYNC_WAN_URL).toBe("http://192.168.31.15:7200");
   });
 
   it("index.html includes Telegram WebApp SDK script and initialization", () => {
@@ -833,222 +780,12 @@ describe("Telegram Mini App (TMA) Integration", () => {
   });
 });
 
-describe("Reverse SSH Tunnel Auto-Healing Watchdog", () => {
-  const watchdogScriptPath = path.join(
-    import.meta.dir,
-    "../scripts/tunnel-watchdog.sh",
-  );
-  const watchdogPlistPath = path.join(
-    import.meta.dir,
-    "../scripts/com.ospeto.reading-tunnel-watchdog.plist",
-  );
-
-  it("tunnel-watchdog.sh exists, is executable, and passes bash syntax check", () => {
-    expect(fs.existsSync(watchdogScriptPath)).toBe(true);
-    const stat = fs.statSync(watchdogScriptPath);
-    // Check executable permission
-    expect((stat.mode & 0o111) !== 0).toBe(true);
-
-    const syntaxCheck = spawnSync("bash", ["-n", watchdogScriptPath]);
-    expect(syntaxCheck.status).toBe(0);
-  });
-
-  it("tunnel-watchdog.sh contains health probes, auto-healing, and Telegram alert escalation across dual tunnels", () => {
-    const scriptContent = fs.readFileSync(watchdogScriptPath, "utf8");
-    // Local prerequisites
-    expect(scriptContent).toContain("127.0.0.1 7890");
-    expect(scriptContent).toContain("LOCAL_HTTP_PORT");
-    expect(scriptContent).toContain("LOCAL_KOSYNC_PORT");
-    // Dual remote tunnel configurations & probes
-    expect(scriptContent).toContain("US_WAN_HQ_URL");
-    expect(scriptContent).toContain("US_TUNNEL_LABEL");
-    expect(scriptContent).toContain("SG_TUNNEL_LABEL");
-    expect(scriptContent).toContain("SG_OPDS_80_URL");
-    expect(scriptContent).toContain("SG_OPDS_8443_URL");
-    expect(scriptContent).toContain("SG_KOSYNC_URL");
-    // Auto-healing for both US panel and Singapore sg-vps
-    expect(scriptContent).toContain("pkill -f");
-    expect(scriptContent).toContain("fuser -k");
-    expect(scriptContent).toContain("restart_launchagent");
-    expect(scriptContent).toContain("sg-vps");
-    expect(scriptContent).toContain("panel");
-    // Input validation and failure domain isolation
-    expect(scriptContent).toContain("LOCAL_HTTP_PORT out of range");
-    expect(scriptContent).toContain("LOCAL_FAILURE");
-    // Port forwarding collision detection
-    expect(scriptContent).toContain("remote port forwarding failed for listen port");
-    // Failure counting and alerting
-    expect(scriptContent).toContain("US_FAIL_COUNT_FILE");
-    expect(scriptContent).toContain("SG_FAIL_COUNT_FILE");
-    expect(scriptContent).toContain("TELEGRAM_BACKUP_CHAT_ID");
-    expect(scriptContent).toContain("sendMessage");
-  });
-
-  it("com.ospeto.reading-tunnel-watchdog.plist is valid and runs periodically", () => {
-    expect(fs.existsSync(watchdogPlistPath)).toBe(true);
-    const content = fs.readFileSync(watchdogPlistPath, "utf8");
-    expect(content).toContain(
-      "<string>com.ospeto.reading-tunnel-watchdog</string>",
-    );
-    expect(content).toContain(
-      "<string>/Users/ospeto/uploader/scripts/tunnel-watchdog.sh</string>",
-    );
-    expect(content).toContain("<key>StartInterval</key>");
-    expect(content).toContain("<integer>120</integer>");
-    expect(content).toContain("<key>RunAtLoad</key>");
-    expect(content).toContain("<true/>");
-
-    const lintRes = spawnSync("plutil", ["-lint", watchdogPlistPath]);
-    expect(lintRes.status).toBe(0);
-  });
-
-  it("tunnel-watchdog.sh gates US VLESS monitoring behind ENABLE_US_TUNNEL=1 and plist existence", () => {
-    const scriptContent = fs.readFileSync(watchdogScriptPath, "utf8");
-    expect(scriptContent).toContain('ENABLE_US_TUNNEL="${ENABLE_US_TUNNEL:-0}"');
-    expect(scriptContent).toContain(
-      'US_PLIST="${US_PLIST:-${HOME}/Library/LaunchAgents/${US_TUNNEL_LABEL}.plist}"',
-    );
-    expect(scriptContent).toContain(
-      '[ "$ENABLE_US_TUNNEL" != "1" ] || [ ! -f "$US_PLIST" ]',
-    );
-  });
-
-  it("tunnel-watchdog.sh purges lingering US failure markers when US tunnel is disabled or plist absent", () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "watchdog-test-"));
-    const tempLog = path.join(tempDir, "watchdog.log");
-    const tempEnv = path.join(tempDir, ".env");
-    const testFailFile = path.join(tempDir, "test-us-failures");
-    const testAlertFile = path.join(tempDir, "test-us-alerted");
-
-    fs.writeFileSync(testFailFile, "5");
-    fs.writeFileSync(testAlertFile, "5");
-    fs.writeFileSync(
-      tempEnv,
-      "ENABLE_US_TUNNEL=0\nLOCAL_HTTP_PORT=8086\nLOCAL_KOSYNC_PORT=7200\n",
-    );
-
-    try {
-      const res = spawnSync(
-        "bash",
-        [
-          "-c",
-          `export LOCAL_HTTP_PORT=8086 LOCAL_KOSYNC_PORT=7200 ENV_FILE="${tempEnv}" LOG_FILE="${tempLog}" US_FAIL_COUNT_FILE="${testFailFile}" US_ALERT_TRACK_FILE="${testAlertFile}" US_PLIST="/nonexistent.plist"; sed -e '/^# 2\\. Check Local Prerequisites/,/^# ==============================================================================/ { /^# ==============================================================================/!d; }' "${watchdogScriptPath}" | sed '/^# 4\\. Monitor & Auto-Heal: Singapore/q' | bash`,
-        ],
-        { encoding: "utf8" },
-      );
-
-      expect(res.status).toBe(0);
-      // Verify that failure and alert files were purged
-      expect(fs.existsSync(testFailFile)).toBe(false);
-      expect(fs.existsSync(testAlertFile)).toBe(false);
-
-      // Verify log message indicates skip and cleanup
-      const logContent = fs.existsSync(tempLog)
-        ? fs.readFileSync(tempLog, "utf8")
-        : "";
-      expect(logContent).toContain(
-        "US VLESS tunnel monitoring skipped (ENABLE_US_TUNNEL=0, plist_exists=0)",
-      );
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  it("tunnel-watchdog.sh purges lingering US failure markers when ENABLE_US_TUNNEL=1 but plist is absent", () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "watchdog-test-"));
-    const tempLog = path.join(tempDir, "watchdog.log");
-    const tempEnv = path.join(tempDir, ".env");
-    const testFailFile = path.join(tempDir, "test-us-failures");
-    const testAlertFile = path.join(tempDir, "test-us-alerted");
-
-    fs.writeFileSync(testFailFile, "10");
-    fs.writeFileSync(testAlertFile, "10");
-    fs.writeFileSync(
-      tempEnv,
-      "ENABLE_US_TUNNEL=1\nLOCAL_HTTP_PORT=8086\nLOCAL_KOSYNC_PORT=7200\n",
-    );
-
-    try {
-      const res = spawnSync(
-        "bash",
-        [
-          "-c",
-          `export LOCAL_HTTP_PORT=8086 LOCAL_KOSYNC_PORT=7200 ENV_FILE="${tempEnv}" LOG_FILE="${tempLog}" US_FAIL_COUNT_FILE="${testFailFile}" US_ALERT_TRACK_FILE="${testAlertFile}" US_PLIST="/nonexistent.plist"; sed -e '/^# 2\\. Check Local Prerequisites/,/^# ==============================================================================/ { /^# ==============================================================================/!d; }' "${watchdogScriptPath}" | sed '/^# 4\\. Monitor & Auto-Heal: Singapore/q' | bash`,
-        ],
-        { encoding: "utf8" },
-      );
-
-      expect(res.status).toBe(0);
-      // Verify that failure and alert files were purged
-      expect(fs.existsSync(testFailFile)).toBe(false);
-      expect(fs.existsSync(testAlertFile)).toBe(false);
-
-      // Verify log message indicates skip and cleanup
-      const logContent = fs.existsSync(tempLog)
-        ? fs.readFileSync(tempLog, "utf8")
-        : "";
-      expect(logContent).toContain(
-        "US VLESS tunnel monitoring skipped (ENABLE_US_TUNNEL=1, plist_exists=0)",
-      );
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  it("tunnel-watchdog.sh purges lingering US failure markers when ENABLE_US_TUNNEL=0 even if plist exists", () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "watchdog-test-"));
-    const tempLog = path.join(tempDir, "watchdog.log");
-    const tempEnv = path.join(tempDir, ".env");
-    const testFailFile = path.join(tempDir, "test-us-failures");
-    const testAlertFile = path.join(tempDir, "test-us-alerted");
-    const testPlistFile = path.join(tempDir, "test.plist");
-
-    fs.writeFileSync(testFailFile, "7");
-    fs.writeFileSync(testAlertFile, "7");
-    fs.writeFileSync(testPlistFile, "<plist></plist>");
-    fs.writeFileSync(
-      tempEnv,
-      "ENABLE_US_TUNNEL=0\nLOCAL_HTTP_PORT=8086\nLOCAL_KOSYNC_PORT=7200\n",
-    );
-
-    try {
-      const res = spawnSync(
-        "bash",
-        [
-          "-c",
-          `export LOCAL_HTTP_PORT=8086 LOCAL_KOSYNC_PORT=7200 ENV_FILE="${tempEnv}" LOG_FILE="${tempLog}" US_FAIL_COUNT_FILE="${testFailFile}" US_ALERT_TRACK_FILE="${testAlertFile}" US_PLIST="${testPlistFile}"; sed -e '/^# 2\\. Check Local Prerequisites/,/^# ==============================================================================/ { /^# ==============================================================================/!d; }' "${watchdogScriptPath}" | sed '/^# 4\\. Monitor & Auto-Heal: Singapore/q' | bash`,
-        ],
-        { encoding: "utf8" },
-      );
-
-      expect(res.status).toBe(0);
-      // Verify that failure and alert files were purged
-      expect(fs.existsSync(testFailFile)).toBe(false);
-      expect(fs.existsSync(testAlertFile)).toBe(false);
-
-      // Verify log message indicates skip and cleanup
-      const logContent = fs.existsSync(tempLog)
-        ? fs.readFileSync(tempLog, "utf8")
-        : "";
-      expect(logContent).toContain(
-        "US VLESS tunnel monitoring skipped (ENABLE_US_TUNNEL=0, plist_exists=1)",
-      );
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-});
-
 describe("Unified In-Chat Health Dashboard (/status)", () => {
-  it("getStatusDashboard generates structured Markdown card with all 5 subsystems", async () => {
+  it("getStatusDashboard generates structured LAN-only Markdown card with all 4 local subsystems", async () => {
     const origFetch = globalThis.fetch;
     globalThis.fetch = (async (input: any) => {
       const u = typeof input === "string" ? input : input?.url || "";
       if (
-        u.includes("reading.wavypremium.xyz") ||
-        u.includes("reading-sg.wavypremium.xyz") ||
-        u.includes("kosync.wavypremium.xyz") ||
-        u.includes("kosync-sg.wavypremium.xyz") ||
         u.includes("8086") ||
         u.includes("8088") ||
         u.includes("7200")
@@ -1066,35 +803,28 @@ describe("Unified In-Chat Health Dashboard (/status)", () => {
     }
     expect(typeof card).toBe("string");
     expect(card).toContain("📊 *Reading Stack Health Dashboard*");
+    expect(card).not.toContain("WAN Edge");
+    expect(card).not.toContain("Reverse SSH Tunnel");
 
-    // 1. WAN Edge
-    expect(card).toContain("🌐 *WAN Edge (VPS panel)*");
-    expect(card).toContain("Reading HQ:");
-    expect(card).toContain("KOSync WAN:");
-
-    // 2. Reverse Tunnel
-    expect(card).toContain("🚇 *Reverse SSH Tunnel*");
-    expect(card).toContain("Tunnel Daemon:");
-    expect(card).toContain("Port Forwards:");
-    expect(card).toContain("8086");
-    expect(card).toContain("7200");
-    expect(card).toContain("Sing-box Proxy:");
-
-    // 3. Reading HQ & Calibre
-    expect(card).toContain("📚 *Reading HQ & Calibre*");
+    // 1. Reading HQ & Calibre (LAN)
+    expect(card).toContain("📚 *Reading HQ & Calibre (LAN)*");
     expect(card).toContain("Web Uploader:");
     expect(card).toContain("Calibre Server:");
     expect(card).toContain("Total Catalog:");
     expect(card).toContain("Newest Title:");
 
-    // 4. KOReader Sync
+    // 2. KOReader Sync
     expect(card).toContain("🔄 *KOReader Sync (KOSync)*");
     expect(card).toContain("KOSync Server:");
     expect(card).toContain("Sync Database:");
     expect(card).toContain("Users & Devices:");
     expect(card).toContain("Synced Progress:");
 
-    // 5. Mac Mini Host
+    // 3. Outbound Proxy
+    expect(card).toContain("🔌 *Outbound Proxy (Mac Mini)*");
+    expect(card).toContain("Sing-box Proxy:");
+
+    // 4. Mac Mini Host
     expect(card).toContain("🖥️ *Mac Mini Host*");
     expect(card).toContain("Uptime:");
     expect(card).toContain("Memory:");
@@ -1292,6 +1022,7 @@ describe("Telegram Bot /help Command & KOReader Connection Guide", () => {
     expect(msg).toContain("/backup");
 
     // KOReader Connection Guide: KOSync
+    expect(msg).toContain("KOReader Connection Guide (Home LAN)");
     expect(msg).toContain("KOSync Progress Sync");
     expect(msg).toContain("Tools");
     expect(msg).toContain("Progress sync");
@@ -1299,8 +1030,7 @@ describe("Telegram Bot /help Command & KOReader Connection Guide", () => {
     expect(msg).toContain("moe");
     expect(msg).toContain("Automatically keep documents in sync");
     expect(msg).toContain("http://192.168.31.15:7200");
-    expect(msg).toContain("http://kosync-sg.wavypremium.xyz");
-    expect(msg).toContain("https://kosync-sg.wavypremium.xyz:8443");
+    expect(msg).not.toContain("wavypremium.xyz");
 
     // KOReader Connection Guide: OPDS
     expect(msg).toContain("OPDS Book Catalog");
@@ -1308,8 +1038,6 @@ describe("Telegram Bot /help Command & KOReader Connection Guide", () => {
     expect(msg).toContain("OPDS catalog");
     expect(msg).toContain("Add new catalog");
     expect(msg).toContain("Mac Mini Library");
-    expect(msg).toContain("http://opds.wavypremium.xyz/opds");
-    expect(msg).toContain("https://opds.wavypremium.xyz:8443/opds");
     expect(msg).toContain("http://192.168.31.15:8088/opds");
     expect(msg).toContain("http://192.168.31.15:8086/opds");
     expect(msg).toContain("/dedup");
@@ -1318,11 +1046,6 @@ describe("Telegram Bot /help Command & KOReader Connection Guide", () => {
     expect(msg).toContain("/clean");
     expect(msg).toContain("/clean_duplicates");
 
-    // Kindle Wi-Fi Proxy
-    expect(msg).toContain("Kindle Wi-Fi Proxy");
-    expect(msg).toContain("192.168.31.15");
-    expect(msg).toContain("7890");
-
     // Stack Endpoints Reference
     expect(msg).toContain("KOSync Server:");
     expect(msg).toContain("Calibre OPDS Feed:");
@@ -1330,8 +1053,8 @@ describe("Telegram Bot /help Command & KOReader Connection Guide", () => {
     expect(msg).toContain("http://192.168.31.15:8088");
     expect(msg).toContain("Reading HQ Dashboard:");
     expect(msg).toContain("http://192.168.31.15:8086");
-    expect(msg).toContain("https://reading.wavypremium.xyz");
-    expect(msg).toContain("LAN Proxy Gateway:");
+    expect(msg).toContain("Outbound Proxy Gateway:");
+    expect(msg).toContain("127.0.0.1:7890");
     expect(msg).toContain("@saroat_ospeto_bot");
   });
 
@@ -1406,30 +1129,18 @@ describe("Webpage Manual & KOReader Connection Section (index.html)", () => {
     expect(html).toContain('<symbol id="icon-book-open"');
     expect(html).toContain('<symbol id="icon-server"');
 
-    // All Stack Endpoints with one-click copy buttons
-    // 1. KOSync (Local, Singapore Plain HTTP Port 80, and Singapore TLS Port 8443)
+    // All Stack Endpoints with one-click copy buttons (LAN-only)
+    // 1. KOSync (Local LAN)
     expect(html).toContain("copyToClipboard('http://192.168.31.15:7200')");
-    expect(html).toContain(
-      "copyToClipboard('http://kosync-sg.wavypremium.xyz')",
-    );
-    expect(html).toContain(
-      "copyToClipboard('https://kosync-sg.wavypremium.xyz:8443')",
-    );
-    // 2. Calibre OPDS (Local & Singapore WAN)
-    expect(html).toContain("copyToClipboard('http://opds.wavypremium.xyz/opds')");
-    expect(html).toContain("copyToClipboard('https://opds.wavypremium.xyz:8443/opds')");
+    expect(html).not.toContain("wavypremium.xyz");
+    // 2. Calibre & LightHouse OPDS (Local LAN)
+    expect(html).toContain("copyToClipboard('http://192.168.31.15:8086/opds')");
     expect(html).toContain("copyToClipboard('http://192.168.31.15:8088/opds')");
     // 3. Calibre Web reader (Local)
     expect(html).toContain("copyToClipboard('http://192.168.31.15:8088')");
-    // 4. Reading HQ Dashboard (Local, WAN & Singapore Mini App)
+    // 4. Reading HQ Dashboard (Local)
     expect(html).toContain("copyToClipboard('http://192.168.31.15:8086')");
-    expect(html).toContain(
-      "copyToClipboard('https://reading.wavypremium.xyz')",
-    );
-    expect(html).toContain(
-      "copyToClipboard('https://reading-sg.wavypremium.xyz:8443')",
-    );
-    // 5. LAN Proxy Gateway
+    // 5. Outbound Proxy Gateway
     expect(html).toContain("copyToClipboard('192.168.31.15:7890')");
     // 6. Telegram Bot
     expect(html).toContain("copyToClipboard('@saroat_ospeto_bot')");
@@ -2718,12 +2429,11 @@ describe("Documentation, Manual Sync & Standing Invariant Verification", () => {
     expect(readme).toContain("bin/lighthouse backup");
     expect(readme).toContain("bin/lighthouse restore");
 
-    // 3. Singapore WAN endpoints
-    expect(readme).toContain("http://kosync-sg.wavypremium.xyz");
-    expect(readme).toContain("https://kosync-sg.wavypremium.xyz:8443");
-    expect(readme).toContain("http://opds.wavypremium.xyz/opds");
-    expect(readme).toContain("https://opds.wavypremium.xyz:8443/opds");
-    expect(readme).toContain("https://reading-sg.wavypremium.xyz:8443");
+    // 3. LAN endpoints (no WAN endpoints)
+    expect(readme).toContain("http://192.168.31.15:7200");
+    expect(readme).toContain("http://192.168.31.15:8086/opds");
+    expect(readme).toContain("http://192.168.31.15:8088/opds");
+    expect(readme).toContain("http://192.168.31.15:8086");
 
     // 4. Jev System-1 Ingestion Intelligence
     expect(readme).toContain("Jev System-1 Ingestion Intelligence");
@@ -2747,16 +2457,16 @@ describe("Documentation, Manual Sync & Standing Invariant Verification", () => {
     expect(readme).toContain("3D Skeuomorphic Depth & Accessibility");
   });
 
-  it("uploader/index.html connection guide modal includes all Singapore endpoints and features guide", () => {
+  it("uploader/index.html connection guide modal includes all LAN endpoints and features guide", () => {
     const htmlPath = path.join(import.meta.dir, "index.html");
     const html = fs.readFileSync(htmlPath, "utf8");
 
-    // Singapore endpoints with copy actions
-    expect(html).toContain("copyToClipboard('http://kosync-sg.wavypremium.xyz')");
-    expect(html).toContain("copyToClipboard('https://kosync-sg.wavypremium.xyz:8443')");
-    expect(html).toContain("copyToClipboard('http://opds.wavypremium.xyz/opds')");
-    expect(html).toContain("copyToClipboard('https://opds.wavypremium.xyz:8443/opds')");
-    expect(html).toContain("copyToClipboard('https://reading-sg.wavypremium.xyz:8443')");
+    // LAN endpoints with copy actions
+    expect(html).toContain("copyToClipboard('http://192.168.31.15:7200')");
+    expect(html).toContain("copyToClipboard('http://192.168.31.15:8086/opds')");
+    expect(html).toContain("copyToClipboard('http://192.168.31.15:8088/opds')");
+    expect(html).toContain("copyToClipboard('http://192.168.31.15:8086')");
+    expect(html).not.toContain("wavypremium.xyz");
 
     // Features tab and quick guide section
     expect(html).toContain('id="guide-tab-features"');

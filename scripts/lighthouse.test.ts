@@ -143,11 +143,6 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
         encoding: "utf8",
         cwd: tempTestDir, // running from /tmp
-        env: {
-          ...process.env,
-          US_WAN_HQ_URL: "http://127.0.0.1:1",
-          SG_OPDS_80_URL: "http://127.0.0.1:1",
-        },
       });
       expect(res.status).toBe(0);
       expect(res.stdout).toContain(`Root: ${REPO_ROOT}`);
@@ -160,7 +155,6 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
         "enrich-synopses.sh",
         "migration-preflight.sh",
         "sync-series-metadata.sh",
-        "tunnel-watchdog.sh",
       ];
       for (const s of scripts) {
         const scriptPath = path.join(REPO_ROOT, "scripts", s);
@@ -194,15 +188,10 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
   });
 
   describe("2. Status Command Dashboard", () => {
-    it("displays one-screen dashboard with all 4 core ports and sections", () => {
+    it("displays one-screen LAN-only dashboard with all 4 core ports and sections", () => {
       const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
         encoding: "utf8",
         cwd: REPO_ROOT,
-        env: {
-          ...process.env,
-          US_WAN_HQ_URL: "http://127.0.0.1:1",
-          SG_OPDS_80_URL: "http://127.0.0.1:1",
-        },
       });
       expect(res.status).toBe(0);
       const out = res.stdout;
@@ -213,13 +202,13 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(out).toContain("Port 7200");
       expect(out).toContain("Port 8088");
       expect(out).toContain("Port 7890");
-      expect(out).toContain("WAN REVERSE TUNNELS");
+      expect(out).not.toContain("WAN REVERSE TUNNELS");
       expect(out).toContain("STORAGE & DATABASES");
     });
   });
 
   describe("3. Dynamic LaunchAgent Generator (install-daemons)", () => {
-    it("generates valid launchd plists without hardcoded user paths", () => {
+    it("generates valid LAN-only launchd plists without hardcoded user paths", () => {
       const outputDir = path.join(tempTestDir, "agents");
       const res = spawnSync(
         LIGHTHOUSE_BIN,
@@ -233,23 +222,18 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(fs.existsSync(outputDir)).toBe(true);
 
       const files = fs.readdirSync(outputDir);
-      expect(files.length).toBe(7);
+      expect(files.length).toBe(4);
 
       const uploaderPlist = files.find((f: string) => f.includes("book-uploader"));
       const botPlist = files.find((f: string) => f.includes("reading-telegram-bot"));
-      const watchdogPlist = files.find((f: string) => f.includes("reading-tunnel-watchdog"));
-      const vlessPlist = files.find((f: string) => f.includes("reading-vless-tunnel"));
-      const sgPlist = files.find((f: string) => f.includes("reading-sg-tunnel"));
       const backupPlist = files.find((f: string) => f.includes("reading-stack-backup"));
       const ssdBackupPlist = files.find((f: string) => f.includes("reading-ssd-backup"));
 
       expect(uploaderPlist).toBeDefined();
       expect(botPlist).toBeDefined();
-      expect(watchdogPlist).toBeDefined();
-      expect(vlessPlist).toBeDefined();
-      expect(sgPlist).toBeDefined();
       expect(backupPlist).toBeDefined();
       expect(ssdBackupPlist).toBeDefined();
+      expect(files.find((f: string) => f.includes("tunnel"))).toBeUndefined();
 
       // Check contents of book-uploader plist
       const uploaderContent = fs.readFileSync(
@@ -891,7 +875,6 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       path.join(REPO_ROOT, "scripts", "clean-duplicates.sh"),
       path.join(REPO_ROOT, "scripts", "migration-preflight.sh"),
       path.join(REPO_ROOT, "scripts", "sync-series-metadata.sh"),
-      path.join(REPO_ROOT, "scripts", "tunnel-watchdog.sh"),
     ];
 
     it("passes bash -n syntax validation on all scripts", () => {
@@ -918,41 +901,21 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
     }, 30000);
   });
 
-  describe("7. Tunnel Health & Watchdog Auto-Healing Invariants", () => {
-    const watchdogScript = path.join(REPO_ROOT, "scripts", "tunnel-watchdog.sh");
-
-    it("lighthouse health skips US tunnel healing when ENABLE_US_TUNNEL is unset or 0 even if probe returns 502 or 000", () => {
-      const mockBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-health-mocks-"));
+  describe("7. LAN Health & Auto-Healing Invariants", () => {
+    it("lighthouse health reports all local services healthy when ports listen and never invokes ssh", () => {
+      const mockBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-health-lan-"));
       const invocationLog = path.join(mockBinDir, "calls.log");
 
-      // Stub ssh: record any call, but do not actually connect
       fs.writeFileSync(
         path.join(mockBinDir, "ssh"),
         `#!/bin/bash\necho "ssh: $@" >> "${invocationLog}"\nexit 0\n`,
         { mode: 0o755 },
       );
-      // Stub launchctl: record kickstart/unload/load
       fs.writeFileSync(
         path.join(mockBinDir, "launchctl"),
         `#!/bin/bash\necho "launchctl: $@" >> "${invocationLog}"\nexit 0\n`,
         { mode: 0o755 },
       );
-      // Stub curl: return 502 for US endpoint and 200 for others
-      fs.writeFileSync(
-        path.join(mockBinDir, "curl"),
-        `#!/bin/bash
-for arg in "$@"; do
-  if [[ "$arg" == *"reading.wavypremium.xyz"* ]]; then
-    printf "502"
-    exit 0
-  fi
-done
-printf "200"
-exit 0
-`,
-        { mode: 0o755 },
-      );
-      // Stub nc to report listening ports for local services
       fs.writeFileSync(
         path.join(mockBinDir, "nc"),
         `#!/bin/bash\nexit 0\n`,
@@ -965,555 +928,28 @@ exit 0
           env: {
             ...process.env,
             PATH: `${mockBinDir}:${process.env.PATH}`,
-            ENABLE_US_TUNNEL: "0",
-            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
-            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
           },
         });
 
         expect(res.status).toBe(0);
-        expect(res.stdout).toContain("HTTP 502 WARN (Decommissioned, ENABLE_US_TUNNEL=0)");
+        expect(res.stdout).toContain("Checking Reading HQ (port 8086)...");
         expect(res.stdout).toContain("Health check passed: All services healthy.");
+        expect(res.stdout).not.toContain("Probing US WAN");
+        expect(res.stdout).not.toContain("Probing Singapore");
 
         const calls = fs.existsSync(invocationLog) ? fs.readFileSync(invocationLog, "utf8") : "";
-        expect(calls).not.toContain("panel");
-        expect(calls).not.toContain("fuser -k");
+        expect(calls).not.toContain("ssh:");
         expect(calls).not.toContain("reading-vless-tunnel");
-      } finally {
-        fs.rmSync(mockBinDir, { recursive: true, force: true });
-      }
-    });
-
-    it("lighthouse health skips US tunnel healing when ENABLE_US_TUNNEL is unset and probe returns 000", () => {
-      const mockBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-health-mocks-"));
-      const invocationLog = path.join(mockBinDir, "calls.log");
-
-      fs.writeFileSync(
-        path.join(mockBinDir, "ssh"),
-        `#!/bin/bash\necho "ssh: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      fs.writeFileSync(
-        path.join(mockBinDir, "launchctl"),
-        `#!/bin/bash\necho "launchctl: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      fs.writeFileSync(
-        path.join(mockBinDir, "curl"),
-        `#!/bin/bash
-for arg in "$@"; do
-  if [[ "$arg" == *"reading.wavypremium.xyz"* ]]; then
-    printf "000"
-    exit 0
-  fi
-done
-printf "200"
-exit 0
-`,
-        { mode: 0o755 },
-      );
-      fs.writeFileSync(
-        path.join(mockBinDir, "nc"),
-        `#!/bin/bash\nexit 0\n`,
-        { mode: 0o755 },
-      );
-
-      const cleanEnv = { ...process.env };
-      delete cleanEnv.ENABLE_US_TUNNEL;
-
-      try {
-        const res = spawnSync(LIGHTHOUSE_BIN, ["health"], {
-          encoding: "utf8",
-          env: {
-            ...cleanEnv,
-            PATH: `${mockBinDir}:${process.env.PATH}`,
-            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
-            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
-          },
-        });
-
-        expect(res.status).toBe(0);
-        expect(res.stdout).toContain("HTTP 000 WARN (Decommissioned, ENABLE_US_TUNNEL=0)");
-        expect(res.stdout).toContain("Health check passed: All services healthy.");
-
-        const calls = fs.existsSync(invocationLog) ? fs.readFileSync(invocationLog, "utf8") : "";
-        expect(calls).not.toContain("panel");
-        expect(calls).not.toContain("fuser -k");
-        expect(calls).not.toContain("reading-vless-tunnel");
-      } finally {
-        fs.rmSync(mockBinDir, { recursive: true, force: true });
-      }
-    });
-
-    it("lighthouse health reports healthy without healing when ENABLE_US_TUNNEL=1 and probe is 200", () => {
-      const mockBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-health-mocks-"));
-      const invocationLog = path.join(mockBinDir, "calls.log");
-
-      fs.writeFileSync(
-        path.join(mockBinDir, "ssh"),
-        `#!/bin/bash\necho "ssh: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      fs.writeFileSync(
-        path.join(mockBinDir, "launchctl"),
-        `#!/bin/bash\necho "launchctl: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      fs.writeFileSync(
-        path.join(mockBinDir, "curl"),
-        `#!/bin/bash\nprintf "200"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      fs.writeFileSync(
-        path.join(mockBinDir, "nc"),
-        `#!/bin/bash\nexit 0\n`,
-        { mode: 0o755 },
-      );
-
-      try {
-        const res = spawnSync(LIGHTHOUSE_BIN, ["health"], {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: `${mockBinDir}:${process.env.PATH}`,
-            ENABLE_US_TUNNEL: "1",
-            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
-            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
-          },
-        });
-
-        expect(res.status).toBe(0);
-        expect(res.stdout).toContain("Probing US WAN Endpoint (https://reading.wavypremium.xyz)... HTTP 200 OK");
-        expect(res.stdout).toContain("Health check passed: All services healthy.");
-
-        const calls = fs.existsSync(invocationLog) ? fs.readFileSync(invocationLog, "utf8") : "";
-        expect(calls).not.toContain("panel");
-        expect(calls).not.toContain("fuser -k");
-        expect(calls).not.toContain("reading-vless-tunnel");
-      } finally {
-        fs.rmSync(mockBinDir, { recursive: true, force: true });
-      }
-    });
-
-    it("tunnel watchdog accepts HTTP 302 on OPDS port 80 URL and 200/200/200 without triggering pkill or fuser -k", () => {
-      const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), "watchdog-probe-test-"));
-      const tempLog = path.join(mockDir, "watchdog.log");
-      const tempEnv = path.join(mockDir, ".env");
-      const mockBinDir = path.join(mockDir, "bin");
-      const invocationLog = path.join(mockDir, "calls.log");
-
-      fs.mkdirSync(mockBinDir, { recursive: true });
-
-      // Stub pkill
-      fs.writeFileSync(
-        path.join(mockBinDir, "pkill"),
-        `#!/bin/bash\necho "pkill: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      // Stub ssh
-      fs.writeFileSync(
-        path.join(mockBinDir, "ssh"),
-        `#!/bin/bash\necho "ssh: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      // Stub launchctl
-      fs.writeFileSync(
-        path.join(mockBinDir, "launchctl"),
-        `#!/bin/bash\necho "launchctl: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      // Stub curl: returns 200 for local, 302 for SG_OPDS_80, 200 for SG_OPDS_8443 and KOSync
-      fs.writeFileSync(
-        path.join(mockBinDir, "curl"),
-        `#!/bin/bash
-for arg in "$@"; do
-  if [[ "$arg" == *"opds.wavypremium.xyz/opds"* && "$arg" == http://* ]]; then
-    printf "302"
-    exit 0
-  fi
-done
-printf "200"
-exit 0
-`,
-        { mode: 0o755 },
-      );
-      // Stub nc
-      fs.writeFileSync(
-        path.join(mockBinDir, "nc"),
-        `#!/bin/bash\nexit 0\n`,
-        { mode: 0o755 },
-      );
-
-      fs.writeFileSync(
-        tempEnv,
-        `ENABLE_US_TUNNEL=0
-LOCAL_HTTP_PORT=8086
-LOCAL_KOSYNC_PORT=7200
-SG_REMOTE_HOST=sg-vps
-SG_OPDS_80_URL=http://opds.wavypremium.xyz/opds
-SG_OPDS_8443_URL=https://opds.wavypremium.xyz:8443/opds
-SG_KOSYNC_URL=http://kosync-sg.wavypremium.xyz/health
-`,
-      );
-
-      try {
-        const res = spawnSync(watchdogScript, [], {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: `${mockBinDir}:${process.env.PATH}`,
-            ENV_FILE: tempEnv,
-            LOG_FILE: tempLog,
-            SG_FAIL_COUNT_FILE: path.join(mockDir, "sg-fail"),
-            SG_ALERT_TRACK_FILE: path.join(mockDir, "sg-alert"),
-          },
-        });
-
-        expect(res.status).toBe(0);
-
-        const calls = fs.existsSync(invocationLog) ? fs.readFileSync(invocationLog, "utf8") : "";
-        expect(calls).not.toContain("pkill");
-        expect(calls).not.toContain("fuser -k");
-        expect(calls).not.toContain("kickstart");
-
-        const logContent = fs.existsSync(tempLog) ? fs.readFileSync(tempLog, "utf8") : "";
-        expect(logContent).not.toContain("health check failed");
-      } finally {
-        fs.rmSync(mockDir, { recursive: true, force: true });
-      }
-    });
-
-    it("tunnel watchdog pkill pattern matches Singapore tunnel argv and does NOT match operator forward ssh -L", () => {
-      const scriptContent = fs.readFileSync(watchdogScript, "utf8");
-      // Find the pkill command used for Singapore tunnel
-      const match = scriptContent.match(/pkill -f "([^"]+)"/g);
-      expect(match).toBeDefined();
-
-      // The Singapore pkill pattern
-      const sgPkillLine = scriptContent
-        .split("\n")
-        .find((l) => l.includes("pkill -f") && l.includes("SG_REMOTE_HOST"));
-      expect(sgPkillLine).toBeDefined();
-
-      const patternMatch = sgPkillLine!.match(/pkill -f "([^"]+)"/);
-      expect(patternMatch).toBeDefined();
-
-      const rawPattern = patternMatch![1];
-      // Convert bash regex to JS RegExp
-      const jsRegexStr = rawPattern
-        .replace(/\$\{LOCAL_HTTP_PORT\}/g, "8086")
-        .replace(/\$\{SG_REMOTE_HOST\}/g, "sg-vps");
-      const regex = new RegExp(jsRegexStr);
-
-      // 1. Plist program arguments for com.ospeto.reading-sg-tunnel
-      const tunnelCommand =
-        "/usr/bin/ssh -N -R 127.0.0.1:8086:127.0.0.1:8086 -R 127.0.0.1:7200:127.0.0.1:7200 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o BatchMode=yes -o ConnectTimeout=8 sg-vps";
-      expect(regex.test(tunnelCommand)).toBe(true);
-
-      // 2. Operator forward
-      const operatorCommand = "ssh -L 8086:127.0.0.1:8086 user@sg-vps";
-      expect(regex.test(operatorCommand)).toBe(false);
-    });
-
-    it("tunnel watchdog retries via proxy when direct probe returns 000 and proxy returns 200, avoiding auto-heal", () => {
-      const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), "watchdog-proxy-fallback-test-"));
-      const tempLog = path.join(mockDir, "watchdog.log");
-      const tempEnv = path.join(mockDir, ".env");
-      const mockBinDir = path.join(mockDir, "bin");
-      const invocationLog = path.join(mockDir, "calls.log");
-
-      fs.mkdirSync(mockBinDir, { recursive: true });
-
-      // Stub pkill
-      fs.writeFileSync(
-        path.join(mockBinDir, "pkill"),
-        `#!/bin/bash\necho "pkill: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      // Stub ssh
-      fs.writeFileSync(
-        path.join(mockBinDir, "ssh"),
-        `#!/bin/bash\necho "ssh: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      // Stub launchctl
-      fs.writeFileSync(
-        path.join(mockBinDir, "launchctl"),
-        `#!/bin/bash\necho "launchctl: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      // Stub nc: returns 0 (proxy reachable)
-      fs.writeFileSync(
-        path.join(mockBinDir, "nc"),
-        `#!/bin/bash\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      // Stub curl:
-      // If direct request to SG endpoints (no --proxy flag), return 000 (simulating ISP DPI block).
-      // If --proxy flag is present, return 200 (healthy via proxy).
-      // Local probes (127.0.0.1) return 200.
-      fs.writeFileSync(
-        path.join(mockBinDir, "curl"),
-        `#!/bin/bash
-has_proxy=0
-is_sg=0
-is_local=0
-for arg in "$@"; do
-  if [ "$arg" = "--proxy" ]; then
-    has_proxy=1
-  fi
-  if [[ "$arg" == *"wavypremium.xyz"* ]]; then
-    is_sg=1
-  fi
-  if [[ "$arg" == *"127.0.0.1"* ]]; then
-    is_local=1
-  fi
-done
-
-if [ "$is_local" -eq 1 ]; then
-  printf "200"
-  exit 0
-fi
-
-if [ "$is_sg" -eq 1 ]; then
-  if [ "$has_proxy" -eq 1 ]; then
-    printf "200"
-  else
-    printf "000"
-  fi
-  exit 0
-fi
-
-printf "200"
-exit 0
-`,
-        { mode: 0o755 },
-      );
-
-      fs.writeFileSync(
-        tempEnv,
-        `ENABLE_US_TUNNEL=0
-LOCAL_HTTP_PORT=8086
-LOCAL_KOSYNC_PORT=7200
-PROXY_URL=http://127.0.0.1:7890
-SG_REMOTE_HOST=sg-vps
-SG_OPDS_80_URL=http://opds.wavypremium.xyz/opds
-SG_OPDS_8443_URL=https://opds.wavypremium.xyz:8443/opds
-SG_KOSYNC_URL=http://kosync-sg.wavypremium.xyz/health
-`,
-      );
-
-      try {
-        const res = spawnSync(watchdogScript, [], {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: `${mockBinDir}:${process.env.PATH}`,
-            ENV_FILE: tempEnv,
-            LOG_FILE: tempLog,
-            SG_FAIL_COUNT_FILE: path.join(mockDir, "sg-fail"),
-            SG_ALERT_TRACK_FILE: path.join(mockDir, "sg-alert"),
-          },
-        });
-
-        expect(res.status).toBe(0);
-
-        const calls = fs.existsSync(invocationLog) ? fs.readFileSync(invocationLog, "utf8") : "";
-        expect(calls).not.toContain("pkill");
-        expect(calls).not.toContain("fuser -k");
-        expect(calls).not.toContain("kickstart");
-
-        const logContent = fs.existsSync(tempLog) ? fs.readFileSync(tempLog, "utf8") : "";
-        expect(logContent).toContain("retrying via proxy");
-        expect(logContent).not.toContain("health check failed");
-
-        // Verify fail count remains 0
-        const failCount = fs.readFileSync(path.join(mockDir, "sg-fail"), "utf8").trim();
-        expect(failCount).toBe("0");
-      } finally {
-        fs.rmSync(mockDir, { recursive: true, force: true });
-      }
-    });
-
-    it("tunnel watchdog records failure when both direct and proxy probes return 000", () => {
-      const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), "watchdog-proxy-fail-test-"));
-      const tempLog = path.join(mockDir, "watchdog.log");
-      const tempEnv = path.join(mockDir, ".env");
-      const mockBinDir = path.join(mockDir, "bin");
-      const invocationLog = path.join(mockDir, "calls.log");
-
-      fs.mkdirSync(mockBinDir, { recursive: true });
-
-      // Stub pkill
-      fs.writeFileSync(
-        path.join(mockBinDir, "pkill"),
-        `#!/bin/bash\necho "pkill: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      // Stub ssh
-      fs.writeFileSync(
-        path.join(mockBinDir, "ssh"),
-        `#!/bin/bash\necho "ssh: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      // Stub launchctl
-      fs.writeFileSync(
-        path.join(mockBinDir, "launchctl"),
-        `#!/bin/bash\necho "launchctl: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      // Stub nc: returns 0 (proxy reachable)
-      fs.writeFileSync(
-        path.join(mockBinDir, "nc"),
-        `#!/bin/bash\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      // Stub curl:
-      // Local probes return 200 (target URL contains 127.0.0.1 and not --proxy).
-      // SG probes always return 000 (even with --proxy).
-      fs.writeFileSync(
-        path.join(mockBinDir, "curl"),
-        `#!/bin/bash
-has_proxy=0
-for arg in "$@"; do
-  if [ "$arg" = "--proxy" ]; then
-    has_proxy=1
-  fi
-done
-
-if [ "$has_proxy" -eq 0 ]; then
-  for arg in "$@"; do
-    if [[ "$arg" == *"127.0.0.1"* ]]; then
-      printf "200"
-      exit 0
-    fi
-  done
-fi
-
-printf "000"
-exit 0
-`,
-        { mode: 0o755 },
-      );
-
-      fs.writeFileSync(
-        tempEnv,
-        `ENABLE_US_TUNNEL=0
-LOCAL_HTTP_PORT=8086
-LOCAL_KOSYNC_PORT=7200
-PROXY_URL=http://127.0.0.1:7890
-SG_REMOTE_HOST=sg-vps
-SG_OPDS_80_URL=http://opds.wavypremium.xyz/opds
-SG_OPDS_8443_URL=https://opds.wavypremium.xyz:8443/opds
-SG_KOSYNC_URL=http://kosync-sg.wavypremium.xyz/health
-`,
-      );
-
-      try {
-        const res = spawnSync(watchdogScript, [], {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: `${mockBinDir}:${process.env.PATH}`,
-            ENV_FILE: tempEnv,
-            LOG_FILE: tempLog,
-            SG_FAIL_COUNT_FILE: path.join(mockDir, "sg-fail"),
-            SG_ALERT_TRACK_FILE: path.join(mockDir, "sg-alert"),
-          },
-        });
-
-        expect(res.status).toBe(0);
-
-        const calls = fs.existsSync(invocationLog) ? fs.readFileSync(invocationLog, "utf8") : "";
-        expect(calls).toContain("pkill");
-        expect(calls).toContain("fuser -k");
-
-        const logContent = fs.existsSync(tempLog) ? fs.readFileSync(tempLog, "utf8") : "";
-        expect(logContent).toContain("health check failed");
-
-        // Verify fail count incremented to 1
-        const failCount = fs.readFileSync(path.join(mockDir, "sg-fail"), "utf8").trim();
-        expect(failCount).toBe("1");
-      } finally {
-        fs.rmSync(mockDir, { recursive: true, force: true });
-      }
-    }, 15000);
-
-    it("bin/lighthouse health retries via proxy when direct probe returns 000 and marks endpoint healthy", () => {
-      const mockBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-health-proxy-mocks-"));
-      const invocationLog = path.join(mockBinDir, "calls.log");
-
-      fs.writeFileSync(
-        path.join(mockBinDir, "ssh"),
-        `#!/bin/bash\necho "ssh: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      fs.writeFileSync(
-        path.join(mockBinDir, "launchctl"),
-        `#!/bin/bash\necho "launchctl: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      fs.writeFileSync(
-        path.join(mockBinDir, "nc"),
-        `#!/bin/bash\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      // Stub curl:
-      // Direct SG request returns 000; when --proxy is passed, returns 200.
-      fs.writeFileSync(
-        path.join(mockBinDir, "curl"),
-        `#!/bin/bash
-has_proxy=0
-for arg in "$@"; do
-  if [ "$arg" = "--proxy" ]; then
-    has_proxy=1
-  fi
-done
-
-if [ "$has_proxy" -eq 1 ]; then
-  printf "200"
-else
-  printf "000"
-fi
-exit 0
-`,
-        { mode: 0o755 },
-      );
-
-      try {
-        const res = spawnSync(LIGHTHOUSE_BIN, ["health"], {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: `${mockBinDir}:${process.env.PATH}`,
-            ENABLE_US_TUNNEL: "0",
-            PROXY_PORT: "7890",
-            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
-          },
-        });
-
-        expect(res.status).toBe(0);
-        expect(res.stdout).toContain("Probing Singapore OPDS Endpoint (http://opds.wavypremium.xyz/opds)... HTTP 200 OK");
-        expect(res.stdout).toContain("Health check passed: All services healthy.");
-
-        const calls = fs.existsSync(invocationLog) ? fs.readFileSync(invocationLog, "utf8") : "";
-        expect(calls).not.toContain("sg-vps");
-        expect(calls).not.toContain("fuser -k");
         expect(calls).not.toContain("reading-sg-tunnel");
       } finally {
         fs.rmSync(mockBinDir, { recursive: true, force: true });
       }
-    }, 15000);
+    });
 
-    it("bin/lighthouse health fails and triggers auto-healing when both direct and proxy return 000", () => {
-      const mockBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-health-proxy-fail-mocks-"));
+    it("lighthouse health attempts book-uploader kickstart when Reading HQ port is closed", () => {
+      const mockBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-health-fail-"));
       const invocationLog = path.join(mockBinDir, "calls.log");
 
-      fs.writeFileSync(
-        path.join(mockBinDir, "ssh"),
-        `#!/bin/bash\necho "ssh: $@" >> "${invocationLog}"\nexit 0\n`,
-        { mode: 0o755 },
-      );
       fs.writeFileSync(
         path.join(mockBinDir, "launchctl"),
         `#!/bin/bash\necho "launchctl: $@" >> "${invocationLog}"\nexit 0\n`,
@@ -1521,13 +957,7 @@ exit 0
       );
       fs.writeFileSync(
         path.join(mockBinDir, "nc"),
-        `#!/bin/bash\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      // Stub curl: always returns 000
-      fs.writeFileSync(
-        path.join(mockBinDir, "curl"),
-        `#!/bin/bash\nprintf "000"\nexit 0\n`,
+        `#!/bin/bash\nexit 1\n`,
         { mode: 0o755 },
       );
 
@@ -1537,24 +967,19 @@ exit 0
           env: {
             ...process.env,
             PATH: `${mockBinDir}:${process.env.PATH}`,
-            ENABLE_US_TUNNEL: "0",
-            PROXY_PORT: "7890",
-            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
           },
         });
 
         expect(res.status).toBe(1);
-        expect(res.stdout).toContain("Probing Singapore OPDS Endpoint (http://opds.wavypremium.xyz/opds)... HTTP 000 FAIL");
-        expect(res.stdout).toContain("Auto-healing SG Tunnel: clearing remote listeners on sg-vps...");
+        expect(res.stdout).toContain("Auto-healing: Kickstarting");
+        expect(res.stdout).toContain("Health check failed with 1 unresolved issue(s)");
 
         const calls = fs.existsSync(invocationLog) ? fs.readFileSync(invocationLog, "utf8") : "";
-        expect(calls).toContain("sg-vps");
-        expect(calls).toContain("fuser -k");
-        expect(calls).toContain("reading-sg-tunnel");
+        expect(calls).toContain("book-uploader");
       } finally {
         fs.rmSync(mockBinDir, { recursive: true, force: true });
       }
-    }, 15000);
+    });
   });
 
   describe("8. CLI Option Argument Validation & Pre-Side-Effect Bounds (U23)", () => {
@@ -1620,7 +1045,7 @@ exit 0
       expect(res.status).toBe(0);
       expect(fs.existsSync(quotedDir)).toBe(true);
       const generated = fs.readdirSync(quotedDir);
-      expect(generated.length).toBe(7);
+      expect(generated.length).toBe(4);
       expect(generated.some((f: string) => f.includes("book-uploader"))).toBe(true);
     });
 
@@ -2581,8 +2006,6 @@ exit 0
           PATH: `${mockDir}:${process.env.PATH}`,
           LIGHTHOUSE_DAEMON_PREFIX: "com.ospeto",
           LAUNCHAGENTS_DIR: fixtureAgents,
-          US_WAN_HQ_URL: "http://127.0.0.1:1",
-          SG_OPDS_80_URL: "http://127.0.0.1:1",
         },
       });
 
@@ -2626,8 +2049,6 @@ exit 1
           PATH: `${mockDir}:${process.env.PATH}`,
           LIGHTHOUSE_DAEMON_PREFIX: "com.ospeto",
           LAUNCHAGENTS_DIR: fixtureAgents,
-          US_WAN_HQ_URL: "http://127.0.0.1:1",
-          SG_OPDS_80_URL: "http://127.0.0.1:1",
         },
       });
 
@@ -2661,8 +2082,6 @@ exit 0
           PATH: `${mockDir}:${process.env.PATH}`,
           LIGHTHOUSE_DAEMON_PREFIX: "com.ospeto",
           LAUNCHAGENTS_DIR: fixtureAgents,
-          US_WAN_HQ_URL: "http://127.0.0.1:1",
-          SG_OPDS_80_URL: "http://127.0.0.1:1",
         },
       });
 
@@ -2687,8 +2106,6 @@ exit 0
           env: {
             ...process.env,
             FIRECRAWL_PORT: String(testPort),
-            US_WAN_HQ_URL: "http://127.0.0.1:1",
-            SG_OPDS_80_URL: "http://127.0.0.1:1",
           },
         });
         expect(res.status).toBe(0);
@@ -2709,8 +2126,6 @@ exit 0
         env: {
           ...process.env,
           FIRECRAWL_PORT: String(unusedPort),
-          US_WAN_HQ_URL: "http://127.0.0.1:1",
-          SG_OPDS_80_URL: "http://127.0.0.1:1",
         },
       });
       expect(res.status).toBe(0);
@@ -2827,8 +2242,6 @@ exit 0
           CALIBRE_DB_PATH: fixtureCalibre,
           KOSYNC_DB_PATH: fixtureKosync,
           CACHE_DB_PATH: fixtureCache,
-          US_WAN_HQ_URL: "http://127.0.0.1:1",
-          SG_OPDS_80_URL: "http://127.0.0.1:1",
         },
       });
 
@@ -2843,304 +2256,49 @@ exit 0
     });
   });
 
-  describe("11. Status Tunnel Process & Endpoint Separation (U18)", () => {
-    function setupStatusMock(opts: {
-      sgRunning?: boolean;
-      sgPid?: number;
-      usRunning?: boolean;
-      usPid?: number;
-      sgCode?: string;
-      usCode?: string;
-    }) {
-      const mockBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-status-u18-"));
+  describe("11. Status Read-Only & LAN-Only Verification", () => {
+    it("executes status strictly read-only without ssh or launchctl mutations and omits WAN tunnel blocks", () => {
+      const mockBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-status-lan-"));
       const invocationLog = path.join(mockBinDir, "invocations.log");
-
-      // launchctl stub
-      const sgLine = opts.sgRunning
-        ? `if [[ "$*" == *"reading-sg-tunnel"* ]]; then echo "state = running"; echo "pid = ${opts.sgPid || 22222}"; exit 0; fi`
-        : `if [[ "$*" == *"reading-sg-tunnel"* ]]; then exit 1; fi`;
-      const usLine = opts.usRunning
-        ? `if [[ "$*" == *"reading-vless-tunnel"* ]]; then echo "state = running"; echo "pid = ${opts.usPid || 33333}"; exit 0; fi`
-        : `if [[ "$*" == *"reading-vless-tunnel"* ]]; then exit 1; fi`;
 
       fs.writeFileSync(
         path.join(mockBinDir, "launchctl"),
-        `#!/bin/bash\necho "launchctl: $@" >> "${invocationLog}"\n${sgLine}\n${usLine}\nexit 1\n`,
+        `#!/bin/bash\necho "launchctl: $@" >> "${invocationLog}"\nexit 1\n`,
         { mode: 0o755 },
       );
-
-      // curl stub
-      const sgCode = opts.sgCode ?? "200";
-      const usCode = opts.usCode ?? "200";
-      fs.writeFileSync(
-        path.join(mockBinDir, "curl"),
-        `#!/bin/bash
-echo "curl: $@" >> "${invocationLog}"
-for arg in "$@"; do
-  if [[ "$arg" == *"opds"* ]]; then
-    printf "${sgCode}"
-    exit 0
-  fi
-  if [[ "$arg" == *"reading.wavypremium.xyz"* ]]; then
-    printf "${usCode}"
-    exit 0
-  fi
-done
-printf "200"
-exit 0
-`,
-        { mode: 0o755 },
-      );
-
-      // nc stub for port listeners and proxy reachability check
       fs.writeFileSync(
         path.join(mockBinDir, "nc"),
         `#!/bin/bash\nexit 0\n`,
         { mode: 0o755 },
       );
-
-      // ssh stub to ensure status is strictly read-only and never invokes ssh
       fs.writeFileSync(
         path.join(mockBinDir, "ssh"),
         `#!/bin/bash\necho "ssh: $@" >> "${invocationLog}"\nexit 0\n`,
         { mode: 0o755 },
       );
 
-      return { mockBinDir, invocationLog };
-    }
-
-    it("never reports CONNECTED when tunnel daemon is running but endpoint returns 502 or 000 (E11)", () => {
-      // Test 1a: running + 502
-      const mock502 = setupStatusMock({
-        sgRunning: true,
-        sgPid: 41234,
-        sgCode: "502",
-        usCode: "000",
-      });
-      try {
-        const res502 = spawnSync(LIGHTHOUSE_BIN, ["status"], {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: `${mock502.mockBinDir}:${process.env.PATH}`,
-            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
-            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
-          },
-        });
-        expect(res502.status).toBe(0);
-        expect(res502.stdout).toContain("SG Tunnel (sg-vps)");
-        expect(res502.stdout).toContain("Process:   [RUNNING] PID: 41234");
-        expect(res502.stdout).toContain("Endpoint:  [INACTIVE] http://opds.wavypremium.xyz/opds (HTTP 502)");
-
-        // Extract SG Tunnel section and verify [CONNECTED] is never present on 502
-        const sgBlock502 = res502.stdout.split("SG Tunnel")[1]?.split("\n\n")[0] || "";
-        expect(sgBlock502).not.toContain("[CONNECTED]");
-      } finally {
-        fs.rmSync(mock502.mockBinDir, { recursive: true, force: true });
-      }
-
-      // Test 1b: running + 000
-      const mock000 = setupStatusMock({
-        sgRunning: true,
-        sgPid: 41234,
-        sgCode: "000",
-        usCode: "000",
-      });
-      try {
-        const res000 = spawnSync(LIGHTHOUSE_BIN, ["status"], {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: `${mock000.mockBinDir}:${process.env.PATH}`,
-            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
-            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
-          },
-        });
-        expect(res000.status).toBe(0);
-        expect(res000.stdout).toContain("Process:   [RUNNING] PID: 41234");
-        expect(res000.stdout).toContain("Endpoint:  [INACTIVE] http://opds.wavypremium.xyz/opds (HTTP 000)");
-
-        const sgBlock000 = res000.stdout.split("SG Tunnel")[1]?.split("\n\n")[0] || "";
-        expect(sgBlock000).not.toContain("[CONNECTED]");
-      } finally {
-        fs.rmSync(mock000.mockBinDir, { recursive: true, force: true });
-      }
-    }, 15000);
-
-    it("reports healthy external endpoint when tunnel daemon is stopped without falsely claiming remote failure", () => {
-      const mock = setupStatusMock({
-        sgRunning: false,
-        sgCode: "200",
-      });
       try {
         const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
           encoding: "utf8",
           env: {
             ...process.env,
-            PATH: `${mock.mockBinDir}:${process.env.PATH}`,
-            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
-            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
+            PATH: `${mockBinDir}:${process.env.PATH}`,
           },
         });
         expect(res.status).toBe(0);
-        expect(res.stdout).toContain("SG Tunnel (sg-vps)");
-        expect(res.stdout).toContain("Process:   [STOPPED] Inactive");
-        expect(res.stdout).toContain("Endpoint:  [CONNECTED] http://opds.wavypremium.xyz/opds (HTTP 200)");
-      } finally {
-        fs.rmSync(mock.mockBinDir, { recursive: true, force: true });
-      }
-    });
+        expect(res.stdout).not.toContain("WAN REVERSE TUNNELS");
+        expect(res.stdout).not.toContain("reading-sg-tunnel");
+        expect(res.stdout).not.toContain("reading-vless-tunnel");
 
-    it("reports both process running and endpoint connected when managed tunnel is healthy", () => {
-      const mock = setupStatusMock({
-        sgRunning: true,
-        sgPid: 54321,
-        sgCode: "200",
-      });
-      try {
-        const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: `${mock.mockBinDir}:${process.env.PATH}`,
-            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
-            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
-          },
-        });
-        expect(res.status).toBe(0);
-        expect(res.stdout).toContain("SG Tunnel (sg-vps)");
-        expect(res.stdout).toContain("Process:   [RUNNING] PID: 54321");
-        expect(res.stdout).toContain("Endpoint:  [CONNECTED] http://opds.wavypremium.xyz/opds (HTTP 200)");
-      } finally {
-        fs.rmSync(mock.mockBinDir, { recursive: true, force: true });
-      }
-    });
-
-    it("treats HTTP 302 as redirect and unverified rather than connected until U25", () => {
-      const mock = setupStatusMock({
-        sgRunning: true,
-        sgPid: 33333,
-        sgCode: "302",
-      });
-      try {
-        const res = spawnSync(LIGHTHOUSE_BIN, ["status"], {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: `${mock.mockBinDir}:${process.env.PATH}`,
-            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
-            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
-          },
-        });
-        expect(res.status).toBe(0);
-        expect(res.stdout).toContain("SG Tunnel (sg-vps)");
-        expect(res.stdout).toContain("Process:   [RUNNING] PID: 33333");
-        expect(res.stdout).toContain("Endpoint:  [WARN] http://opds.wavypremium.xyz/opds (HTTP 302 Redirect / Unverified)");
-
-        const sgBlock = res.stdout.split("SG Tunnel")[1]?.split("\n\n")[0] || "";
-        expect(sgBlock).not.toContain("[CONNECTED]");
-      } finally {
-        fs.rmSync(mock.mockBinDir, { recursive: true, force: true });
-      }
-    });
-
-    it("reports optional US tunnel as disabled and decommissioned when ENABLE_US_TUNNEL is 0 or unset", () => {
-      const mock = setupStatusMock({
-        usRunning: false,
-        usCode: "000",
-      });
-      const cleanEnv = { ...process.env };
-      delete cleanEnv.ENABLE_US_TUNNEL;
-
-      try {
-        // Case 1: Explicit ENABLE_US_TUNNEL=0
-        const resExplicit = spawnSync(LIGHTHOUSE_BIN, ["status"], {
-          encoding: "utf8",
-          env: {
-            ...cleanEnv,
-            PATH: `${mock.mockBinDir}:${process.env.PATH}`,
-            ENABLE_US_TUNNEL: "0",
-            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
-            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
-          },
-        });
-        expect(resExplicit.status).toBe(0);
-        expect(resExplicit.stdout).toContain("US Tunnel (panel)");
-        expect(resExplicit.stdout).toContain("Process:   [STOPPED] Disabled (ENABLE_US_TUNNEL=0)");
-        expect(resExplicit.stdout).toContain("Endpoint:  [WARN] https://reading.wavypremium.xyz (HTTP 000, Decommissioned, ENABLE_US_TUNNEL=0)");
-
-        // Case 2: Truly unset ENABLE_US_TUNNEL (defaults to "0")
-        const resUnset = spawnSync(LIGHTHOUSE_BIN, ["status"], {
-          encoding: "utf8",
-          env: {
-            ...cleanEnv,
-            PATH: `${mock.mockBinDir}:${process.env.PATH}`,
-            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
-            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
-          },
-        });
-        expect(resUnset.status).toBe(0);
-        expect(resUnset.stdout).toContain("US Tunnel (panel)");
-        expect(resUnset.stdout).toContain("Process:   [STOPPED] Disabled (ENABLE_US_TUNNEL=0)");
-        expect(resUnset.stdout).toContain("Endpoint:  [WARN] https://reading.wavypremium.xyz (HTTP 000, Decommissioned, ENABLE_US_TUNNEL=0)");
-      } finally {
-        fs.rmSync(mock.mockBinDir, { recursive: true, force: true });
-      }
-    });
-
-    it("enforces bounded probe timeout, performs fresh probes, and executes strictly read-only", () => {
-      const mock = setupStatusMock({
-        sgRunning: true,
-        sgPid: 12345,
-        sgCode: "200",
-      });
-      try {
-        const res1 = spawnSync(LIGHTHOUSE_BIN, ["status"], {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: `${mock.mockBinDir}:${process.env.PATH}`,
-            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
-            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
-          },
-        });
-        expect(res1.status).toBe(0);
-        expect(res1.stdout).toContain("Endpoint:  [CONNECTED] http://opds.wavypremium.xyz/opds (HTTP 200)");
-
-        const logs = fs.existsSync(mock.invocationLog)
-          ? fs.readFileSync(mock.invocationLog, "utf8")
+        const logs = fs.existsSync(invocationLog)
+          ? fs.readFileSync(invocationLog, "utf8")
           : "";
-
-        // Verify curl was called with bounded timeout flag (-m 4)
-        expect(logs).toContain("-m 4");
-
-        // Verify strictly read-only: status must never invoke ssh or launchctl kickstart/load/unload
         expect(logs).not.toContain("ssh:");
         expect(logs).not.toContain("launchctl: kickstart");
         expect(logs).not.toContain("launchctl: unload");
         expect(logs).not.toContain("launchctl: load");
-
-        // Update curl mock in place to return 502: verify fresh probe is performed without stale cache
-        fs.writeFileSync(
-          path.join(mock.mockBinDir, "curl"),
-          `#!/bin/bash\nprintf "502"\nexit 0\n`,
-          { mode: 0o755 },
-        );
-
-        const res2 = spawnSync(LIGHTHOUSE_BIN, ["status"], {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: `${mock.mockBinDir}:${process.env.PATH}`,
-            SG_OPDS_80_URL: "http://opds.wavypremium.xyz/opds",
-            US_WAN_HQ_URL: "https://reading.wavypremium.xyz",
-          },
-        });
-        expect(res2.status).toBe(0);
-        expect(res2.stdout).toContain("Endpoint:  [INACTIVE] http://opds.wavypremium.xyz/opds (HTTP 502)");
-        expect(res2.stdout).not.toContain("[CONNECTED]");
       } finally {
-        fs.rmSync(mock.mockBinDir, { recursive: true, force: true });
+        fs.rmSync(mockBinDir, { recursive: true, force: true });
       }
     });
   });

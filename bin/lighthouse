@@ -95,11 +95,6 @@ PRESET_CALIBRE_PORT="${CALIBRE_PORT+set}"
 PRESET_PROXY_PORT="${PROXY_PORT+set}"
 PRESET_PROXY_URL="${PROXY_URL+set}"
 PRESET_CALIBRE_SERVER_URL="${CALIBRE_SERVER_URL+set}"
-PRESET_US_WAN_HQ_URL="${US_WAN_HQ_URL+set}"
-PRESET_SG_OPDS_80_URL="${SG_OPDS_80_URL+set}"
-PRESET_SG_KOSYNC_URL="${SG_KOSYNC_URL+set}"
-PRESET_US_REMOTE_HOST="${US_REMOTE_HOST+set}"
-PRESET_SG_REMOTE_HOST="${SG_REMOTE_HOST+set}"
 PRESET_DAEMON_PREFIX="${LIGHTHOUSE_DAEMON_PREFIX+set}"
 PRESET_CALIBRE_LIBRARY_DIR="${CALIBRE_LIBRARY_DIR+set}"
 PRESET_CALIBRE_DB_PATH="${CALIBRE_DB_PATH+set}"
@@ -114,7 +109,6 @@ PRESET_FIRECRAWL_URL="${FIRECRAWL_URL+set}"
 PRESET_FIRECRAWL_COMPOSE_DIR="${FIRECRAWL_COMPOSE_DIR+set}"
 PRESET_FIRECRAWL_IDLE_TIMEOUT_MS="${FIRECRAWL_IDLE_TIMEOUT_MS+set}"
 PRESET_FIRECRAWL_ENABLED="${FIRECRAWL_ENABLED+set}"
-PRESET_ENABLE_US_TUNNEL="${ENABLE_US_TUNNEL+set}"
 
 HAS_EXPLICIT_FIRECRAWL_PORT="${PRESET_FIRECRAWL_PORT:+1}"
 HAS_EXPLICIT_FIRECRAWL_URL="${PRESET_FIRECRAWL_URL:+1}"
@@ -126,11 +120,6 @@ CALIBRE_PORT="${CALIBRE_PORT:-8088}"
 PROXY_PORT="${PROXY_PORT:-7890}"
 PROXY_URL="${PROXY_URL:-http://127.0.0.1:${PROXY_PORT}}"
 CALIBRE_SERVER_URL="${CALIBRE_SERVER_URL:-http://127.0.0.1:${CALIBRE_PORT}}"
-US_WAN_HQ_URL="${US_WAN_HQ_URL:-https://reading.wavypremium.xyz}"
-SG_OPDS_80_URL="${SG_OPDS_80_URL:-http://opds.wavypremium.xyz/opds}"
-SG_KOSYNC_URL="${SG_KOSYNC_URL:-http://kosync-sg.wavypremium.xyz}"
-US_REMOTE_HOST="${US_REMOTE_HOST:-panel}"
-SG_REMOTE_HOST="${SG_REMOTE_HOST:-sg-vps}"
 DAEMON_PREFIX="${LIGHTHOUSE_DAEMON_PREFIX:-com.${CURRENT_USER}}"
 
 CALIBRE_LIBRARY_DIR="${CALIBRE_LIBRARY_DIR:-}"
@@ -146,7 +135,6 @@ FIRECRAWL_URL="${FIRECRAWL_URL:-http://127.0.0.1:${FIRECRAWL_PORT}}"
 FIRECRAWL_COMPOSE_DIR="${FIRECRAWL_COMPOSE_DIR:-/Users/ospeto/Documents/Firecrawl/firecrawl}"
 FIRECRAWL_IDLE_TIMEOUT_MS="${FIRECRAWL_IDLE_TIMEOUT_MS:-900000}"
 FIRECRAWL_ENABLED="${FIRECRAWL_ENABLED:-true}"
-ENABLE_US_TUNNEL="${ENABLE_US_TUNNEL:-0}"
 
 if [ -f "$ENV_FILE" ]; then
   while IFS='=' read -r key val || [ -n "$key" ]; do
@@ -171,11 +159,6 @@ if [ -f "$ENV_FILE" ]; then
       PROXY_PORT) [ -z "$PRESET_PROXY_PORT" ] && PROXY_PORT="$val" ;;
       PROXY_URL) [ -z "$PRESET_PROXY_URL" ] && PROXY_URL="$val" ;;
       CALIBRE_SERVER_URL) [ -z "$PRESET_CALIBRE_SERVER_URL" ] && CALIBRE_SERVER_URL="$val" ;;
-      US_WAN_HQ_URL) [ -z "$PRESET_US_WAN_HQ_URL" ] && US_WAN_HQ_URL="$val" ;;
-      SG_OPDS_80_URL) [ -z "$PRESET_SG_OPDS_80_URL" ] && SG_OPDS_80_URL="$val" ;;
-      SG_KOSYNC_URL) [ -z "$PRESET_SG_KOSYNC_URL" ] && SG_KOSYNC_URL="$val" ;;
-      US_REMOTE_HOST) [ -z "$PRESET_US_REMOTE_HOST" ] && US_REMOTE_HOST="$val" ;;
-      SG_REMOTE_HOST) [ -z "$PRESET_SG_REMOTE_HOST" ] && SG_REMOTE_HOST="$val" ;;
       LIGHTHOUSE_DAEMON_PREFIX) [ -z "$PRESET_DAEMON_PREFIX" ] && DAEMON_PREFIX="$val" ;;
       CALIBRE_LIBRARY_DIR) [ -z "$PRESET_CALIBRE_LIBRARY_DIR" ] && CALIBRE_LIBRARY_DIR="$(anchor_path "$val")" ;;
       CALIBRE_DB_PATH) [ -z "$PRESET_CALIBRE_DB_PATH" ] && CALIBRE_DB_PATH="$(anchor_path "$val")" ;;
@@ -200,7 +183,6 @@ if [ -f "$ENV_FILE" ]; then
       FIRECRAWL_COMPOSE_DIR) [ -z "$PRESET_FIRECRAWL_COMPOSE_DIR" ] && FIRECRAWL_COMPOSE_DIR="$val" ;;
       FIRECRAWL_IDLE_TIMEOUT_MS) [ -z "$PRESET_FIRECRAWL_IDLE_TIMEOUT_MS" ] && FIRECRAWL_IDLE_TIMEOUT_MS="$val" ;;
       FIRECRAWL_ENABLED) [ -z "$PRESET_FIRECRAWL_ENABLED" ] && FIRECRAWL_ENABLED="$val" ;;
-      ENABLE_US_TUNNEL) [ -z "$PRESET_ENABLE_US_TUNNEL" ] && ENABLE_US_TUNNEL="$val" ;;
     esac
   done < "$ENV_FILE"
 fi
@@ -478,87 +460,13 @@ cmd_status() {
   fi
   echo ""
 
-  # 2. WAN Reverse Tunnels
-  echo -e "  ${COLOR_BOLD}WAN REVERSE TUNNELS${COLOR_RESET}"
-  echo -e "  ${COLOR_DIM}----------------------------------------------------------------------${COLOR_RESET}"
-
-  # US Tunnel Check
-  local us_status
-  us_status=$(get_launchagent_status "${DAEMON_PREFIX}.reading-vless-tunnel")
-  local us_proc_desc
-  if [ "$ENABLE_US_TUNNEL" != "1" ]; then
-    if [[ "$us_status" =~ ^RUNNING:(.+) ]]; then
-      us_proc_desc="$(badge_running) PID: ${BASH_REMATCH[1]} (Disabled, ENABLE_US_TUNNEL=${ENABLE_US_TUNNEL})"
-    elif [ "$us_status" = "RUNNING" ]; then
-      us_proc_desc="$(badge_running) Active (Disabled, ENABLE_US_TUNNEL=${ENABLE_US_TUNNEL})"
-    else
-      us_proc_desc="$(badge_stopped) Disabled (ENABLE_US_TUNNEL=${ENABLE_US_TUNNEL})"
-    fi
-  else
-    if [[ "$us_status" =~ ^RUNNING:(.+) ]]; then
-      us_proc_desc="$(badge_running) PID: ${BASH_REMATCH[1]}"
-    elif [ "$us_status" = "RUNNING" ]; then
-      us_proc_desc="$(badge_running) Active"
-    else
-      us_proc_desc="$(badge_stopped) Inactive"
-    fi
-  fi
-
-  local us_http
-  us_http=$(probe_http_code "$US_WAN_HQ_URL" 4)
-  local us_endpoint_desc
-  if [ "$us_http" = "200" ]; then
-    us_endpoint_desc="$(badge_connected) ${US_WAN_HQ_URL} (HTTP ${us_http})"
-  elif [ "$us_http" = "302" ] || [ "$us_http" = "301" ]; then
-    us_endpoint_desc="$(badge_warn) ${US_WAN_HQ_URL} (HTTP ${us_http} Redirect / Unverified)"
-  elif [ "$ENABLE_US_TUNNEL" != "1" ]; then
-    us_endpoint_desc="$(badge_warn) ${US_WAN_HQ_URL} (HTTP ${us_http}, Decommissioned, ENABLE_US_TUNNEL=${ENABLE_US_TUNNEL})"
-  else
-    us_endpoint_desc="$(badge_inactive) ${US_WAN_HQ_URL} (HTTP ${us_http})"
-  fi
-
-  echo -e "  US Tunnel (${US_REMOTE_HOST})"
-  echo -e "    Process:   ${us_proc_desc}"
-  echo -e "    Endpoint:  ${us_endpoint_desc}"
-
-  # Singapore Tunnel Check
-  local sg_status
-  sg_status=$(get_launchagent_status "${DAEMON_PREFIX}.reading-sg-tunnel")
-  local sg_proc_desc
-  if [[ "$sg_status" =~ ^RUNNING:(.+) ]]; then
-    sg_proc_desc="$(badge_running) PID: ${BASH_REMATCH[1]}"
-  elif [ "$sg_status" = "RUNNING" ]; then
-    sg_proc_desc="$(badge_running) Active"
-  else
-    sg_proc_desc="$(badge_stopped) Inactive"
-  fi
-
-  local sg_http
-  sg_http=$(probe_http_code "$SG_OPDS_80_URL" 4)
-  local sg_endpoint_desc
-  if [ "$sg_http" = "200" ]; then
-    sg_endpoint_desc="$(badge_connected) ${SG_OPDS_80_URL} (HTTP ${sg_http})"
-  elif [ "$sg_http" = "302" ] || [ "$sg_http" = "301" ]; then
-    sg_endpoint_desc="$(badge_warn) ${SG_OPDS_80_URL} (HTTP ${sg_http} Redirect / Unverified)"
-  else
-    sg_endpoint_desc="$(badge_inactive) ${SG_OPDS_80_URL} (HTTP ${sg_http})"
-  fi
-
-  echo -e "  SG Tunnel (${SG_REMOTE_HOST})"
-  echo -e "    Process:   ${sg_proc_desc}"
-  echo -e "    Endpoint:  ${sg_endpoint_desc}"
-  echo ""
-
-  # 3. Background Daemons (macOS launchd)
+  # 2. Background Daemons (macOS launchd)
   if command -v launchctl >/dev/null 2>&1; then
     echo -e "  ${COLOR_BOLD}BACKGROUND DAEMONS (launchd)${COLOR_RESET}"
     echo -e "  ${COLOR_DIM}----------------------------------------------------------------------${COLOR_RESET}"
     local daemons=(
       "${DAEMON_PREFIX}.book-uploader"
       "${DAEMON_PREFIX}.reading-telegram-bot"
-      "${DAEMON_PREFIX}.reading-tunnel-watchdog"
-      "${DAEMON_PREFIX}.reading-vless-tunnel"
-      "${DAEMON_PREFIX}.reading-sg-tunnel"
       "${DAEMON_PREFIX}.reading-stack-backup"
       "${DAEMON_PREFIX}.reading-ssd-backup"
     )
@@ -654,7 +562,6 @@ cmd_up() {
     "${DAEMON_PREFIX}.calibre-server"
     "${DAEMON_PREFIX}.book-uploader"
     "${DAEMON_PREFIX}.reading-telegram-bot"
-    "${DAEMON_PREFIX}.reading-tunnel-watchdog"
   )
 
   for service in "${local_services[@]}"; do
@@ -669,7 +576,7 @@ cmd_up() {
     fi
   done
 
-  # Bounded readiness check for local HTTP before starting reverse tunnels
+  # Bounded readiness check for local HTTP
   echo -n "  Waiting for local services readiness... "
   local wait_count=0
   while [ "$wait_count" -lt 10 ]; do
@@ -679,24 +586,6 @@ cmd_up() {
     fi
     sleep 1
     wait_count=$((wait_count + 1))
-  done
-
-  # Phase 2: Reverse Tunnels
-  local tunnel_services=(
-    "${DAEMON_PREFIX}.reading-vless-tunnel"
-    "${DAEMON_PREFIX}.reading-sg-tunnel"
-  )
-
-  for service in "${tunnel_services[@]}"; do
-    local plist="${agents_dir}/${service}.plist"
-    if [ -f "$plist" ]; then
-      echo -e "  Starting ${COLOR_CYAN}${service}${COLOR_RESET}..."
-      launchctl unload "$plist" 2>/dev/null || true
-      launchctl load -w "$plist" 2>/dev/null || true
-      if launchctl print "gui/${CURRENT_UID}/${service}" >/dev/null 2>&1; then
-        launchctl kickstart -k "gui/${CURRENT_UID}/${service}" 2>/dev/null || true
-      fi
-    fi
   done
 
   echo -e "${COLOR_GREEN}Stack startup sequence completed.${COLOR_RESET}"
@@ -716,9 +605,6 @@ cmd_down() {
 
   # Reverse dependency order
   local shutdown_services=(
-    "${DAEMON_PREFIX}.reading-sg-tunnel"
-    "${DAEMON_PREFIX}.reading-vless-tunnel"
-    "${DAEMON_PREFIX}.reading-tunnel-watchdog"
     "${DAEMON_PREFIX}.reading-telegram-bot"
     "${DAEMON_PREFIX}.book-uploader"
     "${DAEMON_PREFIX}.calibre-server"
@@ -743,10 +629,8 @@ cmd_health() {
   validate_daemon_prefix "$DAEMON_PREFIX"
   validate_port "$UPLOADER_PORT" "UPLOADER_PORT"
   validate_port "$KOSYNC_PORT" "KOSYNC_PORT"
-  validate_hostname "$US_REMOTE_HOST" "US_REMOTE_HOST"
-  validate_hostname "$SG_REMOTE_HOST" "SG_REMOTE_HOST"
 
-  echo -e "${COLOR_BOLD}Running LightHouse Health & Auto-Healing Probes...${COLOR_RESET}"
+  echo -e "${COLOR_BOLD}Running LightHouse Health & Auto-Healing Probes (LAN-only)...${COLOR_RESET}"
   local failures=0
   local healed=0
 
@@ -781,56 +665,6 @@ cmd_health() {
     echo -e "$(badge_active)"
   else
     echo -e "$(badge_warn) (Offline or containerized)"
-  fi
-
-  # 2. WAN Probes & Tunnel Auto-Healing
-  echo -n "  Probing US WAN Endpoint (${US_WAN_HQ_URL})... "
-  local us_code
-  us_code=$(probe_http_code "$US_WAN_HQ_URL" 5)
-  if [ "$us_code" = "200" ] || [ "$us_code" = "302" ]; then
-    echo -e "${COLOR_GREEN}HTTP ${us_code} OK${COLOR_RESET}"
-  elif [ "$ENABLE_US_TUNNEL" != "1" ]; then
-    echo -e "${COLOR_YELLOW}HTTP ${us_code} WARN (Decommissioned, ENABLE_US_TUNNEL=${ENABLE_US_TUNNEL})${COLOR_RESET}"
-  else
-    echo -e "${COLOR_RED}HTTP ${us_code} FAIL${COLOR_RESET}"
-    failures=$((failures + 1))
-    # Auto-heal: attempt stale remote port clearing and local tunnel restart
-    echo -e "  ${COLOR_YELLOW}Auto-healing US Tunnel: clearing remote listeners on ${US_REMOTE_HOST}...${COLOR_RESET}"
-    ssh -o ConnectTimeout=5 -o BatchMode=yes "$US_REMOTE_HOST" "fuser -k ${UPLOADER_PORT}/tcp ${KOSYNC_PORT}/tcp 2>/dev/null || true" 2>/dev/null || true
-    if command -v launchctl >/dev/null 2>&1; then
-      launchctl kickstart -k "gui/${CURRENT_UID}/${DAEMON_PREFIX}.reading-vless-tunnel" 2>/dev/null || true
-      sleep 2
-      local us_recheck
-      us_recheck=$(probe_http_code "$US_WAN_HQ_URL" 5)
-      if [ "$us_recheck" = "200" ] || [ "$us_recheck" = "302" ]; then
-        echo -e "  ${COLOR_GREEN}Successfully healed US Tunnel.${COLOR_RESET}"
-        healed=$((healed + 1))
-        failures=$((failures - 1))
-      fi
-    fi
-  fi
-
-  echo -n "  Probing Singapore OPDS Endpoint (${SG_OPDS_80_URL})... "
-  local sg_code
-  sg_code=$(probe_http_code "$SG_OPDS_80_URL" 5)
-  if [ "$sg_code" = "200" ] || [ "$sg_code" = "302" ]; then
-    echo -e "${COLOR_GREEN}HTTP ${sg_code} OK${COLOR_RESET}"
-  else
-    echo -e "${COLOR_RED}HTTP ${sg_code} FAIL${COLOR_RESET}"
-    failures=$((failures + 1))
-    echo -e "  ${COLOR_YELLOW}Auto-healing SG Tunnel: clearing remote listeners on ${SG_REMOTE_HOST}...${COLOR_RESET}"
-    ssh -o ConnectTimeout=5 -o BatchMode=yes "$SG_REMOTE_HOST" "fuser -k ${UPLOADER_PORT}/tcp ${KOSYNC_PORT}/tcp 2>/dev/null || true" 2>/dev/null || true
-    if command -v launchctl >/dev/null 2>&1; then
-      launchctl kickstart -k "gui/${CURRENT_UID}/${DAEMON_PREFIX}.reading-sg-tunnel" 2>/dev/null || true
-      sleep 2
-      local sg_recheck
-      sg_recheck=$(probe_http_code "$SG_OPDS_80_URL" 5)
-      if [ "$sg_recheck" = "200" ] || [ "$sg_recheck" = "302" ]; then
-        echo -e "  ${COLOR_GREEN}Successfully healed SG Tunnel.${COLOR_RESET}"
-        healed=$((healed + 1))
-        failures=$((failures - 1))
-      fi
-    fi
   fi
 
   echo ""
@@ -892,14 +726,10 @@ EOF
   bun_path=$(which bun 2>/dev/null || echo "/opt/homebrew/bin/bun")
   local bash_path
   bash_path=$(which bash 2>/dev/null || echo "/bin/bash")
-  local ssh_path
-  ssh_path=$(which ssh 2>/dev/null || echo "/usr/bin/ssh")
 
   validate_port "$UPLOADER_PORT" "UPLOADER_PORT"
   validate_port "$KOSYNC_PORT" "KOSYNC_PORT"
   validate_port "$PROXY_PORT" "PROXY_PORT"
-  validate_hostname "$US_REMOTE_HOST" "US_REMOTE_HOST"
-  validate_hostname "$SG_REMOTE_HOST" "SG_REMOTE_HOST"
   validate_daemon_prefix "$DAEMON_PREFIX"
 
   # XML escape all interpolated values
@@ -909,24 +739,12 @@ EOF
   P_BUN=$(xml_escape "$bun_path")
   local P_BASH
   P_BASH=$(xml_escape "$bash_path")
-  local P_SSH
-  P_SSH=$(xml_escape "$ssh_path")
   local P_ROOT
   P_ROOT=$(xml_escape "$LIGHTHOUSE_ROOT")
   local P_HOME
   P_HOME=$(xml_escape "$HOME")
   local P_LOG_DIR
   P_LOG_DIR=$(xml_escape "$LOG_DIR")
-  local P_UPLOADER_PORT
-  P_UPLOADER_PORT=$(xml_escape "$UPLOADER_PORT")
-  local P_KOSYNC_PORT
-  P_KOSYNC_PORT=$(xml_escape "$KOSYNC_PORT")
-  local P_PROXY_PORT
-  P_PROXY_PORT=$(xml_escape "$PROXY_PORT")
-  local P_US_REMOTE
-  P_US_REMOTE=$(xml_escape "$US_REMOTE_HOST")
-  local P_SG_REMOTE
-  P_SG_REMOTE=$(xml_escape "$SG_REMOTE_HOST")
 
   echo -e "${COLOR_BOLD}Generating dynamic launchd plists for User: ${CURRENT_USER}...${COLOR_RESET}"
   echo -e "  Root:       ${LIGHTHOUSE_ROOT}"
@@ -1014,132 +832,7 @@ EOF
 </plist>
 EOF
 
-  # 3. Tunnel Watchdog Plist
-  local watchdog_plist="${target_dir}/${DAEMON_PREFIX}.reading-tunnel-watchdog.plist"
-  cat << EOF > "$watchdog_plist"
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>${P_PREFIX}.reading-tunnel-watchdog</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${P_BASH}</string>
-        <string>${P_ROOT}/scripts/tunnel-watchdog.sh</string>
-    </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-        <key>LIGHTHOUSE_ROOT</key>
-        <string>${P_ROOT}</string>
-        <key>HOME</key>
-        <string>${P_HOME}</string>
-    </dict>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>StartInterval</key>
-    <integer>120</integer>
-    <key>StandardOutPath</key>
-    <string>${P_LOG_DIR}/reading-tunnel-watchdog.log</string>
-    <key>StandardErrorPath</key>
-    <string>${P_LOG_DIR}/reading-tunnel-watchdog.log</string>
-</dict>
-</plist>
-EOF
-
-  # 4. US VLESS Tunnel Plist
-  local vless_plist="${target_dir}/${DAEMON_PREFIX}.reading-vless-tunnel.plist"
-  cat << EOF > "$vless_plist"
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>${P_PREFIX}.reading-vless-tunnel</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${P_SSH}</string>
-        <string>-N</string>
-        <string>-R</string>
-        <string>0.0.0.0:${P_UPLOADER_PORT}:127.0.0.1:${P_UPLOADER_PORT}</string>
-        <string>-R</string>
-        <string>0.0.0.0:${P_KOSYNC_PORT}:127.0.0.1:${P_KOSYNC_PORT}</string>
-        <string>-o</string>
-        <string>ProxyCommand=nc -X 5 -x 127.0.0.1:${P_PROXY_PORT} %h %p</string>
-        <string>-o</string>
-        <string>ServerAliveInterval=15</string>
-        <string>-o</string>
-        <string>ServerAliveCountMax=3</string>
-        <string>-o</string>
-        <string>ExitOnForwardFailure=yes</string>
-        <string>${P_US_REMOTE}</string>
-    </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    </dict>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>${P_LOG_DIR}/reading-vless-tunnel.log</string>
-    <key>StandardErrorPath</key>
-    <string>${P_LOG_DIR}/reading-vless-tunnel.log</string>
-</dict>
-</plist>
-EOF
-
-  # 5. Singapore Tunnel Plist
-  local sg_plist="${target_dir}/${DAEMON_PREFIX}.reading-sg-tunnel.plist"
-  cat << EOF > "$sg_plist"
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>${P_PREFIX}.reading-sg-tunnel</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${P_SSH}</string>
-        <string>-N</string>
-        <string>-R</string>
-        <string>127.0.0.1:${P_UPLOADER_PORT}:127.0.0.1:${P_UPLOADER_PORT}</string>
-        <string>-R</string>
-        <string>127.0.0.1:${P_KOSYNC_PORT}:127.0.0.1:${P_KOSYNC_PORT}</string>
-        <string>-o</string>
-        <string>ServerAliveInterval=15</string>
-        <string>-o</string>
-        <string>ServerAliveCountMax=3</string>
-        <string>-o</string>
-        <string>ExitOnForwardFailure=yes</string>
-        <string>-o</string>
-        <string>BatchMode=yes</string>
-        <string>-o</string>
-        <string>ConnectTimeout=8</string>
-        <string>${P_SG_REMOTE}</string>
-    </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    </dict>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>${P_LOG_DIR}/reading-sg-tunnel.log</string>
-    <key>StandardErrorPath</key>
-    <string>${P_LOG_DIR}/reading-sg-tunnel.log</string>
-</dict>
-</plist>
-EOF
-
-  # 6. Daily Backup Plist
+  # 3. Daily Backup Plist
   local backup_plist="${target_dir}/${DAEMON_PREFIX}.reading-stack-backup.plist"
   cat << EOF > "$backup_plist"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1237,7 +930,7 @@ EOF
 EOF
 
   # Validate all generated plists with plutil if available
-  local all_plists=("$uploader_plist" "$bot_plist" "$watchdog_plist" "$vless_plist" "$sg_plist" "$backup_plist" "$ssd_backup_plist")
+  local all_plists=("$uploader_plist" "$bot_plist" "$backup_plist" "$ssd_backup_plist")
   for p in "${all_plists[@]}"; do
     if command -v plutil >/dev/null 2>&1; then
       plutil -lint "$p" >/dev/null

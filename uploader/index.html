@@ -2377,16 +2377,16 @@
 
         <!-- Quick Wireless Sync & OPDS URLs -->
         <div class="space-y-2 pt-1">
-          <div class="text-[10px] font-bold text-[#71717a] uppercase tracking-wider">Wireless Reader Sync &amp; OPDS</div>
+          <div class="text-[10px] font-bold text-[#71717a] uppercase tracking-wider">Wireless Reader Sync &amp; OPDS (Home LAN)</div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <button type="button" onclick="copyToClipboard('http://kosync-sg.wavypremium.xyz')" class="min-h-[44px] h-11 px-3 py-2 bg-[#18181f] hover:bg-zinc-800 text-zinc-200 text-xs font-semibold rounded-xl border border-[#23232a] flex items-center justify-between gap-2 active:scale-[0.98] transition-all duration-150 cursor-pointer">
+            <button type="button" onclick="copyToClipboard('http://192.168.31.15:7200')" class="min-h-[44px] h-11 px-3 py-2 bg-[#18181f] hover:bg-zinc-800 text-zinc-200 text-xs font-semibold rounded-xl border border-[#23232a] flex items-center justify-between gap-2 active:scale-[0.98] transition-all duration-150 cursor-pointer">
               <span class="flex items-center gap-2 truncate">
                 <svg class="w-4 h-4 text-sky-400 shrink-0"><use href="#icon-arrows-rotate"/></svg>
                 <span class="truncate">KOSync Server</span>
               </span>
               <span class="text-[10px] font-mono text-[#71717a] px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 shrink-0">Copy</span>
             </button>
-            <button type="button" onclick="copyToClipboard('http://opds.wavypremium.xyz/opds')" class="min-h-[44px] h-11 px-3 py-2 bg-[#18181f] hover:bg-zinc-800 text-zinc-200 text-xs font-semibold rounded-xl border border-[#23232a] flex items-center justify-between gap-2 active:scale-[0.98] transition-all duration-150 cursor-pointer">
+            <button type="button" onclick="copyToClipboard('http://192.168.31.15:8086/opds')" class="min-h-[44px] h-11 px-3 py-2 bg-[#18181f] hover:bg-zinc-800 text-zinc-200 text-xs font-semibold rounded-xl border border-[#23232a] flex items-center justify-between gap-2 active:scale-[0.98] transition-all duration-150 cursor-pointer">
               <span class="flex items-center gap-2 truncate">
                 <svg class="w-4 h-4 text-emerald-400 shrink-0"><use href="#icon-rss"/></svg>
                 <span class="truncate">OPDS Catalog</span>
@@ -2996,7 +2996,7 @@
           <div><strong class="text-zinc-200">Local progress &amp; highlights:</strong> KOReader already writes each book's percentage, highlights and notes into the sidecar folder beside the book (<code class="text-zinc-300">&lt;book&gt;.sdr/metadata.&lt;extension&gt;.lua</code>). The plugin reads that file directly: <strong class="text-zinc-200">Highlights</strong> lists this device's quotes and notes, newest first, grouped by book (tap one to open the book at that page), and progress on every screen prefers the device's own number over the server's for books that are on this device. No connection is needed for either, nothing polls, and it is strictly read-only — the plugin never writes a sidecar and never uploads progress.</div>
           <div><strong class="text-zinc-200">Paging and the device scan are both cached.</strong> A page turn fetches only the catalog page: the reading shelf behind the progress bars is kept for 60 seconds per view instead of being re-requested for every page, and is refetched on <strong>Refresh</strong>, when you switch Books / Authors / Series, and immediately after a download. A request that fails is never remembered: that page falls back to this device's own progress and says so, and the next page asks the server again. The sidecar walk remembers <em>where</em> the sidecars are (it writes only their folder paths to KOReader's cache directory) so a later session reads those folders directly instead of walking the whole library again — every percentage and highlight is still re-read fresh each time. <strong>Refresh</strong> in the book list walks the device again and rewrites that list, a book downloaded through this plugin appears at once, and a list older than ten minutes is not reused — the next scan walks the library instead — so a sidecar the walk has not seen yet (a book you copy on by hand, or one you opened in KOReader since the last walk) appears as soon as you press <strong>Refresh</strong>.</div>
           <div><strong class="text-zinc-200">Regenerating:</strong> download again and replace <code class="text-zinc-300">koreader/plugins/lighthouse.koplugin</code>. Do this after changing the server address or the API key, or to pick up a newer build of the plugin.</div>
-          <div><strong class="text-zinc-200">Which server URL:</strong> the archive always targets the origin this page is served from. Download from the LAN address to get a LAN plugin, or from the WAN address to get a WAN plugin. An <code class="text-zinc-300">https://</code> origin uses KOReader's TLS transport; a build without TLS reports it plainly and the LAN <code class="text-zinc-300">http://</code> address still works.</div>
+          <div><strong class="text-zinc-200">Which server URL:</strong> the archive always targets the LAN origin this page is served from (<code class="text-zinc-300">http://192.168.31.15:8086</code>). An <code class="text-zinc-300">https://</code> origin uses KOReader's TLS transport; the LAN <code class="text-zinc-300">http://</code> address works on every build with zero tunnel dependencies.</div>
           <div><strong class="text-zinc-200">Slow connections:</strong> the plugin follows up to 5 redirects and reads its timeouts from <code class="text-zinc-300">lighthouse_config.lua</code> (90s catalog, 300s download by default), so a first catalog page over slow Wi-Fi still loads. Cover downloads are capped per page (a few seconds and at most a dozen images), and no single cover request is allowed to outlive that budget, so a slow link degrades to placeholders instead of a stalled catalog.</div>
           <div><strong class="text-zinc-200">Devices that cannot take a plugin:</strong> the manual OPDS + KOSync setup in the other tabs still works and is unchanged.</div>
           <div><strong class="text-zinc-200">Reading stats is one page:</strong> it reads <code class="text-zinc-300">/api/kosync/stats</code> once per open (no polling, no background work) and draws everything without scrolling or paging — the four-cell headline strip (total hours, streak, today, this week), the library and year bands side by side, up to three currently-reading rows with a pixel bar and percent, the compact 52-week activity grid (one rect per day, weeks as columns), up to three recent sessions, and one footer line (<code class="text-zinc-300">LightHouse</code> … <code class="text-zinc-300">32 min on an average day · detail on web</code>). Any section the server did not send is left out entirely rather than shown as zero or a placeholder.</div>
@@ -3029,35 +3029,15 @@
           <div class="flex items-start gap-2.5">
             <span class="w-5 h-5 rounded-full bg-zinc-800 text-zinc-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">3</span>
             <div class="w-full space-y-1.5">
-              <div>Tap <strong>Custom sync server</strong> and enter server address:</div>
+              <div>Tap <strong>Custom sync server</strong> and enter the local LAN server address:</div>
               <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1">
                 <div class="flex-1 flex items-center justify-between bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
-                  <span class="text-[10px] text-emerald-400 uppercase font-semibold mr-2">Plain HTTP (Port 80)</span>
-                  <code class="text-xs font-mono text-zinc-100 select-all truncate">http://kosync-sg.wavypremium.xyz</code>
-                </div>
-                <button onclick="copyToClipboard('http://kosync-sg.wavypremium.xyz')" class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 text-xs font-semibold rounded-xl border border-zinc-700/60 transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
-                  <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
-                  <span>Copy HTTP</span>
-                </button>
-              </div>
-              <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                <div class="flex-1 flex items-center justify-between bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
-                  <span class="text-[10px] text-sky-400 uppercase font-semibold mr-2">Encrypted TLS (8443)</span>
-                  <code class="text-xs font-mono text-zinc-100 select-all truncate">https://kosync-sg.wavypremium.xyz:8443</code>
-                </div>
-                <button onclick="copyToClipboard('https://kosync-sg.wavypremium.xyz:8443')" class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 text-xs font-semibold rounded-xl border border-zinc-700/60 transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
-                  <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
-                  <span>Copy TLS</span>
-                </button>
-              </div>
-              <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                <div class="flex-1 flex items-center justify-between bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
-                  <span class="text-[10px] text-zinc-500 uppercase font-semibold mr-2">Local LAN</span>
+                  <span class="text-[10px] text-emerald-400 uppercase font-semibold mr-2">Home LAN (HTTP)</span>
                   <code class="text-xs font-mono text-zinc-100 select-all truncate">http://192.168.31.15:7200</code>
                 </div>
                 <button onclick="copyToClipboard('http://192.168.31.15:7200')" class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 text-xs font-semibold rounded-xl border border-zinc-700/60 transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
                   <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
-                  <span>Copy Local</span>
+                  <span>Copy LAN</span>
                 </button>
               </div>
             </div>
@@ -3111,8 +3091,7 @@
                   <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
                 </button>
               </div>
-              <div class="text-[10px] text-zinc-500 font-medium">Port: <code class="text-zinc-300">8086</code></div>
-              <div class="text-[10px] text-amber-300/90 font-medium">Optional WAN: <code class="text-zinc-300">opds.wavypremium.xyz</code> plain HTTP port <code class="text-zinc-300">80</code>. <code class="text-zinc-300">?token=</code> travels in cleartext and is logged in proxy access logs. Do not publish the token.</div>
+              <div class="text-[10px] text-zinc-500 font-medium">Port: <code class="text-zinc-300">8086</code> (Home LAN plain HTTP)</div>
             </div>
             <div>4. Set <code class="text-zinc-200">JOPLIN_TOKEN</code> in the uploader <code class="text-zinc-200">.env</code> to a private random secret, then enter that same value in KOReader under <strong>Set authorization token</strong>. Do not use a shared or published token. If <code class="text-zinc-200">JOPLIN_TOKEN</code> is unset, exports are rejected.</div>
             <div class="pt-1">5. Tap <strong>Export now</strong> &rarr; <strong>Export to Joplin</strong>. Highlights, chapters, and notes are formatted with clean YAML frontmatter and saved to <code class="text-zinc-200">Books/&lt;Title&gt;.md</code>. Re-exporting deduplicates generated outside attribution while preserving quote bytes, displayed attribution, and manual notes verbatim without duplicates!</div>
@@ -3132,13 +3111,6 @@
             <div class="flex items-center gap-2 pt-0.5">
               <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-purple-300 truncate select-all">http://192.168.31.15:8086/api/highlights/sync</code>
               <button onclick="copyToClipboard('http://192.168.31.15:8086/api/highlights/sync')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
-                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
-              </button>
-            </div>
-            <div class="pt-0.5">Over public WAN (Singapore proxy):</div>
-            <div class="flex items-center gap-2 pt-0.5">
-              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-purple-300 truncate select-all">https://reading-sg.wavypremium.xyz:8443/api/highlights/sync</code>
-              <button onclick="copyToClipboard('https://reading-sg.wavypremium.xyz:8443/api/highlights/sync')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
@@ -3291,22 +3263,22 @@
               <div>Enter Catalog URL:</div>
               <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1">
                 <div class="flex-1 flex items-center justify-between bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
-                  <span class="text-[10px] text-emerald-400 uppercase font-semibold mr-2">Plain HTTP (Port 80)</span>
-                  <code class="text-xs font-mono text-zinc-100 select-all truncate">http://opds.wavypremium.xyz/opds</code>
+                  <span class="text-[10px] text-emerald-400 uppercase font-semibold mr-2">LightHouse OPDS (LAN)</span>
+                  <code class="text-xs font-mono text-zinc-100 select-all truncate">http://192.168.31.15:8086/opds</code>
                 </div>
-                <button onclick="copyToClipboard('http://opds.wavypremium.xyz/opds')" class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 text-xs font-semibold rounded-xl border border-zinc-700/60 transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
+                <button onclick="copyToClipboard('http://192.168.31.15:8086/opds')" class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 text-xs font-semibold rounded-xl border border-zinc-700/60 transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
                   <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
-                  <span>Copy HTTP</span>
+                  <span>Copy HQ</span>
                 </button>
               </div>
               <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                 <div class="flex-1 flex items-center justify-between bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
-                  <span class="text-[10px] text-sky-400 uppercase font-semibold mr-2">Encrypted TLS (8443)</span>
-                  <code class="text-xs font-mono text-zinc-100 select-all truncate">https://opds.wavypremium.xyz:8443/opds</code>
+                  <span class="text-[10px] text-sky-400 uppercase font-semibold mr-2">Calibre OPDS (LAN)</span>
+                  <code class="text-xs font-mono text-zinc-100 select-all truncate">http://192.168.31.15:8088/opds</code>
                 </div>
-                <button onclick="copyToClipboard('https://opds.wavypremium.xyz:8443/opds')" class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 text-xs font-semibold rounded-xl border border-zinc-700/60 transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
+                <button onclick="copyToClipboard('http://192.168.31.15:8088/opds')" class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 text-xs font-semibold rounded-xl border border-zinc-700/60 transition-colors shrink-0 flex items-center justify-center gap-1.5 cursor-pointer">
                   <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
-                  <span>Copy TLS</span>
+                  <span>Copy Calibre</span>
                 </button>
               </div>
               <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
@@ -3863,7 +3835,7 @@
           </div>
           <div class="flex items-start gap-2.5">
             <span class="w-5 h-5 rounded-full bg-zinc-800 text-zinc-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">5</span>
-            <div><strong>Verify a key:</strong> <code class="text-zinc-100">curl -H "Authorization: Bearer &lt;key&gt;" -X POST https://reading-sg.wavypremium.xyz:8443/api/auth/session</code> reports the key name and its scopes without ever echoing the secret.</div>
+            <div><strong>Verify a key:</strong> <code class="text-zinc-100">curl -H "Authorization: Bearer &lt;key&gt;" -X POST http://192.168.31.15:8086/api/auth/session</code> reports the key name and its scopes without ever echoing the secret.</div>
           </div>
         </div>
       </div>
@@ -3948,7 +3920,7 @@
                   <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
                 </button>
               </div>
-              <div class="text-[10px] text-zinc-500 font-medium">Port <code class="text-zinc-200">8086</code>. Optional WAN is plain HTTP port <code class="text-zinc-200">80</code> on <code class="text-zinc-200">opds.wavypremium.xyz</code>. <code class="text-zinc-200">?token=</code> is cleartext and appears in proxy access logs.</div>
+              <div class="text-[10px] text-zinc-500 font-medium">Port <code class="text-zinc-200">8086</code> (Home LAN plain HTTP).</div>
               <div class="text-[10px] text-zinc-500 font-medium">Authorization token: the private <code class="text-zinc-200">JOPLIN_TOKEN</code> from <code class="text-zinc-200">.env</code>. It is not published here.</div>
             </div>
           </div>
@@ -3971,73 +3943,19 @@
             </div>
           </div>
 
-          <!-- KOSync Plain HTTP (Singapore SG) -->
+          <!-- LightHouse OPDS Proxy (Local) -->
           <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
-                <span>KOSync Server (Singapore Port 80)</span>
+                <span>LightHouse OPDS Proxy (Local)</span>
               </span>
-              <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-emerald-400 font-mono border border-zinc-700">WAN Default</span>
+              <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-emerald-400 font-mono border border-zinc-700">LAN</span>
             </div>
-            <div class="text-[11px] text-zinc-400">Plain HTTP progress sync (Recommended for KOReader/Kindle)</div>
+            <div class="text-[11px] text-zinc-400">Reverse-proxied Calibre catalog feed on port 8086</div>
             <div class="flex items-center gap-2 pt-1">
-              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">http://kosync-sg.wavypremium.xyz</code>
-              <button onclick="copyToClipboard('http://kosync-sg.wavypremium.xyz')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
-                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
-              </button>
-            </div>
-          </div>
-
-          <!-- KOSync Encrypted TLS (Singapore SG) -->
-          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
-            <div class="flex items-center justify-between">
-              <span class="text-xs font-bold text-white flex items-center gap-1.5">
-                <span class="w-2 h-2 rounded-full bg-sky-400"></span>
-                <span>KOSync Server (Encrypted Port 8443)</span>
-              </span>
-              <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-sky-400 font-mono border border-zinc-700">WAN TLS</span>
-            </div>
-            <div class="text-[11px] text-zinc-400">Encrypted TLS sync on alternate port 8443</div>
-            <div class="flex items-center gap-2 pt-1">
-              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://kosync-sg.wavypremium.xyz:8443</code>
-              <button onclick="copyToClipboard('https://kosync-sg.wavypremium.xyz:8443')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
-                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
-              </button>
-            </div>
-          </div>
-
-          <!-- OPDS Plain HTTP (Singapore SG) -->
-          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
-            <div class="flex items-center justify-between">
-              <span class="text-xs font-bold text-white flex items-center gap-1.5">
-                <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
-                <span>Calibre OPDS Feed (Singapore Port 80)</span>
-              </span>
-              <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-emerald-400 font-mono border border-zinc-700">WAN Default</span>
-            </div>
-            <div class="text-[11px] text-zinc-400">Plain HTTP book catalog (Recommended for KOReader/Kindle)</div>
-            <div class="flex items-center gap-2 pt-1">
-              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">http://opds.wavypremium.xyz/opds</code>
-              <button onclick="copyToClipboard('http://opds.wavypremium.xyz/opds')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
-                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
-              </button>
-            </div>
-          </div>
-
-          <!-- OPDS Encrypted TLS (Singapore SG) -->
-          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
-            <div class="flex items-center justify-between">
-              <span class="text-xs font-bold text-white flex items-center gap-1.5">
-                <span class="w-2 h-2 rounded-full bg-sky-400"></span>
-                <span>Calibre OPDS Feed (Encrypted Port 8443)</span>
-              </span>
-              <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-sky-400 font-mono border border-zinc-700">WAN TLS</span>
-            </div>
-            <div class="text-[11px] text-zinc-400">Encrypted TLS OPDS catalog on alternate port 8443</div>
-            <div class="flex items-center gap-2 pt-1">
-              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://opds.wavypremium.xyz:8443/opds</code>
-              <button onclick="copyToClipboard('https://opds.wavypremium.xyz:8443/opds')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">http://192.168.31.15:8086/opds</code>
+              <button onclick="copyToClipboard('http://192.168.31.15:8086/opds')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>
@@ -4097,52 +4015,16 @@
             </div>
           </div>
 
-          <!-- LightHouse Singapore WAN (Mini App & Web App) -->
-          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
-            <div class="flex items-center justify-between">
-              <span class="text-xs font-bold text-white flex items-center gap-1.5">
-                <span class="w-2 h-2 rounded-full bg-sky-400"></span>
-                <span>LightHouse Singapore (Mini App &amp; Web)</span>
-              </span>
-              <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-sky-400 font-mono border border-zinc-700">WAN Port 8443</span>
-            </div>
-            <div class="text-[11px] text-zinc-400">Low-latency Singapore WAN Mini App &amp; Web App</div>
-            <div class="flex items-center gap-2 pt-1">
-              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://reading-sg.wavypremium.xyz:8443</code>
-              <button onclick="copyToClipboard('https://reading-sg.wavypremium.xyz:8443')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
-                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
-              </button>
-            </div>
-          </div>
-
-          <!-- LightHouse WAN / Mini App (Caddy Global Edge) -->
-          <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
-            <div class="flex items-center justify-between">
-              <span class="text-xs font-bold text-white flex items-center gap-1.5">
-                <span class="w-2 h-2 rounded-full bg-blue-400"></span>
-                <span>LightHouse (WAN / Mini App)</span>
-              </span>
-              <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-sky-400 font-mono border border-zinc-700">Global</span>
-            </div>
-            <div class="text-[11px] text-zinc-400">Global HTTPS access & Telegram Mini App</div>
-            <div class="flex items-center gap-2 pt-1">
-              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://reading.wavypremium.xyz</code>
-              <button onclick="copyToClipboard('https://reading.wavypremium.xyz')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
-                <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
-              </button>
-            </div>
-          </div>
-
           <!-- LAN Proxy Gateway -->
           <div class="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-white flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-indigo-400"></span>
-                <span>LAN Proxy Gateway</span>
+                <span>Outbound Proxy Gateway</span>
               </span>
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-indigo-400 font-mono border border-zinc-700">Proxy</span>
             </div>
-            <div class="text-[11px] text-zinc-400">sing-box tunnel for GFW bypass (HTTP/SOCKS5)</div>
+            <div class="text-[11px] text-zinc-400">sing-box outbound proxy on Mac Mini (HTTP/SOCKS5)</div>
             <div class="flex items-center gap-2 pt-1">
               <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-300 truncate select-all">192.168.31.15:7890</code>
               <button onclick="copyToClipboard('192.168.31.15:7890')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
@@ -4162,8 +4044,8 @@
             </div>
             <div class="text-[11px] text-zinc-400">Downloads and imports series or book from lnori.com, server.elsci.one, or server.elscione.com with Anubis PoW solving, asynchronous FIFO sequential queueing, autonomous background decoupling, live SSE progress streaming (<code>stream: true</code>), progress polling with queue position (<code>GET /api/lnori/progress</code>), and cancel support (<code>POST /api/lnori/cancel</code>)</div>
             <div class="flex items-center gap-2 pt-1">
-              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">https://reading-sg.wavypremium.xyz:8443/api/lnori/ingest</code>
-              <button onclick="copyToClipboard('https://reading-sg.wavypremium.xyz:8443/api/lnori/ingest')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
+              <code class="flex-1 px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 truncate select-all">http://192.168.31.15:8086/api/lnori/ingest</code>
+              <button onclick="copyToClipboard('http://192.168.31.15:8086/api/lnori/ingest')" class="p-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white rounded-lg border border-zinc-700/60 transition-colors cursor-pointer shrink-0" title="Copy">
                 <svg class="w-3.5 h-3.5"><use href="#icon-copy"/></svg>
               </button>
             </div>

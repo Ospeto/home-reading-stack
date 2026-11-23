@@ -231,9 +231,9 @@ const PROXY_URL = "http://127.0.0.1:7890";
 const WEB_UPLOADER_URL = "http://192.168.31.15:8086";
 const CALIBRE_WEB_URL = "http://192.168.31.15:8088";
 export const READING_WEBAPP_URL =
-  process.env.READING_WEBAPP_URL || "https://reading-sg.wavypremium.xyz:8443";
+  process.env.READING_WEBAPP_URL || "http://192.168.31.15:8086";
 export const KOSYNC_WAN_URL =
-  process.env.KOSYNC_WAN_URL || "http://kosync-sg.wavypremium.xyz";
+  process.env.KOSYNC_WAN_URL || "http://192.168.31.15:7200";
 const MAX_TELEGRAM_FILE_SIZE = 20 * 1024 * 1024; // 20MB Telegram Bot API limit
 export const ALLOWED_EXTS = [".epub", ".zip", ".rar", ".7z", ".tar"];
 export const REJECTED_EXTS = [
@@ -1498,53 +1498,6 @@ export async function getStatusDashboard(): Promise<string> {
     .toLocaleString("en-GB", { timeZone: "Asia/Yangon" })
     .replace(",", "");
 
-  // 1. WAN Edge
-  let wanReadingStatus = "🔴 `Unreachable`";
-  const t0 = performance.now();
-  try {
-    const res = await safeFetchWithSsrf(READING_WEBAPP_URL, {
-      proxy: PROXY_URL,
-      signal: AbortSignal.timeout(8000),
-    } as any);
-    const dt = Math.round(performance.now() - t0);
-    wanReadingStatus =
-      res.status === 200
-        ? `🟢 \`200 OK\` (${dt}ms)`
-        : `🔴 \`HTTP ${res.status}\` (${dt}ms)`;
-  } catch (_e) {
-    void _e;
-    const dt = Math.round(performance.now() - t0);
-    wanReadingStatus = `🔴 \`Timeout/Error\` (${dt}ms)`;
-  }
-
-  let wanKosyncStatus = "🟡 `Pending WAN Setup`";
-  try {
-    const res = await safeFetchWithSsrf(KOSYNC_WAN_URL, {
-      proxy: PROXY_URL,
-      signal: AbortSignal.timeout(4000),
-    } as any);
-    wanKosyncStatus =
-      res.status === 200 ? `🟢 \`200 OK\`` : `🟡 \`HTTP ${res.status}\``;
-  } catch (_e) {
-    void _e;
-    wanKosyncStatus = `🟡 \`Tunnel Forwarded (:7200)\` (DNS Pending)`;
-  }
-
-  // 2. Reverse SSH Tunnel
-  let tunnelStatus = "🔴 `Stopped`";
-  try {
-    const pg = spawnSync("pgrep", ["-f", "ssh.*0.0.0.0:8086"], {
-      encoding: "utf8",
-      timeout: SUBPROCESS_TIMEOUT_MS,
-      maxBuffer: SUBPROCESS_MAX_BUFFER,
-    });
-    throwOnSubprocessTimeout(pg, "pgrep tunnel");
-    const pid = (pg.stdout || "").trim().split("\n")[0];
-    if (pid) tunnelStatus = `🟢 \`Active\` (PID ${pid})`;
-  } catch (_e) {
-    void _e;
-  }
-
   let proxyStatus = "🔴 `Disconnected`";
   try {
     const pCheck = spawnSync("nc", ["-z", "127.0.0.1", "7890"], {
@@ -1733,14 +1686,7 @@ export async function getStatusDashboard(): Promise<string> {
   return (
     `📊 *Reading Stack Health Dashboard*\n` +
     `_Updated: ${ts} (Asia/Yangon)_\n\n` +
-    `🌐 *WAN Edge (VPS panel)*\n` +
-    `• *Reading HQ:* ${wanReadingStatus} • [reading.wavypremium.xyz](${READING_WEBAPP_URL})\n` +
-    `• *KOSync WAN:* ${wanKosyncStatus}\n\n` +
-    `🚇 *Reverse SSH Tunnel*\n` +
-    `• *Tunnel Daemon:* ${tunnelStatus}\n` +
-    `• *Port Forwards:* \`8086\` (HQ) • \`7200\` (KOSync)\n` +
-    `• *Sing-box Proxy:* ${proxyStatus}\n\n` +
-    `📚 *Reading HQ & Calibre*\n` +
+    `📚 *Reading HQ & Calibre (LAN)*\n` +
     `• *Web Uploader:* ${uploaderLocal}\n` +
     `• *Calibre Server:* ${calibreLocal}\n` +
     `• *Total Catalog:* \`${totalBooks} books\` (\`${formatStats}\`)\n` +
@@ -1750,6 +1696,8 @@ export async function getStatusDashboard(): Promise<string> {
     `• *Sync Database:* ${kosyncDbStatus}\n` +
     `• *Users & Devices:* \`${kosyncUsers} user(s)\` • \`${deviceNames ? "Active" : "None"}${deviceText}\`\n` +
     `• *Synced Progress:* \`${kosyncProgress} reading record(s)\`\n\n` +
+    `🔌 *Outbound Proxy (Mac Mini)*\n` +
+    `• *Sing-box Proxy:* ${proxyStatus}\n\n` +
     `🖥️ *Mac Mini Host*\n` +
     `• *Uptime:* \`${uptimeStr}\`\n` +
     `• *Memory:* ${memStr}\n` +
@@ -1815,7 +1763,7 @@ export function getMainMenuText(): string {
     `• *Currently Reading:* Track reading progress synchronized from KOReader (\`/reading\`).\n` +
     `• *Recent Books:* View newest additions to your library (\`/recent\`).\n` +
     `• *Ingest:* Send eBook files (\`.epub\`, \`.pdf\`, \`.cbz\`, etc.) or paste any article URL.\n` +
-    `• *Server Status:* Monitor WAN edge, reverse tunnel, and host metrics (\`/status\`).\n` +
+    `• *Server Status:* Monitor local services, KOSync, and host metrics (\`/status\`).\n` +
     `• *Hot Backup:* Snapshot reading databases to Telegram (\`/backup\`).\n` +
     `• *Deduplicate:* Inspect and clean duplicate books (\`/dedup\`).`
   );
@@ -1830,16 +1778,14 @@ export function getHelpMessage(): string {
     `• \`/recent\` - 5 newest books in Calibre library\n` +
     `• \`/find <query>\` (or \`/f <query>\`) - Search library\n` +
     `• \`/get <id>\` - Download any book by ID\n` +
-    `• \`/app\` - Launch Reading HQ Mini App\n` +
+    `• \`/app\` - Launch Reading HQ Dashboard\n` +
     `• \`/status\` (or \`/health\`) - System health dashboard\n` +
     `• \`/backup\` - Hot backup of SQLite databases\n` +
     `• \`/dedup\` (or \`/dedupe\`, \`/duplicates\`, \`/clean\`, \`/clean_duplicates\`) - Inspect and clean duplicate books\n\n` +
-    `*KOReader Connection Guide*\n\n` +
+    `*KOReader Connection Guide (Home LAN)*\n\n` +
     `*1. KOSync Progress Sync*\n` +
     `• In KOReader: open any book → Top menu → *Tools* (wrench icon) → *Progress sync*\n` +
-    `• Tap *Custom sync server* → enter server address:\n` +
-    `  • Plain HTTP (Port 80 - Recommended): \`http://kosync-sg.wavypremium.xyz\`\n` +
-    `  • Encrypted TLS (Port 8443): \`https://kosync-sg.wavypremium.xyz:8443\`\n` +
+    `• Tap *Custom sync server* → enter local LAN address:\n` +
     `  • Local LAN: \`http://192.168.31.15:7200\`\n` +
     `• Tap *Login* → enter Username: \`moe\` (password as configured)\n` +
     `• Check *"Automatically keep documents in sync"*\n` +
@@ -1848,30 +1794,15 @@ export function getHelpMessage(): string {
     `• In KOReader: top menu → *Search* (magnifying glass) → *OPDS catalog*\n` +
     `• Tap *Add new catalog*:\n` +
     `  • Catalog Name: \`Mac Mini Library\`\n` +
-    `  • Plain HTTP (Port 80 - Recommended): \`http://opds.wavypremium.xyz/opds\`\n` +
-    `  • Encrypted TLS (Port 8443): \`https://opds.wavypremium.xyz:8443/opds\`\n` +
-    `  • Local LAN: \`http://192.168.31.15:8088/opds\` or \`http://192.168.31.15:8086/opds\`\n` +
-    `• Tap *Connect* (no login required on local LAN or WAN)\n\n` +
-    `*3. Kindle Wi-Fi Proxy (GFW / DPI Bypass)*\n` +
-    `• If Kindle displays connection errors reaching external servers:\n` +
-    `• Wi-Fi Settings → connected network → Advanced → HTTP Proxy:\n` +
-    `  • Host: \`192.168.31.15\` | Port: \`7890\`\n\n` +
-    `*Stack Endpoints Reference*\n` +
-    `• *KOSync Server:*\n` +
-    `  • Plain HTTP (Port 80 - Recommended): \`http://kosync-sg.wavypremium.xyz\`\n` +
-    `  • Encrypted TLS (Port 8443): \`https://kosync-sg.wavypremium.xyz:8443\`\n` +
-    `  • Local LAN: \`http://192.168.31.15:7200\`\n` +
-    `• *Calibre OPDS Feed:*\n` +
-    `  • Plain HTTP (Port 80 - Recommended): \`http://opds.wavypremium.xyz/opds\`\n` +
-    `  • Encrypted TLS (Port 8443): \`https://opds.wavypremium.xyz:8443/opds\`\n` +
-    `  • Local LAN: \`http://192.168.31.15:8088/opds\` or \`http://192.168.31.15:8086/opds\`\n` +
-    `• *Calibre Web Reader:*\n` +
-    `  • Local: \`http://192.168.31.15:8088\`\n` +
-    `• *Reading HQ Dashboard:*\n` +
-    `  • Local: \`http://192.168.31.15:8086\`\n` +
-    `  • WAN / Mini App: \`https://reading.wavypremium.xyz\`\n` +
-    `• *LAN Proxy Gateway:*\n` +
-    `  • \`192.168.31.15:7890\` (HTTP/SOCKS5)\n` +
+    `  • LightHouse OPDS: \`http://192.168.31.15:8086/opds\`\n` +
+    `  • Direct Calibre OPDS: \`http://192.168.31.15:8088/opds\`\n` +
+    `• Tap *Connect* (no login required on local LAN)\n\n` +
+    `*Stack Endpoints Reference (LAN)*\n` +
+    `• *KOSync Server:* \`http://192.168.31.15:7200\`\n` +
+    `• *Calibre OPDS Feed:* \`http://192.168.31.15:8086/opds\` or \`http://192.168.31.15:8088/opds\`\n` +
+    `• *Calibre Web Reader:* \`http://192.168.31.15:8088\`\n` +
+    `• *Reading HQ Dashboard:* \`http://192.168.31.15:8086\`\n` +
+    `• *Outbound Proxy Gateway:* \`127.0.0.1:7890\` (HTTP/SOCKS5 on Mac Mini)\n` +
     `• *Telegram Bot:* \`@saroat_ospeto_bot\`\n\n` +
     `_Send any EPUB file (.epub or .zip/.7z archive) or article URL to ingest immediately._`
   );
