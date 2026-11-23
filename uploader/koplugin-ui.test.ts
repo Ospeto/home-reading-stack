@@ -428,6 +428,30 @@ print("square_raises=" .. tostring(raised_ok))
 print("square_restored_after_raise=" .. tostring(SizeProbe.radius.window))
 print("corner_radius_token=" .. tostring(Ui.tokens.corner_radius))
 
+-- Phase 3 text utilities & detail / quote-list layout plans -----------------
+local plain = Ui.plainText("<p>Hello &amp; <b>world</b>!</p><br/>Line &quot;two&quot;&nbsp;here.")
+print("plain_text=" .. plain:gsub("\n", "|"))
+local burmese_wrap = Ui.wrapLines("${luaByteEscapes(BURMESE + " " + BURMESE + " " + BURMESE)}", 8, 2)
+local valid_utf8 = true
+for _, ln in ipairs(burmese_wrap.lines) do
+  local i = 1
+  while i <= #ln do
+    local b = ln:byte(i)
+    if b < 0x80 then i = i + 1
+    elseif b >= 0xC2 and b <= 0xDF then i = i + 2
+    elseif b >= 0xE0 and b <= 0xEF then i = i + 3
+    elseif b >= 0xF0 and b <= 0xF4 then i = i + 4
+    else valid_utf8 = false break end
+  end
+end
+print("wrap_burmese_lines=" .. #burmese_wrap.lines .. ":" .. tostring(burmese_wrap.truncated) .. ":" .. tostring(valid_utf8))
+local detail_pw = Ui.detailPlan(1236, 1648, scale_probe, { with_covers = true, action_rows = 2 })
+local detail_no_cov = Ui.detailPlan(800, 600, 1, { with_covers = false, action_rows = 1 })
+print("detail_pw=" .. tostring(detail_pw.fits) .. ":" .. tostring(detail_pw.cover_w > 0) .. ":" .. tostring(detail_pw.body_lines >= 4))
+print("detail_nocov=" .. tostring(detail_no_cov.fits) .. ":" .. tostring(detail_no_cov.cover_w))
+local q_plan = Ui.quoteListPlan(1236, 1648, scale_probe, { min_rows = 2 })
+print("quote_plan=" .. tostring(q_plan.fits) .. ":" .. tostring(q_plan.rows >= 2) .. ":" .. tostring(q_plan.quote_lines >= 2))
+
 print("OK")
 `;
 
@@ -906,5 +930,17 @@ describe("plugin UI primitives: square corners", () => {
     const out = runHarness();
     expect(out.square_raises).toBe("false");
     expect(out.square_restored_after_raise).toBe("7");
+  });
+});
+
+describe("plugin UI primitives: Phase 3 text & planners", () => {
+  it("strips HTML safely, wraps Burmese text on codepoint boundaries, and fits detail/quote plans", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.plain_text).toBe('Hello & world!||Line "two" here.');
+    expect(out.wrap_burmese_lines).toBe("2:true:true");
+    expect(out.detail_pw).toBe("true:true:true");
+    expect(out.detail_nocov).toBe("true:0");
+    expect(out.quote_plan).toBe("true:true:true");
   });
 });

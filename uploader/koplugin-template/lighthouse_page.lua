@@ -134,6 +134,7 @@ end
 local Panel = Widget:extend{
     child = nil,
     action = nil,
+    hold_action = nil,
     focus_line = nil,
     dimen = nil,
 }
@@ -257,6 +258,7 @@ local PageWidget = InputContainer:extend{
     plan = nil,
     faces = nil,
     on_action = nil,
+    on_hold = nil,
     on_overflow = nil,
     on_switch = nil,
     cover_widget = nil,
@@ -306,11 +308,14 @@ function PageWidget:buildHeader()
     local width = plan.content_w
     local actions = self.model.header_actions
     local has_search = type(actions) == "table" and actions.search == true
+    local extra = type(actions) == "table" and type(actions.extra) == "table"
+        and type(actions.extra.action) == "table" and actions.extra or nil
 
     local back_w = math.floor(width * 0.14)
-    local overflow_w = has_search and math.floor(width * 0.10) or math.floor(width * 0.14)
+    local overflow_w = (has_search or extra) and math.floor(width * 0.10) or math.floor(width * 0.14)
     local search_w = has_search and math.floor(width * 0.20) or 0
-    local title_w = math.max(width - back_w - search_w - overflow_w, 1)
+    local extra_w = extra and math.floor(width * 0.24) or 0
+    local title_w = math.max(width - back_w - search_w - extra_w - overflow_w, 1)
 
     local back = LeftContainer:new{
         dimen = Geom:new{ w = back_w, h = plan.header },
@@ -340,6 +345,18 @@ function PageWidget:buildHeader()
         back_panel,
         title,
     }
+    if extra then
+        local extra_box = RightContainer:new{
+            dimen = Geom:new{ w = extra_w, h = plan.header },
+            label(extra.label or "", self.faces.row_small, { bold = true, width = extra_w, align = "right" }),
+        }
+        local extra_panel = Panel:new{
+            child = extra_box,
+            action = extra.action,
+        }
+        self:register(extra_panel)
+        group[#group + 1] = extra_panel
+    end
     if has_search then
         local search_text = actions.search_label or "Search"
         local search = RightContainer:new{
@@ -557,6 +574,45 @@ function PageWidget:buildSectionHeading(heading)
     }
 end
 
+--- Shared 1px bordered cover frame or neutral e-ink placeholder.
+-- @tparam table page PageWidget instance
+-- @param cover_id number|nil
+-- @number cover_w
+-- @number cover_h
+-- @treturn table FrameContainer
+local function coverBoxFor(page, cover_id, cover_w, cover_h)
+    local inner_w = math.max(cover_w - 2, 1)
+    local inner_h = math.max(cover_h - 2, 1)
+    local cover = nil
+    if type(page.cover_widget) == "function" then
+        local ok, widget = pcall(page.cover_widget, cover_id, inner_w, inner_h)
+        if ok and widget then cover = widget end
+    end
+    if cover then
+        return FrameContainer:new{
+            radius = Ui.tokens.corner_radius,
+            bordersize = 1,
+            padding = 0,
+            color = COLOR_BORDER,
+            CenterContainer:new{
+                dimen = Geom:new{ w = inner_w, h = inner_h },
+                cover,
+            },
+        }
+    end
+    return FrameContainer:new{
+        radius = Ui.tokens.corner_radius,
+        bordersize = 1,
+        padding = 0,
+        color = COLOR_BORDER,
+        background = COLOR_PLACEHOLDER_BG,
+        CenterContainer:new{
+            dimen = Geom:new{ w = inner_w, h = inner_h },
+            label(Ui.GLYPH.cover, page.faces.row_small, { align = "center", color = COLOR_MUTED }),
+        },
+    }
+end
+
 --- Builds one content row: cover, title, secondary line, bar, right column.
 -- @tparam table self page
 -- @tparam table row model row (see `lighthouse_views.lua`)
@@ -570,19 +626,12 @@ function PageWidget:buildRow(row, height)
     local right_w = math.max(math.floor(width * 0.16), 1)
     local cover_w = 0
     local cover_h = plan.reading_cover_h or height
-    local cover = nil
 
     -- The reader's "Show cover thumbnails" preference decides whether a row
     -- reserves a cover column at all: turning it off must give the text the
     -- space back, not paint a placeholder where a picture used to be.
     if self.covers and row.kind == "reading" and type(self.cover_widget) == "function" then
         cover_w = plan.reading_cover_w or 0
-        if cover_w > 0 then
-            local inner_w = math.max(cover_w - 2, 1)
-            local inner_h = math.max(cover_h - 2, 1)
-            local ok, widget = pcall(self.cover_widget, row.cover_id, inner_w, inner_h)
-            if ok and widget then cover = widget end
-        end
     end
 
     local text_w = width - right_w - right_gap - (cover_w > 0 and (cover_w + gutter) or 0)
@@ -628,33 +677,7 @@ function PageWidget:buildRow(row, height)
 
     local group = HorizontalGroup:new{ align = "center" }
     if cover_w > 0 then
-        local inner_w = math.max(cover_w - 2, 1)
-        local inner_h = math.max(cover_h - 2, 1)
-        local cover_box
-        if cover then
-            cover_box = FrameContainer:new{
-                radius = Ui.tokens.corner_radius,
-                bordersize = 1,
-                padding = 0,
-                color = COLOR_BORDER,
-                CenterContainer:new{
-                    dimen = Geom:new{ w = inner_w, h = inner_h },
-                    cover,
-                },
-            }
-        else
-            cover_box = FrameContainer:new{
-                radius = Ui.tokens.corner_radius,
-                bordersize = 1,
-                padding = 0,
-                color = COLOR_BORDER,
-                background = COLOR_PLACEHOLDER_BG,
-                CenterContainer:new{
-                    dimen = Geom:new{ w = inner_w, h = inner_h },
-                    label(Ui.GLYPH.cover, self.faces.row_small, { align = "center", color = COLOR_MUTED }),
-                },
-            }
-        end
+        local cover_box = coverBoxFor(self, row.cover_id, cover_w, cover_h)
         group[#group + 1] = LeftContainer:new{
             dimen = Geom:new{ w = cover_w, h = height },
             cover_box,
@@ -671,6 +694,322 @@ function PageWidget:buildRow(row, height)
     }
     local panel = Panel:new{
         child = VerticalGroup:new{ align = "left", group, focus_line },
+        action = row.action,
+        hold_action = row.hold_action,
+        focus_line = focus_line,
+    }
+    if row.action then self:registerFocusable(panel) end
+    return panel
+end
+
+--- Builds the Book Detail Card hero block: large cover + metadata + progress.
+-- @tparam table self page
+-- @tparam table block { cover_id, title, author, author_action, series, series_action, ... }
+-- @treturn table widget
+function PageWidget:buildBookHero(block)
+    local plan = self.plan
+    local width = plan.content_w
+    local gutter = math.max(plan.gap or 8, 8)
+    local sec_gap = math.max(math.floor((plan.gap or 8) / 3), 2)
+    local line_h = plan.line_h or 20
+    local cover_w = (self.covers and plan.cover_w and plan.cover_w > 0) and plan.cover_w or 0
+    local cover_h = plan.cover_h or math.max((plan.hero_h or 120) - gutter, 1)
+    local text_w = math.max(width - (cover_w > 0 and (cover_w + gutter) or 0), 1)
+    local hero_h = math.max(plan.hero_h or cover_h, cover_h)
+
+    local title_px = math.max(math.floor(line_h * 0.72), 12)
+    local title_chars = math.max(math.floor(text_w / math.max(title_px * 0.56, 6)), 14)
+    local wrapped_title = Ui.wrapLines(block.title or "", title_chars, 3)
+    local meta_stack = VerticalGroup:new{ align = "left" }
+    local title_lines = #wrapped_title.lines > 0 and wrapped_title.lines or { block.title or "" }
+    for idx = 1, #title_lines do
+        meta_stack[#meta_stack + 1] = label(title_lines[idx], self.faces.row_title, { bold = true, width = text_w })
+    end
+
+    if block.author and block.author ~= "" then
+        meta_stack[#meta_stack + 1] = VerticalSpan:new{ width = sec_gap }
+        if block.author_action then
+            local author_widget = LeftContainer:new{
+                dimen = Geom:new{ w = text_w, h = line_h },
+                label(block.author .. " " .. Ui.GLYPH.chevron, self.faces.row_small, {
+                    bold = true,
+                    width = text_w,
+                    color = COLOR_BLACK,
+                }),
+            }
+            local author_panel = Panel:new{
+                child = author_widget,
+                action = block.author_action,
+            }
+            self:register(author_panel)
+            meta_stack[#meta_stack + 1] = author_panel
+        else
+            meta_stack[#meta_stack + 1] = label(block.author, self.faces.row_small, {
+                width = text_w,
+                color = COLOR_MUTED,
+            })
+        end
+    end
+
+    if block.series and block.series ~= "" then
+        local series_text = block.series_action
+            and (block.series .. " " .. Ui.GLYPH.chevron)
+            or block.series
+        if block.series_action then
+            local series_widget = LeftContainer:new{
+                dimen = Geom:new{ w = text_w, h = line_h },
+                label(series_text, self.faces.row_small, { width = text_w, color = COLOR_MUTED }),
+            }
+            local series_panel = Panel:new{
+                child = series_widget,
+                action = block.series_action,
+            }
+            self:register(series_panel)
+            meta_stack[#meta_stack + 1] = series_panel
+        else
+            meta_stack[#meta_stack + 1] = label(series_text, self.faces.row_small, {
+                width = text_w,
+                color = COLOR_MUTED,
+            })
+        end
+    end
+
+    local badge_line = Ui.join({ block.rating_stars, block.on_device_label })
+    if badge_line ~= "" then
+        meta_stack[#meta_stack + 1] = VerticalSpan:new{ width = sec_gap }
+        meta_stack[#meta_stack + 1] = label(badge_line, self.faces.row_small, {
+            width = text_w,
+            color = COLOR_MUTED,
+        })
+    end
+
+    if block.progress_ratio ~= nil then
+        local filled = Ui.barFill(block.progress_ratio, text_w)
+        meta_stack[#meta_stack + 1] = VerticalSpan:new{ width = sec_gap }
+        meta_stack[#meta_stack + 1] = progressBar(filled, text_w, plan.bar or 6)
+    end
+    local progress_text = (block.progress_detail and block.progress_detail ~= "")
+        and block.progress_detail
+        or (block.progress_value or "")
+    if progress_text ~= "" then
+        meta_stack[#meta_stack + 1] = VerticalSpan:new{ width = sec_gap }
+        meta_stack[#meta_stack + 1] = label(progress_text, self.faces.row_small, {
+            width = text_w,
+            color = block.progress_ratio ~= nil and COLOR_BLACK or COLOR_MUTED,
+        })
+    end
+    if block.local_note and block.local_note ~= "" then
+        meta_stack[#meta_stack + 1] = label(block.local_note, self.faces.footer, {
+            width = text_w,
+            color = COLOR_MUTED,
+        })
+    end
+
+    local row = HorizontalGroup:new{ align = "top" }
+    if cover_w > 0 then
+        row[#row + 1] = LeftContainer:new{
+            dimen = Geom:new{ w = cover_w, h = cover_h },
+            coverBoxFor(self, block.cover_id, cover_w, cover_h),
+        }
+        row[#row + 1] = HorizontalSpan:new{ width = gutter }
+    end
+    row[#row + 1] = LeftContainer:new{
+        dimen = Geom:new{ w = text_w, h = math.max(hero_h - sec_gap, cover_h) },
+        meta_stack,
+    }
+    return LeftContainer:new{
+        dimen = Geom:new{ w = width, h = hero_h },
+        row,
+    }
+end
+
+--- Renders a 1- or 2-row square action button bar inside Book Detail Card.
+-- @tparam table self page
+-- @tparam table block { buttons = { { label, action, primary, disabled }... } }
+-- @treturn table widget
+function PageWidget:buildActionBar(block)
+    local plan = self.plan
+    local width = plan.content_w
+    local buttons = block.buttons or {}
+    if #buttons == 0 then return VerticalSpan:new{ width = 0 } end
+
+    local btn_h = plan.action_h or 36
+    local thickness = plan.hairline or 1
+    local btn_gap = math.max(math.floor(plan.gap or 8), 4)
+    local row_gap = math.max(math.floor((plan.gap or 8) / 2), 3)
+    local rows = {}
+    if #buttons <= 2 then
+        rows[1] = buttons
+    else
+        for idx = 1, #buttons, 2 do
+            local pair = { buttons[idx] }
+            if buttons[idx + 1] then pair[2] = buttons[idx + 1] end
+            rows[#rows + 1] = pair
+        end
+    end
+
+    local stack = VerticalGroup:new{ align = "left" }
+    for r_idx = 1, #rows do
+        local row_btns = rows[r_idx]
+        local count = #row_btns
+        local btn_w = math.max(math.floor((width - (count - 1) * btn_gap) / count), 1)
+        local inner_w = math.max(btn_w - 2 * thickness, 1)
+        local inner_h = math.max(btn_h - 2 * thickness, 1)
+        local hgroup = HorizontalGroup:new{ align = "center" }
+        for b_idx = 1, count do
+            local btn = row_btns[b_idx]
+            local is_primary = btn.primary == true
+            local is_disabled = btn.disabled == true
+            local fg = is_primary and COLOR_WHITE or (is_disabled and COLOR_MUTED or COLOR_BLACK)
+            local bg = is_primary and COLOR_BLACK or COLOR_WHITE
+            local border = is_primary and COLOR_BLACK or (is_disabled and COLOR_DIVIDER or COLOR_BORDER)
+            local frame = FrameContainer:new{
+                radius = Ui.tokens.corner_radius,
+                bordersize = thickness,
+                padding = 0,
+                color = border,
+                background = bg,
+                CenterContainer:new{
+                    dimen = Geom:new{ w = inner_w, h = inner_h },
+                    label(btn.label or "", self.faces.heading, {
+                        bold = not is_disabled,
+                        color = fg,
+                        width = inner_w,
+                        align = "center",
+                    }),
+                },
+            }
+            if not is_disabled and type(btn.action) == "table" then
+                local focus_line = LineWidget:new{
+                    dimen = Geom:new{ w = btn_w, h = thickness },
+                    background = COLOR_DIVIDER,
+                }
+                local panel = Panel:new{
+                    child = VerticalGroup:new{ align = "left", frame, focus_line },
+                    action = btn.action,
+                    focus_line = focus_line,
+                }
+                self:registerFocusable(panel)
+                hgroup[#hgroup + 1] = panel
+            else
+                hgroup[#hgroup + 1] = frame
+            end
+            if b_idx < count then
+                hgroup[#hgroup + 1] = HorizontalSpan:new{ width = btn_gap }
+            end
+        end
+        stack[#stack + 1] = hgroup
+        if r_idx < #rows then
+            stack[#stack + 1] = VerticalSpan:new{ width = row_gap }
+        end
+    end
+    return stack
+end
+
+--- Renders wrapped synopsis / body lines, optional tags & device metadata.
+-- @tparam table self page
+-- @tparam table block { heading, lines, muted, tags, meta, action }
+-- @treturn table widget
+function PageWidget:buildTextBody(block)
+    local plan = self.plan
+    local width = plan.content_w
+    local line_h = plan.line_h or 20
+    local sec_gap = math.max(math.floor((plan.gap or 8) / 2), 2)
+    local stack = VerticalGroup:new{ align = "left" }
+    if block.heading then
+        stack[#stack + 1] = self:buildSectionHeading(block.heading)
+    end
+    local body_color = block.muted and COLOR_MUTED or COLOR_BLACK
+    local lines = block.lines or {}
+    if #lines > 0 then
+        local lines_group = VerticalGroup:new{ align = "left" }
+        for idx = 1, #lines do
+            local line = lines[idx]
+            lines_group[#lines_group + 1] = LeftContainer:new{
+                dimen = Geom:new{ w = width, h = line_h },
+                label(line == "" and " " or line, self.faces.row_small, {
+                    width = width,
+                    color = body_color,
+                }),
+            }
+        end
+        if type(block.action) == "table" then
+            local body_panel = Panel:new{
+                child = lines_group,
+                action = block.action,
+            }
+            self:register(body_panel)
+            stack[#stack + 1] = body_panel
+        else
+            stack[#stack + 1] = lines_group
+        end
+    end
+    if block.tags and block.tags ~= "" then
+        stack[#stack + 1] = VerticalSpan:new{ width = sec_gap }
+        stack[#stack + 1] = label(block.tags, self.faces.footer, { width = width, color = COLOR_MUTED })
+    end
+    if block.meta and block.meta ~= "" then
+        stack[#stack + 1] = label(block.meta, self.faces.footer, { width = width, color = COLOR_MUTED })
+    end
+    return stack
+end
+
+--- Renders one multi-line highlight quote card with note & chapter/page meta.
+-- @tparam table self page
+-- @tparam table row { lines, note, meta_left, meta_right, action }
+-- @number height card height
+-- @treturn table Panel
+function PageWidget:buildQuoteRow(row, height)
+    local plan = self.plan
+    local width = plan.content_w
+    local line_h = plan.line_h or 20
+    local pad_v = math.max(math.floor((plan.gap or 8) / 2), 3)
+    local stack = VerticalGroup:new{ align = "left" }
+    local lines = row.lines or {}
+    for idx = 1, #lines do
+        stack[#stack + 1] = LeftContainer:new{
+            dimen = Geom:new{ w = width, h = line_h },
+            label(lines[idx], self.faces.row_small, { width = width, color = COLOR_BLACK }),
+        }
+    end
+    if row.note and row.note ~= "" then
+        stack[#stack + 1] = LeftContainer:new{
+            dimen = Geom:new{ w = width, h = line_h },
+            label(Ui.GLYPH.section .. " " .. row.note, self.faces.row_small, {
+                width = width,
+                color = COLOR_MUTED,
+            }),
+        }
+    end
+    local right_w = math.floor(width * 0.20)
+    local left_w = math.max(width - right_w, 1)
+    stack[#stack + 1] = VerticalSpan:new{ width = pad_v }
+    stack[#stack + 1] = HorizontalGroup:new{
+        align = "center",
+        LeftContainer:new{
+            dimen = Geom:new{ w = left_w, h = line_h },
+            label(row.meta_left or "", self.faces.footer, { width = left_w, color = COLOR_MUTED }),
+        },
+        RightContainer:new{
+            dimen = Geom:new{ w = right_w, h = line_h },
+            label(row.meta_right or "", self.faces.footer, {
+                bold = true,
+                width = right_w,
+                color = COLOR_BLACK,
+                align = "right",
+            }),
+        },
+    }
+    local card = LeftContainer:new{
+        dimen = Geom:new{ w = width, h = height },
+        stack,
+    }
+    local focus_line = LineWidget:new{
+        dimen = Geom:new{ w = width, h = plan.hairline },
+        background = COLOR_DIVIDER,
+    }
+    local panel = Panel:new{
+        child = VerticalGroup:new{ align = "left", card, focus_line },
         action = row.action,
         focus_line = focus_line,
     }
@@ -970,6 +1309,21 @@ function PageWidget:init()
             for row_index = 1, #rows do
                 content[#content + 1] = self:buildRow(rows[row_index], plan.row_h or 60)
             end
+        elseif block.kind == "book_hero" then
+            content[#content + 1] = VerticalSpan:new{ width = section_gap }
+            content[#content + 1] = self:buildBookHero(block)
+            content[#content + 1] = rule(width, plan.hairline, COLOR_DIVIDER)
+        elseif block.kind == "action_bar" then
+            content[#content + 1] = VerticalSpan:new{ width = section_gap }
+            content[#content + 1] = self:buildActionBar(block)
+        elseif block.kind == "text_body" then
+            content[#content + 1] = VerticalSpan:new{ width = section_gap }
+            content[#content + 1] = self:buildTextBody(block)
+        elseif block.kind == "quote_list" then
+            local rows = block.rows or {}
+            for row_index = 1, #rows do
+                content[#content + 1] = self:buildQuoteRow(rows[row_index], plan.row_h or 104)
+            end
         end
     end
 
@@ -1015,6 +1369,9 @@ function PageWidget:init()
     self.ges_events = {
         TapSelect = {
             GestureRange:new{ ges = "tap", range = function() return self.dimen end },
+        },
+        HoldSelect = {
+            GestureRange:new{ ges = "hold", range = function() return self.dimen end },
         },
         Swipe = {
             GestureRange:new{ ges = "swipe", range = function() return self.dimen end },
@@ -1102,6 +1459,29 @@ function PageWidget:onTapSelect(event_arg, ges)
             end
             self:run(panel.action)
             return true
+        end
+    end
+    return false
+end
+
+--- Long-press: dispatches row quick actions when registered.
+function PageWidget:onHoldSelect(event_arg, ges)
+    if type(ges) ~= "table" or ges.pos == nil then ges = event_arg end
+    if not ges or not ges.pos or not self.panels then return false end
+    for panel_index = #self.panels, 1, -1 do
+        local panel = self.panels[panel_index]
+        if panel.dimen and ges.pos:intersectWith(panel.dimen) then
+            local target = panel.hold_action or panel.action
+            if target and type(self.on_hold) == "function" then
+                if panel.focus_line then
+                    if self.focus_index and self.focus_panels and self.focus_panels[self.focus_index] then
+                        self.focus_panels[self.focus_index]:setFocused(false)
+                    end
+                    panel:setFocused(true)
+                end
+                self.on_hold(target, panel)
+                return true
+            end
         end
     end
     return false
@@ -1216,6 +1596,7 @@ function Page.build(options)
         cover_widget = options.cover_widget,
         covers = options.covers ~= false,
         on_action = options.on_action,
+        on_hold = options.on_hold,
         on_overflow = options.on_overflow,
         on_switch = options.on_switch,
         on_back = options.on_back,

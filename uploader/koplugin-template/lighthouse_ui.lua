@@ -157,6 +157,11 @@ Ui.tokens = {
     page_switch_units = 40,
     page_subline_units = 30,
     page_heat_legend_units = 18,
+    page_action_h_units = 36,
+    page_body_line_units = 20,
+    page_quote_row_units = 104,
+    page_quote_min_units = 74,
+    page_detail_cover_ratio = 0.28,
     --: Heatmap: 52 weeks of seven days, drawn as a pixel grid rather than one
     --: text row per week (the shape that made the old screen ten pages long).
     page_heat_weeks = 52,
@@ -361,6 +366,166 @@ function Ui.ellipsize(text, max_chars)
     end
     if cut < 1 then return Ui.GLYPH.ellipsis end
     return text:sub(1, cut) .. Ui.GLYPH.ellipsis
+end
+
+--- Strips basic HTML markup and decodes entities into clean plain paragraphs.
+-- @param text string|nil raw HTML or plain synopsis
+-- @treturn string normalized plain text
+function Ui.plainText(text)
+    if type(text) ~= "string" or text == "" then return "" end
+    local out = text:gsub("\r\n", "\n"):gsub("\r", "\n")
+    out = out:gsub("<[Bb][Rr][^>]*>", "\n")
+    out = out:gsub("</[Pp]%s*>", "\n\n")
+    out = out:gsub("</[Dd][Ii][Vv]%s*>", "\n")
+    out = out:gsub("</[Ll][Ii]%s*>", "\n")
+    out = out:gsub("</[Hh][1-6]%s*>", "\n\n")
+    out = out:gsub("<[^>]+>", "")
+    out = out:gsub("&[Nn][Bb][Ss][Pp];", " ")
+    out = out:gsub("&[Ll][Tt];", "<")
+    out = out:gsub("&[Gg][Tt];", ">")
+    out = out:gsub("&[Qq][Uu][Oo][Tt];", '"')
+    out = out:gsub("&#39;", "'"):gsub("&[Aa][Pp][Oo][Ss];", "'")
+    out = out:gsub("&[Mm][Dd][Aa][Ss][Hh];", "—")
+    out = out:gsub("&[Nn][Dd][Aa][Ss][Hh];", "–")
+    out = out:gsub("&[Hh][Ee][Ll][Ll][Ii][Pp];", "…")
+    out = out:gsub("&#([0-9]+);", function(digits)
+        local cp = tonumber(digits)
+        if not cp or cp < 32 or cp > 126 then return " " end
+        return string.char(cp)
+    end)
+    out = out:gsub("&[Aa][Mm][Pp];", "&")
+    out = out:gsub("[ \t]+", " ")
+    out = out:gsub(" *\n *", "\n")
+    out = out:gsub("\n\n\n+", "\n\n")
+    out = out:gsub("^%s+", ""):gsub("%s+$", "")
+    return out
+end
+
+--- Splits a string at a UTF-8 code-point count boundary without breaking glyphs.
+-- @string text
+-- @number count
+-- @treturn string head
+-- @treturn string rest
+local function takeCodepoints(text, count)
+    local limit = math.max(math.floor(count), 1)
+    local seen, cut = 0, 0
+    for byte_index = 1, #text do
+        local byte = text:byte(byte_index)
+        if byte < 0x80 or byte >= 0xC0 then
+            seen = seen + 1
+            if seen > limit then break end
+        end
+        cut = byte_index
+    end
+    return text:sub(1, cut), text:sub(cut + 1)
+end
+
+--- Wraps text into at most `max_lines` lines of at most `max_chars` glyphs.
+-- Safe on UTF-8 multi-byte scripts (Burmese, CJK): never splits a code point.
+-- @param text string|nil
+-- @number max_chars
+-- @number[opt] max_lines
+-- @treturn table { lines = { string... }, truncated = boolean }
+function Ui.wrapLines(text, max_chars, max_lines)
+    if type(text) ~= "string" or text == "" then
+        return { lines = {}, truncated = false }
+    end
+    local clean = Ui.plainText(text)
+    if clean == "" then
+        return { lines = {}, truncated = false }
+    end
+    local width = math.floor(numberIn(max_chars, 40, 4))
+    local cap = max_lines ~= nil and math.floor(numberIn(max_lines, 0, 0)) or nil
+    if cap == 0 then
+        return { lines = {}, truncated = true }
+    end
+
+    local lines = {}
+    local truncated = false
+    local function pushLine(line)
+        if cap and #lines >= cap then
+            truncated = true
+            return false
+        end
+        lines[#lines + 1] = line
+        return true
+    end
+
+    local para_start = 1
+    local para_len = #clean
+    local last_was_blank = false
+    while para_start <= para_len and not truncated do
+        local nl = clean:find("\n", para_start, true)
+        local para = nl and clean:sub(para_start, nl - 1) or clean:sub(para_start)
+        para_start = nl and (nl + 1) or (para_len + 1)
+        para = para:gsub("^%s+", ""):gsub("%s+$", "")
+
+        if para == "" then
+            if #lines > 0 and not last_was_blank then
+                if not pushLine("") then break end
+                last_was_blank = true
+            end
+        else
+            last_was_blank = false
+            local current = ""
+            for word in para:gmatch("%S+") do
+                local word_len = graphemeCount(word)
+                if current == "" then
+                    if word_len <= width then
+                        current = word
+                    else
+                        local chunk = word
+                        while graphemeCount(chunk) > width and not truncated do
+                            local head, rest = takeCodepoints(chunk, width)
+                            if not pushLine(head) then break end
+                            chunk = rest
+                        end
+                        current = truncated and "" or chunk
+                    end
+                else
+                    local cur_len = graphemeCount(current)
+                    if cur_len + 1 + word_len <= width then
+                        current = current .. " " .. word
+                    else
+                        if not pushLine(current) then
+                            current = ""
+                            break
+                        end
+                        if word_len <= width then
+                            current = word
+                        else
+                            local chunk = word
+                            while graphemeCount(chunk) > width and not truncated do
+                                local head, rest = takeCodepoints(chunk, width)
+                                if not pushLine(head) then break end
+                                chunk = rest
+                            end
+                            current = truncated and "" or chunk
+                        end
+                    end
+                end
+                if truncated then break end
+            end
+            if not truncated and current ~= "" then
+                pushLine(current)
+            end
+        end
+    end
+
+    while #lines > 0 and lines[#lines] == "" do
+        table.remove(lines)
+    end
+    if truncated and #lines > 0 then
+        local tail = lines[#lines]
+        if tail == "" then
+            lines[#lines] = Ui.GLYPH.ellipsis
+        elseif graphemeCount(tail) >= width then
+            lines[#lines] = Ui.ellipsize(tail, width)
+        else
+            lines[#lines] = tail .. Ui.GLYPH.ellipsis
+        end
+    end
+    return { lines = lines, truncated = truncated }
 end
 
 --- Joins the non-empty parts of a list with the plugin's separator.
@@ -1411,6 +1576,190 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
         reading_cover_h = cover_h,
         total = total,
         slack = slack,
+    }
+end
+
+--- Lays out the single-screen Book Detail Card.
+-- Holds the header, hero (cover + title + author/series + rating/progress),
+-- action button bar (1 or 2 rows), synopsis body lines, and footer inside `height`.
+-- @number screen_w screen width in pixels
+-- @number screen_h screen height in pixels
+-- @number scale pixels per unit for this device
+-- @tparam table[opt] options { with_covers = boolean, action_rows = number }
+-- @treturn table detail layout plan
+function Ui.detailPlan(screen_w, screen_h, scale, options)
+    options = options or {}
+    local tokens = Ui.tokens
+    local s = numberIn(scale, 1, 0.5, 4)
+    local height = numberIn(screen_h, 800, 200, 8000)
+    local width = numberIn(screen_w, 600, 200, 8000)
+
+    local function scaled(units)
+        local value = math.floor(units * s + 0.5)
+        if value < 1 then value = 1 end
+        return value
+    end
+
+    local with_covers = options.with_covers ~= false
+    local pad = scaled(tokens.page_pad_units)
+    local gap = scaled(tokens.page_gap_units)
+    local section_gap = math.max(math.floor(gap / 2), 2)
+    local hairline = math.max(math.floor(tokens.hairline_units * s + 0.5), 1)
+    local header = scaled(tokens.page_header_units)
+    local footer = scaled(tokens.page_footer_units)
+    local bar = math.max(scaled(tokens.page_bar_units), 2)
+    local section_head = scaled(tokens.page_section_head_units)
+    local action_h = scaled(tokens.page_action_h_units)
+    local action_rows = math.max(math.min(math.floor(tonumber(options.action_rows) or 1), 2), 1)
+    local line_h = scaled(tokens.page_body_line_units)
+
+    local content_w = width - 2 * pad
+    if content_w < 1 then content_w = 1 end
+
+    local fixed = pad + header + hairline + footer + hairline + pad + gap
+    local available = math.max(height - fixed, 1)
+
+    local action_gap = math.max(math.floor(gap / 2), 2)
+    local action_block_h = action_rows * action_h + (action_rows - 1) * action_gap + section_gap
+
+    local cover_w, cover_h = 0, 0
+    if with_covers then
+        cover_w = math.max(math.floor(content_w * tokens.page_detail_cover_ratio), 1)
+        cover_h = math.max(math.floor(cover_w / tokens.cover_aspect + 0.5), 1)
+        local max_cover_h = math.max(math.floor(available * 0.42), line_h * 4)
+        if cover_h > max_cover_h then
+            cover_h = max_cover_h
+            cover_w = math.max(math.floor(cover_h * tokens.cover_aspect + 0.5), 1)
+        end
+    end
+
+    local min_hero_h = 6 * line_h + gap
+    local hero_h = math.max(cover_h + gap, min_hero_h)
+    local max_hero_h = math.max(available - action_block_h - section_head - 2 * line_h, math.floor(available * 0.45))
+    if hero_h > max_hero_h then
+        hero_h = math.max(max_hero_h, math.min(min_hero_h, available))
+        if with_covers and cover_h > hero_h - gap then
+            cover_h = math.max(hero_h - gap, 1)
+            cover_w = math.max(math.floor(cover_h * tokens.cover_aspect + 0.5), 1)
+        end
+    end
+
+    local body_overhead = section_gap + section_head + 2 * line_h
+    local body_budget = available - hero_h - action_block_h - body_overhead
+    local body_lines = body_budget > 0 and math.floor(body_budget / line_h) or 0
+
+    local body_px = math.max(math.floor(line_h * 0.58), 10)
+    local body_chars = math.max(math.floor(content_w / math.max(body_px * 0.55, 6)), 20)
+
+    local total = fixed + hero_h + action_block_h + section_gap + section_head + body_lines * line_h
+    local slack = math.max(height - total, 0)
+
+    return {
+        scale = s,
+        width = width,
+        height = height,
+        pad = pad,
+        gap = gap,
+        section_gap = section_gap,
+        content_w = content_w,
+        header = header,
+        footer = footer,
+        hairline = hairline,
+        bar = bar,
+        section_head = section_head,
+        action_h = action_h,
+        action_rows = action_rows,
+        line_h = line_h,
+        cover_w = cover_w,
+        cover_h = cover_h,
+        hero_h = hero_h,
+        body_lines = body_lines,
+        body_chars = body_chars,
+        with_covers = with_covers,
+        total = total,
+        slack = slack,
+        fits = total <= height,
+    }
+end
+
+--- Lays out a multi-line quote card list (for a book's Highlights reader).
+-- @number screen_w screen width in pixels
+-- @number screen_h screen height in pixels
+-- @number scale pixels per unit for this device
+-- @tparam table[opt] options { min_rows = number }
+-- @treturn table quote list layout plan
+function Ui.quoteListPlan(screen_w, screen_h, scale, options)
+    options = options or {}
+    local tokens = Ui.tokens
+    local s = numberIn(scale, 1, 0.5, 4)
+    local height = numberIn(screen_h, 800, 200, 8000)
+    local width = numberIn(screen_w, 600, 200, 8000)
+
+    local function scaled(units)
+        local value = math.floor(units * s + 0.5)
+        if value < 1 then value = 1 end
+        return value
+    end
+
+    local pad = scaled(tokens.page_pad_units)
+    local gap = scaled(tokens.page_gap_units)
+    local hairline = math.max(math.floor(tokens.hairline_units * s + 0.5), 1)
+    local header = scaled(tokens.page_header_units)
+    local subline_h = scaled(tokens.page_subline_units)
+    local footer = scaled(tokens.page_footer_units)
+    local line_h = scaled(tokens.page_body_line_units)
+
+    local content_w = width - 2 * pad
+    if content_w < 1 then content_w = 1 end
+
+    local fixed = pad + header + hairline + subline_h + footer + hairline + pad + gap
+    local available = math.max(height - fixed, 1)
+
+    local row_min = math.max(scaled(tokens.page_quote_min_units), 48)
+    local row_h = scaled(tokens.page_quote_row_units)
+    local min_rows = math.max(math.floor(tonumber(options.min_rows) or 2), 1)
+    local step_h = row_h + hairline
+    local rows = math.floor(available / step_h)
+    if rows < min_rows then
+        row_h = math.max(math.floor(available / min_rows) - hairline, row_min)
+        step_h = row_h + hairline
+        rows = math.max(math.floor(available / step_h), 1)
+    elseif rows * step_h < available then
+        local row_max = math.floor(row_h * 1.25)
+        local taller = math.floor(available / rows) - hairline
+        if taller > row_h and taller <= row_max then
+            row_h = taller
+            step_h = row_h + hairline
+        end
+    end
+
+    local quote_lines = row_h >= (4 * line_h + gap) and 3 or 2
+    local quote_px = math.max(math.floor(math.min(row_h, 120) * 0.22), 11)
+    local quote_chars = math.max(math.floor(content_w / math.max(quote_px * 0.56, 6)), 22)
+
+    local total = fixed + rows * step_h
+    local slack = math.max(height - total, 0)
+
+    return {
+        scale = s,
+        width = width,
+        height = height,
+        pad = pad,
+        gap = gap,
+        content_w = content_w,
+        header = header,
+        hairline = hairline,
+        subline_h = subline_h,
+        section_head = scaled(tokens.page_section_head_units),
+        footer = footer,
+        line_h = line_h,
+        row_h = row_h,
+        rows = rows,
+        quote_lines = quote_lines,
+        quote_chars = quote_chars,
+        total = total,
+        slack = slack,
+        fits = total <= height,
     }
 end
 

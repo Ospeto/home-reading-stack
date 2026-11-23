@@ -366,6 +366,46 @@ print("views_labels_defines_time_words=" .. tostring(Views.LABELS.just_now ~= ni
 print("merged_time_words=" .. flat(Views.labels().just_now) .. "|"
   .. flat(Views.labels().clock_today) .. "|" .. flat(Views.labels().months[11]))
 
+-- Phase 3 view models ------------------------------------------------------
+local series_drill = Views.libraryModel("books", {
+  entries = entries, page = 1, page_size = 4, has_next = false,
+  query = "Spice and Wolf", title = "Spice and Wolf", series_name = "Spice and Wolf", sort = "series",
+})
+print("series_extra_label=" .. flat(series_drill.header_actions and series_drill.header_actions.extra and series_drill.header_actions.extra.label))
+print("series_extra_kind=" .. flat(series_drill.header_actions and series_drill.header_actions.extra and series_drill.header_actions.extra.action.kind))
+
+local detail_local = Views.bookDetailModel({
+  book_id = 11, title = "Spice and Wolf, Vol. 1", authors = "Isuna Hasekura",
+  series = "Spice and Wolf", series_index = 1, rating = 8,
+  download_href = "/api/books/11/download/epub",
+  status = { percentage = 0.88, progress_source = "device" },
+  local_record = { annotation_count = 2 },
+  summary = "<p>Kraft Lawrence travels across the countryside.</p>",
+  tags = { "Fantasy", "Economics" },
+}, { local_path = "/mnt/us/books/spice1.epub", body_lines = 4, body_chars = 40 })
+print("detail_blocks=" .. flat(detail_local.blocks[1].kind) .. "," .. flat(detail_local.blocks[2].kind) .. "," .. flat(detail_local.blocks[3].kind))
+print("detail_primary_btn=" .. flat(detail_local.blocks[2].buttons[1].label) .. ":" .. flat(detail_local.blocks[2].buttons[1].action.kind))
+print("detail_hl_btn=" .. flat(detail_local.blocks[2].buttons[3].label) .. ":" .. flat(detail_local.blocks[2].buttons[3].action.kind))
+print("detail_synopsis=" .. flat(detail_local.blocks[3].lines[1]))
+
+local shelf_model = Views.readingShelfModel({
+  { book_id = 11, title = "Spice and Wolf", authors = "Isuna Hasekura", percentage = 0.88, has_local_file = true, local_path = "/books/s1.epub", timestamp = 1763290000 },
+  { book_id = 12, title = "Dune", authors = "Frank Herbert", percentage = 0.25, has_local_file = false, timestamp = 1763200000 },
+}, 1763293600, { page = 1, page_size = 1, degraded = true, offline = true })
+print("shelf_rows_count=" .. #shelf_model.blocks[1].rows .. ":" .. flat(shelf_model.pager.pages) .. ":" .. flat(shelf_model.subline.left) .. ":" .. flat(shelf_model.subline.right))
+print("shelf_row1_action=" .. flat(shelf_model.blocks[1].rows[1].action.kind) .. ":" .. flat(shelf_model.blocks[1].rows[1].hold_action.kind))
+
+local hl_index = Views.highlightsIndexModel({
+  { title = "Spice and Wolf", authors = "Isuna Hasekura", annotation_count = 2, annotations = { { text = "A clever merchant." }, { text = "Another." } } },
+}, { page = 1, page_size = 5 })
+print("hl_index=" .. flat(hl_index.title) .. ":" .. flat(hl_index.blocks[1].rows[1].value) .. ":" .. flat(hl_index.blocks[1].rows[1].action.kind))
+
+local hl_book = Views.bookHighlightsModel({
+  title = "Spice and Wolf",
+  annotations = { { text = "A clever merchant always checks the scales before trading.", note = "Key theme", chapter = "Ch 1", datetime = "2026-11-14", pageno = 48 } },
+}, { page = 1, page_size = 4, quote_lines = 2, quote_chars = 28, book_exists = true })
+print("hl_book=" .. flat(hl_book.blocks[1].kind) .. ":" .. flat(hl_book.blocks[1].rows[1].note) .. ":" .. flat(hl_book.blocks[1].rows[1].meta_right) .. ":" .. flat(hl_book.blocks[1].rows[1].action.kind))
+
 print("OK")
 `;
 
@@ -639,5 +679,22 @@ describe("plugin library page model: Authors and edge cases", () => {
     if (!LUA_BINARY) return;
     const out = runHarness();
     expect(out.unknown_mode_active).toBe("true");
+  });
+});
+
+describe("plugin Phase 3 view models", () => {
+  it("builds book detail card, reading shelf, highlights index, book highlights, and series extra action", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.series_extra_label).toBe("Next unread");
+    expect(out.series_extra_kind).toBe("download_next_unread");
+    expect(out.detail_blocks).toBe("book_hero,action_bar,text_body");
+    expect(out.detail_primary_btn).toBe("Open book:open_book");
+    expect(out.detail_hl_btn).toBe("Highlights (2):book_highlights");
+    expect(out.detail_synopsis).toBe("Kraft Lawrence travels across the");
+    expect(out.shelf_rows_count).toBe("1:2:This device only - the server could not be reached.:Offline");
+    expect(out.shelf_row1_action).toBe("open_book:reading_actions");
+    expect(out.hl_index).toBe("Highlights:2:highlight_book");
+    expect(out.hl_book).toBe("quote_list:Note: Key theme:p. 48:highlight");
   });
 });
