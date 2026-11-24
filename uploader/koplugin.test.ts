@@ -31,6 +31,7 @@ import {
   buildStoredZip,
   crc32,
   generateKoplugin,
+  isLoopbackHostname,
   kopluginDownloadHeaders,
   luaStringLiteral,
   normalizeBaseUrl,
@@ -9522,7 +9523,11 @@ package.preload["libs/libkoreader-lfs"] = function()
       if fake_dirs[target] ~= nil then return "directory" end
       return nil
     end,
-    mkdir = function(d) fake_dirs[d] = fake_dirs[d] or {}; return true end,
+    mkdir = function(d)
+      fake_dirs[d] = fake_dirs[d] or {}
+      os.execute('mkdir -p "' .. tostring(d) .. '"')
+      return true
+    end,
   }
 end
 
@@ -9969,7 +9974,11 @@ package.preload["libs/libkoreader-lfs"] = function()
       end
       return nil
     end,
-    mkdir = function(d) fake_dirs[d] = fake_dirs[d] or {}; return true end,
+    mkdir = function(d)
+      fake_dirs[d] = fake_dirs[d] or {}
+      os.execute('mkdir -p "' .. tostring(d) .. '"')
+      return true
+    end,
   }
 end
 
@@ -10243,7 +10252,11 @@ package.preload["libs/libkoreader-lfs"] = function()
       end
       return nil
     end,
-    mkdir = function(d) fake_dirs[d] = fake_dirs[d] or {}; return true end,
+    mkdir = function(d)
+      fake_dirs[d] = fake_dirs[d] or {}
+      os.execute('mkdir -p "' .. tostring(d) .. '"')
+      return true
+    end,
   }
 end
 
@@ -10363,8 +10376,9 @@ print("sync_cover_false=" .. tostring(bim_batches[1] and bim_batches[1][1] and b
 `);
 
 describe("plugin v1.11.0 background metadata indexing", () => {
-  it("bumps version to 1.11.0, auto-indexes downloads/syncs, chunks batches, and exposes 1-tap Index local books", () => {
-    expect(KOPLUGIN_VERSION).toBe("1.11.0");
+  it("bumps version to >= 1.11.0, auto-indexes downloads/syncs, chunks batches, and exposes 1-tap Index local books", () => {
+    expect(Number(KOPLUGIN_VERSION.split(".")[0])).toBeGreaterThanOrEqual(1);
+    expect(Number(KOPLUGIN_VERSION.split(".")[1])).toBeGreaterThanOrEqual(11);
     if (!LUA_BINARY || !UNZIP_BINARY) return;
 
     const { zip, settings } = generateKoplugin({
@@ -10372,7 +10386,7 @@ describe("plugin v1.11.0 background metadata indexing", () => {
       apiKey: "v111-test-key",
       generatedAt: "2026-11-24T03:00:00.000Z",
     });
-    expect(settings.pluginVersion).toBe("1.11.0");
+    expect(settings.pluginVersion).toBe(KOPLUGIN_VERSION);
 
     const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-v111-"));
     fs.mkdirSync(path.join(workdir, "books", "SubFolder"), { recursive: true });
@@ -10422,5 +10436,943 @@ describe("plugin v1.11.0 background metadata indexing", () => {
     expect(out.sync_batches).toBe("1");
     expect(out.sync_count).toBe("2");
     expect(out.sync_cover_false).toBe("true");
+  });
+});
+
+const V112_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local workdir = assert(arg[2], "workdir required")
+local books_dir = workdir .. "/books"
+local dl_dir = workdir .. "/downloads"
+local cover_cache_dir = workdir .. "/koreader/cache/lighthouse-covers"
+
+local ui_mgr = require("ui/uimanager")
+ui_mgr.nextTick = function(_, fn) fn() end
+ui_mgr.scheduleIn = function(_, _, fn) fn() end
+
+local is_online = true
+local net_mgr = require("ui/network/manager")
+net_mgr.isOnline = function() return is_online end
+
+local settings_store = {}
+_G.G_reader_settings = {
+  readSetting = function(_, k) return settings_store[k] end,
+  saveSetting = function(_, k, v) settings_store[k] = v end,
+  nilOrTrue = function(_, k) return settings_store[k] ~= false end,
+}
+
+package.preload["ltn12"] = function()
+  return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
+    sink = {
+      table = function(chunks)
+        chunks = chunks or {}
+        return function(chunk)
+          if chunk then chunks[#chunks + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function() return function() return 1 end end,
+    },
+  }
+end
+
+local fake_files, fake_dirs, fake_sizes, fake_mtimes = {}, {}, {}, {}
+local function make_file(p, bytes, mtime)
+  fake_files[p] = bytes
+  fake_sizes[p] = #bytes
+  fake_mtimes[p] = mtime or 100
+end
+
+local book1 = books_dir .. "/Spice and Wolf Vol 1.epub"
+make_file(book1, "EPUB1")
+make_file(book1 .. ".sdr/metadata.epub.lua", [==[
+return {
+    ["annotations"] = {
+        { ["chapter"] = "Ch 1", ["datetime"] = "2026-11-24 10:00:00", ["pageno"] = 12, ["text"] = "Offline queued quote" },
+    },
+    ["doc_props"] = { ["authors"] = "Isuna Hasekura", ["title"] = "Spice and Wolf Vol 1" },
+    ["percent_finished"] = 0.50,
+}
+]==])
+fake_dirs[books_dir] = { "Spice and Wolf Vol 1.epub", "Spice and Wolf Vol 1.epub.sdr" }
+fake_dirs[book1 .. ".sdr"] = { "metadata.epub.lua" }
+
+package.preload["libs/libkoreader-lfs"] = function()
+  return {
+    attributes = function(target, field)
+      if fake_files[target] ~= nil then
+        if field == "size" then return #fake_files[target] end
+        if field == "modification" then return fake_mtimes[target] or 100 end
+        return "file"
+      end
+      if fake_dirs[target] ~= nil then return "directory" end
+      local h = io.open(target, "rb")
+      if h then
+        local d = h:read("*a") or ""
+        h:close()
+        if field == "size" then return #d end
+        if field == "modification" then return 100 end
+        return "file"
+      end
+      return nil
+    end,
+    mkdir = function(d)
+      fake_dirs[d] = fake_dirs[d] or {}
+      os.execute('mkdir -p "' .. tostring(d) .. '"')
+      return true
+    end,
+  }
+end
+
+-- 1. Cache module tests (LRU + TTL + disk pruning)
+local Cache = require("lighthouse_cache")
+local lru = Cache.new(2, 10)
+lru:set("a", "A", 100)
+lru:set("b", "B", 100)
+local hit_a = lru:get("a", 102)
+lru:set("c", "C", 103) -- evicts "b" (LRU)
+local after_b = lru:get("b", 104)
+local after_a = lru:get("a", 104)
+local expired_a = lru:get("a", 115) -- > 10s TTL after set at 100
+local cs = lru:stats()
+print("cache_lru_ok=" .. tostring(hit_a == "A" and after_b == nil and after_a == "A" and expired_a == nil and cs.hits == 2 and cs.misses == 2))
+
+local d_files = {
+  ["/c/old.jpg"] = { size = 60, mtime = 10 },
+  ["/c/mid.jpg"] = { size = 70, mtime = 20 },
+  ["/c/new.jpg"] = { size = 40, mtime = 30 },
+}
+local mock_io = {
+  list = function()
+    local names = {}
+    for p in pairs(d_files) do names[#names + 1] = p:match("([^/]+)$") end
+    return names
+  end,
+  attributes = function(p, field)
+    local item = d_files[p]
+    if not item then return nil end
+    if field == "size" then return item.size end
+    if field == "modification" then return item.mtime end
+    return "file"
+  end,
+  remove = function(p)
+    if d_files[p] then d_files[p] = nil; return true end
+    return false
+  end,
+}
+local pruned = Cache.pruneDir("/c", { max_files = 2, max_bytes = 100 }, mock_io)
+print("prune_ok=" .. tostring(pruned.removed == 2 and pruned.bytes_freed == 130 and d_files["/c/new.jpg"] ~= nil and d_files["/c/old.jpg"] == nil))
+local cleared = Cache.clearDir("/c", mock_io)
+print("clear_ok=" .. tostring(cleared.removed == 1 and cleared.bytes_freed == 40))
+
+-- 2. Outbox module tests (dedup + cap + remove)
+local Outbox = require("lighthouse_outbox")
+Outbox.enqueue(G_reader_settings, "/a.epub")
+Outbox.enqueue(G_reader_settings, "/b.epub")
+Outbox.enqueue(G_reader_settings, "/a.epub")
+print("outbox_dedup=" .. tostring(Outbox.count(G_reader_settings) == 2))
+for i = 1, 105 do
+  Outbox.enqueue(G_reader_settings, "/cap_" .. tostring(i) .. ".epub")
+end
+print("outbox_cap=" .. tostring(Outbox.count(G_reader_settings) == Outbox.MAX_ITEMS))
+Outbox.clear(G_reader_settings)
+print("outbox_cleared=" .. tostring(Outbox.count(G_reader_settings) == 0))
+
+-- 3. HTTP retries, ETag 304, atomic .part download, and OPDS/outbox integration
+local opds_calls = 0
+local group_calls = {}
+local hl_posts = 0
+local attempt_counter = {}
+
+package.preload["json"] = function()
+  return {
+    encode = function(t) return '{"title":"' .. tostring(t.title or "") .. '"}' end,
+    decode = function(raw)
+      if type(raw) == "string" and raw:find('"version":"', 1, true) then
+        return { version = raw:match('"version":"([^"]+)"'), downloadPath = "/api/koplugin/download" }
+      elseif type(raw) == "string" and raw:find('"groups":', 1, true) then
+        local by = raw:match('"by":"([^"]+)"') or "series"
+        return {
+          books = 1,
+          authors = 1,
+          series = 1,
+          groups = { { name = by .. " Group", count = 1, unread = 1, coverId = 11 } },
+        }
+      end
+      return {}
+    end,
+  }
+end
+
+local sample_opds_xml = [==[<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:lighthouse="http://lighthouse.local/ns">
+  <title>LightHouse</title>
+  <lighthouse:total>1</lighthouse:total>
+  <entry>
+    <id>urn:calibre:book:11</id>
+    <title>Spice and Wolf Vol 1</title>
+    <author><name>Isuna Hasekura</name></author>
+    <link rel="http://opds-spec.org/acquisition" href="/api/books/11/download/epub" type="application/epub+zip"/>
+  </entry>
+</feed>]==]
+
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      local url = tostring(request and request.url or "")
+      attempt_counter[url] = (attempt_counter[url] or 0) + 1
+      local n = attempt_counter[url]
+      local hdrs = request.headers or {}
+
+      if url:find("/retry-503", 1, true) then
+        if n == 1 then return 1, 503, {} end
+        if request.sink then request.sink("recovered"); request.sink(nil) end
+        return 1, 200, { ["ETag"] = '"v1"' }
+      elseif url:find("/retry-timeout", 1, true) then
+        if n == 1 then return nil, "timeout" end
+        if request.sink then request.sink("ok-after-timeout"); request.sink(nil) end
+        return 1, 200, {}
+      elseif url:find("/no-retry-401", 1, true) then
+        return 1, 401, {}
+      elseif url:find("/etag-check", 1, true) then
+        if hdrs["If-None-Match"] == '"abc"' then
+          return 1, 304, { ["ETag"] = '"abc"' }
+        end
+        if request.sink then request.sink("fresh"); request.sink(nil) end
+        return 1, 200, { ["ETag"] = '"abc"' }
+      elseif url:find("/trunc-epub", 1, true) then
+        if request.sink then request.sink(string.rep("A", 300)); request.sink(nil) end
+        return 1, 200, { ["Content-Length"] = "900" }
+      elseif url:find("/good-epub", 1, true) then
+        local payload = "PK\003\004" .. string.rep("B", 400)
+        if request.sink then request.sink(payload); request.sink(nil) end
+        return 1, 200, { ["Content-Length"] = tostring(#payload) }
+      elseif url:find("/api/opds", 1, true) then
+        opds_calls = opds_calls + 1
+        if request.sink then request.sink(sample_opds_xml); request.sink(nil) end
+        return 1, 200, {}
+      elseif url:find("/api/library/groups", 1, true) then
+        local by = url:match("by=([%a]+)") or "series"
+        local etag = '"g-' .. by .. '"'
+        if hdrs["If-None-Match"] == etag then
+          group_calls[by .. "_304"] = (group_calls[by .. "_304"] or 0) + 1
+          return 1, 304, { ["ETag"] = etag }
+        end
+        group_calls[by] = (group_calls[by] or 0) + 1
+        local json_s = '{"books":1,"authors":1,"series":1,"by":"' .. by .. '","groups":[{"name":"' .. by .. '"}]}'
+        if request.sink then request.sink(json_s); request.sink(nil) end
+        return 1, 200, { ["ETag"] = etag }
+      elseif url:find("/api/kosync/active", 1, true) then
+        if request.sink then request.sink("[]"); request.sink(nil) end
+        return 1, 200, {}
+      elseif url:find("/api/koplugin/version", 1, true) then
+        if request.sink then request.sink('{"version":"1.12.0","downloadPath":"/api/koplugin/download"}'); request.sink(nil) end
+        return 1, 200, {}
+      elseif url:find("/api/highlights/sync", 1, true) then
+        hl_posts = hl_posts + 1
+        if request.sink then request.sink('{"success":true}'); request.sink(nil) end
+        return 1, 200, {}
+      end
+      if request.sink then request.sink("{}"); request.sink(nil) end
+      return 1, 200, {}
+    end,
+  }
+end
+
+local config = require("lighthouse_config")
+local Client = require("lighthouse_client")
+
+local r503_body, r503_err = Client.get(config, "/retry-503", { retry_delay = 0 })
+print("retry_503=" .. tostring(r503_body == "recovered" and r503_err == nil))
+
+local rto_body, rto_err = Client.get(config, "/retry-timeout", { retry_delay = 0 })
+print("retry_timeout=" .. tostring(rto_body == "ok-after-timeout" and rto_err == nil))
+
+local r401_body, r401_err = Client.get(config, "/no-retry-401", { retry_delay = 0 })
+print("no_retry_401=" .. tostring(r401_body == nil and r401_err == "http_401" and attempt_counter[Client.buildUrl(config, "/no-retry-401")] == 1))
+
+local _, etag_err, etag_meta = Client.get(config, "/etag-check", { etag = '"abc"', retry_delay = 0 })
+print("etag_304=" .. tostring(etag_err == "not_modified" and etag_meta and etag_meta.status == 304))
+
+local trunc_target = dl_dir .. "/existing.epub"
+do
+  local wf = assert(io.open(trunc_target, "wb"))
+  wf:write("KEEP_OLD_GOOD_EPUB")
+  wf:close()
+end
+local trunc_ok, trunc_err = Client.download(config, "/trunc-epub", trunc_target)
+local rf_after = assert(io.open(trunc_target, "rb"))
+local kept = rf_after:read("*a")
+rf_after:close()
+print("atomic_trunc=" .. tostring(trunc_ok == nil and trunc_err == "truncated_download" and kept == "KEEP_OLD_GOOD_EPUB" and io.open(trunc_target .. ".part", "rb") == nil))
+
+local good_target = dl_dir .. "/fresh.epub"
+local good_ok, good_err = Client.download(config, "/good-epub", good_target)
+print("atomic_good=" .. tostring(good_ok == true and good_err == nil and io.open(good_target, "rb") ~= nil and io.open(good_target .. ".part", "rb") == nil))
+
+-- 4. OTA CRC-32 mismatch & rollback tests
+local Ota = require("lighthouse_ota")
+local good_zip_f = assert(io.open(workdir .. "/good.zip", "rb"))
+local good_zip_bytes = good_zip_f:read("*a")
+good_zip_f:close()
+-- Corrupt last payload byte of first entry without changing sizes -> CRC mismatch
+local name_len = good_zip_bytes:byte(27) + good_zip_bytes:byte(28) * 256
+local csize = good_zip_bytes:byte(19) + good_zip_bytes:byte(20) * 256 + good_zip_bytes:byte(21) * 65536 + good_zip_bytes:byte(22) * 16777216
+local flip_pos = 30 + name_len + math.max(csize, 1)
+local bad_byte = string.char((good_zip_bytes:byte(flip_pos) + 1) % 256)
+local corrupt_zip = good_zip_bytes:sub(1, flip_pos - 1) .. bad_byte .. good_zip_bytes:sub(flip_pos + 1)
+local crc_res, crc_err = Ota.unpackStoredZip(corrupt_zip)
+print("ota_crc_err=" .. tostring(crc_res == nil and crc_err == "crc_mismatch"))
+
+local rb_dir = workdir .. "/rollback_plugin"
+assert(os.execute('mkdir -p "' .. rb_dir .. '"') == 0 or os.execute('mkdir -p "' .. rb_dir .. '"') == true)
+for _, pair in ipairs({ {"a.lua", "OLD_A"}, {"b.lua", "OLD_B"} }) do
+  local h = assert(io.open(rb_dir .. "/" .. pair[1], "wb"))
+  h:write(pair[2])
+  h:close()
+end
+local orig_rename = os.rename
+local rename_calls = 0
+_G.os.rename = function(src, dst)
+  rename_calls = rename_calls + 1
+  -- Call 1: a.lua -> a.lua.ota_bak (succeeds)
+  -- Call 2: a.lua.ota_tmp -> a.lua (succeeds)
+  -- Call 3: b.lua -> b.lua.ota_bak (succeeds)
+  -- Call 4: b.lua.ota_tmp -> b.lua (FAILS -> triggers rollback of a.lua & b.lua)
+  if rename_calls == 4 then
+    return nil, "simulated_rename_fail"
+  end
+  return orig_rename(src, dst)
+end
+local rb_ok, rb_err = Ota.installEntries(rb_dir, {
+  { name = "a.lua", data = "NEW_A" },
+  { name = "b.lua", data = "NEW_B" },
+})
+_G.os.rename = orig_rename
+local function read_all(p)
+  local f = io.open(p, "rb")
+  if not f then return nil end
+  local d = f:read("*a")
+  f:close()
+  return d
+end
+print("ota_rollback=" .. tostring(rb_ok == nil and tostring(rb_err):find("simulated_rename_fail", 1, true) ~= nil and read_all(rb_dir .. "/a.lua") == "OLD_A" and read_all(rb_dir .. "/b.lua") == "OLD_B"))
+
+-- 5. LightHouse main.lua integration: OPDS LRU cache, per-mode groups, offline outbox -> reconnect flush, Diagnostics
+local Sidecar = require("lighthouse_sidecar")
+Sidecar.DEVICE_DIRS = { books_dir }
+Sidecar.io.list = function(d) return fake_dirs[d] end
+Sidecar.io.attributes = function(p)
+  if fake_files[p] ~= nil then return "file" end
+  if fake_dirs[p] ~= nil then return "directory" end
+  return nil
+end
+Sidecar.io.open = function(p)
+  local data = fake_files[p]
+  if not data then return nil end
+  local done = false
+  return { read = function() if done then return nil end; done = true; return data end, close = function() end }
+end
+Sidecar.io.loadfile = function(p)
+  local data = fake_files[p]
+  if not data then return nil end
+  return loadstring(data, p)
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+G_reader_settings:saveSetting("download_dir", dl_dir)
+
+-- OPDS cache hit avoids 2nd HTTP fetch; Refresh busts cache
+LightHouse:openLibrary{ mode = "books", page = 1 }
+local calls_after_1 = opds_calls
+LightHouse:openLibrary{ mode = "books", page = 1 }
+local calls_after_2 = opds_calls
+LightHouse:openLibrary{ mode = "books", page = 1, refresh = true }
+local calls_after_refresh = opds_calls
+print("opds_cache_ok=" .. tostring(calls_after_1 == 1 and calls_after_2 == 1 and calls_after_refresh == 2))
+
+-- Mode switch series -> authors -> series uses conditional ETag 304 without re-downloading JSON body
+LightHouse:openLibrary{ mode = "series", page = 1 }
+LightHouse:openLibrary{ mode = "authors", page = 1 }
+LightHouse:openLibrary{ mode = "series", page = 1 }
+print("group_cache_ok=" .. tostring(group_calls.series == 1 and group_calls.authors == 1 and group_calls.series_304 == 1))
+
+-- Offline close queues highlight to outbox -> Wi-Fi reconnect flushes & clears outbox
+is_online = false
+hl_posts = 0
+LightHouse.ui = { document = { file = book1 }, menu = { registerToMainMenu = function() end } }
+LightHouse:onCloseDocument()
+local queued_offline = Outbox.count(G_reader_settings)
+is_online = true
+LightHouse:onNetworkConnected()
+local remaining_after = Outbox.count(G_reader_settings)
+print("outbox_flow_ok=" .. tostring(queued_offline == 1 and hl_posts == 1 and remaining_after == 0))
+
+-- Diagnostics menu item & summary dialog
+local menu_items = {}
+LightHouse:addToMainMenu(menu_items)
+local diag_idx, conn_idx
+for idx = 1, #menu_items.lighthouse.sub_item_table do
+  local txt = menu_items.lighthouse.sub_item_table[idx].text
+  if txt == "Diagnostics" then diag_idx = idx end
+  if txt == "Connection" then conn_idx = idx end
+end
+print("menu_diag_ok=" .. tostring(diag_idx ~= nil and conn_idx == diag_idx + 1))
+
+shown = {}
+LightHouse:runDiagnostics()
+local diag_box = shown[#shown]
+local diag_text = tostring(diag_box and diag_box.text or "")
+print("diag_has_reach=" .. tostring(diag_text:find("reachable (authenticated)", 1, true) ~= nil))
+print("diag_has_cache=" .. tostring(diag_text:find("OPDS Cache:", 1, true) ~= nil and diag_text:find("Cover Cache:", 1, true) ~= nil))
+print("diag_has_outbox=" .. tostring(diag_text:find("Offline Highlight Outbox: 0", 1, true) ~= nil))
+if diag_box and diag_box.ok_cb then diag_box.ok_cb() end
+local after_clear = shown[#shown]
+print("diag_clear_msg=" .. tostring(after_clear and after_clear.text))
+`);
+
+describe("plugin v1.12.0 production hardening, caching, offline outbox, and diagnostics", () => {
+  it("verifies LRU/disk caching, offline highlight outbox, HTTP retries, atomic downloads, OTA CRC/rollback, and diagnostics", () => {
+    expect(Number(KOPLUGIN_VERSION.split(".")[0])).toBeGreaterThanOrEqual(1);
+    expect(Number(KOPLUGIN_VERSION.split(".")[1])).toBeGreaterThanOrEqual(12);
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+
+    const { zip, settings, entryNames } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "v112-test-key",
+      generatedAt: "2026-11-24T04:00:00.000Z",
+    });
+    expect(settings.pluginVersion).toBe(KOPLUGIN_VERSION);
+    expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_cache.lua`);
+    expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_outbox.lua`);
+
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-v112-"));
+    fs.mkdirSync(path.join(workdir, "books"), { recursive: true });
+    fs.mkdirSync(path.join(workdir, "downloads"), { recursive: true });
+
+    const zipPath = path.join(workdir, "good.zip");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
+      encoding: "utf8",
+    });
+    expect(extract.status).toBe(0);
+
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "v112_harness.lua");
+    fs.writeFileSync(harnessPath, V112_HARNESS);
+    const res = spawnSync(LUA_BINARY as string, [harnessPath, pluginRoot, workdir], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+
+    expect(out.cache_lru_ok).toBe("true");
+    expect(out.prune_ok).toBe("true");
+    expect(out.clear_ok).toBe("true");
+    expect(out.outbox_dedup).toBe("true");
+    expect(out.outbox_cap).toBe("true");
+    expect(out.outbox_cleared).toBe("true");
+    expect(out.retry_503).toBe("true");
+    expect(out.retry_timeout).toBe("true");
+    expect(out.no_retry_401).toBe("true");
+    expect(out.etag_304).toBe("true");
+    expect(out.atomic_trunc).toBe("true");
+    expect(out.atomic_good).toBe("true");
+    expect(out.ota_crc_err).toBe("true");
+    expect(out.ota_rollback).toBe("true");
+    expect(out.opds_cache_ok).toBe("true");
+    expect(out.group_cache_ok).toBe("true");
+    expect(out.outbox_flow_ok).toBe("true");
+    expect(out.menu_diag_ok).toBe("true");
+    expect(out.diag_has_reach).toBe("true");
+    expect(out.diag_has_cache).toBe("true");
+    expect(out.diag_has_outbox).toBe("true");
+    expect(out.diag_clear_msg).toContain("Cleared");
+  });
+});
+
+const V113_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local workdir = assert(arg[2], "workdir required")
+local books_dir = workdir .. "/books"
+local dl_dir = workdir .. "/downloads"
+local data_dir = workdir .. "/data"
+package.preload["datastorage"] = function()
+  return {
+    getDataDir = function() return data_dir end,
+    getSettingsDir = function() return data_dir end,
+  }
+end
+local scheduled = {}
+local dirty_count = 0
+
+local ui_mgr = require("ui/uimanager")
+ui_mgr.nextTick = function(_, fn) fn() end
+ui_mgr.scheduleIn = function(_, secs, fn)
+  scheduled[#scheduled + 1] = { secs = secs, fn = fn }
+end
+ui_mgr.setDirty = function(_, widget, mode)
+  dirty_count = dirty_count + 1
+end
+
+local function flush_scheduled(target_sec)
+  local pending = scheduled
+  scheduled = {}
+  local ran = 0
+  for idx = 1, #pending do
+    local item = pending[idx]
+    if not target_sec or math.abs(item.secs - target_sec) < 0.01 then
+      item.fn()
+      ran = ran + 1
+    else
+      scheduled[#scheduled + 1] = item
+    end
+  end
+  return ran
+end
+
+local net_mgr = require("ui/network/manager")
+net_mgr.isOnline = function() return true end
+
+local settings_store = {}
+_G.G_reader_settings = {
+  readSetting = function(_, k) return settings_store[k] end,
+  saveSetting = function(_, k, v) settings_store[k] = v end,
+  nilOrTrue = function(_, k) return settings_store[k] ~= false end,
+}
+
+package.preload["ltn12"] = function()
+  return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
+    sink = {
+      table = function(chunks)
+        chunks = chunks or {}
+        return function(chunk)
+          if chunk then chunks[#chunks + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function() return function() return 1 end end,
+    },
+  }
+end
+
+local fake_files, fake_dirs = {}, {}
+local vol1_path = books_dir .. "/Spice 01 - Spice and Wolf, Vol. 1 - Isuna Hasekura.epub"
+fake_files[vol1_path] = "EPUB1"
+fake_files[vol1_path .. ".sdr/metadata.epub.lua"] = [==[
+return {
+    ["annotations"] = {},
+    ["doc_props"] = { ["authors"] = "Isuna Hasekura", ["title"] = "Spice and Wolf, Vol. 1", ["series"] = "Spice and Wolf", ["series_index"] = 1 },
+    ["percent_finished"] = 1.0,
+}
+]==]
+fake_dirs[books_dir] = { "Spice 01 - Spice and Wolf, Vol. 1 - Isuna Hasekura.epub", "Spice 01 - Spice and Wolf, Vol. 1 - Isuna Hasekura.epub.sdr" }
+fake_dirs[vol1_path .. ".sdr"] = { "metadata.epub.lua" }
+fake_dirs[dl_dir] = {}
+
+package.preload["libs/libkoreader-lfs"] = function()
+  return {
+    attributes = function(target, field)
+      if fake_files[target] ~= nil then
+        return field == "size" and #fake_files[target] or "file"
+      end
+      if fake_dirs[target] ~= nil then return "directory" end
+      local h = io.open(target, "rb")
+      if h then
+        local d = h:read("*a") or ""
+        h:close()
+        return field == "size" and #d or "file"
+      end
+      return nil
+    end,
+    mkdir = function(d)
+      fake_dirs[d] = fake_dirs[d] or {}
+      os.execute('mkdir -p "' .. tostring(d) .. '"')
+      return true
+    end,
+  }
+end
+
+local Sidecar = require("lighthouse_sidecar")
+Sidecar.DEVICE_DIRS = { books_dir }
+Sidecar.io.list = function(d) return fake_dirs[d] end
+Sidecar.io.attributes = function(p)
+  if fake_files[p] ~= nil then return "file" end
+  if fake_dirs[p] ~= nil then return "directory" end
+  return nil
+end
+Sidecar.io.open = function(p)
+  local data = fake_files[p]
+  if not data then return nil end
+  local done = false
+  return { read = function() if done then return nil end; done = true; return data end, close = function() end }
+end
+Sidecar.io.loadfile = function(p)
+  local data = fake_files[p]
+  if not data then return nil end
+  return loadstring(data, p)
+end
+
+local bim_batches = {}
+package.preload["bookinfomanager"] = function()
+  return {
+    isExtractingInBackground = function() return false end,
+    getBookInfo = function() return nil end,
+    extractInBackground = function(_, q) bim_batches[#bim_batches + 1] = q end,
+  }
+end
+
+local opds_gets = {}
+local cover_gets = 0
+local missing_sync_downloads = {}
+
+local function feed_for(entries, next_href, total)
+  local items = {}
+  for idx = 1, #entries do
+    local e = entries[idx]
+    items[#items + 1] = string.format([[
+      <entry>
+        <id>urn:calibre:book:%d</id>
+        <title>%s</title>
+        <author><name>%s</name></author>
+        <category term="%s" label="Volume %d"/>
+        <link rel="http://opds-spec.org/acquisition" href="/api/books/%d/download/epub" type="application/epub+zip"/>
+        <link rel="http://opds-spec.org/image/thumbnail" href="/api/books/%d/cover?w=360" type="image/jpeg"/>
+      </entry>
+    ]], e.id, e.title, e.author or "Author", e.series or "Spice and Wolf", e.vol or 1, e.id, e.id)
+  end
+  local next_tag = next_href and ('<link rel="next" href="' .. next_href .. '"/>') or ""
+  return '<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" xmlns:lighthouse="http://lighthouse.local/ns"><title>LightHouse</title><lighthouse:total>' .. tostring(total) .. '</lighthouse:total>' .. next_tag .. table.concat(items) .. '</feed>'
+end
+
+local p1_entries = {
+  { id = 101, title = "Book 101", vol = 1 },
+  { id = 102, title = "Book 102", vol = 2 },
+  { id = 103, title = "Book 103", vol = 3 },
+  { id = 104, title = "Book 104", vol = 4 },
+  { id = 105, title = "Book 105", vol = 5 },
+}
+local p2_entries = {
+  { id = 106, title = "Book 106", vol = 6 },
+}
+local series_entries = {
+  { id = 1, title = "Spice and Wolf, Vol. 1", author = "Isuna Hasekura", series = "Spice and Wolf", vol = 1 },
+  { id = 2, title = "Spice and Wolf, Vol. 2", author = "Isuna Hasekura", series = "Spice and Wolf", vol = 2 },
+  { id = 3, title = "Spice and Wolf, Vol. 3", author = "Isuna Hasekura", series = "Spice and Wolf", vol = 3 },
+}
+
+package.preload["json"] = function()
+  return {
+    encode = function() return '{"ok":true}' end,
+    decode = function(raw)
+      if type(raw) == "string" and raw:find('"bookId":801', 1, true) then
+        return {
+          { bookId = 801, document = "d801", percentage = 0.25, timestamp = 1795400000, title = "Remote Active One", authors = "Auth R1", device = "PW" },
+          { bookId = 802, document = "d802", percentage = 0.60, timestamp = 1795400020, title = "Remote Active Two", authors = "Auth R2", device = "PW" },
+        }
+      end
+      return {}
+    end,
+  }
+end
+
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      local url = tostring(request and request.url or "")
+      local resp = "{}"
+      if url:find("/api/kosync/active", 1, true) then
+        resp = '[{"bookId":801},{"bookId":802}]'
+      elseif url:find("/api/opds", 1, true) then
+        opds_gets[#opds_gets + 1] = url
+        if url:find("Spice", 1, true) then
+          resp = feed_for(series_entries, nil, 3)
+        elseif url:find("start=0", 1, true) then
+          resp = feed_for(p1_entries, "/api/opds?start=5&count=5", 6)
+        else
+          resp = feed_for(p2_entries, nil, 6)
+        end
+      elseif url:find("/cover", 1, true) then
+        cover_gets = cover_gets + 1
+        resp = "\255\216" .. string.rep("J", 320) .. "\255\217"
+      elseif url:find("/api/books/80", 1, true) then
+        local bid = url:match("/api/books/(%d+)/")
+        missing_sync_downloads[#missing_sync_downloads + 1] = tonumber(bid)
+        resp = "PK\003\004" .. string.rep("M", 512)
+      elseif url:find("/download/epub", 1, true) then
+        resp = "PK\003\004" .. string.rep("S", 512)
+      end
+      if request and request.sink then
+        request.sink(resp)
+        request.sink(nil)
+      end
+      return 1, 200, {}
+    end,
+  }
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+G_reader_settings:saveSetting("download_dir", dl_dir)
+LightHouse._library_plan = {
+  scale = 1, width = 600, height = 800, pad = 14, gap = 8, content_w = 572,
+  header = 52, hairline = 1, switch_h = 34, subline_h = 30, section_head = 25,
+  footer = 26, bar = 6, row_h = 88, rows = 5, with_covers = true,
+  reading_cover_w = 50, reading_cover_h = 70, total = 800, slack = 0,
+}
+
+-- 1. Cold openLibrary draws immediately WITHOUT waiting for cover fetches, then progressive batches + speculative Page 2 prefetch run cleanly
+LightHouse:openLibrary{ mode = "books", page = 1 }
+local covers_at_paint = cover_gets
+local opds_at_p1 = #opds_gets
+local footer_badge = LightHouse.last_page_model and LightHouse.last_page_model.footer and LightHouse.last_page_model.footer.right
+
+-- Run progressive cover chunks (0.1s ticks: 4 + 1 = 5 covers across 2 ticks)
+flush_scheduled(0.1)
+local covers_after_tick1 = cover_gets
+local dirty_after_tick1 = dirty_count
+flush_scheduled(0.1)
+local covers_after_tick2 = cover_gets
+
+-- Run speculative next-page prefetch (1.5s tick -> caches Page 2 -> turning to Page 2 costs 0 extra HTTP calls)
+flush_scheduled(1.5)
+local opds_after_prefetch = #opds_gets
+LightHouse:openLibrary{ mode = "books", page = 2 }
+local opds_after_turn_p2 = #opds_gets
+
+print("nonblock_paint=" .. tostring(covers_at_paint == 0 and opds_at_p1 == 1))
+print("prog_covers_ok=" .. tostring(covers_after_tick1 == 4 and dirty_after_tick1 >= 1 and covers_after_tick2 == 5))
+print("prefetch_p2_ok=" .. tostring(opds_after_prefetch == 2 and opds_after_turn_p2 == 2))
+print("lib_footer_badge=" .. tostring(footer_badge))
+
+-- 2. Library overflow has Sync (2) + Download entire series works end-to-end with auto-index
+LightHouse:showPageOverflow()
+local ov = shown[#shown]
+local has_sync_ov = false
+for r = 1, #(ov and ov.buttons or {}) do
+  for c = 1, #ov.buttons[r] do
+    if ov.buttons[r][c].text == "Sync (2)" then has_sync_ov = true end
+  end
+end
+print("overflow_sync_badge=" .. tostring(has_sync_ov))
+LightHouse:closeOverflow()
+
+-- Check series long-press has Download entire series
+shown = {}
+LightHouse:showRowQuickActions({ kind = "series", name = "Spice and Wolf" })
+local qa = shown[#shown]
+local has_dl_series_qa = false
+for r = 1, #(qa and qa.buttons or {}) do
+  for c = 1, #qa.buttons[r] do
+    if qa.buttons[r][c].text == "Download entire series" then has_dl_series_qa = true end
+  end
+end
+print("qa_dl_series=" .. tostring(has_dl_series_qa))
+
+shown = {}
+bim_batches = {}
+local missing_series_cnt = LightHouse:downloadSeriesBooks("Spice and Wolf")
+local ds_confirm = shown[#shown]
+print("ds_confirm=" .. tostring(missing_series_cnt) .. ":" .. tostring(ds_confirm and ds_confirm.ok_text))
+if ds_confirm and ds_confirm.ok_cb then ds_confirm.ok_cb() end
+local ds_msg = shown[#shown] and shown[#shown].text or ""
+local v2_on_disk = io.open(dl_dir .. "/Spice and Wolf 02 - Spice and Wolf, Vol. 2 - Isuna Hasekura.epub", "rb") ~= nil
+local v3_on_disk = io.open(dl_dir .. "/Spice and Wolf 03 - Spice and Wolf, Vol. 3 - Isuna Hasekura.epub", "rb") ~= nil
+print("ds_done_ok=" .. tostring(ds_msg:find("Downloaded 2 volume", 1, true) ~= nil and v2_on_disk and v3_on_disk))
+print("ds_indexed_count=" .. tostring(bim_batches[1] and #bim_batches[1]))
+
+-- 3. Currently reading screen has header badge "Sync (2)" -> triggers syncMissingActiveBooks
+LightHouse:showReading()
+local r_model = LightHouse.last_page_model
+local r_extra = r_model and r_model.header_actions and r_model.header_actions.extra
+print("reading_header_badge=" .. tostring(r_extra and r_extra.label) .. ":" .. tostring(r_extra and r_extra.action and r_extra.action.kind))
+shown = {}
+LightHouse.page:run(r_extra.action)
+local ms_confirm = shown[#shown]
+if ms_confirm and ms_confirm.ok_cb then ms_confirm.ok_cb() end
+print("missing_synced_cnt=" .. tostring(#missing_sync_downloads))
+`);
+
+describe("plugin and server v1.13.0 performance patches and power-reader features", () => {
+  it("serves ETag / 304 Not Modified on /api/library/groups and /api/opds", async () => {
+    const sampleBooks = [
+      {
+        id: 1,
+        title: "Spice and Wolf, Vol. 1",
+        authors: "Isuna Hasekura",
+        author_sort: "Hasekura, Isuna",
+        series: "Spice and Wolf",
+        series_index: 1,
+        tags: [],
+        path: "Isuna Hasekura/Spice and Wolf, Vol. 1 (1)",
+        timestamp: "2026-11-24T00:00:00+00:00",
+        pubdate: "2026-11-24T00:00:00+00:00",
+        rating: 8,
+        comments: "",
+        formats: [{ format: "EPUB", name: "Spice1", uncompressed_size: 1024 }],
+      },
+    ];
+    setServerDependenciesForTest({ getCalibreBooks: () => sampleBooks as any } as any);
+    try {
+      const lanSrv = { requestIP: () => ({ address: "192.168.31.15" }) };
+      const g1 = await handleRequest(
+        new Request("http://192.168.31.15:8086/api/library/groups?by=series", {
+          headers: { host: "192.168.31.15:8086" },
+        }),
+        lanSrv,
+      );
+      expect(g1.status).toBe(200);
+      const groupsEtag = g1.headers.get("ETag") || "";
+      expect(groupsEtag.length).toBeGreaterThan(4);
+
+      const g2 = await handleRequest(
+        new Request("http://192.168.31.15:8086/api/library/groups?by=series", {
+          headers: {
+            host: "192.168.31.15:8086",
+            "if-none-match": groupsEtag,
+          },
+        }),
+        lanSrv,
+      );
+      expect(g2.status).toBe(304);
+      expect(await g2.text()).toBe("");
+
+      const o1 = await handleRequest(
+        new Request("http://192.168.31.15:8086/api/opds?start=0&count=10", {
+          headers: { host: "192.168.31.15:8086" },
+        }),
+        lanSrv,
+      );
+      expect(o1.status).toBe(200);
+      const opdsEtag = o1.headers.get("ETag") || "";
+      expect(opdsEtag.length).toBeGreaterThan(4);
+
+      const o2 = await handleRequest(
+        new Request("http://192.168.31.15:8086/api/opds?start=0&count=10", {
+          headers: {
+            host: "192.168.31.15:8086",
+            "if-none-match": `W/${opdsEtag}`,
+          },
+        }),
+        lanSrv,
+      );
+      expect(o2.status).toBe(304);
+      expect(await o2.text()).toBe("");
+    } finally {
+      resetServerDependenciesForTest();
+    }
+  });
+
+  it("rewrites loopback Host headers to LAN IPv4 when allowLoopback=false", () => {
+    expect(isLoopbackHostname("127.0.0.1")).toBe(true);
+    expect(isLoopbackHostname("localhost")).toBe(true);
+    expect(isLoopbackHostname("192.168.31.15")).toBe(false);
+
+    const url = new URL("http://127.0.0.1:8086/api/koplugin/download");
+    const req = new Request(url, { headers: { host: "127.0.0.1:8086" } });
+    expect(
+      resolvePluginBaseUrl(req, url, {
+        trustForwarded: false,
+        allowLoopback: false,
+        lanIpOverride: "192.168.31.15",
+      }),
+    ).toBe("http://192.168.31.15:8086");
+
+    const prevLan = process.env.LIGHTHOUSE_LAN_URL;
+    process.env.LIGHTHOUSE_LAN_URL = "http://192.168.31.99:8086";
+    try {
+      expect(
+        resolvePluginBaseUrl(req, url, {
+          trustForwarded: false,
+          allowLoopback: false,
+        }),
+      ).toBe("http://192.168.31.99:8086");
+    } finally {
+      if (prevLan === undefined) delete process.env.LIGHTHOUSE_LAN_URL;
+      else process.env.LIGHTHOUSE_LAN_URL = prevLan;
+    }
+  });
+
+  it("verifies next-page prefetch, progressive covers, 1-tap full series download, and cross-Kindle sync badges", () => {
+    expect(KOPLUGIN_VERSION).toBe("1.13.0");
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "v113-test-key",
+      generatedAt: "2026-11-24T04:30:00.000Z",
+    });
+
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-v113-"));
+    fs.mkdirSync(path.join(workdir, "books"), { recursive: true });
+    fs.mkdirSync(path.join(workdir, "downloads"), { recursive: true });
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
+      encoding: "utf8",
+    });
+    expect(extract.status).toBe(0);
+
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "v113_harness.lua");
+    fs.writeFileSync(harnessPath, V113_HARNESS);
+    const res = spawnSync(LUA_BINARY as string, [harnessPath, pluginRoot, workdir], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+
+    expect(out.nonblock_paint).toBe("true");
+    expect(out.prog_covers_ok).toBe("true");
+    expect(out.prefetch_p2_ok).toBe("true");
+    expect(out.lib_footer_badge).toBe("2 missing active");
+    expect(out.overflow_sync_badge).toBe("true");
+    expect(out.qa_dl_series).toBe("true");
+    expect(out.ds_confirm).toBe("2:Download all");
+    expect(out.ds_done_ok).toBe("true");
+    expect(out.ds_indexed_count).toBe("2");
+    expect(out.reading_header_badge).toBe("Sync (2):sync_missing_active");
+    expect(out.missing_synced_cnt).toBe("2");
   });
 });

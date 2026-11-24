@@ -53,6 +53,51 @@ local DEFAULT_REQUEST_BLOCK_TIMEOUT = 10
 local DEFAULT_REQUEST_TOTAL_TIMEOUT = 90
 local DEFAULT_DOWNLOAD_BLOCK_TIMEOUT = 15
 local DEFAULT_DOWNLOAD_TOTAL_TIMEOUT = 300
+local DEFAULT_GET_RETRIES = 1
+local DEFAULT_RETRY_DELAY_SECONDS = 0.4
+
+local RETRYABLE_HTTP_CODES = {
+    [502] = true,
+    [503] = true,
+    [504] = true,
+}
+
+--- True when a failed request looks transient and safe to replay.
+-- @number|nil code HTTP status code (nil on socket failure)
+-- @string|nil err internal error code
+-- @treturn boolean
+local function isTransientFailure(code, err)
+    if code then
+        return RETRYABLE_HTTP_CODES[code] == true
+    end
+    local msg = tostring(err or ""):lower()
+    if msg == "not_configured" or msg == "https_unavailable"
+        or msg == "too_many_redirects" or msg == "invalid_redirect"
+        or msg:sub(1, 11) == "file_error:"
+        or msg:find("unexpected status", 1, true) ~= nil then
+        return false
+    end
+    return msg:find("timeout", 1, true) ~= nil
+        or msg:find("closed", 1, true) ~= nil
+        or msg:find("reset", 1, true) ~= nil
+        or msg:find("refused", 1, true) ~= nil
+        or msg:find("temporarily", 1, true) ~= nil
+        or msg:find("unreachable", 1, true) ~= nil
+        or msg:find("broken pipe", 1, true) ~= nil
+end
+
+--- Sleeps briefly before retrying when LuaSocket is available.
+-- @number seconds
+local function sleepSeconds(seconds)
+    local delay = tonumber(seconds)
+    if not delay or delay <= 0 then return end
+    pcall(function()
+        local sock = require("socket")
+        if type(sock) == "table" and type(sock.sleep) == "function" then
+            sock.sleep(delay)
+        end
+    end)
+end
 
 --- Strips a trailing slash so paths can be appended safely.
 -- @string url
@@ -306,54 +351,92 @@ local function stripApiKeyCrossHost(headers, current, next_url)
 end
 
 --- GETs a URL and returns the response body.
+-- Retries once on transient socket/5xx errors unless `options.max_retries == 0`.
+-- Supports conditional requests via `options.etag` (`If-None-Match` -> `"not_modified"`).
 -- @tparam table config generated config table
 -- @string path absolute URL or path relative to base_url
+-- @tparam[opt] table options { etag = string, max_retries = number, retry_delay = number }
 -- @treturn string|nil body
--- @treturn string|nil error description
-function Client.get(config, path)
+-- @treturn string|nil error description (or `"not_modified"` on 304)
+-- @treturn table|nil { status = number, etag = string|nil }
+function Client.get(config, path, options)
     if not Client.isConfigured(config) then
         return nil, "not_configured"
     end
 
-    local headers = Client.buildHeaders(config)
-    local current = Client.buildUrl(config, path)
-    local redirects = 0
-    local chunks = {}
-    local code, response_headers, err
-
-    socketutil:set_timeout(
-        numberOr(config.request_block_timeout, DEFAULT_REQUEST_BLOCK_TIMEOUT),
-        numberOr(config.request_total_timeout, DEFAULT_REQUEST_TOTAL_TIMEOUT)
-    )
-    while true do
-        chunks = {}
-        code, response_headers, err = requestOnce(current, ltn12.sink.table(chunks), headers)
-        if not code or not REDIRECT_CODES[code] then
-            break
+    options = type(options) == "table" and options or {}
+    local max_retries = DEFAULT_GET_RETRIES
+    if options.max_retries ~= nil then
+        local parsed_retries = tonumber(options.max_retries)
+        if parsed_retries and parsed_retries >= 0 then
+            max_retries = math.floor(parsed_retries)
         end
-        local next_url, redirect_err = nextHop(current, response_headers, redirects)
-        if not next_url then
-            code, err = nil, redirect_err
-            break
-        end
-        redirects = redirects + 1
-        stripApiKeyCrossHost(headers, current, next_url)
-        current = next_url
     end
-    socketutil:reset_timeout()
+    local retry_delay = DEFAULT_RETRY_DELAY_SECONDS
+    if options.retry_delay ~= nil then
+        local parsed_delay = tonumber(options.retry_delay)
+        if parsed_delay and parsed_delay >= 0 then
+            retry_delay = parsed_delay
+        end
+    end
+
+    local block_timeout = numberOr(config.request_block_timeout, DEFAULT_REQUEST_BLOCK_TIMEOUT)
+    local total_timeout = numberOr(config.request_total_timeout, DEFAULT_REQUEST_TOTAL_TIMEOUT)
+    local chunks, code, response_headers, err
+
+    for attempt = 0, max_retries do
+        if attempt > 0 then
+            sleepSeconds(retry_delay)
+        end
+        local headers = Client.buildHeaders(config)
+        if type(options.etag) == "string" and options.etag ~= "" then
+            headers["If-None-Match"] = options.etag
+        end
+        local current = Client.buildUrl(config, path)
+        local redirects = 0
+
+        socketutil:set_timeout(block_timeout, total_timeout)
+        while true do
+            chunks = {}
+            code, response_headers, err = requestOnce(current, ltn12.sink.table(chunks), headers)
+            if not code or not REDIRECT_CODES[code] then
+                break
+            end
+            local next_url, redirect_err = nextHop(current, response_headers, redirects)
+            if not next_url then
+                code, err = nil, redirect_err
+                break
+            end
+            redirects = redirects + 1
+            stripApiKeyCrossHost(headers, current, next_url)
+            current = next_url
+        end
+        socketutil:reset_timeout()
+
+        if code == 200 or code == 304 then
+            break
+        end
+        if attempt >= max_retries or not isTransientFailure(code, err) then
+            break
+        end
+    end
 
     if not code then
         return nil, err or "network_error"
     end
+    local response_etag = headerValue(response_headers, "etag")
+    if code == 304 then
+        return nil, "not_modified", { status = 304, etag = response_etag }
+    end
     if code ~= 200 then
-        return nil, string.format("http_%d", code)
+        return nil, string.format("http_%d", code), { status = code, etag = response_etag }
     end
 
     local body = table.concat(chunks)
     if looksLikeHtmlDocument(body) then
         return nil, "html_response"
     end
-    return body, nil
+    return body, nil, { status = 200, etag = response_etag }
 end
 
 --- POSTs a JSON payload and returns the response body.
@@ -439,7 +522,8 @@ function Client.download(config, url, filepath, max_seconds)
         return nil, "not_configured"
     end
 
-    local handle = io.open(filepath, "wb")
+    local part_path = tostring(filepath) .. ".part"
+    local handle = io.open(part_path, "wb")
     if not handle then
         return nil, string.format("file_error: cannot write %s", tostring(filepath))
     end
@@ -473,13 +557,13 @@ function Client.download(config, url, filepath, max_seconds)
         redirects = redirects + 1
         stripApiKeyCrossHost(headers, current, next_url)
         current = next_url
-        -- The redirect body is already in the file; restart the next hop from
-        -- an empty file so an interstitial page is never mixed into the EPUB.
+        -- The redirect body is already in the `.part` file; restart the next hop
+        -- cleanly so an interstitial page is never mixed into the EPUB.
         pcall(function() handle:close() end)
-        handle = io.open(filepath, "wb")
+        handle = io.open(part_path, "wb")
         if not handle then
             socketutil:reset_timeout()
-            os.remove(filepath)
+            os.remove(part_path)
             return nil, string.format("file_error: cannot rewrite %s", tostring(filepath))
         end
     end
@@ -487,29 +571,41 @@ function Client.download(config, url, filepath, max_seconds)
     pcall(function() handle:close() end)
 
     if not code then
-        os.remove(filepath)
+        os.remove(part_path)
         return nil, err or "network_error"
     end
     if code ~= 200 then
-        os.remove(filepath)
+        os.remove(part_path)
         return nil, string.format("http_%d", code)
     end
 
-    -- Guard against a zero-byte file or a web page masquerading as an EPUB.
-    local size = lfs.attributes(filepath, "size") or 0
+    -- Guard against a zero-byte, truncated, or HTML interstitial payload.
+    local size = lfs.attributes(part_path, "size") or 0
     if size < MIN_DOWNLOAD_BYTES then
-        os.remove(filepath)
+        os.remove(part_path)
         return nil, "empty_response"
     end
 
-    local probe = io.open(filepath, "rb")
+    local expected_len = tonumber(headerValue(response_headers, "content-length"))
+    if expected_len and expected_len > 0 and size < expected_len then
+        os.remove(part_path)
+        return nil, "truncated_download"
+    end
+
+    local probe = io.open(part_path, "rb")
     if probe then
         local head = probe:read(512)
         probe:close()
         if looksLikeHtmlDocument(head) then
-            os.remove(filepath)
+            os.remove(part_path)
             return nil, "html_response"
         end
+    end
+
+    local ok_rename, rename_err = os.rename(part_path, filepath)
+    if not ok_rename then
+        os.remove(part_path)
+        return nil, string.format("file_error: %s", tostring(rename_err or "rename_failed"))
     end
 
     return true, nil
