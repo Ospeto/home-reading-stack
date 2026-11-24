@@ -84,10 +84,12 @@ local util = require("util")
 local _ = require("gettext")
 
 local config = require("lighthouse_config")
+local Cache = require("lighthouse_cache")
 local Client = require("lighthouse_client")
 local Nav = require("lighthouse_nav")
 local OPDS = require("lighthouse_opds")
 local Ota = require("lighthouse_ota")
+local Outbox = require("lighthouse_outbox")
 local Page = require("lighthouse_page")
 local Sidecar = require("lighthouse_sidecar")
 local Stats = require("lighthouse_stats")
@@ -136,6 +138,11 @@ local LightHouse = WidgetContainer:extend{
 -- looking. Anything this plugin does that changes the shelf calls
 -- `forgetShelf()` and refetches immediately.
 LightHouse.SHELF_REUSE_SECONDS = 60
+LightHouse.OPDS_CACHE_MAX_ENTRIES = 12
+LightHouse.OPDS_CACHE_TTL_SECONDS = 120
+LightHouse.GROUPING_CACHE_TTL_SECONDS = 120
+LightHouse.COVER_CACHE_MAX_FILES = 400
+LightHouse.COVER_CACHE_MAX_BYTES = 30 * 1024 * 1024
 
 --- How long the list of sidecar directories may be reused, in seconds.
 --
@@ -861,6 +868,20 @@ function LightHouse:fetchOneCover(entry, started)
     return true
 end
 
+local function coverCacheIo()
+    if type(lfs) == "table" and type(lfs.dir) == "function" then
+        return nil
+    end
+    if type(Sidecar.io) == "table" and type(Sidecar.io.list) == "function" then
+        return {
+            list = Sidecar.io.list,
+            attributes = Sidecar.io.attributes,
+            remove = os.remove,
+        }
+    end
+    return nil
+end
+
 --- Fetches the covers a page is missing, inside the caller's spinner.
 -- Bounded twice over - a fetch count and a wall-clock budget - so a slow link
 -- degrades to placeholders instead of hanging the catalog. A book the server
@@ -884,6 +905,13 @@ function LightHouse:prefetchCovers(entries)
             end
             fetched = fetched + 1
         end
+    end
+    if fetched > 0 and not self._cover_cache_pruned then
+        self._cover_cache_pruned = true
+        pcall(Cache.pruneDir, coverDir(), {
+            max_files = LightHouse.COVER_CACHE_MAX_FILES,
+            max_bytes = LightHouse.COVER_CACHE_MAX_BYTES,
+        }, coverCacheIo())
     end
 end
 
@@ -1134,6 +1162,11 @@ function LightHouse:addToMainMenu(menu_items)
             {
                 text = _("Check for update"),
                 callback = function() self:checkForPluginUpdate() end,
+            },
+            {
+                text = _("Diagnostics"),
+                callback = function() self:runDiagnostics() end,
+                help_text = _("Test server connectivity, latency, cache size, and offline highlight queue."),
             },
             {
                 text = _("Connection"),
@@ -2747,13 +2780,75 @@ end
 -- so it is fetched once and paged on the device: paging a grouping through the
 -- network would cost one request per page turn.
 -- @string by "authors" | "series"
+local function cloneFeedForRender(feed)
+    if type(feed) ~= "table" then return feed end
+    local copy = {}
+    for key, value in pairs(feed) do
+        copy[key] = value
+    end
+    local entries_copy = {}
+    local src_entries = type(feed.entries) == "table" and feed.entries or {}
+    for entry_index = 1, #src_entries do
+        local src = src_entries[entry_index]
+        if type(src) == "table" then
+            local row = {}
+            for rk, rv in pairs(src) do row[rk] = rv end
+            entries_copy[entry_index] = row
+        else
+            entries_copy[entry_index] = src
+        end
+    end
+    copy.entries = entries_copy
+    return copy
+end
+
+--- Returns the bounded in-memory LRU cache for OPDS pages.
+-- @treturn table `lighthouse_cache` instance
+function LightHouse:opdsCache()
+    if not self._opds_cache then
+        self._opds_cache = Cache.new(
+            LightHouse.OPDS_CACHE_MAX_ENTRIES,
+            LightHouse.OPDS_CACHE_TTL_SECONDS
+        )
+    end
+    return self._opds_cache
+end
+
+--- Clears cached OPDS pages, author/series groupings, and shelf progress.
+function LightHouse:forgetCatalogCaches()
+    if self._opds_cache then
+        self._opds_cache:clear()
+    end
+    self._groupings_by_mode = {}
+    self._groupings = nil
+    self:forgetShelf()
+end
+
+-- @boolean[opt] force_refresh bypass TTL check
 -- @treturn table|nil { groups, totals }
 -- @treturn string|nil error code
-function LightHouse:fetchGrouping(by)
-    local cache = self._groupings or {}
-    self._groupings = cache
-    if cache[by] then return cache[by] end
-    local body, err = Client.get(config, "/api/library/groups?by=" .. by)
+function LightHouse:fetchGrouping(by, force_refresh)
+    self._groupings_by_mode = self._groupings_by_mode or {}
+    self._groupings = self._groupings or {}
+    local now = os.time()
+    local cached = self._groupings_by_mode[by]
+    if not force_refresh and type(cached) == "table" and type(cached.at) == "number" then
+        local age = now - cached.at
+        if age >= 0 and age <= LightHouse.GROUPING_CACHE_TTL_SECONDS and type(cached.grouping) == "table" then
+            self._groupings[by] = cached.grouping
+            return cached.grouping
+        end
+    end
+
+    local etag = type(cached) == "table" and cached.etag or nil
+    local body, err, meta = Client.get(config, "/api/library/groups?by=" .. by, {
+        etag = etag,
+    })
+    if err == "not_modified" and type(cached) == "table" and type(cached.grouping) == "table" then
+        cached.at = now
+        self._groupings[by] = cached.grouping
+        return cached.grouping
+    end
     if type(body) ~= "string" or body == "" then
         return nil, err or "invalid_response"
     end
@@ -2769,7 +2864,12 @@ function LightHouse:fetchGrouping(by)
             series = Status.num(decoded.series),
         },
     }
-    cache[by] = grouping
+    self._groupings_by_mode[by] = {
+        grouping = grouping,
+        at = now,
+        etag = meta and meta.etag or nil,
+    }
+    self._groupings[by] = grouping
     return grouping
 end
 
@@ -2890,9 +2990,8 @@ function LightHouse:openLibrary(options)
     if options.refresh then
         self.local_scan = nil
         self.local_index = nil
-    end
-    if options.refresh or mode_changed then
-        self._groupings = nil
+        self:forgetCatalogCaches()
+    elseif mode_changed then
         self:forgetShelf()
     end
 
@@ -2969,10 +3068,9 @@ function LightHouse:openLibrary(options)
         local path = "/api/opds?" .. buildQuery(opds_params)
 
         local refresh_device = options.refresh == true
-        local loaded, load_err = self:withSpinner(_("Loading LightHouse catalog…"), function()
-            local body, err = Client.get(config, path)
-            if not body then return nil, err or "invalid_response" end
-            local feed = OPDS.parse(body)
+        local cached_feed = not refresh_device and self:opdsCache():get(path, os.time()) or nil
+        local function assembleOpds(raw_feed)
+            local feed = cloneFeedForRender(raw_feed)
             if #feed.entries == 0 then
                 return { feed = feed }
             end
@@ -3004,7 +3102,22 @@ function LightHouse:openLibrary(options)
                 end
             end
             return { feed = feed, shelf_err = shelf_err }
-        end)
+        end
+
+        local loaded, load_err
+        if cached_feed then
+            loaded = assembleOpds(cached_feed)
+        else
+            loaded, load_err = self:withSpinner(_("Loading LightHouse catalog…"), function()
+                local body, err = Client.get(config, path)
+                if not body then return nil, err or "invalid_response" end
+                local parsed_feed = OPDS.parse(body)
+                if #parsed_feed.entries > 0 then
+                    self:opdsCache():set(path, parsed_feed, os.time())
+                end
+                return assembleOpds(parsed_feed)
+            end)
+        end
 
         if not loaded then
             self.library_state = nil
@@ -3092,7 +3205,10 @@ function LightHouse:openLibrary(options)
         context.totals = { books = feed.total }
     else
         local grouping, err = self:withSpinner(_("Loading the library…"), function()
-            local fetched, fetch_err = self:fetchGrouping(mode == "series" and "series" or "authors")
+            local fetched, fetch_err = self:fetchGrouping(
+                mode == "series" and "series" or "authors",
+                options.refresh == true or mode_changed
+            )
             if not fetched then return nil, fetch_err end
             local available = math.max(math.ceil(#fetched.groups / page_size), 1)
             local target_page = page > available and available or page
@@ -4171,6 +4287,7 @@ function LightHouse:syncBookHighlights(record, options)
         for k, v in pairs(raw_map) do map[k] = v end
     end
     if options.force ~= true and book_path ~= "" and map[book_path] == fp then
+        Outbox.remove(G_reader_settings, book_path)
         return true, "unchanged", 0
     end
 
@@ -4190,14 +4307,70 @@ function LightHouse:syncBookHighlights(record, options)
     if book_path ~= "" then
         map[book_path] = fp
         G_reader_settings:saveSetting("lighthouse_synced_highlights", map)
+        Outbox.remove(G_reader_settings, book_path)
     end
     return true, "synced", #payload.entries
 end
 
+--- Flushes any pending offline highlight syncs queued when closing books offline.
+-- @tparam[opt] table options { silent = boolean, timeout = number }
+-- @treturn number flushed book count
+-- @treturn number remaining queued count
+function LightHouse:flushHighlightOutbox(options)
+    options = type(options) == "table" and options or {}
+    if not Client.isConfigured(config) then
+        return 0, Outbox.count(G_reader_settings)
+    end
+    local pending = Outbox.list(G_reader_settings)
+    if #pending == 0 then return 0, 0 end
+    if not NetworkMgr:isOnline() then return 0, #pending end
+
+    local flushed = 0
+    for idx = 1, #pending do
+        local book_path = pending[idx]
+        if not Sidecar.bookExists(book_path) then
+            Outbox.remove(G_reader_settings, book_path)
+        else
+            local record = Sidecar.read(book_path)
+            if not record or type(record.annotations) ~= "table" or #record.annotations == 0 then
+                Outbox.remove(G_reader_settings, book_path)
+            else
+                local ok, reason = self:syncBookHighlights(record, {
+                    silent = true,
+                    timeout = options.timeout or 10,
+                })
+                if ok then
+                    Outbox.remove(G_reader_settings, book_path)
+                    if reason == "synced" then
+                        flushed = flushed + 1
+                    end
+                end
+            end
+        end
+    end
+
+    local remaining = Outbox.count(G_reader_settings)
+    if not options.silent and flushed > 0 then
+        notice(T(_("Synced queued highlights for %1 book(s)."), tostring(flushed)), 3)
+    end
+    return flushed, remaining
+end
+
+--- KOReader event hook: flushes queued offline highlight syncs when Wi-Fi connects.
+function LightHouse:onNetworkConnected()
+    if not self:autoSyncHighlightsEnabled() then return end
+    if Outbox.count(G_reader_settings) == 0 then return end
+    UIManager:scheduleIn(2, function()
+        pcall(function()
+            self:flushHighlightOutbox({ silent = true, timeout = 10 })
+        end)
+    end)
+end
+
 --- Non-blocking hook called by KOReader when a reader closes a document.
 -- Schedules work slightly after close so KOReader flushes the sidecar first
--- and closing never stalls. Runs highlight sync (when online + enabled) and
--- next-volume suggestion (local sibling check works even offline).
+-- and closing never stalls. Queues unsynced highlights offline into the outbox
+-- and runs next-volume suggestion (local sibling check works even offline).
 function LightHouse:onCloseDocument()
     local doc = self.ui and self.ui.document
     local book_path = doc and doc.file
@@ -4210,10 +4383,24 @@ function LightHouse:onCloseDocument()
         pcall(function()
             local record = Sidecar.read(book_path)
             if not record then return end
-            if self:autoSyncHighlightsEnabled() and Client.isConfigured(config) and NetworkMgr:isOnline() then
-                pcall(function()
-                    self:syncBookHighlights(record, { silent = true, timeout = 10 })
-                end)
+            if self:autoSyncHighlightsEnabled() and Client.isConfigured(config) then
+                if NetworkMgr:isOnline() then
+                    local ok_call, ok_sync, reason = pcall(function()
+                        return self:syncBookHighlights(record, { silent = true, timeout = 10 })
+                    end)
+                    if ok_call and not ok_sync and reason ~= "empty" and reason ~= "not_configured" and reason ~= "invalid_json" then
+                        Outbox.enqueue(G_reader_settings, book_path)
+                    end
+                elseif type(record.annotations) == "table" and #record.annotations > 0 then
+                    local payload = buildHighlightSyncPayload(record)
+                    if payload then
+                        local raw_map = G_reader_settings:readSetting("lighthouse_synced_highlights")
+                        local synced_fp = type(raw_map) == "table" and raw_map[book_path] or nil
+                        if synced_fp ~= highlightFingerprint(record) then
+                            Outbox.enqueue(G_reader_settings, book_path)
+                        end
+                    end
+                end
             end
             if self:nextVolumePromptEnabled() then
                 pcall(function()
@@ -5061,6 +5248,92 @@ function LightHouse:indexLocalBooks()
     end
     notice(T(_("Indexing %1 unindexed book(s) in the background…"), tostring(queued)), 4)
     return queued
+end
+
+-- ---------------------------------------------------------------------------
+-- Cover Cache Cleanup & Self-Test Diagnostics
+-- ---------------------------------------------------------------------------
+
+--- Clears cached cover thumbnails from disk and resets session prune flag.
+-- @treturn table { removed = number, bytes_freed = number }
+function LightHouse:clearCoverCache()
+    local res = Cache.clearDir(coverDir(), coverCacheIo())
+    self._cover_cache_pruned = false
+    local freed = Views.formatBytes(res.bytes_freed or 0)
+    notice(T(_("Cleared %1 cached cover(s) (%2)."), tostring(res.removed or 0), freed), 3)
+    return res
+end
+
+--- Runs live server reachability, latency, auth, cache, outbox, and indexer checks.
+function LightHouse:runDiagnostics()
+    local cover_stats = Cache.dirStats(coverDir(), coverCacheIo())
+    local opds_stats = self:opdsCache():stats()
+    local outbox_count = Outbox.count(G_reader_settings)
+    local bim = loadBookInfoManager()
+    local online = NetworkMgr:isOnline() == true
+    local configured = Client.isConfigured(config)
+
+    local ping_status = _("not tested")
+    local latency_text = "n/a"
+    local server_ver = _("unknown")
+
+    if configured and online then
+        local sock_ok, sock = pcall(require, "socket")
+        local function clockNow()
+            if sock_ok and type(sock) == "table" and type(sock.gettime) == "function" then
+                return sock.gettime()
+            end
+            return os.clock()
+        end
+        local t0 = clockNow()
+        local body, err = self:withSpinner(_("Running LightHouse diagnostics…"), function()
+            return Client.get(config, "/api/koplugin/version", { max_retries = 0 })
+        end)
+        local t1 = clockNow()
+        local elapsed_ms = math.max(math.floor((t1 - t0) * 1000 + 0.5), 0)
+        latency_text = tostring(elapsed_ms) .. " ms"
+        if body then
+            local ok_dec, manifest = pcall(JSON.decode, body)
+            if ok_dec and type(manifest) == "table" and manifest.version then
+                server_ver = "v" .. Status.str(manifest.version)
+            else
+                server_ver = _("ok")
+            end
+            ping_status = _("reachable (authenticated)")
+        else
+            ping_status = tostring(errorHeadline(err)) .. " (" .. tostring(err or "error") .. ")"
+        end
+    elseif not configured then
+        ping_status = _("not configured")
+    elseif not online then
+        ping_status = _("Wi-Fi offline")
+    end
+
+    local lines = {
+        _("Server:") .. " " .. (config.base_url ~= "" and config.base_url or _("(not set)")),
+        _("Connectivity:") .. " " .. ping_status .. " — " .. latency_text,
+        _("Plugin / Server:") .. " v" .. Status.str(config.plugin_version, "0") .. " / " .. server_ver,
+        _("OPDS Cache:") .. " " .. T(_("%1/%2 pages (%3 hits, %4 misses)"),
+            tostring(opds_stats.size or 0),
+            tostring(opds_stats.max_entries or 0),
+            tostring(opds_stats.hits or 0),
+            tostring(opds_stats.misses or 0)),
+        _("Cover Cache:") .. " " .. T(_("%1 files (%2 / 30 MB max)"),
+            tostring(cover_stats.files or 0),
+            Views.formatBytes(cover_stats.bytes or 0)),
+        _("Offline Highlight Outbox:") .. " " .. tostring(outbox_count) .. " " .. _("queued"),
+        _("CoverBrowser Indexer:") .. " " .. (bim and _("active") or _("unavailable")),
+    }
+
+    local ConfirmBox = require("ui/widget/confirmbox")
+    UIManager:show(squareWidget(ConfirmBox, {
+        text = table.concat(lines, "\n"),
+        cancel_text = _("Close"),
+        ok_text = _("Clear cover cache"),
+        ok_cb = function()
+            self:clearCoverCache()
+        end,
+    }))
 end
 
 -- Pure helpers exposed for the repository's Lua test harness. They stay plain

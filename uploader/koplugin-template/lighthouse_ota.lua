@@ -31,6 +31,98 @@ local function u32(bytes, pos)
     return b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
 end
 
+local bit_ok, bitlib = pcall(require, "bit")
+local bit32_ok, bit32lib = false, nil
+if not bit_ok then
+    bit32_ok, bit32lib = pcall(require, "bit32")
+end
+
+local function bxor32(a, b)
+    if bit_ok then
+        local v = bitlib.bxor(a, b)
+        if v < 0 then v = v + 4294967296 end
+        return v
+    elseif bit32_ok then
+        return bit32lib.bxor(a, b)
+    end
+    local r, p = 0, 1
+    local x, y = a % 4294967296, b % 4294967296
+    for _bit = 1, 32 do
+        if (x % 2) ~= (y % 2) then r = r + p end
+        x = math.floor(x / 2)
+        y = math.floor(y / 2)
+        p = p * 2
+    end
+    return r
+end
+
+local function band32(a, b)
+    if bit_ok then
+        local v = bitlib.band(a, b)
+        if v < 0 then v = v + 4294967296 end
+        return v
+    elseif bit32_ok then
+        return bit32lib.band(a, b)
+    end
+    local r, p = 0, 1
+    local x, y = a % 4294967296, b % 4294967296
+    for _bit = 1, 32 do
+        if (x % 2 == 1) and (y % 2 == 1) then r = r + p end
+        x = math.floor(x / 2)
+        y = math.floor(y / 2)
+        p = p * 2
+    end
+    return r
+end
+
+local function rshift32(a, n)
+    if bit_ok then
+        local v = bitlib.rshift(a, n)
+        if v < 0 then v = v + 4294967296 end
+        return v
+    elseif bit32_ok then
+        return bit32lib.rshift(a, n)
+    end
+    return math.floor((a % 4294967296) / (2 ^ n))
+end
+
+local CRC32_TABLE = {}
+for i = 0, 255 do
+    local c = i
+    for _bit = 1, 8 do
+        if band32(c, 1) ~= 0 then
+            c = bxor32(rshift32(c, 1), 0xEDB88320)
+        else
+            c = rshift32(c, 1)
+        end
+    end
+    CRC32_TABLE[i] = c
+end
+
+--- Computes IEEE 802.3 CRC-32 for raw bytes, matching PKZIP and Node/Bun `crc32()`.
+-- @string data raw binary payload
+-- @treturn number unsigned 32-bit CRC
+function Ota.crc32(data)
+    local crc = 0xFFFFFFFF
+    local len = type(data) == "string" and #data or 0
+    if bit_ok then
+        local tbl = CRC32_TABLE
+        for idx = 1, len do
+            local byte = data:byte(idx)
+            crc = bitlib.bxor(tbl[bitlib.band(bitlib.bxor(crc, byte), 0xFF)], bitlib.rshift(crc, 8))
+        end
+        crc = bitlib.bxor(crc, 0xFFFFFFFF)
+        if crc < 0 then crc = crc + 4294967296 end
+        return crc
+    end
+    local tbl = CRC32_TABLE
+    for idx = 1, len do
+        local byte = data:byte(idx)
+        crc = bxor32(tbl[band32(bxor32(crc, byte), 0xFF)], rshift32(crc, 8))
+    end
+    return bxor32(crc, 0xFFFFFFFF)
+end
+
 --- Parses numeric `major.minor.patch` version components.
 -- @param value string|nil e.g. "1.10.0" or "v1.10.0"
 -- @treturn table { major, minor, patch }
@@ -137,12 +229,13 @@ function Ota.unpackStoredZip(bytes)
 
         local flags = u16(bytes, pos + 6)
         local method = u16(bytes, pos + 8)
+        local expected_crc = u32(bytes, pos + 14)
         local comp_size = u32(bytes, pos + 18)
         local uncomp_size = u32(bytes, pos + 22)
         local name_len = u16(bytes, pos + 26)
         local extra_len = u16(bytes, pos + 28)
 
-        if not flags or not method or not comp_size or not uncomp_size or not name_len or not extra_len then
+        if not flags or not method or not expected_crc or not comp_size or not uncomp_size or not name_len or not extra_len then
             return nil, "invalid_zip"
         end
         if method ~= 0 or comp_size ~= uncomp_size or math.floor(flags / 8) % 2 == 1 then
@@ -158,6 +251,10 @@ function Ota.unpackStoredZip(bytes)
         local raw_name = bytes:sub(name_start, name_start + name_len - 1)
         local data = comp_size > 0 and bytes:sub(data_start, data_start + comp_size - 1) or ""
         pos = data_start + comp_size
+
+        if Ota.crc32(data) ~= expected_crc then
+            return nil, "crc_mismatch"
+        end
 
         local rel_name, is_dir = validateEntryName(raw_name)
         if not rel_name then
@@ -240,11 +337,54 @@ function Ota.installEntries(plugin_dir, entries)
         end
     end
 
+    local swapped = {}
+    local function rollbackSwapped()
+        for idx = #swapped, 1, -1 do
+            local item = swapped[idx]
+            if item.bak then
+                pcall(os.remove, item.target)
+                pcall(os.rename, item.bak, item.target)
+            else
+                pcall(os.remove, item.target)
+            end
+        end
+    end
+
     for idx = 1, #staged do
-        local ok_rename, rename_err = os.rename(staged[idx].tmp, staged[idx].target)
+        local item = staged[idx]
+        local bak = item.target .. ".ota_bak"
+        local existed = false
+        local probe = io.open(item.target, "rb")
+        if probe then
+            probe:close()
+            existed = true
+            pcall(os.remove, bak)
+            local ok_bak, bak_err = os.rename(item.target, bak)
+            if not ok_bak then
+                rollbackSwapped()
+                cleanupStaged()
+                return nil, string.format("file_error: %s", tostring(bak_err or "backup_failed"))
+            end
+        end
+
+        local ok_rename, rename_err = os.rename(item.tmp, item.target)
         if not ok_rename then
+            if existed then
+                pcall(os.rename, bak, item.target)
+            end
+            rollbackSwapped()
             cleanupStaged()
             return nil, string.format("file_error: %s", tostring(rename_err or "rename_failed"))
+        end
+        swapped[#swapped + 1] = {
+            target = item.target,
+            bak = existed and bak or nil,
+        }
+    end
+
+    for idx = 1, #swapped do
+        if swapped[idx].bak then
+            pcall(os.remove, swapped[idx].bak)
         end
     end
 
