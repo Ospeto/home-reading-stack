@@ -11323,7 +11323,8 @@ describe("plugin and server v1.13.0 performance patches and power-reader feature
   });
 
   it("verifies next-page prefetch, progressive covers, 1-tap full series download, and cross-Kindle sync badges", () => {
-    expect(KOPLUGIN_VERSION).toBe("1.13.0");
+    expect(Number(KOPLUGIN_VERSION.split(".")[0])).toBeGreaterThanOrEqual(1);
+    expect(Number(KOPLUGIN_VERSION.split(".")[1])).toBeGreaterThanOrEqual(13);
     if (!LUA_BINARY || !UNZIP_BINARY) return;
 
     const { zip } = generateKoplugin({
@@ -11374,5 +11375,440 @@ describe("plugin and server v1.13.0 performance patches and power-reader feature
     expect(out.ds_indexed_count).toBe("2");
     expect(out.reading_header_badge).toBe("Sync (2):sync_missing_active");
     expect(out.missing_synced_cnt).toBe("2");
+  });
+});
+
+const V114_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local workdir = assert(arg[2], "workdir required")
+local books_dir = workdir .. "/books"
+local dl_dir = workdir .. "/downloads"
+local data_dir = workdir .. "/data"
+package.preload["datastorage"] = function()
+  return {
+    getDataDir = function() return data_dir end,
+    getSettingsDir = function() return data_dir end,
+  }
+end
+local ui_mgr = require("ui/uimanager")
+ui_mgr.nextTick = function(_, fn) fn() end
+ui_mgr.scheduleIn = function(_, _secs, _fn) end
+local net_mgr = require("ui/network/manager")
+net_mgr.isOnline = function() return true end
+
+local settings_store = {}
+_G.G_reader_settings = {
+  readSetting = function(_, k) return settings_store[k] end,
+  saveSetting = function(_, k, v) settings_store[k] = v end,
+  nilOrTrue = function(_, k) return settings_store[k] ~= false end,
+}
+
+package.preload["ltn12"] = function()
+  return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
+    sink = {
+      table = function(chunks)
+        chunks = chunks or {}
+        return function(chunk)
+          if chunk then chunks[#chunks + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function(fh)
+        return function(chunk)
+          if chunk and fh then fh:write(chunk) elseif fh then fh:close() end
+          return 1
+        end
+      end,
+    },
+  }
+end
+
+local fake_files, fake_dirs = {}, {}
+local unindexed_path = books_dir .. "/New Book.epub"
+local indexed_path = books_dir .. "/Done Book.epub"
+fake_files[unindexed_path] = "EPUB-UNINDEXED"
+fake_files[indexed_path] = "EPUB-INDEXED"
+fake_dirs[books_dir] = { "New Book.epub", "Done Book.epub", ".hidden.epub", "Ignore.epub.sdr" }
+fake_dirs[dl_dir] = {}
+
+package.preload["libs/libkoreader-lfs"] = function()
+  return {
+    attributes = function(target, field)
+      if fake_files[target] ~= nil then
+        return field == "size" and #fake_files[target] or "file"
+      end
+      if fake_dirs[target] ~= nil then return "directory" end
+      local h = io.open(target, "rb")
+      if h then
+        local d = h:read("*a") or ""
+        h:close()
+        return field == "size" and #d or "file"
+      end
+      return nil
+    end,
+    dir = function(d)
+      local entries = fake_dirs[d] or {}
+      local idx = 0
+      return function()
+        idx = idx + 1
+        return entries[idx]
+      end
+    end,
+    mkdir = function(d)
+      fake_dirs[d] = fake_dirs[d] or {}
+      os.execute('mkdir -p "' .. tostring(d) .. '"')
+      return true
+    end,
+  }
+end
+
+local trapper_events = {}
+local cancel_after_calls = nil
+local MockTrapper = {
+  setPausedText = function(_, txt)
+    trapper_events[#trapper_events + 1] = "pause:" .. tostring(txt)
+  end,
+  info = function(_, txt)
+    trapper_events[#trapper_events + 1] = txt
+    if cancel_after_calls and #trapper_events >= cancel_after_calls then
+      return false
+    end
+    return true
+  end,
+  wrap = function(_, fn) fn() end,
+  clear = function()
+    trapper_events[#trapper_events + 1] = "CLEAR"
+  end,
+}
+package.preload["ui/trapper"] = function() return MockTrapper end
+
+local bim_batches = {}
+local bim_meta = {
+  [indexed_path] = { has_meta = "Y" },
+  [unindexed_path] = { has_meta = "N" },
+}
+package.preload["bookinfomanager"] = function()
+  return {
+    isExtractingInBackground = function() return false end,
+    getBookInfo = function(_, p) return bim_meta[p] end,
+    extractInBackground = function(_, chunk) bim_batches[#bim_batches + 1] = chunk end,
+  }
+end
+
+local active_sessions_json = "[]"
+local opds_feed_xml = [[<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opds="http://opds-spec.org/2010/catalog" xmlns:calibre="http://calibre-ebook.com/2009/metadata">
+  <title>LightHouse Library</title>
+  <totalResults>2</totalResults><startIndex>0</startIndex><itemsPerPage>40</itemsPerPage>
+  <entry>
+    <id>urn:lighthouse:book:501</id><title>Spice and Wolf, Vol. 1</title><author><name>Isuna Hasekura</name></author>
+    <category term="Spice and Wolf" label="Volume 1"/>
+    <link rel="http://opds-spec.org/acquisition" type="application/epub+zip" href="/api/books/501/download/epub"/>
+  </entry>
+  <entry>
+    <id>urn:lighthouse:book:502</id><title>Spice and Wolf, Vol. 2</title><author><name>Isuna Hasekura</name></author>
+    <category term="Spice and Wolf" label="Volume 2"/>
+    <link rel="http://opds-spec.org/acquisition" type="application/epub+zip" href="/api/books/502/download/epub"/>
+  </entry>
+</feed>]]
+
+package.preload["json"] = function()
+  return {
+    encode = function() return '{"ok":true}' end,
+    decode = function(raw)
+      if type(raw) == "string" and raw:find('"bookId":701', 1, true) then
+        return {
+          { bookId = 701, document = "m1", percentage = 0.2, timestamp = 1700000000, title = "Active Remote", authors = "Remote Auth", device = "PW" },
+        }
+      end
+      if type(raw) == "string" and raw:find('"version":"1.14.0"', 1, true) then
+        return { version = "1.14.0", downloadPath = "/api/koplugin/download" }
+      end
+      return {}
+    end,
+  }
+end
+
+package.preload["socket.http"] = function()
+  return {
+    TIMEOUT = 10,
+    request = function(request)
+      local url = tostring(request.url or "")
+      if url:match("/api/opds") then
+        if request.sink then request.sink(opds_feed_xml); request.sink(nil) end
+        return 1, 200, { ["content-type"] = "application/atom+xml" }
+      end
+      if url:match("/api/kosync/active") then
+        if request.sink then request.sink(active_sessions_json); request.sink(nil) end
+        return 1, 200, { ["content-type"] = "application/json" }
+      end
+      if url:match("/api/koplugin/version") then
+        if request.sink then request.sink('{"version":"1.14.0","downloadPath":"/api/koplugin/download"}'); request.sink(nil) end
+        return 1, 200, { ["content-type"] = "application/json" }
+      end
+      if url:match("/api/books/%d+/download/epub") then
+        local payload = "PK\3\4" .. string.rep("E", 512) .. "-" .. url
+        if request.sink then request.sink(payload); request.sink(nil) end
+        return 1, 200, { ["content-length"] = tostring(#payload), ["content-type"] = "application/epub+zip" }
+      end
+      return 1, 404, {}
+    end,
+  }
+end
+
+-- 1. Direct unit tests on lighthouse_queue
+local Queue = require("lighthouse_queue")
+local q_store = {}
+local q_settings = {
+  readSetting = function(_, k) return q_store[k] end,
+  saveSetting = function(_, k, v) q_store[k] = v end,
+}
+local added1, cnt1 = Queue.add(q_settings, { book_id = 11, title = "Book 11", authors = "Auth A" })
+local dup1, cnt_dup = Queue.add(q_settings, { book_id = 11, title = "Book 11", authors = "Auth A" })
+local has11 = Queue.has(q_settings, { book_id = 11 })
+local tog_off, cnt_off = Queue.toggle(q_settings, { book_id = 11 })
+local tog_on, cnt_on = Queue.toggle(q_settings, { book_id = 11, title = "Book 11" })
+for i = 1, 105 do
+  Queue.add(q_settings, { book_id = 1000 + i, title = "Cap " .. i })
+end
+local cap_count = Queue.count(q_settings)
+Queue.remove(q_settings, { book_id = 1105 })
+local after_rm = Queue.count(q_settings)
+local rm_many, left_many = Queue.removeMany(q_settings, { ["id:1104"] = true, ["id:1103"] = true })
+Queue.clear(q_settings)
+local after_clr = Queue.count(q_settings)
+print("queue_unit=" .. tostring(added1 and not dup1 and cnt1 == 1 and cnt_dup == 1 and has11 and not tog_off and cnt_off == 0 and tog_on and cnt_on == 1))
+print("queue_cap=" .. tostring(cap_count == 100 and after_rm == 99 and rm_many == 2 and left_many == 97 and after_clr == 0))
+
+-- 2. Direct unit tests on lighthouse_indexer
+local Indexer = require("lighthouse_indexer")
+local Sidecar = require("lighthouse_sidecar")
+Sidecar.DEVICE_DIRS = { books_dir }
+local unidx = Indexer.findUnindexedLocalBooks(dl_dir, Sidecar)
+local idx_state = {}
+local bulk_60 = {}
+for i = 1, 60 do bulk_60[#bulk_60 + 1] = books_dir .. "/Chunk_" .. i .. ".epub" end
+local q_cnt = Indexer.indexBookFiles(idx_state, bulk_60, ui_mgr)
+print("indexer_unit=" .. tostring(#unidx == 1 and unidx[1] == unindexed_path and q_cnt == 60 and #bim_batches == 1 and #bim_batches[1] == 50 and #idx_state._pending_index_queue == 10))
+
+-- 3. Direct fallback InfoMessage test on lighthouse_sync (without Trapper)
+local Sync = require("lighthouse_sync")
+local Client = require("lighthouse_client")
+local fallback_res = Sync.runBatchDownloads({
+  config = { base_url = "http://192.168.31.15:8086", api_key = "k" },
+  Client = Client,
+  UIManager = ui_mgr,
+  InfoMessage = require("ui/widget/infomessage"),
+  formatMessage = function(tpl, a, b, c)
+    return tpl:gsub("%%1", tostring(a)):gsub("%%2", tostring(b)):gsub("%%3", tostring(c))
+  end,
+  gettext = function(s) return s end,
+}, {
+  { key = "fb1", label = "Fallback One", url = "/api/books/81/download/epub", filepath = dl_dir .. "/fb1.epub" },
+  { key = "fb2", label = "Fallback Two", url = "/api/books/82/download/epub", filepath = dl_dir .. "/fb2.epub" },
+}, { use_trapper = false })
+local fb_msgs = {}
+for i = 1, #shown do
+  if shown[i].__kind == "infomessage" then fb_msgs[#fb_msgs + 1] = shown[i].text end
+end
+print("sync_fallback=" .. tostring(fallback_res.downloaded == 2 and not fallback_res.cancelled and #fb_msgs >= 2 and fb_msgs[1]:find("Downloading 1/2: Fallback One", 1, true) ~= nil))
+
+-- 4. Full main.lua integration: Reading Queue + Library Footer Badge + Mid-Batch Cancel + Diagnostics
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+G_reader_settings:saveSetting("download_dir", dl_dir)
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+
+local menu_items = {}
+LightHouse:addToMainMenu(menu_items)
+local has_queue_menu = false
+for i = 1, #menu_items.lighthouse.sub_item_table do
+  if menu_items.lighthouse.sub_item_table[i].text == "Download queue" then has_queue_menu = true end
+end
+print("main_menu_queue=" .. tostring(has_queue_menu))
+
+local b1 = { book_id = 601, title = "Queued One", authors = "Author A", download_href = "/api/books/601/download/epub" }
+local b2 = { book_id = 602, title = "Queued Two", authors = "Author B", download_href = "/api/books/602/download/epub" }
+
+-- Check row quick actions toggles from "Add to queue" -> "Remove from queue"
+shown = {}
+LightHouse:showRowQuickActions({ kind = "book", entry = b1 })
+local qa1 = shown[#shown]
+local has_add_qa = false
+for r = 1, #(qa1 and qa1.buttons or {}) do
+  for c = 1, #qa1.buttons[r] do
+    if qa1.buttons[r][c].text == "Add to queue" then has_add_qa = true end
+  end
+end
+
+local is_q1, c1 = LightHouse:toggleBookInQueue(b1)
+local is_q2, c2 = LightHouse:toggleBookInQueue(b2)
+shown = {}
+LightHouse:showRowQuickActions({ kind = "book", entry = b1 })
+local qa2 = shown[#shown]
+local has_rm_qa = false
+for r = 1, #(qa2 and qa2.buttons or {}) do
+  for c = 1, #qa2.buttons[r] do
+    if qa2.buttons[r][c].text == "Remove from queue" then has_rm_qa = true end
+  end
+end
+print("qa_queue_toggle=" .. tostring(has_add_qa and is_q1 and c1 == 1 and is_q2 and c2 == 2 and has_rm_qa))
+
+-- Footer shows "2 queued" cleanly when 0 missing active, and "1 missing · 2 queued" when 1 missing active
+LightHouse:openLibrary{ mode = "books", page = 1 }
+local footer_q_only = LightHouse.last_page_model and LightHouse.last_page_model.footer and LightHouse.last_page_model.footer.right
+
+LightHouse:showPageOverflow()
+local ov = shown[#shown]
+local has_ov_q = false
+for r = 1, #(ov and ov.buttons or {}) do
+  for c = 1, #ov.buttons[r] do
+    if ov.buttons[r][c].text == "Queue (2)" then has_ov_q = true end
+  end
+end
+LightHouse:closeOverflow()
+
+active_sessions_json = '[{"document":"m1","percentage":0.2,"timestamp":1700000000,"title":"Active Remote","authors":"Remote Auth","bookId":701,"device":"PW"}]'
+LightHouse:forgetShelf()
+LightHouse:openLibrary{ mode = "books", page = 1, refresh = true }
+local footer_both = LightHouse.last_page_model and LightHouse.last_page_model.footer and LightHouse.last_page_model.footer.right
+print("footer_badges=" .. tostring(footer_q_only) .. "|" .. tostring(footer_both) .. "|ov=" .. tostring(has_ov_q))
+
+-- Check diagnostics includes Download Queue count
+shown = {}
+LightHouse:runDiagnostics()
+local diag_box = shown[#shown]
+local has_diag_q = tostring(diag_box and diag_box.text or ""):find("Download Queue: 2 queued", 1, true) ~= nil
+print("diag_queue=" .. tostring(has_diag_q))
+
+-- Check showDownloadQueue opens Menu with Download all (2)
+shown = {}
+local q_menu_cnt = LightHouse:showDownloadQueue()
+local q_menu = shown[#shown]
+local q_first_txt = q_menu and q_menu.item_table and q_menu.item_table[1] and q_menu.item_table[1].text or ""
+print("queue_dialog=" .. tostring(q_menu_cnt == 2 and q_menu and q_menu.title == "Download queue (2)" and q_first_txt == "Download all (2)"))
+
+-- Mid-batch cancel on queued downloads: item 1 completes & leaves queue, item 2 triggers cancel & stays queued!
+trapper_events = {}
+cancel_after_calls = 3 -- pause(1), item1 info(2), item2 info(3 -> false)
+bim_batches = {}
+shown = {}
+LightHouse:downloadQueuedBooks()
+local cancel_notice = shown[#shown] and shown[#shown].text or ""
+local q1_on_disk = io.open(dl_dir .. "/Queued One - Author A.epub", "rb") ~= nil
+local q2_on_disk = io.open(dl_dir .. "/Queued Two - Author B.epub", "rb") ~= nil
+print("queue_mid_cancel=" .. tostring(
+  Queue.count(G_reader_settings) == 1
+  and q1_on_disk
+  and not q2_on_disk
+  and bim_batches[1] ~= nil
+  and #bim_batches[1] == 1
+  and cancel_notice:find("Cancelled after downloading 1 of 2", 1, true) ~= nil
+))
+
+-- Resume remaining queued book without cancel
+cancel_after_calls = nil
+shown = {}
+LightHouse:downloadQueuedBooks()
+local resume_notice = shown[#shown] and shown[#shown].text or ""
+local q2_resumed = io.open(dl_dir .. "/Queued Two - Author B.epub", "rb") ~= nil
+print("queue_resume=" .. tostring(
+  Queue.count(G_reader_settings) == 0
+  and q2_resumed
+  and resume_notice:find("Downloaded 1 queued book", 1, true) ~= nil
+))
+
+-- Verify downloadSeriesBooks mid-batch cancel via Trapper
+trapper_events = {}
+cancel_after_calls = 3 -- pause(1), vol1 info(2), vol2 info(3 -> false)
+shown = {}
+LightHouse:downloadSeriesBooks("Spice and Wolf")
+local ds_confirm = shown[#shown]
+if ds_confirm and ds_confirm.ok_cb then ds_confirm.ok_cb() end
+local ds_cancel_msg = shown[#shown] and shown[#shown].text or ""
+local s1_ok = io.open(dl_dir .. "/Spice and Wolf 01 - Spice and Wolf, Vol. 1 - Isuna Hasekura.epub", "rb") ~= nil
+local s2_ok = io.open(dl_dir .. "/Spice and Wolf 02 - Spice and Wolf, Vol. 2 - Isuna Hasekura.epub", "rb") ~= nil
+print("series_cancel=" .. tostring(
+  s1_ok and not s2_ok
+  and ds_cancel_msg:find("Cancelled after downloading 1 of 2 volume", 1, true) ~= nil
+  and trapper_events[2]:find("Downloading 1/2: Spice and Wolf, Vol. 1", 1, true) ~= nil
+  and trapper_events[#trapper_events] == "CLEAR"
+))
+`);
+
+describe("plugin v1.14.0 modularization, batch Trapper progress/cancel, and Download Later queue", () => {
+  it("packages lighthouse_indexer, lighthouse_sync, and lighthouse_queue with version 1.14.0", () => {
+    expect(KOPLUGIN_VERSION).toBe("1.14.0");
+    const { settings, entryNames } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "v114-test-key",
+      generatedAt: "2026-11-24T12:45:00.000Z",
+    });
+    expect(settings.pluginVersion).toBe("1.14.0");
+    expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_indexer.lua`);
+    expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_sync.lua`);
+    expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_queue.lua`);
+  });
+
+  it("verifies modular indexer/sync/queue APIs, Trapper batch progress & mid-batch cancel, and Queue UI wiring", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "v114-test-key",
+      generatedAt: "2026-11-24T12:45:00.000Z",
+    });
+
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-v114-"));
+    fs.mkdirSync(path.join(workdir, "books"), { recursive: true });
+    fs.mkdirSync(path.join(workdir, "downloads"), { recursive: true });
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
+      encoding: "utf8",
+    });
+    expect(extract.status).toBe(0);
+
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "v114_harness.lua");
+    fs.writeFileSync(harnessPath, V114_HARNESS);
+    const res = spawnSync(LUA_BINARY as string, [harnessPath, pluginRoot, workdir], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+
+    expect(out.queue_unit).toBe("true");
+    expect(out.queue_cap).toBe("true");
+    expect(out.indexer_unit).toBe("true");
+    expect(out.sync_fallback).toBe("true");
+    expect(out.main_menu_queue).toBe("true");
+    expect(out.qa_queue_toggle).toBe("true");
+    expect(out.footer_badges).toBe("2 queued|1 missing · 2 queued|ov=true");
+    expect(out.diag_queue).toBe("true");
+    expect(out.queue_dialog).toBe("true");
+    expect(out.queue_mid_cancel).toBe("true");
+    expect(out.queue_resume).toBe("true");
+    expect(out.series_cancel).toBe("true");
   });
 });
