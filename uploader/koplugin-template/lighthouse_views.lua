@@ -129,6 +129,12 @@ Views.LABELS = {
     unknown_author = "Unknown",
     in_progress_count = "%s in progress",
     no_epub = "No EPUB download",
+    device_storage = "Device storage",
+    storage_summary = "%s free of %s (%d%% used)",
+    finished_reclaimable = "%s in %d finished books",
+    finished_reclaimable_singular = "%s in 1 finished book",
+    no_finished_local = "No finished books on device",
+    remove_short = "Remove",
 }
 
 --- Merges caller-supplied labels over the built-in English ones.
@@ -1167,6 +1173,114 @@ function Views.bookHighlightsModel(group, options)
         switch = nil,
         subline = { left = left_label, right = right_label },
         blocks = { { kind = "quote_list", rows = rows } },
+        footer = footer,
+        pager = pager,
+    }
+end
+
+--- Formats a byte count into a short human-readable size ("2.0 GB", "142 MB").
+-- @number bytes non-negative byte count
+-- @treturn string formatted label
+function Views.formatBytes(bytes)
+    local value = math.max(Status.num(bytes) or 0, 0)
+    local gb = 1024 * 1024 * 1024
+    local mb = 1024 * 1024
+    local kb = 1024
+    if value >= gb then
+        return string.format("%.1f GB", value / gb)
+    elseif value >= mb then
+        local m = value / mb
+        if m >= 10 then
+            return string.format("%.0f MB", m)
+        end
+        return string.format("%.1f MB", m)
+    elseif value >= kb then
+        return string.format("%.0f KB", value / kb)
+    end
+    return string.format("%.0f B", value)
+end
+
+--- Builds the full-screen Device Storage & Finished-Book Cleaner model.
+-- @tparam table[opt] storage_info { total_bytes, free_bytes, used_bytes, used_pct }
+-- @tparam table[opt] finished_books array of finished local records with `size_bytes`
+-- @tparam table[opt] options { labels, page, page_size }
+-- @treturn table page model
+function Views.storageModel(storage_info, finished_books, options)
+    options = options or {}
+    local text = Views.labels(options.labels)
+    storage_info = type(storage_info) == "table" and storage_info or {}
+
+    local sorted = {}
+    if type(finished_books) == "table" then
+        for idx = 1, #finished_books do
+            local book = finished_books[idx]
+            if type(book) == "table" then sorted[#sorted + 1] = book end
+        end
+    end
+    table.sort(sorted, function(a, b)
+        local sa = Status.num(a.size_bytes) or 0
+        local sb = Status.num(b.size_bytes) or 0
+        if sa ~= sb then return sa > sb end
+        return Status.str(a.title) < Status.str(b.title)
+    end)
+
+    local reclaimable = 0
+    for idx = 1, #sorted do
+        reclaimable = reclaimable + math.max(Status.num(sorted[idx].size_bytes) or 0, 0)
+    end
+
+    local page_size = math.max(math.floor(tonumber(options.page_size) or 8), 1)
+    local pages = math.max(math.ceil(#sorted / page_size), 1)
+    local page = math.max(math.min(math.floor(tonumber(options.page) or 1), pages), 1)
+
+    local rows = {}
+    local first = (page - 1) * page_size + 1
+    local last = math.min(page * page_size, #sorted)
+    for idx = first, last do
+        local book = sorted[idx]
+        local title = Ui.rowTitle(book.title)
+        if title == "" then title = text.untitled end
+        local authors = Status.str(book.authors)
+        if authors == "" then authors = text.unknown_author end
+        local size_str = Views.formatBytes(Status.num(book.size_bytes) or 0)
+        rows[#rows + 1] = {
+            kind = "plain",
+            title = title,
+            secondary = authors,
+            value = size_str,
+            value_sub = Ui.GLYPH.done .. " " .. text.remove_short .. " " .. Ui.GLYPH.chevron,
+            action = { kind = "delete_local_book", item = book },
+        }
+    end
+
+    local total_bytes = Status.num(storage_info.total_bytes) or 0
+    local free_bytes = Status.num(storage_info.free_bytes) or 0
+    local used_pct = Status.num(storage_info.used_pct)
+    if not used_pct and total_bytes > 0 then
+        used_pct = math.floor(((math.max(total_bytes - free_bytes, 0) / total_bytes) * 100) + 0.5)
+    end
+    used_pct = math.max(math.min(math.floor((used_pct or 0) + 0.5), 100), 0)
+
+    local left_label = total_bytes > 0
+        and string.format(text.storage_summary, Views.formatBytes(free_bytes), Views.formatBytes(total_bytes), used_pct)
+        or Views.formatBytes(free_bytes)
+    local right_label
+    if #sorted == 0 then
+        right_label = text.no_finished_local
+    elseif #sorted == 1 then
+        right_label = string.format(text.finished_reclaimable_singular, Views.formatBytes(reclaimable))
+    else
+        right_label = string.format(text.finished_reclaimable, Views.formatBytes(reclaimable), #sorted)
+    end
+
+    local footer, pager = pagerFooter(page, pages, text.device_storage, text)
+
+    return {
+        title = text.device_storage,
+        header_actions = {},
+        switch = nil,
+        subline = { left = left_label, right = right_label },
+        blocks = { { kind = "list", rows = rows } },
         footer = footer,
         pager = pager,
     }

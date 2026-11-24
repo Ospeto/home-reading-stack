@@ -1082,6 +1082,27 @@ elseif scenario == "sink_write_failure" then
     end
     return 1, 404, {}
   end
+elseif scenario == "post_json" then
+  handler = function(request)
+    local chunks = {}
+    if type(request.source) == "function" then
+      while true do
+        local c = request.source()
+        if not c then break end
+        chunks[#chunks + 1] = c
+      end
+    end
+    _G._posted_method = request.method
+    _G._posted_ctype = (request.headers or {})["Content-Type"]
+    _G._posted_clen = (request.headers or {})["Content-Length"]
+    _G._posted_body = table.concat(chunks)
+    if request.url == "http://lan.test/api/highlights/sync" then
+      return redirect("https://wan.test/api/highlights/sync", 307)
+    end
+    return emit(request, '{"success":true}')
+  end
+elseif scenario == "post_json_error" then
+  handler = function() return 1, 500, {} end
 end
 
 package.preload["socket.http"] = function() return make_transport(http_urls, http_keys, http_redirect, handler) end
@@ -1096,6 +1117,16 @@ package.preload["socketutil"] = function()
 end
 package.preload["ltn12"] = function()
   return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
     sink = {
       table = function(chunks)
         chunks = chunks or {}
@@ -1204,6 +1235,19 @@ elseif scenario == "download" or scenario == "html" or scenario == "small_file"
   report("https_keys", table.concat(https_keys, ""))
   report("http_redirect", table.concat(http_redirect, ""))
   report("https_redirect", table.concat(https_redirect, ""))
+  report("timeouts", table.concat(timeouts, "|"))
+elseif scenario == "post_json" or scenario == "post_json_error" then
+  local body, err = Client.postJson(config_http, "/api/highlights/sync", '{"title":"Dune"}', 5)
+  report("body", body)
+  report("err", err)
+  report("method", _G._posted_method)
+  report("ctype", _G._posted_ctype)
+  report("clen", _G._posted_clen)
+  report("req_body", _G._posted_body)
+  report("http_calls", #http_urls)
+  report("https_calls", #https_urls)
+  report("http_keys", table.concat(http_keys, ""))
+  report("https_keys", table.concat(https_keys, ""))
   report("timeouts", table.concat(timeouts, "|"))
 else
   local body, err = Client.get(config_http, "/api/opds")
@@ -1365,6 +1409,26 @@ describe("plugin HTTP client redirect handling", () => {
     const out = runClientScenario("transport_error");
     expect(out.body).toBe("nil");
     expect(out.err).toBe("network_error: timeout");
+  });
+
+  it("posts JSON with content headers, timeout ceiling, 307 cross-host key stripping, and HTTP errors", () => {
+    if (!LUA_BINARY) return;
+    const out = runClientScenario("post_json");
+    expect(out.body).toBe('{"success":true}');
+    expect(out.err).toBe("nil");
+    expect(out.method).toBe("POST");
+    expect(out.ctype).toBe("application/json");
+    expect(out.clen).toBe("16");
+    expect(out.req_body).toBe('{"title":"Dune"}');
+    expect(out.http_calls).toBe("1");
+    expect(out.https_calls).toBe("1");
+    expect(out.http_keys).toBe("Y");
+    expect(out.https_keys).toBe("N");
+    expect(out.timeouts).toBe("5/5");
+
+    const errOut = runClientScenario("post_json_error");
+    expect(errOut.body).toBe("nil");
+    expect(errOut.err).toBe("http_500");
   });
 });
 
@@ -2460,6 +2524,16 @@ package.preload["json"] = function()
 end
 package.preload["ltn12"] = function()
   return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
     sink = {
       table = function(target)
         return function(chunk)
@@ -3018,6 +3092,16 @@ package.preload["json"] = function()
 end
 package.preload["ltn12"] = function()
   return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
     sink = {
       table = function(target)
         return function(chunk)
@@ -4286,6 +4370,16 @@ package.preload["socket.http"] = function()
 end
 package.preload["ltn12"] = function()
   return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
     sink = {
       table = function(target)
         return function(chunk)
@@ -4696,6 +4790,16 @@ package.preload["json"] = function()
 end
 package.preload["ltn12"] = function()
   return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
     sink = {
       table = function(target)
         return function(chunk)
@@ -6221,6 +6325,16 @@ package.preload["json"] = function()
 end
 package.preload["ltn12"] = function()
   return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
     sink = {
       table = function(target)
         return function(chunk)
@@ -7830,6 +7944,16 @@ package.preload["socket.http"] = function()
 end
 package.preload["ltn12"] = function()
   return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
     sink = {
       table = function(target)
         return function(chunk)
@@ -8460,6 +8584,16 @@ local stats_response = {
 
 package.preload["ltn12"] = function()
   return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
     sink = {
       table = function(target)
         return function(chunk)
@@ -8846,6 +8980,16 @@ local downloaded_entries = {}
 local last_opds_url = ""
 package.preload["ltn12"] = function()
   return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
     sink = {
       table = function(target)
         return function(chunk)
@@ -9201,5 +9345,302 @@ describe("plugin Phase 3 native screens & power-reader UX", () => {
     expect(out.p3_reading_p1).toBe("1/2");
     expect(out.p3_reading_p2).toBe("2");
     expect(out.p3_reading_back_p1).toBe("1");
+  });
+});
+
+const V190_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local workdir = assert(arg[2], "workdir required")
+local books_dir = workdir .. "/books"
+
+local ui_mgr = require("ui/uimanager")
+ui_mgr.nextTick = function(_, fn) fn() end
+ui_mgr.scheduleIn = function(_, _, fn) fn() end
+
+package.preload["apps/reader/readerui"] = function()
+  return { instance = {}, showReader = function() end }
+end
+
+local is_online = true
+local net_mgr = require("ui/network/manager")
+net_mgr.isOnline = function() return is_online end
+
+local ffi_util = require("ffi/util")
+local purged_dirs = {}
+ffi_util.df = function()
+  return 13.4 * 1024 * 1024 * 1024, 2.0 * 1024 * 1024 * 1024
+end
+ffi_util.purgeDir = function(dir)
+  purged_dirs[#purged_dirs + 1] = dir
+  return true
+end
+
+local settings_store = {}
+_G.G_reader_settings = {
+  readSetting = function(_, k) return settings_store[k] end,
+  saveSetting = function(_, k, v) settings_store[k] = v end,
+  nilOrTrue = function(_, k) return settings_store[k] ~= false end,
+}
+
+package.preload["ltn12"] = function()
+  return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
+    sink = {
+      table = function(chunks)
+        chunks = chunks or {}
+        return function(chunk)
+          if chunk then chunks[#chunks + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function() return function() return 1 end end,
+    },
+  }
+end
+
+local sync_posts = {}
+local downloaded_ids = {}
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      local url = tostring(request and request.url or "")
+      local resp = "{}"
+      if request.method == "POST" and url:find("/api/highlights/sync", 1, true) then
+        local body_parts = {}
+        if type(request.source) == "function" then
+          while true do
+            local chunk = request.source()
+            if not chunk then break end
+            body_parts[#body_parts + 1] = chunk
+          end
+        end
+        sync_posts[#sync_posts + 1] = { url = url, body = table.concat(body_parts), key = (request.headers or {})["X-API-Key"] }
+        resp = '{"success":true}'
+      elseif url:find("/api/kosync/active", 1, true) then
+        resp = '{"active":true}'
+      elseif url:find("/download/epub", 1, true) then
+        local id_str = url:match("/api/books/(%d+)/download/epub")
+        downloaded_ids[#downloaded_ids + 1] = tonumber(id_str)
+        resp = string.rep("E", 512)
+      end
+      if request and request.sink then
+        request.sink(resp)
+        request.sink(nil)
+      end
+      return 1, 200, {}
+    end,
+  }
+end
+
+package.preload["json"] = function()
+  return {
+    encode = function(tbl)
+      return '{"title":"' .. tostring(tbl.title or "") .. '","count":' .. tostring(#(tbl.entries or {})) .. '}'
+    end,
+    decode = function(raw)
+      if type(raw) == "string" and raw:find("active", 1, true) then
+        return {
+          { id = 1, bookId = 11, title = "Local Book", displayTitle = "Local Book", authors = "Auth One", displayAuthors = "Auth One", percentage = 0.995, device = "PW" },
+          { id = 2, bookId = 12, title = "Missing Book", displayTitle = "Missing Book", authors = "Auth Two", displayAuthors = "Auth Two", percentage = 0.42, device = "PW" },
+        }
+      end
+      return {}
+    end,
+  }
+end
+
+local fake_files, fake_dirs, fake_sizes = {}, {}, {}
+local function make_file(p, bytes)
+  fake_files[p] = bytes
+  fake_sizes[p] = #bytes
+end
+
+local local_done = books_dir .. "/Local Book - Auth One.epub"
+local local_inprog = books_dir .. "/Reading Now - Auth Two.epub"
+make_file(local_done, string.rep("X", 2048))
+make_file(local_inprog, string.rep("Y", 4096))
+make_file(local_done .. ".sdr/metadata.epub.lua", [==[
+return {
+    ["annotations"] = {
+        { ["chapter"] = "Ch 2", ["datetime"] = "2026-11-24 06:00:00", ["pageno"] = 20, ["text"] = "Important highlight quote", ["note"] = "My note" },
+    },
+    ["doc_props"] = { ["authors"] = "Auth One", ["title"] = "Local Book" },
+    ["percent_finished"] = 1.0,
+}
+]==])
+make_file(local_inprog .. ".sdr/metadata.epub.lua", [==[
+return {
+    ["annotations"] = {},
+    ["doc_props"] = { ["authors"] = "Auth Two", ["title"] = "Reading Now" },
+    ["percent_finished"] = 0.35,
+}
+]==])
+fake_dirs[books_dir] = { "Local Book - Auth One.epub", "Local Book - Auth One.epub.sdr", "Reading Now - Auth Two.epub", "Reading Now - Auth Two.epub.sdr" }
+fake_dirs[local_done .. ".sdr"] = { "metadata.epub.lua" }
+fake_dirs[local_inprog .. ".sdr"] = { "metadata.epub.lua" }
+
+package.preload["libs/libkoreader-lfs"] = function()
+  return {
+    attributes = function(target, field)
+      if fake_files[target] ~= nil then
+        if field == "size" then return fake_sizes[target] end
+        return "file"
+      end
+      if fake_dirs[target] ~= nil then return "directory" end
+      return nil
+    end,
+    mkdir = function(d) fake_dirs[d] = fake_dirs[d] or {}; return true end,
+  }
+end
+
+local orig_os_remove = os.remove
+local removed_paths = {}
+_G.os.remove = function(p)
+  if fake_files[p] ~= nil then
+    fake_files[p] = nil
+    removed_paths[#removed_paths + 1] = p
+    return true
+  end
+  return orig_os_remove(p)
+end
+
+local Sidecar = require("lighthouse_sidecar")
+Sidecar.io.open = function(p, mode)
+  if mode == "wb" then
+    local buf = {}
+    return {
+      write = function(_, chunk) buf[#buf + 1] = chunk; return 1 end,
+      close = function() make_file(p, table.concat(buf)); return true end,
+    }
+  end
+  local data = fake_files[p]
+  if not data then return nil end
+  local done = false
+  return { read = function() if done then return nil end; done = true; return data end, close = function() end }
+end
+Sidecar.io.loadfile = function(p)
+  local data = fake_files[p]
+  if not data then return nil end
+  return loadstring(data, p)
+end
+Sidecar.io.list = function(d) return fake_dirs[d] end
+Sidecar.io.attributes = function(p, field)
+  if fake_files[p] ~= nil then return field == "modification" and 1794633720 or "file" end
+  if fake_dirs[p] ~= nil then return "directory" end
+  return nil
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+G_reader_settings:saveSetting("download_dir", books_dir)
+LightHouse.ui = { document = { file = local_done }, menu = { registerToMainMenu = function() end } }
+
+-- 1. Auto-sync highlights on close + dedupe + toggle off + offline safety
+LightHouse:onCloseDocument()
+print("sync_after_first_close=" .. tostring(#sync_posts) .. ":" .. tostring(sync_posts[1] and sync_posts[1].body))
+LightHouse:onCloseDocument()
+print("sync_deduped=" .. tostring(#sync_posts))
+
+make_file(local_done .. ".sdr/metadata.epub.lua", [==[
+return {
+    ["annotations"] = {
+        { ["chapter"] = "Ch 3", ["datetime"] = "2026-11-24 07:00:00", ["pageno"] = 30, ["text"] = "Second quote", ["note"] = "" },
+        { ["chapter"] = "Ch 2", ["datetime"] = "2026-11-24 06:00:00", ["pageno"] = 20, ["text"] = "Important highlight quote", ["note"] = "My note" },
+    },
+    ["doc_props"] = { ["authors"] = "Auth One", ["title"] = "Local Book" },
+    ["percent_finished"] = 1.0,
+}
+]==])
+LightHouse:toggleAutoSyncHighlights()
+LightHouse:onCloseDocument()
+print("sync_when_toggled_off=" .. tostring(#sync_posts))
+is_online = false
+LightHouse:toggleAutoSyncHighlights()
+LightHouse:onCloseDocument()
+print("sync_when_offline=" .. tostring(#sync_posts))
+is_online = true
+LightHouse:onCloseDocument()
+print("sync_on_new_hl=" .. tostring(#sync_posts) .. ":" .. tostring(sync_posts[2] and sync_posts[2].body))
+
+-- 2. Sync missing active books
+LightHouse:showReading()
+LightHouse:syncMissingActiveBooks()
+local missing_confirm = shown[#shown]
+print("missing_confirm_kind=" .. tostring(missing_confirm and missing_confirm.__kind))
+if missing_confirm and missing_confirm.ok_cb then missing_confirm.ok_cb() end
+print("downloaded_missing_ids=" .. tostring(#downloaded_ids) .. ":" .. tostring(downloaded_ids[1]))
+
+-- 3. Storage cleaner + path traversal guard
+print("reject_outside=" .. tostring(LightHouse:isInsideBookRoot("/etc/passwd")))
+print("reject_traversal=" .. tostring(LightHouse:isInsideBookRoot(books_dir .. "/../secret.epub")))
+print("allow_inside=" .. tostring(LightHouse:isInsideBookRoot(local_done)))
+
+LightHouse:showStorage()
+local st_model = LightHouse.last_page_model
+print("storage_rows=" .. tostring(#st_model.blocks[1].rows) .. ":" .. tostring(st_model.blocks[1].rows[1].title))
+LightHouse.page:run(st_model.blocks[1].rows[1].action)
+local del_confirm = shown[#shown]
+if del_confirm and del_confirm.ok_cb then del_confirm.ok_cb() end
+print("deleted_epub=" .. tostring(removed_paths[1] == local_done))
+print("purged_sdr=" .. tostring(purged_dirs[1] == local_done .. ".sdr"))
+
+print("OK")
+`);
+
+describe("plugin v1.9.0 auto highlight sync, active book sync, and storage cleaner", () => {
+  it("syncs new highlights on close with deduplication, downloads missing active books, and safely removes finished local copies", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "v190-test-key",
+      generatedAt: "2026-11-24T00:00:00.000Z",
+    });
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-v190-"));
+    fs.mkdirSync(path.join(workdir, "books"), { recursive: true });
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
+      encoding: "utf8",
+    });
+    expect(extract.status).toBe(0);
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "v190_harness.lua");
+    fs.writeFileSync(harnessPath, V190_HARNESS);
+    const res = spawnSync(LUA_BINARY as string, [harnessPath, pluginRoot, workdir], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+    expect(out.sync_after_first_close).toBe('1:{"title":"Local Book","count":1}');
+    expect(out.sync_deduped).toBe("1");
+    expect(out.sync_when_toggled_off).toBe("1");
+    expect(out.sync_when_offline).toBe("1");
+    expect(out.sync_on_new_hl).toBe('2:{"title":"Local Book","count":2}');
+    expect(out.missing_confirm_kind).toBe("confirmbox");
+    expect(out.downloaded_missing_ids).toBe("1:12");
+    expect(out.reject_outside).toBe("false");
+    expect(out.reject_traversal).toBe("false");
+    expect(out.allow_inside).toBe("true");
+    expect(out.storage_rows).toBe("1:Local Book");
+    expect(out.deleted_epub).toBe("true");
+    expect(out.purged_sdr).toBe("true");
   });
 });

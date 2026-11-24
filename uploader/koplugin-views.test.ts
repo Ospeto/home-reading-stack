@@ -406,6 +406,28 @@ local hl_book = Views.bookHighlightsModel({
 }, { page = 1, page_size = 4, quote_lines = 2, quote_chars = 28, book_exists = true })
 print("hl_book=" .. flat(hl_book.blocks[1].kind) .. ":" .. flat(hl_book.blocks[1].rows[1].note) .. ":" .. flat(hl_book.blocks[1].rows[1].meta_right) .. ":" .. flat(hl_book.blocks[1].rows[1].action.kind))
 
+-- Device storage & finished-book cleaner view model -------------------------
+print("fmt_bytes=" .. Views.formatBytes(512) .. "|" .. Views.formatBytes(1536) .. "|" .. Views.formatBytes(142 * 1024 * 1024) .. "|" .. Views.formatBytes(2.0 * 1024 * 1024 * 1024))
+
+local storage_model = Views.storageModel({
+  total_bytes = 13.4 * 1024 * 1024 * 1024,
+  free_bytes = 2.0 * 1024 * 1024 * 1024,
+  used_pct = 85,
+}, {
+  { title = "Small Done", authors = "Auth A", book_path = "/books/a.epub", size_bytes = 2 * 1024 * 1024 },
+  { title = "Huge Done", authors = "Auth B", book_path = "/books/b.epub", size_bytes = 140 * 1024 * 1024 },
+}, { page = 1, page_size = 1 })
+print("storage_title=" .. flat(storage_model.title))
+print("storage_sub_left=" .. flat(storage_model.subline.left))
+print("storage_sub_right=" .. flat(storage_model.subline.right))
+print("storage_row1=" .. flat(storage_model.blocks[1].rows[1].title) .. ":" .. flat(storage_model.blocks[1].rows[1].value) .. ":" .. flat(storage_model.blocks[1].rows[1].action.kind) .. ":" .. flat(storage_model.pager.pages))
+
+local storage_empty = Views.storageModel({
+  total_bytes = 10 * 1024 * 1024 * 1024,
+  free_bytes = 5 * 1024 * 1024 * 1024,
+}, {}, { page = 1, page_size = 5 })
+print("storage_empty_right=" .. flat(storage_empty.subline.right))
+
 print("OK")
 `;
 
@@ -696,5 +718,11 @@ describe("plugin Phase 3 view models", () => {
     expect(out.shelf_row1_action).toBe("open_book:reading_actions");
     expect(out.hl_index).toBe("Highlights:2:highlight_book");
     expect(out.hl_book).toBe("quote_list:Note: Key theme:p. 48:highlight");
+    expect(out.fmt_bytes).toBe("512 B|2 KB|142 MB|2.0 GB");
+    expect(out.storage_title).toBe("Device storage");
+    expect(out.storage_sub_left).toBe("2.0 GB free of 13.4 GB (85% used)");
+    expect(out.storage_sub_right).toBe("142 MB in 2 finished books");
+    expect(out.storage_row1).toBe("Huge Done:140 MB:delete_local_book:2");
+    expect(out.storage_empty_right).toBe("No finished books on device");
   });
 });

@@ -1095,6 +1095,21 @@ function LightHouse:addToMainMenu(menu_items)
                 callback = function() self:showStats() end,
             },
             {
+                text = _("Device storage"),
+                callback = function() self:showStorage() end,
+                help_text = _("Inspect free space and remove local copies of finished books to free space on this device."),
+            },
+            {
+                text = _("Sync highlights to Obsidian"),
+                callback = function() self:syncAllHighlightsToObsidian() end,
+            },
+            {
+                text = _("Auto-sync highlights to Obsidian"),
+                checked_func = function() return self:autoSyncHighlightsEnabled() end,
+                callback = function() self:toggleAutoSyncHighlights() end,
+                help_text = _("Push this book's highlights to Obsidian when you close a book and Wi-Fi is on."),
+            },
+            {
                 text = _("Show cover thumbnails"),
                 checked_func = function() return self:coversEnabled() end,
                 callback = function() self:toggleCovers() end,
@@ -1142,6 +1157,8 @@ function LightHouse:showConnection(configured)
         _("Catalog endpoint:") .. " /api/opds",
         _("Progress endpoint:") .. " /api/kosync/active",
         _("Statistics endpoint:") .. " /api/kosync/stats",
+        _("Highlights endpoint:") .. " /api/highlights/sync",
+        _("Auto-sync highlights:") .. " " .. (self:autoSyncHighlightsEnabled() and _("enabled") or _("off")),
         _("Download folder:") .. " " .. self:getDownloadDir(),
         _("Local progress and highlights:") .. " " .. _("read from this device's KOReader sidecar files"),
         _("Cover thumbnails:") .. " " .. (self:coversEnabled() and _("shown") or _("hidden (fastest)")),
@@ -1555,6 +1572,12 @@ function LightHouse:pageLabels()
         unknown_author = _("Unknown"),
         in_progress_count = _("%s in progress"),
         no_epub = _("No EPUB download"),
+        device_storage = _("Device storage"),
+        storage_summary = _("%s free of %s (%d%% used)"),
+        finished_reclaimable = _("%s in %d finished books"),
+        finished_reclaimable_singular = _("%s in 1 finished book"),
+        no_finished_local = _("No finished books on device"),
+        remove_short = _("Remove"),
     }
 end
 
@@ -1830,6 +1853,9 @@ function LightHouse:showPageOverflow()
     if view_kind ~= "stats" then
         addAction(nav_row, _("Reading stats"), function() self:showStats() end)
     end
+    if view_kind ~= "storage" then
+        addAction(nav_row, _("Device storage"), function() self:showStorage() end)
+    end
     if #nav_row > 0 then rows[#rows + 1] = nav_row end
 
     -- Current-screen actions.
@@ -1857,12 +1883,19 @@ function LightHouse:showPageOverflow()
                 self:showReading{ page = ctx.page or 1, refresh = true }
             elseif view_kind == "highlights" then
                 self:showHighlights(ctx.record, { page = ctx.page or 1, refresh = true })
+            elseif view_kind == "storage" then
+                self:showStorage{ page = ctx.page or 1, refresh = true }
             elseif view_kind == "book" and ctx.entry then
                 self:openBookDetails(ctx.entry)
             else
                 self:showStats()
             end
         end, true)
+        if view_kind == "reading" then
+            addAction(action_row, _("Sync missing books"), function() self:syncMissingActiveBooks() end)
+        elseif view_kind == "highlights" then
+            addAction(action_row, _("Sync to Obsidian"), function() self:syncAllHighlightsToObsidian(ctx.record) end)
+        end
         addAction(action_row, _("Search"), function() self:showSearchDialog() end)
     end
     rows[#rows + 1] = action_row
@@ -1898,6 +1931,8 @@ function LightHouse:showPageOverflow()
             self:openBookDetails(ctx.entry)
         elseif view_kind == "highlights" then
             self:showHighlights(ctx.record, { page = ctx.page or 1 })
+        elseif view_kind == "storage" then
+            self:showStorage{ page = ctx.page or 1 }
         else
             self:showStats()
         end
@@ -4019,14 +4054,469 @@ function LightHouse:showMenu(title, items, options)
     end
 end
 
+--- Builds the `/api/highlights/sync` payload for one sidecar record.
+-- @tparam table record normalized record from `Sidecar`
+-- @treturn table|nil JSON-serializable payload, or nil when empty
+local function buildHighlightSyncPayload(record)
+    if type(record) ~= "table" or type(record.annotations) ~= "table" then return nil end
+    local entries = {}
+    for idx = 1, #record.annotations do
+        local ann = record.annotations[idx]
+        if type(ann) == "table" then
+            local text = Sidecar.annotationText(ann)
+            local notes = Sidecar.annotationNote(ann)
+            if text ~= "" or notes ~= "" then
+                entries[#entries + 1] = {
+                    text = text,
+                    notes = notes ~= "" and notes or nil,
+                    chapter = Status.str(ann.chapter) ~= "" and Status.str(ann.chapter) or nil,
+                    page = Sidecar.annotationPage(ann),
+                    datetime = Status.str(ann.datetime) ~= "" and Status.str(ann.datetime) or nil,
+                }
+            end
+        end
+    end
+    if #entries == 0 then return nil end
+    local title = Status.str(record.title)
+    if title == "" then title = Sidecar.displayTitle(record) end
+    local author = Status.str(record.authors)
+    if author == "" then author = "Unknown" end
+    return {
+        title = title,
+        author = author,
+        progress = Status.num(record.percent_finished),
+        entries = entries,
+    }
+end
+
+--- Deterministic fingerprint `<count>:<newest_datetime>:<total_chars>` for deduping auto-sync.
+-- @tparam table record normalized record from `Sidecar`
+-- @treturn string
+local function highlightFingerprint(record)
+    if type(record) ~= "table" or type(record.annotations) ~= "table" then return "0::0" end
+    local count = 0
+    local newest = ""
+    local chars = 0
+    for idx = 1, #record.annotations do
+        local ann = record.annotations[idx]
+        if type(ann) == "table" then
+            local text = Sidecar.annotationText(ann)
+            local notes = Sidecar.annotationNote(ann)
+            if text ~= "" or notes ~= "" then
+                count = count + 1
+                chars = chars + #text + #notes
+                local dt = Status.str(ann.datetime)
+                if dt > newest then newest = dt end
+            end
+        end
+    end
+    return string.format("%d:%s:%d", count, newest, chars)
+end
+
+--- True when closing a book should auto-push new highlights to Obsidian.
+-- @treturn boolean
+function LightHouse:autoSyncHighlightsEnabled()
+    if type(G_reader_settings.nilOrTrue) == "function" then
+        return G_reader_settings:nilOrTrue("lighthouse_auto_sync_highlights")
+    end
+    return G_reader_settings:readSetting("lighthouse_auto_sync_highlights") ~= false
+end
+
+--- Flips the auto-sync highlights preference and notices the new state.
+function LightHouse:toggleAutoSyncHighlights()
+    local next_val = not self:autoSyncHighlightsEnabled()
+    G_reader_settings:saveSetting("lighthouse_auto_sync_highlights", next_val)
+    notice(next_val
+        and _("Highlights will auto-sync to Obsidian when a book closes.")
+        or _("Auto-sync highlights turned off."))
+end
+
+--- Sends one book's highlights to `/api/highlights/sync` if new or forced.
+-- @tparam table record normalized sidecar record
+-- @tparam[opt] table options { force = boolean, silent = boolean, timeout = number }
+-- @treturn boolean ok
+-- @treturn string status "synced" | "unchanged" | "empty" | error string
+-- @treturn number synced annotation count
+function LightHouse:syncBookHighlights(record, options)
+    options = type(options) == "table" and options or {}
+    local payload = buildHighlightSyncPayload(record)
+    if not payload then return false, "empty", 0 end
+    if not Client.isConfigured(config) then return false, "not_configured", 0 end
+
+    local book_path = Status.str(record.book_path)
+    local fp = highlightFingerprint(record)
+    local raw_map = G_reader_settings:readSetting("lighthouse_synced_highlights")
+    local map = {}
+    if type(raw_map) == "table" then
+        for k, v in pairs(raw_map) do map[k] = v end
+    end
+    if options.force ~= true and book_path ~= "" and map[book_path] == fp then
+        return true, "unchanged", 0
+    end
+
+    local encoded_ok, body = pcall(JSON.encode, payload)
+    if not encoded_ok or type(body) ~= "string" then
+        return false, "invalid_json", 0
+    end
+
+    local res_body, err = Client.postJson(config, "/api/highlights/sync", body, options.timeout or 10)
+    if not res_body then
+        if options.silent then
+            logger.info("LightHouse: silent highlight sync skipped:", tostring(err))
+        end
+        return false, err or "network_error", 0
+    end
+
+    if book_path ~= "" then
+        map[book_path] = fp
+        G_reader_settings:saveSetting("lighthouse_synced_highlights", map)
+    end
+    return true, "synced", #payload.entries
+end
+
+--- Non-blocking hook called by KOReader when a reader closes a document.
+-- Schedules a silent background push slightly after close so KOReader finishes
+-- flushing the document's sidecar file first and closing never stalls.
+function LightHouse:onCloseDocument()
+    local doc = self.ui and self.ui.document
+    local book_path = doc and doc.file
+    if type(book_path) ~= "string" or book_path == "" then return end
+    if not self:autoSyncHighlightsEnabled() or not Client.isConfigured(config) then return end
+
+    UIManager:scheduleIn(0.5, function()
+        pcall(function()
+            if not self:autoSyncHighlightsEnabled() then return end
+            if not NetworkMgr:isOnline() then return end
+            local record = Sidecar.read(book_path)
+            if record then
+                self:syncBookHighlights(record, { silent = true, timeout = 10 })
+            end
+        end)
+    end)
+end
+
+--- Pushes highlights for one book or all local books to `/api/highlights/sync`.
+-- @tparam[opt] table only_record optional sidecar record for single-book sync
+function LightHouse:syncAllHighlightsToObsidian(only_record)
+    if not Client.isConfigured(config) then
+        notice(_("LightHouse is not configured yet."))
+        return
+    end
+    if not NetworkMgr:isOnline() then
+        NetworkMgr:willRerunWhenOnline(function() self:syncAllHighlightsToObsidian(only_record) end)
+        return
+    end
+
+    local records
+    if type(only_record) == "table" then
+        records = { only_record }
+    else
+        records = self:localRecords(true)
+    end
+
+    local synced_books = 0
+    local synced_highlights = 0
+    local unchanged_books = 0
+    local last_err = nil
+
+    self:withSpinner(_("Syncing highlights to Obsidian…"), function()
+        for idx = 1, #records do
+            local rec = records[idx]
+            if type(rec) == "table" and type(rec.annotations) == "table" and #rec.annotations > 0 then
+                local ok, reason, count = self:syncBookHighlights(rec, {
+                    force = only_record ~= nil,
+                    timeout = 10,
+                })
+                if ok then
+                    if reason == "synced" then
+                        synced_books = synced_books + 1
+                        synced_highlights = synced_highlights + (count or 0)
+                    else
+                        unchanged_books = unchanged_books + 1
+                    end
+                elseif reason ~= "empty" then
+                    last_err = reason
+                end
+            end
+        end
+    end)
+
+    if synced_books > 0 then
+        notice(T(_("Synced %1 highlights from %2 book(s) to Obsidian."), tostring(synced_highlights), tostring(synced_books)), 4)
+    elseif last_err then
+        notice(errorHeadline(last_err) .. "\n" .. describeError(last_err), 5)
+    elseif unchanged_books > 0 then
+        notice(_("All highlights are already synced to Obsidian."), 3)
+    else
+        notice(_("No highlights found on this device to sync."), 3)
+    end
+end
+
+--- Selects active reading sessions missing a local EPUB copy on this device (capped at 10).
+-- @tparam table shelf normalized reading shelf sessions
+-- @treturn table array of downloadable missing sessions
+function LightHouse:missingActiveSessions(shelf)
+    local missing = {}
+    if type(shelf) ~= "table" then return missing end
+    for idx = 1, #shelf do
+        local session = shelf[idx]
+        if type(session) == "table" and not session.has_local_file and Status.num(session.book_id) then
+            missing[#missing + 1] = session
+            if #missing >= 10 then break end
+        end
+    end
+    return missing
+end
+
+--- Downloads active books started on another Kindle that are not yet on this device.
+function LightHouse:syncMissingActiveBooks()
+    if not Client.isConfigured(config) then
+        notice(_("LightHouse is not configured yet."))
+        return
+    end
+    if not NetworkMgr:isOnline() then
+        NetworkMgr:willRerunWhenOnline(function() self:syncMissingActiveBooks() end)
+        return
+    end
+
+    local shelf = self._reading_shelf and self._reading_shelf.shelf or nil
+    if not shelf then
+        local sessions, err = self:withSpinner(_("Checking active books…"), function()
+            return self:fetchSessions()
+        end)
+        if not sessions then
+            notice(errorHeadline(err) .. "\n" .. describeError(err), 5)
+            return
+        end
+        shelf = self:mergeReadingShelf(sessions, self:localRecords())
+        for idx = 1, #shelf do
+            local s = shelf[idx]
+            local resolved = self:localBookPathFor(s) or Status.str(s.book_path)
+            s.local_path = resolved ~= "" and resolved or nil
+            s.has_local_file = resolved ~= "" and Sidecar.bookExists(resolved)
+        end
+    end
+
+    local missing = self:missingActiveSessions(shelf)
+    if #missing == 0 then
+        notice(_("All currently reading books are already on this device."), 3)
+        return
+    end
+
+    local dir = self:getDownloadDir()
+    if not makeDirs(dir) then
+        notice(T(_("Cannot create the download folder %1"), dir))
+        return
+    end
+
+    UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
+        text = T(_("Download %1 active book(s) missing on this device?"), tostring(#missing)),
+        ok_text = _("Download all"),
+        ok_cb = function()
+            local downloaded = 0
+            local failed = 0
+            self:withSpinner(T(_("Downloading %1 missing book(s)…"), tostring(#missing)), function()
+                for idx = 1, #missing do
+                    local session = missing[idx]
+                    local book_id = math.floor(Status.num(session.book_id))
+                    local entry = {
+                        book_id = book_id,
+                        title = Status.str(session.title),
+                        authors = Status.str(session.authors),
+                    }
+                    local filepath = dir .. "/" .. buildFilename(entry)
+                    if lfs.attributes(filepath, "mode") == "file" then
+                        downloaded = downloaded + 1
+                    else
+                        local url = Client.buildUrl(config, string.format("/api/books/%d/download/epub", book_id))
+                        local ok = Client.download(config, url, filepath)
+                        if ok then
+                            downloaded = downloaded + 1
+                        else
+                            failed = failed + 1
+                        end
+                    end
+                end
+            end)
+
+            self:forgetShelf()
+            self.local_scan = nil
+            self.local_index = nil
+            forgetSidecarList()
+            if failed == 0 then
+                notice(T(_("Downloaded %1 active book(s)."), tostring(downloaded)), 4)
+            else
+                notice(T(_("Downloaded %1 of %2 active book(s) (%3 failed)."), tostring(downloaded), tostring(#missing), tostring(failed)), 5)
+            end
+            self:showReading{ page = 1, refresh = true }
+        end,
+    }))
+end
+
+--- Reads free and total storage bytes for the Kindle/Kobo user partition.
+-- @treturn table { total_bytes, free_bytes, used_bytes, used_pct }
+function LightHouse:deviceStorageInfo()
+    local dir = self:getDownloadDir()
+    local total, free = 0, 0
+    if type(ffiUtil.df) == "function" then
+        local ok, t, f = pcall(ffiUtil.df, dir)
+        if not ok or not tonumber(t) or tonumber(t) <= 0 then
+            ok, t, f = pcall(ffiUtil.df, "/mnt/us")
+        end
+        if ok and tonumber(t) and tonumber(t) > 0 then
+            total = math.max(tonumber(t), 0)
+            free = math.max(tonumber(f) or 0, 0)
+        end
+    end
+    local used = math.max(total - free, 0)
+    local used_pct = total > 0 and math.floor(((used / total) * 100) + 0.5) or 0
+    return {
+        total_bytes = total,
+        free_bytes = free,
+        used_bytes = used,
+        used_pct = used_pct,
+    }
+end
+
+--- Returns finished local books (>= 99%) still present on disk, with byte sizes.
+-- @boolean[opt] force re-walk local directories
+-- @treturn table array of local records with `size_bytes`
+function LightHouse:finishedLocalBooks(force)
+    local records = self:localRecords(force == true)
+    local finished = {}
+    for idx = 1, #records do
+        local rec = records[idx]
+        if type(rec) == "table" and Status.num(rec.percent_finished) and Status.num(rec.percent_finished) >= 0.99 then
+            local path = Status.str(rec.book_path)
+            if path ~= "" and Sidecar.bookExists(path) then
+                local copy = {}
+                for k, v in pairs(rec) do copy[k] = v end
+                copy.size_bytes = tonumber(lfs.attributes(path, "size")) or 0
+                finished[#finished + 1] = copy
+            end
+        end
+    end
+    return finished
+end
+
+--- Safety check preventing file deletion outside configured book roots or via traversal.
+-- @string path candidate file path
+-- @treturn boolean
+function LightHouse:isInsideBookRoot(path)
+    if type(path) ~= "string" or path == "" then return false end
+    local normalized = path:gsub("\\", "/"):gsub("//+", "/")
+    for segment in normalized:gmatch("[^/]+") do
+        if segment == ".." then return false end
+    end
+    local roots = self:localSearchDirs()
+    for idx = 1, #roots do
+        local root = Status.str(roots[idx]):gsub("//+", "/"):gsub("/+$", "")
+        if root ~= "" then
+            local prefix = root .. "/"
+            if normalized:sub(1, #prefix) == prefix and #normalized > #prefix then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+--- Confirms and removes a finished local book + its `.sdr` folder to free space.
+-- @tparam table item local book record (`book_path`, `title`, `size_bytes`)
+-- @function[opt] on_done callback invoked after deletion
+function LightHouse:deleteLocalBook(item, on_done)
+    if type(item) ~= "table" then return false end
+    local book_path = Status.str(item.book_path)
+    if book_path == "" or not self:isInsideBookRoot(book_path) or not Sidecar.bookExists(book_path) then
+        notice(_("Refused: file is missing or outside LightHouse book folders."))
+        return false
+    end
+
+    local title = Ui.rowTitle(item.title)
+    if title == "" then title = Sidecar.displayTitle(item) end
+    if title == "" then title = _("Untitled") end
+    local size_text = Views.formatBytes(Status.num(item.size_bytes) or 0)
+
+    UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
+        text = T(_("Remove local copy of “%1” (%2)?\nYour book and progress stay safe on LightHouse."), title, size_text),
+        ok_text = _("Remove local file"),
+        ok_cb = function()
+            local removed, err = os.remove(book_path)
+            if not removed then
+                notice(T(_("Could not remove file: %1"), tostring(err or "error")))
+                return
+            end
+            if type(ffiUtil.purgeDir) == "function" then
+                pcall(ffiUtil.purgeDir, book_path .. Sidecar.SIDECAR_SUFFIX)
+            end
+            self:forgetShelf()
+            self.local_scan = nil
+            self.local_index = nil
+            self._highlight_groups = nil
+            forgetSidecarList()
+            notice(T(_("Removed “%1” (%2 freed)."), title, size_text), 3)
+            if type(on_done) == "function" then on_done() end
+        end,
+    }))
+    return true
+end
+
+--- Renders the Device Storage & Finished-Book Cleaner screen on a native PageWidget.
+-- @tparam[opt] table options { page = number, refresh = boolean }
+function LightHouse:showStorage(options)
+    options = type(options) == "table" and options or {}
+    local page = math.max(math.floor(tonumber(options.page) or 1), 1)
+    local level = { kind = "storage", key = "storage", surface = "page" }
+
+    local finished = self:withLocalScan(_("Scanning local books…"), function()
+        return self:finishedLocalBooks(options.refresh == true)
+    end)
+    local storage_info = self:deviceStorageInfo()
+    local plan = Ui.listPlan(screenWidth(), screenHeight(), screenScale(), {
+        with_switch = false,
+        with_covers = false,
+        min_rows = 4,
+    })
+    local page_size = math.max(plan.rows, 1)
+    local model = Views.storageModel(storage_info, finished, {
+        labels = self:pageLabels(),
+        page = page,
+        page_size = page_size,
+    })
+    if model.pager and model.pager.page then page = model.pager.page end
+
+    local function dispatch(action)
+        if type(action) ~= "table" then return end
+        if action.kind == "delete_local_book" then
+            self:deleteLocalBook(action.item, function()
+                self:showStorage{ page = page, refresh = true }
+            end)
+        elseif action.kind == "page" then
+            self:showStorage{ page = action.page }
+        elseif action.kind == "page_jump" then
+            self:showPageJumpDialog(action.pager or model.pager, function(target)
+                self:showStorage{ page = target }
+            end)
+        end
+    end
+
+    self:showLevel(level, function()
+        self.library_state = nil
+        self.view_context = { kind = "storage", page = page }
+        self:showPage(model, plan, { on_action = dispatch })
+    end)
+end
+
 -- Pure helpers exposed for the repository's Lua test harness. They stay plain
 -- function fields on the plugin table, so KOReader's PluginLoader is unaffected.
 -- `formatMessage` is the guarded `T()` itself: the tests drive it directly to
 -- prove that no substitution type can reach `string.gsub`.
 LightHouse.buildFilename = buildFilename
+LightHouse.buildHighlightSyncPayload = buildHighlightSyncPayload
 LightHouse.describeError = describeError
 LightHouse.errorHeadline = errorHeadline
 LightHouse.formatSeriesIndex = formatSeriesIndex
 LightHouse.formatMessage = T
+LightHouse.highlightFingerprint = highlightFingerprint
 
 return LightHouse
