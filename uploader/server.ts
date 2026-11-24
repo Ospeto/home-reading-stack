@@ -4599,7 +4599,8 @@ async function handleRequestCore(
       totalResults: matchedBooks.length,
     });
 
-    const opdsEtag = `"${crypto.createHash("sha1").update(opdsXml).digest("hex").slice(0, 16)}"`;
+    const opdsEtagInput = opdsXml.replace(/<updated>[^<]*<\/updated>/g, "");
+    const opdsEtag = `"${crypto.createHash("sha1").update(opdsEtagInput).digest("hex").slice(0, 16)}"`;
     const opdsHeaders: Record<string, string> = {
       "Content-Type":
         "application/atom+xml;profile=opds-catalog;kind=acquisition;charset=utf-8",
