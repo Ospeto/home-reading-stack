@@ -3748,6 +3748,19 @@ function jsonResponse(data: any, status = 200, origin?: string) {
   return new Response(JSON.stringify(data), { status, headers });
 }
 
+function etagMatchesHeader(ifNoneMatch: string | null, etag: string): boolean {
+  if (!ifNoneMatch || !etag) return false;
+  const target = etag.replace(/^W\//i, "").trim();
+  for (const rawPart of ifNoneMatch.split(",")) {
+    const candidate = rawPart.trim();
+    if (candidate === "*") return true;
+    if (candidate.replace(/^W\//i, "").trim() === target) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export interface ProxyPathValidationResult {
   valid: boolean;
   error?: string;
@@ -4586,16 +4599,21 @@ async function handleRequestCore(
       totalResults: matchedBooks.length,
     });
 
+    const opdsEtag = `"${crypto.createHash("sha1").update(opdsXml).digest("hex").slice(0, 16)}"`;
     const opdsHeaders: Record<string, string> = {
       "Content-Type":
         "application/atom+xml;profile=opds-catalog;kind=acquisition;charset=utf-8",
       "Cache-Control": "public, max-age=60, must-revalidate",
+      ETag: opdsEtag,
       "X-Content-Type-Options": "nosniff",
     };
     if (corsOrigin && isAllowedOrigin(corsOrigin)) {
       opdsHeaders["Access-Control-Allow-Origin"] = corsOrigin;
       opdsHeaders["Access-Control-Allow-Credentials"] = "true";
       opdsHeaders["Vary"] = "Origin";
+    }
+    if (req.method === "GET" && etagMatchesHeader(req.headers.get("if-none-match"), opdsEtag)) {
+      return new Response(null, { status: 304, headers: opdsHeaders });
     }
     if (req.method === "HEAD") {
       return new Response(null, { status: 200, headers: opdsHeaders });
@@ -4680,7 +4698,10 @@ async function handleRequestCore(
             pluginSocketIp.replace(/^::ffff:/, "").trim(),
           ),
       );
-      const pluginBaseUrl = resolvePluginBaseUrl(req, url, { trustForwarded });
+      const pluginBaseUrl = resolvePluginBaseUrl(req, url, {
+        trustForwarded,
+        allowLoopback: false,
+      });
       const generated = generateKoplugin({
         baseUrl: pluginBaseUrl,
         apiKey: resolveApiKeyFromEnv(),
@@ -4978,11 +4999,24 @@ async function handleRequestCore(
       requested === "author" || requested === "authors" ? "author" : "series";
     const groupedBooks = getCalibreBooks();
     const progress = getOpdsProgressByBookId(groupedBooks) ?? new Map<number, number>();
-    return jsonResponse(
-      buildLibraryGroups(groupedBooks, progress, by, OPDS_FINISHED_THRESHOLD),
-      200,
-      corsOrigin,
-    );
+    const payload = buildLibraryGroups(groupedBooks, progress, by, OPDS_FINISHED_THRESHOLD);
+    const jsonBody = JSON.stringify(payload);
+    const groupsEtag = `"${crypto.createHash("sha1").update(jsonBody).digest("hex").slice(0, 16)}"`;
+    const groupHeaders: Record<string, string> = {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "private, no-cache",
+      ETag: groupsEtag,
+      "X-Content-Type-Options": "nosniff",
+    };
+    if (corsOrigin && isAllowedOrigin(corsOrigin)) {
+      groupHeaders["Access-Control-Allow-Origin"] = corsOrigin;
+      groupHeaders["Access-Control-Allow-Credentials"] = "true";
+      groupHeaders["Vary"] = "Origin";
+    }
+    if (etagMatchesHeader(req.headers.get("if-none-match"), groupsEtag)) {
+      return new Response(null, { status: 304, headers: groupHeaders });
+    }
+    return new Response(jsonBody, { status: 200, headers: groupHeaders });
   }
 
   // API: Durable Job Queue Inspection. Read-only library and reading-data

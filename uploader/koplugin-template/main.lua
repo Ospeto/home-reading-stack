@@ -915,6 +915,142 @@ function LightHouse:prefetchCovers(entries)
     end
 end
 
+--- Schedules non-blocking background fetching of missing covers in small chunks
+-- (4 per UI tick) and refreshes the currently visible PageWidget as each chunk lands.
+-- @tparam table entries catalog or synthetic cover entries
+-- @tparam table owner_level nav stack level owning the active page
+-- @tparam table model rendered view model
+-- @tparam table plan layout plan
+-- @tparam table page_handlers PageWidget callbacks
+-- @treturn number count of queued missing covers
+function LightHouse:scheduleProgressiveCovers(entries, owner_level, model, plan, page_handlers)
+    if not self:coversEnabled() or type(entries) ~= "table" or #entries == 0 then
+        return 0
+    end
+    local now = os.time()
+    local pending = {}
+    local cap = Ui.tokens.cover_fetch_max or 16
+    for idx = 1, #entries do
+        local entry = entries[idx]
+        if coverNeedsFetch(entry, now) then
+            pending[#pending + 1] = entry
+            if #pending >= cap then break end
+        end
+    end
+    if #pending == 0 then return 0 end
+    if type(UIManager.scheduleIn) ~= "function" then
+        self:prefetchCovers(pending)
+        return #pending
+    end
+
+    self._cover_gen = (self._cover_gen or 0) + 1
+    local gen = self._cover_gen
+    local cursor = 1
+    local started = now
+    local total_fetched = 0
+    local batch_size = 4
+
+    local function runBatch()
+        if self._cover_gen ~= gen or not self.page then return end
+        if Nav.top(self:navStack()) ~= owner_level then return end
+        local tick_now = os.time()
+        if not Ui.coverBudgetLeft(cursor - 1, started, tick_now) then
+            if total_fetched > 0 and not self._cover_cache_pruned then
+                self._cover_cache_pruned = true
+                pcall(Cache.pruneDir, coverDir(), {
+                    max_files = LightHouse.COVER_CACHE_MAX_FILES,
+                    max_bytes = LightHouse.COVER_CACHE_MAX_BYTES,
+                }, coverCacheIo())
+            end
+            return
+        end
+
+        local fetched_this_batch = 0
+        local stop_at = math.min(cursor + batch_size - 1, #pending)
+        for idx = cursor, stop_at do
+            local ok_cover = pcall(self.fetchOneCover, self, pending[idx], started)
+            if ok_cover then
+                fetched_this_batch = fetched_this_batch + 1
+                total_fetched = total_fetched + 1
+            end
+        end
+        cursor = stop_at + 1
+
+        if fetched_this_batch > 0 and self._cover_gen == gen and self.page
+            and Nav.top(self:navStack()) == owner_level
+            and not self.overflow_menu and not self.menu then
+            local prev_focus = self.page.focus_index
+            self:showPage(model, plan, page_handlers)
+            if prev_focus and self.page and type(self.page.focus_panels) == "table"
+                and self.page.focus_panels[prev_focus] then
+                self.page.focus_index = prev_focus
+            end
+            if type(UIManager.setDirty) == "function" and self.page then
+                pcall(UIManager.setDirty, UIManager, self.page, "ui")
+            end
+        end
+
+        if cursor <= #pending then
+            UIManager:scheduleIn(0.1, runBatch)
+        elseif total_fetched > 0 and not self._cover_cache_pruned then
+            self._cover_cache_pruned = true
+            pcall(Cache.pruneDir, coverDir(), {
+                max_files = LightHouse.COVER_CACHE_MAX_FILES,
+                max_bytes = LightHouse.COVER_CACHE_MAX_BYTES,
+            }, coverCacheIo())
+        end
+    end
+
+    UIManager:scheduleIn(0.1, runBatch)
+    return #pending
+end
+
+--- Speculatively fetches page N+1 into `opdsCache()` 1.5s after page N opens.
+-- @tparam table state current library_state
+-- @number page_size items per page
+-- @treturn boolean true if scheduled
+function LightHouse:scheduleNextPagePrefetch(state, page_size)
+    if type(UIManager.scheduleIn) ~= "function" then return false end
+    if type(state) ~= "table" or state.mode ~= "books" then return false end
+    if not Client.isConfigured(config) or not NetworkMgr:isOnline() then return false end
+
+    local next_params = {
+        search = Status.str(state.query),
+        start = math.max(math.floor(tonumber(state.page) or 1), 1) * math.max(math.floor(tonumber(page_size) or 1), 1),
+        count = math.max(math.floor(tonumber(page_size) or 1), 1),
+        sort = VALID_SORTS and VALID_SORTS[state.sort] and state.sort or self:defaultSort(),
+    }
+    if Status.str(state.filter) ~= "" then
+        next_params.filter = Status.str(state.filter)
+    end
+    local next_path = "/api/opds?" .. buildQuery(next_params)
+    if self:opdsCache():get(next_path, os.time()) ~= nil then
+        return false
+    end
+
+    self._prefetch_gen = (self._prefetch_gen or 0) + 1
+    local p_gen = self._prefetch_gen
+    UIManager:scheduleIn(1.5, function()
+        if self._prefetch_gen ~= p_gen or not self.page or not self.library_state then return end
+        local cur = self.library_state
+        if cur.mode ~= state.mode or cur.page ~= state.page
+            or cur.query ~= state.query or cur.sort ~= state.sort
+            or cur.filter ~= state.filter then
+            return
+        end
+        if not NetworkMgr:isOnline() then return end
+        if self:opdsCache():get(next_path, os.time()) ~= nil then return end
+        local ok_get, body = pcall(Client.get, config, next_path, { max_retries = 0 })
+        if ok_get and type(body) == "string" and body ~= "" then
+            local ok_parse, parsed = pcall(OPDS.parse, body)
+            if ok_parse and type(parsed) == "table" and type(parsed.entries) == "table" and #parsed.entries > 0 then
+                self:opdsCache():set(next_path, parsed, os.time())
+            end
+        end
+    end)
+    return true
+end
+
 --- Builds the left cover slot for one row.
 -- @tparam table entry catalog entry with a `.book_id`
 -- @tparam table layout result of `Ui.layout`
@@ -1916,6 +2052,11 @@ function LightHouse:showPageOverflow()
         addAction(action_row, _("Search"), function() self:showSearchDialog() end)
         if state.mode == "books" then
             addAction(action_row, _("Sort & Filter"), function() self:showSortFilterDialog() end)
+            if Status.str(state.series_name) ~= "" then
+                addAction(action_row, _("Download entire series"), function()
+                    self:downloadSeriesBooks(state.series_name)
+                end)
+            end
         else
             local grouping = self._groupings and self._groupings[state.mode == "series" and "series" or "authors"]
             if grouping and grouping.groups then
@@ -1925,6 +2066,11 @@ function LightHouse:showPageOverflow()
                     self:showLetterJumpDialog(grouping.groups, page_size)
                 end)
             end
+        end
+        if (self._missing_active_count or 0) > 0 then
+            addAction(action_row, T(_("Sync (%1)"), tostring(self._missing_active_count)), function()
+                self:syncMissingActiveBooks()
+            end)
         end
     else
         addAction(action_row, _("Refresh"), function()
@@ -2326,6 +2472,12 @@ function LightHouse:showRowQuickActions(action, loaded_entries)
                 fn = function() self:downloadNextUnreadInSeries(name, loaded_entries) end,
             },
         })
+        addButtonRow({
+            {
+                label = _("Download entire series"),
+                fn = function() self:downloadSeriesBooks(name, loaded_entries) end,
+            },
+        })
     elseif action.kind == "author" and Status.str(action.name) ~= "" then
         local name = Status.str(action.name)
         title = Ui.rowTitle(name)
@@ -2505,6 +2657,118 @@ function LightHouse:downloadNextUnreadInSeries(series_name, loaded_entries)
         return
     end
     self:downloadEntry(candidate)
+end
+
+--- Batch-downloads all missing volumes of a series and indexes them into ZenOS.
+-- Checks local files first, prompts once with the exact missing count, downloads
+-- via atomic `.part` transfers, invalidates caches, and triggers `indexBookFiles`.
+-- @string series_name target series title
+-- @tparam[opt] table loaded_entries fallback entries when offline
+-- @treturn number queued count (0 if nothing missing or unconfirmed)
+function LightHouse:downloadSeriesBooks(series_name, loaded_entries)
+    local target_series = Status.str(series_name)
+    if target_series == "" then return 0 end
+    local normalized = target_series:lower():gsub("^%s+", ""):gsub("%s+$", "")
+
+    local entries = loaded_entries
+    if Client.isConfigured(config) and NetworkMgr:isOnline() then
+        local path = "/api/opds?" .. buildQuery{
+            search = target_series,
+            start = 0,
+            count = 100,
+            sort = "series",
+        }
+        local fetched, fetch_err = self:withSpinner(T(_("Checking %1…"), target_series), function()
+            local body, err = Client.get(config, path)
+            if not body then return nil, err or "invalid_response" end
+            local feed = OPDS.parse(body)
+            return feed.entries
+        end)
+        if not fetched then
+            notice(errorHeadline(fetch_err) .. "\n" .. describeError(fetch_err), 6)
+            return 0
+        end
+        entries = fetched
+    elseif type(entries) ~= "table" then
+        if not Client.isConfigured(config) then
+            notice(describeError("not_configured"), 4)
+        else
+            NetworkMgr:willRerunWhenOnline(function() self:downloadSeriesBooks(series_name, loaded_entries) end)
+        end
+        return 0
+    end
+
+    local dir = self:getDownloadDir()
+    self:localRecords()
+    local missing = {}
+    local seen_href = {}
+    for idx = 1, #(entries or {}) do
+        local entry = entries[idx]
+        if type(entry) == "table" and entry.download_href then
+            local entry_series = Status.str(entry.series):lower():gsub("^%s+", ""):gsub("%s+$", "")
+            if entry_series == "" or entry_series == normalized then
+                pcall(function() self:applyLocalToEntry(entry) end)
+                if self:localBookPathFor(entry) == nil then
+                    local filepath = dir .. "/" .. buildFilename(entry)
+                    local on_disk = lfs.attributes(filepath, "mode") == "file" or Sidecar.bookExists(filepath)
+                    if not on_disk and not seen_href[entry.download_href] then
+                        seen_href[entry.download_href] = true
+                        missing[#missing + 1] = {
+                            entry = entry,
+                            filepath = filepath,
+                        }
+                    end
+                end
+            end
+        end
+    end
+
+    if #missing == 0 then
+        notice(T(_("All volumes in “%1” are already on this device."), target_series), 4)
+        return 0
+    end
+
+    if not makeDirs(dir) then
+        notice(T(_("Cannot create the download folder %1"), dir))
+        return 0
+    end
+
+    UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
+        text = T(_("Download %1 missing volume(s) of “%2”?"), tostring(#missing), target_series),
+        ok_text = _("Download all"),
+        ok_cb = function()
+            local downloaded = 0
+            local failed = 0
+            local newly_downloaded = {}
+            self:withSpinner(T(_("Downloading %1 volume(s) of %2…"), tostring(#missing), target_series), function()
+                for idx = 1, #missing do
+                    local item = missing[idx]
+                    local ok = Client.download(config, item.entry.download_href, item.filepath)
+                    if ok then
+                        downloaded = downloaded + 1
+                        newly_downloaded[#newly_downloaded + 1] = item.filepath
+                    else
+                        failed = failed + 1
+                    end
+                end
+            end)
+
+            self:forgetShelf()
+            self:forgetCatalogCaches()
+            self.local_scan = nil
+            self.local_index = nil
+            forgetSidecarList()
+            if #newly_downloaded > 0 then
+                self:indexBookFiles(newly_downloaded)
+            end
+            if failed == 0 then
+                notice(T(_("Downloaded %1 volume(s) of “%2”."), tostring(downloaded), target_series), 4)
+            else
+                notice(T(_("Downloaded %1 of %2 volume(s) (%3 failed)."), tostring(downloaded), tostring(#missing), tostring(failed)), 5)
+            end
+        end,
+    }))
+    return #missing
 end
 
 -- ---------------------------------------------------------------------------
@@ -3079,6 +3343,9 @@ function LightHouse:openLibrary(options)
                 Status.merge(feed.entries, sessions)
             end
             self:localRecords(refresh_device)
+            if sessions then
+                self._missing_active_count = self:countMissingActiveFromSessions(sessions)
+            end
             for entry_index = 1, #feed.entries do
                 local entry = feed.entries[entry_index]
                 local applied = pcall(function() self:applyLocalToEntry(entry) end)
@@ -3087,18 +3354,6 @@ function LightHouse:openLibrary(options)
                 end
                 if entry.local_record or self:localBookPathFor(entry) ~= nil then
                     entry.on_device = true
-                end
-            end
-            if self:coversEnabled() then
-                local now = os.time()
-                local pending = 0
-                for entry_index = 1, #feed.entries do
-                    if coverNeedsFetch(feed.entries[entry_index], now) then
-                        pending = pending + 1
-                    end
-                end
-                if pending > 0 then
-                    self:prefetchCovers(feed.entries)
                 end
             end
             return { feed = feed, shelf_err = shelf_err }
@@ -3210,17 +3465,6 @@ function LightHouse:openLibrary(options)
                 options.refresh == true or mode_changed
             )
             if not fetched then return nil, fetch_err end
-            local available = math.max(math.ceil(#fetched.groups / page_size), 1)
-            local target_page = page > available and available or page
-            if self:coversEnabled() then
-                local ids = {}
-                local first = (target_page - 1) * page_size + 1
-                for group_index = first, first + page_size - 1 do
-                    local group = fetched.groups[group_index]
-                    if group and group.coverId then ids[#ids + 1] = group.coverId end
-                end
-                self:prefetchCoverIds(ids, nil, true)
-            end
             return fetched
         end)
         if not grouping then
@@ -3251,6 +3495,9 @@ function LightHouse:openLibrary(options)
     end
 
     local model = Views.libraryModel(mode, context, { labels = self:pageLabels() })
+    if mode == "books" and (self._missing_active_count or 0) > 0 and type(model.footer) == "table" then
+        model.footer.right = T(_("%1 missing active"), tostring(self._missing_active_count))
+    end
 
     local function dispatch(action)
         if type(action) ~= "table" then return end
@@ -3268,6 +3515,10 @@ function LightHouse:openLibrary(options)
             self:showLetterJumpDialog(context.groups, page_size)
         elseif action.kind == "download_next_unread" then
             self:downloadNextUnreadInSeries(action.series or series_name, context.entries)
+        elseif action.kind == "download_series" then
+            self:downloadSeriesBooks(action.series or series_name, context.entries)
+        elseif action.kind == "sync_missing_active" then
+            self:syncMissingActiveBooks()
         elseif action.kind == "book" then
             self:openBookDetails(action.entry)
         elseif action.kind == "series" then
@@ -3296,18 +3547,46 @@ function LightHouse:openLibrary(options)
     -- same time: the header's overflow menu reads it to offer refresh and the
     -- grouping switch, and a restored level must offer its own, not its
     -- child's.
+    local page_handlers = {
+        on_action = dispatch,
+        on_hold = function(hold_action)
+            self:showRowQuickActions(hold_action, context.entries)
+        end,
+        on_switch = function(key)
+            self:openLibrary{ mode = key, page = 1, query = "", title = "", series_name = "", filter = "" }
+        end,
+    }
     self:showLevel(level, function()
         self.library_state = state
         self.view_context = { kind = "library" }
-        self:showPage(model, plan, {
-            on_action = dispatch,
-            on_hold = function(hold_action)
-                self:showRowQuickActions(hold_action, context.entries)
-            end,
-            on_switch = function(key)
-                self:openLibrary{ mode = key, page = 1, query = "", title = "", series_name = "", filter = "" }
-            end,
-        })
+        self:showPage(model, plan, page_handlers)
+        if self:coversEnabled() then
+            if mode == "books" then
+                self:scheduleProgressiveCovers(context.entries, level, model, plan, page_handlers)
+            elseif type(context.groups) == "table" then
+                local cover_entries = {}
+                local first = (page - 1) * page_size + 1
+                for group_index = first, first + page_size - 1 do
+                    local group = context.groups[group_index]
+                    local bid = Status.num(group and group.coverId)
+                    if bid then
+                        cover_entries[#cover_entries + 1] = {
+                            book_id = bid,
+                            thumbnail_href = Client.buildUrl(
+                                config,
+                                string.format("/api/books/%d/cover?w=%d", math.floor(bid), Ui.tokens.cover_width_px)
+                            ),
+                        }
+                    end
+                end
+                if #cover_entries > 0 then
+                    self:scheduleProgressiveCovers(cover_entries, level, model, plan, page_handlers)
+                end
+            end
+        end
+        if mode == "books" and context.has_next then
+            self:scheduleNextPagePrefetch(state, page_size)
+        end
     end)
     if shelf_notice then notice(shelf_notice, 4) end
 end
@@ -3585,6 +3864,9 @@ function LightHouse:showReading(options)
         end
     end
 
+    local missing_active = self:missingActiveSessions(cached.shelf)
+    self._missing_active_count = #missing_active
+
     local model = Views.readingShelfModel(cached.shelf, os.time(), {
         labels = self:pageLabels(),
         page = page,
@@ -3592,6 +3874,13 @@ function LightHouse:showReading(options)
         degraded = cached.degraded,
         offline = cached.offline,
     })
+    if #missing_active > 0 then
+        model.header_actions = type(model.header_actions) == "table" and model.header_actions or {}
+        model.header_actions.extra = {
+            label = T(_("Sync (%1)"), tostring(#missing_active)),
+            action = { kind = "sync_missing_active" },
+        }
+    end
     if model.pager and model.pager.page then page = model.pager.page end
 
     local function dispatch(action)
@@ -3600,6 +3889,8 @@ function LightHouse:showReading(options)
             self:openBookFile(action.path)
         elseif action.kind == "book" then
             self:openBookDetails(action.entry)
+        elseif action.kind == "sync_missing_active" then
+            self:syncMissingActiveBooks()
         elseif action.kind == "page" then
             self:showReading{ page = action.page }
         elseif action.kind == "page_jump" then
@@ -4468,6 +4759,25 @@ function LightHouse:syncAllHighlightsToObsidian(only_record)
     end
 end
 
+--- Counts normalized server sessions that do not yet exist locally on this device.
+-- @tparam table sessions normalized KOSync sessions from `/api/kosync/active`
+-- @treturn number
+function LightHouse:countMissingActiveFromSessions(sessions)
+    if type(sessions) ~= "table" then return 0 end
+    local count = 0
+    for idx = 1, #sessions do
+        local s = sessions[idx]
+        if type(s) == "table" and Status.num(s.book_id) then
+            local resolved = self:localBookPathFor(s) or Status.str(s.book_path)
+            if resolved == "" or not Sidecar.bookExists(resolved) then
+                count = count + 1
+                if count >= 10 then break end
+            end
+        end
+    end
+    return count
+end
+
 --- Selects active reading sessions missing a local EPUB copy on this device (capped at 10).
 -- @tparam table shelf normalized reading shelf sessions
 -- @treturn table array of downloadable missing sessions
@@ -4558,6 +4868,8 @@ function LightHouse:syncMissingActiveBooks()
             end)
 
             self:forgetShelf()
+            self:forgetCatalogCaches()
+            self._missing_active_count = failed
             self.local_scan = nil
             self.local_index = nil
             forgetSidecarList()

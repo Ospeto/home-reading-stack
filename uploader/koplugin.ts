@@ -23,6 +23,7 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 /** Directory name KOReader requires when the archive is unpacked into `koreader/plugins/`. */
@@ -32,7 +33,7 @@ export const KOPLUGIN_DIR_NAME = "lighthouse.koplugin";
 export const KOPLUGIN_DOWNLOAD_FILENAME = "lighthouse.koplugin";
 
 /** Version stamped into the generated configuration. */
-export const KOPLUGIN_VERSION = "1.12.0";
+export const KOPLUGIN_VERSION = "1.13.0";
 
 /** Per-socket-operation timeout for JSON/OPDS requests, in seconds. */
 export const KOPLUGIN_REQUEST_BLOCK_TIMEOUT = 10;
@@ -117,17 +118,54 @@ export function normalizeBaseUrl(raw: string | null | undefined): string | null 
   return parsed.origin;
 }
 
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+/** Returns true when a URL hostname points at the local loopback interface. */
+export function isLoopbackHostname(hostname: string | null | undefined): boolean {
+  if (typeof hostname !== "string") return false;
+  const clean = hostname.trim().toLowerCase();
+  return LOOPBACK_HOSTS.has(clean) || clean.startsWith("127.");
+}
+
+/**
+ * Returns the host's primary non-internal IPv4 LAN address, or null if offline.
+ * Excludes loopback (`127.*`) and link-local (`169.254.*`) addresses.
+ */
+export function detectLanIpv4(): string | null {
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    const addrs = nets[name];
+    if (!addrs) continue;
+    for (const addr of addrs) {
+      if (addr.internal) continue;
+      const family = String(addr.family);
+      if (family !== "IPv4" && family !== "4") continue;
+      if (addr.address.startsWith("127.") || addr.address.startsWith("169.254.")) {
+        continue;
+      }
+      return addr.address;
+    }
+  }
+  return null;
+}
+
 /**
  * Resolves the origin a downloading client is using.
  *
  * X-Forwarded-* headers are only honoured when the request arrived from the
  * trusted loopback reverse tunnel, matching how the rest of the server decides
- * WAN vs LAN identity.
+ * WAN vs LAN identity. When `allowLoopback === false` (used by `/api/koplugin/download`),
+ * a loopback hostname like `127.0.0.1:8086` is rewritten to `LIGHTHOUSE_LAN_URL`
+ * or the machine's LAN IPv4 so a Kindle never ends up calling itself.
  */
 export function resolvePluginBaseUrl(
   req: Request,
   url: URL,
-  options: { trustForwarded?: boolean } = {},
+  options: {
+    trustForwarded?: boolean;
+    allowLoopback?: boolean;
+    lanIpOverride?: string | null;
+  } = {},
 ): string {
   const trustForwarded = options.trustForwarded === true;
   const socketProto = url.protocol.replace(/:$/, "") || "http";
@@ -141,7 +179,24 @@ export function resolvePluginBaseUrl(
     || url.host;
   const proto = (trustForwarded ? firstHeaderValue("x-forwarded-proto") || socketProto : socketProto);
 
-  return normalizeBaseUrl(`${proto}://${host}`) || url.origin;
+  const resolved = normalizeBaseUrl(`${proto}://${host}`) || url.origin;
+  if (options.allowLoopback === false) {
+    try {
+      const parsed = new URL(resolved);
+      if (isLoopbackHostname(parsed.hostname)) {
+        const envLan = normalizeBaseUrl(process.env.LIGHTHOUSE_LAN_URL);
+        if (envLan) return envLan;
+        const lanIp = options.lanIpOverride !== undefined ? options.lanIpOverride : detectLanIpv4();
+        if (lanIp) {
+          const portSuffix = parsed.port ? `:${parsed.port}` : "";
+          return normalizeBaseUrl(`${parsed.protocol}//${lanIp}${portSuffix}`) || resolved;
+        }
+      }
+    } catch {
+      // Keep resolved fallback if URL parsing fails unexpectedly.
+    }
+  }
+  return resolved;
 }
 
 /** Escapes a value for inclusion as a Lua string literal. */
