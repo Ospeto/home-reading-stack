@@ -10110,3 +10110,317 @@ describe("plugin v1.10.0 OTA self-update and smart next-volume prompt", () => {
     expect(out.ota_uptodate_msg).toContain("up to date");
   });
 });
+
+const V111_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local workdir = assert(arg[2], "workdir required")
+local books_dir = workdir .. "/books"
+local docs_dir = workdir .. "/documents"
+local dl_dir = workdir .. "/downloads"
+
+local ui_mgr = require("ui/uimanager")
+ui_mgr.nextTick = function(_, fn) fn() end
+ui_mgr.scheduleIn = function(_, _, fn) fn() end
+
+local net_mgr = require("ui/network/manager")
+net_mgr.isOnline = function() return true end
+
+local settings_store = {}
+_G.G_reader_settings = {
+  readSetting = function(_, k) return settings_store[k] end,
+  saveSetting = function(_, k, v) settings_store[k] = v end,
+  nilOrTrue = function(_, k) return settings_store[k] ~= false end,
+}
+
+package.preload["ltn12"] = function()
+  return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
+    sink = {
+      table = function(chunks)
+        chunks = chunks or {}
+        return function(chunk)
+          if chunk then chunks[#chunks + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function() return function() return 1 end end,
+    },
+  }
+end
+
+local remote_active_json = '[{"bookId":77,"document":"h77","percentage":0.25,"timestamp":1795400000,"title":"Active Sync One","authors":"Author A"},{"bookId":78,"document":"h78","percentage":0.5,"timestamp":1795400010,"title":"Active Sync Two","authors":"Author B"}]'
+package.preload["json"] = function()
+  return {
+    encode = function() return '{"ok":true}' end,
+    decode = function(raw)
+      if type(raw) == "string" and raw:find('"bookId":77', 1, true) then
+        return {
+          { bookId = 77, document = "h77", percentage = 0.25, timestamp = 1795400000, title = "Active Sync One", authors = "Author A", device = "PW" },
+          { bookId = 78, document = "h78", percentage = 0.50, timestamp = 1795400010, title = "Active Sync Two", authors = "Author B", device = "PW" },
+        }
+      end
+      return {}
+    end,
+  }
+end
+
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      local url = tostring(request and request.url or "")
+      local resp = "{}"
+      if url:find("/api/kosync/active", 1, true) then
+        resp = remote_active_json
+      elseif url:find("/download/epub", 1, true) then
+        resp = string.rep("E", 512)
+      end
+      if request and request.sink then
+        request.sink(resp)
+        request.sink(nil)
+      end
+      return 1, 200, {}
+    end,
+  }
+end
+
+local fake_files, fake_dirs = {}, {}
+fake_dirs[books_dir] = {
+  "Indexed.epub",
+  "Unindexed One.epub",
+  "SubFolder",
+  "Unindexed One.epub.sdr",
+  ".hidden.epub",
+  "._appledouble.epub",
+  "cover.jpg",
+}
+fake_dirs[books_dir .. "/SubFolder"] = {
+  "Nested Two.azw3",
+  "Unsupported.pdf",
+  "IgnoreMeta.epub",
+}
+fake_dirs[docs_dir] = {
+  "Doc Three.mobi",
+}
+fake_dirs[dl_dir] = {}
+
+local b_idx = books_dir .. "/Indexed.epub"
+local b_un1 = books_dir .. "/Unindexed One.epub"
+local b_un2 = books_dir .. "/SubFolder/Nested Two.azw3"
+local b_unsup = books_dir .. "/SubFolder/Unsupported.pdf"
+local b_ign = books_dir .. "/SubFolder/IgnoreMeta.epub"
+local b_doc3 = docs_dir .. "/Doc Three.mobi"
+
+fake_files[b_idx] = "1"
+fake_files[b_un1] = "1"
+fake_files[b_un2] = "1"
+fake_files[b_unsup] = "1"
+fake_files[b_ign] = "1"
+fake_files[b_doc3] = "1"
+fake_files[books_dir .. "/.hidden.epub"] = "1"
+fake_files[books_dir .. "/._appledouble.epub"] = "1"
+fake_files[books_dir .. "/cover.jpg"] = "1"
+
+package.preload["libs/libkoreader-lfs"] = function()
+  return {
+    attributes = function(target, field)
+      if fake_files[target] ~= nil then
+        return field == "size" and #fake_files[target] or "file"
+      end
+      if fake_dirs[target] ~= nil then return "directory" end
+      local h = io.open(target, "rb")
+      if h then
+        local d = h:read("*a") or ""
+        h:close()
+        return field == "size" and #d or "file"
+      end
+      return nil
+    end,
+    mkdir = function(d) fake_dirs[d] = fake_dirs[d] or {}; return true end,
+  }
+end
+
+local Sidecar = require("lighthouse_sidecar")
+Sidecar.DEVICE_DIRS = { books_dir, docs_dir }
+Sidecar.io.list = function(d) return fake_dirs[d] end
+Sidecar.io.attributes = function(p)
+  if fake_files[p] ~= nil then return "file" end
+  if fake_dirs[p] ~= nil then return "directory" end
+  return nil
+end
+
+local bim_available = false
+local bim_batches = {}
+local bim_info_map = {
+  [b_idx] = { has_meta = "Y" },
+  [b_unsup] = { has_meta = nil, unsupported = "not readable by engine" },
+  [b_ign] = { has_meta = nil, ignore_meta = "Y" },
+}
+
+local MockBookInfoManager = {
+  isExtractingInBackground = function() return false end,
+  getBookInfo = function(_, filepath) return bim_info_map[filepath] end,
+  extractInBackground = function(_, queue)
+    bim_batches[#bim_batches + 1] = queue
+  end,
+}
+
+package.preload["bookinfomanager"] = function()
+  if not bim_available then error("coverbrowser disabled") end
+  return MockBookInfoManager
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+G_reader_settings:saveSetting("download_dir", dl_dir)
+
+-- Menu contains Index local books right below Device storage
+local menu_items = {}
+LightHouse:addToMainMenu(menu_items)
+local storage_pos, index_pos
+for idx = 1, #menu_items.lighthouse.sub_item_table do
+  local text = menu_items.lighthouse.sub_item_table[idx].text
+  if text == "Device storage" then storage_pos = idx end
+  if text == "Index local books" then index_pos = idx end
+end
+print("menu_order_ok=" .. tostring(storage_pos ~= nil and index_pos == storage_pos + 1))
+
+-- Graceful degradation when CoverBrowser / BookInfoManager is absent
+local q_unavail, q_err = LightHouse:indexBookFiles({ b_un1 })
+print("unavail_q=" .. tostring(q_unavail) .. ":" .. tostring(q_err))
+shown = {}
+local idx_unavail = LightHouse:indexLocalBooks()
+print("unavail_menu=" .. tostring(idx_unavail) .. ":" .. tostring(shown[#shown] and shown[#shown].text))
+
+-- Enable BookInfoManager (ensure unloaded cached nil isn't stuck in package.loaded)
+package.loaded["bookinfomanager"] = MockBookInfoManager
+bim_available = true
+
+-- indexLocalBooks finds ONLY missing supported books (skips has_meta, ignore_meta, unsupported, dotfiles, .sdr)
+shown = {}
+bim_batches = {}
+local queued_local = LightHouse:indexLocalBooks()
+print("queued_local=" .. tostring(queued_local))
+print("local_msg=" .. tostring(shown[#shown] and shown[#shown].text))
+local local_paths = {}
+for idx = 1, #(bim_batches[1] or {}) do
+  local entry = bim_batches[1][idx]
+  assert(entry.cover_specs == false, "cover_specs must be false for metadata-only indexing")
+  local_paths[#local_paths + 1] = entry.filepath
+end
+table.sort(local_paths)
+print("local_paths=" .. table.concat(local_paths, "|"))
+print("local_exact_ok=" .. tostring(
+  local_paths[1] == b_un2
+  and local_paths[2] == b_un1
+  and local_paths[3] == b_doc3
+  and #local_paths == 3
+))
+
+-- When all local books already have has_meta='Y', indexLocalBooks notices and skips background work
+bim_info_map[b_un1] = { has_meta = "Y" }
+bim_info_map[b_un2] = { has_meta = "Y" }
+bim_info_map[b_doc3] = { has_meta = "Y" }
+bim_batches = {}
+shown = {}
+local zero_local = LightHouse:indexLocalBooks()
+print("zero_local=" .. tostring(zero_local) .. ":" .. tostring(#bim_batches))
+print("zero_msg=" .. tostring(shown[#shown] and shown[#shown].text))
+
+-- Chunking & deduplication > 50 files (120 unique + 5 duplicates -> 50 + 50 + 20)
+bim_batches = {}
+local many = {}
+for i = 1, 120 do many[#many + 1] = books_dir .. "/Bulk_" .. string.format("%03d", i) .. ".epub" end
+for i = 1, 5 do many[#many + 1] = books_dir .. "/Bulk_001.epub" end
+local bulk_q = LightHouse:indexBookFiles(many)
+local batch_sizes = {}
+for idx = 1, #bim_batches do batch_sizes[#batch_sizes + 1] = tostring(#bim_batches[idx]) end
+print("bulk_q=" .. tostring(bulk_q) .. ":" .. table.concat(batch_sizes, ","))
+
+-- Auto-index hook on startDownload
+bim_batches = {}
+local dl_target = dl_dir .. "/Single Book - Author.epub"
+LightHouse:startDownload({ title = "Single Book", download_href = "/api/books/10/download/epub" }, dl_target)
+print("start_dl_batches=" .. tostring(#bim_batches))
+print("start_dl_path=" .. tostring(bim_batches[1] and bim_batches[1][1] and bim_batches[1][1].filepath == dl_target))
+print("start_dl_cover_specs=" .. tostring(bim_batches[1] and bim_batches[1][1] and bim_batches[1][1].cover_specs))
+
+-- Auto-index batch hook on syncMissingActiveBooks
+bim_batches = {}
+shown = {}
+LightHouse:syncMissingActiveBooks()
+local sync_confirm = shown[#shown]
+if sync_confirm and sync_confirm.ok_cb then sync_confirm.ok_cb() end
+print("sync_batches=" .. tostring(#bim_batches))
+print("sync_count=" .. tostring(bim_batches[1] and #bim_batches[1]))
+print("sync_cover_false=" .. tostring(bim_batches[1] and bim_batches[1][1] and bim_batches[1][1].cover_specs == false and bim_batches[1][2] and bim_batches[1][2].cover_specs == false))
+`);
+
+describe("plugin v1.11.0 background metadata indexing", () => {
+  it("bumps version to 1.11.0, auto-indexes downloads/syncs, chunks batches, and exposes 1-tap Index local books", () => {
+    expect(KOPLUGIN_VERSION).toBe("1.11.0");
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+
+    const { zip, settings } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "v111-test-key",
+      generatedAt: "2026-11-24T03:00:00.000Z",
+    });
+    expect(settings.pluginVersion).toBe("1.11.0");
+
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-v111-"));
+    fs.mkdirSync(path.join(workdir, "books", "SubFolder"), { recursive: true });
+    fs.mkdirSync(path.join(workdir, "documents"), { recursive: true });
+    fs.mkdirSync(path.join(workdir, "downloads"), { recursive: true });
+
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
+      encoding: "utf8",
+    });
+    expect(extract.status).toBe(0);
+
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "v111_harness.lua");
+    fs.writeFileSync(harnessPath, V111_HARNESS);
+    const res = spawnSync(LUA_BINARY as string, [harnessPath, pluginRoot, workdir], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+
+    expect(out.menu_order_ok).toBe("true");
+    expect(out.unavail_q).toBe("0:unavailable");
+    expect(out.unavail_menu).toContain("0:CoverBrowser plugin is disabled");
+    expect(out.queued_local).toBe("3");
+    expect(out.local_msg).toBe("Indexing 3 unindexed book(s) in the background…");
+    expect(out.local_exact_ok).toBe("true");
+    expect(out.zero_local).toBe("0:0");
+    expect(out.zero_msg).toBe("All local books are already indexed.");
+    expect(out.bulk_q).toBe("120:50,50,20");
+    expect(out.start_dl_batches).toBe("1");
+    expect(out.start_dl_path).toBe("true");
+    expect(out.start_dl_cover_specs).toBe("false");
+    expect(out.sync_batches).toBe("1");
+    expect(out.sync_count).toBe("2");
+    expect(out.sync_cover_false).toBe("true");
+  });
+});
