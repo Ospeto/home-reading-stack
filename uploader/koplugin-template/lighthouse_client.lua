@@ -42,6 +42,12 @@ local REDIRECT_CODES = {
     [308] = true,
 }
 
+--- Status codes on POST that replay the same method/body at Location.
+local POST_REDIRECT_CODES = {
+    [307] = true,
+    [308] = true,
+}
+
 -- Kept in sync with the values the generator writes into lighthouse_config.lua.
 local DEFAULT_REQUEST_BLOCK_TIMEOUT = 10
 local DEFAULT_REQUEST_TOTAL_TIMEOUT = 90
@@ -208,14 +214,16 @@ local function fileSink(handle)
     end
 end
 
---- Performs exactly one HTTP GET.
+--- Performs one HTTP request (`GET` by default, or `POST` with `source`).
 -- @string url absolute URL
 -- @param sink ltn12 sink
 -- @tparam table headers request headers
+-- @string[opt="GET"] method HTTP method
+-- @param[opt] source ltn12 source for request body
 -- @treturn number|nil status code
 -- @treturn table|nil response headers
 -- @treturn string|nil error description
-local function requestOnce(url, sink, headers)
+local function requestOnce(url, sink, headers, method, source)
     local transport, transport_err = pickTransport(url)
     if not transport then
         return nil, nil, transport_err
@@ -223,14 +231,15 @@ local function requestOnce(url, sink, headers)
 
     local ok, leading, code, response_headers = pcall(transport.request, {
         url = url,
-        method = "GET",
+        method = method or "GET",
         headers = headers,
+        source = source,
         sink = sink,
         -- LuaSocket follows redirects internally when unset, forwarding the
         -- full header set (including X-API-Key) to every hop and returning
         -- only the final response — which would bypass stripApiKeyCrossHost.
-        -- Disable it so Client.get/Client.download's own redirect loop is
-        -- authoritative.
+        -- Disable it so Client.get/Client.download/Client.postJson's own
+        -- redirect loop is authoritative.
         redirect = false,
     })
     if not ok then
@@ -337,6 +346,76 @@ function Client.get(config, path)
         return nil, err or "network_error"
     end
     if code ~= 200 then
+        return nil, string.format("http_%d", code)
+    end
+
+    local body = table.concat(chunks)
+    if looksLikeHtmlDocument(body) then
+        return nil, "html_response"
+    end
+    return body, nil
+end
+
+--- POSTs a JSON payload and returns the response body.
+-- Follows only `307`/`308` redirects so the method and JSON body are preserved
+-- across hops, and strips `X-API-Key` if a redirect crosses hosts.
+-- @tparam table config generated config table
+-- @string path absolute URL or path relative to base_url
+-- @string json_body serialized JSON payload
+-- @number[opt] max_seconds ceiling for block/total timeouts
+-- @treturn string|nil body
+-- @treturn string|nil error description
+function Client.postJson(config, path, json_body, max_seconds)
+    if not Client.isConfigured(config) then
+        return nil, "not_configured"
+    end
+
+    local payload = type(json_body) == "string" and json_body or ""
+    local headers = Client.buildHeaders(config)
+    headers["Content-Type"] = "application/json"
+    headers["Content-Length"] = tostring(#payload)
+
+    local current = Client.buildUrl(config, path)
+    local redirects = 0
+    local chunks = {}
+    local code, response_headers, err
+
+    local block_timeout = numberOr(config.request_block_timeout, DEFAULT_REQUEST_BLOCK_TIMEOUT)
+    local total_timeout = numberOr(config.request_total_timeout, DEFAULT_REQUEST_TOTAL_TIMEOUT)
+    local ceiling = tonumber(max_seconds)
+    if ceiling and ceiling > 0 then
+        if block_timeout > ceiling then block_timeout = ceiling end
+        if total_timeout > ceiling then total_timeout = ceiling end
+    end
+
+    socketutil:set_timeout(block_timeout, total_timeout)
+    while true do
+        chunks = {}
+        code, response_headers, err = requestOnce(
+            current,
+            ltn12.sink.table(chunks),
+            headers,
+            "POST",
+            ltn12.source.string(payload)
+        )
+        if not code or not POST_REDIRECT_CODES[code] then
+            break
+        end
+        local next_url, redirect_err = nextHop(current, response_headers, redirects)
+        if not next_url then
+            code, err = nil, redirect_err
+            break
+        end
+        redirects = redirects + 1
+        stripApiKeyCrossHost(headers, current, next_url)
+        current = next_url
+    end
+    socketutil:reset_timeout()
+
+    if not code then
+        return nil, err or "network_error"
+    end
+    if code ~= 200 and code ~= 201 and code ~= 204 then
         return nil, string.format("http_%d", code)
     end
 

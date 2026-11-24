@@ -147,12 +147,21 @@ Ui.tokens = {
     page_section_head_units = 25,
     page_reading_units = 88,
     page_reading_min_units = 58,
+    page_list_row_units = 78,
+    page_list_compact_units = 52,
+    page_list_compact_min_units = 38,
     page_session_units = 56,
     page_session_min_units = 40,
     page_footer_units = 26,
     page_bar_units = 6,
     page_switch_units = 40,
     page_subline_units = 30,
+    page_heat_legend_units = 18,
+    page_action_h_units = 36,
+    page_body_line_units = 20,
+    page_quote_row_units = 104,
+    page_quote_min_units = 74,
+    page_detail_cover_ratio = 0.28,
     --: Heatmap: 52 weeks of seven days, drawn as a pixel grid rather than one
     --: text row per week (the shape that made the old screen ten pages long).
     page_heat_weeks = 52,
@@ -195,6 +204,10 @@ Ui.GLYPH = {
     --: reading face is not required to carry it).
     back = "◂",
     overflow = "⋮",
+    --: Sort/jump selector indicator, clear filter mark, and on-device dot.
+    dropdown = "▾",
+    clear = "✕",
+    local_dot = "●",
 }
 
 --- English wording for the relative-time, clock and duration lines.
@@ -353,6 +366,166 @@ function Ui.ellipsize(text, max_chars)
     end
     if cut < 1 then return Ui.GLYPH.ellipsis end
     return text:sub(1, cut) .. Ui.GLYPH.ellipsis
+end
+
+--- Strips basic HTML markup and decodes entities into clean plain paragraphs.
+-- @param text string|nil raw HTML or plain synopsis
+-- @treturn string normalized plain text
+function Ui.plainText(text)
+    if type(text) ~= "string" or text == "" then return "" end
+    local out = text:gsub("\r\n", "\n"):gsub("\r", "\n")
+    out = out:gsub("<[Bb][Rr][^>]*>", "\n")
+    out = out:gsub("</[Pp]%s*>", "\n\n")
+    out = out:gsub("</[Dd][Ii][Vv]%s*>", "\n")
+    out = out:gsub("</[Ll][Ii]%s*>", "\n")
+    out = out:gsub("</[Hh][1-6]%s*>", "\n\n")
+    out = out:gsub("<[^>]+>", "")
+    out = out:gsub("&[Nn][Bb][Ss][Pp];", " ")
+    out = out:gsub("&[Ll][Tt];", "<")
+    out = out:gsub("&[Gg][Tt];", ">")
+    out = out:gsub("&[Qq][Uu][Oo][Tt];", '"')
+    out = out:gsub("&#39;", "'"):gsub("&[Aa][Pp][Oo][Ss];", "'")
+    out = out:gsub("&[Mm][Dd][Aa][Ss][Hh];", "—")
+    out = out:gsub("&[Nn][Dd][Aa][Ss][Hh];", "–")
+    out = out:gsub("&[Hh][Ee][Ll][Ll][Ii][Pp];", "…")
+    out = out:gsub("&#([0-9]+);", function(digits)
+        local cp = tonumber(digits)
+        if not cp or cp < 32 or cp > 126 then return " " end
+        return string.char(cp)
+    end)
+    out = out:gsub("&[Aa][Mm][Pp];", "&")
+    out = out:gsub("[ \t]+", " ")
+    out = out:gsub(" *\n *", "\n")
+    out = out:gsub("\n\n\n+", "\n\n")
+    out = out:gsub("^%s+", ""):gsub("%s+$", "")
+    return out
+end
+
+--- Splits a string at a UTF-8 code-point count boundary without breaking glyphs.
+-- @string text
+-- @number count
+-- @treturn string head
+-- @treturn string rest
+local function takeCodepoints(text, count)
+    local limit = math.max(math.floor(count), 1)
+    local seen, cut = 0, 0
+    for byte_index = 1, #text do
+        local byte = text:byte(byte_index)
+        if byte < 0x80 or byte >= 0xC0 then
+            seen = seen + 1
+            if seen > limit then break end
+        end
+        cut = byte_index
+    end
+    return text:sub(1, cut), text:sub(cut + 1)
+end
+
+--- Wraps text into at most `max_lines` lines of at most `max_chars` glyphs.
+-- Safe on UTF-8 multi-byte scripts (Burmese, CJK): never splits a code point.
+-- @param text string|nil
+-- @number max_chars
+-- @number[opt] max_lines
+-- @treturn table { lines = { string... }, truncated = boolean }
+function Ui.wrapLines(text, max_chars, max_lines)
+    if type(text) ~= "string" or text == "" then
+        return { lines = {}, truncated = false }
+    end
+    local clean = Ui.plainText(text)
+    if clean == "" then
+        return { lines = {}, truncated = false }
+    end
+    local width = math.floor(numberIn(max_chars, 40, 4))
+    local cap = max_lines ~= nil and math.floor(numberIn(max_lines, 0, 0)) or nil
+    if cap == 0 then
+        return { lines = {}, truncated = true }
+    end
+
+    local lines = {}
+    local truncated = false
+    local function pushLine(line)
+        if cap and #lines >= cap then
+            truncated = true
+            return false
+        end
+        lines[#lines + 1] = line
+        return true
+    end
+
+    local para_start = 1
+    local para_len = #clean
+    local last_was_blank = false
+    while para_start <= para_len and not truncated do
+        local nl = clean:find("\n", para_start, true)
+        local para = nl and clean:sub(para_start, nl - 1) or clean:sub(para_start)
+        para_start = nl and (nl + 1) or (para_len + 1)
+        para = para:gsub("^%s+", ""):gsub("%s+$", "")
+
+        if para == "" then
+            if #lines > 0 and not last_was_blank then
+                if not pushLine("") then break end
+                last_was_blank = true
+            end
+        else
+            last_was_blank = false
+            local current = ""
+            for word in para:gmatch("%S+") do
+                local word_len = graphemeCount(word)
+                if current == "" then
+                    if word_len <= width then
+                        current = word
+                    else
+                        local chunk = word
+                        while graphemeCount(chunk) > width and not truncated do
+                            local head, rest = takeCodepoints(chunk, width)
+                            if not pushLine(head) then break end
+                            chunk = rest
+                        end
+                        current = truncated and "" or chunk
+                    end
+                else
+                    local cur_len = graphemeCount(current)
+                    if cur_len + 1 + word_len <= width then
+                        current = current .. " " .. word
+                    else
+                        if not pushLine(current) then
+                            current = ""
+                            break
+                        end
+                        if word_len <= width then
+                            current = word
+                        else
+                            local chunk = word
+                            while graphemeCount(chunk) > width and not truncated do
+                                local head, rest = takeCodepoints(chunk, width)
+                                if not pushLine(head) then break end
+                                chunk = rest
+                            end
+                            current = truncated and "" or chunk
+                        end
+                    end
+                end
+                if truncated then break end
+            end
+            if not truncated and current ~= "" then
+                pushLine(current)
+            end
+        end
+    end
+
+    while #lines > 0 and lines[#lines] == "" do
+        table.remove(lines)
+    end
+    if truncated and #lines > 0 then
+        local tail = lines[#lines]
+        if tail == "" then
+            lines[#lines] = Ui.GLYPH.ellipsis
+        elseif graphemeCount(tail) >= width then
+            lines[#lines] = Ui.ellipsize(tail, width)
+        else
+            lines[#lines] = tail .. Ui.GLYPH.ellipsis
+        end
+    end
+    return { lines = lines, truncated = truncated }
 end
 
 --- Joins the non-empty parts of a list with the plugin's separator.
@@ -1094,25 +1267,42 @@ function Ui.pagePlan(screen_w, screen_h, scale)
 
     local pad = scaled(tokens.page_pad_units)
     local gap = scaled(tokens.page_gap_units)
+    local section_gap = math.max(math.floor(gap / 2), 2)
     local hairline = math.max(math.floor(tokens.hairline_units * s + 0.5), 1)
     local header = scaled(tokens.page_header_units)
     local hero = scaled(tokens.page_hero_units)
     local band_head = scaled(tokens.page_band_head_units)
     local band_row = scaled(tokens.page_band_row_units)
     local section_head = scaled(tokens.page_section_head_units)
+    local heat_legend = scaled(tokens.page_heat_legend_units)
     local footer = scaled(tokens.page_footer_units)
     local bar = math.max(scaled(tokens.page_bar_units), 2)
     local reading_min = math.max(math.floor(tokens.page_reading_min_units * s + 0.5), 24)
+    local reading_max_h = math.max(math.floor(tokens.page_reading_units * s * 1.15 + 0.5), reading_min)
     local session_min = math.max(math.floor(tokens.page_session_min_units * s + 0.5), 18)
+    local session_max_h = math.max(math.floor(tokens.page_session_units * s * 1.15 + 0.5), session_min)
     local cell_min = math.max(math.floor(tokens.page_heat_cell_min_units * s + 0.5), 3)
     local cell_max = math.max(math.floor(tokens.page_heat_cell_max_units * s + 0.5), cell_min)
     local gap_x = math.max(scaled(tokens.page_heat_gap_units), 1)
 
-    -- The page frame draws its own border outside the padding, so both are
-    -- subtracted here: a plan that ignored the border would be a page slightly
-    -- wider and taller than the screen it is drawn on.
-    local content_w = width - 2 * pad - 2 * hairline
+    -- The full-screen page uses borderless padding (no outer frame box), so
+    -- content width is simply screen width minus horizontal padding.
+    local content_w = width - 2 * pad
     if content_w < 1 then content_w = 1 end
+
+    -- The heatmap's week count and cell width follow the content width:
+    -- 52 columns while a cell and a gap still fit, fewer only when narrow.
+    -- Computed upfront so cell height never stretches taller than cell width.
+    local weeks = math.floor(tokens.page_heat_weeks)
+    local min_weeks = math.floor(tokens.page_heat_min_weeks)
+    if weeks < 1 then weeks = 1 end
+    if min_weeks < 1 then min_weeks = 1 end
+    while weeks > min_weeks and math.floor((content_w - (weeks - 1) * gap_x) / weeks) < cell_min do
+        weeks = weeks - 7
+    end
+    local cell_w = math.floor((content_w - (weeks - 1) * gap_x) / weeks)
+    if cell_w < cell_min then cell_w = cell_min end
+    local square_cell_max = math.min(cell_max, cell_w)
 
     -- The band always budgets four rows: its row count follows the data, and a
     -- payload missing one of them must not move the whole page up and down
@@ -1120,11 +1310,11 @@ function Ui.pagePlan(screen_w, screen_h, scale)
     local band_rows = 4
     local band_h = band_head + band_rows * band_row
 
-    -- Frame border + padding + header + hero + band + three section headings +
-    -- footer, with a hairline under the header, the hero and the band and one
-    -- above the footer.
-    local fixed = 2 * hairline + pad + header + hairline + hero + hairline + band_h + hairline
-        + 3 * section_head + footer + hairline + pad + gap * 2
+    -- Padding + header + hero + band + three section headings + section gaps +
+    -- heatmap legend + footer, with interior hairlines.
+    local fixed = pad + header + hairline + hero + hairline + band_h + hairline
+        + 3 * section_head + 3 * section_gap + heat_legend
+        + footer + hairline + pad + gap * 2
     local available = height - fixed
     if available < 0 then available = 0 end
 
@@ -1134,7 +1324,10 @@ function Ui.pagePlan(screen_w, screen_h, scale)
     if session_rows < 1 then session_rows = 1 end
     local reading_h = math.max(math.floor(tokens.page_reading_units * s + 0.5), reading_min)
     local session_h = math.max(math.floor(tokens.page_session_units * s + 0.5), session_min)
-    local cell_h = math.max(math.floor(tokens.page_heat_cell_units * s + 0.5), cell_min)
+    local cell_h = math.min(
+        math.max(math.floor(tokens.page_heat_cell_units * s + 0.5), cell_min),
+        square_cell_max
+    )
 
     -- Shrink the three list bands together, 5% at a time, and drop a row only
     -- after the smallest scale still does not fit. The reading rows go first:
@@ -1160,7 +1353,10 @@ function Ui.pagePlan(screen_w, screen_h, scale)
             local factor = percent / 100
             local step_reading = math.max(math.floor(tokens.page_reading_units * s * factor + 0.5), reading_min)
             local step_session = math.max(math.floor(tokens.page_session_units * s * factor + 0.5), session_min)
-            local step_cell = math.max(math.floor(tokens.page_heat_cell_units * s * factor + 0.5), cell_min)
+            local step_cell = math.min(
+                math.max(math.floor(tokens.page_heat_cell_units * s * factor + 0.5), cell_min),
+                square_cell_max
+            )
             if fits(reading_rows, session_rows, step_reading, step_session, step_cell) then
                 reading_h, session_h, cell_h = step_reading, step_session, step_cell
                 chosen = true
@@ -1176,40 +1372,39 @@ function Ui.pagePlan(screen_w, screen_h, scale)
         else
             -- A screen with room for neither list: the heatmap is the only
             -- flexible band left, so it takes what is there.
-            cell_h = cell_min
+            cell_h = math.min(cell_min, square_cell_max)
             reading_rows = 0
             session_rows = 0
             chosen = true
         end
     end
 
-    if cell_h > cell_max then cell_h = cell_max end
+    if cell_h > square_cell_max then cell_h = square_cell_max end
 
-    -- Spend whatever height is left on the picture instead of leaving it as
-    -- blank paper above the footer: a taller heatmap cell is what a reader would
-    -- rather see, and the design's "no wide gaps" applies to the page, not only
-    -- to the rows. Bounded by `page_heat_cell_max_units`, so a huge screen gets a
-    -- readable grid rather than seven enormous blocks.
+    -- Grow heatmap cells only up to square (cell_h <= cell_w), then put
+    -- remaining vertical room into currently-reading and recent-session rows.
     local used = fixed
         + bandHeight(reading_rows, reading_h)
         + heatHeight(cell_h)
         + bandHeight(session_rows, session_h)
-    while cell_h < cell_max and (height - used) >= 7 do
+    while cell_h < square_cell_max and (height - used) >= 7 do
         cell_h = cell_h + 1
         used = used + 7
     end
-
-    -- The heatmap's week count follows the width: 52 columns while a cell and a
-    -- gap still fit, fewer only when the screen genuinely cannot carry them.
-    local weeks = math.floor(tokens.page_heat_weeks)
-    local min_weeks = math.floor(tokens.page_heat_min_weeks)
-    if weeks < 1 then weeks = 1 end
-    if min_weeks < 1 then min_weeks = 1 end
-    while weeks > min_weeks and math.floor((content_w - (weeks - 1) * gap_x) / weeks) < cell_min do
-        weeks = weeks - 7
+    local grew = true
+    while grew and (height - used) > 0 do
+        grew = false
+        if reading_rows > 0 and reading_h < reading_max_h and (height - used) >= reading_rows then
+            reading_h = reading_h + 1
+            used = used + reading_rows
+            grew = true
+        end
+        if session_rows > 0 and session_h < session_max_h and (height - used) >= session_rows then
+            session_h = session_h + 1
+            used = used + session_rows
+            grew = true
+        end
     end
-    local cell_w = math.floor((content_w - (weeks - 1) * gap_x) / weeks)
-    if cell_w < cell_min then cell_w = cell_min end
 
     local total = fixed
         + bandHeight(reading_rows, reading_h)
@@ -1235,6 +1430,7 @@ function Ui.pagePlan(screen_w, screen_h, scale)
         height = height,
         pad = pad,
         gap = gap,
+        section_gap = section_gap,
         content_w = content_w,
         header = header,
         hero = hero,
@@ -1243,6 +1439,7 @@ function Ui.pagePlan(screen_w, screen_h, scale)
         band_head = band_head,
         band_row = band_row,
         section_head = section_head,
+        heat_legend = heat_legend,
         footer = footer,
         hairline = hairline,
         bar = bar,
@@ -1277,10 +1474,10 @@ end
 -- @number screen_w screen width in pixels
 -- @number screen_h screen height in pixels
 -- @number scale pixels per unit for this device (the factor main.lua derives; 1 = one unit is one pixel)
--- @tparam table[opt] options { with_switch = boolean, min_rows = number }
+-- @tparam table[opt] options { with_switch = boolean, with_covers = boolean, min_rows = number }
 -- @treturn table plan { scale, height, pad, content_w, header, hairline,
 --                       switch_h, subline_h, footer, row_h, rows, bar, cover_w,
---                       cover_h, total, slack }
+--                       cover_h, with_covers, total, slack }
 function Ui.listPlan(screen_w, screen_h, scale, options)
     options = options or {}
     local tokens = Ui.tokens
@@ -1294,6 +1491,7 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
         return value
     end
 
+    local with_covers = options.with_covers ~= false
     local pad = scaled(tokens.page_pad_units)
     local gap = scaled(tokens.page_gap_units)
     local hairline = math.max(math.floor(tokens.hairline_units * s + 0.5), 1)
@@ -1302,21 +1500,24 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
     local bar = math.max(scaled(tokens.page_bar_units), 2)
     local switch_h = options.with_switch and scaled(tokens.page_switch_units) or 0
     local subline_h = scaled(tokens.page_subline_units)
-    local row_min = math.max(math.floor(tokens.page_reading_min_units * s + 0.5), 24)
-    local row_max = math.max(math.floor(tokens.page_reading_units * s * 1.15 + 0.5), row_min)
+    local target_units = with_covers and tokens.page_list_row_units or tokens.page_list_compact_units
+    local row_min_units = with_covers and tokens.page_reading_min_units or tokens.page_list_compact_min_units
+    local row_min = math.max(math.floor(row_min_units * s + 0.5), 24)
+    local max_mult = with_covers and 1.15 or 1.2
+    local row_max = math.max(math.floor(target_units * s * max_mult + 0.5), row_min)
     local min_rows = math.max(math.floor(tonumber(options.min_rows) or 3), 1)
 
-    local content_w = width - 2 * pad - 2 * hairline
+    local content_w = width - 2 * pad
     if content_w < 1 then content_w = 1 end
 
-    -- Header, the switch's own two rules, the sub-line, the footer rule, the
-    -- frame border and the page padding are all fixed; only the row band flexes.
-    local fixed = 2 * hairline + pad + header + hairline + subline_h + footer + hairline + pad + gap
+    -- Header, the switch's own two rules, the sub-line, the footer rule and
+    -- page padding are all fixed; only the row band flexes.
+    local fixed = pad + header + hairline + subline_h + footer + hairline + pad + gap
     if switch_h > 0 then fixed = fixed + switch_h + 2 * hairline end
     local available = height - fixed
     if available < 1 then available = 1 end
 
-    local row_h = scaled(tokens.page_reading_units)
+    local row_h = scaled(target_units)
     -- Every drawn row also carries its own focus line, so the band a row needs
     -- is the row plus one hairline.
     local step_h = row_h + hairline
@@ -1338,13 +1539,16 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
         end
     end
 
-    local cover_h = row_h - gap
-    if cover_h < 1 then cover_h = 1 end
-    local cover_w = math.max(math.floor(cover_h * tokens.cover_aspect + 0.5), 1)
-    local max_cover_w = math.floor(content_w / 4)
-    if cover_w > max_cover_w then
-        cover_w = max_cover_w
-        cover_h = math.max(math.floor(cover_w / tokens.cover_aspect + 0.5), 1)
+    local cover_w, cover_h = 0, 0
+    if with_covers then
+        cover_h = row_h - gap
+        if cover_h < 1 then cover_h = 1 end
+        cover_w = math.max(math.floor(cover_h * tokens.cover_aspect + 0.5), 1)
+        local max_cover_w = math.floor(content_w / 4)
+        if cover_w > max_cover_w then
+            cover_w = max_cover_w
+            cover_h = math.max(math.floor(cover_w / tokens.cover_aspect + 0.5), 1)
+        end
     end
 
     local total = fixed + rows * step_h
@@ -1367,10 +1571,195 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
         bar = bar,
         row_h = row_h,
         rows = rows,
+        with_covers = with_covers,
         reading_cover_w = cover_w,
         reading_cover_h = cover_h,
         total = total,
         slack = slack,
+    }
+end
+
+--- Lays out the single-screen Book Detail Card.
+-- Holds the header, hero (cover + title + author/series + rating/progress),
+-- action button bar (1 or 2 rows), synopsis body lines, and footer inside `height`.
+-- @number screen_w screen width in pixels
+-- @number screen_h screen height in pixels
+-- @number scale pixels per unit for this device
+-- @tparam table[opt] options { with_covers = boolean, action_rows = number }
+-- @treturn table detail layout plan
+function Ui.detailPlan(screen_w, screen_h, scale, options)
+    options = options or {}
+    local tokens = Ui.tokens
+    local s = numberIn(scale, 1, 0.5, 4)
+    local height = numberIn(screen_h, 800, 200, 8000)
+    local width = numberIn(screen_w, 600, 200, 8000)
+
+    local function scaled(units)
+        local value = math.floor(units * s + 0.5)
+        if value < 1 then value = 1 end
+        return value
+    end
+
+    local with_covers = options.with_covers ~= false
+    local pad = scaled(tokens.page_pad_units)
+    local gap = scaled(tokens.page_gap_units)
+    local section_gap = math.max(math.floor(gap / 2), 2)
+    local hairline = math.max(math.floor(tokens.hairline_units * s + 0.5), 1)
+    local header = scaled(tokens.page_header_units)
+    local footer = scaled(tokens.page_footer_units)
+    local bar = math.max(scaled(tokens.page_bar_units), 2)
+    local section_head = scaled(tokens.page_section_head_units)
+    local action_h = scaled(tokens.page_action_h_units)
+    local action_rows = math.max(math.min(math.floor(tonumber(options.action_rows) or 1), 2), 1)
+    local line_h = scaled(tokens.page_body_line_units)
+
+    local content_w = width - 2 * pad
+    if content_w < 1 then content_w = 1 end
+
+    local fixed = pad + header + hairline + footer + hairline + pad + gap
+    local available = math.max(height - fixed, 1)
+
+    local action_gap = math.max(math.floor(gap / 2), 2)
+    local action_block_h = action_rows * action_h + (action_rows - 1) * action_gap + section_gap
+
+    local cover_w, cover_h = 0, 0
+    if with_covers then
+        cover_w = math.max(math.floor(content_w * tokens.page_detail_cover_ratio), 1)
+        cover_h = math.max(math.floor(cover_w / tokens.cover_aspect + 0.5), 1)
+        local max_cover_h = math.max(math.floor(available * 0.42), line_h * 4)
+        if cover_h > max_cover_h then
+            cover_h = max_cover_h
+            cover_w = math.max(math.floor(cover_h * tokens.cover_aspect + 0.5), 1)
+        end
+    end
+
+    local min_hero_h = 6 * line_h + gap
+    local hero_h = math.max(cover_h + gap, min_hero_h)
+    local max_hero_h = math.max(available - action_block_h - section_head - 2 * line_h, math.floor(available * 0.45))
+    if hero_h > max_hero_h then
+        hero_h = math.max(max_hero_h, math.min(min_hero_h, available))
+        if with_covers and cover_h > hero_h - gap then
+            cover_h = math.max(hero_h - gap, 1)
+            cover_w = math.max(math.floor(cover_h * tokens.cover_aspect + 0.5), 1)
+        end
+    end
+
+    local body_overhead = section_gap + section_head + 2 * line_h
+    local body_budget = available - hero_h - action_block_h - body_overhead
+    local body_lines = body_budget > 0 and math.floor(body_budget / line_h) or 0
+
+    local body_px = math.max(math.floor(line_h * 0.58), 10)
+    local body_chars = math.max(math.floor(content_w / math.max(body_px * 0.55, 6)), 20)
+
+    local total = fixed + hero_h + action_block_h + section_gap + section_head + body_lines * line_h
+    local slack = math.max(height - total, 0)
+
+    return {
+        scale = s,
+        width = width,
+        height = height,
+        pad = pad,
+        gap = gap,
+        section_gap = section_gap,
+        content_w = content_w,
+        header = header,
+        footer = footer,
+        hairline = hairline,
+        bar = bar,
+        section_head = section_head,
+        action_h = action_h,
+        action_rows = action_rows,
+        line_h = line_h,
+        cover_w = cover_w,
+        cover_h = cover_h,
+        hero_h = hero_h,
+        body_lines = body_lines,
+        body_chars = body_chars,
+        with_covers = with_covers,
+        total = total,
+        slack = slack,
+        fits = total <= height,
+    }
+end
+
+--- Lays out a multi-line quote card list (for a book's Highlights reader).
+-- @number screen_w screen width in pixels
+-- @number screen_h screen height in pixels
+-- @number scale pixels per unit for this device
+-- @tparam table[opt] options { min_rows = number }
+-- @treturn table quote list layout plan
+function Ui.quoteListPlan(screen_w, screen_h, scale, options)
+    options = options or {}
+    local tokens = Ui.tokens
+    local s = numberIn(scale, 1, 0.5, 4)
+    local height = numberIn(screen_h, 800, 200, 8000)
+    local width = numberIn(screen_w, 600, 200, 8000)
+
+    local function scaled(units)
+        local value = math.floor(units * s + 0.5)
+        if value < 1 then value = 1 end
+        return value
+    end
+
+    local pad = scaled(tokens.page_pad_units)
+    local gap = scaled(tokens.page_gap_units)
+    local hairline = math.max(math.floor(tokens.hairline_units * s + 0.5), 1)
+    local header = scaled(tokens.page_header_units)
+    local subline_h = scaled(tokens.page_subline_units)
+    local footer = scaled(tokens.page_footer_units)
+    local line_h = scaled(tokens.page_body_line_units)
+
+    local content_w = width - 2 * pad
+    if content_w < 1 then content_w = 1 end
+
+    local fixed = pad + header + hairline + subline_h + footer + hairline + pad + gap
+    local available = math.max(height - fixed, 1)
+
+    local row_min = math.max(scaled(tokens.page_quote_min_units), 48)
+    local row_h = scaled(tokens.page_quote_row_units)
+    local min_rows = math.max(math.floor(tonumber(options.min_rows) or 2), 1)
+    local step_h = row_h + hairline
+    local rows = math.floor(available / step_h)
+    if rows < min_rows then
+        row_h = math.max(math.floor(available / min_rows) - hairline, row_min)
+        step_h = row_h + hairline
+        rows = math.max(math.floor(available / step_h), 1)
+    elseif rows * step_h < available then
+        local row_max = math.floor(row_h * 1.25)
+        local taller = math.floor(available / rows) - hairline
+        if taller > row_h and taller <= row_max then
+            row_h = taller
+            step_h = row_h + hairline
+        end
+    end
+
+    local quote_lines = row_h >= (4 * line_h + gap) and 3 or 2
+    local quote_px = math.max(math.floor(math.min(row_h, 120) * 0.22), 11)
+    local quote_chars = math.max(math.floor(content_w / math.max(quote_px * 0.56, 6)), 22)
+
+    local total = fixed + rows * step_h
+    local slack = math.max(height - total, 0)
+
+    return {
+        scale = s,
+        width = width,
+        height = height,
+        pad = pad,
+        gap = gap,
+        content_w = content_w,
+        header = header,
+        hairline = hairline,
+        subline_h = subline_h,
+        section_head = scaled(tokens.page_section_head_units),
+        footer = footer,
+        line_h = line_h,
+        row_h = row_h,
+        rows = rows,
+        quote_lines = quote_lines,
+        quote_chars = quote_chars,
+        total = total,
+        slack = slack,
+        fits = total <= height,
     }
 end
 

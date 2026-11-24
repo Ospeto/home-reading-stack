@@ -68,8 +68,22 @@ Views.LABELS = {
     last_52_weeks = "LAST 52 WEEKS",
     books_upper = "BOOKS",
     search = "Search library…",
+    search_short = "Search",
     next_page = "Next page",
+    prev_page = "Prev",
+    next_page_short = "Next",
     page = "Page %d of %d",
+    page_compact = "Page %d / %d",
+    clear_filter = "Clear",
+    on_device = "On device",
+    sort_newest = "Newest",
+    sort_title = "A–Z",
+    sort_author = "Author",
+    sort_series = "Series",
+    filter_unread = "Unread",
+    heat_less = "Less",
+    heat_more = "More",
+    jump_az = "A–Z",
     all_books = "All books",
     grouped_by_series = "Grouped by series",
     grouped_by_author = "Grouped by author",
@@ -88,6 +102,39 @@ Views.LABELS = {
     no_authors = "No authors in this library yet",
     author_count = "%s authors",
     series_count = "%s series",
+    reading_shelf = "Currently reading",
+    highlights = "Highlights",
+    synopsis = "SYNOPSIS",
+    open_book = "Open book",
+    open_short = "Open",
+    download_epub = "Download EPUB",
+    download_short = "Download",
+    download_again = "Download again",
+    full_synopsis = "Full synopsis",
+    next_unread = "Next unread",
+    highlights_count = "Highlights (%s)",
+    highlights_plural = "%s highlights",
+    highlights_singular = "1 highlight",
+    no_synopsis = "No synopsis available.",
+    book_missing = "Book file is missing from this device",
+    file_missing_short = "Missing",
+    local_progress_note = "Progress read from this device",
+    device_only_notice = "This device only - the server could not be reached.",
+    newest_first = "Newest first",
+    offline = "Offline",
+    note_prefix = "Note: %s",
+    page_short = "p. %s",
+    tags_label = "Tags: %s",
+    last_device = "Last device: %s",
+    unknown_author = "Unknown",
+    in_progress_count = "%s in progress",
+    no_epub = "No EPUB download",
+    device_storage = "Device storage",
+    storage_summary = "%s free of %s (%d%% used)",
+    finished_reclaimable = "%s in %d finished books",
+    finished_reclaimable_singular = "%s in 1 finished book",
+    no_finished_local = "No finished books on device",
+    remove_short = "Remove",
 }
 
 --- Merges caller-supplied labels over the built-in English ones.
@@ -288,7 +335,6 @@ function Views.sessionRow(session, today, text)
     end
     local secondary = Ui.join({
         when,
-        Ui.durationLong(duration, labels),
         Status.str(session.device),
     })
     return {
@@ -298,6 +344,43 @@ function Views.sessionRow(session, today, text)
         value = duration and Stats.formatDuration(duration) or nil,
         bold = false,
     }
+end
+
+--- Month axis labels for the activity heatmap (oldest -> newest).
+-- @tparam table[opt] heatmap_days normalized heatmap entries
+-- @tparam table[opt] today os.date("*t") table
+-- @number[opt] weeks number of columns drawn
+-- @tparam table text labels
+-- @treturn table array of short month names
+local function heatmapMonths(heatmap_days, today, weeks, text)
+    local month_names = type(text) == "table" and type(text.months) == "table"
+        and #text.months == 12 and text.months or Ui.TIME_LABELS.months
+    local end_month
+    if type(heatmap_days) == "table" then
+        for day_index = #heatmap_days, 1, -1 do
+            local day = heatmap_days[day_index]
+            local date_str = type(day) == "table" and type(day.date) == "string" and day.date or nil
+            local month_num = date_str and tonumber(date_str:match("^%d%d%d%d%-(%d%d)%-%d%d$")) or nil
+            if month_num and month_num >= 1 and month_num <= 12 then
+                end_month = month_num
+                break
+            end
+        end
+    end
+    if not end_month and type(today) == "table" then
+        local month_num = tonumber(today.month)
+        if month_num and month_num >= 1 and month_num <= 12 then end_month = month_num end
+    end
+    if not end_month then return {} end
+
+    local span_weeks = math.max(math.floor(tonumber(weeks) or Ui.tokens.page_heat_weeks), 1)
+    local ticks = math.min(6, math.max(2, math.floor(span_weeks / 8)))
+    local labels = {}
+    for step = ticks - 1, 0, -1 do
+        local index = ((end_month - 1 - step * 2) % 12) + 1
+        labels[#labels + 1] = month_names[index]
+    end
+    return labels
 end
 
 --- Builds the single-page reading-statistics model.
@@ -347,6 +430,8 @@ function Views.statsModel(stats, sessions, now, options)
             kind = "heatmap",
             heading = { left = text.activity, right = text.last_52_weeks },
             columns = Ui.heatmapColumns(heatmap_days, options.weeks),
+            months = heatmapMonths(heatmap_days, today, options.weeks, text),
+            legend = { less = text.heat_less, more = text.heat_more },
         }
     end
 
@@ -478,7 +563,7 @@ function Views.authorRow(group, text)
     }
 end
 
---- One book row: cover, title, author and series, progress.
+--- One book row: cover, title, author and series, progress and rating.
 -- @tparam table entry OPDS entry already merged with reading progress
 -- @tparam table text labels
 -- @treturn table row model
@@ -488,15 +573,35 @@ function Views.bookRow(entry, text)
     local title = Ui.rowTitle(entry.title)
     if title == "" then title = labels.untitled end
     local value, ratio = Views.progressValue(entry.status, labels)
+    local on_device = entry.on_device == true or type(entry.local_record) == "table"
+    local secondary = Views.bookSecondary(entry)
+    if on_device then
+        secondary = Ui.join({ secondary, Ui.GLYPH.local_dot .. " " .. labels.on_device })
+    end
+    local rating = Status.num(entry.rating)
+    local value_sub = (rating and rating > 0) and Status.ratingStars(rating) or nil
     return {
         kind = "reading",
         title = title,
-        secondary = Views.bookSecondary(entry),
+        secondary = secondary,
         value = value,
+        value_sub = value_sub,
         ratio = ratio,
+        on_device = on_device,
         cover_id = Status.num(entry.book_id),
         action = { kind = "book", entry = entry },
     }
+end
+
+--- Resolves the display label for an OPDS sort key.
+-- @string[opt] sort_key "added" | "title" | "author" | "series"
+-- @tparam table text labels
+-- @treturn string
+local function sortLabel(sort_key, text)
+    if sort_key == "added" then return text.sort_newest end
+    if sort_key == "author" then return text.sort_author end
+    if sort_key == "series" then return text.sort_series end
+    return text.sort_title
 end
 
 --- Builds the library page model for one grouping.
@@ -506,6 +611,9 @@ end
 --     entries = catalog entries (books mode, already paged),
 --     groups = grouping rows (authors/series mode, all of them),
 --     query = current search text,
+--     title = contextual header title when filtered,
+--     sort = "added" | "title" | "author" | "series",
+--     filter = "" | "unread",
 --     totals = { books, authors, series },
 --     page = 1-based page number,
 --     page_size = rows per page,
@@ -522,21 +630,12 @@ function Views.libraryModel(mode, context, options)
     local page = math.max(math.floor(tonumber(context.page) or 1), 1)
     local page_size = math.max(math.floor(tonumber(context.page_size) or 1), 1)
     local totals = type(context.totals) == "table" and context.totals or {}
+    local query = Status.str(context.query)
+    local filter_key = Status.str(context.filter)
+    local sort_key = Status.str(context.sort)
 
     local rows = {}
     local pages = 1
-
-    -- Every page of every grouping leads with the search row: a reader who has
-    -- paged forward must still be able to search without paging back, and the
-    -- row is the same row (same label, same `search` action) on every page.
-    -- The page budget in `main.lua` reserves it on every page too, so reserving
-    -- it here is what keeps the drawn rows inside the plan.
-    rows[#rows + 1] = {
-        kind = "action",
-        title = text.search,
-        value = Ui.GLYPH.chevron,
-        action = { kind = "search" },
-    }
 
     if mode == "books" then
         local entries = type(context.entries) == "table" and context.entries or {}
@@ -553,14 +652,6 @@ function Views.libraryModel(mode, context, options)
         else
             pages = context.has_next and (page + 1) or page
         end
-        if context.has_next then
-            rows[#rows + 1] = {
-                kind = "action",
-                title = text.next_page,
-                value = Ui.GLYPH.chevron,
-                action = { kind = "page", page = page + 1 },
-            }
-        end
     else
         local groups = type(context.groups) == "table" and context.groups or {}
         pages = math.max(math.ceil(#groups / page_size), 1)
@@ -568,8 +659,6 @@ function Views.libraryModel(mode, context, options)
         -- last page is what there is to draw, and the footer says so.
         if page > pages then page = pages end
         local first = (page - 1) * page_size + 1
-        -- Counted separately from `#rows`: the search row is navigation, not one
-        -- of this page's `page_size` group rows.
         local drawn = 0
         for group_index = first, #groups do
             if drawn >= page_size then break end
@@ -588,62 +677,612 @@ function Views.libraryModel(mode, context, options)
                 bold = false,
             }
         end
-        if page < pages then
-            rows[#rows + 1] = {
-                kind = "action",
-                title = text.next_page,
-                value = Ui.GLYPH.chevron,
-                action = { kind = "page", page = page + 1 },
-            }
-        end
     end
 
-    -- Sub-line: how big this grouping is, and the order it is in.
-    local subline = { right = text.az }
+    -- Sub-line: shelf summary (with Clear when filtered) and interactive sort/jump.
+    local subline = {}
     if mode == "series" then
         subline.left = Ui.join({
             string.format(text.series_count, Ui.formatThousands(totals.series) or "0"),
             string.format(text.books_count, Ui.formatThousands(totals.books) or "0"),
         })
+        subline.right = text.jump_az .. " " .. Ui.GLYPH.dropdown
+        subline.right_action = { kind = "jump_letter" }
     elseif mode == "authors" then
         subline.left = Ui.join({
             string.format(text.author_count, Ui.formatThousands(totals.authors) or "0"),
             string.format(text.books_count, Ui.formatThousands(totals.books) or "0"),
         })
+        subline.right = text.jump_az .. " " .. Ui.GLYPH.dropdown
+        subline.right_action = { kind = "jump_letter" }
     else
-        local query = Status.str(context.query)
-        if query ~= "" then
+        local count_text = totals.books
+            and string.format(text.books_count, Ui.formatThousands(totals.books))
+            or nil
+        if filter_key == "unread" then
+            subline.left = Ui.join({ count_text, text.filter_unread })
+        elseif count_text then
+            subline.left = count_text
+        elseif query ~= "" then
             subline.left = query
-        elseif totals.books then
-            subline.left = string.format(text.books_count, Ui.formatThousands(totals.books))
         end
+        if query ~= "" then
+            subline.clear = {
+                label = Ui.GLYPH.clear .. " " .. text.clear_filter,
+                action = { kind = "clear_query" },
+            }
+        end
+        local active_sort = sortLabel(sort_key, text)
+        local right_label = filter_key == "unread"
+            and Ui.join({ active_sort, text.filter_unread })
+            or active_sort
+        subline.right = right_label .. " " .. Ui.GLYPH.dropdown
+        subline.right_action = { kind = "sort_filter" }
     end
 
-    local switch = {}
-    local segments = Ui.switchSegments(mode)
-    local label_for = { books = text.books, authors = text.authors, series = text.series }
-    for segment_index = 1, #segments do
-        local segment = segments[segment_index]
-        switch[#switch + 1] = {
-            key = segment.key,
-            label = label_for[segment.key] or segment.label,
-            active = segment.active,
-        }
+    -- Filtered views hide the grouping switch and show the active filter/query
+    -- as the header title so the reader always knows where they are.
+    local title = text.library
+    local switch = nil
+    if query ~= "" then
+        local context_title = Status.str(context.title)
+        title = context_title ~= "" and context_title or query
+    else
+        switch = {}
+        local segments = Ui.switchSegments(mode)
+        local label_for = { books = text.books, authors = text.authors, series = text.series }
+        for segment_index = 1, #segments do
+            local segment = segments[segment_index]
+            switch[#switch + 1] = {
+                key = segment.key,
+                label = label_for[segment.key] or segment.label,
+                active = segment.active,
+            }
+        end
     end
 
     local footer = {
         left = string.format(text.page, page, pages),
         right = mode == "series" and text.grouped_by_series
             or (mode == "authors" and text.grouped_by_author or text.all_books),
+        prev = Ui.GLYPH.back .. " " .. text.prev_page,
+        center = string.format(text.page_compact, page, pages),
+        next = text.next_page_short .. " " .. Ui.GLYPH.chevron,
     }
 
+    local header_actions = { search = true, search_label = text.search_short }
+    local series_name = Status.str(context.series_name)
+    if mode == "books" and series_name ~= "" then
+        header_actions.search = false
+        header_actions.extra = {
+            label = text.next_unread,
+            action = { kind = "download_next_unread", series = series_name },
+        }
+    end
+
     return {
-        title = text.library,
+        title = title,
+        header_actions = header_actions,
         switch = switch,
         subline = subline,
         blocks = { { kind = "list", rows = rows } },
         footer = footer,
-        pager = { page = page, pages = pages },
+        pager = {
+            page = page,
+            pages = pages,
+            has_prev = page > 1,
+            has_next = page < pages,
+        },
+    }
+end
+
+-- ----------------------------------------------------------------------------
+-- Book Detail Card, Currently Reading shelf, and Highlights reader
+-- ----------------------------------------------------------------------------
+
+--- Shared 3-zone pager footer for multi-page views.
+-- @number page
+-- @number pages
+-- @string right_summary
+-- @tparam table text
+-- @treturn table footer, pager
+local function pagerFooter(page, pages, right_summary, text)
+    local footer = {
+        left = string.format(text.page, page, pages),
+        right = right_summary or "",
+        prev = Ui.GLYPH.back .. " " .. text.prev_page,
+        center = string.format(text.page_compact, page, pages),
+        next = text.next_page_short .. " " .. Ui.GLYPH.chevron,
+    }
+    local pager = {
+        page = page,
+        pages = pages,
+        has_prev = page > 1,
+        has_next = page < pages,
+    }
+    return footer, pager
+end
+
+--- Builds the single-screen Book Detail Card model.
+-- @tparam table entry OPDS catalog entry or normalized reading session
+-- @tparam table[opt] options { labels, local_path, body_lines, body_chars }
+-- @treturn table page model
+function Views.bookDetailModel(entry, options)
+    options = options or {}
+    local text = Views.labels(options.labels)
+    entry = type(entry) == "table" and entry or {}
+
+    local title = Ui.rowTitle(entry.title)
+    if title == "" then title = text.untitled end
+    local authors = Status.str(entry.authors)
+    local author_label = authors ~= "" and authors or text.unknown_author
+    local author_action = authors ~= "" and { kind = "filter_author", name = authors } or nil
+
+    local series = Status.str(entry.series)
+    local series_label = ""
+    local series_action = nil
+    if series ~= "" then
+        local s_idx = Status.num(entry.series_index)
+        series_label = s_idx and string.format("%s #%g", series, s_idx) or series
+        series_action = { kind = "filter_series", name = series }
+    end
+
+    local rating = Status.num(entry.rating)
+    local rating_stars = (rating and rating > 0) and Status.ratingStars(rating) or nil
+    local rating_label = Status.ratingLabel(rating)
+
+    local progress_status = type(entry.status) == "table" and entry.status or nil
+    if progress_status == nil then
+        local pct = Status.num(entry.percentage)
+        if pct then
+            progress_status = {
+                percentage = pct,
+                device = entry.device,
+                timestamp = entry.timestamp,
+                progress_source = entry.progress_source,
+            }
+        end
+    end
+    local progress_value, progress_ratio = Views.progressValue(progress_status, text)
+    local progress_detail = Status.statusLabel(progress_status and { status = progress_status } or {})
+    local is_local_progress = progress_status ~= nil and Status.str(progress_status.progress_source) == "device"
+    local local_note = is_local_progress and text.local_progress_note or nil
+
+    local local_path = Status.str(options.local_path)
+    local on_device = local_path ~= ""
+    local local_record = type(entry.local_record) == "table" and entry.local_record or nil
+    local hl_count = local_record and (Status.num(local_record.annotation_count) or 0) or 0
+
+    local raw_synopsis = Status.str(entry.summary)
+    if raw_synopsis == "" then raw_synopsis = Status.str(entry.content) end
+    local clean_synopsis = Ui.plainText(raw_synopsis)
+    local body_lines = math.max(math.floor(tonumber(options.body_lines) or 8), 1)
+    local body_chars = math.max(math.floor(tonumber(options.body_chars) or 44), 16)
+    local wrapped = clean_synopsis ~= ""
+        and Ui.wrapLines(clean_synopsis, body_chars, body_lines)
+        or { lines = { text.no_synopsis }, truncated = false }
+
+    local buttons = {}
+    if on_device then
+        buttons[#buttons + 1] = {
+            label = text.open_book,
+            action = { kind = "open_book", path = local_path, entry = entry },
+            primary = true,
+        }
+        if entry.download_href ~= nil then
+            buttons[#buttons + 1] = {
+                label = text.download_again,
+                action = { kind = "download", entry = entry },
+            }
+        end
+    elseif entry.download_href ~= nil then
+        buttons[#buttons + 1] = {
+            label = text.download_epub,
+            action = { kind = "download", entry = entry },
+            primary = true,
+        }
+    elseif Status.str(entry.book_path) ~= "" then
+        buttons[#buttons + 1] = {
+            label = text.book_missing,
+            disabled = true,
+        }
+    else
+        buttons[#buttons + 1] = {
+            label = text.no_epub,
+            disabled = true,
+        }
+    end
+    if hl_count > 0 then
+        buttons[#buttons + 1] = {
+            label = string.format(text.highlights_count, Ui.formatThousands(hl_count) or tostring(hl_count)),
+            action = { kind = "book_highlights", record = local_record },
+        }
+    end
+    if clean_synopsis ~= "" then
+        buttons[#buttons + 1] = {
+            label = text.full_synopsis,
+            action = { kind = "synopsis", entry = entry },
+        }
+    end
+
+    local tags = {}
+    if type(entry.tags) == "table" then
+        for tag_index = 1, #entry.tags do
+            local tag_name = Status.str(entry.tags[tag_index])
+            if tag_name ~= "" then tags[#tags + 1] = tag_name end
+        end
+    end
+    local tags_line = #tags > 0 and string.format(text.tags_label, table.concat(tags, ", ")) or nil
+    local device = progress_status and Status.str(progress_status.device) or ""
+    local device_line = device ~= "" and string.format(text.last_device, device) or nil
+
+    local hero_block = {
+        kind = "book_hero",
+        cover_id = Status.num(entry.book_id),
+        title = title,
+        author = author_label,
+        author_action = author_action,
+        series = series_label,
+        series_action = series_action,
+        rating_stars = rating_stars,
+        rating_label = rating_label,
+        progress_value = progress_value,
+        progress_ratio = progress_ratio,
+        progress_detail = progress_detail,
+        on_device = on_device,
+        on_device_label = on_device and (Ui.GLYPH.local_dot .. " " .. text.on_device) or nil,
+        local_note = local_note,
+    }
+    local action_block = {
+        kind = "action_bar",
+        buttons = buttons,
+    }
+    local body_block = {
+        kind = "text_body",
+        heading = {
+            left = text.synopsis,
+            right = wrapped.truncated and text.full_synopsis or nil,
+        },
+        lines = wrapped.lines,
+        truncated = wrapped.truncated,
+        muted = clean_synopsis == "",
+        tags = tags_line,
+        meta = device_line,
+        action = wrapped.truncated and { kind = "synopsis", entry = entry } or nil,
+    }
+
+    local published = Status.str(entry.published)
+    local footer_left = published ~= "" and published:sub(1, 10) or author_label
+    local footer_right = on_device and (Ui.GLYPH.local_dot .. " " .. text.on_device) or text.library
+
+    return {
+        title = title,
+        header_actions = {},
+        switch = nil,
+        subline = nil,
+        blocks = { hero_block, action_block, body_block },
+        footer = {
+            left = footer_left,
+            right = footer_right,
+        },
+    }
+end
+
+--- Builds the full-screen Currently Reading page model.
+-- @tparam table sessions merged reading shelf from `mergeReadingShelf`
+-- @param now current unix seconds
+-- @tparam table[opt] options { labels, page, page_size, degraded, offline }
+-- @treturn table page model
+function Views.readingShelfModel(sessions, now, options)
+    options = options or {}
+    local text = Views.labels(options.labels)
+    sessions = type(sessions) == "table" and sessions or {}
+
+    local page_size = math.max(math.floor(tonumber(options.page_size) or 7), 1)
+    local pages = math.max(math.ceil(#sessions / page_size), 1)
+    local page = math.max(math.min(math.floor(tonumber(options.page) or 1), pages), 1)
+
+    local rows = {}
+    local first = (page - 1) * page_size + 1
+    local last = math.min(page * page_size, #sessions)
+    for idx = first, last do
+        local session = sessions[idx]
+        if type(session) == "table" then
+            local title = Ui.rowTitle(session.title)
+            if title == "" then title = Ui.rowTitle(session.filename) end
+            if title == "" then title = text.untitled end
+            local authors = Status.str(session.authors)
+            if authors == "" then authors = text.unknown_author end
+            local when = Ui.relativeWhen(Status.num(session.timestamp), now, text)
+            local device = Status.str(session.device)
+            local local_path = Status.str(session.local_path)
+            if local_path == "" then local_path = Status.str(session.book_path) end
+            local has_local = session.has_local_file == true and local_path ~= ""
+            local book_id = Status.num(session.book_id)
+            local status_tag = has_local and (Ui.GLYPH.local_dot .. " " .. text.on_device)
+                or (Status.str(session.book_path) ~= "" and text.file_missing_short or device)
+            local pct = Status.num(session.percentage) or 0
+            local val = pct >= 0.99 and Ui.GLYPH.done or string.format("%d%%", math.floor(pct * 100 + 0.5))
+            local action_hint = has_local and (text.open_short .. " " .. Ui.GLYPH.chevron)
+                or (book_id and text.download_short or text.file_missing_short)
+            local row_action = has_local
+                and { kind = "open_book", path = local_path, entry = session }
+                or { kind = "book", entry = session }
+
+            rows[#rows + 1] = {
+                kind = "reading",
+                title = title,
+                secondary = Ui.join({ authors, when, status_tag }),
+                value = val,
+                value_sub = action_hint,
+                ratio = pct,
+                on_device = has_local,
+                cover_id = book_id,
+                action = row_action,
+                hold_action = { kind = "reading_actions", entry = session, local_path = has_local and local_path or nil },
+            }
+        end
+    end
+
+    local subline_left = options.degraded
+        and text.device_only_notice
+        or string.format(text.in_progress_count, Ui.formatThousands(#sessions) or tostring(#sessions))
+    local subline_right = options.offline and text.offline or text.newest_first
+    local footer, pager = pagerFooter(page, pages, text.reading_shelf, text)
+
+    return {
+        title = text.reading_shelf,
+        header_actions = {},
+        switch = nil,
+        subline = { left = subline_left, right = subline_right },
+        blocks = { { kind = "list", rows = rows } },
+        footer = footer,
+        pager = pager,
+    }
+end
+
+--- Builds the full-screen Highlights index (grouped by book, newest first).
+-- @tparam table groups result of `Sidecar.highlightGroups`
+-- @tparam table[opt] options { labels, page, page_size }
+-- @treturn table page model
+function Views.highlightsIndexModel(groups, options)
+    options = options or {}
+    local text = Views.labels(options.labels)
+    groups = type(groups) == "table" and groups or {}
+
+    local total_hl = 0
+    for idx = 1, #groups do
+        local g = groups[idx]
+        total_hl = total_hl + (Status.num(g and g.annotation_count) or #(g and g.annotations or {}))
+    end
+
+    local page_size = math.max(math.floor(tonumber(options.page_size) or 8), 1)
+    local pages = math.max(math.ceil(#groups / page_size), 1)
+    local page = math.max(math.min(math.floor(tonumber(options.page) or 1), pages), 1)
+
+    local rows = {}
+    local first = (page - 1) * page_size + 1
+    local last = math.min(page * page_size, #groups)
+    for idx = first, last do
+        local group = groups[idx]
+        if type(group) == "table" then
+            local title = Ui.rowTitle(group.title)
+            if title == "" then title = text.untitled end
+            local authors = Status.str(group.authors)
+            if authors == "" then authors = text.unknown_author end
+            local first_ann = type(group.annotations) == "table" and group.annotations[1] or nil
+            local raw_quote = first_ann and (Status.str(first_ann.text) ~= "" and Status.str(first_ann.text) or Status.str(first_ann.note)) or ""
+            local snippet = raw_quote ~= "" and Ui.ellipsize(Ui.plainText(raw_quote), 44) or nil
+            local count = Status.num(group.annotation_count) or #(group.annotations or {})
+            local count_str = Ui.formatThousands(count) or tostring(count)
+            rows[#rows + 1] = {
+                kind = "plain",
+                title = title,
+                secondary = Ui.join({ authors, snippet }),
+                value = count_str,
+                value_sub = Ui.GLYPH.chevron,
+                action = { kind = "highlight_book", group = group },
+            }
+        end
+    end
+
+    local hl_summary = total_hl == 1
+        and text.highlights_singular
+        or string.format(text.highlights_plural, Ui.formatThousands(total_hl) or tostring(total_hl))
+    local subline = {
+        left = Ui.join({
+            string.format(text.books_count, Ui.formatThousands(#groups) or tostring(#groups)),
+            hl_summary,
+        }),
+        right = text.newest_first,
+    }
+    local footer, pager = pagerFooter(page, pages, text.highlights, text)
+
+    return {
+        title = text.highlights,
+        header_actions = {},
+        switch = nil,
+        subline = subline,
+        blocks = { { kind = "list", rows = rows } },
+        footer = footer,
+        pager = pager,
+    }
+end
+
+--- Builds the multi-line quote reader screen for a single book's highlights.
+-- @tparam table group one entry from `Sidecar.highlightGroups`
+-- @tparam table[opt] options { labels, page, page_size, quote_lines, quote_chars, book_exists }
+-- @treturn table page model
+function Views.bookHighlightsModel(group, options)
+    options = options or {}
+    local text = Views.labels(options.labels)
+    group = type(group) == "table" and group or {}
+    local annotations = type(group.annotations) == "table" and group.annotations or {}
+
+    local title = Ui.rowTitle(group.title)
+    if title == "" then title = text.untitled end
+    local page_size = math.max(math.floor(tonumber(options.page_size) or 4), 1)
+    local pages = math.max(math.ceil(#annotations / page_size), 1)
+    local page = math.max(math.min(math.floor(tonumber(options.page) or 1), pages), 1)
+    local quote_lines = math.max(math.floor(tonumber(options.quote_lines) or 3), 1)
+    local quote_chars = math.max(math.floor(tonumber(options.quote_chars) or 42), 18)
+
+    local rows = {}
+    local first = (page - 1) * page_size + 1
+    local last = math.min(page * page_size, #annotations)
+    for idx = first, last do
+        local ann = annotations[idx]
+        if type(ann) == "table" then
+            local raw_text = Status.str(ann.text)
+            if raw_text == "" then raw_text = Status.str(ann.note) end
+            local wrapped = Ui.wrapLines(raw_text, quote_chars, quote_lines)
+            local lines = #wrapped.lines > 0 and wrapped.lines or { text.untitled }
+            local raw_note = Status.str(ann.note)
+            local note = nil
+            if raw_note ~= "" and raw_note ~= Status.str(ann.text) then
+                note = string.format(text.note_prefix, Ui.ellipsize(Ui.plainText(raw_note), quote_chars))
+            end
+            local pageno = Status.num(ann.pageno) or Status.num(ann.page)
+            local meta_left = Ui.join({ Status.str(ann.chapter), Status.str(ann.datetime) })
+            local meta_right = (pageno and pageno >= 1)
+                and string.format(text.page_short, tostring(math.floor(pageno)))
+                or ""
+            rows[#rows + 1] = {
+                kind = "quote",
+                lines = lines,
+                note = note,
+                meta_left = meta_left,
+                meta_right = meta_right,
+                action = { kind = "highlight", group = group, annotation = ann },
+            }
+        end
+    end
+
+    local total_count = #annotations
+    local left_label = total_count == 1
+        and text.highlights_singular
+        or string.format(text.highlights_plural, Ui.formatThousands(total_count) or tostring(total_count))
+    local right_label = options.book_exists ~= false
+        and (Ui.GLYPH.local_dot .. " " .. text.on_device)
+        or text.file_missing_short
+    local footer, pager = pagerFooter(page, pages, text.highlights, text)
+
+    return {
+        title = title,
+        header_actions = {},
+        switch = nil,
+        subline = { left = left_label, right = right_label },
+        blocks = { { kind = "quote_list", rows = rows } },
+        footer = footer,
+        pager = pager,
+    }
+end
+
+--- Formats a byte count into a short human-readable size ("2.0 GB", "142 MB").
+-- @number bytes non-negative byte count
+-- @treturn string formatted label
+function Views.formatBytes(bytes)
+    local value = math.max(Status.num(bytes) or 0, 0)
+    local gb = 1024 * 1024 * 1024
+    local mb = 1024 * 1024
+    local kb = 1024
+    if value >= gb then
+        return string.format("%.1f GB", value / gb)
+    elseif value >= mb then
+        local m = value / mb
+        if m >= 10 then
+            return string.format("%.0f MB", m)
+        end
+        return string.format("%.1f MB", m)
+    elseif value >= kb then
+        return string.format("%.0f KB", value / kb)
+    end
+    return string.format("%.0f B", value)
+end
+
+--- Builds the full-screen Device Storage & Finished-Book Cleaner model.
+-- @tparam table[opt] storage_info { total_bytes, free_bytes, used_bytes, used_pct }
+-- @tparam table[opt] finished_books array of finished local records with `size_bytes`
+-- @tparam table[opt] options { labels, page, page_size }
+-- @treturn table page model
+function Views.storageModel(storage_info, finished_books, options)
+    options = options or {}
+    local text = Views.labels(options.labels)
+    storage_info = type(storage_info) == "table" and storage_info or {}
+
+    local sorted = {}
+    if type(finished_books) == "table" then
+        for idx = 1, #finished_books do
+            local book = finished_books[idx]
+            if type(book) == "table" then sorted[#sorted + 1] = book end
+        end
+    end
+    table.sort(sorted, function(a, b)
+        local sa = Status.num(a.size_bytes) or 0
+        local sb = Status.num(b.size_bytes) or 0
+        if sa ~= sb then return sa > sb end
+        return Status.str(a.title) < Status.str(b.title)
+    end)
+
+    local reclaimable = 0
+    for idx = 1, #sorted do
+        reclaimable = reclaimable + math.max(Status.num(sorted[idx].size_bytes) or 0, 0)
+    end
+
+    local page_size = math.max(math.floor(tonumber(options.page_size) or 8), 1)
+    local pages = math.max(math.ceil(#sorted / page_size), 1)
+    local page = math.max(math.min(math.floor(tonumber(options.page) or 1), pages), 1)
+
+    local rows = {}
+    local first = (page - 1) * page_size + 1
+    local last = math.min(page * page_size, #sorted)
+    for idx = first, last do
+        local book = sorted[idx]
+        local title = Ui.rowTitle(book.title)
+        if title == "" then title = text.untitled end
+        local authors = Status.str(book.authors)
+        if authors == "" then authors = text.unknown_author end
+        local size_str = Views.formatBytes(Status.num(book.size_bytes) or 0)
+        rows[#rows + 1] = {
+            kind = "plain",
+            title = title,
+            secondary = authors,
+            value = size_str,
+            value_sub = Ui.GLYPH.done .. " " .. text.remove_short .. " " .. Ui.GLYPH.chevron,
+            action = { kind = "delete_local_book", item = book },
+        }
+    end
+
+    local total_bytes = Status.num(storage_info.total_bytes) or 0
+    local free_bytes = Status.num(storage_info.free_bytes) or 0
+    local used_pct = Status.num(storage_info.used_pct)
+    if not used_pct and total_bytes > 0 then
+        used_pct = math.floor(((math.max(total_bytes - free_bytes, 0) / total_bytes) * 100) + 0.5)
+    end
+    used_pct = math.max(math.min(math.floor((used_pct or 0) + 0.5), 100), 0)
+
+    local left_label = total_bytes > 0
+        and string.format(text.storage_summary, Views.formatBytes(free_bytes), Views.formatBytes(total_bytes), used_pct)
+        or Views.formatBytes(free_bytes)
+    local right_label
+    if #sorted == 0 then
+        right_label = text.no_finished_local
+    elseif #sorted == 1 then
+        right_label = string.format(text.finished_reclaimable_singular, Views.formatBytes(reclaimable))
+    else
+        right_label = string.format(text.finished_reclaimable, Views.formatBytes(reclaimable), #sorted)
+    end
+
+    local footer, pager = pagerFooter(page, pages, text.device_storage, text)
+
+    return {
+        title = text.device_storage,
+        header_actions = {},
+        switch = nil,
+        subline = { left = left_label, right = right_label },
+        blocks = { { kind = "list", rows = rows } },
+        footer = footer,
+        pager = pager,
     }
 end
 

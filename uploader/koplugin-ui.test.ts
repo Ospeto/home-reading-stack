@@ -296,6 +296,7 @@ print("budget_nil_time=" .. tostring(Ui.coverBudgetLeft(1, nil, nil)))
 -- accepted design removed.
 local plan_small = Ui.pagePlan(600, 800, 1)
 local plan_paperwhite = Ui.pagePlan(1072, 1448, 1.79)
+local plan_1236 = Ui.pagePlan(1236, 1648, 2.06)
 local plan_tiny = Ui.pagePlan(200, 200, 0.5)
 print("plan_small_total=" .. tostring(plan_small.total))
 print("plan_small_fits=" .. tostring(plan_small.total <= 800))
@@ -309,6 +310,11 @@ print("plan_rows_capped=" .. tostring(plan_small.reading_rows <= Ui.tokens.page_
   and plan_small.session_rows <= Ui.tokens.page_session_max))
 print("plan_heat_weeks=" .. plan_small.heat_weeks .. "," .. plan_paperwhite.heat_weeks)
 print("plan_heat_cell=" .. plan_small.heat_cell_w .. "x" .. plan_small.heat_cell_h)
+print("plan_heat_square=" .. tostring(
+  plan_small.heat_cell_h <= plan_small.heat_cell_w
+  and plan_paperwhite.heat_cell_h <= plan_paperwhite.heat_cell_w
+  and plan_1236.heat_cell_h <= plan_1236.heat_cell_w
+))
 print("plan_cover_inside_row=" .. tostring(plan_small.reading_cover_h <= plan_small.reading_h))
 print("plan_grows=" .. tostring(plan_paperwhite.header >= plan_small.header
   and plan_paperwhite.reading_h >= plan_small.reading_h))
@@ -334,11 +340,17 @@ print("scale_factor_junk=" .. tostring(Ui.scaleFactor(nil, 600)) .. ","
 -- The device's own library page, planned with the factor the runtime really
 -- has: it must hold a shelf, not a couple of rows, and must fit the screen.
 local device_plan = Ui.listPlan(1236, 1648, scale_probe, { with_switch = true, min_rows = 3 })
+local device_compact = Ui.listPlan(1236, 1648, scale_probe, {
+  with_switch = true, with_covers = false, min_rows = 3,
+})
 print("device_plan_rows=" .. device_plan.rows)
 print("device_plan_rowh=" .. device_plan.row_h)
 print("device_plan_fits=" .. tostring(device_plan.total <= device_plan.height))
 print("device_plan_full_height=" .. tostring(device_plan.total >= device_plan.height - device_plan.gap))
 print("device_plan_rowh_shrank=" .. tostring(device_plan.row_h < Ui.listPlan(1236, 1648, 3, { with_switch = true }).row_h))
+print("device_compact_rows=" .. device_compact.rows)
+print("device_compact_fits=" .. tostring(device_compact.total <= device_compact.height))
+print("device_compact_cover_w=" .. device_compact.reading_cover_w)
 
 -- Face sizes: getFace multiplies by the device scale, so a pixel measure has to
 -- be turned back into units first. 31px on this panel is 15.05 units.
@@ -415,6 +427,30 @@ end)
 print("square_raises=" .. tostring(raised_ok))
 print("square_restored_after_raise=" .. tostring(SizeProbe.radius.window))
 print("corner_radius_token=" .. tostring(Ui.tokens.corner_radius))
+
+-- Phase 3 text utilities & detail / quote-list layout plans -----------------
+local plain = Ui.plainText("<p>Hello &amp; <b>world</b>!</p><br/>Line &quot;two&quot;&nbsp;here.")
+print("plain_text=" .. plain:gsub("\n", "|"))
+local burmese_wrap = Ui.wrapLines("${luaByteEscapes(BURMESE + " " + BURMESE + " " + BURMESE)}", 8, 2)
+local valid_utf8 = true
+for _, ln in ipairs(burmese_wrap.lines) do
+  local i = 1
+  while i <= #ln do
+    local b = ln:byte(i)
+    if b < 0x80 then i = i + 1
+    elseif b >= 0xC2 and b <= 0xDF then i = i + 2
+    elseif b >= 0xE0 and b <= 0xEF then i = i + 3
+    elseif b >= 0xF0 and b <= 0xF4 then i = i + 4
+    else valid_utf8 = false break end
+  end
+end
+print("wrap_burmese_lines=" .. #burmese_wrap.lines .. ":" .. tostring(burmese_wrap.truncated) .. ":" .. tostring(valid_utf8))
+local detail_pw = Ui.detailPlan(1236, 1648, scale_probe, { with_covers = true, action_rows = 2 })
+local detail_no_cov = Ui.detailPlan(800, 600, 1, { with_covers = false, action_rows = 1 })
+print("detail_pw=" .. tostring(detail_pw.fits) .. ":" .. tostring(detail_pw.cover_w > 0) .. ":" .. tostring(detail_pw.body_lines >= 4))
+print("detail_nocov=" .. tostring(detail_no_cov.fits) .. ":" .. tostring(detail_no_cov.cover_w))
+local q_plan = Ui.quoteListPlan(1236, 1648, scale_probe, { min_rows = 2 })
+print("quote_plan=" .. tostring(q_plan.fits) .. ":" .. tostring(q_plan.rows >= 2) .. ":" .. tostring(q_plan.quote_lines >= 2))
 
 print("OK")
 `;
@@ -740,6 +776,7 @@ describe("plugin UI primitives: one-page geometry", () => {
     const out = runHarness();
     // The compact picture is the point: 52 columns, not a row per week.
     expect(out.plan_heat_weeks.split(",")).toEqual(["52", "52"]);
+    expect(out.plan_heat_square).toBe("true");
     expect(out.plan_cover_inside_row).toBe("true");
     expect(out.plan_grows).toBe("true");
     const [width, height] = out.plan_heat_cell.split("x").map(Number);
@@ -784,10 +821,14 @@ describe("plugin UI primitives: one-page geometry", () => {
     // The regression this guards: with the one-unit scale the same screen
     // planned four rows, two of them navigation, so the library showed two
     // books a page at twice the intended type size.
-    expect(Number(out.device_plan_rows)).toBeGreaterThanOrEqual(6);
+    expect(Number(out.device_plan_rows)).toBeGreaterThanOrEqual(7);
     expect(out.device_plan_fits).toBe("true");
     expect(out.device_plan_full_height).toBe("true");
     expect(out.device_plan_rowh_shrank).toBe("true");
+    // Compact mode without covers packs 10+ rows cleanly onto the same panel.
+    expect(Number(out.device_compact_rows)).toBeGreaterThanOrEqual(10);
+    expect(out.device_compact_fits).toBe("true");
+    expect(out.device_compact_cover_w).toBe("0");
   });
 });
 
@@ -889,5 +930,17 @@ describe("plugin UI primitives: square corners", () => {
     const out = runHarness();
     expect(out.square_raises).toBe("false");
     expect(out.square_restored_after_raise).toBe("7");
+  });
+});
+
+describe("plugin UI primitives: Phase 3 text & planners", () => {
+  it("strips HTML safely, wraps Burmese text on codepoint boundaries, and fits detail/quote plans", () => {
+    if (!LUA_BINARY) return;
+    const out = runHarness();
+    expect(out.plain_text).toBe('Hello & world!||Line "two" here.');
+    expect(out.wrap_burmese_lines).toBe("2:true:true");
+    expect(out.detail_pw).toBe("true:true:true");
+    expect(out.detail_nocov).toBe("true:0");
+    expect(out.quote_plan).toBe("true:true:true");
   });
 });

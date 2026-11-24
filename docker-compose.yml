@@ -83,8 +83,7 @@ services:
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
       - JINA_API_KEY=${JINA_API_KEY:-}
       - JEV_API_KEY=${JEV_API_KEY:-}
-      - READING_WEBAPP_URL=${READING_WEBAPP_URL:-https://reading.wavypremium.xyz}
-      - KOSYNC_WAN_URL=${KOSYNC_WAN_URL:-http://kosync-sg.wavypremium.xyz}
+      - READING_WEBAPP_URL=${READING_WEBAPP_URL:-http://192.168.31.15:8086}
       - NODE_ENV=production
     volumes:
       - ${UPLOADER_DIR:-./uploader}:/app

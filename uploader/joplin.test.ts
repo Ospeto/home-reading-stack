@@ -818,10 +818,7 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
       expect(readme).toContain("KOReader Joplin Highlight Sync");
       expect(readme).toContain("http://192.168.31.15:8086");
       expect(readme).toContain("plain HTTP-only");
-      expect(readme).toContain("opds.wavypremium.xyz");
-      expect(readme).toContain("Port `80`");
-      expect(readme).toContain("cleartext");
-      expect(readme).toContain("proxy access logs");
+      expect(readme).not.toContain("opds.wavypremium.xyz");
       expect(readme).toContain("JOPLIN_TOKEN");
       const joplinLines = readme.split("\n").filter((line) => /Joplin/i.test(line));
       expect(joplinLines.length).toBeGreaterThan(0);
@@ -842,13 +839,11 @@ describe("Joplin Clipper HTTP Compatibility (uploader/joplin.ts)", () => {
       expect(html).toContain("Native Joplin Clipper Exporter");
       expect(html).toContain("copyToClipboard('192.168.31.15')");
       expect(html).not.toContain("copyToClipboard('opds.wavypremium.xyz')");
+      expect(html).not.toContain("opds.wavypremium.xyz");
       expect(html).not.toContain("copyToClipboard('lighthouse')");
       expect(html).toContain("JOPLIN_TOKEN");
       expect(html).toContain("plain HTTP-only");
       expect(html).toContain("8086");
-      expect(html).toContain("plain HTTP port");
-      expect(html).toContain("cleartext");
-      expect(html).toContain("proxy access logs");
       const guideStart = html.indexOf("Native Joplin Clipper Exporter");
       const guideEnd = html.indexOf("Wireless Over-The-Air Export", guideStart);
       const cardStart = html.indexOf("KOReader Joplin Exporter (Native Wi-Fi Sync)");

@@ -32,18 +32,8 @@ LightHouse turns a home Mac mini or Linux host into an always-on personal readin
 │         │ 1. KOSync Server (:7200)  │ ◄── Real-time progress/bookmark  │
 │         │ 2. OPDS Server   (:8088)  │ ◄── OTA Book Catalog & Downloads │
 │         │ 3. LightHouse UI (:8086)  │ ◄── Catalog Manager & Ingestion  │
-│         │ 4. LAN Proxy     (:7890)  │ ◄── sing-box SOCKS5 / VLESS      │
-│         │ 5. Tunnel Agents (launchd)│ ──┐ Persistent SSH Tunnels       │
-│         └───────────────────────────┘   │                              │
-└─────────────────────────────────────────┼──────────────────────────────┘
-                                          │ ssh reverse tunnels
-                                          │ via ProxyCommand (SOCKS5 :7890)
-                                          ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│         Singapore Edge (`sg-vps`) & US Edge (`panel.wavypremium.xyz`)  │
-│  - Caddy TLS Reverse Proxy (https://reading.wavypremium.xyz)           │
-│  - Low-latency Singapore WAN: KOSync (:80/:8443) & OPDS (:80/:8443)    │
-│  - Singapore Web App & TMA (:8443) / Caddy Edge (https://reading...)   │
+│         │ 4. Outbound Proxy(:7890)  │ ◄── sing-box SOCKS5 / HTTP       │
+│         └───────────────────────────┘                                  │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -51,51 +41,38 @@ LightHouse turns a home Mac mini or Linux host into an always-on personal readin
 
 1. **LightHouse Web Manager (`uploader/server.ts`, port `8086`):**
    - High-performance Bun/TypeScript server with in-process SQLite queries.
-   - Minimalist, responsive Telegram Mini App (TMA) and desktop catalog interface (`uploader/index.html`).
+   - Minimalist, responsive catalog dashboard (`uploader/index.html`) served over your home LAN.
    - Durable SQLite-backed ingestion job queue (`cache.db`) and EPUB-only canonical enforcement.
    - **Race-free SQLite startup contract** (`uploader/sqlite-open.ts`): `PRAGMA busy_timeout = 5000` is armed *before* the `journal_mode = WAL` switch, and both the open and the switch retry a bounded ~8 attempts (150 ms doubling to a 1.5 s cap per statement) on `SQLITE_BUSY` / `SQLITE_BUSY_RECOVERY` / `SQLITE_LOCKED`, so the Reading HQ server and the Telegram bot can start in either order. In-memory databases (`:memory:`, empty path, `file::memory:`) skip WAL entirely, and if `cache.db` genuinely cannot be prepared the server refuses to bind `:8086` and exits non-zero instead of serving nothing.
    - Built-in OPDS feed reverse proxy forwarding `/opds` and `/get/*` directly to Calibre with range requests, client-facing URL rewriting, exact UTF-8 `Content-Length` accounting, and clean RFC 9110 validator hygiene.
 2. **KOSync Server (`kosync/`, port `7200`):**
    - Lightweight, self-hosted KOReader synchronization backend backed by SQLite (`koreader-sync.db`).
-   - Syncs reading positions, progress percentage, and timestamps across devices instantly.
+   - Syncs reading positions, progress percentage, and timestamps across devices instantly over home Wi-Fi.
 3. **Calibre Content & OPDS Server (port `8088`):**
    - Native Calibre library server running over `metadata.db` in WAL mode.
    - Provides Open Publication Distribution System (OPDS) XML/Atom catalog feeds for direct wireless book downloads.
-4. **sing-box LAN Proxy Gateway (port `7890`):**
-   - Inbound HTTP & SOCKS5 proxy routing outbound external requests through low-latency VLESS nodes.
-   - Serves as the Wi-Fi HTTP proxy for Kindle devices needing to bypass GFW/DPI firewalls.
-5. **Reverse SSH Tunnels & Auto-Healing Watchdog:**
-   - Dual WAN tunnels routing traffic through Singapore (`sg-vps`) and US (`panel`) edge nodes.
-   - Monitored by `scripts/tunnel-watchdog.sh` every 120s with automatic remote port collision recovery (`fuser -k`).
+4. **sing-box Outbound Proxy Gateway (port `7890`):**
+   - Local HTTP & SOCKS5 proxy routing outbound scraping and Telegram bot requests reliably.
 
 ---
 
 ## 🌐 Services & Endpoints Reference
 
-Singapore WAN endpoints are the **primary recommended routes** for low-latency progress sync and wireless book downloads on KOReader.
+LightHouse operates **LAN-first** directly over your home Wi-Fi (`192.168.31.15`).
 
 | Service | Address | Protocol | Description |
 | --- | --- | --- | --- |
-| **Singapore WAN KOSync (Recommended)** | `http://kosync-sg.wavypremium.xyz` | HTTP (Port 80) | High-speed Singapore WAN KOSync progress sync (KOReader default) |
-| **Singapore WAN KOSync (TLS)** | `https://kosync-sg.wavypremium.xyz:8443` | HTTPS (8443) | Encrypted Singapore WAN KOSync progress sync |
-| **Singapore WAN OPDS Feed (Recommended)** | `http://opds.wavypremium.xyz/opds` | HTTP / Atom | High-speed wireless OPDS catalog for KOReader & mobile devices |
-| **Singapore WAN OPDS Feed (TLS)** | `https://opds.wavypremium.xyz:8443/opds` | HTTPS (8443) | Encrypted Singapore wireless OPDS catalog |
-| **KOReader Joplin Highlight Sync (LAN)** | `http://192.168.31.15:8086` / private `JOPLIN_TOKEN` from `.env` | HTTP / Joplin | Primary Joplin export target. KOReader's Joplin plugin is plain HTTP-only (`socket.http`, no TLS). Do not publish the token. |
-| **KOReader Joplin Highlight Sync (WAN, optional)** | `http://opds.wavypremium.xyz` port `80` | HTTP / Joplin | Optional only. `?token=` travels in cleartext and is logged in proxy access logs. Do not publish the token. |
-| **Singapore WAN Web & Mini App** | `https://reading-sg.wavypremium.xyz:8443` | HTTPS (8443) | Low-latency Singapore WAN Telegram Mini App & Web App |
-| **Global WAN Dashboard & Mini App** | `https://reading.wavypremium.xyz` | HTTPS | Global secure access to LightHouse via SSH reverse tunnel + Caddy TLS |
-| **LightHouse Dashboard (Local)** | `http://192.168.31.15:8086` | Web SPA | Fast catalog manager, KOSync reading telemetry, facets, and upload manager |
-| **Telegram Bot & Mini App** | `@saroat_ospeto_bot` | Telegram API | Ingest books, search catalog (`/find`), view shelf (`/reading`), hot backups (`/backup`) |
-| **Local KOSync** | `http://192.168.31.15:7200` | HTTP / JSON | Direct LAN progress sync for KOReader |
-| **Local Calibre OPDS Feed** | `http://192.168.31.15:8088/opds` | Atom / XML | Direct home LAN book catalog |
+| **LightHouse Dashboard (LAN)** | `http://192.168.31.15:8086` | Web SPA | Primary catalog manager, KOSync reading telemetry, facets, and upload manager |
 | **Native LightHouse OPDS Feed** | `http://192.168.31.15:8086/api/opds` | Atom / XML | Zero-downtime native OPDS 1.2 catalog feed with filtered title/author/series search generated directly from SQLite metadata. Supports OPDS paging (`?start=N&count=M` → `rel="next"`), sort (`?sort=title\|author\|series\|added`, newest-added first for `added`) and filtering (`?filter=unread` or `?filter=<tag>`) over the whole matched result set, both applied before the page window and carried forward into `rel="next"`, and exposes Calibre ratings as `<lighthouse:rating>` |
+| **LightHouse OPDS Proxy** | `http://192.168.31.15:8086/opds` | Atom / XML | Reverse-proxied Calibre OPDS feed on the main LightHouse port |
+| **Local Calibre OPDS Feed** | `http://192.168.31.15:8088/opds` | Atom / XML | Direct home LAN Calibre book catalog |
+| **Local KOSync** | `http://192.168.31.15:7200` | HTTP / JSON | Direct LAN progress sync for KOReader |
+| **KOReader Joplin Highlight Sync (LAN)** | `http://192.168.31.15:8086` / private `JOPLIN_TOKEN` from `.env` | HTTP / Joplin | Primary Joplin export target. KOReader's Joplin plugin is plain HTTP-only (`socket.http`, no TLS). Do not publish the token. |
 | **Library Groupings (Authors / Series)** | `http://192.168.31.15:8086/api/library/groups?by=series` | HTTP / JSON | Folds the whole Calibre catalogue into author or series groups (`by=author\|authors` for authors) with volume counts, how many are read and a cover book id. Read state is the same furthest-KOSync-progress rule the OPDS feed uses (`>= 0.99`), and the KOSync database is queried once per request in read-only mode. Served as one small document the KOReader plugin pages locally, so switching to Authors or Series costs one request rather than one per page, and the plugin refetches it on **Refresh** and whenever the grouping changes so a finished book does not leave a stale read count on screen |
 | **KOReader Plugin Generator** | `http://192.168.31.15:8086/api/koplugin/download` | ZIP (`.koplugin`) | Generates a pre-configured KOReader plugin archive per request from the current server settings. Requires the same authentication as the web app; the API key is baked into the generated `lighthouse_config.lua` and never logged or placed in a query string |
 | **Local Calibre Web Reader** | `http://192.168.31.15:8088` | Web UI | In-browser reading and Calibre catalog manager |
-| **Local LAN Proxy Gateway** | `http://192.168.31.15:7890` | HTTP / SOCKS5 | sing-box proxy gateway for Kindle GFW bypass |
-| **Singapore Reverse Tunnel Daemon** | `com.ospeto.reading-sg-tunnel` | SSH | LaunchAgent binding Mac Mini `:8086` and `:7200` to `sg-vps` |
-| **VLESS Reverse Tunnel Daemon** | `com.ospeto.reading-vless-tunnel` | SSH / SOCKS5 | LaunchAgent binding Mac Mini `:8086` to VPS `panel` via ProxyCommand |
-| **Tunnel Watchdog Daemon** | `com.ospeto.reading-tunnel-watchdog` | Bash Script | Periodic health watchdog executing `scripts/tunnel-watchdog.sh` every 120s |
+| **Telegram Bot** | `@saroat_ospeto_bot` | Telegram API | Ingest books, search catalog (`/find`), view shelf (`/reading`), hot backups (`/backup`) |
+| **Local Outbound Proxy** | `127.0.0.1:7890` | HTTP / SOCKS5 | sing-box outbound proxy for scrapers & Telegram bot |
 
 ---
 
@@ -105,11 +82,11 @@ LightHouse includes a portable management CLI (`bin/lighthouse`) for service lif
 
 | Command | Description |
 | --- | --- |
-| `bin/lighthouse status` | Displays full one-screen dashboard of all ports (8086, 7200, 8088, 7890, 3002 Firecrawl), tunnels, launchd daemons (accurately distinguishing running, loaded-idle scheduled, disabled, and missing plists), and database record counts. |
-| `bin/lighthouse up` | Starts all services gracefully in strict dependency order (Calibre, KOSync, LightHouse UI, LAN proxy, reverse tunnels). |
-| `bin/lighthouse down` | Stops all services gracefully in reverse dependency order without leaving orphaned processes. |
+| `bin/lighthouse status` | Displays full one-screen dashboard of local ports (8086, 7200, 8088, 7890, 3002 Firecrawl), launchd daemons (accurately distinguishing running, loaded-idle scheduled, disabled, and missing plists), and database record counts. |
+| `bin/lighthouse up` | Starts all local services gracefully in strict dependency order (sing-box proxy, KOSync, Calibre, LightHouse UI, Telegram bot). |
+| `bin/lighthouse down` | Stops all local services gracefully in reverse dependency order without leaving orphaned processes. |
 | `bin/lighthouse restart` | Performs safe sequential stop and restart of reading stack services (`down; sleep 1; up`). |
-| `bin/lighthouse health` | Probes HTTP/TCP endpoints, checks response codes, and auto-heals stale remote listeners (`fuser -k`). |
+| `bin/lighthouse health` | Probes local HTTP/TCP services (`:8086`, `:7200`, `:8088`) and auto-heals Reading HQ if inactive. |
 | `bin/lighthouse categorize` | Classifies book languages (`mya`, `eng`, `other`), assigns standardized category tags, and prunes promotional tags. |
 | `bin/lighthouse enrich-synopsis` | Populates descriptions for Calibre books prioritizing per-volume lookups (EPUB metadata, online volume queries) with AniList series fallback and duplicate series overview re-enrichment. |
 | `bin/lighthouse heal-covers` | Audits and heals Calibre on-disk volume covers from EPUBs and purges stale/duplicate downscaled thumbnail caches. |
@@ -335,11 +312,10 @@ Notes:
 
 1. Open any book in KOReader → tap top of screen for menu bar.
 2. Tap the **Tools (wrench icon)** tab → select **Progress sync**.
-3. Tap **Custom sync server** and enter the Singapore WAN endpoint:
+3. Tap **Custom sync server** and enter the local LAN endpoint:
    ```text
-   http://kosync-sg.wavypremium.xyz
+   http://192.168.31.15:7200
    ```
-   *(Encrypted TLS: `https://kosync-sg.wavypremium.xyz:8443` | Local LAN: `http://192.168.31.15:7200`)*
 4. Tap **Login** → enter Username (`moe`) and password.
 5. Enable **"Automatically keep documents in sync"**.
 6. Tap **"Pull progress to this device now"** to verify connection.
@@ -361,9 +337,9 @@ Use this when your device cannot load an external plugin. The generated plugin a
 3. Set Catalog Name to: `LightHouse Library` (or `Mac Mini Library`).
 4. Enter Catalog URL:
    ```text
-   http://opds.wavypremium.xyz/opds
+   http://192.168.31.15:8086/opds
    ```
-   *(Encrypted TLS: `https://opds.wavypremium.xyz:8443/opds` | Local LAN: `http://192.168.31.15:8088/opds`)*
+   *(Direct Calibre OPDS: `http://192.168.31.15:8088/opds` | Native OPDS 1.2: `http://192.168.31.15:8086/api/opds`)*
 5. Tap **Connect** (no credentials required). Books can now be browsed, searched by title/author/series, and downloaded directly over Wi-Fi.
 
 ### 3. Joplin Highlight & Note Export (Wireless Obsidian Sync)
@@ -373,9 +349,8 @@ KOReader includes a native **Joplin** exporter that syncs your highlights, chapt
 2. Tap the **Tools (wrench icon)** tab → select **Export highlights**.
 3. Tap **Choose formats and services** → check **Joplin** (and ensure Markdown formatting is enabled).
 4. Tap **Set Joplin IP and port number**. KOReader's Joplin exporter is plain HTTP-only (LuaSocket `socket.http`; it cannot open TLS):
-   - **Host (IP):** `192.168.31.15` *(primary LAN target)*
+   - **Host (IP):** `192.168.31.15` *(LAN HTTP target)*
    - **Port:** `8086`
-   - Optional WAN: Host `opds.wavypremium.xyz`, Port `80` (plain HTTP). The `?token=` query travels in cleartext and is written to proxy access logs.
 5. Set `JOPLIN_TOKEN` in the uploader `.env` to a long random secret (for example `openssl rand -hex 24`). If it is unset or empty, Joplin writes are rejected. Enter that same private value in KOReader under **Set authorization token**. Do not commit or publish the token.
 6. Tap **Export now** (or choose book) → **Export to Joplin**.
 7. Highlights and notes are immediately written into your Obsidian vault at `<vault>/Books/<Title>.md` with clean YAML frontmatter, book synopsis, and idempotent markers (`<!-- lighthouse:highlights:start -->` / `<!-- lighthouse:highlights:end -->`). Generated attribution (chapters, page numbers, timestamps from KOReader, Obsidian, or Kindle) is deduplicated while preserving quote bytes, displayed attribution, and manual notes verbatim. Re-exporting never creates duplicates.
@@ -389,18 +364,14 @@ If your Kindle displays *"Check your network connection"* when connecting to ove
    - **Proxy Port:** `7890`
 3. Save network settings. All Kindle network requests will now route through the home host's sing-box proxy gateway.
 
-### 5. Telegram Mini App & Web App Access
+### 5. Web App & Telegram Access
 
-LightHouse provides an app-like catalog experience across mobile devices and desktop browsers:
-- **Singapore WAN Web App (Low-Latency Port 8443):**
+LightHouse provides an app-like catalog experience directly on your home LAN:
+- **Home LAN Dashboard:**
   ```text
-  https://reading-sg.wavypremium.xyz:8443
+  http://192.168.31.15:8086
   ```
-- **Global Caddy Edge:**
-  ```text
-  https://reading.wavypremium.xyz
-  ```
-- **Telegram Native Mini App:** Tap the persistent **Menu** button or send `/app` inside `@saroat_ospeto_bot` to open the full catalog interface inside Telegram with native haptics.
+- **Telegram Bot:** Send `/menu`, `/reading`, `/recent`, `/find`, `/status`, or `/backup` to `@saroat_ospeto_bot` to manage your library and ingest books/articles.
 
 ---
 
@@ -441,8 +412,8 @@ LightHouse bridges your reading devices (KOReader on Kobo/Kindle/Android, native
    - On repeated syncs, only the block inside the markers is updated; any manual user reflections, synthesis notes, or custom frontmatter properties outside the markers are 100% preserved.
 
 3. **Four Seamless Synchronization Pathways:**
-   - **Native KOReader Joplin Clipper Exporter (`POST /notes`, `PUT /notes/:id`):** One-tap wireless sync built directly into KOReader. The plugin is plain HTTP-only. Point it at LAN `http://192.168.31.15:8086` (primary) and the private `JOPLIN_TOKEN` from `.env`. Optional WAN is plain HTTP port `80` on `opds.wavypremium.xyz`; `?token=` is cleartext and lands in proxy access logs. Do not publish the token. The server implements native Joplin Clipper HTTP compatibility (`/ping`, `/folders`, `/notes`), writes structured Markdown notes with block-style YAML tags to `<vault>/Books/<Title>.md`, and merges highlights idempotently. Unset tokens fail closed.
-   - **Wireless Over-The-Air Ingest (`POST /api/highlights/sync`):** Configure KOReader's bundled **Export highlights** plugin to send JSON/Markdown exports directly to `http://192.168.31.15:8086/api/highlights/sync` on LAN or `https://reading-sg.wavypremium.xyz:8443/api/highlights/sync` on WAN.
+   - **Native KOReader Joplin Clipper Exporter (`POST /notes`, `PUT /notes/:id`):** One-tap wireless sync built directly into KOReader. The plugin is plain HTTP-only. Point it at LAN `http://192.168.31.15:8086` and the private `JOPLIN_TOKEN` from `.env`. Do not publish the token. The server implements native Joplin Clipper HTTP compatibility (`/ping`, `/folders`, `/notes`), writes structured Markdown notes with block-style YAML tags to `<vault>/Books/<Title>.md`, and merges highlights idempotently. Unset tokens fail closed.
+   - **Wireless Over-The-Air Ingest (`POST /api/highlights/sync`):** Configure KOReader's bundled **Export highlights** plugin to send JSON/Markdown exports directly to `http://192.168.31.15:8086/api/highlights/sync`.
    - **Type-C Kindle USB Two-Way Sync (`bin/lighthouse sync-kindle`):** Two-way USB-C sync between Calibre, Kindle, and Obsidian. Auto-detects Kindle or e-Reader under `/Volumes/`, pushes active/reading/unread books from Calibre into `books/` (fallback to `documents/`) with FAT32 filename sanitization and 50MB free-space safety bounds, checking existing files across both directories to avoid re-copying, and pulls clippings & KOReader `.sdr` highlights into the MAS Obsidian vault (`/Users/ospeto/MAS/03-Resources/Books/<Title>.md`) and indexes them into `cache.db` (`book_highlights`). Supports `--apply`, `--dry-run`, `--all`, and `--eject`.
    - **CLI Batch & Continuous Watch (`bin/lighthouse sync-obsidian`):** Auto-discovers connected Kindle / KOReader storage mounts (`/Volumes/*/`) and sidecar `.sdr` folders (`metadata.epub.lua`), merging with live KOSync databases. Pass `--watch` for continuous auto-syncing.
 
