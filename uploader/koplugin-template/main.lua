@@ -1101,6 +1101,11 @@ function LightHouse:addToMainMenu(menu_items)
                 help_text = _("Inspect free space and remove local copies of finished books to free space on this device."),
             },
             {
+                text = _("Index local books"),
+                callback = function() self:indexLocalBooks() end,
+                help_text = _("Extract metadata for unindexed books on this device so they appear in Series and Authors."),
+            },
+            {
                 text = _("Sync highlights to Obsidian"),
                 callback = function() self:syncAllHighlightsToObsidian() end,
             },
@@ -4000,6 +4005,7 @@ function LightHouse:startDownload(entry, filepath)
     self.local_scan = nil
     self.local_index = nil
     forgetSidecarList()
+    self:indexBookFiles({ filepath })
 
     UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
         text = T(_("Saved to:\n%1"), filepath),
@@ -4338,6 +4344,7 @@ function LightHouse:syncMissingActiveBooks()
         ok_cb = function()
             local downloaded = 0
             local failed = 0
+            local newly_downloaded = {}
             self:withSpinner(T(_("Downloading %1 missing book(s)…"), tostring(#missing)), function()
                 for idx = 1, #missing do
                     local session = missing[idx]
@@ -4355,6 +4362,7 @@ function LightHouse:syncMissingActiveBooks()
                         local ok = Client.download(config, url, filepath)
                         if ok then
                             downloaded = downloaded + 1
+                            newly_downloaded[#newly_downloaded + 1] = filepath
                         else
                             failed = failed + 1
                         end
@@ -4366,6 +4374,9 @@ function LightHouse:syncMissingActiveBooks()
             self.local_scan = nil
             self.local_index = nil
             forgetSidecarList()
+            if #newly_downloaded > 0 then
+                self:indexBookFiles(newly_downloaded)
+            end
             if failed == 0 then
                 notice(T(_("Downloaded %1 active book(s)."), tostring(downloaded)), 4)
             else
@@ -4840,6 +4851,216 @@ function LightHouse:checkForPluginUpdate()
             }))
         end,
     }))
+end
+
+-- ---------------------------------------------------------------------------
+-- Background Book Metadata Indexing (CoverBrowser / ZenOS)
+-- ---------------------------------------------------------------------------
+
+local INDEX_BATCH_SIZE = 50
+local INDEX_BUSY_MAX_RETRIES = 70
+local LOCAL_INDEX_BOOK_EXTS = {
+    epub = true,
+    pdf = true,
+    mobi = true,
+    azw3 = true,
+    cbz = true,
+    cbr = true,
+    fb2 = true,
+    djvu = true,
+    txt = true,
+}
+
+--- Loads KOReader CoverBrowser's BookInfoManager if installed and active.
+-- @treturn table|nil BookInfoManager module
+local function loadBookInfoManager()
+    local ok, bim = pcall(require, "bookinfomanager")
+    if not ok or type(bim) ~= "table" or type(bim.extractInBackground) ~= "function" then
+        return nil
+    end
+    return bim
+end
+
+--- Queues book filepaths for fast metadata-only background indexing.
+-- Splits large queues into batches of at most `INDEX_BATCH_SIZE` and waits for
+-- `BookInfoManager:isExtractingInBackground()` to clear between chunks so
+-- KOReader's 300s subprocess watchdog never terminates large runs.
+-- @tparam table filepaths array of absolute book file paths
+-- @treturn number count of newly queued files
+-- @treturn string|nil error code ("unavailable")
+function LightHouse:indexBookFiles(filepaths)
+    if type(filepaths) ~= "table" or #filepaths == 0 then return 0 end
+    local bim = loadBookInfoManager()
+    if not bim then return 0, "unavailable" end
+
+    local existing_pending = {}
+    self._pending_index_queue = self._pending_index_queue or {}
+    for idx = 1, #self._pending_index_queue do
+        local item = self._pending_index_queue[idx]
+        if type(item) == "table" and type(item.filepath) == "string" then
+            existing_pending[item.filepath] = true
+        end
+    end
+
+    local queued = 0
+    for idx = 1, #filepaths do
+        local p = filepaths[idx]
+        if type(p) == "string" and p ~= "" and not existing_pending[p] then
+            existing_pending[p] = true
+            self._pending_index_queue[#self._pending_index_queue + 1] = {
+                filepath = p,
+                cover_specs = false,
+            }
+            queued = queued + 1
+        end
+    end
+    if queued == 0 then return 0 end
+
+    local busy_retries = 0
+    local function dispatchNextBatch()
+        if not self._pending_index_queue or #self._pending_index_queue == 0 then
+            self._index_pump_scheduled = false
+            return
+        end
+        local active_bim = loadBookInfoManager()
+        if not active_bim then
+            self._pending_index_queue = {}
+            self._index_pump_scheduled = false
+            return
+        end
+        local busy = type(active_bim.isExtractingInBackground) == "function"
+            and active_bim:isExtractingInBackground() == true
+        if busy then
+            busy_retries = busy_retries + 1
+            if busy_retries > INDEX_BUSY_MAX_RETRIES then
+                self._index_pump_scheduled = false
+                return
+            end
+            self._index_pump_scheduled = true
+            UIManager:scheduleIn(5, dispatchNextBatch)
+            return
+        end
+        busy_retries = 0
+        local chunk = {}
+        local rest = {}
+        for idx = 1, #self._pending_index_queue do
+            if idx <= INDEX_BATCH_SIZE then
+                chunk[#chunk + 1] = self._pending_index_queue[idx]
+            else
+                rest[#rest + 1] = self._pending_index_queue[idx]
+            end
+        end
+        self._pending_index_queue = rest
+        pcall(function() active_bim:extractInBackground(chunk) end)
+        if #self._pending_index_queue > 0 then
+            self._index_pump_scheduled = true
+            UIManager:scheduleIn(5, dispatchNextBatch)
+        else
+            self._index_pump_scheduled = false
+        end
+    end
+
+    if not self._index_pump_scheduled then
+        dispatchNextBatch()
+    end
+    return queued
+end
+
+--- Finds supported local books missing metadata in KOReader's bookinfo DB.
+-- Scans `download_dir`, `/mnt/us/books`, and `/mnt/us/documents` (deduplicated,
+-- skipping `.sdr` sidecars and hidden/AppleDouble entries).
+-- @treturn table|nil sorted array of unindexed filepaths
+-- @treturn string|nil error code ("unavailable")
+function LightHouse:findUnindexedLocalBooks()
+    local bim = loadBookInfoManager()
+    if not bim or type(bim.getBookInfo) ~= "function" then
+        return nil, "unavailable"
+    end
+
+    local roots = {}
+    local seen_roots = {}
+    local function addRoot(dir)
+        if type(dir) ~= "string" or dir == "" then return end
+        local clean = dir:gsub("\\", "/"):gsub("/+$", "")
+        if clean ~= "" and not seen_roots[clean] then
+            seen_roots[clean] = true
+            roots[#roots + 1] = clean
+        end
+    end
+    addRoot(self:getDownloadDir())
+    for idx = 1, #Sidecar.DEVICE_DIRS do
+        addRoot(Sidecar.DEVICE_DIRS[idx])
+    end
+
+    local missing = {}
+    local seen_files = {}
+    local function walk(dir, depth)
+        if depth > 8 then return end
+        local names = Sidecar.io.list(dir)
+        if type(names) ~= "table" then return end
+        table.sort(names)
+        for idx = 1, #names do
+            local name = names[idx]
+            if type(name) == "string" and name ~= "." and name ~= ".."
+                and not name:match("^%.") and not name:match("^%._")
+                and not name:match("%.sdr$") then
+                local filepath = dir .. "/" .. name
+                local mode = Sidecar.io.attributes(filepath, "mode")
+                if mode == "directory" then
+                    walk(filepath, depth + 1)
+                elseif mode == "file" and not seen_files[filepath] then
+                    local ext = name:match("%.([%w_]+)$")
+                    if ext and LOCAL_INDEX_BOOK_EXTS[ext:lower()] then
+                        seen_files[filepath] = true
+                        local ok_info, info = pcall(function()
+                            return bim:getBookInfo(filepath, false)
+                        end)
+                        if not ok_info or type(info) ~= "table"
+                            or (info.has_meta ~= "Y" and not info.ignore_meta and not info.unsupported) then
+                            missing[#missing + 1] = filepath
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    for idx = 1, #roots do
+        local root = roots[idx]
+        if Sidecar.io.attributes(root, "mode") == "directory" then
+            walk(root, 0)
+        end
+    end
+    return missing
+end
+
+--- 1-tap menu action scanning unindexed local books and indexing metadata in background.
+-- @treturn number count of books queued for background extraction
+function LightHouse:indexLocalBooks()
+    local missing, err = self:withSpinner(_("Scanning for unindexed books…"), function()
+        return self:findUnindexedLocalBooks()
+    end)
+    if not missing then
+        if err == "unavailable" then
+            notice(_("CoverBrowser plugin is disabled, so book metadata indexing is unavailable."), 4)
+        else
+            notice(_("Could not scan local books."), 4)
+        end
+        return 0
+    end
+    if #missing == 0 then
+        notice(_("All local books are already indexed."), 3)
+        return 0
+    end
+    local queued, q_err = self:indexBookFiles(missing)
+    if queued == 0 then
+        notice(q_err == "unavailable"
+            and _("CoverBrowser plugin is disabled, so book metadata indexing is unavailable.")
+            or _("Could not start background indexing."), 4)
+        return 0
+    end
+    notice(T(_("Indexing %1 unindexed book(s) in the background…"), tostring(queued)), 4)
+    return queued
 end
 
 -- Pure helpers exposed for the repository's Lua test harness. They stay plain
