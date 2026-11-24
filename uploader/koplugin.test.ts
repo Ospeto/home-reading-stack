@@ -11521,6 +11521,10 @@ local opds_feed_xml = [[<?xml version="1.0" encoding="utf-8"?>
   </entry>
 </feed>]]
 
+local ota_restarted = 0
+ui_mgr.restartKOReader = function() ota_restarted = ota_restarted + 1 end
+local remote_manifest_json = '{"version":"1.14.0","downloadPath":"/api/koplugin/download"}'
+
 package.preload["json"] = function()
   return {
     encode = function() return '{"ok":true}' end,
@@ -11529,6 +11533,9 @@ package.preload["json"] = function()
         return {
           { bookId = 701, document = "m1", percentage = 0.2, timestamp = 1700000000, title = "Active Remote", authors = "Remote Auth", device = "PW" },
         }
+      end
+      if type(raw) == "string" and raw:find('"version":"2.0.0"', 1, true) then
+        return { version = "2.0.0", downloadPath = "/api/koplugin/download" }
       end
       if type(raw) == "string" and raw:find('"version":"1.14.0"', 1, true) then
         return { version = "1.14.0", downloadPath = "/api/koplugin/download" }
@@ -11552,8 +11559,15 @@ package.preload["socket.http"] = function()
         return 1, 200, { ["content-type"] = "application/json" }
       end
       if url:match("/api/koplugin/version") then
-        if request.sink then request.sink('{"version":"1.14.0","downloadPath":"/api/koplugin/download"}'); request.sink(nil) end
+        if request.sink then request.sink(remote_manifest_json); request.sink(nil) end
         return 1, 200, { ["content-type"] = "application/json" }
+      end
+      if url:match("/api/koplugin/download") then
+        local f = assert(io.open(workdir .. "/ota_update.zip", "rb"))
+        local zip_bytes = f:read("*a")
+        f:close()
+        if request.sink then request.sink(zip_bytes); request.sink(nil) end
+        return 1, 200, { ["content-type"] = "application/zip", ["content-length"] = tostring(#zip_bytes) }
       end
       if url:match("/api/books/%d+/download/epub") then
         local payload = "PK\3\4" .. string.rep("E", 512) .. "-" .. url
@@ -11732,15 +11746,50 @@ cancel_after_calls = 3 -- pause(1), vol1 info(2), vol2 info(3 -> false)
 shown = {}
 LightHouse:downloadSeriesBooks("Spice and Wolf")
 local ds_confirm = shown[#shown]
-if ds_confirm and ds_confirm.ok_cb then ds_confirm.ok_cb() end
+local ds_has_ok_callback = type(ds_confirm and ds_confirm.ok_callback) == "function"
+if ds_confirm and ds_confirm.ok_callback then ds_confirm.ok_callback() end
 local ds_cancel_msg = shown[#shown] and shown[#shown].text or ""
 local s1_ok = io.open(dl_dir .. "/Spice and Wolf 01 - Spice and Wolf, Vol. 1 - Isuna Hasekura.epub", "rb") ~= nil
 local s2_ok = io.open(dl_dir .. "/Spice and Wolf 02 - Spice and Wolf, Vol. 2 - Isuna Hasekura.epub", "rb") ~= nil
 print("series_cancel=" .. tostring(
-  s1_ok and not s2_ok
+  ds_has_ok_callback and s1_ok and not s2_ok
   and ds_cancel_msg:find("Cancelled after downloading 1 of 2 volume", 1, true) ~= nil
   and trapper_events[2]:find("Downloading 1/2: Spice and Wolf, Vol. 1", 1, true) ~= nil
   and trapper_events[#trapper_events] == "CLEAR"
+))
+
+-- 5. Verify OTA ConfirmBox uses KOReader's canonical ok_callback & shows step progress bar
+local ota_target_dir = workdir .. "/ota_target"
+os.execute('mkdir -p "' .. ota_target_dir .. '"')
+LightHouse.path = ota_target_dir
+remote_manifest_json = '{"version":"2.0.0","downloadPath":"/api/koplugin/download"}'
+shown = {}
+LightHouse:checkForPluginUpdate()
+local ota_confirm = shown[#shown]
+local ota_has_ok_callback = type(ota_confirm and ota_confirm.ok_callback) == "function"
+shown = {}
+if ota_confirm and ota_confirm.ok_callback then ota_confirm.ok_callback() end
+local saw_25, saw_55, saw_85, saw_100 = false, false, false, false
+for i = 1, #shown do
+  local txt = tostring(shown[i] and shown[i].text or "")
+  if txt:find("Step 1/4", 1, true) and txt:find("25%", 1, true) then saw_25 = true end
+  if txt:find("Step 2/4", 1, true) and txt:find("55%", 1, true) then saw_55 = true end
+  if txt:find("Step 3/4", 1, true) and txt:find("85%", 1, true) then saw_85 = true end
+  if txt:find("Step 4/4", 1, true) and txt:find("100%", 1, true) then saw_100 = true end
+end
+local ota_restart = shown[#shown]
+local restart_has_ok_callback = type(ota_restart and ota_restart.ok_callback) == "function"
+if ota_restart and ota_restart.ok_callback then ota_restart.ok_callback() end
+local ota_main_written = io.open(ota_target_dir .. "/main.lua", "rb") ~= nil
+local ota_queue_written = io.open(ota_target_dir .. "/lighthouse_queue.lua", "rb") ~= nil
+shown = {}
+LightHouse:checkForPluginUpdate()
+local post_ota_msg = tostring(shown[#shown] and shown[#shown].text or "")
+print("ota_progress_ok=" .. tostring(
+  ota_has_ok_callback and saw_25 and saw_55 and saw_85 and saw_100
+  and restart_has_ok_callback and ota_restarted == 1
+  and ota_main_written and ota_queue_written
+  and post_ota_msg:find("up to date", 1, true) ~= nil
 ))
 `);
 
@@ -11772,6 +11821,7 @@ describe("plugin v1.14.0 modularization, batch Trapper progress/cancel, and Down
     fs.mkdirSync(path.join(workdir, "downloads"), { recursive: true });
     const zipPath = path.join(workdir, "lighthouse.koplugin");
     fs.writeFileSync(zipPath, zip);
+    fs.writeFileSync(path.join(workdir, "ota_update.zip"), zip);
     const pluginsDir = path.join(workdir, "plugins");
     fs.mkdirSync(pluginsDir, { recursive: true });
     const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
@@ -11810,5 +11860,6 @@ describe("plugin v1.14.0 modularization, batch Trapper progress/cancel, and Down
     expect(out.queue_mid_cancel).toBe("true");
     expect(out.queue_resume).toBe("true");
     expect(out.series_cancel).toBe("true");
+    expect(out.ota_progress_ok).toBe("true");
   });
 });

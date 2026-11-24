@@ -180,6 +180,18 @@ end
 -- @tparam table options constructor options
 -- @treturn table the widget
 local function squareWidget(class, options)
+    if type(options) == "table" then
+        local ok_fn = options.ok_callback or options.ok_cb
+        if ok_fn then
+            options.ok_callback = ok_fn
+            options.ok_cb = ok_fn
+        end
+        local cancel_fn = options.cancel_callback or options.cancel_cb
+        if cancel_fn then
+            options.cancel_callback = cancel_fn
+            options.cancel_cb = cancel_fn
+        end
+    end
     return Ui.square(function() return class:new(options) end)
 end
 
@@ -2841,7 +2853,7 @@ function LightHouse:showDownloadQueue()
                 UIManager:show(squareWidget(ConfirmBox, {
                     text = T(_("Clear %1 book(s) from the download queue?"), tostring(#queued)),
                     ok_text = _("Clear queue"),
-                    ok_cb = function()
+                    ok_callback = function()
                         Queue.clear(G_reader_settings)
                         self:dismissWidget(queue_menu)
                         queue_menu = nil
@@ -2913,9 +2925,9 @@ function LightHouse:showDownloadQueue()
                     UIManager:show(squareWidget(ConfirmBox, {
                         text = label,
                         ok_text = _("Download now"),
-                        ok_cb = downloadNow,
+                        ok_callback = downloadNow,
                         cancel_text = _("Remove from queue"),
-                        cancel_cb = removeItem,
+                        cancel_callback = removeItem,
                     }))
                 end
             end,
@@ -3022,7 +3034,7 @@ function LightHouse:downloadSeriesBooks(series_name, loaded_entries)
     UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
         text = T(_("Download %1 missing volume(s) of “%2”?"), tostring(#missing), target_series),
         ok_text = _("Download all"),
-        ok_cb = function()
+        ok_callback = function()
             self:runBatchDownloads(batch_items, nil, function(res)
                 self:forgetShelf()
                 self:forgetCatalogCaches()
@@ -4398,7 +4410,7 @@ function LightHouse:openHighlight(group, annotation)
             text = table.concat(lines, "\n\n"),
             cancel_text = _("Close"),
             ok_text = page and T(_("Open at p. %1"), page) or _("Open book"),
-            ok_cb = function()
+            ok_callback = function()
                 local opened = self:openBookFile(book_path)
                 if opened and page then self:jumpToPage(page) end
             end,
@@ -4658,7 +4670,7 @@ function LightHouse:downloadEntry(entry)
         UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
             text = T(_("“%1” is already in the download folder. Download it again?"), buildFilename(entry)),
             ok_text = _("Download again"),
-            ok_cb = function() self:startDownload(entry, filepath) end,
+            ok_callback = function() self:startDownload(entry, filepath) end,
         }))
         return
     end
@@ -4703,7 +4715,7 @@ function LightHouse:startDownload(entry, filepath)
         text = T(_("Saved to:\n%1"), filepath),
         cancel_text = _("Close"),
         ok_text = _("Open now"),
-        ok_cb = function()
+        ok_callback = function()
             local ReaderUI = require("apps/reader/readerui")
             ReaderUI:showReader(filepath)
         end,
@@ -5015,7 +5027,7 @@ function LightHouse:syncMissingActiveBooks()
     UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
         text = T(_("Download %1 active book(s) missing on this device?"), tostring(#missing)),
         ok_text = _("Download all"),
-        ok_cb = function()
+        ok_callback = function()
             self:runBatchDownloads(batch_items, nil, function(res)
                 self:forgetShelf()
                 self:forgetCatalogCaches()
@@ -5128,7 +5140,7 @@ function LightHouse:deleteLocalBook(item, on_done)
     UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
         text = T(_("Remove local copy of “%1” (%2)?\nYour book and progress stay safe on LightHouse."), title, size_text),
         ok_text = _("Remove local file"),
-        ok_cb = function()
+        ok_callback = function()
             local removed, err = os.remove(book_path)
             if not removed then
                 notice(T(_("Could not remove file: %1"), tostring(err or "error")))
@@ -5385,7 +5397,7 @@ function LightHouse:maybeSuggestNextVolume(book_path, record)
         UIManager:show(squareWidget(ConfirmBox, {
             text = T(_("Finished “%1”.\n“%2” is already on your Kindle. Open it now?"), cur_title, local_next_title or _("Next volume")),
             ok_text = _("Open now"),
-            ok_cb = function() self:openBookFile(local_next_path) end,
+            ok_callback = function() self:openBookFile(local_next_path) end,
         }))
         return true, "local"
     end
@@ -5418,7 +5430,7 @@ function LightHouse:maybeSuggestNextVolume(book_path, record)
         UIManager:show(squareWidget(ConfirmBox, {
             text = T(_("Finished “%1”.\n“%2” is already on your Kindle. Open it now?"), cur_title, next_title),
             ok_text = _("Open now"),
-            ok_cb = function() self:openBookFile(existing_path) end,
+            ok_callback = function() self:openBookFile(existing_path) end,
         }))
         return true, "local"
     end
@@ -5426,7 +5438,7 @@ function LightHouse:maybeSuggestNextVolume(book_path, record)
     UIManager:show(squareWidget(ConfirmBox, {
         text = T(_("Finished “%1”.\nDownload “%2” from LightHouse?"), cur_title, next_title),
         ok_text = _("Download"),
-        ok_cb = function() self:downloadEntry(next_entry) end,
+        ok_callback = function() self:downloadEntry(next_entry) end,
     }))
     return true, "download"
 end
@@ -5470,34 +5482,71 @@ function LightHouse:checkForPluginUpdate()
     UIManager:show(squareWidget(ConfirmBox, {
         text = T(_("Update LightHouse from v%1 to v%2?"), current_ver, remote_ver),
         ok_text = _("Update now"),
-        ok_cb = function()
-            local zip_bytes, dl_err = self:withSpinner(T(_("Downloading LightHouse v%1…"), remote_ver), function()
-                return Client.get(config, dl_path)
-            end)
+        ok_callback = function()
+            local progress_msg = nil
+            local function closeOtaProgress()
+                if progress_msg then
+                    pcall(function() UIManager:close(progress_msg) end)
+                    progress_msg = nil
+                end
+            end
+            local function showOtaProgress(step_num, total_steps, pct, detail)
+                closeOtaProgress()
+                local filled = math.max(0, math.min(10, math.floor((pct or 0) / 10 + 0.5)))
+                local bar = string.rep("#", filled) .. string.rep("-", 10 - filled)
+                local text = T(
+                    _("Updating LightHouse to v%1…\n[%2] %3%\nStep %4/%5: %6"),
+                    remote_ver,
+                    bar,
+                    tostring(pct),
+                    tostring(step_num),
+                    tostring(total_steps),
+                    Status.str(detail)
+                )
+                progress_msg = squareWidget(InfoMessage, { text = text, dismissable = false })
+                UIManager:show(progress_msg)
+                UIManager:forceRePaint()
+            end
+
+            showOtaProgress(1, 4, 25, _("Downloading plugin archive…"))
+            local zip_bytes, dl_err = Client.get(config, dl_path)
             if not zip_bytes then
+                closeOtaProgress()
+                logger.warn("LightHouse: OTA download failed:", tostring(dl_err))
                 notice(errorHeadline(dl_err) .. "\n" .. describeError(dl_err), 5)
                 return
             end
 
+            showOtaProgress(2, 4, 55, _("Verifying archive & CRC-32…"))
             local entries, unpack_err = Ota.unpackStoredZip(zip_bytes)
             if not entries then
+                closeOtaProgress()
+                logger.warn("LightHouse: OTA unpack failed:", tostring(unpack_err))
                 notice(T(_("Update failed: %1"), tostring(unpack_err or "invalid_zip")), 5)
                 return
             end
 
+            showOtaProgress(3, 4, 85, T(_("Installing %1 files…"), tostring(#entries)))
             local plugin_dir = (type(self.path) == "string" and self.path ~= "")
                 and self.path
                 or (DataStorage:getDataDir() .. "/plugins/lighthouse.koplugin")
             local installed, install_err = Ota.installEntries(plugin_dir, entries)
             if not installed then
+                closeOtaProgress()
+                logger.warn("LightHouse: OTA install failed:", tostring(install_err))
                 notice(T(_("Update install failed: %1"), tostring(install_err or "write_error")), 5)
                 return
             end
 
+            showOtaProgress(4, 4, 100, _("Update verified & installed."))
+            config.plugin_version = remote_ver
+            closeOtaProgress()
+
             UIManager:show(squareWidget(ConfirmBox, {
-                text = T(_("Updated LightHouse to v%1. Restart KOReader now?"), remote_ver),
+                text = T(_("Updated LightHouse to v%1 (%2 files installed).\nRestart KOReader now?"),
+                    remote_ver, tostring(#entries)),
                 ok_text = _("Restart now"),
-                ok_cb = function()
+                ok_callback = function()
                     if type(UIManager.restartKOReader) == "function" then
                         UIManager:restartKOReader()
                     end
@@ -5637,7 +5686,7 @@ function LightHouse:runDiagnostics()
         text = table.concat(lines, "\n"),
         cancel_text = _("Close"),
         ok_text = _("Clear cover cache"),
-        ok_cb = function()
+        ok_callback = function()
             self:clearCoverCache()
         end,
     }))
