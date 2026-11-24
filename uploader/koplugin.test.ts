@@ -116,6 +116,7 @@ describe("KOReader plugin template", () => {
     expect(names).toContain("lighthouse_status.lua");
     expect(names).toContain("lighthouse_sidecar.lua");
     expect(names).toContain("lighthouse_stats.lua");
+    expect(names).toContain("lighthouse_ota.lua");
   });
 
   it("carries no credentials in any committed template file", () => {
@@ -706,6 +707,30 @@ describe("GET /api/koplugin/download", () => {
 
   const lanServer = () => ({ requestIP: () => ({ address: "192.168.31.15" }) });
   const tunnelServer = () => ({ requestIP: () => ({ address: "127.0.0.1" }) });
+
+  it("serves GET and HEAD /api/koplugin/version with current plugin version and no-store cache header", async () => {
+    const getReq = new Request("http://192.168.31.15:8086/api/koplugin/version", {
+      headers: { host: "192.168.31.15:8086" },
+    });
+    const getRes = await handleRequest(getReq, lanServer());
+    expect(getRes.status).toBe(200);
+    expect(getRes.headers.get("content-type") || "").toContain("application/json");
+    expect(getRes.headers.get("cache-control") || "").toContain("no-store");
+    const body = await getRes.json();
+    expect(body).toEqual({
+      version: KOPLUGIN_VERSION,
+      downloadPath: "/api/koplugin/download",
+    });
+
+    const headReq = new Request("http://192.168.31.15:8086/api/koplugin/version", {
+      method: "HEAD",
+      headers: { host: "192.168.31.15:8086" },
+    });
+    const headRes = await handleRequest(headReq, lanServer());
+    expect(headRes.status).toBe(200);
+    expect(headRes.headers.get("content-type") || "").toContain("application/json");
+    expect(await headRes.text()).toBe("");
+  });
 
   it("serves a pre-configured archive to a LAN request without credentials", async () => {
     const req = new Request("http://192.168.31.15:8086/api/koplugin/download", {
@@ -9642,5 +9667,446 @@ describe("plugin v1.9.0 auto highlight sync, active book sync, and storage clean
     expect(out.storage_rows).toBe("1:Local Book");
     expect(out.deleted_epub).toBe("true");
     expect(out.purged_sdr).toBe("true");
+  });
+});
+
+describe("lighthouse_ota.lua pure OTA unpacker and version comparison", () => {
+  it("compares semantic versions numerically, extracts valid buildStoredZip archives, and rejects traversal or invalid Lua before writing", () => {
+    if (!LUA_BINARY) return;
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-ota-"));
+    const installDir = path.join(workdir, "installed");
+    fs.mkdirSync(installDir, { recursive: true });
+
+    const goodZip = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "ota-key",
+      generatedAt: "2026-11-24T00:00:00.000Z",
+    }).zip;
+    fs.writeFileSync(path.join(workdir, "good.zip"), goodZip);
+
+    const traversalZip = buildStoredZip([
+      { name: "lighthouse.koplugin/main.lua", data: Buffer.from("return {}", "utf8") },
+      { name: "lighthouse.koplugin/_meta.lua", data: Buffer.from("return {}", "utf8") },
+      { name: "lighthouse.koplugin/lighthouse_config.lua", data: Buffer.from("return {}", "utf8") },
+      { name: "lighthouse.koplugin/../evil.lua", data: Buffer.from("return {}", "utf8") },
+    ]);
+    fs.writeFileSync(path.join(workdir, "traversal.zip"), traversalZip);
+
+    const brokenLuaZip = buildStoredZip([
+      { name: "lighthouse.koplugin/main.lua", data: Buffer.from("function broken( {", "utf8") },
+      { name: "lighthouse.koplugin/_meta.lua", data: Buffer.from("return {}", "utf8") },
+      { name: "lighthouse.koplugin/lighthouse_config.lua", data: Buffer.from("return {}", "utf8") },
+    ]);
+    fs.writeFileSync(path.join(workdir, "broken.zip"), brokenLuaZip);
+
+    const harness = String.raw`
+local ota_path = assert(arg[1])
+local workdir = assert(arg[2])
+local install_dir = assert(arg[3])
+local Ota = assert(loadfile(ota_path))()
+
+print("cmp_19_110=" .. tostring(Ota.compareVersions("1.9.0", "1.10.0")))
+print("cmp_same=" .. tostring(Ota.compareVersions("1.10.0", "1.10.0")))
+print("cmp_20_110=" .. tostring(Ota.compareVersions("2.0.0", "1.10.0")))
+print("avail_up=" .. tostring(Ota.isUpdateAvailable("1.9.0", "1.10.0")))
+print("avail_same=" .. tostring(Ota.isUpdateAvailable("1.10.0", "1.10.0")))
+
+local function read_all(p)
+  local f = assert(io.open(p, "rb"))
+  local d = f:read("*a")
+  f:close()
+  return d
+end
+
+local entries, err = Ota.unpackStoredZip(read_all(workdir .. "/good.zip"))
+assert(entries and not err, tostring(err))
+print("good_count=" .. tostring(#entries))
+
+local bad_t, err_t = Ota.unpackStoredZip(read_all(workdir .. "/traversal.zip"))
+print("traversal_err=" .. tostring(bad_t == nil) .. ":" .. tostring(err_t))
+
+local bad_s, err_s = Ota.unpackStoredZip(read_all(workdir .. "/broken.zip"))
+print("syntax_err=" .. tostring(bad_s == nil) .. ":" .. tostring(err_s))
+
+local installed, inst_err = Ota.installEntries(install_dir, entries)
+assert(installed and not inst_err, tostring(inst_err))
+print("installed_main=" .. tostring(io.open(install_dir .. "/main.lua", "rb") ~= nil))
+print("installed_ota=" .. tostring(io.open(install_dir .. "/lighthouse_ota.lua", "rb") ~= nil))
+print("no_tmp_left=" .. tostring(io.open(install_dir .. "/main.lua.ota_tmp", "rb") == nil))
+`;
+    const harnessPath = path.join(workdir, "ota_test.lua");
+    fs.writeFileSync(harnessPath, harness);
+    const res = spawnSync(
+      LUA_BINARY,
+      [harnessPath, path.join(KOPLUGIN_TEMPLATE_DIR, "lighthouse_ota.lua"), workdir, installDir],
+      { encoding: "utf8" },
+    );
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+    expect(out.cmp_19_110).toBe("-1");
+    expect(out.cmp_same).toBe("0");
+    expect(out.cmp_20_110).toBe("1");
+    expect(out.avail_up).toBe("true");
+    expect(out.avail_same).toBe("false");
+    expect(Number(out.good_count)).toBeGreaterThanOrEqual(13);
+    expect(out.traversal_err).toBe("true:unsafe_archive_path");
+    expect(out.syntax_err).toBe("true:lua_syntax_error");
+    expect(out.installed_main).toBe("true");
+    expect(out.installed_ota).toBe("true");
+    expect(out.no_tmp_left).toBe("true");
+  });
+});
+
+const V110_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local workdir = assert(arg[2], "workdir required")
+local books_dir = workdir .. "/books"
+local dl_dir = workdir .. "/downloads"
+
+local opened_paths = {}
+local restarted_koreader = 0
+local ui_mgr = require("ui/uimanager")
+ui_mgr.nextTick = function(_, fn) fn() end
+ui_mgr.scheduleIn = function(_, _, fn) fn() end
+ui_mgr.restartKOReader = function() restarted_koreader = restarted_koreader + 1 end
+
+package.preload["apps/reader/readerui"] = function()
+  return {
+    instance = {},
+    showReader = function(_, p) opened_paths[#opened_paths + 1] = p end,
+  }
+end
+
+local is_online = true
+local net_mgr = require("ui/network/manager")
+net_mgr.isOnline = function() return is_online end
+
+local settings_store = {}
+_G.G_reader_settings = {
+  readSetting = function(_, k) return settings_store[k] end,
+  saveSetting = function(_, k, v) settings_store[k] = v end,
+  nilOrTrue = function(_, k) return settings_store[k] ~= false end,
+}
+
+package.preload["ltn12"] = function()
+  return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
+    sink = {
+      table = function(chunks)
+        chunks = chunks or {}
+        return function(chunk)
+          if chunk then chunks[#chunks + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function() return function() return 1 end end,
+    },
+  }
+end
+
+local ota_zip_f = assert(io.open(workdir .. "/ota_200.zip", "rb"))
+local ota_zip_bytes = ota_zip_f:read("*a")
+ota_zip_f:close()
+
+local remote_version = "2.0.0"
+local opds_has_vol2_remote_only = false
+
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      local url = tostring(request and request.url or "")
+      local resp = "{}"
+      if url:find("/api/koplugin/version", 1, true) then
+        resp = '{"version":"' .. remote_version .. '","downloadPath":"/api/koplugin/download"}'
+      elseif url:find("/api/koplugin/download", 1, true) then
+        resp = ota_zip_bytes
+      elseif url:find("/api/opds", 1, true) then
+        if opds_has_vol2_remote_only then
+          resp = [==[<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:lighthouse="http://lighthouse.local/ns">
+  <title>LightHouse</title>
+  <entry>
+    <id>urn:calibre:book:51</id>
+    <title>Overlord, Vol. 1</title>
+    <author><name>Kugane Maruyama</name></author>
+    <category term="Overlord" label="Volume 1"/>
+    <link rel="http://opds-spec.org/acquisition" href="/api/books/51/download/epub" type="application/epub+zip"/>
+  </entry>
+  <entry>
+    <id>urn:calibre:book:52</id>
+    <title>Overlord, Vol. 2</title>
+    <author><name>Kugane Maruyama</name></author>
+    <category term="Overlord" label="Volume 2"/>
+    <link rel="http://opds-spec.org/acquisition" href="/api/books/52/download/epub" type="application/epub+zip"/>
+  </entry>
+</feed>]==]
+        else
+          resp = [==[<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:lighthouse="http://lighthouse.local/ns">
+  <title>LightHouse</title>
+  <entry>
+    <id>urn:calibre:book:21</id>
+    <title>Dune, Vol. 1</title>
+    <author><name>Frank Herbert</name></author>
+    <category term="Dune" label="Volume 1"/>
+    <link rel="http://opds-spec.org/acquisition" href="/api/books/21/download/epub" type="application/epub+zip"/>
+  </entry>
+  <entry>
+    <id>urn:calibre:book:22</id>
+    <title>Dune, Vol. 2</title>
+    <author><name>Frank Herbert</name></author>
+    <category term="Dune" label="Volume 2"/>
+    <link rel="http://opds-spec.org/acquisition" href="/api/books/22/download/epub" type="application/epub+zip"/>
+  </entry>
+</feed>]==]
+        end
+      elseif url:find("/api/books/52/download/epub", 1, true) then
+        resp = string.rep("E", 512)
+      end
+      if request and request.sink then
+        request.sink(resp)
+        request.sink(nil)
+      end
+      return 1, 200, {}
+    end,
+  }
+end
+
+package.preload["json"] = function()
+  return {
+    encode = function() return '{"ok":true}' end,
+    decode = function(raw)
+      if type(raw) == "string" then
+        local ver = raw:match('"version":"([^"]+)"')
+        if ver then return { version = ver, downloadPath = "/api/koplugin/download" } end
+      end
+      return {}
+    end,
+  }
+end
+
+local fake_files, fake_dirs = {}, {}
+local function make_file(p, bytes) fake_files[p] = bytes end
+
+-- 1. Spice sibling Vol 1 + Vol 2 on device (offline test)
+local spice_v1 = books_dir .. "/Spice and Wolf, Vol. 1.epub"
+local spice_v2 = books_dir .. "/Spice and Wolf, Vol. 2.epub"
+local unfin = books_dir .. "/Unfinished, Vol. 1.epub"
+make_file(spice_v1, "EPUB1")
+make_file(spice_v2, "EPUB2")
+make_file(unfin, "EPUB3")
+make_file(spice_v1 .. ".sdr/metadata.epub.lua", [==[
+return {
+    ["annotations"] = {},
+    ["doc_props"] = { ["authors"] = "Isuna Hasekura", ["title"] = "Spice and Wolf, Vol. 1", ["series"] = "Spice and Wolf" },
+    ["percent_finished"] = 1.0,
+}
+]==])
+make_file(unfin .. ".sdr/metadata.epub.lua", [==[
+return {
+    ["annotations"] = {},
+    ["doc_props"] = { ["authors"] = "Isuna Hasekura", ["title"] = "Unfinished, Vol. 1", ["series"] = "Spice and Wolf" },
+    ["percent_finished"] = 0.40,
+}
+]==])
+fake_dirs[books_dir] = { "Spice and Wolf, Vol. 1.epub", "Spice and Wolf, Vol. 2.epub", "Unfinished, Vol. 1.epub" }
+
+-- 2. Dune Vol 1 finished elsewhere; Dune Vol 2 already in download_dir
+local dune_v1 = workdir .. "/other/Dune, Vol. 1.epub"
+local dune_v2_dl = dl_dir .. "/Dune 02 - Dune, Vol. 2 - Frank Herbert.epub"
+make_file(dune_v1, "DUNE1")
+make_file(dune_v2_dl, "DUNE2")
+make_file(dune_v1 .. ".sdr/metadata.epub.lua", [==[
+return {
+    ["annotations"] = {},
+    ["doc_props"] = { ["authors"] = "Frank Herbert", ["title"] = "Dune, Vol. 1", ["series"] = "Dune" },
+    ["percent_finished"] = 1.0,
+}
+]==])
+fake_dirs[workdir .. "/other"] = { "Dune, Vol. 1.epub" }
+
+-- 3. Overlord Vol 1 finished; Vol 2 only on LightHouse server
+local ov_v1 = workdir .. "/remote/Overlord, Vol. 1.epub"
+make_file(ov_v1, "OV1")
+make_file(ov_v1 .. ".sdr/metadata.epub.lua", [==[
+return {
+    ["annotations"] = {},
+    ["doc_props"] = { ["authors"] = "Kugane Maruyama", ["title"] = "Overlord, Vol. 1", ["series"] = "Overlord" },
+    ["percent_finished"] = 1.0,
+}
+]==])
+fake_dirs[workdir .. "/remote"] = { "Overlord, Vol. 1.epub" }
+
+package.preload["libs/libkoreader-lfs"] = function()
+  return {
+    attributes = function(target, field)
+      if fake_files[target] ~= nil then
+        return field == "size" and #fake_files[target] or "file"
+      end
+      if fake_dirs[target] ~= nil then return "directory" end
+      local h = io.open(target, "rb")
+      if h then
+        local d = h:read("*a") or ""
+        h:close()
+        return field == "size" and #d or "file"
+      end
+      return nil
+    end,
+    mkdir = function(d) fake_dirs[d] = fake_dirs[d] or {}; return true end,
+  }
+end
+
+local Sidecar = require("lighthouse_sidecar")
+Sidecar.io.open = function(p)
+  local data = fake_files[p]
+  if not data then return nil end
+  local done = false
+  return { read = function() if done then return nil end; done = true; return data end, close = function() end }
+end
+Sidecar.io.loadfile = function(p)
+  local data = fake_files[p]
+  if not data then return nil end
+  return loadstring(data, p)
+end
+Sidecar.io.list = function(d) return fake_dirs[d] end
+Sidecar.io.attributes = function(p)
+  if fake_files[p] ~= nil then return "file" end
+  if fake_dirs[p] ~= nil then return "directory" end
+  return nil
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+LightHouse.path = plugin_root
+G_reader_settings:saveSetting("download_dir", dl_dir)
+G_reader_settings:saveSetting("lighthouse_auto_sync_highlights", false)
+
+-- Unfinished book -> no prompt
+shown = {}
+LightHouse.ui = { document = { file = unfin }, menu = { registerToMainMenu = function() end } }
+LightHouse:onCloseDocument()
+print("unfin_prompts=" .. tostring(#shown))
+
+-- Local sibling Vol 2 while OFFLINE -> prompts Open now & opens spice_v2
+is_online = false
+shown = {}
+LightHouse.ui = { document = { file = spice_v1 }, menu = { registerToMainMenu = function() end } }
+LightHouse:onCloseDocument()
+local w1 = shown[#shown]
+print("sibling_prompt_text=" .. tostring(w1 and w1.text):gsub("\n", "|") .. "::" .. tostring(w1 and w1.ok_text))
+if w1 and w1.ok_cb then w1.ok_cb() end
+print("sibling_opened=" .. tostring(opened_paths[1] == spice_v2))
+
+-- Closing same finished book again -> deduped (0 new prompts)
+shown = {}
+LightHouse:onCloseDocument()
+print("sibling_deduped=" .. tostring(#shown))
+
+-- Online: Dune Vol 2 already in download_dir -> Open now (NOT download)
+is_online = true
+shown = {}
+LightHouse.ui = { document = { file = dune_v1 }, menu = { registerToMainMenu = function() end } }
+LightHouse:onCloseDocument()
+local w2 = shown[#shown]
+print("dl_existing_ok_text=" .. tostring(w2 and w2.ok_text))
+if w2 and w2.ok_cb then w2.ok_cb() end
+print("dl_existing_opened=" .. tostring(opened_paths[2] == dune_v2_dl))
+
+-- Online: Overlord Vol 2 NOT on device -> Download prompt & downloads EPUB
+opds_has_vol2_remote_only = true
+shown = {}
+LightHouse.ui = { document = { file = ov_v1 }, menu = { registerToMainMenu = function() end } }
+LightHouse:onCloseDocument()
+local w3 = shown[#shown]
+print("remote_ok_text=" .. tostring(w3 and w3.ok_text))
+if w3 and w3.ok_cb then w3.ok_cb() end
+local ov_dl_path = dl_dir .. "/Overlord 02 - Overlord, Vol. 2 - Kugane Maruyama.epub"
+print("remote_downloaded=" .. tostring(io.open(ov_dl_path, "rb") ~= nil))
+
+-- OTA Self-Update: 1.10.0 vs 2.0.0 -> downloads, installs, offers restart; same version -> up to date
+shown = {}
+LightHouse:checkForPluginUpdate()
+local w_upd = shown[#shown]
+print("ota_confirm_ok=" .. tostring(w_upd and w_upd.ok_text))
+if w_upd and w_upd.ok_cb then w_upd.ok_cb() end
+local w_rst = shown[#shown]
+print("ota_restart_ok=" .. tostring(w_rst and w_rst.ok_text))
+if w_rst and w_rst.ok_cb then w_rst.ok_cb() end
+print("ota_restarted=" .. tostring(restarted_koreader))
+local cfg_after = assert(loadfile(plugin_root .. "/lighthouse_config.lua"))()
+print("ota_updated_cfg_ok=" .. tostring(cfg_after.base_url == "http://192.168.31.15:8086"))
+
+remote_version = require("lighthouse_config").plugin_version
+shown = {}
+LightHouse:checkForPluginUpdate()
+print("ota_uptodate_msg=" .. tostring(shown[#shown] and shown[#shown].text))
+`);
+
+describe("plugin v1.10.0 OTA self-update and smart next-volume prompt", () => {
+  it("opens local next volumes directly (even offline), downloads missing next volumes, and applies OTA updates in-place", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "v110-test-key",
+      generatedAt: "2026-11-24T00:00:00.000Z",
+    });
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-v110-"));
+    fs.mkdirSync(path.join(workdir, "books"), { recursive: true });
+    fs.mkdirSync(path.join(workdir, "downloads"), { recursive: true });
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    fs.writeFileSync(path.join(workdir, "ota_200.zip"), zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
+      encoding: "utf8",
+    });
+    expect(extract.status).toBe(0);
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "v110_harness.lua");
+    fs.writeFileSync(harnessPath, V110_HARNESS);
+    const res = spawnSync(LUA_BINARY as string, [harnessPath, pluginRoot, workdir], {
+      encoding: "utf8",
+    });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    const out = Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+    expect(out.unfin_prompts).toBe("0");
+    expect(out.sibling_prompt_text).toContain("already on your Kindle. Open it now?::Open now");
+    expect(out.sibling_opened).toBe("true");
+    expect(out.sibling_deduped).toBe("0");
+    expect(out.dl_existing_ok_text).toBe("Open now");
+    expect(out.dl_existing_opened).toBe("true");
+    expect(out.remote_ok_text).toBe("Download");
+    expect(out.remote_downloaded).toBe("true");
+    expect(out.ota_confirm_ok).toBe("Update now");
+    expect(out.ota_restart_ok).toBe("Restart now");
+    expect(out.ota_restarted).toBe("1");
+    expect(out.ota_updated_cfg_ok).toBe("true");
+    expect(out.ota_uptodate_msg).toContain("up to date");
   });
 });

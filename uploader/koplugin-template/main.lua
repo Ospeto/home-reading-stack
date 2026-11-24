@@ -87,6 +87,7 @@ local config = require("lighthouse_config")
 local Client = require("lighthouse_client")
 local Nav = require("lighthouse_nav")
 local OPDS = require("lighthouse_opds")
+local Ota = require("lighthouse_ota")
 local Page = require("lighthouse_page")
 local Sidecar = require("lighthouse_sidecar")
 local Stats = require("lighthouse_stats")
@@ -1110,6 +1111,12 @@ function LightHouse:addToMainMenu(menu_items)
                 help_text = _("Push this book's highlights to Obsidian when you close a book and Wi-Fi is on."),
             },
             {
+                text = _("Suggest next volume on finish"),
+                checked_func = function() return self:nextVolumePromptEnabled() end,
+                callback = function() self:toggleNextVolumePrompt() end,
+                help_text = _("When closing a finished book in a series, offer to open the next volume if it is on this device or download it from LightHouse."),
+            },
+            {
                 text = _("Show cover thumbnails"),
                 checked_func = function() return self:coversEnabled() end,
                 callback = function() self:toggleCovers() end,
@@ -1118,6 +1125,10 @@ function LightHouse:addToMainMenu(menu_items)
             {
                 text = _("Choose download folder…"),
                 callback = function() self:chooseDownloadDir() end,
+            },
+            {
+                text = _("Check for update"),
+                callback = function() self:checkForPluginUpdate() end,
             },
             {
                 text = _("Connection"),
@@ -1936,6 +1947,9 @@ function LightHouse:showPageOverflow()
         else
             self:showStats()
         end
+    end)
+    addAction(util_row, _("Update"), function()
+        self:checkForPluginUpdate()
     end)
     addAction(util_row, _("Connection"), function()
         self:showConnection(Client.isConfigured(config))
@@ -4175,21 +4189,30 @@ function LightHouse:syncBookHighlights(record, options)
 end
 
 --- Non-blocking hook called by KOReader when a reader closes a document.
--- Schedules a silent background push slightly after close so KOReader finishes
--- flushing the document's sidecar file first and closing never stalls.
+-- Schedules work slightly after close so KOReader flushes the sidecar first
+-- and closing never stalls. Runs highlight sync (when online + enabled) and
+-- next-volume suggestion (local sibling check works even offline).
 function LightHouse:onCloseDocument()
     local doc = self.ui and self.ui.document
     local book_path = doc and doc.file
     if type(book_path) ~= "string" or book_path == "" then return end
-    if not self:autoSyncHighlightsEnabled() or not Client.isConfigured(config) then return end
+    if not self:autoSyncHighlightsEnabled() and not self:nextVolumePromptEnabled() then
+        return
+    end
 
     UIManager:scheduleIn(0.5, function()
         pcall(function()
-            if not self:autoSyncHighlightsEnabled() then return end
-            if not NetworkMgr:isOnline() then return end
             local record = Sidecar.read(book_path)
-            if record then
-                self:syncBookHighlights(record, { silent = true, timeout = 10 })
+            if not record then return end
+            if self:autoSyncHighlightsEnabled() and Client.isConfigured(config) and NetworkMgr:isOnline() then
+                pcall(function()
+                    self:syncBookHighlights(record, { silent = true, timeout = 10 })
+                end)
+            end
+            if self:nextVolumePromptEnabled() then
+                pcall(function()
+                    self:maybeSuggestNextVolume(book_path, record)
+                end)
             end
         end)
     end)
@@ -4507,6 +4530,318 @@ function LightHouse:showStorage(options)
     end)
 end
 
+-- ---------------------------------------------------------------------------
+-- 1-Tap OTA Self-Update & Smart Next Volume Prompt
+-- ---------------------------------------------------------------------------
+
+local NEXT_VOL_BOOK_EXTS = {
+    epub = true,
+    azw3 = true,
+    mobi = true,
+    cbz = true,
+    pdf = true,
+    fb2 = true,
+}
+
+--- Extracts a volume number from a title or filename ("Vol. 2", "#3", "02 - Title").
+-- @string text title or filename
+-- @treturn number|nil volume index
+local function extractVolumeIndex(text)
+    if type(text) ~= "string" or text == "" then return nil end
+    local lower = text:lower()
+    local v = lower:match("vol%.?u?m?e?%s*(%d+%.?%d*)")
+        or lower:match("book%s*(%d+%.?%d*)")
+        or lower:match("#(%d+%.?%d*)")
+        or lower:match("^%s*(%d+)%s*[%-%.]")
+    return tonumber(v)
+end
+
+--- Finds the next unread series entry strictly after the finished book.
+-- @tparam table entries OPDS entries returned for the series
+-- @tparam table record finished book record
+-- @treturn table|nil OPDS entry for the next volume
+local function findNextSeriesEntry(entries, record)
+    if type(entries) ~= "table" or type(record) ~= "table" then return nil end
+    local target_series = Status.normalize(Status.str(record.series))
+    local cur_idx = Status.num(record.series_index)
+        or extractVolumeIndex(Status.str(record.title))
+        or extractVolumeIndex(Sidecar.fileName(Status.str(record.book_path)))
+    local cur_title_norm = Status.normalize(Status.str(record.title))
+
+    local pool = {}
+    for idx = 1, #entries do
+        local entry = entries[idx]
+        if type(entry) == "table" and entry.download_href then
+            local e_series = Status.normalize(Status.str(entry.series))
+            if target_series == "" or e_series == "" or e_series == target_series then
+                pool[#pool + 1] = entry
+            end
+        end
+    end
+
+    if cur_idx then
+        local best_entry, best_idx
+        for idx = 1, #pool do
+            local entry = pool[idx]
+            local e_idx = Status.num(entry.series_index) or extractVolumeIndex(Status.str(entry.title))
+            local pct = type(entry.status) == "table" and Status.num(entry.status.percentage) or Status.num(entry.percentage)
+            if e_idx and e_idx > cur_idx and (not pct or pct < 0.99) then
+                if not best_idx or e_idx < best_idx then
+                    best_entry = entry
+                    best_idx = e_idx
+                end
+            end
+        end
+        if best_entry then return best_entry end
+    end
+
+    -- Fallback when index is unknown: match normalized current title and return next unread entry.
+    if cur_title_norm ~= "" then
+        local matched_pos = nil
+        for idx = 1, #pool do
+            if Status.normalize(Status.str(pool[idx].title)) == cur_title_norm then
+                matched_pos = idx
+                break
+            end
+        end
+        if matched_pos then
+            for idx = matched_pos + 1, #pool do
+                local pct = type(pool[idx].status) == "table" and Status.num(pool[idx].status.percentage) or Status.num(pool[idx].percentage)
+                if not pct or pct < 0.99 then
+                    return pool[idx]
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+--- Scans only the finished book's parent directory for the next local volume.
+-- Works completely offline without walking the whole device tree.
+-- @string book_path finished book path
+-- @number current_index numeric volume index of finished book
+-- @treturn string|nil path to next local volume
+-- @treturn string|nil clean display title of next volume
+local function findLocalSiblingNextVolume(book_path, current_index)
+    if type(book_path) ~= "string" or book_path == "" or type(current_index) ~= "number" then
+        return nil, nil
+    end
+    local normalized = book_path:gsub("\\", "/")
+    local parent = normalized:match("^(.+)/[^/]+$")
+    local cur_name = normalized:match("([^/]+)$")
+    if not parent or parent == "" then return nil, nil end
+
+    local names = Sidecar.io.list(parent)
+    if type(names) ~= "table" then return nil, nil end
+
+    local best_path, best_name, best_idx
+    for idx = 1, #names do
+        local name = names[idx]
+        if type(name) == "string" and name ~= cur_name then
+            local ext = name:match("%.([%w_]+)$")
+            if ext and NEXT_VOL_BOOK_EXTS[ext:lower()] then
+                local v_idx = extractVolumeIndex(name)
+                if v_idx and v_idx > current_index then
+                    local candidate = parent .. "/" .. name
+                    if Sidecar.bookExists(candidate) then
+                        if v_idx == current_index + 1 then
+                            local clean_name = name:gsub("%.[^%.]+$", "")
+                            return candidate, clean_name
+                        end
+                        if not best_idx or v_idx < best_idx then
+                            best_path = candidate
+                            best_name = name:gsub("%.[^%.]+$", "")
+                            best_idx = v_idx
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best_path, best_name
+end
+
+--- True when finishing a series book should suggest opening/downloading the next volume.
+-- @treturn boolean
+function LightHouse:nextVolumePromptEnabled()
+    if type(G_reader_settings.nilOrTrue) == "function" then
+        return G_reader_settings:nilOrTrue("lighthouse_next_volume_prompt")
+    end
+    return G_reader_settings:readSetting("lighthouse_next_volume_prompt") ~= false
+end
+
+--- Toggles the next-volume finish prompt preference.
+function LightHouse:toggleNextVolumePrompt()
+    local next_val = not self:nextVolumePromptEnabled()
+    G_reader_settings:saveSetting("lighthouse_next_volume_prompt", next_val)
+    notice(next_val
+        and _("Next volume will be suggested when you finish a series book.")
+        or _("Next volume suggestions turned off."))
+end
+
+--- Checks if a newly closed finished book has a next volume locally or on LightHouse.
+-- @string book_path path to finished document
+-- @tparam table record normalized sidecar record
+function LightHouse:maybeSuggestNextVolume(book_path, record)
+    if not self:nextVolumePromptEnabled() then return false end
+    if type(book_path) ~= "string" or book_path == "" or type(record) ~= "table" then return false end
+    local pct = Status.num(record.percent_finished)
+    if not pct or pct < 0.99 then return false end
+
+    local raw_prompted = G_reader_settings:readSetting("lighthouse_next_vol_prompted")
+    local prompted = {}
+    if type(raw_prompted) == "table" then
+        for k, v in pairs(raw_prompted) do prompted[k] = v end
+    end
+    if prompted[book_path] then return false end
+
+    local cur_title = Status.str(record.title)
+    if cur_title == "" then cur_title = Sidecar.displayTitle(record) end
+    if cur_title == "" then cur_title = _("this book") end
+
+    local series = Status.str(record.series)
+    local cur_idx = Status.num(record.series_index)
+        or extractVolumeIndex(cur_title)
+        or extractVolumeIndex(Sidecar.fileName(book_path))
+    if series == "" and not cur_idx then return false end
+
+    local function markPrompted()
+        prompted[book_path] = true
+        G_reader_settings:saveSetting("lighthouse_next_vol_prompted", prompted)
+    end
+
+    local ConfirmBox = require("ui/widget/confirmbox")
+
+    -- 1. Check sibling local volume first (works offline too).
+    local local_next_path, local_next_title = findLocalSiblingNextVolume(book_path, cur_idx)
+    if local_next_path then
+        markPrompted()
+        UIManager:show(squareWidget(ConfirmBox, {
+            text = T(_("Finished “%1”.\n“%2” is already on your Kindle. Open it now?"), cur_title, local_next_title or _("Next volume")),
+            ok_text = _("Open now"),
+            ok_cb = function() self:openBookFile(local_next_path) end,
+        }))
+        return true, "local"
+    end
+
+    -- 2. Otherwise query LightHouse OPDS when configured and online.
+    if series == "" or not Client.isConfigured(config) or not NetworkMgr:isOnline() then
+        return false
+    end
+
+    local path = "/api/opds?" .. buildQuery{
+        search = series,
+        start = 0,
+        count = 40,
+        sort = "series",
+    }
+    local body = Client.get(config, path)
+    if not body then return false end
+    local ok_parse, feed = pcall(OPDS.parse, body)
+    if not ok_parse or type(feed) ~= "table" or type(feed.entries) ~= "table" then return false end
+
+    local next_entry = findNextSeriesEntry(feed.entries, record)
+    if not next_entry then return false end
+
+    markPrompted()
+    local existing_path = self:localBookPathFor(next_entry)
+    local next_title = Ui.rowTitle(next_entry.title)
+    if next_title == "" then next_title = _("Next volume") end
+
+    if existing_path then
+        UIManager:show(squareWidget(ConfirmBox, {
+            text = T(_("Finished “%1”.\n“%2” is already on your Kindle. Open it now?"), cur_title, next_title),
+            ok_text = _("Open now"),
+            ok_cb = function() self:openBookFile(existing_path) end,
+        }))
+        return true, "local"
+    end
+
+    UIManager:show(squareWidget(ConfirmBox, {
+        text = T(_("Finished “%1”.\nDownload “%2” from LightHouse?"), cur_title, next_title),
+        ok_text = _("Download"),
+        ok_cb = function() self:downloadEntry(next_entry) end,
+    }))
+    return true, "download"
+end
+
+--- Checks LightHouse server for a newer plugin release and installs it in-place OTA.
+function LightHouse:checkForPluginUpdate()
+    if not Client.isConfigured(config) then
+        notice(describeError("not_configured"), 4)
+        return
+    end
+    if not NetworkMgr:isOnline() then
+        NetworkMgr:willRerunWhenOnline(function() self:checkForPluginUpdate() end)
+        return
+    end
+
+    local body, err = self:withSpinner(_("Checking for LightHouse update…"), function()
+        return Client.get(config, "/api/koplugin/version")
+    end)
+    if not body then
+        notice(errorHeadline(err) .. "\n" .. describeError(err), 5)
+        return
+    end
+
+    local ok_dec, manifest = pcall(JSON.decode, body)
+    if not ok_dec or type(manifest) ~= "table" or type(manifest.version) ~= "string" then
+        notice(describeError("invalid_response"), 5)
+        return
+    end
+
+    local current_ver = Status.str(config.plugin_version, "0")
+    local remote_ver = Status.str(manifest.version)
+    if not Ota.isUpdateAvailable(current_ver, remote_ver) then
+        notice(T(_("LightHouse v%1 is up to date."), current_ver), 3)
+        return
+    end
+
+    local dl_path = Status.str(manifest.downloadPath, "/api/koplugin/download")
+    if dl_path == "" then dl_path = "/api/koplugin/download" end
+    local ConfirmBox = require("ui/widget/confirmbox")
+
+    UIManager:show(squareWidget(ConfirmBox, {
+        text = T(_("Update LightHouse from v%1 to v%2?"), current_ver, remote_ver),
+        ok_text = _("Update now"),
+        ok_cb = function()
+            local zip_bytes, dl_err = self:withSpinner(T(_("Downloading LightHouse v%1…"), remote_ver), function()
+                return Client.get(config, dl_path)
+            end)
+            if not zip_bytes then
+                notice(errorHeadline(dl_err) .. "\n" .. describeError(dl_err), 5)
+                return
+            end
+
+            local entries, unpack_err = Ota.unpackStoredZip(zip_bytes)
+            if not entries then
+                notice(T(_("Update failed: %1"), tostring(unpack_err or "invalid_zip")), 5)
+                return
+            end
+
+            local plugin_dir = (type(self.path) == "string" and self.path ~= "")
+                and self.path
+                or (DataStorage:getDataDir() .. "/plugins/lighthouse.koplugin")
+            local installed, install_err = Ota.installEntries(plugin_dir, entries)
+            if not installed then
+                notice(T(_("Update install failed: %1"), tostring(install_err or "write_error")), 5)
+                return
+            end
+
+            UIManager:show(squareWidget(ConfirmBox, {
+                text = T(_("Updated LightHouse to v%1. Restart KOReader now?"), remote_ver),
+                ok_text = _("Restart now"),
+                ok_cb = function()
+                    if type(UIManager.restartKOReader) == "function" then
+                        UIManager:restartKOReader()
+                    end
+                end,
+            }))
+        end,
+    }))
+end
+
 -- Pure helpers exposed for the repository's Lua test harness. They stay plain
 -- function fields on the plugin table, so KOReader's PluginLoader is unaffected.
 -- `formatMessage` is the guarded `T()` itself: the tests drive it directly to
@@ -4515,6 +4850,9 @@ LightHouse.buildFilename = buildFilename
 LightHouse.buildHighlightSyncPayload = buildHighlightSyncPayload
 LightHouse.describeError = describeError
 LightHouse.errorHeadline = errorHeadline
+LightHouse.extractVolumeIndex = extractVolumeIndex
+LightHouse.findLocalSiblingNextVolume = findLocalSiblingNextVolume
+LightHouse.findNextSeriesEntry = findNextSeriesEntry
 LightHouse.formatSeriesIndex = formatSeriesIndex
 LightHouse.formatMessage = T
 LightHouse.highlightFingerprint = highlightFingerprint

@@ -39,6 +39,7 @@ import { parseObsidianUri } from "./obsidian";
 import { generateOpdsFeed, rewriteOpdsXml } from "./opds";
 import { buildLibraryGroups } from "./library-groups";
 import {
+  KOPLUGIN_VERSION,
   generateKoplugin,
   kopluginDownloadHeaders,
   resolveApiKeyFromEnv,
@@ -4600,6 +4601,25 @@ async function handleRequestCore(
       return new Response(null, { status: 200, headers: opdsHeaders });
     }
     return new Response(opdsXml, { status: 200, headers: opdsHeaders });
+  }
+
+  // API: KOReader plugin version manifest for 1-tap OTA update checks
+  if (
+    url.pathname === "/api/koplugin/version" &&
+    (req.method === "GET" || req.method === "HEAD")
+  ) {
+    const res = jsonResponse(
+      {
+        version: KOPLUGIN_VERSION,
+        downloadPath: "/api/koplugin/download",
+      },
+      200,
+      corsOrigin,
+    );
+    if (req.method === "HEAD") {
+      return new Response(null, { status: 200, headers: res.headers });
+    }
+    return res;
   }
 
   // API: KOReader plugin (.koplugin) download
