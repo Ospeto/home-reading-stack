@@ -86,14 +86,17 @@ local _ = require("gettext")
 local config = require("lighthouse_config")
 local Cache = require("lighthouse_cache")
 local Client = require("lighthouse_client")
+local Indexer = require("lighthouse_indexer")
 local Nav = require("lighthouse_nav")
 local OPDS = require("lighthouse_opds")
 local Ota = require("lighthouse_ota")
 local Outbox = require("lighthouse_outbox")
 local Page = require("lighthouse_page")
+local Queue = require("lighthouse_queue")
 local Sidecar = require("lighthouse_sidecar")
 local Stats = require("lighthouse_stats")
 local Status = require("lighthouse_status")
+local Sync = require("lighthouse_sync")
 local Ui = require("lighthouse_ui")
 local Views = require("lighthouse_views")
 
@@ -177,6 +180,18 @@ end
 -- @tparam table options constructor options
 -- @treturn table the widget
 local function squareWidget(class, options)
+    if type(options) == "table" then
+        local ok_fn = options.ok_callback or options.ok_cb
+        if ok_fn then
+            options.ok_callback = ok_fn
+            options.ok_cb = ok_fn
+        end
+        local cancel_fn = options.cancel_callback or options.cancel_cb
+        if cancel_fn then
+            options.cancel_callback = cancel_fn
+            options.cancel_cb = cancel_fn
+        end
+    end
     return Ui.square(function() return class:new(options) end)
 end
 
@@ -1251,6 +1266,11 @@ function LightHouse:addToMainMenu(menu_items)
                 callback = function() self:showReading() end,
             },
             {
+                text = _("Download queue"),
+                callback = function() self:showDownloadQueue() end,
+                help_text = _("View books saved to your Download Later basket and fetch them all in one batch."),
+            },
+            {
                 text = _("Highlights"),
                 callback = function() self:showHighlights() end,
                 help_text = _("Highlights and notes from this device, read from KOReader's own sidecar files. No connection is needed and nothing is uploaded."),
@@ -2072,6 +2092,12 @@ function LightHouse:showPageOverflow()
                 self:syncMissingActiveBooks()
             end)
         end
+        local q_count = Queue.count(G_reader_settings)
+        if q_count > 0 then
+            addAction(action_row, T(_("Queue (%1)"), tostring(q_count)), function()
+                self:showDownloadQueue()
+            end)
+        end
     else
         addAction(action_row, _("Refresh"), function()
             if view_kind == "reading" then
@@ -2090,6 +2116,20 @@ function LightHouse:showPageOverflow()
             addAction(action_row, _("Sync missing books"), function() self:syncMissingActiveBooks() end)
         elseif view_kind == "highlights" then
             addAction(action_row, _("Sync to Obsidian"), function() self:syncAllHighlightsToObsidian(ctx.record) end)
+        elseif view_kind == "book" and type(ctx.entry) == "table" then
+            local bid = Status.num(ctx.entry.book_id)
+            if ctx.entry.download_href ~= nil or bid then
+                local in_q = Queue.has(G_reader_settings, ctx.entry)
+                addAction(action_row, in_q and _("Remove from queue") or _("Add to queue"), function()
+                    self:toggleBookInQueue(ctx.entry)
+                end)
+            end
+        end
+        local q_count = Queue.count(G_reader_settings)
+        if q_count > 0 then
+            addAction(action_row, T(_("Queue (%1)"), tostring(q_count)), function()
+                self:showDownloadQueue()
+            end)
         end
         addAction(action_row, _("Search"), function() self:showSearchDialog() end)
     end
@@ -2524,6 +2564,11 @@ function LightHouse:showRowQuickActions(action, loaded_entries)
                 bold = local_path == "",
                 fn = function() self:downloadEntry(target) end,
             }
+            local in_queue = Queue.has(G_reader_settings, target)
+            primary_row[#primary_row + 1] = {
+                label = in_queue and _("Remove from queue") or _("Add to queue"),
+                fn = function() self:toggleBookInQueue(target) end,
+            }
         end
         if #primary_row > 0 then addButtonRow(primary_row) end
 
@@ -2659,9 +2704,248 @@ function LightHouse:downloadNextUnreadInSeries(series_name, loaded_entries)
     self:downloadEntry(candidate)
 end
 
+--- Runs a multi-book download batch with per-volume progress and tap-to-cancel.
+-- @tparam table items batch item descriptors `{ label, url, filepath, key, skip_if_exists }`
+-- @tparam[opt] table options forwarded to `Sync.runBatchDownloads`
+-- @tparam[opt] function on_complete callback receiving batch result summary
+-- @treturn table|nil synchronous batch summary when running without async trapper
+function LightHouse:runBatchDownloads(items, options, on_complete)
+    return Sync.runBatchDownloads({
+        config = config,
+        Client = Client,
+        UIManager = UIManager,
+        InfoMessage = InfoMessage,
+        squareWidget = squareWidget,
+        formatMessage = T,
+        gettext = _,
+        lfs = lfs,
+    }, items, options, on_complete)
+end
+
+--- Toggles a book in the persistent "Download Later" reading queue.
+-- @tparam table entry catalog or detail entry
+-- @treturn boolean true when added to queue, false when removed
+-- @treturn number current queue size
+function LightHouse:toggleBookInQueue(entry)
+    if type(entry) ~= "table" then
+        return false, Queue.count(G_reader_settings)
+    end
+    local target = {}
+    for k, v in pairs(entry) do target[k] = v end
+    if not target.download_href then
+        local bid = Status.num(target.book_id)
+        if bid then
+            target.download_href = Client.buildUrl(
+                config,
+                string.format("/api/books/%d/download/epub", math.floor(bid))
+            )
+        end
+    end
+    local title = Ui.rowTitle(target.title)
+    if title == "" then title = _("Untitled") end
+    local is_queued, count = Queue.toggle(G_reader_settings, target)
+    if is_queued then
+        notice(T(_("Added “%1” to download queue (%2)."), title, tostring(count)), 3)
+    else
+        notice(T(_("Removed “%1” from download queue (%2)."), title, tostring(count)), 3)
+    end
+    return is_queued, count
+end
+
+--- Downloads all books in the persistent "Download Later" queue.
+-- Keeps any failed or cancelled items in the queue for one-tap resume.
+-- @tparam[opt] table options forwarded to `runBatchDownloads`
+-- @treturn number queued count attempted (0 when blocked or empty)
+function LightHouse:downloadQueuedBooks(options)
+    options = type(options) == "table" and options or {}
+    if not Client.isConfigured(config) then
+        notice(_("LightHouse is not configured yet."))
+        return 0
+    end
+    if not NetworkMgr:isOnline() then
+        NetworkMgr:willRerunWhenOnline(function() self:downloadQueuedBooks(options) end)
+        return 0
+    end
+
+    local queued = Queue.list(G_reader_settings)
+    if #queued == 0 then
+        notice(_("Download queue is empty."), 3)
+        return 0
+    end
+
+    local dir = self:getDownloadDir()
+    if not makeDirs(dir) then
+        notice(T(_("Cannot create the download folder %1"), dir))
+        return 0
+    end
+
+    local batch_items = {}
+    for idx = 1, #queued do
+        local entry = queued[idx]
+        local url = Status.str(entry.download_href)
+        local bid = Status.num(entry.book_id)
+        if url == "" and bid then
+            url = Client.buildUrl(config, string.format("/api/books/%d/download/epub", math.floor(bid)))
+        elseif url ~= "" then
+            url = Client.buildUrl(config, url)
+        end
+        local label = Ui.rowTitle(entry.title)
+        if label == "" then label = _("Untitled") end
+        batch_items[#batch_items + 1] = {
+            key = entry.key,
+            label = label,
+            url = url,
+            filepath = dir .. "/" .. buildFilename(entry),
+            skip_if_exists = true,
+        }
+    end
+
+    self:runBatchDownloads(batch_items, options, function(res)
+        if type(res.completed_keys) == "table" then
+            Queue.removeMany(G_reader_settings, res.completed_keys)
+        end
+        self:forgetShelf()
+        self:forgetCatalogCaches()
+        self.local_scan = nil
+        self.local_index = nil
+        forgetSidecarList()
+        if #(res.newly_downloaded or {}) > 0 then
+            self:indexBookFiles(res.newly_downloaded)
+        end
+        if res.cancelled then
+            local left = Queue.count(G_reader_settings)
+            notice(T(_("Cancelled after downloading %1 of %2 book(s) (%3 still queued)."),
+                tostring(res.downloaded), tostring(res.total), tostring(left)), 5)
+        elseif res.failed == 0 then
+            notice(T(_("Downloaded %1 queued book(s)."), tostring(res.downloaded)), 4)
+        else
+            notice(T(_("Downloaded %1 of %2 queued book(s) (%3 failed; kept in queue)."),
+                tostring(res.downloaded), tostring(res.total), tostring(res.failed)), 5)
+        end
+    end)
+    return #batch_items
+end
+
+--- Opens the interactive "Download Later" queue manager dialog.
+-- @treturn number number of queued books shown (0 when empty)
+function LightHouse:showDownloadQueue()
+    local queued = Queue.list(G_reader_settings)
+    if #queued == 0 then
+        notice(_("Download queue is empty. Long-press any book to add it."), 4)
+        return 0
+    end
+
+    local queue_menu
+    local items = {
+        {
+            text = T(_("Download all (%1)"), tostring(#queued)),
+            bold = true,
+            callback = function()
+                self:dismissWidget(queue_menu)
+                queue_menu = nil
+                self:downloadQueuedBooks()
+            end,
+        },
+        {
+            text = _("Clear queue"),
+            callback = function()
+                local ConfirmBox = require("ui/widget/confirmbox")
+                UIManager:show(squareWidget(ConfirmBox, {
+                    text = T(_("Clear %1 book(s) from the download queue?"), tostring(#queued)),
+                    ok_text = _("Clear queue"),
+                    ok_callback = function()
+                        Queue.clear(G_reader_settings)
+                        self:dismissWidget(queue_menu)
+                        queue_menu = nil
+                        notice(_("Download queue cleared."), 3)
+                    end,
+                }))
+            end,
+        },
+    }
+
+    for idx = 1, #queued do
+        local entry = queued[idx]
+        local row_title = Ui.rowTitle(entry.title)
+        if row_title == "" then row_title = _("Untitled") end
+        local authors = Status.str(entry.authors)
+        local label = authors ~= "" and (row_title .. " — " .. authors) or row_title
+        items[#items + 1] = {
+            text = label,
+            callback = function()
+                local target = {}
+                for k, v in pairs(entry) do target[k] = v end
+                local bid = Status.num(target.book_id)
+                if not target.download_href and bid then
+                    target.download_href = Client.buildUrl(
+                        config,
+                        string.format("/api/books/%d/download/epub", math.floor(bid))
+                    )
+                end
+                local action_dlg
+                local function closeAction()
+                    if action_dlg then
+                        self:dismissWidget(action_dlg)
+                        action_dlg = nil
+                    end
+                end
+                local function downloadNow()
+                    closeAction()
+                    self:dismissWidget(queue_menu)
+                    queue_menu = nil
+                    self:downloadEntry(target)
+                end
+                local function removeItem()
+                    closeAction()
+                    Queue.remove(G_reader_settings, entry)
+                    self:dismissWidget(queue_menu)
+                    queue_menu = nil
+                    notice(T(_("Removed “%1” from download queue."), row_title), 3)
+                    if Queue.count(G_reader_settings) > 0 then
+                        self:showDownloadQueue()
+                    end
+                end
+                local ok_bd, ButtonDialog = pcall(require, "ui/widget/buttondialog")
+                if ok_bd and type(ButtonDialog) == "table" and type(ButtonDialog.new) == "function" then
+                    action_dlg = squareWidget(ButtonDialog, {
+                        title = label,
+                        buttons = {
+                            {
+                                { text = _("Download now"), callback = downloadNow },
+                                { text = _("Remove from queue"), callback = removeItem },
+                            },
+                            {
+                                { text = _("Cancel"), callback = closeAction },
+                            },
+                        },
+                    })
+                    UIManager:show(action_dlg)
+                else
+                    local ConfirmBox = require("ui/widget/confirmbox")
+                    UIManager:show(squareWidget(ConfirmBox, {
+                        text = label,
+                        ok_text = _("Download now"),
+                        ok_callback = downloadNow,
+                        cancel_text = _("Remove from queue"),
+                        cancel_callback = removeItem,
+                    }))
+                end
+            end,
+        }
+    end
+
+    queue_menu = squareWidget(Menu, {
+        title = T(_("Download queue (%1)"), tostring(#queued)),
+        item_table = items,
+        title_multilines = true,
+    })
+    UIManager:show(queue_menu)
+    return #queued
+end
+
 --- Batch-downloads all missing volumes of a series and indexes them into ZenOS.
 -- Checks local files first, prompts once with the exact missing count, downloads
--- via atomic `.part` transfers, invalidates caches, and triggers `indexBookFiles`.
+-- sequentially with per-volume progress & tap-to-cancel, invalidates caches, and triggers `indexBookFiles`.
 -- @string series_name target series title
 -- @tparam[opt] table loaded_entries fallback entries when offline
 -- @treturn number queued count (0 if nothing missing or unconfirmed)
@@ -2733,39 +3017,43 @@ function LightHouse:downloadSeriesBooks(series_name, loaded_entries)
         return 0
     end
 
+    local batch_items = {}
+    for idx = 1, #missing do
+        local item = missing[idx]
+        local vol_title = Ui.rowTitle(item.entry.title)
+        if vol_title == "" then vol_title = _("Untitled") end
+        batch_items[#batch_items + 1] = {
+            key = item.entry.download_href,
+            label = vol_title,
+            url = item.entry.download_href,
+            filepath = item.filepath,
+            skip_if_exists = true,
+        }
+    end
+
     UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
         text = T(_("Download %1 missing volume(s) of “%2”?"), tostring(#missing), target_series),
         ok_text = _("Download all"),
-        ok_cb = function()
-            local downloaded = 0
-            local failed = 0
-            local newly_downloaded = {}
-            self:withSpinner(T(_("Downloading %1 volume(s) of %2…"), tostring(#missing), target_series), function()
-                for idx = 1, #missing do
-                    local item = missing[idx]
-                    local ok = Client.download(config, item.entry.download_href, item.filepath)
-                    if ok then
-                        downloaded = downloaded + 1
-                        newly_downloaded[#newly_downloaded + 1] = item.filepath
-                    else
-                        failed = failed + 1
-                    end
+        ok_callback = function()
+            self:runBatchDownloads(batch_items, nil, function(res)
+                self:forgetShelf()
+                self:forgetCatalogCaches()
+                self.local_scan = nil
+                self.local_index = nil
+                forgetSidecarList()
+                if #(res.newly_downloaded or {}) > 0 then
+                    self:indexBookFiles(res.newly_downloaded)
+                end
+                if res.cancelled then
+                    notice(T(_("Cancelled after downloading %1 of %2 volume(s) of “%3”."),
+                        tostring(res.downloaded), tostring(res.total), target_series), 5)
+                elseif res.failed == 0 then
+                    notice(T(_("Downloaded %1 volume(s) of “%2”."), tostring(res.downloaded), target_series), 4)
+                else
+                    notice(T(_("Downloaded %1 of %2 volume(s) (%3 failed)."),
+                        tostring(res.downloaded), tostring(res.total), tostring(res.failed)), 5)
                 end
             end)
-
-            self:forgetShelf()
-            self:forgetCatalogCaches()
-            self.local_scan = nil
-            self.local_index = nil
-            forgetSidecarList()
-            if #newly_downloaded > 0 then
-                self:indexBookFiles(newly_downloaded)
-            end
-            if failed == 0 then
-                notice(T(_("Downloaded %1 volume(s) of “%2”."), tostring(downloaded), target_series), 4)
-            else
-                notice(T(_("Downloaded %1 of %2 volume(s) (%3 failed)."), tostring(downloaded), tostring(#missing), tostring(failed)), 5)
-            end
         end,
     }))
     return #missing
@@ -3495,8 +3783,16 @@ function LightHouse:openLibrary(options)
     end
 
     local model = Views.libraryModel(mode, context, { labels = self:pageLabels() })
-    if mode == "books" and (self._missing_active_count or 0) > 0 and type(model.footer) == "table" then
-        model.footer.right = T(_("%1 missing active"), tostring(self._missing_active_count))
+    if mode == "books" and type(model.footer) == "table" then
+        local missing_cnt = self._missing_active_count or 0
+        local queued_cnt = Queue.count(G_reader_settings)
+        if missing_cnt > 0 and queued_cnt > 0 then
+            model.footer.right = T(_("%1 missing · %2 queued"), tostring(missing_cnt), tostring(queued_cnt))
+        elseif missing_cnt > 0 then
+            model.footer.right = T(_("%1 missing active"), tostring(missing_cnt))
+        elseif queued_cnt > 0 then
+            model.footer.right = T(_("%1 queued"), tostring(queued_cnt))
+        end
     end
 
     local function dispatch(action)
@@ -4114,7 +4410,7 @@ function LightHouse:openHighlight(group, annotation)
             text = table.concat(lines, "\n\n"),
             cancel_text = _("Close"),
             ok_text = page and T(_("Open at p. %1"), page) or _("Open book"),
-            ok_cb = function()
+            ok_callback = function()
                 local opened = self:openBookFile(book_path)
                 if opened and page then self:jumpToPage(page) end
             end,
@@ -4374,7 +4670,7 @@ function LightHouse:downloadEntry(entry)
         UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
             text = T(_("“%1” is already in the download folder. Download it again?"), buildFilename(entry)),
             ok_text = _("Download again"),
-            ok_cb = function() self:startDownload(entry, filepath) end,
+            ok_callback = function() self:startDownload(entry, filepath) end,
         }))
         return
     end
@@ -4412,13 +4708,14 @@ function LightHouse:startDownload(entry, filepath)
     self.local_scan = nil
     self.local_index = nil
     forgetSidecarList()
+    Queue.remove(G_reader_settings, entry)
     self:indexBookFiles({ filepath })
 
     UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
         text = T(_("Saved to:\n%1"), filepath),
         cancel_text = _("Close"),
         ok_text = _("Open now"),
-        ok_cb = function()
+        ok_callback = function()
             local ReaderUI = require("apps/reader/readerui")
             ReaderUI:showReader(filepath)
         end,
@@ -4481,65 +4778,6 @@ function LightHouse:showMenu(title, items, options)
     end
 end
 
---- Builds the `/api/highlights/sync` payload for one sidecar record.
--- @tparam table record normalized record from `Sidecar`
--- @treturn table|nil JSON-serializable payload, or nil when empty
-local function buildHighlightSyncPayload(record)
-    if type(record) ~= "table" or type(record.annotations) ~= "table" then return nil end
-    local entries = {}
-    for idx = 1, #record.annotations do
-        local ann = record.annotations[idx]
-        if type(ann) == "table" then
-            local text = Sidecar.annotationText(ann)
-            local notes = Sidecar.annotationNote(ann)
-            if text ~= "" or notes ~= "" then
-                entries[#entries + 1] = {
-                    text = text,
-                    notes = notes ~= "" and notes or nil,
-                    chapter = Status.str(ann.chapter) ~= "" and Status.str(ann.chapter) or nil,
-                    page = Sidecar.annotationPage(ann),
-                    datetime = Status.str(ann.datetime) ~= "" and Status.str(ann.datetime) or nil,
-                }
-            end
-        end
-    end
-    if #entries == 0 then return nil end
-    local title = Status.str(record.title)
-    if title == "" then title = Sidecar.displayTitle(record) end
-    local author = Status.str(record.authors)
-    if author == "" then author = "Unknown" end
-    return {
-        title = title,
-        author = author,
-        progress = Status.num(record.percent_finished),
-        entries = entries,
-    }
-end
-
---- Deterministic fingerprint `<count>:<newest_datetime>:<total_chars>` for deduping auto-sync.
--- @tparam table record normalized record from `Sidecar`
--- @treturn string
-local function highlightFingerprint(record)
-    if type(record) ~= "table" or type(record.annotations) ~= "table" then return "0::0" end
-    local count = 0
-    local newest = ""
-    local chars = 0
-    for idx = 1, #record.annotations do
-        local ann = record.annotations[idx]
-        if type(ann) == "table" then
-            local text = Sidecar.annotationText(ann)
-            local notes = Sidecar.annotationNote(ann)
-            if text ~= "" or notes ~= "" then
-                count = count + 1
-                chars = chars + #text + #notes
-                local dt = Status.str(ann.datetime)
-                if dt > newest then newest = dt end
-            end
-        end
-    end
-    return string.format("%d:%s:%d", count, newest, chars)
-end
-
 --- True when closing a book should auto-push new highlights to Obsidian.
 -- @treturn boolean
 function LightHouse:autoSyncHighlightsEnabled()
@@ -4565,42 +4803,13 @@ end
 -- @treturn string status "synced" | "unchanged" | "empty" | error string
 -- @treturn number synced annotation count
 function LightHouse:syncBookHighlights(record, options)
-    options = type(options) == "table" and options or {}
-    local payload = buildHighlightSyncPayload(record)
-    if not payload then return false, "empty", 0 end
-    if not Client.isConfigured(config) then return false, "not_configured", 0 end
-
-    local book_path = Status.str(record.book_path)
-    local fp = highlightFingerprint(record)
-    local raw_map = G_reader_settings:readSetting("lighthouse_synced_highlights")
-    local map = {}
-    if type(raw_map) == "table" then
-        for k, v in pairs(raw_map) do map[k] = v end
-    end
-    if options.force ~= true and book_path ~= "" and map[book_path] == fp then
-        Outbox.remove(G_reader_settings, book_path)
-        return true, "unchanged", 0
-    end
-
-    local encoded_ok, body = pcall(JSON.encode, payload)
-    if not encoded_ok or type(body) ~= "string" then
-        return false, "invalid_json", 0
-    end
-
-    local res_body, err = Client.postJson(config, "/api/highlights/sync", body, options.timeout or 10)
-    if not res_body then
-        if options.silent then
-            logger.info("LightHouse: silent highlight sync skipped:", tostring(err))
-        end
-        return false, err or "network_error", 0
-    end
-
-    if book_path ~= "" then
-        map[book_path] = fp
-        G_reader_settings:saveSetting("lighthouse_synced_highlights", map)
-        Outbox.remove(G_reader_settings, book_path)
-    end
-    return true, "synced", #payload.entries
+    return Sync.syncBookHighlights({
+        config = config,
+        Client = Client,
+        JSON = JSON,
+        settings = G_reader_settings,
+        logger = logger,
+    }, record, options)
 end
 
 --- Flushes any pending offline highlight syncs queued when closing books offline.
@@ -4609,38 +4818,17 @@ end
 -- @treturn number remaining queued count
 function LightHouse:flushHighlightOutbox(options)
     options = type(options) == "table" and options or {}
-    if not Client.isConfigured(config) then
-        return 0, Outbox.count(G_reader_settings)
-    end
-    local pending = Outbox.list(G_reader_settings)
-    if #pending == 0 then return 0, 0 end
-    if not NetworkMgr:isOnline() then return 0, #pending end
-
-    local flushed = 0
-    for idx = 1, #pending do
-        local book_path = pending[idx]
-        if not Sidecar.bookExists(book_path) then
-            Outbox.remove(G_reader_settings, book_path)
-        else
-            local record = Sidecar.read(book_path)
-            if not record or type(record.annotations) ~= "table" or #record.annotations == 0 then
-                Outbox.remove(G_reader_settings, book_path)
-            else
-                local ok, reason = self:syncBookHighlights(record, {
-                    silent = true,
-                    timeout = options.timeout or 10,
-                })
-                if ok then
-                    Outbox.remove(G_reader_settings, book_path)
-                    if reason == "synced" then
-                        flushed = flushed + 1
-                    end
-                end
-            end
-        end
-    end
-
-    local remaining = Outbox.count(G_reader_settings)
+    local flushed, remaining = Sync.flushHighlightOutbox({
+        config = config,
+        Client = Client,
+        JSON = JSON,
+        settings = G_reader_settings,
+        logger = logger,
+        NetworkMgr = NetworkMgr,
+        Sidecar = Sidecar,
+    }, options, function(rec, opts)
+        return self:syncBookHighlights(rec, opts)
+    end)
     if not options.silent and flushed > 0 then
         notice(T(_("Synced queued highlights for %1 book(s)."), tostring(flushed)), 3)
     end
@@ -4683,11 +4871,11 @@ function LightHouse:onCloseDocument()
                         Outbox.enqueue(G_reader_settings, book_path)
                     end
                 elseif type(record.annotations) == "table" and #record.annotations > 0 then
-                    local payload = buildHighlightSyncPayload(record)
+                    local payload = Sync.buildHighlightSyncPayload(record)
                     if payload then
                         local raw_map = G_reader_settings:readSetting("lighthouse_synced_highlights")
                         local synced_fp = type(raw_map) == "table" and raw_map[book_path] or nil
-                        if synced_fp ~= highlightFingerprint(record) then
+                        if synced_fp ~= Sync.highlightFingerprint(record) then
                             Outbox.enqueue(G_reader_settings, book_path)
                         end
                     end
@@ -4763,35 +4951,16 @@ end
 -- @tparam table sessions normalized KOSync sessions from `/api/kosync/active`
 -- @treturn number
 function LightHouse:countMissingActiveFromSessions(sessions)
-    if type(sessions) ~= "table" then return 0 end
-    local count = 0
-    for idx = 1, #sessions do
-        local s = sessions[idx]
-        if type(s) == "table" and Status.num(s.book_id) then
-            local resolved = self:localBookPathFor(s) or Status.str(s.book_path)
-            if resolved == "" or not Sidecar.bookExists(resolved) then
-                count = count + 1
-                if count >= 10 then break end
-            end
-        end
-    end
-    return count
+    return Sync.countMissingActiveFromSessions(sessions, function(session)
+        return self:localBookPathFor(session)
+    end, Sidecar)
 end
 
 --- Selects active reading sessions missing a local EPUB copy on this device (capped at 10).
 -- @tparam table shelf normalized reading shelf sessions
 -- @treturn table array of downloadable missing sessions
 function LightHouse:missingActiveSessions(shelf)
-    local missing = {}
-    if type(shelf) ~= "table" then return missing end
-    for idx = 1, #shelf do
-        local session = shelf[idx]
-        if type(session) == "table" and not session.has_local_file and Status.num(session.book_id) then
-            missing[#missing + 1] = session
-            if #missing >= 10 then break end
-        end
-    end
-    return missing
+    return Sync.missingActiveSessions(shelf)
 end
 
 --- Downloads active books started on another Kindle that are not yet on this device.
@@ -4835,53 +5004,51 @@ function LightHouse:syncMissingActiveBooks()
         return
     end
 
+    local batch_items = {}
+    for idx = 1, #missing do
+        local session = missing[idx]
+        local book_id = math.floor(Status.num(session.book_id))
+        local entry = {
+            book_id = book_id,
+            title = Status.str(session.title),
+            authors = Status.str(session.authors),
+        }
+        local title = Ui.rowTitle(entry.title)
+        if title == "" then title = _("Untitled") end
+        batch_items[#batch_items + 1] = {
+            key = "id:" .. tostring(book_id),
+            label = title,
+            url = Client.buildUrl(config, string.format("/api/books/%d/download/epub", book_id)),
+            filepath = dir .. "/" .. buildFilename(entry),
+            skip_if_exists = true,
+        }
+    end
+
     UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
         text = T(_("Download %1 active book(s) missing on this device?"), tostring(#missing)),
         ok_text = _("Download all"),
-        ok_cb = function()
-            local downloaded = 0
-            local failed = 0
-            local newly_downloaded = {}
-            self:withSpinner(T(_("Downloading %1 missing book(s)…"), tostring(#missing)), function()
-                for idx = 1, #missing do
-                    local session = missing[idx]
-                    local book_id = math.floor(Status.num(session.book_id))
-                    local entry = {
-                        book_id = book_id,
-                        title = Status.str(session.title),
-                        authors = Status.str(session.authors),
-                    }
-                    local filepath = dir .. "/" .. buildFilename(entry)
-                    if lfs.attributes(filepath, "mode") == "file" then
-                        downloaded = downloaded + 1
-                    else
-                        local url = Client.buildUrl(config, string.format("/api/books/%d/download/epub", book_id))
-                        local ok = Client.download(config, url, filepath)
-                        if ok then
-                            downloaded = downloaded + 1
-                            newly_downloaded[#newly_downloaded + 1] = filepath
-                        else
-                            failed = failed + 1
-                        end
-                    end
+        ok_callback = function()
+            self:runBatchDownloads(batch_items, nil, function(res)
+                self:forgetShelf()
+                self:forgetCatalogCaches()
+                self._missing_active_count = res.remaining
+                self.local_scan = nil
+                self.local_index = nil
+                forgetSidecarList()
+                if #(res.newly_downloaded or {}) > 0 then
+                    self:indexBookFiles(res.newly_downloaded)
                 end
+                if res.cancelled then
+                    notice(T(_("Cancelled after downloading %1 of %2 active book(s)."),
+                        tostring(res.downloaded), tostring(res.total)), 5)
+                elseif res.failed == 0 then
+                    notice(T(_("Downloaded %1 active book(s)."), tostring(res.downloaded)), 4)
+                else
+                    notice(T(_("Downloaded %1 of %2 active book(s) (%3 failed)."),
+                        tostring(res.downloaded), tostring(res.total), tostring(res.failed)), 5)
+                end
+                self:showReading{ page = 1, refresh = true }
             end)
-
-            self:forgetShelf()
-            self:forgetCatalogCaches()
-            self._missing_active_count = failed
-            self.local_scan = nil
-            self.local_index = nil
-            forgetSidecarList()
-            if #newly_downloaded > 0 then
-                self:indexBookFiles(newly_downloaded)
-            end
-            if failed == 0 then
-                notice(T(_("Downloaded %1 active book(s)."), tostring(downloaded)), 4)
-            else
-                notice(T(_("Downloaded %1 of %2 active book(s) (%3 failed)."), tostring(downloaded), tostring(#missing), tostring(failed)), 5)
-            end
-            self:showReading{ page = 1, refresh = true }
         end,
     }))
 end
@@ -4973,7 +5140,7 @@ function LightHouse:deleteLocalBook(item, on_done)
     UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
         text = T(_("Remove local copy of “%1” (%2)?\nYour book and progress stay safe on LightHouse."), title, size_text),
         ok_text = _("Remove local file"),
-        ok_cb = function()
+        ok_callback = function()
             local removed, err = os.remove(book_path)
             if not removed then
                 notice(T(_("Could not remove file: %1"), tostring(err or "error")))
@@ -5230,7 +5397,7 @@ function LightHouse:maybeSuggestNextVolume(book_path, record)
         UIManager:show(squareWidget(ConfirmBox, {
             text = T(_("Finished “%1”.\n“%2” is already on your Kindle. Open it now?"), cur_title, local_next_title or _("Next volume")),
             ok_text = _("Open now"),
-            ok_cb = function() self:openBookFile(local_next_path) end,
+            ok_callback = function() self:openBookFile(local_next_path) end,
         }))
         return true, "local"
     end
@@ -5263,7 +5430,7 @@ function LightHouse:maybeSuggestNextVolume(book_path, record)
         UIManager:show(squareWidget(ConfirmBox, {
             text = T(_("Finished “%1”.\n“%2” is already on your Kindle. Open it now?"), cur_title, next_title),
             ok_text = _("Open now"),
-            ok_cb = function() self:openBookFile(existing_path) end,
+            ok_callback = function() self:openBookFile(existing_path) end,
         }))
         return true, "local"
     end
@@ -5271,7 +5438,7 @@ function LightHouse:maybeSuggestNextVolume(book_path, record)
     UIManager:show(squareWidget(ConfirmBox, {
         text = T(_("Finished “%1”.\nDownload “%2” from LightHouse?"), cur_title, next_title),
         ok_text = _("Download"),
-        ok_cb = function() self:downloadEntry(next_entry) end,
+        ok_callback = function() self:downloadEntry(next_entry) end,
     }))
     return true, "download"
 end
@@ -5315,34 +5482,71 @@ function LightHouse:checkForPluginUpdate()
     UIManager:show(squareWidget(ConfirmBox, {
         text = T(_("Update LightHouse from v%1 to v%2?"), current_ver, remote_ver),
         ok_text = _("Update now"),
-        ok_cb = function()
-            local zip_bytes, dl_err = self:withSpinner(T(_("Downloading LightHouse v%1…"), remote_ver), function()
-                return Client.get(config, dl_path)
-            end)
+        ok_callback = function()
+            local progress_msg = nil
+            local function closeOtaProgress()
+                if progress_msg then
+                    pcall(function() UIManager:close(progress_msg) end)
+                    progress_msg = nil
+                end
+            end
+            local function showOtaProgress(step_num, total_steps, pct, detail)
+                closeOtaProgress()
+                local filled = math.max(0, math.min(10, math.floor((pct or 0) / 10 + 0.5)))
+                local bar = string.rep("#", filled) .. string.rep("-", 10 - filled)
+                local text = T(
+                    _("Updating LightHouse to v%1…\n[%2] %3%\nStep %4/%5: %6"),
+                    remote_ver,
+                    bar,
+                    tostring(pct),
+                    tostring(step_num),
+                    tostring(total_steps),
+                    Status.str(detail)
+                )
+                progress_msg = squareWidget(InfoMessage, { text = text, dismissable = false })
+                UIManager:show(progress_msg)
+                UIManager:forceRePaint()
+            end
+
+            showOtaProgress(1, 4, 25, _("Downloading plugin archive…"))
+            local zip_bytes, dl_err = Client.get(config, dl_path)
             if not zip_bytes then
+                closeOtaProgress()
+                logger.warn("LightHouse: OTA download failed:", tostring(dl_err))
                 notice(errorHeadline(dl_err) .. "\n" .. describeError(dl_err), 5)
                 return
             end
 
+            showOtaProgress(2, 4, 55, _("Verifying archive & CRC-32…"))
             local entries, unpack_err = Ota.unpackStoredZip(zip_bytes)
             if not entries then
+                closeOtaProgress()
+                logger.warn("LightHouse: OTA unpack failed:", tostring(unpack_err))
                 notice(T(_("Update failed: %1"), tostring(unpack_err or "invalid_zip")), 5)
                 return
             end
 
+            showOtaProgress(3, 4, 85, T(_("Installing %1 files…"), tostring(#entries)))
             local plugin_dir = (type(self.path) == "string" and self.path ~= "")
                 and self.path
                 or (DataStorage:getDataDir() .. "/plugins/lighthouse.koplugin")
             local installed, install_err = Ota.installEntries(plugin_dir, entries)
             if not installed then
+                closeOtaProgress()
+                logger.warn("LightHouse: OTA install failed:", tostring(install_err))
                 notice(T(_("Update install failed: %1"), tostring(install_err or "write_error")), 5)
                 return
             end
 
+            showOtaProgress(4, 4, 100, _("Update verified & installed."))
+            config.plugin_version = remote_ver
+            closeOtaProgress()
+
             UIManager:show(squareWidget(ConfirmBox, {
-                text = T(_("Updated LightHouse to v%1. Restart KOReader now?"), remote_ver),
+                text = T(_("Updated LightHouse to v%1 (%2 files installed).\nRestart KOReader now?"),
+                    remote_ver, tostring(#entries)),
                 ok_text = _("Restart now"),
-                ok_cb = function()
+                ok_callback = function()
                     if type(UIManager.restartKOReader) == "function" then
                         UIManager:restartKOReader()
                     end
@@ -5356,181 +5560,19 @@ end
 -- Background Book Metadata Indexing (CoverBrowser / ZenOS)
 -- ---------------------------------------------------------------------------
 
-local INDEX_BATCH_SIZE = 50
-local INDEX_BUSY_MAX_RETRIES = 70
-local LOCAL_INDEX_BOOK_EXTS = {
-    epub = true,
-    pdf = true,
-    mobi = true,
-    azw3 = true,
-    cbz = true,
-    cbr = true,
-    fb2 = true,
-    djvu = true,
-    txt = true,
-}
-
---- Loads KOReader CoverBrowser's BookInfoManager if installed and active.
--- @treturn table|nil BookInfoManager module
-local function loadBookInfoManager()
-    local ok, bim = pcall(require, "bookinfomanager")
-    if not ok or type(bim) ~= "table" or type(bim.extractInBackground) ~= "function" then
-        return nil
-    end
-    return bim
-end
-
 --- Queues book filepaths for fast metadata-only background indexing.
--- Splits large queues into batches of at most `INDEX_BATCH_SIZE` and waits for
--- `BookInfoManager:isExtractingInBackground()` to clear between chunks so
--- KOReader's 300s subprocess watchdog never terminates large runs.
 -- @tparam table filepaths array of absolute book file paths
 -- @treturn number count of newly queued files
 -- @treturn string|nil error code ("unavailable")
 function LightHouse:indexBookFiles(filepaths)
-    if type(filepaths) ~= "table" or #filepaths == 0 then return 0 end
-    local bim = loadBookInfoManager()
-    if not bim then return 0, "unavailable" end
-
-    local existing_pending = {}
-    self._pending_index_queue = self._pending_index_queue or {}
-    for idx = 1, #self._pending_index_queue do
-        local item = self._pending_index_queue[idx]
-        if type(item) == "table" and type(item.filepath) == "string" then
-            existing_pending[item.filepath] = true
-        end
-    end
-
-    local queued = 0
-    for idx = 1, #filepaths do
-        local p = filepaths[idx]
-        if type(p) == "string" and p ~= "" and not existing_pending[p] then
-            existing_pending[p] = true
-            self._pending_index_queue[#self._pending_index_queue + 1] = {
-                filepath = p,
-                cover_specs = false,
-            }
-            queued = queued + 1
-        end
-    end
-    if queued == 0 then return 0 end
-
-    local busy_retries = 0
-    local function dispatchNextBatch()
-        if not self._pending_index_queue or #self._pending_index_queue == 0 then
-            self._index_pump_scheduled = false
-            return
-        end
-        local active_bim = loadBookInfoManager()
-        if not active_bim then
-            self._pending_index_queue = {}
-            self._index_pump_scheduled = false
-            return
-        end
-        local busy = type(active_bim.isExtractingInBackground) == "function"
-            and active_bim:isExtractingInBackground() == true
-        if busy then
-            busy_retries = busy_retries + 1
-            if busy_retries > INDEX_BUSY_MAX_RETRIES then
-                self._index_pump_scheduled = false
-                return
-            end
-            self._index_pump_scheduled = true
-            UIManager:scheduleIn(5, dispatchNextBatch)
-            return
-        end
-        busy_retries = 0
-        local chunk = {}
-        local rest = {}
-        for idx = 1, #self._pending_index_queue do
-            if idx <= INDEX_BATCH_SIZE then
-                chunk[#chunk + 1] = self._pending_index_queue[idx]
-            else
-                rest[#rest + 1] = self._pending_index_queue[idx]
-            end
-        end
-        self._pending_index_queue = rest
-        pcall(function() active_bim:extractInBackground(chunk) end)
-        if #self._pending_index_queue > 0 then
-            self._index_pump_scheduled = true
-            UIManager:scheduleIn(5, dispatchNextBatch)
-        else
-            self._index_pump_scheduled = false
-        end
-    end
-
-    if not self._index_pump_scheduled then
-        dispatchNextBatch()
-    end
-    return queued
+    return Indexer.indexBookFiles(self, filepaths, UIManager)
 end
 
 --- Finds supported local books missing metadata in KOReader's bookinfo DB.
--- Scans `download_dir`, `/mnt/us/books`, and `/mnt/us/documents` (deduplicated,
--- skipping `.sdr` sidecars and hidden/AppleDouble entries).
 -- @treturn table|nil sorted array of unindexed filepaths
 -- @treturn string|nil error code ("unavailable")
 function LightHouse:findUnindexedLocalBooks()
-    local bim = loadBookInfoManager()
-    if not bim or type(bim.getBookInfo) ~= "function" then
-        return nil, "unavailable"
-    end
-
-    local roots = {}
-    local seen_roots = {}
-    local function addRoot(dir)
-        if type(dir) ~= "string" or dir == "" then return end
-        local clean = dir:gsub("\\", "/"):gsub("/+$", "")
-        if clean ~= "" and not seen_roots[clean] then
-            seen_roots[clean] = true
-            roots[#roots + 1] = clean
-        end
-    end
-    addRoot(self:getDownloadDir())
-    for idx = 1, #Sidecar.DEVICE_DIRS do
-        addRoot(Sidecar.DEVICE_DIRS[idx])
-    end
-
-    local missing = {}
-    local seen_files = {}
-    local function walk(dir, depth)
-        if depth > 8 then return end
-        local names = Sidecar.io.list(dir)
-        if type(names) ~= "table" then return end
-        table.sort(names)
-        for idx = 1, #names do
-            local name = names[idx]
-            if type(name) == "string" and name ~= "." and name ~= ".."
-                and not name:match("^%.") and not name:match("^%._")
-                and not name:match("%.sdr$") then
-                local filepath = dir .. "/" .. name
-                local mode = Sidecar.io.attributes(filepath, "mode")
-                if mode == "directory" then
-                    walk(filepath, depth + 1)
-                elseif mode == "file" and not seen_files[filepath] then
-                    local ext = name:match("%.([%w_]+)$")
-                    if ext and LOCAL_INDEX_BOOK_EXTS[ext:lower()] then
-                        seen_files[filepath] = true
-                        local ok_info, info = pcall(function()
-                            return bim:getBookInfo(filepath, false)
-                        end)
-                        if not ok_info or type(info) ~= "table"
-                            or (info.has_meta ~= "Y" and not info.ignore_meta and not info.unsupported) then
-                            missing[#missing + 1] = filepath
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    for idx = 1, #roots do
-        local root = roots[idx]
-        if Sidecar.io.attributes(root, "mode") == "directory" then
-            walk(root, 0)
-        end
-    end
-    return missing
+    return Indexer.findUnindexedLocalBooks(self:getDownloadDir(), Sidecar)
 end
 
 --- 1-tap menu action scanning unindexed local books and indexing metadata in background.
@@ -5576,12 +5618,13 @@ function LightHouse:clearCoverCache()
     return res
 end
 
---- Runs live server reachability, latency, auth, cache, outbox, and indexer checks.
+--- Runs live server reachability, latency, auth, cache, outbox, queue, and indexer checks.
 function LightHouse:runDiagnostics()
     local cover_stats = Cache.dirStats(coverDir(), coverCacheIo())
     local opds_stats = self:opdsCache():stats()
     local outbox_count = Outbox.count(G_reader_settings)
-    local bim = loadBookInfoManager()
+    local queue_count = Queue.count(G_reader_settings)
+    local bim = Indexer.loadBookInfoManager()
     local online = NetworkMgr:isOnline() == true
     local configured = Client.isConfigured(config)
 
@@ -5634,6 +5677,7 @@ function LightHouse:runDiagnostics()
             tostring(cover_stats.files or 0),
             Views.formatBytes(cover_stats.bytes or 0)),
         _("Offline Highlight Outbox:") .. " " .. tostring(outbox_count) .. " " .. _("queued"),
+        _("Download Queue:") .. " " .. tostring(queue_count) .. " " .. _("queued"),
         _("CoverBrowser Indexer:") .. " " .. (bim and _("active") or _("unavailable")),
     }
 
@@ -5642,7 +5686,7 @@ function LightHouse:runDiagnostics()
         text = table.concat(lines, "\n"),
         cancel_text = _("Close"),
         ok_text = _("Clear cover cache"),
-        ok_cb = function()
+        ok_callback = function()
             self:clearCoverCache()
         end,
     }))
@@ -5653,7 +5697,7 @@ end
 -- `formatMessage` is the guarded `T()` itself: the tests drive it directly to
 -- prove that no substitution type can reach `string.gsub`.
 LightHouse.buildFilename = buildFilename
-LightHouse.buildHighlightSyncPayload = buildHighlightSyncPayload
+LightHouse.buildHighlightSyncPayload = Sync.buildHighlightSyncPayload
 LightHouse.describeError = describeError
 LightHouse.errorHeadline = errorHeadline
 LightHouse.extractVolumeIndex = extractVolumeIndex
@@ -5661,6 +5705,6 @@ LightHouse.findLocalSiblingNextVolume = findLocalSiblingNextVolume
 LightHouse.findNextSeriesEntry = findNextSeriesEntry
 LightHouse.formatSeriesIndex = formatSeriesIndex
 LightHouse.formatMessage = T
-LightHouse.highlightFingerprint = highlightFingerprint
+LightHouse.highlightFingerprint = Sync.highlightFingerprint
 
 return LightHouse
