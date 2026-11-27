@@ -5096,8 +5096,14 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
 
       // Verified source counts in modal cards
       expect(html).toContain("${s.volumeCount !== undefined ? s.volumeCount : totalVols} vols available");
-      expect(html).toContain("Source offline");
       expect(html).toContain("${s.volumeCount || totalVols} vols (unverified)");
+      // Errored sources name the cause instead of a bare "Source offline" label
+      expect(html).toContain("'Server setup needed'");
+      expect(html).toContain("'Blocked for automation'");
+      expect(html).toContain("'Source refused request'");
+      expect(html).toContain("'Source unreachable'");
+      expect(html).toContain("'Source unavailable'");
+      expect(html).not.toContain("volStatusText = 'Source offline'");
 
       // Modal ingest guard rejects when all verified volumes are in library
       expect(html).toContain("showToast('All volumes already in library. Use force re-download link below if needed.');");

@@ -26,6 +26,17 @@ import {
   runElscioneHelperDownload,
   getElscioneHelperPath,
   getPythonPath,
+  listPythonCandidates,
+  browserRequestHeaders,
+  isCloudflareInterstitial,
+  isElscioneBlockedError,
+  isElscioneDependencyError,
+  isElscioneProxyUsable,
+  resetElscioneProxyHealthCacheForTest,
+  resetElscionePythonCacheForTest,
+  ELSCIONE_BLOCKED_CODE,
+  ELSCIONE_PYTHON_DEPENDENCY_CODE,
+  ELSCIONE_PYTHON_DEPENDENCY_MESSAGE,
   type AnubisChallenge,
   type ElscioneProgressEvent,
 } from "./elscione";
@@ -1928,6 +1939,369 @@ describe("Elscione Light Novel Ingestion Module", () => {
       expect(result.skippedCount).toBe(1);
       expect(result.duplicateCount).toBe(0);
       expect(result.calibreBookIds).toEqual([99]);
+    });
+  });
+
+  describe("Python interpreter capability selection", () => {
+    beforeEach(() => {
+      resetElscionePythonCacheForTest();
+    });
+
+    it("skips an interpreter whose curl_cffi import fails and selects one that succeeds", () => {
+      const probed: string[] = [];
+      const chosen = getPythonPath({
+        pythonProbe: (candidate: string) => {
+          probed.push(candidate);
+          // The first existing candidate on this host is Homebrew python3, which lacks curl_cffi.
+          return candidate === "/usr/local/bin/python3";
+        },
+      });
+
+      expect(chosen).toBe("/usr/local/bin/python3");
+      expect(probed).toContain("/opt/homebrew/bin/python3");
+      expect(probed.indexOf("/opt/homebrew/bin/python3")).toBeLessThan(
+        probed.indexOf("/usr/local/bin/python3"),
+      );
+    });
+
+    it("treats a probe that throws as an incapable interpreter instead of crashing", () => {
+      const chosen = getPythonPath({
+        pythonProbe: (candidate: string) => {
+          if (candidate === "/opt/homebrew/bin/python3.14") throw new Error("probe exploded");
+          return candidate === "python3";
+        },
+      });
+      expect(chosen).toBe("python3");
+    });
+
+    it("honours an explicit pythonPath verbatim without probing", () => {
+      let probes = 0;
+      const chosen = getPythonPath({
+        pythonPath: "/custom/bin/python3.99",
+        pythonProbe: () => {
+          probes++;
+          return false;
+        },
+      });
+      expect(chosen).toBe("/custom/bin/python3.99");
+      expect(probes).toBe(0);
+    });
+
+    it("lists the explicit env override first and includes remaining Homebrew minors", () => {
+      const candidates = listPythonCandidates({ ELSCIONE_PYTHON_PATH: "/env/python3" } as any);
+      expect(candidates[0]).toBe("/env/python3");
+      expect(new Set(candidates).size).toBe(candidates.length);
+    });
+
+    it("surfaces the missing curl_cffi dependency when no interpreter has it", () => {
+      expect(() => getPythonPath({ pythonProbe: () => false })).toThrow(/curl_cffi/i);
+      let caught: any;
+      try {
+        getPythonPath({ pythonProbe: () => false });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught?.code).toBe(ELSCIONE_PYTHON_DEPENDENCY_CODE);
+      expect(isElscioneDependencyError(caught)).toBe(true);
+      expect(String(caught?.message)).toContain("pip3 install curl_cffi");
+      expect(String(caught?.message)).toContain(ELSCIONE_PYTHON_DEPENDENCY_MESSAGE.slice(0, 30));
+    });
+
+    it("maps a helper exit-1 curl_cffi failure to the dependency error, not a network error", async () => {
+      const mockSpawnSync = () => ({
+        status: 1,
+        stdout: "",
+        stderr:
+          "Error: curl_cffi is required for Elscione network operations. Install with 'pip3 install curl_cffi'.\n",
+      });
+
+      let caught: any;
+      try {
+        await runElscioneHelperManifest("https://server.elscione.com/Test%20Series/", {
+          pythonPath: "python3",
+          spawnSync: mockSpawnSync as any,
+        });
+      } catch (err: any) {
+        caught = err;
+      }
+
+      expect(caught).toBeDefined();
+      expect(caught.code).toBe(ELSCIONE_PYTHON_DEPENDENCY_CODE);
+      // A dependency fault must never be reported as the reader's connection being down.
+      expect(String(caught.message)).not.toMatch(/failed to fetch|network error/i);
+    });
+
+    it("does not silently fall back to the in-process fetch when the dependency is missing", async () => {
+      // No fetch mock is injected: if the code fell through to the in-process path it would either
+      // hit the real network or fail with a transport error. It must do neither.
+      let caught: any;
+      try {
+        await extractElscioneManifest(
+          "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Mushoku%20Tensei/",
+          { pythonProbe: () => false },
+        );
+      } catch (err: any) {
+        caught = err;
+      }
+      expect(caught).toBeDefined();
+      expect(isElscioneDependencyError(caught)).toBe(true);
+      expect(caught.code).toBe(ELSCIONE_PYTHON_DEPENDENCY_CODE);
+      expect(String(caught.message)).toContain("pip3 install curl_cffi");
+    });
+  });
+
+  describe("Browser-shaped requests and blocked-source outcomes", () => {
+    beforeEach(() => {
+      resetElscioneSessionForTest();
+      resetElscioneProxyHealthCacheForTest();
+    });
+
+    it("browserRequestHeaders carries the same-origin fetch headers the source requires", () => {
+      const headers = browserRequestHeaders("https://server.elscione.com/a/b/");
+      expect(headers["Accept-Language"]).toBe("en-US,en;q=0.9");
+      expect(headers["Sec-Fetch-Mode"]).toBe("cors");
+      expect(headers["Sec-Fetch-Site"]).toBe("same-origin");
+      expect(headers["Sec-Fetch-Dest"]).toBe("empty");
+      expect(headers["Referer"]).toBe("https://server.elscione.com/a/b/");
+      expect(headers["Origin"]).toBe("https://server.elscione.com");
+    });
+
+    it("the manifest POST sends browser-shaped headers including Accept-Language", async () => {
+      let sentHeaders: Record<string, string> = {};
+      let sentMethod = "";
+      const mockFetch = async (_url: string, init?: RequestInit) => {
+        sentMethod = String(init?.method || "GET");
+        sentHeaders = (init?.headers || {}) as Record<string, string>;
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                href: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Mushoku%20Tensei/Mushoku%20Tensei%20-%20Volume%2001.epub",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const manifest = await extractElscioneManifest(
+        "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Mushoku%20Tensei/",
+        { fetch: mockFetch as any, useHelper: false },
+      );
+
+      expect(sentMethod).toBe("POST");
+      expect(sentHeaders["Accept-Language"]).toBe("en-US,en;q=0.9");
+      expect(sentHeaders["Sec-Fetch-Mode"]).toBe("cors");
+      expect(sentHeaders["Accept"]).toContain("application/json");
+      expect(sentHeaders["Content-Type"]).toContain("application/json");
+      expect(manifest.volumes.length).toBe(1);
+    });
+
+    it("a Cloudflare interstitial on pass-challenge fails closed as blocked and never loops", async () => {
+      let fetches = 0;
+      const mockFetch = async (url: string) => {
+        fetches++;
+        if (url.includes("pass-challenge")) {
+          return new Response(
+            "<html><head><title>Just a moment...</title></head><body>cf_chl_opt</body></html>",
+            { status: 403, headers: { "Content-Type": "text/html" } },
+          );
+        }
+        return new Response(
+          `<html><script id="anubis_challenge" type="application/json">{"id":"ch_cf","difficulty":0,"randomData":"seed"}</script></html>`,
+          { status: 403, headers: { "Content-Type": "text/html" } },
+        );
+      };
+
+      let caught: any;
+      try {
+        await fetchWithAnubis(
+          "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Mushoku%20Tensei/",
+          { method: "POST" },
+          { fetch: mockFetch as any, proxyProbe: () => false },
+        );
+      } catch (err: any) {
+        caught = err;
+      }
+
+      expect(caught).toBeDefined();
+      expect(caught.code).toBe(ELSCIONE_BLOCKED_CODE);
+      expect(isElscioneBlockedError(caught)).toBe(true);
+      expect(String(caught.message)).toContain("browser only");
+      expect(String(caught.message)).not.toMatch(/failed to fetch|check your connection/i);
+      // initial request + one pass-challenge attempt, and no retry into the same wall
+      expect(fetches).toBe(2);
+    });
+
+    it("a challenge that survives the solved cookie is reported as blocked, not retried", async () => {
+      let fetches = 0;
+      const challengeHtml =
+        `<html><script id="anubis_challenge" type="application/json">{"id":"ch_loop","difficulty":0,"randomData":"seed"}</script></html>`;
+      const mockFetch = async (url: string) => {
+        fetches++;
+        if (url.includes("pass-challenge")) {
+          return new Response("Passed", { status: 200 });
+        }
+        return new Response(challengeHtml, {
+          status: 403,
+          headers: { "Content-Type": "text/html" },
+        });
+      };
+
+      await expect(
+        fetchWithAnubis(
+          "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Mushoku%20Tensei/",
+          { method: "POST" },
+          { fetch: mockFetch as any, proxyProbe: () => false },
+        ),
+      ).rejects.toThrow(/blocked the automated request/i);
+
+      expect(fetches).toBe(3);
+    });
+
+    it("a non-JSON challenge body becomes a blocked error instead of an unverified source", async () => {
+      const mockFetch = async (url: string) => {
+        if (url.includes("pass-challenge")) {
+          return new Response("Passed", { status: 200 });
+        }
+        return new Response(
+          "<html><head><title>Attention Required! | Cloudflare</title></head></html>",
+          { status: 403, headers: { "Content-Type": "text/html" } },
+        );
+      };
+
+      await expect(
+        extractElscioneManifest(
+          "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Mushoku%20Tensei/",
+          { fetch: mockFetch as any, useHelper: false, proxyProbe: () => false },
+        ),
+      ).rejects.toThrow(/blocked the automated request/i);
+    });
+
+    it("isCloudflareInterstitial distinguishes a Cloudflare wall from an Anubis challenge", () => {
+      expect(isCloudflareInterstitial("<title>Just a moment...</title>")).toBe(true);
+      expect(isCloudflareInterstitial("Attention Required! | Cloudflare")).toBe(true);
+      expect(
+        isCloudflareInterstitial(
+          `<script id="anubis_challenge" type="application/json">{"id":"ch","difficulty":4}</script>`,
+        ),
+      ).toBe(false);
+      expect(isCloudflareInterstitial("{\"items\":[]}")).toBe(false);
+    });
+  });
+
+  describe("Proxy fallback discipline", () => {
+    beforeEach(() => {
+      resetElscioneSessionForTest();
+      resetElscioneProxyHealthCacheForTest();
+    });
+
+    it("a dead local proxy never turns a direct success into a failure", async () => {
+      let fetches = 0;
+      const mockFetch = async () => {
+        fetches++;
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      };
+
+      const res = await fetchWithAnubis(
+        "https://server.elscione.com/folder/",
+        {},
+        { fetch: mockFetch as any, proxyProbe: () => false },
+      );
+
+      expect(res.status).toBe(200);
+      expect(fetches).toBe(1);
+      expect(await isElscioneProxyUsable({ proxyProbe: () => false })).toBe(false);
+    });
+
+    it("skips the proxy entirely when it is unusable and reports both facts", async () => {
+      let fetches = 0;
+      const mockFetch = async () => {
+        fetches++;
+        throw new Error("connect ECONNREFUSED 45.139.226.179:443");
+      };
+
+      await expect(
+        fetchWithAnubis(
+          "https://server.elscione.com/folder/",
+          {},
+          { fetch: mockFetch as any, proxyProbe: () => false },
+        ),
+      ).rejects.toThrow(/local proxy is not usable/i);
+      expect(fetches).toBe(1);
+    });
+
+    it("uses the proxy as a bounded fallback when it is actually healthy", async () => {
+      let proxyFetches = 0;
+      const mockFetch = async (_url: string, init?: any) => {
+        if (init?.proxy) {
+          proxyFetches++;
+          expect(init.proxy).toBe("http://127.0.0.1:7890");
+          return new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        throw new Error("direct route refused");
+      };
+
+      const res = await fetchWithAnubis(
+        "https://server.elscione.com/folder/",
+        {},
+        { fetch: mockFetch as any, proxyProbe: () => true },
+      );
+      expect(res.status).toBe(200);
+      expect(proxyFetches).toBe(1);
+    });
+  });
+
+  describe("Reader-facing error classification in index.html", () => {
+    function loadClassifier(): (raw: any) => { kind: string; message: string } {
+      const html = fs.readFileSync(path.join((import.meta as any).dir, "index.html"), "utf8");
+      const fnMatch = html.match(/function classifyErrorCause\(raw\) \{([\s\S]*?)\n {4}\}/);
+      expect(fnMatch).not.toBeNull();
+      return new Function("raw", fnMatch![1]) as (raw: any) => { kind: string; message: string };
+    }
+
+    it("maps a missing dependency, a block, an HTTP status, and a real outage to four messages", () => {
+      const classify = loadClassifier();
+
+      const dependency = classify(
+        "Elsci.one needs the Python curl_cffi package on the server, which is not installed. Install it with 'pip3 install curl_cffi' and retry.",
+      );
+      const blocked = classify(
+        "Elscione source blocked the automated request; this source is verified via browser only.",
+      );
+      const http = classify("Failed to fetch directory manifest from Elscione (403): remote source");
+      const offline = classify("error: Failed to fetch");
+
+      expect(dependency.kind).toBe("dependency");
+      expect(blocked.kind).toBe("blocked");
+      expect(http.kind).toBe("http");
+      expect(offline.kind).toBe("offline");
+
+      const messages = [dependency.message, blocked.message, http.message, offline.message];
+      expect(new Set(messages).size).toBe(4);
+      for (const msg of messages) {
+        expect(msg.length).toBeGreaterThan(10);
+        expect(msg).not.toMatch(/curl_cffi|anubis|\.ts\b|\/Users\//i);
+      }
+      expect(dependency.message).not.toMatch(/check your connection/i);
+      expect(blocked.message).not.toMatch(/check your connection/i);
+      expect(offline.message).toMatch(/check your connection/i);
+    });
+
+    it("gives rate limiting its own message distinct from a plain refusal", () => {
+      const classify = loadClassifier();
+      const limited = classify("Elscione request failed (429)");
+      const refused = classify("Elscione request failed (403)");
+      expect(limited.kind).toBe("http");
+      expect(refused.kind).toBe("http");
+      expect(limited.message).not.toBe(refused.message);
+      expect(limited.message).toMatch(/rate limit/i);
     });
   });
 });

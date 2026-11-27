@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import net from "node:net";
 import process from "node:process";
 import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -35,7 +36,184 @@ const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const SUBPROCESS_TIMEOUT_MS = 60_000;
 const SUBPROCESS_MAX_BUFFER = 16 * 1024 * 1024;
+const PYTHON_PROBE_TIMEOUT_MS = 8_000;
+const PROXY_PROBE_TIMEOUT_MS = 400;
+const PROXY_HEALTH_TTL_MS = 30_000;
 export const MAX_VOLUMES_PER_REQUEST = 50;
+
+/** Machine-readable codes so callers (and the reader-facing classifier) can name the real cause. */
+export const ELSCIONE_PYTHON_DEPENDENCY_CODE = "ELSCIONE_PYTHON_DEPENDENCY_MISSING";
+export const ELSCIONE_BLOCKED_CODE = "ELSCIONE_SOURCE_BLOCKED";
+
+/**
+ * Reader-meaningful text for the one failure that is neither the source's fault nor the reader's:
+ * the host has no Python interpreter able to import `curl_cffi`, which the Elscione helper needs.
+ */
+export const ELSCIONE_PYTHON_DEPENDENCY_MESSAGE =
+  "Elsci.one needs the Python curl_cffi package on the server, which is not installed. Install it with 'pip3 install curl_cffi' and retry.";
+
+/**
+ * Fail-closed text for a source that answered by blocking the automated request (Cloudflare
+ * interstitial on top of an Anubis challenge) instead of by denying or by having nothing.
+ */
+export const ELSCIONE_BLOCKED_MESSAGE =
+  "Elscione source blocked the automated request; this source is verified via browser only.";
+
+export interface ElscioneDependencyError extends Error {
+  code: typeof ELSCIONE_PYTHON_DEPENDENCY_CODE;
+  dependencyMissing: true;
+}
+
+function createDependencyError(detail?: string): ElscioneDependencyError {
+  const base = ELSCIONE_PYTHON_DEPENDENCY_MESSAGE;
+  const err = new Error(
+    detail && !base.includes(detail.trim()) ? `${base} (${detail.trim()})` : base,
+  ) as ElscioneDependencyError;
+  err.code = ELSCIONE_PYTHON_DEPENDENCY_CODE;
+  err.dependencyMissing = true;
+  return err;
+}
+
+export function isElscioneDependencyError(err: any): boolean {
+  if (!err) return false;
+  if (err.code === ELSCIONE_PYTHON_DEPENDENCY_CODE) return true;
+  const msg = String(err?.message || err);
+  return /curl_cffi/i.test(msg);
+}
+
+export function isElscioneBlockedError(err: any): boolean {
+  return Boolean(err && err.code === ELSCIONE_BLOCKED_CODE);
+}
+
+function createBlockedError(detail?: string): Error {
+  const err = new Error(
+    detail ? `${ELSCIONE_BLOCKED_MESSAGE} (${detail})` : ELSCIONE_BLOCKED_MESSAGE,
+  );
+  (err as any).code = ELSCIONE_BLOCKED_CODE;
+  return err;
+}
+
+/**
+ * True when a response body is a Cloudflare interstitial ("Just a moment...", "Attention
+ * required!") rather than the site or its bot challenge. Distinguishing the two matters: an
+ * Anubis challenge can be solved, a Cloudflare interstitial on the pass-challenge hop cannot.
+ */
+export function isCloudflareInterstitial(text: string, res?: Response): boolean {
+  if (res) {
+    const mitigated = (res.headers.get("cf-mitigated") || "").toLowerCase();
+    if (mitigated.includes("challenge")) return true;
+  }
+  if (!text) return false;
+  return (
+    /<title>\s*just a moment\.\.\.\s*<\/title>/i.test(text) ||
+    /attention required!?\s*\|?\s*cloudflare/i.test(text) ||
+    /cf_chl_opt|cdn-cgi\/challenge-platform|__cf_chl_/i.test(text) ||
+    /checking your browser before accessing/i.test(text)
+  );
+}
+
+/**
+ * Browser-shaped headers a same-origin `fetch()` from the site itself would send.
+ *
+ * The source's edge rejects a bare POST (403 + Cloudflare "Attention Required!") but serves the
+ * same request with 200 once `Accept-Language` and the Sec-Fetch family are present, so these are
+ * part of talking to the source at all, not cosmetic.
+ */
+export function browserRequestHeaders(referer?: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"macOS"',
+  };
+  if (referer) {
+    headers["Referer"] = referer;
+    headers["Origin"] = safeCreateUrl(referer)?.origin || referer;
+  }
+  return headers;
+}
+
+let proxyHealthCache: { url: string; healthy: boolean; checkedAt: number } | null = null;
+
+/** Test hook: forget the cached proxy health verdict. */
+export function resetElscioneProxyHealthCacheForTest(): void {
+  proxyHealthCache = null;
+}
+
+function defaultProxyProbe(proxyUrl: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (healthy: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(healthy);
+    };
+    const parsed = safeCreateUrl(proxyUrl);
+    if (!parsed) return finish(false);
+    const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+    let socket: any;
+    try {
+      socket = net.connect({ host: parsed.hostname, port });
+    } catch {
+      return finish(false);
+    }
+    const timer = setTimeout(() => {
+      try {
+        socket.destroy();
+      } catch {
+        // ignore
+      }
+      finish(false);
+    }, PROXY_PROBE_TIMEOUT_MS);
+    socket.once("connect", () => {
+      clearTimeout(timer);
+      try {
+        socket.destroy();
+      } catch {
+        // ignore
+      }
+      finish(true);
+    });
+    socket.once("error", () => {
+      clearTimeout(timer);
+      finish(false);
+    });
+  });
+}
+
+/**
+ * The local sing-box listener accepts a TCP connection even when it cannot serve, so "something is
+ * listening" proves nothing. Only a completed handshake counts, and the verdict is cached briefly
+ * because a dead proxy must not add a probe to every request.
+ */
+export async function isElscioneProxyUsable(
+  dependencies?: ElscioneDependencies,
+): Promise<boolean> {
+  const proxyUrl = dependencies?.proxyUrl || PROXY_URL;
+  const probe = dependencies?.proxyProbe ?? defaultProxyProbe;
+  const now = Date.now();
+  if (
+    proxyHealthCache &&
+    proxyHealthCache.url === proxyUrl &&
+    now - proxyHealthCache.checkedAt < PROXY_HEALTH_TTL_MS
+  ) {
+    return proxyHealthCache.healthy;
+  }
+  let healthy = false;
+  try {
+    healthy = (await probe(proxyUrl)) === true;
+  } catch {
+    healthy = false;
+  }
+  // Injected probes are per-test: never let one poison the cached verdict.
+  if (!dependencies?.proxyProbe) {
+    proxyHealthCache = { url: proxyUrl, healthy, checkedAt: now };
+  }
+  return healthy;
+}
 
 export interface ElscioneDependencies {
   fetch?: (url: string, init?: RequestInit) => Promise<Response>;
@@ -50,6 +228,14 @@ export interface ElscioneDependencies {
   signal?: AbortSignal;
   helperPath?: string;
   pythonPath?: string;
+  /**
+   * Interpreter capability probe. Returning true means "can import curl_cffi". Injected in tests so
+   * interpreter selection never depends on the host's real pythons.
+   */
+  pythonProbe?: (candidate: string) => boolean;
+  /** Local proxy health probe. Returning true means "the proxy actually accepts and serves". */
+  proxyProbe?: (proxyUrl: string) => Promise<boolean> | boolean;
+  proxyUrl?: string;
   useHelper?: boolean;
   fetchOnlineSynopsis?: typeof fetchOnlineSynopsis;
   force?: boolean;
@@ -508,6 +694,7 @@ export async function submitAnubisSolution(
   const headers: Record<string, string> = {
     "User-Agent": USER_AGENT,
     Referer: baseUrl,
+    "Accept-Language": "en-US,en;q=0.9",
   };
   if (isElscioneUrl(passUrl.toString())) {
     const currentCookies = getElscioneSessionCookies();
@@ -516,26 +703,43 @@ export async function submitAnubisSolution(
     }
   }
 
-  let res: Response;
-  try {
-    res = await fetcher(passUrl.toString(), {
+  const requestPassChallenge = async (useProxy: boolean): Promise<Response> => {
+    const reqInit: any = {
       method: "GET",
       headers,
       signal: composeSignal(30000, dependencies?.signal),
       redirect: "manual",
-    } as any);
-  } catch {
+    };
+    if (useProxy) {
+      reqInit.proxy = dependencies?.proxyUrl || PROXY_URL;
+    }
+    return await fetcher(passUrl.toString(), reqInit);
+  };
+
+  let res: Response;
+  try {
+    res = await requestPassChallenge(false);
+  } catch (directErr: any) {
     if (dependencies?.signal?.aborted) {
       throw new Error("Anubis pass-challenge aborted by client");
     }
-    // Fall back to Sing-box LAN proxy if direct failed
-    res = await fetcher(passUrl.toString(), {
-      method: "GET",
-      headers,
-      proxy: PROXY_URL,
-      signal: composeSignal(30000, dependencies?.signal),
-      redirect: "manual",
-    } as any);
+    // The local proxy is a fallback, not the path: a dead listener must not mask the direct error.
+    const proxyUsable = await isElscioneProxyUsable(dependencies);
+    if (!proxyUsable) {
+      throw new Error(
+        `Anubis pass-challenge could not reach the source directly (${directErr?.message || directErr}) and the local proxy is not usable`,
+      );
+    }
+    res = await requestPassChallenge(true);
+  }
+
+  // A Cloudflare interstitial here means the edge is refusing this client outright: solving again
+  // would hit the same wall, so this outcome is reported as a block, not retried.
+  if (res.status === 403 || res.status === 503) {
+    const body = await res.clone().text().catch(() => "");
+    if (isCloudflareInterstitial(body, res)) {
+      throw createBlockedError("blocked at Anubis pass-challenge");
+    }
   }
 
   updateCookiesFromResponse(res);
@@ -594,7 +798,7 @@ export async function fetchWithAnubis(
       signal: composeSignal(30000, dependencies?.signal),
     };
     if (useProxy) {
-      reqInit.proxy = PROXY_URL;
+      reqInit.proxy = dependencies?.proxyUrl || PROXY_URL;
     }
     return await fetcher(target, reqInit);
   };
@@ -602,9 +806,18 @@ export async function fetchWithAnubis(
   const fetchWithRetry = async (target: string): Promise<Response> => {
     try {
       return await doFetch(target, false, buildHeaders(init?.headers, target));
-    } catch {
+    } catch (directErr: any) {
       if (dependencies?.signal?.aborted) {
         throw new Error("Elscione request aborted by client");
+      }
+      // Direct is the primary path. The local proxy is only worth a second attempt when it can
+      // actually serve, because the sing-box listener accepts connections and then resets, which
+      // would turn one honest failure into a second misleading one.
+      const proxyUsable = await isElscioneProxyUsable(dependencies);
+      if (!proxyUsable) {
+        throw new Error(
+          `Elscione request failed directly (${directErr?.message || directErr}) and the local proxy is not usable`,
+        );
       }
       return await doFetch(target, true, buildHeaders(init?.headers, target));
     }
@@ -671,6 +884,23 @@ export async function fetchWithAnubis(
       if (isElscioneUrl(currentUrl)) {
         updateCookiesFromResponse(res);
       }
+
+      // One attempt only. A challenge that survives the solved cookie is a block, not a transient
+      // hiccup; retrying again would hammer the same wall and still end in a misleading 403.
+      const retryContentType = (res.headers.get("content-type") || "").toLowerCase();
+      if (
+        res.status === 403 ||
+        res.status === 401 ||
+        (retryContentType.includes("text/html") && res.status >= 200 && res.status < 300)
+      ) {
+        const retryText = await res.clone().text().catch(() => "");
+        if (isCloudflareInterstitial(retryText, res)) {
+          throw createBlockedError("Cloudflare interstitial after solving the Anubis challenge");
+        }
+        if (parseAnubisChallenge(retryText)) {
+          throw createBlockedError("Anubis challenge persisted after solving");
+        }
+      }
     }
   }
 
@@ -721,22 +951,110 @@ export function getElscioneHelperPath(dependencies?: ElscioneDependencies): stri
   return possiblePaths[0];
 }
 
+const PYTHON_CAPABILITY_PROBE_ARGS = ["-c", "import curl_cffi"];
+const HOMEBREW_PYTHON_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"];
+
+let cachedCapablePythonPath: string | null = null;
+
+/** Test hook: forget the cached interpreter so capability probing runs again. */
+export function resetElscionePythonCacheForTest(): void {
+  cachedCapablePythonPath = null;
+}
+
+/**
+ * Every interpreter worth probing, in priority order: explicit configuration first, then the
+ * Homebrew pythons most likely to carry `curl_cffi`, then whatever `python3` resolves to.
+ */
+export function listPythonCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  const push = (candidate?: string | null) => {
+    const clean = typeof candidate === "string" ? candidate.trim() : "";
+    if (!clean || seen.has(clean)) return;
+    seen.add(clean);
+    candidates.push(clean);
+  };
+
+  push(env.ELSCIONE_PYTHON_PATH);
+  push(env.PYTHON_PATH);
+  push("/opt/homebrew/bin/python3.14");
+  push("/opt/homebrew/bin/python3");
+  push("/usr/local/bin/python3");
+
+  // Remaining Homebrew minors, newest first: an interpreter that is merely present says nothing
+  // about whether it can import `curl_cffi`, so all of them are probed rather than trusted.
+  const minors: string[] = [];
+  for (const dir of HOMEBREW_PYTHON_DIRS) {
+    let entries: string[] = [];
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const match = entry.match(/^python3\.(\d+)$/);
+      if (!match) continue;
+      minors.push({ path: path.join(dir, entry), minor: Number(match[1]) } as any);
+    }
+  }
+  const sortedMinors = (minors as any[])
+    .sort((a, b) => b.minor - a.minor)
+    .map((entry) => entry.path as string);
+  for (const p of sortedMinors) push(p);
+
+  push("python3");
+  return candidates;
+}
+
+/**
+ * Default capability probe: the interpreter must actually import `curl_cffi`. Bounded so a hung
+ * interpreter cannot stall a request, and fail-closed on a missing binary.
+ */
+function defaultPythonProbe(candidate: string): boolean {
+  try {
+    const res = spawnSync(candidate, PYTHON_CAPABILITY_PROBE_ARGS, {
+      encoding: "utf8",
+      timeout: PYTHON_PROBE_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024,
+    });
+    if (!res || res.error) return false;
+    return res.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Selects a Python interpreter that can genuinely run the Elscione helper.
+ *
+ * Existence is not capability: Homebrew's `/opt/homebrew/bin/python3` can be a newer minor with no
+ * `curl_cffi`, and choosing it made every Elscione fetch fail while a usable interpreter sat next to
+ * it. Candidates are probed in order and the first one that imports `curl_cffi` wins, cached for the
+ * process lifetime. When none qualify this throws a dependency error that names the missing package
+ * instead of letting the caller report a network failure.
+ */
 export function getPythonPath(dependencies?: ElscioneDependencies): string {
   if (dependencies?.pythonPath) return dependencies.pythonPath;
-  if (process.env.PYTHON_PATH) return process.env.PYTHON_PATH;
+  if (cachedCapablePythonPath) return cachedCapablePythonPath;
 
-  // Prefer Homebrew python3 on macOS where curl_cffi and certificates are installed
-  const homebrewPaths = [
-    "/opt/homebrew/bin/python3", // Apple Silicon Homebrew
-    "/usr/local/bin/python3",    // Intel Homebrew
-  ];
-  for (const p of homebrewPaths) {
-    if (fs.existsSync(p)) {
-      return p;
+  const injectedProbe = dependencies?.pythonProbe;
+  const probe = injectedProbe ?? defaultPythonProbe;
+
+  for (const candidate of listPythonCandidates()) {
+    let capable = false;
+    try {
+      capable = probe(candidate) === true;
+    } catch {
+      capable = false;
+    }
+    if (capable) {
+      // Only the real host probe is authoritative enough to cache; an injected probe is per-test.
+      if (!injectedProbe) cachedCapablePythonPath = candidate;
+      return candidate;
     }
   }
 
-  return "python3";
+  throw createDependencyError("no Python interpreter on this host can import curl_cffi");
 }
 
 /**
@@ -760,6 +1078,12 @@ export async function runElscioneHelperManifest(
   });
 
   if (res.status !== 0) {
+    const detail = `${res.stderr || ""}${res.stdout || ""}`;
+    // The helper prints the missing-dependency instructions on stderr and exits 1. That is a
+    // setup fault on this host, not a network fault, so it is re-thrown as one.
+    if (/curl_cffi/i.test(detail)) {
+      throw createDependencyError(detail.trim().split("\n").pop() || undefined);
+    }
     throw new Error(
       `Elscione helper manifest exited with status ${res.status}: ${res.stderr || res.stdout}`,
     );
@@ -990,6 +1314,11 @@ export async function extractElscioneManifest(
       if (dependencies?.signal?.aborted) {
         throw err;
       }
+      // A missing Python dependency is not a network fault and the in-process fallback cannot fix
+      // it: report the real cause instead of a second, unrelated failure.
+      if (isElscioneDependencyError(err)) {
+        throw createDependencyError(err?.message);
+      }
       console.warn(
         `[Elscione] Helper manifest failed, falling back to in-process fetch: ${err?.message || err}`,
       );
@@ -1021,7 +1350,7 @@ export async function extractElscioneManifest(
       headers: {
         "Content-Type": "application/json;charset=utf-8",
         Accept: "application/json, text/plain, */*",
-        Referer: targetFolderUrl,
+        ...browserRequestHeaders(targetFolderUrl),
       },
       body: h5aiPayload,
     },
@@ -1029,6 +1358,15 @@ export async function extractElscioneManifest(
   );
 
   if (!res.ok) {
+    // A block is not the same fact as a refusal or an outage: name it before falling through to
+    // the generic status error, so a Cloudflare wall never surfaces as a plain 403.
+    const failureBody = await res.clone().text().catch(() => "");
+    if (isCloudflareInterstitial(failureBody, res)) {
+      throw createBlockedError(`Cloudflare interstitial (HTTP ${res.status})`);
+    }
+    if (parseAnubisChallenge(failureBody)) {
+      throw createBlockedError(`Anubis challenge could not be passed (HTTP ${res.status})`);
+    }
     throw new Error(
       `Failed to fetch directory manifest from Elscione (${res.status}): ${targetFolderUrl}`,
     );
@@ -1038,6 +1376,15 @@ export async function extractElscioneManifest(
   try {
     bodyJson = await res.json();
   } catch (err: any) {
+    // A challenge or interstitial parses as HTML, not JSON. Saying "failed to parse" there hides
+    // the fact that the source blocked the request, and would let callers report "unverified".
+    const bodyText = await res.text().catch(() => "");
+    if (isCloudflareInterstitial(bodyText, res)) {
+      throw createBlockedError("Cloudflare interstitial instead of a manifest");
+    }
+    if (parseAnubisChallenge(bodyText)) {
+      throw createBlockedError("Anubis challenge could not be passed");
+    }
     throw new Error(`Failed to parse Elscione _h5ai JSON response: ${err?.message || err}`);
   }
 
@@ -1421,6 +1768,10 @@ export async function downloadElscioneEpub(
         ) {
           throw new Error("Elscione ingestion aborted by client");
         }
+        // A missing Python dependency will fail identically on the next attempt: report it once.
+        if (isElscioneDependencyError(err)) {
+          throw createDependencyError(err?.message);
+        }
         console.warn(
           `[Elscione] Helper download attempt ${attempt + 1}/${MAX_HELPER_ATTEMPTS} failed: ${err?.message || err}`,
         );
@@ -1502,6 +1853,11 @@ export async function downloadElscioneEpub(
         throw new Error("Elscione ingestion aborted by client");
       }
       console.warn(`[Elscione] EPUB download attempt ${attempt + 1} failed: ${err?.message || err}`);
+      // A block answers the same way every time and retrying it only burns the retry budget while
+      // burying the real cause behind a later, unrelated failure.
+      if (isElscioneBlockedError(err)) {
+        throw err;
+      }
       const httpStatus = Number(err?.httpStatus);
       const isRetryable =
         !Number.isFinite(httpStatus) ||

@@ -3384,7 +3384,7 @@
               <span>Lnori &amp; Elscione Light Novel Ingestion</span>
             </div>
             <p class="text-[11px] text-zinc-400 leading-relaxed">
-              Download and ingest light novel series or individual volumes directly from <code class="text-zinc-200">lnori.com</code> and <code class="text-zinc-200">server.elsci.one</code> / <code class="text-zinc-200">server.elscione.com</code> via the Web UI (Upload Modal &rarr; <code class="text-zinc-200">Add Light Novel</code>) or Telegram Bot. Links sent to the Telegram bot are enqueued to the centralized Uploader server queue (<code class="text-zinc-200">POST /api/lnori/ingest</code>), reporting live queue positions, streaming active volume progress, and delivering completion cards with 1-tap Reading HQ buttons (also supported at <code class="text-zinc-200">POST /api/elscione/ingest</code>). URLs with raw spaces, unencoded quotes, or missing protocol prefixes are automatically normalized. For Elscione, LightHouse automatically solves Anubis Proof-of-Work SHA-256 challenges, queries the _h5ai folder directory API, downloads EPUB volumes, extracts covers via <code class="text-zinc-200">sips</code>, and enriches Calibre metadata.
+              Download and ingest light novel series or individual volumes directly from <code class="text-zinc-200">lnori.com</code> and <code class="text-zinc-200">server.elsci.one</code> / <code class="text-zinc-200">server.elscione.com</code> via the Web UI (Upload Modal &rarr; <code class="text-zinc-200">Add Light Novel</code>) or Telegram Bot. Links sent to the Telegram bot are enqueued to the centralized Uploader server queue (<code class="text-zinc-200">POST /api/lnori/ingest</code>), reporting live queue positions, streaming active volume progress, and delivering completion cards with 1-tap Reading HQ buttons (also supported at <code class="text-zinc-200">POST /api/elscione/ingest</code>). URLs with raw spaces, unencoded quotes, or missing protocol prefixes are automatically normalized. For Elscione, LightHouse automatically solves Anubis Proof-of-Work SHA-256 challenges, queries the _h5ai folder directory API, downloads EPUB volumes, extracts covers via <code class="text-zinc-200">sips</code>, and enriches Calibre metadata. The Elscione helper runs on the Python interpreter that can actually import <code class="text-zinc-200">curl_cffi</code> (candidates are probed in order, honouring <code class="text-zinc-200">ELSCIONE_PYTHON_PATH</code> first); if no interpreter has it, the source card reports a server setup problem with the install command rather than a network failure.
             </p>
           </div>
           <div class="space-y-1 pt-1 border-t border-zinc-800/80">
@@ -4765,6 +4765,32 @@
       return `<svg class="${cls} inline-block shrink-0" aria-hidden="true"><use href="#icon-${name}"/></svg>`;
     }
 
+    // Four different facts used to collapse into one "network failed" message. They stay
+    // distinct here so the reader can tell a broken server component from a bot block, a refused
+    // request, or their own connection being down. Wording stays plain: no paths, no stack traces.
+    function classifyErrorCause(raw) {
+      let msg = typeof raw === 'string' ? raw : (raw && (raw.message || raw.error) ? String(raw.message || raw.error) : String(raw || ''));
+      if (/curl_cffi|python\s*(?:package|module|interpreter|dependency)/i.test(msg)) {
+        return { kind: 'dependency', message: 'This source needs a helper that is not installed on the server. Install it, then tap Verify to retry.' };
+      }
+      if (/blocked the automated request|verified via browser only|anubis|bot challenge|just a moment|attention required/i.test(msg)) {
+        return { kind: 'blocked', message: 'Source blocks automated access. Open Browse Source to check it yourself.' };
+      }
+      const statusMatch = msg.match(/\b(403|429)\b/);
+      if (statusMatch) {
+        return {
+          kind: 'http',
+          message: statusMatch[1] === '429'
+            ? 'Source is rate limiting requests. Wait a minute, then retry.'
+            : 'Source refused the request. Open Browse Source to check it yourself.'
+        };
+      }
+      if (/failed to fetch|network\s*error|econnrefused|enotfound|eai_again|socket hang up|proxy is not usable/i.test(msg)) {
+        return { kind: 'offline', message: 'Network connection failed. Please check your connection.' };
+      }
+      return { kind: 'other', message: '' };
+    }
+
     function formatCleanErrorMessage(raw) {
       if (!raw) return 'Operation failed';
       let msg = typeof raw === 'string' ? raw : (raw.message || raw.error || String(raw));
@@ -4800,10 +4826,11 @@
       msg = msg.replace(/\bfile\s+file\b/gi, 'file');
 
       // Clean common node/network phrases into friendly explanations
-      if (/no such file or directory/i.test(msg)) {
+      const cause = classifyErrorCause(msg);
+      if (cause.kind !== 'other') {
+        msg = cause.message;
+      } else if (/no such file or directory/i.test(msg)) {
         msg = 'File or directory not found';
-      } else if (/failed to fetch|network\s*error/i.test(msg)) {
-        msg = 'Network connection failed. Please check your connection.';
       } else if (/timed?\s*out/i.test(msg)) {
         msg = 'Connection timed out. Please try again.';
       }
@@ -6515,18 +6542,29 @@
           }
         }
         setHtml(sources, sourceEntries.map((s) => {
+          // The payload already carries the per-source failure reason, so classify it once and let
+          // both the status line and the detail row speak to the real cause.
+          const sourceCause = s.error ? classifyErrorCause(s.error).kind : 'other';
+          const sourceError = s.error ? formatCleanErrorMessage(s.error) : '';
+
           let volStatusText = '';
           if (s.status === 'verified') {
             volStatusText = `${s.volumeCount !== undefined ? s.volumeCount : totalVols} vols available`;
           } else if (s.status === 'error') {
-            volStatusText = 'Source offline';
+            volStatusText = sourceCause === 'dependency'
+              ? 'Server setup needed'
+              : sourceCause === 'blocked'
+                ? 'Blocked for automation'
+                : sourceCause === 'http'
+                  ? 'Source refused request'
+                  : sourceCause === 'offline'
+                    ? 'Source unreachable'
+                    : 'Source unavailable';
           } else {
             volStatusText = `${s.volumeCount || totalVols} vols (unverified)`;
           }
 
-          // B7/G4: the payload already carries the per-source failure reason, so show it instead
-          // of a bare "Source offline" the reader cannot act on.
-          const sourceError = s.error ? formatCleanErrorMessage(s.error) : '';
+          // B7/G4: show the failure reason instead of a label the reader cannot act on.
           const errorRow = sourceError
             ? `<div class="text-[11px] text-rose-300/90 leading-snug break-words">${escapeHtml(sourceError)}</div>`
             : '';
