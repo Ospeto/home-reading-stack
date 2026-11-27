@@ -25,6 +25,9 @@ import {
 } from "./volume-model";
 
 const PROXY_URL = "http://127.0.0.1:7890";
+const PROXY_PROBE_URL = "https://lnori.com/robots.txt";
+const PROXY_PROBE_TIMEOUT_MS = 2_500;
+const PROXY_HEALTH_TTL_MS = 30_000;
 export const MAX_EPUB_BYTES = 256 * 1024 * 1024;
 export const MAX_COVER_BYTES = 16 * 1024 * 1024;
 export const MAX_HTML_BYTES = 8 * 1024 * 1024;
@@ -42,6 +45,167 @@ export interface LnoriDependencies {
   signal?: AbortSignal;
   fetchOnlineSynopsis?: typeof fetchOnlineSynopsis;
   force?: boolean;
+  /**
+   * Local proxy health probe. Returning true means "the proxy really carries Lnori traffic".
+   * Injected in tests so proxy discipline never depends on the host's real listener.
+   */
+  proxyProbe?: (proxyUrl: string) => Promise<boolean> | boolean;
+  proxyUrl?: string;
+}
+
+/** Machine-readable marker for "the direct route failed and the local proxy cannot help either". */
+export const LNORI_PROXY_UNUSABLE_CODE = "LNORI_PROXY_UNUSABLE";
+/** Machine-readable marker for "Lnori answered 404: it has no page under this id". */
+export const LNORI_NOT_FOUND_CODE = "LNORI_NOT_FOUND";
+
+let proxyHealthCache: {
+  url: string;
+  probe: (proxyUrl: string) => Promise<boolean> | boolean;
+  healthy: boolean;
+  checkedAt: number;
+} | null = null;
+
+/** Test hook: forget the cached proxy health verdict. */
+export function resetLnoriProxyHealthCacheForTest(): void {
+  proxyHealthCache = null;
+}
+
+/**
+ * The local sing-box listener accepts the TCP connection, answers `CONNECT ... 200`, and then
+ * resets the TLS handshake when its upstream is dead. A socket-level probe therefore reports a
+ * broken proxy as healthy, which is exactly the failure this guard exists to prevent, so the
+ * probe completes a real HTTPS request through it. A non-5xx answer proves the tunnel works; any
+ * throw, reset, or proxy-generated 5xx means it cannot carry Lnori traffic right now.
+ */
+async function defaultProxyProbe(proxyUrl: string): Promise<boolean> {
+  try {
+    const res = await safeFetchWithSsrf(
+      PROXY_PROBE_URL,
+      {
+        headers: { "User-Agent": USER_AGENT },
+        proxy: proxyUrl,
+        signal: AbortSignal.timeout(PROXY_PROBE_TIMEOUT_MS),
+      } as any,
+      0,
+      { allowedProxyUrls: [proxyUrl] },
+    );
+    try {
+      await res.body?.cancel();
+    } catch {
+      // The probe only cares whether the tunnel carried a response.
+    }
+    return res.status > 0 && res.status < 500;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when the proxy fallback is worth attempting. The verdict is cached for a short TTL because a
+ * dead proxy must not add a probe to every single request.
+ *
+ * The cached verdict is keyed by probe identity as well as URL. The real probe is one module-level
+ * function, so production reuses its verdict for the whole TTL; an injected probe is a fresh closure
+ * per test, so one test's answer can never be replayed into another (or overrule the host's real
+ * listener), while repeated calls inside a single test still exercise the cache.
+ */
+export async function isLnoriProxyUsable(dependencies?: LnoriDependencies): Promise<boolean> {
+  const proxyUrl = lnoriProxyUrl(dependencies);
+  const probe = dependencies?.proxyProbe ?? defaultProxyProbe;
+  const now = Date.now();
+  if (
+    proxyHealthCache &&
+    proxyHealthCache.url === proxyUrl &&
+    proxyHealthCache.probe === probe &&
+    now - proxyHealthCache.checkedAt < PROXY_HEALTH_TTL_MS
+  ) {
+    return proxyHealthCache.healthy;
+  }
+  let healthy = false;
+  try {
+    healthy = (await probe(proxyUrl)) === true;
+  } catch {
+    healthy = false;
+  }
+  proxyHealthCache = { url: proxyUrl, probe, healthy, checkedAt: now };
+  return healthy;
+}
+
+function lnoriProxyUrl(dependencies?: LnoriDependencies): string {
+  return dependencies?.proxyUrl || PROXY_URL;
+}
+
+/**
+ * Raised instead of handing the caller a proxy socket reset. The direct failure is kept in the
+ * message: a dead local proxy is an infrastructure fact, not evidence about the source.
+ */
+function createProxyUnusableError(detail: string): Error {
+  const err = new Error(
+    `Could not reach Lnori (${detail}) and the local proxy is not usable`,
+  );
+  (err as any).code = LNORI_PROXY_UNUSABLE_CODE;
+  return err;
+}
+
+/** A 404 from Lnori is a fact about the id, not a transport failure. */
+function createNotFoundError(targetUrl: string): Error {
+  const err = new Error(
+    `Lnori does not have a series under this id (HTTP 404): ${targetUrl}`,
+  );
+  (err as any).code = LNORI_NOT_FOUND_CODE;
+  (err as any).notFound = true;
+  return err;
+}
+
+export function isLnoriNotFoundError(err: any): boolean {
+  if (!err) return false;
+  if (err.code === LNORI_NOT_FOUND_CODE || err.notFound === true) return true;
+  return /Lnori does not have a series under this id/i.test(String(err?.message || err));
+}
+
+function isAbortFailure(err: any, dependencies?: LnoriDependencies): boolean {
+  return Boolean(
+    dependencies?.signal?.aborted ||
+      err?.name === "AbortError" ||
+      err?.message?.includes("aborted"),
+  );
+}
+
+/**
+ * One request, direct first, proxy only as a checked fallback.
+ *
+ * Every Lnori request used to fall through to `127.0.0.1:7890` on any thrown fetch, with no check
+ * that the listener could actually carry traffic. That turned an honest HTTP 404 into a proxy
+ * socket reset and told the reader the network had failed. The proxy is now consulted only when
+ * the direct attempt did not answer, and only after its health probe says it can serve.
+ *
+ * `noProxyForStatuses` names responses that are facts about the request rather than about the
+ * route: a 404 says Lnori has nothing under that id, so re-asking it through a tunnel changes
+ * nothing and only risks replacing the truth with a transport error.
+ */
+async function fetchLnoriResilient(
+  url: string,
+  buildInit: (useProxy: boolean) => any,
+  dependencies?: LnoriDependencies,
+  options?: { noProxyForStatuses?: number[] },
+): Promise<Response> {
+  const fetcher = dependencies?.fetch ?? safeFetchWithSsrf;
+  const noProxyForStatuses = options?.noProxyForStatuses ?? [];
+  try {
+    const res = await fetcher(url, buildInit(false));
+    if (res.ok || noProxyForStatuses.includes(res.status)) return res;
+    if (!(await isLnoriProxyUsable(dependencies))) return res;
+    await cancelResponseBody(res);
+    return await fetcher(url, buildInit(true));
+  } catch (directErr: any) {
+    if (isAbortFailure(directErr, dependencies)) {
+      throw new Error("Lnori ingestion aborted by client");
+    }
+    if (!(await isLnoriProxyUsable(dependencies))) {
+      throw createProxyUnusableError(directErr?.message || String(directErr));
+    }
+    return await fetcher(url, buildInit(true));
+  }
 }
 
 export function composeSignal(timeoutMs: number, userSignal?: AbortSignal): AbortSignal {
@@ -919,52 +1083,21 @@ export async function fetchLnoriHtml(
   targetUrl: string,
   dependencies?: LnoriDependencies,
 ): Promise<string> {
-  const fetcher = dependencies?.fetch ?? safeFetchWithSsrf;
-  let res: Response;
-  let directUsed = true;
-  try {
-    // Attempt direct connection first for maximum speed
-    res = await fetcher(targetUrl, {
-      headers: {
-        "User-Agent": USER_AGENT,
-        Referer: "https://lnori.com/",
-      },
+  const pageHeaders = {
+    "User-Agent": USER_AGENT,
+    Referer: "https://lnori.com/",
+  };
+  let res = await fetchLnoriResilient(
+    targetUrl,
+    (useProxy) => ({
+      headers: pageHeaders,
+      ...(useProxy ? { proxy: lnoriProxyUrl(dependencies) } : {}),
       signal: composeSignal(30000, dependencies?.signal),
-    } as any);
-  } catch (err: any) {
-    if (
-      dependencies?.signal?.aborted ||
-      err?.name === "AbortError" ||
-      err?.message?.includes("aborted")
-    ) {
-      throw new Error("Lnori ingestion aborted by client");
-    }
-    // If direct connection failed or threw, fall back to proxy
-    res = await fetcher(targetUrl, {
-      headers: {
-        "User-Agent": USER_AGENT,
-        Referer: "https://lnori.com/",
-      },
-      proxy: PROXY_URL,
-      signal: composeSignal(30000, dependencies?.signal),
-    } as any);
-    directUsed = false;
-  }
-
-  if (directUsed && !res.ok) {
-    await cancelResponseBody(res);
-    if (dependencies?.signal?.aborted) {
-      throw new Error("Lnori ingestion aborted by client");
-    }
-    res = await fetcher(targetUrl, {
-      headers: {
-        "User-Agent": USER_AGENT,
-        Referer: "https://lnori.com/",
-      },
-      proxy: PROXY_URL,
-      signal: composeSignal(30000, dependencies?.signal),
-    } as any);
-  }
+    }),
+    dependencies,
+    // A 404 names the id, not the route: never re-ask it through the tunnel.
+    { noProxyForStatuses: [404] },
+  );
 
   if (res.status === 404) {
     // Check if URL was missing slug (e.g. https://lnori.com/series/8046 or https://lnori.com/book/23021)
@@ -975,37 +1108,15 @@ export async function fetchLnoriHtml(
           ? "https://lnori.com/sitemap/sitemap-series.xml"
           : "https://lnori.com/sitemap/sitemap-book.xml";
       try {
-        let sRes: Response;
-        let sDirectUsed = true;
-        try {
-          // Direct first for sitemap
-          sRes = await fetcher(sitemapPath, {
+        const sRes = await fetchLnoriResilient(
+          sitemapPath,
+          (useProxy) => ({
             headers: { "User-Agent": USER_AGENT },
+            ...(useProxy ? { proxy: lnoriProxyUrl(dependencies) } : {}),
             signal: composeSignal(20000, dependencies?.signal),
-          } as any);
-        } catch {
-          if (dependencies?.signal?.aborted) {
-            throw new Error("Lnori ingestion aborted by client");
-          }
-          // Fallback to proxy
-          sRes = await fetcher(sitemapPath, {
-            headers: { "User-Agent": USER_AGENT },
-            proxy: PROXY_URL,
-            signal: composeSignal(20000, dependencies?.signal),
-          } as any);
-          sDirectUsed = false;
-        }
-        if (sDirectUsed && !sRes.ok) {
-          await cancelResponseBody(sRes);
-          if (dependencies?.signal?.aborted) {
-            throw new Error("Lnori ingestion aborted by client");
-          }
-          sRes = await fetcher(sitemapPath, {
-            headers: { "User-Agent": USER_AGENT },
-            proxy: PROXY_URL,
-            signal: composeSignal(20000, dependencies?.signal),
-          } as any);
-        }
+          }),
+          dependencies,
+        );
         if (sRes.ok) {
           const xml = await readResponseTextWithLimit(sRes, MAX_HTML_BYTES, "Lnori sitemap");
           const regex = new RegExp(
@@ -1016,19 +1127,20 @@ export async function fetchLnoriHtml(
           if (smMatch && smMatch[1] && smMatch[1] !== targetUrl) {
             return await fetchLnoriHtml(smMatch[1], dependencies);
           }
+        } else {
+          await cancelResponseBody(sRes);
         }
       } catch (smErr: any) {
-        if (
-          dependencies?.signal?.aborted ||
-          smErr?.name === "AbortError" ||
-          smErr?.message?.includes("aborted")
-        ) {
+        if (isAbortFailure(smErr, dependencies)) {
           throw smErr;
         }
-        // ignore sitemap fallback failure
+        // ignore sitemap fallback failure; the 404 below still names the real fact
       }
     }
-    throw new Error(`Lnori URL returned HTTP 404: ${targetUrl}`);
+    // A 404 is Lnori saying it has no page under this id. Saying so is the honest report: it is
+    // distinguishable from a block (403) and from a transport failure, and it must not be dressed
+    // up as a socket error the reader would read as "my connection is broken".
+    throw createNotFoundError(targetUrl);
   }
 
   if (!res.ok) {
@@ -1224,7 +1336,7 @@ export async function downloadLnoriEpub(
           signal: ttfbController.signal,
         };
         if (useProxy) {
-          fetchOptions.proxy = PROXY_URL;
+          fetchOptions.proxy = lnoriProxyUrl(dependencies);
         }
 
         try {
@@ -1250,6 +1362,12 @@ export async function downloadLnoriEpub(
 
       let res: Response;
       if (forceProxy) {
+        // Sticky proxy from an earlier attempt is only reused while it is still carrying traffic.
+        if (!(await isLnoriProxyUsable(dependencies))) {
+          forceProxy = false;
+        }
+      }
+      if (forceProxy) {
         res = await runFetch(true);
       } else {
         let directUsed = true;
@@ -1263,18 +1381,27 @@ export async function downloadLnoriEpub(
           ) {
             throw directErr;
           }
-          // Direct fetch threw, timed out, or connection failed: fall back to proxy
+          // Direct fetch threw, timed out, or connection failed: fall back to proxy only when it is
+          // healthy. A dead listener must fail fast instead of adding a socket reset of its own.
+          if (!(await isLnoriProxyUsable(dependencies))) {
+            throw createProxyUnusableError(directErr?.message || String(directErr));
+          }
           res = await runFetch(true);
           directUsed = false;
         }
 
         if (directUsed && !res.ok) {
-          await cancelResponseBody(res);
-          if (dependencies?.signal?.aborted) {
-            throw new Error("Lnori ingestion aborted by client");
+          // Check the proxy before discarding the direct response: when the listener cannot serve,
+          // the direct response is the only evidence about this storage host and must be kept so
+          // its status is classified below instead of being replaced by a proxy transport failure.
+          if (await isLnoriProxyUsable(dependencies)) {
+            await cancelResponseBody(res);
+            if (dependencies?.signal?.aborted) {
+              throw new Error("Lnori ingestion aborted by client");
+            }
+            forceProxy = true;
+            res = await runFetch(true);
           }
-          forceProxy = true;
-          res = await runFetch(true);
         }
       }
 
@@ -1361,7 +1488,6 @@ export async function fetchAndConvertCover(
   workDir: string | undefined,
   dependencies?: LnoriDependencies,
 ): Promise<string | null> {
-  const fetcher = dependencies?.fetch ?? safeFetchWithSsrf;
   const runSpawnSync = dependencies?.spawnSync ?? spawnSync;
   const bookId = validateLnoriBookId(lnoriBookId);
   if (!workDir) throw new Error("Lnori cover work directory is required");
@@ -1376,60 +1502,28 @@ export async function fetchAndConvertCover(
   let downloaded = false;
   for (const cUrl of urlsToTry) {
     try {
-      let res: Response;
-      let directUsed = true;
-      try {
-        // Direct first for cover download
-        res = await fetcher(cUrl, {
-          headers: {
-            Referer: "https://lnori.com/",
-            "User-Agent": USER_AGENT,
-          },
+      const coverHeaders = {
+        Referer: "https://lnori.com/",
+        "User-Agent": USER_AGENT,
+      };
+      // Same proxy discipline as the series page: direct first, and the proxy only when the direct
+      // attempt did not answer and the listener is proven usable.
+      const res = await fetchLnoriResilient(
+        cUrl,
+        (useProxy) => ({
+          headers: coverHeaders,
+          ...(useProxy ? { proxy: lnoriProxyUrl(dependencies) } : {}),
           signal: composeSignal(20000, dependencies?.signal),
-        } as any);
-      } catch (directErr: any) {
-        if (
-          dependencies?.signal?.aborted ||
-          directErr?.name === "AbortError" ||
-          directErr?.message?.includes("aborted")
-        ) {
-          throw new Error("Lnori ingestion aborted by client");
-        }
-        // Fall back to proxy
-        res = await fetcher(cUrl, {
-          headers: {
-            Referer: "https://lnori.com/",
-            "User-Agent": USER_AGENT,
-          },
-          proxy: PROXY_URL,
-          signal: composeSignal(20000, dependencies?.signal),
-        } as any);
-        directUsed = false;
-      }
-
-      if (directUsed && !res.ok) {
-        await cancelResponseBody(res);
-        if (dependencies?.signal?.aborted) {
-          throw new Error("Lnori ingestion aborted by client");
-        }
-        // Direct returned non-OK: fall back to proxy for the same candidate before trying next
-        res = await fetcher(cUrl, {
-          headers: {
-            Referer: "https://lnori.com/",
-            "User-Agent": USER_AGENT,
-          },
-          proxy: PROXY_URL,
-          signal: composeSignal(20000, dependencies?.signal),
-        } as any);
-      }
+        }),
+        dependencies,
+      );
 
       if (res.ok) {
         await streamResponseToFile(res, rawCoverPath, MAX_COVER_BYTES, "Lnori cover");
         downloaded = true;
         break;
-      } else {
-        await cancelResponseBody(res);
       }
+      await cancelResponseBody(res);
     } catch (err: any) {
       if (
         dependencies?.signal?.aborted ||

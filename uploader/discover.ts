@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import process from "node:process";
 import { Database } from "bun:sqlite";
 import { safeFetchWithSsrf, sanitizeErrorMessage } from "./security";
-import { getCalibreDbPath, isLnoriUrl, fetchLnoriHtml, extractManifestFromHtml, parseLnoriUrl } from "./lnori";
+import { getCalibreDbPath, isLnoriUrl, isLnoriNotFoundError, fetchLnoriHtml, extractManifestFromHtml, parseLnoriUrl } from "./lnori";
 import {
   isElscioneUrl,
   parseElscioneUrl,
@@ -398,57 +398,57 @@ export const KNOWN_TITLE_TO_ELSCIONE: Record<string, string> = {
 };
 
 export const KNOWN_TITLE_TO_LNORI: Record<string, { id: number; slug: string }> = {
-  "danmachi": { id: 2201, slug: "is-it-wrong-to-try-to-pick-up-girls-in-a-dungeon" },
-  "is it wrong to try to pick up girls in a dungeon": { id: 2201, slug: "is-it-wrong-to-try-to-pick-up-girls-in-a-dungeon" },
+  "danmachi": { id: 2643, slug: "is-it-wrong-to-try-to-pick-up-girls-in-a-dungeon" },
+  "is it wrong to try to pick up girls in a dungeon": { id: 2643, slug: "is-it-wrong-to-try-to-pick-up-girls-in-a-dungeon" },
   "rezero": { id: 3343, slug: "re-zero-starting-life-in-another-world" },
   "rezero starting life in another world": { id: 3343, slug: "re-zero-starting-life-in-another-world" },
   "re zero": { id: 3343, slug: "re-zero-starting-life-in-another-world" },
   "re zero starting life in another world": { id: 3343, slug: "re-zero-starting-life-in-another-world" },
-  "86": { id: 4808, slug: "86-eighty-six" },
-  "86 eighty six": { id: 4808, slug: "86-eighty-six" },
-  "86eightysix": { id: 4808, slug: "86-eighty-six" },
+  "86": { id: 6547, slug: "86-eighty-six" },
+  "86 eighty six": { id: 6547, slug: "86-eighty-six" },
+  "86eightysix": { id: 6547, slug: "86-eighty-six" },
   "the irregular at magic high school": { id: 1941, slug: "the-irregular-at-magic-high-school" },
   "mahouka koukou no rettousei": { id: 1941, slug: "the-irregular-at-magic-high-school" },
-  "rascal does not dream": { id: 4242, slug: "rascal-does-not-dream-of-bunny-girl-senpai" },
-  "rascal does not dream of bunny girl senpai": { id: 4242, slug: "rascal-does-not-dream-of-bunny-girl-senpai" },
-  "haibaras teenage new game": { id: 11250, slug: "haibaras-teenage-new-game" },
-  "days with my stepsister": { id: 10890, slug: "days-with-my-stepsister" },
-  "gimai seikatsu": { id: 10890, slug: "days-with-my-stepsister" },
+  "rascal does not dream": { id: 3486, slug: "rascal-does-not-dream" },
+  "rascal does not dream of bunny girl senpai": { id: 3486, slug: "rascal-does-not-dream" },
+  "haibaras teenage new game": { id: 12985, slug: "haibaras-teenage-new-game" },
+  "days with my stepsister": { id: 11802, slug: "days-with-my-stepsister" },
+  "gimai seikatsu": { id: 11802, slug: "days-with-my-stepsister" },
   "love unseen beneath the clear night sky": { id: 15290, slug: "love-unseen-beneath-the-clear-night-sky" },
   "heroine saint no im an all works maid": { id: 10676, slug: "heroine-saint-no-im-an-all-works-maid-and-proud-of-it" },
-  "the water magician": { id: 13054, slug: "the-water-magician" },
-  "too many losing heroines": { id: 12780, slug: "too-many-losing-heroines" },
-  "make heroine ga oosugiru": { id: 12780, slug: "too-many-losing-heroines" },
-  "secrets of the silent witch": { id: 11990, slug: "secrets-of-the-silent-witch" },
-  "silent witch": { id: 11990, slug: "secrets-of-the-silent-witch" },
+  "the water magician": { id: 11957, slug: "the-water-magician" },
+  "too many losing heroines": { id: 12417, slug: "too-many-losing-heroines" },
+  "make heroine ga oosugiru": { id: 12417, slug: "too-many-losing-heroines" },
+  "secrets of the silent witch": { id: 12295, slug: "secrets-of-the-silent-witch" },
+  "silent witch": { id: 12295, slug: "secrets-of-the-silent-witch" },
   "playing death games to put food on the table": { id: 14193, slug: "playing-death-games-to-put-food-on-the-table" },
   "shibou yuugi de meshi wo kuu": { id: 14193, slug: "playing-death-games-to-put-food-on-the-table" },
-  "sentenced to be a hero": { id: 12440, slug: "sentenced-to-be-a-hero" },
-  "yuusha kei ni shosu": { id: 12440, slug: "sentenced-to-be-a-hero" },
-  "the frontier lord begins with zero subjects": { id: 11786, slug: "the-frontier-lord-begins-with-zero-subjects" },
-  "min maxing my trpg build in another world": { id: 9820, slug: "min-maxing-my-trpg-build-in-another-world" },
-  "im the evil lord of an intergalactic empire": { id: 9557, slug: "im-the-evil-lord-of-an-intergalactic-empire" },
-  "a certain magical index": { id: 1916, slug: "a-certain-magical-index" },
-  "toaru majutsu no index": { id: 1916, slug: "a-certain-magical-index" },
+  "sentenced to be a hero": { id: 12616, slug: "sentenced-to-be-a-hero" },
+  "yuusha kei ni shosu": { id: 12616, slug: "sentenced-to-be-a-hero" },
+  "the frontier lord begins with zero subjects": { id: 8622, slug: "the-frontier-lord-begins-with-zero-subjects" },
+  "min maxing my trpg build in another world": { id: 10783, slug: "min-maxing-my-trpg-build-in-another-world" },
+  "im the evil lord of an intergalactic empire": { id: 11131, slug: "im-the-evil-lord-of-an-intergalactic-empire" },
+  "a certain magical index": { id: 490, slug: "a-certain-magical-index" },
+  "toaru majutsu no index": { id: 490, slug: "a-certain-magical-index" },
   "sword art online": { id: 1234, slug: "sword-art-online" },
-  "no game no life": { id: 2419, slug: "no-game-no-life" },
+  "no game no life": { id: 2276, slug: "no-game-no-life" },
   "spice and wolf": { id: 677, slug: "spice-and-wolf" },
   "spice wolf": { id: 677, slug: "spice-and-wolf" },
   "worldend": { id: 4031, slug: "worldend-what-do-you-do-at-the-end-of-the-world-are-you-busy-will-you-save-us" },
   "worldend what do you do at the end of the world are you busy will you save us": { id: 4031, slug: "worldend-what-do-you-do-at-the-end-of-the-world-are-you-busy-will-you-save-us" },
   "suka suka": { id: 4031, slug: "worldend-what-do-you-do-at-the-end-of-the-world-are-you-busy-will-you-save-us" },
   "goblin slayer": { id: 5304, slug: "goblin-slayer" },
-  "toradora": { id: 2074, slug: "toradora" },
-  "konosuba": { id: 2872, slug: "konosuba-gods-blessing-on-this-wonderful-world" },
-  "konosuba gods blessing on this wonderful world": { id: 2872, slug: "konosuba-gods-blessing-on-this-wonderful-world" },
+  "toradora": { id: 692, slug: "toradora" },
+  "konosuba": { id: 3079, slug: "konosuba-gods-blessing-on-this-wonderful-world" },
+  "konosuba gods blessing on this wonderful world": { id: 3079, slug: "konosuba-gods-blessing-on-this-wonderful-world" },
   "solo leveling": { id: 6219, slug: "solo-leveling" },
   "a sisters all you need": { id: 4380, slug: "a-sisters-all-you-need" },
   "the angel next door spoils me rotten": { id: 9601, slug: "the-angel-next-door-spoils-me-rotten" },
   "the apothecary diaries": { id: 3768, slug: "the-apothecary-diaries" },
   "apothecary diaries": { id: 3768, slug: "the-apothecary-diaries" },
   "kusuriya no hitorigoto": { id: 3768, slug: "the-apothecary-diaries" },
-  "the eminence in shadow": { id: 6215, slug: "the-eminence-in-shadow" },
-  "kage no jitsuryokusha ni naritakute": { id: 6215, slug: "the-eminence-in-shadow" },
+  "the eminence in shadow": { id: 8821, slug: "the-eminence-in-shadow" },
+  "kage no jitsuryokusha ni naritakute": { id: 8821, slug: "the-eminence-in-shadow" },
   "ascendance of a bookworm": { id: 4239, slug: "ascendance-of-a-bookworm-ill-do-anything-to-become-a-librarian" },
   "classroom of the elite": { id: 4557, slug: "classroom-of-the-elite" },
   "mushoku tensei": { id: 3336, slug: "mushoku-tensei-jobless-reincarnation" },
@@ -465,7 +465,7 @@ export const KNOWN_TITLE_TO_LNORI: Record<string, { id: number; slug: string }> 
   "monogatari": { id: 1014, slug: "monogatari" },
   "bakemonogatari": { id: 1014, slug: "monogatari" },
   "monogatari series": { id: 1014, slug: "monogatari" },
-  "grimgar of fantasy and ash": { id: 2873, slug: "grimgar-of-fantasy-and-ash" },
+  "grimgar of fantasy and ash": { id: 2864, slug: "grimgar-of-fantasy-and-ash" },
 };
 
 export const KNOWN_TITLE_CANONICAL_MAP: Record<string, string> = {
@@ -1212,7 +1212,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     volumeCount: 13,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/4808/86-eighty-six",
+      lnori: "https://lnori.com/series/6547/86-eighty-six",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/86/",
     },
     primarySource: "elscione",
@@ -1258,7 +1258,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     volumeCount: 6,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/6215/the-eminence-in-shadow",
+      lnori: "https://lnori.com/series/8821/the-eminence-in-shadow",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Eminence%20in%20Shadow/",
     },
     primarySource: "elscione",
@@ -1304,7 +1304,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     volumeCount: 21,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/2873/grimgar-of-fantasy-and-ash",
+      lnori: "https://lnori.com/series/2864/grimgar-of-fantasy-and-ash",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Grimgar%20of%20Fantasy%20and%20Ash/",
     },
     primarySource: "elscione",
@@ -1327,7 +1327,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     volumeCount: 19,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/2201/is-it-wrong-to-try-to-pick-up-girls-in-a-dungeon",
+      lnori: "https://lnori.com/series/2643/is-it-wrong-to-try-to-pick-up-girls-in-a-dungeon",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/DanMachi/",
     },
     primarySource: "elscione",
@@ -1373,7 +1373,7 @@ export const SEED_TRENDING_NOVELS: DiscoveredNovel[] = [
     volumeCount: 24,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/1916/a-certain-magical-index",
+      lnori: "https://lnori.com/series/490/a-certain-magical-index",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/A%20Certain%20Magical%20Index/",
     },
     primarySource: "elscione",
@@ -1513,7 +1513,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     volumeCount: 6,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/12440/sentenced-to-be-a-hero",
+      lnori: "https://lnori.com/series/12616/sentenced-to-be-a-hero",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Sentenced%20to%20Be%20a%20Hero/",
     },
     primarySource: "elscione",
@@ -1536,7 +1536,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     volumeCount: 4,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/13054/the-water-magician",
+      lnori: "https://lnori.com/series/11957/the-water-magician",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Water%20Magician/",
     },
     primarySource: "elscione",
@@ -1559,7 +1559,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     volumeCount: 6,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/11250/haibaras-teenage-new-game",
+      lnori: "https://lnori.com/series/12985/haibaras-teenage-new-game",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Haibara's%20Teenage%20New%20Game%2B/",
     },
     primarySource: "elscione",
@@ -1582,7 +1582,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     volumeCount: 7,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/12780/too-many-losing-heroines",
+      lnori: "https://lnori.com/series/12417/too-many-losing-heroines",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Too%20Many%20Losing%20Heroines!/",
     },
     primarySource: "elscione",
@@ -1605,7 +1605,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     volumeCount: 8,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/11990/secrets-of-the-silent-witch",
+      lnori: "https://lnori.com/series/12295/secrets-of-the-silent-witch",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Secrets%20of%20the%20Silent%20Witch/",
     },
     primarySource: "elscione",
@@ -1628,7 +1628,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     volumeCount: 11,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/10890/days-with-my-stepsister",
+      lnori: "https://lnori.com/series/11802/days-with-my-stepsister",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Days%20With%20My%20Stepsister/",
     },
     primarySource: "elscione",
@@ -1651,7 +1651,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     volumeCount: 4,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/11786/the-frontier-lord-begins-with-zero-subjects",
+      lnori: "https://lnori.com/series/8622/the-frontier-lord-begins-with-zero-subjects",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/The%20Frontier%20Lord%20Begins%20With%20Zero%20Subjects/",
     },
     primarySource: "elscione",
@@ -1674,7 +1674,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     volumeCount: 9,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/9820/min-maxing-my-trpg-build-in-another-world",
+      lnori: "https://lnori.com/series/10783/min-maxing-my-trpg-build-in-another-world",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/Min-Maxing%20My%20TRPG%20Build%20in%20Another%20World/",
     },
     primarySource: "elscione",
@@ -1697,7 +1697,7 @@ export const SEED_NEW_NOVELS: DiscoveredNovel[] = [
     volumeCount: 8,
     source: "both",
     sourceUrls: {
-      lnori: "https://lnori.com/series/9557/im-the-evil-lord-of-an-intergalactic-empire",
+      lnori: "https://lnori.com/series/11131/im-the-evil-lord-of-an-intergalactic-empire",
       elscione: "https://server.elscione.com/Officially%20Translated%20Light%20Novels/I'm%20the%20Evil%20Lord%20of%20an%20Intergalactic%20Empire!/",
     },
     primarySource: "elscione",
@@ -2297,7 +2297,24 @@ async function resolveLnoriInventory(
     };
   }
 
-  const html = await fetchLnoriHtml(url, dependencies);
+  let html: string;
+  try {
+    html = await fetchLnoriHtml(url, dependencies);
+  } catch (err: any) {
+    // A 404 is Lnori saying it has no series under this id (a stale or wrong link), which is a
+    // different fact from a block or a transport failure. Report it as such instead of letting it
+    // arrive as a generic error the reader would read as "my connection is broken".
+    if (isLnoriNotFoundError(err)) {
+      return {
+        source: "lnori",
+        url,
+        status: "error",
+        error: `Lnori does not have a series under this id (HTTP 404): ${url}`,
+        verifiedAt: Date.now(),
+      };
+    }
+    throw err;
+  }
   const manifest = extractManifestFromHtml(html, url, parsedUrl);
   if (!manifest || !Array.isArray(manifest.volumePaths) || manifest.volumePaths.length === 0) {
     return {
