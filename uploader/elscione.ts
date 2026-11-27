@@ -20,6 +20,7 @@ import {
   streamResponseToFile,
   runCalibredb,
   isVolumeAlreadyInCalibre,
+  resolveIngestVolumeAssignment,
   getSipsPath,
   composeSignal,
   escapeTelegramMarkdown,
@@ -1554,13 +1555,26 @@ export async function ingestElscioneSeries(
 
       const vol = manifest.volumes[i];
       const volNum = vol.volumeNumber;
-      const title = vol.title || `${manifest.seriesTitle}: Volume ${volNum}`;
-      const seriesIndex = vol.partNumber !== undefined && vol.partNumber > 1
-        ? vol.partNumber * 100 + volNum
-        : volNum;
+      // One volume model for every source: a part-local volume keeps its part namespace and the
+      // assignment tells Calibre what flat `series_index` stores for it.
+      const assignment = resolveIngestVolumeAssignment(manifest.seriesTitle, {
+        volumeNumber: volNum,
+        title: vol.title,
+        partNumber: vol.partNumber,
+      });
+      const title = assignment.title;
+      const seriesIndex = assignment.seriesIndex;
 
       // Pre-download duplicate check
-      if (isVolumeAlreadyInCalibre(manifest.seriesTitle, seriesIndex, title, dependencies)) {
+      if (
+        isVolumeAlreadyInCalibre(
+          manifest.seriesTitle,
+          assignment.key.volume,
+          title,
+          dependencies,
+          assignment.key.namespace,
+        )
+      ) {
         console.log(
           `[Elscione] Volume ${volNum} of "${manifest.seriesTitle}" already in library, skipping`,
         );

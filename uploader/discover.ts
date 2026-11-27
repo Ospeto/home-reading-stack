@@ -11,7 +11,17 @@ import {
   extractVolumeNumberFromFilename as extractVolumeNumberFromFilenameElscione,
   safeDecodeURIComponent,
 } from "./elscione";
-import { searchRanobeDB, searchAniList, extractVolumeNumber, parseMultiPartVolume } from "./scraper";
+import { searchRanobeDB, searchAniList, extractVolumeNumber } from "./scraper";
+import {
+  auditNamespaceFor,
+  buildSeriesVolumeModel,
+  catalogueVolumeCountFrom,
+  isAuxiliaryNamespace,
+  isLocalNamespace,
+  projectOwnedVolume,
+  projectTitleVolumeNumber,
+  resolveCalibreVolumeKeys,
+} from "./volume-model";
 import discoverCatalog from "./discover-catalog.json";
 
 export type DiscoverSource = "lnori" | "elscione" | "both";
@@ -46,7 +56,11 @@ export interface DiscoveredNovel {
   genres: string[];
   score: number;
   popularity: number;
-  releaseDate: string;
+  /**
+   * ISO release date, or `null` when no source actually states one. A fabricated placeholder
+   * (the old "2024-01-01") made an old title read as new and made the Newest sort meaningless.
+   */
+  releaseDate?: string | null;
   volumeCount: number;
   catalogVolumeCount?: number;
   verifiedVolumeCount?: number;
@@ -64,6 +78,8 @@ export interface DiscoveredNovel {
   missingVolumeCount?: number;
   sourceStatus?: "verified" | "unverified" | "error";
   allVerifiedOwned?: boolean;
+  /** The volume namespace this card is measured in (main, part:N, year:N, art-book …). */
+  volumeNamespace?: string;
 }
 
 export interface DiscoverNovelsParams {
@@ -2866,6 +2882,10 @@ export const DISTINCT_SPINOFF_MARKERS: RegExp[] = [
   /\bfamilia chronicle\b/i,
   /\bminor myths and legends\b/i,
   /\b(?:otome games are tough (?:for )?us|tough (?:for )?us too|for us\s*too|us too|marie route)\b/i,
+  // Derivative companion books that carry the parent's name but are their own work.
+  /\b(?:ill|i ll|i will) do anything to become a librarian\b/i,
+  /\bcompanion (?:book|volume)\b/i,
+  /\bcolou?r (?:book|illustrations?)\b/i,
 ];
 
 function extractYearMarker(str: string): string | null {
@@ -2881,6 +2901,14 @@ export function isSpinoffMismatch(candA: string, candB: string): boolean {
 
   // If explicitly declared same-cluster aliases, not a mismatch
   if (aliasLookupMap.get(normA)?.includes(normB)) return false;
+
+  // An auxiliary sequence is its own book: an art book, fanbook, guidebook, short-story
+  // collection or spin-off never inherits the parent series' volumes, and the parent series
+  // never claims the companion's volume. This is the same namespace the volume model uses,
+  // so "Alya … - Momoco's Art Book" cannot come back as "Available (10 vols)".
+  const nsA = auditNamespaceFor(candA);
+  const nsB = auditNamespaceFor(candB);
+  if (isAuxiliaryNamespace(nsA) !== isAuxiliaryNamespace(nsB)) return true;
 
   // Year marker check (e.g. Year 2 vs Year 3 vs mainline without year)
   const yearA = extractYearMarker(normA);
@@ -3338,21 +3366,14 @@ export function resolveCanonicalVolumeNumber(
   // Normalize hyphens and underscores to spaces to support URL slugs and filenames
   const normalizedTitle = title.replace(/[-_]+/g, " ");
 
-  // 1. Check for multi-part series pattern (Part X ... Volume Y)
-  const multiPart = parseMultiPartVolume(title) || parseMultiPartVolume(normalizedTitle);
-  if (multiPart) {
-    const { part, volume } = multiPart;
-    const combined = `${title} ${normalizedTitle} ${seriesName || ""}`.toLowerCase();
-    const isBookworm = /ascendance[\s_\-]*of[\s_\-]*a[\s_\-]*bookworm|honzuki/i.test(combined);
+  // The unified volume model owns the projection: a multi-part title keeps its part-local
+  // number and is projected onto the flat catalogue only for a known multi-part series
+  // (Ascendance of a Bookworm). Sub-series titles (Year 2) keep their own namespace, which
+  // the matcher compares instead of collapsing onto the base series by number alone.
+  const projected = projectTitleVolumeNumber(title, seriesName);
+  if (projected !== null) return projected;
 
-    if (isBookworm && part >= 1 && part <= BOOKWORM_PART_OFFSETS.length) {
-      return BOOKWORM_PART_OFFSETS[part - 1] + volume;
-    }
-
-    return volume;
-  }
-
-  // 2. Standard volume extraction (supporting titles, slugs, and filenames)
+  // Fall back to the filename-specific extractors for shapes the model does not parse
   return (
     extractVolumeNumber(title) ??
     extractVolumeNumber(normalizedTitle) ??
@@ -3418,6 +3439,7 @@ export function matchNovelWithCalibreIndex(
 
   const booksToEvaluate = checkAllBooks ? index.processedCalibreBooks : Array.from(candidateSet);
   let matchCount = 0;
+  const matchedBooks: any[] = [];
   const ownedVolumeSet = new Set<number>();
 
   for (const b of booksToEvaluate) {
@@ -3503,28 +3525,37 @@ export function matchNovelWithCalibreIndex(
 
     if (isMatch) {
       matchCount++;
-      let volNum: number | null = null;
-      if (b.book.title) {
-        volNum = resolveCanonicalVolumeNumber(b.book.title, b.book.series || novel.title);
-      }
-      if (
-        (volNum === null || volNum < 0) &&
-        b.book.series_index !== undefined &&
-        b.book.series_index !== null &&
-        !isNaN(Number(b.book.series_index)) &&
-        Number(b.book.series_index) >= 0
-      ) {
-        // Preserve fractional series_index values without rounding
-        volNum = Number(b.book.series_index);
-      }
-      if (volNum !== null && volNum >= 0) {
-        ownedVolumeSet.add(volNum);
+      matchedBooks.push(b.book);
+    }
+  }
+
+  // Volume attribution goes through the unified volume model, so every surface (Calibre
+  // `series_index`, this matcher and the ingest duplicate gate) shares one answer. The book's
+  // own title decides its namespace: a Year-2 or Part-5 volume is never folded onto a
+  // base-series number, and an auxiliary sequence (art book, fanbook, bundle) never inherits
+  // the parent series' volumes.
+  const novelNamespace = auditNamespaceFor(novel.title);
+  const matchedSources = matchedBooks.map((book) => ({
+    title: book?.title ?? null,
+    series: book?.series ?? null,
+    seriesIndex: book?.series_index ?? null,
+  }));
+  const volumeModel = buildSeriesVolumeModel(matchedSources, {
+    seriesText: `${novel.title} ${novel.titleRomaji || ""} ${matchedSources[0]?.series || ""}`.trim(),
+  });
+  for (const row of matchedSources) {
+    for (const key of resolveCalibreVolumeKeys(row)) {
+      const projected = projectOwnedVolume(key, volumeModel, novelNamespace);
+      if (projected !== null && !Number.isNaN(projected) && projected >= 0) {
+        ownedVolumeSet.add(projected);
       }
     }
   }
 
+  const localNamespace = isLocalNamespace(novelNamespace);
   const ownedVolumeIndices = Array.from(ownedVolumeSet).sort((a, b) => a - b);
-  const existingVolumes = ownedVolumeIndices.length > 0 ? ownedVolumeIndices.length : matchCount;
+  const existingVolumes =
+    ownedVolumeIndices.length > 0 ? ownedVolumeIndices.length : localNamespace ? 0 : matchCount;
   const maxOwned = ownedVolumeIndices.length > 0 ? Math.max(...ownedVolumeIndices) : 0;
   const catalogVolumeCount = novel.catalogVolumeCount ??
     (novel.volumeCount && novel.volumeCount > 1
@@ -3553,7 +3584,17 @@ export function matchNovelWithCalibreIndex(
   const hasVerified = Array.isArray(verifiedVolumes) && verifiedVolumes.length > 0;
   let missingVolumeIndices: number[] | undefined = undefined;
   let missingVolumeCount: number | undefined = undefined;
-  let totalVolumeCount = hasVerified ? verifiedVolumes!.length : Math.max(catalogVolumeCount, existingVolumes, Math.ceil(maxOwned));
+  // A mainline series may legitimately hold more books than the seed catalog knew about, but
+  // an auxiliary or sub-series card is measured strictly on its own namespace: an art book
+  // cannot borrow its parent's 10 volumes to claim "Available (10 vols)".
+  let totalVolumeCount = hasVerified
+    ? verifiedVolumes!.length
+    : catalogueVolumeCountFrom({
+        catalogCount: catalogVolumeCount,
+        ownershipCount: existingVolumes,
+        maxOwned,
+        namespace: novelNamespace,
+      });
   let sourceStatus: "verified" | "unverified" | "error" =
     novel.sourceStatus || (hasVerified ? "verified" : "unverified");
   let allVerifiedOwned = false;
@@ -3580,9 +3621,12 @@ export function matchNovelWithCalibreIndex(
     verifiedVolumes: hasVerified ? verifiedVolumes : undefined,
     sourceStatus,
     allVerifiedOwned,
-    inLibrary: matchCount > 0,
+    // A card only counts as owned when the books it owns belong to the volume sequence it is
+    // measuring: last-resort fuzzy matches onto the parent series do not own an art book.
+    inLibrary: matchCount > 0 && (!localNamespace || ownedVolumeIndices.length > 0),
     existingVolumes,
     ownedVolumeIndices,
+    volumeNamespace: novelNamespace,
     missingVolumeIndices,
     missingVolumeCount,
   };
@@ -3798,7 +3842,8 @@ export async function buildCompleteCatalogNovels(
     const genres = seed?.genres && seed.genres.length > 0 ? seed.genres : ["Light Novel", "Fantasy"];
     const score = seed?.score ?? 85;
     const popularity = seed?.popularity ?? (real.source === "both" ? 7500 : 5000);
-    const releaseDate = seed?.releaseDate ?? "2024-01-01";
+    // No fabricated date: when the seed does not state one, the field stays null and sorts last.
+    const releaseDate = seed?.releaseDate ?? null;
     const volumeCount = resolveCatalogVolumeCount(folder, seed?.titleRomaji, seed);
 
     const slug = folder
@@ -3869,7 +3914,8 @@ export async function buildCompleteCatalogNovels(
     const genres = seed?.genres && seed.genres.length > 0 ? seed.genres : ["Light Novel", "Fantasy"];
     const score = seed?.score ?? 85;
     const popularity = seed?.popularity ?? (real.source === "both" ? 7500 : 5000);
-    const releaseDate = seed?.releaseDate ?? "2024-01-01";
+    // No fabricated date: when the seed does not state one, the field stays null and sorts last.
+    const releaseDate = seed?.releaseDate ?? null;
     const volumeCount = resolveCatalogVolumeCount(displayTitle, seed?.titleRomaji, seed);
 
     const novel = assignPrimarySource({
@@ -4034,6 +4080,43 @@ export async function fetchDiscoverFeed(
 }
 
 /**
+ * Newest-first comparator that puts undated titles LAST.
+ *
+ * A null date means "no source states a release date", so an undated title can never be
+ * presented as the newest release; it sorts after every dated title and keeps a stable
+ * order (popularity, then title) among themselves.
+ */
+export function compareReleaseDateNewestFirst(
+  a: Pick<DiscoveredNovel, "releaseDate">,
+  b: Pick<DiscoveredNovel, "releaseDate">,
+): number {
+  const dateA = typeof a.releaseDate === "string" && a.releaseDate ? a.releaseDate : null;
+  const dateB = typeof b.releaseDate === "string" && b.releaseDate ? b.releaseDate : null;
+  if (dateA === null && dateB === null) return 0;
+  if (dateA === null) return 1;
+  if (dateB === null) return -1;
+  return dateB.localeCompare(dateA);
+}
+
+/**
+ * Builds an ISO release date from an AniList `startDate` fragment.
+ *
+ * Returns `null` when the source states no year at all. Missing month/day fall back to
+ * `01` only because the source published a partial date; the old code instead invented a
+ * whole `2024-01-01` year for every undated title, which made old series read as new and
+ * made the Newest sort meaningless.
+ */
+export function buildReleaseDateFromStartDate(
+  startDate: { year?: number | null; month?: number | null; day?: number | null } | null | undefined,
+): string | null {
+  const year = Number(startDate?.year);
+  if (!Number.isFinite(year) || year <= 0) return null;
+  const month = String(startDate?.month || 1).padStart(2, "0");
+  const day = String(startDate?.day || 1).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/**
  * Attempts to fetch live online feed from AniList GraphQL and match against Lnori & Elscione.
  * Falls back to seed catalogue on any error or timeout.
  */
@@ -4126,10 +4209,7 @@ async function fetchOnlineFeedWithFallback(
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-|-$/g, "");
 
-      const year = item.startDate?.year || 2024;
-      const month = String(item.startDate?.month || 1).padStart(2, "0");
-      const day = String(item.startDate?.day || 1).padStart(2, "0");
-      const releaseDate = `${year}-${month}-${day}`;
+      const releaseDate = buildReleaseDateFromStartDate(item.startDate);
 
       // Verify real download sources on Elscione and/or Lnori.
       // If neither exists, SKIP to eliminate synthetic URL fabrication (e.g. Sayonara Lara)
@@ -4580,10 +4660,7 @@ export async function searchAniListNovels(
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-|-$/g, "");
 
-      const year = item.startDate?.year || 2024;
-      const month = String(item.startDate?.month || 1).padStart(2, "0");
-      const day = String(item.startDate?.day || 1).padStart(2, "0");
-      const releaseDate = `${year}-${month}-${day}`;
+      const releaseDate = buildReleaseDateFromStartDate(item.startDate);
 
       let author = "";
       if (Array.isArray(item.staff?.edges) && item.staff.edges.length > 0) {
@@ -4864,7 +4941,7 @@ export async function searchUniversalNovels(
           genres: ["Light Novel", "Fantasy"],
           score: 85,
           popularity: 5000,
-          releaseDate: "2024-01-01",
+          releaseDate: null,
           volumeCount,
           source: real.source,
           primarySource: real.primarySource,
@@ -4929,7 +5006,7 @@ export async function searchUniversalNovels(
           genres: ["Light Novel", "Fantasy"],
           score: 85,
           popularity: 5000,
-          releaseDate: "2024-01-01",
+          releaseDate: null,
           volumeCount,
           source: real.source,
           primarySource: real.primarySource,
@@ -5077,7 +5154,7 @@ export async function getDiscoverNovels(
         return b.score - a.score;
       }
       if (sortBy === "newest") {
-        return b.releaseDate.localeCompare(a.releaseDate);
+        return compareReleaseDateNewestFirst(a, b);
       }
       if (sortBy === "title_asc") {
         return a.title.localeCompare(b.title);
@@ -5096,7 +5173,7 @@ export async function getDiscoverNovels(
         return b.score - a.score;
       }
       if (sortBy === "newest") {
-        return b.releaseDate.localeCompare(a.releaseDate);
+        return compareReleaseDateNewestFirst(a, b);
       }
       if (sortBy === "title_asc") {
         return a.title.localeCompare(b.title);

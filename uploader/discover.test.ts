@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import {
@@ -52,6 +53,8 @@ import {
   resolveSourceInventory,
   attachCachedInventoriesIfAvailable,
   matchNovelWithCalibreIndex,
+  buildReleaseDateFromStartDate,
+  compareReleaseDateNewestFirst,
 } from "./discover";
 import { extractVolumeNumber } from "./scraper";
 import {
@@ -5844,5 +5847,160 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         expect(html).toContain("updateDiscoverCardOnGrid(item);");
       });
     });
+  });
+});
+
+describe("Release Date Integrity (B6: no fabricated dates, nulls sort last)", () => {
+  it("buildReleaseDateFromStartDate keeps a partial AniList date but never invents a year", () => {
+    expect(buildReleaseDateFromStartDate({ year: 2015, month: 5, day: 25 })).toBe("2015-05-25");
+    // Partial dates fall back to the 1st of the month/day, because the source did publish a year.
+    expect(buildReleaseDateFromStartDate({ year: 2015, month: 5 })).toBe("2015-05-01");
+    expect(buildReleaseDateFromStartDate({ year: 2015 })).toBe("2015-01-01");
+    // No year means no date at all - the old code produced "2024-01-01" here.
+    expect(buildReleaseDateFromStartDate(undefined)).toBeNull();
+    expect(buildReleaseDateFromStartDate(null)).toBeNull();
+    expect(buildReleaseDateFromStartDate({})).toBeNull();
+    expect(buildReleaseDateFromStartDate({ year: null, month: 3, day: 4 })).toBeNull();
+    expect(buildReleaseDateFromStartDate({ year: 0 })).toBeNull();
+  });
+
+  it("compareReleaseDateNewestFirst sorts dated titles first, newest first, and undated last", () => {
+    const rows = [
+      { title: "Undated A", releaseDate: null as string | null },
+      { title: "Older", releaseDate: "2020-01-11" },
+      { title: "Mid", releaseDate: "2021-01-25" },
+      { title: "Undated B", releaseDate: undefined as string | undefined },
+      { title: "Newest", releaseDate: "2023-08-25" },
+      { title: "Undated C", releaseDate: "" as string },
+    ];
+    const sorted = [...rows].sort(compareReleaseDateNewestFirst).map((r) => r.title);
+    expect(sorted.slice(0, 3)).toEqual(["Newest", "Mid", "Older"]);
+    expect(sorted.slice(3).sort()).toEqual(["Undated A", "Undated B", "Undated C"]);
+  });
+
+  it("getDiscoverNovels with sort=newest never ranks an undated catalogue card above a dated one", async () => {
+    const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "discover-date-sort-"));
+    const cacheDb = new Database(path.join(workDir, "cache.db"));
+    try {
+      const undated: DiscoveredNovel = {
+        id: "lnori-undated-novel",
+        title: "Undated Novel",
+        author: "Some Author",
+        coverUrl: "https://example.com/u.jpg",
+        synopsis: "Synopsis for the undated novel that is long enough to pass the synopsis quality gate.",
+        genres: ["Light Novel"],
+        score: 99,
+        popularity: 999999,
+        releaseDate: null,
+        volumeCount: 3,
+        source: "lnori",
+        sourceUrls: { lnori: "https://lnori.com/series/9999/undated-novel" },
+        inLibrary: false,
+        existingVolumes: 0,
+      };
+      resetDiscoverCacheForTest({ cacheDb });
+      setCachedFeed(`${DISCOVER_FEED_CACHE_VERSION}:feed:all`, [undated, ...SEED_NEW_NOVELS], { cacheDb });
+
+      const res = await getDiscoverNovels({ tab: "all", sort: "newest", pageSize: 100 }, { cacheDb });
+      const dates = res.novels.map((n) => n.releaseDate ?? null);
+      const firstNull = dates.findIndex((d) => d === null);
+      if (firstNull !== -1) {
+        // Every dated card must come before every undated one.
+        expect(dates.slice(firstNull).every((d) => d === null)).toBe(true);
+      }
+      const dated = dates.filter((d): d is string => typeof d === "string");
+      for (let i = 1; i < dated.length; i++) {
+        expect(dated[i - 1] >= dated[i]).toBe(true);
+      }
+      expect(firstNull === -1 || firstNull >= SEED_NEW_NOVELS.length).toBe(true);
+    } finally {
+      resetDiscoverCacheForTest({ cacheDb });
+      cacheDb.close();
+      await fs.promises.rm(workDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Spinoff & Art-Book Isolation (B4: companions never inherit parent volumes)", () => {
+  const libraryRows = [
+    ...Array.from({ length: 10 }, (_, i) => ({
+      id: 1371 + i,
+      title: `Alya Sometimes Hides Her Feelings in Russian: Volume ${i + 1}`,
+      series: "Alya Sometimes Hides Her Feelings in Russian",
+      series_index: i + 1,
+    })),
+    { id: 595, title: "Ascendance of a Bookworm: Part 1 Daughter of a Soldier Volume 3", series: "Ascendance of a Bookworm", series_index: 1.3 },
+    { id: 596, title: "Ascendance of a Bookworm: Official Fanbook Volume 2", series: "Ascendance of a Bookworm", series_index: 1.2 },
+  ];
+
+  const makeNovel = (title: string, volumeCount: number): DiscoveredNovel => ({
+    id: `n-${title.slice(0, 12)}`,
+    title,
+    author: "Test Author",
+    coverUrl: "https://example.com/c.jpg",
+    synopsis: "A synopsis that is long enough to look like real prose for the synopsis gate.",
+    genres: ["Light Novel"],
+    score: 85,
+    popularity: 5000,
+    releaseDate: null,
+    volumeCount,
+    source: "lnori",
+    sourceUrls: { lnori: "https://lnori.com/series/1/x" },
+    inLibrary: false,
+    existingVolumes: 0,
+  });
+
+  it("an art book stays unowned and keeps its own 1-volume count (report §2.4: was Available (10 vols))", () => {
+    const [artBook] = crossCheckNovelsWithCalibre(
+      [makeNovel("Alya Sometimes Hides Her Feelings in Russian - Momoco's Art Book", 1)],
+      { getCalibreBooks: () => libraryRows },
+    );
+    expect(artBook.inLibrary).toBe(false);
+    expect(artBook.existingVolumes).toBe(0);
+    expect(artBook.ownedVolumeIndices).toEqual([]);
+    // The old bug rewrote this to 10 via `volumeCount: totalVolumeCount`.
+    expect(artBook.volumeCount).toBe(1);
+    expect(artBook.volumeNamespace).toBe("art-book");
+  });
+
+  it("a companion book whose title keeps the parent name is still isolated", () => {
+    const [companion] = crossCheckNovelsWithCalibre(
+      [makeNovel("Ascendance Of A Bookworm Ill Do Anything To Become A Librarian", 1)],
+      { getCalibreBooks: () => libraryRows },
+    );
+    expect(companion.inLibrary).toBe(false);
+    expect(companion.existingVolumes).toBe(0);
+    expect(companion.volumeCount).toBe(1);
+  });
+
+  it("the parent series still reconciles its own volumes normally", () => {
+    const [mainline] = crossCheckNovelsWithCalibre(
+      [makeNovel("Alya Sometimes Hides Her Feelings in Russian", 1)],
+      { getCalibreBooks: () => libraryRows },
+    );
+    expect(mainline.inLibrary).toBe(true);
+    expect(mainline.existingVolumes).toBe(10);
+    expect(mainline.volumeCount).toBe(10);
+    expect(mainline.volumeNamespace).toBe("main");
+  });
+
+  it("isSpinoffMismatch treats an auxiliary companion as a different work in both directions", () => {
+    expect(isSpinoffMismatch("Alya Sometimes Hides Her Feelings in Russian - Momoco's Art Book", "Alya Sometimes Hides Her Feelings in Russian")).toBe(true);
+    expect(isSpinoffMismatch("Alya Sometimes Hides Her Feelings in Russian", "Alya Sometimes Hides Her Feelings in Russian - Momoco's Art Book")).toBe(true);
+    expect(isSpinoffMismatch("Ascendance of a Bookworm: Official Fanbook Volume 2", "Ascendance of a Bookworm")).toBe(true);
+    // Two mainline works are still not a spinoff mismatch.
+    expect(isSpinoffMismatch("Alya Sometimes Hides Her Feelings in Russian", "Alya Sometimes Hides Her Feelings in Russian: Volume 3")).toBe(false);
+  });
+
+  it("a fanbook row does not own mainline volumes and vice versa", () => {
+    const [mainline] = crossCheckNovelsWithCalibre(
+      [makeNovel("Ascendance of a Bookworm", 33)],
+      {
+        getCalibreBooks: () => [
+          { id: 596, title: "Ascendance of a Bookworm: Official Fanbook Volume 2", series: "Ascendance of a Bookworm", series_index: 1.2 },
+        ],
+      },
+    );
+    expect(mainline.ownedVolumeIndices ?? []).not.toContain(2);
   });
 });

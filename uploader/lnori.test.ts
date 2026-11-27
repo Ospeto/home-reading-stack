@@ -22,6 +22,7 @@ import {
   validateDownloadedEpub,
   validateLnoriBookId,
   isVolumeAlreadyInCalibre,
+  resolveIngestVolumeAssignment,
   type ParsedLnoriUrl,
   type LnoriProgressEvent,
   formatLnoriProgress,
@@ -1368,6 +1369,108 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
       };
       expect(isVolumeAlreadyInCalibre("Mock Series", 1, "Mock Series: Volume 1", { isVolumeInLibrary })).toBe(true);
       expect(isVolumeAlreadyInCalibre("Mock Series", 2, "Mock Series: Volume 2", { isVolumeInLibrary })).toBe(false);
+    });
+
+    it("isVolumeAlreadyInCalibre finds a Year 1 volume stored at a fractional series_index (regression: Classroom of the Elite #9 / #10 were reported missing)", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "calibre-cote-test-"));
+      const dbPath = path.join(workDir, "metadata.db");
+      const db = new Database(dbPath);
+      db.run(`
+        CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, series_index REAL);
+        CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+        INSERT INTO series VALUES (1, "Classroom of the Elite");
+        INSERT INTO books VALUES (1, "Classroom of the Elite Vol. 9", 1.09);
+        INSERT INTO books VALUES (2, "Classroom of the Elite Vol. 10", 1.1);
+        INSERT INTO books VALUES (3, "Classroom of the Elite: Year 2 Vol. 9", 2.09);
+        INSERT INTO books_series_link VALUES (1, 1, 1);
+        INSERT INTO books_series_link VALUES (2, 2, 1);
+        INSERT INTO books_series_link VALUES (3, 3, 1);
+      `);
+      db.close();
+
+      try {
+        // The library stores Year 1 at 1.0x, so a plain series_index comparison missed both.
+        expect(
+          isVolumeAlreadyInCalibre("Classroom of the Elite", 9, "Classroom of the Elite: Volume 9", { calibreDbPath: dbPath }),
+        ).toBe(true);
+        expect(
+          isVolumeAlreadyInCalibre("Classroom of the Elite", 10, "Classroom of the Elite: Volume 10", { calibreDbPath: dbPath }),
+        ).toBe(true);
+        // A genuinely missing volume is still missing.
+        expect(
+          isVolumeAlreadyInCalibre("Classroom of the Elite", 12, "Classroom of the Elite: Volume 12", { calibreDbPath: dbPath }),
+        ).toBe(false);
+        // Year 2 volume 9 is its own namespace: it neither satisfies Year 1 volume 9 nor hides it.
+        expect(
+          isVolumeAlreadyInCalibre("Classroom of the Elite", 9, "Classroom of the Elite: Year 2 Volume 9", { calibreDbPath: dbPath }, "year:2"),
+        ).toBe(true);
+        expect(
+          isVolumeAlreadyInCalibre("Classroom of the Elite", 5, "Classroom of the Elite: Year 2 Volume 5", { calibreDbPath: dbPath }, "year:2"),
+        ).toBe(false);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("isVolumeAlreadyInCalibre compares Bookworm parts inside their part namespace (regression: all parts sit at series_index 1.x)", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "calibre-bookworm-test-"));
+      const dbPath = path.join(workDir, "metadata.db");
+      const db = new Database(dbPath);
+      db.run(`
+        CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, series_index REAL);
+        CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+        INSERT INTO series VALUES (1, "Ascendance of a Bookworm");
+        INSERT INTO books VALUES (1, "Ascendance of a Bookworm: Short Story Collection Volume 1", 1.1);
+        INSERT INTO books VALUES (2, "Ascendance of a Bookworm: Part 1 Daughter of a Soldier Volume 3", 1.3);
+        INSERT INTO books VALUES (3, "Ascendance of a Bookworm: Part 2 Apprentice Shrine Maiden Volume 4", 1.4);
+        INSERT INTO books_series_link VALUES (1, 1, 1);
+        INSERT INTO books_series_link VALUES (2, 2, 1);
+        INSERT INTO books_series_link VALUES (3, 3, 1);
+      `);
+      db.close();
+
+      try {
+        // Part 1 volume 3 is on disk at 1.3; asking for it must find it.
+        expect(
+          isVolumeAlreadyInCalibre("Ascendance of a Bookworm", 3, "Ascendance of a Bookworm: Part 1 Volume 3", { calibreDbPath: dbPath }, "part:1"),
+        ).toBe(true);
+        // Part 2 volume 4 is on disk at 1.4.
+        expect(
+          isVolumeAlreadyInCalibre("Ascendance of a Bookworm", 4, "Ascendance of a Bookworm: Part 2 Volume 4", { calibreDbPath: dbPath }, "part:2"),
+        ).toBe(true);
+        // Part 1 volume 1 is NOT on disk (the 1.1 row is a Short Story Collection, a different book).
+        expect(
+          isVolumeAlreadyInCalibre("Ascendance of a Bookworm", 1, "Ascendance of a Bookworm: Part 1 Volume 1", { calibreDbPath: dbPath }, "part:1"),
+        ).toBe(false);
+        // Part 2 volume 4 must not be answered by Part 1 volume 4's absence/presence.
+        expect(
+          isVolumeAlreadyInCalibre("Ascendance of a Bookworm", 3, "Ascendance of a Bookworm: Part 2 Volume 3", { calibreDbPath: dbPath }, "part:2"),
+        ).toBe(false);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("resolveIngestVolumeAssignment encodes the namespace into the one flat series_index Calibre stores", () => {
+      // mainline volume
+      expect(resolveIngestVolumeAssignment("Overlord", { volumeNumber: 15 }).seriesIndex).toBe(15);
+      // a Year-N volume uses the library's own sub-series convention (Year 2 vol 9 -> 2.09)
+      const yearTwo = resolveIngestVolumeAssignment("Classroom of the Elite", {
+        volumeNumber: 9,
+        title: "Classroom of the Elite: Year 2 Vol. 9",
+      });
+      expect(yearTwo.key).toEqual({ namespace: "year:2", volume: 9 });
+      expect(yearTwo.seriesIndex).toBe(2.09);
+      // a source-declared part keeps the historical part*100+volume encoding
+      const partTwo = resolveIngestVolumeAssignment("Ascendance of a Bookworm", {
+        volumeNumber: 4,
+        partNumber: 2,
+        title: "Ascendance of a Bookworm: Part 2 Volume 4",
+      });
+      expect(partTwo.key).toEqual({ namespace: "part:2", volume: 4 });
+      expect(partTwo.seriesIndex).toBe(204);
     });
 
     it("ingestLnoriSeries continues to volume 2 when volume 1 download throws and reports one skipped error and one import", async () => {
