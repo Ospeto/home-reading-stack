@@ -15,11 +15,13 @@ import {
   isCommentsEmpty,
   extractEpubDescription,
   fetchOnlineSynopsis,
+  parseRetryAfterMs,
 } from "./scraper";
 import {
   streamResponseToFile,
   runCalibredb,
   isVolumeAlreadyInCalibre,
+  resolveIngestVolumeAssignment,
   getSipsPath,
   composeSignal,
   escapeTelegramMarkdown,
@@ -1433,6 +1435,9 @@ export async function downloadElscioneEpub(
 
   const MAX_RETRIES = 3;
   let lastError: any = null;
+  // A 429 states when to come back; a permanent 4xx (403/404/410) will answer the same way for
+  // every attempt, so retrying it only burns the whole retry budget before failing anyway.
+  let retryAfterMs: number | null = null;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (dependencies?.signal?.aborted) {
@@ -1440,7 +1445,9 @@ export async function downloadElscioneEpub(
     }
 
     if (attempt > 0) {
-      const backoffMs = Math.min(10000, 1000 * 2 ** (attempt - 1));
+      const backoffMs =
+        retryAfterMs !== null ? retryAfterMs : Math.min(10000, 1000 * 2 ** (attempt - 1));
+      retryAfterMs = null;
       await sleep(backoffMs);
     }
 
@@ -1464,7 +1471,14 @@ export async function downloadElscioneEpub(
       );
 
       if (!res.ok) {
-        throw new Error(`Failed to download EPUB (${res.status}): ${normalizedDownloadUrl}`);
+        if (res.status === 429) {
+          retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"), 2000, 10000);
+        }
+        const httpErr = new Error(
+          `Failed to download EPUB (${res.status}): ${normalizedDownloadUrl}`,
+        );
+        (httpErr as any).httpStatus = res.status;
+        throw httpErr;
       }
 
       await streamResponseToFile(
@@ -1488,6 +1502,15 @@ export async function downloadElscioneEpub(
         throw new Error("Elscione ingestion aborted by client");
       }
       console.warn(`[Elscione] EPUB download attempt ${attempt + 1} failed: ${err?.message || err}`);
+      const httpStatus = Number(err?.httpStatus);
+      const isRetryable =
+        !Number.isFinite(httpStatus) ||
+        httpStatus >= 500 ||
+        httpStatus === 408 ||
+        httpStatus === 429;
+      if (!isRetryable) {
+        throw err;
+      }
     }
   }
 
@@ -1554,13 +1577,26 @@ export async function ingestElscioneSeries(
 
       const vol = manifest.volumes[i];
       const volNum = vol.volumeNumber;
-      const title = vol.title || `${manifest.seriesTitle}: Volume ${volNum}`;
-      const seriesIndex = vol.partNumber !== undefined && vol.partNumber > 1
-        ? vol.partNumber * 100 + volNum
-        : volNum;
+      // One volume model for every source: a part-local volume keeps its part namespace and the
+      // assignment tells Calibre what flat `series_index` stores for it.
+      const assignment = resolveIngestVolumeAssignment(manifest.seriesTitle, {
+        volumeNumber: volNum,
+        title: vol.title,
+        partNumber: vol.partNumber,
+      });
+      const title = assignment.title;
+      const seriesIndex = assignment.seriesIndex;
 
       // Pre-download duplicate check
-      if (isVolumeAlreadyInCalibre(manifest.seriesTitle, seriesIndex, title, dependencies)) {
+      if (
+        isVolumeAlreadyInCalibre(
+          manifest.seriesTitle,
+          assignment.key.volume,
+          title,
+          dependencies,
+          assignment.key.namespace,
+        )
+      ) {
         console.log(
           `[Elscione] Volume ${volNum} of "${manifest.seriesTitle}" already in library, skipping`,
         );

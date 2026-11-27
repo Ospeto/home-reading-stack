@@ -929,8 +929,76 @@ EOF
 </plist>
 EOF
 
+  # 8. Discover New Releases Seed Refresh Plist (curated tab, refreshed on a schedule)
+  #    The New Releases tab is curated (every card names a real download source), so it has to be
+  #    refreshed on a schedule or it freezes at the titles it shipped with.
+  local seeds_hour=6
+  local seeds_minute=30
+  local seeds_enabled=1
+  local seeds_cfg_file="${DISCOVER_SEEDS_CONFIG_PATH:-${LIGHTHOUSE_ROOT}/data/discover-seeds-config.json}"
+  if [ -f "$seeds_cfg_file" ]; then
+    local parsed_seed_time
+    parsed_seed_time=$(grep -o '"scheduleTime"[[:space:]]*:[[:space:]]*"[^"]*"' "$seeds_cfg_file" | sed -e 's/.*"scheduleTime"[[:space:]]*:[[:space:]]*"//' -e 's/"//' 2>/dev/null || echo "06:30")
+    if [[ "$parsed_seed_time" =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+      local seed_h=$(( 10#${BASH_REMATCH[1]} ))
+      local seed_m=$(( 10#${BASH_REMATCH[2]} ))
+      if [ "$seed_h" -ge 0 ] && [ "$seed_h" -le 23 ] && [ "$seed_m" -ge 0 ] && [ "$seed_m" -le 59 ]; then
+        seeds_hour="$seed_h"
+        seeds_minute="$seed_m"
+      fi
+    fi
+    if grep -q '"enabled"[[:space:]]*:[[:space:]]*false' "$seeds_cfg_file" 2>/dev/null; then
+      seeds_enabled=0
+    fi
+  fi
+
+  local seeds_plist="${target_dir}/${DAEMON_PREFIX}.reading-discover-seeds.plist"
+  if [ "$seeds_enabled" -eq 0 ]; then
+    echo -e "  ${COLOR_YELLOW}Notice: Discover New Releases refresh is disabled in configuration. No plist generated.${COLOR_RESET}"
+  else
+  cat << EOF > "$seeds_plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${P_PREFIX}.reading-discover-seeds</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${P_BUN}</string>
+        <string>run</string>
+        <string>${P_ROOT}/scripts/refresh-discover-seeds.ts</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LIGHTHOUSE_ROOT</key>
+        <string>${P_ROOT}</string>
+        <key>HOME</key>
+        <string>${P_HOME}</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>${seeds_hour}</integer>
+        <key>Minute</key>
+        <integer>${seeds_minute}</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>${P_LOG_DIR}/reading-discover-seeds.log</string>
+    <key>StandardErrorPath</key>
+    <string>${P_LOG_DIR}/reading-discover-seeds.log</string>
+</dict>
+</plist>
+EOF
+  fi
+
   # Validate all generated plists with plutil if available
   local all_plists=("$uploader_plist" "$bot_plist" "$backup_plist" "$ssd_backup_plist")
+  if [ "$seeds_enabled" -eq 1 ]; then
+    all_plists+=("$seeds_plist")
+  fi
   for p in "${all_plists[@]}"; do
     if command -v plutil >/dev/null 2>&1; then
       plutil -lint "$p" >/dev/null
@@ -1759,6 +1827,20 @@ cmd_ingest_novel() {
   exec bun run "$script_path" "$@"
 }
 
+# ------------------------------------------------------------------------------
+# Command: refresh-discover-seeds
+#   Rebuilds the curated New Releases list for the Discover tab from live AniList
+#   releases that pass the real-source gate.
+# ------------------------------------------------------------------------------
+cmd_refresh_discover_seeds() {
+  local script_path="${LIGHTHOUSE_ROOT}/scripts/refresh-discover-seeds.ts"
+  if [ ! -f "$script_path" ]; then
+    echo "Error: ${script_path} not found" >&2
+    exit 1
+  fi
+  exec bun run "$script_path" "$@"
+}
+
 cmd_backup_ssd() {
   local script_path="${LIGHTHOUSE_ROOT}/scripts/backup-ssd.sh"
   if [ ! -f "$script_path" ]; then
@@ -1879,6 +1961,7 @@ Commands:
   heal-covers [options]    Audit & heal Calibre volume covers, purge stale thumbnail caches
   ingest-novel <url> [options] Ingest web novel via FanFicFare (RoyalRoad, AO3, ScribbleHub, etc.)
   firecrawl <cmd> [options] Control self-hosted Firecrawl on-demand cluster (status|up|down)
+  refresh-discover-seeds [--dry-run] Rebuild the curated New Releases list from live AniList releases
   backup-ssd [options]     Incremental whole-library backup to external SSD (rsync + hot SQLite DBs)
   install-daemons          Dynamically generate and register macOS LaunchAgents for current user
   backup [options]         Create hot SQLite backup with WAL checkpoint, checksum, and manifest
@@ -1988,6 +2071,7 @@ case "$ACTION" in
   enrich-synopsis) cmd_enrich_synopsis "$@" ;;
   heal-covers) cmd_heal_covers "$@" ;;
   ingest-novel|webnovel) cmd_ingest_novel "$@" ;;
+  refresh-discover-seeds) cmd_refresh_discover_seeds "$@" ;;
   sync-obsidian) cmd_sync_obsidian "$@" ;;
   sync-kindle) cmd_sync_kindle "$@" ;;
   kindle-ssh) cmd_kindle_ssh "$@" ;;

@@ -1778,6 +1778,59 @@ describe("Elscione Light Novel Ingestion Module", () => {
       fs.rmSync(tempDir, { recursive: true, force: true });
     });
 
+    it("downloadElscioneEpub does not retry a permanent 4xx and honours Retry-After on 429", async () => {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "elscione-dl-permanent-"));
+      const notFoundPath = path.join(tempDir, "not-found.epub");
+      const throttledPath = path.join(tempDir, "throttled.epub");
+
+      // 1. A 404 answers the same way every time: one attempt, no retry budget burned.
+      let notFoundCalls = 0;
+      await expect(
+        downloadElscioneEpub(
+          "https://server.elscione.com/missing-book.epub",
+          notFoundPath,
+          undefined,
+          {
+            sleep: async () => {},
+            fetch: (async () => {
+              notFoundCalls++;
+              return new Response("Not Found", { status: 404 });
+            }) as any,
+          },
+        ),
+      ).rejects.toThrow(/Failed to download EPUB \(404\)/);
+      expect(notFoundCalls).toBe(1);
+
+      // 2. A 429 states when to come back, so the backoff follows the header, not 1s/2s/4s.
+      let throttledCalls = 0;
+      const sleeps: number[] = [];
+      await expect(
+        downloadElscioneEpub(
+          "https://server.elscione.com/throttled-book.epub",
+          throttledPath,
+          undefined,
+          {
+            sleep: async (ms: number) => {
+              sleeps.push(ms);
+            },
+            fetch: (async () => {
+              throttledCalls++;
+              return new Response("slow down", {
+                status: 429,
+                headers: { "retry-after": "5" },
+              });
+            }) as any,
+          },
+        ),
+      ).rejects.toThrow(/Failed to download EPUB \(429\)/);
+      expect(throttledCalls).toBeGreaterThan(1);
+      expect(sleeps.length).toBeGreaterThan(0);
+      expect(sleeps.every((ms) => ms === 5000)).toBe(true);
+      expect(sleeps).not.toContain(1000);
+
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+
     it("ingestElscioneSeries returns success: false when all volumes fail to download", async () => {
       const mockItems = [
         {

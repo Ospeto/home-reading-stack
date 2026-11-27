@@ -24,6 +24,12 @@ import {
   setServerJobQueueForTest,
   getActiveDiscoverJobs,
   registerDiscoverJob,
+  enqueueLnoriJob,
+  getLnoriQueue,
+  getLnoriRunState,
+  getDiscoverJobProgress,
+  recoverPersistedNovelQueue,
+  cancelActiveLnoriIngest,
 } from "./server";
 import { DurableJobQueue } from "./jobs";
 import {
@@ -7367,5 +7373,205 @@ describe("Scoped API Keys — WAN authorization edge", () => {
     } finally {
       restoreAuthEnv();
     }
+  });
+});
+
+describe("Novel ingest queue durability, progress and isolation (B11, B12, B13)", () => {
+  let queueDb: Database;
+  let queue: DurableJobQueue;
+
+  beforeEach(() => {
+    queueDb = new Database(":memory:");
+    queue = new DurableJobQueue(queueDb);
+    setServerJobQueueForTest(queue);
+    resetServerDependenciesForTest();
+    resetActiveLnoriStateForTest();
+  });
+
+  afterEach(() => {
+    resetActiveLnoriStateForTest();
+    resetServerDependenciesForTest();
+    setServerJobQueueForTest(null);
+    queue.close();
+  });
+
+  it("B11: a job queued longer than 60 seconds still reports queued instead of 404ing", async () => {
+    let releaseFirst: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const startedUrls: string[] = [];
+
+    setServerDependenciesForTest({
+      ingestLnoriSeries: async (url: string) => {
+        startedUrls.push(url);
+        if (url.includes("slot-blocker")) {
+          await firstGate;
+        }
+        return {
+          success: true,
+          seriesTitle: url.includes("slot-blocker") ? "Blocker" : "Queued Series",
+          importedCount: 0,
+          duplicateCount: 0,
+          totalCount: 1,
+          calibreBookIds: [1],
+        };
+      },
+    });
+
+    // First run occupies the single execution lane so the second job can only queue.
+    enqueueLnoriJob("https://lnori.com/series/1/slot-blocker");
+    const queued = enqueueLnoriJob("https://lnori.com/series/2/long-queued");
+    await new Promise((r) => setTimeout(r, 60));
+
+    expect(startedUrls).toContain("https://lnori.com/series/1/slot-blocker");
+    expect(startedUrls).not.toContain("https://lnori.com/series/2/long-queued");
+    expect(getLnoriQueue().some((item) => item.id === queued.runId)).toBe(true);
+    // The durable row exists before the run ever starts: that is what survives a restart.
+    expect(queue.getJob(`novel_${queued.runId}`)?.status).toBe("pending");
+
+    const origNow = Date.now;
+    try {
+      Date.now = () => origNow() + 10 * 60 * 1000; // ten minutes later
+      const progress = getDiscoverJobProgress(String(queued.jobId));
+      expect(progress).not.toBeNull();
+      expect(progress!.phase).toBe("queued");
+    } finally {
+      Date.now = origNow;
+    }
+
+    releaseFirst?.();
+    await new Promise((r) => setTimeout(r, 80));
+  });
+
+  it("B12: a finished run keeps its own terminal state while the next run drains, with no supersede error", async () => {
+    const resolveSecond: Array<() => void> = [];
+    setServerDependenciesForTest({
+      ingestLnoriSeries: async (url: string) => {
+        if (url.includes("sequential-2")) {
+          await new Promise<void>((r) => resolveSecond.push(r));
+        }
+        return {
+          success: true,
+          seriesTitle: url.includes("sequential-1") ? "First Series" : "Second Series",
+          importedCount: 1,
+          duplicateCount: 0,
+          totalCount: 1,
+          calibreBookIds: [11],
+        };
+      },
+    });
+
+    const first = enqueueLnoriJob("https://lnori.com/series/1/sequential-1");
+    const second = enqueueLnoriJob("https://lnori.com/series/2/sequential-2");
+    await new Promise((r) => setTimeout(r, 80));
+
+    // The first run finished successfully; the second is now live in its own state.
+    const firstState = getLnoriRunState(first.runId);
+    expect(firstState).not.toBeNull();
+    expect(firstState!.phase).toBe("complete");
+    expect(firstState!.completedData?.seriesTitle).toBe("First Series");
+    // Not "Task generation superseded": that phantom error turned a successful run into a failure.
+    expect(firstState!.error ?? null).toBeNull();
+
+    const secondState = getLnoriRunState(second.runId);
+    expect(secondState).not.toBeNull();
+    expect(secondState!.phase).not.toBe("complete");
+    expect(secondState!.runId).toBe(second.runId);
+
+    for (const release of resolveSecond) release();
+    await new Promise((r) => setTimeout(r, 80));
+  });
+
+  it("B13: per-run cancellation cancels the named run, not merely the newest one", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    setServerDependenciesForTest({
+      ingestLnoriSeries: async (_url: string) => {
+        await gate;
+        return {
+          success: true,
+          seriesTitle: "Cancellable",
+          importedCount: 0,
+          duplicateCount: 0,
+          totalCount: 1,
+          calibreBookIds: [1],
+        };
+      },
+    });
+
+    const blocker = enqueueLnoriJob("https://lnori.com/series/1/cancel-blocker");
+    const queued = enqueueLnoriJob("https://lnori.com/series/2/cancel-queued");
+    await new Promise((r) => setTimeout(r, 60));
+
+    // Cancelling the queued (non-active) run by its own id works and drops its durable row.
+    expect(cancelActiveLnoriIngest(queued.runId)).toBe(true);
+    expect(getLnoriQueue().some((item) => item.id === queued.runId)).toBe(false);
+    expect(queue.getJob(`novel_${queued.runId}`)).toBeNull();
+    // The active run is untouched by that cancellation.
+    expect(getLnoriRunState(blocker.runId)?.runId).toBe(blocker.runId);
+
+    // Cancelling the active run by id aborts it: the state flips to a cancellation error at
+    // once, before the (already in-flight) ingest call can settle.
+    expect(cancelActiveLnoriIngest(blocker.runId)).toBe(true);
+    const cancelledState = getLnoriRunState(blocker.runId);
+    expect(cancelledState?.phase).toBe("error");
+    expect(String(cancelledState?.error || "")).toContain("cancelled");
+    expect(cancelledState?.active).toBe(false);
+
+    release?.();
+    await new Promise((r) => setTimeout(r, 80));
+  });
+
+  it("B13: queued volumes recorded in the durable jobs table are restored after a restart", async () => {
+    const runId = "lnori-9001-restore";
+    queue.enqueue(
+      "novel_ingest",
+      {
+        runId,
+        jobId: 9001,
+        targetUrl: "https://lnori.com/series/9001/restored",
+        source: "lnori",
+        force: false,
+        queuedAt: new Date().toISOString(),
+      },
+      { id: `novel_${runId}`, maxRetries: 1 },
+    );
+    // A completed run must not be restored: only pending/processing work is still owed.
+    queue.enqueue(
+      "novel_ingest",
+      {
+        runId: "lnori-9002-done",
+        jobId: 9002,
+        targetUrl: "https://lnori.com/series/9002/already-done",
+        source: "lnori",
+        force: false,
+        queuedAt: new Date().toISOString(),
+      },
+      { id: "novel_lnori-9002-done", maxRetries: 1 },
+    );
+    queue.updateJobStatus("novel_lnori-9002-done", "completed", { result: { ok: true } });
+
+    const restored = recoverPersistedNovelQueue();
+    expect(restored).toBe(1);
+    const restoredItem = getLnoriQueue().find((item) => item.id === runId);
+    expect(restoredItem).toBeDefined();
+    expect(restoredItem!.targetUrl).toBe("https://lnori.com/series/9001/restored");
+    expect(restoredItem!.durableJobId).toBe(`novel_${runId}`);
+    expect(getLnoriQueue().some((item) => item.id === "lnori-9002-done")).toBe(false);
+  });
+
+  it("B13: the durable novel_ingest rows are never picked up by the generic job worker", async () => {
+    queue.enqueue(
+      "novel_ingest",
+      { runId: "lnori-9100-worker", jobId: 9100, targetUrl: "https://lnori.com/series/9100/x", source: "lnori" },
+      { id: "novel_lnori-9100-worker" },
+    );
+    // novel_ingest has no registered handler by design, so processNextJob must not claim it.
+    const claimed = await queue.processNextJob();
+    expect(claimed).toBe(false);
+    expect(queue.getJob("novel_lnori-9100-worker")?.status).toBe("pending");
   });
 });

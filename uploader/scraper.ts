@@ -450,6 +450,36 @@ export function extractVolumeNumber(title: string): number | null {
     return multiPart.volume;
   }
 
+  // 0b. An explicit vol(ume)/book marker with a digit always wins over a subtitle "Part I/II"
+  // later in the same title, so "Overlord, Vol. 15: The Half-Elf Demigod Part I" yields 15
+  // instead of collapsing onto the part numeral (1).
+  const explicitDigitPatterns = [
+    /[\[\(（［{【]\s*(?:vol(?:ume)?|book|bk)\.?\s*0*(\d+(?:\.\d+)?)\s*[\]\)）］}】]/i,
+    /\b(?:vol(?:ume)?|book|bk)\.?\s*0*(\d+(?:\.\d+)?)\b/i,
+  ];
+  for (const p of explicitDigitPatterns) {
+    const m = s.match(p);
+    if (m && m[1]) {
+      const val = parseBurmeseOrAsciiNumber(m[1]);
+      if (val !== null && !isNaN(val)) return val;
+    }
+  }
+
+  // 0c. An explicit vol(ume)/book Roman marker likewise wins over a part numeral
+  // (e.g. "Overlord [Vol. IV]: The Lizard Man Heroes Part I" -> 4).
+  const explicitRomanPatterns = [
+    /[\[\(（［{【]\s*(?:vol(?:ume)?|book|bk|v)\.?\s*([ivx]+)\s*[\]\)）］}】]/i,
+    /\b(?:vol(?:ume)?|book|bk|v)\.\s*([ivx]+)\b/i,
+    /\b(?:volume|book|bk)\s+([ivx]+)\b/i,
+  ];
+  for (const rp of explicitRomanPatterns) {
+    const rm = s.match(rp);
+    if (rm && rm[1]) {
+      const romanVal = ROMAN_NUMERAL_VOLUME_MAP[rm[1].toLowerCase()];
+      if (romanVal !== undefined) return romanVal;
+    }
+  }
+
   // 1. Check Roman numeral volume patterns with explicit prefix (e.g. "Vol. IV", "Volume II", "Book III", "[Vol. V]")
   // Require dot or whitespace after 'v' so Roman numerals starting with 'V' (e.g. VI, VII, VIII) do not collide
   const romanPatterns = [

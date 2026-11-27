@@ -12,7 +12,17 @@ import {
   extractEpubDescription,
   fetchOnlineSynopsis,
   extractVolumeNumber,
+  parseRetryAfterMs,
 } from "./scraper";
+
+import {
+  calibreSeriesIndexForKey,
+  parseVolumeNamespace,
+  resolveCalibreVolumeKeys,
+  resolveCanonicalVolumeKey,
+  volumeKeysMatch,
+  type VolumeKey,
+} from "./volume-model";
 
 const PROXY_URL = "http://127.0.0.1:7890";
 export const MAX_EPUB_BYTES = 256 * 1024 * 1024;
@@ -192,6 +202,14 @@ export async function streamResponseToFile(
         onProgress(Math.min(100, Math.round((receivedBytes / declaredLength) * 100)));
       }
     }
+
+    // A truncated transfer ends with a normal `done`, so the declared length is the only signal
+    // that the file is short. Accepting it used to land a half EPUB in Calibre as a real volume.
+    if (Number.isFinite(declaredLength) && declaredLength > 0 && receivedBytes < declaredLength) {
+      throw new Error(
+        `${label} truncated transfer: received ${receivedBytes} of ${declaredLength} bytes`,
+      );
+    }
   } catch (err) {
     try {
       await reader?.cancel();
@@ -299,11 +317,55 @@ export function getCalibreDbPath(): string {
   );
 }
 
+export interface IngestVolumeAssignment {
+  /** Volume namespace the incoming book belongs to (main, part:N, year:N, art-book …). */
+  key: VolumeKey;
+  /** The single number Calibre stores in `series_index` for this key. */
+  seriesIndex: number;
+  /** Title to write into Calibre. */
+  title: string;
+}
+
+/**
+ * Resolves what a source volume is, in the one volume model every surface shares.
+ *
+ * A source exposes a volume number and sometimes a part number; the namespace decides whether
+ * that number is a mainline volume, a part-local volume or a Year-N volume, and
+ * `calibreSeriesIndexForKey` decides what Calibre's flat `series_index` has to store so the row
+ * can be found again by the same model.
+ */
+export function resolveIngestVolumeAssignment(
+  seriesTitle: string,
+  options: {
+    volumeNumber: number;
+    title?: string | null;
+    partNumber?: number | null;
+    namespace?: string;
+  },
+): IngestVolumeAssignment {
+  const volumeNumber = options.volumeNumber;
+  let namespace = options.namespace;
+  if (!namespace) {
+    if (typeof options.partNumber === "number" && options.partNumber > 0) {
+      namespace = `part:${options.partNumber}`;
+    } else {
+      namespace = parseVolumeNamespace(options.title ?? `${seriesTitle}: Volume ${volumeNumber}`);
+    }
+  }
+  const key: VolumeKey = { namespace, volume: volumeNumber };
+  return {
+    key,
+    seriesIndex: calibreSeriesIndexForKey(key),
+    title: options.title || `${seriesTitle}: Volume ${volumeNumber}`,
+  };
+}
+
 export function isVolumeAlreadyInCalibre(
   seriesTitle: string,
   assignedIndex: number,
   title: string,
   dependencies?: LnoriDependencies,
+  volumeNamespace?: string,
 ): boolean {
   if (dependencies?.force) {
     return false;
@@ -312,25 +374,30 @@ export function isVolumeAlreadyInCalibre(
     return dependencies.isVolumeInLibrary(seriesTitle, assignedIndex, title);
   }
 
+  // The one volume model decides identity: a row matches when its namespace and volume agree
+  // with the incoming book, whatever flat number Calibre happens to store in series_index.
+  const queryKey: VolumeKey = volumeNamespace
+    ? { namespace: volumeNamespace, volume: assignedIndex }
+    : resolveCanonicalVolumeKey(title, seriesTitle) ?? {
+        namespace: "main",
+        volume: assignedIndex,
+      };
+  const rowMatches = (row: { title?: string | null; series?: string | null; series_index?: any }): boolean => {
+    for (const key of resolveCalibreVolumeKeys({
+      title: row.title ?? undefined,
+      series: row.series ?? undefined,
+      seriesIndex: row.series_index,
+    })) {
+      if (volumeKeysMatch(key, queryKey)) return true;
+    }
+    return false;
+  };
+
   const dbPath = dependencies?.calibreDbPath || getCalibreDbPath();
   if (fs.existsSync(dbPath)) {
     try {
       const db = new Database(dbPath, { readonly: true });
       db.run("PRAGMA busy_timeout = 2000;");
-
-      const seriesMatch = db.query(`
-        SELECT b.id FROM books b
-        JOIN books_series_link bsl ON b.id = bsl.book
-        JOIN series s ON bsl.series = s.id
-        WHERE LOWER(TRIM(s.name)) = LOWER(TRIM(?))
-          AND ROUND(b.series_index, 2) = ROUND(?, 2)
-        LIMIT 1
-      `).get(seriesTitle, assignedIndex);
-
-      if (seriesMatch) {
-        db.close();
-        return true;
-      }
 
       const titleMatch = db.query(`
         SELECT b.id FROM books b
@@ -343,34 +410,41 @@ export function isVolumeAlreadyInCalibre(
         return true;
       }
 
-      // Additional resilient check: check if any book has title matching series and exact volume number
+      // Read the series' rows and compare them through the model. Calibre stores a namespace
+      // collision in the flat `series_index` (Bookworm's parts all sit at 1.x), so comparing
+      // the stored number alone misses books that are already on disk.
+      const seriesRows = db.query(`
+        SELECT b.id, b.title, b.series_index, s.name AS series FROM books b
+        JOIN books_series_link bsl ON b.id = bsl.book
+        JOIN series s ON bsl.series = s.id
+        WHERE LOWER(TRIM(s.name)) = LOWER(TRIM(?))
+        LIMIT 5000
+      `).all(seriesTitle) as any[];
+
+      for (const row of seriesRows) {
+        if (rowMatches(row)) {
+          db.close();
+          return true;
+        }
+      }
+
+      // A row can carry the series only in its title (multi-author franchises, renamed series).
       const normSeries = seriesTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
       if (normSeries && normSeries.length >= 3) {
         const titleSearchPrefix = seriesTitle.slice(0, 20).toLowerCase();
         const candidateRows = db.query(`
-          SELECT b.id, b.title, b.series_index FROM books b
+          SELECT b.id, b.title, b.series_index, NULL AS series FROM books b
           WHERE LOWER(b.title) LIKE ?
           LIMIT 100
-        `).all(`%${titleSearchPrefix}%`);
+        `).all(`%${titleSearchPrefix}%`) as any[];
 
-        for (const row of candidateRows as any[]) {
+        for (const row of candidateRows) {
           const rowTitle = (row.title || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-          if (rowTitle && (rowTitle.includes(normSeries) || normSeries.includes(rowTitle))) {
-            let rowVol: number | null = null;
-            if (
-              row.series_index !== undefined &&
-              row.series_index !== null &&
-              !isNaN(Number(row.series_index)) &&
-              Number(row.series_index) > 0
-            ) {
-              rowVol = Number(row.series_index);
-            } else if (row.title) {
-              rowVol = extractVolumeNumber(row.title);
-            }
-            if (rowVol !== null && Math.abs(rowVol - assignedIndex) < 0.01) {
-              db.close();
-              return true;
-            }
+          if (!rowTitle) continue;
+          if (!(rowTitle.includes(normSeries) || normSeries.includes(rowTitle))) continue;
+          if (rowMatches(row)) {
+            db.close();
+            return true;
           }
         }
       }
@@ -381,7 +455,7 @@ export function isVolumeAlreadyInCalibre(
     }
   }
 
-  // Fallback: calibredb list
+  // Fallback: calibredb list, queried by the encoded series index of the model key.
   try {
     const safeSeries = seriesTitle.replace(/"/g, '\\"');
     const listRes = runCalibredb([
@@ -1094,6 +1168,10 @@ export async function downloadLnoriEpub(
   const MAX_RETRIES = 3;
   let lastError: any = null;
   let forceProxy = false;
+  // A 429 tells us exactly when to come back. Honouring `Retry-After` replaces the guessed
+  // exponential backoff for that attempt, so we neither hammer the host early nor wait longer
+  // than it asked.
+  let retryAfterMs: number | null = null;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (dependencies?.signal?.aborted) {
@@ -1101,7 +1179,9 @@ export async function downloadLnoriEpub(
     }
 
     if (attempt > 0) {
-      const backoffMs = Math.min(10000, 1000 * 2 ** (attempt - 1));
+      const backoffMs =
+        retryAfterMs !== null ? retryAfterMs : Math.min(10000, 1000 * 2 ** (attempt - 1));
+      retryAfterMs = null;
       await sleep(backoffMs);
     }
 
@@ -1218,6 +1298,9 @@ export async function downloadLnoriEpub(
         lastError = err;
 
         if ((res.status >= 500 || res.status === 429) && attempt < MAX_RETRIES) {
+          if (res.status === 429) {
+            retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"), 2000, 10000);
+          }
           continue;
         }
         throw lastError;
@@ -1234,6 +1317,9 @@ export async function downloadLnoriEpub(
           signal: dependencies?.signal,
         },
       );
+      // Validate inside the retry loop, as Elscione does: a corrupt or truncated container is a
+      // transport problem worth another attempt, not a definitive failure of the download.
+      validateDownloadedEpub(destPath);
       lastError = null;
       break;
     } catch (err: any) {
@@ -1251,6 +1337,7 @@ export async function downloadLnoriEpub(
       if (
         err?.message?.includes("exceeds maximum size") ||
         err?.message?.includes("contained no body") ||
+        err?.message?.includes("truncated transfer") ||
         err?.message?.includes("Failed to download EPUB from Lnori storage (4")
       ) {
         throw err;
@@ -1266,8 +1353,6 @@ export async function downloadLnoriEpub(
   if (lastError) {
     throw lastError;
   }
-
-  validateDownloadedEpub(destPath);
 }
 
 export async function fetchAndConvertCover(
@@ -1572,11 +1657,28 @@ export async function ingestLnoriSeries(
       }
 
       const assignedIndex = volMeta.volumeNumber === undefined ? volNum : volMeta.volumeNumber;
+      // One volume model for every source: the assignment decides the namespace, the title and
+      // the flat `series_index` Calibre stores, so the duplicate gate below compares like with like.
+      const assignment = resolveIngestVolumeAssignment(manifest.seriesTitle, {
+        volumeNumber: assignedIndex,
+        title: volMeta.name
+          ? `${manifest.seriesTitle}: ${volMeta.name}`
+          : `${manifest.seriesTitle}: Volume ${assignedIndex}`,
+      });
+      const calibreSeriesIndex = assignment.seriesIndex;
       collectedVolumes.push(assignedIndex);
       const title = `${manifest.seriesTitle}: Volume ${assignedIndex}`;
 
       // Pre-download duplicate detection: check if volume already exists in Calibre
-      if (isVolumeAlreadyInCalibre(manifest.seriesTitle, assignedIndex, title, dependencies)) {
+      if (
+        isVolumeAlreadyInCalibre(
+          manifest.seriesTitle,
+          assignment.key.volume,
+          title,
+          dependencies,
+          assignment.key.namespace,
+        )
+      ) {
         console.log(
           `[Lnori] Volume ${assignedIndex} of "${manifest.seriesTitle}" already in library, skipping`,
         );
@@ -1672,7 +1774,7 @@ export async function ingestLnoriSeries(
           "--field",
           `series:${manifest.seriesTitle}`,
           "--field",
-          `series_index:${assignedIndex}`,
+          `series_index:${calibreSeriesIndex}`,
           "--field",
           `tags:${tagsStr}`,
         ];

@@ -11,8 +11,19 @@ import {
   extractVolumeNumberFromFilename as extractVolumeNumberFromFilenameElscione,
   safeDecodeURIComponent,
 } from "./elscione";
-import { searchRanobeDB, searchAniList, extractVolumeNumber, parseMultiPartVolume } from "./scraper";
+import { searchRanobeDB, searchAniList, extractVolumeNumber } from "./scraper";
+import {
+  auditNamespaceFor,
+  buildSeriesVolumeModel,
+  catalogueVolumeCountFrom,
+  isAuxiliaryNamespace,
+  isLocalNamespace,
+  projectOwnedVolume,
+  projectTitleVolumeNumber,
+  resolveCalibreVolumeKeys,
+} from "./volume-model";
 import discoverCatalog from "./discover-catalog.json";
+import { loadCuratedNewReleaseSeeds } from "./discover-seeds";
 
 export type DiscoverSource = "lnori" | "elscione" | "both";
 export type DiscoverSourceFilter = "all" | "lnori" | "elscione";
@@ -46,7 +57,11 @@ export interface DiscoveredNovel {
   genres: string[];
   score: number;
   popularity: number;
-  releaseDate: string;
+  /**
+   * ISO release date, or `null` when no source actually states one. A fabricated placeholder
+   * (the old "2024-01-01") made an old title read as new and made the Newest sort meaningless.
+   */
+  releaseDate?: string | null;
   volumeCount: number;
   catalogVolumeCount?: number;
   verifiedVolumeCount?: number;
@@ -63,7 +78,15 @@ export interface DiscoveredNovel {
   missingVolumeIndices?: number[];
   missingVolumeCount?: number;
   sourceStatus?: "verified" | "unverified" | "error";
+  /**
+   * True when every download source failed, so the volume list could not be verified. The card
+   * stays visible (and keeps whatever ownership Calibre already proves) with a retry affordance
+   * instead of silently vanishing from the incomplete/missing filters.
+   */
+  needsVerification?: boolean;
   allVerifiedOwned?: boolean;
+  /** The volume namespace this card is measured in (main, part:N, year:N, art-book …). */
+  volumeNamespace?: string;
 }
 
 export interface DiscoverNovelsParams {
@@ -87,6 +110,45 @@ export interface DiscoverNovelsResult {
   page: number;
   pageSize: number;
   totalPages: number;
+  /**
+   * Measured size of every tab, or `null` where the tab has not been built yet. Real counts
+   * replaced a hardcoded 25/1400 pair that disagreed with the catalogue it described.
+   */
+  counts?: DiscoverTabCounts;
+  /** Whether this tab was served live, from the curated seed store, or from cache. */
+  feedSource?: DiscoverFeedSource;
+  /** Which curated list backed the feed (`refreshed` once the scheduled refresh has run). */
+  feedOrigin?: "refreshed" | "compiled";
+  /** ISO timestamp of the refreshed curated list, when one was used. */
+  feedGeneratedAt?: string | null;
+  /** Per-source failures behind a degraded feed, so the UI can say why it is degraded. */
+  feedErrors?: string[];
+}
+
+export interface DiscoverTabCounts {
+  trending: number | null;
+  newReleases: number | null;
+  all: number | null;
+}
+
+export type DiscoverFeedSource = "live" | "curated" | "cache";
+
+/**
+ * Where a feed build got its rows, plus the source failures it worked around.
+ *
+ * The UI needs this to tell the user it is looking at the curated fallback rather than a live
+ * feed, which the feed payload alone never said (a curated feed was indistinguishable from a
+ * live one because both were just an array of novels).
+ */
+export interface DiscoverFeedMeta {
+  feedSource: DiscoverFeedSource;
+  feedOrigin?: "refreshed" | "compiled";
+  feedGeneratedAt?: string | null;
+  feedErrors: string[];
+}
+
+export function createDiscoverFeedMeta(): DiscoverFeedMeta {
+  return { feedSource: "live", feedErrors: [] };
 }
 
 export interface DiscoverDependencies {
@@ -109,6 +171,11 @@ export interface DiscoverDependencies {
     source: "elscione" | "lnori",
   ) => Promise<VerifiedSourceInventory | null> | VerifiedSourceInventory | null;
   useHelper?: boolean;
+  /**
+   * Suppresses the curated-seed supplement when only live AniList rows are wanted. The scheduled
+   * refresh uses this so it can never re-derive its own output from the list it replaced.
+   */
+  skipSeedSupplement?: boolean;
 }
 
 const DISCOVER_CACHE_TTL_MS = 60 * 60 * 1000; // 1-hour TTL
@@ -2567,6 +2634,19 @@ export function attachCachedInventoriesIfAvailable(
         volumeCount: verifiedVolumes.length,
       };
     }
+
+    // Every source failed: the volume list is unknown, not empty. Keep the failure visible (and
+    // the per-source reason with it) so the card survives the incomplete/missing filters with a
+    // verify affordance instead of vanishing as if the series were complete.
+    if (cachedSources.every((s) => s.status === "error")) {
+      return {
+        ...novel,
+        sources: cachedSources,
+        sourceInventories: Object.fromEntries(cachedSources.map((s) => [s.source, s])),
+        sourceStatus: "error",
+        needsVerification: true,
+      };
+    }
   }
 
   return novel;
@@ -2866,6 +2946,10 @@ export const DISTINCT_SPINOFF_MARKERS: RegExp[] = [
   /\bfamilia chronicle\b/i,
   /\bminor myths and legends\b/i,
   /\b(?:otome games are tough (?:for )?us|tough (?:for )?us too|for us\s*too|us too|marie route)\b/i,
+  // Derivative companion books that carry the parent's name but are their own work.
+  /\b(?:ill|i ll|i will) do anything to become a librarian\b/i,
+  /\bcompanion (?:book|volume)\b/i,
+  /\bcolou?r (?:book|illustrations?)\b/i,
 ];
 
 function extractYearMarker(str: string): string | null {
@@ -2881,6 +2965,14 @@ export function isSpinoffMismatch(candA: string, candB: string): boolean {
 
   // If explicitly declared same-cluster aliases, not a mismatch
   if (aliasLookupMap.get(normA)?.includes(normB)) return false;
+
+  // An auxiliary sequence is its own book: an art book, fanbook, guidebook, short-story
+  // collection or spin-off never inherits the parent series' volumes, and the parent series
+  // never claims the companion's volume. This is the same namespace the volume model uses,
+  // so "Alya … - Momoco's Art Book" cannot come back as "Available (10 vols)".
+  const nsA = auditNamespaceFor(candA);
+  const nsB = auditNamespaceFor(candB);
+  if (isAuxiliaryNamespace(nsA) !== isAuxiliaryNamespace(nsB)) return true;
 
   // Year marker check (e.g. Year 2 vs Year 3 vs mainline without year)
   const yearA = extractYearMarker(normA);
@@ -3338,21 +3430,14 @@ export function resolveCanonicalVolumeNumber(
   // Normalize hyphens and underscores to spaces to support URL slugs and filenames
   const normalizedTitle = title.replace(/[-_]+/g, " ");
 
-  // 1. Check for multi-part series pattern (Part X ... Volume Y)
-  const multiPart = parseMultiPartVolume(title) || parseMultiPartVolume(normalizedTitle);
-  if (multiPart) {
-    const { part, volume } = multiPart;
-    const combined = `${title} ${normalizedTitle} ${seriesName || ""}`.toLowerCase();
-    const isBookworm = /ascendance[\s_\-]*of[\s_\-]*a[\s_\-]*bookworm|honzuki/i.test(combined);
+  // The unified volume model owns the projection: a multi-part title keeps its part-local
+  // number and is projected onto the flat catalogue only for a known multi-part series
+  // (Ascendance of a Bookworm). Sub-series titles (Year 2) keep their own namespace, which
+  // the matcher compares instead of collapsing onto the base series by number alone.
+  const projected = projectTitleVolumeNumber(title, seriesName);
+  if (projected !== null) return projected;
 
-    if (isBookworm && part >= 1 && part <= BOOKWORM_PART_OFFSETS.length) {
-      return BOOKWORM_PART_OFFSETS[part - 1] + volume;
-    }
-
-    return volume;
-  }
-
-  // 2. Standard volume extraction (supporting titles, slugs, and filenames)
+  // Fall back to the filename-specific extractors for shapes the model does not parse
   return (
     extractVolumeNumber(title) ??
     extractVolumeNumber(normalizedTitle) ??
@@ -3367,6 +3452,107 @@ export function resolveCanonicalVolumeNumber(
  */
 export function invalidateCalibreInvertedIndex(): void {
   _cachedCalibreInvertedIndex = null;
+  _novelAuditCache.clear();
+  _novelAuditCacheSignature = null;
+}
+
+/**
+ * Per-novel audit memo, keyed by the Calibre library signature plus everything about the card
+ * that changes its audit.
+ *
+ * A status-filtered catalogue request used to re-run the whole inverted-index match for every
+ * one of the ~1400 cards on every request (5–7 s), even though the answer only changes when the
+ * library or the card changes. The memo is scoped to one library signature, so an ingest or a
+ * metadata edit throws it away instead of serving a stale "missing" verdict.
+ */
+const _novelAuditCache = new Map<string, DiscoveredNovel>();
+let _novelAuditCacheSignature: string | null = null;
+const MAX_NOVEL_AUDIT_CACHE_ENTRIES = 20000;
+
+/**
+ * The fields a cross-check actually computes. Only these are replayed on a memo hit, so a
+ * memoised audit can never overwrite a card's identity (title, source, sourceUrls, cover…)
+ * with the identity of whichever card first produced that key.
+ */
+const NOVEL_AUDIT_FIELDS = [
+  "volumeCount",
+  "catalogVolumeCount",
+  "verifiedVolumeCount",
+  "verifiedVolumes",
+  "sourceStatus",
+  "allVerifiedOwned",
+  "inLibrary",
+  "existingVolumes",
+  "ownedVolumeIndices",
+  "missingVolumeIndices",
+  "missingVolumeCount",
+  "volumeNamespace",
+] as const;
+
+function pickNovelAudit(audited: DiscoveredNovel): Partial<DiscoveredNovel> {
+  const patch: Partial<DiscoveredNovel> = {};
+  for (const field of NOVEL_AUDIT_FIELDS) {
+    (patch as Record<string, unknown>)[field] = audited[field];
+  }
+  return patch;
+}
+
+function applyNovelAudit(novel: DiscoveredNovel, audited: DiscoveredNovel): DiscoveredNovel {
+  return { ...novel, ...pickNovelAudit(audited) };
+}
+
+function computeNovelAuditCacheKey(novel: DiscoveredNovel, signature: string): string {
+  const sourcesKey = Array.isArray(novel.sources)
+    ? novel.sources
+        .map((s) => `${s.source}:${s.status}:${Array.isArray(s.volumes) ? s.volumes.join(".") : ""}`)
+        .join("|")
+    : "";
+  return [
+    signature,
+    novel.id ?? "",
+    novel.source ?? "",
+    normalizeTitleForMatch(novel.title || ""),
+    novel.titleRomaji || "",
+    String(novel.volumeCount ?? ""),
+    String(novel.catalogVolumeCount ?? ""),
+    novel.sourceStatus || "",
+    Array.isArray(novel.verifiedVolumes) ? novel.verifiedVolumes.join(",") : "",
+    sourcesKey,
+  ].join("\u0001");
+}
+
+function getCachedNovelAudit(
+  novel: DiscoveredNovel,
+  index: CalibreInvertedIndex,
+): DiscoveredNovel | undefined {
+  if (_novelAuditCacheSignature !== index.signature) {
+    _novelAuditCache.clear();
+    _novelAuditCacheSignature = index.signature;
+  }
+  const cached = _novelAuditCache.get(computeNovelAuditCacheKey(novel, index.signature));
+  return cached ? { ...cached } : undefined;
+}
+
+function setCachedNovelAudit(
+  novel: DiscoveredNovel,
+  index: CalibreInvertedIndex,
+  audited: DiscoveredNovel,
+): DiscoveredNovel {
+  if (_novelAuditCache.size >= MAX_NOVEL_AUDIT_CACHE_ENTRIES) {
+    _novelAuditCache.clear();
+  }
+  if (_novelAuditCacheSignature !== index.signature) {
+    _novelAuditCache.clear();
+    _novelAuditCacheSignature = index.signature;
+  }
+  _novelAuditCache.set(computeNovelAuditCacheKey(novel, index.signature), audited);
+  return audited;
+}
+
+/** Clears the per-novel audit memo (used after an ingest, alongside the feed cache). */
+export function invalidateNovelAuditCache(): void {
+  _novelAuditCache.clear();
+  _novelAuditCacheSignature = null;
 }
 
 /**
@@ -3418,6 +3604,7 @@ export function matchNovelWithCalibreIndex(
 
   const booksToEvaluate = checkAllBooks ? index.processedCalibreBooks : Array.from(candidateSet);
   let matchCount = 0;
+  const matchedBooks: any[] = [];
   const ownedVolumeSet = new Set<number>();
 
   for (const b of booksToEvaluate) {
@@ -3503,28 +3690,37 @@ export function matchNovelWithCalibreIndex(
 
     if (isMatch) {
       matchCount++;
-      let volNum: number | null = null;
-      if (b.book.title) {
-        volNum = resolveCanonicalVolumeNumber(b.book.title, b.book.series || novel.title);
-      }
-      if (
-        (volNum === null || volNum < 0) &&
-        b.book.series_index !== undefined &&
-        b.book.series_index !== null &&
-        !isNaN(Number(b.book.series_index)) &&
-        Number(b.book.series_index) >= 0
-      ) {
-        // Preserve fractional series_index values without rounding
-        volNum = Number(b.book.series_index);
-      }
-      if (volNum !== null && volNum >= 0) {
-        ownedVolumeSet.add(volNum);
+      matchedBooks.push(b.book);
+    }
+  }
+
+  // Volume attribution goes through the unified volume model, so every surface (Calibre
+  // `series_index`, this matcher and the ingest duplicate gate) shares one answer. The book's
+  // own title decides its namespace: a Year-2 or Part-5 volume is never folded onto a
+  // base-series number, and an auxiliary sequence (art book, fanbook, bundle) never inherits
+  // the parent series' volumes.
+  const novelNamespace = auditNamespaceFor(novel.title);
+  const matchedSources = matchedBooks.map((book) => ({
+    title: book?.title ?? null,
+    series: book?.series ?? null,
+    seriesIndex: book?.series_index ?? null,
+  }));
+  const volumeModel = buildSeriesVolumeModel(matchedSources, {
+    seriesText: `${novel.title} ${novel.titleRomaji || ""} ${matchedSources[0]?.series || ""}`.trim(),
+  });
+  for (const row of matchedSources) {
+    for (const key of resolveCalibreVolumeKeys(row)) {
+      const projected = projectOwnedVolume(key, volumeModel, novelNamespace);
+      if (projected !== null && !Number.isNaN(projected) && projected >= 0) {
+        ownedVolumeSet.add(projected);
       }
     }
   }
 
+  const localNamespace = isLocalNamespace(novelNamespace);
   const ownedVolumeIndices = Array.from(ownedVolumeSet).sort((a, b) => a - b);
-  const existingVolumes = ownedVolumeIndices.length > 0 ? ownedVolumeIndices.length : matchCount;
+  const existingVolumes =
+    ownedVolumeIndices.length > 0 ? ownedVolumeIndices.length : localNamespace ? 0 : matchCount;
   const maxOwned = ownedVolumeIndices.length > 0 ? Math.max(...ownedVolumeIndices) : 0;
   const catalogVolumeCount = novel.catalogVolumeCount ??
     (novel.volumeCount && novel.volumeCount > 1
@@ -3553,7 +3749,17 @@ export function matchNovelWithCalibreIndex(
   const hasVerified = Array.isArray(verifiedVolumes) && verifiedVolumes.length > 0;
   let missingVolumeIndices: number[] | undefined = undefined;
   let missingVolumeCount: number | undefined = undefined;
-  let totalVolumeCount = hasVerified ? verifiedVolumes!.length : Math.max(catalogVolumeCount, existingVolumes, Math.ceil(maxOwned));
+  // A mainline series may legitimately hold more books than the seed catalog knew about, but
+  // an auxiliary or sub-series card is measured strictly on its own namespace: an art book
+  // cannot borrow its parent's 10 volumes to claim "Available (10 vols)".
+  let totalVolumeCount = hasVerified
+    ? verifiedVolumes!.length
+    : catalogueVolumeCountFrom({
+        catalogCount: catalogVolumeCount,
+        ownershipCount: existingVolumes,
+        maxOwned,
+        namespace: novelNamespace,
+      });
   let sourceStatus: "verified" | "unverified" | "error" =
     novel.sourceStatus || (hasVerified ? "verified" : "unverified");
   let allVerifiedOwned = false;
@@ -3579,10 +3785,14 @@ export function matchNovelWithCalibreIndex(
     verifiedVolumeCount: hasVerified ? verifiedVolumes!.length : undefined,
     verifiedVolumes: hasVerified ? verifiedVolumes : undefined,
     sourceStatus,
+    needsVerification: sourceStatus === "error",
     allVerifiedOwned,
-    inLibrary: matchCount > 0,
+    // A card only counts as owned when the books it owns belong to the volume sequence it is
+    // measuring: last-resort fuzzy matches onto the parent series do not own an art book.
+    inLibrary: matchCount > 0 && (!localNamespace || ownedVolumeIndices.length > 0),
     existingVolumes,
     ownedVolumeIndices,
+    volumeNamespace: novelNamespace,
     missingVolumeIndices,
     missingVolumeCount,
   };
@@ -3632,6 +3842,7 @@ function computeUnownedNovelAudit(
     volumeCount: catalogVolumeCount,
     catalogVolumeCount,
     sourceStatus: enriched.sourceStatus || "unverified",
+    needsVerification: (enriched.sourceStatus || "unverified") === "error",
     allVerifiedOwned: false,
     inLibrary: false,
     existingVolumes: 0,
@@ -3707,7 +3918,12 @@ export async function crossCheckNovelsWithCalibreAsync(
       await yieldEventLoop();
     }
     const enriched = attachCachedInventoriesIfAvailable(novels[i], dependencies);
-    results.push(matchNovelWithCalibreIndex(enriched, index));
+    const memo = getCachedNovelAudit(enriched, index);
+    if (memo) {
+      results.push(applyNovelAudit(enriched, memo));
+      continue;
+    }
+    results.push(setCachedNovelAudit(enriched, index, matchNovelWithCalibreIndex(enriched, index)));
   }
 
   return results;
@@ -3730,7 +3946,9 @@ export function crossCheckNovelsWithCalibre(
   const index = getOrCreateCalibreInvertedIndex(calibreBooks);
   return novels.map((novel) => {
     const enriched = attachCachedInventoriesIfAvailable(novel, dependencies);
-    return matchNovelWithCalibreIndex(enriched, index);
+    const memo = getCachedNovelAudit(enriched, index);
+    if (memo) return applyNovelAudit(enriched, memo);
+    return setCachedNovelAudit(enriched, index, matchNovelWithCalibreIndex(enriched, index));
   });
 }
 
@@ -3798,7 +4016,8 @@ export async function buildCompleteCatalogNovels(
     const genres = seed?.genres && seed.genres.length > 0 ? seed.genres : ["Light Novel", "Fantasy"];
     const score = seed?.score ?? 85;
     const popularity = seed?.popularity ?? (real.source === "both" ? 7500 : 5000);
-    const releaseDate = seed?.releaseDate ?? "2024-01-01";
+    // No fabricated date: when the seed does not state one, the field stays null and sorts last.
+    const releaseDate = seed?.releaseDate ?? null;
     const volumeCount = resolveCatalogVolumeCount(folder, seed?.titleRomaji, seed);
 
     const slug = folder
@@ -3869,7 +4088,8 @@ export async function buildCompleteCatalogNovels(
     const genres = seed?.genres && seed.genres.length > 0 ? seed.genres : ["Light Novel", "Fantasy"];
     const score = seed?.score ?? 85;
     const popularity = seed?.popularity ?? (real.source === "both" ? 7500 : 5000);
-    const releaseDate = seed?.releaseDate ?? "2024-01-01";
+    // No fabricated date: when the seed does not state one, the field stays null and sorts last.
+    const releaseDate = seed?.releaseDate ?? null;
     const volumeCount = resolveCatalogVolumeCount(displayTitle, seed?.titleRomaji, seed);
 
     const novel = assignPrimarySource({
@@ -3912,6 +4132,55 @@ export const buildCatalogDiscoverNovels = buildCompleteCatalogNovels;
 export const DISCOVER_FEED_CACHE_VERSION = "v6";
 
 /**
+ * Drops the cached feeds (and, optionally, one source's cached inventory) after an ingest.
+ *
+ * Without this an ingest that just added volumes to Calibre still served the pre-ingest feed
+ * for up to the 1-hour TTL, so a freshly downloaded volume kept showing as missing. The
+ * `all` catalogue is invalidated too, because ingest changes what the library owns.
+ */
+export function invalidateDiscoverFeedCache(
+  dependencies?: DiscoverDependencies,
+  sourceUrl?: string,
+): string[] {
+  const cleared: string[] = [];
+  const tabs: DiscoverTab[] = ["trending", "new", "all"];
+
+  for (const tab of tabs) {
+    const feedKey = `${DISCOVER_FEED_CACHE_VERSION}:feed:${tab}`;
+    inMemoryFeedCache.delete(feedKey);
+    cleared.push(feedKey);
+  }
+
+  const cleanSourceUrl = typeof sourceUrl === "string" ? sourceUrl.trim() : "";
+  const inventoryKey = cleanSourceUrl ? `v1:src_inv:${cleanSourceUrl}` : "";
+  if (cleanSourceUrl) {
+    _sourceInventoryMemoryCache.delete(cleanSourceUrl);
+    _inFlightSourceResolutions.delete(cleanSourceUrl);
+    cleared.push(inventoryKey);
+  }
+
+  try {
+    const db = dependencies?.cacheDb;
+    if (db) {
+      initDiscoverCacheTable(db);
+      // Fixed, allowlisted keys: one DELETE per known tab, never an interpolated key list.
+      for (const tab of tabs) {
+        db.query("DELETE FROM discover_cache WHERE feed_key = ?").run(
+          `${DISCOVER_FEED_CACHE_VERSION}:feed:${tab}`,
+        );
+      }
+      if (inventoryKey) {
+        db.query("DELETE FROM discover_cache WHERE feed_key = ?").run(inventoryKey);
+      }
+    }
+  } catch (err) {
+    console.debug("[Discover] invalidateDiscoverFeedCache SQLite delete failed:", err);
+  }
+
+  return cleared;
+}
+
+/**
  * Discovers and builds the feed for a requested tab ("trending" | "new" | "all").
  * Enforces strict separation: trending and new feeds are distinct and never combined,
  * while "all" represents the unified complete library of light novels across sources.
@@ -3919,12 +4188,14 @@ export const DISCOVER_FEED_CACHE_VERSION = "v6";
 export async function fetchDiscoverFeed(
   tab: DiscoverTab,
   dependencies?: DiscoverDependencies,
+  meta?: DiscoverFeedMeta,
 ): Promise<DiscoveredNovel[]> {
   const cacheKey = `${DISCOVER_FEED_CACHE_VERSION}:feed:${tab}`;
 
   // 1. Check cache
   const cached = getCachedFeed(cacheKey, dependencies);
   if (cached && cached.length > 0) {
+    if (meta) meta.feedSource = "cache";
     const verified = await ensureAllNovelsHaveSynopses(cached, dependencies);
     if (dependencies?.skipCrossCheck) return verified;
     return crossCheckNovelsWithCalibre(verified, dependencies);
@@ -3933,6 +4204,10 @@ export async function fetchDiscoverFeed(
   // 2. Tab "all": Build complete catalogue from Elscione & Lnori
   if (tab === "all") {
     let allNovels = await buildCompleteCatalogNovels(dependencies);
+    // The complete catalogue is assembled from two independent sources, so the same title can
+    // arrive twice ("Occultic Nine" did). Deduplicate before caching, not after the Calibre
+    // cross-check, so the All tab never lists a card twice.
+    allNovels = deduplicateDiscoverNovels(allNovels);
     allNovels = await ensureAllNovelsHaveSynopses(allNovels, dependencies);
     setCachedFeed(cacheKey, allNovels, dependencies);
     if (dependencies?.skipCrossCheck) return allNovels;
@@ -3953,15 +4228,39 @@ export async function fetchDiscoverFeed(
     const timeoutMs = dependencies?.onlineTimeoutMs ?? 4000;
     try {
       freshNovels = await fetchOnlineFeedWithFallback(tab, timeoutMs, dependencies);
-    } catch (err) {
+      if (!freshNovels || freshNovels.length === 0) {
+        meta?.feedErrors.push(
+          `AniList returned no downloadable titles for the ${tab} feed`,
+        );
+      }
+    } catch (err: any) {
       console.debug(`[Discover] Online feed fetch failed for ${tab}, using seed:`, err);
+      meta?.feedErrors.push(
+        `AniList ${tab} feed failed: ${sanitizeErrorMessage(err?.message || String(err))}`,
+      );
     }
+  } else {
+    meta?.feedErrors.push(`Live ${tab} feed is disabled in this environment`);
   }
 
   if (!freshNovels || freshNovels.length === 0) {
-    freshNovels = tab === "trending"
-      ? (dependencies?.seedTrendingNovels ?? SEED_TRENDING_NOVELS)
-      : (dependencies?.seedNewNovels ?? SEED_NEW_NOVELS);
+    if (tab === "new") {
+      // The curated list is the tab's source of truth: every entry names a real download source,
+      // and the scheduled refresh keeps it from freezing at the titles it shipped with.
+      const curated = loadCuratedNewReleaseSeeds({
+        compiledSeeds: dependencies?.seedNewNovels ?? SEED_NEW_NOVELS,
+      });
+      freshNovels = curated.novels.map((n) => ({ ...n }));
+      if (meta) {
+        meta.feedSource = "curated";
+        meta.feedOrigin = curated.origin;
+        meta.feedGeneratedAt = curated.generatedAt;
+        if (curated.error) meta.feedErrors.push(`Curated list fallback: ${curated.error}`);
+      }
+    } else {
+      freshNovels = dependencies?.seedTrendingNovels ?? SEED_TRENDING_NOVELS;
+      if (meta) meta.feedSource = "curated";
+    }
   }
 
   // Strict Deduplication:
@@ -3999,7 +4298,11 @@ export async function fetchDiscoverFeed(
 
     freshNovels = deduplicateDiscoverNovels(freshNovels);
 
-    const seedCandidates = dependencies?.seedNewNovels ?? SEED_NEW_NOVELS;
+    const seedCandidates = (() => {
+      if (dependencies?.seedNewNovels) return dependencies.seedNewNovels;
+      const curated = loadCuratedNewReleaseSeeds({ compiledSeeds: SEED_NEW_NOVELS });
+      return curated.novels;
+    })();
     for (const seed of seedCandidates) {
       const norm = normalizeTitleForMatch(seed.title);
       const can = canonicalTitleKey(seed.title);
@@ -4031,6 +4334,43 @@ export async function fetchDiscoverFeed(
   // 4. Cross-check against Calibre
   if (dependencies?.skipCrossCheck) return freshNovels;
   return crossCheckNovelsWithCalibre(freshNovels, dependencies);
+}
+
+/**
+ * Newest-first comparator that puts undated titles LAST.
+ *
+ * A null date means "no source states a release date", so an undated title can never be
+ * presented as the newest release; it sorts after every dated title and keeps a stable
+ * order (popularity, then title) among themselves.
+ */
+export function compareReleaseDateNewestFirst(
+  a: Pick<DiscoveredNovel, "releaseDate">,
+  b: Pick<DiscoveredNovel, "releaseDate">,
+): number {
+  const dateA = typeof a.releaseDate === "string" && a.releaseDate ? a.releaseDate : null;
+  const dateB = typeof b.releaseDate === "string" && b.releaseDate ? b.releaseDate : null;
+  if (dateA === null && dateB === null) return 0;
+  if (dateA === null) return 1;
+  if (dateB === null) return -1;
+  return dateB.localeCompare(dateA);
+}
+
+/**
+ * Builds an ISO release date from an AniList `startDate` fragment.
+ *
+ * Returns `null` when the source states no year at all. Missing month/day fall back to
+ * `01` only because the source published a partial date; the old code instead invented a
+ * whole `2024-01-01` year for every undated title, which made old series read as new and
+ * made the Newest sort meaningless.
+ */
+export function buildReleaseDateFromStartDate(
+  startDate: { year?: number | null; month?: number | null; day?: number | null } | null | undefined,
+): string | null {
+  const year = Number(startDate?.year);
+  if (!Number.isFinite(year) || year <= 0) return null;
+  const month = String(startDate?.month || 1).padStart(2, "0");
+  const day = String(startDate?.day || 1).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 /**
@@ -4126,10 +4466,7 @@ async function fetchOnlineFeedWithFallback(
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-|-$/g, "");
 
-      const year = item.startDate?.year || 2024;
-      const month = String(item.startDate?.month || 1).padStart(2, "0");
-      const day = String(item.startDate?.day || 1).padStart(2, "0");
-      const releaseDate = `${year}-${month}-${day}`;
+      const releaseDate = buildReleaseDateFromStartDate(item.startDate);
 
       // Verify real download sources on Elscione and/or Lnori.
       // If neither exists, SKIP to eliminate synthetic URL fabrication (e.g. Sayonara Lara)
@@ -4208,9 +4545,14 @@ async function fetchOnlineFeedWithFallback(
     }
 
     // If online matching yielded fewer than 10 verified items, supplement with verified seed entries
-    const seedCandidates = tab === "trending"
-      ? (dependencies?.seedTrendingNovels ?? SEED_TRENDING_NOVELS)
-      : (dependencies?.seedNewNovels ?? SEED_NEW_NOVELS);
+    // The scheduled refresh asks for live rows only: topping them up from the curated list would
+    // re-derive today's output from the list it is about to replace, freezing the tab forever.
+    const seedCandidates = dependencies?.skipSeedSupplement
+      ? []
+      : tab === "trending"
+        ? (dependencies?.seedTrendingNovels ?? SEED_TRENDING_NOVELS)
+        : dependencies?.seedNewNovels ??
+          loadCuratedNewReleaseSeeds({ compiledSeeds: SEED_NEW_NOVELS }).novels;
 
     const existingTitles = new Set(results.map((r) => normalizeTitleForMatch(r.title)));
     for (const r of results) {
@@ -4235,6 +4577,24 @@ async function fetchOnlineFeedWithFallback(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Live-only fetch used by the scheduled New Releases refresh.
+ *
+ * Exposed so `scripts/refresh-discover-seeds.ts` can ask for real AniList rows without the seed
+ * top-up: topping up from the curated list would let the refresh re-derive its own output and the
+ * tab would stay frozen at whatever it already contained.
+ */
+export async function fetchOnlineFeedForRefresh(
+  tab: DiscoverTab,
+  timeoutMs: number,
+  dependencies?: DiscoverDependencies,
+): Promise<DiscoveredNovel[] | null> {
+  return fetchOnlineFeedWithFallback(tab, timeoutMs, {
+    ...dependencies,
+    skipSeedSupplement: true,
+  });
 }
 
 /**
@@ -4580,10 +4940,7 @@ export async function searchAniListNovels(
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-|-$/g, "");
 
-      const year = item.startDate?.year || 2024;
-      const month = String(item.startDate?.month || 1).padStart(2, "0");
-      const day = String(item.startDate?.day || 1).padStart(2, "0");
-      const releaseDate = `${year}-${month}-${day}`;
+      const releaseDate = buildReleaseDateFromStartDate(item.startDate);
 
       let author = "";
       if (Array.isArray(item.staff?.edges) && item.staff.edges.length > 0) {
@@ -4864,7 +5221,7 @@ export async function searchUniversalNovels(
           genres: ["Light Novel", "Fantasy"],
           score: 85,
           popularity: 5000,
-          releaseDate: "2024-01-01",
+          releaseDate: null,
           volumeCount,
           source: real.source,
           primarySource: real.primarySource,
@@ -4929,7 +5286,7 @@ export async function searchUniversalNovels(
           genres: ["Light Novel", "Fantasy"],
           score: 85,
           popularity: 5000,
-          releaseDate: "2024-01-01",
+          releaseDate: null,
           volumeCount,
           source: real.source,
           primarySource: real.primarySource,
@@ -4988,10 +5345,11 @@ export async function getDiscoverNovels(
   };
 
   let allNovels: DiscoveredNovel[];
+  const feedMeta = createDiscoverFeedMeta();
   if (searchQuery) {
     allNovels = await searchUniversalNovels(searchQuery, fetchDeps);
   } else {
-    allNovels = await fetchDiscoverFeed(tab, fetchDeps);
+    allNovels = await fetchDiscoverFeed(tab, fetchDeps, feedMeta);
   }
 
   // 2. Extract unique available genres from this feed
@@ -5045,14 +5403,17 @@ export async function getDiscoverNovels(
     } else if (statusFilter === "in_library") {
       filtered = filtered.filter((n) => n.inLibrary);
     } else if (statusFilter === "incomplete" || statusFilter === "missing_volumes") {
-      filtered = filtered.filter(
-        (n) =>
-          n.inLibrary &&
-          n.existingVolumes > 0 &&
+      filtered = filtered.filter((n) => {
+        if (!n.inLibrary || n.existingVolumes <= 0) return false;
+        // Every source errored: the volume list is unknown, not complete. Keep the card, with its
+        // retry affordance, instead of dropping the only series that needs re-verification.
+        if (n.sourceStatus === "error" || n.needsVerification) return true;
+        return (
           n.sourceStatus === "verified" &&
           n.missingVolumeCount !== undefined &&
-          n.missingVolumeCount > 0,
-      );
+          n.missingVolumeCount > 0
+        );
+      });
     }
   }
 
@@ -5077,7 +5438,7 @@ export async function getDiscoverNovels(
         return b.score - a.score;
       }
       if (sortBy === "newest") {
-        return b.releaseDate.localeCompare(a.releaseDate);
+        return compareReleaseDateNewestFirst(a, b);
       }
       if (sortBy === "title_asc") {
         return a.title.localeCompare(b.title);
@@ -5096,7 +5457,7 @@ export async function getDiscoverNovels(
         return b.score - a.score;
       }
       if (sortBy === "newest") {
-        return b.releaseDate.localeCompare(a.releaseDate);
+        return compareReleaseDateNewestFirst(a, b);
       }
       if (sortBy === "title_asc") {
         return a.title.localeCompare(b.title);
@@ -5127,7 +5488,49 @@ export async function getDiscoverNovels(
     page: clampedPage,
     pageSize,
     totalPages,
+    counts: await measureDiscoverTabCounts(tab, totalCount, dependencies),
+    feedSource: feedMeta.feedSource,
+    feedOrigin: feedMeta.feedOrigin,
+    feedGeneratedAt: feedMeta.feedGeneratedAt,
+    feedErrors: feedMeta.feedErrors,
   };
+}
+
+/**
+ * Measures each tab's real size instead of reporting a hardcoded literal.
+ *
+ * The active tab is already counted by this request, so only the other tabs are measured, and a
+ * tab that cannot be measured reports `null` rather than a made-up number.
+ */
+async function measureDiscoverTabCounts(
+  activeTab: DiscoverTab,
+  activeCount: number,
+  dependencies?: DiscoverDependencies,
+): Promise<DiscoverTabCounts> {
+  const counts: DiscoverTabCounts = {
+    trending: activeTab === "trending" ? activeCount : null,
+    newReleases: activeTab === "new" ? activeCount : null,
+    all: activeTab === "all" ? activeCount : null,
+  };
+
+  const measure = async (tab: DiscoverTab): Promise<number | null> => {
+    try {
+      const novels = await fetchDiscoverFeed(tab, {
+        ...dependencies,
+        skipCrossCheck: true,
+      });
+      return novels.length;
+    } catch (err) {
+      console.debug(`[Discover] could not measure the ${tab} tab size:`, err);
+      return null;
+    }
+  };
+
+  if (counts.trending === null) counts.trending = await measure("trending");
+  if (counts.newReleases === null) counts.newReleases = await measure("new");
+  if (counts.all === null) counts.all = await measure("all");
+
+  return counts;
 }
 
 let _numericJobCounter = Date.now();

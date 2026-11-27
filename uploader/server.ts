@@ -96,6 +96,8 @@ import {
   stripEmojis,
   REAL_ELSCIONE_FOLDERS,
   setCachedSourceInventory,
+  invalidateDiscoverFeedCache,
+  invalidateNovelAuditCache,
   type VerifiedSourceInventory,
 } from "./discover";
 import { isJoplinRoute, handleJoplinRequest } from "./joplin";
@@ -352,15 +354,28 @@ export function getDiscoverJobProgress(
     return false;
   };
 
-  // 2. Check active in-flight task (activeLnoriState)
+  // 2. Check any in-flight task, not just the run occupying the display slot: a second ingest
+  // must not hide the first one's progress from its own poller.
+  let runningState: ActiveLnoriState | null = null;
   if (
     activeLnoriState.active &&
     matchesId(activeLnoriState.runId, activeLnoriState.targetUrl)
   ) {
+    runningState = activeLnoriState;
+  } else {
+    for (const state of lnoriRunStates.values()) {
+      if (state.active && matchesId(state.runId, state.targetUrl)) {
+        runningState = state;
+        break;
+      }
+    }
+  }
+  if (runningState) {
+    const running = runningState;
     let phase: "queued" | "downloading" | "processing" | "complete" | "error" =
       "processing";
-    const rawPhase = activeLnoriState.phase as string;
-    const action = activeLnoriState.data?.action;
+    const rawPhase = running.phase as string;
+    const action = running.data?.action;
     if (
       rawPhase === "downloading" ||
       rawPhase === "volume" ||
@@ -377,8 +392,8 @@ export function getDiscoverJobProgress(
       phase = "processing";
     }
 
-    const volumesCompleted = activeLnoriState.index || 0;
-    const totalVolumes = activeLnoriState.total || 0;
+    const volumesCompleted = running.index || 0;
+    const totalVolumes = running.total || 0;
     let percent = 0;
     if (phase === "complete") {
       percent = 100;
@@ -396,10 +411,10 @@ export function getDiscoverJobProgress(
     const res: DiscoverJobProgress = {
       success: true,
       jobId: cleanJobId,
-      runId: activeLnoriState.runId || undefined,
-      targetUrl: activeLnoriState.targetUrl || undefined,
-      source: activeLnoriState.targetUrl
-        ? isElscioneUrl(activeLnoriState.targetUrl)
+      runId: running.runId || undefined,
+      targetUrl: running.targetUrl || undefined,
+      source: running.targetUrl
+        ? isElscioneUrl(running.targetUrl)
           ? "elscione"
           : "lnori"
         : undefined,
@@ -407,15 +422,15 @@ export function getDiscoverJobProgress(
       percent,
       volumesCompleted,
       totalVolumes,
-      statusText: activeLnoriState.status || undefined,
-      summary: activeLnoriState.status || undefined,
+      statusText: running.status || undefined,
+      summary: running.status || undefined,
     };
-    if (activeLnoriState.volumeTitle) {
-      res.currentVolume = stripEmojis(activeLnoriState.volumeTitle);
+    if (running.volumeTitle) {
+      res.currentVolume = stripEmojis(running.volumeTitle);
     }
     if (phase === "error") {
       res.error = stripEmojis(
-        activeLnoriState.error || activeLnoriState.status || "Ingestion error",
+        running.error || running.status || "Ingestion error",
       );
     }
     return decorateWithRegistered(res);
@@ -566,9 +581,26 @@ export function getDiscoverJobProgress(
     console.debug("[Discover] jobQueue lookup failed:", err);
   }
 
-  // If registered job exists but hasn't started yet, only treat as queued during initial registration grace window (60s)
+  // If a registered job still has live state anywhere - a run state, a durable queue row, or
+  // nothing at all - report it as queued rather than 404ing a download that is genuinely waiting.
+  // The 60s grace window only exists because the registry cannot otherwise tell a job that never
+  // started from one that was pruned, so a live job of any age is now recognised explicitly.
   if (registered) {
-    if (Date.now() - registered.createdAt < 60_000) {
+    const liveRunState = runId ? lnoriRunStates.get(runId) : undefined;
+    let liveDurable = false;
+    if (!liveRunState) {
+      try {
+        const durable =
+          (runId ? jobQueue.getJob(durableNovelJobId(runId)) : null) ||
+          (runId ? jobQueue.getJob(runId) : null);
+        liveDurable = Boolean(
+          durable && (durable.status === "pending" || durable.status === "processing"),
+        );
+      } catch (err) {
+        console.debug("[Discover] durable queue lookup failed:", err);
+      }
+    }
+    if (liveRunState || liveDurable || Date.now() - registered.createdAt < 60_000) {
       return decorateWithRegistered({
         success: true,
         jobId: cleanJobId,
@@ -578,7 +610,7 @@ export function getDiscoverJobProgress(
         totalVolumes: 0,
       });
     }
-    // Older than grace window and not found in activeLnoriState, lnoriQueue, completedLnoriJobs, or jobQueue: prune
+    // Nothing live knows this id, so the registration is genuinely orphaned: prune it.
     discoverJobRegistry.delete(cleanJobId);
   }
 
@@ -706,6 +738,12 @@ export interface LnoriQueueItem {
   seriesId?: string;
   createdAt: string;
   force?: boolean;
+  /** Numeric job id the client polls; also the durable `jobs` row id when persisted. */
+  jobId?: number;
+  /** Source the queue item was enqueued for, so a restart can restore it faithfully. */
+  source?: "lnori" | "elscione";
+  /** Durable row id (`job_<n>`) so a cancellation can delete the persisted request. */
+  durableJobId?: string;
 }
 
 export interface ActiveLnoriState {
@@ -748,6 +786,42 @@ let activeLnoriAbortController: AbortController | null = null;
 const activeLnoriListeners: Array<(event: LnoriProgressEvent & { runId?: string }) => void> = [];
 const lnoriQueue: LnoriQueueItem[] = [];
 
+/**
+ * The single execution lane.
+ *
+ * `activeLnoriState` is only what the UI is shown; it is not a lock. The lane flag is cleared in
+ * `executeLnoriIngestTask`'s `finally`, never when a state object happens to flip `active: false`
+ * mid-run, so a request that arrives in that window queues instead of starting a second
+ * concurrent Calibre writer.
+ */
+let lnoriActiveRunId: string | null = null;
+
+/** Per-run abort controllers, so cancelling is per-run rather than newest-only. */
+const activeLnoriControllers = new Map<string, AbortController>();
+
+/**
+ * Per-run state, so an older run's progress and result are never rejected as "superseded" just
+ * because a newer run took over the display slot.
+ */
+const lnoriRunStates = new Map<string, ActiveLnoriState>();
+const MAX_LNORI_RUN_STATES = 50;
+
+function publishRunState(runState: ActiveLnoriState): void {
+  if (!runState.runId) return;
+  lnoriRunStates.set(runState.runId, runState);
+  if (lnoriRunStates.size > MAX_LNORI_RUN_STATES) {
+    const oldestKey = lnoriRunStates.keys().next().value;
+    if (oldestKey && oldestKey !== runState.runId) lnoriRunStates.delete(oldestKey);
+  }
+  // Mirror into the display slot only while this run owns (or has just released) the lane, so a
+  // late event from an older run never overwrites the run the user is actually watching.
+  if (lnoriActiveRunId !== null && lnoriActiveRunId !== runState.runId) return;
+  activeLnoriState = runState;
+  if (runState.active && runState.runId) {
+    activeLnoriAbortController = activeLnoriControllers.get(runState.runId) ?? null;
+  }
+}
+
 // Ring buffer of recent completed/errored jobs to preserve terminal state for polling clients
 const completedLnoriJobs = new Map<string, ActiveLnoriState>();
 const MAX_COMPLETED_JOBS_HISTORY = 50;
@@ -772,6 +846,130 @@ export function getLnoriQueue(): LnoriQueueItem[] {
 
 let nextNumericJobCounter = Date.now();
 
+/**
+ * Durable id of the `jobs` row that records a queued novel ingest.
+ */
+function durableNovelJobId(runId: string): string {
+  return `novel_${runId}`;
+}
+
+/**
+ * Records a queued ingest in the durable `jobs` table.
+ *
+ * The in-memory queue stays the source of ordering and cancellation, but a restart (launchd
+ * kickstart, deploy, crash) used to drop every queued volume silently. The row is written with
+ * type `novel_ingest`, which has no registered handler, so `processNextJob` never picks it up:
+ * it exists purely so `recoverPersistedNovelQueue` can rebuild the queue on the next boot.
+ */
+function persistQueuedNovelJob(item: LnoriQueueItem): string | null {
+  try {
+    const id = durableNovelJobId(item.id);
+    jobQueue.enqueue(
+      "novel_ingest",
+      {
+        runId: item.id,
+        jobId: item.jobId ?? null,
+        targetUrl: item.targetUrl,
+        source: item.source ?? (isElscioneUrl(item.targetUrl) ? "elscione" : "lnori"),
+        force: Boolean(item.force),
+        queuedAt: item.createdAt,
+      },
+      { id, maxRetries: 1 },
+    );
+    return id;
+  } catch (err) {
+    console.debug("[Lnori] could not persist queued ingest:", err);
+    return null;
+  }
+}
+
+/**
+ * Updates the durable row of a queued/executed ingest. Never throws: durability is a
+ * safety net, not a precondition for the download itself.
+ */
+function updateDurableNovelJob(
+  runId: string,
+  status: "pending" | "processing" | "completed" | "failed",
+  options: { error?: string | null; result?: any } = {},
+): void {
+  try {
+    const instance = getJobQueueInstance();
+    instance.updateJobStatus(durableNovelJobId(runId), status, options);
+  } catch (err) {
+    console.debug("[Lnori] could not update durable ingest row:", err);
+  }
+}
+
+/**
+ * Rebuilds the in-memory ingest queue from the durable `jobs` table after a restart, so a
+ * queued volume survives a kickstart instead of being dropped.
+ *
+ * Returns the number of jobs restored.
+ */
+export function recoverPersistedNovelQueue(): number {
+  let restored = 0;
+  try {
+    const instance = getJobQueueInstance();
+    const rows = instance.getJobsByType("novel_ingest", 500);
+    for (const row of rows) {
+      if (row.status !== "pending" && row.status !== "processing") continue;
+      const payload = (row.payload || {}) as any;
+      const targetUrl = typeof payload.targetUrl === "string" ? payload.targetUrl : "";
+      const runId = typeof payload.runId === "string" ? payload.runId : row.id;
+      if (!targetUrl) continue;
+      if (lnoriQueue.some((item) => item.id === runId)) continue;
+      if (lnoriActiveRunId === runId) continue;
+      if (completedLnoriJobs.has(runId)) continue;
+      lnoriQueue.push({
+        id: runId,
+        targetUrl,
+        createdAt: typeof payload.queuedAt === "string" ? payload.queuedAt : new Date().toISOString(),
+        force: Boolean(payload.force),
+        jobId: typeof payload.jobId === "number" ? payload.jobId : undefined,
+        source: payload.source === "elscione" ? "elscione" : "lnori",
+        durableJobId: row.id,
+      });
+      restored++;
+    }
+  } catch (err) {
+    console.debug("[Lnori] could not recover persisted ingest queue:", err);
+  }
+  if (restored > 0) {
+    console.log(`[Lnori] Restored ${restored} queued ingest job(s) from the durable queue.`);
+    scheduleLnoriDrain(50);
+  }
+  return restored;
+}
+
+function enqueueNovelIngestJob(
+  source: "lnori" | "elscione",
+  targetUrl: string,
+  force?: boolean,
+): { jobId: number; runId: string } {
+  const cleanUrl = cleanAndNormalizeNovelUrl(targetUrl);
+  const parsed = source === "lnori" ? parseLnoriUrl(cleanUrl) : null;
+  const jobId = ++nextNumericJobCounter;
+  const runId = `${source}-${jobId}-${Math.random().toString(36).slice(2, 6)}`;
+  registerDiscoverJob(jobId, runId, source, cleanUrl);
+
+  if (lnoriActiveRunId !== null) {
+    const item: LnoriQueueItem = {
+      id: runId,
+      targetUrl: cleanUrl,
+      seriesId: parsed?.id,
+      createdAt: new Date().toISOString(),
+      force,
+      jobId,
+      source,
+    };
+    item.durableJobId = persistQueuedNovelJob(item) ?? undefined;
+    lnoriQueue.push(item);
+  } else {
+    executeLnoriIngestTask(runId, cleanUrl, force);
+  }
+  return { jobId, runId };
+}
+
 export function enqueueLnoriJob(targetUrl: string, force?: boolean): { jobId: number; runId: string } {
   if (serverDependencies.enqueueLnoriJob) {
     const res = serverDependencies.enqueueLnoriJob(targetUrl, force);
@@ -783,24 +981,7 @@ export function enqueueLnoriJob(targetUrl: string, force?: boolean): { jobId: nu
     );
     return res;
   }
-  const cleanUrl = cleanAndNormalizeNovelUrl(targetUrl);
-  const parsed = parseLnoriUrl(cleanUrl);
-  const jobId = ++nextNumericJobCounter;
-  const runId = `lnori-${jobId}-${Math.random().toString(36).slice(2, 6)}`;
-  registerDiscoverJob(jobId, runId, "lnori", cleanUrl);
-
-  if (activeLnoriState.active) {
-    lnoriQueue.push({
-      id: runId,
-      targetUrl: cleanUrl,
-      seriesId: parsed?.id,
-      createdAt: new Date().toISOString(),
-      force,
-    });
-  } else {
-    executeLnoriIngestTask(runId, cleanUrl, force);
-  }
-  return { jobId, runId };
+  return enqueueNovelIngestJob("lnori", targetUrl, force);
 }
 
 export function enqueueElscioneJob(targetUrl: string, force?: boolean): { jobId: number; runId: string } {
@@ -814,22 +995,7 @@ export function enqueueElscioneJob(targetUrl: string, force?: boolean): { jobId:
     );
     return res;
   }
-  const cleanUrl = cleanAndNormalizeNovelUrl(targetUrl);
-  const jobId = ++nextNumericJobCounter;
-  const runId = `elscione-${jobId}-${Math.random().toString(36).slice(2, 6)}`;
-  registerDiscoverJob(jobId, runId, "elscione", cleanUrl);
-
-  if (activeLnoriState.active) {
-    lnoriQueue.push({
-      id: runId,
-      targetUrl: cleanUrl,
-      createdAt: new Date().toISOString(),
-      force,
-    });
-  } else {
-    executeLnoriIngestTask(runId, cleanUrl, force);
-  }
-  return { jobId, runId };
+  return enqueueNovelIngestJob("elscione", targetUrl, force);
 }
 
 export function getActiveLnoriState(): ActiveLnoriState {
@@ -842,11 +1008,38 @@ export function getActiveLnoriState(): ActiveLnoriState {
   };
 }
 
+/**
+ * Progress for one specific run, whether or not it is the run currently on display.
+ *
+ * This is what makes a second ingest stop superseding the first: the older run keeps its own
+ * state object, so its poller still sees its own phase and result instead of "superseded".
+ */
+export function getLnoriRunState(runId: string): ActiveLnoriState | null {
+  if (!runId) return null;
+  const state = lnoriRunStates.get(runId);
+  if (state) {
+    return {
+      ...state,
+      data: state.data ? JSON.parse(JSON.stringify(state.data)) : null,
+      completedData: state.completedData ? JSON.parse(JSON.stringify(state.completedData)) : null,
+    };
+  }
+  const completed = completedLnoriJobs.get(runId);
+  return completed ? { ...completed } : null;
+}
 export function resetActiveLnoriStateForTest(): void {
   if (lnoriDrainTimer !== null) {
     clearTimeout(lnoriDrainTimer);
     lnoriDrainTimer = null;
   }
+  for (const controller of activeLnoriControllers.values()) {
+    try {
+      controller.abort();
+    } catch {
+      // ignore
+    }
+  }
+  activeLnoriControllers.clear();
   if (activeLnoriAbortController) {
     activeLnoriAbortController.abort();
     activeLnoriAbortController = null;
@@ -854,6 +1047,8 @@ export function resetActiveLnoriStateForTest(): void {
   activeLnoriListeners.length = 0;
   lnoriQueue.length = 0;
   completedLnoriJobs.clear();
+  lnoriRunStates.clear();
+  lnoriActiveRunId = null;
   discoverJobRegistry.clear();
   activeLnoriState = {
     runId: "",
@@ -872,79 +1067,21 @@ export function resetActiveLnoriStateForTest(): void {
   };
 }
 
-export function cancelActiveLnoriIngest(targetRunId?: string): boolean {
-  const activeSource = isElscioneUrl(activeLnoriState.targetUrl || "") ? "Elscione" : "Lnori";
-  // If a specific targetRunId is provided, check if it matches a queued item first
-  if (targetRunId) {
-    const queueIdx = lnoriQueue.findIndex((item) => item.id === targetRunId);
-    if (queueIdx !== -1) {
-      const removed = lnoriQueue.splice(queueIdx, 1)[0];
-      recordCompletedLnoriJob({
-        runId: removed.id,
-        active: false,
-        targetUrl: removed.targetUrl,
-        phase: "error",
-        status: `${activeSource} ingestion cancelled by user`,
-        error: `${activeSource} ingestion cancelled by user`,
-        index: 0,
-        total: 0,
-        volumeTitle: null,
-        data: { error: `${activeSource} ingestion cancelled by user`, aborted: true },
-        completedData: null,
-        startedAt: removed.createdAt,
-        updatedAt: new Date().toISOString(),
-      });
-      return true;
-    }
-    // If not in queue, check if it matches the active job
-    if (activeLnoriState.active && activeLnoriState.runId === targetRunId && activeLnoriAbortController) {
-      activeLnoriAbortController.abort();
-      activeLnoriState.active = false;
-      activeLnoriState.phase = "error";
-      activeLnoriState.status = `${activeSource} ingestion cancelled by user`;
-      activeLnoriState.error = `${activeSource} ingestion cancelled by user`;
-      activeLnoriState.updatedAt = new Date().toISOString();
+/**
+ * Marks a run cancelled and tells every attached progress stream immediately.
+ */
+function markRunCancelled(runState: ActiveLnoriState, message: string): void {
+  runState.active = false;
+  runState.phase = "error";
+  runState.status = message;
+  runState.error = message;
+  runState.updatedAt = new Date().toISOString();
 
-      // Broadcast immediate cancellation to active SSE/NDJSON stream listeners
-      const cancelEvent: LnoriProgressEvent & { runId?: string } = {
-        phase: "error",
-        status: `${activeSource} ingestion cancelled by user`,
-        runId: targetRunId,
-        data: { error: `${activeSource} ingestion cancelled by user`, aborted: true },
-      };
-      for (let i = activeLnoriListeners.length - 1; i >= 0; i--) {
-        try {
-          activeLnoriListeners[i](cancelEvent);
-        } catch {
-          activeLnoriListeners.splice(i, 1);
-        }
-      }
-
-      scheduleLnoriDrain();
-      recordCompletedLnoriJob(activeLnoriState);
-      return true;
-    }
-    return false;
-  }
-
-  // If no targetRunId is provided, cancel the active ingestion
-  if (!activeLnoriState.active || !activeLnoriAbortController) {
-    return false;
-  }
-  const cancelledRunId = activeLnoriState.runId;
-  activeLnoriAbortController.abort();
-  activeLnoriState.active = false;
-  activeLnoriState.phase = "error";
-  activeLnoriState.status = `${activeSource} ingestion cancelled by user`;
-  activeLnoriState.error = `${activeSource} ingestion cancelled by user`;
-  activeLnoriState.updatedAt = new Date().toISOString();
-
-  // Broadcast immediate cancellation to active SSE/NDJSON stream listeners
   const cancelEvent: LnoriProgressEvent & { runId?: string } = {
     phase: "error",
-    status: `${activeSource} ingestion cancelled by user`,
-    runId: cancelledRunId,
-    data: { error: `${activeSource} ingestion cancelled by user`, aborted: true },
+    status: message,
+    runId: runState.runId || undefined,
+    data: { error: message, aborted: true },
   };
   for (let i = activeLnoriListeners.length - 1; i >= 0; i--) {
     try {
@@ -953,9 +1090,58 @@ export function cancelActiveLnoriIngest(targetRunId?: string): boolean {
       activeLnoriListeners.splice(i, 1);
     }
   }
+  recordCompletedLnoriJob(runState);
+  updateDurableNovelJob(runState.runId, "failed", { error: message });
+}
 
-  scheduleLnoriDrain();
-  recordCompletedLnoriJob(activeLnoriState);
+/**
+ * Cancels one specific run, or the run occupying the single execution lane when no id is given.
+ *
+ * Cancellation used to be newest-only: only whatever `activeLnoriState` happened to point at
+ * could be aborted. Every run now has its own controller and state, so any run can be cancelled
+ * by its own id, including one that is still queued.
+ */
+export function cancelActiveLnoriIngest(targetRunId?: string): boolean {
+  // 1. A queued item can always be cancelled by its own id.
+  if (targetRunId) {
+    const queueIdx = lnoriQueue.findIndex((item) => item.id === targetRunId);
+    if (queueIdx !== -1) {
+      const removed = lnoriQueue.splice(queueIdx, 1)[0];
+      const sourceName = isElscioneUrl(removed.targetUrl) ? "Elscione" : "Lnori";
+      try {
+        getJobQueueInstance().deleteJob(removed.durableJobId || durableNovelJobId(removed.id));
+      } catch (err) {
+        console.debug("[Lnori] could not delete cancelled durable ingest row:", err);
+      }
+      recordCompletedLnoriJob({
+        runId: removed.id,
+        active: false,
+        targetUrl: removed.targetUrl,
+        phase: "error",
+        status: `${sourceName} ingestion cancelled by user`,
+        error: `${sourceName} ingestion cancelled by user`,
+        index: 0,
+        total: 0,
+        volumeTitle: null,
+        data: { error: `${sourceName} ingestion cancelled by user`, aborted: true },
+        completedData: null,
+        startedAt: removed.createdAt,
+        updatedAt: new Date().toISOString(),
+      });
+      return true;
+    }
+  }
+
+  const runId = targetRunId || lnoriActiveRunId || activeLnoriState.runId;
+  if (!runId) return false;
+
+  const controller = activeLnoriControllers.get(runId);
+  const runState = lnoriRunStates.get(runId) || (activeLnoriState.runId === runId ? activeLnoriState : null);
+  if (!controller || !runState) return false;
+
+  const sourceName = isElscioneUrl(runState.targetUrl || "") ? "Elscione" : "Lnori";
+  controller.abort();
+  markRunCancelled(runState, `${sourceName} ingestion cancelled by user`);
   return true;
 }
 
@@ -1026,7 +1212,9 @@ export function scheduleLnoriDrain(delayMs = 20): void {
 }
 
 export function processNextLnoriQueueItem(): void {
-  if (activeLnoriState.active) {
+  // The lane flag, not the display state, decides concurrency: a finished run flips its own
+  // `active` flag before it drains, which used to let a second download start alongside it.
+  if (lnoriActiveRunId !== null) {
     return;
   }
   const nextItem = lnoriQueue.shift();
@@ -1049,10 +1237,12 @@ export function executeLnoriIngestTask(
   const refreshBooks = serverDependencies.getCalibreBooks ?? getCalibreBooks;
 
   const backgroundAbortController = new AbortController();
+  activeLnoriControllers.set(runId, backgroundAbortController);
   activeLnoriAbortController = backgroundAbortController;
+  lnoriActiveRunId = runId;
   const nowIso = new Date().toISOString();
 
-  activeLnoriState = {
+  const runState: ActiveLnoriState = {
     runId,
     active: true,
     targetUrl,
@@ -1067,35 +1257,36 @@ export function executeLnoriIngestTask(
     startedAt: nowIso,
     updatedAt: nowIso,
   };
+  publishRunState(runState);
+  updateDurableNovelJob(runId, "processing");
 
   const updateStateFromEvent = (event: LnoriProgressEvent) => {
-    if (activeLnoriState.runId !== runId) return;
-    activeLnoriState.updatedAt = new Date().toISOString();
+    runState.updatedAt = new Date().toISOString();
     if (event.phase) {
-      activeLnoriState.phase = event.phase;
+      runState.phase = event.phase;
     }
     if (typeof event.index === "number") {
-      activeLnoriState.index = event.index;
+      runState.index = event.index;
     }
     if (typeof event.total === "number") {
-      activeLnoriState.total = event.total;
+      runState.total = event.total;
     }
     if (event.volumeTitle) {
-      activeLnoriState.volumeTitle = event.volumeTitle;
+      runState.volumeTitle = event.volumeTitle;
     }
     if (event.status) {
-      activeLnoriState.status =
+      runState.status =
         event.phase === "error"
           ? sanitizeErrorMessage(event.status)
           : event.status;
     }
     if (event.data) {
-      activeLnoriState.data = event.data;
+      runState.data = event.data;
     }
+    publishRunState(runState);
   };
 
   const broadcastEvent = (event: LnoriProgressEvent) => {
-    if (activeLnoriState.runId !== runId) return;
     updateStateFromEvent(event);
     const eventWithRunId: LnoriProgressEvent & { runId?: string } = {
       ...event,
@@ -1117,7 +1308,6 @@ export function executeLnoriIngestTask(
       const result = await runIngest(
         targetUrl,
         async (event: LnoriProgressEvent) => {
-          if (activeLnoriState.runId !== runId) return;
           if (event.phase === "complete") {
             hasCompleted = true;
           }
@@ -1129,34 +1319,32 @@ export function executeLnoriIngestTask(
         { signal: backgroundAbortController.signal, force },
       );
 
-      if (activeLnoriState.runId !== runId) {
-        return { success: false, error: "Task generation superseded" };
-      }
-
       if (!result || !result.success) {
         const errMsg =
           sanitizeErrorMessage(result?.error) ||
           `Failed to ingest light novel from ${sourceName}`;
         const errorDetails = result?.errorDetails;
         const failedVolumes = result?.failedVolumes;
-        activeLnoriState.active = false;
-        activeLnoriState.phase = "error";
-        activeLnoriState.error = errMsg;
-        activeLnoriState.status = errMsg;
-        activeLnoriState.data = {
+        runState.active = false;
+        runState.phase = "error";
+        runState.error = errMsg;
+        runState.status = errMsg;
+        runState.data = {
           error: errMsg,
           ...(errorDetails ? { errorDetails } : {}),
           ...(failedVolumes ? { failedVolumes } : {}),
         };
-        activeLnoriState.updatedAt = new Date().toISOString();
+        runState.updatedAt = new Date().toISOString();
         if (!hasErrored) {
           broadcastEvent({
             phase: "error",
             status: errMsg,
-            data: activeLnoriState.data,
+            data: runState.data,
           });
         }
-        recordCompletedLnoriJob(activeLnoriState);
+        publishRunState(runState);
+        recordCompletedLnoriJob(runState);
+        updateDurableNovelJob(runId, "failed", { error: errMsg });
         return {
           success: false,
           error: errMsg,
@@ -1206,17 +1394,29 @@ export function executeLnoriIngestTask(
           }
         }
 
-        activeLnoriState.active = false;
-        activeLnoriState.phase = "complete";
-        activeLnoriState.completedData = finalCompletedData;
-        activeLnoriState.index = result.totalCount;
-        activeLnoriState.total = result.totalCount;
-        activeLnoriState.volumeTitle = result.seriesTitle;
-        activeLnoriState.status =
+        // B8: the library just changed, so the cached feeds and the per-novel Calibre audit
+        // would otherwise keep serving the pre-ingest ownership for up to an hour.
+        try {
+          invalidateDiscoverFeedCache(
+            { cacheDb: getCacheDb() },
+            cleanAndNormalizeNovelUrl(targetUrl),
+          );
+          invalidateNovelAuditCache();
+        } catch (invErr) {
+          console.debug("[Discover] cache invalidation after ingest failed:", invErr);
+        }
+
+        runState.active = false;
+        runState.phase = "complete";
+        runState.completedData = finalCompletedData;
+        runState.index = result.totalCount;
+        runState.total = result.totalCount;
+        runState.volumeTitle = result.seriesTitle;
+        runState.status =
           result.skippedErrors
             ? `Finished: ${result.importedCount} new volumes added, ${result.duplicateCount ?? result.skippedCount} existing volumes preserved (${result.skippedErrors} volumes failed).`
             : `Finished: ${result.importedCount} new volumes added, ${result.duplicateCount ?? result.skippedCount} existing volumes preserved.`;
-        activeLnoriState.updatedAt = new Date().toISOString();
+        runState.updatedAt = new Date().toISOString();
 
         if (!hasCompleted) {
           broadcastEvent({
@@ -1224,17 +1424,16 @@ export function executeLnoriIngestTask(
             index: result.totalCount,
             total: result.totalCount,
             volumeTitle: result.seriesTitle,
-            status: activeLnoriState.status,
+            status: runState.status,
             data: finalCompletedData,
           });
         }
-        recordCompletedLnoriJob(activeLnoriState);
+        publishRunState(runState);
+        recordCompletedLnoriJob(runState);
+        updateDurableNovelJob(runId, "completed", { result: finalCompletedData });
         return finalCompletedData;
       }
     } catch (err: any) {
-      if (activeLnoriState.runId !== runId) {
-        return { success: false, error: "Task generation superseded" };
-      }
       const isAborted =
         backgroundAbortController.signal.aborted ||
         err?.name === "AbortError" ||
@@ -1243,11 +1442,11 @@ export function executeLnoriIngestTask(
         ? `${sourceName} ingestion cancelled by user`
         : sanitizeErrorMessage(err) || `Failed to ingest light novel from ${sourceName}`;
 
-      activeLnoriState.active = false;
-      activeLnoriState.phase = "error";
-      activeLnoriState.error = errMsg;
-      activeLnoriState.status = errMsg;
-      activeLnoriState.updatedAt = new Date().toISOString();
+      runState.active = false;
+      runState.phase = "error";
+      runState.error = errMsg;
+      runState.status = errMsg;
+      runState.updatedAt = new Date().toISOString();
 
       if (!hasErrored) {
         broadcastEvent({
@@ -1256,11 +1455,17 @@ export function executeLnoriIngestTask(
           data: { error: errMsg, aborted: isAborted },
         });
       }
-      recordCompletedLnoriJob(activeLnoriState);
+      publishRunState(runState);
+      recordCompletedLnoriJob(runState);
+      updateDurableNovelJob(runId, "failed", { error: errMsg });
       return { success: false, error: errMsg };
     } finally {
+      activeLnoriControllers.delete(runId);
       if (activeLnoriAbortController === backgroundAbortController) {
         activeLnoriAbortController = null;
+      }
+      if (lnoriActiveRunId === runId) {
+        lnoriActiveRunId = null;
       }
       // Process next queued ingestion item sequentially via coalesced drain
       scheduleLnoriDrain(20);
@@ -7007,6 +7212,12 @@ async function handleRequestCore(
           ? "new_releases"
           : (tabParam === "all_titles" && result.tab === "all" ? "all_titles" : result.tab);
 
+      const counts = result.counts ?? {
+        trending: result.tab === "trending" ? result.count : null,
+        newReleases: result.tab === "new" ? result.count : null,
+        all: result.tab === "all" ? result.count : null,
+      };
+
       return jsonResponse(
         {
           success: true,
@@ -7015,11 +7226,13 @@ async function handleRequestCore(
           items,
           count: result.count,
           total: result.count,
-          counts: {
-            trending: result.tab === "trending" ? result.count : 25,
-            newReleases: result.tab === "new" ? result.count : 25,
-            all: result.tab === "all" ? result.count : 1400,
-          },
+          counts,
+          // Disclosure: the client must be able to say it is showing the curated fallback
+          // instead of a live feed, and why the feed is degraded.
+          feedSource: result.feedSource ?? "live",
+          feedOrigin: result.feedOrigin,
+          feedGeneratedAt: result.feedGeneratedAt ?? null,
+          feedErrors: result.feedErrors ?? [],
           genres: result.genres,
           sources: result.sources,
           page: result.page,
@@ -7625,8 +7838,9 @@ async function handleRequestCore(
 
       const MAX_LNORI_QUEUE = 25;
 
-      // If an ingestion is currently active with a different URL, enqueue it
-      if (activeLnoriState.active) {
+      // If a download currently owns the single execution lane, queue this one on the same durable
+      // queue the worker uses, so a restart rehydrates it instead of dropping it.
+      if (lnoriActiveRunId !== null) {
         if (lnoriQueue.length >= MAX_LNORI_QUEUE) {
           return jsonResponse(
             {
@@ -7646,7 +7860,9 @@ async function handleRequestCore(
           targetUrl,
           seriesId: parsedTarget?.id,
           createdAt: new Date().toISOString(),
+          source: isElscione ? "elscione" : "lnori",
         };
+        queueItem.durableJobId = persistQueuedNovelJob(queueItem) ?? undefined;
         lnoriQueue.push(queueItem);
         const queuePosition = lnoriQueue.length;
 
@@ -7669,6 +7885,9 @@ async function handleRequestCore(
       const sourceName = isElscione ? "Elscione" : "Lnori";
       const runId = `${idPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const nowIso = new Date().toISOString();
+      // Claim the lane synchronously to keep the post-validation TOCTOU window closed; the task
+      // itself republishes this same run state through publishRunState().
+      lnoriActiveRunId = runId;
       activeLnoriState = {
         runId,
         active: true,
@@ -9086,6 +9305,9 @@ if ((import.meta as any).main) {
   try {
     getCacheDb();
     jobQueue.startWorker(1000);
+    // Rebuild any ingest that was queued when the process last stopped, so a restart does not
+    // silently drop volumes the user already asked for.
+    recoverPersistedNovelQueue();
   } catch (err) {
     console.error(
       "[Server] Fatal: could not open cache.db; refusing to bind port " +
