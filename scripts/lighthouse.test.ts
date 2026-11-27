@@ -222,18 +222,26 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(fs.existsSync(outputDir)).toBe(true);
 
       const files = fs.readdirSync(outputDir);
-      expect(files.length).toBe(4);
+      expect(files.length).toBe(5);
 
       const uploaderPlist = files.find((f: string) => f.includes("book-uploader"));
       const botPlist = files.find((f: string) => f.includes("reading-telegram-bot"));
       const backupPlist = files.find((f: string) => f.includes("reading-stack-backup"));
       const ssdBackupPlist = files.find((f: string) => f.includes("reading-ssd-backup"));
+      const seedsPlist = files.find((f: string) => f.includes("reading-discover-seeds"));
 
       expect(uploaderPlist).toBeDefined();
       expect(botPlist).toBeDefined();
       expect(backupPlist).toBeDefined();
       expect(ssdBackupPlist).toBeDefined();
+      expect(seedsPlist).toBeDefined();
       expect(files.find((f: string) => f.includes("tunnel"))).toBeUndefined();
+
+      // The curated New Releases refresh is scheduled by a fifth LaunchAgent.
+      const seedsContent = fs.readFileSync(path.join(outputDir, seedsPlist!), "utf8");
+      expect(seedsContent).toContain(".reading-discover-seeds");
+      expect(seedsContent).toContain("refresh-discover-seeds.ts");
+      expect(seedsContent).toContain("<key>StartCalendarInterval</key>");
 
       // Check contents of book-uploader plist
       const uploaderContent = fs.readFileSync(
@@ -262,6 +270,35 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
           expect(check.status).toBe(0);
         }
       }
+    });
+
+    it("skips the reading-discover-seeds plist when the seeds daemon is disabled in configuration", () => {
+      const outputDir = path.join(tempTestDir, "seeds_disabled_agents");
+      const seedsConfigPath = path.join(tempTestDir, "data", "discover-seeds-config.json");
+      fs.mkdirSync(path.dirname(seedsConfigPath), { recursive: true });
+      fs.writeFileSync(
+        seedsConfigPath,
+        JSON.stringify({ enabled: false, scheduleTime: "06:30" }),
+      );
+
+      const res = spawnSync(
+        LIGHTHOUSE_BIN,
+        ["install-daemons", "--dry-run", "--output-dir", outputDir],
+        {
+          encoding: "utf8",
+          cwd: REPO_ROOT,
+          env: {
+            ...process.env,
+            DISCOVER_SEEDS_CONFIG_PATH: seedsConfigPath,
+          },
+        },
+      );
+      expect(res.status).toBe(0);
+
+      const files = fs.readdirSync(outputDir);
+      expect(files.length).toBe(4);
+      expect(files.some((f: string) => f.includes("reading-discover-seeds"))).toBe(false);
+      expect(res.stdout).toContain("Discover New Releases refresh is disabled");
     });
 
     it("escapes XML special characters in generated plists", () => {
@@ -960,6 +997,14 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
         `#!/bin/bash\nexit 1\n`,
         { mode: 0o755 },
       );
+      // `is_port_listening` falls back to lsof when nc is unavailable/negative, so stub it too;
+      // otherwise a developer machine that is actually running the stack reports the port open and
+      // this "port closed" fixture never reaches the auto-heal branch.
+      fs.writeFileSync(
+        path.join(mockBinDir, "lsof"),
+        `#!/bin/bash\nexit 1\n`,
+        { mode: 0o755 },
+      );
 
       try {
         const res = spawnSync(LIGHTHOUSE_BIN, ["health"], {
@@ -1045,8 +1090,9 @@ describe("LightHouse Unified Architecture & Control CLI", () => {
       expect(res.status).toBe(0);
       expect(fs.existsSync(quotedDir)).toBe(true);
       const generated = fs.readdirSync(quotedDir);
-      expect(generated.length).toBe(4);
+      expect(generated.length).toBe(5);
       expect(generated.some((f: string) => f.includes("book-uploader"))).toBe(true);
+      expect(generated.some((f: string) => f.includes("reading-discover-seeds"))).toBe(true);
     });
 
     it("rejects absent, empty, and next-option arguments for backup options with friendly diagnostics", () => {

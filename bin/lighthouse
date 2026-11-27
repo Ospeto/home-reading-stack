@@ -935,7 +935,7 @@ EOF
   local seeds_hour=6
   local seeds_minute=30
   local seeds_enabled=1
-  local seeds_cfg_file="${LIGHTHOUSE_ROOT}/data/discover-seeds-config.json"
+  local seeds_cfg_file="${DISCOVER_SEEDS_CONFIG_PATH:-${LIGHTHOUSE_ROOT}/data/discover-seeds-config.json}"
   if [ -f "$seeds_cfg_file" ]; then
     local parsed_seed_time
     parsed_seed_time=$(grep -o '"scheduleTime"[[:space:]]*:[[:space:]]*"[^"]*"' "$seeds_cfg_file" | sed -e 's/.*"scheduleTime"[[:space:]]*:[[:space:]]*"//' -e 's/"//' 2>/dev/null || echo "06:30")
@@ -953,6 +953,9 @@ EOF
   fi
 
   local seeds_plist="${target_dir}/${DAEMON_PREFIX}.reading-discover-seeds.plist"
+  if [ "$seeds_enabled" -eq 0 ]; then
+    echo -e "  ${COLOR_YELLOW}Notice: Discover New Releases refresh is disabled in configuration. No plist generated.${COLOR_RESET}"
+  else
   cat << EOF > "$seeds_plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -989,9 +992,13 @@ EOF
 </dict>
 </plist>
 EOF
+  fi
 
   # Validate all generated plists with plutil if available
-  local all_plists=("$uploader_plist" "$bot_plist" "$backup_plist" "$ssd_backup_plist" "$seeds_plist")
+  local all_plists=("$uploader_plist" "$bot_plist" "$backup_plist" "$ssd_backup_plist")
+  if [ "$seeds_enabled" -eq 1 ]; then
+    all_plists+=("$seeds_plist")
+  fi
   for p in "${all_plists[@]}"; do
     if command -v plutil >/dev/null 2>&1; then
       plutil -lint "$p" >/dev/null
@@ -1010,10 +1017,6 @@ EOF
       launchctl unload "$p" 2>/dev/null || true
       if [ "$p" = "$ssd_backup_plist" ] && [ "$ssd_enabled" -eq 0 ]; then
         echo -e "  Notice: SSD Auto-Backup is disabled in configuration. Plist generated but left unloaded."
-        continue
-      fi
-      if [ "$p" = "$seeds_plist" ] && [ "$seeds_enabled" -eq 0 ]; then
-        echo -e "  Notice: Discover New Releases refresh is disabled in configuration. Plist generated but left unloaded."
         continue
       fi
       launchctl load -w "$p" 2>/dev/null || true
