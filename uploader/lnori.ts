@@ -12,6 +12,7 @@ import {
   extractEpubDescription,
   fetchOnlineSynopsis,
   extractVolumeNumber,
+  parseRetryAfterMs,
 } from "./scraper";
 
 import {
@@ -200,6 +201,14 @@ export async function streamResponseToFile(
       if (onProgress && declaredLength > 0) {
         onProgress(Math.min(100, Math.round((receivedBytes / declaredLength) * 100)));
       }
+    }
+
+    // A truncated transfer ends with a normal `done`, so the declared length is the only signal
+    // that the file is short. Accepting it used to land a half EPUB in Calibre as a real volume.
+    if (Number.isFinite(declaredLength) && declaredLength > 0 && receivedBytes < declaredLength) {
+      throw new Error(
+        `${label} truncated transfer: received ${receivedBytes} of ${declaredLength} bytes`,
+      );
     }
   } catch (err) {
     try {
@@ -1159,6 +1168,10 @@ export async function downloadLnoriEpub(
   const MAX_RETRIES = 3;
   let lastError: any = null;
   let forceProxy = false;
+  // A 429 tells us exactly when to come back. Honouring `Retry-After` replaces the guessed
+  // exponential backoff for that attempt, so we neither hammer the host early nor wait longer
+  // than it asked.
+  let retryAfterMs: number | null = null;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (dependencies?.signal?.aborted) {
@@ -1166,7 +1179,9 @@ export async function downloadLnoriEpub(
     }
 
     if (attempt > 0) {
-      const backoffMs = Math.min(10000, 1000 * 2 ** (attempt - 1));
+      const backoffMs =
+        retryAfterMs !== null ? retryAfterMs : Math.min(10000, 1000 * 2 ** (attempt - 1));
+      retryAfterMs = null;
       await sleep(backoffMs);
     }
 
@@ -1283,6 +1298,9 @@ export async function downloadLnoriEpub(
         lastError = err;
 
         if ((res.status >= 500 || res.status === 429) && attempt < MAX_RETRIES) {
+          if (res.status === 429) {
+            retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"), 2000, 10000);
+          }
           continue;
         }
         throw lastError;
@@ -1299,6 +1317,9 @@ export async function downloadLnoriEpub(
           signal: dependencies?.signal,
         },
       );
+      // Validate inside the retry loop, as Elscione does: a corrupt or truncated container is a
+      // transport problem worth another attempt, not a definitive failure of the download.
+      validateDownloadedEpub(destPath);
       lastError = null;
       break;
     } catch (err: any) {
@@ -1316,6 +1337,7 @@ export async function downloadLnoriEpub(
       if (
         err?.message?.includes("exceeds maximum size") ||
         err?.message?.includes("contained no body") ||
+        err?.message?.includes("truncated transfer") ||
         err?.message?.includes("Failed to download EPUB from Lnori storage (4")
       ) {
         throw err;
@@ -1331,8 +1353,6 @@ export async function downloadLnoriEpub(
   if (lastError) {
     throw lastError;
   }
-
-  validateDownloadedEpub(destPath);
 }
 
 export async function fetchAndConvertCover(

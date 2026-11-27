@@ -2782,4 +2782,52 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
       expect(isLnoriUrl(match![0])).toBe(true);
     });
   });
+
+  describe("Download resilience (B17 Retry-After, B18 short reads, in-loop validation)", () => {
+    it("fails a short read against the declared content-length instead of accepting a truncated file", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-short-"));
+      const destPath = path.join(workDir, "short.epub");
+      try {
+        const response = new Response(new Uint8Array([1, 2, 3]), {
+          headers: { "content-length": "10" },
+        });
+        await expect(
+          streamResponseToFile(response, destPath, 1024, "Short EPUB"),
+        ).rejects.toThrow("Short EPUB truncated transfer: received 3 of 10 bytes");
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it("honours Retry-After on HTTP 429 instead of the guessed exponential backoff", async () => {
+      const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lnori-429-"));
+      const destPath = path.join(workDir, "throttled.epub");
+      const sleeps: number[] = [];
+      let calls = 0;
+      try {
+        await expect(
+          downloadLnoriEpub("throttled.epub", destPath, undefined, {
+            sleep: async (ms: number) => {
+              sleeps.push(ms);
+            },
+            fetch: async () => {
+              calls++;
+              return new Response("slow down", {
+                status: 429,
+                headers: { "retry-after": "7" },
+              });
+            },
+          }),
+        ).rejects.toThrow("Failed to download EPUB from Lnori storage (429)");
+
+        // The host asked for 7 seconds; the guessed backoff would have been 1s then 2s.
+        expect(sleeps.length).toBeGreaterThan(0);
+        expect(sleeps.every((ms) => ms === 7000)).toBe(true);
+        expect(sleeps).not.toContain(1000);
+        expect(calls).toBeGreaterThan(1);
+      } finally {
+        await fs.promises.rm(workDir, { recursive: true, force: true });
+      }
+    });
+  });
 });

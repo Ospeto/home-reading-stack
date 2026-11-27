@@ -55,6 +55,9 @@ import {
   matchNovelWithCalibreIndex,
   buildReleaseDateFromStartDate,
   compareReleaseDateNewestFirst,
+  invalidateDiscoverFeedCache,
+  setCachedSourceInventory,
+  getCachedSourceInventory,
 } from "./discover";
 import { extractVolumeNumber } from "./scraper";
 import {
@@ -4264,12 +4267,21 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         series_index: i + 1,
       }));
 
-      // Case 1: Source error -> sourceStatus is "error", missingVolumeCount is undefined
-      // Must NOT be returned despite existingVolumes (16) < catalog volumeCount (22)
+      // Case 1: Source error -> sourceStatus is "error", missingVolumeCount is undefined.
+      // B7/G4: the card must NOT be dropped anymore. Every source errored, so the volume list is
+      // unknown, not complete: keep the owned series visible with a verify affordance and never
+      // fabricate a missing-volume list from the catalogue count.
+      // (Asserted against "DanMachi", a series that really is in the trending feed, and against a
+      // library that actually owns one of its volumes. The previous version of this case asserted
+      // absence of a card that never entered the filtered set at all, so it passed vacuously.)
+      const mockCalibreWithDanMachi = [
+        ...mockCalibre,
+        { id: 900, title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 1", series: "Is It Wrong to Try to Pick Up Girls in a Dungeon?", series_index: 1 },
+      ];
       const resError = await getDiscoverNovels(
-        { tab: "trending", status: "incomplete" },
+        { tab: "trending", status: "incomplete", pageSize: 100 },
         {
-          getCalibreBooks: () => mockCalibre,
+          getCalibreBooks: () => mockCalibreWithDanMachi,
           resolveSourceVolumes: (url, source) => ({
             source,
             url,
@@ -4279,8 +4291,28 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         },
       );
       expect(resError.success).toBe(true);
-      const dalError = resError.novels.find((n) => n.id === "date-a-live");
-      expect(dalError).toBeUndefined();
+      const degraded = resError.novels.find((n) => n.id === "danmachi");
+      expect(degraded).toBeDefined();
+      expect(degraded?.needsVerification).toBe(true);
+      expect(degraded?.sourceStatus).toBe("error");
+      // No invented gap: the catalogue count never becomes a "missing" list.
+      expect(degraded?.missingVolumeCount).toBeUndefined();
+      expect(degraded?.missingVolumeIndices).toBeUndefined();
+      // ...and the same card is dropped once a source verifies it as nothing missing.
+      const resErrorVerified = await getDiscoverNovels(
+        { tab: "trending", status: "incomplete", pageSize: 100 },
+        {
+          getCalibreBooks: () => mockCalibreWithDanMachi,
+          resolveSourceVolumes: (url, source) => ({
+            source,
+            url,
+            status: "verified",
+            volumeCount: 1,
+            volumes: [1],
+          }),
+        },
+      );
+      expect(resErrorVerified.novels.some((n) => n.id === "danmachi")).toBe(false);
 
       // Case 2: Unverified source -> sourceStatus is "unverified", missingVolumeCount is undefined
       // Must NOT be returned
@@ -6002,5 +6034,134 @@ describe("Spinoff & Art-Book Isolation (B4: companions never inherit parent volu
       },
     );
     expect(mainline.ownedVolumeIndices ?? []).not.toContain(2);
+  });
+});
+
+describe("B8: a successful ingest invalidates the feed and source-inventory caches", () => {
+  it("clears every cached feed tab and the ingested source's inventory", async () => {
+    const cacheDb = new Database(":memory:");
+    resetDiscoverCacheForTest({ cacheDb });
+
+    const sourceUrl = "https://lnori.com/series/4242/cache-invalidation";
+    const novel: DiscoveredNovel = {
+      id: "cache-invalidation-novel",
+      title: "Cache Invalidation Novel",
+      author: "Test Author",
+      coverUrl: "",
+      synopsis: "A sufficiently long synopsis for the cache invalidation regression test case.",
+      genres: ["Fantasy"],
+      score: 70,
+      popularity: 500,
+      releaseDate: null,
+      volumeCount: 3,
+      source: "lnori",
+      sourceUrls: { lnori: sourceUrl },
+      inLibrary: false,
+      existingVolumes: 0,
+    };
+
+    // Seed the cache exactly as a real request would.
+    for (const tab of ["trending", "new", "all"] as const) {
+      setCachedFeed(`${DISCOVER_FEED_CACHE_VERSION}:feed:${tab}`, [novel], { cacheDb });
+      expect(getCachedFeed(`${DISCOVER_FEED_CACHE_VERSION}:feed:${tab}`, { cacheDb })).not.toBeNull();
+    }
+    setCachedSourceInventory(
+      sourceUrl,
+      {
+        source: "lnori",
+        url: sourceUrl,
+        status: "verified",
+        volumeCount: 3,
+        volumes: [1, 2, 3],
+        verifiedAt: Date.now(),
+      },
+      { cacheDb },
+    );
+    expect(getCachedSourceInventory(sourceUrl, { cacheDb })).not.toBeNull();
+
+    const cleared = invalidateDiscoverFeedCache({ cacheDb }, sourceUrl);
+
+    expect(cleared).toContain(`${DISCOVER_FEED_CACHE_VERSION}:feed:trending`);
+    expect(cleared).toContain(`${DISCOVER_FEED_CACHE_VERSION}:feed:new`);
+    expect(cleared).toContain(`${DISCOVER_FEED_CACHE_VERSION}:feed:all`);
+    expect(cleared).toContain(`v1:src_inv:${sourceUrl}`);
+
+    // The physical rows are gone too, not merely the in-memory copies: a restart-time read must
+    // never resurrect the pre-ingest ownership.
+    for (const tab of ["trending", "new", "all"] as const) {
+      expect(getCachedFeed(`${DISCOVER_FEED_CACHE_VERSION}:feed:${tab}`, { cacheDb })).toBeNull();
+    }
+    expect(getCachedSourceInventory(sourceUrl, { cacheDb })).toBeNull();
+
+    cacheDb.close();
+  });
+
+  it("leaves an unrelated source's inventory alone", async () => {
+    const cacheDb = new Database(":memory:");
+    resetDiscoverCacheForTest({ cacheDb });
+
+    const ingested = "https://lnori.com/series/1/ingested";
+    const untouched = "https://lnori.com/series/2/untouched";
+    const inventory = (url: string) => ({
+      source: "lnori" as const,
+      url,
+      status: "verified" as const,
+      volumeCount: 1,
+      volumes: [1],
+      verifiedAt: Date.now(),
+    });
+    setCachedSourceInventory(ingested, inventory(ingested), { cacheDb });
+    setCachedSourceInventory(untouched, inventory(untouched), { cacheDb });
+
+    invalidateDiscoverFeedCache({ cacheDb }, ingested);
+
+    expect(getCachedSourceInventory(ingested, { cacheDb })).toBeNull();
+    expect(getCachedSourceInventory(untouched, { cacheDb })).not.toBeNull();
+
+    cacheDb.close();
+  });
+});
+
+describe("B16 & G3: the feed payload reports measured counts and its real source", () => {
+  it("reports measured tab counts instead of the 25/1400 literals", async () => {
+    const cacheDb = new Database(":memory:");
+    resetDiscoverCacheForTest({ cacheDb });
+
+    const trending = await getDiscoverNovels({ tab: "trending" }, { cacheDb });
+    expect(trending.success).toBe(true);
+    expect(trending.counts).toBeDefined();
+    // The active tab's count is the request's own count, never a fabricated literal.
+    expect(trending.counts!.trending).toBe(trending.count);
+    expect(trending.counts!.trending).not.toBe(25);
+    // The All catalogue holds far more than the old 1400 literal or exactly it.
+    expect(trending.counts!.all).toBeGreaterThan(1200);
+    expect(trending.counts!.all).not.toBe(1400);
+
+    const all = await getDiscoverNovels({ tab: "all", pageSize: 1 }, { cacheDb });
+    expect(all.counts!.all).toBe(all.count);
+
+    cacheDb.close();
+  });
+
+  it("discloses that a curated fallback list is being shown, and why", async () => {
+    const cacheDb = new Database(":memory:");
+    resetDiscoverCacheForTest({ cacheDb });
+
+    // Offline: no fetch, so the curated New Releases list backs the tab.
+    const res = await getDiscoverNovels(
+      { tab: "new" },
+      { cacheDb, fetch: async () => { throw new Error("network disabled"); } },
+    );
+
+    expect(res.success).toBe(true);
+    expect(res.feedSource).toBe("curated");
+    expect(Array.isArray(res.feedErrors)).toBe(true);
+    expect(res.feedErrors!.length).toBeGreaterThan(0);
+    // Every card still names a downloadable source: the real-source gate is untouched.
+    for (const n of res.novels) {
+      expect(Boolean(n.sourceUrls?.lnori || n.sourceUrls?.elscione || n.primaryUrl)).toBe(true);
+    }
+
+    cacheDb.close();
   });
 });

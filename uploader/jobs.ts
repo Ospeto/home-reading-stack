@@ -20,7 +20,14 @@ export type JobType =
   | "url_article_ingest"
   | "text_article_ingest"
   | "metadata_enrich"
-  | "cover_backfill";
+  | "cover_backfill"
+  /**
+   * A queued light-novel (Lnori / Elsci.one) ingest. Persisted for restart recovery but
+   * deliberately left without a registered handler: `processNextJob` only picks types that
+   * have one, so the durable row records the request while the in-memory queue owns the
+   * ordering and cancellation semantics.
+   */
+  | "novel_ingest";
 
 export type JobStatus = "pending" | "processing" | "running" | "completed" | "failed";
 
@@ -220,6 +227,54 @@ export class DurableJobQueue {
 
     const rows = this.db.prepare(sql).all(...params) as any[];
     return rows.map((r) => this.mapRowToRecord(r));
+  }
+
+  /**
+   * Retrieves every job of one type, newest first.
+   */
+  public getJobsByType<T = any>(type: JobType, limit = 500): JobRecord<T>[] {
+    const boundedLimit = Math.max(1, Math.min(Math.floor(limit) || 500, 5000));
+    const rows = this.db
+      .prepare("SELECT * FROM jobs WHERE type = ? ORDER BY created_at ASC LIMIT ?")
+      .all(type, boundedLimit) as any[];
+    return rows.map((r) => this.mapRowToRecord<T>(r));
+  }
+
+  /**
+   * Updates a job's lifecycle status in place.
+   *
+   * Used by callers that own execution themselves (the light-novel ingest queue) and only need
+   * the durable row to track reality across a restart.
+   */
+  public updateJobStatus(
+    id: string,
+    status: JobStatus,
+    options: { error?: string | null; result?: any } = {},
+  ): boolean {
+    const now = Date.now();
+    const resultStr =
+      options.result === undefined || options.result === null
+        ? null
+        : JSON.stringify(options.result);
+    const res = this.db
+      .prepare(
+        `UPDATE jobs
+         SET status = ?,
+             updated_at = ?,
+             error = ?,
+             result = COALESCE(?, result)
+         WHERE id = ?`
+      )
+      .run(status, now, options.error ?? null, resultStr, id);
+    return res.changes > 0;
+  }
+
+  /**
+   * Deletes a job row outright (used when a queued ingest is cancelled before it ever ran).
+   */
+  public deleteJob(id: string): boolean {
+    const res = this.db.prepare("DELETE FROM jobs WHERE id = ?").run(id);
+    return res.changes > 0;
   }
 
   /**
