@@ -27,6 +27,11 @@ import {
   type LnoriProgressEvent,
   formatLnoriProgress,
   classifyLnoriStorageResponse,
+  isLnoriProxyUsable,
+  isLnoriNotFoundError,
+  resetLnoriProxyHealthCacheForTest,
+  LNORI_NOT_FOUND_CODE,
+  LNORI_PROXY_UNUSABLE_CODE,
 } from "./lnori";
 
 describe("Lnori Light Novel Ingestion Module", () => {
@@ -528,6 +533,9 @@ describe("Lnori Light Novel Ingestion Module", () => {
           if (calls === 1) throw new Error("direct connection failed");
           return new Response("<html>proxy response</html>");
         },
+        // A healthy proxy is the point of this test; injecting the probe keeps the discipline
+        // from depending on the host's real listener.
+        proxyProbe: () => true,
       });
       expect(html).toBe("<html>proxy response</html>");
       expect(calls).toBe(2);
@@ -548,6 +556,7 @@ describe("Lnori Light Novel Ingestion Module", () => {
               if (calls === 1) throw new Error("direct connection failed");
               return new Response("unavailable", { status: 503 });
             },
+            proxyProbe: () => true,
           }),
         ).rejects.toThrow("Failed to download EPUB from Lnori storage (503)");
         // Attempt 0: direct (calls=1, throws) -> fallback to proxy (calls=2, returns 503)
@@ -576,6 +585,7 @@ describe("Lnori Light Novel Ingestion Module", () => {
           if (calls === 1) return new Response("forbidden", { status: 403 });
           return new Response("<html>proxy response</html>", { status: 200 });
         },
+        proxyProbe: () => true,
       });
       expect(html).toBe("<html>proxy response</html>");
       expect(calls).toBe(2);
@@ -631,6 +641,7 @@ describe("Lnori Light Novel Ingestion Module", () => {
             }
             return new Response(validEpubContent, { status: 200 });
           },
+          proxyProbe: () => true,
         });
 
         expect(calls).toBe(2);
@@ -696,6 +707,7 @@ describe("Lnori Light Novel Ingestion Module", () => {
             // Attempt 1: must use proxy directly, NOT direct!
             return new Response(validEpubContent, { status: 200 });
           },
+          proxyProbe: () => true,
         });
 
         expect(calls).toBe(3);
@@ -762,6 +774,7 @@ describe("Lnori Light Novel Ingestion Module", () => {
             // Attempt 1: direct succeeds at full speed
             return new Response(validEpubContent, { status: 200 });
           },
+          proxyProbe: () => true,
         });
 
         expect(calls).toBe(3);
@@ -907,6 +920,7 @@ describe("Lnori Light Novel Ingestion Module", () => {
             }
             return new Response(validEpubContent, { status: 200 });
           },
+          proxyProbe: () => true,
         });
 
         expect(calls).toBe(2);
@@ -1095,6 +1109,7 @@ describe("Lnori Light Novel Ingestion Module", () => {
             if (calls === 1) throw new Error("direct connection failed");
             return new Response(new Uint8Array([1, 2, 3]));
           },
+          proxyProbe: () => true,
           sipsPath: "fake-sips",
           spawnSync: (_command: string, args: string[]) => {
             fs.writeFileSync(args[args.length - 1], "jpeg");
@@ -1133,6 +1148,7 @@ describe("Lnori Light Novel Ingestion Module", () => {
               // Proxy WebP returns 200 OK
               return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
             },
+            proxyProbe: () => true,
             sipsPath: "fake-sips",
             spawnSync: (_command: string, args: string[]) => {
               fs.writeFileSync(args[args.length - 1], "jpeg");
@@ -2829,5 +2845,139 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
         await fs.promises.rm(workDir, { recursive: true, force: true });
       }
     });
+  });
+});
+
+/**
+ * The proxy is a fallback, not a reflex.
+ *
+ * A dead local listener used to turn an honest 404 into "The socket connection was closed
+ * unexpectedly", telling the reader their network failed when the link was simply stale. These
+ * tests pin the three behaviours that prevent that: a 404 stays a 404, a dead proxy is skipped
+ * instead of tried, and a healthy proxy is still used when the direct route genuinely fails.
+ */
+describe("Lnori proxy discipline and honest 404s", () => {
+  const STALE_URL = "https://lnori.com/series/12780/too-many-losing-heroines";
+
+  it("reports a stale id as not-found rather than a proxy socket error", async () => {
+    const calls: Array<string | undefined> = [];
+    const probeCalls: string[] = [];
+    const err: any = await fetchLnoriHtml(STALE_URL, {
+      fetch: async (_url: string, init: any) => {
+        calls.push(init?.proxy);
+        return new Response("Not Found", { status: 404 });
+      },
+      proxyProbe: (proxyUrl: string) => {
+        probeCalls.push(proxyUrl);
+        return true;
+      },
+    }).catch((e) => e);
+
+    expect(isLnoriNotFoundError(err)).toBe(true);
+    expect(err.code).toBe(LNORI_NOT_FOUND_CODE);
+    expect(err.message).toBe(
+      `Lnori does not have a series under this id (HTTP 404): ${STALE_URL}`,
+    );
+    // The socket-reset wording must not appear: the network was never the problem.
+    expect(err.message).not.toMatch(/socket|ECONNRESET|proxy/i);
+    // One direct request, no proxy retry, and no probe: a 404 is a fact about the id.
+    expect(calls).toEqual([undefined]);
+    expect(probeCalls).toEqual([]);
+  });
+
+  it("skips a dead proxy instead of trying it, and says the proxy is the problem", async () => {
+    const calls: Array<string | undefined> = [];
+    const err: any = await fetchLnoriHtml(STALE_URL, {
+      fetch: async (_url: string, init: any) => {
+        calls.push(init?.proxy);
+        throw new Error("The socket connection was closed unexpectedly.");
+      },
+      proxyProbe: () => false,
+    }).catch((e) => e);
+
+    expect(err.code).toBe(LNORI_PROXY_UNUSABLE_CODE);
+    expect(err.message).toBe(
+      "Could not reach Lnori (The socket connection was closed unexpectedly.) " +
+        "and the local proxy is not usable",
+    );
+    // Exactly one attempt, direct: the dead listener is never contacted.
+    expect(calls).toEqual([undefined]);
+  });
+
+  it("still uses a healthy proxy when the direct attempt throws", async () => {
+    const calls: Array<string | undefined> = [];
+    const html = await fetchLnoriHtml(STALE_URL, {
+      fetch: async (_url: string, init: any) => {
+        calls.push(init?.proxy);
+        if (!init?.proxy) throw new Error("direct connection failed");
+        return new Response("<html>via proxy</html>", { status: 200 });
+      },
+      proxyProbe: () => true,
+    });
+
+    expect(html).toBe("<html>via proxy</html>");
+    expect(calls).toEqual([undefined, "http://127.0.0.1:7890"]);
+  });
+
+  it("never probes the proxy on the direct success path", async () => {
+    let probeCalls = 0;
+    let fetchCalls = 0;
+    const html = await fetchLnoriHtml(STALE_URL, {
+      fetch: async () => {
+        fetchCalls++;
+        return new Response("<html>direct</html>", { status: 200 });
+      },
+      proxyProbe: () => {
+        probeCalls++;
+        return true;
+      },
+    });
+
+    expect(html).toBe("<html>direct</html>");
+    expect(fetchCalls).toBe(1);
+    expect(probeCalls).toBe(0);
+  });
+
+  it("consults one probe verdict per TTL instead of probing every request", async () => {
+    resetLnoriProxyHealthCacheForTest();
+    let probeCalls = 0;
+    const probe = () => {
+      probeCalls++;
+      return true;
+    };
+
+    expect(await isLnoriProxyUsable({ proxyProbe: probe })).toBe(true);
+    expect(await isLnoriProxyUsable({ proxyProbe: probe })).toBe(true);
+    expect(await isLnoriProxyUsable({ proxyProbe: probe })).toBe(true);
+    expect(probeCalls).toBe(1);
+
+    // A different verdict (a different probe) is evaluated on its own terms, never served from
+    // another probe's cache entry.
+    expect(await isLnoriProxyUsable({ proxyProbe: () => false })).toBe(false);
+    expect(probeCalls).toBe(1);
+    resetLnoriProxyHealthCacheForTest();
+  });
+
+  it("re-probes after the cached verdict is dropped so a revived proxy is picked up", async () => {
+    resetLnoriProxyHealthCacheForTest();
+    let healthy = false;
+    let probeCalls = 0;
+    const probe = () => {
+      probeCalls++;
+      return healthy;
+    };
+
+    // One probe, one verdict, replayed for the whole TTL.
+    expect(await isLnoriProxyUsable({ proxyProbe: probe })).toBe(false);
+    healthy = true;
+    expect(await isLnoriProxyUsable({ proxyProbe: probe })).toBe(false);
+    expect(probeCalls).toBe(1);
+
+    // Dropping the cached verdict (what the TTL does on expiry) makes the next call ask again, so a
+    // proxy that came back is not shadowed by a stale "unhealthy" for the rest of the TTL.
+    resetLnoriProxyHealthCacheForTest();
+    expect(await isLnoriProxyUsable({ proxyProbe: probe })).toBe(true);
+    expect(probeCalls).toBe(2);
+    resetLnoriProxyHealthCacheForTest();
   });
 });

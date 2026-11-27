@@ -1388,7 +1388,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         "https://server.elscione.com/Officially%20Translated%20Light%20Novels/86/",
       );
       expect(eightySix?.sourceUrls.lnori).toBe(
-        "https://lnori.com/series/4808/86-eighty-six",
+        "https://lnori.com/series/6547/86-eighty-six",
       );
     });
 
@@ -6169,5 +6169,68 @@ describe("B16 & G3: the feed payload reports measured counts and its real source
     }
 
     cacheDb.close();
+  });
+});
+
+/**
+ * A stale Lnori id is a fact about the link, not a network failure.
+ *
+ * Lnori renumbers series, so a curated link can point at an id that no longer exists. That must
+ * reach the reader as "not found under this id" — never as the socket error a dead local proxy used
+ * to contribute — and it must not be retried through that proxy.
+ */
+describe("Lnori stale-id honesty in source verification", () => {
+  it("reports a stale series id as not-found instead of a transport failure", async () => {
+    const probed: string[] = [];
+    const fetched: Array<string | undefined> = [];
+    const inventory = await resolveSourceInventory(
+      "https://lnori.com/series/12780/too-many-losing-heroines",
+      "lnori",
+      {
+        fetch: (async (_url: string, init?: any) => {
+          fetched.push(init?.proxy);
+          return new Response("Not Found", { status: 404 });
+        }) as any,
+        proxyProbe: () => {
+          probed.push("probe");
+          return false;
+        },
+      } as any,
+    );
+
+    expect(inventory.status).toBe("error");
+    expect(inventory.volumeCount).toBeUndefined();
+    expect(inventory.error).toBe(
+      "Lnori does not have a series under this id (HTTP 404): " +
+        "https://lnori.com/series/12780/too-many-losing-heroines",
+    );
+    expect(inventory.error).not.toMatch(/socket|ECONNRESET|proxy/i);
+    // One direct attempt; the dead proxy is never tried and never even probed.
+    expect(fetched).toEqual([undefined]);
+    expect(probed).toEqual([]);
+  });
+
+  it("still verifies a real series through a healthy proxy when the direct route fails", async () => {
+    const inventory = await resolveSourceInventory(
+      "https://lnori.com/series/12417/too-many-losing-heroines",
+      "lnori",
+      {
+        fetch: (async (_url: string, init?: any) => {
+          if (!init?.proxy) throw new Error("direct connection failed");
+          return new Response(
+            `<html><body>
+               <a href="/book/9001/too-many-losing-heroines-volume-1">v1</a>
+               <a href="/book/9002/too-many-losing-heroines-volume-2">v2</a>
+             </body></html>`,
+            { status: 200, headers: { "Content-Type": "text/html" } },
+          );
+        }) as any,
+        proxyProbe: () => true,
+      } as any,
+    );
+
+    expect(inventory.status).toBe("verified");
+    expect(inventory.volumeCount).toBe(2);
+    expect(inventory.volumes).toEqual([1, 2]);
   });
 });

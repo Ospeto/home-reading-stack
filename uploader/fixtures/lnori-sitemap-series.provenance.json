@@ -1,0 +1,8 @@
+{
+  "sourceUrl": "https://lnori.com/sitemap/sitemap-series.xml",
+  "fetchedAt": "2026-11-27T19:17:55.948Z",
+  "locCount": 884,
+  "uniqueSlugCount": 883,
+  "sha256": "e35b64281a70f172597af09886f956745c30376a2deb9918447d71235b821dfe",
+  "note": "Checked-in snapshot used by uploader/discover.test.ts so the id-liveness test is hermetic. Regenerate with: bun scripts/refresh-lnori-series.ts --fixture-out uploader/fixtures/lnori-sitemap-series.xml"
+}
