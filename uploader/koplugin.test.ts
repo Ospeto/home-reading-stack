@@ -951,6 +951,9 @@ local scenario = assert(arg[2], "scenario required")
 local workdir = assert(arg[3], "workdir required")
 
 local http_urls, https_urls, timeouts = {}, {}, {}
+-- Every backoff the client asked for, in seconds, so a retry proves it waited
+-- the delay the response asked for instead of a fixed guess.
+local sleeps = {}
 -- Per-hop record of whether the request carried X-API-Key ("Y"/"N"), so the
 -- cross-host stripping behavior can be asserted without guessing at headers.
 local http_keys, https_keys = {}, {}
@@ -1108,6 +1111,44 @@ elseif scenario == "sink_write_failure" then
     end
     return 1, 404, {}
   end
+elseif scenario == "download_retry_after" then
+  -- The first attempt is cut short by a 503 that asks for a 1s pause; the
+  -- retry must honour the Retry-After header and start from an empty .part
+  -- file, so the receiver never gets the 1000 stray bytes mixed into the EPUB.
+  local attempts = 0
+  handler = function(request)
+    attempts = attempts + 1
+    if attempts == 1 then
+      request.sink(string.rep("X", 1000))
+      return 1, 503, { ["retry-after"] = "1" }
+    end
+    return emit(request, string.rep("E", 900))
+  end
+elseif scenario == "download_retry_after_capped" then
+  -- A server that asks for the rest of the afternoon does not get it: the
+  -- plugin waits its own ceiling and retries once, so a stalled spinner cannot
+  -- last as long as the header says.
+  local attempts = 0
+  handler = function(request)
+    attempts = attempts + 1
+    if attempts == 1 then
+      return 1, 503, { ["retry-after"] = "3600" }
+    end
+    return emit(request, string.rep("E", 900))
+  end
+elseif scenario == "download_retry_exhausted" then
+  -- Every attempt fails: the code the reader sees is the server's own, not a
+  -- generic failure that hides what happened.
+  handler = function() return 1, 503, {} end
+elseif scenario == "download_permanent_4xx" then
+  -- A 404 is the request's own fault; replaying it only doubles the wait.
+  handler = function() return 1, 404, {} end
+elseif scenario == "download_truncated" then
+  -- A short read: the server promised 900 bytes and the link died at 400.
+  handler = function(request)
+    request.sink(string.rep("E", 400))
+    return 1, 200, { ["content-length"] = "900" }
+  end
 elseif scenario == "post_json" then
   handler = function(request)
     local chunks = {}
@@ -1133,6 +1174,9 @@ end
 
 package.preload["socket.http"] = function() return make_transport(http_urls, http_keys, http_redirect, handler) end
 package.preload["socket.https"] = function() return make_transport(https_urls, https_keys, https_redirect, handler) end
+package.preload["socket"] = function()
+  return { sleep = function(seconds) sleeps[#sleeps + 1] = tostring(seconds) end }
+end
 package.preload["socketutil"] = function()
   return {
     set_timeout = function(_, block, total)
@@ -1237,7 +1281,10 @@ if scenario == "schemes" or scenario == "https_missing" then
   report("https_redirect", table.concat(https_redirect, ""))
   report("timeouts", table.concat(timeouts, "|"))
 elseif scenario == "download" or scenario == "html" or scenario == "small_file"
-    or scenario == "plain_download" or scenario == "sink_write_failure" then
+    or scenario == "plain_download" or scenario == "sink_write_failure"
+    or scenario == "download_retry_after" or scenario == "download_retry_after_capped"
+    or scenario == "download_retry_exhausted" or scenario == "download_permanent_4xx"
+    or scenario == "download_truncated" then
   local target = workdir .. "/book.epub"
   local config_used = config_http
   if scenario ~= "plain_download" then
@@ -1262,6 +1309,7 @@ elseif scenario == "download" or scenario == "html" or scenario == "small_file"
   report("http_redirect", table.concat(http_redirect, ""))
   report("https_redirect", table.concat(https_redirect, ""))
   report("timeouts", table.concat(timeouts, "|"))
+  report("sleeps", table.concat(sleeps, "|"))
 elseif scenario == "post_json" or scenario == "post_json_error" then
   local body, err = Client.postJson(config_http, "/api/highlights/sync", '{"title":"Dune"}', 5)
   report("body", body)
@@ -1512,6 +1560,66 @@ describe("plugin EPUB download", () => {
     // The partial download must not survive as a broken book.
     expect(out.file_exists).toBe("false");
   });
+
+  it("retries one transient 503 and honours the Retry-After delay", () => {
+    if (!LUA_BINARY) return;
+    const out = runClientScenario("download_retry_after");
+    expect(out.ok).toBe("true");
+    expect(out.err).toBe("nil");
+    // Two attempts: the first 503, then the successful one.
+    expect(out.https_calls).toBe("2");
+    // The retry waited exactly what the response asked for.
+    expect(out.sleeps).toBe("1");
+    // The aborted attempt had already written 1000 bytes into the .part file;
+    // the retry has to start from an empty file, so the saved book is the
+    // second response alone and the stray bytes are gone.
+    expect(out.file_size).toBe("900");
+    expect(out.file_only_final).toBe("true");
+  });
+
+  it("caps a long Retry-After at the plugin's own ceiling", () => {
+    if (!LUA_BINARY) return;
+    const out = runClientScenario("download_retry_after_capped");
+    expect(out.ok).toBe("true");
+    expect(out.https_calls).toBe("2");
+    // The server asked for an hour; the plugin waits its bounded ceiling
+    // instead of holding a spinner that long.
+    expect(out.sleeps).toBe("10");
+  });
+
+  it("reports the server's own code when the retry also fails", () => {
+    if (!LUA_BINARY) return;
+    const out = runClientScenario("download_retry_exhausted");
+    expect(out.ok).toBe("nil");
+    // The real status, not a generic failure: the reader's retry decision
+    // depends on knowing whether the server was unavailable.
+    expect(out.err).toBe("http_503");
+    expect(out.https_calls).toBe("2");
+    expect(out.sleeps).toBe("0.4");
+    expect(out.file_exists).toBe("false");
+  });
+
+  it("never replays a permanent 4xx", () => {
+    if (!LUA_BINARY) return;
+    const out = runClientScenario("download_permanent_4xx");
+    expect(out.ok).toBe("nil");
+    expect(out.err).toBe("http_404");
+    // Exactly one attempt: a missing book stays missing, and replaying the
+    // request only doubles how long the reader waits for the same answer.
+    expect(out.https_calls).toBe("1");
+    expect(out.sleeps).toBe("");
+    expect(out.file_exists).toBe("false");
+  });
+
+  it("reports a short read as a truncated download", () => {
+    if (!LUA_BINARY) return;
+    const out = runClientScenario("download_truncated");
+    expect(out.ok).toBe("nil");
+    // The body arrived but stopped early; the reader is told the transfer was
+    // cut short, not handed a half-written book.
+    expect(out.err).toBe("truncated_download");
+    expect(out.file_exists).toBe("false");
+  });
 });
 
 /**
@@ -1674,6 +1782,7 @@ print("err_exception=" .. LightHouse.describeError("exception: boom"))
 print("err_file=" .. LightHouse.describeError("file_error: cannot write /tmp/x.epub"))
 print("err_html=" .. LightHouse.describeError("html_response"))
 print("err_redirects=" .. LightHouse.describeError("too_many_redirects"))
+print("err_truncated=" .. LightHouse.describeError("truncated_download"))
 print("err_unknown=" .. LightHouse.describeError("something_else"))
 `;
 
@@ -1779,6 +1888,10 @@ describe("plugin error reporting", () => {
     expect(out.err_file).toContain("/tmp/x.epub");
     expect(out.err_html).toContain("web page");
     expect(out.err_redirects).toContain("too many times");
+    // A short read is its own failure: "Something went wrong." tells the
+    // reader nothing to do, while a truncated download says to try again.
+    expect(out.err_truncated).toContain("cut short");
+    expect(out.err_truncated).not.toBe("Something went wrong.");
     expect(out.err_unknown).toBe("Something went wrong.");
     const messages = new Set([
       out.err_https,
@@ -1787,9 +1900,10 @@ describe("plugin error reporting", () => {
       out.err_file,
       out.err_html,
       out.err_redirects,
+      out.err_truncated,
       out.err_unknown,
     ]);
-    expect(messages.size).toBe(7);
+    expect(messages.size).toBe(8);
   });
 });
 
@@ -11523,7 +11637,7 @@ local opds_feed_xml = [[<?xml version="1.0" encoding="utf-8"?>
 
 local ota_restarted = 0
 ui_mgr.restartKOReader = function() ota_restarted = ota_restarted + 1 end
-local remote_manifest_json = '{"version":"1.14.0","downloadPath":"/api/koplugin/download"}'
+local remote_manifest_json = '{"version":"1.15.0","downloadPath":"/api/koplugin/download"}'
 
 package.preload["json"] = function()
   return {
@@ -11537,14 +11651,15 @@ package.preload["json"] = function()
       if type(raw) == "string" and raw:find('"version":"2.0.0"', 1, true) then
         return { version = "2.0.0", downloadPath = "/api/koplugin/download" }
       end
-      if type(raw) == "string" and raw:find('"version":"1.14.0"', 1, true) then
-        return { version = "1.14.0", downloadPath = "/api/koplugin/download" }
+      if type(raw) == "string" and raw:find('"version":"1.15.0"', 1, true) then
+        return { version = "1.15.0", downloadPath = "/api/koplugin/download" }
       end
       return {}
     end,
   }
 end
 
+local fail_urls = {}
 package.preload["socket.http"] = function()
   return {
     TIMEOUT = 10,
@@ -11570,6 +11685,7 @@ package.preload["socket.http"] = function()
         return 1, 200, { ["content-type"] = "application/zip", ["content-length"] = tostring(#zip_bytes) }
       end
       if url:match("/api/books/%d+/download/epub") then
+        if fail_urls[url:match("/api/books/%d+/download/epub")] then return 1, 404, {} end
         local payload = "PK\3\4" .. string.rep("E", 512) .. "-" .. url
         if request.sink then request.sink(payload); request.sink(nil) end
         return 1, 200, { ["content-length"] = tostring(#payload), ["content-type"] = "application/epub+zip" }
@@ -11757,6 +11873,51 @@ print("series_cancel=" .. tostring(
   and trapper_events[2]:find("Downloading 1/2: Spice and Wolf, Vol. 1", 1, true) ~= nil
   and trapper_events[#trapper_events] == "CLEAR"
 ))
+-- The cancel notice separates what it never started from what failed, so the
+-- reader is not told a cancelled volume blew up.
+print("series_cancel_pending=" .. tostring(ds_cancel_msg:find("still pending", 1, true) ~= nil))
+
+-- 4b. Ownership is keyed on the Calibre book id, so a metadata edit no longer
+-- flips a downloaded volume to missing (audit §2.9).
+local Ownership = require("lighthouse_ownership")
+local owned_path = dl_dir .. "/Spice and Wolf 01 - Spice and Wolf, Vol. 1 - Isuna Hasekura.epub"
+Ownership.record(G_reader_settings, { book_id = 501 }, owned_path)
+-- The reader corrected the series index in Calibre; the derived filename for
+-- this entry is now something else entirely.
+local edited_entry = { book_id = 501, title = "Spice and Wolf, Vol. 1", authors = "Isuna Hasekura", series = "Spice and Wolf", series_index = 9 }
+local derived_after_edit = dl_dir .. "/" .. LightHouse.buildFilename(edited_entry)
+local resolved_after_edit = LightHouse:localBookPathFor(edited_entry)
+print("owned_after_edit=" .. tostring(
+  resolved_after_edit == owned_path
+  and derived_after_edit ~= owned_path
+  and io.open(derived_after_edit, "rb") == nil
+))
+-- Without a record, the same edited entry is genuinely missing: this is the
+-- behaviour the ledger replaces, and it must not silently claim ownership.
+local unowned_entry = { book_id = 599, title = "Never Downloaded", authors = "Nobody", series = "Spice and Wolf", series_index = 3 }
+print("unowned_after_edit=" .. tostring(LightHouse:localBookPathFor(unowned_entry) == nil))
+-- Deleting the local copy forgets it, so the volume is offered again.
+Ownership.forgetPath(G_reader_settings, owned_path)
+print("forgotten_after_delete=" .. tostring(LightHouse:localBookPathFor(edited_entry) == nil))
+Ownership.record(G_reader_settings, { book_id = 501 }, owned_path)
+
+-- 4c. A failed volume is named in the notice, not just counted (audit §3.13).
+fail_urls["/api/books/502/download/epub"] = true
+trapper_events = {}
+cancel_after_calls = nil
+bim_batches = {}
+shown = {}
+LightHouse:downloadSeriesBooks("Spice and Wolf")
+local fail_confirm = shown[#shown]
+if fail_confirm and fail_confirm.ok_callback then fail_confirm.ok_callback() end
+local fail_msg = shown[#shown] and shown[#shown].text or ""
+print("series_failure_names=" .. tostring(
+  fail_msg:find("Spice and Wolf, Vol. 2", 1, true) ~= nil
+  and fail_msg:find("1 failed", 1, true) ~= nil
+  and fail_msg:find("Failed: ", 1, true) ~= nil
+  and fail_msg:find("http_404", 1, true) ~= nil
+))
+fail_urls["/api/books/502/download/epub"] = nil
 
 -- 5. Verify OTA ConfirmBox uses KOReader's canonical ok_callback & shows step progress bar
 local ota_target_dir = workdir .. "/ota_target"
@@ -11793,18 +11954,21 @@ print("ota_progress_ok=" .. tostring(
 ))
 `);
 
-describe("plugin v1.14.0 modularization, batch Trapper progress/cancel, and Download Later queue", () => {
-  it("packages lighthouse_indexer, lighthouse_sync, and lighthouse_queue with version 1.14.0", () => {
-    expect(KOPLUGIN_VERSION).toBe("1.14.0");
+describe("plugin v1.15.0 ownership ledger, failing-volume reporting, and one bounded download retry", () => {
+  it("packages lighthouse_indexer, lighthouse_sync, lighthouse_queue, and lighthouse_ownership with version 1.15.0", () => {
+    expect(KOPLUGIN_VERSION).toBe("1.15.0");
     const { settings, entryNames } = generateKoplugin({
       baseUrl: "http://192.168.31.15:8086",
       apiKey: "v114-test-key",
       generatedAt: "2026-11-24T12:45:00.000Z",
     });
-    expect(settings.pluginVersion).toBe("1.14.0");
+    expect(settings.pluginVersion).toBe("1.15.0");
     expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_indexer.lua`);
     expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_sync.lua`);
     expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_queue.lua`);
+    // The ownership ledger is a new template module: if the packaging walk ever
+    // skips it, every device download would fail to require it.
+    expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_ownership.lua`);
   });
 
   it("verifies modular indexer/sync/queue APIs, Trapper batch progress & mid-batch cancel, and Queue UI wiring", () => {
@@ -11860,6 +12024,11 @@ describe("plugin v1.14.0 modularization, batch Trapper progress/cancel, and Down
     expect(out.queue_mid_cancel).toBe("true");
     expect(out.queue_resume).toBe("true");
     expect(out.series_cancel).toBe("true");
+    expect(out.series_cancel_pending).toBe("true");
+    expect(out.owned_after_edit).toBe("true");
+    expect(out.unowned_after_edit).toBe("true");
+    expect(out.forgotten_after_delete).toBe("true");
+    expect(out.series_failure_names).toBe("true");
     expect(out.ota_progress_ok).toBe("true");
   });
 });
