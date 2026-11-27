@@ -54,9 +54,19 @@ local DEFAULT_REQUEST_TOTAL_TIMEOUT = 90
 local DEFAULT_DOWNLOAD_BLOCK_TIMEOUT = 15
 local DEFAULT_DOWNLOAD_TOTAL_TIMEOUT = 300
 local DEFAULT_GET_RETRIES = 1
+local DEFAULT_DOWNLOAD_RETRIES = 1
 local DEFAULT_RETRY_DELAY_SECONDS = 0.4
 
+--- Longest `Retry-After` the plugin will actually wait for, in seconds.
+-- A server that asks for minutes is asking the reader to hold a spinner that
+-- long; one bounded retry after this ceiling is still better than none.
+local MAX_RETRY_AFTER_SECONDS = 10
+
+-- `429 Too Many Requests` is a retry-later signal, not a permanent refusal, so
+-- it belongs here with the gateway errors rather than with the 4xx the plugin
+-- must not replay (401/403/404 mean the request itself is wrong).
 local RETRYABLE_HTTP_CODES = {
+    [429] = true,
     [502] = true,
     [503] = true,
     [504] = true,
@@ -191,6 +201,20 @@ local function headerValue(headers, name)
         end
     end
     return nil
+end
+
+--- Reads a `Retry-After` header as a bounded number of seconds.
+-- Only the delta-seconds form is understood; an HTTP-date needs a wall clock
+-- the plugin does not carry, so it falls back to the caller's own delay. The
+-- ceiling keeps a server asking for minutes from pinning a spinner that long.
+-- @tparam table|nil response_headers headers of the refusal
+-- @treturn number|nil seconds to wait, when the header carried a usable value
+local function retryAfterSeconds(response_headers)
+    local raw = tonumber(headerValue(response_headers, "retry-after"))
+    if not raw or raw ~= raw then return nil end
+    if raw < 0 then return 0 end
+    if raw > MAX_RETRY_AFTER_SECONDS then return MAX_RETRY_AFTER_SECONDS end
+    return raw
 end
 
 --- Resolves a (possibly relative) Location header against the request URL.
@@ -523,16 +547,6 @@ function Client.download(config, url, filepath, max_seconds)
     end
 
     local part_path = tostring(filepath) .. ".part"
-    local handle = io.open(part_path, "wb")
-    if not handle then
-        return nil, string.format("file_error: cannot write %s", tostring(filepath))
-    end
-
-    local headers = Client.buildHeaders(config)
-    local current = Client.buildUrl(config, url)
-    local redirects = 0
-    local code, response_headers, err
-
     local block_timeout = numberOr(config.download_block_timeout, DEFAULT_DOWNLOAD_BLOCK_TIMEOUT)
     local total_timeout = numberOr(config.download_total_timeout, DEFAULT_DOWNLOAD_TOTAL_TIMEOUT)
     -- One number caps both, so a caller cannot accidentally leave a stalled
@@ -543,32 +557,69 @@ function Client.download(config, url, filepath, max_seconds)
         if total_timeout > ceiling then total_timeout = ceiling end
     end
 
-    socketutil:set_timeout(block_timeout, total_timeout)
-    while true do
-        code, response_headers, err = requestOnce(current, fileSink(handle), headers)
-        if not code or not REDIRECT_CODES[code] then
-            break
+    local code, response_headers, err
+
+    -- A caller that passed its own budget (a cover thumbnail, which has a
+    -- per-page time allowance shared with every other cover on that page) gets
+    -- one attempt: a second attempt would spend the page's budget twice, and a
+    -- cover that misses is refetched on the next open anyway. The EPUB path
+    -- has no such allowance, so it earns the retry.
+    local max_attempts = (ceiling and ceiling > 0) and 0 or DEFAULT_DOWNLOAD_RETRIES
+
+    -- ONE bounded retry, gated exactly like `Client.get`: a Wi-Fi blip or a
+    -- 502/503/504/429 from the tunnel must not cost the reader the volume.
+    -- A permanent failure (401/403/404, a redirect loop, a local write error)
+    -- is never replayed, and every attempt starts from a clean `.part` file so
+    -- a half-written body can never be mixed into the finished EPUB.
+    for attempt = 0, max_attempts do
+        if attempt > 0 then
+            sleepSeconds(retryAfterSeconds(response_headers) or DEFAULT_RETRY_DELAY_SECONDS)
         end
-        local next_url, redirect_err = nextHop(current, response_headers, redirects)
-        if not next_url then
-            code, err = nil, redirect_err
-            break
-        end
-        redirects = redirects + 1
-        stripApiKeyCrossHost(headers, current, next_url)
-        current = next_url
-        -- The redirect body is already in the `.part` file; restart the next hop
-        -- cleanly so an interstitial page is never mixed into the EPUB.
-        pcall(function() handle:close() end)
-        handle = io.open(part_path, "wb")
+
+        local handle = io.open(part_path, "wb")
         if not handle then
-            socketutil:reset_timeout()
-            os.remove(part_path)
-            return nil, string.format("file_error: cannot rewrite %s", tostring(filepath))
+            return nil, string.format("file_error: cannot write %s", tostring(filepath))
+        end
+
+        local headers = Client.buildHeaders(config)
+        local current = Client.buildUrl(config, url)
+        local redirects = 0
+
+        socketutil:set_timeout(block_timeout, total_timeout)
+        while true do
+            code, response_headers, err = requestOnce(current, fileSink(handle), headers)
+            if not code or not REDIRECT_CODES[code] then
+                break
+            end
+            local next_url, redirect_err = nextHop(current, response_headers, redirects)
+            if not next_url then
+                code, err = nil, redirect_err
+                break
+            end
+            redirects = redirects + 1
+            stripApiKeyCrossHost(headers, current, next_url)
+            current = next_url
+            -- The redirect body is already in the `.part` file; restart the next hop
+            -- cleanly so an interstitial page is never mixed into the EPUB.
+            pcall(function() handle:close() end)
+            handle = io.open(part_path, "wb")
+            if not handle then
+                socketutil:reset_timeout()
+                os.remove(part_path)
+                return nil, string.format("file_error: cannot rewrite %s", tostring(filepath))
+            end
+        end
+        socketutil:reset_timeout()
+        pcall(function() handle:close() end)
+
+        local ok_status = code == 200
+        if ok_status or attempt >= max_attempts then
+            break
+        end
+        if not isTransientFailure(code, err) then
+            break
         end
     end
-    socketutil:reset_timeout()
-    pcall(function() handle:close() end)
 
     if not code then
         os.remove(part_path)

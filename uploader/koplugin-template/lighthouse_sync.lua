@@ -229,10 +229,10 @@ end
 -- Uses KOReader `ui/trapper` when present so tapping the screen stops the batch cleanly
 -- after the active transfer, and falls back to per-item `InfoMessage` updates otherwise.
 -- Invokes `on_complete(result)` inside the runner context (async-safe with `Trapper:wrap`).
--- @tparam table deps { config, Client, UIManager, InfoMessage, squareWidget, formatMessage, gettext, lfs }
--- @tparam table items array of `{ label, url, filepath, key, skip_if_exists }`
+-- @tparam table deps { config, Client, UIManager, InfoMessage, squareWidget, formatMessage, gettext, lfs, record_owned }
+-- @tparam table items array of `{ label, url, filepath, key, book_id, skip_if_exists }`
 -- @tparam[opt] table options { trapper = table, use_trapper = boolean, paused_text = string }
--- @tparam[opt] function on_complete callback receiving `{ total, downloaded, failed, cancelled, remaining, newly_downloaded, completed_keys }`
+-- @tparam[opt] function on_complete callback receiving `{ total, downloaded, failed, cancelled, pending, remaining, failed_labels, failed_keys, newly_downloaded, completed_keys }`
 -- @treturn table|nil result when execution ran synchronously
 function Sync.runBatchDownloads(deps, items, options, on_complete)
     options = type(options) == "table" and options or {}
@@ -243,7 +243,10 @@ function Sync.runBatchDownloads(deps, items, options, on_complete)
             downloaded = 0,
             failed = 0,
             cancelled = false,
+            pending = 0,
             remaining = 0,
+            failed_labels = {},
+            failed_keys = {},
             newly_downloaded = {},
             completed_keys = {},
         }
@@ -261,6 +264,7 @@ function Sync.runBatchDownloads(deps, items, options, on_complete)
     local gettext_fn = deps.gettext or function(s) return s end
     local T_fn = deps.formatMessage or function(tpl, ...) return tpl end
     local lfs_mod = deps.lfs
+    local record_owned = deps.record_owned
 
     local trapper = options.trapper
     if trapper == nil and options.use_trapper ~= false then
@@ -273,20 +277,37 @@ function Sync.runBatchDownloads(deps, items, options, on_complete)
         and type(trapper.wrap) == "function"
         and type(trapper.info) == "function"
 
+    -- A failure has to name the item it belonged to: "3 failed" tells the
+    -- reader nothing to retry, while the volume titles do. The error code is
+    -- kept too, because the caller knows how to word it (see `describeError`).
     local function downloadOne(item)
         if item.skip_if_exists and fileExistsOnDisk(lfs_mod, item.filepath) then
-            return true, false
+            return true, false, nil
         end
         if type(item.url) ~= "string" or item.url == "" or type(item.filepath) ~= "string" or item.filepath == "" then
-            return false, false
+            return false, false, "invalid_response"
         end
-        local ok_call, ok_dl = pcall(function()
+        local ok_call, ok_dl, dl_err = pcall(function()
             return Client.download(config, item.url, item.filepath)
         end)
         if ok_call and ok_dl then
-            return true, true
+            -- Ownership is recorded by id while the batch runs, so a volume
+            -- pulled here is owned exactly like one from the detail screen.
+            if type(record_owned) == "function" and item.book_id ~= nil then
+                pcall(record_owned, item.book_id, item.filepath)
+            end
+            return true, true, nil
         end
-        return false, false
+        local err_text
+        if ok_call then
+            err_text = dl_err
+        else
+            err_text = "exception: " .. tostring(ok_dl)
+        end
+        -- An empty code is a failed download with no reason attached; the
+        -- caller words it from the error code, so never hand it nil.
+        if Status.str(err_text) == "" then err_text = "network_error" end
+        return false, false, Status.str(err_text)
     end
 
     local sync_result
@@ -296,6 +317,10 @@ function Sync.runBatchDownloads(deps, items, options, on_complete)
             local downloaded = 0
             local failed = 0
             local cancelled = false
+            local pending = 0
+            local failed_labels = {}
+            local failed_keys = {}
+            local failed_items = {}
             local newly_downloaded = {}
             local completed_keys = {}
 
@@ -323,10 +348,13 @@ function Sync.runBatchDownloads(deps, items, options, on_complete)
                 end)
                 if (not ok_info) or go_on == false then
                     cancelled = true
+                    -- Everything from this item onward was never attempted: it
+                    -- is pending, not failed, and not downloaded either.
+                    pending = total - idx + 1
                     break
                 end
 
-                local ok_item, is_new = downloadOne(item)
+                local ok_item, is_new, item_err = downloadOne(item)
                 if ok_item then
                     downloaded = downloaded + 1
                     if is_new then
@@ -337,6 +365,9 @@ function Sync.runBatchDownloads(deps, items, options, on_complete)
                     end
                 else
                     failed = failed + 1
+                    failed_labels[#failed_labels + 1] = label
+                    if item.key ~= nil then failed_keys[#failed_keys + 1] = item.key end
+                    failed_items[#failed_items + 1] = { label = label, key = item.key, code = item_err }
                 end
             end
 
@@ -351,7 +382,15 @@ function Sync.runBatchDownloads(deps, items, options, on_complete)
                 downloaded = downloaded,
                 failed = failed,
                 cancelled = cancelled,
+                -- `pending` counts only the items the cancel left untouched, and
+                -- `remaining` stays "still not on this device" (pending plus
+                -- failed), so a caller can tell what to retry from what it
+                -- could not start.
+                pending = pending,
                 remaining = math.max(total - downloaded, 0),
+                failed_labels = failed_labels,
+                failed_keys = failed_keys,
+                failed_items = failed_items,
                 newly_downloaded = newly_downloaded,
                 completed_keys = completed_keys,
             }
@@ -365,6 +404,10 @@ function Sync.runBatchDownloads(deps, items, options, on_complete)
 
     local downloaded = 0
     local failed = 0
+    local pending = 0
+    local failed_labels = {}
+    local failed_keys = {}
+    local failed_items = {}
     local newly_downloaded = {}
     local completed_keys = {}
 
@@ -389,7 +432,7 @@ function Sync.runBatchDownloads(deps, items, options, on_complete)
             end)
         end
 
-        local ok_item, is_new = downloadOne(item)
+        local ok_item, is_new, item_err = downloadOne(item)
 
         if info and type(UIManager) == "table" then
             pcall(function() UIManager:close(info) end)
@@ -405,6 +448,9 @@ function Sync.runBatchDownloads(deps, items, options, on_complete)
             end
         else
             failed = failed + 1
+            failed_labels[#failed_labels + 1] = label
+            if item.key ~= nil then failed_keys[#failed_keys + 1] = item.key end
+            failed_items[#failed_items + 1] = { label = label, key = item.key, code = item_err }
         end
     end
 
@@ -413,7 +459,11 @@ function Sync.runBatchDownloads(deps, items, options, on_complete)
         downloaded = downloaded,
         failed = failed,
         cancelled = false,
+        pending = pending,
         remaining = math.max(total - downloaded, 0),
+        failed_labels = failed_labels,
+        failed_keys = failed_keys,
+        failed_items = failed_items,
         newly_downloaded = newly_downloaded,
         completed_keys = completed_keys,
     }

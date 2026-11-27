@@ -91,6 +91,7 @@ local Nav = require("lighthouse_nav")
 local OPDS = require("lighthouse_opds")
 local Ota = require("lighthouse_ota")
 local Outbox = require("lighthouse_outbox")
+local Ownership = require("lighthouse_ownership")
 local Page = require("lighthouse_page")
 local Queue = require("lighthouse_queue")
 local Sidecar = require("lighthouse_sidecar")
@@ -218,6 +219,8 @@ local function describeError(err)
         return _("This KOReader build has no TLS support, so it cannot reach an https:// server. Use the LAN http:// address instead.")
     elseif code == "empty_response" then
         return _("The server returned an empty file.")
+    elseif code == "truncated_download" then
+        return _("The download was cut short before the whole file arrived. Check Wi-Fi and try again.")
     elseif code == "invalid_response" then
         return _("Try again. If it keeps happening, download the plugin again from the LightHouse web app (Guide → KOReader plugin).")
     elseif code == "html_response" then
@@ -236,6 +239,47 @@ local function describeError(err)
         return T(_("The server returned an error (%1)."), code:gsub("^http_", ""))
     end
     return _("Something went wrong.")
+end
+
+--- Names the items a batch download failed on, for the reader who has to
+-- decide what to retry.
+--
+-- `Downloaded 7 of 9 volume(s) (2 failed).` says something went wrong but not
+-- where, so the reader has to open every volume to find the two that never
+-- arrived. Naming them (and their error when it differs) turns the notice into
+-- the retry list. At most `BATCH_FAILURE_LABELS` names are listed so a batch
+-- that failed everywhere still fits one screen; the count stays exact.
+-- @tparam table res `Sync.runBatchDownloads` result
+-- @treturn string "" when nothing failed, else a newline-prefixed list
+local BATCH_FAILURE_LABELS = 3
+local function describeBatchFailures(res)
+    if type(res) ~= "table" then return "" end
+    local failed_items = type(res.failed_items) == "table" and res.failed_items or {}
+    local labels = type(res.failed_labels) == "table" and res.failed_labels or {}
+    if #failed_items == 0 and #labels == 0 then return "" end
+    local names = {}
+    for index = 1, math.min(#failed_items, BATCH_FAILURE_LABELS) do
+        local item = failed_items[index]
+        local name = Status.str(item and item.label)
+        if name == "" then name = _("Untitled") end
+        local code = Status.str(item and item.code)
+        if code ~= "" and code ~= "truncated_download" then
+            -- The code is only worth the pixels when it narrows the retry (a
+            -- refused key, a missing file), never for the common transient.
+            names[#names + 1] = T(_("%1 (%2)"), name, code)
+        else
+            names[#names + 1] = name
+        end
+    end
+    for index = #failed_items + 1, math.min(#labels, BATCH_FAILURE_LABELS) do
+        names[#names + 1] = Status.str(labels[index])
+    end
+    local listed = table.concat(names, _(", "))
+    local count = math.max(#failed_items, #labels)
+    if count > BATCH_FAILURE_LABELS then
+        return T(_("\nFailed: %1 and %2 more."), listed, tostring(count - BATCH_FAILURE_LABELS))
+    end
+    return T(_("\nFailed: %1."), listed)
 end
 
 --- Recursively creates a directory path.
@@ -665,6 +709,8 @@ local function errorHeadline(err)
         return _("Can't reach the LightHouse server")
     elseif code == "empty_response" then
         return _("The server sent an empty response")
+    elseif code == "truncated_download" then
+        return _("The download was cut short")
     elseif code == "invalid_response" then
         return _("The server response could not be read")
     elseif code == "html_response" then
@@ -2203,12 +2249,25 @@ function LightHouse:showPageOverflow()
 end
 
 --- Resolves an existing on-device EPUB path for a catalog entry or session.
+--
+-- The Calibre book id decides ownership first. A path derived from live
+-- metadata (`buildFilename`) changes the moment the server's metadata does -
+-- a corrected series index, a respelled author - so a volume already on the
+-- device would read as missing and be downloaded again, while a leftover file
+-- whose name happens to match would read as owned. The id the OPDS feed
+-- carries survives every metadata edit, so the ledger keyed on it is asked
+-- first, and the filename rules below stay as the fallback for entries with no
+-- id and for books downloaded before the ledger existed.
 -- Checks explicit `book_path`, matched `local_record.book_path`, and the
 -- deterministic download destination under `getDownloadDir()`.
 -- @tparam table entry OPDS entry or KOSync session
 -- @treturn string|nil readable file path on this device
 function LightHouse:localBookPathFor(entry)
     if type(entry) ~= "table" then return nil end
+    local owned = Ownership.resolve(G_reader_settings, entry, function(path)
+        return Sidecar.bookExists(path)
+    end)
+    if owned ~= nil then return owned end
     local candidates = {}
     local direct = Status.str(entry.book_path)
     if direct ~= "" then candidates[#candidates + 1] = direct end
@@ -2719,6 +2778,12 @@ function LightHouse:runBatchDownloads(items, options, on_complete)
         formatMessage = T,
         gettext = _,
         lfs = lfs,
+        -- Every batch item that carries a book id is written to the ownership
+        -- ledger as it lands, so a volume pulled in a series or queue batch is
+        -- owned by id exactly like a single download from the detail screen.
+        record_owned = function(book_id, filepath)
+            Ownership.record(G_reader_settings, { book_id = book_id }, filepath)
+        end,
     }, items, options, on_complete)
 end
 
@@ -2793,6 +2858,7 @@ function LightHouse:downloadQueuedBooks(options)
         if label == "" then label = _("Untitled") end
         batch_items[#batch_items + 1] = {
             key = entry.key,
+            book_id = Status.num(entry.book_id),
             label = label,
             url = url,
             filepath = dir .. "/" .. buildFilename(entry),
@@ -2820,7 +2886,8 @@ function LightHouse:downloadQueuedBooks(options)
             notice(T(_("Downloaded %1 queued book(s)."), tostring(res.downloaded)), 4)
         else
             notice(T(_("Downloaded %1 of %2 queued book(s) (%3 failed; kept in queue)."),
-                tostring(res.downloaded), tostring(res.total), tostring(res.failed)), 5)
+                tostring(res.downloaded), tostring(res.total), tostring(res.failed))
+                .. describeBatchFailures(res), 8)
         end
     end)
     return #batch_items
@@ -3024,6 +3091,7 @@ function LightHouse:downloadSeriesBooks(series_name, loaded_entries)
         if vol_title == "" then vol_title = _("Untitled") end
         batch_items[#batch_items + 1] = {
             key = item.entry.download_href,
+            book_id = Status.num(item.entry.book_id),
             label = vol_title,
             url = item.entry.download_href,
             filepath = item.filepath,
@@ -3045,13 +3113,15 @@ function LightHouse:downloadSeriesBooks(series_name, loaded_entries)
                     self:indexBookFiles(res.newly_downloaded)
                 end
                 if res.cancelled then
-                    notice(T(_("Cancelled after downloading %1 of %2 volume(s) of “%3”."),
-                        tostring(res.downloaded), tostring(res.total), target_series), 5)
+                    notice(T(_("Cancelled after downloading %1 of %2 volume(s) of “%3” (%4 still pending)."),
+                        tostring(res.downloaded), tostring(res.total), target_series,
+                        tostring(res.pending or 0)), 5)
                 elseif res.failed == 0 then
                     notice(T(_("Downloaded %1 volume(s) of “%2”."), tostring(res.downloaded), target_series), 4)
                 else
                     notice(T(_("Downloaded %1 of %2 volume(s) (%3 failed)."),
-                        tostring(res.downloaded), tostring(res.total), tostring(res.failed)), 5)
+                        tostring(res.downloaded), tostring(res.total), tostring(res.failed))
+                        .. describeBatchFailures(res), 8)
                 end
             end)
         end,
@@ -4710,6 +4780,9 @@ function LightHouse:startDownload(entry, filepath)
     forgetSidecarList()
     Queue.remove(G_reader_settings, entry)
     self:indexBookFiles({ filepath })
+    -- The ledger is what will still say "owned" after Calibre renames this
+    -- volume, so it is written from the id the entry carries, never the name.
+    Ownership.record(G_reader_settings, entry, filepath)
 
     UIManager:show(squareWidget(require("ui/widget/confirmbox"), {
         text = T(_("Saved to:\n%1"), filepath),
@@ -5017,6 +5090,7 @@ function LightHouse:syncMissingActiveBooks()
         if title == "" then title = _("Untitled") end
         batch_items[#batch_items + 1] = {
             key = "id:" .. tostring(book_id),
+            book_id = book_id,
             label = title,
             url = Client.buildUrl(config, string.format("/api/books/%d/download/epub", book_id)),
             filepath = dir .. "/" .. buildFilename(entry),
@@ -5045,7 +5119,8 @@ function LightHouse:syncMissingActiveBooks()
                     notice(T(_("Downloaded %1 active book(s)."), tostring(res.downloaded)), 4)
                 else
                     notice(T(_("Downloaded %1 of %2 active book(s) (%3 failed)."),
-                        tostring(res.downloaded), tostring(res.total), tostring(res.failed)), 5)
+                        tostring(res.downloaded), tostring(res.total), tostring(res.failed))
+                        .. describeBatchFailures(res), 8)
                 end
                 self:showReading{ page = 1, refresh = true }
             end)
@@ -5149,6 +5224,9 @@ function LightHouse:deleteLocalBook(item, on_done)
             if type(ffiUtil.purgeDir) == "function" then
                 pcall(ffiUtil.purgeDir, book_path .. Sidecar.SIDECAR_SUFFIX)
             end
+            -- A deleted book must also leave the ownership ledger, or the
+            -- title would read as present on this device for ever.
+            Ownership.forgetPath(G_reader_settings, book_path)
             self:forgetShelf()
             self.local_scan = nil
             self.local_index = nil
