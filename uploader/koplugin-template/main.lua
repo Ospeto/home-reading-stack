@@ -1028,11 +1028,14 @@ function LightHouse:scheduleProgressiveCovers(entries, owner_level, model, plan,
 
         local fetched_this_batch = 0
         local stop_at = math.min(cursor + batch_size - 1, #pending)
+        local changed = {}
         for idx = cursor, stop_at do
             local ok_cover = pcall(self.fetchOneCover, self, pending[idx], started)
             if ok_cover then
                 fetched_this_batch = fetched_this_batch + 1
                 total_fetched = total_fetched + 1
+                local cover_id = Status.num(pending[idx].book_id)
+                if cover_id then changed[cover_id] = true end
             end
         end
         cursor = stop_at + 1
@@ -1040,14 +1043,38 @@ function LightHouse:scheduleProgressiveCovers(entries, owner_level, model, plan,
         if fetched_this_batch > 0 and self._cover_gen == gen and self.page
             and Nav.top(self:navStack()) == owner_level
             and not self.overflow_menu and not self.menu then
-            local prev_focus = self.page.focus_index
-            self:showPage(model, plan, page_handlers)
-            if prev_focus and self.page and type(self.page.focus_panels) == "table"
-                and self.page.focus_panels[prev_focus] then
-                self.page.focus_index = prev_focus
+            -- Swap the new images into the frames that are already on the glass
+            -- and invalidate only those boxes. Four covers arriving used to
+            -- rebuild all six rows and repaint the whole panel - three full-panel
+            -- flashes per page turn on e-ink, which is exactly the kind of
+            -- blinking this plugin exists to avoid. The frames are fixed-size
+            -- holes, so the image drops in without moving a single row.
+            local applied = 0
+            for cover_id in pairs(changed) do
+                if type(self.page.applyCover) == "function" then
+                    local ok_apply, count = pcall(self.page.applyCover, self.page, cover_id)
+                    applied = applied + ((ok_apply and tonumber(count)) or 0)
+                end
+            end
+            local rects = {}
+            if applied > 0 and type(self.page.coverRects) == "function" then
+                local ok_rects, got = pcall(self.page.coverRects, self.page, changed)
+                if ok_rects and type(got) == "table" then rects = got end
             end
             if type(UIManager.setDirty) == "function" and self.page then
-                pcall(UIManager.setDirty, UIManager, self.page, "ui")
+                if #rects > 0 then
+                    -- Per-rect invalidation: the e-ink panel is only asked to
+                    -- refresh the cover boxes that actually changed.
+                    for rect_index = 1, #rects do
+                        pcall(UIManager.setDirty, UIManager, self.page, "ui", rects[rect_index])
+                    end
+                else
+                    -- No painted geometry recorded (a build whose frames never
+                    -- reported a position): fall back to the honest answer,
+                    -- which is the whole page. Never a partial refresh that
+                    -- leaves a stale placeholder behind.
+                    pcall(UIManager.setDirty, UIManager, self.page, "ui")
+                end
             end
         end
 
@@ -1829,6 +1856,11 @@ function LightHouse:pageLabels()
         finished_reclaimable_singular = _("%s in 1 finished book"),
         no_finished_local = _("No finished books on device"),
         remove_short = _("Remove"),
+        in_queue = _("Queued"),
+        downloading = _("Downloading %1 of %2"),
+        batch_done = _("Downloaded %1 of %2"),
+        batch_stopped = _("Stopped after %1 of %2"),
+        overflow_empty = _("No actions for this screen"),
     }
 end
 
@@ -1978,6 +2010,46 @@ function LightHouse:closeOverflow()
     end
 end
 
+--- Locks the plugin to portrait for as long as one of its pages is up.
+--
+-- Every screen here is composed for a tall, narrow panel: the list is six rows
+-- in portrait and five in landscape, and the stats page loses two of its three
+-- reading rows the moment the device is turned. Rather than plan two different
+-- layouts for every screen, the plugin holds the panel upright while it is open
+-- and hands the reader's own orientation back when they leave. Nothing is
+-- written to settings, so a device left in landscape is in landscape again the
+-- moment the plugin is closed.
+-- @treturn boolean locked true when the panel is (or was already) portrait
+function LightHouse:lockPortrait()
+    local screen = Device and Device.screen
+    if type(screen) ~= "table" then return false end
+    if type(screen.setRotationMode) ~= "function" then return false end
+    local portrait = screen.ORIENTATION_PORTRAIT
+    if portrait == nil then return false end
+    -- Remembered once, so a second page in the same visit does not overwrite
+    -- the reader's original orientation with the one this plugin imposed.
+    if self._rotation_saved == nil and type(screen.getRotationMode) == "function" then
+        local ok_get, mode = pcall(screen.getRotationMode, screen)
+        self._rotation_saved = ok_get and mode or false
+    elseif self._rotation_saved == nil then
+        self._rotation_saved = false
+    end
+    local ok_set = pcall(screen.setRotationMode, screen, portrait)
+    return ok_set == true
+end
+
+--- Gives the reader back the orientation they had before the plugin opened.
+-- @treturn boolean restored true when a saved orientation was restored
+function LightHouse:restoreRotation()
+    local screen = Device and Device.screen
+    local saved = self._rotation_saved
+    self._rotation_saved = nil
+    if saved == nil or saved == false then return false end
+    if type(screen) ~= "table" or type(screen.setRotationMode) ~= "function" then return false end
+    local ok_set = pcall(screen.setRotationMode, screen, saved)
+    return ok_set == true
+end
+
 --- Leaves the plugin, the way Back at the top level always has.
 function LightHouse:exitPlugin()
     self:closeOverflow()
@@ -1985,6 +2057,10 @@ function LightHouse:exitPlugin()
     self.menu = nil
     self:dismissWidget(self.page)
     self.page = nil
+    -- The panel goes back to the orientation the reader had it in. This is the
+    -- one thing a visit to the plugin changes about the device, and it is
+    -- changed back on the way out rather than left for the reader to notice.
+    self:restoreRotation()
     -- Nothing of this visit outlives it: a later visit starts at a top level
     -- rather than inheriting a chain the reader has already left.
     self.library_state = nil
@@ -2005,6 +2081,9 @@ end
 function LightHouse:showPage(model, plan, handlers)
     handlers = handlers or {}
     self:closeOverflow()
+    -- A page of this plugin is composed for a portrait panel, so the panel is
+    -- held upright for as long as one of these pages is up.
+    self:lockPortrait()
     -- A page is a whole screen, so a menu left over from a level the reader has
     -- left must not stay on the glass behind it. Closing it is not a step up:
     -- the level stack already says where the reader is.
@@ -2043,10 +2122,21 @@ function LightHouse:showPage(model, plan, handlers)
         return nil
     end
     self.page = page
+    -- What this screen was asked to draw, kept so a background job that changes
+    -- one band can redraw the page without re-asking the catalog. A library
+    -- download moves once per volume; re-fetching the whole listing to move a
+    -- progress bar would spend the request budget on the reader's patience.
+    local top_level = Nav.top(self:navStack())
+    self._page_state = {
+        model = model,
+        plan = plan,
+        handlers = handlers,
+        kind = top_level and Status.str(top_level.kind) or "",
+    }
     -- The level owns the screen it drew: a menu opened over this page is gone
     -- when the page is, and a step back onto this level needs no redraw while
     -- the widget is still on the glass.
-    local level = Nav.top(self:navStack())
+    local level = top_level
     if level then level.widget = page end
     -- The model is kept on the plugin, not only inside the widget: it is what
     -- the screen was asked to draw, and the off-device suite asserts it (a
@@ -2068,58 +2158,81 @@ function LightHouse:showPage(model, plan, handlers)
     return page
 end
 
---- The overflow sheet behind the header's ⋮.
--- Offers unified in-app navigation across Library / Reading / Highlights / Stats
--- plus refresh, sort/filter, jump, covers toggle and connection details.
+--- The overflow screen behind the header's ⋮, as a native page.
+--
+-- Every screen in the plugin is one tap away from here, and so is everything
+-- this screen can do, but they are told apart: navigation in one section, this
+-- screen's own actions in another, settings last. The old sheet was a stock
+-- dialog: seven buttons to a row about five characters wide on a 600 px panel,
+-- a title that always claimed "LightHouse library" whatever screen the reader
+-- was on, and a `Close` button whose callback was empty. It is a page now, so
+-- every action gets a full-width row with a real tap target, the title names
+-- the screen the reader came from, and Back closes it because it is a level.
 function LightHouse:showPageOverflow()
     self:closeOverflow()
     local state = self.library_state
     local ctx = self.view_context or {}
     local view_kind = state and "library" or Status.str(ctx.kind, "stats")
-    local rows = {}
-    local menu_items = {}
+    local groups = {}
 
-    local function addAction(row_table, label_text, fn, bold)
-        local wrapped = function()
-            self:closeOverflow()
-            fn()
-        end
-        row_table[#row_table + 1] = { text = label_text, callback = wrapped }
-        menu_items[#menu_items + 1] = { text = label_text, bold = bold == true, callback = wrapped }
+    -- Each action records itself against the section it belongs to.
+    local function section(heading, note)
+        local group = { heading = heading, note = note, rows = {} }
+        groups[#groups + 1] = group
+        return group
+    end
+    local function addAction(group, label_text, fn, options)
+        options = type(options) == "table" and options or {}
+        group.rows[#group.rows + 1] = {
+            title = label_text,
+            secondary = options.secondary,
+            value = options.value,
+            bold = options.bold == true,
+            action = {
+                kind = "overflow_action",
+                run = function()
+                    self:closeOverflow()
+                    fn()
+                end,
+            },
+        }
     end
 
     -- Unified in-app navigation across the plugin's screens.
-    local nav_row = {}
+    local nav = section(_("Go to"), nil)
     if view_kind ~= "library" then
-        addAction(nav_row, _("Library"), function()
+        addAction(nav, _("Library"), function()
             self:openLibrary{ mode = "books", page = 1, query = "", title = "", series_name = "" }
-        end)
+        end, { value = Ui.GLYPH.chevron })
     end
     if view_kind ~= "reading" then
-        addAction(nav_row, _("Currently reading"), function() self:showReading() end)
+        addAction(nav, _("Currently reading"), function() self:showReading() end,
+            { value = Ui.GLYPH.chevron })
     end
     if view_kind ~= "highlights" or ctx.record ~= nil then
-        addAction(nav_row, _("Highlights"), function() self:showHighlights() end)
+        addAction(nav, _("Highlights"), function() self:showHighlights() end,
+            { value = Ui.GLYPH.chevron })
     end
     if view_kind ~= "stats" then
-        addAction(nav_row, _("Reading stats"), function() self:showStats() end)
+        addAction(nav, _("Reading stats"), function() self:showStats() end,
+            { value = Ui.GLYPH.chevron })
     end
     if view_kind ~= "storage" then
-        addAction(nav_row, _("Device storage"), function() self:showStorage() end)
+        addAction(nav, _("Device storage"), function() self:showStorage() end,
+            { value = Ui.GLYPH.chevron })
     end
-    if #nav_row > 0 then rows[#rows + 1] = nav_row end
 
-    -- Current-screen actions.
-    local action_row = {}
+    -- This screen's own actions.
+    local actions = section(_("This screen"), nil)
     if state then
-        addAction(action_row, _("Refresh"), function()
+        addAction(actions, _("Refresh"), function()
             self:openLibrary{ page = state.page, refresh = true }
-        end, true)
-        addAction(action_row, _("Search"), function() self:showSearchDialog() end)
+        end, { bold = true })
+        addAction(actions, _("Search"), function() self:showSearchDialog() end)
         if state.mode == "books" then
-            addAction(action_row, _("Sort & Filter"), function() self:showSortFilterDialog() end)
+            addAction(actions, _("Sort & Filter"), function() self:showSortFilterDialog() end)
             if Status.str(state.series_name) ~= "" then
-                addAction(action_row, _("Download entire series"), function()
+                addAction(actions, _("Download entire series"), function()
                     self:downloadSeriesBooks(state.series_name)
                 end)
             end
@@ -2128,24 +2241,24 @@ function LightHouse:showPageOverflow()
             if grouping and grouping.groups then
                 local plan = self:libraryPlan(state.query == "")
                 local page_size = math.max(math.min(plan.rows, pageSize()), 1)
-                addAction(action_row, _("Jump A–Z"), function()
+                addAction(actions, _("Jump A–Z"), function()
                     self:showLetterJumpDialog(grouping.groups, page_size)
                 end)
             end
         end
         if (self._missing_active_count or 0) > 0 then
-            addAction(action_row, T(_("Sync (%1)"), tostring(self._missing_active_count)), function()
+            addAction(actions, T(_("Sync (%1)"), tostring(self._missing_active_count)), function()
                 self:syncMissingActiveBooks()
             end)
         end
         local q_count = Queue.count(G_reader_settings)
         if q_count > 0 then
-            addAction(action_row, T(_("Queue (%1)"), tostring(q_count)), function()
+            addAction(actions, T(_("Queue (%1)"), tostring(q_count)), function()
                 self:showDownloadQueue()
             end)
         end
     else
-        addAction(action_row, _("Refresh"), function()
+        addAction(actions, _("Refresh"), function()
             if view_kind == "reading" then
                 self:showReading{ page = ctx.page or 1, refresh = true }
             elseif view_kind == "highlights" then
@@ -2157,53 +2270,52 @@ function LightHouse:showPageOverflow()
             else
                 self:showStats()
             end
-        end, true)
+        end, { bold = true })
         if view_kind == "reading" then
-            addAction(action_row, _("Sync missing books"), function() self:syncMissingActiveBooks() end)
+            addAction(actions, _("Sync missing books"), function() self:syncMissingActiveBooks() end)
         elseif view_kind == "highlights" then
-            addAction(action_row, _("Sync to Obsidian"), function() self:syncAllHighlightsToObsidian(ctx.record) end)
+            addAction(actions, _("Sync to Obsidian"), function() self:syncAllHighlightsToObsidian(ctx.record) end)
         elseif view_kind == "book" and type(ctx.entry) == "table" then
             local bid = Status.num(ctx.entry.book_id)
             if ctx.entry.download_href ~= nil or bid then
                 local in_q = Queue.has(G_reader_settings, ctx.entry)
-                addAction(action_row, in_q and _("Remove from queue") or _("Add to queue"), function()
+                addAction(actions, in_q and _("Remove from queue") or _("Add to queue"), function()
                     self:toggleBookInQueue(ctx.entry)
                 end)
             end
         end
         local q_count = Queue.count(G_reader_settings)
         if q_count > 0 then
-            addAction(action_row, T(_("Queue (%1)"), tostring(q_count)), function()
+            addAction(actions, T(_("Queue (%1)"), tostring(q_count)), function()
                 self:showDownloadQueue()
             end)
         end
-        addAction(action_row, _("Search"), function() self:showSearchDialog() end)
+        addAction(actions, _("Search"), function() self:showSearchDialog() end)
     end
-    rows[#rows + 1] = action_row
 
+    -- Grouping switch, when there are other groupings to switch to.
     if state then
-        local switch_row = {}
-        local modes = { "books", "authors", "series" }
+        local switch_group = section(_("Browse as"), nil)
         local labels = { books = _("Books"), authors = _("Authors"), series = _("Series") }
+        local modes = { "books", "authors", "series" }
         for mode_index = 1, #modes do
             local mode = modes[mode_index]
             if mode ~= state.mode or state.query ~= "" then
-                addAction(switch_row, labels[mode], function()
+                addAction(switch_group, labels[mode], function()
                     self:openLibrary{ mode = mode, page = 1, query = "", title = "", series_name = "" }
                 end)
             end
         end
-        if #switch_row > 0 then rows[#rows + 1] = switch_row end
     end
 
-    -- Settings & utility row.
-    local covers_label = self:coversEnabled()
-        and _("Covers: On")
-        or _("Covers: Off")
-    local util_row = {}
-    addAction(util_row, covers_label, function()
+    -- Settings.
+    local settings = section(_("Settings"), nil)
+    addAction(settings, _("Cover thumbnails"), function()
         self:toggleCovers()
         self._library_plan = nil
+        -- Toggling covers changes the band every row draws in, so the screen
+        -- underneath is rebuilt on the way back rather than redrawn with the
+        -- old plan.
         if state then
             self:openLibrary{ page = state.page }
         elseif view_kind == "reading" then
@@ -2217,35 +2329,70 @@ function LightHouse:showPageOverflow()
         else
             self:showStats()
         end
-    end)
-    addAction(util_row, _("Update"), function()
+    end, { value = self:coversEnabled() and _("On") or _("Off") })
+    addAction(settings, _("Update"), function()
         self:checkForPluginUpdate()
-    end)
-    addAction(util_row, _("Connection"), function()
+    end, { value = Ui.GLYPH.chevron })
+    addAction(settings, _("Connection"), function()
         self:showConnection(Client.isConfigured(config))
-    end)
-    addAction(util_row, _("Close"), function() end)
-    rows[#rows + 1] = util_row
+    end, { value = Ui.GLYPH.chevron })
 
-    local ok_bd, ButtonDialog = pcall(require, "ui/widget/buttondialog")
-    if ok_bd and type(ButtonDialog) == "table" and type(ButtonDialog.new) == "function" then
-        local dialog = squareWidget(ButtonDialog, {
-            title = _("LightHouse library"),
-            buttons = rows,
-        })
-        self.overflow_menu = dialog
-        UIManager:show(dialog)
-        return
+    -- The title names the screen the reader is on, because that is the question
+    -- this screen answers: "what else can I do from HERE".
+    local screen_title = _("LightHouse library")
+    if state then
+        local model = self.last_page_model
+        local from_model = type(model) == "table" and Status.str(model.title) or ""
+        screen_title = from_model ~= "" and from_model or screen_title
+    elseif view_kind == "reading" then
+        screen_title = _("Currently reading")
+    elseif view_kind == "highlights" then
+        screen_title = _("Highlights")
+    elseif view_kind == "storage" then
+        screen_title = _("Device storage")
+    elseif view_kind == "book" and type(ctx.entry) == "table" then
+        local book_title = Ui.rowTitle(ctx.entry.title)
+        screen_title = book_title ~= "" and book_title or screen_title
+    elseif view_kind == "stats" then
+        screen_title = _("Reading stats")
     end
 
-    local menu = squareWidget(Menu, {
-        title = _("LightHouse library"),
-        item_table = menu_items,
-        title_multilines = true,
-        close_callback = function() self.overflow_menu = nil end,
+    -- Only the sections that drew a row: an empty "Browse as" would read as a
+    -- screen that failed to load its own options.
+    local drawn = {}
+    for group_index = 1, #groups do
+        if #groups[group_index].rows > 0 then drawn[#drawn + 1] = groups[group_index] end
+    end
+    -- One heading band per section, plus their gaps, held back before the rows
+    -- are counted: the same "reserve what is drawn above" rule the list uses
+    -- for its switch and its progress band.
+    local section_units = 0
+    if #drawn > 0 then
+        section_units = #drawn * (Ui.tokens.page_section_head_units + Ui.tokens.page_gap_units)
+    end
+    local plan = Ui.listPlan(screenWidth(), screenHeight(), screenScale(), {
+        with_switch = false,
+        with_covers = false,
+        extra_units = section_units,
+        min_rows = 3,
     })
-    self.overflow_menu = menu
-    UIManager:show(menu)
+    local labels = self:pageLabels()
+    local model = Views.overflowModel({ title = screen_title, groups = drawn }, {
+        labels = labels,
+        footer_left = _("Back"),
+        footer_right = _("Tap a row to run it"),
+    })
+    local function dispatch(action)
+        if type(action) ~= "table" then return end
+        if action.kind == "overflow_action" and type(action.run) == "function" then
+            action.run()
+        end
+    end
+    -- A level of its own, so Back dismisses the screen and returns to whatever
+    -- the reader was looking at, with that screen's state untouched.
+    self:showLevel({ kind = "overflow", key = "overflow", surface = "page" }, function()
+        self:showPage(model, plan, { on_action = dispatch })
+    end)
 end
 
 --- Resolves an existing on-device EPUB path for a catalog entry or session.
@@ -2817,6 +2964,83 @@ function LightHouse:toggleBookInQueue(entry)
     return is_queued, count
 end
 
+--- Marks a batch as running, so the list can say so.
+-- The band is drawn from this, not from the modal: the progress modal covers
+-- the screen and is dismissed the moment the reader taps, so the only place a
+-- running download stays visible is the screen it started from.
+-- @number total items in the batch
+function LightHouse:beginBatch(total)
+    self._batch_progress = { total = math.max(math.floor(tonumber(total) or 0), 0), index = 0 }
+    self._library_plan = nil
+    -- The band is planned in, so the list has to be laid out again to make room
+    -- for it: the page the reader started the batch from is the one that will
+    -- still be on the glass when the modal is dismissed, and a bar that only
+    -- appears after the download finished would be a progress bar for a finished
+    -- job.
+    if self.page and self.library_state then self:redrawLibrary() end
+end
+
+--- Clears the running-batch state and redraws what said it was running.
+-- Both halves matter: a stale band would keep claiming a download after it
+-- finished, and a list left un-redrawn would keep showing the rows the batch
+-- just changed - a volume that landed still reading "Unread".
+-- The order is invalidate, index, redraw: the index is built from the files the
+-- batch just wrote, so clearing the caches after building it would throw the new
+-- index away and leave Series and Authors a book short.
+-- @tparam[opt] table newly_downloaded file paths the batch wrote
+-- @treturn boolean true when a library page was redrawn
+function LightHouse:finishBatch(newly_downloaded)
+    local was_running = self._batch_progress ~= nil
+    self._batch_progress = nil
+    self._library_plan = nil
+    self:forgetShelf()
+    self:forgetCatalogCaches()
+    self.local_scan = nil
+    self.local_index = nil
+    forgetSidecarList()
+    if type(newly_downloaded) == "table" and #newly_downloaded > 0 then
+        pcall(function() self:indexBookFiles(newly_downloaded) end)
+    end
+    -- Every row is re-merged with the records the batch just wrote, and the
+    -- catalog document is already cached, so this redraw costs no request.
+    return self:redrawLibrary() or was_running
+end
+
+--- The batch options a download runs with, plus its progress hook.
+-- @tparam[opt] table options caller options
+-- @treturn table options with `on_progress` attached
+function LightHouse:batchOptions(options)
+    local merged = {}
+    if type(options) == "table" then
+        for key, value in pairs(options) do merged[key] = value end
+    end
+    merged.on_progress = function(index, total, label)
+        self:onBatchProgress(index, total, label)
+    end
+    return merged
+end
+
+--- Advances the running-batch band without leaving the modal.
+-- @number index 1-based item the batch is on
+-- @number total items in the batch
+-- @string label the volume in flight
+function LightHouse:onBatchProgress(index, total, label)
+    if type(self._batch_progress) ~= "table" then return end
+    self._batch_progress.index = math.max(math.floor(tonumber(index) or 0), 0)
+    self._batch_progress.total = math.max(math.floor(tonumber(total) or 0), 0)
+    self._batch_progress.label = Status.str(label)
+    -- Redraw the band already on the page instead of walking the whole list
+    -- again: the batch is running behind the modal, and the reader sees the
+    -- screen they started from only when they dismiss it. Rebuilding the page
+    -- from the plan and handlers it was built with keeps the rows, the covers
+    -- and the scroll state exactly where the reader left them.
+    local page_state = self._page_state
+    if type(page_state) ~= "table" or page_state.kind ~= "library" then return end
+    page_state.model.progress = self:batchProgressModel()
+    if not self.page then return end
+    self:showPage(page_state.model, page_state.plan, page_state.handlers)
+end
+
 --- Downloads all books in the persistent "Download Later" queue.
 -- Keeps any failed or cancelled items in the queue for one-tap resume.
 -- @tparam[opt] table options forwarded to `runBatchDownloads`
@@ -2866,18 +3090,15 @@ function LightHouse:downloadQueuedBooks(options)
         }
     end
 
-    self:runBatchDownloads(batch_items, options, function(res)
+    self:beginBatch(#batch_items)
+    self:runBatchDownloads(batch_items, self:batchOptions(options), function(res)
         if type(res.completed_keys) == "table" then
             Queue.removeMany(G_reader_settings, res.completed_keys)
         end
-        self:forgetShelf()
-        self:forgetCatalogCaches()
-        self.local_scan = nil
-        self.local_index = nil
-        forgetSidecarList()
-        if #(res.newly_downloaded or {}) > 0 then
-            self:indexBookFiles(res.newly_downloaded)
-        end
+        -- The queue changed, and so did the rows: the band goes, the list is
+        -- redrawn from the same state, and a volume that landed no longer reads
+        -- "Unread".
+        self:finishBatch(res.newly_downloaded)
         if res.cancelled then
             local left = Queue.count(G_reader_settings)
             notice(T(_("Cancelled after downloading %1 of %2 book(s) (%3 still queued)."),
@@ -3103,15 +3324,12 @@ function LightHouse:downloadSeriesBooks(series_name, loaded_entries)
         text = T(_("Download %1 missing volume(s) of “%2”?"), tostring(#missing), target_series),
         ok_text = _("Download all"),
         ok_callback = function()
-            self:runBatchDownloads(batch_items, nil, function(res)
-                self:forgetShelf()
-                self:forgetCatalogCaches()
-                self.local_scan = nil
-                self.local_index = nil
-                forgetSidecarList()
-                if #(res.newly_downloaded or {}) > 0 then
-                    self:indexBookFiles(res.newly_downloaded)
-                end
+            self:beginBatch(#batch_items)
+            self:runBatchDownloads(batch_items, self:batchOptions(nil), function(res)
+                -- A whole series landing is the case where the list most needs
+                -- redrawing: every row the reader is looking at just stopped
+                -- being a download and became a book on this device.
+                self:finishBatch(res.newly_downloaded)
                 if res.cancelled then
                     notice(T(_("Cancelled after downloading %1 of %2 volume(s) of “%3” (%4 still pending)."),
                         tostring(res.downloaded), tostring(res.total), target_series,
@@ -3377,24 +3595,91 @@ end
 --- Layout of the library page, cached per screen SIZE, covers toggle and switch visibility.
 -- Keyed on the screen, not just cached once: a reader who rotates the device
 -- or toggles covers gets a plan for the new geometry instead of the old one.
+-- A running batch reserves its own band, so the flag is part of the key too:
+-- the plan changes shape the moment a batch starts or finishes.
 -- @boolean[opt] with_switch default true
+-- @boolean[opt] with_progress default: true while a batch is running
 -- @treturn table plan
-function LightHouse:libraryPlan(with_switch)
+function LightHouse:libraryPlan(with_switch, with_progress)
     local show_switch = with_switch ~= false
     local covers = self:coversEnabled()
+    local show_progress = with_progress
+    if show_progress == nil then show_progress = self._batch_progress ~= nil end
     local key = tostring(screenWidth()) .. "x" .. tostring(screenHeight())
         .. ":" .. tostring(covers) .. ":" .. tostring(show_switch)
+        .. ":" .. tostring(show_progress)
     if self._library_plan and self._library_plan_key == key then
         return self._library_plan
     end
     local plan = Ui.listPlan(screenWidth(), screenHeight(), screenScale(), {
         with_switch = show_switch,
         with_covers = covers,
+        with_progress = show_progress,
         min_rows = 3,
     })
     self._library_plan = plan
     self._library_plan_key = key
     return plan
+end
+
+--- The band drawn while a batch downloads, or nil when nothing is running.
+-- It names the volume in flight and how much of the batch is done, so a reader
+-- who started "Download entire series" and then looked at the list can see that
+-- something is happening without holding the progress modal open.
+-- @treturn table|nil { label, value, ratio }
+function LightHouse:batchProgressModel()
+    local batch = self._batch_progress
+    if type(batch) ~= "table" then return nil end
+    local total = math.max(math.floor(tonumber(batch.total) or 0), 0)
+    if total <= 0 then return nil end
+    local index = math.max(math.min(math.floor(tonumber(batch.index) or 0), total), 0)
+    local text = self:pageLabels()
+    local ratio = index / total
+    local line = T(text.downloading, math.min(index + 1, total), total)
+    local label = Status.str(batch.label)
+    if label ~= "" then line = line .. ": " .. label end
+    return {
+        label = line,
+        value = string.format("%d%%", math.floor(ratio * 100 + 0.5)),
+        ratio = ratio,
+    }
+end
+
+--- The keys of the volumes waiting in the download queue, as a set.
+-- A row needs one lookup, not a scan of the queue per row.
+-- @treturn table<string, boolean>
+function LightHouse:queuedKeySet()
+    local keys = {}
+    local queued = Queue.list(G_reader_settings)
+    for index = 1, #queued do
+        local key = Status.str(queued[index] and queued[index].key)
+        if key ~= "" then keys[key] = true end
+    end
+    return keys
+end
+
+--- Redraws the list the reader is looking at, in place.
+-- A batch that just landed changed two things the list asserts: whether a row
+-- is on this device and how far into it the reader is. Rebuilding the page from
+-- the same state costs no request - the catalog document is cached and paging a
+-- grouping is local - but every row is merged with the local records the batch
+-- just wrote, so a downloaded volume stops reading "Unread".
+-- @treturn boolean true when a library page was redrawn
+function LightHouse:redrawLibrary()
+    local state = self.library_state
+    if type(state) ~= "table" or not self.page then return false end
+    local level = Nav.top(self:navStack())
+    if not level or level.kind ~= "library" then return false end
+    self:openLibrary{
+        mode = state.mode,
+        page = state.page,
+        query = state.query,
+        title = state.title,
+        sort = state.sort,
+        filter = state.filter,
+        series_name = state.series_name,
+    }
+    return true
 end
 
 --- Fetches one grouping from the server, cached for this session.
@@ -3852,7 +4137,13 @@ function LightHouse:openLibrary(options)
         end
     end
 
+    -- A volume the reader put in the queue says so on its own row, so the row
+    -- answers "did I already ask for this?" without opening the queue dialog.
+    context.queued_keys = self:queuedKeySet()
     local model = Views.libraryModel(mode, context, { labels = self:pageLabels() })
+    -- A running batch draws its own planned band. Reserved in the plan, not
+    -- painted over a row, so the list shrinks by exactly the band it gained.
+    model.progress = self:batchProgressModel()
     if mode == "books" and type(model.footer) == "table" then
         local missing_cnt = self._missing_active_count or 0
         local queued_cnt = Queue.count(G_reader_settings)

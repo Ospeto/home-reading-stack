@@ -53,8 +53,19 @@ local VerticalSpan = require("ui/widget/verticalspan")
 local UIManager = require("ui/uimanager")
 
 local Ui = require("lighthouse_ui")
-
 local Page = {}
+
+--- A footer field as a string. The model is the only writer, but a footer is
+-- not worth a raise: an absent field reads as absent, never as `nil` or as
+-- `function: 0x…` on the glass.
+-- @param value any
+-- @treturn string
+local function footerText(value)
+    local kind = type(value)
+    if kind == "string" then return value end
+    if kind == "number" then return tostring(value) end
+    return ""
+end
 
 -- E-ink palette. Every one of these has a hard fallback, because a build that
 -- lacks the shade must get a readable page rather than a raise in the paint
@@ -273,6 +284,13 @@ local PageWidget = InputContainer:extend{
 -- Both plans (`Ui.pagePlan` for the statistics page, `Ui.listPlan` for the
 -- library) feed this, and they carry different bands, so every measure falls
 -- back to a section-sized value rather than assuming the other screen's plan.
+--
+-- The row title is the one face that is NOT derived from a leftover band: it
+-- comes from `Ui.rowTitlePx`, which the plan itself fills in. A band-derived
+-- height is a layout outcome, so a type size taken straight from it answers a
+-- different question than "how big must this be to read", and the old fixed
+-- 120 px ceiling made a 178 px band on a 300 dpi panel draw exactly the 22 px
+-- glyphs a 167 dpi one does - 7.4 pt of title where the reader needed 10.
 -- @tparam table plan result of a `Ui` layout function
 -- @treturn table faces
 local function buildFaces(plan)
@@ -283,9 +301,19 @@ local function buildFaces(plan)
     local band_head = math.max(math.floor((plan.band_head or section_head) * 0.66), 9)
     local hero_label = math.max(math.floor((plan.hero_label or section_head) * 0.82), 9)
     local hero_value = math.max(math.floor((plan.hero_value or header) * 0.86), 9)
-    local row_title = math.floor(math.min(plan.reading_h or plan.row_h or 88, 120) * 0.26)
+    local band = plan.reading_h or plan.row_h or 88
+    local row_title
+    if type(plan.row_title_px) == "number" and plan.row_title_px > 0 then
+        row_title = math.floor(plan.row_title_px)
+    else
+        row_title = Ui.rowTitlePx(band, scale)
+    end
     local row_small = math.max(row_title - math.floor(scale * 3), 11)
     local footer = math.max(math.floor((plan.footer or 26) * 0.6), 9)
+    --: Paragraph type. The plan carries the deliberate size (`Ui.bodyType`), so
+    --: this face is the size the line box was derived FROM and not a fraction of
+    --: whatever box was left over: 82 % fill instead of a 41 px box drawing 16 px
+    --: glyphs (39 %) on a Paperwhite 5.
     return {
         header = face("cfont", header, scale),
         title = face("cfont", math.floor(plan.header * 0.52), scale),
@@ -297,6 +325,7 @@ local function buildFaces(plan)
         row_small = face("cfont", math.max(row_small, 10), scale),
         row_value = face("cfont", math.max(row_title, 12), scale),
         footer = face("cfont", math.max(footer, 10), scale),
+        body = face("cfont", math.max(math.floor(tonumber(plan.body_px) or 0), row_small, 10), scale),
     }
 end
 
@@ -588,28 +617,22 @@ local function coverBoxFor(page, cover_id, cover_w, cover_h)
         local ok, widget = pcall(page.cover_widget, cover_id, inner_w, inner_h)
         if ok and widget then cover = widget end
     end
-    if cover then
-        return FrameContainer:new{
-            radius = Ui.tokens.corner_radius,
-            bordersize = 1,
-            padding = 0,
-            color = COLOR_BORDER,
-            CenterContainer:new{
-                dimen = Geom:new{ w = inner_w, h = inner_h },
-                cover,
-            },
-        }
-    end
+    -- The slot is recorded whether it holds an image or the placeholder, and the
+    -- box around it is the same size either way. That is what lets a cover
+    -- arrive later WITHOUT relaying out the page: the frame is already the right
+    -- size, so the image is swapped inside it and nothing on the glass moves.
+    local holder = CenterContainer:new{
+        dimen = Geom:new{ w = inner_w, h = inner_h },
+        cover or label(Ui.GLYPH.cover, page.faces.row_small, { align = "center", color = COLOR_MUTED }),
+    }
+    page:registerCoverSlot(cover_id, holder, inner_w, inner_h)
     return FrameContainer:new{
         radius = Ui.tokens.corner_radius,
         bordersize = 1,
         padding = 0,
         color = COLOR_BORDER,
-        background = COLOR_PLACEHOLDER_BG,
-        CenterContainer:new{
-            dimen = Geom:new{ w = inner_w, h = inner_h },
-            label(Ui.GLYPH.cover, page.faces.row_small, { align = "center", color = COLOR_MUTED }),
-        },
+        background = cover and nil or COLOR_PLACEHOLDER_BG,
+        holder,
     }
 end
 
@@ -717,7 +740,13 @@ function PageWidget:buildBookHero(block)
     local text_w = math.max(width - (cover_w > 0 and (cover_w + gutter) or 0), 1)
     local hero_h = math.max(plan.hero_h or cover_h, cover_h)
 
-    local title_px = math.max(math.floor(line_h * 0.72), 12)
+    -- The title is wrapped for the face it is DRAWN with, not for a size guessed
+    -- from the page's leftover band. The old code measured with
+    -- `floor(line_h * 0.72)` and then painted with `faces.row_title`, so on a K5
+    -- it allotted 51 characters a 32 px line would hold and drew them at 22 px -
+    -- 1.57x overflow, third line clipped off the glass.
+    local title_px = tonumber(plan.row_title_px)
+        or Ui.rowTitlePx(plan.reading_h or plan.row_h or line_h, plan.scale or 1)
     local title_chars = math.max(math.floor(text_w / math.max(title_px * 0.56, 6)), 14)
     local wrapped_title = Ui.wrapLines(block.title or "", title_chars, 3)
     local meta_stack = VerticalGroup:new{ align = "left" }
@@ -927,7 +956,10 @@ function PageWidget:buildTextBody(block)
             local line = lines[idx]
             lines_group[#lines_group + 1] = LeftContainer:new{
                 dimen = Geom:new{ w = width, h = line_h },
-                label(line == "" and " " or line, self.faces.row_small, {
+                -- Drawn with the same face the box was measured for. The box used
+                -- to be sized from the face and the face painted at `row_small`,
+                -- which is how a 36 px box ended up holding 17 px type.
+                label(line == "" and " " or line, self.faces.body, {
                     width = width,
                     color = body_color,
                 }),
@@ -1090,16 +1122,78 @@ end
 --- Builds the footer: a rule, then explicit Prev / Page / Next or stats footer.
 -- @tparam table self page
 -- @treturn table widget
+--- Builds the running-batch band: what is downloading and how far it has got.
+--
+-- Without this the only sign that a batch was running was a notice laid over the
+-- list, which the page then repainted away on the next cover fetch. The band is
+-- part of the plan (`Ui.listPlan`'s `with_progress`), so the list gives up a row
+-- for it rather than being painted on top of.
+-- @tparam table self page
+-- @tparam table progress { label, value, ratio, detail }
+-- @treturn table widget
+function PageWidget:buildProgress(progress)
+    local plan = self.plan
+    local width = plan.content_w
+    local band_h = math.max((plan.progress_h or plan.subline_h or 34) - plan.hairline, 1)
+    local text_h = math.max(math.floor(band_h * 0.6), 1)
+    local bar_h = math.max(band_h - text_h - math.max(math.floor(plan.gap / 4), 2), 2)
+    local value_w = math.floor(width * 0.34)
+    local label_w = math.max(width - value_w, 1)
+    local headline = HorizontalGroup:new{
+        align = "center",
+        LeftContainer:new{
+            dimen = Geom:new{ w = label_w, h = text_h },
+            label(progress.label or "", self.faces.row_small, { width = label_w, bold = true }),
+        },
+        RightContainer:new{
+            dimen = Geom:new{ w = value_w, h = text_h },
+            label(progress.value or "", self.faces.row_small, {
+                width = value_w,
+                align = "right",
+                color = COLOR_MUTED,
+            }),
+        },
+    }
+    local ratio = tonumber(progress.ratio) or 0
+    if ratio < 0 then ratio = 0 end
+    if ratio > 1 then ratio = 1 end
+    local filled = Ui.barFill(ratio, width)
+    return VerticalGroup:new{
+        align = "left",
+        rule(width, plan.hairline, COLOR_DIVIDER),
+        VerticalSpan:new{ width = math.max(math.floor(plan.gap / 4), 2) },
+        headline,
+        VerticalSpan:new{ width = math.max(math.floor(plan.gap / 4), 2) },
+        progressBar(filled, width, bar_h),
+    }
+end
+
+--- Builds the footer: a rule, then Prev / page / Next with the summary beside them.
+--
+-- Three targets and two facts have to share one band, so the band is divided by
+-- role instead of by halves: Prev and Next keep a quarter each, and the centre
+-- quarter is split between the page number and the right-hand summary. The old
+-- split read `footer.next or footer.right`, so on every paged screen the right
+-- quarter repeated the page number and the summary - "All books", "Grouped by
+-- series", "%1 missing · %2 queued" - was never drawn at all. The page number
+-- printed twice and the one line that told the reader what the list WAS was
+-- silently dropped on every single page.
+-- @tparam table self page
+-- @treturn table widget
 function PageWidget:buildFooter()
     local plan = self.plan
     local width = plan.content_w
     local footer = self.model.footer or {}
     local pager = self.model.pager
+    local right_text = footerText(footer.right)
 
     if pager then
-        local prev_w = math.floor(width * 0.25)
-        local next_w = math.floor(width * 0.25)
-        local center_w = math.max(width - prev_w - next_w, 1)
+        local prev_w = math.floor(width * 0.22)
+        local next_w = math.floor(width * 0.22)
+        -- The summary only takes a share when there is one to draw; a footer
+        -- with no summary keeps the page number centred.
+        local summary_w = right_text ~= "" and math.floor(width * 0.28) or 0
+        local center_w = math.max(width - prev_w - next_w - summary_w, 1)
         local has_prev = pager.has_prev == true
         local has_next = pager.has_next == true
 
@@ -1128,7 +1222,7 @@ function PageWidget:buildFooter()
         local right_panel = Panel:new{
             child = RightContainer:new{
                 dimen = Geom:new{ w = next_w, h = plan.footer },
-                label(footer.next or footer.right or "", self.faces.footer, {
+                label(footer.next or "", self.faces.footer, {
                     bold = has_next,
                     color = has_next and COLOR_BLACK or COLOR_DIVIDER,
                     width = next_w,
@@ -1140,10 +1234,31 @@ function PageWidget:buildFooter()
         self:register(prev_panel)
         self:register(center_panel)
         self:register(right_panel)
+        local row = HorizontalGroup:new{ align = "center", prev_panel, center_panel }
+        if summary_w > 0 then
+            local summary_panel = Panel:new{
+                child = CenterContainer:new{
+                    dimen = Geom:new{ w = summary_w, h = plan.footer },
+                    label(right_text, self.faces.footer, {
+                        color = COLOR_MUTED,
+                        width = summary_w,
+                        align = "center",
+                    }),
+                },
+                action = { kind = "page_jump", pager = pager },
+            }
+            self:register(summary_panel)
+            row[#row + 1] = summary_panel
+        end
+        row[#row + 1] = right_panel
+        -- What the footer says, for the renderer-level assertion: every label
+        -- this footer drew is recorded, so a test can prove the summary reached
+        -- the glass instead of trusting that the model carried it.
+        self.footer_labels = { left = footer.prev or footer.left or "", center = footer.center or footer.left or "", summary = right_text, next = footer.next or "" }
         return VerticalGroup:new{
             align = "left",
             rule(width, plan.hairline, COLOR_DIVIDER),
-            HorizontalGroup:new{ align = "center", prev_panel, center_panel, right_panel },
+            row,
         }
     end
 
@@ -1154,6 +1269,7 @@ function PageWidget:buildFooter()
         color = COLOR_MUTED,
         align = "right",
     })
+    self.footer_labels = { left = footer.left or "", right = footer.right or "" }
     return VerticalGroup:new{
         align = "left",
         rule(width, plan.hairline, COLOR_DIVIDER),
@@ -1172,6 +1288,84 @@ function PageWidget:register(panel)
     self.panels = self.panels or {}
     self.panels[#self.panels + 1] = panel
     return panel
+end
+
+--- Records a cover frame so an image can be swapped into it later.
+-- The holder's `paintTo` is wrapped to remember where it was last painted, so a
+-- cover that arrives after the page was drawn can invalidate its own rectangle
+-- instead of the whole panel. That is the difference between a screen that
+-- flickers once per four covers and one that only repaints four small boxes.
+-- @param cover_id number|nil book the slot belongs to
+-- @tparam table holder the CenterContainer inside the frame
+-- @number w inner width the image was sized for
+-- @number h inner height the image was sized for
+function PageWidget:registerCoverSlot(cover_id, holder, w, h)
+    self.cover_slots = self.cover_slots or {}
+    local slot = { id = cover_id, holder = holder, w = w, h = h }
+    self.cover_slots[#self.cover_slots + 1] = slot
+    if type(holder.paintTo) == "function" then
+        local base_paint = holder.paintTo
+        holder.paintTo = function(inner, bb, x, y)
+            slot.x, slot.y = x, y
+            return base_paint(inner, bb, x, y)
+        end
+    end
+    return slot
+end
+
+--- The screen rectangles of every cover frame that has been painted.
+-- Used to invalidate just the boxes a cover swap touched. A slot that has never
+-- been painted has no coordinates and is left out; the caller falls back to the
+-- whole page in that case.
+-- @tparam[opt] table ids set of book ids to include; all slots when omitted
+-- @treturn table array of Geom rectangles
+function PageWidget:coverRects(ids)
+    local rects = {}
+    local slots = self.cover_slots
+    if type(slots) ~= "table" then return rects end
+    for slot_index = 1, #slots do
+        local slot = slots[slot_index]
+        local wanted = ids == nil or (slot.id ~= nil and ids[slot.id] == true)
+        if wanted and type(slot.x) == "number" and type(slot.y) == "number" then
+            -- Two pixels of slack cover the frame's own border, so the box the
+            -- cover sits in is repainted with the image inside it.
+            local inset = 2
+            rects[#rects + 1] = Geom:new{
+                x = slot.x - inset,
+                y = slot.y - inset,
+                w = slot.w + 2 * inset,
+                h = slot.h + 2 * inset,
+            }
+        end
+    end
+    return rects
+end
+
+--- Swaps a fetched cover into every frame already holding that book's placeholder.
+-- The frame's inner box is the size the image was fetched for, so this replaces
+-- the contents of a fixed-size hole: no row moves, no face is rebuilt and the
+-- page does not have to be laid out again. It is what makes a cover arriving
+-- after the first paint cheap - the alternative was rebuilding all six rows and
+-- repainting the whole e-ink panel once per four covers.
+-- @param cover_id number|nil
+-- @treturn number frames updated
+function PageWidget:applyCover(cover_id)
+    if cover_id == nil or type(self.cover_widget) ~= "function" then return 0 end
+    local slots = self.cover_slots
+    if type(slots) ~= "table" then return 0 end
+    local applied = 0
+    for slot_index = 1, #slots do
+        local slot = slots[slot_index]
+        if slot.id == cover_id then
+            local ok, widget = pcall(self.cover_widget, cover_id, slot.w, slot.h)
+            if ok and widget then
+                slot.holder[1] = widget
+                if slot.holder.resetLayout then slot.holder:resetLayout() end
+                applied = applied + 1
+            end
+        end
+    end
+    return applied
 end
 
 --- Records a content row the key cycle can land on and returns it.
@@ -1274,6 +1468,13 @@ function PageWidget:init()
             end
             content[#content + 1] = sub_row
         end
+    end
+
+    -- A running batch gets its own band: one label saying which volume is in
+    -- flight and a bar saying how far the batch has got. It is a planned band,
+    -- not an overlay, so it never paints over the first row of the list.
+    if type(self.model.progress) == "table" then
+        content[#content + 1] = self:buildProgress(self.model.progress)
     end
 
     local section_gap = plan.section_gap or math.max(math.floor((plan.gap or 8) / 2), 2)
@@ -1448,20 +1649,64 @@ end
 function PageWidget:onTapSelect(event_arg, ges)
     if type(ges) ~= "table" or ges.pos == nil then ges = event_arg end
     if not ges or not ges.pos or not self.panels then return false end
-    for panel_index = #self.panels, 1, -1 do
-        local panel = self.panels[panel_index]
-        if panel.dimen and ges.pos:intersectWith(panel.dimen) then
-            if panel.focus_line then
-                if self.focus_index and self.focus_panels and self.focus_panels[self.focus_index] then
-                    self.focus_panels[self.focus_index]:setFocused(false)
+    local hit = self:panelAt(ges.pos)
+    if not hit then return false end
+    if hit.focus_line then
+        if self.focus_index and self.focus_panels and self.focus_panels[self.focus_index] then
+            self.focus_panels[self.focus_index]:setFocused(false)
+        end
+        hit:setFocused(true)
+    end
+    self:run(hit.action)
+    return true
+end
+
+--- The panel a point lands on: exact rectangles first, then a forgiving halo.
+--
+-- The exact pass is the contract and stays first, so a tap inside two adjacent
+-- rows still picks the one it is actually in. What the halo adds is the miss
+-- that used to be swallowed in silence: the footer controls and the grouping
+-- switch are the smallest things on the page, and a tap a millimetre above or
+-- below one of them hit nothing at all - the page did not even register the
+-- touch, so the reader concluded the plugin was broken. The halo never overrides
+-- an exact hit, and the panel whose body is nearest the touch wins, so a miss
+-- between two rows goes to the closer one rather than to whichever was
+-- registered last.
+-- @tparam table pos Geom point
+-- @treturn table|nil panel
+function PageWidget:panelAt(pos)
+    local panels = self.panels or {}
+    for panel_index = #panels, 1, -1 do
+        local panel = panels[panel_index]
+        if panel.dimen and pos:intersectWith(panel.dimen) then return panel end
+    end
+
+    local scale = (self.plan and self.plan.scale) or 1
+    local slack_y = math.max(math.floor(7 * scale + 0.5), 4)
+    local slack_x = math.max(math.floor(4 * scale + 0.5), 3)
+    local best, best_distance
+    for panel_index = #panels, 1, -1 do
+        local panel = panels[panel_index]
+        local dimen = panel.dimen
+        if dimen then
+            local x, y = tonumber(dimen.x), tonumber(dimen.y)
+            local w, h = tonumber(dimen.w), tonumber(dimen.h)
+            if x and y and w and h then
+                local x0, y0 = x - slack_x, y - slack_y
+                local x1, y1 = x + w + slack_x, y + h + slack_y
+                local px, py = pos.x, pos.y
+                if px >= x0 and px <= x1 and py >= y0 and py <= y1 then
+                    local dx = math.max(x0 - px, px - x1, 0)
+                    local dy = math.max(y0 - py, py - y1, 0)
+                    local distance = dy * 1000 + dx
+                    if not best_distance or distance < best_distance then
+                        best, best_distance = panel, distance
+                    end
                 end
-                panel:setFocused(true)
             end
-            self:run(panel.action)
-            return true
         end
     end
-    return false
+    return best
 end
 
 --- Long-press: dispatches row quick actions when registered.

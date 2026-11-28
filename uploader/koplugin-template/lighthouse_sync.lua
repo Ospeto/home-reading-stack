@@ -343,6 +343,12 @@ function Sync.runBatchDownloads(deps, items, options, on_complete)
                     tostring(total),
                     label
                 )
+                -- The caller can draw the same fact on its own screen (the
+                -- library's progress band) instead of leaving it inside a
+                -- modal the reader has to dismiss to see anything else.
+                if type(options.on_progress) == "function" then
+                    pcall(options.on_progress, idx, total, label)
+                end
                 local ok_info, go_on = pcall(function()
                     return trapper:info(progress_text)
                 end)
@@ -421,6 +427,9 @@ function Sync.runBatchDownloads(deps, items, options, on_complete)
             tostring(total),
             label
         )
+        if type(options.on_progress) == "function" then
+            pcall(options.on_progress, idx, total, label)
+        end
         local info
         if type(UIManager) == "table" and InfoMessage ~= nil then
             info = squareWidget(InfoMessage, { text = progress_text, dismissable = false })

@@ -147,14 +147,27 @@ Ui.tokens = {
     page_section_head_units = 25,
     page_reading_units = 88,
     page_reading_min_units = 58,
-    page_list_row_units = 78,
-    page_list_compact_units = 52,
+    --: A list row's band. Sized for the TYPE, not for the count: 95 units puts
+    --: the row-title face at 10.3-12.3 pt on every shipping panel (K5 600x800 at
+    --: 167 dpi, PW3 1072x1448 at 300 dpi, PW5SE 1236x1648 at 299 dpi) and lands
+    --: SIX rows on all three. The count is what the band costs, so it is the
+    --: number that has to be chosen deliberately: seven rows of 7.4 pt type is
+    --: a page the reader cannot resolve, six rows of 10.8 pt is one they can.
+    page_list_row_units = 95,
+    --: The same row with the cover column given back to the text. Eight to nine
+    --: rows of ~11 mm, which is what makes the covers-off setting usable.
+    page_list_compact_units = 64,
     page_list_compact_min_units = 38,
     page_session_units = 56,
     page_session_min_units = 40,
-    page_footer_units = 26,
+    --: Footer band. The footer carries three tap targets plus the page number,
+    --: so it is a target height (6.7-7.7 mm) rather than the 4.0 mm strip that
+    --: held three 3.9 mm controls and read as a hairline.
+    page_footer_units = 44,
     page_bar_units = 6,
-    page_switch_units = 40,
+    --: Grouping switch. A segment is a primary control, so it is sized as one:
+    --: 7.9-9.1 mm instead of 6.0-7.0 mm.
+    page_switch_units = 52,
     page_subline_units = 30,
     page_heat_legend_units = 18,
     page_action_h_units = 36,
@@ -162,6 +175,27 @@ Ui.tokens = {
     page_quote_row_units = 104,
     page_quote_min_units = 74,
     page_detail_cover_ratio = 0.28,
+    --: Row-title type: this fraction of the band the row sits in, floored at
+    --: `page_row_title_min_units`. A row band is a layout OUTCOME, so a type
+    --: size derived from it alone answers a different question than the one the
+    --: reader asks - and the old fixed 120 px ceiling made a 178 px band on a
+    --: 300 dpi panel draw the same 22 px glyphs a 167 dpi one does, which is why
+    --: the panel with 80 % more pixels rendered type 22 % SMALLER.
+    page_row_title_ratio = 0.26,
+    page_row_title_min_units = 24,
+    --: Detail synopsis type, in title-units, and the leading multiple that turns
+    --: it into a line box. 23 units is ~10 pt on every panel; 1.2 is single
+    --: spacing, so the glyphs fill 82 % of the box instead of the 39-47 % the old
+    --: box-derived order produced (a 41 px box drawing 16 px type on a PW5SE).
+    page_body_px_units = 23,
+    page_body_lead_ratio = 1.2,
+    --: How many lines of synopsis the Detail screen spends on its legible lede.
+    --: The rest of the synopsis is one tap away in KOReader's own scroller; a
+    --: page that tries to hold all of it is a page that renders 4 pt type.
+    page_detail_lede_lines = 5,
+    --: One-line batch-download band under the sub-line: a label and a progress
+    --: bar. Only planned in while a batch is running.
+    page_progress_units = 34,
     --: Heatmap: 52 weeks of seven days, drawn as a pixel grid rather than one
     --: text row per week (the shape that made the old screen ten pages long).
     page_heat_weeks = 52,
@@ -1474,10 +1508,11 @@ end
 -- @number screen_w screen width in pixels
 -- @number screen_h screen height in pixels
 -- @number scale pixels per unit for this device (the factor main.lua derives; 1 = one unit is one pixel)
--- @tparam table[opt] options { with_switch = boolean, with_covers = boolean, min_rows = number }
+-- @tparam table[opt] options { with_switch = boolean, with_covers = boolean, min_rows = number, with_progress = boolean }
 -- @treturn table plan { scale, height, pad, content_w, header, hairline,
---                       switch_h, subline_h, footer, row_h, rows, bar, cover_w,
---                       cover_h, with_covers, total, slack }
+--                       switch_h, subline_h, progress_h, footer, row_h, rows,
+--                       row_title_px, bar, cover_w, cover_h, with_covers,
+--                       total, slack }
 function Ui.listPlan(screen_w, screen_h, scale, options)
     options = options or {}
     local tokens = Ui.tokens
@@ -1500,6 +1535,15 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
     local bar = math.max(scaled(tokens.page_bar_units), 2)
     local switch_h = options.with_switch and scaled(tokens.page_switch_units) or 0
     local subline_h = scaled(tokens.page_subline_units)
+    --: A running batch adds one band under the sub-line. It is planned in only
+    --: while it is running, so a reader who is not downloading anything pays
+    --: nothing for it - and the list shrinks by a row for the duration instead
+    --: of the bar being drawn over a row.
+    local progress_h = options.with_progress and (scaled(tokens.page_progress_units) + hairline) or 0
+    --: Height held back for something the caller draws above the rows - the
+    --: overflow screen's section headings, one band each. Given in the same
+    --: unscaled units as the tokens, so it follows the screen like they do.
+    local extra_h = options.extra_units and scaled(options.extra_units) or 0
     local target_units = with_covers and tokens.page_list_row_units or tokens.page_list_compact_units
     local row_min_units = with_covers and tokens.page_reading_min_units or tokens.page_list_compact_min_units
     local row_min = math.max(math.floor(row_min_units * s + 0.5), 24)
@@ -1512,7 +1556,7 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
 
     -- Header, the switch's own two rules, the sub-line, the footer rule and
     -- page padding are all fixed; only the row band flexes.
-    local fixed = pad + header + hairline + subline_h + footer + hairline + pad + gap
+    local fixed = pad + header + hairline + subline_h + progress_h + extra_h + footer + hairline + pad + gap
     if switch_h > 0 then fixed = fixed + switch_h + 2 * hairline end
     local available = height - fixed
     if available < 1 then available = 1 end
@@ -1551,6 +1595,8 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
         end
     end
 
+    local row_title_px = Ui.rowTitlePx(row_h, s)
+
     local total = fixed + rows * step_h
     local slack = height - total
     if slack < 0 then slack = 0 end
@@ -1566,17 +1612,64 @@ function Ui.listPlan(screen_w, screen_h, scale, options)
         hairline = hairline,
         switch_h = switch_h,
         subline_h = subline_h,
+        progress_h = progress_h,
+        extra_h = extra_h,
         section_head = scaled(tokens.page_section_head_units),
         footer = footer,
         bar = bar,
         row_h = row_h,
         rows = rows,
+        row_title_px = row_title_px,
         with_covers = with_covers,
         reading_cover_w = cover_w,
         reading_cover_h = cover_h,
         total = total,
         slack = slack,
     }
+end
+
+--- The pixel size of the row-title face for a band this tall on this device.
+--
+-- One definition, used by every plan that carries a row band, so the list, the
+-- Detail hero and the quote cards cannot drift apart again. There is no upper
+-- ceiling: the old fixed 120 px cap made a 178 px band on a 300 dpi panel draw
+-- the same 22 px glyphs a 167 dpi one did, which is why the device with 80 %
+-- more pixels rendered type 22 % SMALLER. What is bounded is the floor, because
+-- a row the reader cannot resolve is not a row.
+-- @number band_px the drawn band the type sits in
+-- @number scale pixels per unit for this device
+-- @treturn number pixel size of the row-title face
+function Ui.rowTitlePx(band_px, scale)
+    local tokens = Ui.tokens
+    local s = numberIn(scale, 1, 0.5, 4)
+    local band = tonumber(band_px) or 0
+    local floor_px = math.floor(tokens.page_row_title_min_units * s + 0.5)
+    local value = math.floor(band * tokens.page_row_title_ratio)
+    if value < floor_px then value = floor_px end
+    return value
+end
+
+--- The paragraph type sizes for a device, derived from the face and not the box.
+--
+-- `body_px` is the target face; `line_h` is the box that face sits in, and the
+-- fill fraction is therefore a property of this function rather than of
+-- whatever band happened to be left over. The old order - box first, then
+-- `max(floor(line_h * 0.58), 10)` - is what made a PW5SE draw 16 px type in a
+-- 41 px box: 39 % fill, a lede the reader could not read.
+-- @number scale pixels per unit for this device
+-- @treturn number body_px, number line_h
+function Ui.bodyType(scale)
+    local tokens = Ui.tokens
+    local s = numberIn(scale, 1, 0.5, 4)
+    local function scaled(units)
+        local value = math.floor(units * s + 0.5)
+        if value < 1 then value = 1 end
+        return value
+    end
+    local body_px = math.max(scaled(tokens.page_body_px_units), 10)
+    local lead = tonumber(tokens.page_body_lead_ratio) or 1.2
+    local line_h = math.max(math.ceil(body_px * lead), scaled(tokens.page_body_line_units))
+    return body_px, line_h
 end
 
 --- Lays out the single-screen Book Detail Card.
@@ -1611,7 +1704,19 @@ function Ui.detailPlan(screen_w, screen_h, scale, options)
     local section_head = scaled(tokens.page_section_head_units)
     local action_h = scaled(tokens.page_action_h_units)
     local action_rows = math.max(math.min(math.floor(tonumber(options.action_rows) or 1), 2), 1)
-    local line_h = scaled(tokens.page_body_line_units)
+    -- Type first, box second: the synopsis face is a legibility target and the
+    -- line box is derived from it, so the fill fraction is a property of the
+    -- design instead of whatever band was left over.
+    local body_px, line_h = Ui.bodyType(s)
+    -- The row-title face for this screen. Detail's own title is drawn with the
+    -- row-title face, and a detail card whose title renders smaller than the list
+    -- row the reader tapped is a step down in legibility at the exact moment the
+    -- reader wants the title most. So the band is a type target - 1.75 lead of the
+    -- synopsis face, floored at the list's own band including its 1.15x grow
+    -- ceiling - and the type comes from that band, never from a leftover.
+    local row_h = math.ceil(body_px * 1.75)
+    local list_band = math.ceil(scaled(tokens.page_list_row_units) * 1.15)
+    if row_h < list_band then row_h = list_band end
 
     local content_w = width - 2 * pad
     if content_w < 1 then content_w = 1 end
@@ -1647,9 +1752,15 @@ function Ui.detailPlan(screen_w, screen_h, scale, options)
     local body_overhead = section_gap + section_head + 2 * line_h
     local body_budget = available - hero_h - action_block_h - body_overhead
     local body_lines = body_budget > 0 and math.floor(body_budget / line_h) or 0
+    -- A lede, not the whole synopsis: five legible lines and one tap to
+    -- KOReader's own scroller beats fourteen lines at 4 pt. When there is room
+    -- for more than the lede the page still gives it to the lede, because the
+    -- rest of the text is what the button is for.
+    local lede_lines = math.max(math.floor(tonumber(tokens.page_detail_lede_lines) or 5), 2)
+    if body_lines > lede_lines then body_lines = lede_lines end
 
-    local body_px = math.max(math.floor(line_h * 0.58), 10)
     local body_chars = math.max(math.floor(content_w / math.max(body_px * 0.55, 6)), 20)
+    local row_title_px = Ui.rowTitlePx(row_h, s)
 
     local total = fixed + hero_h + action_block_h + section_gap + section_head + body_lines * line_h
     local slack = math.max(height - total, 0)
@@ -1670,6 +1781,9 @@ function Ui.detailPlan(screen_w, screen_h, scale, options)
         action_h = action_h,
         action_rows = action_rows,
         line_h = line_h,
+        body_px = body_px,
+        row_h = row_h,
+        row_title_px = row_title_px,
         cover_w = cover_w,
         cover_h = cover_h,
         hero_h = hero_h,
