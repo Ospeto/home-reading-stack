@@ -762,8 +762,10 @@
     .bg-amber-400\/10 { background-color: rgba(251, 191, 36, 0.10); }
     .bg-amber-400\/20 { background-color: rgba(251, 191, 36, 0.20); }
     .hover\:bg-amber-400\/20:hover { background-color: rgba(251, 191, 36, 0.20); }
+    .bg-amber-400\/30 { background-color: rgba(251, 191, 36, 0.30); }
     .border-amber-400\/25 { border-color: rgba(251, 191, 36, 0.25); }
     .border-amber-400\/30 { border-color: rgba(251, 191, 36, 0.30); }
+    .border-amber-400\/40 { border-color: rgba(251, 191, 36, 0.40); }
     .text-amber-300 { color: #fcd34d; }
     .text-amber-200 { color: #fde68a; }
     .hover\:text-amber-200:hover { color: #fde68a; }
@@ -1523,6 +1525,56 @@
     }
 
     /* ------------------------------------------------------------------
+       Ownership + series-position chips.
+
+       Two badges answer two questions, in the same shape on library cards,
+       Discover cards and the Discover modal:
+         .chip-meta      what is it?   (series position, volume extent)
+         .chip-<state>   do I own it?  (available / partial / owned / busy)
+       The ownership chip is the only badge allowed on a cover, and its state
+       word is the only place a card states ownership, so the page says "in
+       library" once instead of five times in five shapes.
+       ------------------------------------------------------------------ */
+    .chip { display: inline-flex; align-items: center; gap: 0.2rem; border-radius: 9999px; border: 1px solid transparent; padding: 0.125rem 0.375rem; font-size: 9px; font-weight: 700; line-height: 1.15; white-space: nowrap; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+    .chip-lg { padding: 0.1875rem 0.5rem; font-size: 10px; }
+    .chip-meta { background-color: rgb(0 0 0 / 0.7); border-color: rgb(255 255 255 / 0.1); color: rgb(228 228 231); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; }
+    .chip-available { background-color: rgb(56 189 248 / 0.28); border-color: rgb(56 189 248 / 0.45); color: rgb(186 230 253); }
+    .chip-partial { background-color: rgb(245 158 11 / 0.28); border-color: rgb(245 158 11 / 0.45); color: rgb(253 230 138); }
+    .chip-owned { background-color: rgb(16 185 129 / 0.28); border-color: rgb(16 185 129 / 0.45); color: rgb(167 243 208); }
+    .chip-busy { background-color: rgb(245 158 11 / 0.32); border-color: rgb(245 158 11 / 0.5); color: rgb(253 230 138); }
+    .chip-dot { width: 0.375rem; height: 0.375rem; border-radius: 9999px; background-color: currentColor; flex-shrink: 0; }
+
+    /* Genre pills live in the drawer now, where the row is bounded and scrollable, so the row
+       must state that it continues (QW5). `.fade-scroll` is that statement: a right-edge mask
+       plus a hairline scrollbar, applied only when the count exceeds the visible run. */
+    .pill-row { padding-bottom: 0.125rem; }
+    .fade-scroll {
+      -webkit-mask-image: linear-gradient(to bottom, #000 82%, transparent 100%);
+      mask-image: linear-gradient(to bottom, #000 82%, transparent 100%);
+      scrollbar-width: thin;
+      scrollbar-color: rgb(255 255 255 / 0.18) transparent;
+      overscroll-behavior: contain;
+    }
+    .fade-scroll::-webkit-scrollbar { width: 6px; }
+    .fade-scroll::-webkit-scrollbar-thumb { background-color: rgb(255 255 255 / 0.18); border-radius: 9999px; }
+    .fade-scroll::-webkit-scrollbar-track { background: transparent; }
+
+    /* QW4/QW5 on a phone: the Discover control row and the tab row are horizontal scrollers, so
+       they must state that they continue past the edge instead of clipping a chip mid-word. */
+    @media (max-width: 639px) {
+      .edge-fade-x {
+        -webkit-mask-image: linear-gradient(to right, #000 86%, transparent 100%);
+        mask-image: linear-gradient(to right, #000 86%, transparent 100%);
+      }
+    }
+
+    /* One source row in the Discover modal picker. The selected source is the one the
+       single primary download uses, so `aria-pressed` is the whole selection state. */
+    .source-pick { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.5rem 0.625rem; border-radius: 0.75rem; border: 1px solid rgb(255 255 255 / 0.1); background-color: rgb(255 255 255 / 0.03); font-size: 11px; color: rgb(212 212 216); cursor: pointer; text-align: left; transition: background-color 150ms, border-color 150ms; }
+    .source-pick:hover { background-color: rgb(255 255 255 / 0.07); }
+    .source-pick[aria-pressed="true"] { border-color: rgb(245 158 11 / 0.5); background-color: rgb(245 158 11 / 0.12); color: rgb(254 243 199); }
+
+    /* ------------------------------------------------------------------
        tailwind-gap: utilities present in markup but absent from the compiled sheet.
 
        Line 19 above is a stale compiled Tailwind (v3.4.19) build: the page is
@@ -1573,6 +1625,10 @@
     .inline { display: inline; }
     .h-0 { height: 0px; }
     .max-h-52 { max-height: 13rem; }
+    .left-1\.5 { left: 0.375rem; }
+    .max-h-56 { max-height: 14rem; }
+    .max-w-xl { max-width: 36rem; }
+    .max-w-\[calc\(100\%-12px\)\] { max-width: calc(100% - 12px); }
     .max-h-72 { max-height: 18rem; }
     .max-h-\[360px\] { max-height: 360px; }
     .max-h-\[50vh\] { max-height: 50vh; }
@@ -1583,6 +1639,8 @@
     .w-1\/3 { width: 33.333333%; }
     .w-11\/12 { width: 91.666667%; }
     .w-3\/4 { width: 75%; }
+    .w-32 { width: 8rem; }
+    .w-\[88px\] { width: 88px; }
     .w-36 { width: 9rem; }
     .w-4\/5 { width: 80%; }
     .min-w-\[16px\] { min-width: 16px; }
@@ -1601,6 +1659,9 @@
     .resize-y { resize: vertical; }
     .gap-0\.5 { gap: 0.125rem; }
     .gap-x-2 { column-gap: 0.5rem; }
+    .gap-x-3 { column-gap: 0.75rem; }
+    .gap-y-1\.5 { row-gap: 0.375rem; }
+    .gap-y-2 { row-gap: 0.5rem; }
     .gap-y-0\.5 { row-gap: 0.125rem; }
     .space-y-6 > :not([hidden]) ~ :not([hidden]) { --tw-space-y-reverse: 0; margin-top: calc(1.5rem * calc(1 - var(--tw-space-y-reverse))); margin-bottom: calc(1.5rem * var(--tw-space-y-reverse)); }
     .self-start { align-self: flex-start; }
@@ -1674,6 +1735,7 @@
     .object-top { object-position: top; }
     .py-5 { padding-top: 1.25rem; padding-bottom: 1.25rem; }
     .pl-1 { padding-left: 0.25rem; }
+    .pl-1\.5 { padding-left: 0.375rem; }
     .pl-7 { padding-left: 1.75rem; }
     .pr-0\.5 { padding-right: 0.125rem; }
     .pr-7 { padding-right: 1.75rem; }
@@ -1747,11 +1809,16 @@
       .sm\:left-auto { left: auto; }
       .sm\:right-6 { right: 1.5rem; }
       .sm\:mx-0 { margin-left: 0px; margin-right: 0px; }
+      .sm\:ml-auto { margin-left: auto; }
       .sm\:line-clamp-2 { overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
       .sm\:max-h-96 { max-height: 24rem; }
+      .sm\:max-h-72 { max-height: 18rem; }
+      .sm\:max-w-xl { max-width: 36rem; }
+      .sm\:w-32 { width: 8rem; }
       .sm\:w-48 { width: 12rem; }
       .sm\:w-56 { width: 14rem; }
       .sm\:flex-none { flex: none; }
+      .sm\:flex-wrap { flex-wrap: wrap; }
       .sm\:justify-center { justify-content: center; }
       .sm\:self-auto { align-self: auto; }
       .sm\:p-5 { padding: 1.25rem; }
@@ -2094,8 +2161,9 @@
   <header class="sticky top-0 z-40 apple-material-header border-b border-white/10 px-3 sm:px-6 transition-all shrink-0" style="padding-top: max(0.6rem, env(safe-area-inset-top, 0px)); padding-bottom: 0.6rem;">
     <div class="max-w-[1700px] mx-auto flex flex-col gap-2.5">
       
-      <!-- Top Row (Brand & Actions) -->
-      <div class="flex items-center justify-between gap-3">
+      <!-- Top Row (Brand & Actions). Wraps rather than overflows: at 390px the action cluster
+           drops to a second line instead of pushing Add past the viewport edge. -->
+      <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
         <!-- Left: Clean, minimal brand typography with muted warm gold pastel accent -->
         <div class="flex items-center gap-2.5 sm:gap-3 shrink-0">
           <div class="w-8 h-8 rounded-full bg-amber-400/10 border border-amber-400/25 text-amber-300 flex items-center justify-center font-bold text-sm shadow-sm shrink-0">
@@ -2112,7 +2180,7 @@
         </div>
 
         <!-- Right: Uniformly styled touch buttons (height 36px, rounded-full) -->
-        <div class="flex items-center gap-2 shrink-0">
+        <div class="flex flex-wrap items-center justify-end gap-2 min-w-0 ml-auto">
           <!-- Kindle USB Status Badge Pill (Shown when connected) -->
           <button id="kindleStatusBtn" onclick="openKindleModal()" class="hidden h-9 px-3 rounded-full text-amber-300 hover:text-amber-200 bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/25 transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-[0.96] shadow-sm backdrop-blur-md animate-pulse" title="Kindle Connected over USB">
             <svg class="w-4 h-4 text-amber-300"><use href="#icon-tablet"/></svg>
@@ -2150,8 +2218,9 @@
         </div>
       </div>
 
-      <!-- Second Row (Full-Width Search Bar) -->
-      <div class="w-full">
+      <!-- Second Row (Full-Width Search Bar). Hidden on Discover: that surface owns its own
+           catalogue search and a second, wider library search next to it read as one control. -->
+      <div id="headerSearchRow" class="w-full">
         <div class="relative flex items-center">
           <div class="absolute inset-y-0 left-0 pl-3.5 sm:pl-4 flex items-center pointer-events-none text-zinc-400">
             <svg class="w-4.5 h-4.5 sm:w-5 sm:h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" x2="16.65" y1="21" y2="16.65"></line></svg>
@@ -2312,84 +2381,71 @@
       </div>
 
       <!-- DISCOVER SHELF (TRENDING & NEW RELEASES) -->
-      <div id="discoverView" class="hidden flex-1 flex flex-col space-y-4 w-full">
-        <!-- Top Segmented Pill Toggle: Trending vs New Releases (STRICTLY NOT COMBINED) -->
-        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-white/5">
-          <!-- Segmented Toggle -->
-          <div class="inline-flex items-center bg-zinc-900/90 border border-white/10 rounded-full p-1 shadow-lg gap-1 self-start sm:self-auto" role="tablist" aria-label="Discover Feeds">
-            <button onclick="switchDiscoverTab('trending')" id="discoverTabTrending" role="tab" aria-selected="true" class="discover-tab discover-tab-active px-4 py-1.5 rounded-full text-xs font-bold transition-all duration-150 flex items-center gap-1.5 cursor-pointer active:scale-[0.96]" title="Browse Trending Light Novels">
-              <span>Trending</span>
-              <span id="discoverTrendingBadge" class="px-1.5 py-0.5 rounded-full text-[10px] font-mono font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30">0</span>
-            </button>
-            <button onclick="switchDiscoverTab('new_releases')" id="discoverTabNewReleases" role="tab" aria-selected="false" class="discover-tab px-4 py-1.5 rounded-full text-xs font-bold text-zinc-400 hover:text-white transition-all duration-150 flex items-center gap-1.5 cursor-pointer active:scale-[0.96]" title="Browse New Light Novel Releases">
-              <span>New Releases</span>
-              <span id="discoverNewReleasesBadge" class="px-1.5 py-0.5 rounded-full text-[10px] font-mono font-medium bg-white/10 text-zinc-300 border border-white/10">0</span>
-            </button>
-            <button onclick="switchDiscoverTab('all')" id="discoverTabAll" role="tab" aria-selected="false" class="discover-tab px-4 py-1.5 rounded-full text-xs font-bold text-zinc-400 hover:text-white transition-all duration-150 flex items-center gap-1.5 cursor-pointer active:scale-[0.96]" title="Browse All Light Novels">
-              <span>All Titles</span>
-              <span id="discoverAllBadge" class="px-1.5 py-0.5 rounded-full text-[10px] font-mono font-medium bg-white/10 text-zinc-300 border border-white/10">0</span>
-            </button>
-          </div>
-
-          <!-- Live Feed Status / Info -->
-          <div class="flex items-center gap-2 text-xs text-zinc-400">
-            <span id="discoverFeedStatusDot" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span id="discoverFeedStatus">Live Feeds from Lnori &amp; Elsci.one</span>
-            <button id="discoverFeedVerifyBtn" onclick="loadDiscoverFeed(true)" class="hidden px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-200 border border-amber-400/30 text-[10px] font-semibold cursor-pointer active:scale-[0.96]">Verify</button>
-          </div>
-        </div>
-
-        <!-- Interactive Filters Bar -->
-        <div class="bg-zinc-900/40 backdrop-blur-xl border border-white/10 rounded-2xl p-3 sm:p-4 space-y-3 shadow-lg">
-          <!-- Row 1: Source Filter + Library Status Filter + Sort + Live Search -->
-          <div class="flex flex-wrap items-center justify-between gap-3">
-            <!-- Source Filter Segmented Control -->
-            <div class="flex items-center gap-1.5">
-              <span class="text-[11px] font-semibold text-zinc-400 hidden sm:inline">Source:</span>
-              <div class="inline-flex bg-zinc-950/80 border border-white/10 rounded-xl p-0.5 text-xs">
-                <button onclick="setDiscoverSourceFilter('all')" id="discoverSource-all" class="px-2.5 py-1 rounded-lg bg-white/15 text-white font-semibold transition-all cursor-pointer active:scale-[0.96]">All Sources</button>
-                <button onclick="setDiscoverSourceFilter('lnori')" id="discoverSource-lnori" class="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]">Lnori</button>
-                <button onclick="setDiscoverSourceFilter('elscione')" id="discoverSource-elscione" class="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]">Elsci.one</button>
-              </div>
+      <div id="discoverView" class="hidden flex-1 flex flex-col space-y-3 w-full">
+        <!-- Discover chrome is two rows, not four.
+             Row 1: the feed tabs, one merged source+status segmented control, and the feed state in
+             words. Genre and sort live in the shared filter drawer (Discover mode) so Discover does
+             not own a second filter idiom, and the library capsule's Filters button stops looking
+             inert here. The global library search row is hidden while Discover is active, which is
+             what makes the search below the only search on the surface. -->
+        <div class="flex flex-col gap-2 pb-2 border-b border-white/5">
+          <div class="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+            <div class="edge-fade-tabs inline-flex items-center bg-zinc-900/90 border border-white/10 rounded-full p-1 shadow-lg gap-1 max-w-full overflow-x-auto no-scrollbar" role="tablist" aria-label="Discover Feeds">
+              <button onclick="switchDiscoverTab('trending')" id="discoverTabTrending" role="tab" aria-selected="true" class="discover-tab discover-tab-active px-3.5 py-1.5 rounded-full text-xs font-bold transition-all duration-150 flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 active:scale-[0.96]" title="Browse Trending Light Novels">
+                <span>Trending</span>
+                <span id="discoverTrendingBadge" class="px-1.5 py-0.5 rounded-full text-[10px] font-mono font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30">&middot;</span>
+              </button>
+              <button onclick="switchDiscoverTab('new_releases')" id="discoverTabNewReleases" role="tab" aria-selected="false" class="discover-tab px-3.5 py-1.5 rounded-full text-xs font-bold text-zinc-400 hover:text-white transition-all duration-150 flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 active:scale-[0.96]" title="Browse New Light Novel Releases">
+                <span>New Releases</span>
+                <span id="discoverNewReleasesBadge" class="px-1.5 py-0.5 rounded-full text-[10px] font-mono font-medium bg-white/10 text-zinc-300 border border-white/10">&middot;</span>
+              </button>
+              <button onclick="switchDiscoverTab('all')" id="discoverTabAll" role="tab" aria-selected="false" class="discover-tab px-3.5 py-1.5 rounded-full text-xs font-bold text-zinc-400 hover:text-white transition-all duration-150 flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 active:scale-[0.96]" title="Browse All Light Novels">
+                <span>All Titles</span>
+                <span id="discoverAllBadge" class="px-1.5 py-0.5 rounded-full text-[10px] font-mono font-medium bg-white/10 text-zinc-300 border border-white/10">&middot;</span>
+              </button>
             </div>
 
-            <!-- Library Status Filter Segmented Control -->
-            <div class="flex items-center gap-1.5">
-              <span class="text-[11px] font-semibold text-zinc-400 hidden sm:inline">Library:</span>
-              <div class="inline-flex bg-zinc-950/80 border border-white/10 rounded-xl p-0.5 text-xs">
-                <button onclick="setDiscoverStatusFilter('all')" id="discoverStatus-all" class="px-2.5 py-1 rounded-lg bg-white/15 text-white font-semibold transition-all cursor-pointer active:scale-[0.96]">All</button>
-                <button onclick="setDiscoverStatusFilter('ready')" id="discoverStatus-ready" class="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]">Available</button>
-                <button onclick="setDiscoverStatusFilter('in_library')" id="discoverStatus-in_library" class="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]">In Library</button>
-                <button onclick="setDiscoverStatusFilter('incomplete')" id="discoverStatus-incomplete" class="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]" title="Series in library with missing volumes available online">Incomplete</button>
-              </div>
+            <!-- Source and library status, merged into one control in the tab row -->
+            <div id="discoverScopeControl" class="edge-fade-scope flex items-center gap-1 bg-zinc-950/80 border border-white/10 rounded-full p-1 text-xs max-w-full overflow-x-auto no-scrollbar" role="group" aria-label="Discover source and library status filters">
+              <span class="hidden sm:inline pl-1.5 pr-0.5 text-[10px] font-semibold text-zinc-500 shrink-0">Source</span>
+              <button onclick="setDiscoverSourceFilter('all')" id="discoverSource-all" aria-pressed="true" class="px-2.5 py-1 rounded-full bg-white/15 text-white font-semibold transition-all cursor-pointer active:scale-[0.96] shrink-0">All</button>
+              <button onclick="setDiscoverSourceFilter('lnori')" id="discoverSource-lnori" aria-pressed="false" class="px-2.5 py-1 rounded-full text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96] shrink-0">Lnori</button>
+              <button onclick="setDiscoverSourceFilter('elscione')" id="discoverSource-elscione" aria-pressed="false" class="px-2.5 py-1 rounded-full text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96] shrink-0">Elsci.one</button>
+              <span class="hidden sm:block w-px h-4 bg-white/10 mx-0.5 shrink-0" aria-hidden="true"></span>
+              <span class="hidden sm:inline pl-1 pr-0.5 text-[10px] font-semibold text-zinc-500 shrink-0">Library</span>
+              <button onclick="setDiscoverStatusFilter('all')" id="discoverStatus-all" aria-pressed="true" class="px-2.5 py-1 rounded-full bg-white/15 text-white font-semibold transition-all cursor-pointer active:scale-[0.96] shrink-0">All</button>
+              <button onclick="setDiscoverStatusFilter('ready')" id="discoverStatus-ready" aria-pressed="false" class="px-2.5 py-1 rounded-full text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96] shrink-0">Available</button>
+              <button onclick="setDiscoverStatusFilter('in_library')" id="discoverStatus-in_library" aria-pressed="false" class="px-2.5 py-1 rounded-full text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96] shrink-0">Owned</button>
+              <button onclick="setDiscoverStatusFilter('incomplete')" id="discoverStatus-incomplete" aria-pressed="false" class="px-2.5 py-1 rounded-full text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96] shrink-0" title="Series in library with missing volumes available online">Partial</button>
             </div>
 
-            <!-- Sort & Live Search -->
-            <div class="flex items-center gap-2 w-full sm:w-auto">
-              <!-- Live Search Input -->
-              <div class="relative flex-1 sm:w-56">
-                <svg class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500"><use href="#icon-magnifying-glass"/></svg>
-                <input type="text" id="discoverSearchInput" oninput="handleDiscoverSearch(this.value)" placeholder="Search all light novels across sources..."
-                  class="w-full h-8 pl-8 pr-7 bg-zinc-950/80 border border-white/10 rounded-xl text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-amber-400/50 transition-colors">
-                <button id="discoverSearchClearBtn" onclick="clearDiscoverSearch()" class="hidden absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 cursor-pointer">
-                  <svg class="w-3 h-3"><use href="#icon-xmark"/></svg>
-                </button>
-              </div>
-
-              <!-- Sort Dropdown -->
-              <select id="discoverSortSelect" onchange="setDiscoverSort(this.value)" class="h-8 bg-zinc-950/80 border border-white/10 rounded-xl text-xs text-zinc-300 px-2.5 focus:outline-none focus:border-amber-400/50 cursor-pointer">
-                <option value="popular">Most Popular</option>
-                <option value="rating">Highest Rated</option>
-                <option value="newest">Newest</option>
-                <option value="title_asc">Title A-Z</option>
-              </select>
+            <!-- Feed state: the dot carries the state, and the words say it too -->
+            <div class="flex items-center gap-1.5 text-[11px] text-zinc-400 sm:ml-auto min-w-0">
+              <span id="discoverFeedStatusDot" class="w-1.5 h-1.5 rounded-full bg-zinc-600 shrink-0"></span>
+              <span id="discoverFeedStatus" class="truncate">Checking sources...</span>
+              <button id="discoverFeedVerifyBtn" onclick="loadDiscoverFeed(true)" class="hidden px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-200 border border-amber-400/30 text-[10px] font-semibold cursor-pointer active:scale-[0.96] shrink-0">Retry</button>
             </div>
           </div>
 
-          <!-- Row 2: Genre Filter (Horizontal Scrollable Pills) -->
-          <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
-            <span class="text-[11px] font-semibold text-zinc-500 shrink-0">Genre:</span>
-            <div id="discoverGenrePills" class="flex items-center gap-1.5 shrink-0"></div>
+          <!-- The one search row. It searches the Discover catalogue only, and says so. -->
+          <div class="flex items-center gap-2">
+            <div class="relative flex-1 min-w-0">
+              <svg class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500"><use href="#icon-magnifying-glass"/></svg>
+              <input type="text" id="discoverSearchInput" oninput="handleDiscoverSearch(this.value)" placeholder="Search the Discover catalogue, not your library..."
+                class="w-full h-9 pl-8 pr-8 bg-zinc-950/80 border border-white/10 rounded-xl text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-amber-400/50 transition-colors">
+              <button id="discoverSearchClearBtn" onclick="clearDiscoverSearch()" class="hidden absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 cursor-pointer">
+                <svg class="w-3 h-3"><use href="#icon-xmark"/></svg>
+              </button>
+            </div>
+            <button id="discoverFilterBtn" onclick="openFilterDrawer('discover')" aria-haspopup="dialog" class="h-9 px-3 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer active:scale-[0.96] transition-colors shrink-0" title="Discover filters: genre and sort">
+              <svg class="w-3.5 h-3.5 text-zinc-400" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24">
+                <line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line>
+                <line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line>
+                <line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line>
+              </svg>
+              <span>Filters</span>
+              <span id="discoverFilterActiveBadge" class="hidden min-w-[16px] h-4 px-1 rounded-full text-[9px] font-bold bg-amber-400/30 text-amber-200 border border-amber-400/40 items-center justify-center font-mono leading-none">0</span>
+            </button>
           </div>
         </div>
 
@@ -2462,97 +2518,127 @@
             <div class="w-8 h-8 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300 flex items-center justify-center">
               <svg class="w-4 h-4"><use href="#icon-filter"/></svg>
             </div>
-            <span>Filter Library</span>
+            <span id="filterDrawerTitle">Filter Library</span>
           </div>
           <button onclick="closeFilterDrawer()" class="w-9 h-9 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white border border-zinc-800 flex items-center justify-center cursor-pointer active:scale-[0.97] transition-all" title="Close">
             <svg class="w-4 h-4"><use href="#icon-xmark"/></svg>
           </button>
         </div>
 
-        <!-- Active Filter Badge -->
-        <div id="activeFilterBox" class="hidden px-3 py-2.5 rounded-xl bg-sky-950/40 border border-sky-800/50 space-y-1.5">
-          <div class="flex items-center justify-between">
-            <span class="text-[10px] font-bold text-sky-400 uppercase tracking-wider">Active Filter</span>
-            <button onclick="clearAllFilters()" class="text-[11px] text-sky-400 hover:text-sky-300 hover:underline cursor-pointer font-medium">Clear</button>
+        <!-- Library mode: the filters that describe books you already own. -->
+        <div id="drawerLibrarySections" class="space-y-5">
+          <!-- Active Filter Badge -->
+          <div id="activeFilterBox" class="hidden px-3 py-2.5 rounded-xl bg-sky-950/40 border border-sky-800/50 space-y-1.5">
+            <div class="flex items-center justify-between">
+              <span class="text-[10px] font-bold text-sky-400 uppercase tracking-wider">Active Filter</span>
+              <button onclick="clearAllFilters()" class="text-[11px] text-sky-400 hover:text-sky-300 hover:underline cursor-pointer font-medium">Clear</button>
+            </div>
+            <div id="activeFilterBadge" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-sky-500/20 text-sky-300 border border-sky-500/30 truncate max-w-full"></div>
           </div>
-          <div id="activeFilterBadge" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-sky-500/20 text-sky-300 border border-sky-500/30 truncate max-w-full"></div>
-        </div>
 
-        <!-- Reading Status / Shelves -->
-        <div class="space-y-1.5">
-          <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Reading Status</div>
-          <nav class="grid grid-cols-2 gap-1.5 text-xs">
-            <button onclick="setFilter('all', null)" id="nav-all" class="flex items-center justify-between px-3 py-2 rounded-xl bg-white/10 text-white font-medium transition-colors cursor-pointer text-left active:scale-[0.97]">
-              <span class="flex items-center gap-2 truncate">
-                <svg class="w-3.5 h-3.5 text-zinc-400 shrink-0" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
-                <span class="truncate">All Books</span>
-              </span>
-              <span id="facetTotalBooks" class="text-[10px] text-zinc-400 font-mono shrink-0 ml-1">0</span>
-            </button>
-            <button onclick="setFilter('status', 'reading')" id="nav-reading" class="flex items-center justify-between px-3 py-2 rounded-xl text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left active:scale-[0.97]">
-              <span class="flex items-center gap-2 truncate">
-                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
-                <span class="truncate">Reading Now</span>
-              </span>
-              <span id="sidebarReadingCount" class="text-[10px] text-zinc-500 font-mono shrink-0 ml-1">0</span>
-            </button>
-            <button onclick="setFilter('status', 'want_to_read')" id="nav-want-to-read" class="flex items-center justify-between px-3 py-2 rounded-xl text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left active:scale-[0.97]">
-              <span class="flex items-center gap-2 truncate">
-                <svg class="w-3.5 h-3.5 text-zinc-400 shrink-0" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"></path></svg>
-                <span class="truncate">Want to Read</span>
-              </span>
-              <span id="sidebarWantToReadCount" class="text-[10px] text-zinc-500 font-mono shrink-0 ml-1">0</span>
-            </button>
-            <button onclick="setFilter('status', 'finished')" id="nav-finished" class="flex items-center justify-between px-3 py-2 rounded-xl text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left active:scale-[0.97]">
-              <span class="flex items-center gap-2 truncate">
-                <svg class="w-3.5 h-3.5 text-zinc-400 shrink-0" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                <span class="truncate">Finished</span>
-              </span>
-              <span id="sidebarFinishedCount" class="text-[10px] text-zinc-500 font-mono shrink-0 ml-1">0</span>
-            </button>
-          </nav>
-        </div>
-
-        <!-- Sort Options -->
-        <div class="space-y-1.5">
-          <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Sort Order</div>
-          <select id="drawerSortSelect" onchange="syncSort(this.value)" class="w-full bg-zinc-900 border border-zinc-800 rounded-xl text-xs text-zinc-200 focus:outline-none focus:ring-1 focus:ring-zinc-400 px-3 py-2 cursor-pointer active:scale-[0.98] transition-all">
-            <option value="recent">Recent Additions</option>
-            <option value="series">Series / Volume Index</option>
-            <option value="progress">Reading Progress</option>
-            <option value="title">Title (A-Z)</option>
-            <option value="author">Author (A-Z)</option>
-          </select>
-        </div>
-
-        <!-- Collections (Series) Facet -->
-        <div class="space-y-2">
-          <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
-            <span>Collections</span>
-            <span id="drawerSeriesCount" class="text-zinc-500 font-mono text-[10px]">0</span>
+          <!-- Reading Status / Shelves -->
+          <div class="space-y-1.5">
+            <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Reading Status</div>
+            <nav class="grid grid-cols-2 gap-1.5 text-xs">
+              <button onclick="setFilter('all', null)" id="nav-all" class="flex items-center justify-between px-3 py-2 rounded-xl bg-white/10 text-white font-medium transition-colors cursor-pointer text-left active:scale-[0.97]">
+                <span class="flex items-center gap-2 truncate">
+                  <svg class="w-3.5 h-3.5 text-zinc-400 shrink-0" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+                  <span class="truncate">All Books</span>
+                </span>
+                <span id="facetTotalBooks" class="text-[10px] text-zinc-400 font-mono shrink-0 ml-1">0</span>
+              </button>
+              <button onclick="setFilter('status', 'reading')" id="nav-reading" class="flex items-center justify-between px-3 py-2 rounded-xl text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left active:scale-[0.97]">
+                <span class="flex items-center gap-2 truncate">
+                  <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
+                  <span class="truncate">Reading Now</span>
+                </span>
+                <span id="sidebarReadingCount" class="text-[10px] text-zinc-500 font-mono shrink-0 ml-1">0</span>
+              </button>
+              <button onclick="setFilter('status', 'want_to_read')" id="nav-want-to-read" class="flex items-center justify-between px-3 py-2 rounded-xl text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left active:scale-[0.97]">
+                <span class="flex items-center gap-2 truncate">
+                  <svg class="w-3.5 h-3.5 text-zinc-400 shrink-0" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"></path></svg>
+                  <span class="truncate">Want to Read</span>
+                </span>
+                <span id="sidebarWantToReadCount" class="text-[10px] text-zinc-500 font-mono shrink-0 ml-1">0</span>
+              </button>
+              <button onclick="setFilter('status', 'finished')" id="nav-finished" class="flex items-center justify-between px-3 py-2 rounded-xl text-neutral-400 hover:text-neutral-200 hover:bg-white/5 transition-colors cursor-pointer text-left active:scale-[0.97]">
+                <span class="flex items-center gap-2 truncate">
+                  <svg class="w-3.5 h-3.5 text-zinc-400 shrink-0" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                  <span class="truncate">Finished</span>
+                </span>
+                <span id="sidebarFinishedCount" class="text-[10px] text-zinc-500 font-mono shrink-0 ml-1">0</span>
+              </button>
+            </nav>
           </div>
-          <div id="drawerSeriesList" class="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto pr-1"></div>
-        </div>
 
-        <!-- Authors Facet -->
-        <div class="space-y-2">
-          <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
-            <span>Authors</span>
-            <span id="drawerAuthorCount" class="text-zinc-500 font-mono text-[10px]">0</span>
+          <!-- Sort Options -->
+          <div class="space-y-1.5">
+            <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Sort Order</div>
+            <select id="drawerSortSelect" onchange="syncSort(this.value)" class="w-full bg-zinc-900 border border-zinc-800 rounded-xl text-xs text-zinc-200 focus:outline-none focus:ring-1 focus:ring-zinc-400 px-3 py-2 cursor-pointer active:scale-[0.98] transition-all">
+              <option value="recent">Recent Additions</option>
+              <option value="series">Series / Volume Index</option>
+              <option value="progress">Reading Progress</option>
+              <option value="title">Title (A-Z)</option>
+              <option value="author">Author (A-Z)</option>
+            </select>
           </div>
-          <div id="drawerAuthorList" class="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto pr-1"></div>
+
+          <!-- Collections (Series) Facet -->
+          <div class="space-y-2">
+            <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
+              <span>Collections</span>
+              <span id="drawerSeriesCount" class="text-zinc-500 font-mono text-[10px]">0</span>
+            </div>
+            <div id="drawerSeriesList" class="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto pr-1"></div>
+          </div>
+
+          <!-- Authors Facet -->
+          <div class="space-y-2">
+            <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
+              <span>Authors</span>
+              <span id="drawerAuthorCount" class="text-zinc-500 font-mono text-[10px]">0</span>
+            </div>
+            <div id="drawerAuthorList" class="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto pr-1"></div>
+          </div>
+
+          <!-- Formats Facet -->
+          <div class="space-y-2">
+            <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Formats</div>
+            <div id="drawerFormatList" class="flex flex-wrap gap-1.5"></div>
+          </div>
+
+          <!-- Tags Facet -->
+          <div class="space-y-2">
+            <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Tags</div>
+            <div id="drawerTagList" class="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto"></div>
+          </div>
         </div>
 
-        <!-- Formats Facet -->
-        <div class="space-y-2">
-          <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Formats</div>
-          <div id="drawerFormatList" class="flex flex-wrap gap-1.5"></div>
-        </div>
+        <!-- Discover mode: the same sheet, carrying genre and sort for the Discover shelf.
+             Discover genres are not library tags, so they get their own section rather than
+             borrowing the Tags facet and quietly offering the wrong filter. -->
+        <div id="drawerDiscoverSections" class="hidden space-y-5">
+          <div class="space-y-1.5">
+            <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
+              <span>Genre</span>
+              <span id="drawerDiscoverGenreCount" class="text-zinc-500 font-mono text-[10px]">0</span>
+            </div>
+            <div id="discoverGenrePills" class="pill-row fade-scroll flex flex-wrap gap-1.5 max-h-52 overflow-y-auto pr-1"></div>
+          </div>
 
-        <!-- Tags Facet -->
-        <div class="space-y-2">
-          <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Tags</div>
-          <div id="drawerTagList" class="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto"></div>
+          <div class="space-y-1.5">
+            <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Sort Order</div>
+            <select id="discoverSortSelect" onchange="setDiscoverSort(this.value)" class="w-full bg-zinc-900 border border-zinc-800 rounded-xl text-xs text-zinc-200 focus:outline-none focus:ring-1 focus:ring-zinc-400 px-3 py-2 cursor-pointer active:scale-[0.98] transition-all">
+              <option value="popular">Most Popular</option>
+              <option value="rating">Highest Rated</option>
+              <option value="newest">Newest</option>
+              <option value="title_asc">Title A-Z</option>
+            </select>
+          </div>
+
+          <p class="text-[11px] leading-relaxed text-zinc-500">
+            Search, source and library status stay on the Discover row so this sheet only carries what the row cannot.
+          </p>
         </div>
 
         <!-- Manual / Guide in Drawer -->
@@ -2565,7 +2651,7 @@
       </div>
 
       <div class="pt-4 border-t border-zinc-800/80 flex items-center gap-2">
-        <button onclick="clearAllFilters(); closeFilterDrawer();" class="flex-1 h-11 py-2.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white font-semibold text-xs rounded-xl border border-zinc-800 cursor-pointer active:scale-[0.97] transition-all">Reset All</button>
+        <button onclick="resetDrawerFilters()" class="flex-1 h-11 py-2.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white font-semibold text-xs rounded-xl border border-zinc-800 cursor-pointer active:scale-[0.97] transition-all">Reset All</button>
         <button onclick="closeFilterDrawer()" class="flex-1 h-11 py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs rounded-xl shadow-sm cursor-pointer active:scale-[0.97] transition-all">Done</button>
       </div>
     </div>
@@ -2811,80 +2897,78 @@
 
   <!-- DISCOVER NOVEL PREVIEW MODAL -->
   <div id="discoverModal" class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-end sm:items-center justify-center p-0 sm:p-4" onclick="if(event.target === this) closeDiscoverModal()">
-    <div class="ui-card apple-material-modal w-full sm:max-w-2xl max-h-[92vh] rounded-t-3xl sm:rounded-2xl border border-white/10 p-5 sm:p-7 shadow-2xl flex flex-col overflow-hidden bg-zinc-950/90">
-      
+    <div class="ui-card apple-material-modal w-full sm:max-w-xl max-h-[92vh] rounded-t-3xl sm:rounded-2xl border border-white/10 p-4 sm:p-5 shadow-2xl flex flex-col overflow-hidden bg-zinc-950/90">
+
       <!-- Modal Header -->
-      <div class="flex items-center justify-between pb-4 border-b border-white/10 shrink-0">
+      <div class="flex items-center justify-between pb-3 border-b border-white/10 shrink-0">
         <div class="flex items-center gap-2">
           <svg class="w-4 h-4 text-amber-400"><use href="#icon-book-open"/></svg>
-          <h3 id="discoverModalHeaderTitle" class="tracking-optical-display text-sm sm:text-base font-bold text-white leading-tight">Light Novel Discovery</h3>
+          <h3 id="discoverModalHeaderTitle" class="tracking-optical-display text-sm font-bold text-white leading-tight">Discover</h3>
         </div>
-        <button onclick="closeDiscoverModal()" class="w-10 h-10 rounded-xl bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer active:scale-[0.96] transition-all" title="Close (Esc)">
+        <button onclick="closeDiscoverModal()" class="w-8 h-8 rounded-lg bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer active:scale-[0.96] transition-all" title="Close (Esc)">
           <svg class="w-4 h-4"><use href="#icon-xmark"/></svg>
         </button>
       </div>
 
       <!-- Modal Body (Scrollable) -->
-      <div class="flex-1 overflow-y-auto py-5 space-y-6 no-scrollbar">
-        <div class="flex flex-col sm:flex-row gap-5 items-start">
-          <!-- Extra-large high-res cover -->
-          <div class="relative w-36 sm:w-48 aspect-[2/3] shrink-0 rounded-xl overflow-hidden shadow-2xl border border-white/10 mx-auto sm:mx-0 book-spine-effect bg-zinc-900">
+      <div class="flex-1 overflow-y-auto py-3 space-y-3 no-scrollbar">
+
+        <!-- Decision card: cover and the decision, side by side at every width.
+             The cover is a fixed 88px at phone width so it can never take the text column. -->
+        <div class="flex items-start gap-3">
+          <div class="relative w-[88px] sm:w-32 shrink-0 aspect-[2/3] rounded-lg overflow-hidden shadow-lg border border-white/10 bg-zinc-900 book-spine-effect">
             <img id="discoverModalCover" src="" alt="Cover" class="w-full h-full object-cover object-top rounded-xl bg-zinc-950" onerror="this.onerror=null; this.src=generateFallbackCoverSvg(this.alt);">
-            <div id="discoverModalStatusBadge" class="absolute top-2 left-2 px-2 py-0.5 rounded-full text-[10px] font-bold backdrop-blur-md"></div>
+            <div id="discoverModalStatusBadge" class="absolute top-1.5 left-1.5 flex items-center gap-1 max-w-full"></div>
           </div>
 
-          <!-- Metadata & details -->
-          <div class="flex-1 min-w-0 space-y-3">
-            <div>
-              <h2 id="discoverModalTitle" class="text-base sm:text-lg font-bold text-white leading-snug"></h2>
-              <div id="discoverModalRomaji" class="text-xs text-amber-300/80 font-medium italic mt-0.5"></div>
-              <div id="discoverModalAuthor" class="text-xs text-zinc-400 mt-1"></div>
+          <div class="flex-1 min-w-0 space-y-1.5">
+            <h2 id="discoverModalTitle" class="text-sm sm:text-base font-bold text-white leading-snug line-clamp-3"></h2>
+            <div id="discoverModalRomaji" class="text-[11px] text-amber-300/80 font-medium italic truncate"></div>
+            <div id="discoverModalAuthor" class="text-xs text-zinc-400 truncate"></div>
+
+            <!-- Ownership + extent vocabulary: the same chips the cards use. -->
+            <div class="flex flex-wrap items-center gap-1.5">
+              <span id="discoverModalVolumes" class="chip chip-meta"></span>
+              <span id="discoverModalRelease" class="chip chip-meta"></span>
+              <div id="discoverModalRating" class="chip chip-meta text-amber-300 border-amber-400/30"></div>
             </div>
 
-            <!-- Meta attributes row -->
-            <div class="flex flex-wrap items-center gap-2 text-xs">
-              <span id="discoverModalVolumes" class="px-2.5 py-1 rounded-lg bg-white/5 border border-white/5 text-zinc-300 font-mono text-[11px]"></span>
-              <span id="discoverModalRelease" class="px-2.5 py-1 rounded-lg bg-white/5 border border-white/5 text-zinc-300 font-mono text-[11px]"></span>
-              <div id="discoverModalRating" class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 font-mono text-[11px]"></div>
-            </div>
-
-            <!-- Genre chips -->
-            <div id="discoverModalGenres" class="flex flex-wrap gap-1.5 pt-1"></div>
-
-            <!-- Available Sources -->
-            <div class="pt-2">
-              <span class="text-[11px] font-semibold text-zinc-400 block mb-1.5">Available Ingestion Sources:</span>
-              <div id="discoverModalSources" class="flex flex-col gap-2"></div>
-            </div>
+            <div id="discoverModalGenres" class="flex flex-wrap gap-1"></div>
           </div>
+        </div>
+
+        <!-- One source row, one selection. The footer button is the only download. -->
+        <div class="pt-1">
+          <span class="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider block mb-1">Source</span>
+          <div id="discoverModalSources" class="flex flex-col gap-2"></div>
         </div>
 
         <!-- Synopsis Section -->
-        <div class="space-y-2 pt-2 border-t border-white/5">
-          <h4 class="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Synopsis</h4>
-          <div id="discoverModalSynopsis" class="text-sm leading-relaxed text-zinc-300 font-normal whitespace-pre-line bg-white/[0.02] p-4 sm:p-5 rounded-xl border border-white/5 max-h-72 sm:max-h-96 overflow-y-auto"></div>
+        <div class="space-y-1.5 pt-2 border-t border-white/5">
+          <h4 class="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">Synopsis</h4>
+          <div id="discoverModalSynopsis" class="text-xs sm:text-sm leading-relaxed text-zinc-300 font-normal whitespace-pre-line bg-white/[0.02] p-3 rounded-lg border border-white/5 max-h-56 sm:max-h-72 overflow-y-auto"></div>
         </div>
       </div>
 
-      <!-- Modal Footer (Action Bar) -->
-      <div class="pt-4 border-t border-white/10 shrink-0 flex flex-col sm:flex-row items-center justify-between gap-3">
-        <div id="discoverModalLibraryNote" class="text-xs text-zinc-400 flex items-center gap-1.5"></div>
-        <div class="flex items-center gap-2 w-full sm:w-auto justify-end">
-          <button type="button" onclick="closeDiscoverModal()" class="px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-semibold cursor-pointer active:scale-[0.96] transition-all">Close</button>
-          <button id="discoverModalIngestBtn" type="button" onclick="handleDiscoverModalIngest()" class="flex-1 sm:flex-none px-5 py-2.5 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]">
-            <span>Download All</span>
+      <!-- Modal Footer (the single primary action) -->
+      <div class="pt-3 border-t border-white/10 shrink-0 space-y-1.5">
+        <div id="discoverModalLibraryNote" class="text-[11px] text-zinc-400 flex items-center gap-1.5"></div>
+        <div class="flex items-center gap-2">
+          <button type="button" onclick="closeDiscoverModal()" class="px-3 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-semibold cursor-pointer active:scale-[0.96] transition-all">Close</button>
+          <button id="discoverModalIngestBtn" type="button" onclick="handleDiscoverModalIngest()" class="flex-1 px-4 py-2.5 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]">
+            <span>Download</span>
+          </button>
+        </div>
+        <div id="discoverModalForceContainer" class="hidden text-right w-full">
+          <button type="button" onclick="handleDiscoverModalForceIngest()" class="text-[10px] text-zinc-500 hover:text-zinc-300 underline cursor-pointer transition-colors">
+            Force re-download all volumes
           </button>
         </div>
       </div>
-      <div id="discoverModalForceContainer" class="hidden text-right pt-1 w-full">
-        <button type="button" onclick="handleDiscoverModalForceIngest()" class="text-[11px] text-zinc-400 hover:text-zinc-200 underline cursor-pointer transition-colors">
-          Force re-download all volumes
-        </button>
-      </div>
 
       <!-- Ingestion Error Banner in Modal -->
-      <div id="discoverModalErrorBanner" class="hidden pt-3 border-t border-white/5 w-full">
-        <div class="p-3 rounded-xl bg-rose-950/40 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between gap-2.5 backdrop-blur-md">
+      <div id="discoverModalErrorBanner" class="hidden pt-2 border-t border-white/5 w-full">
+        <div class="p-2.5 rounded-lg bg-rose-950/40 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between gap-2.5 backdrop-blur-md">
           <div class="flex items-center gap-2 min-w-0">
             <svg class="w-4 h-4 text-rose-400 shrink-0"><use href="#icon-triangle-exclamation"/></svg>
             <span id="discoverModalErrorText" class="font-medium break-words line-clamp-3 sm:line-clamp-2"></span>
@@ -2896,7 +2980,7 @@
       </div>
 
       <!-- Live Download Progress Track in Modal -->
-      <div id="discoverModalProgressContainer" class="hidden pt-3 border-t border-white/5 w-full space-y-1.5">
+      <div id="discoverModalProgressContainer" class="hidden pt-2 border-t border-white/5 w-full space-y-1.5">
         <div class="flex items-center justify-between text-xs">
           <span id="discoverModalProgressStatus" class="text-amber-300 font-medium truncate">Downloading Vol 1 of 5 (20%)...</span>
           <span id="discoverModalProgressPct" class="font-mono text-zinc-400 text-xs shrink-0 ml-2">20%</span>
@@ -3455,11 +3539,12 @@
           </div>
           <div class="text-[11px] text-zinc-400 space-y-1.5 pl-7 leading-relaxed">
             <div>Browse curated feeds of top light novels and web novels from Lnori and Elsci.one with live Calibre library reconciliation:</div>
-            <div>• <strong>VisionOS Capsule Navigation:</strong> Tap <code class="text-zinc-200">Discover</code> in the top navigation bar to access separate <code class="text-zinc-200">Trending</code> and <code class="text-zinc-200">New Releases</code> views (strictly segregated).</div>
-            <div>• <strong>Custom Interactive Filtering:</strong> Filter by Source (<code class="text-zinc-200">Lnori</code>, <code class="text-zinc-200">Elsci.one</code>), Genre (<code class="text-zinc-200">Fantasy</code>, <code class="text-zinc-200">Isekai</code>, <code class="text-zinc-200">Romance</code>, etc.), Library Status (<code class="text-zinc-200">Available</code> vs <code class="text-zinc-200">In Library</code>), Live Search, and Sorting (<code class="text-zinc-200">Most Popular</code>, <code class="text-zinc-200">Highest Rated</code>, <code class="text-zinc-200">Newest</code>).</div>
+            <div>• <strong>VisionOS Capsule Navigation:</strong> Tap <code class="text-zinc-200">Discover</code> in the top navigation bar to access separate <code class="text-zinc-200">Trending</code>, <code class="text-zinc-200">New Releases</code> and <code class="text-zinc-200">All Titles</code> views (strictly segregated). On a phone the header wraps and the capsule scrolls, so the active chip is scrolled into view and a faded right edge marks the strip as continuing.</div>
+            <div>• <strong>Two-Row Discover Chrome:</strong> Row 1 holds the feed tabs plus one segmented control that merges <em>Source</em> (<code class="text-zinc-200">All</code>, <code class="text-zinc-200">Lnori</code>, <code class="text-zinc-200">Elsci.one</code>) with <em>Library</em> (<code class="text-zinc-200">All</code>, <code class="text-zinc-200">Available</code>, <code class="text-zinc-200">Owned</code>, <code class="text-zinc-200">Partial</code>); row 2 is the only search field, plus a <code class="text-zinc-200">Filters</code> button. Genre and Sorting (<code class="text-zinc-200">Most Popular</code>, <code class="text-zinc-200">Highest Rated</code>, <code class="text-zinc-200">Newest</code>, <code class="text-zinc-200">Title (A-Z)</code>) live in the same filter drawer the library uses, opened in <strong>Discover mode</strong> (<code class="text-zinc-200">openFilterDrawer('discover')</code>), so Discover no longer owns a second filter idiom and the library search row hides while Discover is active.</div>
             <div>• <strong>Real Download Sources Guarantee:</strong> Feeds are strictly anchored to real, existing series on Elsci.one and Lnori (indexed directly against 1200+ Elscione folders and 880+ Lnori series with zero synthetic URLs), preferring Elsci.one as primary download source whenever available on both.</div>
-            <div>• <strong>Card-Level Volume Visibility &amp; Calibre Reconciliation:</strong> Prominent volume count indicators displayed directly on cards (<code class="text-zinc-200">In Library (X vols)</code>, partial ownership <code class="text-zinc-200">In Library (X/Y vols)</code>, and <code class="text-zinc-200">Available (Y vols)</code> badges, plus card metadata row volume badges) with automatic Calibre library volume reconciliation.</div>
-            <div>• <strong>1-Click Direct Ingestion, Persistent Downloads &amp; Live Progress:</strong> Tap <code class="text-zinc-200">Ingest</code> on any card or inside the preview modal (<code class="text-zinc-200">#discoverModal</code>) to automatically enqueue background downloading directly into Calibre via <code class="text-zinc-200">POST /api/discover/ingest</code>, tracked in real-time via <code class="text-zinc-200">GET /api/discover/progress/:jobId</code> with persistent state surviving page refreshes and tab closures (<code class="text-zinc-200">localStorage</code>), duplicate submission blocking, and resilient reconnection polling. A queued download reports <code class="text-zinc-200">queued</code> for as long as it is genuinely waiting, queued volumes are persisted to the durable <code class="text-zinc-200">jobs</code> table so a restart cannot drop them, and each run is cancellable by its own <code class="text-zinc-200">runId</code>.</div>
+            <div>• <strong>Two-Chip Ownership Vocabulary &amp; Card-Level Volume Visibility:</strong> every surface answers two questions with two chips. A cover carries exactly one <em>ownership</em> chip — <code class="text-zinc-200">Available</code>, <code class="text-zinc-200">Owned X/Y</code>, <code class="text-zinc-200">Owned</code>, or <code class="text-zinc-200">Downloading</code> — and the metadata row carries the <em>extent</em> chip (<code class="text-zinc-200">33 vols</code>). The same pair appears on library cards (series position <code class="text-zinc-200">Vol 12</code>) and in the Discover modal, so ownership is stated once per card instead of five times in five phrasings, and the extent is never printed twice.</div>
+            <div>• <strong>One Download Action Per Card:</strong> the Discover modal is a compact decision card — small cover beside the title, synopsis and source picker on one scroll, and exactly one primary action in the footer (<code class="text-zinc-200">Download All</code>, <code class="text-zinc-200">Download Remaining (N vols)</code>, or a disabled <code class="text-zinc-200">All Volumes in Library</code>). The source rows are a picker, not a second set of buttons: the highlighted row is the source the footer download uses, and the external-link icon on each row only opens that source for inspection. Neither per-source <code class="text-zinc-200">Ingest</code> buttons nor per-source browse buttons remain.</div>
+            <div>• <strong>1-Click Direct Ingestion, Persistent Downloads &amp; Live Progress:</strong> Tap <code class="text-zinc-200">Download</code> on any card or the footer button inside the preview modal (<code class="text-zinc-200">#discoverModal</code>) to automatically enqueue background downloading directly into Calibre via <code class="text-zinc-200">POST /api/discover/ingest</code>, tracked in real-time via <code class="text-zinc-200">GET /api/discover/progress/:jobId</code> with persistent state surviving page refreshes and tab closures (<code class="text-zinc-200">localStorage</code>), duplicate submission blocking, and resilient reconnection polling. A queued download reports <code class="text-zinc-200">queued</code> for as long as it is genuinely waiting, queued volumes are persisted to the durable <code class="text-zinc-200">jobs</code> table so a restart cannot drop them, and each run is cancellable by its own <code class="text-zinc-200">runId</code>.</div>
             <div>• <strong>Curated New Releases with a Scheduled Refresh:</strong> The <code class="text-zinc-200">New Releases</code> tab stays curated (every card names a real downloadable source) and the list itself is refreshed on a schedule: <code class="text-zinc-200">bin/lighthouse refresh-discover-seeds</code> rewrites <code class="text-zinc-200">data/discover-new-releases.json</code> from live releases that pass the real-source gate, driven by the <code class="text-zinc-200">reading-discover-seeds</code> LaunchAgent (default 06:30, configurable in <code class="text-zinc-200">data/discover-seeds-config.json</code>; setting <code class="text-zinc-200">"enabled": false</code> there skips generating the agent entirely). The shelf header discloses when a curated or cached list is being shown and why, and tab badges report measured counts.</div>
             <div>• <strong>Accurate Volume Identity:</strong> Volume numbers are modelled per namespace (<code class="text-zinc-200">main</code>, <code class="text-zinc-200">part:N</code>, <code class="text-zinc-200">year:N</code>, and separate art-book / fanbook / omnibus namespaces) so a Year 2 volume never counts as a base-series volume, an art book never inherits its parent's volumes, and a volume the library already holds is never downloaded twice. A title with no published date shows <code class="text-zinc-200">Recent</code> and sorts last instead of being stamped with a fabricated date.</div>
             <div>• <strong>Degraded Sources Stay Actionable:</strong> When every source for a card is offline the card keeps its ownership data, stays visible in the <code class="text-zinc-200">Incomplete</code> and <code class="text-zinc-200">Missing Volumes</code> filters with an explicit unverified state, renders the source's own error text, and offers <code class="text-zinc-200">Verify</code> / <code class="text-zinc-200">Try again</code> actions — including when an ingest is refused with a 4xx/429.</div>
@@ -5021,7 +5106,7 @@
         return { kind: 'dependency', message: 'This source needs a helper that is not installed on the server. Install it, then tap Verify to retry.' };
       }
       if (/blocked the automated request|verified via browser only|anubis|bot challenge|just a moment|attention required/i.test(msg)) {
-        return { kind: 'blocked', message: 'Source blocks automated access. Open Browse Source to check it yourself.' };
+        return { kind: 'blocked', message: 'Source blocks automated access. Use the source link in the Discover modal to check it yourself.' };
       }
       const statusMatch = msg.match(/\b(403|429)\b/);
       if (statusMatch) {
@@ -5029,7 +5114,7 @@
           kind: 'http',
           message: statusMatch[1] === '429'
             ? 'Source is rate limiting requests. Wait a minute, then retry.'
-            : 'Source refused the request. Open Browse Source to check it yourself.'
+            : 'Source refused the request. Use the source link in the Discover modal to check it yourself.'
         };
       }
       if (/failed to fetch|network\s*error|econnrefused|enotfound|eai_again|socket hang up|proxy is not usable/i.test(msg)) {
@@ -5364,6 +5449,9 @@
       all: null,
     };
     let activeDiscoverItem = null;
+    // Which source the modal's single Download action will use. Reset on every open so the
+    // recommended source is what the reader sees preselected, never a stale choice.
+    let discoverModalSource = null;
     let ingestingDiscoverIds = new Set();
     let discoverSearchDebounceTimer = null;
 
@@ -5980,8 +6068,11 @@
           chipDiscover.setAttribute('aria-selected', 'true');
         }
 
+        document.getElementById('headerSearchRow')?.classList.add('hidden');
         syncActiveDiscoverDownloads();
         loadDiscoverFeed();
+        revealActiveCapsuleChip();
+        syncEdgeFades();
       } else {
         currentView = 'library';
         document.getElementById('discoverView')?.classList.add('hidden');
@@ -5991,7 +6082,34 @@
           chipDiscover.classList.remove('visionos-tab-active');
           chipDiscover.setAttribute('aria-selected', 'false');
         }
+        document.getElementById('headerSearchRow')?.classList.remove('hidden');
         setViewMode(viewMode || 'grid');
+        revealActiveCapsuleChip();
+        syncEdgeFades();
+      }
+    }
+
+    // QW4: on a phone the capsule scrolls horizontally, so an active tab could sit entirely
+    // outside the visible strip and look unselected. Bringing it into view when the view changes
+    // is what makes the highlight believable.
+    // The eye needs to be told a horizontal strip continues. Marking it unconditionally would dim
+    // a control that already fits, so the mask is applied only to boxes that actually overflow.
+    function syncEdgeFades() {
+      document.querySelectorAll('.edge-fade-scope, .edge-fade-tabs').forEach((box) => {
+        box.classList.toggle('edge-fade-x', box.scrollWidth > box.clientWidth + 2);
+      });
+    }
+    window.addEventListener('resize', syncEdgeFades, { passive: true });
+
+    function revealActiveCapsuleChip() {
+      const capsule = document.querySelector('.visionos-nav-container');
+      if (!capsule) return;
+      const active = capsule.querySelector('.visionos-tab-active');
+      if (!active || typeof active.scrollIntoView !== 'function') return;
+      try {
+        active.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+      } catch {
+        try { active.scrollIntoView(); } catch {}
       }
     }
 
@@ -6043,6 +6161,14 @@
         `;
       }).join('');
       setHtml(container, pillsHtml);
+      const count = document.getElementById('drawerDiscoverGenreCount');
+      if (count) count.textContent = String(allGenres.length);
+      // QW5: the row is bounded and says so. The section header carries the total, and the fade is
+      // applied only when the row really does continue past its box - a mask over a row that fits
+      // would dim a pill the reader can already see.
+      const markOverflow = () => container.classList.toggle('fade-scroll', container.scrollHeight > container.clientHeight + 2);
+      markOverflow();
+      requestAnimationFrame(markOverflow);
     }
 
     function renderDiscoverSkeletons() {
@@ -6080,7 +6206,7 @@
         label.classList.remove('text-zinc-400');
         label.classList.add('text-amber-200');
         if (dot) {
-          dot.classList.remove('bg-emerald-400', 'animate-pulse');
+          dot.classList.remove('bg-zinc-600', 'bg-emerald-400', 'animate-pulse');
           dot.classList.add('bg-amber-400');
         }
         if (verifyBtn) verifyBtn.classList.remove('hidden');
@@ -6088,19 +6214,21 @@
       }
 
       if (feedSource === 'cache') {
+        // QW7: the dot must mean one thing. Emerald + pulse means the sources answered just now;
+        // a cached feed is a remembered answer, so it gets cool solid blue and says "Cached".
         label.textContent = 'Cached feed';
         label.title = '';
         label.classList.remove('text-amber-200');
-        label.classList.add('text-zinc-400');
+        label.classList.add('text-sky-200');
         if (dot) {
-          dot.classList.remove('bg-amber-400');
-          dot.classList.add('bg-emerald-400', 'animate-pulse');
+          dot.classList.remove('bg-zinc-600', 'bg-amber-400', 'animate-pulse');
+          dot.classList.add('bg-sky-400');
         }
         if (verifyBtn) verifyBtn.classList.add('hidden');
         return;
       }
 
-      label.textContent = 'Live Feeds from Lnori & Elsci.one';
+      label.textContent = 'Live from Lnori & Elsci.one';
       label.title = errors.join(' · ');
       label.classList.remove('text-amber-200');
       label.classList.add('text-zinc-400');
@@ -6280,22 +6408,40 @@
       loadDiscoverFeed();
     }
 
+    // One segmented control carries source and library status together, so its selection state is
+    // expressed once, in one place, and announced to assistive tech as pressed/not pressed.
+    function paintSegmentedGroup(prefix, keys, activeKey) {
+      keys.forEach(k => {
+        const btn = document.getElementById(`${prefix}-${k}`);
+        if (!btn) return;
+        const on = k === activeKey;
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+        btn.className = on
+          ? 'segmented-item segmented-item-active px-2.5 py-1 rounded-full bg-white/15 text-white font-semibold transition-all cursor-pointer active:scale-[0.96] shrink-0'
+          : 'segmented-item px-2.5 py-1 rounded-full text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96] shrink-0';
+      });
+    }
+
+    // Counts what the drawer would change, so the Filters button can say "2" instead of leaving the
+    // user to open the sheet and find out.
+    function updateDiscoverFilterBadge() {
+      const badge = document.getElementById('discoverFilterActiveBadge');
+      if (!badge) return;
+      let n = 0;
+      if (discoverFilter.genre && discoverFilter.genre !== 'All') n++;
+      const defaultSort = discoverTab === 'new_releases' ? 'newest' : 'popular';
+      if (discoverFilter.sort && discoverFilter.sort !== defaultSort) n++;
+      badge.textContent = String(n);
+      badge.classList.toggle('hidden', n === 0);
+      badge.classList.toggle('inline-flex', n > 0);
+    }
+
     function setDiscoverSourceFilter(src) {
       try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); } catch {}
       tgHaptic.light();
       discoverFilter.source = src;
       discoverFilter.page = 1;
-
-      ['all', 'lnori', 'elscione'].forEach(s => {
-        const btn = document.getElementById(`discoverSource-${s}`);
-        if (!btn) return;
-        if (s === src) {
-          btn.className = 'px-2.5 py-1 rounded-lg bg-white/15 text-white font-semibold transition-all cursor-pointer active:scale-[0.96]';
-        } else {
-          btn.className = 'px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]';
-        }
-      });
-
+      paintSegmentedGroup('discoverSource', ['all', 'lnori', 'elscione'], src);
       loadDiscoverFeed();
     }
 
@@ -6304,17 +6450,7 @@
       tgHaptic.light();
       discoverFilter.status = st;
       discoverFilter.page = 1;
-
-      ['all', 'ready', 'in_library', 'incomplete'].forEach(s => {
-        const btn = document.getElementById(`discoverStatus-${s}`);
-        if (!btn) return;
-        if (s === st) {
-          btn.className = 'px-2.5 py-1 rounded-lg bg-white/15 text-white font-semibold transition-all cursor-pointer active:scale-[0.96]';
-        } else {
-          btn.className = 'px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-[0.96]';
-        }
-      });
-
+      paintSegmentedGroup('discoverStatus', ['all', 'ready', 'in_library', 'incomplete'], st);
       loadDiscoverFeed();
     }
 
@@ -6332,12 +6468,14 @@
             : 'px-3 py-1 rounded-full text-xs transition-all border bg-zinc-900/80 text-zinc-400 hover:text-white border-white/5 cursor-pointer active:scale-[0.96]';
         });
       }
+      updateDiscoverFilterBadge();
       loadDiscoverFeed();
     }
 
     function setDiscoverSort(val) {
       discoverFilter.sort = val;
       discoverFilter.page = 1;
+      updateDiscoverFilterBadge();
       loadDiscoverFeed();
     }
 
@@ -6446,6 +6584,52 @@
       return prefix + ranges.join(', ');
     }
 
+    // DC2(a): one chip taxonomy, used by library cards, Discover cards and the Discover modal.
+    //   chipMeta(text)  - series position or extent: `Vol 10`, `16 vols`
+    //   chipOwnership() - the only chip allowed on a cover: Available / Owned / Owned 3/16 / Downloading
+    // Stating ownership in one shape and one place is what removes the five phrasings and the
+    // repeated "in library" line that used to sit next to the same badge.
+    function chipMetaHtml(text, extraClass) {
+      return `<span class="chip chip-meta${extraClass ? ` ${extraClass}` : ''}">${escapeHtml(String(text))}</span>`;
+    }
+
+    function chipOwnershipHtml(state, ratio, size) {
+      const sizeClass = size === 'lg' ? ' chip-lg' : '';
+      if (state === 'busy') {
+        return `<span class="chip chip-busy${sizeClass}"><span class="chip-dot animate-ping"></span><span>Downloading</span></span>`;
+      }
+      if (state === 'partial') {
+        return `<span class="chip chip-partial${sizeClass}"><span class="chip-dot"></span><span>Owned ${escapeHtml(ratio || '')}</span></span>`;
+      }
+      if (state === 'owned') {
+        return `<span class="chip chip-owned${sizeClass}"><span class="chip-dot"></span><span>Owned</span></span>`;
+      }
+      return `<span class="chip chip-available${sizeClass}"><span>Available</span></span>`;
+    }
+
+    // Resolve the chip state once, so the card, its in-place update and the modal cannot disagree.
+    function resolveDiscoverOwnership(item) {
+      const isVerified = item.sourceStatus === 'verified' && Array.isArray(item.verifiedVolumes) && item.verifiedVolumes.length > 0;
+      const inLib = (item.inLibrary !== undefined) ? item.inLibrary : item.isInLibrary;
+      const rawLibCount = (item.existingVolumes !== undefined) ? item.existingVolumes : (item.inLibraryVolumes || 0);
+      const ownedIndices = item.ownedVolumeIndices || [];
+      const ownedSet = new Set(ownedIndices);
+      const verifiedOwnedCount = isVerified ? item.verifiedVolumes.filter(v => ownedSet.has(v)).length : rawLibCount;
+      const verifiedTotal = isVerified ? (item.verifiedVolumeCount ?? item.verifiedVolumes.length) : (item.volumeCount || 1);
+      const totalVols = isVerified ? verifiedTotal : Math.max(item.volumeCount || 1, rawLibCount);
+      const libCount = isVerified ? verifiedOwnedCount : rawLibCount;
+      const missingCount = isVerified && item.missingVolumeCount !== undefined ? item.missingVolumeCount : undefined;
+      const hasMissing = isVerified && missingCount !== undefined && missingCount > 0;
+      const isComplete = isVerified && Boolean(item.allVerifiedOwned || (inLib && !hasMissing && (libCount >= totalVols)));
+      const isPartial = !isComplete && inLib && libCount > 0 && totalVols > libCount;
+      const state = isComplete ? 'owned' : (isPartial ? 'partial' : 'available');
+      return {
+        isVerified, inLib, totalVols, libCount, missingCount, hasMissing,
+        isComplete, isPartial, state, ownedIndices,
+        catalogTotal: item.catalogVolumeCount || item.volumeCount || totalVols,
+      };
+    }
+
     function renderDiscoverCards(items) {
       const container = document.getElementById('discoverGrid');
       const emptyState = document.getElementById('discoverEmptyState');
@@ -6465,56 +6649,10 @@
         if (item && item.id) discoverNovelsMap.set(item.id, item);
       });
 
-      const verifiedCheckSvg = `<svg class="w-3 h-3 text-emerald-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>`;
-
       const cardsHtml = items.map(item => {
         const isIngesting = ingestingDiscoverIds.has(item.id);
         const downloadState = activeDiscoverDownloads.get(item.id);
-        const inLib = (item.inLibrary !== undefined) ? item.inLibrary : item.isInLibrary;
-        const rawLibCount = (item.existingVolumes !== undefined) ? item.existingVolumes : (item.inLibraryVolumes || 0);
-        const isVerified = item.sourceStatus === 'verified' && Array.isArray(item.verifiedVolumes) && item.verifiedVolumes.length > 0;
-        const hasVerifiedInventory = isVerified;
-        const ownedIndices = item.ownedVolumeIndices || [];
-        const ownedSet = new Set(ownedIndices);
-        const verifiedOwnedCount = isVerified ? item.verifiedVolumes.filter(v => ownedSet.has(v)).length : rawLibCount;
-        const verifiedTotal = isVerified ? (item.verifiedVolumeCount ?? item.verifiedVolumes.length) : (item.volumeCount || 1);
-        const totalVols = hasVerifiedInventory ? verifiedTotal : Math.max(item.volumeCount || 1, rawLibCount);
-        const libCount = hasVerifiedInventory ? verifiedOwnedCount : rawLibCount;
-        const missingCount = isVerified && item.missingVolumeCount !== undefined
-          ? item.missingVolumeCount
-          : undefined;
-        const hasMissing = item.missingVolumeCount !== undefined
-          ? (isVerified && item.missingVolumeCount > 0)
-          : false;
-        const isPartial = libCount > 0 && totalVols > libCount;
-        const isPartialAudited = isVerified && inLib && libCount > 0 && hasMissing;
-        const isComplete = isVerified && Boolean(item.allVerifiedOwned || (inLib && !hasMissing && (libCount >= totalVols)));
-
-        let statusBadgeHtml = '';
-        if (isIngesting) {
-          statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/30 text-amber-200 border border-amber-500/40 animate-pulse flex items-center gap-1 shadow-sm max-w-full truncate">
-            <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping shrink-0"></span>
-            <span class="truncate">Downloading...</span>
-          </span>`;
-        } else if (isComplete) {
-          statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm truncate max-w-full flex items-center gap-1">
-            ${verifiedCheckSvg}
-            <span>In Library (${libCount} vols)</span>
-          </span>`;
-        } else if (isPartialAudited) {
-          statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm truncate max-w-full">
-            In Library (${libCount}/${totalVols} vols)
-          </span>`;
-        } else if (inLib) {
-          statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm truncate max-w-full flex items-center gap-1">
-            ${verifiedCheckSvg}
-            <span>In Library (${libCount} vols)</span>
-          </span>`;
-        } else {
-          statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-sky-500/30 text-sky-200 border border-sky-500/40 shadow-sm truncate max-w-full">
-            Available (${totalVols} vols)
-          </span>`;
-        }
+        const own = resolveDiscoverOwnership(item);
 
         const sourceBadges = [];
         // Ensure Elscione is preferred and displayed first
@@ -6549,19 +6687,17 @@
 
         const starSvg = `<svg class="w-2.5 h-2.5 inline fill-amber-400 mr-0.5" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>`;
 
+        // The cover carries the ownership chip and nothing else. The extent lives in the metadata
+        // row, which is legible, so `${totalVols} vols` is stated once per card.
         return `
           <div class="discover-card group relative flex flex-col bg-zinc-900/50 hover:bg-zinc-900/80 backdrop-blur-xl border border-white/10 hover:border-white/20 rounded-2xl p-2.5 sm:p-3 transition-all duration-200 shadow-xl justify-between" data-novel-id="${escapeHtml(item.id)}">
             <div>
               <!-- Cover Container -->
               <div class="relative w-full aspect-[2/3] rounded-xl overflow-hidden mb-2.5 bg-zinc-950 book-spine-effect cursor-pointer" onclick="openDiscoverModal('${escapeHtml(item.id)}')">
                 <img src="${item.coverUrl ? escapeHtml(item.coverUrl) : generateFallbackCoverSvg(item.title, item.author)}" alt="${escapeHtml(item.title)}" loading="lazy" decoding="async" data-title="${escapeHtml(item.title)}" data-author="${escapeHtml(item.author || '')}" onerror="this.onerror=null; this.src=generateFallbackCoverSvg(this.alt);" class="w-full h-full object-cover object-top rounded-xl bg-zinc-950 group-hover:scale-[1.03] transition-transform duration-300">
-                
-                <div class="absolute top-2 left-2 flex items-center gap-1 z-10 max-w-[calc(100%-16px)] pointer-events-none" id="cardBadge-${escapeHtml(item.id)}">
-                  ${statusBadgeHtml}
-                </div>
 
-                <div class="absolute bottom-2 right-2 px-1.5 py-0.5 rounded-md text-[9px] font-mono font-semibold bg-black/70 text-zinc-200 backdrop-blur-md border border-white/10 z-10 pointer-events-none max-w-[80%] truncate">
-                  ${totalVols} vols
+                <div class="absolute top-2 left-2 flex items-center gap-1 z-10 max-w-[calc(100%-16px)] pointer-events-none" id="cardBadge-${escapeHtml(item.id)}">
+                  ${isIngesting ? chipOwnershipHtml('busy') : chipOwnershipHtml(own.state, `${own.libCount}/${own.totalVols}`)}
                 </div>
               </div>
 
@@ -6569,9 +6705,7 @@
               <div class="space-y-1">
                 <div class="flex items-center gap-1 mb-1 flex-wrap">
                   ${sourceBadgesHtml}
-                  <span data-card-vol-pill class="px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold bg-white/10 text-zinc-300 border border-white/10 shrink-0">
-                    ${totalVols} vols
-                  </span>
+                  <span data-card-vol-pill>${chipMetaHtml(`${own.totalVols} vols`)}</span>
                   <span class="text-[10px] text-amber-400/90 font-mono ml-auto flex items-center shrink-0">${starSvg}${ratingVal.toFixed(1)}</span>
                 </div>
 
@@ -6579,7 +6713,7 @@
                   ${escapeHtml(item.title)}
                 </h3>
                 ${romaji ? `<div class="text-[10px] text-zinc-500 truncate italic" title="${escapeHtml(romaji)}">${escapeHtml(romaji)}</div>` : ''}
-                
+
                 <div class="text-[10px] text-zinc-400 truncate pt-0.5">
                   By <span class="text-zinc-300">${escapeHtml(authorName)}</span>
                 </div>
@@ -6698,6 +6832,67 @@
       if (synopsis) setHtml(synopsis, renderSynopsisSkeleton());
     }
 
+    // One list of sources for both the picker and the download handler, so the row the reader
+    // sees selected is literally the source the footer button uses.
+    function resolveDiscoverSources(item) {
+      const entries = [];
+      if (Array.isArray(item.sources) && item.sources.length > 0) {
+        [...item.sources].sort((a, b) => (a.source === b.source ? 0 : (a.source === 'elscione' ? -1 : 1))).forEach(s => {
+          entries.push({
+            source: s.source,
+            name: s.source === 'lnori' ? 'Lnori' : 'Elsci.one',
+            url: s.url,
+            status: s.status,
+            volumeCount: s.volumeCount,
+            volumes: s.volumes,
+            error: s.error,
+          });
+        });
+      }
+      if (!entries.some(e => e.source === 'elscione') && item.sourceUrls?.elscione) {
+        entries.unshift({ source: 'elscione', name: 'Elsci.one', url: item.sourceUrls.elscione, status: 'unverified' });
+      }
+      if (!entries.some(e => e.source === 'lnori') && item.sourceUrls?.lnori) {
+        entries.push({ source: 'lnori', name: 'Lnori', url: item.sourceUrls.lnori, status: 'unverified' });
+      }
+      return entries;
+    }
+
+    function discoverSourceStatusText(entry, fallbackTotal) {
+      if (entry.status === 'verified') {
+        return `${entry.volumeCount !== undefined ? entry.volumeCount : fallbackTotal} vols available`;
+      }
+      if (entry.status === 'error') {
+        const cause = entry.error ? classifyErrorCause(entry.error).kind : 'other';
+        if (cause === 'dependency') return 'Server setup needed';
+        if (cause === 'blocked') return 'Blocked for automation';
+        if (cause === 'http') return 'Source refused request';
+        if (cause === 'offline') return 'Source unreachable';
+        return 'Source unavailable';
+      }
+      return `${entry.volumeCount || fallbackTotal} vols (unverified)`;
+    }
+
+    function selectDiscoverModalSource(source, entryEl) {
+      if (!entryEl) return;
+      discoverModalSource = source;
+      entryEl.parentElement.querySelectorAll('.source-pick').forEach(el => {
+        el.setAttribute('aria-pressed', el.getAttribute('data-source') === source ? 'true' : 'false');
+      });
+    }
+
+    // Only http(s) source links become anchors; anything else (javascript:, data:) is dropped so a
+    // scraped source URL can never become script in the modal.
+    function sanitizeExternalHref(url) {
+      try {
+        const parsed = new URL(String(url), window.location.origin);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+        return parsed.toString();
+      } catch {
+        return '';
+      }
+    }
+
     function populateDiscoverModal(item) {
       activeDiscoverItem = item;
       hideDiscoverModalError();
@@ -6727,7 +6922,6 @@
       const verifiedTotal = isVerified ? (item.verifiedVolumeCount ?? item.verifiedVolumes.length) : (item.volumeCount || 1);
       const totalVols = hasVerifiedInventory ? verifiedTotal : Math.max(item.volumeCount || 1, rawLibCount);
       const libCount = hasVerifiedInventory ? verifiedOwnedCount : rawLibCount;
-      const catalogTotal = item.catalogVolumeCount || item.volumeCount || totalVols;
 
       if (cover) {
         cover.setAttribute('data-title', item.title || '');
@@ -6738,105 +6932,55 @@
       if (title) title.textContent = item.title;
       if (romaji) romaji.textContent = item.romajiTitle || item.titleRomaji || '';
       if (author) author.textContent = `By ${item.author || 'Author Unknown'}`;
-      if (volumes) {
-        if (isVerified && catalogTotal > totalVols) {
-          volumes.textContent = `${totalVols} Vols Available (${catalogTotal} in Catalog)`;
-        } else if (!isVerified) {
-          volumes.textContent = `${catalogTotal} Volumes (Catalog)`;
-        } else {
-          volumes.textContent = `${totalVols} Volumes`;
-        }
-      }
-      if (release) release.textContent = `Released: ${item.releaseDate || 'Recent'}`;
+      // QW9: one extent statement. The catalogue size is not this title's extent, so it is gone.
+      if (volumes) volumes.textContent = `${totalVols} vols`;
+      if (release) release.textContent = item.releaseDate || 'Recent';
 
       const ratingVal = item.rating || (item.score ? (item.score / 20) : 4.8);
-      const starSvg = `<svg class="w-3 h-3 fill-amber-400" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>`;
-      if (rating) setHtml(rating, `${starSvg}<span>${ratingVal.toFixed(1)} / 5.0</span><span class="text-zinc-500 font-normal">(${item.popularityScore || 85}% pop)</span>`);
+      const starSvg = `<svg class="w-2.5 h-2.5 fill-amber-400 shrink-0" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>`;
+      if (rating) setHtml(rating, `${starSvg}<span>${ratingVal.toFixed(1)}</span>`);
 
       if (genres) {
-        setHtml(genres, (item.genres || []).map(g =>
-          `<span class="px-2 py-0.5 rounded-full text-xs bg-white/5 border border-white/10 text-zinc-300">${escapeHtml(g)}</span>`
+        setHtml(genres, (item.genres || []).slice(0, 4).map(g =>
+          `<span class="px-1.5 py-0.5 rounded-full text-[10px] bg-white/5 border border-white/10 text-zinc-400">${escapeHtml(g)}</span>`
         ).join(''));
       }
 
+      const sourceEntries = resolveDiscoverSources(item);
+      const recommended = getPrimaryNovelSource(item).source || sourceEntries[0]?.source || null;
+      if (!discoverModalSource || !sourceEntries.some(e => e.source === discoverModalSource)) {
+        discoverModalSource = recommended;
+      }
+
       if (sources) {
-        const sourceEntries = [];
-        if (Array.isArray(item.sources) && item.sources.length > 0) {
-          const sortedSources = [...item.sources].sort((a, b) => {
-            if (a.source === b.source) return 0;
-            return a.source === 'elscione' ? -1 : 1;
-          });
-          sortedSources.forEach(s => {
-            const isLn = s.source === 'lnori';
-            sourceEntries.push({
-              name: isLn ? 'Lnori' : 'Elsci.one',
-              url: s.url,
-              source: s.source,
-              color: isLn ? 'text-indigo-400 border-indigo-500/30 bg-indigo-500/10' : 'text-rose-400 border-rose-500/30 bg-rose-500/10',
-              status: s.status,
-              volumeCount: s.volumeCount,
-              volumes: s.volumes,
-              error: s.error,
-            });
-          });
-        } else {
-          // Show Elscione first (preferred)
-          if (item.sourceUrls?.elscione) {
-            sourceEntries.push({ name: 'Elsci.one', url: item.sourceUrls.elscione, source: 'elscione', color: 'text-rose-400 border-rose-500/30 bg-rose-500/10', status: 'unverified' });
-          }
-          if (item.sourceUrls?.lnori) {
-            sourceEntries.push({ name: 'Lnori', url: item.sourceUrls.lnori, source: 'lnori', color: 'text-indigo-400 border-indigo-500/30 bg-indigo-500/10', status: 'unverified' });
-          }
-        }
         setHtml(sources, sourceEntries.map((s) => {
-          // The payload already carries the per-source failure reason, so classify it once and let
-          // both the status line and the detail row speak to the real cause.
-          const sourceCause = s.error ? classifyErrorCause(s.error).kind : 'other';
+          const statusText = discoverSourceStatusText(s, totalVols);
+          const isSelected = s.source === discoverModalSource;
           const sourceError = s.error ? formatCleanErrorMessage(s.error) : '';
-
-          let volStatusText = '';
-          if (s.status === 'verified') {
-            volStatusText = `${s.volumeCount !== undefined ? s.volumeCount : totalVols} vols available`;
-          } else if (s.status === 'error') {
-            volStatusText = sourceCause === 'dependency'
-              ? 'Server setup needed'
-              : sourceCause === 'blocked'
-                ? 'Blocked for automation'
-                : sourceCause === 'http'
-                  ? 'Source refused request'
-                  : sourceCause === 'offline'
-                    ? 'Source unreachable'
-                    : 'Source unavailable';
-          } else {
-            volStatusText = `${s.volumeCount || totalVols} vols (unverified)`;
-          }
-
-          // B7/G4: show the failure reason instead of a label the reader cannot act on.
-          const errorRow = sourceError
-            ? `<div class="text-[11px] text-rose-300/90 leading-snug break-words">${escapeHtml(sourceError)}</div>`
+          const errRow = sourceError
+            ? `<div class="text-[10px] text-rose-300/90 leading-snug break-words">${escapeHtml(sourceError)}</div>`
             : '';
-          const verifyRow = s.status === 'error' && item.id
-            ? `<button type="button" onclick="event.stopPropagation(); loadDiscoverFeed(true);" class="px-2.5 py-1 rounded-full bg-white/10 hover:bg-white/20 text-white font-semibold text-[11px] cursor-pointer active:scale-[0.96] shrink-0 transition-all">Verify</button>`
+          // The row selects the source the footer action uses. The trailing icon opens the
+          // source page itself, so the picker keeps the "look before you download" ability
+          // without adding a second download affordance to the modal.
+          const sourceHref = s.url ? sanitizeExternalHref(s.url) : '';
+          const openLink = sourceHref
+            ? `<a href="${escapeHtml(sourceHref)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" class="text-zinc-500 hover:text-zinc-200 shrink-0 p-0.5" title="Open ${escapeHtml(s.name)} in a new tab" aria-label="Open ${escapeHtml(s.name)} in a new tab">
+                 <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H18m0 0v4.5M18 6l-7.5 7.5M6 6h4.5M6 6v12h12v-4.5"/></svg>
+               </a>`
             : '';
-
           return `
-          <div class="flex flex-col gap-2 p-3 rounded-xl border ${s.color} text-xs">
-            <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-              <span class="font-bold font-mono shrink-0">${escapeHtml(s.name)}</span>
-              <span class="text-zinc-400 text-[11px]">&bull; ${escapeHtml(volStatusText)}</span>
-            </div>
-            ${errorRow}
-            <div class="flex flex-wrap items-center justify-between gap-1.5 pt-2 border-t border-white/10">
-              <a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" class="underline text-zinc-400 hover:text-white flex items-center gap-1 text-[11px] shrink-0">
-                <span>Browse Source</span>
-              </a>
-              ${verifyRow}
-              <button type="button" onclick="triggerDiscoverIngest('${escapeHtml(item.id)}', event, '${escapeHtml(s.source)}')" class="px-3 py-1 bg-white/10 hover:bg-white/20 text-white rounded-full font-semibold text-[11px] cursor-pointer active:scale-[0.96] shrink-0 transition-all">
-                Ingest
-              </button>
-            </div>
+          <div class="flex items-center gap-1">
+            <button type="button" class="source-pick" data-source="${escapeHtml(s.source || '')}" aria-pressed="${isSelected ? 'true' : 'false'}" onclick="selectDiscoverModalSource('${escapeHtml(s.source || '')}', this)">
+              <span class="flex items-center gap-1.5 min-w-0">
+                <span class="w-1.5 h-1.5 rounded-full shrink-0 ${isSelected ? 'bg-amber-400' : 'bg-zinc-600'}"></span>
+                <span class="font-semibold truncate">${escapeHtml(s.name)}</span>
+              </span>
+              <span class="text-[10px] text-zinc-400 text-right shrink-0">${escapeHtml(statusText)}</span>
+            </button>
+            ${openLink}
           </div>
-        `;
+          ${errRow}`;
         }).join(''));
       }
 
@@ -6873,96 +7017,60 @@
       const isComplete = isVerified && Boolean(item.allVerifiedOwned || (inLib && !hasMissing && (libCount >= totalVols)));
       const isPartial = isVerified && inLib && libCount > 0 && hasMissing;
 
-      const verifiedCheckSvg = `<svg class="w-3.5 h-3.5 text-emerald-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>`;
+      const verifiedCheckSvg = `<svg class="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>`;
       const downloadSvg = `<svg class="w-3.5 h-3.5 text-zinc-950 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>`;
       const forceContainer = document.getElementById('discoverModalForceContainer');
 
+      // DC2: the cover carries the same ownership chip the card does, and it is the only badge there.
+      const chipState = isIngesting ? 'busy' : (isComplete ? 'owned' : (isPartial ? 'partial' : 'available'));
+      const chipRatio = isPartial ? `${libCount}/${totalVols}` : '';
       if (statusBadge) {
-        if (isIngesting) {
-          statusBadge.className = 'absolute top-2 left-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/30 text-amber-200 border border-amber-500/50 backdrop-blur-md animate-pulse';
-          statusBadge.textContent = 'Downloading...';
-        } else if (isComplete) {
-          statusBadge.className = 'absolute top-2 left-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/50 backdrop-blur-md flex items-center gap-1';
-          setHtml(statusBadge, `${verifiedCheckSvg}<span>All in Library (${libCount}/${totalVols})</span>`);
-        } else if (isPartial) {
-          statusBadge.className = 'absolute top-2 left-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/50 backdrop-blur-md';
-          statusBadge.textContent = `In Library (${libCount}/${totalVols} vols)`;
-        } else if (inLib) {
-          statusBadge.className = 'absolute top-2 left-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/50 backdrop-blur-md';
-          statusBadge.textContent = `In Library (${libCount} vols)`;
-        } else {
-          statusBadge.className = 'absolute top-2 left-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-500/30 text-sky-200 border border-sky-500/50 backdrop-blur-md';
-          statusBadge.textContent = `Available (${totalVols} vols)`;
-        }
+        setHtml(statusBadge, chipOwnershipHtml(chipState, chipRatio, 'lg'));
       }
 
+      // QW9: one footer line, same vocabulary as the chip.
       if (libraryNote) {
         if (isComplete) {
-          setHtml(libraryNote, `
-            <div class="flex items-center gap-1.5 text-emerald-400 font-medium text-xs">
-              ${verifiedCheckSvg}
-              <span>All in Library (${libCount}/${totalVols}) &bull; All ${totalVols} verified source volumes in your Calibre library.</span>
-            </div>
-          `);
+          setHtml(libraryNote, `<span class="text-emerald-400 font-medium">All ${totalVols} volumes are in your Calibre library.</span>`);
         } else if (isPartial) {
-          const ownedStr = formatVolumeRangeString(ownedIndices) || `Vols 1-${libCount}`;
           const missingStr = formatVolumeRangeString(missingIndices) || `Vols ${libCount + 1}-${totalVols}`;
-          setHtml(libraryNote, `
-            <div class="flex flex-col gap-0.5 text-xs">
-              <div class="text-zinc-300">
-                <span class="text-emerald-400 font-semibold">In Library:</span> ${escapeHtml(ownedStr)} &bull; <span class="text-amber-400 font-semibold">Missing:</span> ${escapeHtml(missingStr)}
-              </div>
-              <div class="text-[11px] text-zinc-400">
-                ${libCount} of ${totalVols} volumes in library &bull; ${missingCount} missing volume${missingCount === 1 ? '' : 's'} will be downloaded
-              </div>
-            </div>
-          `);
+          // One line, and the line stays one line: a long gap list is summarised by its count
+          // instead of being allowed to wrap and push the primary action down the card.
+          const missingLabel = missingStr && missingStr.length <= 28
+            ? `${missingStr} missing`
+            : `${missingCount} of ${totalVols} volumes missing`;
+          setHtml(libraryNote, `<span class="text-amber-300 font-medium">${escapeHtml(missingLabel)}</span><span class="text-zinc-500">&nbsp;&bull;&nbsp;will be downloaded</span>`);
         } else if (inLib) {
-          setHtml(libraryNote, `
-            <div class="flex items-center gap-1.5 text-zinc-300 text-xs">
-              <span>${libCount} volume${libCount === 1 ? '' : 's'} in library &bull; Source availability unverified</span>
-            </div>
-          `);
+          setHtml(libraryNote, `<span>${libCount} volume${libCount === 1 ? '' : 's'} in library &bull; Source availability unverified</span>`);
         } else {
-          setHtml(libraryNote, `<span class="text-zinc-400">Not in your Calibre library yet. Tap Download All below.</span>`);
+          setHtml(libraryNote, `<span class="text-zinc-400">Not in your Calibre library yet.</span>`);
         }
       }
 
       if (ingestBtn) {
         if (isIngesting) {
           ingestBtn.setAttribute('disabled', 'true');
-          ingestBtn.className = 'flex-1 sm:flex-none px-5 py-2.5 bg-amber-400 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 opacity-80 cursor-wait';
+          ingestBtn.className = 'flex-1 px-4 py-2.5 bg-amber-400 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 opacity-80 cursor-wait';
           setHtml(ingestBtn, `
             <svg class="w-4 h-4 animate-spin text-zinc-950" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke-width="4" class="opacity-75"></path></svg>
-            <span>Downloading in Background...</span>
+            <span>Downloading...</span>
           `);
           if (forceContainer) forceContainer.classList.add('hidden');
+        } else if (isComplete) {
+          ingestBtn.setAttribute('disabled', 'true');
+          ingestBtn.className = 'flex-1 px-4 py-2.5 bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-semibold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-not-allowed opacity-90';
+          setHtml(ingestBtn, `${verifiedCheckSvg}<span>All Volumes in Library (${totalVols}/${totalVols})</span>`);
+          if (forceContainer) forceContainer.classList.remove('hidden');
+        } else if (isPartial) {
+          ingestBtn.removeAttribute('disabled');
+          ingestBtn.className = 'flex-1 px-4 py-2.5 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]';
+          setHtml(ingestBtn, `${downloadSvg}<span>Download Remaining (${missingCount} vols)</span>`);
+          if (forceContainer) forceContainer.classList.add('hidden');
         } else {
-          if (isComplete) {
-            ingestBtn.setAttribute('disabled', 'true');
-            ingestBtn.className = 'flex-1 sm:flex-none px-5 py-2.5 bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-semibold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-not-allowed opacity-90';
-            setHtml(ingestBtn, `
-              ${verifiedCheckSvg}
-              <span>All Volumes in Library (${totalVols}/${totalVols})</span>
-            `);
-            if (forceContainer) forceContainer.classList.remove('hidden');
-          } else if (isPartial) {
-            ingestBtn.removeAttribute('disabled');
-            ingestBtn.className = 'flex-1 sm:flex-none px-5 py-2.5 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]';
-            setHtml(ingestBtn, `
-              ${downloadSvg}
-              <span>Download Remaining (${missingCount} vols)</span>
-            `);
-            if (forceContainer) forceContainer.classList.add('hidden');
-          } else {
-            ingestBtn.removeAttribute('disabled');
-            ingestBtn.className = 'flex-1 sm:flex-none px-5 py-2.5 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]';
-            setHtml(ingestBtn, `
-              ${downloadSvg}
-              <span>Download All (${totalVols} vols)</span>
-            `);
-            if (forceContainer) forceContainer.classList.add('hidden');
-          }
+          ingestBtn.removeAttribute('disabled');
+          ingestBtn.className = 'flex-1 px-4 py-2.5 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold text-xs rounded-xl shadow-md transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.96]';
+          setHtml(ingestBtn, `${downloadSvg}<span>Download All (${totalVols} vols)</span>`);
+          if (forceContainer) forceContainer.classList.add('hidden');
         }
       }
 
@@ -6983,67 +7091,23 @@
 
     function updateDiscoverCardOnGrid(item) {
       if (!item) return;
-      const cardEl = document.querySelector(`.discover-card[data-novel-id="${escapeHtml(item.id)}"]`);
+      const cardEl = document.querySelector(`.discover-card[data-novel-id="${CSS.escape(item.id)}"]`);
       if (!cardEl) return;
 
       const isIngesting = ingestingDiscoverIds.has(item.id);
-      const downloadState = activeDiscoverDownloads.get(item.id);
-      const inLib = (item.inLibrary !== undefined) ? item.inLibrary : item.isInLibrary;
-      const rawLibCount = (item.existingVolumes !== undefined) ? item.existingVolumes : (item.inLibraryVolumes || 0);
-      const isVerified = item.sourceStatus === 'verified' && Array.isArray(item.verifiedVolumes) && item.verifiedVolumes.length > 0;
-      const hasVerifiedInventory = isVerified;
-      const ownedIndices = item.ownedVolumeIndices || [];
-      const ownedSet = new Set(ownedIndices);
-      const verifiedOwnedCount = isVerified ? item.verifiedVolumes.filter(v => ownedSet.has(v)).length : rawLibCount;
-      const verifiedTotal = isVerified ? (item.verifiedVolumeCount ?? item.verifiedVolumes.length) : (item.volumeCount || 1);
-      const totalVols = hasVerifiedInventory ? verifiedTotal : Math.max(item.volumeCount || 1, rawLibCount);
-      const libCount = hasVerifiedInventory ? verifiedOwnedCount : rawLibCount;
-      const catalogTotal = item.catalogVolumeCount || item.volumeCount || totalVols;
-      const missingCount = isVerified && item.missingVolumeCount !== undefined ? item.missingVolumeCount : undefined;
-      const hasMissing = item.missingVolumeCount !== undefined ? (isVerified && item.missingVolumeCount > 0) : false;
-      const isPartial = libCount > 0 && totalVols > libCount;
-      const isPartialAudited = isVerified && inLib && libCount > 0 && hasMissing;
-      const isComplete = Boolean(
-        (isVerified && (item.allVerifiedOwned || (!hasMissing && libCount >= totalVols))) ||
-        (!isVerified && inLib && catalogTotal > 0 && libCount >= catalogTotal)
-      );
+      const own = resolveDiscoverOwnership(item);
 
-      const verifiedCheckSvg = `<svg class="w-3.5 h-3.5 text-emerald-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>`;
-
-      let statusBadgeHtml = '';
-      if (isIngesting) {
-        statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/30 text-amber-200 border border-amber-500/40 animate-pulse flex items-center gap-1 shadow-sm max-w-full truncate">
-          <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping shrink-0"></span>
-          <span class="truncate">Downloading...</span>
-        </span>`;
-      } else if (isComplete) {
-        statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm truncate max-w-full flex items-center gap-1">
-          ${verifiedCheckSvg}
-          <span>In Library (${libCount} vols)</span>
-        </span>`;
-      } else if (isPartialAudited) {
-        statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm truncate max-w-full">
-          In Library (${libCount}/${totalVols} vols)
-        </span>`;
-      } else if (inLib) {
-        statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 shadow-sm truncate max-w-full flex items-center gap-1">
-          ${verifiedCheckSvg}
-          <span>In Library (${libCount} vols)</span>
-        </span>`;
-      } else {
-        statusBadgeHtml = `<span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-sky-500/30 text-sky-200 border border-sky-500/40 shadow-sm truncate max-w-full">
-          Available (${totalVols} vols)
-        </span>`;
+      // Both nodes are repainted from the one resolved state, so a card cannot disagree with its
+      // own modal after a download finishes.
+      const badgeContainer = cardEl.querySelector(`#cardBadge-${CSS.escape(item.id)}`);
+      if (badgeContainer) {
+        setHtml(badgeContainer, isIngesting
+          ? chipOwnershipHtml('busy')
+          : chipOwnershipHtml(own.state, `${own.libCount}/${own.totalVols}`));
       }
 
-      const badgeContainer = cardEl.querySelector(`#cardBadge-${CSS.escape(item.id)}`);
-      if (badgeContainer) setHtml(badgeContainer, statusBadgeHtml);
-
-      const coverPill = cardEl.querySelector('.absolute.bottom-2.right-2');
-      if (coverPill) coverPill.textContent = `${totalVols} vols`;
-
       const metaPill = cardEl.querySelector('span[data-card-vol-pill]');
-      if (metaPill) metaPill.textContent = `${totalVols} vols`;
+      if (metaPill) setHtml(metaPill, chipMetaHtml(`${own.totalVols} vols`));
 
       const actionsContainer = cardEl.querySelector(`#cardActions-${CSS.escape(item.id)}`);
       if (actionsContainer && !isIngesting) {
@@ -7143,12 +7207,12 @@
         showToast('All volumes already in library. Use force re-download link below if needed.');
         return;
       }
-      triggerDiscoverIngest(activeDiscoverItem.id);
+      triggerDiscoverIngest(activeDiscoverItem.id, undefined, discoverModalSource || undefined);
     }
 
     function handleDiscoverModalForceIngest() {
       if (!activeDiscoverItem) return;
-      triggerDiscoverIngest(activeDiscoverItem.id, undefined, undefined, true);
+      triggerDiscoverIngest(activeDiscoverItem.id, undefined, discoverModalSource || undefined, true);
     }
 
     async function triggerDiscoverIngest(novelId, event, preferredSource, force) {
@@ -7716,6 +7780,8 @@
 
       const sync = kosyncMap.get(book.id);
       const pct = sync ? Math.min(100, Math.round((sync.percentage || 0) * 100)) : 0;
+      // DC2: one vocabulary for reading state across the app. The series position is a chip on the
+      // cover, so the subtitle carries reading state only and never repeats the volume number.
       let statusText = '';
       let progressBar = '';
 
@@ -7724,8 +7790,6 @@
       } else if (sync && sync.percentage > 0) {
         statusText = `<span class="text-mac-accent font-medium">${pct}% completed</span>`;
         progressBar = `<div class="absolute bottom-0 inset-x-0 h-1 bg-black/50 z-10"><div class="bg-mac-accent h-full transition-all" style="width: ${pct}%"></div></div>`;
-      } else if (book.series && book.series_index) {
-        statusText = `Volume ${book.series_index}`;
       } else {
         statusText = escapeHtml(book.authors || 'Unread');
       }
@@ -7738,12 +7802,12 @@
       ` : '';
 
       const seriesIndexBadge = (book.series && book.series_index) ? `
-        <div class="absolute top-2 left-2 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-black/70 text-white/90 border border-white/10 backdrop-blur-sm max-w-[80%] truncate">
-          Vol ${book.series_index}
+        <div class="absolute top-2 left-2 z-10 max-w-[80%] pointer-events-none">
+          ${chipMetaHtml(`Vol ${book.series_index}`)}
         </div>
       ` : (book.series ? `
-        <div class="absolute top-2 left-2 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold bg-black/70 text-white/90 border border-white/10 backdrop-blur-sm max-w-[80%] truncate">
-          ${escapeHtml(book.series)}
+        <div class="absolute top-2 left-2 z-10 max-w-[80%] pointer-events-none">
+          ${chipMetaHtml(book.series)}
         </div>
       ` : '');
 
@@ -7856,7 +7920,7 @@
             ${highlightCoverBadge}
 
             <!-- Selection Checkbox -->
-            <button onclick="event.stopPropagation(); toggleSelect(${book.id})" class="absolute top-2 right-2 z-20 min-w-[36px] min-h-[36px] w-9 h-9 rounded-lg bg-black/60 text-white flex items-center justify-center border border-white/20 backdrop-blur-sm ${isSelected ? 'bg-sky-500 text-white border-sky-400' : 'sm:opacity-0 sm:group-hover:opacity-100'} transition-all cursor-pointer active:scale-[0.98]" title="Select Book">
+            <button onclick="event.stopPropagation(); toggleSelect(${book.id})" class="absolute top-2 right-2 z-20 min-w-[36px] min-h-[36px] w-9 h-9 rounded-lg bg-black/60 text-white items-center justify-center border border-white/20 backdrop-blur-sm ${isSelected ? 'flex bg-sky-500 text-white border-sky-400' : 'hidden sm:flex sm:opacity-0 sm:group-hover:opacity-100'} transition-all cursor-pointer active:scale-[0.98]" title="Select Book">
               ${svgIcon('check', `w-3.5 h-3.5 ${isSelected ? 'opacity-100' : 'opacity-0'}`)}
             </button>
 
@@ -8319,8 +8383,40 @@
     }
 
     // MOBILE FILTER DRAWER
-    function openFilterDrawer() {
+    // DC1(a): one filter sheet serves both surfaces. Library mode shows the library facets;
+    // Discover mode shows genre and sort, because Discover genres are not library tags and
+    // offering the library's Tags facet there would filter the wrong thing.
+    let filterDrawerMode = 'library';
+
+    function setFilterDrawerMode(mode) {
+      filterDrawerMode = mode === 'discover' ? 'discover' : 'library';
+      const librarySection = document.getElementById('drawerLibrarySections');
+      const discoverSection = document.getElementById('drawerDiscoverSections');
+      const title = document.getElementById('filterDrawerTitle');
+      const isDiscover = filterDrawerMode === 'discover';
+      librarySection?.classList.toggle('hidden', isDiscover);
+      discoverSection?.classList.toggle('hidden', !isDiscover);
+      if (title) title.textContent = isDiscover ? 'Filter Discover' : 'Filter Library';
+      if (isDiscover) {
+        const sortSelect = document.getElementById('discoverSortSelect');
+        if (sortSelect) sortSelect.value = discoverFilter.sort;
+        updateDiscoverFilterBadge();
+      }
+    }
+
+    // One Reset button for whichever mode the sheet is showing.
+    function resetDrawerFilters() {
+      if (filterDrawerMode === 'discover') {
+        resetDiscoverFilters();
+      } else {
+        clearAllFilters();
+      }
+      closeFilterDrawer();
+    }
+
+    function openFilterDrawer(mode) {
       tgHaptic.light();
+      setFilterDrawerMode(mode || 'library');
       openModalAnimated('filterDrawer', true);
     }
     function closeFilterDrawer() {

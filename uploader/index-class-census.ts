@@ -30,6 +30,9 @@ export const HOOK_CLASSES: ReadonlySet<string> = new Set([
   "retry-upload-btn",
   // Markers the library card logic looks for (hideHoverPopover, updateUploadProgress).
   "popup-active",
+  // Horizontal scrollers that syncEdgeFades() measures and then decorates with `.edge-fade-x`.
+  "edge-fade-tabs",
+  "edge-fade-scope",
   "card-popup-content",
   "card-popup-subtitle",
 ]);

@@ -68,9 +68,9 @@ describe("class census: the guard actually fails when a utility goes missing", (
   });
 
   it("flags the modal cover width, which is why the cover used to swallow its text column", () => {
-    const broken = removeRule(html, ".w-36");
+    const broken = removeRule(html, ".w-\\[88px\\]");
     const report = runClassCensus(broken);
-    expect(report.missing.map((m) => m.token)).toContain("w-36");
+    expect(report.missing.map((m) => m.token)).toContain("w-[88px]");
   });
 });
 
