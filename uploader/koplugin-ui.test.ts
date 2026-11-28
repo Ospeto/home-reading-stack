@@ -821,12 +821,18 @@ describe("plugin UI primitives: one-page geometry", () => {
     // The regression this guards: with the one-unit scale the same screen
     // planned four rows, two of them navigation, so the library showed two
     // books a page at twice the intended type size.
-    expect(Number(out.device_plan_rows)).toBeGreaterThanOrEqual(7);
+    //
+    // The shelf is measured in rows that hold a legible title, not in rows at
+    // any size: the band is sized from the 9.5 pt floor, so six rows on a
+    // Paperwhite 5 SE (a 197px band, 12.3 pt) is the design, and the old
+    // seven come out at 178px, 7.5 pt, which is the defect this pass removes.
+    expect(Number(out.device_plan_rows)).toBeGreaterThanOrEqual(6);
     expect(out.device_plan_fits).toBe("true");
     expect(out.device_plan_full_height).toBe("true");
     expect(out.device_plan_rowh_shrank).toBe("true");
-    // Compact mode without covers packs 10+ rows cleanly onto the same panel.
-    expect(Number(out.device_compact_rows)).toBeGreaterThanOrEqual(10);
+    // Without a cover gutter the same panel packs eight rows at a 147px band -
+    // that is what "compact mode" now buys: more rows, not just a wider title.
+    expect(Number(out.device_compact_rows)).toBeGreaterThanOrEqual(8);
     expect(out.device_compact_fits).toBe("true");
     expect(out.device_compact_cover_w).toBe("0");
   });

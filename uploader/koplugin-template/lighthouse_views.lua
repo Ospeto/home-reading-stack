@@ -36,6 +36,7 @@ which keeps every model comparable in a test.
 local Stats = require("lighthouse_stats")
 local Status = require("lighthouse_status")
 local Ui = require("lighthouse_ui")
+local Queue = require("lighthouse_queue")
 
 local Views = {}
 
@@ -135,6 +136,11 @@ Views.LABELS = {
     finished_reclaimable_singular = "%s in 1 finished book",
     no_finished_local = "No finished books on device",
     remove_short = "Remove",
+    in_queue = "Queued",
+    downloading = "Downloading %1 of %2",
+    batch_done = "Downloaded %1 of %2",
+    batch_stopped = "Stopped after %1 of %2",
+    overflow_empty = "No actions for this screen",
 }
 
 --- Merges caller-supplied labels over the built-in English ones.
@@ -564,11 +570,19 @@ function Views.authorRow(group, text)
 end
 
 --- One book row: cover, title, author and series, progress and rating.
+--
+-- A library row is a long-press target as well as a tap target: tapping opens
+-- the book, holding it opens the quick-action sheet for that same book. The
+-- long-press used to do exactly what the tap did, so the reader who had been
+-- told "Long-press any book to add it" (see `main.lua`) held a row and watched
+-- it open instead of queueing.
 -- @tparam table entry OPDS entry already merged with reading progress
 -- @tparam table text labels
+-- @tparam[opt] table[opt] options { queued = boolean }
 -- @treturn table row model
-function Views.bookRow(entry, text)
+function Views.bookRow(entry, text, options)
     local labels = text or Views.LABELS
+    options = options or {}
     entry = type(entry) == "table" and entry or {}
     local title = Ui.rowTitle(entry.title)
     if title == "" then title = labels.untitled end
@@ -580,6 +594,12 @@ function Views.bookRow(entry, text)
     end
     local rating = Status.num(entry.rating)
     local value_sub = (rating and rating > 0) and Status.ratingStars(rating) or nil
+    -- A queued volume says so on the row itself. In the list a reader could see
+    -- "Download Later" add a title and then had no way to tell, page by page,
+    -- which titles were already waiting - the count lived in the overflow menu.
+    if options.queued == true then
+        value_sub = Ui.join({ labels.in_queue, value_sub })
+    end
     return {
         kind = "reading",
         title = title,
@@ -590,6 +610,7 @@ function Views.bookRow(entry, text)
         on_device = on_device,
         cover_id = Status.num(entry.book_id),
         action = { kind = "book", entry = entry },
+        hold_action = { kind = "book_actions", entry = entry },
     }
 end
 
@@ -639,8 +660,17 @@ function Views.libraryModel(mode, context, options)
 
     if mode == "books" then
         local entries = type(context.entries) == "table" and context.entries or {}
+        -- The queue is a set of entry keys, not a flag on the row: the catalog
+        -- entry and the queued copy are different tables for the same volume.
+        local queued_keys = type(context.queued_keys) == "table" and context.queued_keys or nil
         for entry_index = 1, #entries do
-            rows[#rows + 1] = Views.bookRow(entries[entry_index], text)
+            local entry = entries[entry_index]
+            local queued = false
+            if queued_keys then
+                local key = Queue.entryKey(entry)
+                if key and queued_keys[key] then queued = true end
+            end
+            rows[#rows + 1] = Views.bookRow(entry, text, { queued = queued })
         end
         -- The catalog pages itself: one more page exists exactly when the feed
         -- said so. When the feed also reports how many books matched, the footer
@@ -741,10 +771,14 @@ function Views.libraryModel(mode, context, options)
         end
     end
 
+    -- The footer's right-hand summary names what the list actually IS. With the
+    -- pager present the renderer draws this beside the page number; before, that
+    -- string was built and then dropped on every paged screen.
+    local right_summary = mode == "series" and text.grouped_by_series
+        or (mode == "authors" and text.grouped_by_author or text.all_books)
     local footer = {
         left = string.format(text.page, page, pages),
-        right = mode == "series" and text.grouped_by_series
-            or (mode == "authors" and text.grouped_by_author or text.all_books),
+        right = right_summary,
         prev = Ui.GLYPH.back .. " " .. text.prev_page,
         center = string.format(text.page_compact, page, pages),
         next = text.next_page_short .. " " .. Ui.GLYPH.chevron,
@@ -801,6 +835,81 @@ local function pagerFooter(page, pages, right_summary, text)
         has_next = page < pages,
     }
     return footer, pager
+end
+
+--- Builds the full-screen "every screen, one tap away" page behind the ⋮.
+--
+-- The overflow used to be a stock ButtonDialog: up to seven buttons on one row,
+-- each about as wide as five characters on a 600 px panel, no separator between
+-- navigation and current-screen actions, a title that always said "LightHouse
+-- library" whatever screen the reader was on, and a `Close` button with an empty
+-- callback. This model is the same offer as a native page: one row per action,
+-- a full-width tap target each, sectioned so navigation, this screen's actions
+-- and settings never share a row, and a title naming the screen the reader was
+-- actually looking at.
+-- @tparam table[opt] context { title, groups = { { heading, note, rows } } }
+-- @tparam table[opt] options { labels, footer_left, footer_right }
+-- @treturn table page model
+function Views.overflowModel(context, options)
+    options = options or {}
+    local text = Views.labels(options.labels)
+    context = type(context) == "table" and context or {}
+    local groups = type(context.groups) == "table" and context.groups or {}
+
+    local blocks = {}
+    for group_index = 1, #groups do
+        local group = groups[group_index]
+        if type(group) == "table" then
+            local rows = {}
+            local group_rows = type(group.rows) == "table" and group.rows or {}
+            for row_index = 1, #group_rows do
+                local row = group_rows[row_index]
+                if type(row) == "table" then
+                    local title = Status.str(row.title)
+                    if title ~= "" then
+                        local secondary = Status.str(row.secondary)
+                        rows[#rows + 1] = {
+                            kind = "plain",
+                            title = title,
+                            secondary = secondary ~= "" and secondary or nil,
+                            value = Status.str(row.value),
+                            value_sub = Status.str(row.value_sub),
+                            bold = row.bold ~= false,
+                            action = type(row.action) == "table" and row.action or nil,
+                        }
+                    end
+                end
+            end
+            if #rows > 0 then
+                blocks[#blocks + 1] = {
+                    kind = "section",
+                    heading = { left = Status.str(group.heading), right = Status.str(group.note) },
+                    row_kind = "plain",
+                    rows = rows,
+                }
+            end
+        end
+    end
+    -- Nothing to offer is worth saying: a blank page under the ⋮ would read as
+    -- a screen that failed to load.
+    if #blocks == 0 then
+        blocks[1] = { kind = "list", rows = { { kind = "plain", title = text.overflow_empty, bold = false } } }
+    end
+
+    local title = Status.str(context.title)
+    if title == "" then title = text.library end
+
+    return {
+        title = title,
+        header_actions = {},
+        switch = nil,
+        subline = nil,
+        blocks = blocks,
+        footer = {
+            left = Status.str(options.footer_left),
+            right = Status.str(options.footer_right),
+        },
+    }
 end
 
 --- Builds the single-screen Book Detail Card model.

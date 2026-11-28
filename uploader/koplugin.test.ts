@@ -149,13 +149,48 @@ describe("KOReader plugin template", () => {
     expect(generated.settings.pluginVersion).toBe(KOPLUGIN_VERSION);
   });
 
-  it("declares the plugin metadata KOReader reads from _meta.lua", () => {    const meta = fs.readFileSync(
+  it("declares the plugin metadata KOReader reads from _meta.lua", () => {
+    const meta = fs.readFileSync(
       path.join(KOPLUGIN_TEMPLATE_DIR, "_meta.lua"),
       "utf8",
     );
     expect(meta).toContain("fullname");
     expect(meta).toContain("description");
     expect(meta).toContain('require("gettext")');
+  });
+
+  it("carries one version in every place KOReader and the updater read it", () => {
+    // The OTA self-update compares what the server advertises against the
+    // version the installed copy reports. Three files carry that number: the
+    // generator's constant, the committed template's `plugin_version`, and
+    // `_meta.lua`'s `version` - which is what KOReader itself shows and what a
+    // copy installed by hand reports. A bump that touches two of them leaves a
+    // Kindle whose menu says one number and whose updater acts on another, and
+    // the update never lands. `GET /api/koplugin/version` serves the generator
+    // constant, so all three have to move together.
+    const config = fs.readFileSync(
+      path.join(KOPLUGIN_TEMPLATE_DIR, KOPLUGIN_CONFIG_FILE),
+      "utf8",
+    );
+    const meta = fs.readFileSync(
+      path.join(KOPLUGIN_TEMPLATE_DIR, "_meta.lua"),
+      "utf8",
+    );
+    const configVersion = config.match(/plugin_version\s*=\s*"([^"]+)"/);
+    const metaVersion = meta.match(/\bversion\s*=\s*"([^"]+)"/);
+    expect(configVersion?.[1]).toBe(KOPLUGIN_VERSION);
+    expect(metaVersion?.[1]).toBe(KOPLUGIN_VERSION);
+    // A semantic version, not a date and not a placeholder.
+    expect(KOPLUGIN_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+
+    // And the archive the device downloads agrees with both.
+    const { settings, entryNames } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      generatedAt: SAMPLE_SETTINGS.generatedAt,
+    });
+    expect(settings.pluginVersion).toBe(KOPLUGIN_VERSION);
+    expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/_meta.lua`);
+    expect(settings.pluginVersion).toBe(configVersion?.[1]);
   });
 
   it("returns a plugin table with a stable name from main.lua", () => {
@@ -3820,13 +3855,14 @@ describe("plugin one-page views", () => {
 
     // The density the plugin reads, on a panel that rounds its answers up: a
     // 600-unit probe survives the rounding (1236px), one unit does not (3px on
-    // a 2.06 panel), with the tighter 78-unit row target giving 7 rows on a
-    // borderless canvas.
+    // a 2.06 panel), with the 95-unit row target giving six rows on a
+    // borderless canvas - the row count the 9.5 pt type floor costs, and the
+    // count the audit's accepted option (b) bought.
     expect(out.probe_one_unit).toBe("3");
     expect(out.probe_600_units).toBe("1236");
     expect(out.library_plan_scale).toBe("2.060");
-    expect(Number(out.library_plan_rows)).toBe(7);
-    expect(Number(out.library_row_h)).toBe(178);
+    expect(Number(out.library_plan_rows)).toBe(6);
+    expect(Number(out.library_row_h)).toBe(197);
 
     // Both pages measure one screen: no inline search or pagination rows live
     // inside the list body (search moves to the header; paging lives in the
@@ -3835,19 +3871,19 @@ describe("plugin one-page views", () => {
     expect(Number(out.library_page_1_height)).toBe(height);
     expect(Number(out.library_page_2_height)).toBe(height);
 
-    // Seven planned rows hold seven books on page 1 and the remaining three
-    // books on page 2.
-    expect(out.library_page_size).toBe("7");
-    expect(out.library_page_1_kinds).toBe("book,book,book,book,book,book,book");
-    expect(out.library_page_2_kinds).toBe("book,book,book");
+    // Six planned rows hold six books on page 1 and the remaining four books
+    // on page 2.
+    expect(out.library_page_size).toBe("6");
+    expect(out.library_page_1_kinds).toBe("book,book,book,book,book,book");
+    expect(out.library_page_2_kinds).toBe("book,book,book,book");
     expect(out.library_rows_fit_plan).toBe("true");
 
     // The row title is asked for in pixels and drawn in pixels: the plan rule
-    // gives a 207px row a `floor(min(row_h, 120) * 0.26)` = 31px title, and the
-    // density answer returns those 31px back (a 15.049-unit request). Handing
-    // the pixel measure straight to Font.getFace draws 64px in the same row,
-    // which is the oversized type the report describes.
-    expect(Number(out.library_row_title_px)).toBe(31);
+    // gives a 197px row a `floor(197 * 0.26)` = 51px title - 12.3 pt at 299 dpi,
+    // well above the 9.5 pt floor - and the density answer returns those 51px
+    // back (a 24.76-unit request). The old 120px cap cut that to 31px (7.5 pt)
+    // on the same row.
+    expect(Number(out.library_row_title_px)).toBe(51);
     expect(out.library_row_title_fits).toBe("true");
 
     // A page the plan cannot hold is not padded with the plan's leftover: the
@@ -3880,10 +3916,12 @@ describe("plugin one-page views", () => {
     // cells: the picture is a grid, not one row per week.
     expect(out.heat_weeks).toBe("52");
     expect(out.heat_shaded).toBe("3");
-    // Two row lists (currently reading, recent sessions), each capped at the
-    // three rows the design allows even though the payload carries four.
+    // Two row lists (currently reading, recent sessions), capped at the three
+    // rows the design allows even though the payload carries four. The taller
+    // footer the audit asked for costs one of those rows: the two sections share
+    // five rows on this plan, and the caps still hold per section.
     expect(out.sections).toBe("2");
-    expect(out.section_rows).toBe("6");
+    expect(out.section_rows).toBe("5");
     expect(out.footer).toBe("LightHouse|32 min on an average day · detail on web");
   });
 
@@ -4729,10 +4767,11 @@ describe("plugin library groupings", () => {
     expect(out.series_after_switch).toBe("3");
 
     // And the refreshed page draws what the server just sent: page 2 of the
-    // ten-group document without an inline search row.
-    expect(out.refresh_row_kinds).toBe("series,series,series");
-    expect(out.refresh_row).toBe("series 8|series 9|series 10");
-    expect(out.refresh_entry).toBe("series 8//A Writer · 3 books · 1 read//33%//1 / 3");
+    // ten-group document without an inline search row. Six rows to a page now
+    // that the row band carries the 9.5 pt type floor, so page 2 is groups 7-10.
+    expect(out.refresh_row_kinds).toBe("series,series,series,series");
+    expect(out.refresh_row).toBe("series 7|series 8|series 9|series 10");
+    expect(out.refresh_entry).toBe("series 7//A Writer · 3 books · 1 read//33%//1 / 3");
 
     // A grouping page is sized from the rows the model draws, so it fills the
     // screen instead of leaving slack above the footer.
@@ -8896,23 +8935,31 @@ print("page_after_next_key=" .. tostring(LightHouse.library_state and LightHouse
 LightHouse.page:onPrevPage()
 print("page_after_prev_key=" .. tostring(LightHouse.library_state and LightHouse.library_state.page))
 
--- 4. Compact overflow sheet & dismissal
+-- 4. The overflow is a full-screen native page, and Back dismisses it as a level
+-- The overflow model is read off the page the plugin just drew: every action is a
+-- row with a full-width tap target, the sections are told apart, and the title
+-- names the screen the reader came from.
+local overflow_depth_before = #LightHouse.nav
 LightHouse:showPageOverflow()
-local overflow = shown[#shown]
+local overflow_model = LightHouse.last_page_model
 local overflow_labels = {}
-local close_btn
-for row_i = 1, #(overflow and overflow.buttons or {}) do
-  for btn_i = 1, #overflow.buttons[row_i] do
-    local btn = overflow.buttons[row_i][btn_i]
-    overflow_labels[#overflow_labels + 1] = btn.text
-    if btn.text == "Close" then close_btn = btn end
+for block_i = 1, #(overflow_model and overflow_model.blocks or {}) do
+  local block = overflow_model.blocks[block_i]
+  if block.kind == "section" and block.heading and block.heading.left then
+    overflow_labels[#overflow_labels + 1] = block.heading.left
+  end
+  for row_i = 1, #(block.rows or {}) do
+    overflow_labels[#overflow_labels + 1] = block.rows[row_i].title
   end
 end
-print("overflow_kind=" .. tostring(overflow and overflow.__kind))
-print("overflow_tracked=" .. tostring(LightHouse.overflow_menu == overflow))
+print("overflow_kind=" .. tostring(overflow_model and "page" or "nil"))
+print("overflow_title=" .. tostring(overflow_model and overflow_model.title))
+print("overflow_tracked=" .. tostring(LightHouse.page ~= nil and LightHouse.overflow_menu == nil))
+print("overflow_depth=" .. tostring(#LightHouse.nav - overflow_depth_before))
 print("overflow_labels=" .. table.concat(overflow_labels, "|"))
-if close_btn and type(close_btn.callback) == "function" then close_btn.callback() end
-print("overflow_closed_nil=" .. tostring(LightHouse.overflow_menu == nil))
+LightHouse.page:run({ kind = "back" })
+print("overflow_back_depth=" .. tostring(#LightHouse.nav - overflow_depth_before))
+print("overflow_back_title=" .. tostring(LightHouse.last_page_model and LightHouse.last_page_model.title))
 
 -- 2. Series drill-down sort=series, Sort & Filter dialog, query reset on clear & tab switch
 LightHouse:openLibrary{ mode = "series", page = 1 }
@@ -9040,12 +9087,24 @@ describe("plugin Phase 1 & 2 UX polish", () => {
     expect(out.page_after_prev_key).toBe("1");
   });
 
-  it("shows a compact ButtonDialog overflow sheet and clears overflow_menu on close", () => {
+  it("draws the overflow as a full-screen page that Back dismisses", () => {
     if (!LUA_BINARY || !UNZIP_BINARY) return;
     const out = runUxPolishHarness();
-    expect(out.overflow_kind).toBe("buttondialog");
+    // It is a page, not a stock ButtonDialog: the dialog had seven buttons on
+    // one row, a title that always said "LightHouse library", and a `Close`
+    // button whose callback was empty.
+    expect(out.overflow_kind).toBe("page");
     expect(out.overflow_tracked).toBe("true");
+    // The title names the screen the reader was on, not a fixed "LightHouse
+    // library" the way the old dialog did.
+    expect(out.overflow_title).toBe("Library");
+    expect(out.overflow_depth).toBe("1");
     const labels = out.overflow_labels.split("|");
+    // The sections are separate, so navigation, this screen's actions and the
+    // settings never share a row.
+    for (const heading of ["Go to", "This screen", "Settings"]) {
+      expect(labels).toContain(heading);
+    }
     for (const expected of [
       "Currently reading",
       "Highlights",
@@ -9054,12 +9113,14 @@ describe("plugin Phase 1 & 2 UX polish", () => {
       "Search",
       "Sort & Filter",
       "Connection",
-      "Close",
+      "Cover thumbnails",
     ]) {
       expect(labels).toContain(expected);
     }
-    expect(labels.some((label) => label.startsWith("Covers:"))).toBe(true);
-    expect(out.overflow_closed_nil).toBe("true");
+    expect(labels).not.toContain("Close");
+    // Back is the way out, and it returns to the screen the reader came from.
+    expect(out.overflow_back_depth).toBe("0");
+    expect(out.overflow_back_title).toBe("Library");
   });
 
   it("applies sort=series on series drill, filter=unread via Sort & Filter, and resets queries", () => {
@@ -9395,7 +9456,7 @@ LightHouse._library_plan = {
   reading_cover_w = 0, reading_cover_h = 0, total = 800, slack = 0,
 }
 local dev_screen = require("device").screen
-LightHouse._library_plan_key = tostring(dev_screen:getWidth()) .. "x" .. tostring(dev_screen:getHeight()) .. ":" .. tostring(LightHouse:coversEnabled()) .. ":false"
+LightHouse._library_plan_key = tostring(dev_screen:getWidth()) .. "x" .. tostring(dev_screen:getHeight()) .. ":" .. tostring(LightHouse:coversEnabled()) .. ":false:false"
 LightHouse:showReading{ page = 1 }
 print("p3_reading_p1=" .. tostring(LightHouse.last_page_model.pager.page) .. "/" .. tostring(LightHouse.last_page_model.pager.pages))
 LightHouse.page:onNextPage()
@@ -11290,15 +11351,15 @@ print("lib_footer_badge=" .. tostring(footer_badge))
 
 -- 2. Library overflow has Sync (2) + Download entire series works end-to-end with auto-index
 LightHouse:showPageOverflow()
-local ov = shown[#shown]
+local ov = LightHouse.last_page_model
 local has_sync_ov = false
-for r = 1, #(ov and ov.buttons or {}) do
-  for c = 1, #ov.buttons[r] do
-    if ov.buttons[r][c].text == "Sync (2)" then has_sync_ov = true end
+for block_i = 1, #(ov and ov.blocks or {}) do
+  for row_i = 1, #(ov.blocks[block_i].rows or {}) do
+    if ov.blocks[block_i].rows[row_i].title == "Sync (2)" then has_sync_ov = true end
   end
 end
 print("overflow_sync_badge=" .. tostring(has_sync_ov))
-LightHouse:closeOverflow()
+LightHouse:goUp()
 
 -- Check series long-press has Download entire series
 shown = {}
@@ -11637,7 +11698,7 @@ local opds_feed_xml = [[<?xml version="1.0" encoding="utf-8"?>
 
 local ota_restarted = 0
 ui_mgr.restartKOReader = function() ota_restarted = ota_restarted + 1 end
-local remote_manifest_json = '{"version":"1.15.0","downloadPath":"/api/koplugin/download"}'
+local remote_manifest_json = '{"version":"1.16.0","downloadPath":"/api/koplugin/download"}'
 
 package.preload["json"] = function()
   return {
@@ -11651,8 +11712,8 @@ package.preload["json"] = function()
       if type(raw) == "string" and raw:find('"version":"2.0.0"', 1, true) then
         return { version = "2.0.0", downloadPath = "/api/koplugin/download" }
       end
-      if type(raw) == "string" and raw:find('"version":"1.15.0"', 1, true) then
-        return { version = "1.15.0", downloadPath = "/api/koplugin/download" }
+      if type(raw) == "string" and raw:find('"version":"1.16.0"', 1, true) then
+        return { version = "1.16.0", downloadPath = "/api/koplugin/download" }
       end
       return {}
     end,
@@ -11797,14 +11858,14 @@ LightHouse:openLibrary{ mode = "books", page = 1 }
 local footer_q_only = LightHouse.last_page_model and LightHouse.last_page_model.footer and LightHouse.last_page_model.footer.right
 
 LightHouse:showPageOverflow()
-local ov = shown[#shown]
+local ov = LightHouse.last_page_model
 local has_ov_q = false
-for r = 1, #(ov and ov.buttons or {}) do
-  for c = 1, #ov.buttons[r] do
-    if ov.buttons[r][c].text == "Queue (2)" then has_ov_q = true end
+for block_i = 1, #(ov and ov.blocks or {}) do
+  for row_i = 1, #(ov.blocks[block_i].rows or {}) do
+    if ov.blocks[block_i].rows[row_i].title == "Queue (2)" then has_ov_q = true end
   end
 end
-LightHouse:closeOverflow()
+LightHouse:goUp()
 
 active_sessions_json = '[{"document":"m1","percentage":0.2,"timestamp":1700000000,"title":"Active Remote","authors":"Remote Auth","bookId":701,"device":"PW"}]'
 LightHouse:forgetShelf()
@@ -11956,13 +12017,13 @@ print("ota_progress_ok=" .. tostring(
 
 describe("plugin v1.15.0 ownership ledger, failing-volume reporting, and one bounded download retry", () => {
   it("packages lighthouse_indexer, lighthouse_sync, lighthouse_queue, and lighthouse_ownership with version 1.15.0", () => {
-    expect(KOPLUGIN_VERSION).toBe("1.15.0");
+    expect(KOPLUGIN_VERSION).toBe("1.16.0");
     const { settings, entryNames } = generateKoplugin({
       baseUrl: "http://192.168.31.15:8086",
       apiKey: "v114-test-key",
       generatedAt: "2026-11-24T12:45:00.000Z",
     });
-    expect(settings.pluginVersion).toBe("1.15.0");
+    expect(settings.pluginVersion).toBe("1.16.0");
     expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_indexer.lua`);
     expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_sync.lua`);
     expect(entryNames).toContain(`${KOPLUGIN_DIR_NAME}/lighthouse_queue.lua`);
@@ -12030,5 +12091,1225 @@ describe("plugin v1.15.0 ownership ledger, failing-volume reporting, and one bou
     expect(out.forgotten_after_delete).toBe("true");
     expect(out.series_failure_names).toBe("true");
     expect(out.ota_progress_ok).toBe("true");
+  });
+});
+
+/**
+ * The type floor, on the three panels the captain named.
+ *
+ * The audit measured a Paperwhite 3 drawing a 7.4 pt title in a 13.2 mm band with
+ * 47% of it empty, and a 1236x1648 panel drawing 7.5 pt - the device with 80%
+ * more pixels drawing glyphs 22% *smaller* than a 600x800 Basic. Both came from
+ * the same shape of bug: the row title was a ratio of a band that is a layout
+ * outcome, capped at a constant 120 px, so type was a consequence of how many
+ * rows happened to fit. This harness drives the real layout module at the three
+ * shipping geometries and asserts the floor the reader was promised: six rows at
+ * no less than 9.5 pt, a Detail title no smaller than the list it came from, and
+ * body text that fills its line box instead of floating in it.
+ *
+ * Point size is `px / dpi * 72`, the same conversion the audit used: a glyph is
+ * a physical size, and three panels report three densities for the same numbers.
+ */
+const TYPE_FLOOR_HARNESS = String.raw`
+local root = assert(arg[1], "template dir required")
+local Ui = assert(loadfile(root .. "/lighthouse_ui.lua"))()
+
+local FLOOR_PT = 9.5
+
+local panels = {
+  { tag = "k5", width = 600, height = 800, scale = 600 / 600, dpi = 167 },
+  { tag = "pw3", width = 1072, height = 1448, scale = 1072 / 600, dpi = 300 },
+  { tag = "pw5se", width = 1236, height = 1648, scale = 1236 / 600, dpi = 299 },
+}
+
+local function points(pixels, dpi) return pixels / dpi * 72 end
+
+for index = 1, #panels do
+  local panel = panels[index]
+  local tag = panel.tag
+  local dpi = panel.dpi
+
+  -- The screen a reader actually gets: covers on, the grouping switch up, the
+  -- byte-for-byte options LightHouse:libraryPlan() passes.
+  local list = Ui.listPlan(panel.width, panel.height, panel.scale, {
+    with_switch = true, with_covers = true, min_rows = 3,
+  })
+  local compact = Ui.listPlan(panel.width, panel.height, panel.scale, {
+    with_switch = true, with_covers = false, min_rows = 3,
+  })
+  local detail = Ui.detailPlan(panel.width, panel.height, panel.scale, {
+    with_covers = true, action_rows = 2,
+  })
+
+  print(tag .. "_list_rows=" .. tostring(list.rows))
+  print(tag .. "_list_band_px=" .. tostring(list.row_h))
+  print(tag .. "_list_title_px=" .. tostring(list.row_title_px))
+  print(tag .. "_list_title_pt=" .. string.format("%.2f", points(list.row_title_px, dpi)))
+  print(tag .. "_list_fits=" .. tostring(list.fits or (list.total <= list.height)))
+  print(tag .. "_compact_rows=" .. tostring(compact.rows))
+  print(tag .. "_compact_title_pt=" .. string.format("%.2f", points(compact.row_title_px, dpi)))
+  print(tag .. "_detail_title_px=" .. tostring(detail.row_title_px))
+  print(tag .. "_detail_title_pt=" .. string.format("%.2f", points(detail.row_title_px, dpi)))
+  print(tag .. "_body_px=" .. tostring(detail.body_px))
+  print(tag .. "_line_h=" .. tostring(detail.line_h))
+  print(tag .. "_body_fill=" .. string.format("%.4f", detail.body_px / detail.line_h))
+  print(tag .. "_detail_fits=" .. tostring(detail.fits))
+  -- Touch targets the audit measured under 5 mm before this pass.
+  print(tag .. "_footer_mm=" .. string.format("%.2f", list.footer * 25.4 / dpi))
+  print(tag .. "_switch_mm=" .. string.format("%.2f", list.switch_h * 25.4 / dpi))
+end
+
+-- The cap is gone, not merely raised: a band far taller than any shipping panel
+-- gets a proportionally taller face instead of the old constant. The old rule
+-- was floor(min(band, 120) * 0.26), so on the 178 px band a 1236x1648 panel
+-- lays out it answered 31 px whatever the band was; these two are the same
+-- probe under the old rule and the new one.
+print("uncapped_tall_band_px=" .. tostring(Ui.rowTitlePx(400, 1)))
+print("uncapped_huge_band_px=" .. tostring(Ui.rowTitlePx(1000, 1)))
+print("capped_tall_band_px=" .. tostring(math.floor(math.min(400, 120) * 0.26)))
+-- And a short band still gets a readable face rather than a hairline.
+print("floor_short_band_px=" .. tostring(Ui.rowTitlePx(40, 1)))
+print("floor_pts=" .. tostring(FLOOR_PT))
+print("OK")
+`;
+
+describe("plugin type floor on the shipping panels", () => {
+  /** Runs the type-floor harness against the committed template. */
+  function runTypeFloorHarness(): Record<string, string> {
+    return runLuaHarness(TYPE_FLOOR_HARNESS, [KOPLUGIN_TEMPLATE_DIR]);
+  }
+
+  // pt = px / dpi * 72. The three panels answer three densities for the same
+  // numbers, so a passing pixel size is not a passing glyph.
+  const PANELS = [
+    { tag: "k5", dpi: 167, rows: 6 },
+    { tag: "pw3", dpi: 300, rows: 6 },
+    { tag: "pw5se", dpi: 299, rows: 6 },
+  ] as const;
+
+  it("draws list titles at the 9.5 pt floor on all three panels", () => {
+    if (!LUA_BINARY) return;
+    const out = runTypeFloorHarness();
+
+    for (const panel of PANELS) {
+      // Six rows is the density half of the decision: the audit's 7-row band was
+      // what forced the type down in the first place.
+      expect(out[`${panel.tag}_list_rows`]).toBe(String(panel.rows));
+      expect(Number(out[`${panel.tag}_list_title_pt`])).toBeGreaterThanOrEqual(9.5);
+      // The band is filled: a 47%-empty band on a Paperwhite was the symptom.
+      expect(Number(out[`${panel.tag}_list_band_px`])).toBeGreaterThan(0);
+      expect(out[`${panel.tag}_list_fits`]).toBe("true");
+    }
+
+    // Covers-off compact mode is a real mode, not the same band with the cover
+    // hidden: it fits more rows in a shorter band at the same floor.
+    for (const panel of PANELS) {
+      const rows = Number(out[`${panel.tag}_compact_rows`]);
+      expect(rows).toBeGreaterThanOrEqual(panel.rows);
+      expect(Number(out[`${panel.tag}_compact_title_pt`])).toBeGreaterThanOrEqual(9.5);
+    }
+
+    // The floor is a floor, not a cap: a taller band gets a taller face, and a
+    // short band does not fall through it. The old rule answered 31 px for every
+    // band over 120 px - which is why the panel with 80% more pixels drew 22%
+    // smaller glyphs than the 600x800 one.
+    expect(Number(out.uncapped_tall_band_px)).toBeGreaterThan(
+      Number(out.capped_tall_band_px) * 3,
+    );
+    expect(Number(out.uncapped_huge_band_px)).toBeGreaterThan(
+      Number(out.uncapped_tall_band_px),
+    );
+    expect(Number(out.floor_short_band_px)).toBeGreaterThanOrEqual(24);
+    expect(Number(out.floor_pts)).toBe(9.5);
+  });
+
+  it("draws the Detail title no smaller than the list it was opened from", () => {
+    if (!LUA_BINARY) return;
+    const out = runTypeFloorHarness();
+
+    for (const panel of PANELS) {
+      // The defect this fixes: Detail rendered 5.3 pt type on a Paperwhite in a
+      // band that had room for 9.5 pt, because `detailPlan` had no row height to
+      // derive a face from and pinned to a literal 88 px.
+      expect(out[`${panel.tag}_detail_fits`]).toBe("true");
+      expect(Number(out[`${panel.tag}_detail_title_pt`])).toBeGreaterThanOrEqual(
+        Number(out[`${panel.tag}_list_title_pt`]),
+      );
+      expect(Number(out[`${panel.tag}_detail_title_pt`])).toBeGreaterThanOrEqual(9.5);
+    }
+  });
+
+  it("fills at least 80% of the body line box with the glyphs it draws in it", () => {
+    if (!LUA_BINARY) return;
+    const out = runTypeFloorHarness();
+
+    for (const panel of PANELS) {
+      // 95/47/39% was the audit: the body face was derived from the line height
+      // at 0.58x while the renderer drew a different face entirely.
+      expect(Number(out[`${panel.tag}_body_fill`])).toBeGreaterThanOrEqual(0.8);
+      expect(Number(out[`${panel.tag}_body_px`])).toBeGreaterThanOrEqual(10);
+      expect(Number(out[`${panel.tag}_body_px`])).toBeLessThan(
+        Number(out[`${panel.tag}_line_h`]),
+      );
+    }
+  });
+
+  it("grows the footer and the grouping switch past the 6 mm touch floor", () => {
+    if (!LUA_BINARY) return;
+    const out = runTypeFloorHarness();
+
+    for (const panel of PANELS) {
+      // Every footer control measured under 5 mm before this pass, which is
+      // below both Apple's 7 mm guidance and Kindle's 6 mm one.
+      expect(Number(out[`${panel.tag}_footer_mm`])).toBeGreaterThanOrEqual(6);
+      expect(Number(out[`${panel.tag}_switch_mm`])).toBeGreaterThanOrEqual(6);
+    }
+  });
+});
+
+/**
+ * Back, from both ways into the plugin.
+ *
+ * The plugin can be entered two ways: from KOReader's own menu, where a screen
+ * is the whole visit, and from inside the plugin, where the reader has a Library
+ * underneath. Back must answer the question the reader is asking - "undo what I
+ * just did" - which means returning to the Library in the second case and
+ * leaving the plugin in the first. Before this pass every screen was a single
+ * top-level level, so Back from Stats always dumped the reader into KOReader's
+ * file manager, even when they had arrived from the Library one tap earlier.
+ */
+const BACK_SEMANTICS_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local expected_base_url = assert(arg[2], "expected base url argument required")
+
+local current_url = ""
+local stats_requests = 0
+
+local function feed_body()
+  return table.concat({
+    '<?xml version="1.0" encoding="utf-8"?>',
+    '<feed xmlns="http://www.w3.org/2005/Atom"><title>LightHouse</title>',
+    '<entry><id>urn:calibre:book:301</id><title>Book One</title>',
+    '<author><name>A Writer</name></author>',
+    '<link rel="http://opds-spec.org/acquisition" href="/api/books/301/download/epub" type="application/epub+zip"/>',
+    '</entry></feed>',
+  })
+end
+
+local stats_payload = {
+  totalSessions = 12,
+  readingDaysCount = 5,
+  finishedCount = 1,
+  activeBooks = {
+    { bookId = 11, displayTitle = "Book One", displayAuthors = "A Writer",
+      percentage = 0.25, timestamp = 1763290000, device = "Kindle" },
+  },
+  streaks = { currentStreak = 2, longestStreak = 5, readingDaysCount = 5 },
+  dailyReadingTime = { todaySeconds = 1200, todayMinutes = 20, thisWeekSeconds = 7200, totalHours = 3.5 },
+  libraryHealth = { totalBooks = 4, unreadCount = 2, inProgressCount = 1, finishedCount = 1, staleCount = 0 },
+}
+
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      current_url = tostring(request and request.url or "")
+      local body = "{}"
+      if current_url:find("/api/opds", 1, true) then
+        body = feed_body()
+      elseif current_url:find("/api/kosync/stats", 1, true) then
+        stats_requests = stats_requests + 1
+        body = "{}"  -- replaced by the json stub below; the body itself is unused
+      elseif current_url:find("/api/kosync/active", 1, true) then
+        body = "[]"
+      end
+      if request and request.sink then
+        request.sink(body)
+        request.sink(nil)
+      end
+      return 1, 200, {}
+    end,
+  }
+end
+package.preload["ltn12"] = function()
+  return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
+    sink = {
+      table = function(target)
+        return function(chunk)
+          if chunk then target[#target + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function() end,
+    },
+  }
+end
+package.preload["json"] = function()
+  return {
+    decode = function()
+      if current_url:find("/api/kosync/stats", 1, true) then return stats_payload end
+      if current_url:find("/api/kosync/active", 1, true) then return {} end
+      return {}
+    end,
+  }
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local Nav = require("lighthouse_nav")
+
+-- KOReader's menu, recorded so the test can press the entry the reader presses.
+local menu_items = {}
+LightHouse.ui = { menu = { registerToMainMenu = function(_, plugin) plugin:addToMainMenu(menu_items) end } }
+LightHouse:init()
+
+local function depth() return #LightHouse.nav end
+
+local function top()
+  local stack = LightHouse.nav or {}
+  return stack[#stack]
+end
+
+local function level()
+  local entry = top()
+  if not entry then return "none" end
+  local state = entry.state or {}
+  return string.format("%s|%s|%s|p%s|q%s", tostring(entry.kind), tostring(entry.key),
+    tostring(state.mode), tostring(state.page), tostring(state.query))
+end
+
+local function menu_entry(label)
+  local items = menu_items.lighthouse and menu_items.lighthouse.sub_item_table or {}
+  for index = 1, #items do
+    if items[index].text == label then return items[index] end
+  end
+  return nil
+end
+
+local function library_rows()
+  local model = LightHouse.last_page_model
+  local rows = {}
+  for block_index = 1, #(model and model.blocks or {}) do
+    for row_index = 1, #(model.blocks[block_index].rows or {}) do
+      rows[#rows + 1] = model.blocks[block_index].rows[row_index]
+    end
+  end
+  return rows
+end
+
+--- Back, pressed on whichever surface the level drew.
+-- A page has a back action; a menu is closed by KOReader itself and then runs
+-- its own close_callback, which is where the plugin's step up hangs. Both are
+-- "the reader pressed Back" and both have to land the same way.
+local function press_back()
+  if LightHouse.page then
+    LightHouse.page:run({ kind = "back" })
+    return true
+  end
+  local menu = LightHouse.menu
+  if not menu then return false end
+  require("ui/uimanager").close(menu)
+  if type(menu.close_callback) == "function" then menu.close_callback() end
+  return true
+end
+
+-- 1. Entered from KOReader's own menu: the screen IS the visit, so Back leaves.
+local stats_entry = assert(menu_entry("Reading stats"), "the main menu must offer Reading stats")
+stats_entry.callback()
+print("menu_depth=" .. tostring(depth()))
+print("menu_level=" .. level())
+print("menu_page_up=" .. tostring(LightHouse.page ~= nil))
+print("menu_title=" .. tostring(LightHouse.last_page_model and LightHouse.last_page_model.title))
+print("menu_stats_requests=" .. tostring(stats_requests))
+press_back()
+print("menu_after_back_depth=" .. tostring(depth()))
+print("menu_after_back_page_gone=" .. tostring(LightHouse.page == nil))
+print("menu_after_back_menu_gone=" .. tostring(LightHouse.menu == nil))
+
+-- 2. Entered from inside the plugin: the reader has a Library underneath, so
+-- Back undoes the step and returns to it - it does not throw them out.
+LightHouse:openLibrary{ mode = "books", page = 1 }
+print("inside_library_depth=" .. tostring(depth()))
+print("inside_library_level=" .. level())
+local library_page = LightHouse.page
+local library_rows_before = #library_rows()
+stats_entry.callback()
+print("inside_stats_depth=" .. tostring(depth()))
+print("inside_stats_level=" .. level())
+print("inside_stats_is_new_page=" .. tostring(LightHouse.page ~= nil and LightHouse.page ~= library_page))
+print("inside_stats_title=" .. tostring(LightHouse.last_page_model and LightHouse.last_page_model.title))
+press_back()
+print("inside_after_back_depth=" .. tostring(depth()))
+print("inside_after_back_level=" .. level())
+print("inside_after_back_title=" .. tostring(LightHouse.last_page_model and LightHouse.last_page_model.title))
+print("inside_after_back_rows=" .. tostring(#library_rows()))
+print("inside_after_back_same_rows=" .. tostring(#library_rows() == library_rows_before))
+print("inside_after_back_page_up=" .. tostring(LightHouse.page ~= nil))
+
+-- 3. And one more Back from the Library leaves the plugin, exactly as before.
+press_back()
+print("exit_depth=" .. tostring(depth()))
+print("exit_page_gone=" .. tostring(LightHouse.page == nil))
+
+-- 4. Every other wire-in screen behaves the same way from inside the plugin.
+local screens = {
+  { label = "Currently reading", kind = "reading" },
+  { label = "Highlights", kind = "highlights" },
+  { label = "Device storage", kind = "storage" },
+}
+for index = 1, #screens do
+  local screen = screens[index]
+  LightHouse:exitPlugin()
+  LightHouse:openLibrary{ mode = "books", page = 1 }
+  local entry = menu_entry(screen.label)
+  if entry then
+    entry.callback()
+    local opened = depth() == 2
+    press_back()
+    print("screen_" .. screen.kind .. "_returns=" .. tostring(opened
+      and depth() == 1 and top() and top().kind == "library"))
+  else
+    print("screen_" .. screen.kind .. "_returns=false")
+  end
+end
+
+-- 5. From the main menu, the same screens exit.
+for index = 1, #screens do
+  local screen = screens[index]
+  LightHouse:exitPlugin()
+  local entry = menu_entry(screen.label)
+  if entry then
+    entry.callback()
+    print("menu_" .. screen.kind .. "_open_depth=" .. tostring(depth())
+      .. " page=" .. tostring(LightHouse.page ~= nil)
+      .. " menu=" .. tostring(LightHouse.menu ~= nil)
+      .. " level=" .. level())
+    press_back()
+    print("menu_" .. screen.kind .. "_exits=" .. tostring(depth() == 0 and LightHouse.page == nil))
+  else
+    print("menu_" .. screen.kind .. "_exits=false")
+  end
+end
+
+-- 6. The overflow page names the screen the reader is actually on, and keeps
+-- navigation, this screen's actions and the settings in separate sections. The
+-- old sheet was titled "LightHouse library" on every one of these screens.
+local function overflow_report(label)
+  LightHouse:showPageOverflow()
+  local model = LightHouse.last_page_model
+  local title = model and model.title or "nil"
+  local headings = {}
+  local nav_rows = 0
+  for block_index = 1, #(model and model.blocks or {}) do
+    local block = model.blocks[block_index]
+    if block.heading and block.heading.left then
+      headings[#headings + 1] = block.heading.left
+      if block.heading.left == "Go to" then nav_rows = #(block.rows or {}) end
+    end
+  end
+  print("overflow_" .. label .. "_title=" .. tostring(title))
+  print("overflow_" .. label .. "_sections=" .. table.concat(headings, ">"))
+  print("overflow_" .. label .. "_nav_rows=" .. tostring(nav_rows))
+  LightHouse:goUp()
+end
+
+LightHouse:exitPlugin()
+menu_entry("Reading stats").callback()
+overflow_report("stats")
+LightHouse:exitPlugin()
+menu_entry("Currently reading").callback()
+overflow_report("reading")
+LightHouse:exitPlugin()
+menu_entry("Highlights").callback()
+overflow_report("highlights")
+LightHouse:exitPlugin()
+menu_entry("Device storage").callback()
+overflow_report("storage")
+LightHouse:exitPlugin()
+
+-- And on a book's own page it names the book, because that is the screen the
+-- reader is on and the question is "what else can I do with THIS volume".
+LightHouse:openLibrary{ mode = "books", page = 1 }
+do
+  local model = LightHouse.last_page_model
+  local row = model and model.blocks[1] and model.blocks[1].rows and model.blocks[1].rows[1]
+  if row and LightHouse.page then LightHouse.page:run(row.action) end
+end
+overflow_report("book")
+
+print("OK")
+`);
+
+describe("plugin back semantics inside and outside the plugin", () => {
+  /** Generates, unpacks and runs the back-semantics harness on the shipped zip. */
+  function runBackHarness(): Record<string, string> {
+    if (!LUA_BINARY || !UNZIP_BINARY) return {};
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "back-semantics-key",
+      generatedAt: "2026-11-14T00:00:00.000Z",
+    });
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-back-"));
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
+      encoding: "utf8",
+    });
+    expect(extract.status).toBe(0);
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "back_semantics_harness.lua");
+    fs.writeFileSync(harnessPath, BACK_SEMANTICS_HARNESS);
+    const res = spawnSync(
+      LUA_BINARY as string,
+      [harnessPath, pluginRoot, "http://192.168.31.15:8086"],
+      { encoding: "utf8" },
+    );
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    return Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+  }
+
+  it("leaves the plugin when the screen was opened from KOReader's own menu", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runBackHarness();
+
+    // The screen is the whole visit: one level, drawn as a page.
+    expect(out.menu_depth).toBe("1");
+    expect(out.menu_level).toBe("stats|stats|nil|pnil|qnil");
+    expect(out.menu_page_up).toBe("true");
+    expect(out.menu_title).toBe("Reading stats");
+    expect(out.menu_stats_requests).toBe("1");
+
+    // Back undoes the visit, because there is nothing underneath it.
+    expect(out.menu_after_back_depth).toBe("0");
+    expect(out.menu_after_back_page_gone).toBe("true");
+    expect(out.menu_after_back_menu_gone).toBe("true");
+  });
+
+  it("returns to the Library when the screen was opened from inside the plugin", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runBackHarness();
+
+    // One level of Library, then one level of Stats on top of it.
+    expect(out.inside_library_depth).toBe("1");
+    expect(out.inside_library_level).toBe("library|root|books|p1|q");
+    expect(out.inside_stats_depth).toBe("2");
+    expect(out.inside_stats_level).toBe("stats|stats|nil|pnil|qnil");
+    expect(out.inside_stats_is_new_page).toBe("true");
+
+    // Back pops one level and hands the reader their Library back, rather than
+    // dumping them into KOReader's file manager.
+    expect(out.inside_after_back_depth).toBe("1");
+    expect(out.inside_after_back_level).toBe("library|root|books|p1|q");
+    expect(out.inside_after_back_title).toBe("Library");
+    expect(out.inside_after_back_page_up).toBe("true");
+    expect(out.inside_after_back_same_rows).toBe("true");
+
+    // And Back from the Library still leaves the plugin, as it always has.
+    expect(out.exit_depth).toBe("0");
+    expect(out.exit_page_gone).toBe("true");
+  });
+
+  it("applies the same rule to every screen the main menu opens", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runBackHarness();
+
+    // From inside the plugin, each screen returns to the Library.
+    for (const kind of ["reading", "highlights", "storage"]) {
+      expect(out[`screen_${kind}_returns`]).toBe("true");
+    }
+    // From the main menu, each of them exits.
+    for (const kind of ["reading", "highlights", "storage"]) {
+      expect(out[`menu_${kind}_exits`]).toBe("true");
+    }
+  });
+
+  it("names the screen the reader is on in the overflow page", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runBackHarness();
+
+    // The title answers "what else can I do from HERE", so it is the screen's
+    // own name. The old sheet said "LightHouse library" on all five of these.
+    expect(out.overflow_stats_title).toBe("Reading stats");
+    expect(out.overflow_reading_title).toBe("Currently reading");
+    expect(out.overflow_highlights_title).toBe("Highlights");
+    expect(out.overflow_storage_title).toBe("Device storage");
+    expect(out.overflow_book_title).toBe("Book One");
+
+    // Navigation, this screen's actions and the settings are three sections,
+    // never one wall of buttons.
+    for (const label of ["stats", "reading", "highlights", "storage", "book"]) {
+      const sections = out[`overflow_${label}_sections`].split(">");
+      expect(sections).toContain("Go to");
+      expect(sections).toContain("This screen");
+      expect(sections).toContain("Settings");
+      // And the section the reader is already on is not offered as somewhere to
+      // go: there are four or five screens and the current one is missing.
+      expect(Number(out[`overflow_${label}_nav_rows`])).toBeGreaterThanOrEqual(4);
+    }
+  });
+});
+
+/**
+ * What a finished batch does to the screen the reader is looking at.
+ *
+ * A queue batch runs behind a modal the reader dismisses after the first tap, so
+ * the only place its result can be read is the page it started from. Before this
+ * pass that page was left exactly as it was drawn: a volume that had just landed
+ * kept reading "Unread" with no on-device dot, and the next thing the reader
+ * does is tap the book they just downloaded. This harness drives a real batch
+ * through `downloadQueuedBooks` on a real (temp) filesystem and asserts three
+ * things: the running band is broadcast onto the page while the batch runs, the
+ * page is redrawn at each step rather than only the modal, and when the batch
+ * finishes the row reads the progress the device now knows about.
+ */
+const BATCH_BROADCAST_HARNESS = (KOREADER_STUB_PRELUDE + String.raw`
+local expected_base_url = assert(arg[2], "expected base url argument required")
+local workdir = assert(arg[3], "workdir required")
+local books_dir = workdir .. "/books"
+local dl_dir = workdir .. "/downloads"
+
+package.preload["datastorage"] = function()
+  return {
+    getDataDir = function() return workdir .. "/data" end,
+    getSettingsDir = function() return workdir .. "/data" end,
+  }
+end
+
+local settings_store = { download_dir = dl_dir }
+_G.G_reader_settings = {
+  readSetting = function(_, key) return settings_store[key] end,
+  saveSetting = function(_, key, value) settings_store[key] = value end,
+}
+
+local ui_mgr = require("ui/uimanager")
+ui_mgr.nextTick = function(_, fn) fn() end
+ui_mgr.scheduleIn = function(_, _secs, fn) fn() end
+local net_mgr = require("ui/network/manager")
+net_mgr.isOnline = function() return true end
+
+package.preload["ltn12"] = function()
+  return {
+    source = {
+      string = function(text)
+        local sent = false
+        return function()
+          if sent then return nil end
+          sent = true
+          return text
+        end
+      end,
+    },
+    sink = {
+      table = function(chunks)
+        chunks = chunks or {}
+        return function(chunk)
+          if chunk then chunks[#chunks + 1] = chunk end
+          return 1
+        end
+      end,
+      file = function(fh)
+        return function(chunk)
+          if chunk and fh then fh:write(chunk) elseif fh then fh:close() end
+          return 1
+        end
+      end,
+    },
+  }
+end
+
+-- One book in the catalogue, and an EPUB download big enough to survive the
+-- client's "empty or interstitial?" guard.
+local epub_payload = "PK\3\4" .. string.rep("E", 900) .. "-Book One"
+package.preload["socket.http"] = function()
+  return {
+    request = function(request)
+      local url = tostring(request and request.url or "")
+      local body = "{}"
+      if url:find("/api/opds", 1, true) then
+        body = table.concat({
+          '<?xml version="1.0" encoding="utf-8"?>',
+          '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">',
+          '<title>LightHouse</title><opensearch:totalResults>1</opensearch:totalResults>',
+          '<entry><id>urn:calibre:book:301</id><title>Book One</title>',
+          '<author><name>A Writer</name></author>',
+          '<link rel="http://opds-spec.org/acquisition" href="/api/books/301/download/epub" type="application/epub+zip"/>',
+          '</entry></feed>',
+        })
+      elseif url:find("/api/kosync/active", 1, true) then
+        body = "[]"
+      elseif url:find("/download/epub", 1, true) then
+        body = epub_payload
+      end
+      if request and request.sink then
+        request.sink(body)
+        request.sink(nil)
+      end
+      return 1, 200, { ["content-type"] = "application/octet-stream" }
+    end,
+  }
+end
+package.preload["json"] = function()
+  return { decode = function() return {} end }
+end
+
+-- A real filesystem behind the device's lfs: Sidecar.read really opens and
+-- really loads the sidecar this harness writes, so the row's progress is read
+-- the way it is read on the device. The listing is tracked here because the
+-- harness writes the sidecar after the plugin has already scanned, and a listing
+-- that could see the file from the start would hide the stale-page case.
+local real_dirs = { [books_dir] = true, [dl_dir] = true }
+local real_lists = { [books_dir] = {}, [dl_dir] = {} }
+package.preload["libs/libkoreader-lfs"] = function()
+  return {
+    attributes = function(target, field)
+      if real_dirs[target] then
+        return field == "mode" and "directory" or nil
+      end
+      local handle = io.open(target, "rb")
+      if not handle then return nil end
+      if field == "size" then
+        local size = handle:seek("end")
+        handle:close()
+        return size
+      end
+      handle:close()
+      if field == "mode" then return "file" end
+      if field == "modification" then return os.time() end
+      return nil
+    end,
+    dir = function(directory)
+      local names = {}
+      local listing = nil
+      if directory == dl_dir or directory == books_dir then
+        -- Shell-free listing: the harness already knows which entries it wrote,
+        -- and it tracks them in this table.
+        listing = real_lists[directory] or {}
+      else
+        listing = real_lists[directory] or {}
+      end
+      for index = 1, #listing do names[index] = listing[index] end
+      local cursor = 0
+      return function()
+        cursor = cursor + 1
+        return names[cursor]
+      end
+    end,
+    mkdir = function() return true end,
+  }
+end
+
+local bim_batches = {}
+package.preload["bookinfomanager"] = function()
+  return {
+    isExtractingInBackground = function() return false end,
+    getBookInfo = function() return { has_meta = "N" } end,
+    extractInBackground = function(_, chunk) bim_batches[#bim_batches + 1] = chunk end,
+  }
+end
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+local Queue = require("lighthouse_queue")
+local Ui = require("lighthouse_ui")
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+LightHouse.coversEnabled = function() return false end
+
+local function first_row()
+  local model = LightHouse.last_page_model
+  for block_index = 1, #(model and model.blocks or {}) do
+    local block = model.blocks[block_index]
+    if block.kind == "list" and block.rows and block.rows[1] then return block.rows[1] end
+  end
+  return nil
+end
+
+--- The reader's view: what the row says, whether the band is up, and which page
+-- object is actually on the glass.
+local function state(tag)
+  local model = LightHouse.last_page_model
+  local row = first_row()
+  print(tag .. "_value=" .. tostring(row and row.value))
+  print(tag .. "_secondary=" .. tostring(row and row.secondary))
+  print(tag .. "_on_device=" .. tostring(row and row.on_device))
+  print(tag .. "_band=" .. tostring(model and model.progress ~= nil))
+  print(tag .. "_page=" .. tostring(LightHouse.page))
+  print(tag .. "_slack_exists=" .. tostring(model ~= nil))
+end
+
+-- 1. The library as the reader finds it: nothing on the device, so the row is
+-- honest about it.
+LightHouse:openLibrary{ mode = "books", page = 1 }
+state("start")
+local start_page = LightHouse.page
+print("start_is_page=" .. tostring(start_page ~= nil))
+local rows_before = LightHouse.last_page_model and #LightHouse.last_page_model.blocks[1].rows
+
+-- 2. KOReader reads the volume and writes its sidecar. The plugin's local scan
+-- already ran, so without a redraw the page cannot know this happened.
+local sidecar_dir = dl_dir .. "/Book One - A Writer.epub.sdr"
+os.execute('mkdir -p "' .. sidecar_dir .. '"')
+local sidecar = assert(io.open(sidecar_dir .. "/metadata.epub.lua", "wb"))
+sidecar:write("return { percent_finished = 0.42, doc_pages = 200, annotations = {} }\n")
+sidecar:close()
+real_lists[dl_dir] = { "Book One - A Writer.epub.sdr" }
+real_lists[sidecar_dir] = { "metadata.epub.lua" }
+
+-- The forensic point: the plan the page was drawn with is still the stale one.
+state("stale")
+
+-- 3. Watch the band every time the batch advances.
+local progress_snapshots = {}
+local real_progress = LightHouse.onBatchProgress
+function LightHouse:onBatchProgress(index, total, label)
+  real_progress(self, index, total, label)
+  local model = self.last_page_model
+  local band = model and model.progress
+  progress_snapshots[#progress_snapshots + 1] = {
+    index = index, total = total,
+    band = band ~= nil,
+    ratio = band and band.ratio,
+    label = band and band.label,
+    page = tostring(self.page),
+  }
+end
+
+-- 4. Run the batch the reader asked for.
+local entry = {
+  book_id = 301, title = "Book One", authors = "A Writer",
+  download_href = "/api/books/301/download/epub",
+}
+local queued_ok, queued_count = Queue.add(G_reader_settings, entry)
+print("queued=" .. tostring(queued_ok) .. ":" .. tostring(queued_count))
+
+local batch_total = LightHouse:downloadQueuedBooks()
+print("batch_total=" .. tostring(batch_total))
+print("downloads=" .. table.concat(progress_snapshots and (function()
+  local out = {}
+  for index = 1, #progress_snapshots do
+    local snap = progress_snapshots[index]
+    out[index] = tostring(snap.index) .. "/" .. tostring(snap.total)
+      .. ":band=" .. tostring(snap.band)
+      .. ":page=" .. tostring(snap.page ~= tostring(start_page))
+  end
+  return out
+end)() or {}, ","))
+
+local snapshot_band = progress_snapshots[1] and progress_snapshots[1].band or false
+local snapshot_redrew = progress_snapshots[1] ~= nil
+  and progress_snapshots[1].page ~= tostring(start_page)
+print("during_batch_band=" .. tostring(snapshot_band))
+print("during_batch_repainted=" .. tostring(snapshot_redrew))
+print("during_batch_label=" .. tostring(progress_snapshots[1] and progress_snapshots[1].label))
+
+-- 5. After the batch: no band, a redrawn page, and a row that tells the truth.
+state("after")
+print("after_band_cleared=" .. tostring(LightHouse.last_page_model
+  and LightHouse.last_page_model.progress == nil))
+print("after_repainted=" .. tostring(LightHouse.page ~= nil and LightHouse.page ~= start_page))
+print("after_same_row_count=" .. tostring(#LightHouse.last_page_model.blocks[1].rows == rows_before))
+print("after_queue_drained=" .. tostring(Queue.count(G_reader_settings) == 0))
+
+-- The plan also gave the band back: the list is laid out for the rows it now
+-- has, not for the rows plus a bar that is no longer running.
+print("after_plan_rows=" .. tostring(LightHouse:libraryPlan().rows))
+print("OK")
+`);
+
+describe("plugin batch progress and redraw", () => {
+  /** Generates, unpacks and runs the batch-broadcast harness on a real filesystem. */
+  function runBatchHarness(): Record<string, string> {
+    if (!LUA_BINARY || !UNZIP_BINARY) return {};
+    const { zip } = generateKoplugin({
+      baseUrl: "http://192.168.31.15:8086",
+      apiKey: "batch-broadcast-key",
+      generatedAt: "2026-11-14T00:00:00.000Z",
+    });
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "koplugin-batch-"));
+    fs.mkdirSync(path.join(workdir, "books"), { recursive: true });
+    fs.mkdirSync(path.join(workdir, "downloads"), { recursive: true });
+    const zipPath = path.join(workdir, "lighthouse.koplugin");
+    fs.writeFileSync(zipPath, zip);
+    const pluginsDir = path.join(workdir, "plugins");
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const extract = spawnSync(UNZIP_BINARY as string, ["-q", zipPath, "-d", pluginsDir], {
+      encoding: "utf8",
+    });
+    expect(extract.status).toBe(0);
+    const pluginRoot = path.join(pluginsDir, KOPLUGIN_DIR_NAME);
+    const harnessPath = path.join(workdir, "batch_broadcast_harness.lua");
+    fs.writeFileSync(harnessPath, BATCH_BROADCAST_HARNESS);
+    const res = spawnSync(
+      LUA_BINARY as string,
+      [harnessPath, pluginRoot, "http://192.168.31.15:8086", workdir],
+      { encoding: "utf8" },
+    );
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    return Object.fromEntries(
+      res.stdout
+        .split("\n")
+        .filter((line: string) => line.includes("="))
+        .map((line: string) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+  }
+
+  it("broadcasts a running batch onto the page and lays the list out for it", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runBatchHarness();
+
+    // One queued book, downloaded once.
+    expect(out.queued).toBe("true:1");
+    expect(out.batch_total).toBe("1");
+
+    // The band exists while the batch runs, carries the item the batch is on,
+    // and its presence redrew the page - the modal has covered the screen by
+    // then, so the page is the only place the reader can still see progress.
+    expect(out.during_batch_band).toBe("true");
+    expect(out.during_batch_repainted).toBe("true");
+    expect(out.during_batch_label).toContain("Downloading 1 of 1");
+    expect(out.during_batch_label).toContain("Book One");
+  });
+
+  it("clears the band and redraws the row when the batch finishes", () => {
+    if (!LUA_BINARY || !UNZIP_BINARY) return;
+    const out = runBatchHarness();
+
+    // The catalogue said "Unread" and the download proved otherwise: the page
+    // is redrawn from the records the batch just wrote, so the row the reader
+    // is about to tap no longer claims the book is not there.
+    expect(out.start_value).toBe("Unread");
+    expect(out.start_on_device).toBe("false");
+    // The sidecar KOReader wrote while the batch ran is what the row now reads.
+    expect(out.stale_value).toBe("Unread");
+    expect(out.after_value).toBe("42%");
+    expect(out.after_on_device).toBe("true");
+    expect(out.after_secondary).toContain("On device");
+    expect(out.after_band_cleared).toBe("true");
+    expect(out.after_repainted).toBe("true");
+    expect(out.after_same_row_count).toBe("true");
+    expect(out.after_queue_drained).toBe("true");
+    // The plan gives the band's space back to the rows.
+    expect(Number(out.after_plan_rows)).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * What the footer row actually draws, and what a slightly-off tap hits.
+ *
+ * The pager branch of `buildFooter` used to read only `prev`, `center` and
+ * `next`, so `footer.right` - the summary the model carefully composed, "All
+ * books" or "1 missing · 2 queued" - was silently dropped on every paged
+ * screen, and the page number was drawn twice. The model-level tests in
+ * `koplugin-views.test.ts` assert the footer *object*; this asserts the widgets
+ * the renderer built from it, which is the layer the bug lived in.
+ */
+/**
+ * The two things a reader can do that the list never offered.
+ *
+ * A book row answered a tap but nothing else, so the "long-press any book" the
+ * plugin's own notice advertises did nothing at all. And a plugin page drawn for
+ * a tall panel was left in whatever orientation the reader had last used, which
+ * costs a page two of its three reading rows the moment the device is turned.
+ */
+/**
+ * The Detail screen as one page: a legible lede, and the way to the rest.
+ *
+ * Detail used to derive its body size from the line box it had already reserved
+ * (`max(floor(line_h * 0.58), 10)`), so the panel with 80% more pixels drew the
+ * *smaller* synopsis - 3.9 pt on a Paperwhite 5 SE in a 41 px box. It also had no
+ * `row_h` for its hero, so the title fell back to a fixed 88 px band and came out
+ * smaller than the list row the reader had just tapped. Its 14 lines of body
+ * could not be read at that size anyway. The screen is now one page: the type
+ * drives the line box, four to five lines are drawn, and the full text is one
+ * tap away in KOReader's own TextViewer.
+ */
+const DETAIL_LEDE_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
+local Ui = assert(loadfile(plugin_root .. "/lighthouse_ui.lua"))()
+local Views = assert(loadfile(plugin_root .. "/lighthouse_views.lua"))()
+
+local function sentence_repeat()
+  local parts = {}
+  for index = 1, 40 do
+    parts[index] = "The lighthouse keeper counted the ships again, and the fog kept its own ledger. "
+  end
+  return table.concat(parts, "")
+end
+local synopsis = sentence_repeat()
+
+local panels = {
+  { tag = "k5", w = 600, h = 800, dpi = 167 },
+  { tag = "pw3", w = 1072, h = 1448, dpi = 300 },
+  { tag = "pw5se", w = 1236, h = 1648, dpi = 299 },
+}
+for index = 1, #panels do
+  local panel = panels[index]
+  local scale = panel.w / 600
+  local list = Ui.listPlan(panel.w, panel.h, scale, { with_switch = true, with_covers = true, min_rows = 3 })
+  local plan = Ui.detailPlan(panel.w, panel.h, scale, { with_covers = true, action_rows = 2 })
+  local model = Views.bookDetailModel(
+    { book_id = 5, title = "A Book Of Some Length", authors = "A Writer", summary = synopsis },
+    { labels = Views.LABELS, body_lines = plan.body_lines, body_chars = plan.body_chars })
+  local body = model.blocks[3]
+  local kinds = {}
+  for button_index = 1, #model.blocks[2].buttons do
+    -- A disabled button ("This book is not on this device") carries no action.
+    local button = model.blocks[2].buttons[button_index]
+    kinds[#kinds + 1] = button.action and button.action.kind or ("disabled:" .. tostring(button.kind))
+  end
+  print(panel.tag .. "_body_lines=" .. tostring(#body.lines))
+  print(panel.tag .. "_body_truncated=" .. tostring(body.truncated))
+  print(panel.tag .. "_body_heading_right=" .. tostring(body.heading and body.heading.right))
+  print(panel.tag .. "_body_action=" .. tostring(body.action and body.action.kind))
+  print(panel.tag .. "_buttons=" .. table.concat(kinds, ","))
+  print(panel.tag .. "_plan_fits=" .. tostring(plan.fits))
+  print(panel.tag .. "_hero_band_ge_list=" .. tostring(plan.row_h >= list.row_h))
+  print(panel.tag .. "_body_fill=" .. tostring(plan.body_px / plan.line_h))
+  print(panel.tag .. "_body_pt=" .. tostring(plan.body_px / panel.dpi * 72))
+end
+
+-- A synopsis short enough to fit is drawn whole, with no Full synopsis button
+-- and no heading on the right: nothing is being withheld, so nothing offers it.
+local short_plan = Ui.detailPlan(600, 800, 1, { with_covers = true, action_rows = 2 })
+local short_model = Views.bookDetailModel(
+  { book_id = 6, title = "A Short One", authors = "A Writer", summary = "Two lines of text, no more." },
+  { labels = Views.LABELS, body_lines = short_plan.body_lines, body_chars = short_plan.body_chars })
+local short_body = short_model.blocks[3]
+local has_full = false
+for button_index = 1, #short_model.blocks[2].buttons do
+  local short_button = short_model.blocks[2].buttons[button_index]
+  if short_button.action and short_button.action.kind == "synopsis" then has_full = true end
+end
+print("short_truncated=" .. tostring(short_body.truncated))
+print("short_has_full_button=" .. tostring(has_full))
+print("short_body_action=" .. tostring(short_body.action and short_body.action.kind))
+
+print("OK")
+`;
+
+const HOLD_AND_ORIENTATION_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
+local Views = assert(loadfile(plugin_root .. "/lighthouse_views.lua"))()
+
+-- 1. A book row carries an action for a tap and a different one for a hold.
+local row = Views.bookRow({ book_id = 7, title = "Book One", authors = "A Writer" }, Views.LABELS)
+print("tap_kind=" .. tostring(row.action and row.action.kind))
+print("hold_kind=" .. tostring(row.hold_action and row.hold_action.kind))
+print("hold_has_entry=" .. tostring(row.hold_action and row.hold_action.entry ~= nil))
+print("hold_entry_book=" .. tostring(row.hold_action and row.hold_action.entry
+  and row.hold_action.entry.book_id))
+
+local series = Views.seriesRow({ name = "A Series", authors = "A Writer", book_count = 3 },
+  Views.LABELS)
+print("series_hold=" .. tostring(series.hold_action == nil))
+
+-- 2. The panel is held upright while the plugin is open and handed back after.
+local Device = require("device")
+local rotations = {}
+Device.screen.setRotationMode = function(_, mode) rotations[#rotations + 1] = mode end
+Device.screen.getRotationMode = function() return "landscape" end
+Device.screen.ORIENTATION_PORTRAIT = "portrait"
+
+local LightHouse = assert(loadfile(plugin_root .. "/main.lua"))()
+LightHouse.ui = { menu = { registerToMainMenu = function() end } }
+LightHouse:init()
+
+LightHouse:lockPortrait()
+print("lock_calls=" .. table.concat(rotations, ","))
+LightHouse:lockPortrait()
+print("lock_calls_after_second=" .. table.concat(rotations, ","))
+LightHouse:restoreRotation()
+print("restore_calls=" .. table.concat(rotations, ","))
+-- A second restore has nothing saved to restore and must not set anything.
+local before = #rotations
+LightHouse:restoreRotation()
+print("second_restore_set_again=" .. tostring(#rotations > before))
+
+-- 3. A build with no orientation API is left alone rather than guessed at.
+Device.screen.setRotationMode = nil
+print("lock_without_api=" .. tostring(LightHouse:lockPortrait()))
+
+print("OK")
+`;
+
+const FOOTER_AND_SLOP_HARNESS = KOREADER_STUB_PRELUDE + String.raw`
+local Ui = assert(loadfile(plugin_root .. "/lighthouse_ui.lua"))()
+local Views = assert(loadfile(plugin_root .. "/lighthouse_views.lua"))()
+local Page = assert(loadfile(plugin_root .. "/lighthouse_page.lua"))()
+
+local plan = Ui.listPlan(600, 800, 1, { with_switch = true, with_covers = false, min_rows = 3 })
+
+local entries = {}
+for index = 1, 6 do
+  entries[index] = { title = "Book " .. tostring(index), authors = "A Writer", book_id = index }
+end
+
+local model = Views.libraryModel("books", {
+  entries = entries, page = 2, page_size = 6, has_next = true, query = "",
+  totals = { books = 24 },
+}, { labels = Views.LABELS })
+-- The summary the plugin puts on this footer after a batch left books missing.
+-- The separator is built from its bytes: a raw literal here would carry a
+-- non-ASCII codepoint through String.raw, which re-escapes it into a form LuaJIT
+-- does not accept.
+local SEPARATOR = " " .. (string.char(0xc2) .. string.char(0xb7)) .. " "
+model.footer.right = "1 missing" .. SEPARATOR .. "2 queued"
+
+local page = assert(Page.build{ model = model, plan = plan })
+local drawn = page.footer_labels or {}
+
+print("footer_center=" .. tostring(drawn.center))
+print("footer_summary=" .. tostring(drawn.summary))
+print("footer_left=" .. tostring(drawn.left))
+print("footer_next=" .. tostring(drawn.next))
+-- The three strings the audit asked for, all present and distinct: the old
+-- branch drew the page number where the summary belonged.
+print("footer_has_summary=" .. tostring(drawn.summary == model.footer.right))
+print("footer_center_is_page=" .. tostring(drawn.center == "Page 2 / 4"))
+print("footer_center_not_summary=" .. tostring(drawn.center ~= drawn.summary))
+
+-- Tap slop: a touch two millimetres below the last row used to be swallowed.
+-- The panels record their geometry when painted, so the harness paints once and
+-- then aims just outside the row it wants.
+local target = nil
+for index = 1, #page.panels do
+  local panel = page.panels[index]
+  if panel.action and panel.action.kind == "footer_left" then target = panel end
+end
+print("slop_panel_found=" .. tostring(target ~= nil))
+if target then
+  -- A geometry with the one method the hit test uses. The prelude stub is a
+  -- plain table, because nothing else in the plugin asks a rect to do anything.
+  local box_meta = {}
+  box_meta.__index = box_meta
+  function box_meta:intersectWith(other)
+    if type(other) ~= "table" then return false end
+    return self.x < other.x + other.w and other.x < self.x + self.w
+      and self.y < other.y + other.h and other.y < self.y + self.h
+  end
+  local function at(x, y, w, h)
+    return setmetatable({ x = x, y = y, w = w or 1, h = h or 1 }, box_meta)
+  end
+  -- The geometry a paint would set: the footer sits at the bottom of the screen.
+  target.dimen = at(10, 740, 120, plan.footer)
+  local on = page:panelAt(at(40, 750))
+  local near = page:panelAt(at(40, 740 + plan.footer + 6))
+  local far = page:panelAt(at(40, 30))
+  local beside = page:panelAt(at(200, 750))
+  print("slop_exact_hit=" .. tostring(on == target))
+  print("slop_near_hit=" .. tostring(near == target))
+  print("slop_far_miss=" .. tostring(far == nil))
+  print("slop_beside_miss=" .. tostring(beside == nil))
+  print("slop_slack_y=" .. tostring(math.max(math.floor(7 * plan.scale + 0.5), 4)))
+end
+
+print("OK")
+`;
+
+describe("plugin detail one-page lede", () => {
+  it("draws four or five legible lines and routes the rest to the TextViewer", () => {
+    if (!LUA_BINARY) return;
+    const out = runLuaHarness(DETAIL_LEDE_HARNESS, [KOPLUGIN_TEMPLATE_DIR]);
+
+    for (const panel of [
+      { tag: "k5", dpi: 167 },
+      { tag: "pw3", dpi: 300 },
+      { tag: "pw5se", dpi: 299 },
+    ]) {
+      // A lede, not the whole synopsis: four or five lines, and the screen says
+      // so by offering the full text.
+      const lines = Number(out[`${panel.tag}_body_lines`]);
+      expect(lines).toBeGreaterThanOrEqual(4);
+      expect(lines).toBeLessThanOrEqual(5);
+      expect(out[`${panel.tag}_body_truncated`]).toBe("true");
+      expect(out[`${panel.tag}_body_heading_right`]).toBe("Full synopsis");
+      expect(out[`${panel.tag}_body_action`]).toBe("synopsis");
+      expect(out[`${panel.tag}_buttons`]).toContain("synopsis");
+      // Laid out to fit, with the type it planned drawn at a readable size.
+      expect(out[`${panel.tag}_plan_fits`]).toBe("true");
+      expect(Number(out[`${panel.tag}_body_fill`])).toBeGreaterThanOrEqual(0.8);
+      expect(Number(out[`${panel.tag}_body_pt`])).toBeGreaterThanOrEqual(9);
+      // The hero band is never thinner than the list band the reader came from,
+      // so the title cannot shrink on the way in.
+      expect(out[`${panel.tag}_hero_band_ge_list`]).toBe("true");
+    }
+
+    // A synopsis that fits is drawn whole, and the body itself offers nothing
+    // further: nothing is being withheld, so the body is not a button. The
+    // Full synopsis action stays available in the button row either way, because
+    // a reader who wants to read it comfortably should not have to first make it
+    // truncate.
+    expect(out.short_truncated).toBe("false");
+    expect(out.short_body_action).toBe("nil");
+    expect(out.short_has_full_button).toBe("true");
+  });
+});
+
+describe("plugin hold actions and orientation lock", () => {
+  it("gives a book row a hold action, and holds the panel upright while open", () => {
+    if (!LUA_BINARY) return;
+    const out = runLuaHarness(HOLD_AND_ORIENTATION_HARNESS, [KOPLUGIN_TEMPLATE_DIR]);
+
+    // Tap opens the book; hold opens its quick actions. They are not the same
+    // action, which is what made the plugin's own "long-press any book" notice
+    // a lie.
+    expect(out.tap_kind).toBe("book");
+    expect(out.hold_kind).toBe("book_actions");
+    expect(out.hold_has_entry).toBe("true");
+    expect(out.hold_entry_book).toBe("7");
+    // A series row has no hold action, because it has nothing extra to offer.
+    expect(out.series_hold).toBe("true");
+
+    // Portrait on the way in, the reader's own orientation on the way out.
+    expect(out.lock_calls).toBe("portrait");
+    // Locking twice in one visit must not save the lock as the reader's choice,
+    // or the panel stays portrait after they leave.
+    expect(out.lock_calls_after_second).toBe("portrait,portrait");
+    expect(out.restore_calls).toBe("portrait,portrait,landscape");
+    expect(out.second_restore_set_again).toBe("false");
+
+    // A build that cannot set the orientation is left alone, not crashed on.
+    expect(out.lock_without_api).toBe("false");
+  });
+});
+
+describe("plugin footer rendering and tap slop", () => {
+  it("draws the footer summary beside the page number, and forgives a near miss", () => {
+    if (!LUA_BINARY) return;
+    const out = runLuaHarness(FOOTER_AND_SLOP_HARNESS, [KOPLUGIN_TEMPLATE_DIR]);
+
+    // The three labels reach the glass, and the page number and the summary are
+    // different strings - the old footer drew the page number twice.
+    expect(out.footer_summary).toBe("1 missing · 2 queued");
+    expect(out.footer_center).toBe("Page 2 / 4");
+    expect(out.footer_has_summary).toBe("true");
+    expect(out.footer_center_is_page).toBe("true");
+    expect(out.footer_center_not_summary).toBe("true");
+
+    // A tap inside the control hits it; a tap a few millimetres below still
+    // hits it; a tap on another screen does not.
+    expect(out.slop_panel_found).toBe("true");
+    expect(out.slop_exact_hit).toBe("true");
+    expect(out.slop_near_hit).toBe("true");
+    expect(out.slop_far_miss).toBe("true");
   });
 });
