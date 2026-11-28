@@ -378,7 +378,8 @@ describe("Series Availability & Download All Shared Behavior (Date A Live & Mult
 
     it("index.html preserves clean card download button and verified modal contracts", async () => {
       const html = await Bun.file("uploader/index.html").text();
-      expect(html).toContain("All in Library (${libCount}/${totalVols})");
+      // DC2: completion is stated once, in the chip vocabulary, plus the one dead primary button
+      expect(html).toContain("All ${totalVols} volumes are in your Calibre library.");
       expect(html).toContain("All Volumes in Library (${totalVols}/${totalVols})");
       expect(html).toContain("Download All (${totalVols} vols)");
     });

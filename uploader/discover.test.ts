@@ -1554,10 +1554,19 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
     });
 
     it("verifies badge and button consistency for in-library vs available novels in index.html", () => {
-      // In Library badge and modal dynamic smart action buttons
-      expect(html).toContain("In Library (${libCount} vols)");
-      expect(html).toContain("Available (${totalVols} vols)");
-      expect(html).toContain("${totalVols} vols");
+      // DC2: one chip taxonomy. The cover badge is the ownership chip, and the extent chip carries
+      // the volume count. Neither states the other's fact, and "in library" is not repeated.
+      expect(html).toContain("function chipOwnershipHtml(state, ratio, size)");
+      expect(html).toContain("chip chip-available");
+      expect(html).toContain("chip chip-owned");
+      expect(html).toContain("chip chip-partial");
+      expect(html).toContain("<span>Available</span>");
+      expect(html).toContain("<span>Owned ");
+      expect(html).toContain("chipMetaHtml(`${own.totalVols} vols`)");
+      // One extent statement per card
+      // One rendered pill on the card; the second occurrence is the selector that repaints it.
+      expect((html.match(/data-card-vol-pill>/g) || []).length).toBe(1);
+      // Modal smart action labels
       expect(html).toContain("Download Remaining (${missingCount} vols)");
       expect(html).toContain("All Volumes in Library (${totalVols}/${totalVols})");
       expect(html).toContain("Download All (${totalVols} vols)");
@@ -1601,8 +1610,9 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(html).toContain("discoverModalProgressContainer");
       expect(html).toContain("discoverModalProgressBar");
       expect(html).toContain("discoverModalProgressPct");
-      // Badge update on completion
-      expect(html).toContain("In Library (");
+      // Badge update on completion: the ownership chip is repainted from one resolved state, so a
+      // finished download can never leave the card claiming the old ownership.
+      expect(html).toContain("chipOwnershipHtml(own.state, `${own.libCount}/${own.totalVols}`)");
       expect(html).toContain("Downloaded");
       // Audited novel unpacks data.novel or data
       expect(html).toContain("const audited = data?.novel || data;");
@@ -1610,7 +1620,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
 
     it("verifies complete synopsis readability and on-the-fly fetching in discoverModal", () => {
       expect(html).toContain('id="discoverModalSynopsis"');
-      expect(html).toContain("text-sm leading-relaxed text-zinc-300");
+      expect(html).toContain("sm:text-sm leading-relaxed text-zinc-300");
       expect(html).toContain("overflow-y-auto");
       expect(html).toContain("renderSynopsisSkeleton");
       expect(html).toContain("/api/discover/novel/");
@@ -1629,28 +1639,34 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(html).toContain("https?:\\/\\/?(?:\\[path\\]|\\[file\\])");
     });
 
-    it("verifies modal sources layout uses clean two-row Apple-aesthetic cards without text collisions", () => {
-      // Two-row card layout: flex-col, rounded-xl border, proper padding
-      expect(html).toContain("flex flex-col gap-2 p-3 rounded-xl border ${s.color} text-xs");
-      // Row 1: Source badge (bold monospace) with volume count cleanly aligned without truncating into the name
-      expect(html).toContain("font-bold font-mono shrink-0");
-      expect(html).toContain("&bull; ${escapeHtml(volStatusText)}");
-      expect(html).toContain("vols available");
-      // Row 2: Subtle border separator with proper padding and flex-wrap for constrained widths
-      expect(html).toContain("flex flex-wrap items-center justify-between gap-1.5 pt-2 border-t border-white/10");
-      // 'Browse Source' underline text link on the left and 'Ingest' pill button on the right
-      expect(html).toContain('class="underline text-zinc-400 hover:text-white flex items-center gap-1 text-[11px] shrink-0"');
-      expect(html).toContain("rounded-full font-semibold text-[11px] cursor-pointer active:scale-[0.96] shrink-0");
+    it("verifies the modal offers one source row and exactly one download action (QW8)", () => {
+      // One source list, built from one resolver, so the picker cannot disagree with the action.
+      expect(html).toContain("function resolveDiscoverSources(item)");
+      expect(html).toContain(
+        "const recommended = getPrimaryNovelSource(item).source || sourceEntries[0]?.source || null;"
+      );
+      // One row per source, and the selected row is the only one marked pressed.
+      expect(html).toContain('class="source-pick" data-source="${escapeHtml(s.source || \'\')}"');
+      expect(html).toContain('aria-pressed="${isSelected ? \'true\' : \'false\'}"');
+      expect(html).toContain("function selectDiscoverModalSource(source, entryEl)");
+      // The footer button is the only download; per-source Ingest/Browse affordances are gone.
+      expect(html).toContain('id="discoverModalIngestBtn" type="button" onclick="handleDiscoverModalIngest()"');
+      expect(html).not.toContain("Browse Source");
+      expect(html).not.toContain("volStatusText");
+      // The chosen source is what the action uses.
+      expect(html).toContain("triggerDiscoverIngest(activeDiscoverItem.id, undefined, discoverModalSource || undefined);");
+      expect(html).toContain("triggerDiscoverIngest(activeDiscoverItem.id, undefined, discoverModalSource || undefined, true);");
     });
 
-    it("verifies discover modal source card actions row wraps gracefully to prevent horizontal clipping when width is constrained (<145px)", () => {
-      // Action row wraps gracefully with flex-wrap and gap-1.5 when usable card width is constrained (<145px)
-      expect(html).toContain("flex flex-wrap items-center justify-between gap-1.5 pt-2 border-t border-white/10");
-      // Header row also wraps gracefully on narrow viewports
-      expect(html).toContain("flex flex-wrap items-center gap-x-2 gap-y-0.5");
-      // Actions maintain shrink-0 so text never truncates internally while container wraps
-      expect(html).toContain('class="underline text-zinc-400 hover:text-white flex items-center gap-1 text-[11px] shrink-0"');
-      expect(html).toContain("rounded-full font-semibold text-[11px] cursor-pointer active:scale-[0.96] shrink-0");
+    it("verifies the source picker survives a 390px card without clipping", () => {
+      // The row is a full-width button: name on the left, count on the right, both allowed to
+      // shrink, so a long source name truncates instead of pushing the count out of the card.
+      expect(html).toContain('class="source-pick" data-source="${escapeHtml(s.source || \'\')}"');
+      expect(html).toContain('<span class="font-semibold truncate">');
+      expect(html).toContain('<span class="text-[10px] text-zinc-400 text-right shrink-0">');
+      // The signed-out of the picker: the button, not a nested link/pill pair.
+      expect(html).toContain(".source-pick { width: 100%;");
+      expect(html).not.toContain("flex flex-wrap items-center justify-between gap-1.5 pt-2 border-t border-white/10");
     });
 
     it("verifies author display uses real author with Author Unknown fallback, never 'Light Novel'", () => {
@@ -3190,17 +3206,15 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       const htmlPath = path.join((import.meta as any).dir, "index.html");
       const html = fs.readFileSync(htmlPath, "utf8");
 
-      // In Library badge with partial ownership support (libCount/total vols) and full ownership
-      expect(html).toContain("In Library (${libCount}/${totalVols} vols)");
-      expect(html).toContain("In Library (${libCount} vols)");
-      expect(html).toContain("const isPartial = libCount > 0 && totalVols > libCount;");
-      // Available badge with vols count
-      expect(html).toContain("Available (${totalVols} vols)");
-      // Metadata row volume badge
-      expect(html).toContain("${totalVols} vols");
+      // DC2: the ownership chip states ownership, the meta chip states extent, once each.
+      expect(html).toContain("chipOwnershipHtml(own.state, `${own.libCount}/${own.totalVols}`)");
+      expect(html).toContain("const isPartial = !isComplete && inLib && libCount > 0 && totalVols > libCount;");
+      expect(html).toContain("const state = isComplete ? 'owned' : (isPartial ? 'partial' : 'available');");
+      // Metadata row volume chip is the only place the card states its extent
+      expect(html).toContain("chipMetaHtml(`${own.totalVols} vols`)");
       // Modal volume rendering (never hardcoded 1 when existingVolumes is higher)
       expect(html).toContain("const totalVols = hasVerifiedInventory ? verifiedTotal : Math.max(item.volumeCount || 1, rawLibCount);");
-      expect(html).toContain("volumes.textContent = `${totalVols} Volumes`;");
+      expect(html).toContain("volumes.textContent = `${totalVols} vols`;");
     });
 
     it("ensures updated catalog volume counts take precedence over seeds in complete catalog and search", async () => {
@@ -4417,9 +4431,11 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(html).toContain("All Volumes in Library (${totalVols}/${totalVols})");
       expect(html).toContain("Download All (${totalVols} vols)");
 
-      // Status notes with volume breakdown
-      expect(html).toContain("In Library:</span> ${escapeHtml(ownedStr)} &bull; <span class=\"text-amber-400 font-semibold\">Missing:</span> ${escapeHtml(missingStr)}");
-      expect(html).toContain("will be downloaded");
+      // Status notes: one line in the chip vocabulary, with the volume breakdown kept. A long gap
+      // list is summarised by count so the note cannot wrap into the primary action.
+      expect(html).toContain("const missingLabel = missingStr && missingStr.length <= 28");
+      expect(html).toContain(": `${missingCount} of ${totalVols} volumes missing`;");
+      expect(html).toContain("${escapeHtml(missingLabel)}</span><span class=\"text-zinc-500\">&nbsp;&bull;&nbsp;will be downloaded</span>");
       expect(html).toContain("formatVolumeRangeString");
 
       // Force re-download link and handler
@@ -5088,15 +5104,15 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       const htmlPath = path.join((import.meta as any).dir, "index.html");
       const html = fs.readFileSync(htmlPath, "utf8");
 
-      // Status badge and ingest button completion contracts
-      expect(html).toContain("All in Library (${libCount}/${totalVols})");
+      // Completion is stated once: an owned chip on the cover, one footer line, one dead button
+      expect(html).toContain("chipOwnershipHtml(chipState, chipRatio, 'lg')");
       expect(html).toContain("All Volumes in Library (${totalVols}/${totalVols})");
       expect(html).toContain("cursor-not-allowed opacity-90");
-      expect(html).toContain("All in Library (${libCount}/${totalVols}) &bull; All ${totalVols} verified source volumes in your Calibre library.");
+      expect(html).toContain("All ${totalVols} volumes are in your Calibre library.");
 
       // Verified source counts in modal cards
-      expect(html).toContain("${s.volumeCount !== undefined ? s.volumeCount : totalVols} vols available");
-      expect(html).toContain("${s.volumeCount || totalVols} vols (unverified)");
+      expect(html).toContain("${entry.volumeCount !== undefined ? entry.volumeCount : fallbackTotal} vols available");
+      expect(html).toContain("${entry.volumeCount || fallbackTotal} vols (unverified)");
       // Errored sources name the cause instead of a bare "Source offline" label
       expect(html).toContain("'Server setup needed'");
       expect(html).toContain("'Blocked for automation'");
@@ -5134,7 +5150,7 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(html).toContain("const hasMissing = isVerified && missingCount !== undefined ? missingCount > 0 : false;");
 
       // Card action button and status badge unverified isolation
-      expect(html).toContain("} else if (isPartialAudited) {");
+      expect(html).toContain("const isPartial = !isComplete && inLib && libCount > 0 && totalVols > libCount;");
       expect(html).toContain(
         '<button type="button" id="cardIngestBtn-${escapeHtml(item.id)}" onclick="triggerDiscoverIngest(\'${escapeHtml(item.id)}\', event)" class="flex-1 py-1.5 px-2 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold shadow-md text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer active:scale-[0.96]"><span>Download</span></button>'
       );
@@ -5496,10 +5512,9 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
       expect(html).toContain("const libCount = hasVerifiedInventory ? verifiedOwnedCount : rawLibCount;");
 
       // Modal rendering contracts: no duplicate totalVols declaration, uses verified counts
-      expect(html).toContain("<span>All in Library (${libCount}/${totalVols})</span>");
-      expect(html).toContain("<span>All in Library (${libCount}/${totalVols}) &bull; All ${totalVols} verified source volumes in your Calibre library.</span>");
+      expect(html).toContain("All ${totalVols} volumes are in your Calibre library.");
       expect(html).toContain("<span>All Volumes in Library (${totalVols}/${totalVols})</span>");
-      expect(html).toContain("volumes.textContent = `${totalVols} Volumes`;");
+      expect(html).toContain("volumes.textContent = `${totalVols} vols`;");
 
       // Simulation of modal renderer with verified source 1-16 and Calibre ownership 1-22
       const verifiedDALItem = {
@@ -5873,14 +5888,14 @@ describe("Light Novel Discovery Engine (uploader/discover.ts)", () => {
         const htmlPath = path.join((import.meta as any).dir, "index.html");
         const html = fs.readFileSync(htmlPath, "utf8");
 
-        // Cover bottom-right badge
-        expect(html).toContain("${totalVols} vols");
-        // Partial audited badge denominator
-        expect(html).toContain("In Library (${libCount}/${totalVols} vols)");
+        // Extent chip in the metadata row (the cover carries only the ownership chip)
+        expect(html).toContain("chipMetaHtml(`${own.totalVols} vols`)");
+        // Partial audited badge denominator: the ownership chip carries the ratio
+        expect(html).toContain("chipOwnershipHtml(own.state, `${own.libCount}/${own.totalVols}`)");
         // Available badge
-        expect(html).toContain("Available (${totalVols} vols)");
+        expect(html).toContain("<span>Available</span>");
         // Modal detail header
-        expect(html).toContain("volumes.textContent = `${totalVols} Volumes`;");
+        expect(html).toContain("volumes.textContent = `${totalVols} vols`;");
         // Grid card update on modal resolution
         expect(html).toContain("updateDiscoverCardOnGrid(item);");
       });
